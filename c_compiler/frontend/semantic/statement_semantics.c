@@ -206,12 +206,64 @@ static bool CXXTemporaryIsElidedByDirectInitialization(ASTNode* node,
   return false;
 }
 
+// Mirror of the backend's CXXDesignatedInitFunctionalCastConstructor
+// (expr_codegen.c): does this initializer expression construct its result in
+// place via a functional-cast / converting constructor call (possibly reached
+// through an expr_init wrapper or a comma)?  When true, the backend elides the
+// constructor directly into the destination storage rather than building a
+// separate object and copying it in.
+static bool CXXInitializerConstructsInPlace(ASTNode* init) {
+  if (init == NULL) {
+    return false;
+  }
+  if (init->op == AST_OP(expr_init)) {
+    return CXXInitializerConstructsInPlace(
+        ((ExpressionInitializerASTNode*)init)->expr);
+  }
+  if (init->op == AST_OP(call)) {
+    ASTNode* callee = ((VectorASTNode*)init)->left;
+    return callee != NULL && callee->type != NULL &&
+           TypeIsFunction(callee->type) &&
+           callee->type->info.function.is_constructor;
+  }
+  if (init->op == AST_OP(comma)) {
+    return CXXInitializerConstructsInPlace(((BinaryASTNode*)init)->left);
+  }
+  return false;
+}
+
+// True when the backend elides the compound literal's construction directly
+// into the compound literal's own storage.  In that case the compound literal's
+// temporary is the live object (and must be destroyed), while the inner
+// construction-source temporary is never materialized on its own (and must be
+// skipped via the `elided` set in CXXTemporaryCollection).
+static bool CXXCompoundLiteralElidesIntoOwnStorage(
+    CompoundLiteralASTNode* literal) {
+  if (!CXXCompoundLiteralWrapsConstructedTemporary(literal)) {
+    return false;
+  }
+  return CXXInitializerConstructsInPlace(
+      CXXSingleExpressionInitializer(literal->initializer));
+}
+
+// State threaded through CollectCXXTemporarySymbols: `temps` are the temporaries
+// to destroy at the end of the full expression; `elided` are inner
+// construction-source temporaries that a compound literal elides into its own
+// storage and that therefore must not be destroyed on their own.  The AST is
+// visited pre-order, so a compound literal is always seen before the inner
+// temporary nested in its initializer.
+typedef struct {
+  Vector temps;
+  Vector elided;
+} CXXTemporaryCollection;
+
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
+  CXXTemporaryCollection* collection = data;
   Symbol* sym = NULL;
   if (node->op == AST_OP(identifier)) {
     if (node->parent != NULL && node->parent->op == AST_OP(compound_literal) &&
@@ -224,10 +276,29 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     if (sym != NULL && CXXTemporaryIsElidedByDirectInitialization(node, sym)) {
       return;
     }
+    // An inner temporary that a compound literal elides into its own storage is
+    // never a live object; destroying it would run a destructor on
+    // uninitialized storage.  The enclosing compound literal's temporary is
+    // destroyed instead (collected below when the compound literal is visited).
+    if (sym != NULL && VectorContainsPointer(&collection->elided, sym)) {
+      return;
+    }
   } else if (node->op == AST_OP(compound_literal)) {
     CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
+    // A compound literal that only wraps the construction of an inner temporary
+    // does not own storage of its own -- unless the backend elides the
+    // constructor directly into the compound literal's own slot, in which case
+    // the compound literal's temporary is the live object that must be
+    // destroyed and the inner source temporary must be skipped.
     if (CXXCompoundLiteralWrapsConstructedTemporary(literal)) {
-      return;
+      if (!CXXCompoundLiteralElidesIntoOwnStorage(literal)) {
+        return;
+      }
+      Symbol* source = CXXTemporaryConstructionResultSymbol(
+          CXXSingleExpressionInitializer(literal->initializer));
+      if (source != NULL && !VectorContainsPointer(&collection->elided, source)) {
+        VectorAppend(&collection->elided, source);
+      }
     }
     if (literal->sym != NULL && literal->sym->op == AST_OP(identifier)) {
       sym = ((IdentifierASTNode*)literal->sym)->symbol;
@@ -235,9 +306,9 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
   } else {
     return;
   }
-  Vector* temps = data;
-  if (CXXTemporaryNeedsDestructor(sym) && !VectorContainsPointer(temps, sym)) {
-    VectorAppend(temps, sym);
+  if (CXXTemporaryNeedsDestructor(sym) &&
+      !VectorContainsPointer(&collection->temps, sym)) {
+    VectorAppend(&collection->temps, sym);
   }
 }
 
@@ -268,11 +339,12 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
         compiler->current_function->info.function.coroutine_frame_type != NULL))) {
     return expr;
   }
-  Vector temps;
-  VectorInit(&temps);
-  ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &temps);
-  for (size_t i = temps.length; i > 0; i--) {
-    Symbol* sym = temps.value.p[i - 1];
+  CXXTemporaryCollection collection;
+  VectorInit(&collection.temps);
+  VectorInit(&collection.elided);
+  ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  for (size_t i = collection.temps.length; i > 0; i--) {
+    Symbol* sym = collection.temps.value.p[i - 1];
     ASTNode* destructor =
         NewCXXTemporaryDestructorCall(sym, expr->location);
     if (destructor == NULL) {
@@ -282,7 +354,8 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
                             expr->location, expr, destructor);
     expr->flags |= kASTAnalyzed;
   }
-  VectorDestruct(&temps);
+  VectorDestruct(&collection.temps);
+  VectorDestruct(&collection.elided);
   return expr;
 }
 
