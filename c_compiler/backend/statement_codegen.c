@@ -846,18 +846,30 @@ static void GenerateCompoundStatement(Generator* gen,
       ScheduleOpenLocalCleanups(gen, node, trailing_start, &open, scope_end);
     }
     if (stmt->flags & kASTEHCleanupOnly) {
-      // A constructor subobject destructor: emit it only inside a cleanup pad,
+      // Constructor subobject destructors: emitted only inside a cleanup pad,
       // never on the normal path (including constant evaluation, where the
-      // object stays alive).  When cleanup is active its range starts here
-      // (right after the subobject's initializer) and runs to scope_end.
+      // object stays alive).  A run of consecutive kASTEHCleanupOnly statements
+      // belongs to one subobject (e.g. the per-element destructors of an array
+      // member) and is pooled into a single cleanup pad so it forms one EH range
+      // run in one pass, in emitted (reverse-element) order.  The range starts
+      // here -- right after the subobject's initializer -- and runs to scope_end.
+      size_t run_end = i;
+      while (run_end + 1 < num_statements &&
+             (((ASTNode*)node->statements->value.p[run_end + 1])->flags &
+              kASTEHCleanupOnly)) {
+        run_end++;
+      }
       if (do_cleanup) {
         IRNode* start_label = GeneratorEmit(gen, NewIR(IR_OP(label)));
         Vector dtors;
         VectorInit(&dtors);
-        VectorAppend(&dtors, stmt);
+        for (size_t j = i; j <= run_end; j++) {
+          VectorAppend(&dtors, node->statements->value.p[j]);
+        }
         ScheduleCleanupPad(gen, start_label, scope_end, &dtors);
         VectorDestruct(&dtors);
       }
+      i = run_end;  // the loop's i++ advances past the whole run
       continue;
     }
     GenerateStatement(gen, stmt);

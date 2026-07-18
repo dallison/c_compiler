@@ -4135,6 +4135,36 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   }
   InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
                                            complete_initializers, location);
+  // Partial-construction cleanup for the virtual bases just constructed: if a
+  // later initializer or the constructor body throws, the complete object must
+  // destroy its virtual bases (in reverse construction order) yet not run its
+  // own destructor.  The complete-object guard restricts this to the complete-
+  // object constructor variant -- the base-subobject variant never builds the
+  // virtual bases -- and kASTEHCleanupOnly makes the backend emit it only inside
+  // an exception cleanup pad.  Inserted before the direct-base initializers so
+  // its EH range starts earliest and is therefore torn down last (matching the
+  // reverse-of-construction order; see GenerateCompoundStatement).
+  if (CompilerExceptionsEnabled() && owner->virtual_bases.length > 0) {
+    Vector* vbase_dtors = NewVector();
+    for (size_t i = owner->virtual_bases.length; i > 0; i--) {
+      CXXVirtualBaseInfo* vbase = owner->virtual_bases.value.p[i - 1];
+      if (!TypeHasNonTrivialDestructor(vbase->type)) {
+        continue;
+      }
+      ASTNode* dtor = NewCXXVirtualBaseSpecialMemberCall(
+          syntax, func, vbase, /*destructor=*/true, NULL, location);
+      if (dtor != NULL) {
+        VectorAppend(vbase_dtors, dtor);
+      }
+    }
+    ASTNode* guarded =
+        NewCXXCompleteObjectGuardedStatement(func, vbase_dtors, location);
+    if (guarded != NULL) {
+      guarded->flags |= kASTEHCleanupOnly;
+      VectorInsertOrAppend(body, insert_at, guarded);
+      insert_at++;
+    }
+  }
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->is_virtual) {
@@ -4220,11 +4250,14 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     }
     VectorInsertOrAppend(body, insert_at, stmt);
     insert_at++;
-    // Partial-construction cleanup for this member.  Fixed-array members are not
-    // yet covered (their per-element reverse-order cleanup needs a single pooled
-    // cleanup pad); a throw after such a member is constructed leaks it.
+    // Partial-construction cleanup for this member.  A fixed-array member yields
+    // one destructor per element (reverse index order); the codegen pools the
+    // consecutive kASTEHCleanupOnly statements into a single cleanup pad.  This
+    // covers a throw after the member is fully constructed; a throw *during*
+    // element construction of an array is not yet covered (it needs a runtime
+    // element counter) and leaks the elements built so far.
     TypeRecord* member_type = member->symbol->type;
-    if (CompilerExceptionsEnabled() && !TypeIsFixedArray(member_type) &&
+    if (CompilerExceptionsEnabled() &&
         TypeHasNonTrivialDestructor(member_type)) {
       Vector member_dtors;
       VectorInit(&member_dtors);
