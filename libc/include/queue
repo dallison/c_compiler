@@ -1,0 +1,216 @@
+//
+//  queue
+//  c_compiler
+//
+//  C++20 std::queue and std::priority_queue support for DaveCC.
+//
+//  std::queue is a FIFO adaptor over a sequence container (std::deque by
+//  default): push_back at the tail, pop_front at the head.  std::priority_queue
+//  is a max-heap adaptor over a random-access container (std::vector by
+//  default) maintained with the <algorithm> heap operations.
+//
+
+#ifndef __davecc_queue__
+#define __davecc_queue__
+
+#include <algorithm>
+#include <compare>
+#include <deque>
+#include <functional>
+#include <initializer_list>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+template <class T, class Container = deque<T> >
+class queue {
+ public:
+  using container_type = Container;
+  using value_type = typename Container::value_type;
+  using size_type = typename Container::size_type;
+  using reference = typename Container::reference;
+  using const_reference = typename Container::const_reference;
+
+ protected:
+  Container c;
+
+ public:
+  queue() : c() {}
+  explicit queue(const Container& cont) : c(cont) {}
+  explicit queue(Container&& cont) : c(std::move(cont)) {}
+  queue(const queue& other) : c(other.c) {}
+  queue(queue&& other) : c(std::move(other.c)) {}
+
+  queue& operator=(const queue& other) {
+    c = other.c;
+    return *this;
+  }
+  queue& operator=(queue&& other) {
+    c = std::move(other.c);
+    return *this;
+  }
+
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  reference front() { return c.front(); }
+  const_reference front() const { return c.front(); }
+  reference back() { return c.back(); }
+  const_reference back() const { return c.back(); }
+
+  void push(const value_type& value) { c.push_back(value); }
+  void push(value_type&& value) { c.push_back(std::move(value)); }
+
+  template <class... Args>
+  reference emplace(Args&&... args) {
+    return c.emplace_back(std::forward<Args>(args)...);
+  }
+
+  void pop() { c.pop_front(); }
+
+  void swap(queue& other) noexcept { c.swap(other.c); }
+
+  const Container& __container() const { return c; }
+};
+
+template <class T, class Container>
+bool operator==(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() == b.__container();
+}
+
+template <class T, class Container>
+bool operator!=(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() != b.__container();
+}
+
+template <class T, class Container>
+bool operator<(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() < b.__container();
+}
+
+template <class T, class Container>
+bool operator>(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() > b.__container();
+}
+
+template <class T, class Container>
+bool operator<=(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() <= b.__container();
+}
+
+template <class T, class Container>
+bool operator>=(const queue<T, Container>& a, const queue<T, Container>& b) {
+  return a.__container() >= b.__container();
+}
+
+template <class T, class Container>
+void swap(queue<T, Container>& a, queue<T, Container>& b) noexcept {
+  a.swap(b);
+}
+
+template <class T, class Container = vector<T>,
+          class Compare = less<typename Container::value_type> >
+class priority_queue {
+ public:
+  using container_type = Container;
+  using value_compare = Compare;
+  using value_type = typename Container::value_type;
+  using size_type = typename Container::size_type;
+  using reference = typename Container::reference;
+  using const_reference = typename Container::const_reference;
+
+ protected:
+  Container c;
+  Compare comp;
+
+ public:
+  priority_queue() : c(), comp() {}
+
+  explicit priority_queue(const Compare& compare) : c(), comp(compare) {}
+
+  priority_queue(const Compare& compare, const Container& cont)
+      : c(cont), comp(compare) {
+    std::make_heap(c.begin(), c.end(), comp);
+  }
+
+  priority_queue(const Compare& compare, Container&& cont)
+      : c(std::move(cont)), comp(compare) {
+    std::make_heap(c.begin(), c.end(), comp);
+  }
+
+  priority_queue(const priority_queue& other) : c(other.c), comp(other.comp) {}
+  priority_queue(priority_queue&& other)
+      : c(std::move(other.c)), comp(std::move(other.comp)) {}
+
+  template <class It>
+  priority_queue(It first, It last) : c(), comp() {
+    c.insert(c.end(), first, last);
+    std::make_heap(c.begin(), c.end(), comp);
+  }
+
+  template <class It>
+  priority_queue(It first, It last, const Compare& compare)
+      : c(), comp(compare) {
+    c.insert(c.end(), first, last);
+    std::make_heap(c.begin(), c.end(), comp);
+  }
+
+  template <class It>
+  priority_queue(It first, It last, const Compare& compare,
+                 const Container& cont)
+      : c(cont), comp(compare) {
+    c.insert(c.end(), first, last);
+    std::make_heap(c.begin(), c.end(), comp);
+  }
+
+  priority_queue& operator=(const priority_queue& other) {
+    c = other.c;
+    comp = other.comp;
+    return *this;
+  }
+  priority_queue& operator=(priority_queue&& other) {
+    c = std::move(other.c);
+    comp = std::move(other.comp);
+    return *this;
+  }
+
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  const_reference top() const { return c.front(); }
+
+  void push(const value_type& value) {
+    c.push_back(value);
+    std::push_heap(c.begin(), c.end(), comp);
+  }
+  void push(value_type&& value) {
+    c.push_back(std::move(value));
+    std::push_heap(c.begin(), c.end(), comp);
+  }
+
+  template <class... Args>
+  void emplace(Args&&... args) {
+    c.emplace_back(std::forward<Args>(args)...);
+    std::push_heap(c.begin(), c.end(), comp);
+  }
+
+  void pop() {
+    std::pop_heap(c.begin(), c.end(), comp);
+    c.pop_back();
+  }
+
+  void swap(priority_queue& other) noexcept {
+    using std::swap;
+    swap(c, other.c);
+    swap(comp, other.comp);
+  }
+};
+
+template <class T, class Container, class Compare>
+void swap(priority_queue<T, Container, Compare>& a,
+          priority_queue<T, Container, Compare>& b) noexcept {
+  a.swap(b);
+}
+
+}  // namespace std
+
+#endif /* __davecc_queue__ */

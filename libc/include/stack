@@ -1,0 +1,107 @@
+//
+//  stack
+//  c_compiler
+//
+//  C++20 std::stack support for DaveCC.
+//
+//  A container adaptor providing LIFO access on top of an underlying sequence
+//  container (std::deque by default).  All operations forward to the wrapped
+//  container's back().
+//
+
+#ifndef __davecc_stack__
+#define __davecc_stack__
+
+#include <compare>
+#include <deque>
+#include <initializer_list>
+#include <utility>
+
+namespace std {
+
+template <class T, class Container = deque<T> >
+class stack {
+ public:
+  using container_type = Container;
+  using value_type = typename Container::value_type;
+  using size_type = typename Container::size_type;
+  using reference = typename Container::reference;
+  using const_reference = typename Container::const_reference;
+
+ protected:
+  Container c;
+
+ public:
+  stack() : c() {}
+  explicit stack(const Container& cont) : c(cont) {}
+  explicit stack(Container&& cont) : c(std::move(cont)) {}
+  stack(const stack& other) : c(other.c) {}
+  stack(stack&& other) : c(std::move(other.c)) {}
+
+  stack& operator=(const stack& other) {
+    c = other.c;
+    return *this;
+  }
+  stack& operator=(stack&& other) {
+    c = std::move(other.c);
+    return *this;
+  }
+
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  reference top() { return c.back(); }
+  const_reference top() const { return c.back(); }
+
+  void push(const value_type& value) { c.push_back(value); }
+  void push(value_type&& value) { c.push_back(std::move(value)); }
+
+  template <class... Args>
+  reference emplace(Args&&... args) {
+    return c.emplace_back(std::forward<Args>(args)...);
+  }
+
+  void pop() { c.pop_back(); }
+
+  void swap(stack& other) noexcept { c.swap(other.c); }
+
+  const Container& __container() const { return c; }
+};
+
+template <class T, class Container>
+bool operator==(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() == b.__container();
+}
+
+template <class T, class Container>
+bool operator!=(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() != b.__container();
+}
+
+template <class T, class Container>
+bool operator<(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() < b.__container();
+}
+
+template <class T, class Container>
+bool operator>(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() > b.__container();
+}
+
+template <class T, class Container>
+bool operator<=(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() <= b.__container();
+}
+
+template <class T, class Container>
+bool operator>=(const stack<T, Container>& a, const stack<T, Container>& b) {
+  return a.__container() >= b.__container();
+}
+
+template <class T, class Container>
+void swap(stack<T, Container>& a, stack<T, Container>& b) noexcept {
+  a.swap(b);
+}
+
+}  // namespace std
+
+#endif /* __davecc_stack__ */

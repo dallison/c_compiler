@@ -1,0 +1,980 @@
+//
+//  deque
+//  c_compiler
+//
+//  C++20 std::deque support for DaveCC.
+//
+//  Storage is the classic "map of blocks": a resizable array of pointers
+//  (`__map_`) whose active slots [__bfirst_, __blast_) each own a fixed-size
+//  block of `__block_size()` elements.  Logical element positions are addressed
+//  by a flattened index relative to __bfirst_, with __start_ marking the front
+//  element.  This gives O(1) amortized push/pop at both ends and O(1) random
+//  access.  Iterators are lightweight (container pointer + logical index); like
+//  the standard deque, they are invalidated by any insertion or erasure.
+//
+
+#ifndef __davecc_deque__
+#define __davecc_deque__
+
+#include <compare>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <new>
+#include <stddef.h>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __deque_detail {
+
+static inline void __throw_out_of_range() {
+  throw out_of_range((const char*)"deque::at");
+}
+
+}  // namespace __deque_detail
+
+template <class T, class Allocator = allocator<T> >
+class deque {
+ private:
+  using __alloc_traits = allocator_traits<Allocator>;
+  using __map_allocator =
+      typename __alloc_traits::template rebind_alloc<T*>;
+  using __map_alloc_traits = allocator_traits<__map_allocator>;
+
+ public:
+  using value_type = T;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+
+ private:
+  T** __map_;
+  size_type __map_cap_;
+  size_type __bfirst_;
+  size_type __blast_;
+  size_type __start_;
+  size_type __size_;
+  allocator_type __alloc_;
+  __map_allocator __map_alloc_;
+
+  static size_type __block_size() {
+    size_type s = sizeof(T);
+    return s < 256 ? (size_type)(4096 / s) : (size_type)16;
+  }
+
+  T* __allocate_block() {
+    return __alloc_traits::allocate(__alloc_, __block_size());
+  }
+
+  void __deallocate_block(T* block) noexcept {
+    __alloc_traits::deallocate(__alloc_, block, __block_size());
+  }
+
+  T** __allocate_map(size_type count) {
+    return __map_alloc_traits::allocate(__map_alloc_, count);
+  }
+
+  void __deallocate_map(T** map, size_type count) noexcept {
+    __map_alloc_traits::deallocate(__map_alloc_, map, count);
+  }
+
+  size_type __active_blocks() const noexcept { return __blast_ - __bfirst_; }
+
+  // Address of the element whose flattened index (relative to __bfirst_) is f.
+  pointer __at_flat(size_type f) noexcept {
+    size_type bs = __block_size();
+    return __map_[__bfirst_ + f / bs] + (f % bs);
+  }
+
+  const_pointer __at_flat(size_type f) const noexcept {
+    size_type bs = __block_size();
+    return __map_[__bfirst_ + f / bs] + (f % bs);
+  }
+
+ public:
+  // Internal element accessors. Public (with a __ prefix) so the nested
+  // iterator classes can reach them without needing friendship; a friend
+  // declaration for the (later-defined) nested classes would instead inject
+  // those names into the enclosing namespace.
+  reference __ref(size_type i) noexcept { return *__at_flat(__start_ + i); }
+  const_reference __ref(size_type i) const noexcept {
+    return *__at_flat(__start_ + i);
+  }
+
+  // Address of the i-th logical element. The nested iterators use these
+  // pointer-returning accessors instead of the reference-returning __ref():
+  // calling a reference-returning member through the iterator's stored deque*
+  // currently loses the return value's reference-ness in the frontend, so
+  // dereferencing an explicit pointer keeps the result a proper lvalue.
+  pointer __addr(size_type i) noexcept { return __at_flat(__start_ + i); }
+  const_pointer __addr(size_type i) const noexcept {
+    return __at_flat(__start_ + i);
+  }
+
+ private:
+
+  void __init_one_block() {
+    __map_cap_ = 1;
+    __map_ = __allocate_map(__map_cap_);
+    __map_[0] = __allocate_block();
+    __bfirst_ = 0;
+    __blast_ = 1;
+    __start_ = 0;
+    __size_ = 0;
+  }
+
+  void __free_all() noexcept {
+    __destroy_elements();
+    if (__map_ != nullptr) {
+      for (size_type i = __bfirst_; i < __blast_; i++) {
+        __deallocate_block(__map_[i]);
+      }
+      __deallocate_map(__map_, __map_cap_);
+    }
+    __map_ = nullptr;
+    __map_cap_ = 0;
+    __bfirst_ = 0;
+    __blast_ = 0;
+    __start_ = 0;
+    __size_ = 0;
+  }
+
+  void __destroy_elements() noexcept {
+    for (size_type i = 0; i < __size_; i++) {
+      __alloc_traits::destroy(__alloc_, &__ref(i));
+    }
+  }
+
+  // Reallocate the map so there is room for `need_front` additional block
+  // slots before the active range and `need_back` after it.  Active block
+  // pointers are copied while preserving their order, so __start_ (which is
+  // relative to __bfirst_) is unchanged.
+  void __regrow_map(size_type need_front, size_type need_back) {
+    size_type active = __active_blocks();
+    size_type needed = active + need_front + need_back;
+    size_type new_cap = __map_cap_ == 0 ? 1 : __map_cap_ * 2;
+    if (new_cap < needed) {
+      new_cap = needed;
+    }
+    size_type new_first = (new_cap - active) / 2;
+    if (new_first < need_front) {
+      new_first = need_front;
+    }
+    if (new_first > new_cap - active - need_back) {
+      new_first = new_cap - active - need_back;
+    }
+    T** fresh = __allocate_map(new_cap);
+    for (size_type i = 0; i < new_cap; i++) {
+      fresh[i] = nullptr;
+    }
+    for (size_type i = 0; i < active; i++) {
+      fresh[new_first + i] = __map_[__bfirst_ + i];
+    }
+    if (__map_ != nullptr) {
+      __deallocate_map(__map_, __map_cap_);
+    }
+    __map_ = fresh;
+    __map_cap_ = new_cap;
+    __bfirst_ = new_first;
+    __blast_ = new_first + active;
+  }
+
+  void __ensure_back_block() {
+    if (__blast_ == __map_cap_) {
+      __regrow_map(0, 1);
+    }
+    __map_[__blast_] = __allocate_block();
+    __blast_++;
+  }
+
+  void __ensure_front_block() {
+    if (__bfirst_ == 0) {
+      __regrow_map(1, 0);
+    }
+    __bfirst_--;
+    __map_[__bfirst_] = __allocate_block();
+    __start_ += __block_size();
+  }
+
+  void __prepare_back() {
+    if (__start_ + __size_ == __active_blocks() * __block_size()) {
+      __ensure_back_block();
+    }
+  }
+
+  void __prepare_front() {
+    if (__start_ == 0) {
+      __ensure_front_block();
+    }
+  }
+
+  // After a front element is removed, drop a leading block that no longer holds
+  // any live element (keeping at least one active block).
+  void __trim_front() {
+    size_type bs = __block_size();
+    while (__start_ >= bs && __active_blocks() > 1) {
+      __deallocate_block(__map_[__bfirst_]);
+      __bfirst_++;
+      __start_ -= bs;
+    }
+  }
+
+  // After a back element is removed, drop a trailing block that no longer holds
+  // any live element (keeping at least one active block).
+  void __trim_back() {
+    size_type bs = __block_size();
+    while (__active_blocks() > 1 &&
+           __start_ + __size_ <= (__active_blocks() - 1) * bs) {
+      __blast_--;
+      __deallocate_block(__map_[__blast_]);
+    }
+  }
+
+  template <class It>
+  void __append_range(It first, It last) {
+    for (; first != last; ++first) {
+      push_back(*first);
+    }
+  }
+
+  void __move_assign_from(deque& other) {
+    __free_all();
+    __map_ = other.__map_;
+    __map_cap_ = other.__map_cap_;
+    __bfirst_ = other.__bfirst_;
+    __blast_ = other.__blast_;
+    __start_ = other.__start_;
+    __size_ = other.__size_;
+    other.__map_ = nullptr;
+    other.__init_one_block();
+  }
+
+ public:
+  class iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = T*;
+    using reference = T&;
+
+    deque* __d_;
+    size_type __i_;
+
+    iterator() : __d_(nullptr), __i_(0) {}
+    iterator(deque* d, size_type i) : __d_(d), __i_(i) {}
+
+    reference operator*() const { return *__d_->__addr(__i_); }
+    pointer operator->() const { return __d_->__addr(__i_); }
+    reference operator[](difference_type n) const {
+      return *__d_->__addr(__i_ + n);
+    }
+
+    iterator& operator++() {
+      __i_++;
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp = *this;
+      __i_++;
+      return tmp;
+    }
+    iterator& operator--() {
+      __i_--;
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp = *this;
+      __i_--;
+      return tmp;
+    }
+    iterator& operator+=(difference_type n) {
+      __i_ += n;
+      return *this;
+    }
+    iterator& operator-=(difference_type n) {
+      __i_ -= n;
+      return *this;
+    }
+    iterator operator+(difference_type n) const {
+      return iterator(__d_, __i_ + n);
+    }
+    iterator operator-(difference_type n) const {
+      return iterator(__d_, __i_ - n);
+    }
+    difference_type operator-(const iterator& other) const {
+      return (difference_type)__i_ - (difference_type)other.__i_;
+    }
+
+    bool operator==(const iterator& o) const { return __i_ == o.__i_; }
+    bool operator!=(const iterator& o) const { return __i_ != o.__i_; }
+    bool operator<(const iterator& o) const { return __i_ < o.__i_; }
+    bool operator>(const iterator& o) const { return __i_ > o.__i_; }
+    bool operator<=(const iterator& o) const { return __i_ <= o.__i_; }
+    bool operator>=(const iterator& o) const { return __i_ >= o.__i_; }
+
+    friend iterator operator+(difference_type n, const iterator& it) {
+      return iterator(it.__d_, it.__i_ + n);
+    }
+  };
+
+  class const_iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = const T*;
+    using reference = const T&;
+
+    const deque* __d_;
+    size_type __i_;
+
+    const_iterator() : __d_(nullptr), __i_(0) {}
+    const_iterator(const deque* d, size_type i) : __d_(d), __i_(i) {}
+    const_iterator(const iterator& it) : __d_(it.__d_), __i_(it.__i_) {}
+
+    reference operator*() const { return *__d_->__addr(__i_); }
+    pointer operator->() const { return __d_->__addr(__i_); }
+    reference operator[](difference_type n) const {
+      return *__d_->__addr(__i_ + n);
+    }
+
+    const_iterator& operator++() {
+      __i_++;
+      return *this;
+    }
+    const_iterator operator++(int) {
+      const_iterator tmp = *this;
+      __i_++;
+      return tmp;
+    }
+    const_iterator& operator--() {
+      __i_--;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      const_iterator tmp = *this;
+      __i_--;
+      return tmp;
+    }
+    const_iterator& operator+=(difference_type n) {
+      __i_ += n;
+      return *this;
+    }
+    const_iterator& operator-=(difference_type n) {
+      __i_ -= n;
+      return *this;
+    }
+    const_iterator operator+(difference_type n) const {
+      return const_iterator(__d_, __i_ + n);
+    }
+    const_iterator operator-(difference_type n) const {
+      return const_iterator(__d_, __i_ - n);
+    }
+    difference_type operator-(const const_iterator& other) const {
+      return (difference_type)__i_ - (difference_type)other.__i_;
+    }
+
+    bool operator==(const const_iterator& o) const { return __i_ == o.__i_; }
+    bool operator!=(const const_iterator& o) const { return __i_ != o.__i_; }
+    bool operator<(const const_iterator& o) const { return __i_ < o.__i_; }
+    bool operator>(const const_iterator& o) const { return __i_ > o.__i_; }
+    bool operator<=(const const_iterator& o) const { return __i_ <= o.__i_; }
+    bool operator>=(const const_iterator& o) const { return __i_ >= o.__i_; }
+
+    friend const_iterator operator+(difference_type n,
+                                    const const_iterator& it) {
+      return const_iterator(it.__d_, it.__i_ + n);
+    }
+  };
+
+  // NOTE: these reverse iterators are written by hand rather than reusing
+  // std::reverse_iterator<iterator>.  Because `iterator` stores a `deque*` and
+  // its operator* refers back to the enclosing deque, forming the member typedef
+  // std::reverse_iterator<iterator> makes deque<T>'s type transitively refer to
+  // itself; the frontend's type deep-copy (used when deque<T> is a default
+  // template argument, e.g. std::stack<T>) recurses without bound on such a
+  // self-referential type.  A plain nested class avoids embedding that
+  // self-referential template-id in deque<T>'s type.
+  // NOTE: named with a __ prefix (and exposed via the standard typedefs below)
+  // to avoid colliding with std::reverse_iterator from <iterator>: an
+  // unqualified use of `reverse_iterator` inside this class would otherwise be
+  // ambiguous between the nested class and the std template.
+  class __reverse_iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = T*;
+    using reference = T&;
+
+    iterator __base_;
+
+    __reverse_iterator() : __base_() {}
+    explicit __reverse_iterator(iterator base) : __base_(base) {}
+
+    iterator base() const { return __base_; }
+    // Access the element before the base position directly through the deque
+    // pointer (like the forward iterator) rather than dereferencing a temporary
+    // iterator; the latter miscompiles in the current frontend.
+    reference operator*() const {
+      return *__base_.__d_->__addr(__base_.__i_ - 1);
+    }
+    pointer operator->() const {
+      return __base_.__d_->__addr(__base_.__i_ - 1);
+    }
+    reference operator[](difference_type n) const {
+      return *__base_.__d_->__addr(__base_.__i_ - 1 - n);
+    }
+
+    __reverse_iterator& operator++() {
+      --__base_;
+      return *this;
+    }
+    __reverse_iterator operator++(int) {
+      __reverse_iterator tmp = *this;
+      --__base_;
+      return tmp;
+    }
+    __reverse_iterator& operator--() {
+      ++__base_;
+      return *this;
+    }
+    __reverse_iterator operator--(int) {
+      __reverse_iterator tmp = *this;
+      ++__base_;
+      return tmp;
+    }
+    __reverse_iterator& operator+=(difference_type n) {
+      __base_ -= n;
+      return *this;
+    }
+    __reverse_iterator& operator-=(difference_type n) {
+      __base_ += n;
+      return *this;
+    }
+    __reverse_iterator operator+(difference_type n) const {
+      return __reverse_iterator(__base_ - n);
+    }
+    __reverse_iterator operator-(difference_type n) const {
+      return __reverse_iterator(__base_ + n);
+    }
+    difference_type operator-(const __reverse_iterator& o) const {
+      return o.__base_ - __base_;
+    }
+
+    bool operator==(const __reverse_iterator& o) const {
+      return __base_ == o.__base_;
+    }
+    bool operator!=(const __reverse_iterator& o) const {
+      return __base_ != o.__base_;
+    }
+    bool operator<(const __reverse_iterator& o) const {
+      return o.__base_ < __base_;
+    }
+    bool operator>(const __reverse_iterator& o) const {
+      return o.__base_ > __base_;
+    }
+    bool operator<=(const __reverse_iterator& o) const {
+      return o.__base_ <= __base_;
+    }
+    bool operator>=(const __reverse_iterator& o) const {
+      return o.__base_ >= __base_;
+    }
+  };
+
+  class __const_reverse_iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = const T*;
+    using reference = const T&;
+
+    const_iterator __base_;
+
+    __const_reverse_iterator() : __base_() {}
+    explicit __const_reverse_iterator(const_iterator base) : __base_(base) {}
+    __const_reverse_iterator(const __reverse_iterator& other)
+        : __base_(other.__base_) {}
+
+    const_iterator base() const { return __base_; }
+    reference operator*() const {
+      return *__base_.__d_->__addr(__base_.__i_ - 1);
+    }
+    pointer operator->() const {
+      return __base_.__d_->__addr(__base_.__i_ - 1);
+    }
+    reference operator[](difference_type n) const {
+      return *__base_.__d_->__addr(__base_.__i_ - 1 - n);
+    }
+
+    __const_reverse_iterator& operator++() {
+      --__base_;
+      return *this;
+    }
+    __const_reverse_iterator operator++(int) {
+      __const_reverse_iterator tmp = *this;
+      --__base_;
+      return tmp;
+    }
+    __const_reverse_iterator& operator--() {
+      ++__base_;
+      return *this;
+    }
+    __const_reverse_iterator operator--(int) {
+      __const_reverse_iterator tmp = *this;
+      ++__base_;
+      return tmp;
+    }
+    __const_reverse_iterator& operator+=(difference_type n) {
+      __base_ -= n;
+      return *this;
+    }
+    __const_reverse_iterator& operator-=(difference_type n) {
+      __base_ += n;
+      return *this;
+    }
+    __const_reverse_iterator operator+(difference_type n) const {
+      return __const_reverse_iterator(__base_ - n);
+    }
+    __const_reverse_iterator operator-(difference_type n) const {
+      return __const_reverse_iterator(__base_ + n);
+    }
+    difference_type operator-(const __const_reverse_iterator& o) const {
+      return o.__base_ - __base_;
+    }
+
+    bool operator==(const __const_reverse_iterator& o) const {
+      return __base_ == o.__base_;
+    }
+    bool operator!=(const __const_reverse_iterator& o) const {
+      return __base_ != o.__base_;
+    }
+    bool operator<(const __const_reverse_iterator& o) const {
+      return o.__base_ < __base_;
+    }
+    bool operator>(const __const_reverse_iterator& o) const {
+      return o.__base_ > __base_;
+    }
+    bool operator<=(const __const_reverse_iterator& o) const {
+      return o.__base_ <= __base_;
+    }
+    bool operator>=(const __const_reverse_iterator& o) const {
+      return o.__base_ >= __base_;
+    }
+  };
+
+  using reverse_iterator = __reverse_iterator;
+  using const_reverse_iterator = __const_reverse_iterator;
+
+  deque() : __alloc_() { __init_one_block(); }
+
+  explicit deque(const Allocator& alloc) : __alloc_(alloc) {
+    __init_one_block();
+  }
+
+  explicit deque(size_type count, const Allocator& alloc = Allocator())
+      : __alloc_(alloc) {
+    __init_one_block();
+    for (size_type i = 0; i < count; i++) {
+      emplace_back();
+    }
+  }
+
+  deque(size_type count, const T& value, const Allocator& alloc = Allocator())
+      : __alloc_(alloc) {
+    __init_one_block();
+    for (size_type i = 0; i < count; i++) {
+      push_back(value);
+    }
+  }
+
+  template <class It>
+  deque(It first, It last, const Allocator& alloc = Allocator(),
+        typename enable_if<!is_integral<It>::value, int>::type = 0)
+      : __alloc_(alloc) {
+    __init_one_block();
+    __append_range(first, last);
+  }
+
+  deque(initializer_list<T> init, const Allocator& alloc = Allocator())
+      : __alloc_(alloc) {
+    __init_one_block();
+    __append_range(init.begin(), init.end());
+  }
+
+  deque(const deque& other)
+      : __alloc_(__alloc_traits::select_on_container_copy_construction(
+            other.__alloc_)) {
+    __init_one_block();
+    for (size_type i = 0; i < other.__size_; i++) {
+      push_back(other.__ref(i));
+    }
+  }
+
+  deque(deque&& other)
+      : __map_(other.__map_),
+        __map_cap_(other.__map_cap_),
+        __bfirst_(other.__bfirst_),
+        __blast_(other.__blast_),
+        __start_(other.__start_),
+        __size_(other.__size_),
+        __alloc_(other.__alloc_),
+        __map_alloc_(other.__map_alloc_) {
+    other.__map_ = nullptr;
+    other.__init_one_block();
+  }
+
+  ~deque() { __free_all(); }
+
+  deque& operator=(const deque& other) {
+    if (this != &other) {
+      clear();
+      for (size_type i = 0; i < other.__size_; i++) {
+        push_back(other.__ref(i));
+      }
+    }
+    return *this;
+  }
+
+  deque& operator=(deque&& other) {
+    if (this != &other) {
+      __move_assign_from(other);
+    }
+    return *this;
+  }
+
+  deque& operator=(initializer_list<T> init) {
+    assign(init);
+    return *this;
+  }
+
+  void assign(size_type count, const T& value) {
+    clear();
+    for (size_type i = 0; i < count; i++) {
+      push_back(value);
+    }
+  }
+
+  template <class It>
+  void assign(It first, It last,
+              typename enable_if<!is_integral<It>::value, int>::type = 0) {
+    clear();
+    __append_range(first, last);
+  }
+
+  void assign(initializer_list<T> init) {
+    clear();
+    __append_range(init.begin(), init.end());
+  }
+
+  allocator_type get_allocator() const noexcept { return __alloc_; }
+
+  reference at(size_type pos) {
+    if (pos >= __size_) {
+      __deque_detail::__throw_out_of_range();
+    }
+    return __ref(pos);
+  }
+  const_reference at(size_type pos) const {
+    if (pos >= __size_) {
+      __deque_detail::__throw_out_of_range();
+    }
+    return __ref(pos);
+  }
+
+  reference operator[](size_type pos) { return __ref(pos); }
+  const_reference operator[](size_type pos) const { return __ref(pos); }
+  reference front() { return __ref(0); }
+  const_reference front() const { return __ref(0); }
+  reference back() { return __ref(__size_ - 1); }
+  const_reference back() const { return __ref(__size_ - 1); }
+
+  iterator begin() noexcept { return iterator(this, 0); }
+  const_iterator begin() const noexcept { return const_iterator(this, 0); }
+  const_iterator cbegin() const noexcept { return const_iterator(this, 0); }
+  iterator end() noexcept { return iterator(this, __size_); }
+  const_iterator end() const noexcept { return const_iterator(this, __size_); }
+  const_iterator cend() const noexcept {
+    return const_iterator(this, __size_);
+  }
+  reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+  const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+  reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+  const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+
+  bool empty() const noexcept { return __size_ == 0; }
+  size_type size() const noexcept { return __size_; }
+  size_type max_size() const noexcept {
+    return __alloc_traits::max_size(__alloc_);
+  }
+
+  void shrink_to_fit() {}
+
+  void clear() noexcept {
+    __destroy_elements();
+    for (size_type i = __bfirst_; i < __blast_; i++) {
+      __deallocate_block(__map_[i]);
+    }
+    if (__map_ != nullptr) {
+      __deallocate_map(__map_, __map_cap_);
+      __map_ = nullptr;
+    }
+    __init_one_block();
+  }
+
+  void push_back(const T& value) {
+    __prepare_back();
+    __alloc_traits::construct(__alloc_, __at_flat(__start_ + __size_), value);
+    __size_++;
+  }
+
+  void push_back(T&& value) {
+    __prepare_back();
+    __alloc_traits::construct(__alloc_, __at_flat(__start_ + __size_),
+                              std::move(value));
+    __size_++;
+  }
+
+  template <class... Args>
+  reference emplace_back(Args&&... args) {
+    __prepare_back();
+    __alloc_traits::construct(__alloc_, __at_flat(__start_ + __size_),
+                              std::forward<Args>(args)...);
+    __size_++;
+    return back();
+  }
+
+  void push_front(const T& value) {
+    __prepare_front();
+    __start_--;
+    __alloc_traits::construct(__alloc_, __at_flat(__start_), value);
+    __size_++;
+  }
+
+  void push_front(T&& value) {
+    __prepare_front();
+    __start_--;
+    __alloc_traits::construct(__alloc_, __at_flat(__start_), std::move(value));
+    __size_++;
+  }
+
+  template <class... Args>
+  reference emplace_front(Args&&... args) {
+    __prepare_front();
+    __start_--;
+    __alloc_traits::construct(__alloc_, __at_flat(__start_),
+                              std::forward<Args>(args)...);
+    __size_++;
+    return front();
+  }
+
+  void pop_back() {
+    __size_--;
+    __alloc_traits::destroy(__alloc_, __at_flat(__start_ + __size_));
+    __trim_back();
+  }
+
+  void pop_front() {
+    __alloc_traits::destroy(__alloc_, __at_flat(__start_));
+    __start_++;
+    __size_--;
+    __trim_front();
+  }
+
+  void resize(size_type count) {
+    while (__size_ > count) {
+      pop_back();
+    }
+    while (__size_ < count) {
+      emplace_back();
+    }
+  }
+
+  void resize(size_type count, const T& value) {
+    while (__size_ > count) {
+      pop_back();
+    }
+    while (__size_ < count) {
+      push_back(value);
+    }
+  }
+
+  iterator insert(const_iterator pos, const T& value) {
+    size_type index = pos.__i_;
+    push_back(value);
+    for (size_type j = __size_ - 1; j > index; j--) {
+      __ref(j) = std::move(__ref(j - 1));
+    }
+    __ref(index) = value;
+    return iterator(this, index);
+  }
+
+  iterator insert(const_iterator pos, T&& value) {
+    size_type index = pos.__i_;
+    emplace_back(std::move(value));
+    T tmp = std::move(__ref(__size_ - 1));
+    for (size_type j = __size_ - 1; j > index; j--) {
+      __ref(j) = std::move(__ref(j - 1));
+    }
+    __ref(index) = std::move(tmp);
+    return iterator(this, index);
+  }
+
+  iterator insert(const_iterator pos, size_type count, const T& value) {
+    size_type index = pos.__i_;
+    for (size_type k = 0; k < count; k++) {
+      insert(const_iterator(this, index + k), value);
+    }
+    return iterator(this, index);
+  }
+
+  template <class It>
+  iterator insert(const_iterator pos, It first, It last,
+                  typename enable_if<!is_integral<It>::value, int>::type = 0) {
+    size_type index = pos.__i_;
+    size_type offset = 0;
+    for (; first != last; ++first, ++offset) {
+      insert(const_iterator(this, index + offset), *first);
+    }
+    return iterator(this, index);
+  }
+
+  iterator insert(const_iterator pos, initializer_list<T> init) {
+    return insert(pos, init.begin(), init.end());
+  }
+
+  template <class... Args>
+  iterator emplace(const_iterator pos, Args&&... args) {
+    size_type index = pos.__i_;
+    emplace_back(std::forward<Args>(args)...);
+    T tmp = std::move(__ref(__size_ - 1));
+    for (size_type j = __size_ - 1; j > index; j--) {
+      __ref(j) = std::move(__ref(j - 1));
+    }
+    __ref(index) = std::move(tmp);
+    return iterator(this, index);
+  }
+
+  iterator erase(const_iterator pos) {
+    size_type index = pos.__i_;
+    for (size_type j = index; j + 1 < __size_; j++) {
+      __ref(j) = std::move(__ref(j + 1));
+    }
+    pop_back();
+    return iterator(this, index);
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    size_type index = first.__i_;
+    size_type count = last.__i_ - first.__i_;
+    for (size_type j = index; j + count < __size_; j++) {
+      __ref(j) = std::move(__ref(j + count));
+    }
+    for (size_type k = 0; k < count; k++) {
+      pop_back();
+    }
+    return iterator(this, index);
+  }
+
+  void swap(deque& other) noexcept {
+    T** map = __map_;
+    size_type map_cap = __map_cap_;
+    size_type bfirst = __bfirst_;
+    size_type blast = __blast_;
+    size_type start = __start_;
+    size_type size = __size_;
+    __map_ = other.__map_;
+    __map_cap_ = other.__map_cap_;
+    __bfirst_ = other.__bfirst_;
+    __blast_ = other.__blast_;
+    __start_ = other.__start_;
+    __size_ = other.__size_;
+    other.__map_ = map;
+    other.__map_cap_ = map_cap;
+    other.__bfirst_ = bfirst;
+    other.__blast_ = blast;
+    other.__start_ = start;
+    other.__size_ = size;
+    allocator_type alloc = __alloc_;
+    __alloc_ = other.__alloc_;
+    other.__alloc_ = alloc;
+    __map_allocator map_alloc = __map_alloc_;
+    __map_alloc_ = other.__map_alloc_;
+    other.__map_alloc_ = map_alloc;
+  }
+};
+
+template <class T, class Allocator>
+bool operator==(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); i++) {
+    if (!(a[i] == b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class T, class Allocator>
+bool operator!=(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  return !(a == b);
+}
+
+template <class T, class Allocator>
+bool operator<(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  size_t n = a.size() < b.size() ? a.size() : b.size();
+  for (size_t i = 0; i < n; i++) {
+    if (a[i] < b[i]) {
+      return true;
+    }
+    if (b[i] < a[i]) {
+      return false;
+    }
+  }
+  return a.size() < b.size();
+}
+
+template <class T, class Allocator>
+bool operator>(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  return b < a;
+}
+
+template <class T, class Allocator>
+bool operator<=(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  return !(b < a);
+}
+
+template <class T, class Allocator>
+bool operator>=(const deque<T, Allocator>& a, const deque<T, Allocator>& b) {
+  return !(a < b);
+}
+
+template <class T, class Allocator>
+void swap(deque<T, Allocator>& a, deque<T, Allocator>& b) noexcept {
+  a.swap(b);
+}
+
+}  // namespace std
+
+#endif /* __davecc_deque__ */
