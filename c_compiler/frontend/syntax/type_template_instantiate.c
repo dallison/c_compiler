@@ -506,8 +506,10 @@ static bool AddTemplateInstantiationTag(TypeParser* parser, Symbol* templ,
 }
 
 /* Reject (with a diagnostic) class-template instantiations that use member
- * kinds the instantiation machinery does not yet handle: anonymous members,
- * bit-fields, and virtual/pure-virtual member functions. */
+ * kinds the instantiation machinery does not yet handle: anonymous members and
+ * bit-fields.  Virtual (and pure-virtual) member functions *are* supported: the
+ * instantiation path completes the polymorphic layout and emits the vtable(s)
+ * the same way a normal class definition does. */
 static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
                                                        Struct* str) {
   for (size_t i = 0; i < str->members.length; i++) {
@@ -522,9 +524,7 @@ static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
     }
     if (member->is_member_function &&
         (member->symbol == NULL || member->symbol->type == NULL ||
-         !TypeIsFunction(member->symbol->type) ||
-         member->symbol->type->info.function.is_virtual ||
-         member->symbol->type->info.function.is_pure_virtual)) {
+         !TypeIsFunction(member->symbol->type))) {
       SyntaxError(parser->syntax,
                   "Class template instantiation is not supported yet");
       return false;
@@ -576,6 +576,14 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     }
   }
   func->info.function.is_final = from->info.function.is_final;
+  // Virtualness must survive instantiation so the instantiated member is
+  // registered into a vtable slot (RegisterCXXVirtualMember, run via
+  // AddStructMember, keys off is_virtual).  The concrete slot index is *not*
+  // copied: it is reassigned during registration by override resolution against
+  // the instantiated bases, matching how a normal class assigns slots.
+  func->info.function.is_virtual = from->info.function.is_virtual;
+  func->info.function.is_override = from->info.function.is_override;
+  func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
   func->info.function.cxx_special_member_kind =
@@ -656,6 +664,14 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.cxx_member_owner != NULL && !is_static_member ? 1 : 0;
   for (size_t i = first_formal; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
+    // The implicit `__complete_object` flag (present on constructors/destructors
+    // of a class with virtual bases) is recreated by TypeRecordAddCXXThisParameter
+    // for the instantiated function above; copying the source's copy as well would
+    // duplicate it, giving the instantiated constructor a spurious extra int
+    // parameter and breaking every call to it.
+    if (formal != NULL && StringEqual(&formal->name, "__complete_object")) {
+      continue;
+    }
     if (formal != NULL && formal->flags.is_parameter_pack) {
       AppendSubstitutedFormalParameter(
           parser, &func->info.function.prototype, formal, subst_args,
@@ -1629,6 +1645,66 @@ static Vector* SpecializationTemplateArguments(TypeRecord* type) {
   return NULL;
 }
 
+// The class template that `type` (a class specialization) was instantiated from,
+// or NULL if `type` is not a class-template specialization.
+static Symbol* ClassTemplateOriginOf(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  Symbol* origin = type->template_origin;
+  if (origin == NULL && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL &&
+      type->info.struct_info->tag_symbol->type != NULL) {
+    origin = type->info.struct_info->tag_symbol->type->template_origin;
+  }
+  return origin;
+}
+
+static bool ClassTemplateOriginMatches(Symbol* a, Symbol* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  return a == b || StringEqualString(&a->name, &b->name);
+}
+
+// [temp.deduct.call]/4.3: when the parameter is a class template specialization
+// and the argument is derived from a specialization of that same template,
+// deduction proceeds against the base class.  Searches `actual`'s base classes
+// (transitively) for a base that is a specialization of `formal_origin`'s
+// template and returns that base's concrete type.  Returns NULL when there is no
+// such base, or more than one distinct matching base (an ambiguous case in which
+// deduction fails).
+static TypeRecord* FindTemplateBaseForDeduction(TypeRecord* actual,
+                                                Symbol* formal_origin) {
+  if (actual == NULL || !TypeIsStructOrUnion(actual) ||
+      actual->info.struct_info == NULL || formal_origin == NULL) {
+    return NULL;
+  }
+  Struct* str = actual->info.struct_info;
+  TypeRecord* found = NULL;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL) {
+      continue;
+    }
+    TypeRecord* candidate = NULL;
+    if (ClassTemplateOriginMatches(ClassTemplateOriginOf(base->type),
+                                   formal_origin)) {
+      candidate = base->type;
+    } else {
+      candidate = FindTemplateBaseForDeduction(base->type, formal_origin);
+    }
+    if (candidate != NULL) {
+      if (found != NULL && found != candidate && !TypeEqual(found, candidate)) {
+        return NULL;
+      }
+      found = candidate;
+    }
+  }
+  return found;
+}
+
 static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
                                                     size_t explicit_arg_count,
                                                     TypeRecord* formal,
@@ -1636,25 +1712,20 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   if (formal == NULL || actual == NULL) {
     return false;
   }
-  Symbol* formal_origin = formal->template_origin;
-  Symbol* actual_origin = actual->template_origin;
-  if (formal_origin == NULL && TypeIsStructOrUnion(formal) &&
-      formal->info.struct_info != NULL &&
-      formal->info.struct_info->tag_symbol != NULL &&
-      formal->info.struct_info->tag_symbol->type != NULL) {
-    formal_origin =
-        formal->info.struct_info->tag_symbol->type->template_origin;
+  Symbol* formal_origin = ClassTemplateOriginOf(formal);
+  Symbol* actual_origin = ClassTemplateOriginOf(actual);
+  if (formal_origin == NULL) {
+    return false;
   }
-  if (actual_origin == NULL && TypeIsStructOrUnion(actual) &&
-      actual->info.struct_info != NULL &&
-      actual->info.struct_info->tag_symbol != NULL &&
-      actual->info.struct_info->tag_symbol->type != NULL) {
-    actual_origin =
-        actual->info.struct_info->tag_symbol->type->template_origin;
-  }
-  if (formal_origin == NULL || actual_origin == NULL ||
-      (formal_origin != actual_origin &&
-       !StringEqualString(&formal_origin->name, &actual_origin->name))) {
+  if (actual_origin == NULL ||
+      !ClassTemplateOriginMatches(formal_origin, actual_origin)) {
+    // The argument is not itself a specialization of the parameter's template.
+    // If it derives from one, deduce against that (unique) base class.
+    TypeRecord* base = FindTemplateBaseForDeduction(actual, formal_origin);
+    if (base != NULL) {
+      return DeduceFunctionTemplateTemplateArguments(args, explicit_arg_count,
+                                                     formal, base);
+    }
     return false;
   }
   Vector* formal_args = SpecializationTemplateArguments(formal);
@@ -1894,8 +1965,16 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   }
 
   if (TypeIsReference(formal)) {
+    // In call deduction the argument type `actual` has already had any
+    // top-level reference stripped, so matching against the formal's referent
+    // is correct.  When deducing one *function type* against another
+    // ([temp.deduct.funcaddr]), however, both the return type and the parameter
+    // types keep their reference qualifiers, so a reference `actual` must be
+    // reduced to its referent symmetrically for the referents to be matched.
+    TypeRecord* actual_referent =
+        TypeIsReference(actual) ? actual->next : actual;
     return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
-                                              formal->next, actual);
+                                              formal->next, actual_referent);
   }
 
   if (formal->declarator == kDeclArray &&
@@ -2722,6 +2801,71 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
   }
   if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func->next,
                                           target)) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, func, args,
+                                        /*emit_error=*/false);
+  TypeParserDestruct(&parser);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameterForInstantiation(
+          completed_args)) {
+    if (completed_args != NULL) {
+      VectorDeleteWithContents(completed_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return NULL;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  return completed_args;
+}
+
+/* Public: deduce the template arguments of a function template whose *address*
+ * is being taken against a required function type ([temp.deduct.funcaddr]).
+ * Unlike call deduction, the template arguments are deduced by matching the
+ * whole (dependent) function type of the template against the concrete target
+ * function type `target_fn` (the pointee of the destination function pointer).
+ * `explicit_args` supplies any explicitly-written template arguments (may be
+ * NULL).  Returns the completed argument vector (caller owns) or NULL if
+ * deduction / default completion / constraints fail. */
+Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
+                                                            Symbol* templ,
+                                                            Vector* explicit_args,
+                                                            TypeRecord* target_fn) {
+  if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
+      !TypeIsFunction(templ->type) || target_fn == NULL ||
+      !TypeIsFunction(target_fn)) {
+    return NULL;
+  }
+  TypeRecord* func =
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
+          ? templ->value.func_defn->type
+          : templ->type;
+  if (func->info.function.template_parameter_count <= 0) {
+    return NULL;
+  }
+  size_t explicit_arg_count = 0;
+  Vector* args = NewFunctionTemplateDeductionArguments(func, explicit_args,
+                                                       &explicit_arg_count);
+  if (args == NULL) {
+    return NULL;
+  }
+  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func,
+                                          target_fn)) {
     VectorDeleteWithContents(args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
@@ -5136,6 +5280,29 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
   AddImplicitCXXDeductionGuides(str, tag);
+  // Complete the polymorphic layout of the instantiation exactly as a normal
+  // class definition does (type_class.c): insert the hidden vptr/vbptr, lay out
+  // virtual bases, and emit the vtable(s) and virtual-base table(s).  Without
+  // this an instantiated class template with virtual members would carry a
+  // virtual_members slot map but no vptr field and no emitted vtable, so its
+  // constructors could not initialize the vptr and virtual calls would read
+  // garbage.  This runs before the member-body clone pass below so that the
+  // cloned constructor preambles observe vtables_registered and emit their vptr
+  // initializers directly.
+  UpdateCXXAbstractStatus(str);
+  AddCXXVPtrMember(parser, str);
+  AddCXXVBPtrMember(parser, str);
+  str->non_virtual_size = str->size;
+  LayoutCXXVirtualBaseSpecifiers(str);
+  RegisterCXXVTable(parser, str);
+  RegisterCXXVBTables(parser, str);
+  CXXFixupSpecialMemberTrivialityAfterLayout(str);
+  str->vtables_registered = true;
+  SyntaxFlushPendingVPtrInitializers(str);
+  // The vptr/vbptr insertion above shifts member offsets and grows the object,
+  // so re-finalize the alignment and recompute the cached type size.
+  FinalizeStructAlignment(str);
+  TypeRecordCalculateSize(type);
   // Second pass: with the class fully formed (all members, layout, and implicit
   // special members in place), clone the deferred member function bodies so a
   // body may reference any other member regardless of declaration order.

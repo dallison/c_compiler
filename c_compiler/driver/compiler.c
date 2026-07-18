@@ -855,8 +855,21 @@ static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
   StringDestruct(&member_name);
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  Vector* actuals = NewVector();
+  // A constructor/destructor of a class with virtual bases takes a hidden
+  // `__complete_object` flag as its first explicit argument (the 2nd formal
+  // after `this`).  A file-scope object is always the complete/most-derived
+  // object, so pass 1.  Locals get this via NewCXXConstructorCall; the global
+  // static-init path must supply it too or the callee prototype won't match and
+  // the virtual-base pointers are left uninitialized.
+  if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
+      StructHasVirtualBases(sym->type->info.struct_info)) {
+    VectorAppend(actuals,
+                 NewIntConstantASTNode(
+                     1, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+  }
   ASTNode* call =
-      NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector());
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
   return NewExpressionStatementASTNode(call, location);
 }
 

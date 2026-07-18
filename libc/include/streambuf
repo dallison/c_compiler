@@ -1,0 +1,199 @@
+//
+//  streambuf
+//  c_compiler
+//
+//  C++20 <streambuf> support for DaveCC: basic_streambuf, the abstract byte
+//  transport underneath every stream.  It owns the get/put area pointers and
+//  routes the public buffer operations through the protected virtual interface
+//  (underflow/overflow/seekoff/...) that concrete buffers (stringbuf, filebuf)
+//  override.
+//
+
+#ifndef __davecc_streambuf__
+#define __davecc_streambuf__
+
+#include <iosfwd>
+#include <ios>
+#include <__char_traits>
+#include <cstddef>
+
+namespace std {
+
+template <class CharT, class Traits>
+class basic_streambuf {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  virtual ~basic_streambuf() {}
+
+  // Locale support is not provided; getloc/pubimbue are intentionally omitted.
+
+  // Buffer / positioning.
+  basic_streambuf* pubsetbuf(char_type* s, streamsize n) {
+    return setbuf(s, n);
+  }
+  pos_type pubseekoff(off_type off, ios_base::seekdir way,
+                      ios_base::openmode which = ios_base::in | ios_base::out) {
+    return seekoff(off, way, which);
+  }
+  pos_type pubseekpos(pos_type sp,
+                      ios_base::openmode which = ios_base::in | ios_base::out) {
+    return seekpos(sp, which);
+  }
+  int pubsync() { return sync(); }
+
+  // Get area.
+  streamsize in_avail() {
+    if (__gptr_ < __egptr_) {
+      return static_cast<streamsize>(__egptr_ - __gptr_);
+    }
+    return showmanyc();
+  }
+  int_type snextc() {
+    if (sbumpc() == Traits::eof()) {
+      return Traits::eof();
+    }
+    return sgetc();
+  }
+  int_type sbumpc() {
+    if (__gptr_ < __egptr_) {
+      int_type c = Traits::to_int_type(*__gptr_);
+      __gptr_++;
+      return c;
+    }
+    return uflow();
+  }
+  int_type sgetc() {
+    if (__gptr_ < __egptr_) {
+      return Traits::to_int_type(*__gptr_);
+    }
+    return underflow();
+  }
+  streamsize sgetn(char_type* s, streamsize n) { return xsgetn(s, n); }
+
+  // Putback.
+  int_type sputbackc(char_type c) {
+    if (__eback_ < __gptr_ && Traits::eq(c, __gptr_[-1])) {
+      __gptr_--;
+      return Traits::to_int_type(*__gptr_);
+    }
+    return pbackfail(Traits::to_int_type(c));
+  }
+  int_type sungetc() {
+    if (__eback_ < __gptr_) {
+      __gptr_--;
+      return Traits::to_int_type(*__gptr_);
+    }
+    return pbackfail();
+  }
+
+  // Put area.
+  int_type sputc(char_type c) {
+    if (__pptr_ < __epptr_) {
+      *__pptr_ = c;
+      __pptr_++;
+      return Traits::to_int_type(c);
+    }
+    return overflow(Traits::to_int_type(c));
+  }
+  streamsize sputn(const char_type* s, streamsize n) { return xsputn(s, n); }
+
+ protected:
+  basic_streambuf()
+      : __eback_(nullptr), __gptr_(nullptr), __egptr_(nullptr),
+        __pbase_(nullptr), __pptr_(nullptr), __epptr_(nullptr) {}
+  basic_streambuf(const basic_streambuf& other) = default;
+  basic_streambuf& operator=(const basic_streambuf&) = default;
+
+  // Get-area access.
+  char_type* eback() const { return __eback_; }
+  char_type* gptr() const { return __gptr_; }
+  char_type* egptr() const { return __egptr_; }
+  void gbump(int n) { __gptr_ += n; }
+  void setg(char_type* gbeg, char_type* gnext, char_type* gend) {
+    __eback_ = gbeg;
+    __gptr_ = gnext;
+    __egptr_ = gend;
+  }
+
+  // Put-area access.
+  char_type* pbase() const { return __pbase_; }
+  char_type* pptr() const { return __pptr_; }
+  char_type* epptr() const { return __epptr_; }
+  void pbump(int n) { __pptr_ += n; }
+  void setp(char_type* pbeg, char_type* pend) {
+    __pbase_ = pbeg;
+    __pptr_ = pbeg;
+    __epptr_ = pend;
+  }
+
+  // Virtual interface with default (no-op / fail) behaviour.
+  virtual basic_streambuf* setbuf(char_type*, streamsize) { return this; }
+  virtual pos_type seekoff(off_type, ios_base::seekdir,
+                           ios_base::openmode = ios_base::in | ios_base::out) {
+    return pos_type(off_type(-1));
+  }
+  virtual pos_type seekpos(pos_type,
+                           ios_base::openmode = ios_base::in | ios_base::out) {
+    return pos_type(off_type(-1));
+  }
+  virtual int sync() { return 0; }
+
+  virtual streamsize showmanyc() { return 0; }
+  virtual streamsize xsgetn(char_type* s, streamsize n) {
+    streamsize got = 0;
+    while (got < n) {
+      int_type c = sbumpc();
+      if (Traits::eq_int_type(c, Traits::eof())) {
+        break;
+      }
+      s[got] = Traits::to_char_type(c);
+      got++;
+    }
+    return got;
+  }
+  virtual int_type underflow() { return Traits::eof(); }
+  virtual int_type uflow() {
+    if (Traits::eq_int_type(underflow(), Traits::eof())) {
+      return Traits::eof();
+    }
+    int_type c = Traits::to_int_type(*__gptr_);
+    __gptr_++;
+    return c;
+  }
+  virtual int_type pbackfail(int_type = Traits::eof()) {
+    return Traits::eof();
+  }
+
+  virtual streamsize xsputn(const char_type* s, streamsize n) {
+    streamsize put = 0;
+    while (put < n) {
+      if (__pptr_ < __epptr_) {
+        *__pptr_ = s[put];
+        __pptr_++;
+      } else if (Traits::eq_int_type(overflow(Traits::to_int_type(s[put])),
+                                     Traits::eof())) {
+        break;
+      }
+      put++;
+    }
+    return put;
+  }
+  virtual int_type overflow(int_type = Traits::eof()) { return Traits::eof(); }
+
+ private:
+  char_type* __eback_;
+  char_type* __gptr_;
+  char_type* __egptr_;
+  char_type* __pbase_;
+  char_type* __pptr_;
+  char_type* __epptr_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_streambuf__ */

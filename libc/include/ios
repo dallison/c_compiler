@@ -1,0 +1,264 @@
+//
+//  ios
+//  c_compiler
+//
+//  C++20 <ios> support for DaveCC: ios_base, basic_ios and the format-state
+//  manipulators (dec/hex/oct, fixed/scientific, left/right, ...).  The stream
+//  classes in <ostream>/<istream> build their format state on top of this.
+//
+
+#ifndef __davecc_ios__
+#define __davecc_ios__
+
+#include <iosfwd>
+#include <__char_traits>
+#include <cstddef>
+#include <stdexcept>
+
+namespace std {
+
+// A minimal fpos: it carries a stream offset.  The State template parameter of
+// the standard (multibyte conversion state) is irrelevant to the single-byte
+// char specialization used throughout this library, so it is ignored.
+template <class State>
+class fpos {
+  streamoff __off_;
+
+ public:
+  fpos(streamoff off = 0) : __off_(off) {}
+  operator streamoff() const { return __off_; }
+  streamoff __offset() const { return __off_; }
+
+  fpos& operator+=(streamoff o) { __off_ += o; return *this; }
+  fpos& operator-=(streamoff o) { __off_ -= o; return *this; }
+  fpos operator+(streamoff o) const { return fpos(__off_ + o); }
+  fpos operator-(streamoff o) const { return fpos(__off_ - o); }
+  streamoff operator-(const fpos& other) const { return __off_ - other.__off_; }
+
+  bool operator==(const fpos& other) const { return __off_ == other.__off_; }
+  bool operator!=(const fpos& other) const { return __off_ != other.__off_; }
+};
+
+class ios_base {
+ public:
+  // Format flags.  Values are a private convention (they only need to be
+  // distinct bits); code must use the named constants, never the literals.
+  typedef unsigned int fmtflags;
+  static const fmtflags boolalpha   = 0x0001;
+  static const fmtflags dec         = 0x0002;
+  static const fmtflags fixed       = 0x0004;
+  static const fmtflags hex         = 0x0008;
+  static const fmtflags internal    = 0x0010;
+  static const fmtflags left        = 0x0020;
+  static const fmtflags oct         = 0x0040;
+  static const fmtflags right       = 0x0080;
+  static const fmtflags scientific  = 0x0100;
+  static const fmtflags showbase    = 0x0200;
+  static const fmtflags showpoint   = 0x0400;
+  static const fmtflags showpos     = 0x0800;
+  static const fmtflags skipws      = 0x1000;
+  static const fmtflags unitbuf     = 0x2000;
+  static const fmtflags uppercase   = 0x4000;
+  static const fmtflags adjustfield = left | right | internal;
+  static const fmtflags basefield   = dec | oct | hex;
+  static const fmtflags floatfield  = fixed | scientific;
+
+  typedef unsigned int iostate;
+  static const iostate goodbit = 0x0;
+  static const iostate badbit  = 0x1;
+  static const iostate eofbit  = 0x2;
+  static const iostate failbit = 0x4;
+
+  typedef unsigned int openmode;
+  static const openmode app    = 0x01;
+  static const openmode ate    = 0x02;
+  static const openmode binary = 0x04;
+  static const openmode in     = 0x08;
+  static const openmode out    = 0x10;
+  static const openmode trunc  = 0x20;
+
+  typedef int seekdir;
+  static const seekdir beg = 0;
+  static const seekdir cur = 1;
+  static const seekdir end = 2;
+
+  // A stream-error exception.  The standard derives this from system_error;
+  // this library derives it from runtime_error, which shares the observable
+  // catch-as-exception / what() behaviour used by tests.
+  class failure : public runtime_error {
+   public:
+    explicit failure(const string& msg) : runtime_error(msg) {}
+    explicit failure(const char* msg) : runtime_error(msg) {}
+  };
+
+  fmtflags flags() const { return __flags_; }
+  fmtflags flags(fmtflags f) {
+    fmtflags old = __flags_;
+    __flags_ = f;
+    return old;
+  }
+  fmtflags setf(fmtflags f) {
+    fmtflags old = __flags_;
+    __flags_ |= f;
+    return old;
+  }
+  fmtflags setf(fmtflags f, fmtflags mask) {
+    fmtflags old = __flags_;
+    __flags_ = (__flags_ & ~mask) | (f & mask);
+    return old;
+  }
+  void unsetf(fmtflags mask) { __flags_ &= ~mask; }
+
+  streamsize precision() const { return __precision_; }
+  streamsize precision(streamsize p) {
+    streamsize old = __precision_;
+    __precision_ = p;
+    return old;
+  }
+  streamsize width() const { return __width_; }
+  streamsize width(streamsize w) {
+    streamsize old = __width_;
+    __width_ = w;
+    return old;
+  }
+
+ protected:
+  ios_base()
+      : __flags_(skipws | dec), __precision_(6), __width_(0) {}
+  ~ios_base() {}
+
+ private:
+  // Non-copyable, like the standard.
+  ios_base(const ios_base&);
+  ios_base& operator=(const ios_base&);
+
+  fmtflags __flags_;
+  streamsize __precision_;
+  streamsize __width_;
+};
+
+// Manipulator functions that operate on ios_base format state.
+inline ios_base& boolalpha(ios_base& s) { s.setf(ios_base::boolalpha); return s; }
+inline ios_base& noboolalpha(ios_base& s) { s.unsetf(ios_base::boolalpha); return s; }
+inline ios_base& showbase(ios_base& s) { s.setf(ios_base::showbase); return s; }
+inline ios_base& noshowbase(ios_base& s) { s.unsetf(ios_base::showbase); return s; }
+inline ios_base& showpoint(ios_base& s) { s.setf(ios_base::showpoint); return s; }
+inline ios_base& noshowpoint(ios_base& s) { s.unsetf(ios_base::showpoint); return s; }
+inline ios_base& showpos(ios_base& s) { s.setf(ios_base::showpos); return s; }
+inline ios_base& noshowpos(ios_base& s) { s.unsetf(ios_base::showpos); return s; }
+inline ios_base& skipws(ios_base& s) { s.setf(ios_base::skipws); return s; }
+inline ios_base& noskipws(ios_base& s) { s.unsetf(ios_base::skipws); return s; }
+inline ios_base& uppercase(ios_base& s) { s.setf(ios_base::uppercase); return s; }
+inline ios_base& nouppercase(ios_base& s) { s.unsetf(ios_base::uppercase); return s; }
+inline ios_base& unitbuf(ios_base& s) { s.setf(ios_base::unitbuf); return s; }
+inline ios_base& nounitbuf(ios_base& s) { s.unsetf(ios_base::unitbuf); return s; }
+
+inline ios_base& internal(ios_base& s) {
+  s.setf(ios_base::internal, ios_base::adjustfield);
+  return s;
+}
+inline ios_base& left(ios_base& s) {
+  s.setf(ios_base::left, ios_base::adjustfield);
+  return s;
+}
+inline ios_base& right(ios_base& s) {
+  s.setf(ios_base::right, ios_base::adjustfield);
+  return s;
+}
+inline ios_base& dec(ios_base& s) {
+  s.setf(ios_base::dec, ios_base::basefield);
+  return s;
+}
+inline ios_base& hex(ios_base& s) {
+  s.setf(ios_base::hex, ios_base::basefield);
+  return s;
+}
+inline ios_base& oct(ios_base& s) {
+  s.setf(ios_base::oct, ios_base::basefield);
+  return s;
+}
+inline ios_base& fixed(ios_base& s) {
+  s.setf(ios_base::fixed, ios_base::floatfield);
+  return s;
+}
+inline ios_base& scientific(ios_base& s) {
+  s.setf(ios_base::scientific, ios_base::floatfield);
+  return s;
+}
+
+template <class CharT, class Traits>
+class basic_ios : public ios_base {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  bool good() const { return __state_ == goodbit; }
+  bool eof() const { return (__state_ & eofbit) != 0; }
+  bool fail() const { return (__state_ & (failbit | badbit)) != 0; }
+  bool bad() const { return (__state_ & badbit) != 0; }
+
+  bool operator!() const { return fail(); }
+  explicit operator bool() const { return !fail(); }
+
+  iostate rdstate() const { return __state_; }
+  void clear(iostate state = goodbit) {
+    __state_ = (__rdbuf_ != nullptr) ? state : (state | badbit);
+  }
+  void setstate(iostate state) { clear(__state_ | state); }
+
+  iostate exceptions() const { return __exceptions_; }
+  void exceptions(iostate except) { __exceptions_ = except; }
+
+  basic_streambuf<CharT, Traits>* rdbuf() const { return __rdbuf_; }
+  basic_streambuf<CharT, Traits>* rdbuf(basic_streambuf<CharT, Traits>* sb) {
+    basic_streambuf<CharT, Traits>* old = __rdbuf_;
+    __rdbuf_ = sb;
+    clear();
+    return old;
+  }
+
+  basic_ostream<CharT, Traits>* tie() const { return __tie_; }
+  basic_ostream<CharT, Traits>* tie(basic_ostream<CharT, Traits>* os) {
+    basic_ostream<CharT, Traits>* old = __tie_;
+    __tie_ = os;
+    return old;
+  }
+
+  char_type fill() const { return __fill_; }
+  char_type fill(char_type c) {
+    char_type old = __fill_;
+    __fill_ = c;
+    return old;
+  }
+
+ protected:
+  basic_ios() : __rdbuf_(nullptr), __tie_(nullptr), __state_(badbit),
+                __exceptions_(goodbit), __fill_(' ') {}
+  explicit basic_ios(basic_streambuf<CharT, Traits>* sb) { init(sb); }
+  ~basic_ios() {}
+
+  void init(basic_streambuf<CharT, Traits>* sb) {
+    __rdbuf_ = sb;
+    __tie_ = nullptr;
+    __state_ = (sb != nullptr) ? goodbit : badbit;
+    __exceptions_ = goodbit;
+    __fill_ = ' ';
+  }
+
+ private:
+  basic_ios(const basic_ios&);
+  basic_ios& operator=(const basic_ios&);
+
+  basic_streambuf<CharT, Traits>* __rdbuf_;
+  basic_ostream<CharT, Traits>* __tie_;
+  iostate __state_;
+  iostate __exceptions_;
+  char_type __fill_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_ios__ */

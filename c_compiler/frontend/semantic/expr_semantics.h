@@ -22,6 +22,22 @@ Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
                                                  Vector* explicit_args,
                                                  Vector* actuals);
 
+// [over.over]/[temp.deduct.funcaddr]: resolve a (possibly overloaded) function
+// name -- overload chain head `head`, optional explicit template arguments
+// `explicit_args` -- used where a specific function type `target_fn` is required
+// (the pointee of a destination function-pointer type).  Returns the unique
+// matching concrete function (a non-template overload, or an instantiated
+// function-template specialization), or NULL if there is no unique match.
+Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
+                                               Vector* explicit_args,
+                                               TypeRecord* target_fn);
+
+// Node-level [over.over] helper: if `from` names a function template or
+// overload set and `to` is a pointer-to-function (or reference/function type in
+// a binding context), rewrite `from` in place to the unique matching concrete
+// function.  Returns true on a successful rewrite, false otherwise.
+bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to);
+
 // Attempts to convert `from` to the class type `to` by constructing a temporary
 // through a viable converting constructor, splicing the result in place of
 // `from`.  Returns true if the conversion was performed.

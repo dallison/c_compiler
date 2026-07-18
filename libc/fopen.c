@@ -11,28 +11,30 @@
 #include <stdlib.h>
 
 FILE* fopen(const char* filename, const char* mode) {
-  int open_mode = 0;
+  char base = '\0';
+  int plus = 0;
   const char* m = mode;
   while (*m != '\0') {
-    if (*m == 'r') {
-      open_mode |= 1;
-    } else if (*m == 'w') {
-      open_mode |= 2;
-    } else if (*m == 'a') {
-      open_mode |= 4;
+    if (*m == 'r' || *m == 'w' || *m == 'a') {
+      base = *m;
+    } else if (*m == '+') {
+      plus = 1;
+    } else if (*m == 'b') {
+      // Text/binary distinction is a no-op on this platform.
     } else {
       return NULL;
     }
     m++;
   }
-  if (open_mode == 3) {
-    open_mode = O_RDWR;
-  } else if (open_mode == 1) {
-    open_mode = O_RDONLY;
-  } else if (open_mode == 2) {
-    open_mode = O_WRONLY | O_TRUNC | O_CREAT;
-  } else if (open_mode == 4) {
-    open_mode = O_WRONLY | O_APPEND | O_CREAT;
+  int open_mode;
+  if (base == 'r') {
+    open_mode = plus ? O_RDWR : O_RDONLY;
+  } else if (base == 'w') {
+    open_mode = (plus ? O_RDWR : O_WRONLY) | O_TRUNC | O_CREAT;
+  } else if (base == 'a') {
+    open_mode = (plus ? O_RDWR : O_WRONLY) | O_APPEND | O_CREAT;
+  } else {
+    return NULL;
   }
   int fd = open(filename, open_mode, 0777);
   if (fd == -1) {

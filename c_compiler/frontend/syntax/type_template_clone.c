@@ -90,6 +90,15 @@ static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
+    // A compiler-synthesized pointer adjustment with a forced type (e.g. the
+    // `(Base*)(this + byteoffset)` receiver of a __vbptr initializer) must keep
+    // its analyzed state: re-analysis would recompute `this + offset` as the
+    // receiver's own (element-scaled) pointer type and bind subobject members to
+    // the wrong offset.  AnalyzeExpression short-circuits on the still-analyzed
+    // node, so its (now-cleared) children are never re-analyzed either.
+    if ((node->flags & kASTForcedTypeAdjustment) != 0) {
+      return;
+    }
     node->flags &= ~kASTAnalyzed;
   }
 }
@@ -4265,8 +4274,18 @@ void CloneInstantiatedMemberFunctionBody(TypeParser* parser,
   Struct* saved_substitution_target = parser->template_substitution_target;
   parser->template_substitution_source = substitution_source;
   parser->template_substitution_target = owner;
+  // A virtual member function is referenced from the class's vtable, not (only)
+  // from direct call sites, so the lazy "define on first direct call" scheme
+  // would leave it undefined and the vtable slot pointing at a missing symbol.
+  // Emit its body eagerly, matching how a normal class always defines its
+  // virtuals.  (A pure virtual has no body and is filtered out inside the queue
+  // helper.)
+  bool is_virtual = symbol != NULL && symbol->type != NULL &&
+                    TypeIsFunction(symbol->type) &&
+                    (symbol->type->info.function.is_virtual ||
+                     symbol->type->info.function.is_pure_virtual);
   QueueTemplateMemberFunctionDefinitionImpl(symbol, template_definition, parser,
-                                            args, /*allow_lazy=*/true);
+                                            args, /*allow_lazy=*/!is_virtual);
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
 }

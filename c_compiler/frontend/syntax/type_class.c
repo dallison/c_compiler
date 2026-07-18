@@ -584,6 +584,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   LayoutCXXVirtualBaseSpecifiers(str);
   RegisterCXXVTable(parser, str);
   RegisterCXXVBTables(parser, str);
+  CXXFixupSpecialMemberTrivialityAfterLayout(str);
   // The class's vtables now exist, so any constructor preambles built earlier
   // during member parsing can have their deferred __vptr initializers emitted.
   str->vtables_registered = true;
@@ -593,6 +594,13 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // alignment of its members, or an explicit aligned(N)), as required by the
   // ABI.
   FinalizeStructAlignment(str);
+  // Vptr/vbptr insertion and virtual-base layout above can grow the class
+  // after its tag TypeRecord last cached the size computed while parsing data
+  // members.  Refresh that cache for concrete classes just as the class-template
+  // instantiation path does.  Otherwise sizeof/global allocation can use the
+  // stale non-virtual size while constructors use the finalized virtual-base
+  // offsets, causing adjacent objects to overlap.
+  TypeRecordCalculateSize(tag->type);
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
 
   CheckFlexibleArrays(parser, str, is_union);

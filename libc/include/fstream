@@ -1,0 +1,367 @@
+//
+//  fstream
+//  c_compiler
+//
+//  C++20 <fstream> support for DaveCC: basic_filebuf and the file-backed
+//  streams.  The buffer routes every byte through the C stdio FILE* API
+//  (fgetc/fputc/fread/fwrite/fseek), leaving the base get/put area pointers
+//  null so all access flows through the streambuf virtual interface.
+//
+
+#ifndef __davecc_fstream__
+#define __davecc_fstream__
+
+#include <ios>
+#include <streambuf>
+#include <istream>
+#include <ostream>
+#include <string>
+#include <iosfwd>
+#include <__char_traits>
+#include <cstdio>
+
+namespace std {
+
+template <class CharT, class Traits>
+class basic_filebuf : public basic_streambuf<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  basic_filebuf() : __file_(nullptr), __mode_(0), __owned_(true) {}
+  ~basic_filebuf() override {
+    if (__file_ != nullptr && __owned_) {
+      fclose(__file_);
+    }
+    __file_ = nullptr;
+  }
+
+  bool is_open() const { return __file_ != nullptr; }
+
+  // Wrap an already-open FILE* (e.g. stdin/stdout/stderr) without taking
+  // ownership: the buffer will not close it on destruction.  Used by
+  // <iostream> to back the standard streams.
+  void __attach(FILE* f, ios_base::openmode mode) {
+    __file_ = f;
+    __mode_ = mode;
+    __owned_ = false;
+  }
+
+  basic_filebuf* open(const char* name, ios_base::openmode mode) {
+    if (__file_ != nullptr) {
+      return nullptr;
+    }
+    char m[4];
+    if (!__mode_string(mode, m)) {
+      return nullptr;
+    }
+    FILE* f = fopen(name, m);
+    if (f == nullptr) {
+      return nullptr;
+    }
+    __file_ = f;
+    __mode_ = mode;
+    __owned_ = true;
+    if ((mode & ios_base::ate) != 0) {
+      if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        __file_ = nullptr;
+        return nullptr;
+      }
+    }
+    return this;
+  }
+  basic_filebuf* open(const string& name, ios_base::openmode mode) {
+    return open(name.c_str(), mode);
+  }
+
+  basic_filebuf* close() {
+    if (__file_ == nullptr) {
+      return nullptr;
+    }
+    bool ok = fclose(__file_) == 0;
+    __file_ = nullptr;
+    __mode_ = 0;
+    return ok ? this : nullptr;
+  }
+
+ protected:
+  int_type underflow() override {
+    if (__file_ == nullptr) {
+      return Traits::eof();
+    }
+    int c = fgetc(__file_);
+    if (c < 0) {
+      return Traits::eof();
+    }
+    ungetc(c, __file_);
+    return Traits::to_int_type(static_cast<char_type>(c));
+  }
+  int_type uflow() override {
+    if (__file_ == nullptr) {
+      return Traits::eof();
+    }
+    int c = fgetc(__file_);
+    if (c < 0) {
+      return Traits::eof();
+    }
+    return Traits::to_int_type(static_cast<char_type>(c));
+  }
+  int_type pbackfail(int_type c = Traits::eof()) override {
+    if (__file_ == nullptr) {
+      return Traits::eof();
+    }
+    int ch = Traits::eq_int_type(c, Traits::eof())
+                 ? 0
+                 : static_cast<unsigned char>(Traits::to_char_type(c));
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      // Cannot push back an unknown character through stdio; fail.
+      return Traits::eof();
+    }
+    if (ungetc(ch, __file_) < 0) {
+      return Traits::eof();
+    }
+    return Traits::to_int_type(static_cast<char_type>(ch));
+  }
+  streamsize xsgetn(char_type* s, streamsize n) override {
+    if (__file_ == nullptr || n <= 0) {
+      return 0;
+    }
+    return static_cast<streamsize>(
+        fread(s, sizeof(char_type), static_cast<size_t>(n), __file_));
+  }
+
+  int_type overflow(int_type c = Traits::eof()) override {
+    if (__file_ == nullptr) {
+      return Traits::eof();
+    }
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      return Traits::not_eof(c);
+    }
+    char_type ch = Traits::to_char_type(c);
+    if (fputc(static_cast<char>(ch), __file_) < 0) {
+      return Traits::eof();
+    }
+    return c;
+  }
+  streamsize xsputn(const char_type* s, streamsize n) override {
+    if (__file_ == nullptr || n <= 0) {
+      return 0;
+    }
+    return static_cast<streamsize>(
+        fwrite(s, sizeof(char_type), static_cast<size_t>(n), __file_));
+  }
+
+  int sync() override {
+    if (__file_ == nullptr) {
+      return -1;
+    }
+    return fflush(__file_) == 0 ? 0 : -1;
+  }
+
+  pos_type seekoff(off_type off, ios_base::seekdir way,
+                   ios_base::openmode = ios_base::in |
+                                        ios_base::out) override {
+    if (__file_ == nullptr) {
+      return pos_type(off_type(-1));
+    }
+    int whence = SEEK_SET;
+    if (way == ios_base::cur) {
+      whence = SEEK_CUR;
+    } else if (way == ios_base::end) {
+      whence = SEEK_END;
+    }
+    if (fseek(__file_, static_cast<long>(off), whence) != 0) {
+      return pos_type(off_type(-1));
+    }
+    return pos_type(static_cast<off_type>(ftell(__file_)));
+  }
+  pos_type seekpos(pos_type sp, ios_base::openmode = ios_base::in |
+                                                    ios_base::out) override {
+    return seekoff(static_cast<off_type>(sp), ios_base::beg);
+  }
+
+ private:
+  static bool __mode_string(ios_base::openmode mode, char* out) {
+    bool in = (mode & ios_base::in) != 0;
+    bool out_ = (mode & ios_base::out) != 0;
+    bool app = (mode & ios_base::app) != 0;
+    bool trunc = (mode & ios_base::trunc) != 0;
+    bool binary = (mode & ios_base::binary) != 0;
+    int i = 0;
+    if (in && out_) {
+      if (trunc) {
+        out[i++] = 'w';
+        out[i++] = '+';
+      } else if (app) {
+        out[i++] = 'a';
+        out[i++] = '+';
+      } else {
+        out[i++] = 'r';
+        out[i++] = '+';
+      }
+    } else if (out_) {
+      if (app) {
+        out[i++] = 'a';
+      } else {
+        out[i++] = 'w';
+      }
+    } else if (in) {
+      out[i++] = 'r';
+    } else {
+      return false;
+    }
+    if (binary) {
+      out[i++] = 'b';
+    }
+    out[i] = '\0';
+    return true;
+  }
+
+  FILE* __file_;
+  ios_base::openmode __mode_;
+  bool __owned_;
+};
+
+template <class CharT, class Traits>
+class basic_ifstream : public basic_istream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+
+  basic_ifstream() : basic_istream<CharT, Traits>() { this->init(&__buf_); }
+  explicit basic_ifstream(const char* name,
+                          ios_base::openmode mode = ios_base::in)
+      : basic_istream<CharT, Traits>() {
+    this->init(&__buf_);
+    if (__buf_.open(name, mode | ios_base::in) == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+  explicit basic_ifstream(const string& name,
+                          ios_base::openmode mode = ios_base::in)
+      : basic_ifstream(name.c_str(), mode) {}
+  ~basic_ifstream() override {}
+
+  basic_filebuf<CharT, Traits>* rdbuf() const {
+    return const_cast<basic_filebuf<CharT, Traits>*>(&__buf_);
+  }
+  bool is_open() const { return __buf_.is_open(); }
+  void open(const char* name, ios_base::openmode mode = ios_base::in) {
+    if (__buf_.open(name, mode | ios_base::in) == nullptr) {
+      this->setstate(ios_base::failbit);
+    } else {
+      this->clear();
+    }
+  }
+  void open(const string& name, ios_base::openmode mode = ios_base::in) {
+    open(name.c_str(), mode);
+  }
+  void close() {
+    if (__buf_.close() == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+
+ private:
+  basic_filebuf<CharT, Traits> __buf_;
+};
+
+template <class CharT, class Traits>
+class basic_ofstream : public basic_ostream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+
+  basic_ofstream() : basic_ostream<CharT, Traits>() { this->init(&__buf_); }
+  explicit basic_ofstream(const char* name,
+                          ios_base::openmode mode = ios_base::out)
+      : basic_ostream<CharT, Traits>() {
+    this->init(&__buf_);
+    if (__buf_.open(name, mode | ios_base::out) == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+  explicit basic_ofstream(const string& name,
+                          ios_base::openmode mode = ios_base::out)
+      : basic_ofstream(name.c_str(), mode) {}
+  ~basic_ofstream() override {}
+
+  basic_filebuf<CharT, Traits>* rdbuf() const {
+    return const_cast<basic_filebuf<CharT, Traits>*>(&__buf_);
+  }
+  bool is_open() const { return __buf_.is_open(); }
+  void open(const char* name, ios_base::openmode mode = ios_base::out) {
+    if (__buf_.open(name, mode | ios_base::out) == nullptr) {
+      this->setstate(ios_base::failbit);
+    } else {
+      this->clear();
+    }
+  }
+  void open(const string& name, ios_base::openmode mode = ios_base::out) {
+    open(name.c_str(), mode);
+  }
+  void close() {
+    if (__buf_.close() == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+
+ private:
+  basic_filebuf<CharT, Traits> __buf_;
+};
+
+template <class CharT, class Traits>
+class basic_fstream : public basic_iostream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+
+  basic_fstream() : basic_iostream<CharT, Traits>() { this->init(&__buf_); }
+  explicit basic_fstream(const char* name,
+                         ios_base::openmode mode = ios_base::in |
+                                                   ios_base::out)
+      : basic_iostream<CharT, Traits>() {
+    this->init(&__buf_);
+    if (__buf_.open(name, mode) == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+  explicit basic_fstream(const string& name,
+                         ios_base::openmode mode = ios_base::in |
+                                                   ios_base::out)
+      : basic_fstream(name.c_str(), mode) {}
+  ~basic_fstream() override {}
+
+  basic_filebuf<CharT, Traits>* rdbuf() const {
+    return const_cast<basic_filebuf<CharT, Traits>*>(&__buf_);
+  }
+  bool is_open() const { return __buf_.is_open(); }
+  void open(const char* name,
+            ios_base::openmode mode = ios_base::in | ios_base::out) {
+    if (__buf_.open(name, mode) == nullptr) {
+      this->setstate(ios_base::failbit);
+    } else {
+      this->clear();
+    }
+  }
+  void open(const string& name,
+            ios_base::openmode mode = ios_base::in | ios_base::out) {
+    open(name.c_str(), mode);
+  }
+  void close() {
+    if (__buf_.close() == nullptr) {
+      this->setstate(ios_base::failbit);
+    }
+  }
+
+ private:
+  basic_filebuf<CharT, Traits> __buf_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_fstream__ */

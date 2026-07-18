@@ -71,6 +71,8 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
                                                         bool allow_same_class);
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
+static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
+                                                TypeRecord* referent);
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
                                           bool diagnose_ambiguous);
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
@@ -1162,14 +1164,29 @@ static TypeRecord* CXXOperatorOperandClassType(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ? type : NULL;
 }
 
-// Returns true if the left operand's class has at least one member operator
-// `op_name` that is viable for the binary call `left.op(right)`.  A member
-// operator that is a template is treated as viable conservatively (deducing it
-// here would be a premature side effect); this preserves the historical
-// preference for a member operator while still letting a non-viable *non*-
-// template member operator (e.g. reverse_iterator's `operator-(difference_type)`)
-// yield to a free operator (e.g. `operator-(reverse_iterator, reverse_iterator)`).
-static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name) {
+// Scores the built-in-vs-member competition for a binary operator's member
+// candidate set.  Returns true when at least one member operator overload is
+// viable for `node`'s operands, setting *out_best_score to the best (lowest)
+// candidate score, *out_ambiguous when two or more distinct overloads tie at
+// that best score, and *out_has_template when a template member overload is
+// present (whose score is not computed here).  A template member overload is
+// treated as viable conservatively (deducing it here would be a premature side
+// effect).  Used so a genuinely ambiguous member set does not shadow a better
+// non-member (free) operator ([over.match.oper]).
+static bool BestBinaryMemberOperatorScore(BinaryASTNode* node,
+                                          const char* op_name,
+                                          int* out_best_score,
+                                          bool* out_ambiguous,
+                                          bool* out_has_template) {
+  if (out_best_score != NULL) {
+    *out_best_score = -1;
+  }
+  if (out_ambiguous != NULL) {
+    *out_ambiguous = false;
+  }
+  if (out_has_template != NULL) {
+    *out_has_template = false;
+  }
   ASTNode* left = node->left;
   TypeRecord* class_type = CXXOperatorOperandClassType(left->type);
   if (class_type == NULL || class_type->info.struct_info == NULL) {
@@ -1188,6 +1205,8 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
   bool receiver_const = MemberReceiverIsConst(node);
   bool receiver_volatile = MemberReceiverIsVolatile(node);
   bool viable = false;
+  int best_score = -1;
+  int best_count = 0;
   for (StructMember* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
     if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
@@ -1196,7 +1215,10 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
     }
     if (candidate->symbol->flags.is_template) {
       viable = true;
-      break;
+      if (out_has_template != NULL) {
+        *out_has_template = true;
+      }
+      continue;
     }
     int score = FunctionCallScore(candidate->symbol->type, &call,
                                   /*first_formal_arg=*/1);
@@ -1219,10 +1241,44 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
       continue;
     }
     viable = true;
-    break;
+    if (best_score < 0 || score < best_score) {
+      best_score = score;
+      best_count = 1;
+    } else if (score == best_score) {
+      best_count++;
+    }
   }
   VectorDestruct(&children);
+  if (out_best_score != NULL) {
+    *out_best_score = best_score;
+  }
+  if (out_ambiguous != NULL) {
+    *out_ambiguous = best_count >= 2;
+  }
   return viable;
+}
+
+// Conversion rank of a free binary operator's *second* parameter against the
+// binary node's right operand.  A member operator is scored over its second
+// operand only (its first operand is the implicit object argument), so this is
+// the free-operator score on the same scale, letting a member and a non-member
+// operator compete on the operand that distinguishes them.  Returns -1 when the
+// candidate is not a viable binary free operator.
+static int FreeBinaryOperatorSecondOperandScore(Symbol* function,
+                                                ASTNode* right) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return -1;
+  }
+  Vector* prototype = &function->type->info.function.prototype;
+  if (prototype->length < 2) {
+    return -1;
+  }
+  Symbol* second = prototype->value.p[1];
+  if (second == NULL || second->type == NULL) {
+    return -1;
+  }
+  return OverloadConversionRank(right, second->type);
 }
 
 static ASTNode* BuildMemberOperatorCall(BinaryASTNode* node,
@@ -1246,6 +1302,17 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   if (!CompilerIsCXX() || op_name == NULL) {
     return NULL;
   }
+  // A constructor member-initializer that targets a reference data member binds
+  // the reference; it is not an assignment through the referent.  Do not resolve
+  // it as `referent.operator=(...)` -- leave it for AnalyzeAssignmentExpression's
+  // reference-binding path.  (Without this, a class-type referent's operator=
+  // would be selected here, before the assignment analysis runs.)
+  if (node->base.op == AST_OP(assign) &&
+      (node->base.flags & kASTCXXMemberInitializer) != 0 &&
+      node->left != NULL && node->left->type != NULL &&
+      TypeIsReference(node->left->type)) {
+    return NULL;
+  }
   TypeRecord* left_class = CXXOperatorOperandClassType(node->left->type);
   TypeRecord* right_class = CXXOperatorOperandClassType(node->right->type);
   if (left_class == NULL && right_class == NULL) {
@@ -1259,13 +1326,23 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     member_present = member != NULL && member->is_member_function;
   }
 
-  // A member operator wins only when it is actually viable for these operands.
-  // Otherwise the non-member (free) operator candidates -- which a member
-  // operator of the same name must not hide -- get their turn.  This mirrors
-  // [over.match.oper]: member and non-member candidates compete together.
-  if (member_present && BinaryMemberOperatorViable(node, op_name)) {
-    return BuildMemberOperatorCall(node, op_name);
-  }
+  // Member and non-member (free) operators of the same name compete together
+  // ([over.match.oper]); a member operator does not hide the free ones.  Score
+  // the best member candidate over its second operand and, when a free operator
+  // converts that same operand strictly better -- or the member set is ambiguous
+  // by itself and the free operator is no worse -- choose the free operator.
+  // This is what makes `ostream << "..."` (and `<< 'c'`) select the exact-match
+  // free `operator<<(basic_ostream&, const CharT*)` (resp. `CharT`) instead of a
+  // member `operator<<(bool)` / `operator<<(const void*)` that only matches via a
+  // worse conversion.  A template member overload's conversion cost is not
+  // modeled here, so keep the historical member preference when one is viable.
+  bool member_has_template = false;
+  int member_best_score = -1;
+  bool member_ambiguous = false;
+  bool member_viable =
+      member_present &&
+      BestBinaryMemberOperatorScore(node, op_name, &member_best_score,
+                                    &member_ambiguous, &member_has_template);
 
   String name;
   StringInit(&name, op_name);
@@ -1273,10 +1350,28 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   VectorInit(&lookup_actuals);
   VectorAppend(&lookup_actuals, node->left);
   VectorAppend(&lookup_actuals, node->right);
-  Symbol* function = ResolveFreeFunctionWithADL(&name, &lookup_actuals,
-                                                /*diagnose_ambiguous=*/true);
+  // Only diagnose an ambiguous free set when there is no member fallback: with a
+  // viable member operator, a silently-ambiguous free set must not turn a
+  // previously valid member call into a hard error.
+  Symbol* function = ResolveFreeFunctionWithADL(
+      &name, &lookup_actuals, /*diagnose_ambiguous=*/!member_viable);
   VectorDestruct(&lookup_actuals);
+
+  bool use_free = false;
   if (function != NULL && TypeIsFunction(function->type)) {
+    if (!member_viable) {
+      use_free = true;
+    } else if (!member_has_template) {
+      int free_score = FreeBinaryOperatorSecondOperandScore(function,
+                                                            node->right);
+      if (free_score >= 0 &&
+          (free_score < member_best_score ||
+           (member_ambiguous && free_score <= member_best_score))) {
+        use_free = true;
+      }
+    }
+  }
+  if (use_free) {
     ASTNode* left = ASTNodeMove(node->left);
     ASTNode* right = ASTNodeMove(node->right);
     Vector* actuals = NewVector();
@@ -1290,9 +1385,9 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   }
   StringDestruct(&name);
 
-  // No viable free operator either.  If a (non-viable) member operator exists,
-  // fall back to building the member call so the existing member-overload
-  // machinery can emit a precise diagnostic.
+  // The free operator was not preferred.  If a member operator exists, build the
+  // member call: the existing member-overload machinery either performs the call
+  // or emits a precise diagnostic (including for an ambiguous member set).
   if (member_present) {
     return BuildMemberOperatorCall(node, op_name);
   }
@@ -2435,8 +2530,15 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             TypeIsConst(e->expr->type) && !TypeIsConst(reference_type->next);
         if (!TypeEqualIgnoringQualifiers(e->expr->type,
                                          reference_type->next)) {
-          NormalConversion(e->expr,
-                           ReferenceConversionTarget(e->expr, reference_type));
+          ASTNode* base_bound =
+              TryBindReferenceToBaseSubobject(e->expr, reference_type->next);
+          if (base_bound != NULL) {
+            ASTNodeReplaceChild((ASTNode*)e, 0, base_bound, false);
+            e->expr = base_bound;
+          } else {
+            NormalConversion(e->expr,
+                             ReferenceConversionTarget(e->expr, reference_type));
+          }
         }
         if (discards_qualifiers) {
           SemanticError(e->expr, "Reference initializer discards qualifiers");
@@ -2660,6 +2762,38 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
     }
   }
   node->right = AnalyzeExpression(node->right);
+
+  // A constructor member-initializer that targets a reference data member BINDS
+  // the reference -- it stores the address of the initializer into the member's
+  // pointer slot -- rather than assigning through it.  A reference member access
+  // keeps its declared reference type (T&) here, so without this the assignment
+  // would resolve `this->ref = x` as `ref.operator=(x)` (for a class referent)
+  // or a bogus `T&`-from-`T` conversion (for a scalar referent).  Mirror the
+  // reference-initialization / reference-return contract: convert the
+  // initializer to the referent type, take its address, and store into the slot
+  // (node type T& selects `storea`).
+  if (CompilerIsCXX() &&
+      (((ASTNode*)node)->flags & kASTCXXMemberInitializer) != 0 &&
+      node->base.op == AST_OP(assign) && node->left != NULL &&
+      node->left->type != NULL && TypeIsReference(node->left->type)) {
+    TypeRecord* reference_type = node->left->type;
+    if (!TypeEqualIgnoringQualifiers(node->right->type, reference_type->next)) {
+      NormalConversion(node->right,
+                       ReferenceConversionTarget(node->right, reference_type));
+    }
+    if (ReferenceCanBind(node->right, reference_type) &&
+        !HasAddress(node->right)) {
+      ASTNode* materialized =
+          MaterializeTemporary(node->right, reference_type->next);
+      ASTNodeReplaceChild((ASTNode*)node, 1, materialized, false);
+      node->right = materialized;
+    }
+    node->left->flags |= kASTNeedAddress;
+    node->right->flags |= kASTNeedAddress;
+    ASTNodeSetType((ASTNode*)node, reference_type);
+    return (ASTNode*)node;
+  }
+
   if (BinaryOperatorFunctionName(node->base.op) != NULL) {
     ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
     if (overloaded != NULL) {
@@ -4036,6 +4170,26 @@ static void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node,
   if (node->base.op == AST_OP(dot)) {
     receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
   }
+  // The receiver expression is referenced twice below: once to load the
+  // virtual-base offset (`receiver->__vbptr[index]`) and once as the base of
+  // the pointer adjustment (`receiver + offset`).  If it is anything other than
+  // a plain identifier it may have side effects (e.g. a function call whose
+  // result yields the object), so evaluate it exactly once into a temporary and
+  // reference the temporary in both positions.  Otherwise the receiver would be
+  // cloned and evaluated twice.
+  ASTNode* seed_assign = NULL;
+  if (receiver->op != AST_OP(identifier)) {
+    SourceLocation rloc = receiver->location;
+    Symbol* temp =
+        SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(receiver->type));
+    temp->location = rloc;
+    ASTNode* temp_lhs = NewIdentifierASTNode(temp, rloc);
+    temp_lhs->flags |= kASTNeedAddress;
+    seed_assign = NewBinaryASTNode(AST_OP(assign), receiver->type, rloc,
+                                   temp_lhs, receiver);
+    seed_assign->flags |= kASTAnalyzed;
+    receiver = NewIdentifierASTNode(temp, rloc);
+  }
   ASTNode* offset =
       NewVirtualBaseOffsetLoad(receiver, adjustment.vbtable_index,
                                node->base.location);
@@ -4047,6 +4201,11 @@ static void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node,
       NewBinaryASTNode(AST_OP(plus), adjusted_type, node->base.location,
                        receiver, offset);
   adjusted->flags |= kASTAnalyzed;
+  if (seed_assign != NULL) {
+    adjusted = NewBinaryASTNode(AST_OP(comma), adjusted_type,
+                                node->base.location, seed_assign, adjusted);
+    adjusted->flags |= kASTAnalyzed;
+  }
   node->base.op = AST_OP(arrow);
   node->left = adjusted;
   node->left->parent = (ASTNode*)node;
@@ -4251,6 +4410,33 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
   return best;
 }
 
+// [over.over] viability during overload resolution: `actual` names a function
+// template or overload set and `target` is a pointer-to-function.  Returns a
+// base rank (0, an exact function-to-pointer conversion) when a unique matching
+// function can be formed, or -1.  Deduction/instantiation diagnostics are
+// suppressed since this is a speculative probe over every candidate parameter.
+static int FuncAddrBaseRank(ASTNode* actual, TypeRecord* target) {
+  if (!CompilerIsCXX() || actual == NULL || actual->op != AST_OP(identifier)) {
+    return -1;
+  }
+  if (!TypeIsPointer(target) || target->next == NULL ||
+      !TypeIsFunction(target->next)) {
+    return -1;
+  }
+  if (actual->type == NULL || !TypeIsFunction(actual->type)) {
+    return -1;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)actual;
+  if (id->symbol == NULL) {
+    return -1;
+  }
+  DiagnosticSuppressBegin();
+  Symbol* resolved = CXXResolveFunctionAddressForTargetType(
+      id->symbol, id->template_arguments, target->next);
+  DiagnosticSuppressEnd();
+  return resolved != NULL ? 0 : -1;
+}
+
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   TypeRecord* target = formal_type;
   bool reference = TypeIsReference(formal_type);
@@ -4283,6 +4469,9 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     int base_rank = OverloadBaseConversionRank(actual->type, target);
     if (base_rank >= 0) {
       return base_rank * 10 + binding_rank;
+    }
+    if (FuncAddrBaseRank(actual, target) >= 0) {
+      return binding_rank;
     }
     // A user-defined conversion produces a temporary. It can satisfy an rvalue
     // reference or a const lvalue reference, but never a non-const lvalue
@@ -4327,6 +4516,10 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
         TypeEqualIgnoringQualifiers(actual->type, target);
     int qualification_penalty = pointer_qualification_conversion ? 1 : 0;
     return base_rank * 10 + 5 + qualification_penalty;
+  }
+  if (FuncAddrBaseRank(actual, target) >= 0) {
+    // Exact function-to-pointer conversion (an lvalue transformation).
+    return 5;
   }
   if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
     return 25;
@@ -5245,6 +5438,134 @@ static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
       &compiler->syntax, selected->type->info.function.template_origin,
       selected->type->template_arguments);
   return instantiated != NULL ? instantiated : selected;
+}
+
+// [over.over] / [temp.deduct.funcaddr]: given a (possibly overloaded) function
+// name -- the head |head| of an overload chain, optionally with explicitly
+// written template arguments |explicit_args| -- used where a specific function
+// type |target_fn| is required (the pointee of a destination function pointer),
+// return the unique matching concrete function: a non-template overload whose
+// type matches |target_fn| exactly, or a function-template specialization
+// deduced/instantiated from |target_fn|.  Non-template matches are preferred
+// over template specializations.  Returns NULL when there is no unique match.
+Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
+                                               Vector* explicit_args,
+                                               TypeRecord* target_fn) {
+  if (!CompilerIsCXX() || head == NULL || target_fn == NULL ||
+      !TypeIsFunction(target_fn)) {
+    return NULL;
+  }
+  Symbol* non_template_match = NULL;
+  bool non_template_ambiguous = false;
+  Symbol* template_match = NULL;
+  bool template_ambiguous = false;
+  for (Symbol* cand = head; cand != NULL; cand = cand->overload_next) {
+    if (cand->type == NULL || !TypeIsFunction(cand->type)) {
+      continue;
+    }
+    if (SymbolIsTemplateFunction(cand)) {
+      Symbol* inst = NULL;
+      if (!cand->flags.is_template &&
+          cand->type->info.function.template_origin != NULL &&
+          cand->type->template_arguments != NULL) {
+        // Overload resolution may already have replaced the identifier's
+        // primary template with a non-emitting specialization candidate.  Its
+        // signature and arguments are concrete, but the body has not been
+        // instantiated yet.  Re-deducing from this candidate cannot work (it
+        // is no longer marked as a primary template), so materialize the
+        // selected specialization directly.
+        if (!(TypeEqual(cand->type, target_fn) ||
+              TypeEqualIgnoringQualifiers(cand->type, target_fn))) {
+          continue;
+        }
+        inst = InstantiateSelectedFunctionTemplateCandidate(cand);
+      } else {
+        Vector* args = TypeDeduceFunctionTemplateArgumentsFromFunctionType(
+            &compiler->syntax, cand, explicit_args, target_fn);
+        if (args == NULL) {
+          continue;
+        }
+        inst = TypeInstantiateFunctionTemplate(&compiler->syntax, cand, args);
+        VectorDeleteWithContents(
+            args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      if (inst == NULL || inst->type == NULL || !TypeIsFunction(inst->type) ||
+          !(TypeEqual(inst->type, target_fn) ||
+            TypeEqualIgnoringQualifiers(inst->type, target_fn))) {
+        continue;
+      }
+      if (template_match != NULL && template_match != inst) {
+        template_ambiguous = true;
+      } else {
+        template_match = inst;
+      }
+    } else {
+      // Explicit template arguments cannot apply to a non-template function.
+      if (explicit_args != NULL && explicit_args->length > 0) {
+        continue;
+      }
+      if (TypeEqual(cand->type, target_fn) ||
+          TypeEqualIgnoringQualifiers(cand->type, target_fn)) {
+        if (non_template_match != NULL && non_template_match != cand) {
+          non_template_ambiguous = true;
+        } else {
+          non_template_match = cand;
+        }
+      }
+    }
+  }
+  if (non_template_match != NULL) {
+    return non_template_ambiguous ? NULL : non_template_match;
+  }
+  if (template_match != NULL) {
+    return template_ambiguous ? NULL : template_match;
+  }
+  return NULL;
+}
+
+// [over.over]: when `from` names a (possibly overloaded / templated) function
+// and the required type `to` is a pointer-to-function (or a function type in a
+// reference-binding context), resolve the unique matching function and rewrite
+// `from` in place to refer to the concrete specialization.  Returns true on a
+// successful rewrite.  A no-op (returns false) for non-C++, non-identifier
+// operands, or when no unique function matches.
+bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || to == NULL) {
+    return false;
+  }
+  TypeRecord* target_fn = NULL;
+  if (TypeIsPointer(to) && to->next != NULL && TypeIsFunction(to->next)) {
+    target_fn = to->next;
+  } else if (TypeIsReference(to) && to->next != NULL && TypeIsPointer(to->next) &&
+             to->next->next != NULL && TypeIsFunction(to->next->next)) {
+    target_fn = to->next->next;
+  } else if (TypeIsFunction(to)) {
+    target_fn = to;
+  } else {
+    return false;
+  }
+  if (from->type == NULL || !TypeIsFunction(from->type) ||
+      from->op != AST_OP(identifier)) {
+    return false;
+  }
+  // Only the un-substituted template pattern (or an unresolved overload set)
+  // needs help here; a concrete function whose type already matches is handled
+  // by the ordinary function-to-pointer conversion.
+  IdentifierASTNode* id = (IdentifierASTNode*)from;
+  if (id->symbol == NULL) {
+    return false;
+  }
+  Symbol* resolved = CXXResolveFunctionAddressForTargetType(
+      id->symbol, id->template_arguments, target_fn);
+  if (resolved == NULL || resolved->type == NULL) {
+    return false;
+  }
+  id->symbol = resolved;
+  resolved->flags.used = true;
+  ASTNodeSetType(from, resolved->type);
+  from->flags |= kASTNeedAddress;
+  return true;
 }
 
 static void EmitFunctionTemplateCandidateRejectionNote(
@@ -6484,11 +6805,51 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
   if (member_node->member == NULL || !member_node->member->is_member_function) {
     return false;
   }
+  // Dependence in an argument only requires deferral when the member overload
+  // set itself contains a function template whose deduction must wait.  An
+  // ordinary member of an already-concrete class can accept a function
+  // template name contextually through a concrete function-pointer parameter
+  // ([temp.deduct.funcaddr]); treating that template name as an unresolved
+  // call dependency skips overload resolution and leaves the primary template
+  // address in the generated code (e.g. ostream::operator<<(std::endl)).
+  bool has_member_template = false;
+  for (Symbol* candidate = member_node->member->symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (SymbolIsTemplateFunction(candidate)) {
+      has_member_template = true;
+      break;
+    }
+  }
   if (TemplateArgumentVectorContainsTemplateParameter(
           member_node->template_arguments)) {
     return true;
   }
-  return CallActualsContainTemplateParameter(node);
+  if (!CallActualsContainTemplateParameter(node)) {
+    return false;
+  }
+  if (has_member_template) {
+    return true;
+  }
+  // An ordinary member call still has to wait for genuinely dependent values
+  // (for example, a member-template constructor initializing a concrete member
+  // from its U&& argument).  The one exception is a bare function-template
+  // name: its pattern type contains template parameters, but a concrete
+  // function-pointer formal supplies the target type needed by [over.over].
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* actual = node->children->value.p[i];
+    if (actual == NULL || !TypeContainsTemplateParameter(actual->type)) {
+      continue;
+    }
+    if (actual->op == AST_OP(identifier)) {
+      IdentifierASTNode* id = (IdentifierASTNode*)actual;
+      if (id->symbol != NULL && TypeIsFunction(actual->type) &&
+          SymbolIsTemplateFunction(id->symbol)) {
+        continue;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 /* True when a member-function-template call names its member template with
@@ -6539,6 +6900,62 @@ static void SetDependentMemberTemplateCallType(VectorASTNode* node) {
   TypeRecordDelete(return_type);
 }
 
+// A compiler-generated base-subobject destructor cleanup call spells the base
+// by the name recorded when the enclosing template was *defined* -- the base's
+// primary template name (e.g. "A" for a base `A<T>").  After instantiation the
+// base subobject `A<int>` registers its destructor under the *specialized* tag
+// ("~A<int>"), so the spelled "~A" no longer resolves by exact name.  Search the
+// (direct or indirect) base subobjects of `str` for one whose tag name or
+// primary-template name equals `base_name`, returning that base's actual tag
+// name so the spelling can be rewritten to a resolvable destructor name.  Only
+// bases are searched: a spelling that names the object's own type is handled by
+// the own-destructor rewrite instead.
+static String* CXXFindBaseTagNameForDestructorSpelling(Struct* str,
+                                                       const char* base_name) {
+  if (str == NULL || base_name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct->tag_name != NULL &&
+        strcmp(base_struct->tag_name->value, base_name) == 0) {
+      return base_struct->tag_name;
+    }
+    Symbol* origin = base->type->template_origin;
+    if (origin == NULL && base_struct->tag_symbol != NULL &&
+        base_struct->tag_symbol->type != NULL) {
+      origin = base_struct->tag_symbol->type->template_origin;
+    }
+    if (origin != NULL && strcmp(origin->name.value, base_name) == 0) {
+      return base_struct->tag_name;
+    }
+    // A template-id base ("O<int>") whose destructor is spelled by its primary
+    // name ("~O").  template_origin is not always propagated onto the base type
+    // (notably for instantiations that carry virtual bases), so also match the
+    // primary-template prefix textually: the tag name begins with `base_name`
+    // immediately followed by the template-argument list opener '<'.
+    if (base_struct->tag_name != NULL) {
+      size_t n = strlen(base_name);
+      const char* tag = base_struct->tag_name->value;
+      if (strncmp(tag, base_name, n) == 0 && tag[n] == '<') {
+        return base_struct->tag_name;
+      }
+    }
+    String* nested =
+        CXXFindBaseTagNameForDestructorSpelling(base_struct, base_name);
+    if (nested != NULL) {
+      return nested;
+    }
+  }
+  return NULL;
+}
+
 // Handles an explicit destructor or pseudo-destructor call written through a
 // member-access callee: `obj.~T()`, `p->~T()`, or `p->~int()`.  This is needed
 // for generic code (e.g. containers destroying their elements) where the named
@@ -6562,10 +6979,14 @@ static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
       (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
     return NULL;
   }
-  if (node->children != NULL && node->children->length != 0) {
-    // A destructor call takes no explicit arguments.
-    return NULL;
-  }
+  // A user-written destructor call takes no explicit arguments, but a
+  // compiler-generated base-subobject cleanup call carries the implicit
+  // `__complete_object` flag argument when the base has virtual bases.  We must
+  // still rewrite a dependent/primary-name spelling ("~O" -> "~O<int>") in that
+  // case, so do not bail here; instead only the trivial/pseudo-destructor no-op
+  // replacement below is suppressed when arguments are present (that path would
+  // otherwise drop the argument).
+  bool has_arguments = node->children != NULL && node->children->length != 0;
   BinaryASTNode* access = (BinaryASTNode*)node->left;
   if (access->right == NULL || access->right->op != AST_OP(string)) {
     return NULL;
@@ -6615,6 +7036,28 @@ static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
         spelled_member->symbol->type->info.function.is_destructor) {
       return NULL;
     }
+    // A base-subobject cleanup call `this->~A()` generated inside a class
+    // template spells the base by its primary name ("~A"); after instantiation
+    // the base subobject is `A<int>` with destructor "~A<int>".  If the spelled
+    // name names a base by tag or primary-template name, rewrite it to that
+    // base's specialized destructor name so the ordinary member-call path binds
+    // to the base's destructor -- rather than falling through to the own-type
+    // rewrite below, which would bind to the derived class's own destructor and
+    // recurse forever.
+    String* base_tag = CXXFindBaseTagNameForDestructorSpelling(
+        struct_info, spelled->value + 1);
+    if (base_tag != NULL) {
+      String base_destructor_name;
+      StringInit(&base_destructor_name, "~");
+      StringAppendString(&base_destructor_name, base_tag);
+      if (!StringEqualString(spelled, &base_destructor_name)) {
+        ConstantASTNode* name_node = (ConstantASTNode*)access->right;
+        StringDelete(name_node->value.string);
+        name_node->value.string = NewString(base_destructor_name.value);
+      }
+      StringDestruct(&base_destructor_name);
+      return NULL;
+    }
     String destructor_name;
     StringInit(&destructor_name, "~");
     StringAppendString(&destructor_name, struct_info->tag_name);
@@ -6635,6 +7078,14 @@ static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
     }
     StringDestruct(&destructor_name);
     // Class with a trivial (unmaterialized) destructor: fall through to no-op.
+  }
+
+  // If the call carries arguments (the implicit `__complete_object` flag of a
+  // generated base cleanup, or ill-formed user arguments) we must not collapse
+  // it into an argument-dropping no-op; hand it to the ordinary member-call path
+  // which either binds a materialized destructor or diagnoses the arguments.
+  if (has_arguments) {
+    return NULL;
   }
 
   // Scalar pseudo-destructor, or trivial-destructor class: evaluate the object
@@ -6955,9 +7406,16 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         if (!polymorphic_special_this &&
             !TypeEqualIgnoringQualifiers(actual->type,
                                          reference_type->next)) {
-          NormalConversion(actual,
-                           ReferenceConversionTarget(actual, reference_type));
-          actual = node->children->value.p[i];
+          ASTNode* base_bound =
+              TryBindReferenceToBaseSubobject(actual, reference_type->next);
+          if (base_bound != NULL) {
+            ASTNodeReplaceChild((ASTNode*)node, (int)i, base_bound, false);
+            actual = base_bound;
+          } else {
+            NormalConversion(actual,
+                             ReferenceConversionTarget(actual, reference_type));
+            actual = node->children->value.p[i];
+          }
         }
         if (discards_qualifiers) {
           SemanticError(actual, "Reference argument discards qualifiers");
@@ -7358,6 +7816,22 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         member->symbol->flags.used = true;
       }
       TypeRecord* member_type = member->symbol->type;
+      // A reference data member behaves as the object it is bound to: reads,
+      // writes, and address-of all act on the referent.  Strip the access to the
+      // referent type (mirroring the referent-type rewrite a reference
+      // *variable* read receives) so downstream analysis and codegen treat it as
+      // an lvalue of the referent.  The one exception is a constructor
+      // member-initializer target, which binds the reference and must retain the
+      // reference type so codegen writes the pointer slot, not the referent.
+      // Receiver const-ness is not propagated: a reference member of a const
+      // object still designates a non-const referent.
+      if (!member->is_static && !member->is_member_function &&
+          TypeIsReference(member_type) &&
+          !MemberReferenceIsInitializerTarget(node)) {
+        ASTNodeSetType((ASTNode*)node, member_type->next);
+        node->base.value_category = kValueCategoryLvalue;
+        return;
+      }
       if (!member->is_static && !member->is_member_function &&
           !member->is_mutable && MemberReceiverIsConst(node)) {
         member_type = TypeRecordCopy(member_type);
@@ -7472,6 +7946,16 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     member->symbol->flags.used = true;
   }
   TypeRecord* member_type = member->symbol->type;
+  // A reference data member behaves as its referent (see the pre-resolved
+  // member path above): strip the access to the referent type for every use
+  // except a constructor member-initializer target, which binds the reference.
+  if (!member->is_static && !member->is_member_function &&
+      TypeIsReference(member_type) &&
+      !MemberReferenceIsInitializerTarget(node)) {
+    ASTNodeSetType((ASTNode*)node, member_type->next);
+    node->base.value_category = kValueCategoryLvalue;
+    return;
+  }
   if (!member->is_static && !member->is_member_function && !member->is_mutable &&
       MemberReceiverIsConst(node)) {
     member_type = TypeRecordCopy(member_type);
@@ -7823,6 +8307,44 @@ static bool TryCastReferenceRelatedClass(CastASTNode* node) {
   node->expr = deref;
   deref->parent = (ASTNode*)node;
   return true;
+}
+
+// Bind a class lvalue/xvalue `expr` to a reference whose referent type is a
+// (possibly virtual, possibly offset) base class of `expr`'s class.  The base
+// subobject may live at a non-zero offset -- and for a virtual base, only
+// reachable through the run-time __vbptr -- so the reference must point at the
+// adjusted subobject address, not the raw derived-object address.  Rewrites
+// `expr` to `*static_cast<Base*>(&expr)`, reusing the pointer up-cast path that
+// already emits the correct static/virtual adjustment.  Returns the new lvalue
+// node (detached from any parent) when the rewrite applies, or NULL when `expr`
+// is not a base-class subobject reference (leaving `expr` untouched).
+static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
+                                                TypeRecord* referent) {
+  if (!CompilerIsCXX() || expr == NULL || expr->type == NULL ||
+      referent == NULL || !TypeIsStructOrUnion(expr->type) ||
+      !TypeIsStructOrUnion(referent) ||
+      TypeEqualIgnoringQualifiers(expr->type, referent)) {
+    return NULL;
+  }
+  // Only meaningful for an object that already has an address; a materialized
+  // temporary (no address) is handled separately by the caller.
+  if (!HasAddress(expr)) {
+    return NULL;
+  }
+  CXXBaseAdjustment adjustment;
+  if (!TypeBaseAdjustment(expr->type, referent, /*public_only=*/true,
+                          &adjustment)) {
+    return NULL;
+  }
+  SourceLocation loc = expr->location;
+  ASTNode* moved = ASTNodeMove(expr);
+  ASTNode* addr = NewAnalyzedBuiltinAddressOf(moved, loc);
+  TypeRecord* base_ptr = NewPointerTo(kQualPlain, TypeRecordCopy(referent));
+  ASTNode* ptr_cast = NewCastASTNode(base_ptr, loc, addr);
+  ((CastASTNode*)ptr_cast)->kind = kCastStatic;
+  ptr_cast = AnalyzeExpression(ptr_cast);
+  ASTNode* deref = NewUnaryASTNode(AST_OP(contents), NULL, loc, ptr_cast);
+  return AnalyzeExpression(deref);
 }
 
 static void AnalyzeCastExpression(CastASTNode* node) {

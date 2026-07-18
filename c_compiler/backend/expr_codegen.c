@@ -2241,6 +2241,38 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       NewIR2(IR_OP(adda), addr,
              GeneratorGetIntConstant(gen, NULL, member->byte_offset)));
   IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
+
+  TypeRecord* member_decl_type = member->member->symbol->type;
+  if (!member->member->is_member_function && TypeIsReference(member_decl_type)) {
+    // Reference data member: the slot at `addr` holds a pointer to the referent.
+    // A constructor member-initializer target (its enclosing assign carries
+    // kASTCXXMemberInitializer and this access is that assign's left operand)
+    // BINDS the reference, so hand back the slot for the caller to store the
+    // referent address into.  Any other use dereferences the slot to reach the
+    // referent, matching how a reference *variable* is loaded.
+    ASTNode* parent = node->base.parent;
+    bool bind_target = parent != NULL &&
+                       (parent->flags & kASTCXXMemberInitializer) != 0 &&
+                       node->base.child_id == 0;
+    if (bind_target) {
+      return addr;
+    }
+    TypeRecord* referent = member_decl_type->next;
+    IRNode* ref_addr =
+        IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), addr)),
+                  NewPointerTo(kQualPlain, referent));
+    if ((node->base.flags & kASTNeedAddress) != 0 || TypeIsArray(referent) ||
+        TypeIsStructOrUnion(referent) ||
+        TypeIsMemberPointerAggregate(referent)) {
+      return ref_addr;
+    }
+    IROpcode load_op = GetLoadOpcodeForType(referent);
+    IRNode* load =
+        IRSetType(GeneratorEmit(gen, NewIR1(load_op, ref_addr)), referent);
+    CheckForVarUse(load, (ASTNode*)node);
+    return load;
+  }
+
   if ((node->base.flags & kASTNeedAddress) != 0) {
     // Only address needed.
     return addr;

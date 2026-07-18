@@ -47,10 +47,10 @@ typedef long ssize_t;
 #endif
 
 
-#ifndef SEEK_CUR
-#define SEEK_CUR 0
-#define SEET_END 1
-#define SEEK_SET 2
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 #endif
 
 #ifndef __SC_NAMES

@@ -89,6 +89,16 @@ Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
 Vector* TypeDeduceConversionOperatorTemplateArguments(struct Syntax* syntax,
                                                       Symbol* templ,
                                                       TypeRecord* target);
+// Deduce a function template's arguments when its address is taken against a
+// required function type ([temp.deduct.funcaddr]/[over.over]).  `target_fn` is
+// the destination pointer's pointee function type.  Returns the completed
+// argument vector (caller owns; delete with TemplateArgumentDelete) or NULL on
+// failure.  Feed the result back as explicit template arguments to
+// TypeInstantiateFunctionTemplate to build the specialization.
+Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(struct Syntax* syntax,
+                                                            Symbol* templ,
+                                                            Vector* explicit_args,
+                                                            TypeRecord* target_fn);
 // Partial ordering of two conversion function templates by their target type
 // ([temp.func.order]).  Returns 1 if `a` is more specialized than `b`, -1 if
 // `b` is more specialized than `a`, and 0 if neither (equivalent/incomparable,

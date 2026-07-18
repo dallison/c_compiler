@@ -29,6 +29,9 @@
 #include "set.h"
 
 
+static StructMember* FindDirectStructMemberByName(Struct* str,
+                                                  const char* name);
+
 typedef struct {
   Symbol* symbol;
   CXXConstructorInitList* initializers;
@@ -199,7 +202,9 @@ static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     type->info.struct_info->lexical_parent = owner;
   }
-  StructMember* existing = FindStructMember(owner, &tag->name);
+  // Only a *direct* member of this class collides.  A base class's nested type
+  // of the same name is lawfully hidden by this one, so do not walk bases here.
+  StructMember* existing = MapFindPointerKey(&owner->symbol_table, &tag->name);
   if (existing != NULL) {
     // Completing a previously forward-declared nested type -- `class X;`
     // followed by `class X { ... };` -- reaches here twice for the same tag,
@@ -267,7 +272,10 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   if (!CompilerIsCXX() || owner == NULL || name == NULL || type == NULL) {
     return;
   }
-  if (FindStructMemberByName(owner, name) != NULL) {
+  // Only a *direct* member of this class collides: a derived class may lawfully
+  // redefine (hide) a nested type or typedef inherited from a base class, so the
+  // duplicate check must not walk base classes.
+  if (FindDirectStructMemberByName(owner, name) != NULL) {
     SyntaxError(parser->syntax, "Duplicate nested type %s", name);
     return;
   }

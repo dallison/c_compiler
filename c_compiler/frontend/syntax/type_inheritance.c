@@ -203,6 +203,10 @@ void LayoutCXXBaseSpecifiers(Struct* str) {
     if (base->type == NULL || !TypeIsStructOrUnion(base->type)) {
       continue;
     }
+    // A class-template base can finish instantiation after this base
+    // specifier's TypeRecord cached an intermediate size.  Synchronize it from
+    // the authoritative Struct before using it to advance the derived layout.
+    TypeRecordCalculateSize(base->type);
     AlignNextOffset(str, base->type);
     base->byte_offset = str->next_offset;
     int base_size = base->type->size;
@@ -475,6 +479,9 @@ void LayoutCXXVirtualBaseSpecifiers(Struct* str) {
   }
   for (size_t i = 0; i < str->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    // As for non-virtual bases, refresh a possibly stale template
+    // specialization size before appending the shared virtual-base subobject.
+    TypeRecordCalculateSize(base->type);
     AlignNextOffset(str, base->type);
     base->byte_offset = str->next_offset;
     if (!str->is_union) {

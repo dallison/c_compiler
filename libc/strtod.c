@@ -10,10 +10,6 @@
 #include <ctype.h>
 #include <string.h>
 
-#ifndef __6502__
-#define strtod Strtod
-#endif
-
 extern void Break();
 
 // The algorithm for this is:
@@ -162,3 +158,10 @@ double strtod (const char* str, char** endptr) {
 #endif
   
 }
+
+#ifndef __6502__
+// Backward-compatible alias for the original internal name (see strtod_test).
+double Strtod(const char* str, char** endptr) {
+  return strtod(str, endptr);
+}
+#endif

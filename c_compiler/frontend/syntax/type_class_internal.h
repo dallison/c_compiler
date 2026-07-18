@@ -72,6 +72,12 @@ bool CXXClassNameMatchesUnqualifiedTemplateName(String* class_name,
 
 void ComputeCXXAggregateStatus(Struct* str);
 void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str, Symbol* tag);
+// After a class's layout is finalized (vptr and virtual-base pointers added),
+// mark its special members non-trivial if the class is polymorphic or has
+// virtual bases.  Such special members must run construction/destruction code
+// (vptr/vbptr setup), so they must not be treated as trivial (which would let
+// global static-init skip them, leaving those pointers uninitialized).
+void CXXFixupSpecialMemberTrivialityAfterLayout(Struct* str);
 void AddImplicitLambdaClosureSpecialMembers(struct Syntax* syntax, Struct* str,
                                             Symbol* tag, bool has_capture_fields,
                                             bool has_explicit_template_params);

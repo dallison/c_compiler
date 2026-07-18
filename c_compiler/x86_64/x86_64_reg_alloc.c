@@ -448,6 +448,40 @@ static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
   }
 }
 
+// True when |target| is produced not by itself but by one or more *other*
+// instructions writing it via ->dest (or an rmov into it).  The canonical
+// example is the result temporary of a conditional (?:) expression: a bare
+// `tmp` node is emitted at the top of the function and each arm assigns it
+// with `arm->dest = tmp`.  Such a value can have several definitions in
+// mutually-exclusive blocks, so - exactly like a reassignable variable
+// register - it must use the "store back after every definition, reload for
+// every read" spill model.  Spilling it with the single-definition model
+// (store once, right after the `tmp` node itself) captures the register's
+// undefined value at the declaration point and never observes the real
+// per-branch definitions, so every reload reads garbage.
+static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
+                                       TargetInstruction* target) {
+  TargetGenerator* gen = &allocator->rv->base;
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[b];
+    for (TargetInstruction* inst = block->code;
+         inst != NULL && inst != block->end_code;
+         inst = TargetNext(inst)) {
+      if (inst == target) {
+        continue;
+      }
+      if ((int)inst->opcode == (int)X86_64_OP(spill) ||
+          (int)inst->opcode == (int)X86_64_OP(reload)) {
+        continue;
+      }
+      if (IsVarRegDef(inst, target)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, TargetInstruction* inst) {
   X86_64Register* reg = (X86_64Register*)inst->reg;    // Current register.
 
@@ -487,6 +521,20 @@ static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, Targ
     MapInsert(&allocator->varreg_spills, kv);
     // Catch up any redefinitions that were already processed before this spill.
     InsertVarRegStoreBacks(allocator, inst, spill, first_use);
+  } else if (InstructionHasExternalDefs(allocator, inst)) {
+    // A value written by separate instructions via ->dest (e.g. the result
+    // temporary of a `?:` expression, assigned once per arm).  Use the
+    // variable-register store-back model.  The value node itself (a bare `tmp`
+    // emitted at function entry) carries no meaningful value at its declaration
+    // point, so - unlike a varreg - we must not emit an initialising store
+    // there.  Instead the `spill` handle stays out of the instruction stream
+    // (it only supplies the slot offset for reloads and store-backs), a store
+    // is inserted after every already-processed definition, and definitions
+    // processed after this spill are handled by SyncSpilledVarReg.
+    TargetTrackOrphanInstruction(&allocator->rv->base, spill);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->varreg_spills, kv);
+    InsertVarRegStoreBacks(allocator, inst, spill, /*first_use=*/NULL);
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, spill, inst);
@@ -558,12 +606,17 @@ static void EvictPhysicalRegister(X86_64RegisterAllocator* allocator,
 static void SyncSpilledVarReg(X86_64RegisterAllocator* allocator,
                               TargetInstruction* def_inst,
                               TargetInstruction* varreg) {
-  if (varreg == NULL || !X86_64IsVarRegister(varreg)) {
+  if (varreg == NULL) {
     return;
   }
   if ((varreg->flags & TARGET_INST_SPILLED) == 0) {
     return;
   }
+  // The store-back model applies to any spilled value that keeps its slot fresh
+  // across multiple definitions: variable registers and externally-defined
+  // temporaries (see InstructionHasExternalDefs).  Both are recorded in
+  // varreg_spills when spilled; a value absent from the map uses the plain
+  // single-definition model and needs no store-back here.
   TargetInstruction* orig_spill =
       MapFindPointerKey(&allocator->varreg_spills, varreg);
   if (orig_spill == NULL || def_inst->reg == NULL) {

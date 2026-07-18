@@ -128,7 +128,7 @@ typedef long fpos_t;
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
-#define SEET_END 2
+#define SEEK_END 2
 
 #include <unistd.h>
 int open(const char* filename, int mode, ...);

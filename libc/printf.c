@@ -322,20 +322,18 @@ STATIC int Pad(Writer writer, void* data, int n, bool zero) {
   return count;
 }
 
-STATIC void Prepend(Writer writer, void* data, ConversionFormat* fmt,
-                    bool negative) {
+STATIC int Prepend(Writer writer, void* data, ConversionFormat* fmt,
+                   bool negative) {
   if (negative) {
-    writer("-", 1, data);
-    return ;
+    return writer("-", 1, data);
   }
   if (fmt->prepend_sign) {
-    writer("+", 1, data);
-    return ;
+    return writer("+", 1, data);
   }
   if (fmt->prepend_space) {
-    writer(" ", 1, data);
-    return;
+    return writer(" ", 1, data);
   }
+  return 0;
 }
 
 // Do we need to prepend a character?
@@ -363,8 +361,8 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
                           const char* s, size_t len, bool negative,
                           bool use_precision) {
   if (fmt->field_width == kWidthDefault) {
-    Prepend(writer, data, fmt, negative);
-    int num_chars = PadToPrecision(writer, data, fmt, len, use_precision);
+    int num_chars = Prepend(writer, data, fmt, negative);
+    num_chars += PadToPrecision(writer, data, fmt, len, use_precision);
     return num_chars + writer(s, len, data);
   }
   
@@ -374,7 +372,7 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
   if (fmt->left_justify) {
     // Left justify.  Pad to the right with spaces.
     if (AnyPrependNeeded(fmt, negative)) {
-      Prepend(writer, data, fmt, negative);
+      num_chars += Prepend(writer, data, fmt, negative);
       --padding;
     }
     int n = PadToPrecision(writer, data, fmt, len, use_precision);
@@ -389,7 +387,7 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
     if (AnyPrependNeeded(fmt, negative)) {
       if (fmt->fill_zero) {
         // Filling with zeroes, add prepend character now.
-        Prepend(writer, data, fmt, negative);
+        num_chars += Prepend(writer, data, fmt, negative);
       }
       --padding;    // One less padding character now.
     }
@@ -401,7 +399,7 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
     }
     num_chars += Pad(writer, data, padding, fmt->fill_zero);
     if (!fmt->fill_zero) {
-      Prepend(writer, data, fmt, negative);
+      num_chars += Prepend(writer, data, fmt, negative);
     }
     num_chars +=
         PadToPrecision(writer, data, fmt, len, use_precision);

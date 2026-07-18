@@ -362,6 +362,17 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
     record->size = record->info.array.size.fixed * record->next->size;
     return record;
   }
+  // A struct/union TypeRecord's authoritative size lives in its struct_info.  The
+  // struct can be finalized (virtual bases, vtable/vbptr, late members) *after* a
+  // TypeRecord referencing it already cached an intermediate size -- most notably
+  // during class-template instantiation, where the non-virtual layout is sized
+  // before the virtual-base subobjects are appended.  Always re-sync from the
+  // completed struct so stale caches (e.g. a local's frame slot) are corrected.
+  if (record->declarator == kDeclPrimitive && TypeIsStructOrUnion(record) &&
+      record->info.struct_info != NULL && record->info.struct_info->size > 0) {
+    record->size = record->info.struct_info->size;
+    return record;
+  }
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:

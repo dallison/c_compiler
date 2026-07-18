@@ -1,0 +1,419 @@
+//
+//  ostream
+//  c_compiler
+//
+//  C++20 <ostream> support for DaveCC: basic_ostream and its formatted /
+//  unformatted output operations.  Numeric formatting is built on snprintf for
+//  the digit conversion, with field width, fill and adjustfield applied here so
+//  arbitrary fill characters and internal padding behave per the standard.
+//
+
+#ifndef __davecc_ostream__
+#define __davecc_ostream__
+
+#include <ios>
+#include <streambuf>
+#include <iosfwd>
+#include <__char_traits>
+#include <cstdio>
+#include <string.h>
+
+namespace std {
+
+template <class CharT, class Traits, class Allocator>
+class basic_string;
+
+template <class CharT, class Traits>
+class basic_ostream : public virtual basic_ios<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  class sentry {
+    basic_ostream& __os_;
+    bool __ok_;
+
+   public:
+    explicit sentry(basic_ostream& os) : __os_(os), __ok_(false) {
+      if (os.good()) {
+        if (os.tie() != nullptr) {
+          os.tie()->flush();
+        }
+        __ok_ = os.good();
+      }
+    }
+    ~sentry() {
+      if ((__os_.flags() & ios_base::unitbuf) != 0 && __os_.good()) {
+        if (__os_.rdbuf() != nullptr) {
+          __os_.rdbuf()->pubsync();
+        }
+      }
+    }
+    explicit operator bool() const { return __ok_; }
+
+    sentry(const sentry&) = delete;
+    sentry& operator=(const sentry&) = delete;
+  };
+
+  explicit basic_ostream(basic_streambuf<CharT, Traits>* sb) {
+    this->init(sb);
+  }
+  virtual ~basic_ostream() {}
+
+  // Formatted output of arithmetic values.
+  basic_ostream& operator<<(bool v) {
+    if ((this->flags() & ios_base::boolalpha) != 0) {
+      return __put_bytes(v ? "true" : "false", v ? 4 : 5, 0);
+    }
+    return __put_signed(static_cast<long long>(v ? 1 : 0));
+  }
+  basic_ostream& operator<<(short v) {
+    return __put_signed(static_cast<long long>(v));
+  }
+  basic_ostream& operator<<(unsigned short v) {
+    return __put_unsigned(static_cast<unsigned long long>(v));
+  }
+  basic_ostream& operator<<(int v) {
+    return __put_signed(static_cast<long long>(v));
+  }
+  basic_ostream& operator<<(unsigned int v) {
+    return __put_unsigned(static_cast<unsigned long long>(v));
+  }
+  basic_ostream& operator<<(long v) {
+    return __put_signed(static_cast<long long>(v));
+  }
+  basic_ostream& operator<<(unsigned long v) {
+    return __put_unsigned(static_cast<unsigned long long>(v));
+  }
+  basic_ostream& operator<<(long long v) { return __put_signed(v); }
+  basic_ostream& operator<<(unsigned long long v) { return __put_unsigned(v); }
+  basic_ostream& operator<<(float v) {
+    return __put_float(static_cast<double>(v));
+  }
+  basic_ostream& operator<<(double v) { return __put_float(v); }
+  basic_ostream& operator<<(long double v) {
+    return __put_float(static_cast<double>(v));
+  }
+  basic_ostream& operator<<(const void* v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%p", v);
+    if (n < 0) {
+      n = 0;
+    }
+    return __put_bytes(buf, static_cast<size_t>(n), 0);
+  }
+
+  // Insert the contents of another buffer.
+  basic_ostream& operator<<(basic_streambuf<CharT, Traits>* sb) {
+    if (sb != nullptr) {
+      sentry s(*this);
+      if (s) {
+        int_type c = sb->sgetc();
+        while (!Traits::eq_int_type(c, Traits::eof())) {
+          if (Traits::eq_int_type(this->rdbuf()->sputc(Traits::to_char_type(c)),
+                                  Traits::eof())) {
+            this->setstate(ios_base::badbit);
+            break;
+          }
+          c = sb->snextc();
+        }
+      }
+    }
+    return *this;
+  }
+
+  // Manipulators: ios_base& (*)(ios_base&), basic_ios& (*)(basic_ios&),
+  // basic_ostream& (*)(basic_ostream&).
+  basic_ostream& operator<<(ios_base& (*func)(ios_base&)) {
+    func(*this);
+    return *this;
+  }
+  basic_ostream& operator<<(basic_ios<CharT, Traits>& (*func)(
+      basic_ios<CharT, Traits>&)) {
+    func(*this);
+    return *this;
+  }
+  basic_ostream& operator<<(basic_ostream& (*func)(basic_ostream&)) {
+    return func(*this);
+  }
+
+  // Unformatted output.
+  basic_ostream& put(char_type c) {
+    sentry s(*this);
+    if (s) {
+      if (Traits::eq_int_type(this->rdbuf()->sputc(c), Traits::eof())) {
+        this->setstate(ios_base::badbit);
+      }
+    }
+    return *this;
+  }
+  basic_ostream& write(const char_type* s, streamsize n) {
+    sentry sen(*this);
+    if (sen) {
+      if (this->rdbuf()->sputn(s, n) != n) {
+        this->setstate(ios_base::badbit);
+      }
+    }
+    return *this;
+  }
+  basic_ostream& flush() {
+    if (this->rdbuf() != nullptr) {
+      if (this->rdbuf()->pubsync() == -1) {
+        this->setstate(ios_base::badbit);
+      }
+    }
+    return *this;
+  }
+
+  pos_type tellp() {
+    if (this->fail()) {
+      return pos_type(off_type(-1));
+    }
+    return this->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::out);
+  }
+  basic_ostream& seekp(pos_type pos) {
+    if (!this->fail()) {
+      if (this->rdbuf()->pubseekpos(pos, ios_base::out) ==
+          pos_type(off_type(-1))) {
+        this->setstate(ios_base::failbit);
+      }
+    }
+    return *this;
+  }
+  basic_ostream& seekp(off_type off, ios_base::seekdir dir) {
+    if (!this->fail()) {
+      if (this->rdbuf()->pubseekoff(off, dir, ios_base::out) ==
+          pos_type(off_type(-1))) {
+        this->setstate(ios_base::failbit);
+      }
+    }
+    return *this;
+  }
+
+  // Write `s` (length n) applying field width / fill / adjustfield.  `prefix`
+  // is the number of leading bytes (sign and/or base prefix) that must precede
+  // any internal fill.
+  basic_ostream& __put_bytes(const char* s, size_t n, size_t prefix) {
+    sentry sen(*this);
+    if (!sen) {
+      return *this;
+    }
+    streamsize width = this->width();
+    char fill = this->fill();
+    basic_streambuf<CharT, Traits>* buf = this->rdbuf();
+    bool ok = true;
+    if (width <= static_cast<streamsize>(n)) {
+      ok = buf->sputn(s, static_cast<streamsize>(n)) ==
+           static_cast<streamsize>(n);
+    } else {
+      streamsize pad = width - static_cast<streamsize>(n);
+      ios_base::fmtflags adjust = this->flags() & ios_base::adjustfield;
+      if (adjust == ios_base::left) {
+        ok = buf->sputn(s, static_cast<streamsize>(n)) ==
+             static_cast<streamsize>(n);
+        ok = ok && __emit_fill(buf, fill, pad);
+      } else if (adjust == ios_base::internal) {
+        ok = buf->sputn(s, static_cast<streamsize>(prefix)) ==
+             static_cast<streamsize>(prefix);
+        ok = ok && __emit_fill(buf, fill, pad);
+        ok = ok && buf->sputn(s + prefix, static_cast<streamsize>(n - prefix)) ==
+             static_cast<streamsize>(n - prefix);
+      } else {
+        ok = __emit_fill(buf, fill, pad);
+        ok = ok && buf->sputn(s, static_cast<streamsize>(n)) ==
+             static_cast<streamsize>(n);
+      }
+    }
+    this->width(0);
+    if (!ok) {
+      this->setstate(ios_base::badbit);
+    }
+    return *this;
+  }
+
+ protected:
+  basic_ostream() {}
+
+ private:
+  static bool __emit_fill(basic_streambuf<CharT, Traits>* buf, char fill,
+                          streamsize count) {
+    for (streamsize i = 0; i < count; i++) {
+      if (Traits::eq_int_type(buf->sputc(fill), Traits::eof())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Build the integer base-conversion format specifier tail (after '%'),
+  // honouring basefield / showbase / uppercase / showpos.  Returns the number
+  // of characters written into `spec` (always NUL terminated).
+  void __int_base_spec(char* spec, bool is_signed) {
+    ios_base::fmtflags base = this->flags() & ios_base::basefield;
+    bool upper = (this->flags() & ios_base::uppercase) != 0;
+    bool showbase = (this->flags() & ios_base::showbase) != 0;
+    bool showpos = (this->flags() & ios_base::showpos) != 0;
+    char* p = spec;
+    *p++ = '%';
+    if (showbase) {
+      *p++ = '#';
+    }
+    if (showpos && is_signed && base == ios_base::dec) {
+      *p++ = '+';
+    }
+    *p++ = 'l';
+    *p++ = 'l';
+    if (base == ios_base::hex) {
+      *p++ = upper ? 'X' : 'x';
+    } else if (base == ios_base::oct) {
+      *p++ = 'o';
+    } else {
+      *p++ = is_signed ? 'd' : 'u';
+    }
+    *p = '\0';
+  }
+
+  // Count the leading sign / base-prefix bytes for internal padding.
+  static size_t __prefix_len(const char* s, size_t n) {
+    size_t i = 0;
+    if (i < n && (s[i] == '-' || s[i] == '+')) {
+      i++;
+    }
+    if (i + 1 < n && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+      i += 2;
+    }
+    return i;
+  }
+
+  basic_ostream& __put_signed(long long v) {
+    char spec[8];
+    char buf[64];
+    __int_base_spec(spec, /*is_signed=*/true);
+    int n = snprintf(buf, sizeof(buf), spec, v);
+    if (n < 0) {
+      n = 0;
+    }
+    return __put_bytes(buf, static_cast<size_t>(n),
+                       __prefix_len(buf, static_cast<size_t>(n)));
+  }
+  basic_ostream& __put_unsigned(unsigned long long v) {
+    char spec[8];
+    char buf[64];
+    __int_base_spec(spec, /*is_signed=*/false);
+    int n = snprintf(buf, sizeof(buf), spec, v);
+    if (n < 0) {
+      n = 0;
+    }
+    return __put_bytes(buf, static_cast<size_t>(n),
+                       __prefix_len(buf, static_cast<size_t>(n)));
+  }
+  basic_ostream& __put_float(double v) {
+    char spec[16];
+    char buf[64];
+    ios_base::fmtflags ff = this->flags() & ios_base::floatfield;
+    bool upper = (this->flags() & ios_base::uppercase) != 0;
+    bool showpos = (this->flags() & ios_base::showpos) != 0;
+    bool showpoint = (this->flags() & ios_base::showpoint) != 0;
+    char conv;
+    if (ff == ios_base::fixed) {
+      conv = upper ? 'F' : 'f';
+    } else if (ff == ios_base::scientific) {
+      conv = upper ? 'E' : 'e';
+    } else {
+      conv = upper ? 'G' : 'g';
+    }
+    char* p = spec;
+    *p++ = '%';
+    if (showpos) {
+      *p++ = '+';
+    }
+    if (showpoint) {
+      *p++ = '#';
+    }
+    *p++ = '.';
+    *p++ = '*';
+    *p++ = conv;
+    *p = '\0';
+    int prec = static_cast<int>(this->precision());
+    int n = snprintf(buf, sizeof(buf), spec, prec, v);
+    if (n < 0) {
+      n = 0;
+    }
+    size_t un = static_cast<size_t>(n);
+    if (un >= sizeof(buf)) {
+      un = sizeof(buf) - 1;
+    }
+    size_t prefix = (un > 0 && (buf[0] == '-' || buf[0] == '+')) ? 1 : 0;
+    return __put_bytes(buf, un, prefix);
+  }
+};
+
+// Character and C-string inserters (non-member).
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(basic_ostream<CharT, Traits>& os,
+                                         CharT c) {
+  return os.__put_bytes(&c, 1, 0);
+}
+template <class Traits>
+basic_ostream<char, Traits>& operator<<(basic_ostream<char, Traits>& os,
+                                        signed char c) {
+  char ch = static_cast<char>(c);
+  return os.__put_bytes(&ch, 1, 0);
+}
+template <class Traits>
+basic_ostream<char, Traits>& operator<<(basic_ostream<char, Traits>& os,
+                                        unsigned char c) {
+  char ch = static_cast<char>(c);
+  return os.__put_bytes(&ch, 1, 0);
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(basic_ostream<CharT, Traits>& os,
+                                         const CharT* s) {
+  return os.__put_bytes(s, Traits::length(s), 0);
+}
+template <class Traits>
+basic_ostream<char, Traits>& operator<<(basic_ostream<char, Traits>& os,
+                                        const signed char* s) {
+  return os.__put_bytes(reinterpret_cast<const char*>(s),
+                        strlen(reinterpret_cast<const char*>(s)), 0);
+}
+template <class Traits>
+basic_ostream<char, Traits>& operator<<(basic_ostream<char, Traits>& os,
+                                        const unsigned char* s) {
+  return os.__put_bytes(reinterpret_cast<const char*>(s),
+                        strlen(reinterpret_cast<const char*>(s)), 0);
+}
+
+// std::basic_string inserter (basic_string forward declared above; the caller
+// that instantiates this will have included <string>).
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& os,
+    const basic_string<CharT, Traits, Allocator>& s) {
+  return os.__put_bytes(s.data(), s.size(), 0);
+}
+
+// Manipulators.
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& endl(basic_ostream<CharT, Traits>& os) {
+  os.put(CharT('\n'));
+  os.flush();
+  return os;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& ends(basic_ostream<CharT, Traits>& os) {
+  os.put(CharT());
+  return os;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& flush(basic_ostream<CharT, Traits>& os) {
+  return os.flush();
+}
+
+}  // namespace std
+
+#endif /* __davecc_ostream__ */

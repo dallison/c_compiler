@@ -1,0 +1,77 @@
+//
+//  iosfwd
+//  c_compiler
+//
+//  Forward declarations for the C++ iostream machinery.  Headers that only need
+//  to name a stream type (pointers/references) include this instead of pulling
+//  in the full definitions, which keeps the include graph acyclic (e.g. <string>
+//  can declare its stream inserters without depending on <ostream>).
+//
+
+#ifndef __davecc_iosfwd__
+#define __davecc_iosfwd__
+
+#include <__char_traits>
+#include <memory>
+
+namespace std {
+
+using streamoff = long;
+using streamsize = long;
+using streampos = streamoff;
+
+template <class State>
+class fpos;
+
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_streambuf;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_ios;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_istream;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_ostream;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_iostream;
+
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT> >
+class basic_stringbuf;
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT> >
+class basic_istringstream;
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT> >
+class basic_ostringstream;
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT> >
+class basic_stringstream;
+
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_filebuf;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_ifstream;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_ofstream;
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_fstream;
+
+class ios_base;
+
+using streambuf = basic_streambuf<char>;
+using ios = basic_ios<char>;
+using istream = basic_istream<char>;
+using ostream = basic_ostream<char>;
+using iostream = basic_iostream<char>;
+using stringbuf = basic_stringbuf<char>;
+using istringstream = basic_istringstream<char>;
+using ostringstream = basic_ostringstream<char>;
+using stringstream = basic_stringstream<char>;
+using filebuf = basic_filebuf<char>;
+using ifstream = basic_ifstream<char>;
+using ofstream = basic_ofstream<char>;
+using fstream = basic_fstream<char>;
+
+}  // namespace std
+
+#endif /* __davecc_iosfwd__ */

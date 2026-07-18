@@ -1,0 +1,281 @@
+//
+//  sstream
+//  c_compiler
+//
+//  C++20 <sstream> support for DaveCC: basic_stringbuf and the string-backed
+//  streams.  The buffer keeps the whole content in a std::string and tracks
+//  independent get/put indices, routing every access through the streambuf
+//  virtual interface.  It deliberately leaves the base get/put area pointers
+//  null so the string can grow (reallocate) without dangling those pointers.
+//
+
+#ifndef __davecc_sstream__
+#define __davecc_sstream__
+
+#include <ios>
+#include <streambuf>
+#include <istream>
+#include <ostream>
+#include <string>
+#include <iosfwd>
+#include <__char_traits>
+
+namespace std {
+
+template <class CharT, class Traits, class Allocator>
+class basic_stringbuf : public basic_streambuf<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+  typedef Allocator allocator_type;
+  typedef basic_string<CharT, Traits, Allocator> string_type;
+
+  explicit basic_stringbuf(ios_base::openmode which = ios_base::in |
+                                                      ios_base::out)
+      : __mode_(which), __gpos_(0), __ppos_(0) {
+    __init_positions();
+  }
+  explicit basic_stringbuf(const string_type& s,
+                           ios_base::openmode which = ios_base::in |
+                                                      ios_base::out)
+      : __str_(s), __mode_(which), __gpos_(0), __ppos_(0) {
+    __init_positions();
+  }
+  ~basic_stringbuf() override {}
+
+  string_type str() const { return __str_; }
+  void str(const string_type& s) {
+    __str_ = s;
+    __gpos_ = 0;
+    __ppos_ = 0;
+    __init_positions();
+  }
+
+ protected:
+  int_type underflow() override {
+    if (__gpos_ < __str_.size()) {
+      return Traits::to_int_type(__str_[__gpos_]);
+    }
+    return Traits::eof();
+  }
+  int_type uflow() override {
+    if (__gpos_ < __str_.size()) {
+      return Traits::to_int_type(__str_[__gpos_++]);
+    }
+    return Traits::eof();
+  }
+  int_type pbackfail(int_type c = Traits::eof()) override {
+    if (__gpos_ == 0) {
+      return Traits::eof();
+    }
+    __gpos_--;
+    if (!Traits::eq_int_type(c, Traits::eof())) {
+      __str_[__gpos_] = Traits::to_char_type(c);
+    }
+    return Traits::to_int_type(__str_[__gpos_]);
+  }
+  streamsize showmanyc() override {
+    if (__gpos_ < __str_.size()) {
+      return static_cast<streamsize>(__str_.size() - __gpos_);
+    }
+    return -1;  // no more characters are available now
+  }
+  streamsize xsgetn(char_type* s, streamsize n) override {
+    streamsize got = 0;
+    while (got < n && __gpos_ < __str_.size()) {
+      s[got++] = __str_[__gpos_++];
+    }
+    return got;
+  }
+
+  int_type overflow(int_type c = Traits::eof()) override {
+    if ((__mode_ & ios_base::out) == 0) {
+      return Traits::eof();
+    }
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      return Traits::not_eof(c);
+    }
+    char_type ch = Traits::to_char_type(c);
+    if (__ppos_ < __str_.size()) {
+      __str_[__ppos_] = ch;
+    } else {
+      __str_.push_back(ch);
+    }
+    __ppos_++;
+    return c;
+  }
+  streamsize xsputn(const char_type* s, streamsize n) override {
+    if ((__mode_ & ios_base::out) == 0) {
+      return 0;
+    }
+    streamsize put = 0;
+    while (put < n) {
+      char_type ch = s[put];
+      if (__ppos_ < __str_.size()) {
+        __str_[__ppos_] = ch;
+      } else {
+        __str_.push_back(ch);
+      }
+      __ppos_++;
+      put++;
+    }
+    return put;
+  }
+
+  pos_type seekoff(off_type off, ios_base::seekdir way,
+                   ios_base::openmode which = ios_base::in |
+                                              ios_base::out) override {
+    off_type size = static_cast<off_type>(__str_.size());
+    bool do_in = (which & ios_base::in) != 0;
+    bool do_out = (which & ios_base::out) != 0;
+    off_type new_in = static_cast<off_type>(__gpos_);
+    off_type new_out = static_cast<off_type>(__ppos_);
+
+    if (do_in) {
+      off_type base = (way == ios_base::beg)
+                          ? 0
+                          : (way == ios_base::cur)
+                                ? static_cast<off_type>(__gpos_)
+                                : size;
+      new_in = base + off;
+      if (new_in < 0 || new_in > size) {
+        return pos_type(off_type(-1));
+      }
+    }
+    if (do_out) {
+      off_type base = (way == ios_base::beg)
+                          ? 0
+                          : (way == ios_base::cur)
+                                ? static_cast<off_type>(__ppos_)
+                                : size;
+      new_out = base + off;
+      if (new_out < 0 || new_out > size) {
+        return pos_type(off_type(-1));
+      }
+    }
+    if (do_in) {
+      __gpos_ = static_cast<size_t>(new_in);
+    }
+    if (do_out) {
+      __ppos_ = static_cast<size_t>(new_out);
+    }
+    // For a get/put ambiguous seekoff on both, return the get position.
+    return pos_type(do_in ? new_in : new_out);
+  }
+  pos_type seekpos(pos_type sp, ios_base::openmode which = ios_base::in |
+                                                          ios_base::out)
+      override {
+    return seekoff(static_cast<off_type>(sp), ios_base::beg, which);
+  }
+
+ private:
+  void __init_positions() {
+    __gpos_ = 0;
+    if ((__mode_ & ios_base::ate) != 0 || (__mode_ & ios_base::app) != 0) {
+      __ppos_ = __str_.size();
+    } else {
+      __ppos_ = 0;
+    }
+  }
+
+  string_type __str_;
+  ios_base::openmode __mode_;
+  size_t __gpos_;
+  size_t __ppos_;
+};
+
+template <class CharT, class Traits, class Allocator>
+class basic_istringstream : public basic_istream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef Allocator allocator_type;
+  typedef basic_string<CharT, Traits, Allocator> string_type;
+
+  explicit basic_istringstream(ios_base::openmode which = ios_base::in)
+      : basic_istream<CharT, Traits>(), __buf_(which | ios_base::in) {
+    this->init(&__buf_);
+  }
+  explicit basic_istringstream(const string_type& s,
+                               ios_base::openmode which = ios_base::in)
+      : basic_istream<CharT, Traits>(), __buf_(s, which | ios_base::in) {
+    this->init(&__buf_);
+  }
+  ~basic_istringstream() override {}
+
+  basic_stringbuf<CharT, Traits, Allocator>* rdbuf() const {
+    return const_cast<basic_stringbuf<CharT, Traits, Allocator>*>(&__buf_);
+  }
+  string_type str() const { return __buf_.str(); }
+  void str(const string_type& s) { __buf_.str(s); }
+
+ private:
+  basic_stringbuf<CharT, Traits, Allocator> __buf_;
+};
+
+template <class CharT, class Traits, class Allocator>
+class basic_ostringstream : public basic_ostream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef Allocator allocator_type;
+  typedef basic_string<CharT, Traits, Allocator> string_type;
+
+  explicit basic_ostringstream(ios_base::openmode which = ios_base::out)
+      : basic_ostream<CharT, Traits>(), __buf_(which | ios_base::out) {
+    this->init(&__buf_);
+  }
+  explicit basic_ostringstream(const string_type& s,
+                               ios_base::openmode which = ios_base::out)
+      : basic_ostream<CharT, Traits>(), __buf_(s, which | ios_base::out) {
+    this->init(&__buf_);
+  }
+  ~basic_ostringstream() override {}
+
+  basic_stringbuf<CharT, Traits, Allocator>* rdbuf() const {
+    return const_cast<basic_stringbuf<CharT, Traits, Allocator>*>(&__buf_);
+  }
+  string_type str() const { return __buf_.str(); }
+  void str(const string_type& s) { __buf_.str(s); }
+
+ private:
+  basic_stringbuf<CharT, Traits, Allocator> __buf_;
+};
+
+template <class CharT, class Traits, class Allocator>
+class basic_stringstream : public basic_iostream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef Allocator allocator_type;
+  typedef basic_string<CharT, Traits, Allocator> string_type;
+
+  explicit basic_stringstream(ios_base::openmode which = ios_base::in |
+                                                        ios_base::out)
+      : basic_iostream<CharT, Traits>(), __buf_(which) {
+    this->init(&__buf_);
+  }
+  explicit basic_stringstream(const string_type& s,
+                              ios_base::openmode which = ios_base::in |
+                                                        ios_base::out)
+      : basic_iostream<CharT, Traits>(), __buf_(s, which) {
+    this->init(&__buf_);
+  }
+  ~basic_stringstream() override {}
+
+  basic_stringbuf<CharT, Traits, Allocator>* rdbuf() const {
+    return const_cast<basic_stringbuf<CharT, Traits, Allocator>*>(&__buf_);
+  }
+  string_type str() const { return __buf_.str(); }
+  void str(const string_type& s) { __buf_.str(s); }
+
+ private:
+  basic_stringbuf<CharT, Traits, Allocator> __buf_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_sstream__ */

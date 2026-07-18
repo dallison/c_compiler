@@ -1,0 +1,707 @@
+//
+//  istream
+//  c_compiler
+//
+//  C++20 <istream> support for DaveCC: basic_istream and its formatted /
+//  unformatted input operations.  Numeric extraction reads the input one
+//  character at a time (peeking with sgetc, consuming with sbumpc) so it never
+//  over-reads past the value and needs no multi-character putback.
+//
+
+#ifndef __davecc_istream__
+#define __davecc_istream__
+
+#include <ios>
+#include <streambuf>
+#include <ostream>
+#include <iosfwd>
+#include <__char_traits>
+#include <stdlib.h>
+
+namespace std {
+
+template <class CharT, class Traits, class Allocator>
+class basic_string;
+
+template <class CharT, class Traits>
+class basic_istream : public virtual basic_ios<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  class sentry {
+    bool __ok_;
+
+   public:
+    explicit sentry(basic_istream& is, bool noskipws = false) : __ok_(false) {
+      if (!is.good()) {
+        is.setstate(ios_base::failbit);
+        return;
+      }
+      if (is.tie() != nullptr) {
+        is.tie()->flush();
+      }
+      if (!noskipws && (is.flags() & ios_base::skipws) != 0) {
+        basic_streambuf<CharT, Traits>* buf = is.rdbuf();
+        int_type c = buf->sgetc();
+        while (!Traits::eq_int_type(c, Traits::eof())) {
+          char ch = Traits::to_char_type(c);
+          if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r' &&
+              ch != '\f' && ch != '\v') {
+            break;
+          }
+          c = buf->snextc();
+        }
+        if (Traits::eq_int_type(c, Traits::eof())) {
+          is.setstate(ios_base::eofbit | ios_base::failbit);
+        }
+      }
+      __ok_ = is.good();
+    }
+    explicit operator bool() const { return __ok_; }
+
+    sentry(const sentry&) = delete;
+    sentry& operator=(const sentry&) = delete;
+  };
+
+  explicit basic_istream(basic_streambuf<CharT, Traits>* sb) : __gcount_(0) {
+    this->init(sb);
+  }
+  virtual ~basic_istream() {}
+
+  // Formatted input of arithmetic values.
+  basic_istream& operator>>(bool& v) {
+    long long tmp = 0;
+    if (__extract_int(tmp, /*is_signed=*/true)) {
+      v = tmp != 0;
+    }
+    return *this;
+  }
+  basic_istream& operator>>(short& v) { return __get_signed(v); }
+  basic_istream& operator>>(unsigned short& v) { return __get_unsigned(v); }
+  basic_istream& operator>>(int& v) { return __get_signed(v); }
+  basic_istream& operator>>(unsigned int& v) { return __get_unsigned(v); }
+  basic_istream& operator>>(long& v) { return __get_signed(v); }
+  basic_istream& operator>>(unsigned long& v) { return __get_unsigned(v); }
+  basic_istream& operator>>(long long& v) { return __get_signed(v); }
+  basic_istream& operator>>(unsigned long long& v) { return __get_unsigned(v); }
+  basic_istream& operator>>(float& v) {
+    double d = 0;
+    if (__extract_float(d)) {
+      v = static_cast<float>(d);
+    }
+    return *this;
+  }
+  basic_istream& operator>>(double& v) {
+    double d = 0;
+    if (__extract_float(d)) {
+      v = d;
+    }
+    return *this;
+  }
+  basic_istream& operator>>(void*& v) {
+    sentry s(*this);
+    if (!s) {
+      return *this;
+    }
+    char buf[32];
+    size_t len = 0;
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    int_type c = b->sgetc();
+    while (!Traits::eq_int_type(c, Traits::eof()) && len + 1 < sizeof(buf)) {
+      char ch = Traits::to_char_type(c);
+      if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+        break;
+      }
+      buf[len++] = ch;
+      c = b->snextc();
+    }
+    buf[len] = '\0';
+    if (len == 0) {
+      this->setstate(ios_base::failbit);
+    } else {
+      v = reinterpret_cast<void*>(strtoull(buf, nullptr, 16));
+    }
+    __check_eof(c);
+    return *this;
+  }
+
+  // Manipulators.
+  basic_istream& operator>>(basic_istream& (*func)(basic_istream&)) {
+    return func(*this);
+  }
+  basic_istream& operator>>(basic_ios<CharT, Traits>& (*func)(
+      basic_ios<CharT, Traits>&)) {
+    func(*this);
+    return *this;
+  }
+  basic_istream& operator>>(ios_base& (*func)(ios_base&)) {
+    func(*this);
+    return *this;
+  }
+
+  // Extract a whitespace-delimited field into `s` honouring width().
+  basic_istream& __get_field(char_type* s, streamsize limit) {
+    sentry sen(*this);
+    __gcount_ = 0;
+    if (!sen) {
+      if (limit > 0) {
+        *s = char_type();
+      }
+      return *this;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    streamsize max = this->width();
+    if (limit > 0 && (max <= 0 || max > limit)) {
+      max = limit;
+    }
+    streamsize count = 0;
+    int_type c = b->sgetc();
+    while (!Traits::eq_int_type(c, Traits::eof()) &&
+           (max <= 0 || count + 1 < max)) {
+      char ch = Traits::to_char_type(c);
+      if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' ||
+          ch == '\v') {
+        break;
+      }
+      s[count++] = Traits::to_char_type(c);
+      c = b->snextc();
+    }
+    s[count] = char_type();
+    if (count == 0) {
+      this->setstate(ios_base::failbit);
+    }
+    __check_eof(c);
+    this->width(0);
+    __gcount_ = count;
+    return *this;
+  }
+
+  // Unformatted input.
+  int_type get() {
+    sentry s(*this, true);
+    __gcount_ = 0;
+    if (!s) {
+      return Traits::eof();
+    }
+    int_type c = this->rdbuf()->sbumpc();
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      this->setstate(ios_base::eofbit | ios_base::failbit);
+    } else {
+      __gcount_ = 1;
+    }
+    return c;
+  }
+  basic_istream& get(char_type& c) {
+    int_type r = get();
+    if (!Traits::eq_int_type(r, Traits::eof())) {
+      c = Traits::to_char_type(r);
+    }
+    return *this;
+  }
+  basic_istream& get(char_type* s, streamsize n) {
+    return get(s, n, this->widen_delim());
+  }
+  basic_istream& get(char_type* s, streamsize n, char_type delim) {
+    sentry sen(*this, true);
+    __gcount_ = 0;
+    if (!sen || n <= 0) {
+      if (n > 0) {
+        *s = char_type();
+      }
+      return *this;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    streamsize count = 0;
+    int_type c = b->sgetc();
+    while (!Traits::eq_int_type(c, Traits::eof()) && count + 1 < n) {
+      char_type ch = Traits::to_char_type(c);
+      if (Traits::eq(ch, delim)) {
+        break;
+      }
+      s[count++] = ch;
+      c = b->snextc();
+    }
+    s[count] = char_type();
+    if (count == 0) {
+      this->setstate(ios_base::failbit);
+    }
+    __check_eof(c);
+    __gcount_ = count;
+    return *this;
+  }
+
+  basic_istream& getline(char_type* s, streamsize n) {
+    return getline(s, n, this->widen_delim());
+  }
+  basic_istream& getline(char_type* s, streamsize n, char_type delim) {
+    sentry sen(*this, true);
+    __gcount_ = 0;
+    if (!sen || n <= 0) {
+      if (n > 0) {
+        *s = char_type();
+      }
+      this->setstate(ios_base::failbit);
+      return *this;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    streamsize count = 0;
+    bool got_delim = false;
+    int_type c = b->sgetc();
+    while (!Traits::eq_int_type(c, Traits::eof())) {
+      char_type ch = Traits::to_char_type(c);
+      if (Traits::eq(ch, delim)) {
+        b->sbumpc();  // consume and discard the delimiter
+        got_delim = true;
+        break;
+      }
+      if (count + 1 >= n) {
+        this->setstate(ios_base::failbit);
+        break;
+      }
+      s[count++] = ch;
+      c = b->snextc();
+    }
+    s[count] = char_type();
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      this->setstate(ios_base::eofbit);
+    }
+    __gcount_ = count + (got_delim ? 1 : 0);
+    if (count == 0 && !got_delim && this->eof()) {
+      this->setstate(ios_base::failbit);
+    }
+    return *this;
+  }
+
+  basic_istream& read(char_type* s, streamsize n) {
+    sentry sen(*this, true);
+    __gcount_ = 0;
+    if (!sen) {
+      return *this;
+    }
+    streamsize got = this->rdbuf()->sgetn(s, n);
+    __gcount_ = got;
+    if (got != n) {
+      this->setstate(ios_base::eofbit | ios_base::failbit);
+    }
+    return *this;
+  }
+  streamsize readsome(char_type* s, streamsize n) {
+    sentry sen(*this, true);
+    __gcount_ = 0;
+    if (!sen) {
+      return 0;
+    }
+    streamsize avail = this->rdbuf()->in_avail();
+    if (avail < 0) {
+      this->setstate(ios_base::eofbit);
+      return 0;
+    }
+    streamsize count = avail < n ? avail : n;
+    count = this->rdbuf()->sgetn(s, count);
+    __gcount_ = count;
+    return count;
+  }
+
+  int_type peek() {
+    sentry s(*this, true);
+    __gcount_ = 0;
+    if (!s) {
+      return Traits::eof();
+    }
+    return this->rdbuf()->sgetc();
+  }
+  basic_istream& unget() {
+    __gcount_ = 0;
+    this->clear(this->rdstate() & ~ios_base::eofbit);
+    if (!this->fail()) {
+      if (Traits::eq_int_type(this->rdbuf()->sungetc(), Traits::eof())) {
+        this->setstate(ios_base::badbit);
+      }
+    }
+    return *this;
+  }
+  basic_istream& putback(char_type c) {
+    __gcount_ = 0;
+    this->clear(this->rdstate() & ~ios_base::eofbit);
+    if (!this->fail()) {
+      if (Traits::eq_int_type(this->rdbuf()->sputbackc(c), Traits::eof())) {
+        this->setstate(ios_base::badbit);
+      }
+    }
+    return *this;
+  }
+  basic_istream& ignore(streamsize n = 1, int_type delim = Traits::eof()) {
+    sentry sen(*this, true);
+    __gcount_ = 0;
+    if (!sen) {
+      return *this;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    streamsize count = 0;
+    while (n < 0 || count < n) {
+      int_type c = b->sbumpc();
+      if (Traits::eq_int_type(c, Traits::eof())) {
+        this->setstate(ios_base::eofbit);
+        break;
+      }
+      count++;
+      if (!Traits::eq_int_type(delim, Traits::eof()) &&
+          Traits::eq_int_type(c, delim)) {
+        break;
+      }
+    }
+    __gcount_ = count;
+    return *this;
+  }
+
+  streamsize gcount() const { return __gcount_; }
+
+  pos_type tellg() {
+    if (this->fail()) {
+      return pos_type(off_type(-1));
+    }
+    return this->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::in);
+  }
+  basic_istream& seekg(pos_type pos) {
+    this->clear(this->rdstate() & ~ios_base::eofbit);
+    if (!this->fail()) {
+      if (this->rdbuf()->pubseekpos(pos, ios_base::in) ==
+          pos_type(off_type(-1))) {
+        this->setstate(ios_base::failbit);
+      }
+    }
+    return *this;
+  }
+  basic_istream& seekg(off_type off, ios_base::seekdir dir) {
+    this->clear(this->rdstate() & ~ios_base::eofbit);
+    if (!this->fail()) {
+      if (this->rdbuf()->pubseekoff(off, dir, ios_base::in) ==
+          pos_type(off_type(-1))) {
+        this->setstate(ios_base::failbit);
+      }
+    }
+    return *this;
+  }
+
+  // Run a sentry and report whether extraction may proceed.  Non-member
+  // extractors call this instead of naming `typename basic_istream::sentry`
+  // directly: constructing an object of that dependent member type outside the
+  // class is not something the frontend supports, whereas inside the class the
+  // injected `sentry` name is an ordinary (non-dependent) nested type.  The
+  // input sentry has no destructor side effects, so a transient one here has
+  // the same observable effect (tie flush + optional whitespace skip) as one
+  // held across the caller's read.
+  bool __sentry_ok(bool noskipws = false) {
+    sentry sen(*this, noskipws);
+    return static_cast<bool>(sen);
+  }
+
+ protected:
+  basic_istream() : __gcount_(0) {}
+
+  char_type widen_delim() const { return char_type('\n'); }
+
+ private:
+  streamsize __gcount_;
+
+  void __check_eof(int_type c) {
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      this->setstate(ios_base::eofbit);
+    }
+  }
+
+  bool __extract_int(long long& out, bool is_signed) {
+    sentry s(*this);
+    if (!s) {
+      return false;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    char buf[72];
+    size_t len = 0;
+    int base = 10;
+    ios_base::fmtflags bf = this->flags() & ios_base::basefield;
+    if (bf == ios_base::hex) {
+      base = 16;
+    } else if (bf == ios_base::oct) {
+      base = 8;
+    } else if (bf == 0) {
+      base = 0;  // auto-detect (0x -> hex, leading 0 -> oct)
+    }
+    int_type c = b->sgetc();
+    if (!Traits::eq_int_type(c, Traits::eof())) {
+      char ch = Traits::to_char_type(c);
+      if (ch == '+' || (is_signed && ch == '-')) {
+        buf[len++] = ch;
+        c = b->snextc();
+      }
+    }
+    // Optional 0x / 0X prefix for hex or auto base.
+    if ((base == 16 || base == 0) && !Traits::eq_int_type(c, Traits::eof()) &&
+        Traits::to_char_type(c) == '0') {
+      buf[len++] = '0';
+      c = b->snextc();
+      if (!Traits::eq_int_type(c, Traits::eof())) {
+        char ch = Traits::to_char_type(c);
+        if (ch == 'x' || ch == 'X') {
+          buf[len++] = ch;
+          c = b->snextc();
+        }
+      }
+    }
+    while (!Traits::eq_int_type(c, Traits::eof()) && len + 1 < sizeof(buf)) {
+      char ch = Traits::to_char_type(c);
+      if (!__is_digit_for(ch, base)) {
+        break;
+      }
+      buf[len++] = ch;
+      c = b->snextc();
+    }
+    buf[len] = '\0';
+    __check_eof(c);
+    char* endp = nullptr;
+    if (is_signed) {
+      out = strtoll(buf, &endp, base);
+    } else {
+      out = static_cast<long long>(strtoull(buf, &endp, base));
+    }
+    if (endp == buf) {
+      this->setstate(ios_base::failbit);
+      return false;
+    }
+    return true;
+  }
+
+  bool __extract_float(double& out) {
+    sentry s(*this);
+    if (!s) {
+      return false;
+    }
+    basic_streambuf<CharT, Traits>* b = this->rdbuf();
+    char buf[80];
+    size_t len = 0;
+    bool seen_dot = false;
+    bool seen_exp = false;
+    int_type c = b->sgetc();
+    if (!Traits::eq_int_type(c, Traits::eof())) {
+      char ch = Traits::to_char_type(c);
+      if (ch == '+' || ch == '-') {
+        buf[len++] = ch;
+        c = b->snextc();
+      }
+    }
+    while (!Traits::eq_int_type(c, Traits::eof()) && len + 1 < sizeof(buf)) {
+      char ch = Traits::to_char_type(c);
+      bool ok = false;
+      if (ch >= '0' && ch <= '9') {
+        ok = true;
+      } else if (ch == '.' && !seen_dot && !seen_exp) {
+        seen_dot = true;
+        ok = true;
+      } else if ((ch == 'e' || ch == 'E') && !seen_exp && len > 0) {
+        seen_exp = true;
+        ok = true;
+        buf[len++] = ch;
+        c = b->snextc();
+        if (!Traits::eq_int_type(c, Traits::eof())) {
+          char sign = Traits::to_char_type(c);
+          if (sign == '+' || sign == '-') {
+            buf[len++] = sign;
+            c = b->snextc();
+          }
+        }
+        continue;
+      }
+      if (!ok) {
+        break;
+      }
+      buf[len++] = ch;
+      c = b->snextc();
+    }
+    buf[len] = '\0';
+    __check_eof(c);
+    char* endp = nullptr;
+    out = strtod(buf, &endp);
+    if (endp == buf) {
+      this->setstate(ios_base::failbit);
+      return false;
+    }
+    return true;
+  }
+
+  static bool __is_digit_for(char ch, int base) {
+    if (base == 0) {
+      base = 16;  // accept the widest set during auto-detect; strto* validates
+    }
+    if (ch >= '0' && ch <= '9') {
+      return (ch - '0') < (base < 10 ? base : 10);
+    }
+    if (base == 16) {
+      return (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+    }
+    return false;
+  }
+
+  template <class T>
+  basic_istream& __get_signed(T& v) {
+    long long tmp = 0;
+    if (__extract_int(tmp, /*is_signed=*/true)) {
+      v = static_cast<T>(tmp);
+    }
+    return *this;
+  }
+  template <class T>
+  basic_istream& __get_unsigned(T& v) {
+    long long tmp = 0;
+    if (__extract_int(tmp, /*is_signed=*/false)) {
+      v = static_cast<T>(static_cast<unsigned long long>(tmp));
+    }
+    return *this;
+  }
+};
+
+// The combined input/output stream.  basic_istream and basic_ostream both
+// derive virtually from basic_ios, so the single shared basic_ios subobject is
+// initialized here by the most-derived class.
+template <class CharT, class Traits>
+class basic_iostream : public basic_istream<CharT, Traits>,
+                       public basic_ostream<CharT, Traits> {
+ public:
+  typedef CharT char_type;
+  typedef Traits traits_type;
+  typedef typename Traits::int_type int_type;
+  typedef typename Traits::pos_type pos_type;
+  typedef typename Traits::off_type off_type;
+
+  explicit basic_iostream(basic_streambuf<CharT, Traits>* sb) {
+    this->init(sb);
+  }
+  virtual ~basic_iostream() {}
+
+ protected:
+  basic_iostream() {}
+};
+
+// Character-array extractor (non-member): reads a whitespace-delimited field
+// without overflowing the destination (the C++20 bounded array overload).
+template <class CharT, class Traits, size_t N>
+basic_istream<CharT, Traits>& operator>>(basic_istream<CharT, Traits>& is,
+                                         CharT (&s)[N]) {
+  return is.__get_field(s, static_cast<streamsize>(N));
+}
+
+// Single-character extractor.
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(basic_istream<CharT, Traits>& is,
+                                         CharT& c) {
+  if (is.__sentry_ok()) {
+    typename Traits::int_type r = is.rdbuf()->sbumpc();
+    if (Traits::eq_int_type(r, Traits::eof())) {
+      is.setstate(ios_base::eofbit | ios_base::failbit);
+    } else {
+      c = Traits::to_char_type(r);
+    }
+  }
+  return is;
+}
+
+// std::basic_string extractor / getline (basic_string forward declared above;
+// the caller instantiating these will have included <string>).
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& is,
+    basic_string<CharT, Traits, Allocator>& str) {
+  if (is.__sentry_ok()) {
+    str.clear();
+    basic_streambuf<CharT, Traits>* b = is.rdbuf();
+    streamsize width = is.width();
+    typename Traits::int_type c = b->sgetc();
+    streamsize count = 0;
+    while (!Traits::eq_int_type(c, Traits::eof())) {
+      char ch = Traits::to_char_type(c);
+      if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' ||
+          ch == '\v') {
+        break;
+      }
+      if (width > 0 && count >= width) {
+        break;
+      }
+      str.push_back(Traits::to_char_type(c));
+      count++;
+      c = b->snextc();
+    }
+    if (Traits::eq_int_type(c, Traits::eof())) {
+      is.setstate(ios_base::eofbit);
+    }
+    if (count == 0) {
+      is.setstate(ios_base::failbit);
+    }
+    is.width(0);
+  }
+  return is;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits>& getline(
+    basic_istream<CharT, Traits>& is,
+    basic_string<CharT, Traits, Allocator>& str, CharT delim) {
+  if (!is.__sentry_ok(true)) {
+    return is;
+  }
+  str.clear();
+  basic_streambuf<CharT, Traits>* b = is.rdbuf();
+  streamsize count = 0;
+  bool got_delim = false;
+  typename Traits::int_type c = b->sgetc();
+  while (!Traits::eq_int_type(c, Traits::eof())) {
+    CharT ch = Traits::to_char_type(c);
+    b->sbumpc();
+    if (Traits::eq(ch, delim)) {
+      got_delim = true;
+      break;
+    }
+    str.push_back(ch);
+    count++;
+    c = b->sgetc();
+  }
+  if (Traits::eq_int_type(c, Traits::eof())) {
+    is.setstate(ios_base::eofbit);
+  }
+  if (count == 0 && !got_delim && is.eof()) {
+    is.setstate(ios_base::failbit);
+  }
+  return is;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits>& getline(
+    basic_istream<CharT, Traits>& is,
+    basic_string<CharT, Traits, Allocator>& str) {
+  return getline(is, str, CharT('\n'));
+}
+
+// Whitespace-skipping manipulator.
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& ws(basic_istream<CharT, Traits>& is) {
+  basic_streambuf<CharT, Traits>* b = is.rdbuf();
+  typename Traits::int_type c = b->sgetc();
+  while (!Traits::eq_int_type(c, Traits::eof())) {
+    char ch = Traits::to_char_type(c);
+    if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r' && ch != '\f' &&
+        ch != '\v') {
+      break;
+    }
+    c = b->snextc();
+  }
+  if (Traits::eq_int_type(c, Traits::eof())) {
+    is.setstate(ios_base::eofbit);
+  }
+  return is;
+}
+
+}  // namespace std
+
+#endif /* __davecc_istream__ */

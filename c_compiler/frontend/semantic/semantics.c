@@ -1151,6 +1151,16 @@ static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
 }
 
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
+  // [over.over]/[temp.deduct.funcaddr]: a function-template name or overload set
+  // used where a specific function pointer is required resolves to the unique
+  // matching specialization.  Do this first so the rewritten (concrete) operand
+  // then flows through the normal function-to-pointer conversion below.
+  if (CXXTryResolveFunctionAddressNode(from, to)) {
+    if (TypeEqual(from->type, to)) {
+      return;
+    }
+  }
+
   if (TryConvertDerivedPointer(from, to)) {
     return;
   }

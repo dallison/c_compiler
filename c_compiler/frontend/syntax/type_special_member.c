@@ -1338,6 +1338,131 @@ static bool CXXStructHasDeletedMemberSpecialMemberKind(
   return false;
 }
 
+// True if `accessor` is directly granted friendship by `owner`.  Friendship is
+// neither inherited nor transitive, so a direct membership test on the friend
+// list is sufficient for the subobject-accessibility checks below.
+static bool CXXStructIsFriendOf(Struct* owner, Struct* accessor) {
+  if (owner == NULL || accessor == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < owner->friend_classes.length; i++) {
+    if (owner->friend_classes.value.p[i] == accessor) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True if `accessor`'s defaulted special member may name the special member of
+// `kind` on a subobject of type `subobj`.  A defaulted copy/move operation is
+// defined as deleted when a potentially-constructed subobject's corresponding
+// operation is inaccessible from the defaulted operation
+// ([class.copy.ctor]/11, [class.copy.assign]/7).  For a base subobject
+// `accessor` is a derived class, so a `protected` operation is accessible; for
+// a member subobject only `public` (or friend) access works.  A subobject that
+// declares no special member of `kind` has an implicit `public` one, so it is
+// always accessible on that axis (its deleted-ness is handled separately).
+static bool CXXSubobjectSpecialMemberAccessible(Struct* subobj,
+                                                CXXSpecialMemberKind kind,
+                                                Struct* accessor,
+                                                bool subobj_is_base) {
+  if (subobj == NULL || kind == kCXXSpecialMemberNone) {
+    return true;
+  }
+  bool is_friend = accessor != NULL && CXXStructIsFriendOf(subobj, accessor);
+  bool found_any = false;
+  for (size_t i = 0; i < subobj->members.length; i++) {
+    StructMember* member = subobj->members.value.p[i];
+    for (StructMember* overload = member; overload != NULL;
+         overload = overload->overload_next) {
+      if (!overload->is_member_function || overload->symbol == NULL ||
+          overload->symbol->type == NULL ||
+          overload->symbol->type->info.function.cxx_special_member_kind !=
+              kind) {
+        continue;
+      }
+      found_any = true;
+      CXXAccess access = overload->access;
+      bool accessible;
+      if (is_friend || access == kAccessPublic) {
+        accessible = true;
+      } else if (access == kAccessProtected) {
+        accessible = subobj_is_base;
+      } else {
+        accessible = false;
+      }
+      if (accessible) {
+        return true;
+      }
+    }
+  }
+  return !found_any;
+}
+
+// True if any direct or virtual base's special member of `kind` is inaccessible
+// from `str` (so `str`'s defaulted operation of that kind is deleted).
+static bool CXXStructHasInaccessibleBaseSpecialMemberKind(
+    Struct* str, CXXSpecialMemberKind kind) {
+  if (str == NULL || kind == kCXXSpecialMemberNone) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (!CXXSubobjectSpecialMemberAccessible(base->type->info.struct_info, kind,
+                                             str, /*subobj_is_base=*/true)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (!CXXSubobjectSpecialMemberAccessible(base->type->info.struct_info, kind,
+                                             str, /*subobj_is_base=*/true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True if any non-static data member's special member of `kind` is inaccessible
+// from `str` (so `str`'s defaulted operation of that kind is deleted).
+static bool CXXStructHasInaccessibleMemberSpecialMemberKind(
+    Struct* str, CXXSpecialMemberKind kind) {
+  if (str == NULL || kind == kCXXSpecialMemberNone) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    TypeRecord* type = member->symbol->type;
+    while (type != NULL && TypeIsFixedArray(type)) {
+      type = type->next;
+    }
+    if (type == NULL || !TypeIsStructOrUnion(type) ||
+        type->info.struct_info == NULL) {
+      continue;
+    }
+    if (!CXXSubobjectSpecialMemberAccessible(type->info.struct_info, kind, str,
+                                             /*subobj_is_base=*/false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A subobject participates in the enclosing class's defaulted move
 // constructor / move assignment by move-constructing / move-assigning that
 // subobject.  Overload resolution selects the subobject type's move operation
@@ -1401,6 +1526,60 @@ static bool CXXStructMoveSpecialMemberDeletedByMembers(Struct* str,
     }
     if (CXXStructSelectedMoveSpecialMemberIsDeleted(base->type->info.struct_info,
                                                     assignment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The move-analogue of CXXStructHasInaccessible{Base,Member}SpecialMemberKind:
+// a defaulted move operation is deleted when the *selected* subobject operation
+// (its own move, or the copy operation that binds an rvalue when no move
+// exists) is inaccessible from `str`.
+static bool CXXStructMoveSpecialMemberInaccessible(Struct* str,
+                                                   bool assignment) {
+  if (str == NULL) {
+    return false;
+  }
+  CXXSpecialMemberKind move_kind = assignment ? kCXXSpecialMemberMoveAssignment
+                                              : kCXXSpecialMemberMoveConstructor;
+  CXXSpecialMemberKind copy_kind = assignment ? kCXXSpecialMemberCopyAssignment
+                                              : kCXXSpecialMemberCopyConstructor;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    TypeRecord* type = member->symbol->type;
+    while (type != NULL && TypeIsFixedArray(type)) {
+      type = type->next;
+    }
+    if (type == NULL || !TypeIsStructOrUnion(type) ||
+        type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* sub = type->info.struct_info;
+    CXXSpecialMemberKind selected =
+        CXXStructHasSpecialMemberKind(sub, move_kind) ? move_kind : copy_kind;
+    if (!CXXSubobjectSpecialMemberAccessible(sub, selected, str,
+                                             /*subobj_is_base=*/false)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* sub = base->type->info.struct_info;
+    CXXSpecialMemberKind selected =
+        CXXStructHasSpecialMemberKind(sub, move_kind) ? move_kind : copy_kind;
+    if (!CXXSubobjectSpecialMemberAccessible(sub, selected, str,
+                                             /*subobj_is_base=*/true)) {
       return true;
     }
   }
@@ -1713,6 +1892,10 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
             CXXStructHasDeletedBaseSpecialMemberKind(
                 str, kCXXSpecialMemberCopyConstructor) ||
             CXXStructHasDeletedMemberSpecialMemberKind(
+                str, kCXXSpecialMemberCopyConstructor) ||
+            CXXStructHasInaccessibleBaseSpecialMemberKind(
+                str, kCXXSpecialMemberCopyConstructor) ||
+            CXXStructHasInaccessibleMemberSpecialMemberKind(
                 str, kCXXSpecialMemberCopyConstructor));
     AddCXXSyntheticMemberFunction(parser, str, copy);
   }
@@ -1726,6 +1909,10 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
             CXXStructHasDeletedBaseSpecialMemberKind(
                 str, kCXXSpecialMemberCopyAssignment) ||
             CXXStructHasDeletedMemberSpecialMemberKind(
+                str, kCXXSpecialMemberCopyAssignment) ||
+            CXXStructHasInaccessibleBaseSpecialMemberKind(
+                str, kCXXSpecialMemberCopyAssignment) ||
+            CXXStructHasInaccessibleMemberSpecialMemberKind(
                 str, kCXXSpecialMemberCopyAssignment));
     AddCXXSyntheticMemberFunction(parser, str, copy_assign);
   }
@@ -1741,7 +1928,8 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
             CXXStructHasDeletedMemberSpecialMemberKind(
                 str, kCXXSpecialMemberMoveConstructor) ||
             CXXStructMoveSpecialMemberDeletedByMembers(
-                str, /*assignment=*/false));
+                str, /*assignment=*/false) ||
+            CXXStructMoveSpecialMemberInaccessible(str, /*assignment=*/false));
     AddCXXSyntheticMemberFunction(parser, str, move);
   }
 
@@ -1757,10 +1945,43 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
             CXXStructHasDeletedMemberSpecialMemberKind(
                 str, kCXXSpecialMemberMoveAssignment) ||
             CXXStructMoveSpecialMemberDeletedByMembers(
-                str, /*assignment=*/true));
+                str, /*assignment=*/true) ||
+            CXXStructMoveSpecialMemberInaccessible(str, /*assignment=*/true));
     AddCXXSyntheticMemberFunction(parser, str, move_assign);
   }
   str->cxx_special_members_complete = true;
+}
+
+void CXXFixupSpecialMemberTrivialityAfterLayout(Struct* str) {
+  if (!CompilerIsCXX() || str == NULL) {
+    return;
+  }
+  // A class with virtual base classes or virtual functions has non-trivial
+  // special members: their constructors must initialize the virtual-base and
+  // virtual-function pointers, and destructors likewise.  Triviality is
+  // computed when the implicit members are synthesized, which is before the
+  // vptr is added to the layout, so re-evaluate it now that the layout is
+  // complete.
+  if (str->virtual_bases.length == 0 && str->vptr_member == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      if (!member->is_member_function || member->symbol == NULL ||
+          member->symbol->type == NULL ||
+          !TypeIsFunction(member->symbol->type)) {
+        continue;
+      }
+      TypeRecord* func = member->symbol->type;
+      if (func->info.function.is_constructor ||
+          func->info.function.is_destructor ||
+          func->info.function.cxx_special_member_kind !=
+              kCXXSpecialMemberNone) {
+        func->info.function.is_trivial_special_member = false;
+      }
+    }
+  }
 }
 
 static bool CXXLambdaCaptureMemberIsPlaceholder(StructMember* member) {

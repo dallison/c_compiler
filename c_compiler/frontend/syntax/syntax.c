@@ -1540,9 +1540,59 @@ ASTNode* SyntaxNewPCLabel(SourceLocation location) {
   return node;
 }
 
+// C++ unqualified lookup searches the current class scope -- including base
+// classes -- before the enclosing namespace scopes.  A class's own members are
+// injected into the local symbol stack while its body is parsed, but members
+// *inherited* from base classes are not, so an unqualified reference to an
+// inherited nested type (e.g. `iostate`) or inherited static constant (e.g.
+// `goodbit`) is invisible to the ordinary lookup below even though the qualified
+// forms (`Base::iostate`, `Base::goodbit`) already resolve via FindStructMember's
+// base walk.  Recover such members here.
+//
+// Only members usable without an object are returned -- typedefs, static
+// members, and members with a compile-time value (enum constants / constexpr) --
+// exactly matching what the qualified `Owner::name` path accepts.  A non-static
+// data member reached by unqualified name inside a member-function body is
+// handled elsewhere (name hiding through `this`); returning it from here would
+// change expression name resolution.
+static Symbol* FindInheritedClassMember(Syntax* syntax, String* name) {
+  if (!CompilerIsCXX()) {
+    return NULL;
+  }
+  Struct* owner = syntax->cxx_class_head;
+  if (owner == NULL) {
+    // Not inside a class body (or its base clause).  We may still be parsing a
+    // member-function body, in which case the enclosing class is recoverable
+    // from the function in flight.  Require an open local scope so a stale
+    // current_function left over between file-scope declarations cannot leak an
+    // inherited name into namespace-scope lookups.
+    if (syntax->local_symbol_stack != NULL &&
+        compiler->current_function != NULL &&
+        TypeIsFunction(compiler->current_function)) {
+      owner = compiler->current_function->info.function.cxx_member_owner;
+    }
+  }
+  if (owner == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindStructMember(owner, name);
+  if (member != NULL &&
+      (member->is_static ||
+       (member->symbol != NULL &&
+        (StorageIs(member->symbol->storage, STO(typedef)) ||
+         member->symbol->flags.value_set)))) {
+    return member->symbol;
+  }
+  return NULL;
+}
+
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_symbol_stack;
   Symbol* symbol = FindLocalSymbol(scope, name);
+  if (symbol != NULL) {
+    return FollowAlias(symbol);
+  }
+  symbol = FindInheritedClassMember(syntax, name);
   if (symbol != NULL) {
     return FollowAlias(symbol);
   }
@@ -2631,6 +2681,7 @@ static bool ResolveCXXClassTemplateArgumentDeductionFromInitializer(
     Syntax* syntax, Symbol* sym, ASTNode* initializer);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static StructMember* FindCXXConstructor(TypeRecord* type);
+static bool CXXTypeHasDefaultConstructor(TypeRecord* type);
 static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
                                           ASTNode* initializer);
 static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
@@ -3320,6 +3371,24 @@ static void CheckCXXConstructorInitializerOrder(
   init_list->last_initializer_order = order;
 }
 
+/* The primary-template name of a class type, or NULL if it is not a template
+ * instantiation.  A template-id base is named in a mem-initializer by its bare
+ * template name (`Base<T>()` records the base as "Base"), whereas the
+ * instantiated base's tag_name is the specialized form ("Base<int>"), so base
+ * matching against a mem-initializer name must also consider it. */
+static String* CXXPrimaryTemplateName(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type)) {
+    return NULL;
+  }
+  Symbol* origin = type->template_origin;
+  if (origin == NULL && type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL &&
+      type->info.struct_info->tag_symbol->type != NULL) {
+    origin = type->info.struct_info->tag_symbol->type->template_origin;
+  }
+  return origin != NULL ? &origin->name : NULL;
+}
+
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
   if (owner == NULL || name == NULL) {
@@ -3327,10 +3396,16 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
   }
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
-    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL &&
-        base->type->info.struct_info->tag_name != NULL &&
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, name)) {
+      return base;
+    }
+    String* template_name = CXXPrimaryTemplateName(base->type);
+    if (template_name != NULL && StringEqual(template_name, name)) {
       return base;
     }
   }
@@ -3344,10 +3419,16 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
   }
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
-    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL &&
-        base->type->info.struct_info->tag_name != NULL &&
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, name)) {
+      return base;
+    }
+    String* template_name = CXXPrimaryTemplateName(base->type);
+    if (template_name != NULL && StringEqual(template_name, name)) {
       return base;
     }
   }
@@ -3541,7 +3622,13 @@ static ASTNode* NewCXXVPtrReceiver(TypeRecord* func, Struct* source,
   ASTNode* adjusted =
       NewBinaryASTNode(AST_OP(plus), source_pointer, location, receiver,
                        offset);
-  adjusted->flags |= kASTAnalyzed;
+  // Mark as a forced (already-analyzed) byte-offset pointer adjustment so it
+  // survives template-instantiation re-analysis with its forced `source*` type
+  // intact.  Otherwise `this + source_offset` is re-analyzed as the receiver's
+  // own (element-scaled) pointer type and the `->__vptr` binds to the wrong
+  // subobject offset -- for a secondary base at a non-zero offset this collapses
+  // every vptr store onto offset 0 (see NewCXXVBPtrReceiver for the same fix).
+  adjusted->flags |= kASTAnalyzed | kASTForcedTypeAdjustment;
   return adjusted;
 }
 
@@ -3594,6 +3681,118 @@ static ASTNode* NewCXXVPtrInitializer(TypeRecord* func, CXXVTableInfo* info,
       location);
 }
 
+// Returns the subobject that physically owns the shared __vptr for `s`: the
+// (unique) most-basic polymorphic class in `s`'s hierarchy that carries its own
+// __vptr member.  Classes that derive from a polymorphic base (virtual or not)
+// do not get their own vptr; they share the provider's.
+static Struct* CXXFindVPtrProvider(Struct* s) {
+  if (s == NULL) {
+    return NULL;
+  }
+  if (s->vptr_member != NULL) {
+    return s;
+  }
+  for (size_t i = 0; i < s->bases.length; i++) {
+    CXXBaseSpecifier* base = s->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* p = CXXFindVPtrProvider(base->type->info.struct_info);
+    if (p != NULL) {
+      return p;
+    }
+  }
+  for (size_t i = 0; i < s->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = s->virtual_bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* p = CXXFindVPtrProvider(base->type->info.struct_info);
+    if (p != NULL) {
+      return p;
+    }
+  }
+  return NULL;
+}
+
+// Byte offset of the non-virtual base `to` within `from` (following only
+// non-virtual base links), or false if `to` is not a non-virtual base.
+static bool CXXNonVirtualBaseOffset(Struct* from, Struct* to, int inherited,
+                                    int* out) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  if (from == to) {
+    if (out != NULL) {
+      *out = inherited;
+    }
+    return true;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if (base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (CXXNonVirtualBaseOffset(base->type->info.struct_info, to,
+                                inherited + base->byte_offset, out)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Computes the physical byte offset (within the complete object `owner`) of the
+// __vptr slot that an initializer for `source` at `source_offset` would write.
+// This lets us detect two initializers that target the same physical vptr, which
+// happens when a polymorphic base is a (shared) virtual base: e.g. in a diamond
+// `SS : IStream, OStream` where both virtually inherit polymorphic `Ios`, the
+// SS/IStream/OStream vtables all target Ios's single shared vptr.  Only the
+// first (most-derived, primary) initializer must survive; otherwise a secondary
+// base's vtable overwrites the shared vptr and virtual dispatch (e.g. the
+// destructor) receives a wrongly this-adjusted object.
+static bool CXXVPtrPhysicalOffset(Struct* owner, Struct* source,
+                                  int source_offset, int* out) {
+  if (owner == NULL || source == NULL) {
+    return false;
+  }
+  Struct* provider = CXXFindVPtrProvider(source);
+  if (provider == NULL || provider->vptr_member == NULL) {
+    return false;
+  }
+  int vptr_off = provider->vptr_member->byte_offset;
+  // If the provider lives inside one of the complete object's virtual bases, the
+  // vptr is shared and its physical offset is fixed by the complete-object
+  // layout (independent of which base subobject we approached it through).
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* vb = owner->virtual_bases.value.p[i];
+    if (vb->type == NULL || !TypeIsStructOrUnion(vb->type) ||
+        vb->type->info.struct_info == NULL) {
+      continue;
+    }
+    int within = 0;
+    if (CXXNonVirtualBaseOffset(vb->type->info.struct_info, provider, 0,
+                                &within)) {
+      if (out != NULL) {
+        *out = vb->byte_offset + within + vptr_off;
+      }
+      return true;
+    }
+  }
+  // Otherwise the provider is reached from `source` through non-virtual bases.
+  int within = 0;
+  if (CXXNonVirtualBaseOffset(source, provider, 0, &within)) {
+    if (out != NULL) {
+      *out = source_offset + within + vptr_off;
+    }
+    return true;
+  }
+  return false;
+}
+
 static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
                                       SourceLocation location) {
   if (func == NULL || !TypeIsFunction(func) ||
@@ -3601,13 +3800,35 @@ static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
     return;
   }
   Struct* owner = func->info.function.cxx_member_owner;
+  int* seen_offsets = NULL;
+  size_t seen_count = 0;
+  if (owner->vtable_symbols.length > 0) {
+    seen_offsets = malloc(owner->vtable_symbols.length * sizeof(int));
+  }
   for (size_t i = 0; i < owner->vtable_symbols.length; i++) {
     CXXVTableInfo* info = owner->vtable_symbols.value.p[i];
+    int phys = 0;
+    if (seen_offsets != NULL &&
+        CXXVPtrPhysicalOffset(owner, info->source, info->source_offset,
+                              &phys)) {
+      bool already = false;
+      for (size_t j = 0; j < seen_count; j++) {
+        if (seen_offsets[j] == phys) {
+          already = true;
+          break;
+        }
+      }
+      if (already) {
+        continue;
+      }
+      seen_offsets[seen_count++] = phys;
+    }
     ASTNode* init = NewCXXVPtrInitializer(func, info, location);
     if (init != NULL) {
       VectorAppend(body, init);
     }
   }
+  free(seen_offsets);
 }
 
 static TypeRecord* NewCXXStructType(Struct* str) {
@@ -3634,7 +3855,7 @@ static ASTNode* NewCXXVBPtrReceiver(TypeRecord* func,
   ASTNode* adjusted =
       NewBinaryASTNode(AST_OP(plus), source_pointer, location, receiver,
                        offset);
-  adjusted->flags |= kASTAnalyzed;
+  adjusted->flags |= kASTAnalyzed | kASTForcedTypeAdjustment;
   return adjusted;
 }
 
@@ -3832,13 +4053,39 @@ static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
 static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
                                                        TypeRecord* func,
                                                        StructMember* member) {
-  if (member == NULL || member->default_initializer == NULL) {
+  if (member == NULL || member->symbol == NULL) {
     return NULL;
   }
-  Vector* actuals = CXXDefaultMemberInitializerActuals(
-      member->default_initializer);
-  return NewCXXMemberInitializerStatement(syntax, func, member, actuals,
-                                          member->default_initializer->location);
+  if (member->default_initializer != NULL) {
+    Vector* actuals = CXXDefaultMemberInitializerActuals(
+        member->default_initializer);
+    return NewCXXMemberInitializerStatement(
+        syntax, func, member, actuals, member->default_initializer->location);
+  }
+  // No default member initializer and no explicit mem-initializer: a class-type
+  // member that has a default constructor must still be default-constructed by
+  // the enclosing constructor.  A scalar member is left uninitialized, matching
+  // C++ default initialization, so only synthesize a call for a record member
+  // that has a constructor.  This does not apply to the memberwise copy/move
+  // special members, whose members are copied/moved from the source object (by
+  // AppendCXXMemberwiseAssignments) rather than default-constructed.
+  if (func != NULL && TypeIsFunction(func)) {
+    switch (func->info.function.cxx_special_member_kind) {
+      case kCXXSpecialMemberCopyConstructor:
+      case kCXXSpecialMemberMoveConstructor:
+      case kCXXSpecialMemberCopyAssignment:
+      case kCXXSpecialMemberMoveAssignment:
+        return NULL;
+      default:
+        break;
+    }
+  }
+  TypeRecord* member_type = member->symbol->type;
+  if (!CXXTypeHasDefaultConstructor(member_type)) {
+    return NULL;
+  }
+  return NewCXXMemberInitializerStatement(syntax, func, member, NewVector(),
+                                          member->symbol->location);
 }
 
 static ASTNode* FindCXXExplicitMemberInitializer(CXXConstructorInitList* init_list,
@@ -3874,7 +4121,12 @@ void SyntaxParseCXXConstructorInitializerList(
     SourceLocation location = syntax->lex->current_token_location;
     FullyQualifiedIdentifier name;
     FullyQualifiedIdentifierInit(&name);
-    if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+    // A base-class mem-initializer-id may be a template-id (`Base<T>(args)`), so
+    // consume any template argument list here; the base is still matched by its
+    // bare name (FullyQualifiedIdentifierLast strips the template arguments).
+    // The following token is the initializer's opening `(` / `{`.
+    if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                            TC(openbra))) {
       SyntaxError(syntax, "Expected constructor initializer name");
       FullyQualifiedIdentifierDestruct(&name);
       break;
@@ -4287,13 +4539,38 @@ void SyntaxFlushPendingVPtrInitializers(Struct* owner) {
     ASTNode* body = pending->func->info.function.body;
     if (body != NULL && body->op == AST_OP(compound)) {
       CompoundStatementASTNode* compound = (CompoundStatementASTNode*)body;
+      bool inserted_any = false;
+      // __vbptr initializers share the same registration dependency as the
+      // __vptr stores: when the preamble was built the class's vbtables had not
+      // been registered, so AppendCXXVBPtrInitializers produced nothing and the
+      // eager preamble emission dropped them.  Re-emit them here.  The first
+      // batch must run before any virtual base is constructed, because the
+      // derived-to-virtual-base pointer conversion reads __vbptr; insert it as a
+      // complete-object-guarded block at the very front, ahead of the existing
+      // virtual-base construction block (also at the front).
+      size_t vptr_index = pending->index;
+      Vector* vbptr_inits = NewVector();
+      AppendCXXVBPtrInitializers(pending->func, vbptr_inits, pending->location);
+      if (vbptr_inits->length > 0) {
+        ASTNode* guarded = NewCXXCompleteObjectGuardedStatement(
+            pending->func, vbptr_inits, pending->location);
+        if (guarded != NULL) {
+          VectorInsertOrAppend(compound->statements, 0, guarded);
+          guarded->parent = &compound->base;
+          vptr_index++;
+          inserted_any = true;
+        }
+      } else {
+        VectorDelete(vbptr_inits);
+      }
+
       Vector* vptr_initializers = NewVector();
       AppendCXXVPtrInitializers(pending->func, vptr_initializers,
                                 pending->location);
       // VectorInsertOrAppend handles index == length (e.g. an empty body whose
       // only statements are the deferred __vptr stores), which the strict
       // VectorInsertBefore inside CompoundASTNodeInsertStatement does not.
-      size_t at = pending->index;
+      size_t at = vptr_index;
       for (size_t j = 0; j < vptr_initializers->length; j++) {
         ASTNode* stmt = vptr_initializers->value.p[j];
         VectorInsertOrAppend(compound->statements, at, stmt);
@@ -4301,11 +4578,33 @@ void SyntaxFlushPendingVPtrInitializers(Struct* owner) {
         at++;
       }
       if (vptr_initializers->length > 0) {
+        inserted_any = true;
+      }
+      VectorDelete(vptr_initializers);
+
+      // A base-class constructor may have overwritten __vbptr with its own
+      // (base-subobject) vbtable, so restore the most-derived vbtables after the
+      // base constructors and __vptr stores, matching the eager preamble path.
+      Vector* vbptr_restores = NewVector();
+      AppendCXXVBPtrInitializers(pending->func, vbptr_restores,
+                                 pending->location);
+      if (vbptr_restores->length > 0) {
+        ASTNode* guarded = NewCXXCompleteObjectGuardedStatement(
+            pending->func, vbptr_restores, pending->location);
+        if (guarded != NULL) {
+          VectorInsertOrAppend(compound->statements, at, guarded);
+          guarded->parent = &compound->base;
+          inserted_any = true;
+        }
+      } else {
+        VectorDelete(vbptr_restores);
+      }
+
+      if (inserted_any) {
         for (size_t k = 0; k < compound->statements->length; k++) {
           ((ASTNode*)compound->statements->value.p[k])->child_id = (int)k;
         }
       }
-      VectorDelete(vptr_initializers);
     }
     free(pending);
   }
@@ -5054,6 +5353,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
 }
 
 static bool TypeContainsClassTemplate(TypeRecord* type);
+static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym);
 static int CurrentTemplateParameterListLength(Syntax* syntax);
 static int CurrentTemplateParameterBase(Syntax* syntax);
 static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
@@ -5494,6 +5794,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     } else if (parser->is_inline && !CompilerIsCXX()) {
       SyntaxError(syntax, "inline can only be applied to functions");
     }
+    // A type alias formed while its class template was only forward-declared
+    // carries a *deferred* template-id (see the forward-declaration path in
+    // InstantiateSimpleClassTemplateImpl): the primary's members were not yet
+    // known, so the specialization was recorded but not materialized.  A
+    // variable declaration requires a complete type, so materialize the
+    // specialization now that the definition is available, instead of rejecting
+    // the still-"template" type in the guard below.
+    MaterializeDeferredClassTemplateType(syntax, sym);
     if (!TypeIsClassTemplatePlaceholder(sym->type) &&
         TypeIsAbstractClass(sym->type)) {
       SyntaxError(syntax, "Cannot declare object of abstract class %s",
@@ -6970,6 +7278,28 @@ static bool TypeContainsClassTemplate(TypeRecord* type) {
   return false;
 }
 
+// A type alias formed while its class template was only forward-declared carries
+// a *deferred* template-id (see the forward-declaration path in
+// InstantiateSimpleClassTemplateImpl): the primary's members were not yet known,
+// so the specialization was recorded but not materialized.  A variable
+// declaration requires a complete type, so materialize the specialization now
+// that the definition is available, instead of rejecting the still-"template"
+// type in the guards that follow.
+static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      syntax->parsing_template_declaration ||
+      !TypeContainsClassTemplate(sym->type) ||
+      TypeIsClassTemplatePlaceholder(sym->type)) {
+    return;
+  }
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(syntax, sym->type);
+  if (materialized != sym->type) {
+    SymbolSetType(sym, materialized);
+    TypeRecordDelete(materialized);
+  }
+}
+
 static int CurrentTemplateParameterListLength(Syntax* syntax) {
   return syntax->current_template_parameters != NULL
              ? (int)syntax->current_template_parameters->length
@@ -7007,15 +7337,45 @@ static void MoveCurrentTemplateParametersToStruct(Syntax* syntax, Struct* str) {
   if (syntax->current_template_parameters == NULL || str == NULL) {
     return;
   }
+  Vector* incoming = syntax->current_template_parameters;
+  // A class template's default template arguments accumulate across its
+  // declarations ([temp.param]): a forward declaration may supply a default
+  // that the later definition omits.  The definition re-parses the parameter
+  // list without those defaults, so carry any default that the incoming list is
+  // missing over from the prior parameter list before it is discarded.
+  // Ownership of a transferred default_type moves to the incoming parameter --
+  // the old parameter's pointer is cleared so the TemplateParameterDelete below
+  // does not free the type now owned by the surviving parameter.
+  for (size_t i = 0;
+       i < incoming->length && i < str->template_parameters.length; i++) {
+    TemplateParameter* prev = str->template_parameters.value.p[i];
+    TemplateParameter* next = incoming->value.p[i];
+    if (prev == NULL || next == NULL || prev->kind != next->kind) {
+      continue;
+    }
+    bool next_has_default = next->default_type != NULL ||
+                            next->has_default_int ||
+                            next->default_template_parameter_index >= 0;
+    if (next_has_default) {
+      continue;
+    }
+    if (prev->default_type != NULL) {
+      next->default_type = prev->default_type;
+      prev->default_type = NULL;
+    }
+    next->has_default_int = prev->has_default_int;
+    next->default_int_value = prev->default_int_value;
+    next->default_template_parameter_index =
+        prev->default_template_parameter_index;
+  }
   VectorDestructWithContents(&str->template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
   VectorInit(&str->template_parameters);
-  for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
-    VectorAppend(&str->template_parameters,
-                 syntax->current_template_parameters->value.p[i]);
+  for (size_t i = 0; i < incoming->length; i++) {
+    VectorAppend(&str->template_parameters, incoming->value.p[i]);
   }
-  syntax->current_template_parameters->length = 0;
+  incoming->length = 0;
 }
 
 static void AddFunctionAssociatedConstraint(TypeRecord* func,
@@ -7582,6 +7942,51 @@ static StructMember* FindCXXConstructor(TypeRecord* type) {
     return NULL;
   }
   return ctor;
+}
+
+// True if `type` is a class type that has a (non-deleted) default constructor:
+// one callable with no explicit arguments.  A constructor whose only parameters
+// are the implicit object parameter (and, for a class with virtual bases, the
+// most-derived flag) qualifies; a class whose every constructor takes explicit
+// arguments (e.g. `Point(int, int)`) does not.  Used so a data member without
+// an explicit initializer is default-constructed only when that is actually
+// well-formed -- never for a non-default-constructible member of an aggregate,
+// which is aggregate-initialized instead.
+static bool CXXTypeHasDefaultConstructor(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  StructMember* ctor = FindCXXConstructor(type);
+  if (ctor == NULL) {
+    return false;
+  }
+  size_t expected = 1;
+  if (StructHasVirtualBases(type->info.struct_info)) {
+    expected++;
+  }
+  for (StructMember* candidate = ctor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type)) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (!info->is_constructor || info->is_deleted) {
+      continue;
+    }
+    bool callable_without_arguments = info->prototype.length >= expected;
+    for (size_t j = expected;
+         callable_without_arguments && j < info->prototype.length; j++) {
+      Symbol* parameter = info->prototype.value.p[j];
+      if (parameter == NULL || parameter->default_argument == NULL) {
+        callable_without_arguments = false;
+      }
+    }
+    if (callable_without_arguments) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static TypeRecord* CXXArrayBaseElementType(TypeRecord* type,
@@ -9311,6 +9716,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (parser->is_inline) {
          SyntaxError(syntax, "inline can only be applied to functions");
       }
+      MaterializeDeferredClassTemplateType(syntax, sym);
       if (!TypeIsClassTemplatePlaceholder(sym->type) &&
           TypeIsAbstractClass(sym->type)) {
         SyntaxError(syntax, "Cannot declare object of abstract class %s",
@@ -9577,11 +9983,17 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
   FullyQualifiedIdentifierDestruct(&name);
   LexCheckpointRestore(syntax->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
-  if (followed_by_assignment) {
-    return false;
-  }
+  // When the name positively resolves to a typedef, trust that: a type-name
+  // followed by `=` is a defaulted parameter (`void f(T::x = v)`), not an
+  // assignment.  The `followed_by_assignment` heuristic below is only meant to
+  // steer an *unresolved* qualified name (e.g. a dependent `T::value = 5;`
+  // statement) away from being parsed as a declaration, so apply it only when
+  // lookup was inconclusive.
   if (decided) {
     return is_type;
+  }
+  if (followed_by_assignment) {
+    return false;
   }
   return SyntaxCurrentTokenStartsQualifiedName(syntax);
 }
