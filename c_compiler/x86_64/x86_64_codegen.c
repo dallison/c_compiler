@@ -704,6 +704,18 @@ static X86_64Opcode MoveOpcodeForLoad(X86_64Opcode load_opcode) {
   }
 }
 
+// This backend has no x87 unit: it represents `long double` values with the
+// same 64-bit SSE encoding as `double` (the wider 16-byte object layout only
+// pads the storage; the guest libc reads a long double variadic argument as a
+// `double`).  Every place that selects a double-width SSE operation over a
+// single-precision one must therefore treat `long double` like `double`,
+// otherwise a long double value is silently truncated to 32 bits (e.g. a
+// `movss` where a `movsd` was required).  `TypeIsDouble()` alone does not cover
+// long double, so use this predicate for the double-vs-float choice.
+static bool X86_64FpIsDoubleWidth(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
 static TargetInstruction* GetIntConstant(X86_64Generator* rv, IRNode* node,
                                          TargetType type, int64_t value) {
   return TargetGetIntConstant(&rv->base, node, type, value);
@@ -1205,6 +1217,18 @@ static bool UseRegisterForVariable(X86_64Generator* rv, IRNode* var_node) {
     // When not optimizing, all variables are on the stack.
     return false;
   }
+  // Aggregates (struct/union) are always manipulated through their address in
+  // this backend: member and array-element access lower to adda/addressof/load
+  // against the object's storage, and a small struct argument arrives packed in
+  // a register only as a value.  Such a value has no stable address, so binding
+  // an aggregate to a register variable makes taking &member (e.g. `a.x` where
+  // x is an array member) yield the raw register contents instead of a pointer.
+  // The frontend does not mark these implicit member addresses as address-taken,
+  // so guard here: an aggregate must live in memory.
+  if (TypeIsStructOrUnion(var_node->type)) {
+    return false;
+  }
+
   // Can't use a register if its address has been taken.
   IRVariable* var = (IRVariable*)var_node;
   if (var->symbol->flags.address_taken) {
@@ -2357,7 +2381,7 @@ static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
   if (TypeIsFloat(type)) {
     return X86_64_OP(loadss);
   }
-  if (TypeIsDouble(type)) {
+  if (X86_64FpIsDoubleWidth(type)) {
     return X86_64_OP(loadsd);
   }
   return X86_64_OP(loadl);
@@ -2376,7 +2400,7 @@ static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
   if (TypeIsFloat(type)) {
     return X86_64_OP(storess);
   }
-  if (TypeIsDouble(type)) {
+  if (X86_64FpIsDoubleWidth(type)) {
     return X86_64_OP(storesd);
   }
   return X86_64_OP(storel);
@@ -2862,7 +2886,7 @@ static void SnapshotPostIncOldValue(X86_64Generator* rv, IRNode* node,
   }
   X86_64Opcode mv_opcode =
       TypeIsFloatingPoint(addr_node->type)
-          ? (TypeIsDouble(addr_node->type) ? X86_64_OP(fmv_d)
+          ? (X86_64FpIsDoubleWidth(addr_node->type) ? X86_64_OP(fmv_d)
                                            : X86_64_OP(fmv_s))
           : X86_64_OP(mv);
   TargetInstruction* snapshot = Emit(rv, NewInstruction1(mv_opcode, old));
@@ -2926,7 +2950,7 @@ static TargetInstruction* LowerInc(X86_64Generator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? X86_64_OP(addsd) : X86_64_OP(addss), load, amount));
+    inc =  Emit(rv, NewInstruction2(X86_64FpIsDoubleWidth(node->type) ? X86_64_OP(addsd) : X86_64_OP(addss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, X86_64IntValue(amount));
   }
@@ -2987,7 +3011,7 @@ static TargetInstruction* LowerDec(X86_64Generator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? X86_64_OP(subsd) : X86_64_OP(subss), load, amount));
+    inc =  Emit(rv, NewInstruction2(X86_64FpIsDoubleWidth(node->type) ? X86_64_OP(subsd) : X86_64_OP(subss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -X86_64IntValue(amount));
   }
@@ -3642,7 +3666,7 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
         }
         X86_64Opcode mov_opcode = X86_64_OP(mv);
         if (TypeIsFloatingPoint(arg_node->type)) {
-          if (TypeIsDouble(arg_node->type)) {
+          if (X86_64FpIsDoubleWidth(arg_node->type)) {
             mov_opcode = X86_64_OP(fmv_d);
           } else {
             mov_opcode = X86_64_OP(fmv_s);
@@ -3729,7 +3753,7 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
       X86_64Opcode mov_opcode = X86_64_OP(mv);
       if (TypeIsFloatingPoint(node->type)) {
         mov_opcode =
-            TypeIsDouble(node->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+            X86_64FpIsDoubleWidth(node->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
       }
       TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, call));
       move->dest = dest;
@@ -3891,7 +3915,7 @@ static TargetInstruction* LowerBuiltinVaArg(X86_64Generator* rv, IRNode* node) {
                                              : X86_64_OP(loadw);
   } else if (TypeIsFloatingPoint(node->type)) {
     load_opcode =
-        TypeIsDouble(node->type) ? X86_64_OP(loadsd) : X86_64_OP(loadss);
+        X86_64FpIsDoubleWidth(node->type) ? X86_64_OP(loadsd) : X86_64_OP(loadss);
   }
 
   TargetInstruction* overflow_label =
@@ -3899,58 +3923,57 @@ static TargetInstruction* LowerBuiltinVaArg(X86_64Generator* rv, IRNode* node) {
   TargetInstruction* done_label =
       TargetNewInstruction((TargetOpcode)X86_64_OP(label));
 
+  // Merge the *address* of the argument (which is always a pointer, regardless
+  // of the argument's own type) across the reg-save / overflow diamond, and
+  // perform the load in the join block below.  Merging the loaded value here
+  // instead would be unsound: a value defined only inside the two arms is
+  // invisible to the join block's live-in set, which the dominator-tree
+  // liveness derives solely from the join's immediate dominator's live-out
+  // set.  The allocator would then treat the merged register as free in the
+  // join and reuse it, clobbering the result before it is consumed (e.g. an
+  // integer va_arg fed straight into a following call would come back as some
+  // other argument's value).  The merge target `addr` is therefore created in
+  // this pre-branch block so it is live through the join, and the reg-save arm
+  // builds on it (addr += gp_offset) so the initial definition is a real use
+  // rather than dead code.
+  TargetInstruction* addr = Emit(rv, NewInstruction1(X86_64_OP(mv), reg_save));
+
   Emit(rv, NewInstruction2(X86_64_OP(cmp), gp_offset,
                            GetIntConstant(rv, NULL, kTargetType32Bit, offset_cap)));
   Emit(rv, NewInstruction1(X86_64_OP(jge), overflow_label));
 
+  // Register-save arm: addr = reg_save + gp_offset; advance gp_offset.
   TargetInstruction* reg_addr =
-      Emit(rv, NewInstruction2(X86_64_OP(add), reg_save, gp_offset));
-  TargetInstruction* reg_value =
-      va_is_small_aggregate
-          ? reg_addr
-          : Emit(rv, NewInstruction2(
-                         load_opcode, reg_addr,
-                         GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
-  X86_64Opcode mv_opcode = X86_64_OP(mv);
-  if (load_opcode == X86_64_OP(loadss)) {
-    mv_opcode = X86_64_OP(fmv_s);
-  } else if (load_opcode == X86_64_OP(loadsd)) {
-    mv_opcode = X86_64_OP(fmv_d);
-  }
-  // Advance gp_offset before materializing the result.  The result value
-  // must be the last thing written into the merged result register so that the
-  // (two-address) gp_offset update cannot clobber it via register aliasing.
+      NewInstruction2(X86_64_OP(add), addr, gp_offset);
+  reg_addr->dest = addr;
+  Emit(rv, reg_addr);
   StoreApField(rv, ap_node, offset_field,
                AddImmediate(rv, gp_offset, offset_step),
                X86_64_OP(storel));
-  // The result is a normal allocator-managed virtual register (the value
-  // produced by this mv), not a fixed scratch register.  Using a fixed
-  // register such as t0 here is unsafe: forced physical registers bypass the
-  // allocator's aliasing-aware availability check, so a value that lives into
-  // the surrounding (allocator-managed) code can be handed the same physical
-  // register and clobbered.  The overflow arm below writes the same virtual.
-  TargetInstruction* result_tmp = Emit(rv, NewInstruction1(mv_opcode, reg_value));
   Emit(rv, NewInstruction1(X86_64_OP(jmp), done_label));
 
+  // Overflow arm: addr = overflow_area; advance overflow_arg_area.
   Emit(rv, overflow_label);
   TargetInstruction* overflow_area =
       LoadApField(rv, ap_node, 8, X86_64_OP(loadq));
-  TargetInstruction* stack_value =
-      va_is_small_aggregate
-          ? overflow_area
-          : Emit(rv, NewInstruction2(
-                         load_opcode, overflow_area,
-                         GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
-  // Advance overflow_arg_area before materializing the result (see above).
+  TargetInstruction* mv_stack = NewInstruction1(X86_64_OP(mv), overflow_area);
+  mv_stack->dest = addr;
+  Emit(rv, mv_stack);
   StoreApField(rv, ap_node, 8,
                AddImmediate(rv, overflow_area, aligned_size),
                X86_64_OP(storeq));
-  TargetInstruction* mv_stack = NewInstruction1(mv_opcode, stack_value);
-  mv_stack->dest = result_tmp;
-  Emit(rv, mv_stack);
 
   Emit(rv, done_label);
-  return SetLoweredNode(node, result_tmp);
+
+  // Materialize the result in the join block from the merged address.  For a
+  // small aggregate the value *is* the address (the caller copies from it).
+  TargetInstruction* result =
+      va_is_small_aggregate
+          ? addr
+          : Emit(rv, NewInstruction2(
+                         load_opcode, addr,
+                         GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  return SetLoweredNode(node, result);
 }
 
 static TargetInstruction* LowerBuiltinVaEnd(X86_64Generator* rv, IRNode* node) {
@@ -4511,7 +4534,7 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(X86_64Generator* rv
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
-      X86_64Opcode move_op = TypeIsDouble(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+      X86_64Opcode move_op = X86_64FpIsDoubleWidth(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
       TargetInstruction* mv = Emit(
           rv, NewInstruction1(
                   move_op,
@@ -4531,7 +4554,7 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(X86_64Generator* rv
           FloatingPointVariableRegister(rv, reg_var, sym->symbol);
       TargetInstruction* loaded = PopArg(rv, symbol, arg_loc.location.offset);
       X86_64Opcode move_op =
-          TypeIsDouble(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+          X86_64FpIsDoubleWidth(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
       TargetInstruction* mv = Emit(rv, NewInstruction1(move_op, loaded));
       mv->dest = var;
       return var;
@@ -4636,7 +4659,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
           entry->pooled->data.ivalue = offset;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, X86_64_FP_REG, offset,
-              /*is_fp=*/true, TypeIsDouble(entry->pooled->type) ? 8 : 4);
+              /*is_fp=*/true, X86_64FpIsDoubleWidth(entry->pooled->type) ? 8 : 4);
           VectorAppend(&rv->saved_regs, saved);
           rv->num_fp_arg_regs++;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);

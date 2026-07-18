@@ -270,6 +270,45 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
   UnlockGotResolve(interpreter);
 }
 
+// The guest libc uses Linux open(2) flag values (see libc/include/fcntl.h),
+// but the interpreter services the OPEN syscall through the host's open(),
+// whose O_CREAT / O_TRUNC / ... bit values differ (notably on macOS, where
+// O_CREAT is 0x0200 rather than Linux's 0100).  Passing the guest bits through
+// unchanged silently drops O_CREAT and friends, so a guest fopen(path, "w")
+// for a not-yet-existing file fails and returns NULL.  Translate the guest
+// (Linux-ABI) flags into the host's flags here.  On a Linux host this is the
+// identity mapping; on other hosts it remaps each bit.
+static int TranslateGuestOpenFlags(int guest_flags) {
+  enum {
+    kGuestO_ACCMODE   = 00000003,
+    kGuestO_CREAT     = 00000100,
+    kGuestO_EXCL      = 00000200,
+    kGuestO_NOCTTY    = 00000400,
+    kGuestO_TRUNC     = 00001000,
+    kGuestO_APPEND    = 00002000,
+    kGuestO_NONBLOCK  = 00004000,
+    kGuestO_SYNC      = 00010000,
+    kGuestO_DIRECTORY = 00200000,
+    kGuestO_NOFOLLOW  = 00400000,
+    kGuestO_CLOEXEC   = 02000000,
+  };
+  // Access mode (O_RDONLY / O_WRONLY / O_RDWR) shares 0/1/2 with the host.
+  int host = guest_flags & kGuestO_ACCMODE;
+  if (guest_flags & kGuestO_CREAT)     host |= O_CREAT;
+  if (guest_flags & kGuestO_EXCL)      host |= O_EXCL;
+  if (guest_flags & kGuestO_NOCTTY)    host |= O_NOCTTY;
+  if (guest_flags & kGuestO_TRUNC)     host |= O_TRUNC;
+  if (guest_flags & kGuestO_APPEND)    host |= O_APPEND;
+  if (guest_flags & kGuestO_NONBLOCK)  host |= O_NONBLOCK;
+  if (guest_flags & kGuestO_SYNC)      host |= O_SYNC;
+  if (guest_flags & kGuestO_DIRECTORY) host |= O_DIRECTORY;
+  if (guest_flags & kGuestO_NOFOLLOW)  host |= O_NOFOLLOW;
+#ifdef O_CLOEXEC
+  if (guest_flags & kGuestO_CLOEXEC)   host |= O_CLOEXEC;
+#endif
+  return host;
+}
+
 int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
                             int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                             int64_t a4, int64_t a5) {
@@ -282,7 +321,8 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_EXIT_CLEAN:
       return InterpreterRequestNormalExit(interpreter, a0);
     case X86_64_SYSCALL_OPEN:
-      return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
+      return open((const char*)(uintptr_t)a0,
+                  TranslateGuestOpenFlags((int)a1), (mode_t)a2);
     case X86_64_SYSCALL_CLOSE:
       return close((int)a0);
     case X86_64_SYSCALL_READ:

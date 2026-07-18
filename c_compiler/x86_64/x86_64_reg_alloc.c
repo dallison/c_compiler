@@ -354,6 +354,15 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          // A fixed-register value (an argument register a0..a7 / fa0..fa7, a
+          // call result, ...) lives in one specific physical register because
+          // its consumer (the call, the return) reads that exact register.
+          // The spill model stores the value and reloads it into some *other*
+          // temporary, so spilling a fixed register silently delivers the
+          // argument/result in the wrong place.  Never choose one as a victim.
+          if (X86_64IsFixedRegister(owner)) {
+            continue;
+          }
           int cost = SpillCost(owner);
           if (IsUnsafeSpillVictim(owner)) {
             if (cost < fallback_cost) {
@@ -1104,7 +1113,19 @@ static void InitializeBasicBlockRegisters(X86_64RegisterAllocator* allocator,
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }
-    if (inst->uses == 0) {
+    // A block input is live-in.  It must retain its register when it is
+    // live-out of this block too (i.e. it appears in the block's output set),
+    // because such a value is live *through* the block and its register may
+    // not be reused for another value defined here.  The running `uses`
+    // counter cannot be trusted for this test: it is decremented globally as
+    // the dominator-tree traversal descends into sibling subtrees and is never
+    // restored per subtree, so a value that is still live on a later path can
+    // read as `uses == 0`.  Relying on it alone let a value defined after a
+    // call (e.g. the call result) steal the register of a parameter that is
+    // still needed further down the block's own subtree.  Keep ownership
+    // whenever the value is live-out; only drop it when it is neither live-out
+    // nor has any remaining recorded use.
+    if (inst->uses == 0 && !TargetBasicBlockOutputs(block, inst)) {
       continue;
     }
     assert(inst->reg != NULL);
