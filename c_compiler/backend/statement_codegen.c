@@ -270,11 +270,23 @@ static void RecordExceptionRange(Generator* gen, IRNode* try_start,
   range->try_end = try_end;
   range->catch_label = catch_label;
   range->catch_typeinfo = catch_typeinfo;
+  range->is_cleanup = false;
   VectorAppend(&gen->exception_ranges, range);
 }
 
-static void RecordExceptionKeepLabel(Generator* gen, IRNode* label) {
-  VectorAppend(&gen->exception_keep_labels, label);
+// A cleanup range: while the exception unwinder's pc is in [region_start,
+// region_end], `pad` (which destroys one automatic object and resumes) is run
+// before any enclosing handler.  Nested/enclosing objects chain automatically
+// via the runtime's scope-containment walk (see libc/eh_throw.c).
+static void RecordCleanupRange(Generator* gen, IRNode* region_start,
+                               IRNode* region_end, IRNode* pad) {
+  ExceptionHandlerRange* range = malloc(sizeof(ExceptionHandlerRange));
+  range->try_start = region_start;
+  range->try_end = region_end;
+  range->catch_label = pad;
+  range->catch_typeinfo = NULL;
+  range->is_cleanup = true;
+  VectorAppend(&gen->exception_ranges, range);
 }
 
 // Look up (or lazily declare) the runtime entry point that implements
@@ -298,6 +310,70 @@ static Symbol* GetDaveCCTerminateFunction(SourceLocation location) {
   symbol->location = location;
   SyntaxAddSymbol(&compiler->syntax, symbol);
   return symbol;
+}
+
+// Look up (or lazily declare) the runtime entry point that continues unwinding
+// after a cleanup landing pad has run its destructor.  It never returns.
+static Symbol* GetDaveCCResumeFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__davecc_resume");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__davecc_resume", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static bool IsDestructorStatement(ASTNode* stmt);
+
+// A cleanup landing pad scheduled during body codegen and emitted after the
+// function's return path (so it is only reached via the unwinder).  Running the
+// pad destroys the object(s) `dtor_stmts` and then resumes unwinding.
+typedef struct {
+  IRNode* pad_label;
+  Vector dtor_stmts;  // ASTNode* destructor statements, run in order.
+} PendingCleanupPad;
+
+// The automatic object a compiler-inserted destructor statement acts on, or
+// NULL if the statement is not of the recognized `receiver.~T()` shape.  Used to
+// pair a block's trailing destructor statements with the declarations above
+// them so each object gets a precise EH cleanup range.
+static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
+  if (!IsDestructorStatement(dtor_stmt)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)((ExpressionStatementASTNode*)dtor_stmt)->expr;
+  ASTNode* receiver = NULL;
+  if (call->left->op == AST_OP(dot) || call->left->op == AST_OP(arrow)) {
+    // Pre-lowering shape: receiver.~T().
+    receiver = ((BinaryASTNode*)call->left)->left;
+  } else if (call->children != NULL && call->children->length > 0) {
+    // Analyzed shape: the member call is lowered to ~T(&receiver), so the object
+    // is the (address-of) `this` argument.
+    receiver = call->children->value.p[0];
+  }
+  while (receiver != NULL &&
+         (receiver->op == AST_OP(address) || receiver->op == AST_OP(contents))) {
+    receiver = ((UnaryASTNode*)receiver)->sub;
+  }
+  if (receiver != NULL && receiver->op == AST_OP(subscript)) {
+    receiver = ((BinaryASTNode*)receiver)->left;  // array element: arr[k].~T()
+  }
+  if (receiver != NULL && receiver->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)receiver)->symbol;
+  }
+  return NULL;
 }
 
 // Visitor that flags whether a subtree can raise an exception: only a `throw`
@@ -384,6 +460,40 @@ void GenerateNoexceptGuardTerminate(Generator* gen,
                        /*catch_typeinfo=*/NULL);
 }
 
+// Emits the scope-exit cleanup landing pads scheduled during body codegen, after
+// the function's return path so they are reached only via the unwinder.  Each
+// pad destroys its automatic object(s) and then resumes unwinding; the runtime
+// chains enclosing scopes' pads so the whole live set is destroyed in reverse
+// construction order (see libc/eh_throw.c).
+void GenerateCleanupLandingPads(Generator* gen) {
+  if (gen->cleanup_pads.length == 0) {
+    return;
+  }
+  SourceLocation location = gen->func->info.function.symbol->location;
+  Symbol* resume = GetDaveCCResumeFunction(location);
+  for (size_t i = 0; i < gen->cleanup_pads.length; i++) {
+    PendingCleanupPad* pad = gen->cleanup_pads.value.p[i];
+    GeneratorEmit(gen, pad->pad_label);
+    for (size_t j = 0; j < pad->dtor_stmts.length; j++) {
+      GenerateStatement(gen, pad->dtor_stmts.value.p[j]);
+    }
+    GenerateNoArgRuntimeCall(gen, resume);
+    // __davecc_resume never returns, but the block still needs a terminator so
+    // the CFG builder does not treat it as falling through.  Unreachable.
+    GeneratorEmit(gen, NewIR(IR_OP(leave)));
+    GeneratorEmit(gen, NewIR(IR_OP(ret)));
+  }
+}
+
+void FreeCleanupPads(Generator* gen) {
+  for (size_t i = 0; i < gen->cleanup_pads.length; i++) {
+    PendingCleanupPad* pad = gen->cleanup_pads.value.p[i];
+    VectorDestruct(&pad->dtor_stmts);
+    free(pad);
+  }
+  VectorDestruct(&gen->cleanup_pads);
+}
+
 static bool IsDestructorStatement(ASTNode* stmt) {
   if (stmt == NULL || stmt->op != AST_OP(expr)) {
     return false;
@@ -420,32 +530,6 @@ static bool IsDestructorStatement(ASTNode* stmt) {
     return name->value.string != NULL && name->value.string->value[0] == '~';
   }
   return false;
-}
-
-static bool TryStatementHasCleanup(ASTNode* stmt) {
-  if (stmt == NULL || stmt->op != AST_OP(compound)) {
-    return false;
-  }
-  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
-  for (size_t i = 0; i < compound->statements->length; i++) {
-    if (IsDestructorStatement(compound->statements->value.p[i])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static void GenerateTryCleanupStatements(Generator* gen, ASTNode* stmt) {
-  if (stmt == NULL || stmt->op != AST_OP(compound)) {
-    return;
-  }
-  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
-  for (size_t i = 0; i < compound->statements->length; i++) {
-    ASTNode* cleanup = compound->statements->value.p[i];
-    if (IsDestructorStatement(cleanup)) {
-      GenerateStatement(gen, cleanup);
-    }
-  }
 }
 
 static bool StatementMayFallThrough(ASTNode* stmt) {
@@ -631,14 +715,184 @@ static void GenerateExpressionStatement(Generator* gen,
   GenerateExpression(gen, node->expr);
 }
 
+// Schedules a cleanup landing pad (emitted after the return path) that destroys
+// `dtor_stmts` and resumes unwinding, and records its EH range [start, end].
+static void ScheduleCleanupPad(Generator* gen, IRNode* region_start,
+                               IRNode* region_end, Vector* dtor_stmts) {
+  IRNode* pad = NewIR(IR_OP(label));
+  RecordCleanupRange(gen, region_start, region_end, pad);
+  PendingCleanupPad* pending = malloc(sizeof(PendingCleanupPad));
+  pending->pad_label = pad;
+  VectorInit(&pending->dtor_stmts);
+  for (size_t i = 0; i < dtor_stmts->length; i++) {
+    VectorAppend(&pending->dtor_stmts, dtor_stmts->value.p[i]);
+  }
+  VectorAppend(&gen->cleanup_pads, pending);
+}
+
+// The index of the first of the block's trailing destructor statements (the
+// scope-exit destructors the front end appends for locals), or the statement
+// count if there are none.  Statements flagged kASTEHCleanupOnly (a
+// constructor's partial-construction subobject destructors) are not scope-exit
+// local destructors and stop the scan.
+static size_t TrailingDestructorStart(CompoundStatementASTNode* node) {
+  size_t start = node->statements->length;
+  while (start > 0) {
+    ASTNode* stmt = node->statements->value.p[start - 1];
+    if (!IsDestructorStatement(stmt) || (stmt->flags & kASTEHCleanupOnly)) {
+      break;
+    }
+    start--;
+  }
+  return start;
+}
+
+static bool SymbolHasTrailingDestructor(CompoundStatementASTNode* node,
+                                        size_t trailing_start, Symbol* sym) {
+  for (size_t j = trailing_start; j < node->statements->length; j++) {
+    if (CleanupReceiverSymbol(node->statements->value.p[j]) == sym) {
+      return true;
+    }
+  }
+  return false;
+}
+
+typedef struct {
+  IRNode* start_label;
+  Symbol* symbol;
+} OpenCleanup;
+
+static bool GenerateCompoundExceptionCleanup(Generator* gen) {
+  return CompilerIsCXX() && CompilerExceptionsEnabled() &&
+         !gen->for_constant_evaluation;
+}
+
+// Schedules a cleanup pad for every still-open local automatic object, pairing
+// it with the block's trailing destructor statements that act on it, over the
+// range [object construction, scope_end].
+static void ScheduleOpenLocalCleanups(Generator* gen,
+                                      CompoundStatementASTNode* node,
+                                      size_t trailing_start, Vector* open,
+                                      IRNode* scope_end) {
+  size_t num_statements = node->statements->length;
+  for (size_t k = 0; k < open->length; k++) {
+    OpenCleanup* oc = open->value.p[k];
+    Vector dtors;
+    VectorInit(&dtors);
+    for (size_t j = trailing_start; j < num_statements; j++) {
+      ASTNode* dtor = node->statements->value.p[j];
+      if (CleanupReceiverSymbol(dtor) == oc->symbol) {
+        VectorAppend(&dtors, dtor);
+      }
+    }
+    ScheduleCleanupPad(gen, oc->start_label, scope_end, &dtors);
+    VectorDestruct(&dtors);
+  }
+}
+
 static void GenerateCompoundStatement(Generator* gen,
                                       CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
+
+  // For C++ with exceptions on, give every automatic object with a destructor a
+  // precise EH cleanup range covering [after its construction, block-scope end],
+  // so an exception propagating through the block destroys exactly the objects
+  // that are live -- including through frames that have no try/catch of their
+  // own.  Enclosing and nested objects are ordered by the runtime's
+  // scope-containment walk (see libc/eh_throw.c).
+  //
+  // The same machinery also handles a constructor's partial-construction
+  // cleanup: the front end inserts each fully-constructed subobject's destructor
+  // right after its initializer, flagged kASTEHCleanupOnly.  Those statements
+  // are never emitted on the normal path; each gets a cleanup range covering the
+  // rest of the constructor, so a throw destroys exactly the subobjects built so
+  // far, in reverse construction order.
+  bool eh = GenerateCompoundExceptionCleanup(gen);
+  size_t trailing_start = num_statements;
+  bool local_cleanups = false;
+  bool member_cleanups = false;
+  if (eh) {
+    trailing_start = TrailingDestructorStart(node);
+    bool has_decls = false;
+    for (size_t i = 0; i < num_statements; i++) {
+      ASTNode* stmt = node->statements->value.p[i];
+      if (stmt->flags & kASTEHCleanupOnly) {
+        member_cleanups = true;
+      } else if (i < trailing_start && stmt->op == AST_OP(decl_list)) {
+        has_decls = true;
+      }
+    }
+    local_cleanups = has_decls && trailing_start < num_statements;
+  }
+  bool do_cleanup = eh && (local_cleanups || member_cleanups);
+
+  // A single scope-end label bounds every cleanup range in this block.  It is
+  // positioned just before the trailing local destructors (or at the block end
+  // when there are none) so member/subobject cleanups also cover local
+  // constructions and the user body.
+  IRNode* scope_end = do_cleanup ? NewIR(IR_OP(label)) : NULL;
+  bool scope_end_emitted = false;
+
+  Vector open;  // OpenCleanup* for objects whose scope has not yet ended.
+  VectorInit(&open);
+
   for (size_t i = 0; i < num_statements; i++) {
     ASTNode* stmt = node->statements->value.p[i];
+    if (do_cleanup && !scope_end_emitted && i == trailing_start) {
+      // Reached the trailing destructors: the block scope ends here.  Close the
+      // live range of every object declared above and schedule its cleanup pad.
+      GeneratorEmit(gen, scope_end);
+      scope_end_emitted = true;
+      ScheduleOpenLocalCleanups(gen, node, trailing_start, &open, scope_end);
+    }
+    if (stmt->flags & kASTEHCleanupOnly) {
+      // A constructor subobject destructor: emit it only inside a cleanup pad,
+      // never on the normal path (including constant evaluation, where the
+      // object stays alive).  When cleanup is active its range starts here
+      // (right after the subobject's initializer) and runs to scope_end.
+      if (do_cleanup) {
+        IRNode* start_label = GeneratorEmit(gen, NewIR(IR_OP(label)));
+        Vector dtors;
+        VectorInit(&dtors);
+        VectorAppend(&dtors, stmt);
+        ScheduleCleanupPad(gen, start_label, scope_end, &dtors);
+        VectorDestruct(&dtors);
+      }
+      continue;
+    }
     GenerateStatement(gen, stmt);
+    if (do_cleanup && !scope_end_emitted && stmt->op == AST_OP(decl_list)) {
+      // Objects constructed by this declaration become live from here.
+      DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
+      IRNode* start_label = NULL;
+      for (size_t d = 0; d < decls->declarations->length; d++) {
+        ASTNode* decl = decls->declarations->value.p[d];
+        if (decl->op != AST_OP(vardecl)) {
+          continue;
+        }
+        Symbol* sym = ((VariableDeclarationASTNode*)decl)->symbol;
+        if (!SymbolHasTrailingDestructor(node, trailing_start, sym)) {
+          continue;
+        }
+        if (start_label == NULL) {
+          start_label = GeneratorEmit(gen, NewIR(IR_OP(label)));
+        }
+        OpenCleanup* oc = malloc(sizeof(OpenCleanup));
+        oc->start_label = start_label;
+        oc->symbol = sym;
+        VectorAppend(&open, oc);
+      }
+    }
   }
-  
+  // No trailing local destructors closed the scope (e.g. a constructor with only
+  // member cleanups): position scope_end at the block end.
+  if (do_cleanup && !scope_end_emitted) {
+    GeneratorEmit(gen, scope_end);
+    scope_end_emitted = true;
+    ScheduleOpenLocalCleanups(gen, node, trailing_start, &open, scope_end);
+  }
+  VectorDestructWithContents(&open, NULL, /*free_element=*/true);
+
   // Restore stack pointer to value saved before topmost VLA was allocated.
   for (size_t i = 0; i < num_statements; i++) {
     ASTNode* stmt = node->statements->value.p[i];
@@ -830,14 +1084,9 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
   IRNode* try_start = NewIR(IR_OP(label));
   IRNode* try_end = NewIR(IR_OP(label));
   IRNode* after_try = NewIR(IR_OP(label));
-  bool has_cleanup = TryStatementHasCleanup(node->try_stmt);
   Vector catch_labels;
-  Vector cleanup_labels;
-  Vector landing_labels;
   Vector catch_typeinfos;
   VectorInit(&catch_labels);
-  VectorInit(&cleanup_labels);
-  VectorInit(&landing_labels);
   VectorInit(&catch_typeinfos);
 
   for (size_t i = 0; i < node->catches->length; i++) {
@@ -845,37 +1094,23 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     if (!IsSupportedCatchHandler(handler)) {
       continue;
     }
-    IRNode* catch_label = NewIR(IR_OP(label));
-    IRNode* landing_label = catch_label;
-    VectorAppend(&catch_labels, catch_label);
-    if (has_cleanup) {
-      landing_label = NewIR(IR_OP(label));
-      VectorAppend(&cleanup_labels, landing_label);
-      RecordExceptionKeepLabel(gen, catch_label);
-    }
-    VectorAppend(&landing_labels, landing_label);
+    VectorAppend(&catch_labels, NewIR(IR_OP(label)));
     VectorAppend(&catch_typeinfos, CatchHandlerTypeInfo(gen, handler));
   }
 
   GeneratorEmit(gen, try_start);
   GenerateStatement(gen, node->try_stmt);
   GeneratorEmit(gen, try_end);
-  for (size_t i = 0; i < landing_labels.length; i++) {
-    RecordExceptionRange(gen, try_start, try_end, landing_labels.value.p[i],
+  // Automatic objects declared in the try body are destroyed on the exception
+  // path by the generic per-object cleanup ranges (see GenerateCompoundStatement
+  // and libc/eh_throw.c): the runtime runs those inner cleanups before it enters
+  // the handler recorded here, and only for the objects actually constructed.
+  for (size_t i = 0; i < catch_labels.length; i++) {
+    RecordExceptionRange(gen, try_start, try_end, catch_labels.value.p[i],
                          catch_typeinfos.value.p[i]);
   }
   if (StatementMayFallThrough(node->try_stmt)) {
     GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
-  }
-
-  if (has_cleanup) {
-    for (size_t i = 0; i < cleanup_labels.length; i++) {
-      IRNode* cleanup_label = cleanup_labels.value.p[i];
-      IRNode* catch_label = catch_labels.value.p[i];
-      GeneratorEmit(gen, cleanup_label);
-      GenerateTryCleanupStatements(gen, node->try_stmt);
-      GeneratorEmit(gen, NewIR1(IR_OP(bra), catch_label));
-    }
   }
 
   size_t catch_index = 0;
@@ -894,8 +1129,6 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
   }
   GeneratorEmit(gen, after_try);
   VectorDestruct(&catch_labels);
-  VectorDestruct(&cleanup_labels);
-  VectorDestruct(&landing_labels);
   VectorDestruct(&catch_typeinfos);
 }
 

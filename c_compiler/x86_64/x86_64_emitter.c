@@ -2810,10 +2810,13 @@ static void X86_64PrintExceptionTable(X86_64Emitter* emitter, FILE* fp,
     PrintExceptionTableLabel(fp, func_name, range->try_end);
     fprintf(fp, "\n\t.8byte ");
     PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    fprintf(fp, "\n\t.8byte %s",
-            range->catch_typeinfo != NULL
-                ? range->catch_typeinfo->symbol_name.value
-                : "0");
+    if (range->is_cleanup) {
+      fprintf(fp, "\n\t.8byte %d", DAVECC_EH_CLEANUP_MARKER);
+    } else if (range->catch_typeinfo != NULL) {
+      fprintf(fp, "\n\t.8byte %s", range->catch_typeinfo->symbol_name.value);
+    } else {
+      fprintf(fp, "\n\t.8byte 0");
+    }
     fprintf(fp, "\n");
   }
   fprintf(fp, "\t.text\n\n");

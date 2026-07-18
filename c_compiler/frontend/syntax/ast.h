@@ -11,6 +11,8 @@
 #ifndef ast_h
 #define ast_h
 
+#include <stdint.h>
+
 #include "symbol.h"
 #include "tokens.h"
 #include "type.h"
@@ -314,7 +316,7 @@ typedef enum {
 typedef struct ASTNode {
   ASTOpcode op;             // Opcode.                          // @wire 1
   int id;                   // Node id (for debugging).         // @wire 3
-  int flags;                // Flags                            // @wire 4
+  uint64_t flags;           // Flags                            // @wire 4
   TypeRecord* type;         // Node type (set by semantics)     // @wire 5
   ASTValueCategory value_category;  // C++ value category.      // @wire 6
   struct ASTNode* parent;   // Parent node (if any).            // @wire 7
@@ -358,6 +360,7 @@ struct ConstraintExpr;
 #define kASTDependentCast (1 << 28)  // Cast target depended on template substitution.
 #define kASTDependentNewAllocation (1 << 29)  // operator new size must be recomputed after type substitution.
 #define kASTScopeExitCleanup (1 << 30)  // Jump statement already had scope-exit destructors inserted.
+#define kASTEHCleanupOnly (1ULL << 31)  // Synthetic destructor statement emitted only in an exception cleanup pad (e.g. a constructor's already-constructed subobjects); never run on the normal path.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

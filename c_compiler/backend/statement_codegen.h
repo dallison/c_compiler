@@ -29,4 +29,10 @@ void GenerateNoexceptGuardLeave(Generator* gen, NoexceptTerminateGuard* guard);
 void GenerateNoexceptGuardTerminate(Generator* gen,
                                     NoexceptTerminateGuard* guard);
 
+// Emits the C++ scope-exit cleanup landing pads scheduled while generating the
+// body; call after the return path.  FreeCleanupPads releases their bookkeeping
+// and must be called when the generator is torn down.
+void GenerateCleanupLandingPads(Generator* gen);
+void FreeCleanupPads(Generator* gen);
+
 #endif /* statement_codegen_h */

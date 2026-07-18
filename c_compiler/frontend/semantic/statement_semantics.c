@@ -445,6 +445,35 @@ static size_t IndexOfChildInCompound(CompoundStatementASTNode* compound,
   return compound->statements->length;
 }
 
+// Append (to `out`, in reverse construction order) the destructor statements
+// for the automatic objects declared directly in `compound` at statement
+// indices [lo, hi).  `skip` (an NRVO'd returned object) is never destroyed.
+static void CollectCompoundLocalDestructors(CompoundStatementASTNode* compound,
+                                            size_t lo, size_t hi, Symbol* skip,
+                                            Vector* out) {
+  if (hi > compound->statements->length) {
+    hi = compound->statements->length;
+  }
+  for (size_t i = hi; i > lo; i--) {
+    ASTNode* stmt = compound->statements->value.p[i - 1];
+    if (stmt->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
+    for (size_t j = decls->declarations->length; j > 0; j--) {
+      ASTNode* decl_node = decls->declarations->value.p[j - 1];
+      if (decl_node->op != AST_OP(vardecl)) {
+        continue;
+      }
+      Symbol* sym = ((VariableDeclarationASTNode*)decl_node)->symbol;
+      if (sym == skip || !CXXLocalNeedsScopeExitDestructor(sym)) {
+        continue;
+      }
+      AppendLocalDestructorStatements(sym, out);
+    }
+  }
+}
+
 // Collect (into `out`, in destruction order) the destructor statements for the
 // automatic objects that go out of scope when control leaves `jump`.  Walks
 // enclosing compound statements from innermost outward, stopping once `limit`
@@ -461,24 +490,7 @@ static void CollectScopeExitDestructors(ASTNode* jump, ASTNode* limit,
     if (parent->op == AST_OP(compound)) {
       CompoundStatementASTNode* compound = (CompoundStatementASTNode*)parent;
       size_t idx = IndexOfChildInCompound(compound, child);
-      for (size_t i = idx; i > 0; i--) {
-        ASTNode* stmt = compound->statements->value.p[i - 1];
-        if (stmt->op != AST_OP(decl_list)) {
-          continue;
-        }
-        DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
-        for (size_t j = decls->declarations->length; j > 0; j--) {
-          ASTNode* decl_node = decls->declarations->value.p[j - 1];
-          if (decl_node->op != AST_OP(vardecl)) {
-            continue;
-          }
-          Symbol* sym = ((VariableDeclarationASTNode*)decl_node)->symbol;
-          if (sym == skip || !CXXLocalNeedsScopeExitDestructor(sym)) {
-            continue;
-          }
-          AppendLocalDestructorStatements(sym, out);
-        }
-      }
+      CollectCompoundLocalDestructors(compound, 0, idx, skip, out);
     }
     if (parent == limit) {
       break;
@@ -561,6 +573,80 @@ static void ProcessBreakContinueJump(ASTNode* jump) {
   ASTNodeReplaceChild(parent, child_id, compound, false);
 }
 
+// Returns the ancestor of `descendant` whose parent is `ancestor` (i.e. the
+// child of `ancestor` on the path down to `descendant`), or NULL if `ancestor`
+// is not on the parent chain.
+static ASTNode* CXXChildTowards(ASTNode* descendant, ASTNode* ancestor) {
+  ASTNode* node = descendant;
+  while (node != NULL && node->parent != ancestor) {
+    node = node->parent;
+  }
+  return node;
+}
+
+// Inserts scope-exit destructor calls for a `goto` (rewriting it as
+// `{ <destructors>; goto; }`).  A goto destroys every automatic object whose
+// scope it exits: all objects declared before it in each enclosing block down
+// to the least common ancestor (LCA) of the goto and its target label.  Within
+// the LCA block itself only a *backward* jump exits scopes -- the objects
+// declared after the label but before the goto are destroyed (they are
+// reconstructed when control re-enters); a forward jump instead enters those
+// scopes, so nothing there is destroyed (jumping past a non-trivial
+// initialization is already rejected by CheckJumpBypassedDeclarations).
+static void ProcessGotoJump(GotoStatementASTNode* go) {
+  ASTNode* jump = &go->base;
+  if ((jump->flags & kASTScopeExitCleanup) != 0) {
+    return;
+  }
+  jump->flags |= kASTScopeExitCleanup;
+  // Compiler-lowered gotos (e.g. coroutine lowering) manage object lifetimes
+  // themselves and must not get a second set of destructor calls.
+  if ((jump->flags & kASTCompilerGeneratedGoto) != 0 || go->label == NULL ||
+      go->lca == NULL) {
+    return;
+  }
+
+  Vector* destructors = NewVector();
+  // Scopes strictly between the goto and the LCA are fully exited.
+  ASTNode* child = jump;
+  ASTNode* parent = jump->parent;
+  while (parent != NULL && parent != go->lca) {
+    if (parent->op == AST_OP(compound)) {
+      CompoundStatementASTNode* compound = (CompoundStatementASTNode*)parent;
+      size_t idx = IndexOfChildInCompound(compound, child);
+      CollectCompoundLocalDestructors(compound, 0, idx, NULL, destructors);
+    }
+    child = parent;
+    parent = parent->parent;
+  }
+  // The LCA block is only partially exited, and only on a backward jump.
+  if (parent == go->lca && go->lca->op == AST_OP(compound)) {
+    CompoundStatementASTNode* compound = (CompoundStatementASTNode*)go->lca;
+    ASTNode* label_branch = CXXChildTowards(go->label, go->lca);
+    if (label_branch != NULL) {
+      size_t jump_idx = IndexOfChildInCompound(compound, child);
+      size_t label_idx = IndexOfChildInCompound(compound, label_branch);
+      if (jump_idx > label_idx) {
+        CollectCompoundLocalDestructors(compound, label_idx + 1, jump_idx, NULL,
+                                        destructors);
+      }
+    }
+  }
+
+  if (destructors->length == 0) {
+    VectorDelete(destructors);
+    return;
+  }
+  ASTNode* jump_parent = jump->parent;
+  int child_id = jump->child_id;
+  // The goto runs after the destructors; NewCompoundStatementASTNode reparents
+  // it into the new block, then we splice the block into the goto's old slot.
+  VectorAppend(destructors, jump);
+  ASTNode* compound = NewCompoundStatementASTNode(destructors, jump->location);
+  compound->flags |= kASTAnalyzed;
+  ASTNodeReplaceChild(jump_parent, child_id, compound, false);
+}
+
 static void CollectJumpStatements(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)child_id;
@@ -568,7 +654,7 @@ static void CollectJumpStatements(ASTNode* node, void* data, int child_id,
     return;
   }
   if (node->op == AST_OP(return) || node->op == AST_OP(break) ||
-      node->op == AST_OP(continue)) {
+      node->op == AST_OP(continue) || node->op == AST_OP(goto)) {
     VectorAppend((Vector*)data, node);
   }
 }
@@ -590,6 +676,8 @@ void CXXInsertScopeExitDestructors(TypeRecord* func) {
     ASTNode* jump = jumps.value.p[i];
     if (jump->op == AST_OP(return)) {
       ProcessReturnJump(func, (CombinedStatementASTNode*)jump);
+    } else if (jump->op == AST_OP(goto)) {
+      ProcessGotoJump((GotoStatementASTNode*)jump);
     } else {
       ProcessBreakContinueJump(jump);
     }

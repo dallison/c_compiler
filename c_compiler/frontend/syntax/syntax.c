@@ -20,6 +20,8 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "type.h"
+#include "type_class_internal.h"
+#include "type_inheritance.h"
 #include "type_internal.h"
 #include "errors.h"
 #include "compiler.h"
@@ -4056,6 +4058,25 @@ void SyntaxResolveCXXConstructorInitializerList(
   }
 }
 
+// Partial-construction cleanup: once a constructor has fully constructed a base
+// or member subobject, an exception thrown by a later initializer or by the
+// constructor body must destroy that subobject (but not the incomplete `*this`).
+// This inserts, right after the subobject's construction statement, its
+// destructor call marked kASTEHCleanupOnly, so the backend emits it only inside
+// an exception cleanup pad -- never on the normal path -- with an EH range
+// covering the remainder of the constructor.  Subobjects nest by construction
+// order, so the runtime destroys them in reverse (see libc/eh_throw.c and
+// GenerateCompoundStatement).  Returns the number of statements inserted.
+static size_t InsertCXXPartialCleanupDestructor(Vector* body, size_t insert_at,
+                                                ASTNode* dtor_stmt) {
+  if (dtor_stmt == NULL) {
+    return 0;
+  }
+  dtor_stmt->flags |= kASTEHCleanupOnly;
+  VectorInsertOrAppend(body, insert_at, dtor_stmt);
+  return 1;
+}
+
 void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
                                         Vector* body,
                                         CXXConstructorInitList* init_list,
@@ -4145,6 +4166,13 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     }
     VectorInsertOrAppend(body, insert_at, call);
     insert_at++;
+    if (CompilerExceptionsEnabled() && TypeHasNonTrivialDestructor(base->type)) {
+      ASTNode* dtor = NewCXXBaseSpecialMemberCall(syntax, func, base,
+                                                  /*destructor=*/true,
+                                                  /*complete_object=*/false,
+                                                  NULL, location);
+      insert_at += InsertCXXPartialCleanupDestructor(body, insert_at, dtor);
+    }
   }
   if (owner->vtables_registered) {
     Vector* vptr_initializers = NewVector();
@@ -4192,6 +4220,22 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     }
     VectorInsertOrAppend(body, insert_at, stmt);
     insert_at++;
+    // Partial-construction cleanup for this member.  Fixed-array members are not
+    // yet covered (their per-element reverse-order cleanup needs a single pooled
+    // cleanup pad); a throw after such a member is constructed leaks it.
+    TypeRecord* member_type = member->symbol->type;
+    if (CompilerExceptionsEnabled() && !TypeIsFixedArray(member_type) &&
+        TypeHasNonTrivialDestructor(member_type)) {
+      Vector member_dtors;
+      VectorInit(&member_dtors);
+      AppendCXXSingleMemberDestructorCalls(func, member, &member_dtors,
+                                           location);
+      for (size_t k = 0; k < member_dtors.length; k++) {
+        insert_at += InsertCXXPartialCleanupDestructor(
+            body, insert_at, member_dtors.value.p[k]);
+      }
+      VectorDestruct(&member_dtors);
+    }
   }
 }
 

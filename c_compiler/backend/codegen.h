@@ -34,11 +34,17 @@ typedef struct {
   IRNode* pooled;
 } PoolEntry;
 
+// Marker written into an exception-table entry's typeinfo slot to distinguish a
+// cleanup range (landing pad destroys one automatic object and resumes
+// unwinding) from a handler.  Must match DAVECC_EH_CLEANUP in libc/eh_throw.c.
+#define DAVECC_EH_CLEANUP_MARKER 1
+
 typedef struct {
   IRNode* try_start;
   IRNode* try_end;
-  IRNode* catch_label;
+  IRNode* catch_label;      // For a cleanup range this is the cleanup pad.
   struct EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;          // Landing pad runs a destructor then resumes.
 } ExceptionHandlerRange;
 
 // A (transitive, non-virtual, public) base subobject of an exception type,
@@ -79,6 +85,7 @@ typedef struct Generator {
   Vector exception_ranges;   // ExceptionHandlerRange* entries.
   Vector exception_keep_labels;  // IR labels reachable only through EH pads.
   Vector exception_typeinfos; // EHTypeInfo* entries emitted for this function.
+  Vector cleanup_pads;       // PendingCleanupPad* entries, emitted at fn end.
 
   Vector basic_blocks;      // Basic Blocks (indexed by block id).
   BasicBlock* entry_block;  // Entry block.
