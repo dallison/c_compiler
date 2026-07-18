@@ -215,6 +215,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->exception_ranges);
   VectorInit(&gen->exception_keep_labels);
   VectorInit(&gen->exception_typeinfos);
+  VectorInit(&gen->cleanup_pads);
   VectorInit(&gen->basic_blocks);
   gen->for_constant_evaluation = false;
 
@@ -254,6 +255,7 @@ void GeneratorDestruct(Generator* gen) {
   VectorDestructWithContents(&gen->variable_pool, NULL, /*free_element=*/true);
   VectorDestructWithContents(&gen->exception_ranges, NULL, /*free_element=*/true);
   VectorDestruct(&gen->exception_keep_labels);
+  FreeCleanupPads(gen);
   // Target generators keep pointers to these records until final assembly
   // emission, which can happen after the transient IR generator is destroyed.
   VectorDestruct(&gen->exception_typeinfos);
@@ -1346,7 +1348,8 @@ void* GenerateFunction(Generator* gen) {
       GeneratorEmit(gen, NewIR1(IR_OP(bra), return_label));
     }
 
-    // Placed after the return path so it is only entered via the unwinder.
+    // Placed after the return path so they are only entered via the unwinder.
+    GenerateCleanupLandingPads(gen);
     GenerateNoexceptGuardTerminate(gen, &noexcept_guard);
   }
 

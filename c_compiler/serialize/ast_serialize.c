@@ -276,7 +276,7 @@ static void WriteASTBase(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
   WireWriteInt32(buf, kAST_op, (int32_t)n->op);
   WireWriteInt32(buf, kAST_shape, (int32_t)shape);
   WireWriteInt32(buf, kAST_id, n->id);
-  WireWriteInt32(buf, kAST_flags, n->flags);
+  WireWriteUint64(buf, kAST_flags, n->flags);
   SWriteRef(ctx, buf, kAST_type, kSerialKindType, n->type);
   WireWriteInt32(buf, kAST_value_category, (int32_t)n->value_category);
   SWriteRef(ctx, buf, kAST_parent, kSerialKindAST, n->parent);
@@ -304,7 +304,7 @@ static bool ReadASTBaseField(DeserializeContext* ctx, WireBuffer* buf,
       WireReadInt32(buf, &n->id);
       return true;
     case kAST_flags:
-      WireReadInt32(buf, &n->flags);
+      WireReadUint64(buf, &n->flags);
       return true;
     case kAST_type:
       n->type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);

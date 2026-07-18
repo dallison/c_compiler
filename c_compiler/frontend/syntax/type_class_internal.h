@@ -59,6 +59,9 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
 
 void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
                                     SourceLocation location);
+void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
+                                          StructMember* member, Vector* body,
+                                          SourceLocation location);
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser, Struct* owner,
                                        TypeRecord* return_type,

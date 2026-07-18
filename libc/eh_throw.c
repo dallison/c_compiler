@@ -9,6 +9,14 @@ typedef struct {
   uintptr_t catch_typeinfo;
 } DaveExceptionTableEntry;
 
+// Sentinel stored in `catch_typeinfo` to mark a *cleanup* range (a region whose
+// landing pad destroys one automatic object and then resumes unwinding) rather
+// than a handler.  A value of 0 means catch-all (`catch (...)` / the noexcept
+// terminate guard); any real CXXTypeInfo lives in .rodata at an address far
+// above these small sentinels, so 1 is safe to reserve.  Must match
+// DAVECC_EH_CLEANUP_MARKER in the compiler backend (see codegen.h).
+#define DAVECC_EH_CLEANUP 1
+
 // Layout must match the objects emitted by the compiler (see
 // X86_64PrintTypeInfoRecords in c_compiler/x86_64/x86_64_emitter.c).  `bases`
 // is a flattened list of the exception type's public, non-virtual base
@@ -94,36 +102,129 @@ static int TypeInfoMatches(const CXXTypeInfo* thrown,
   return 0;
 }
 
-static int FindMatchingCatch(uintptr_t pc, const CXXTypeInfo* thrown_typeinfo,
-                             uintptr_t* catch_label, long* catch_offset) {
+// True when [start,end] contains `pc` and *strictly* encloses the window
+// [cs,ce] (the range of the cleanup most recently run at this pc).  The chain of
+// ranges containing a pc is totally ordered by nesting, so "strictly encloses
+// the last-run range" is how we advance outward one scope at a time.
+static int RangeEncloses(uintptr_t start, uintptr_t end, uintptr_t pc,
+                         uintptr_t cs, uintptr_t ce) {
+  if (pc < start || pc > end) {
+    return 0;
+  }
+  if (start > cs || end < ce) {
+    return 0;
+  }
+  return start < cs || end > ce;
+}
+
+// Selects the innermost (tightest) actionable exception-table entry at `pc` that
+// strictly encloses the window [cs,ce].  A cleanup range is always actionable; a
+// handler range is actionable only when its type matches the thrown object.
+// Returns the entry, sets `*is_catch` and (for a matching handler) `*offset` to
+// the base-subobject adjustment.
+static DaveExceptionTableEntry* FindInnermostAction(uintptr_t pc, uintptr_t cs,
+                                                    uintptr_t ce,
+                                                    const CXXTypeInfo* thrown,
+                                                    int* is_catch,
+                                                    long* offset) {
   DaveExceptionTableEntry* entry =
       (DaveExceptionTableEntry*)__davecc_except_table_start;
   DaveExceptionTableEntry* end =
       (DaveExceptionTableEntry*)__davecc_except_table_end;
-  DaveExceptionTableEntry* match = NULL;
-  long match_offset = 0;
+  DaveExceptionTableEntry* best = NULL;
+  int best_is_catch = 0;
+  long best_offset = 0;
 
   while (entry < end) {
-    const CXXTypeInfo* catch_typeinfo =
-        (const CXXTypeInfo*)entry->catch_typeinfo;
-    long offset = 0;
-    if (pc >= entry->try_start && pc <= entry->try_end &&
-        TypeInfoMatches(thrown_typeinfo, catch_typeinfo, &offset)) {
-      if (match == NULL ||
-          (entry->try_start > match->try_start &&
-           entry->try_end <= match->try_end)) {
-        match = entry;
-        match_offset = offset;
+    if (RangeEncloses(entry->try_start, entry->try_end, pc, cs, ce)) {
+      int entry_is_catch;
+      long entry_offset = 0;
+      if (entry->catch_typeinfo == DAVECC_EH_CLEANUP) {
+        entry_is_catch = 0;
+      } else if (TypeInfoMatches(
+                     thrown, (const CXXTypeInfo*)entry->catch_typeinfo,
+                     &entry_offset)) {
+        entry_is_catch = 1;
+      } else {
+        entry++;
+        continue;  // a handler whose type does not match: not actionable
+      }
+      // Tightest range wins: greatest start, then smallest end.
+      if (best == NULL || entry->try_start > best->try_start ||
+          (entry->try_start == best->try_start &&
+           entry->try_end < best->try_end)) {
+        best = entry;
+        best_is_catch = entry_is_catch;
+        best_offset = entry_offset;
       }
     }
     entry++;
   }
-  if (match == NULL) {
-    return 0;
+  if (best != NULL) {
+    *is_catch = best_is_catch;
+    *offset = best_offset;
   }
-  *catch_label = match->catch_label;
-  *catch_offset = match_offset;
-  return 1;
+  return best;
+}
+
+// State handed to a cleanup landing pad so __davecc_resume can continue the
+// containment chain in the same frame after the pad runs its destructor.
+// Unwinding is sequential, so a single set of slots suffices.
+static uintptr_t resume_pc;
+static uintptr_t resume_rsp;
+static uintptr_t resume_rbp;
+static uintptr_t resume_cs;
+static uintptr_t resume_ce;
+
+// Drives unwinding from frame (pc,rsp,rbp) outward.  Within each frame it walks
+// the scope-containment chain: at [cs,ce] (initially the degenerate window
+// [pc,pc]) it runs the innermost enclosing cleanup and re-enters via
+// __davecc_resume with [cs,ce] tightened to that cleanup's range, so enclosing
+// objects are destroyed in reverse construction order; a matching handler that
+// is inner to any remaining cleanup is entered instead (stopping unwinding).
+// When a frame has no further action, control moves to the caller frame.
+static void UnwindStep(uintptr_t pc, uintptr_t rsp, uintptr_t rbp, uintptr_t cs,
+                       uintptr_t ce) {
+  DaveEHFrameRegisters regs;
+  DaveEHFrameWalkResult walk;
+  for (;;) {
+    int is_catch = 0;
+    long offset = 0;
+    DaveExceptionTableEntry* action = FindInnermostAction(
+        pc, cs, ce, current_exception_typeinfo, &is_catch, &offset);
+    if (action != NULL) {
+      if (is_catch) {
+        // Adjust to the caught base subobject before the handler binds it.
+        current_exception_object += offset;
+        __davecc_jump_to_landing_pad(action->catch_label, rsp, rbp);
+      }
+      // Cleanup: remember where to resume, then run the pad in this frame.
+      resume_pc = pc;
+      resume_rsp = rsp;
+      resume_rbp = rbp;
+      resume_cs = action->try_start;
+      resume_ce = action->try_end;
+      __davecc_jump_to_landing_pad(action->catch_label, rsp, rbp);
+    }
+    // No further action in this frame: unwind to the caller.
+    regs.pc = pc;
+    regs.rsp = rsp;
+    regs.rbp = rbp;
+    if (!DaveEHFrameWalkFrame(&regs, &walk)) {
+      break;
+    }
+    pc = walk.caller_pc;
+    rsp = walk.caller_rsp;
+    rbp = walk.caller_rbp;
+    cs = pc;
+    ce = pc;
+  }
+  abort();
+}
+
+// Re-entry point from a cleanup landing pad once it has run its destructor.
+void __davecc_resume(void) {
+  UnwindStep(resume_pc, resume_rsp, resume_rbp, resume_cs, resume_ce);
 }
 
 char __davecc_current_exception_i1(void) {
@@ -173,24 +274,8 @@ void __davecc_throw(intptr_t exception_object, const CXXTypeInfo* typeinfo) {
     current_exception_typeinfo = typeinfo;
   }
   DaveEHFrameRegisters regs;
-  DaveEHFrameWalkResult walk;
-  uintptr_t catch_label;
-  long catch_offset;
-
   __davecc_capture_regs(&regs);
-  while (regs.pc != 0) {
-    if (FindMatchingCatch(regs.pc, current_exception_typeinfo, &catch_label,
-                          &catch_offset)) {
-      // Adjust to the caught base subobject before the handler binds it.
-      current_exception_object += catch_offset;
-      __davecc_jump_to_landing_pad(catch_label, regs.rsp, regs.rbp);
-    }
-    if (!DaveEHFrameWalkFrame(&regs, &walk)) {
-      break;
-    }
-    regs.pc = walk.caller_pc;
-    regs.rsp = walk.caller_rsp;
-    regs.rbp = walk.caller_rbp;
-  }
-  abort();
+  // The captured frame is __davecc_throw's own (no ranges); UnwindStep walks out
+  // to the throwing frame and beyond, running cleanups and seeking a handler.
+  UnwindStep(regs.pc, regs.rsp, regs.rbp, regs.pc, regs.pc);
 }

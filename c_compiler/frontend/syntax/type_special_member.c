@@ -396,8 +396,52 @@ static ASTNode* NewCXXMemberDestructorCall(TypeRecord* func,
   return NewExpressionStatementASTNode(call, location);
 }
 
+// Appends the destructor call(s) for a single data member to `body`.  A fixed
+// array member yields one call per element in reverse index order (matching the
+// reverse-of-construction destruction order); a scalar/class member yields one
+// call.  Members without a non-trivial destructor append nothing.  Unlike
+// AppendCXXMemberDestructorCalls this does not require `func` to be a destructor,
+// so it can also synthesize a constructor's partial-construction cleanup (the
+// caller decides ordering and marks the statements kASTEHCleanupOnly).
+void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
+                                          StructMember* member, Vector* body,
+                                          SourceLocation location) {
+  if (member == NULL || member->symbol == NULL || member->is_static ||
+      member->is_member_function || StructMemberIsNestedType(member)) {
+    return;
+  }
+  TypeRecord* member_type = member->symbol->type;
+  TypeRecord* object_type = CXXDestructibleElementType(member_type);
+  if (object_type == NULL) {
+    return;
+  }
+  if (TypeIsFixedArray(member_type)) {
+    for (size_t index = member_type->info.array.size.fixed; index > 0;
+         index--) {
+      ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+      ASTNode* index_node = NewIntConstantASTNode(
+          (int64_t)index - 1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+          location);
+      receiver = NewBinaryASTNode(AST_OP(subscript), NULL, location, receiver,
+                                  index_node);
+      ASTNode* call =
+          NewCXXMemberDestructorCall(func, object_type, receiver, location);
+      if (call != NULL) {
+        VectorAppend(body, call);
+      }
+    }
+  } else {
+    ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+    ASTNode* call =
+        NewCXXMemberDestructorCall(func, object_type, receiver, location);
+    if (call != NULL) {
+      VectorAppend(body, call);
+    }
+  }
+}
+
 void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
-                                           SourceLocation location) {
+                                          SourceLocation location) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
       func->info.function.cxx_member_owner == NULL) {
     return;
@@ -405,38 +449,7 @@ void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
   Struct* owner = func->info.function.cxx_member_owner;
   for (size_t i = owner->members.length; i > 0; i--) {
     StructMember* member = owner->members.value.p[i - 1];
-    if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function || StructMemberIsNestedType(member)) {
-      continue;
-    }
-    TypeRecord* member_type = member->symbol->type;
-    TypeRecord* object_type = CXXDestructibleElementType(member_type);
-    if (object_type == NULL) {
-      continue;
-    }
-    if (TypeIsFixedArray(member_type)) {
-      for (size_t index = member_type->info.array.size.fixed; index > 0;
-           index--) {
-        ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
-        ASTNode* index_node = NewIntConstantASTNode(
-            (int64_t)index - 1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-            location);
-        receiver = NewBinaryASTNode(AST_OP(subscript), NULL, location,
-                                    receiver, index_node);
-        ASTNode* call = NewCXXMemberDestructorCall(func, object_type, receiver,
-                                                   location);
-        if (call != NULL) {
-          VectorAppend(body, call);
-        }
-      }
-    } else {
-      ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
-      ASTNode* call = NewCXXMemberDestructorCall(func, object_type, receiver,
-                                                 location);
-      if (call != NULL) {
-        VectorAppend(body, call);
-      }
-    }
+    AppendCXXSingleMemberDestructorCalls(func, member, body, location);
   }
 }
 

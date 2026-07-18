@@ -258,6 +258,7 @@ typedef struct {
   TargetInstruction* try_end;
   TargetInstruction* catch_label;
   EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;
 } X86_64ExceptionRange;
 
 typedef struct X86_64Generator {
