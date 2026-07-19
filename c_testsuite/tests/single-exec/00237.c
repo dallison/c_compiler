@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <limits.h>
 
 enum {
   enum_conditional = 0 ? (1 / 0) : 12,
@@ -22,7 +23,7 @@ int main(void) {
   int array_bound[(enum_conditional == 12 && enum_cast == 255) ? 1 : -1];
   array_bound[0] = enum_logical;
 
-  if (max_int != 4611686018427387903UL) {
+  if (max_int != ULONG_MAX / sizeof(int)) {
     return 1;
   }
   if (ushort_wrap != 65535) {

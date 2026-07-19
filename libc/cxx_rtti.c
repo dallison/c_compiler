@@ -74,7 +74,7 @@ void* __davecc_dynamic_cast(void* p, const __davecc_type_info* dst) {
   return 0;
 }
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
 // EH-capable targets throw std::bad_cast for a failed reference cast.
 // This CXXTypeInfo layout must match libc/eh_throw.c and the compiler's
 // exception type_info emission.
@@ -99,7 +99,7 @@ static const __davecc_eh_type_info __davecc_bad_cast_typeinfo = {
 void* __davecc_dynamic_cast_ref(void* p, const __davecc_type_info* dst) {
   void* result = __davecc_dynamic_cast(p, dst);
   if (result == 0) {
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
     __davecc_throw((intptr_t)&__davecc_bad_cast_object,
                    &__davecc_bad_cast_typeinfo);
 #else

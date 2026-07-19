@@ -180,7 +180,8 @@ unsigned long coroutine_frame_storage[1024];
 int coroutine_frame_storage_index;
 
 void* operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   global_coroutine_operator_new_count =
@@ -800,7 +801,8 @@ struct Promise {
 };
 
 void* Promise::operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   promise_coroutine_operator_new_count =
@@ -876,7 +878,8 @@ struct YieldExceptionPromise {
 };
 
 void* YieldExceptionPromise::operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   promise_coroutine_operator_new_count =
@@ -935,7 +938,8 @@ struct TransformPromise {
 };
 
 void* TransformPromise::operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   promise_coroutine_operator_new_count =
@@ -1001,7 +1005,8 @@ void* AllocationFailurePromise::operator new(unsigned long size) {
     allocation_failure_next_new_fails = 0;
     return 0;
   }
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   return result;
@@ -1055,7 +1060,8 @@ struct FromPromisePromise {
 
 void* FromPromisePromise::operator new(unsigned long size) {
   from_promise_operator_new_count = from_promise_operator_new_count + 1;
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   return result;
@@ -1899,7 +1905,8 @@ struct FinalTransferPromise {
 };
 
 void* FinalTransferPromise::operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   promise_coroutine_operator_new_count =

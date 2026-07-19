@@ -94,6 +94,13 @@
 #define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
+#define SYS_THREAD_CREATE 15
+#define SYS_THREAD_JOIN 16
+#define SYS_THREAD_SELF 17
+#define SYS_GET_TP 18
+#define SYS_THREAD_EXIT 19
+#define SYS_HEAP_LOCK 20
+#define SYS_HEAP_UNLOCK 21
 
 #elif defined(__W65C02__)
 #define SYS_EXIT 1

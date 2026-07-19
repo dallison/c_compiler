@@ -63,6 +63,16 @@ typedef enum {
 // otherwise type-agnostic and defaults to an integer register, which would be
 // wrong for e.g. the merge slot of a `double` conditional expression.
 #define kARMFloatValue (1 << 25)
+
+// Atomic pseudo metadata in the target-instruction flag word.
+#define ARM_ATOMIC_SIZE_SHIFT 18
+#define ARM_ATOMIC_SIZE_MASK (3 << ARM_ATOMIC_SIZE_SHIFT)
+#define ARM_ATOMIC_WEAK (1 << 20)
+#define ARM_ATOMIC_ORDER_SHIFT 26
+#define ARM_ATOMIC_ORDER_MASK (7 << ARM_ATOMIC_ORDER_SHIFT)
+#define ARM_ATOMIC_FAILURE_ORDER_SHIFT 29
+#define ARM_ATOMIC_FAILURE_ORDER_MASK (7u << ARM_ATOMIC_FAILURE_ORDER_SHIFT)
+#define kARMIndirectCallTarget (1 << 21)
 #define kARMExtendedAsm (1 << 26)
 
 #define ARM_MAX_ASM_OPERANDS 16
@@ -136,6 +146,20 @@ typedef enum {
 
   // Now follow the actual ARMv8 64 instruction directly from the
   // specifications.
+
+  ARM_OP(tprel),  // Materialize a local-exec TLS offset.
+
+  // Atomic operations expanded by the emitter after register allocation.
+  ARM_OP(atomic_load),
+  ARM_OP(atomic_store),
+  ARM_OP(atomic_fetch_add),
+  ARM_OP(atomic_fetch_sub),
+  ARM_OP(atomic_add_fetch),
+  ARM_OP(atomic_sub_fetch),
+  ARM_OP(atomic_compare_exchange_bool),
+  ARM_OP(atomic_compare_exchange_val),
+  ARM_OP(atomic_compare_exchange_n),
+  ARM_OP(atomic_fence),
 
   ARM_OP(adc),
   ARM_OP(add),
@@ -383,6 +407,7 @@ typedef struct {
   TargetInstruction* try_end;
   TargetInstruction* catch_label;
   EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;
 } ARMExceptionRange;
 
 typedef struct ARMGenerator {

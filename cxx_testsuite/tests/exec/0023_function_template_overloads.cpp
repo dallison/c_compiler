@@ -92,5 +92,5 @@ int main(void) {
          explicit_template_select + concrete_echo + template_echo +
          explicit_template_echo + sfinae_fallback + sfinae_undeduced_fallback +
          sfinae_member_type_fallback + sfinae_member_type_template.value +
-         specialized_template - 3370;
+         specialized_template - (3338 + 4 * sizeof(void*));
 }

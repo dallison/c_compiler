@@ -26,8 +26,7 @@
 #define STATIC
 #endif
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__arm__) || \
-    defined(__p_code__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start

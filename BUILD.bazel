@@ -676,6 +676,7 @@ cc_library(
     srcs = [
         "arm_interpreter/arm_interpreter.c",
         "arm_interpreter/arm_debugger.c",
+        "arm_interpreter/arm_process.c",
     ],
     hdrs = glob([
         "arm_interpreter/*.h",
@@ -1593,6 +1594,7 @@ genrule(
         "libc/include/**/*.h",
         "arm support/*.s",
     ]) + [
+        "libc/guest_heap.c",
         ":davecc",
         ":archivist",
     ],
@@ -1610,7 +1612,10 @@ archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "arm support/cxx_guard.s"
   "arm support/eh_transfer.s"
+  "arm support/longjmp.s"
+  "arm support/setjmp.s"
   "arm support/syscall.s"
 )
 
@@ -1690,6 +1695,8 @@ libc_srcs=(
   "libc/strtoul.c"
   "libc/strtoull.c"
   "libc/syscall.c"
+  "libc/threads.c"
+  "libc/guest_heap.c"
   "libc/ungetc.c"
   "libc/acos.c"
   "libc/asin.c"
@@ -1764,6 +1771,7 @@ LIBC_TEST_DATA = LIBC_SRCS + [
     "libc/guest_heap.c",
 ] + glob([
     "aarch64 support/*.s",
+    "arm support/*.s",
     "libc/include/**/*.h",
     "libc/tests/**",
     "x86_64 support/*.s",
@@ -1828,6 +1836,37 @@ sh_test(
         ":aarch64",
         ":davecc",
         ":libc_aarch64",
+    ],
+)
+
+sh_test(
+    name = "libc_arm_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "arm",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "libc_arm_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "all",
+        "$(rootpath :davecc)",
+        "arm",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":arm",
+        ":davecc",
+        ":libc_arm",
     ],
 )
 

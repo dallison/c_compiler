@@ -283,6 +283,13 @@ static int StackFrameSize(ARMEmitter* emitter) {
   stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 4;
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
+  if (emitter->g->struct_return_reg >= 0 &&
+      emitter->g->exception_ranges.length > 0) {
+    // Keep a stable home for the hidden result pointer. Exception landing pads
+    // cannot recover it from the prologue's callee-save slot, which contains
+    // the caller's old value of the reserved register.
+    stack_frame_size += 8;
+  }
   
   stack_frame_size = (stack_frame_size + 7) & ~7;  // Aligned to 8 bytes.
 
@@ -409,6 +416,15 @@ static int CombinedSavedIntArgCount(ARMEmitter* emitter) {
     }
   }
   return count;
+}
+
+static int StructReturnPhysicalRegister(ARMEmitter* emitter) {
+  if (emitter->g->struct_return_reg < 0) {
+    return -1;
+  }
+  bool is_leaf = emitter->g->base.num_calls == 0 && compiler->optimize;
+  return (is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR : ARM_FIRST_INT_REG_VAR) +
+         emitter->g->struct_return_reg;
 }
 
 static bool IsCombinedSavedIntArg(SavedArgumentRegister* saved, int count) {
@@ -696,6 +712,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
             offset);
     BitSetIteratorNext(&it);
   }
+  if (StructReturnPhysicalRegister(emitter) >= 0 &&
+      emitter->g->exception_ranges.length > 0) {
+    assert(saved_reg_offset >= 0);
+    fprintf(fp, "\tstr r0, [sp, #%d]\t// hidden result pointer\n",
+            saved_reg_offset);
+  }
 
   if (!is_leaf) {
     fprintf(fp, "\t// End of stack frame\n");
@@ -865,6 +887,14 @@ static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
             offset);
     offset -= 8;
     BitSetIteratorNext(&it);
+  }
+  int struct_return_phys = StructReturnPhysicalRegister(emitter);
+  if (struct_return_phys >= 0) {
+    assert(offset >= 0);
+    fprintf(fp, "\tldr %s, [sp, #%d]\t// hidden result pointer\n",
+            ARMRegisterNameFromNum(struct_return_phys, kARMRegTypeInt,
+                                   kSize32Bit, buf, sizeof(buf)),
+            offset);
   }
 }
 
@@ -1104,6 +1134,202 @@ static void PrintExtendedAsm(FILE* fp, ARMAsmInstruction* inst,
   }
 }
 
+static int AtomicSizeLog2(TargetInstruction* inst) {
+  return (inst->flags & ARM_ATOMIC_SIZE_MASK) >> ARM_ATOMIC_SIZE_SHIFT;
+}
+
+static int AtomicOrder(TargetInstruction* inst) {
+  return (inst->flags & ARM_ATOMIC_ORDER_MASK) >> ARM_ATOMIC_ORDER_SHIFT;
+}
+
+static int AtomicFailureOrder(TargetInstruction* inst) {
+  return (int)(((uint32_t)inst->flags & ARM_ATOMIC_FAILURE_ORDER_MASK) >>
+               ARM_ATOMIC_FAILURE_ORDER_SHIFT);
+}
+
+static bool AtomicOrderHasAcquire(int order) {
+  return order == 1 || order == 2 || order == 4 || order == 5;
+}
+
+static bool AtomicOrderHasRelease(int order) {
+  return order == 3 || order == 4 || order == 5;
+}
+
+static const char* AtomicLoadMnemonic(int size, bool exclusive) {
+  if (exclusive) {
+    return size == 0 ? "ldrexb" : size == 1 ? "ldrexh" : "ldrex";
+  }
+  return size == 0 ? "ldrb" : size == 1 ? "ldrh" : "ldr";
+}
+
+static const char* AtomicStoreMnemonic(int size, bool exclusive) {
+  if (exclusive) {
+    return size == 0 ? "strexb" : size == 1 ? "strexh" : "strex";
+  }
+  return size == 0 ? "strb" : size == 1 ? "strh" : "str";
+}
+
+static const char* AtomicRegName(TargetInstruction* inst, char* buf,
+                                 size_t bufsize) {
+  return GetRegisterName(inst, kSize32Bit, buf, bufsize);
+}
+
+static const char* AtomicOperandRegName(TargetInstruction* inst, int operand,
+                                        char* buf, size_t bufsize) {
+  assert(inst->operand[operand] != NULL &&
+         inst->operand[operand]->reg != NULL);
+  return GetRegisterName(inst->operand[operand], kSize32Bit, buf, bufsize);
+}
+
+static void PrintAtomicInstruction(TargetInstruction* inst,
+                                   const char* func_name, FILE* fp) {
+  int size = AtomicSizeLog2(inst);
+  int order = AtomicOrder(inst);
+  int failure_order = AtomicFailureOrder(inst);
+  bool acquire = AtomicOrderHasAcquire(order);
+  bool release = AtomicOrderHasRelease(order);
+  char b0[16], b1[16], b2[16], b3[16];
+  const char* result =
+      inst->reg == NULL ? NULL : AtomicRegName(inst, b0, sizeof(b0));
+
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(atomic_load): {
+      const char* addr = AtomicOperandRegName(inst, 0, b1, sizeof(b1));
+      if (order == 5) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, false), result, addr);
+      if (acquire) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      return;
+    }
+    case ARM_OP(atomic_store): {
+      const char* value =
+          AtomicOperandRegName(inst, 0, b0, sizeof(b0));
+      const char* addr = AtomicOperandRegName(inst, 1, b1, sizeof(b1));
+      if (release) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicStoreMnemonic(size, false), value, addr);
+      if (order == 5) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      return;
+    }
+    case ARM_OP(atomic_fence):
+      if (order != 0) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      return;
+    case ARM_OP(atomic_fetch_add):
+    case ARM_OP(atomic_fetch_sub):
+    case ARM_OP(atomic_add_fetch):
+    case ARM_OP(atomic_sub_fetch): {
+      bool add = inst->opcode == (TargetOpcode)ARM_OP(atomic_fetch_add) ||
+                 inst->opcode == (TargetOpcode)ARM_OP(atomic_add_fetch);
+      bool return_new =
+          inst->opcode == (TargetOpcode)ARM_OP(atomic_add_fetch) ||
+          inst->opcode == (TargetOpcode)ARM_OP(atomic_sub_fetch);
+      const char* addr = AtomicOperandRegName(inst, 0, b1, sizeof(b1));
+      const char* value =
+          AtomicOperandRegName(inst, 1, b2, sizeof(b2));
+      const char* loaded = return_new ? "r9" : result;
+      const char* updated = return_new ? result : "r9";
+      if (release) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, true), loaded, addr);
+      fprintf(fp, "\t%s %s, %s, %s\n", add ? "add" : "sub", updated,
+              loaded, value);
+      fprintf(fp, "\t%s r12, %s, [%s]\n",
+              AtomicStoreMnemonic(size, true), updated, addr);
+      fprintf(fp, "\tcmp r12, #0\n");
+      fprintf(fp, "\tbne .L%s_atomic_retry_%d\n", func_name, inst->id);
+      if (acquire) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      return;
+    }
+    case ARM_OP(atomic_compare_exchange_bool):
+    case ARM_OP(atomic_compare_exchange_val):
+    case ARM_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          inst->opcode == (TargetOpcode)ARM_OP(atomic_compare_exchange_n);
+      bool returns_bool =
+          inst->opcode != (TargetOpcode)ARM_OP(atomic_compare_exchange_val);
+      const char* addr = AtomicOperandRegName(inst, 0, b1, sizeof(b1));
+      const char* expected;
+      if (expected_is_pointer) {
+        const char* expected_addr =
+            AtomicOperandRegName(inst, 1, b2, sizeof(b2));
+        expected = "r9";
+        fprintf(fp, "\t%s r9, [%s]\n",
+                AtomicLoadMnemonic(size, false), expected_addr);
+      } else {
+        expected = AtomicOperandRegName(inst, 1, b2, sizeof(b2));
+        if (size == 0) {
+          fprintf(fp, "\tuxtb r9, %s\n", expected);
+          expected = "r9";
+        } else if (size == 1) {
+          fprintf(fp, "\tuxth r9, %s\n", expected);
+          expected = "r9";
+        }
+      }
+      const char* desired =
+          AtomicOperandRegName(inst, 2, b3, sizeof(b3));
+      if (release) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, true), result, addr);
+      fprintf(fp, "\tcmp %s, %s\n", result, expected);
+      fprintf(fp, "\tbne .L%s_atomic_mismatch_%d\n", func_name, inst->id);
+      fprintf(fp, "\t%s r12, %s, [%s]\n",
+              AtomicStoreMnemonic(size, true), desired, addr);
+      fprintf(fp, "\tcmp r12, #0\n");
+      if ((inst->flags & ARM_ATOMIC_WEAK) != 0) {
+        fprintf(fp, "\tbne .L%s_atomic_spurious_%d\n", func_name, inst->id);
+      } else {
+        fprintf(fp, "\tbne .L%s_atomic_retry_%d\n", func_name, inst->id);
+      }
+      if (acquire) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tmov %s, #1\n", result);
+      }
+      fprintf(fp, "\tb .L%s_atomic_done_%d\n", func_name, inst->id);
+      fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
+      fprintf(fp, "\tclrex\n");
+      if ((inst->flags & ARM_ATOMIC_WEAK) != 0) {
+        fprintf(fp, ".L%s_atomic_spurious_%d:\n", func_name, inst->id);
+      }
+      if (AtomicOrderHasAcquire(failure_order)) {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      if (expected_is_pointer) {
+        const char* expected_addr =
+            AtomicOperandRegName(inst, 1, b2, sizeof(b2));
+        fprintf(fp, "\t%s %s, [%s]\n",
+                AtomicStoreMnemonic(size, false), result, expected_addr);
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tmov %s, #0\n", result);
+      }
+      fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+      return;
+    }
+    default:
+      assert(false);
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1157,6 +1383,33 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
   
   // Special case instructions.
   switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(tp):
+      fprintf(fp, "\tmrc p15, 0, %s, c13, c0, 3\n",
+              GetRegisterName(inst, kSize32Bit, buf1, sizeof(buf1)));
+      return;
+    case ARM_OP(tprel): {
+      assert(inst->operand[0] != NULL &&
+             inst->operand[0]->opcode == (TargetOpcode)ARM_OP(symbol));
+      TargetSymbol* symbol = (TargetSymbol*)inst->operand[0];
+      char symbol_buf[256];
+      fprintf(fp, "\ttprel %s, %s\n",
+              GetRegisterName(inst, kSize32Bit, buf1, sizeof(buf1)),
+              TargetSymbolName(symbol->symbol, symbol_buf,
+                               sizeof(symbol_buf)));
+      return;
+    }
+    case ARM_OP(atomic_load):
+    case ARM_OP(atomic_store):
+    case ARM_OP(atomic_fetch_add):
+    case ARM_OP(atomic_fetch_sub):
+    case ARM_OP(atomic_add_fetch):
+    case ARM_OP(atomic_sub_fetch):
+    case ARM_OP(atomic_compare_exchange_bool):
+    case ARM_OP(atomic_compare_exchange_val):
+    case ARM_OP(atomic_compare_exchange_n):
+    case ARM_OP(atomic_fence):
+      PrintAtomicInstruction(inst, func_name, fp);
+      return;
     case ARM_OP(mv):
       // Don't emit mv x, x.
       if (inst->operand[0]->reg == inst->reg) {
@@ -1727,10 +1980,14 @@ static void ARMPrintExceptionTable(ARMEmitter* emitter, FILE* fp,
     PrintExceptionTableLabel(fp, func_name, range->try_end);
     fprintf(fp, "\n\t.4byte ");
     PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    fprintf(fp, "\n\t.4byte %s\n",
-            range->catch_typeinfo != NULL
-                ? range->catch_typeinfo->symbol_name.value
-                : "0");
+    if (range->is_cleanup) {
+      fprintf(fp, "\n\t.4byte %d\n", DAVECC_EH_CLEANUP_MARKER);
+    } else if (range->catch_typeinfo != NULL) {
+      fprintf(fp, "\n\t.4byte %s\n",
+              range->catch_typeinfo->symbol_name.value);
+    } else {
+      fprintf(fp, "\n\t.4byte 0\n");
+    }
   }
   fprintf(fp, "\t.text\n\n");
 }
@@ -1756,5 +2013,36 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
           func_name);
   ARMPrintTypeInfoRecords(emitter, fp);
   ARMPrintExceptionTable(emitter, fp, func_name);
+}
+
+void ARMPrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n", thunk_name);
+    fprintf(fp, "%s:\n", thunk_name);
+    if (thunk->this_adjustment > 0) {
+      fprintf(fp, "\tadd r0, r0, #%d\n", thunk->this_adjustment);
+    } else if (thunk->this_adjustment < 0) {
+      fprintf(fp, "\tsub r0, r0, #%d\n", -thunk->this_adjustment);
+    }
+    fprintf(fp, "\tb %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
 }
 

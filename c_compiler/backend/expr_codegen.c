@@ -2004,9 +2004,10 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   return call;
 }
 
-static Symbol* GetDaveCCThrowFunction(SourceLocation location) {
+static Symbol* GetDaveCCThrowFunction(const char* function_name,
+                                      SourceLocation location) {
   String name;
-  StringInit(&name, "__davecc_throw");
+  StringInit(&name, function_name);
   Symbol* symbol = FindGlobalSymbol(&name);
   StringDestruct(&name);
   if (symbol != NULL) {
@@ -2016,7 +2017,7 @@ static Symbol* GetDaveCCThrowFunction(SourceLocation location) {
 
   TypeRecord* func_type = NewFunctionTypeRecord();
   TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
-  symbol = NewSymbol("__davecc_throw", func_type, STO(extern));
+  symbol = NewSymbol(function_name, func_type, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   symbol->flags.noreturn = true;
@@ -2087,7 +2088,8 @@ static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
 
 static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
   if (gen->for_constant_evaluation) {
-    Symbol* throw_symbol = GetDaveCCThrowFunction(node->base.location);
+    Symbol* throw_symbol =
+        GetDaveCCThrowFunction("__davecc_throw", node->base.location);
     IRNode* func = GeneratorGetVariable(gen, throw_symbol);
     IRNode* call = NewIR1(IR_OP(calla), func);
     return IRSetType(GeneratorEmit(gen, call),
@@ -2106,7 +2108,17 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
     }
   }
 
-  Symbol* throw_symbol = GetDaveCCThrowFunction(node->base.location);
+  const char* throw_function = "__davecc_throw";
+  if (node->expr != NULL && TypeIsFloatingPoint(node->expr->type)) {
+    throw_function = node->expr->type->size == 4 ? "__davecc_throw_f4"
+                                                 : "__davecc_throw_f8";
+  } else if (node->expr != NULL && node->expr->type->size > 4 &&
+             compiler->pointer_size < node->expr->type->size &&
+             !TypeIsStructOrUnion(node->expr->type)) {
+    throw_function = "__davecc_throw_i8";
+  }
+  Symbol* throw_symbol =
+      GetDaveCCThrowFunction(throw_function, node->base.location);
   IRNode* func = GeneratorGetVariable(gen, throw_symbol);
   IRNode* call = NewIR1(IR_OP(calla), func);
   Vector args = {0};

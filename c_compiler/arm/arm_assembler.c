@@ -660,7 +660,7 @@ static void Assemble_asr(ARMAssembler* assembler) { AssembleShift(assembler, 2);
 static void Assemble_ror(ARMAssembler* assembler) { AssembleShift(assembler, 3); }
 
 static void AssembleLoadStore(ARMAssembler* assembler, bool load, bool byte,
-                              bool half) {
+                              bool half, bool sign) {
   ARMReg rd;
   ARMOp addr;
   if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
@@ -686,15 +686,17 @@ static void AssembleLoadStore(ARMAssembler* assembler, bool load, bool byte,
   int u = off >= 0 ? 1 : 0;
   uint32_t mag = (uint32_t)(off >= 0 ? off : -off);
   uint32_t inst;
-  if (half) {
-    // Halfword transfer: cond 000 P U 1 W L Rn Rt immH 1011 immL.
+  if (half || sign) {
+    // Halfword/signed transfer: bits 7:4 are 1011 (H), 1101 (SB), or 1111
+    // (SH).
     if (mag > 0xff) {
       AssemblerError(&ASM, "Halfword offset out of range");
       return;
     }
+    uint32_t op = sign ? (half ? 0xfu : 0xdu) : 0xbu;
     inst = ARM_COND(ARM_COND_AL) | (p << 24) | (u << 23) | (1 << 22) |
            (w << 21) | ((load ? 1 : 0) << 20) | (addr.base << 16) |
-           (rd.num << 12) | ((mag & 0xf0) << 4) | (0xb << 4) | (mag & 0xf);
+           (rd.num << 12) | ((mag & 0xf0) << 4) | (op << 4) | (mag & 0xf);
   } else {
     // Word/byte single data transfer: cond 01 0 P U B W L Rn Rt imm12.
     if (mag > 0xfff) {
@@ -708,12 +710,140 @@ static void AssembleLoadStore(ARMAssembler* assembler, bool load, bool byte,
   EmitInst(assembler, inst);
 }
 
-static void Assemble_ldr(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, false); }
-static void Assemble_str(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, false, false); }
-static void Assemble_ldrb(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, true, false); }
-static void Assemble_strb(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, true, false); }
-static void Assemble_ldrh(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, true); }
-static void Assemble_strh(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, false, true); }
+static void Assemble_ldr(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, false, false); }
+static void Assemble_str(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, false, false, false); }
+static void Assemble_ldrb(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, true, false, false); }
+static void Assemble_strb(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, true, false, false); }
+static void Assemble_ldrh(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, true, false); }
+static void Assemble_strh(ARMAssembler* assembler) { AssembleLoadStore(assembler, false, false, true, false); }
+static void Assemble_ldrsb(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, false, true); }
+static void Assemble_ldrsh(ARMAssembler* assembler) { AssembleLoadStore(assembler, true, false, true, true); }
+
+static void AssembleLoadExclusive(ARMAssembler* assembler, int size) {
+  ARMReg rt;
+  ARMOp addr;
+  if (!ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &addr) || addr.kind != kARMOpMem ||
+      addr.index >= 0 || addr.imm != 0 || addr.writeback) {
+    AssemblerError(&ASM, "Expected register and [base] operands");
+    return;
+  }
+  uint32_t base =
+      size == 0 ? 0xe1d00f9fu : size == 1 ? 0xe1f00f9fu : 0xe1900f9fu;
+  EmitInst(assembler, base | ((uint32_t)addr.base << 16) |
+                          ((uint32_t)rt.num << 12));
+}
+
+static void AssembleStoreExclusive(ARMAssembler* assembler, int size) {
+  ARMReg rd;
+  ARMReg rt;
+  ARMOp addr;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &addr) || addr.kind != kARMOpMem ||
+      addr.index >= 0 || addr.imm != 0 || addr.writeback) {
+    AssemblerError(&ASM, "Expected status, value and [base] operands");
+    return;
+  }
+  uint32_t base =
+      size == 0 ? 0xe1c00f90u : size == 1 ? 0xe1e00f90u : 0xe1800f90u;
+  EmitInst(assembler, base | ((uint32_t)addr.base << 16) |
+                          ((uint32_t)rd.num << 12) | (uint32_t)rt.num);
+}
+
+static void Assemble_ldrex(ARMAssembler* assembler) {
+  AssembleLoadExclusive(assembler, 2);
+}
+static void Assemble_ldrexb(ARMAssembler* assembler) {
+  AssembleLoadExclusive(assembler, 0);
+}
+static void Assemble_ldrexh(ARMAssembler* assembler) {
+  AssembleLoadExclusive(assembler, 1);
+}
+static void Assemble_strex(ARMAssembler* assembler) {
+  AssembleStoreExclusive(assembler, 2);
+}
+static void Assemble_strexb(ARMAssembler* assembler) {
+  AssembleStoreExclusive(assembler, 0);
+}
+static void Assemble_strexh(ARMAssembler* assembler) {
+  AssembleStoreExclusive(assembler, 1);
+}
+
+static void Assemble_dmb(ARMAssembler* assembler) {
+  int option = 0xf;
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    if (strcmp(ASM.lex.spelling.value, "ish") == 0) {
+      option = 0xb;
+    } else if (strcmp(ASM.lex.spelling.value, "ishst") == 0) {
+      option = 0xa;
+    } else if (strcmp(ASM.lex.spelling.value, "ishld") == 0) {
+      option = 0x9;
+    } else if (strcmp(ASM.lex.spelling.value, "sy") != 0) {
+      AssemblerError(&ASM, "Unknown dmb option");
+      return;
+    }
+    LexNextToken(&ASM.lex);
+  }
+  EmitInst(assembler, 0xf57ff050u | (uint32_t)option);
+}
+
+static void Assemble_clrex(ARMAssembler* assembler) {
+  EmitInst(assembler, 0xf57ff01fu);
+}
+
+static bool ParseNamedOperand(ARMAssembler* assembler, const char* name) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier)) ||
+      strcmp(ASM.lex.spelling.value, name) != 0) {
+    AssemblerError(&ASM, "Expected %s", name);
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  return true;
+}
+
+static void Assemble_mrc(ARMAssembler* assembler) {
+  if (!ParseNamedOperand(assembler, "p15") || !ExpectComma(assembler)) {
+    return;
+  }
+  int64_t opc1 = AssemblerEvaluateExpression(&ASM);
+  ARMReg rt;
+  if (opc1 != 0 || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
+      !ParseNamedOperand(assembler, "c13") || !ExpectComma(assembler) ||
+      !ParseNamedOperand(assembler, "c0") || !ExpectComma(assembler)) {
+    return;
+  }
+  int64_t opc2 = AssemblerEvaluateExpression(&ASM);
+  if (opc2 != 3) {
+    AssemblerError(&ASM, "Only mrc p15, 0, Rt, c13, c0, 3 is supported");
+    return;
+  }
+  EmitInst(assembler, 0xee1d0f70u | ((uint32_t)rt.num << 12));
+}
+
+static void Assemble_tprel(ARMAssembler* assembler) {
+  ARMReg rd;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected destination register and TLS symbol");
+    return;
+  }
+  String symbol;
+  StringInit(&symbol, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+
+  // Load a standard R_ARM_TLS_LE32-relocated literal and branch over it.
+  EmitInst(assembler, 0xe59f0000u | ((uint32_t)rd.num << 12));
+  EmitInst(assembler, 0xea000000u);
+  int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
+  AssemblerRelocation* reloc =
+      NewAssemblerRelocation(GetOrCreateSymbol(assembler, symbol.value),
+                             R_ARM_TLS_LE32, ASM.current_section, here, 0);
+  AssemblerAddRelocation(&ASM, reloc);
+  EmitInst(assembler, 0);
+  StringDestruct(&symbol);
+}
 
 static void AssembleBranch(ARMAssembler* assembler, int cond, bool link) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
@@ -1217,6 +1347,18 @@ DECLARE_INST_FUNC(ldrb);
 DECLARE_INST_FUNC(strb);
 DECLARE_INST_FUNC(ldrh);
 DECLARE_INST_FUNC(strh);
+DECLARE_INST_FUNC(ldrsb);
+DECLARE_INST_FUNC(ldrsh);
+DECLARE_INST_FUNC(ldrex);
+DECLARE_INST_FUNC(ldrexb);
+DECLARE_INST_FUNC(ldrexh);
+DECLARE_INST_FUNC(strex);
+DECLARE_INST_FUNC(strexb);
+DECLARE_INST_FUNC(strexh);
+DECLARE_INST_FUNC(dmb);
+DECLARE_INST_FUNC(clrex);
+DECLARE_INST_FUNC(mrc);
+DECLARE_INST_FUNC(tprel);
 DECLARE_INST_FUNC(b);
 DECLARE_INST_FUNC(bl);
 DECLARE_INST_FUNC(beq);
@@ -1333,6 +1475,18 @@ static void InitializeInstructions(Map* instructions) {
   INST(strb);
   INST(ldrh);
   INST(strh);
+  INST(ldrsb);
+  INST(ldrsh);
+  INST(ldrex);
+  INST(ldrexb);
+  INST(ldrexh);
+  INST(strex);
+  INST(strexb);
+  INST(strexh);
+  INST(dmb);
+  INST(clrex);
+  INST(mrc);
+  INST(tprel);
   INST(b);
   INST(bl);
   INST(beq);

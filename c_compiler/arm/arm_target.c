@@ -103,7 +103,7 @@ CompilerTarget* NewARMTarget() {
   target->emit_data_start = EmitDataStart;
   target->emit_literals_start = EmitStringLiteralSection;
   target->emit_literal = EmitLiteral;
-  target->emit_cxx_thunks = NULL;
+  target->emit_cxx_thunks = ARMPrintCXXAdjustorThunks;
   target->emit_debug = EmitDebug;
   target->emit_tdata_start = EmitTlsDataStart;
   target->emit_tbss_start = EmitTlsBSSStart;

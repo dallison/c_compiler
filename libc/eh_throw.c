@@ -35,8 +35,24 @@ typedef struct CXXTypeInfo {
   long object_is_class;
 } CXXTypeInfo;
 
-static intptr_t current_exception_object;
-static const CXXTypeInfo* current_exception_typeinfo;
+#if defined(__arm__)
+#define DAVECC_EH_THREAD_LOCAL __thread
+#else
+#define DAVECC_EH_THREAD_LOCAL
+#endif
+
+static DAVECC_EH_THREAD_LOCAL intptr_t current_exception_object;
+static DAVECC_EH_THREAD_LOCAL const CXXTypeInfo* current_exception_typeinfo;
+typedef enum {
+  kExceptionDirect,
+  kExceptionI8,
+  kExceptionF4,
+  kExceptionF8,
+} ExceptionValueKind;
+static DAVECC_EH_THREAD_LOCAL ExceptionValueKind current_exception_kind;
+static DAVECC_EH_THREAD_LOCAL long long current_exception_i8;
+static DAVECC_EH_THREAD_LOCAL float current_exception_f4;
+static DAVECC_EH_THREAD_LOCAL double current_exception_f8;
 
 static intptr_t CopyExceptionObject(intptr_t exception_object,
                                     const CXXTypeInfo* typeinfo) {
@@ -240,7 +256,18 @@ int __davecc_current_exception_i4(void) {
 }
 
 long long __davecc_current_exception_i8(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return current_exception_i8;
+  }
   return (long long)current_exception_object;
+}
+
+float __davecc_current_exception_f4(void) {
+  return current_exception_f4;
+}
+
+double __davecc_current_exception_f8(void) {
+  return current_exception_f8;
 }
 
 void* __davecc_current_exception_ptr(void) {
@@ -248,6 +275,15 @@ void* __davecc_current_exception_ptr(void) {
 }
 
 void* __davecc_current_exception_addr(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return &current_exception_i8;
+  }
+  if (current_exception_kind == kExceptionF4) {
+    return &current_exception_f4;
+  }
+  if (current_exception_kind == kExceptionF8) {
+    return &current_exception_f8;
+  }
   return &current_exception_object;
 }
 
@@ -263,6 +299,15 @@ intptr_t __davecc_current_exception_int(void) {
 // eh_terminate.c so it is available on every backend, not just those with the
 // full exception-unwinding runtime below.
 
+static void UnwindCurrentException(void) {
+  DaveEHFrameRegisters regs;
+  __davecc_capture_regs(&regs);
+  // The captured frame is the throw helper's own (no ranges); UnwindStep walks
+  // out to the throwing frame and beyond, running cleanups and seeking a
+  // handler.
+  UnwindStep(regs.pc, regs.rsp, regs.rbp, regs.pc, regs.pc);
+}
+
 void __davecc_throw(intptr_t exception_object, const CXXTypeInfo* typeinfo) {
   // A null object and null typeinfo encode `throw;`: preserve the exception
   // currently being handled and resume unwinding from this frame.
@@ -272,10 +317,29 @@ void __davecc_throw(intptr_t exception_object, const CXXTypeInfo* typeinfo) {
     // stack storage.
     current_exception_object = CopyExceptionObject(exception_object, typeinfo);
     current_exception_typeinfo = typeinfo;
+    current_exception_kind = kExceptionDirect;
   }
-  DaveEHFrameRegisters regs;
-  __davecc_capture_regs(&regs);
-  // The captured frame is __davecc_throw's own (no ranges); UnwindStep walks out
-  // to the throwing frame and beyond, running cleanups and seeking a handler.
-  UnwindStep(regs.pc, regs.rsp, regs.rbp, regs.pc, regs.pc);
+  UnwindCurrentException();
+}
+
+void __davecc_throw_i8(long long exception_object,
+                       const CXXTypeInfo* typeinfo) {
+  current_exception_i8 = exception_object;
+  current_exception_typeinfo = typeinfo;
+  current_exception_kind = kExceptionI8;
+  UnwindCurrentException();
+}
+
+void __davecc_throw_f4(float exception_object, const CXXTypeInfo* typeinfo) {
+  current_exception_f4 = exception_object;
+  current_exception_typeinfo = typeinfo;
+  current_exception_kind = kExceptionF4;
+  UnwindCurrentException();
+}
+
+void __davecc_throw_f8(double exception_object, const CXXTypeInfo* typeinfo) {
+  current_exception_f8 = exception_object;
+  current_exception_typeinfo = typeinfo;
+  current_exception_kind = kExceptionF8;
+  UnwindCurrentException();
 }

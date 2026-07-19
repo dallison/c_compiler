@@ -24,7 +24,10 @@ bool unsigned_cast_compares_as_unsigned(void) {
 
 int main(void) {
   SizeProvider<int> provider;
-  unsigned long expected = 4611686018427387903UL;
+  unsigned long expected =
+      sizeof(unsigned long) == 8
+          ? static_cast<unsigned long>(4611686018427387903ULL)
+          : 1073741823UL;
   if (provider.max_size() != expected) {
     return 1;
   }

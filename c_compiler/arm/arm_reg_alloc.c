@@ -314,7 +314,14 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j += step) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
-          assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
+              owner->opcode == (TargetOpcode)ARM_OP(spill) ||
+              owner->opcode == (TargetOpcode)ARM_OP(reload)) {
+            // The value is already in its spill slot; stale ownership must
+            // not cause the same instruction to be spilled a second time.
+            regs[j].base.owner = NULL;
+            continue;
+          }
           // A fixed-register holder (an incoming argument register r0..r3, the
           // call-result register, etc.) is pinned to a physical register and is
           // typically defined at function entry, before the prologue establishes
@@ -352,8 +359,7 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
     victim = var_victim;
   }
   if (victim == NULL) {
-    DumpRegisters(allocator);
-    abort();
+    return NULL;
   }
   return victim;
 }
@@ -415,9 +421,16 @@ static ARMRegister* AllocateRegisterWithType(ARMRegisterAllocator* allocator,
 
   if (reg == NULL) {
     TargetInstruction* victim = FindSpillVictim(allocator, type);
-    reg = SpillInstruction(allocator, victim);
+    // FindSpillVictim may have released a stale owner from an earlier spill.
+    reg = FindFreeRegister(allocator, type, can_use_temp);
+    if (reg == NULL && victim != NULL) {
+      reg = SpillInstruction(allocator, victim);
+    }
   }
-  assert(reg != NULL);
+  if (reg == NULL) {
+    DumpRegisters(allocator);
+    abort();
+  }
 
   if (reg->base.reserved) {
     return reg;
@@ -498,7 +511,21 @@ static bool CanUseTemp(ARMRegisterAllocator* allocator, TargetInstruction* inst)
 static void AllocateVariableRegister(ARMRegisterAllocator* allocator,
                                      TargetInstruction* inst) {
   ARMRegisterType reg_type = RegisterTypeFromInstruction(inst);
-  
+  for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+    RegisterVariable* var = allocator->g->var_regs.value.p[i];
+    if (var->inst == inst && !var->is_fp &&
+        var->varnum == allocator->g->struct_return_reg) {
+      bool is_leaf =
+          allocator->g->base.num_calls == 0 && compiler->optimize;
+      ARMRegister* reg =
+          &allocator->int_regs[(is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR
+                                       : ARM_FIRST_INT_REG_VAR) +
+                               allocator->g->struct_return_reg];
+      AssignRegister(reg, inst);
+      return;
+    }
+  }
+
   ARMRegister* reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                  reg_type, CanUseTemp(allocator, inst));
   AssignRegister(reg, inst);
@@ -648,6 +675,24 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
 
   ARMRegister* reg;
 
+  if (inst->dest == NULL &&
+      (opcode == ARM_OP(atomic_load) ||
+       opcode == ARM_OP(atomic_fetch_add) ||
+       opcode == ARM_OP(atomic_fetch_sub) ||
+       opcode == ARM_OP(atomic_add_fetch) ||
+       opcode == ARM_OP(atomic_sub_fetch) ||
+       opcode == ARM_OP(atomic_compare_exchange_bool) ||
+       opcode == ARM_OP(atomic_compare_exchange_val) ||
+       opcode == ARM_OP(atomic_compare_exchange_n))) {
+    reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                   kARMRegTypeInt,
+                                   CanUseTemp(allocator, inst));
+    AssignRegister(reg, inst);
+    FreeRegisters(allocator, inst);
+    inst->flags |= TARGET_INST_PROCESSED;
+    return;
+  }
+
   if (inst->dest != NULL) {
     if (inst->dest->reg == NULL) {
       if (ARMIsVarRegister(inst->dest)) {
@@ -717,6 +762,8 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     case   ARM_OP(al):
     case   ARM_OP(cmp):
     case   ARM_OP(fcmp):
+    case ARM_OP(atomic_store):
+    case ARM_OP(atomic_fence):
     case   ARM_OP(oplsl):
       // These instructions do not have registers allocated to them.
       return;
@@ -890,16 +937,50 @@ static void ProcessBasicBlock(ARMRegisterAllocator* allocator,
 }
 
 
-// Build the preserved_instructions set, instructions that need their
-// register to be preserved across calls.  If the block contains a call
-// all outputs need to be preserved.
+static bool IsCallInstruction(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)ARM_OP(bl) ||
+         inst->opcode == (TargetOpcode)ARM_OP(blr);
+}
+
+static bool IsUser(TargetInstruction* inst, TargetInstruction* candidate) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (candidate->operand[i] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Build the preserved_instructions set, instructions that need a callee-saved
+// register.  Block outputs must survive every call in the block.  Values used
+// later in the same block must also be preserved when a call lies between
+// their definition and use.
 static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   ARMRegisterAllocator* allocator = data;
-  if (!block->contains_call) {
-    return;
+  if (block->contains_call) {
+    BitSetUnionInPlace(&allocator->preserved_instructions,
+                       &block->output_ids);
   }
-  // Preserve all outputs.
-  BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
+
+  for (TargetInstruction* inst = block->code;
+       inst != NULL && inst != block->end_code; inst = TargetNext(inst)) {
+    if ((inst->flags & kARMIndirectCallTarget) != 0) {
+      BitSetInsert(&allocator->preserved_instructions, inst->id);
+    }
+    bool crossed_call = false;
+    for (TargetInstruction* next = TargetNext(inst);
+         next != NULL; next = TargetNext(next)) {
+      if (IsCallInstruction(next)) {
+        crossed_call = true;
+      } else if (crossed_call && IsUser(inst, next)) {
+        BitSetInsert(&allocator->preserved_instructions, inst->id);
+        break;
+      }
+      if (next == block->end_code) {
+        break;
+      }
+    }
+  }
 }
 
 // Maximum number of register-argument moves we resolve in a single run.  ARM
@@ -1050,6 +1131,18 @@ static void ResolveArgumentMoves(ARMRegisterAllocator* allocator) {
 }
 
 void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
+  if (allocator->g->struct_return_reg >= 0) {
+    bool is_leaf = allocator->g->base.num_calls == 0 && compiler->optimize;
+    int reg_num = (is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR
+                           : ARM_FIRST_INT_REG_VAR) +
+                  allocator->g->struct_return_reg;
+    // The hidden result pointer is live for the whole function, including
+    // every loop back edge and early return.  It is represented by a fixed
+    // structreturn pseudo rather than ordinary SSA liveness, so reserve its
+    // physical register from temporary allocation.
+    allocator->int_regs[reg_num].base.reserved = true;
+  }
+
   TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
 

@@ -60,7 +60,8 @@ int main(void) {
   if (partial_pair.read() != 45) {
     return 4;
   }
-  if (sizeof(RuntimePartial<int*>) == sizeof(RuntimePartial<int>)) {
+  if (sizeof(RuntimePartial<int*>) != sizeof(int*) ||
+      sizeof(RuntimePartial<int>) != sizeof(int)) {
     return 5;
   }
   return 0;

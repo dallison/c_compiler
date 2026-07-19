@@ -60,6 +60,7 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(fp): return "fp";  // Frame pointer pseudo operation.
   case ARM_OP(sp): return "sp";  // Stack pointer pseudo operation.
   case ARM_OP(tp): return "tp";  // Thread pointer pseudo operation.
+  case ARM_OP(tprel): return "tprel";
 
   // Function result registers.
   case ARM_OP(resulti): return "resulti";
@@ -74,6 +75,19 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(named_label): return "named_label";
   case ARM_OP(ivarreg): return "ivarreg";
   case ARM_OP(fvarreg): return "fvarreg";
+  case ARM_OP(atomic_load): return "atomic_load";
+  case ARM_OP(atomic_store): return "atomic_store";
+  case ARM_OP(atomic_fetch_add): return "atomic_fetch_add";
+  case ARM_OP(atomic_fetch_sub): return "atomic_fetch_sub";
+  case ARM_OP(atomic_add_fetch): return "atomic_add_fetch";
+  case ARM_OP(atomic_sub_fetch): return "atomic_sub_fetch";
+  case ARM_OP(atomic_compare_exchange_bool):
+    return "atomic_compare_exchange_bool";
+  case ARM_OP(atomic_compare_exchange_val):
+    return "atomic_compare_exchange_val";
+  case ARM_OP(atomic_compare_exchange_n):
+    return "atomic_compare_exchange_n";
+  case ARM_OP(atomic_fence): return "atomic_fence";
   
   // End of TargetOpcode enumeration.
 
@@ -1408,13 +1422,9 @@ static TargetInstruction* EmitAddressOfSymbol(ARMGenerator* g,
 
 static TargetInstruction* LoadStaticVariableAddress(ARMGenerator* g,
                                                     IRNode* node) {
-  TargetInstruction* address = GetLoweredNode(node);
-  if ((ARMOpcode)address->opcode == ARM_OP(symbol) ||
-      (ARMOpcode)address->opcode == ARM_OP(literal) ||
-      TargetIsConst(address)) {
-    return EmitAddressOfSymbol(g, address, kSize32Bit);
-  }
-  return address;
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  return EmitAddressOfSymbol(g, symbol, kSize32Bit);
 }
 
 static struct {
@@ -1461,7 +1471,28 @@ static TargetInstruction* MoveImmediate(ARMGenerator* g, TargetInstruction* src,
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the instruction associated with the node if it's
 // already in a register.
+static TargetInstruction* GetTlsVariableAddress(ARMGenerator* g,
+                                                IRNode* node) {
+  if (compiler->tls_model != TLS(local_exec)) {
+    fprintf(stderr,
+            "error: ARM only supports the local-exec TLS model for static "
+            "executables\n");
+    abort();
+  }
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  TargetInstruction* offset =
+      Emit(g, NewInstruction1(ARM_OP(tprel), symbol));
+  TargetInstruction* thread_pointer = Emit(g, NewInstruction(ARM_OP(tp)));
+  return Emit(g, SetInstructionSize(
+                     NewInstruction2(ARM_OP(add), thread_pointer, offset),
+                     kSize32Bit));
+}
+
 static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
+  if (IRIsThreadVariable(node)) {
+    return GetTlsVariableAddress(g, node);
+  }
   if (IRIsConst(node)) {
     switch (node->opcode) {
       case IR_OP(const8):
@@ -1600,6 +1631,12 @@ static void MaterializeWide(ARMGenerator* g, IRNode* node,
   }
   *lo = GetLoweredNode(node);
   *hi = GetLoweredHi(node);
+  if (*hi == NULL && node->opcode == IR_OP(pusharg) &&
+      node->inputs.length > 0) {
+    IRNode* value = node->inputs.value.p[0];
+    *lo = GetLoweredNode(value);
+    *hi = GetLoweredHi(value);
+  }
   // A non-wide value used in a wide context (e.g. an int promoted implicitly)
   // has no high half; treat it as zero-extended.  This should be rare because
   // the front end inserts explicit extensions, but guard against a NULL.
@@ -2598,6 +2635,11 @@ static bool GetRegAndOffset(ARMGenerator* g, IRNode* addr_node,
                             TargetInstruction** offset,
                             TargetInstruction** scale) {
   *scale = NULL;
+  if (IRIsThreadVariable(addr_node)) {
+    *addr = GetTlsVariableAddress(g, addr_node);
+    *offset = ZeroImm(g);
+    return true;
+  }
   if (IRIsAutoVariable(addr_node)) {
     IRVariable* var = (IRVariable*)addr_node;
     if (TypeIsVLA(var->symbol->type)) {
@@ -2745,23 +2787,23 @@ static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
       opcode = ARM_OP(ldr);
       break;
     case IR_OP(load8):
-      opcode = ARM_OP(ldrb);
+      opcode = ARM_OP(ldrsb);
       break;
     case IR_OP(load64):
       opcode = ARM_OP(ldr);
       size = kSize64Bit;
       break;
     case IR_OP(load16):
-      opcode = ARM_OP(ldrh);
+      opcode = ARM_OP(ldrsh);
       break;
     case IR_OP(loadu32):
       opcode = ARM_OP(ldur);
       break;
     case IR_OP(loadu8):
-      opcode = ARM_OP(ldurb);
+      opcode = ARM_OP(ldrb);
       break;
     case IR_OP(loadu16):
-      opcode = ARM_OP(ldurh);
+      opcode = ARM_OP(ldrh);
       break;
     case IR_OP(loadf):
       opcode = ARM_OP(fldr);
@@ -4208,9 +4250,8 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // being a link-time symbol) stage the target into its own register *before*
   // the argument registers are set up below.  The blr below references this
   // staged value, so the register allocator keeps it live across the argument
-  // moves and won't reuse its register for an argument (e.g. r0).  Without
-  // this, the call target and the first argument can land in the same
-  // register and the argument move clobbers the target.
+  // moves.  Without this, the call target can land in r0-r3 and an argument
+  // move can clobber it.
   bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
       total_stack_size == 0 && g->base.stack_frame_size == 0;
   TargetInstruction* staged_target = NULL;
@@ -4221,15 +4262,11 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         (int)a->opcode == (int)ARM_OP(blr) ||
         (((int)a->opcode != (int)ARM_OP(symbol)) && ARMGeneratesOutput(a))) {
       // Indirect (or chained) call: the target value is computed into a
-      // register.  ARM has only r0-r3 for arguments, so the register allocator
-      // readily places the target in an argument register that the arg setup
-      // below then clobbers.  Copy the target into a fresh allocatable
-      // temporary and call through it.  Using a fresh temp (rather than the
-      // single dedicated scratch r9) lets the allocator preserve it across a
-      // nested call inside the argument list -- e.g. an indirect call whose
-      // argument is itself an indirect call would otherwise have both targets
-      // collide in r9.
+      // register. Give each nested target its own callee-saved temporary so
+      // argument setup cannot overwrite it and an inner indirect call cannot
+      // replace an outer call's target.
       TargetInstruction* tmp = Emit(g, NewInstruction(ARM_OP(tmp)));
+      tmp->flags |= kARMIndirectCallTarget;
       TargetInstruction* mv =
           Emit(g, CopyInstructionSize(NewInstruction1(ARM_OP(mov), a), 0));
       mv->dest = tmp;
@@ -4722,6 +4759,138 @@ static TargetInstruction* LowerStackPointerOps(ARMGenerator* g, IRNode* node) {
   }
 }
 
+static int AtomicIRConstant(IRNode* node) {
+  assert(node != NULL && IRIsConst(node));
+  return (int)((IRConstant*)node)->value.ivalue;
+}
+
+static int AtomicAccessLog2(TypeRecord* type) {
+  assert(type != NULL);
+  switch (type->size) {
+    case 1: return 0;
+    case 2: return 1;
+    case 4: return 2;
+    default:
+      assert(false && "ARM atomics require a 1/2/4-byte object");
+      return 2;
+  }
+}
+
+static TargetInstruction* AtomicAddress(ARMGenerator* g, IRNode* addr_node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  TargetInstruction* scale;
+  GetRegAndOffset(g, addr_node, &base, &offset, &scale);
+  int off = offset != NULL && TargetIsConst(offset) ? ARMIntValue(offset) : 0;
+  return off == 0 ? base : AddImmediate(g, base, off);
+}
+
+static void SetAtomicMetadata(TargetInstruction* inst, TypeRecord* value_type,
+                              int success_order, int failure_order,
+                              bool weak) {
+  inst->flags |= AtomicAccessLog2(value_type) << ARM_ATOMIC_SIZE_SHIFT;
+  inst->flags |= success_order << ARM_ATOMIC_ORDER_SHIFT;
+  inst->flags |=
+      (uint32_t)failure_order << ARM_ATOMIC_FAILURE_ORDER_SHIFT;
+  if (weak) {
+    inst->flags |= ARM_ATOMIC_WEAK;
+  }
+}
+
+static TargetInstruction* FinishAtomicValue(ARMGenerator* g, IRNode* node,
+                                             TargetInstruction* inst) {
+  CopyOrSetInstructionSize(node, inst);
+  Emit(g, inst);
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(g, inst, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, inst);
+}
+
+static TargetInstruction* LowerAtomic(ARMGenerator* g, IRNode* node) {
+  if (node->opcode == IR_OP(atomic_fence)) {
+    TargetInstruction* inst = NewInstruction(ARM_OP(atomic_fence));
+    SetAtomicMetadata(inst, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                      AtomicIRConstant(node->inputs.value.p[0]), 0, false);
+    Emit(g, inst);
+    return SetLoweredNode(node, inst);
+  }
+
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  assert(value_type != NULL);
+  TargetInstruction* addr = AtomicAddress(g, addr_node);
+  TargetInstruction* inst = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load):
+      inst = NewInstruction1(ARM_OP(atomic_load), addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[1]), 0, false);
+      return FinishAtomicValue(g, node, inst);
+
+    case IR_OP(atomic_store): {
+      TargetInstruction* value = Materialize(g, node->inputs.value.p[1]);
+      inst = NewInstruction2(ARM_OP(atomic_store), value, addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      Emit(g, inst);
+      return SetLoweredNode(node, inst);
+    }
+
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch): {
+      ARMOpcode opcode =
+          node->opcode == IR_OP(atomic_fetch_add)
+              ? ARM_OP(atomic_fetch_add)
+              : node->opcode == IR_OP(atomic_fetch_sub)
+                    ? ARM_OP(atomic_fetch_sub)
+                    : node->opcode == IR_OP(atomic_add_fetch)
+                          ? ARM_OP(atomic_add_fetch)
+                          : ARM_OP(atomic_sub_fetch);
+      TargetInstruction* value = Materialize(g, node->inputs.value.p[1]);
+      inst = NewInstruction2(opcode, addr, value);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      return FinishAtomicValue(g, node, inst);
+    }
+
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          node->opcode == IR_OP(atomic_compare_exchange_n);
+      ARMOpcode opcode =
+          expected_is_pointer
+              ? ARM_OP(atomic_compare_exchange_n)
+              : node->opcode == IR_OP(atomic_compare_exchange_bool)
+                    ? ARM_OP(atomic_compare_exchange_bool)
+                    : ARM_OP(atomic_compare_exchange_val);
+      TargetInstruction* expected =
+          Materialize(g, node->inputs.value.p[1]);
+      TargetInstruction* desired =
+          Materialize(g, node->inputs.value.p[2]);
+      inst = NewInstruction3(opcode, addr, expected, desired);
+      int order_index = expected_is_pointer ? 4 : 3;
+      bool weak =
+          expected_is_pointer &&
+          AtomicIRConstant(node->inputs.value.p[3]) != 0;
+      SetAtomicMetadata(
+          inst, value_type,
+          AtomicIRConstant(node->inputs.value.p[order_index]),
+          AtomicIRConstant(node->inputs.value.p[order_index + 1]), weak);
+      return FinishAtomicValue(g, node, inst);
+    }
+
+    default:
+      assert(false);
+      return NULL;
+  }
+}
+
 static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
                                       IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -4958,7 +5127,8 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       return LowerNamedLabel(g, node);
 
     case IR_OP(pusharg):
-      if (NodeIsWideInt(node)) {
+      if (NodeIsWideInt(node) ||
+          NodeIsWideInt(node->inputs.value.p[0])) {
         // Propagate both halves of a 64-bit integer argument so the call's
         // register-pair lowering (MaterializeWide) can find the high half.
         TargetInstruction* lo;
@@ -4989,7 +5159,14 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       return LowerMemcpy(g, node);
 
     case IR_OP(cast): {
-      TargetInstruction* inst = Materialize(g, node->inputs.value.p[0]);
+      TargetInstruction* inst;
+      if (NodeIsWideInt(node)) {
+        TargetInstruction* hi;
+        MaterializeWide(g, node->inputs.value.p[0], &inst, &hi);
+        SetLoweredHi(node, hi);
+      } else {
+        inst = Materialize(g, node->inputs.value.p[0]);
+      }
       // Honor a "-> $n" merge destination (the temp used to merge the arms of
       // && / || / ?:).  Without this, a cast appearing in one arm (e.g.
       // `cond ? NULL : (char*)s`) never writes the merge temp, so the consumer
@@ -5038,8 +5215,7 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(atomic_compare_exchange_val):
     case IR_OP(atomic_compare_exchange_n):
     case IR_OP(atomic_fence):
-      assert(false);
-      return NULL;
+      return LowerAtomic(g, node);
       
     case IR_OP(decsp):
     case IR_OP(savesp):
@@ -5308,6 +5484,23 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(ARMGenerator* g,
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
                                    Vector* args, int* var_offset) {
+  switch (entry->pooled->opcode) {
+    case IR_OP(argument):
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+    case IR_OP(staticvar):
+    case IR_OP(externvar): {
+      IRVariable* variable = (IRVariable*)entry->pooled;
+      if (variable->symbol != NULL && variable->symbol->type != NULL) {
+        TypeRecordCalculateSize(variable->symbol->type);
+        IRSetType(entry->pooled, variable->symbol->type);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
   // Variable length arrays are not given offsets until their block
   // is entered.
   if (TypeIsVLA(entry->pooled->type)) {
@@ -5622,6 +5815,7 @@ static void ResolveExceptionRanges(ARMGenerator* g, Generator* gen) {
     range->try_end = try_end;
     range->catch_label = catch_label;
     range->catch_typeinfo = ir_range->catch_typeinfo;
+    range->is_cleanup = ir_range->is_cleanup;
     VectorAppend(&g->exception_ranges, range);
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {

@@ -24,7 +24,8 @@ unsigned long coroutine_frame_storage[128];
 int coroutine_frame_storage_index;
 
 void* operator new(unsigned long size) {
-  int words = (int)((size + 7) / 8);
+  int words =
+      (int)((size + sizeof(unsigned long) - 1) / sizeof(unsigned long));
   void* result = &coroutine_frame_storage[coroutine_frame_storage_index];
   coroutine_frame_storage_index = coroutine_frame_storage_index + words;
   operator_new_count = operator_new_count + 1;

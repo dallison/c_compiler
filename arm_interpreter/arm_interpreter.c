@@ -4,6 +4,7 @@
 //
 
 #include "arm_interpreter.h"
+#include "arm_process.h"
 #include "elf.h"
 #include "loader_lifecycle.h"
 #include "loader_arch.h"
@@ -11,10 +12,12 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ARM_RESOLVER_LINKED 0x42000000u
@@ -90,11 +93,23 @@ static void* ResolveHostPtrExact(ARMInterpreter* interpreter, uint64_t addr,
                                  size_t size) {
   Loader* loader = interpreter->loader;
   if (interpreter->stack != NULL) {
-    uint64_t start = (uint64_t)(uintptr_t)interpreter->stack;
+    uint64_t start = interpreter->stack_guest_base;
     uint64_t end = start + ARM_STACK_SIZE;
     if (addr >= start && addr + size <= end) {
-      return (void*)(uintptr_t)addr;
+      return interpreter->stack + (addr - start);
     }
+  }
+  if (interpreter->tls_block != NULL && interpreter->tls_block_size > 0) {
+    uint64_t start = interpreter->tls_guest_base;
+    uint64_t end = start + interpreter->tls_block_size;
+    if (addr >= start && addr + size <= end) {
+      return (char*)interpreter->tls_block + (addr - start);
+    }
+  }
+  void* process_address =
+      ARMProcessResolveGuestAddress(interpreter->process, addr, size);
+  if (process_address != NULL) {
+    return process_address;
   }
   if (GuestAddressOk(loader, addr, size)) {
     return (void*)(uintptr_t)addr;
@@ -126,6 +141,11 @@ static void* ResolveHostPtr(ARMInterpreter* interpreter, uint64_t addr,
   return NULL;
 }
 
+void* ARMGuestAddressToHost(ARMInterpreter* interpreter, uint64_t addr,
+                            size_t size) {
+  return ResolveHostPtr(interpreter, addr, size);
+}
+
 static uint32_t Fetch32(ARMInterpreter* interpreter) {
   void* p = ResolveHostPtr(interpreter, interpreter->pc, 4);
   if (p == NULL) {
@@ -134,6 +154,25 @@ static uint32_t Fetch32(ARMInterpreter* interpreter) {
     exit(1);
   }
   return *(uint32_t*)p;
+}
+
+static void GuestMemoryLock(ARMInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryUnlock(ARMInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryDidWrite(ARMInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    interpreter->process->write_epoch++;
+  }
+  interpreter->reservation_valid = false;
 }
 
 static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
@@ -146,25 +185,42 @@ static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
     ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
+  GuestMemoryLock(interpreter);
   *(uint8_t*)p = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 2);
   if (p == NULL) {
-    fprintf(stderr, "Store16 outside mapped memory at 0x%08" PRIx64 "\n", addr);
+    fprintf(stderr, "Store16 outside mapped memory at 0x%08" PRIx64
+                    " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
+            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
+            (uint32_t)interpreter->regs[11]);
+    ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
+  GuestMemoryLock(interpreter);
   *(uint16_t*)p = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
+    fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64
+                    " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
+            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
+            (uint32_t)interpreter->regs[11]);
+    ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
+  GuestMemoryLock(interpreter);
   *(uint32_t*)p = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static uint8_t Load8(ARMInterpreter* interpreter, uint64_t addr) {
@@ -173,7 +229,10 @@ static uint8_t Load8(ARMInterpreter* interpreter, uint64_t addr) {
     fprintf(stderr, "Load8 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
-  return *(uint8_t*)p;
+  GuestMemoryLock(interpreter);
+  uint8_t value = *(uint8_t*)p;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
@@ -182,7 +241,10 @@ static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
     fprintf(stderr, "Load16 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
-  return *(uint16_t*)p;
+  GuestMemoryLock(interpreter);
+  uint16_t value = *(uint16_t*)p;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
@@ -191,7 +253,10 @@ static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
     fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
-  return *(uint32_t*)p;
+  GuestMemoryLock(interpreter);
+  uint32_t value = *(uint32_t*)p;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static int32_t SignExtend32(uint32_t value, int bits) {
@@ -527,6 +592,9 @@ static bool GotPointsIntoPlt(Loader* loader, LoadedDynamicLibrary* lib,
 }
 
 static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
+  }
   Loader* loader = interpreter->loader;
   LoadedDynamicLibrary* lib = loader->dynamic_lib;
   if (lib == NULL) {
@@ -559,7 +627,7 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
                                       &got_slot)) {
       continue;
     }
-    uint32_t got_value = *(uint32_t*)(uintptr_t)got_slot;
+    uint32_t got_value = Load32(interpreter, got_slot);
     if (GotPointsIntoPlt(loader, lib,
                          LinkedToRuntime(interpreter, got_value))) {
       reloc = &file_reloc;
@@ -591,9 +659,12 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
     fprintf(stderr, "Cannot translate symbol %s\n", sym_name);
     exit(1);
   }
-  *(uint32_t*)(uintptr_t)got_runtime = (uint32_t)symbol->value;
+  Store32(interpreter, got_runtime, (uint32_t)symbol->value);
   interpreter->pc = runtime;
   *pc_updated = true;
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->got_resolve_mutex);
+  }
 }
 
 static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
@@ -606,6 +677,12 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
     case ARM_SYSCALL_EXIT:
       // The syscall number is in r7 and the first argument (the exit status)
       // is in r1 (== a1), matching the other syscalls' argument layout.
+      if (interpreter->guest_thread != NULL &&
+          !interpreter->guest_thread->is_main) {
+        ARMSyscallThreadExit(interpreter->guest_thread, a1);
+        *pc_updated = true;
+        return a1;
+      }
       exit(a1);
       break;
     case ARM_SYSCALL_EXIT_CLEAN:
@@ -647,6 +724,29 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
     case ARM_SYSCALL_ABORT:
       abort();
       break;
+    case ARM_SYSCALL_TIME:
+      return (int32_t)time(NULL);
+    case ARM_SYSCALL_CLOCK:
+      return (int32_t)clock();
+    case ARM_SYSCALL_THREAD_CREATE:
+      return ARMSyscallThreadCreate(interpreter->guest_thread, (uint32_t)a1,
+                                    (uint32_t)a2, (uint32_t)a3,
+                                    (uint32_t)a4);
+    case ARM_SYSCALL_THREAD_JOIN:
+      return ARMSyscallThreadJoin(interpreter->guest_thread, (uint32_t)a1,
+                                  (uint32_t)a2);
+    case ARM_SYSCALL_THREAD_SELF:
+      return ARMSyscallThreadSelf(interpreter->guest_thread);
+    case ARM_SYSCALL_GET_TP:
+      return ARMSyscallGetTp(interpreter->guest_thread);
+    case ARM_SYSCALL_THREAD_EXIT:
+      ARMSyscallThreadExit(interpreter->guest_thread, a1);
+      *pc_updated = true;
+      return a1;
+    case ARM_SYSCALL_HEAP_LOCK:
+      return ARMSyscallHeapLock(interpreter->guest_thread);
+    case ARM_SYSCALL_HEAP_UNLOCK:
+      return ARMSyscallHeapUnlock(interpreter->guest_thread);
     case ARM_SYSCALL_RESOLVE:
       ResolveAndFixupSymbol(interpreter, pc_updated);
       return 0;
@@ -952,6 +1052,8 @@ static bool ExecuteHalfword(ARMInterpreter* interpreter, uint32_t insn) {
   bool add_offset = ((insn >> 23) & 1u) != 0;
   bool writeback = ((insn >> 21) & 1u) != 0;
   bool load = ((insn >> 20) & 1u) != 0;
+  bool sign = ((insn >> 6) & 1u) != 0;
+  bool half = ((insn >> 5) & 1u) != 0;
   int rn = (int)((insn >> 16) & 0xfu);
   int rd = (int)((insn >> 12) & 0xfu);
   uint32_t offset = ((insn >> 4) & 0xf0u) | (insn & 0xfu);
@@ -964,7 +1066,15 @@ static bool ExecuteHalfword(ARMInterpreter* interpreter, uint32_t insn) {
     }
   }
   if (load) {
-    WriteReg(interpreter, rd, Load16(interpreter, addr));
+    uint32_t value;
+    if (sign && !half) {
+      value = (uint32_t)(int32_t)(int8_t)Load8(interpreter, addr);
+    } else if (sign) {
+      value = (uint32_t)(int32_t)(int16_t)Load16(interpreter, addr);
+    } else {
+      value = Load16(interpreter, addr);
+    }
+    WriteReg(interpreter, rd, value);
   } else {
     Store16(interpreter, addr, (uint16_t)ReadReg(interpreter, rd));
   }
@@ -1435,6 +1545,80 @@ static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
   return false;
 }
 
+static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
+  uint32_t load_key = insn & 0x0ff00fffu;
+  uint32_t store_key = insn & 0x0ff00ff0u;
+  bool load = load_key == 0x01900f9fu ||
+              load_key == 0x01d00f9fu ||
+              load_key == 0x01f00f9fu;
+  bool store = store_key == 0x01800f90u ||
+               store_key == 0x01c00f90u ||
+               store_key == 0x01e00f90u;
+  if (!load && !store) {
+    return false;
+  }
+
+  size_t size;
+  if (load ? load_key == 0x01d00f9fu : store_key == 0x01c00f90u) {
+    size = 1;
+  } else if (load ? load_key == 0x01f00f9fu
+                  : store_key == 0x01e00f90u) {
+    size = 2;
+  } else {
+    size = 4;
+  }
+  int rn = (int)((insn >> 16) & 0xfu);
+  uint64_t addr = ReadReg(interpreter, rn);
+  void* p = ResolveHostPtr(interpreter, addr, size);
+  if (p == NULL) {
+    fprintf(stderr, "Exclusive access outside mapped memory at 0x%08" PRIx64
+                    "\n", addr);
+    exit(1);
+  }
+
+  GuestMemoryLock(interpreter);
+  if (load) {
+    int rt = (int)((insn >> 12) & 0xfu);
+    uint32_t value = size == 1 ? *(uint8_t*)p
+                     : size == 2 ? *(uint16_t*)p
+                                 : *(uint32_t*)p;
+    WriteReg(interpreter, rt, value);
+    interpreter->reservation_valid = true;
+    interpreter->reservation_address = addr;
+    interpreter->reservation_size = size;
+    interpreter->reservation_epoch =
+        interpreter->process != NULL ? interpreter->process->write_epoch : 0;
+    GuestMemoryUnlock(interpreter);
+    return true;
+  }
+
+  int rd = (int)((insn >> 12) & 0xfu);
+  int rt = (int)(insn & 0xfu);
+  bool success = interpreter->reservation_valid &&
+                 interpreter->reservation_address == addr &&
+                 interpreter->reservation_size == size &&
+                 (interpreter->process == NULL ||
+                  interpreter->reservation_epoch ==
+                      interpreter->process->write_epoch);
+  interpreter->reservation_valid = false;
+  if (success) {
+    uint32_t value = (uint32_t)ReadReg(interpreter, rt);
+    if (size == 1) {
+      *(uint8_t*)p = (uint8_t)value;
+    } else if (size == 2) {
+      *(uint16_t*)p = (uint16_t)value;
+    } else {
+      *(uint32_t*)p = value;
+    }
+    if (interpreter->process != NULL) {
+      interpreter->process->write_epoch++;
+    }
+  }
+  WriteReg(interpreter, rd, success ? 0 : 1);
+  GuestMemoryUnlock(interpreter);
+  return true;
+}
+
 static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
                                bool* pc_updated) {
   *pc_updated = false;
@@ -1445,6 +1629,24 @@ static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
 
   if (insn == ARM_BREAKPOINT_INSN) {
     longjmp(interpreter->debugger, 1);
+  }
+
+  if ((insn & 0xffff0fffu) == 0xee1d0f70u) {
+    WriteReg(interpreter, (int)((insn >> 12) & 0xfu),
+             interpreter->tp_base);
+    return true;
+  }
+
+  if ((insn & 0xfffffff0u) == 0xf57ff050u) {
+    atomic_thread_fence(memory_order_seq_cst);
+    return true;
+  }
+  if (insn == 0xf57ff01fu) {
+    interpreter->reservation_valid = false;
+    return true;
+  }
+  if (ExecuteExclusive(interpreter, insn)) {
+    return true;
   }
 
   if ((insn & 0x0f000000u) == 0x0f000000u) {
@@ -1482,8 +1684,8 @@ static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
     return ExecuteMls(interpreter, insn);
   }
 
-  // Halfword transfer (unsigned): bits 27-25 = 000 and bits 7-4 = 1011.
-  if ((insn & 0x0e0000f0u) == 0x000000b0u) {
+  // Halfword and signed byte/halfword transfers.
+  if ((insn & 0x0e000090u) == 0x00000090u) {
     return ExecuteHalfword(interpreter, insn);
   }
 
@@ -1579,8 +1781,10 @@ static void MapGuestResolver(ARMInterpreter* interpreter) {
   }
 }
 
-static uint64_t ARMInterpreterInitialSp(void) {
-  return (((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull) - 4096;
+static uint64_t ARMInterpreterInitialSp(ARMInterpreter* interpreter) {
+  return (((uint64_t)interpreter->stack_guest_base + ARM_STACK_SIZE) &
+          ~0x7ull) -
+         4096;
 }
 
 static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
@@ -1590,13 +1794,15 @@ static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
   if (!is_static_link) {
     WriteReg(interpreter, 1, entry_address);
   } else if (argc > 0 && argv != NULL) {
-    uint64_t guest_top = ((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull;
+    uint64_t guest_top =
+        ((uint64_t)interpreter->stack_guest_base + ARM_STACK_SIZE) & ~0x7ull;
     uint64_t p = guest_top;
     uint32_t* guest_ptrs = malloc((size_t)(argc + 1) * sizeof(uint32_t));
     for (int i = 0; i < argc; i++) {
       size_t len = strlen(argv[i]) + 1;
       p -= len;
-      memcpy(interpreter->stack + (p - ARM_STACK_BASE), argv[i], len);
+      memcpy(interpreter->stack + (p - interpreter->stack_guest_base), argv[i],
+             len);
       guest_ptrs[i] = (uint32_t)p;
     }
     guest_ptrs[argc] = 0;
@@ -1604,7 +1810,9 @@ static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
     p -= (uint64_t)(argc + 1) * sizeof(uint32_t);
     p &= ~0x7ull;
     uint64_t guest_argv = p;
-    memcpy(interpreter->stack + (guest_argv - ARM_STACK_BASE), guest_ptrs,
+    memcpy(interpreter->stack +
+               (guest_argv - interpreter->stack_guest_base),
+           guest_ptrs,
            (size_t)(argc + 1) * sizeof(uint32_t));
     free(guest_ptrs);
     WriteReg(interpreter, 1, guest_argv);
@@ -1613,11 +1821,15 @@ static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
   }
 }
 
-void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
-                        uint64_t entry_address, int argc, char** argv,
-                        bool trace_regs, bool trace_instructions) {
+void ARMInterpreterInitForThread(
+    ARMInterpreter* interpreter, ARMProcessRuntime* process,
+    ARMGuestThread* guest_thread, Loader* loader, uint64_t entry_address,
+    int argc, char** argv, char* stack, void* tls_block,
+    size_t tls_block_size, bool trace_regs, bool trace_instructions) {
   memset(interpreter, 0, sizeof(*interpreter));
   interpreter->loader = loader;
+  interpreter->process = process;
+  interpreter->guest_thread = guest_thread;
   interpreter->trace_regs = trace_regs;
   interpreter->trace_instructions = trace_instructions;
   interpreter->num_steps = -1;
@@ -1627,31 +1839,51 @@ void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
                                          ARM_SYSCALL_RESOLVE;
   interpreter->symbol_resolver_code[1] = ARM_AL | 0x0f000000u;
 
-  // The stack lives at a fixed 32-bit guest virtual address mapped onto a host
-  // buffer.  ARM is a 32-bit machine, so the stack pointer must fit in 32 bits;
-  // the host malloc address does not.  Register the stack as a loader region so
-  // that ResolveHostPtr translates guest stack addresses to the host buffer.
-  interpreter->stack = malloc(ARM_STACK_SIZE);
-  static ELFProgramHeader stack_segment;
-  memset(&stack_segment, 0, sizeof(stack_segment));
-  stack_segment.vaddr = ARM_STACK_BASE;
-  stack_segment.memsz = ARM_STACK_SIZE;
-  stack_segment.offset = 0;
-  VectorAppend(&loader->regions,
-               NewRegion(interpreter->stack, 0, ARM_STACK_SIZE, &stack_segment,
-                         NULL));
-  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
+  if (stack != NULL) {
+    interpreter->stack = stack;
+  } else {
+    interpreter->stack = malloc(ARM_STACK_SIZE);
+    interpreter->owns_stack = true;
+  }
+  uint32_t tid = guest_thread != NULL ? guest_thread->tid : 1;
+  interpreter->stack_guest_base =
+      ARM_STACK_BASE - (tid > 0 ? (tid - 1) * 0x01000000u : 0);
+  if (tls_block != NULL) {
+    interpreter->tls_block = tls_block;
+    interpreter->tls_block_size = tls_block_size;
+    interpreter->tls_guest_base =
+        ARM_TLS_BASE + (tid > 0 ? (tid - 1) * 0x00100000u : 0);
+    interpreter->tp_base = interpreter->tls_guest_base;
+  } else if (loader->tls.present && loader->tls.main_thread_block != NULL) {
+    interpreter->tls_block = loader->tls.main_thread_block;
+    interpreter->tls_block_size = loader->tls.block_size;
+    interpreter->tls_guest_base = ARM_TLS_BASE;
+    interpreter->tp_base =
+        interpreter->tls_guest_base +
+        (uint32_t)(loader->tls.tp_base -
+                   (uint64_t)(uintptr_t)loader->tls.main_thread_block);
+  }
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp(interpreter);
   interpreter->pc = entry_address;
+  interpreter->running = entry_address != 0;
   interpreter->regs[ARM_LR_REG] = 0;
   SetupGuestMainArgs(interpreter, loader, argc, argv, entry_address,
                      loader->is_static);
   MapGuestResolver(interpreter);
 }
 
+void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
+                        uint64_t entry_address, int argc, char** argv,
+                        bool trace_regs, bool trace_instructions) {
+  ARMInterpreterInitForThread(interpreter, NULL, NULL, loader, entry_address,
+                              argc, argv, NULL, NULL, 0, trace_regs,
+                              trace_instructions);
+}
+
 void ARMInterpreterPrepareMain(ARMInterpreter* interpreter,
                                uint64_t entry_address, int argc, char** argv,
                                bool is_static_link) {
-  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp(interpreter);
   interpreter->pc = entry_address;
   interpreter->regs[ARM_LR_REG] = 0;
   SetupGuestMainArgs(interpreter, interpreter->loader, argc, argv,
@@ -1659,7 +1891,7 @@ void ARMInterpreterPrepareMain(ARMInterpreter* interpreter,
 }
 
 static void ARMInterpreterPrepareCall(ARMInterpreter* interpreter, uint64_t fn) {
-  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp(interpreter);
   interpreter->pc = fn;
   interpreter->regs[ARM_LR_REG] = 0;
 }
@@ -1726,6 +1958,13 @@ int ARMInterpreterCall(ARMInterpreter* interpreter, uint64_t fn) {
   return ARMInterpreterRunLoop(interpreter);
 }
 
+int ARMInterpreterCallWithArg(ARMInterpreter* interpreter, uint64_t fn,
+                              uint32_t arg) {
+  ARMInterpreterPrepareCall(interpreter, fn);
+  WriteReg(interpreter, 0, arg);
+  return ARMInterpreterRunLoop(interpreter);
+}
+
 int ARMInterpreterRun(ARMInterpreter* interpreter) {
   return ARMInterpreterRunLoop(interpreter);
 }
@@ -1747,6 +1986,18 @@ bool ARMGuestAddressExecutable(Loader* loader, uint64_t addr) {
     }
   }
   return false;
+}
+
+uint64_t ARMGuestFunctionRuntime(Loader* loader, uint64_t addr) {
+  if (ARMGuestAddressExecutable(loader, addr)) {
+    return addr;
+  }
+  uint64_t runtime = 0;
+  if (LoaderLinkedAddressToRuntime(loader, NULL, addr, &runtime) &&
+      ARMGuestAddressExecutable(loader, runtime)) {
+    return runtime;
+  }
+  return 0;
 }
 
 uint64_t ARMLookupGuestFunction(Loader* loader, const char* name) {
@@ -1829,9 +2080,19 @@ bool ARMGuestRunFiniArrays(Loader* loader, ARMInterpreter* cpu) {
 int ARMGuestRunProgram(ARMInterpreter* interpreter, Loader* loader,
                        uint64_t entry_address, int argc, char** argv,
                        bool trace_regs, bool trace_instructions) {
-  ARMInterpreterInit(interpreter, loader, entry_address, argc, argv, trace_regs,
-                     trace_instructions);
+  ARMProcessRuntime process;
+  if (!ARMProcessRuntimeInit(&process, loader)) {
+    return 1;
+  }
+  ARMInterpreterInitForThread(interpreter, &process, NULL, loader,
+                              entry_address, argc, argv, NULL, NULL, 0,
+                              trace_regs, trace_instructions);
+  if (ARMProcessAttachMainThread(&process, interpreter) == NULL) {
+    ARMProcessRuntimeDestruct(&process);
+    return 1;
+  }
   if (!ARMGuestRunInitArrays(loader, interpreter)) {
+    ARMProcessRuntimeDestruct(&process);
     return 1;
   }
   ARMInterpreterPrepareMain(interpreter, entry_address, argc, argv,
@@ -1840,6 +2101,7 @@ int ARMGuestRunProgram(ARMInterpreter* interpreter, Loader* loader,
   if (!ARMGuestRunProgramShutdown(loader, interpreter)) {
     result = 1;
   }
+  ARMProcessRuntimeDestruct(&process);
   return result;
 }
 
@@ -1901,6 +2163,8 @@ void ARMInterpreterCycle(ARMInterpreter* interpreter) {
 }
 
 void ARMInterpreterDestruct(ARMInterpreter* interpreter) {
-  free(interpreter->stack);
+  if (interpreter->owns_stack) {
+    free(interpreter->stack);
+  }
   interpreter->stack = NULL;
 }

@@ -57,6 +57,10 @@ static const char* CurrentExceptionAccessorName(TypeRecord* type) {
   if (TypeIsPointer(type)) {
     return "__davecc_current_exception_ptr";
   }
+  if (TypeIsFloatingPoint(type)) {
+    return type->size == 4 ? "__davecc_current_exception_f4"
+                           : "__davecc_current_exception_f8";
+  }
   switch (type->size) {
     case 1:
       return "__davecc_current_exception_i1";

@@ -213,6 +213,11 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       *(int32_t*)target_address = (int32_t)(S + A - P);
       return;
 
+    case R_ARM_TLS_LE32:
+      *(uint32_t*)target_address =
+          (uint32_t)(S + A + ARM_TLS_TCB_SIZE);
+      return;
+
     case R_ARM_PC24:
     case R_ARM_CALL:
     case R_ARM_JUMP24: {

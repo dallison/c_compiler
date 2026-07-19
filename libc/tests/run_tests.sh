@@ -74,7 +74,7 @@ if [ "$do_compiler" -eq 1 ]; then
     bash libc/tests/compiler_regression.sh "$davecc" "$target" -O1
 fi
 
-if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "riscv" ] || [ "$target" = "risc-v" ]; } && [ -n "$interpreter" ]; then
+if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "arm" ] || [ "$target" = "riscv" ] || [ "$target" = "risc-v" ]; } && [ -n "$interpreter" ]; then
   work=$(mktemp -d "${TMPDIR:-/tmp}/libc_runtime_test.XXXXXX")
   trap 'rm -rf "$work"' EXIT
 
@@ -91,6 +91,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
       rt_cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
       link_cflags=(-target aarch64 -O0 -static -Wl,-e -Wl,main)
       ;;
+    arm)
+      rt_cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
+      link_cflags=(-target arm -O0 -static -Wl,-e -Wl,main)
+      ;;
     riscv)
       rt_cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
       link_cflags=(-target riscv -O1 -static -Wl,-e -Wl,main)
@@ -102,7 +106,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
   "$davecc" "${rt_cflags[@]}" libc/tests/runtime/smoke.c -o "$smoke_obj"
   "$davecc" "${link_cflags[@]}" "$smoke_obj" -o "$smoke_exe"
   run_step "runtime smoke test" env INTERP="$interpreter" EXE="$smoke_exe" TARGET="$target" bash -c '
-    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ]; then
+    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ] || [ "$TARGET" = arm ]; then
       "$INTERP" -i "$EXE"
     else
       "$INTERP" "$EXE"
@@ -110,7 +114,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     test $? -eq 0
   '
 
-  if [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ]; then
+  if [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "arm" ]; then
     tls_exe="$work/tls_local_exec.exe"
     tls_obj="$work/tls_local_exec.o"
     "$davecc" "${rt_cflags[@]}" libc/tests/runtime/tls_local_exec.c -o "$tls_obj"
@@ -125,6 +129,8 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     runtime_sources=("aarch64 support/syscall.s")
     if [ "$target" = "x86_64" ]; then
       runtime_sources=("x86_64 support/syscall.s" "x86_64 support/abs.s")
+    elif [ "$target" = "arm" ]; then
+      runtime_sources=("arm support/syscall.s")
     fi
     runtime_objs=()
     for src in "${runtime_sources[@]}"; do
@@ -243,7 +249,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
   fi
 
   run_step "runtime libc tests" env INTERP="$interpreter" EXE="$exe" TARGET="$target" bash -c '
-    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ]; then
+    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ] || [ "$TARGET" = arm ]; then
       "$INTERP" -i "$EXE"
     else
       "$INTERP" "$EXE"
@@ -286,11 +292,11 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
   fi
 fi
 
-if [ "$do_runtime" -eq 1 ] && [ "$target" != "x86_64" ] && [ "$target" != "aarch64" ] && [ "$target" != "riscv" ] && [ "$target" != "risc-v" ]; then
-  echo "SKIP runtime tests (only supported for x86_64, aarch64 and riscv)"
+if [ "$do_runtime" -eq 1 ] && [ "$target" != "x86_64" ] && [ "$target" != "aarch64" ] && [ "$target" != "arm" ] && [ "$target" != "riscv" ] && [ "$target" != "risc-v" ]; then
+  echo "SKIP runtime tests (only supported for x86_64, aarch64, arm and riscv)"
 fi
 
-if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "riscv" ]; } && [ -z "$interpreter" ]; then
+if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "arm" ] || [ "$target" = "riscv" ]; } && [ -z "$interpreter" ]; then
   echo "SKIP runtime tests (no interpreter provided)"
 fi
 

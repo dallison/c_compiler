@@ -15,8 +15,9 @@
 
 // int syscall(int n, ...);
 syscall:
-	push {r7}
+	push {r4, r7}
 	mov r7, r0
+	ldr r4, [sp, #8]
 	.word 0xef000000	// swi #0
-	pop {r7}
+	pop {r4, r7}
 	bx lr

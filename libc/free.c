@@ -12,8 +12,7 @@
 #include <stdbool.h>
 #include <syscall.h>
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__arm__) || \
-    defined(__p_code__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Rename functions to libc names.

@@ -107,6 +107,41 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
     DAsmFormat(out, "blx%s %s", cc, RegName(inst & 0xf));
     return true;
   }
+  if ((inst & 0xfffffff0u) == 0xf57ff050u) {
+    static const char* options[16] = {
+        "#0", "#1", "#2", "#3", "#4", "#5", "#6", "#7",
+        "#8", "ishld", "ishst", "ish", "#12", "#13", "st", "sy",
+    };
+    DAsmFormat(out, "dmb %s", options[inst & 0xf]);
+    return true;
+  }
+  if (inst == 0xf57ff01fu) {
+    DAsmFormat(out, "clrex");
+    return true;
+  }
+  uint32_t exclusive_load = inst & 0x0ff00fffu;
+  if (exclusive_load == 0x01900f9fu ||
+      exclusive_load == 0x01d00f9fu ||
+      exclusive_load == 0x01f00f9fu) {
+    const char* op = exclusive_load == 0x01d00f9fu
+                         ? "ldrexb"
+                         : exclusive_load == 0x01f00f9fu ? "ldrexh" : "ldrex";
+    DAsmFormat(out, "%s%s %s, [%s]", op, cc, RegName((inst >> 12) & 0xf),
+               RegName((inst >> 16) & 0xf));
+    return true;
+  }
+  uint32_t exclusive_store = inst & 0x0ff00ff0u;
+  if (exclusive_store == 0x01800f90u ||
+      exclusive_store == 0x01c00f90u ||
+      exclusive_store == 0x01e00f90u) {
+    const char* op = exclusive_store == 0x01c00f90u
+                         ? "strexb"
+                         : exclusive_store == 0x01e00f90u ? "strexh" : "strex";
+    DAsmFormat(out, "%s%s %s, %s, [%s]", op, cc,
+               RegName((inst >> 12) & 0xf), RegName(inst & 0xf),
+               RegName((inst >> 16) & 0xf));
+    return true;
+  }
   if ((inst & 0x0c000000u) == 0x04000000u) {
     bool load = (inst & 0x00100000u) != 0;
     bool byte = (inst & 0x00400000u) != 0;
