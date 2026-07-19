@@ -365,7 +365,9 @@ const char* RVOpcodeName(int op) {
     case RV_OP(la):
       return "la";
     case RV_OP(lla):
-        return "lla";
+      return "lla";
+    case RV_OP(tprel):
+      return "tprel";
     case RV_OP(sext_w):
       return "sext.w";
 
@@ -423,6 +425,26 @@ const char* RVOpcodeName(int op) {
       return "spill";
     case RV_OP(reload):
       return "reload";
+    case RV_OP(atomic_load):
+      return "atomic_load";
+    case RV_OP(atomic_store):
+      return "atomic_store";
+    case RV_OP(atomic_fetch_add):
+      return "atomic_fetch_add";
+    case RV_OP(atomic_fetch_sub):
+      return "atomic_fetch_sub";
+    case RV_OP(atomic_add_fetch):
+      return "atomic_add_fetch";
+    case RV_OP(atomic_sub_fetch):
+      return "atomic_sub_fetch";
+    case RV_OP(atomic_compare_exchange_bool):
+      return "atomic_compare_exchange_bool";
+    case RV_OP(atomic_compare_exchange_val):
+      return "atomic_compare_exchange_val";
+    case RV_OP(atomic_compare_exchange_n):
+      return "atomic_compare_exchange_n";
+    case RV_OP(atomic_fence):
+      return "atomic_fence";
   }
 }
 
@@ -464,6 +486,8 @@ bool RVIsExpression(TargetInstruction* inst) {
     case RV_OP(nrvoval):
     case RV_OP(symbol):
     case RV_OP(spill):
+    case RV_OP(atomic_store):
+    case RV_OP(atomic_fence):
       return false;
     default:
       return !RVIsFixedRegister(inst) && !RVIsConst(inst);
@@ -847,6 +871,7 @@ static void ResolveExceptionRanges(RVGenerator* rv, Generator* gen) {
     range->try_end = try_end;
     range->catch_label = catch_label;
     range->catch_typeinfo = ir_range->catch_typeinfo;
+    range->is_cleanup = ir_range->is_cleanup;
     VectorAppend(&rv->exception_ranges, range);
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
@@ -1069,55 +1094,6 @@ static TargetInstruction* SetDestOrMove(RVGenerator* rv,
   }
   TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, from));
   move->dest = to;
-  return to;
-}
-
-static TargetInstruction* SetDestOrMoveToArgReg(RVGenerator* rv,
-                                                IRNode* from_node,
-                                                TargetInstruction* from,
-                                                TargetInstruction* to,
-                                                RVOpcode rmov_opcode) {
-  // Look at all uses of from_node and make sure they are all in the
-  // same basic block as from_node itself.
-  bool candidate = true;
-  for (size_t i = 0; i < from_node->outputs.length; i++) {
-    IRNode* user = from_node->outputs.value.p[i];
-    if (user->block != from_node->block) {
-      candidate = false;
-      break;
-    }
-  }
-  // Only pin the producer's result directly into the (caller-saved) argument
-  // register when that result is consumed solely by this argument.  IR basic
-  // blocks are not split by calls, so a value with another use later -- after
-  // an intervening call that clobbers the argument registers -- would read the
-  // wrong value.  This happens when GVN merges a value feeding a call argument
-  // with the same value feeding other arguments/blocks (e.g. the address of a
-  // local `&a` shared by every printf/strcmp call in a function).  The argument
-  // node is usually a `pusharg` wrapper, so look through it to the value
-  // actually producing the register.  With more than one user, keep the value
-  // in its own register (which the allocator can preserve in a callee-saved
-  // register) and emit an explicit move into the argument register instead.
-  IRNode* value_node = from_node;
-  if (value_node != NULL && (int)value_node->opcode == (int)IR_OP(pusharg) &&
-      value_node->inputs.length > 0) {
-    value_node = value_node->inputs.value.p[0];
-  }
-  if (value_node != NULL && value_node->outputs.length > 1) {
-    candidate = false;
-  }
-  // Only redirect the producer's destination straight into the argument
-  // register when the producer is the most recently emitted instruction.
-  // Arguments are moved into their registers in reverse order, so a preceding
-  // argument's value may already have been moved out by an instruction emitted
-  // after this producer; giving an older producer an argument register as its
-  // destination would order that (clobbering) write incorrectly.  Emit an
-  // explicit move at the current position instead.
-  if (candidate && TargetNext(from) == NULL) {
-    return SetDestOrMove(rv, from, to, rmov_opcode);
-  }
-  TargetInstruction* move = Emit(rv, NewInstruction2(rmov_opcode, to, from));
-  move->flags |= RV_INST_ARG_MOVE;
   return to;
 }
 
@@ -1521,10 +1497,26 @@ static COMPILER_UNUSED TargetInstruction* LoadVariableValue(RVGenerator* rv, IRN
   return Emit(rv, NewInstruction2(opcode, addr, offset));
 }
 
+static TargetInstruction* GetTlsVariableAddress(RVGenerator* rv,
+                                                IRNode* node) {
+  if (compiler->tls_model != TLS(local_exec)) {
+    fprintf(stderr,
+            "error: RISC-V only supports the local-exec TLS model for static "
+            "executables\n");
+    abort();
+  }
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(rv, node, variable->symbol);
+  return Emit(rv, NewInstruction1(RV_OP(tprel), symbol));
+}
+
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the instruction associated with the node if it's
 // already in a register.
 static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
+  if (IRIsThreadVariable(node)) {
+    return GetTlsVariableAddress(rv, node);
+  }
   if (IRIsConst(node)) {
     switch (node->opcode) {
       case IR_OP(const8):
@@ -2315,7 +2307,10 @@ static void GetAddressAndOffsetFrom(RVGenerator* rv,
 static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
                             TargetInstruction** addr,
                             TargetInstruction** offset) {
-  if (IRIsAutoVariable(addr_node)) {
+  if (IRIsThreadVariable(addr_node)) {
+    *addr = GetTlsVariableAddress(rv, addr_node);
+    *offset = Zero(rv);
+  } else if (IRIsAutoVariable(addr_node)) {
     IRVariable* var = (IRVariable*)addr_node;
     if (TypeIsVLA(var->symbol->type)) {
       IRNode* vla_addr = var->symbol->value.other;
@@ -2391,23 +2386,7 @@ static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opco
     return Emit(rv, NewInstruction1(RV_OP(mv), addr));
   }
 
-  TargetInstruction* result = NULL;
-  if ((RVOpcode)((int)addr->opcode == (int)RV_OP(addi)) && TargetIsZero(offset)) {
-    // If the address is calculated using an addi instruction we can
-    // combine the immediate from the addi with the load.
-    // The addi instruction will no longer be used and will be eliminated
-    // during the optimization pass.
-    TargetInstruction* src = addr->operand[0];
-    TargetInstruction* immed = addr->operand[1];
-    assert(src != NULL);
-    assert(immed != NULL);
-    assert(TargetIsConst(immed));
-    result = Emit(rv, NewInstruction2(opcode, src, immed));
-  }
-  if (result == NULL) {
-    result = Emit(rv, NewInstruction2(opcode, addr, offset));
-  }
-  return result;
+  return Emit(rv, NewInstruction2(opcode, addr, offset));
 }
 
 static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
@@ -3209,6 +3188,7 @@ static TargetInstruction* LowerMemzero(RVGenerator* rv, IRNode* node) {
 typedef enum {
   kArgLocationRegister,
   kArgLocationRegisterPair,
+  kArgLocationFPRegisterAggregate,
   kArgLocationPushed,
   kArgLocationPushedPair,
   kArgLocationPassedByReferenceInRegister,
@@ -3225,6 +3205,22 @@ typedef struct {
   TargetInstruction* second_reg;
   size_t second_offset;
 } ArgLocation;
+
+typedef struct {
+  TargetInstruction* source;
+  TargetInstruction* destination;
+  RVOpcode opcode;
+} RVPendingArgMove;
+
+static RVPendingArgMove* NewPendingArgMove(TargetInstruction* source,
+                                           TargetInstruction* destination,
+                                           RVOpcode opcode) {
+  RVPendingArgMove* move = malloc(sizeof(*move));
+  move->source = source;
+  move->destination = destination;
+  move->opcode = opcode;
+  return move;
+}
 
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   ArgLocation* loc = malloc(sizeof(ArgLocation));
@@ -3303,11 +3299,14 @@ static TargetInstruction* BuildArgList(RVGenerator* rv, Vector* arg_locations) {
     if (loc->type == kArgLocationRegister) {
       result =
           Emit(rv, NewInstruction2(RV_OP(regarg), result, loc->location.reg));
-    } else if (loc->type == kArgLocationRegisterPair) {
+    } else if (loc->type == kArgLocationRegisterPair ||
+               loc->type == kArgLocationFPRegisterAggregate) {
       result =
           Emit(rv, NewInstruction2(RV_OP(regarg), result, loc->location.reg));
-      result = Emit(rv,
-                    NewInstruction2(RV_OP(regarg), result, loc->second_reg));
+      if (loc->second_reg != NULL) {
+        result = Emit(rv,
+                      NewInstruction2(RV_OP(regarg), result, loc->second_reg));
+      }
     }
   }
   return result;
@@ -3317,20 +3316,49 @@ static TargetInstruction* BuildArgList(RVGenerator* rv, Vector* arg_locations) {
 // floating pointer registers that can be used to pass arguments.  Structs are
 // particularly complex and how they are passed depends on their size and
 // contents.
-//
-// This code does not follow the ABI defined in:
-// https://github.com/riscv/riscv-elf-psabi-doc/blob/master/riscv-elf.md
-// exactly.
-// In particular it:
-// 1. passes structs longer than XLEN (8) bytes by reference but first
-//    copies them to the stack so that they are passed by value.
-//    NOTE: I think it's incorrect for the ABI to pass long structs by
-//    reference and allow them to be modified by the callee.  This means
-//    that there is a major difference in behavior between small and large
-//    structs and simply adding another field to a struct will make programs
-//    stop working (TODO: check the C standard for this).
-// 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
-//    register pair.
+typedef struct {
+  int count;
+  TypeRecord* type[2];
+  int offset[2];
+} RVFloatingAggregate;
+
+static bool GetFloatingAggregate(TypeRecord* type,
+                                 RVFloatingAggregate* aggregate) {
+  memset(aggregate, 0, sizeof(*aggregate));
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info->is_union ||
+      type->info.struct_info->bases.length != 0) {
+    return false;
+  }
+  Struct* info = type->info.struct_info;
+  for (size_t i = 0; i < info->members.length; i++) {
+    StructMember* member = info->members.value.p[i];
+    if (member->is_static || member->is_member_function) {
+      continue;
+    }
+    if (member->bit_size != 0 || member->symbol == NULL ||
+        (!TypeIsFloat(member->symbol->type) &&
+         !TypeIsDouble(member->symbol->type)) ||
+        aggregate->count == 2) {
+      return false;
+    }
+    int n = aggregate->count++;
+    aggregate->type[n] = member->symbol->type;
+    aggregate->offset[n] = member->byte_offset;
+  }
+  return aggregate->count != 0;
+}
+
+static bool IsRegisterPairAggregate(TypeRecord* type) {
+  if (TypeIsMemberPointerAggregate(type)) {
+    return true;
+  }
+  if (!TypeIsStructOrUnion(type)) {
+    return false;
+  }
+  TypeRecordCalculateSize(type);
+  return type->size > 8 && type->size <= 16;
+}
+
 static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -3355,7 +3383,28 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
     bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
-    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+    RVFloatingAggregate floating_aggregate;
+    bool pass_floating_aggregate =
+        !is_variadic_arg &&
+        GetFloatingAggregate(arg_node->type, &floating_aggregate) &&
+        next_fp_arg_reg + floating_aggregate.count <= RV_NUM_FP_ARGS;
+    if (pass_floating_aggregate) {
+      TargetInstruction* first =
+          FloatingPointArgumentRegister(rv, next_fp_arg_reg++);
+      TargetInstruction* second =
+          floating_aggregate.count == 2
+              ? FloatingPointArgumentRegister(rv, next_fp_arg_reg++)
+              : NULL;
+      ArgLocation* location = NewArgLocationRegisterPair(first, second);
+      location->type = kArgLocationFPRegisterAggregate;
+      VectorAppend(&arg_locations, location);
+    } else if (IsRegisterPairAggregate(arg_node->type)) {
+      // Variadic 2*XLEN values use an even-numbered argument-register pair.
+      // Once alignment consumes the final single register, the value is
+      // passed wholly on the 16-byte-aligned stack.
+      if (is_variadic_arg && (next_int_arg_reg & 1) != 0) {
+        next_int_arg_reg++;
+      }
       if (next_int_arg_reg + 1 < RV_NUM_INT_ARGS) {
         TargetInstruction* first =
             IntArgumentRegister(rv, next_int_arg_reg++);
@@ -3364,6 +3413,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         VectorAppend(&arg_locations,
                      NewArgLocationRegisterPair(first, second));
       } else {
+        next_pushed_arg_offset =
+            (next_pushed_arg_offset + 15) & ~(size_t)15;
         VectorAppend(&arg_locations,
                      NewArgLocationPushedPair(next_pushed_arg_offset));
         next_pushed_arg_offset += 16;
@@ -3444,7 +3495,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
 
   // Phase 2:
   // Decrement the stack pointer to make space for the stack args
-  size_t total_stack_size = struct_area_size + next_pushed_arg_offset;
+  size_t total_stack_size =
+      (struct_area_size + next_pushed_arg_offset + 15) & ~(size_t)15;
   if (total_stack_size > 0) {
     TargetInstruction* newsp =
         AddImmediate(rv, StackPointer(rv), -total_stack_size);
@@ -3477,12 +3529,28 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     }
   }
 
+  bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
+                        total_stack_size == 0 &&
+                        rv->base.stack_frame_size == 0;
+  TargetInstruction* addr = GetLoweredNode(callee_node);
+  TargetInstruction* staged_target = NULL;
+  if (!will_tail_call &&
+      (int)addr->opcode != (int)RV_OP(symbol)) {
+    // t2 is reserved from general allocation and from the argument parallel
+    // copy resolver, so it keeps the target intact while argument registers
+    // are populated.
+    staged_target =
+        Emit(rv, NewInstruction2(RV_OP(mv), Tmp2(rv), addr));
+  }
+
   // Phase 4:
   // Pass through all args, in reverse order, pushing those not passed in
   // registers and moving the register arguments into their argument
   // registers.
   //
   // TODO: figure out if we can just set the dest to the reg.
+  Vector pending_arg_moves;
+  VectorInit(&pending_arg_moves);
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
@@ -3490,6 +3558,29 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     bool pass_float_as_int =
         is_variadic_arg && TypeIsFloatingPoint(arg_node->type);
     switch (arg_location->type) {
+      case kArgLocationFPRegisterAggregate: {
+        RVFloatingAggregate aggregate;
+        bool ok = GetFloatingAggregate(arg_node->type, &aggregate);
+        assert(ok);
+        TargetInstruction* address = Materialize(rv, arg_node);
+        for (int member = 0; member < aggregate.count; member++) {
+          RVOpcode load_opcode =
+              TypeIsDouble(aggregate.type[member]) ? RV_OP(fld) : RV_OP(flw);
+          RVOpcode move_opcode =
+              TypeIsDouble(aggregate.type[member]) ? RV_OP(fmv_d)
+                                                   : RV_OP(fmv_s);
+          TargetInstruction* value = Emit(rv, NewInstruction2(
+              load_opcode, address,
+              GetIntConstant(rv, NULL, kTargetType32Bit,
+                             aggregate.offset[member])));
+          TargetInstruction* destination =
+              member == 0 ? arg_location->location.reg
+                          : arg_location->second_reg;
+          VectorAppend(&pending_arg_moves,
+                       NewPendingArgMove(value, destination, move_opcode));
+        }
+        break;
+      }
       case kArgLocationRegisterPair: {
         TargetInstruction* address = Materialize(rv, arg_node);
         TargetInstruction* first = Emit(rv, NewInstruction2(
@@ -3498,10 +3589,12 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         TargetInstruction* second = Emit(rv, NewInstruction2(
             RV_OP(ld), address,
             GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
-        SetDestOrMoveToArgReg(rv, arg_node, first,
-                              arg_location->location.reg, RV_OP(mv));
-        SetDestOrMoveToArgReg(rv, arg_node, second, arg_location->second_reg,
-                              RV_OP(mv));
+        VectorAppend(&pending_arg_moves,
+                     NewPendingArgMove(first, arg_location->location.reg,
+                                       RV_OP(mv)));
+        VectorAppend(&pending_arg_moves,
+                     NewPendingArgMove(second, arg_location->second_reg,
+                                       RV_OP(mv)));
         break;
       }
       case kArgLocationPushedPair: {
@@ -3529,8 +3622,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         TargetInstruction* arg = AddImmediate(
             rv, StackPointer(rv),
             arg_location->reference_offset + next_pushed_arg_offset);
-        SetDestOrMoveToArgReg(rv, arg_node, arg, arg_location->location.reg, RV_OP(mv));
-        // Emit(rv, NewInstruction2(RV_OP(rmov), arg_location->location.reg, arg));
+        VectorAppend(&pending_arg_moves,
+                     NewPendingArgMove(arg, arg_location->location.reg,
+                                       RV_OP(mv)));
         break;
       }
       case kArgLocationPassedByReferenceOnStack: {
@@ -3588,9 +3682,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                                              ? RV_OP(fmv_x_d)
                                              : RV_OP(fmv_x_w),
                                        arg));
-          TargetInstruction* fmove =
-              Emit(rv, NewInstruction2(RV_OP(mv), arg_location->location.reg, arg));
-          fmove->flags |= RV_INST_ARG_MOVE;
+          VectorAppend(&pending_arg_moves,
+                       NewPendingArgMove(arg, arg_location->location.reg,
+                                         RV_OP(mv)));
           break;
         } else if (TypeIsFloatingPoint(arg_node->type)) {
           if (TypeIsDouble(arg_node->type)) {
@@ -3599,11 +3693,20 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
             mov_opcode = RV_OP(fmv_s);
           }
         }
-        // Emit(rv, NewInstruction2(mov_opcode, arg_location->location.reg, arg));
-        SetDestOrMoveToArgReg(rv, arg_node, arg, arg_location->location.reg, mov_opcode);
+        VectorAppend(&pending_arg_moves,
+                     NewPendingArgMove(arg, arg_location->location.reg,
+                                       mov_opcode));
         break;
       }
     }
+  }
+
+  for (size_t i = 0; i < pending_arg_moves.length; i++) {
+    RVPendingArgMove* pending = pending_arg_moves.value.p[i];
+    TargetInstruction* move = Emit(
+        rv, NewInstruction2(pending->opcode, pending->destination,
+                            pending->source));
+    move->flags |= RV_INST_ARG_MOVE;
   }
 
   // Finally emit the call instruction containing the address
@@ -3612,7 +3715,6 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // the lifetime of the registers allocated for argument passing
   // extend to the call site, thus enabling the register allocator
   // to keep them from being used before the call.
-  TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
   RVOpcode opcode;
   TargetInstruction* call;
   
@@ -3622,8 +3724,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // Possible optimization: if the arguments don't contain an address in
   // the current stack frame we can allow tail calls when we have space
   // allocated on the stack.  I don't know how to detect that though.
-  bool can_be_tail_call = (node->flags & kIRTailCall) != 0 &&
-      total_stack_size == 0 && rv->base.stack_frame_size == 0;
+  bool can_be_tail_call = will_tail_call;
 
   if (can_be_tail_call) {
     // Tail call.
@@ -3652,6 +3753,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     }
     rv->base.num_calls--;
   } else {
+    if (staged_target != NULL) {
+      addr = staged_target;
+    }
     if (((int)addr->opcode == (int)RV_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? RV_OP(callf) : RV_OP(call);
@@ -3688,6 +3792,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   }
 
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&pending_arg_moves, NULL, /*free_element=*/true);
   return result;
 }
 
@@ -3768,9 +3873,24 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
     ap_load = Emit(rv, NewInstruction2(RV_OP(ld), ap_addr, ap_offset));
   }
   TargetInstruction* result;
+  size_t arg_size = 8;
   if (TypeIsStructOrUnion(node->type) &&
-      node->type->info.struct_info->size <= 8) {
+      node->type->info.struct_info->size <= 16) {
+    // Aggregates no larger than 2*XLEN are stored inline in the integer
+    // argument-register save area (or inline on the stack).  The IR represents
+    // aggregate values by address, so return the current va_list pointer rather
+    // than interpreting the first XLEN bytes as an indirect pointer.
+    size_t struct_size = node->type->info.struct_info->size;
+    if (struct_size > 8) {
+      ap_load = Emit(rv, NewInstruction2(
+                             RV_OP(addi), ap_load,
+                             GetIntConstant(rv, NULL, kTargetType32Bit, 15)));
+      ap_load = Emit(rv, NewInstruction2(
+                             RV_OP(andi), ap_load,
+                             GetIntConstant(rv, NULL, kTargetType32Bit, -16)));
+    }
     result = ap_load;
+    arg_size = (struct_size + 7) & ~(size_t)7;
   } else if (TypeIsFloatingPoint(node->type)) {
     result = Emit(rv, NewInstruction2(RV_OP(fld), ap_load,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
@@ -3780,7 +3900,8 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
   }
   TargetInstruction* addi =
       Emit(rv, NewInstruction2(RV_OP(addi), ap_load,
-                               GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit,
+                                              arg_size)));
   if (on_stack) {
     Emit(rv, NewInstruction3(RV_OP(sd), addi, ap_addr, ap_offset));
   } else {
@@ -3831,6 +3952,140 @@ static TargetInstruction* LowerStackPointerOps(RVGenerator* rv, IRNode* node) {
       mv->dest = StackPointer(rv);
       return mv->dest;
     }
+    default:
+      assert(false);
+      return NULL;
+  }
+}
+
+static int AtomicIRConstant(IRNode* node) {
+  assert(node != NULL && IRIsConst(node));
+  return (int)((IRConstant*)node)->value.ivalue;
+}
+
+static int AtomicAccessLog2(TypeRecord* type) {
+  assert(type != NULL);
+  switch (type->size) {
+    case 1: return 0;
+    case 2: return 1;
+    case 4: return 2;
+    case 8: return 3;
+    default:
+      assert(false && "RISC-V atomics require a 1/2/4/8-byte object");
+      return 2;
+  }
+}
+
+static TargetInstruction* AtomicAddress(RVGenerator* rv, IRNode* addr_node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetRegAndOffset(rv, addr_node, &base, &offset);
+  if (offset == NULL || TargetIsZero(offset)) {
+    return base;
+  }
+  if (TargetIsConst(offset)) {
+    return AddImmediate(rv, base, RVIntValue(offset));
+  }
+  return Emit(rv, NewInstruction2(RV_OP(add), base, offset));
+}
+
+static void SetAtomicMetadata(TargetInstruction* inst, TypeRecord* value_type,
+                              int success_order, int failure_order,
+                              bool weak) {
+  inst->flags |= AtomicAccessLog2(value_type) << RV_ATOMIC_SIZE_SHIFT;
+  inst->flags |= success_order << RV_ATOMIC_ORDER_SHIFT;
+  inst->flags |= failure_order << RV_ATOMIC_FAILURE_ORDER_SHIFT;
+  if (weak) {
+    inst->flags |= RV_ATOMIC_WEAK;
+  }
+}
+
+static TargetInstruction* FinishAtomicValue(RVGenerator* rv, IRNode* node,
+                                             TargetInstruction* inst) {
+  Emit(rv, inst);
+  TargetInstruction* dest = GetDestInstruction(rv, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(rv, inst, dest, RV_OP(mv));
+  }
+  return SetLoweredNode(node, inst);
+}
+
+static TargetInstruction* LowerAtomic(RVGenerator* rv, IRNode* node) {
+  if (node->opcode == IR_OP(atomic_fence)) {
+    TargetInstruction* inst = NewInstruction(RV_OP(atomic_fence));
+    SetAtomicMetadata(inst, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                      AtomicIRConstant(node->inputs.value.p[0]), 0, false);
+    Emit(rv, inst);
+    return SetLoweredNode(node, inst);
+  }
+
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  assert(value_type != NULL);
+  TargetInstruction* addr = AtomicAddress(rv, addr_node);
+  TargetInstruction* inst = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load):
+      inst = NewInstruction1(RV_OP(atomic_load), addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[1]), 0, false);
+      return FinishAtomicValue(rv, node, inst);
+
+    case IR_OP(atomic_store): {
+      TargetInstruction* value = Materialize(rv, node->inputs.value.p[1]);
+      inst = NewInstruction2(RV_OP(atomic_store), value, addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      Emit(rv, inst);
+      return SetLoweredNode(node, inst);
+    }
+
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch): {
+      RVOpcode opcode =
+          node->opcode == IR_OP(atomic_fetch_add)
+              ? RV_OP(atomic_fetch_add)
+              : node->opcode == IR_OP(atomic_fetch_sub)
+                    ? RV_OP(atomic_fetch_sub)
+                    : node->opcode == IR_OP(atomic_add_fetch)
+                          ? RV_OP(atomic_add_fetch)
+                          : RV_OP(atomic_sub_fetch);
+      TargetInstruction* value = Materialize(rv, node->inputs.value.p[1]);
+      inst = NewInstruction2(opcode, addr, value);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      return FinishAtomicValue(rv, node, inst);
+    }
+
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          node->opcode == IR_OP(atomic_compare_exchange_n);
+      RVOpcode opcode =
+          expected_is_pointer
+              ? RV_OP(atomic_compare_exchange_n)
+              : node->opcode == IR_OP(atomic_compare_exchange_bool)
+                    ? RV_OP(atomic_compare_exchange_bool)
+                    : RV_OP(atomic_compare_exchange_val);
+      TargetInstruction* expected =
+          Materialize(rv, node->inputs.value.p[1]);
+      TargetInstruction* desired =
+          Materialize(rv, node->inputs.value.p[2]);
+      inst = NewInstruction3(opcode, addr, expected, desired);
+      int order_index = expected_is_pointer ? 4 : 3;
+      bool weak = expected_is_pointer &&
+                  AtomicIRConstant(node->inputs.value.p[3]) != 0;
+      SetAtomicMetadata(
+          inst, value_type,
+          AtomicIRConstant(node->inputs.value.p[order_index]),
+          AtomicIRConstant(node->inputs.value.p[order_index + 1]), weak);
+      return FinishAtomicValue(rv, node, inst);
+    }
+
     default:
       assert(false);
       return NULL;
@@ -4141,8 +4396,7 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(atomic_compare_exchange_val):
     case IR_OP(atomic_compare_exchange_n):
     case IR_OP(atomic_fence):
-      assert(false);
-      return NULL;
+      return LowerAtomic(rv, node);
       
     case IR_OP(decsp):
     case IR_OP(savesp):
@@ -4212,7 +4466,16 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location = {0};
-      if (TypeIsMemberPointerAggregate(arg_type)) {
+      RVFloatingAggregate aggregate;
+      bool in_fp_registers =
+          GetFloatingAggregate(arg_type, &aggregate) &&
+          fp_reg + aggregate.count - 1 <= RV_FP_ARG_END;
+      if (in_fp_registers) {
+        location.type = kArgLocationFPRegisterAggregate;
+        location.location.offset = fp_reg;
+        location.second_offset =
+            aggregate.count == 2 ? (size_t)(fp_reg + 1) : 0;
+      } else if (IsRegisterPairAggregate(arg_type)) {
         if (int_reg + 1 <= RV_INT_ARG_END) {
           location.type = kArgLocationRegisterPair;
           location.location.offset = int_reg;
@@ -4245,7 +4508,13 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
     }
 
     Symbol* arg_symbol = args->value.p[i];
-    if (TypeIsMemberPointerAggregate(arg_symbol->type)) {
+    RVFloatingAggregate aggregate;
+    bool in_fp_registers =
+        GetFloatingAggregate(arg_symbol->type, &aggregate) &&
+        fp_reg + aggregate.count - 1 <= RV_FP_ARG_END;
+    if (in_fp_registers) {
+      fp_reg += aggregate.count;
+    } else if (IsRegisterPairAggregate(arg_symbol->type)) {
       if (int_reg + 1 <= RV_INT_ARG_END) {
         int_reg += 2;
       } else {
@@ -4315,6 +4584,7 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(RVGenerator* rv,
       return var;
     }
     case kArgLocationRegisterPair:
+    case kArgLocationFPRegisterAggregate:
     case kArgLocationPushedPair:
       assert(false);
       return NULL;
@@ -4347,6 +4617,7 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
       return var;
     }
     case kArgLocationRegisterPair:
+    case kArgLocationFPRegisterAggregate:
     case kArgLocationPushedPair:
       assert(false);
       return NULL;
@@ -4354,20 +4625,52 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
   return NULL;
 }
 
+static void HomeFloatingAggregateArgument(
+    RVGenerator* rv, PoolEntry* entry, ArgLocation location,
+    const RVFloatingAggregate* aggregate) {
+  int offset =
+      -24 - ((int)rv->saved_regs.length + aggregate->count - 1) * 8;
+  entry->pooled->data.ivalue = offset;
+  SetDebugStackLocation(entry, offset);
+  for (int member = 0; member < aggregate->count; member++) {
+    int reg = (int)location.location.offset + member;
+    VectorAppend(
+        &rv->saved_regs,
+        NewSavedArgumentRegister(reg, RV_FP_REG,
+                                 offset + aggregate->offset[member],
+                                 aggregate->type[member]->size, true));
+  }
+  rv->num_fp_arg_regs += aggregate->count;
+}
+
 // Assign a register to a variable or argument if possible.  The
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
                                    Vector* args, int* var_offset) {
+  switch (entry->pooled->opcode) {
+    case IR_OP(argument):
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+    case IR_OP(staticvar):
+    case IR_OP(externvar): {
+      IRVariable* variable = (IRVariable*)entry->pooled;
+      if (variable->symbol != NULL && variable->symbol->type != NULL) {
+        TypeRecordCalculateSize(variable->symbol->type);
+        IRSetType(entry->pooled, variable->symbol->type);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
   // Variable length arrays are not given offsets until their block
   // is entered.
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
-  TypeRecord* variable_type =
-      is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
-          ? ((IRVariable*)entry->pooled)->symbol->type
-          : entry->pooled->type;
+  TypeRecord* variable_type = entry->pooled->type;
   TypeRecordCalculateSize(entry->pooled->type);
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
@@ -4408,11 +4711,17 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         *var_offset += size;
       }
     }
-  } else if (TypeIsMemberPointerAggregate(variable_type)) {
+  } else if (TypeIsMemberPointerAggregate(variable_type) ||
+             (is_arg && IsRegisterPairAggregate(variable_type))) {
     AlignOffset(entry, var_offset);
     if (is_arg) {
       ArgLocation location = ArgumentLocation(entry, args);
-      if (location.type == kArgLocationRegisterPair) {
+      if (location.type == kArgLocationFPRegisterAggregate) {
+        RVFloatingAggregate aggregate;
+        bool ok = GetFloatingAggregate(variable_type, &aggregate);
+        assert(ok);
+        HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
+      } else if (location.type == kArgLocationRegisterPair) {
         int offset =
             -24 - ((int)rv->saved_regs.length + 1) * 8;
         entry->pooled->data.ivalue = offset;
@@ -4447,7 +4756,12 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         // pointer-sized integer argument so the prologue spills it and the
         // address computation refers to that slot.
         ArgLocation location = ArgumentLocation(entry, args);
-        if (location.type == kArgLocationRegister) {
+        if (location.type == kArgLocationFPRegisterAggregate) {
+          RVFloatingAggregate aggregate;
+          bool ok = GetFloatingAggregate(variable_type, &aggregate);
+          assert(ok);
+          HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
+        } else if (location.type == kArgLocationRegister) {
           int offset = -24 - (int)rv->saved_regs.length * 8;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, RV_FP_REG, offset, 8, false);

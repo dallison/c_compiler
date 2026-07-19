@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -17,6 +18,26 @@
 #include "elf.h"
 #include "loader_lifecycle.h"
 #include "risc_v_disassembler.h"
+#include "risc_v_process.h"
+
+static void GuestMemoryLock(RISCVInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryUnlock(RISCVInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryDidWrite(RISCVInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    interpreter->process->write_epoch++;
+  }
+  interpreter->reservation_valid = false;
+}
 
 void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter) {
   const int kWidth = 40;
@@ -67,6 +88,9 @@ static void DumpStateAndExit(RISCVInterpreter* interpreter) {
 // found, the GOT entry is set to the address of the symbol and the PC
 // is set to that address.
 static void ResolveAndFixupSymbol(RISCVInterpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
+  }
   const int t0 = 5;
   const int t1 = 6;
   int64_t offset = interpreter->iregs[t1];
@@ -99,7 +123,13 @@ static void ResolveAndFixupSymbol(RISCVInterpreter* interpreter) {
   uint64_t symbol_address = found_lib->load_address + symbol->value;
 
   // Fixup GOT entry to contain the symbol address.
+  GuestMemoryLock(interpreter);
   *(uint64_t*)(lib->load_address + reloc->offset) = symbol_address;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->got_resolve_mutex);
+  }
 
   // Finally jump to the address.  The PC will be incremented after the
   // ecall instruction so we need to set it to one instruction before
@@ -117,7 +147,13 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       interpreter->pc = 0;
       break;
     case RISC_V_ECALL_EXIT:
-      exit((int)interpreter->iregs[REG(a1)]);
+      if (interpreter->guest_thread != NULL &&
+          !interpreter->guest_thread->is_main) {
+        RISCVSyscallThreadExit(interpreter->guest_thread,
+                               interpreter->iregs[REG(a1)]);
+      } else {
+        exit((int)interpreter->iregs[REG(a1)]);
+      }
       break;
     case RISC_V_ECALL_EXIT_CLEAN:
       if (interpreter->loader != NULL) {
@@ -192,6 +228,43 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       abort();
       break;
     }
+    case RISC_V_ECALL_TIME:
+      interpreter->iregs[REG(a0)] = RISCVSyscallTime();
+      break;
+    case RISC_V_ECALL_CLOCK:
+      interpreter->iregs[REG(a0)] = RISCVSyscallClock();
+      break;
+    case RISC_V_ECALL_THREAD_CREATE:
+      interpreter->iregs[REG(a0)] = RISCVSyscallThreadCreate(
+          interpreter->guest_thread, interpreter->iregs[REG(a1)],
+          interpreter->iregs[REG(a2)], interpreter->iregs[REG(a3)],
+          interpreter->iregs[REG(a4)]);
+      break;
+    case RISC_V_ECALL_THREAD_JOIN:
+      interpreter->iregs[REG(a0)] = RISCVSyscallThreadJoin(
+          interpreter->guest_thread, interpreter->iregs[REG(a1)],
+          interpreter->iregs[REG(a2)]);
+      break;
+    case RISC_V_ECALL_THREAD_SELF:
+      interpreter->iregs[REG(a0)] =
+          RISCVSyscallThreadSelf(interpreter->guest_thread);
+      break;
+    case RISC_V_ECALL_GET_TP:
+      interpreter->iregs[REG(a0)] =
+          RISCVSyscallGetTp(interpreter->guest_thread);
+      break;
+    case RISC_V_ECALL_THREAD_EXIT:
+      RISCVSyscallThreadExit(interpreter->guest_thread,
+                             interpreter->iregs[REG(a1)]);
+      break;
+    case RISC_V_ECALL_HEAP_LOCK:
+      interpreter->iregs[REG(a0)] =
+          RISCVSyscallHeapLock(interpreter->guest_thread);
+      break;
+    case RISC_V_ECALL_HEAP_UNLOCK:
+      interpreter->iregs[REG(a0)] =
+          RISCVSyscallHeapUnlock(interpreter->guest_thread);
+      break;
     default:
       DumpStateAndExit(interpreter);
   }
@@ -220,11 +293,14 @@ static void DumpRegChanges(RISCVInterpreter* interpreter) {
   }
 }
 
-void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
-                          uint64_t entry_address, int argc,
-                          char** argv, bool trace_regs,
-                          bool trace_instructions) {
+void RISCVInterpreterInitForThread(
+    RISCVInterpreter* interpreter, RISCVProcessRuntime* process,
+    RISCVGuestThread* guest_thread, Loader* loader, uint64_t entry_address,
+    int argc, char** argv, char* stack, void* tls_block,
+    size_t tls_block_size, bool trace_regs, bool trace_instructions) {
   memset(interpreter, 0, sizeof(RISCVInterpreter));
+  interpreter->process = process;
+  interpreter->guest_thread = guest_thread;
   interpreter->trace_regs = trace_regs;
   interpreter->trace_instructions = trace_instructions;
   interpreter->num_steps = -1;
@@ -251,9 +327,28 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
   interpreter->call_return_code[1] = RV_OPCODE(system);
 
   interpreter->loader = loader;
-  interpreter->stack = malloc(RISC_V_STACK_SIZE);
+  interpreter->stack = stack;
+  if (interpreter->stack == NULL) {
+    interpreter->stack = malloc(RISC_V_STACK_SIZE);
+    interpreter->owns_stack = true;
+  }
+  interpreter->stack_guest_base =
+      (uint64_t)(uintptr_t)interpreter->stack;
   interpreter->iregs[RV_SP_REG] =
       (int64_t)(interpreter->stack + RISC_V_STACK_SIZE);
+  if (tls_block != NULL) {
+    interpreter->tls_block = tls_block;
+    interpreter->tls_block_size = tls_block_size;
+    interpreter->tls_guest_base = (uint64_t)(uintptr_t)tls_block;
+    interpreter->iregs[RISC_V_REG_tp] =
+        (int64_t)(uintptr_t)tls_block;
+  } else if (loader->tls.present) {
+    interpreter->tls_block = loader->tls.main_thread_block;
+    interpreter->tls_block_size = loader->tls.block_size;
+    interpreter->tls_guest_base =
+        (uint64_t)(uintptr_t)loader->tls.main_thread_block;
+    interpreter->iregs[RISC_V_REG_tp] = (int64_t)loader->tls.tp_base;
+  }
 
   int64_t* iregs = interpreter->iregs;
 
@@ -280,6 +375,15 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
   if (kShowRegChanges) {
     interpreter->trace_regs = true;
   }
+}
+
+void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
+                          uint64_t entry_address, int argc,
+                          char** argv, bool trace_regs,
+                          bool trace_instructions) {
+  RISCVInterpreterInitForThread(interpreter, NULL, NULL, loader,
+                                entry_address, argc, argv, NULL, NULL, 0,
+                                trace_regs, trace_instructions);
 }
 
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
@@ -592,6 +696,7 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
         }
         int funct3 = (inst >> 12) & 0x7;
         int64_t immed = inst >> 20;  // Auto sign extended to 64 bits.
+        GuestMemoryLock(interpreter);
         switch (funct3) {
           case RV_F3(lb):
             iregs[rd] = *(int8_t*)(iregs[rs1] + immed);
@@ -615,12 +720,14 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
             iregs[rd] = *(uint64_t*)(iregs[rs1] + immed);
             break;
         }
+        GuestMemoryUnlock(interpreter);
         break;
       }
       case RV_OPCODE(store): {
         int funct3 = (inst >> 12) & 0x7;
         int64_t immed_hi = inst >> 25;       // Auto sign extended to 64 bits.
         int64_t immed = immed_hi << 5 | rd;  // rd is the low 5 bits of offset.
+        GuestMemoryLock(interpreter);
         switch (funct3) {
           case RV_F3(sb):
             *(int8_t*)(iregs[rs1] + immed) = iregs[rs2];
@@ -635,9 +742,66 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
             *(uint64_t*)(iregs[rs1] + immed) = iregs[rs2];
             break;
         }
+        GuestMemoryDidWrite(interpreter);
+        GuestMemoryUnlock(interpreter);
+        break;
+      }
+      case RV_OPCODE(amo): {
+        int funct3 = (inst >> 12) & 0x7;
+        int funct5 = (inst >> 27) & 0x1f;
+        uint64_t address = (uint64_t)iregs[rs1];
+        uint32_t size = funct3 == 2 ? 4 : 8;
+        GuestMemoryLock(interpreter);
+        if (funct5 == 0x02) {
+          iregs[rd] =
+              size == 4 ? (int64_t)*(int32_t*)(uintptr_t)address
+                        : (int64_t)*(int64_t*)(uintptr_t)address;
+          interpreter->reservation_valid = true;
+          interpreter->reservation_address = address;
+          interpreter->reservation_size = size;
+          interpreter->reservation_epoch =
+              interpreter->process != NULL
+                  ? interpreter->process->write_epoch
+                  : 0;
+        } else if (funct5 == 0x03) {
+          bool success =
+              interpreter->reservation_valid &&
+              interpreter->reservation_address == address &&
+              interpreter->reservation_size == size &&
+              (interpreter->process == NULL ||
+               interpreter->reservation_epoch ==
+                   interpreter->process->write_epoch);
+          interpreter->reservation_valid = false;
+          if (success) {
+            if (size == 4) {
+              *(int32_t*)(uintptr_t)address = (int32_t)iregs[rs2];
+            } else {
+              *(int64_t*)(uintptr_t)address = iregs[rs2];
+            }
+            if (interpreter->process != NULL) {
+              interpreter->process->write_epoch++;
+            }
+            iregs[rd] = 0;
+          } else {
+            iregs[rd] = 1;
+          }
+        } else if (funct5 == 0x00) {
+          if (size == 4) {
+            int32_t old = *(int32_t*)(uintptr_t)address;
+            *(int32_t*)(uintptr_t)address = old + (int32_t)iregs[rs2];
+            iregs[rd] = old;
+          } else {
+            int64_t old = *(int64_t*)(uintptr_t)address;
+            *(int64_t*)(uintptr_t)address = old + iregs[rs2];
+            iregs[rd] = old;
+          }
+          GuestMemoryDidWrite(interpreter);
+        }
+        GuestMemoryUnlock(interpreter);
         break;
       }
       case RV_OPCODE(misc_mem): {
+        atomic_thread_fence(memory_order_seq_cst);
         break;
       }
       case RV_OPCODE(system): {
@@ -714,22 +878,27 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
       case RV_OPCODE(load_fp): {
         int funct3 = (inst >> 12) & 0x7;
         int64_t immed = inst >> 20;  // Auto sign extended to 64 bits.
+        GuestMemoryLock(interpreter);
         if (funct3 == RV_F3(flw)) {
           fregs[rd] = *(float*)(iregs[rs1] + immed);
         } else {
           fregs[rd] = *(double*)(iregs[rs1] + immed);
         }
+        GuestMemoryUnlock(interpreter);
         break;
       }
       case RV_OPCODE(store_fp): {
         int funct3 = (inst >> 12) & 0x7;
         int64_t immed_hi = inst >> 25;       // Auto sign extended to 64 bits.
         int64_t immed = immed_hi << 5 | rd;  // rd is the low 5 bits of offset.
+        GuestMemoryLock(interpreter);
         if (funct3 == RV_F3(fsw)) {
           *(float*)(iregs[rs1] + immed) = (float)fregs[rs2];
         } else {
           *(double*)(iregs[rs1] + immed) = fregs[rs2];
         }
+        GuestMemoryDidWrite(interpreter);
+        GuestMemoryUnlock(interpreter);
         break;
       }
 
@@ -1009,6 +1178,49 @@ void RISCVInterpreterCall(RISCVInterpreter* interpreter, uint64_t fn) {
   RISCVInterpreterRestoreState(interpreter, &saved);
 }
 
+int RISCVInterpreterCallWithArg(RISCVInterpreter* interpreter, uint64_t fn,
+                                uint64_t arg) {
+  if (interpreter == NULL || fn == 0) {
+    return 0;
+  }
+  RISCVSavedState saved;
+  RISCVInterpreterSaveState(interpreter, &saved);
+  RISCVInterpreterPrepareCall(interpreter, fn);
+  interpreter->iregs[RISC_V_REG_a0] = (int64_t)arg;
+  RISCVInterpreterCycle(interpreter);
+  int result = (int)interpreter->iregs[RISC_V_REG_a0];
+  if (interpreter->exit_code != 0) {
+    result = interpreter->exit_code;
+  }
+  RISCVInterpreterRestoreState(interpreter, &saved);
+  return result;
+}
+
+void* RISCVGuestAddressToHost(RISCVInterpreter* interpreter, uint64_t addr,
+                              size_t size) {
+  if (interpreter == NULL || addr == 0 || addr + size < addr) {
+    return NULL;
+  }
+  if (interpreter->process != NULL) {
+    void* mapped =
+        RISCVProcessResolveGuestAddress(interpreter->process, addr, size);
+    if (mapped != NULL) {
+      return mapped;
+    }
+  }
+  if (interpreter->loader != NULL) {
+    for (size_t i = 0; i < interpreter->loader->regions.length; i++) {
+      Region* region = interpreter->loader->regions.value.p[i];
+      uint64_t start = (uint64_t)(uintptr_t)region->address;
+      uint64_t end = start + (uint64_t)region->length;
+      if (addr >= start && addr + size <= end) {
+        return (void*)(uintptr_t)addr;
+      }
+    }
+  }
+  return NULL;
+}
+
 int RISCVInterpreterRun(RISCVInterpreter* interpreter) {
   RISCVInterpreterCycle(interpreter);
   return interpreter->exit_code;
@@ -1109,5 +1321,7 @@ bool RISCVGuestRunProgramShutdown(Loader* loader, RISCVInterpreter* interpreter)
 }
 
 void RISCVInterpreterDestruct(RISCVInterpreter* interpreter) {
-  free(interpreter->stack);
+  if (interpreter->owns_stack) {
+    free(interpreter->stack);
+  }
 }

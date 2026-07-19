@@ -7,6 +7,7 @@
 //
 
 #include <stdlib.h>
+#include "elf.h"
 #include "loader_arch_riscv.h"
 
 static void InitGOTPLT(LoadedDynamicLibrary* lib, void* data) {
@@ -86,7 +87,7 @@ void RISCVLoaderArchitectureInit(LoaderArchitecture* arch) {
   arch->machine_type = ELF_MACHINE_TYPE_RISC_V;
   arch->platform = "risc-v";
   arch->ignore_vaddr = false;
-  arch->tls_tcb_size = 0;
+  arch->tls_tcb_size = RISCV_TLS_TCB_SIZE;
   arch->init_tls_tcb = NULL;
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;

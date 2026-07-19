@@ -105,11 +105,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -S \
   -o "$work/use_hello_mapping.s" ||
   fail "compile importer with explicit module mapping"
 
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_hello.o" "$work/hello.o" "$LIBC" -o "$work/hello.bin" ||
   fail "link module executable"
 
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/hello.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/hello.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute module program"
 
@@ -175,11 +176,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -o "$work/use_surface.o" ||
   fail "compile surface importer"
 
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_surface.o" "$work/surface.o" "$LIBC" -o "$work/surface.bin" ||
   fail "link surface executable"
 
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/surface.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/surface.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute surface module program"
 
@@ -204,11 +206,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_reachability.cpp" \
   -o "$work/use_reachability.o" ||
   fail "compile reachability importer"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_reachability.o" "$work/reachability.o" "$LIBC" \
   -o "$work/reachability.bin" ||
   fail "link reachability executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/reachability.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/reachability.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute reachability module program"
 
@@ -275,12 +278,13 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_partitioned.cpp" \
   -o "$work/use_partitioned.o" ||
   fail "compile partitioned importer"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_partitioned.o" "$work/partitioned.o" \
   "$work/partitioned_detail.o" "$work/partitioned_impl.o" "$LIBC" \
   -o "$work/partitioned.bin" ||
   fail "link partitioned executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/partitioned.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/partitioned.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute partitioned module program"
 
@@ -304,11 +308,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
 run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   "$FIXTURES/private_dependency.cppm" -o "$work/private_dependency.o" ||
   fail "compile private dependency object"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_reexport_top.o" "$work/private_dependency.o" "$LIBC" \
   -o "$work/reexport_top.bin" ||
   fail "link transitive reexport executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/reexport_top.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/reexport_top.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute transitive reexport program"
 
@@ -332,11 +337,12 @@ if run "$DAVECC" -target "$TARGET" -std=c++20 -S \
 fi
 grep -Fq "header_unit_internal_value" "$work/command.log" ||
   fail "header-unit internal-linkage diagnostic"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_header_unit.o" "$work/header_unit.o" "$LIBC" \
   -o "$work/header_unit.bin" ||
   fail "link header-unit executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/header_unit.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/header_unit.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute header-unit program"
 
@@ -353,11 +359,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_not_reexporting.cpp" \
   -o "$work/use_not_reexporting.o" ||
   fail "compile private dependency importer"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_not_reexporting.o" "$work/not_reexporting.o" \
   "$work/private_dependency.o" "$LIBC" -o "$work/not_reexporting.bin" ||
   fail "link private dependency executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/not_reexporting.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/not_reexporting.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute private dependency program"
 
@@ -387,12 +394,13 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -o "$work/use_identity_iface.o" ||
   fail "compile identity importer"
 
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_identity_iface.o" "$work/identity_iface.o" \
   "$work/identity_impl.o" "$LIBC" -o "$work/identity_iface.bin" ||
   fail "link identity executable"
 
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/identity_iface.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/identity_iface.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute identity module program"
 
@@ -412,11 +420,12 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_alpha_beta.cpp" \
   -o "$work/use_alpha_beta.o" ||
   fail "compile alpha_beta importer"
-run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   "$work/use_alpha_beta.o" "$work/alpha.o" "$work/beta.o" "$LIBC" \
   -o "$work/alpha_beta.bin" ||
   fail "link alpha_beta executable"
-"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/alpha_beta.bin" \
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/alpha_beta.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute alpha_beta module program"
 

@@ -123,6 +123,11 @@ static const char* SymbolName(TargetSymbol* sym, char* buf, size_t len) {
 
 // This is the size of the stack frame including the space
 // for the local variables.
+static bool HasExceptionStructReturn(RVEmitter* emitter) {
+  return emitter->rv->struct_return_reg >= 0 &&
+         emitter->rv->exception_ranges.length > 0;
+}
+
 static int StackFrameSize(RVEmitter* emitter) {
   // Start off with local variable space.  This also includes
   // 16 bytes for the saved ra and s0.
@@ -148,6 +153,9 @@ static int StackFrameSize(RVEmitter* emitter) {
   stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 8;
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
+  if (HasExceptionStructReturn(emitter)) {
+    stack_frame_size += 8;
+  }
   
   stack_frame_size = (stack_frame_size + 15) & ~15;  // Aligned to 16 bytes.
 
@@ -167,8 +175,7 @@ static void DecrementStackPointer(RVEmitter* emitter, int stack_frame_size,
                                   FILE* fp) {
   if (stack_frame_size > 0x7ff) {
     // Too big for an immediate.  Load into t0 and use a sub instruction.
-    fprintf(fp, "\tlui t0, %d\n", stack_frame_size >> 12);
-    fprintf(fp, "\taddi t0, t0, %d\n", stack_frame_size & 0xfff);
+    fprintf(fp, "\tli t0, %d\n", stack_frame_size);
     fprintf(fp, "\tsub sp, sp, t0\n");
   } else {
     fprintf(fp, "\taddi sp, sp, -%d\n", stack_frame_size);
@@ -179,8 +186,7 @@ static COMPILER_UNUSED void IncrementStackPointer(RVEmitter* emitter, int stack_
                                   FILE* fp) {
   if (stack_frame_size > 0x7ff) {
     // Too big for an immediate.  Load into t0 and use an add instruction.
-    fprintf(fp, "\tlui t0, %d\n", stack_frame_size >> 12);
-    fprintf(fp, "\taddi t0, t0, %d\n", stack_frame_size & 0xfff);
+    fprintf(fp, "\tli t0, %d\n", stack_frame_size);
     fprintf(fp, "\tadd sp, sp, t0\n");
   } else {
     fprintf(fp, "\taddi sp, sp, %d\n", stack_frame_size);
@@ -464,6 +470,11 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
+  if (HasExceptionStructReturn(emitter)) {
+    fprintf(fp, "\tsd a0, %d(sp)\t// hidden result pointer\n",
+            saved_reg_offset);
+  }
+
   if (!is_leaf) {
     fprintf(fp, "\t// End of stack frame\n");
   }
@@ -534,15 +545,25 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
   fprintf(fp, "\tmv sp, s0\n");
   DecrementStackPointer(emitter, StackFrameSize(emitter), fp);
 
+  int struct_return_phys = -1;
+  if (emitter->rv->struct_return_reg >= 0) {
+    bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
+                   !emitter->rv->not_leaf;
+    struct_return_phys =
+        (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR) +
+        emitter->rv->struct_return_reg;
+  }
   int offset = emitter->saved_reg_offset;
   char buf[8];
   BitSetIterator it;
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
     int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tld %s, %d(sp)\n",
-            RVRegisterNameFromNum(reg, kRVRegTypeInt, buf, sizeof(buf)),
-            offset);
+    if (reg != struct_return_phys) {
+      fprintf(fp, "\tld %s, %d(sp)\n",
+              RVRegisterNameFromNum(reg, kRVRegTypeInt, buf, sizeof(buf)),
+              offset);
+    }
     offset -= 8;
     BitSetIteratorNext(&it);
   }
@@ -554,6 +575,12 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
             offset);
     offset -= 8;
     BitSetIteratorNext(&it);
+  }
+  if (struct_return_phys >= 0 && HasExceptionStructReturn(emitter)) {
+    fprintf(fp, "\tld %s, %d(sp)\t// hidden result pointer\n",
+            RVRegisterNameFromNum(struct_return_phys, kRVRegTypeInt, buf,
+                                  sizeof(buf)),
+            offset);
   }
 }
 
@@ -684,6 +711,252 @@ static AsmOperand* GetAsmOperand(RVAsmInstruction* inst, int index) {
     return inst->asm_node->outputs.value.p[index];
   }
   return inst->asm_node->inputs.value.p[index - inst->asm_node->outputs.length];
+}
+
+static int AtomicSizeLog2(TargetInstruction* inst) {
+  return (inst->flags & RV_ATOMIC_SIZE_MASK) >> RV_ATOMIC_SIZE_SHIFT;
+}
+
+static int AtomicOrder(TargetInstruction* inst) {
+  return (inst->flags & RV_ATOMIC_ORDER_MASK) >> RV_ATOMIC_ORDER_SHIFT;
+}
+
+static int AtomicFailureOrder(TargetInstruction* inst) {
+  return (inst->flags & RV_ATOMIC_FAILURE_ORDER_MASK) >>
+         RV_ATOMIC_FAILURE_ORDER_SHIFT;
+}
+
+static bool AtomicOrderHasAcquire(int order) {
+  return order == 1 || order == 2 || order == 4 || order == 5;
+}
+
+static bool AtomicOrderHasRelease(int order) {
+  return order == 3 || order == 4 || order == 5;
+}
+
+static const char* AtomicSuffix(bool acquire, bool release) {
+  if (acquire && release) {
+    return ".aqrl";
+  }
+  if (acquire) {
+    return ".aq";
+  }
+  if (release) {
+    return ".rl";
+  }
+  return "";
+}
+
+static void PrintAtomicInstruction(TargetInstruction* inst,
+                                   const char* func_name, FILE* fp) {
+  int size = AtomicSizeLog2(inst);
+  int order = AtomicOrder(inst);
+  int failure_order = AtomicFailureOrder(inst);
+  bool acquire = AtomicOrderHasAcquire(order);
+  bool release = AtomicOrderHasRelease(order);
+  bool seq_cst = order == 5;
+  char b0[16], b1[16], b2[16], b3[16];
+  const char* result = GetRegisterName(inst, b0, sizeof(b0));
+
+  switch ((RVOpcode)inst->opcode) {
+    case RV_OP(atomic_load): {
+      const char* addr = GetRegisterName(inst->operand[0], b1, sizeof(b1));
+      static const char* loads[] = {"lbu", "lhu", "lw", "ld"};
+      if (seq_cst) {
+        fprintf(fp, "\tfence\n");
+      }
+      fprintf(fp, "\t%s %s, 0(%s)\n", loads[size], result, addr);
+      if (acquire) {
+        fprintf(fp, "\tfence\n");
+      }
+      return;
+    }
+    case RV_OP(atomic_store): {
+      const char* value =
+          GetRegisterName(inst->operand[0], b0, sizeof(b0));
+      const char* addr = GetRegisterName(inst->operand[1], b1, sizeof(b1));
+      static const char* stores[] = {"sb", "sh", "sw", "sd"};
+      if (release || seq_cst) {
+        fprintf(fp, "\tfence\n");
+      }
+      fprintf(fp, "\t%s %s, 0(%s)\n", stores[size], value, addr);
+      if (seq_cst) {
+        fprintf(fp, "\tfence\n");
+      }
+      return;
+    }
+    case RV_OP(atomic_fence):
+      if (order != 0) {
+        fprintf(fp, "\tfence\n");
+      }
+      return;
+    case RV_OP(atomic_fetch_add):
+    case RV_OP(atomic_fetch_sub):
+    case RV_OP(atomic_add_fetch):
+    case RV_OP(atomic_sub_fetch): {
+      bool add = inst->opcode == (TargetOpcode)RV_OP(atomic_fetch_add) ||
+                 inst->opcode == (TargetOpcode)RV_OP(atomic_add_fetch);
+      bool return_new =
+          inst->opcode == (TargetOpcode)RV_OP(atomic_add_fetch) ||
+          inst->opcode == (TargetOpcode)RV_OP(atomic_sub_fetch);
+      const char* addr =
+          GetRegisterName(inst->operand[0], b1, sizeof(b1));
+      const char* value =
+          GetRegisterName(inst->operand[1], b2, sizeof(b2));
+      if (size < 2) {
+        int value_mask = size == 0 ? 0xff : 0xffff;
+        fprintf(fp, "\tandi t1, %s, 3\n", addr);
+        fprintf(fp, "\tslli t1, t1, 3\n");
+        fprintf(fp, "\tli t2, %d\n", value_mask);
+        fprintf(fp, "\tsll t2, t2, t1\n");
+        fprintf(fp, "\tsll t3, %s, t1\n", value);
+        fprintf(fp, "\tand t3, t3, t2\n");
+        fprintf(fp, "\tandi t0, %s, -4\n", addr);
+        fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+        fprintf(fp, "\tlr.w%s %s, (t0)\n",
+                AtomicSuffix(acquire, release), result);
+        fprintf(fp, "\tnot t4, t2\n");
+        fprintf(fp, "\tand t4, %s, t4\n", result);
+        fprintf(fp, "\tand t5, %s, t2\n", result);
+        fprintf(fp, "\t%s t5, t5, t3\n", add ? "add" : "sub");
+        fprintf(fp, "\tand t5, t5, t2\n");
+        fprintf(fp, "\tor t5, t5, t4\n");
+        fprintf(fp, "\tsc.w%s t6, t5, (t0)\n",
+                AtomicSuffix(order == 5, release));
+        fprintf(fp, "\tbnez t6, .L%s_atomic_retry_%d\n", func_name,
+                inst->id);
+        if (return_new) {
+          fprintf(fp, "\tmv %s, t5\n", result);
+        }
+        fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
+        fprintf(fp, "\tli t4, %d\n", value_mask);
+        fprintf(fp, "\tand %s, %s, t4\n", result, result);
+        return;
+      }
+      fprintf(fp, "\tmv t0, %s\n", value);
+      if (!add) {
+        fprintf(fp, "\tsub t0, zero, t0\n");
+      }
+      fprintf(fp, "\tamoadd.%c%s %s, t0, (%s)\n",
+              size == 3 ? 'd' : 'w', AtomicSuffix(acquire, release), result,
+              addr);
+      if (return_new) {
+        fprintf(fp, "\t%s %s, %s, t0\n", size == 3 ? "add" : "addw",
+                result, result);
+      }
+      return;
+    }
+    case RV_OP(atomic_compare_exchange_bool):
+    case RV_OP(atomic_compare_exchange_val):
+    case RV_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          inst->opcode == (TargetOpcode)RV_OP(atomic_compare_exchange_n);
+      bool returns_bool =
+          inst->opcode != (TargetOpcode)RV_OP(atomic_compare_exchange_val);
+      bool lr_acquire =
+          acquire || AtomicOrderHasAcquire(failure_order) || order == 5;
+      const char* addr =
+          GetRegisterName(inst->operand[0], b1, sizeof(b1));
+      const char* expected =
+          GetRegisterName(inst->operand[1], b2, sizeof(b2));
+      const char* desired =
+          GetRegisterName(inst->operand[2], b3, sizeof(b3));
+      if (size < 2) {
+        int value_mask = size == 0 ? 0xff : 0xffff;
+        if (expected_is_pointer) {
+          fprintf(fp, "\t%s t3, 0(%s)\n", size == 0 ? "lbu" : "lhu",
+                  expected);
+        } else {
+          fprintf(fp, "\tmv t3, %s\n", expected);
+        }
+        fprintf(fp, "\tandi t1, %s, 3\n", addr);
+        fprintf(fp, "\tslli t1, t1, 3\n");
+        fprintf(fp, "\tli t2, %d\n", value_mask);
+        fprintf(fp, "\tand t3, t3, t2\n");
+        fprintf(fp, "\tand t4, %s, t2\n", desired);
+        fprintf(fp, "\tsll t2, t2, t1\n");
+        fprintf(fp, "\tsll t3, t3, t1\n");
+        fprintf(fp, "\tsll t4, t4, t1\n");
+        fprintf(fp, "\tandi t0, %s, -4\n", addr);
+        fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+        fprintf(fp, "\tlr.w%s %s, (t0)\n",
+                AtomicSuffix(lr_acquire, order == 5), result);
+        fprintf(fp, "\tand t6, %s, t2\n", result);
+        fprintf(fp, "\tbne t6, t3, .L%s_atomic_mismatch_%d\n",
+                func_name, inst->id);
+        fprintf(fp, "\tnot t6, t2\n");
+        fprintf(fp, "\tand t5, %s, t6\n", result);
+        fprintf(fp, "\tor t5, t5, t4\n");
+        fprintf(fp, "\tsc.w%s t6, t5, (t0)\n",
+                AtomicSuffix(order == 5, release));
+        if ((inst->flags & RV_ATOMIC_WEAK) != 0) {
+          fprintf(fp, "\tbnez t6, .L%s_atomic_mismatch_%d\n", func_name,
+                  inst->id);
+        } else {
+          fprintf(fp, "\tbnez t6, .L%s_atomic_retry_%d\n", func_name,
+                  inst->id);
+        }
+        if (returns_bool) {
+          fprintf(fp, "\tli %s, 1\n", result);
+        } else {
+          fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
+          fprintf(fp, "\tli t6, %d\n", value_mask);
+          fprintf(fp, "\tand %s, %s, t6\n", result, result);
+        }
+        fprintf(fp, "\tj .L%s_atomic_done_%d\n", func_name, inst->id);
+        fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
+        fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
+        fprintf(fp, "\tli t6, %d\n", value_mask);
+        fprintf(fp, "\tand %s, %s, t6\n", result, result);
+        if (expected_is_pointer) {
+          fprintf(fp, "\t%s %s, 0(%s)\n", size == 0 ? "sb" : "sh",
+                  result, expected);
+        }
+        if (returns_bool) {
+          fprintf(fp, "\tli %s, 0\n", result);
+        }
+        fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+        return;
+      }
+      if (expected_is_pointer) {
+        fprintf(fp, "\t%s t0, 0(%s)\n", size == 3 ? "ld" : "lw", expected);
+      } else {
+        fprintf(fp, "\tmv t0, %s\n", expected);
+      }
+      fprintf(fp, "\tmv t1, %s\n", desired);
+      fprintf(fp, "\tmv t3, %s\n", addr);
+      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+      fprintf(fp, "\tlr.%c%s %s, (%s)\n", size == 3 ? 'd' : 'w',
+              AtomicSuffix(lr_acquire, order == 5), result, "t3");
+      fprintf(fp, "\tbne %s, t0, .L%s_atomic_mismatch_%d\n", result,
+              func_name, inst->id);
+      fprintf(fp, "\tsc.%c%s t2, t1, (%s)\n", size == 3 ? 'd' : 'w',
+              AtomicSuffix(order == 5, release), "t3");
+      if ((inst->flags & RV_ATOMIC_WEAK) != 0) {
+        fprintf(fp, "\tbnez t2, .L%s_atomic_mismatch_%d\n", func_name,
+                inst->id);
+      } else {
+        fprintf(fp, "\tbnez t2, .L%s_atomic_retry_%d\n", func_name,
+                inst->id);
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tli %s, 1\n", result);
+      }
+      fprintf(fp, "\tj .L%s_atomic_done_%d\n", func_name, inst->id);
+      fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
+      if (expected_is_pointer) {
+        fprintf(fp, "\t%s %s, 0(%s)\n", size == 3 ? "sd" : "sw", result,
+                expected);
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tli %s, 0\n", result);
+      }
+      fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+      return;
+    }
+    default:
+      assert(false);
+  }
 }
 
 static int FindAsmOperandByName(RVAsmInstruction* inst, const char* name,
@@ -824,6 +1097,18 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 
   // Special case instructions.
   switch ((RVOpcode)inst->opcode) {
+    case RV_OP(atomic_load):
+    case RV_OP(atomic_store):
+    case RV_OP(atomic_fetch_add):
+    case RV_OP(atomic_fetch_sub):
+    case RV_OP(atomic_add_fetch):
+    case RV_OP(atomic_sub_fetch):
+    case RV_OP(atomic_compare_exchange_bool):
+    case RV_OP(atomic_compare_exchange_val):
+    case RV_OP(atomic_compare_exchange_n):
+    case RV_OP(atomic_fence):
+      PrintAtomicInstruction(inst, func_name, fp);
+      return;
 //    case RV_OP(rmov):
 //    case RV_OP(rmovf):
 //    case RV_OP(rmovd):
@@ -855,6 +1140,15 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(((int)inst->operand[0]->opcode == (int)RV_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
       fprintf(fp, "\t%-12s%s\n", "call", SymbolName(sym, buf3, sizeof(buf3)));
+      return;
+    }
+    case RV_OP(tprel): {
+      assert(inst->operand[0] != NULL &&
+             inst->operand[0]->opcode == (TargetOpcode)RV_OP(symbol));
+      TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
+      fprintf(fp, "\t%-12s%s, %s\n", "tprel",
+              GetRegisterName(inst, buf1, sizeof(buf1)),
+              SymbolName(sym, buf3, sizeof(buf3)));
       return;
     }
 
@@ -904,17 +1198,16 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       const int spill_addr = RV_SPILL_ADDR;
       if (!RVIsPossibleImmediate(offset)) {
         fprintf(fp, "\t%-12s%s, %d\n",
-                "lui",
+                "li",
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
-                offset >> 12);
+                offset);
         fprintf(fp, "\t%-12s%s, s0, %s\n",
                 "sub",
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)));
-        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Spilled @%d\n",
+        fprintf(fp, "\t%-12s%s, 0(%s)\t// Spilled @%d\n",
                  reg->type == kRVRegTypeInt ? "sd" : "fsd",
                  RVRegisterName(reg, buf1, sizeof(buf1)),
-                 offset & 0xfff,
                  RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)),
                  inst->operand[0]->id);
       } else {
@@ -934,17 +1227,16 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       const int spill_addr = RV_SPILL_ADDR;
       if (!RVIsPossibleImmediate(offset)) {
         fprintf(fp, "\t%-12s%s, %d\n",
-                "lui",
+                "li",
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
-                offset >> 12);
+                offset);
         fprintf(fp, "\t%-12s%s, s0, %s\n",
                 "sub",
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)));
-        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Reloaded spilled @%d\n",
+        fprintf(fp, "\t%-12s%s, 0(%s)\t// Reloaded spilled @%d\n",
                  reg->type == kRVRegTypeInt ? "ld" : "fld",
                  RVRegisterName(reg, buf1, sizeof(buf1)),
-                 offset & 0xfff,
                  RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)),
                  spill->operand[0]->id);
       } else {
@@ -1279,10 +1571,14 @@ static void RVPrintExceptionTable(RVEmitter* emitter, FILE* fp,
     PrintExceptionTableLabel(fp, func_name, range->try_end);
     fprintf(fp, "\n\t.8byte ");
     PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    fprintf(fp, "\n\t.8byte %s\n",
-            range->catch_typeinfo != NULL
-                ? range->catch_typeinfo->symbol_name.value
-                : "0");
+    if (range->is_cleanup) {
+      fprintf(fp, "\n\t.8byte %d\n", DAVECC_EH_CLEANUP_MARKER);
+    } else {
+      fprintf(fp, "\n\t.8byte %s\n",
+              range->catch_typeinfo != NULL
+                  ? range->catch_typeinfo->symbol_name.value
+                  : "0");
+    }
   }
   fprintf(fp, "\t.text\n\n");
 }
@@ -1308,4 +1604,34 @@ void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
           func_name);
   RVPrintTypeInfoRecords(emitter, fp);
   RVPrintExceptionTable(emitter, fp, func_name);
+}
+
+void RVPrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n", thunk_name);
+    fprintf(fp, "%s:\n", thunk_name);
+    if (thunk->this_adjustment != 0) {
+      fprintf(fp, "\tli t0, %d\n", thunk->this_adjustment);
+      fprintf(fp, "\tadd a0, a0, t0\n");
+    }
+    fprintf(fp, "\tj %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
 }

@@ -35,7 +35,7 @@ typedef struct CXXTypeInfo {
   long object_is_class;
 } CXXTypeInfo;
 
-#if defined(__arm__)
+#if defined(__arm__) || defined(__risc_v__)
 #define DAVECC_EH_THREAD_LOCAL __thread
 #else
 #define DAVECC_EH_THREAD_LOCAL

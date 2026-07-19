@@ -276,6 +276,7 @@ typedef enum {
 
   RV_OP(la),      // Load address.
   RV_OP(lla),     // Load local address.
+  RV_OP(tprel),   // Load local-exec TLS address relative to tp.
   RV_OP(sext_w),  // Sign extend word.
 
   // Integer argument registers.
@@ -306,6 +307,17 @@ typedef enum {
   RV_OP(t2),  // Tertiary temp reg.
 
   RV_OP(regarg),  // Holder for reg args.
+
+  RV_OP(atomic_load),
+  RV_OP(atomic_store),
+  RV_OP(atomic_fetch_add),
+  RV_OP(atomic_fetch_sub),
+  RV_OP(atomic_add_fetch),
+  RV_OP(atomic_sub_fetch),
+  RV_OP(atomic_compare_exchange_bool),
+  RV_OP(atomic_compare_exchange_val),
+  RV_OP(atomic_compare_exchange_n),
+  RV_OP(atomic_fence),
   
   // Spill and reload.
   RV_OP(spill),
@@ -331,6 +343,15 @@ typedef enum {
 // register and a float move into it (fmv.d/fmv.s) would target the wrong
 // register file.
 #define RV_INST_FLOAT_TMP 0x40000
+
+// Atomic pseudo metadata in the target-instruction flag word.
+#define RV_ATOMIC_SIZE_SHIFT 18
+#define RV_ATOMIC_SIZE_MASK (3 << RV_ATOMIC_SIZE_SHIFT)
+#define RV_ATOMIC_ORDER_SHIFT 20
+#define RV_ATOMIC_ORDER_MASK (7 << RV_ATOMIC_ORDER_SHIFT)
+#define RV_ATOMIC_FAILURE_ORDER_SHIFT 25
+#define RV_ATOMIC_FAILURE_ORDER_MASK (7 << RV_ATOMIC_FAILURE_ORDER_SHIFT)
+#define RV_ATOMIC_WEAK (1 << 28)
 
 typedef struct {
   int reg_num;
@@ -365,6 +386,7 @@ typedef struct {
   TargetInstruction* try_end;
   TargetInstruction* catch_label;
   EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;
 } RVExceptionRange;
 
 // A RISC-V Generator is derived from a TargetGenerator.  It has

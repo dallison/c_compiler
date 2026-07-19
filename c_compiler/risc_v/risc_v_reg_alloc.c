@@ -65,6 +65,13 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
   allocator->int_regs[RV_FP_REG].base.reserved = true;
   allocator->int_regs[RV_SP_REG].base.reserved = true;
   allocator->int_regs[RV_SPILL_ADDR].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_1].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_1 + 1].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_1 + 2].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_2].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_2 + 1].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_2 + 2].base.reserved = true;
+  allocator->int_regs[RV_INT_TEMP_START_2 + 3].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
@@ -178,6 +185,18 @@ static void FreeRegister(RVRegisterAllocator* allocator, RVRegister* reg) {
   reg->base.owner = NULL;
 }
 
+static bool HasUnprocessedUserOtherThan(TargetInstruction* value,
+                                        TargetInstruction* current) {
+  for (size_t i = 0; i < value->users.length; i++) {
+    TargetInstruction* user = value->users.value.p[i];
+    if (user != current &&
+        (user->flags & TARGET_INST_PROCESSED) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Free up any registers that are no longer needed by the instruction.  This
 // frees up all now-unused operands and destination.
 static void FreeRegisters(RVRegisterAllocator* allocator,
@@ -223,13 +242,12 @@ static void FreeRegisters(RVRegisterAllocator* allocator,
       }
 #endif
       TargetRegister* reg = op->reg;
-      if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
-        op->uses--;
-        assert(op->uses >= 0);
-        if (op->uses == 0) {
-          if (reg->owner == op) {
-            FreeRegister(allocator, (RVRegister*)reg);
-          }
+      if (reg != NULL && !reg->reserved && reg->owner != NULL) {
+        if (op->uses > 0) {
+          op->uses--;
+        }
+        if (!HasUnprocessedUserOtherThan(op, inst) && reg->owner == op) {
+          FreeRegister(allocator, (RVRegister*)reg);
         }
       }
     }
@@ -344,7 +362,26 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
  
-  if (RVIsVarRegister(inst)) {
+  TargetInstruction* save = NULL;
+  bool defined_before_save = false;
+  if (inst->block == allocator->rv->base.entry_block) {
+    for (TargetInstruction* current = inst->block->code; current != NULL;
+         current = TargetNext(current)) {
+      if (current == inst) {
+        defined_before_save = true;
+      }
+      if ((RVOpcode)current->opcode == RV_OP(save)) {
+        save = current;
+        break;
+      }
+    }
+  }
+  if (defined_before_save && save != NULL) {
+    // ABI argument and symbol pseudos are defined before the prologue.  Their
+    // spill slot is frame-pointer-relative, so the store must execute only
+    // after the save instruction has established the frame.
+    TargetBasicBlockEmitAfter(&allocator->rv->base, save->block, spill, save);
+  } else if (RVIsVarRegister(inst)) {
     // Spilling a varreg.  This instruction is in the entry block but
     // it can't be spilled there.  It needs to be spilled at its first
     // use (the assignment to it).  This is going to be the first user
@@ -368,6 +405,23 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   reg->base.owner = NULL;
   inst->flags |= TARGET_INST_SPILLED;
   return reg;
+}
+
+static void EvictPhysicalRegister(RVRegisterAllocator* allocator,
+                                  RVRegisterType type, int num,
+                                  TargetInstruction* keep) {
+  RVRegister* regs =
+      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  TargetInstruction* owner = regs[num].base.owner;
+  if (owner == NULL || owner == keep || regs[num].base.reserved) {
+    return;
+  }
+  if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
+      !HasUnprocessedUserOtherThan(owner, NULL)) {
+    regs[num].base.owner = NULL;
+    return;
+  }
+  SpillInstruction(allocator, owner);
 }
 
 static RVRegister* AllocateRegisterWithType(RVRegisterAllocator* allocator,
@@ -542,6 +596,11 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
   inst->flags |= TARGET_INST_PROCESSED;
 }
 
+static void ReloadSpills(RVRegisterAllocator* allocator,
+                         TargetInstruction* inst);
+static void EnsureOperandsAllocated(RVRegisterAllocator* allocator,
+                                    TargetInstruction* inst);
+
 static bool AllocateUsingDest(RVRegisterAllocator* allocator,
                               TargetInstruction* inst) {
   if (inst->dest == NULL) {
@@ -555,10 +614,43 @@ static bool AllocateUsingDest(RVRegisterAllocator* allocator,
     }
   }
   assert(inst->dest->reg != NULL);
-  if (inst->operand[0] != NULL && inst->operand[0]->reg == NULL &&
-      inst->operand[0]->block != NULL) {
-    AllocateRegister(allocator, inst->operand[0]);
+  RVRegisterType fixed_dest_type = kRVRegTypeInt;
+  bool fixed_dest = true;
+  switch ((RVOpcode)inst->dest->opcode) {
+    case RV_OP(a0):
+    case RV_OP(a1):
+    case RV_OP(a2):
+    case RV_OP(a3):
+    case RV_OP(a4):
+    case RV_OP(a5):
+    case RV_OP(a6):
+    case RV_OP(a7):
+    case RV_OP(resulti):
+      fixed_dest_type = kRVRegTypeInt;
+      break;
+    case RV_OP(fa0):
+    case RV_OP(fa1):
+    case RV_OP(fa2):
+    case RV_OP(fa3):
+    case RV_OP(fa4):
+    case RV_OP(fa5):
+    case RV_OP(fa6):
+    case RV_OP(fa7):
+    case RV_OP(resultf):
+    case RV_OP(resultd):
+      fixed_dest_type = kRVRegTypeFloat;
+      break;
+    default:
+      fixed_dest = false;
+      break;
   }
+  if (fixed_dest) {
+    EvictPhysicalRegister(allocator, fixed_dest_type, inst->dest->reg->num,
+                          inst->dest);
+    inst->dest->reg->owner = inst->dest;
+  }
+  ReloadSpills(allocator, inst);
+  EnsureOperandsAllocated(allocator, inst);
   inst->reg = inst->dest->reg;
   if (inst->operand[0] != NULL) {
     inst->operand[0]->uses++;
@@ -682,6 +774,8 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(literal):
     case RV_OP(asm):
     case RV_OP(loc):
+    case RV_OP(atomic_store):
+    case RV_OP(atomic_fence):
       // These instructions do not have registers allocated to them.
       return;
 
@@ -819,11 +913,14 @@ static void InitializeBasicBlockRegisters(RVRegisterAllocator* allocator,
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }
-    if (inst->uses == 0) {
+    if (inst->uses == 0 &&
+        !HasUnprocessedUserOtherThan(inst, NULL)) {
       continue;
     }
     assert(inst->reg != NULL);
-    inst->reg->owner = inst;
+    if (inst->reg->owner == NULL || inst->id > inst->reg->owner->id) {
+      inst->reg->owner = inst;
+    }
   }
 }
 
@@ -870,11 +967,10 @@ static void ProcessBasicBlock(RVRegisterAllocator* allocator,
 // all outputs need to be preserved.
 static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   RVRegisterAllocator* allocator = data;
-  if (!block->contains_call) {
-    return;
+  if (block->contains_call) {
+    BitSetUnionInPlace(&allocator->preserved_instructions,
+                       &block->output_ids);
   }
-  // Preserve all outputs.
-  BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
 }
 
 // Variable registers are assigned a fixed physical register by index
@@ -905,6 +1001,24 @@ static void ReserveVariableRegisters(RVRegisterAllocator* allocator) {
       allocator->int_regs[first + var->varnum].base.reserved = true;
     }
   }
+}
+
+static bool HasAtomicInstructions(const RVRegisterAllocator* allocator) {
+  for (size_t i = 0; i < allocator->rv->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block =
+        allocator->rv->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      if ((int)inst->opcode >= (int)RV_OP(atomic_load) &&
+          (int)inst->opcode <= (int)RV_OP(atomic_fence)) {
+        return true;
+      }
+      if (inst == block->end_code) {
+        break;
+      }
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -970,6 +1084,7 @@ static bool RVRegInMoves(RVArgMove* moves, int count, RVRegisterType type,
 static int RVFindScratchTemp(RVArgMove* moves, int count, RVRegisterType type) {
   if (type == kRVRegTypeInt) {
     for (int n = RV_INT_TEMP_START_1; n <= RV_INT_TEMP_END_1; n++) {
+      if (n == RV_INT_TEMP_START_1 + 2) continue;  // t2 stages indirect calls.
       if (!RVRegInMoves(moves, count, type, n)) return n;
     }
     for (int n = RV_INT_TEMP_START_2; n <= RV_INT_TEMP_END_2; n++) {
@@ -1161,6 +1276,26 @@ static void RVResolveArgumentMoves(RVRegisterAllocator* alloc) {
 }
 
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
+  // t1 and t2 are required as untracked scratch registers by the atomic
+  // emitter, while t2 also stages indirect call targets.  Functions without
+  // those hazards can use them for ordinary short-lived values.
+  bool has_atomics = HasAtomicInstructions(allocator);
+  if (!has_atomics) {
+    allocator->int_regs[RV_INT_TEMP_START_1 + 1].base.reserved = false;
+  }
+  if (!has_atomics && allocator->rv->base.num_calls == 0) {
+    allocator->int_regs[RV_INT_TEMP_START_1 + 2].base.reserved = false;
+  }
+
+  if (allocator->rv->struct_return_reg >= 0) {
+    bool is_leaf = allocator->rv->base.num_calls == 0 && OptLevel1() &&
+                   !allocator->rv->not_leaf;
+    int reg_num = (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR
+                           : RV_FIRST_INT_REG_VAR) +
+                  allocator->rv->struct_return_reg;
+    allocator->int_regs[reg_num].base.reserved = true;
+  }
+
   TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
 

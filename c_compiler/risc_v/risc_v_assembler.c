@@ -113,6 +113,27 @@ DECLARE_INST_FUNC(divuw);
 DECLARE_INST_FUNC(remw);
 DECLARE_INST_FUNC(remuw);
 
+DECLARE_INST_FUNC(lr_w);
+DECLARE_INST_FUNC(lr_w_aq);
+DECLARE_INST_FUNC(lr_w_aqrl);
+DECLARE_INST_FUNC(lr_d);
+DECLARE_INST_FUNC(lr_d_aq);
+DECLARE_INST_FUNC(lr_d_aqrl);
+DECLARE_INST_FUNC(sc_w);
+DECLARE_INST_FUNC(sc_w_rl);
+DECLARE_INST_FUNC(sc_w_aqrl);
+DECLARE_INST_FUNC(sc_d);
+DECLARE_INST_FUNC(sc_d_rl);
+DECLARE_INST_FUNC(sc_d_aqrl);
+DECLARE_INST_FUNC(amoadd_w);
+DECLARE_INST_FUNC(amoadd_w_aq);
+DECLARE_INST_FUNC(amoadd_w_rl);
+DECLARE_INST_FUNC(amoadd_w_aqrl);
+DECLARE_INST_FUNC(amoadd_d);
+DECLARE_INST_FUNC(amoadd_d_aq);
+DECLARE_INST_FUNC(amoadd_d_rl);
+DECLARE_INST_FUNC(amoadd_d_aqrl);
+
 // RV32F instructions.
 DECLARE_INST_FUNC(flw);
 DECLARE_INST_FUNC(fsw);
@@ -192,6 +213,7 @@ DECLARE_INST_FUNC(fneg_d);
 DECLARE_INST_FUNC(li);
 DECLARE_INST_FUNC(la);
 DECLARE_INST_FUNC(lla);
+DECLARE_INST_FUNC(tprel);
 DECLARE_INST_FUNC(sext_w);
 DECLARE_INST_FUNC(seqz);
 DECLARE_INST_FUNC(snez);
@@ -313,6 +335,27 @@ static void InitializeInstructions(Map* instructions) {
   INST(remw);
   INST(remuw);
 
+  INST2(lr_w, lr.w);
+  INST2(lr_w_aq, lr.w.aq);
+  INST2(lr_w_aqrl, lr.w.aqrl);
+  INST2(lr_d, lr.d);
+  INST2(lr_d_aq, lr.d.aq);
+  INST2(lr_d_aqrl, lr.d.aqrl);
+  INST2(sc_w, sc.w);
+  INST2(sc_w_rl, sc.w.rl);
+  INST2(sc_w_aqrl, sc.w.aqrl);
+  INST2(sc_d, sc.d);
+  INST2(sc_d_rl, sc.d.rl);
+  INST2(sc_d_aqrl, sc.d.aqrl);
+  INST2(amoadd_w, amoadd.w);
+  INST2(amoadd_w_aq, amoadd.w.aq);
+  INST2(amoadd_w_rl, amoadd.w.rl);
+  INST2(amoadd_w_aqrl, amoadd.w.aqrl);
+  INST2(amoadd_d, amoadd.d);
+  INST2(amoadd_d_aq, amoadd.d.aq);
+  INST2(amoadd_d_rl, amoadd.d.rl);
+  INST2(amoadd_d_aqrl, amoadd.d.aqrl);
+
   // RV32F instructions.
   INST(flw);
   INST(fsw);
@@ -392,6 +435,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(li);
   INST(la);
   INST(lla);
+  INST(tprel);
   INST2(sext_w, sext.w);
   INST(seqz);
   INST(snez);
@@ -415,6 +459,7 @@ bool RVAssemblerInit(RVAssembler* assembler, String* infile, String* outfile) {
       R_RISCV_ADD16, R_RISCV_32,       R_RISCV_64,       R_RISCV_ADD16, R_RISCV_ADD32,
       R_RISCV_ADD64,    R_RISCV_SUB16,    R_RISCV_SUB32, R_RISCV_SUB64,
       R_RISCV_CALL_PLT, R_RISCV_GOT_HI20,
+      R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_ADD,
   };
 
   // 4 for the flags specifies the 64 bit float ABI.
@@ -644,6 +689,69 @@ static int32_t RTypeInstruction(int opcode, int rd, int rs1, int rs2,
                                 int funct3, int funct7) {
   return funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | opcode;
 }
+
+static void AssembleAtomic(RVAssembler* assembler, int funct5, int width,
+                           bool aq, bool rl, bool load_reserved) {
+  int rd = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  int rs2 = 0;
+  if (!load_reserved) {
+    rs2 = Register(assembler, kRVRegTypeInt, "integer");
+    if (!LexMatch(&ASM.lex, TOK(comma))) {
+      AssemblerError(&ASM, "Missing comma");
+      return;
+    }
+  }
+  if (!LexMatch(&ASM.lex, TOK(lparen))) {
+    AssemblerError(&ASM, "Expected (address register)");
+    return;
+  }
+  int rs1 = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(rparen))) {
+    AssemblerError(&ASM, "Missing close paren");
+    return;
+  }
+  int funct7 = (funct5 << 2) | (aq ? 2 : 0) | (rl ? 1 : 0);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      RTypeInstruction(RV_OPCODE(amo), rd, rs1, rs2, width, funct7));
+}
+
+#define ASSEMBLE_ATOMIC_LR(name, width, aq, rl)                  \
+  static void Assemble_##name(RVAssembler* assembler) {          \
+    AssembleAtomic(assembler, 0x02, width, aq, rl, true);         \
+  }
+#define ASSEMBLE_ATOMIC(name, funct5, width, aq, rl)             \
+  static void Assemble_##name(RVAssembler* assembler) {          \
+    AssembleAtomic(assembler, funct5, width, aq, rl, false);      \
+  }
+
+ASSEMBLE_ATOMIC_LR(lr_w, 2, false, false)
+ASSEMBLE_ATOMIC_LR(lr_w_aq, 2, true, false)
+ASSEMBLE_ATOMIC_LR(lr_w_aqrl, 2, true, true)
+ASSEMBLE_ATOMIC_LR(lr_d, 3, false, false)
+ASSEMBLE_ATOMIC_LR(lr_d_aq, 3, true, false)
+ASSEMBLE_ATOMIC_LR(lr_d_aqrl, 3, true, true)
+ASSEMBLE_ATOMIC(sc_w, 0x03, 2, false, false)
+ASSEMBLE_ATOMIC(sc_w_rl, 0x03, 2, false, true)
+ASSEMBLE_ATOMIC(sc_w_aqrl, 0x03, 2, true, true)
+ASSEMBLE_ATOMIC(sc_d, 0x03, 3, false, false)
+ASSEMBLE_ATOMIC(sc_d_rl, 0x03, 3, false, true)
+ASSEMBLE_ATOMIC(sc_d_aqrl, 0x03, 3, true, true)
+ASSEMBLE_ATOMIC(amoadd_w, 0x00, 2, false, false)
+ASSEMBLE_ATOMIC(amoadd_w_aq, 0x00, 2, true, false)
+ASSEMBLE_ATOMIC(amoadd_w_rl, 0x00, 2, false, true)
+ASSEMBLE_ATOMIC(amoadd_w_aqrl, 0x00, 2, true, true)
+ASSEMBLE_ATOMIC(amoadd_d, 0x00, 3, false, false)
+ASSEMBLE_ATOMIC(amoadd_d_aq, 0x00, 3, true, false)
+ASSEMBLE_ATOMIC(amoadd_d_rl, 0x00, 3, false, true)
+ASSEMBLE_ATOMIC(amoadd_d_aqrl, 0x00, 3, true, true)
+
+#undef ASSEMBLE_ATOMIC
+#undef ASSEMBLE_ATOMIC_LR
 
 static int32_t ITypeInstruction(int opcode, int rd, int rs1, int funct3,
                                 int immed) {
@@ -1365,8 +1473,13 @@ ASSEMBLE_INT_ALU_REG(sra);
 ASSEMBLE_INT_ALU_REG(or);
 ASSEMBLE_INT_ALU_REG(and);
 
-UNDEFINED_INST(fence);
-UNDEFINED_INST(fence_i);
+static void Assemble_fence(RVAssembler* assembler) {
+  AssemblerEmitWord(&ASM, ASM.current_section, 0x0ff0000f);
+}
+
+static void Assemble_fence_i(RVAssembler* assembler) {
+  AssemblerEmitWord(&ASM, ASM.current_section, 0x0000100f);
+}
 
 static void Assemble_ecall(RVAssembler* assembler) {
   AssemblerEmitWord(&ASM, ASM.current_section, RV_OPCODE(system));
@@ -1856,6 +1969,46 @@ static void Assemble_lla(RVAssembler* assembler) {
   } else {
     AssemblerError(&ASM, "Expected symbol name for lla instruction");
   }
+}
+
+static void Assemble_tprel(RVAssembler* assembler) {
+  int rd = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected TLS symbol name");
+    return;
+  }
+  String symbol_name;
+  StringInit(&symbol_name, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+  AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
+
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_HI20,
+                                   ASM.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    UTypeInstruction(RV_OPCODE(lui), rd, 0));
+
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_ADD,
+                                   ASM.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      RTypeInstruction(RV_OPCODE(op), rd, rd, 4, RV_F3(add), RV_F7(add)));
+
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_LO12_I,
+                                   ASM.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ITypeInstruction(RV_OPCODE(op_imm), rd, rd, RV_F3(addi), 0));
+  StringDestruct(&symbol_name);
 }
 
 // Assembled as addiw rd, rs, 0

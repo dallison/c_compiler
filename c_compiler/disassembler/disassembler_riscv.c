@@ -114,6 +114,29 @@ bool DAsmDisassembleRiscV(const void* bytes, size_t length, uint64_t address,
       }
       break;
     }
+    case 0x2f: {
+      int funct5 = (inst >> 27) & 0x1f;
+      bool aq = ((inst >> 26) & 1) != 0;
+      bool rl = ((inst >> 25) & 1) != 0;
+      const char* name =
+          funct5 == 0x00 ? "amoadd" :
+          funct5 == 0x02 ? "lr" :
+          funct5 == 0x03 ? "sc" : NULL;
+      const char* width = funct3 == 2 ? "w" : (funct3 == 3 ? "d" : NULL);
+      if (name != NULL && width != NULL) {
+        const char* ordering = aq && rl ? ".aqrl" :
+                               aq ? ".aq" : (rl ? ".rl" : "");
+        if (funct5 == 0x02) {
+          DAsmFormat(out, "%s.%s%s %s, (%s)", name, width, ordering,
+                     XReg(rd), XReg(rs1));
+        } else {
+          DAsmFormat(out, "%s.%s%s %s, %s, (%s)", name, width, ordering,
+                     XReg(rd), XReg(rs2), XReg(rs1));
+        }
+        return true;
+      }
+      break;
+    }
     case 0x13: {
       if (funct3 == 1) {
         DAsmFormat(out, "slli %s, %s, %d", XReg(rd), XReg(rs1),

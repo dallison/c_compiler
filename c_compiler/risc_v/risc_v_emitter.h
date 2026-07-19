@@ -29,5 +29,6 @@ void RVEmitterDestruct(RVEmitter* emitter);
 void RVEmitterDelete(RVEmitter* emitter);
 
 void RVPrintFunction(RVEmitter* emitter, FILE* fp);
+void RVPrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* risc_v_emitter_h */

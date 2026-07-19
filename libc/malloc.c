@@ -12,7 +12,7 @@
 #include <assert.h>
 #include <syscall.h>
 
-#if !defined(__6502__) && !defined(__risc_v__)
+#if !defined(__6502__)
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -26,7 +26,7 @@
 #define STATIC
 #endif
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__p_code__)
+#if defined(__6502__) || defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start
@@ -56,19 +56,21 @@ extern char _end[];
 FreeBlockHeader* __free_list;
 int __initial_heap_size;
 
-#if defined(__risc_v__)
-static FreeBlockHeader __riscv_heap[1024 * 1024 / sizeof(FreeBlockHeader)];
-#endif
-
 STATIC void InitFreeList() {
-#if defined(__6502__)
+#if defined(__DAVECC_HAS_HEAP_LOCK__)
+  extern unsigned long long
+      __davecc_guest_heap_storage[((1024 * 1024) + 15) /
+                                  sizeof(unsigned long long)];
+  uintptr_t raw = (uintptr_t)__davecc_guest_heap_storage;
+  uintptr_t aligned = (raw + 15) & ~(uintptr_t)15;
+  __free_list = (FreeBlockHeader*)aligned;
+  __free_list->length =
+      sizeof(__davecc_guest_heap_storage) - (aligned - raw);
+#elif defined(__6502__)
   __free_list = (FreeBlockHeader*)_end;
   __free_list->length = MEMTOP - (int)_end;
-#elif defined(__risc_v__)
-  __free_list = __riscv_heap;
-  __free_list->length = sizeof(__riscv_heap);
 #elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
-    defined(__p_code__)
+    defined(__risc_v__) || defined(__p_code__)
   extern char _end[];
   __free_list = (FreeBlockHeader*)_end;
   if (__initial_heap_size == 0) {
@@ -88,7 +90,7 @@ STATIC void InitFreeList() {
   __free_list->next = NULL;
 }
 
-#if !defined(__6502__) && !defined(__risc_v__) && !defined(__p_code__)
+#if !defined(__6502__) && !defined(__p_code__)
 void PrintFreeList(const char* tag) {
   FreeBlockHeader* b = __free_list;
   while (b != NULL) {

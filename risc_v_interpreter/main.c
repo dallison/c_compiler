@@ -11,6 +11,7 @@
 #include "loader_arch_riscv.h"
 #include "risc_v_interpreter.h"
 #include "risc_v_debugger.h"
+#include "risc_v_process.h"
 #include <stdlib.h>
 
 extern bool print_libraries_only;
@@ -89,7 +90,20 @@ int main(int argc, char * argv[]) {
   RISCVInterpreterInit(&interpreter, &loader,
                        loader.main_address, argc, argv,
                        trace_regs, trace_instructions);
+  RISCVProcessRuntime process;
+  if (!RISCVProcessRuntimeInit(&process, &loader)) {
+    RISCVInterpreterDestruct(&interpreter);
+    LoaderDestruct(&loader);
+    exit(1);
+  }
+  if (RISCVProcessAttachMainThread(&process, &interpreter) == NULL) {
+    RISCVProcessRuntimeDestruct(&process);
+    RISCVInterpreterDestruct(&interpreter);
+    LoaderDestruct(&loader);
+    exit(1);
+  }
   if (!RISCVGuestRunInitArrays(&loader, &interpreter)) {
+    RISCVProcessRuntimeDestruct(&process);
     RISCVInterpreterDestruct(&interpreter);
     LoaderDestruct(&loader);
     exit(1);
@@ -107,6 +121,7 @@ int main(int argc, char * argv[]) {
     result = 1;
   }
   
+  RISCVProcessRuntimeDestruct(&process);
   RISCVInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
   return result;

@@ -11,6 +11,10 @@
 
 #if defined(__DAVECC_HAS_HEAP_LOCK__)
 
+unsigned long long
+    __davecc_guest_heap_storage[((1024 * 1024) + 15) /
+                                sizeof(unsigned long long)];
+
 extern void* Malloc(size_t n);
 extern void Free(void* p);
 extern void* Realloc(void* p, size_t n);

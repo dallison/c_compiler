@@ -114,12 +114,15 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     test $? -eq 0
   '
 
-  if [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "arm" ]; then
+  if [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "arm" ] || [ "$target" = "riscv" ]; then
     tls_exe="$work/tls_local_exec.exe"
     tls_obj="$work/tls_local_exec.o"
     "$davecc" "${rt_cflags[@]}" libc/tests/runtime/tls_local_exec.c -o "$tls_obj"
     "$davecc" "${link_cflags[@]}" "$tls_obj" -o "$tls_exe"
-    run_step "runtime tls local-exec test" env INTERP="$interpreter" EXE="$tls_exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+    run_step "runtime tls local-exec test" env INTERP="$interpreter" EXE="$tls_exe" TARGET="$target" bash -c '
+      if [ "$TARGET" = riscv ]; then "$INTERP" "$EXE"; else "$INTERP" -i "$EXE"; fi
+      test $? -eq 0
+    '
 
     thread_exe="$work/thread_tls_isolation.exe"
     thread_obj="$work/thread_tls_isolation.o"
@@ -131,6 +134,8 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
       runtime_sources=("x86_64 support/syscall.s" "x86_64 support/abs.s")
     elif [ "$target" = "arm" ]; then
       runtime_sources=("arm support/syscall.s")
+    elif [ "$target" = "riscv" ]; then
+      runtime_sources=("RISCV_support/eh_transfer.s" "libc/syscall.c")
     fi
     runtime_objs=()
     for src in "${runtime_sources[@]}"; do
@@ -166,7 +171,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
         "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
         -o "$thread_exe"
     fi
-    run_step "runtime thread tls isolation test" env INTERP="$interpreter" EXE="$thread_exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+    run_step "runtime thread tls isolation test" env INTERP="$interpreter" EXE="$thread_exe" TARGET="$target" bash -c '
+      if [ "$TARGET" = riscv ]; then "$INTERP" "$EXE"; else "$INTERP" -i "$EXE"; fi
+      test $? -eq 0
+    '
 
     link_thread_test() {
       local name=$1
@@ -182,7 +190,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
           "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
           -o "$exe"
       fi
-      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" TARGET="$target" bash -c '
+        if [ "$TARGET" = riscv ]; then "$INTERP" "$EXE"; else "$INTERP" -i "$EXE"; fi
+        test $? -eq 0
+      '
     }
 
     link_thread_libc_test() {
@@ -199,7 +210,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
           "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
           -o "$exe"
       fi
-      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" TARGET="$target" bash -c '
+        if [ "$TARGET" = riscv ]; then "$INTERP" "$EXE"; else "$INTERP" -i "$EXE"; fi
+        test $? -eq 0
+      '
     }
 
     link_thread_test thread_join_negative libc/tests/runtime/thread_join_negative.c

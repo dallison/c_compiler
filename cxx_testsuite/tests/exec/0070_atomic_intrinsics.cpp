@@ -51,5 +51,30 @@ int main(void) {
                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
     return 15;
   }
-  return value == 15 ? 0 : 16;
+  if (value != 15) {
+    return 16;
+  }
+
+  unsigned char byte = 250;
+  if (__atomic_fetch_add(&byte, 10, __ATOMIC_SEQ_CST) != 250 || byte != 4) {
+    return 17;
+  }
+  unsigned char expected_byte = 4;
+  if (!__atomic_compare_exchange_n(&byte, &expected_byte, 9, false,
+                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ||
+      byte != 9) {
+    return 18;
+  }
+
+  unsigned short half = 65530;
+  if (__atomic_add_fetch(&half, 10, __ATOMIC_SEQ_CST) != 4 || half != 4) {
+    return 19;
+  }
+  unsigned short expected_half = 3;
+  if (__atomic_compare_exchange_n(&half, &expected_half, 12, false,
+                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ||
+      expected_half != 4 || half != 4) {
+    return 20;
+  }
+  return 0;
 }

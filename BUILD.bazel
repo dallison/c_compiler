@@ -626,6 +626,7 @@ cc_library(
         "risc_v_interpreter/risc_v_debugger.c",
         "risc_v_interpreter/risc_v_disassembler.c",
         "risc_v_interpreter/risc_v_interpreter.c",
+        "risc_v_interpreter/risc_v_process.c",
     ],
     hdrs = glob([
         "c_compiler/**/*.h",
@@ -1332,6 +1333,7 @@ genrule(
         "libc/include/**/*.h",
         "RISCV_support/*.s",
     ]) + [
+        "libc/guest_heap.c",
         ":davecc",
         ":archivist",
     ],
@@ -1349,8 +1351,11 @@ archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "RISCV_support/cxx_guard.s"
   "RISCV_support/start.s"
   "RISCV_support/eh_transfer.s"
+  "RISCV_support/longjmp.s"
+  "RISCV_support/setjmp.s"
 )
 
 runtime_objs=()
@@ -1439,6 +1444,8 @@ libc_srcs=(
   "libc/fabs.c"
   "libc/sqrt.c"
   "libc/tan.c"
+  "libc/threads.c"
+  "libc/guest_heap.c"
 )
 
 libc_objs=()
@@ -1775,6 +1782,7 @@ LIBC_TEST_DATA = LIBC_SRCS + [
     "libc/include/**/*.h",
     "libc/tests/**",
     "x86_64 support/*.s",
+    "RISCV_support/*.s",
 ])
 
 sh_test(

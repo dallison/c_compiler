@@ -241,6 +241,7 @@ static void ApplyRelocation(Linker* linker,
   uint64_t P = reloc->section->address + reloc->offset;
   int32_t hi20;
   int32_t lo12;
+  int64_t tprel = (int64_t)S + A + RISCV_TLS_TCB_SIZE;
   
   // NOTE: a break in this switch will result in a linker error due to an unsupported
   // relocation.  To support a relocation, use return, not break.
@@ -391,6 +392,22 @@ static void ApplyRelocation(Linker* linker,
       SetBitField32(target_address, 12, 20, hi20);
       return;
     }
+    case R_RISCV_TPREL_HI20:
+      hi20 = High20(tprel);
+      SetBitField32(target_address, 12, 20, hi20);
+      return;
+    case R_RISCV_TPREL_LO12_I:
+      hi20 = High20(tprel);
+      lo12 = Low12(tprel, hi20);
+      SetBitField32(target_address, 20, 12, lo12);
+      return;
+    case R_RISCV_TPREL_LO12_S:
+      SplitValue(tprel, &hi20, &lo12);
+      SetBitField32(target_address, 7, 5, lo12);
+      SetBitField32(target_address, 25, 7, lo12 >> 5);
+      return;
+    case R_RISCV_TPREL_ADD:
+      return;
     case R_RISCV_HI20:
       hi20 = High20(S + A);
       SetBitField32(target_address, 12, 20, hi20);

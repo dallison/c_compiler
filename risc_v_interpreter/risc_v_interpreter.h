@@ -30,6 +30,15 @@
 #define RISC_V_ECALL_REALLOC 10
 #define RISC_V_ECALL_ABORT 11
 #define RISC_V_ECALL_EXIT 12
+#define RISC_V_ECALL_TIME 13
+#define RISC_V_ECALL_CLOCK 14
+#define RISC_V_ECALL_THREAD_CREATE 15
+#define RISC_V_ECALL_THREAD_JOIN 16
+#define RISC_V_ECALL_THREAD_SELF 17
+#define RISC_V_ECALL_GET_TP 18
+#define RISC_V_ECALL_THREAD_EXIT 19
+#define RISC_V_ECALL_HEAP_LOCK 20
+#define RISC_V_ECALL_HEAP_UNLOCK 21
 #define RISC_V_ECALL_EXIT_CLEAN 22
 #define RISC_V_ECALL_NESTED_RETURN 255
 
@@ -70,6 +79,9 @@
 
 #define REG(n) RISC_V_REG_##n
 
+struct RISCVProcessRuntime;
+struct RISCVGuestThread;
+
 typedef struct RISCVInterpreter {
   Loader* loader;
   int64_t iregs[RV_NUM_INT_REGS];
@@ -81,6 +93,13 @@ typedef struct RISCVInterpreter {
   int32_t call_return_code[2];
   int32_t symbol_resolver_code[2];
   char* stack;
+  bool owns_stack;
+  uint64_t stack_guest_base;
+  void* tls_block;
+  size_t tls_block_size;
+  uint64_t tls_guest_base;
+  struct RISCVProcessRuntime* process;
+  struct RISCVGuestThread* guest_thread;
   int64_t pc;
   SymbolScope* current_symbol;
   bool trace_regs;
@@ -88,14 +107,28 @@ typedef struct RISCVInterpreter {
   int64_t num_steps;
   bool running;
   int exit_code;
+  bool reservation_valid;
+  uint64_t reservation_address;
+  uint32_t reservation_size;
+  uint64_t reservation_epoch;
   jmp_buf debugger;
 } RISCVInterpreter;
 
 void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,
                           bool trace_regs, bool trace_instructions);
+void RISCVInterpreterInitForThread(
+    RISCVInterpreter* interpreter, struct RISCVProcessRuntime* process,
+    struct RISCVGuestThread* guest_thread, Loader* loader,
+    uint64_t entry_address, int argc, char** argv, char* stack,
+    void* tls_block, size_t tls_block_size, bool trace_regs,
+    bool trace_instructions);
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter);
 int RISCVInterpreterRun(RISCVInterpreter* interpreter);
 void RISCVInterpreterCall(RISCVInterpreter* interpreter, uint64_t fn);
+int RISCVInterpreterCallWithArg(RISCVInterpreter* interpreter, uint64_t fn,
+                                uint64_t arg);
+void* RISCVGuestAddressToHost(RISCVInterpreter* interpreter, uint64_t addr,
+                              size_t size);
 void RISCVInterpreterDestruct(RISCVInterpreter* interpreter);
 void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter);
 

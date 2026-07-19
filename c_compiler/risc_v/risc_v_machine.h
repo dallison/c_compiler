@@ -105,6 +105,7 @@ typedef enum {
   RV_OPCODE(load_fp) = 0x07,
   RV_OPCODE(store_fp) = 0x27,
   RV_OPCODE(op_fp) = 0x53,
+  RV_OPCODE(amo) = 0x2f,
   // TODO: FMADD.S etc.
 } RVInstOpcode;
 
