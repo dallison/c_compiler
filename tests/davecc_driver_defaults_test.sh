@@ -1,0 +1,66 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="${TEST_SRCDIR:-$(pwd)}/${TEST_WORKSPACE:-}"
+DAVECC="$ROOT/$1"
+INTERPRETER="$ROOT/$2"
+LIBC="$ROOT/$3"
+
+WORK="$(mktemp -d "${TEST_TMPDIR:-/tmp}/davecc-defaults.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+cd "$WORK"
+
+cat > hello.cc <<'SRC'
+#include <iostream>
+
+int main() {
+  std::cout << "driver-defaults-ok\n";
+}
+SRC
+
+# A bare hosted link must find DaveCC's headers and target libc, and must use
+# main rather than the linker's _start default.
+"$DAVECC" -target aarch64 hello.cc -o hello
+
+# Static linkage remains an explicit policy choice. It produces an executable
+# that can be run by the in-tree interpreter.
+"$DAVECC" -target aarch64 -static hello.cc -o hello.static
+output="$("$INTERPRETER" -i hello.static)"
+if [[ "$output" != "driver-defaults-ok" ]]; then
+  echo "unexpected program output: $output" >&2
+  exit 1
+fi
+
+# Passing the target libc explicitly must not cause the driver to add it twice.
+"$DAVECC" -target aarch64 -static hello.cc "$LIBC" -o hello.explicit-libc
+
+# Host compiler environment variables must not affect DaveCC's system headers.
+mkdir fake-host-includes
+printf '%s\n' '#error host iostream must not be used' \
+  > fake-host-includes/iostream
+CPATH="$WORK/fake-host-includes" \
+CPLUS_INCLUDE_PATH="$WORK/fake-host-includes" \
+SDKROOT="$WORK/fake-host-includes" \
+  "$DAVECC" -target aarch64 -S hello.cc -o hello.host-isolated.s
+
+# Compile-only and -nostdlib modes must not require a target archive.
+mkdir empty-lib
+DAVECC_LIB_DIR="$WORK/empty-lib" \
+  "$DAVECC" -target aarch64 -S hello.cc -o hello.compile-only.s
+
+cat > freestanding.c <<'SRC'
+int main(void) {
+  return 0;
+}
+SRC
+DAVECC_LIB_DIR="$WORK/empty-lib" \
+  "$DAVECC" -target aarch64 -static -nostdlib \
+    -Wl,-e -Wl,main freestanding.c -o freestanding
+
+# -nostdinc must remove both the resolved DaveCC path and the compiled-in
+# CWD-relative fallback.
+if "$DAVECC" -target aarch64 -nostdinc -S hello.cc \
+    -o hello.nostdinc.s >nostdinc.out 2>&1; then
+  echo "-nostdinc unexpectedly found <iostream>" >&2
+  exit 1
+fi

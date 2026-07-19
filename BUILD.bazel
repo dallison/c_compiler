@@ -2100,6 +2100,23 @@ sh_test(
     ],
     data = [
         ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "davecc_driver_defaults_test",
+    srcs = ["tests/davecc_driver_defaults_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :libc_aarch64)",
+    ],
+    data = [
+        ":aarch64",
+        ":davecc",
+        ":libc_aarch64",
+        ":libc_headers",
     ],
 )
 

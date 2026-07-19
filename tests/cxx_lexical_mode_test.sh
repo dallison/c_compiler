@@ -35,6 +35,36 @@ expect_fail() {
   fi
 }
 
+expect_cpp20_extension() {
+  local extension="$1"
+  local src="$WORK/default_cpp20.$extension"
+  printf '%s\n' \
+    '#if __cplusplus != 202002L' \
+    '#error expected C++20 mode' \
+    '#endif' \
+    'namespace inferred { int value = 0; }' \
+    'int main(void) { return inferred::value; }' > "$src"
+  "$ROOT/$DAVECC" -target pcode -S "$src" \
+      -o "$WORK/default_cpp20_$extension.s" \
+      >"$WORK/default_cpp20_$extension.out" 2>&1
+}
+
+expect_cpp20_extension cc
+expect_cpp20_extension cpp
+
+iostream_src="$WORK/default_iostream.cc"
+printf '%s\n' \
+  '#include <iostream>' \
+  'int main(void) { std::cout << "hello world\n"; }' > "$iostream_src"
+"$ROOT/$DAVECC" -target aarch64 -S -isystem "$ROOT/libc/include" \
+    "$iostream_src" -o "$WORK/default_iostream.s" \
+    >"$WORK/default_iostream.out" 2>&1
+if [[ -s "$WORK/default_iostream.out" ]]; then
+  echo "default_iostream: unexpected diagnostics" >&2
+  sed 's/^/  /' "$WORK/default_iostream.out" >&2
+  exit 1
+fi
+
 expect_compile c_mode_class \
   'int class; int main(void) { class = 3; return class; }'
 expect_fail cxx11_class \

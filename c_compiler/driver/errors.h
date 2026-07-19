@@ -17,7 +17,8 @@
 void ReportError(const char* filename, int lineno, const char* error, ...);
 
 // Reports an error with vprintf style arguments.
-void VReportError(const char* filename, int lineno, const char* error,
+// Returns true when the diagnostic was emitted.
+bool VReportError(const char* filename, int lineno, const char* error,
                   va_list arg);
 
 // Reports a warning with varargs (printf style) arguments.
@@ -25,7 +26,8 @@ void ReportWarning(const char* filename, int lineno, const char* warn,
                    const char* warning, ...);
 
 // Reports a warning with vprintf style arguments.
-void VReportWarning(const char* filename, int lineno, const char* warn,
+// Returns true when the diagnostic was emitted.
+bool VReportWarning(const char* filename, int lineno, const char* warn,
                     const char* warning, va_list arg);
 
 void ReportNote(const char* filename, int lineno, const char* error, ...);

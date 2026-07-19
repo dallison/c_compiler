@@ -1824,29 +1824,38 @@ static void ReportSourceStack(Lex* lex) {
 void LexError(Lex* lex, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  VReportError(lex->source->filename.value, lex->source->lineno, error, ap);
+  bool emitted = VReportError(lex->source->filename.value,
+                              lex->source->lineno, error, ap);
   va_end(ap);
-  ReportSourceStack(lex);
+  if (emitted) {
+    ReportSourceStack(lex);
+  }
 }
 
 void VLexError(Lex* lex, const char* error, va_list ap) {
-  VReportError(lex->source->filename.value, lex->source->lineno, error, ap);
-  ReportSourceStack(lex);
+  if (VReportError(lex->source->filename.value, lex->source->lineno, error,
+                   ap)) {
+    ReportSourceStack(lex);
+  }
 }
 
 void LexWarning(Lex* lex, const char* warn, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  VReportWarning(lex->source->filename.value, lex->source->lineno, warn, error,
-                 ap);
+  bool emitted =
+      VReportWarning(lex->source->filename.value, lex->source->lineno, warn,
+                     error, ap);
   va_end(ap);
-  ReportSourceStack(lex);
+  if (emitted) {
+    ReportSourceStack(lex);
+  }
 }
 
 void VLexWarning(Lex* lex, const char* warn, const char* error, va_list ap) {
-  VReportWarning(lex->source->filename.value, lex->source->lineno, warn, error,
-                 ap);
-  ReportSourceStack(lex);
+  if (VReportWarning(lex->source->filename.value, lex->source->lineno, warn,
+                     error, ap)) {
+    ReportSourceStack(lex);
+  }
 }
 
 // Read the arguments for an __attribute__ element.

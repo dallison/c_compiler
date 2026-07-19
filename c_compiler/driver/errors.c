@@ -396,16 +396,16 @@ static bool IsWarningError(const char* warning) {
          !SetContains(&compiler->no_error_warnings, (void*)warning);
 }
 
-void VReportError(const char* filename, int lineno, const char* error,
+bool VReportError(const char* filename, int lineno, const char* error,
                   va_list arg) {
   if (compiler->diagnostic_error_trap_depth > 0) {
     // A speculative parse is in progress; record that an error occurred but do
     // not print or count it.  The caller decides whether to roll back.
     compiler->diagnostic_error_trapped = true;
-    return;
+    return false;
   }
   if (DiagnosticsSuppressed()) {
-    return;
+    return false;
   }
   char buf[4096];
   vsnprintf(buf, sizeof(buf), error, arg);
@@ -419,6 +419,7 @@ void VReportError(const char* filename, int lineno, const char* error,
             Color(ANSI_RESET));
     exit(1);
   }
+  return true;
 }
 
 void ReportError(const char* filename, int lineno, const char* error, ...) {
@@ -428,13 +429,13 @@ void ReportError(const char* filename, int lineno, const char* error, ...) {
   va_end(arg);
 }
 
-void VReportWarning(const char* filename, int lineno, const char* warn,
+bool VReportWarning(const char* filename, int lineno, const char* warn,
                     const char* warning, va_list arg) {
   if (DiagnosticsSuppressed()) {
-    return;
+    return false;
   }
   if (IsWarningDisabled(warn)) {
-    return;
+    return false;
   }
   char warning_option[64];
   const char* begin_text = "warning";
@@ -473,6 +474,7 @@ void VReportWarning(const char* filename, int lineno, const char* warn,
             Color(ANSI_RESET));
     exit(1);
   }
+  return true;
 }
 
 void ReportWarning(const char* filename, int lineno, const char* warn,

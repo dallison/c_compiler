@@ -50,6 +50,10 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-o", kCompilerOptionString, kOptionOutputFile, false, "Output filename"},
     {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false, "Add system include path"},
     {"-I", kCompilerOptionString, kOptionIncludePath, true, "Add a user include path -Ipath"},
+    {"-nostdinc", kCompilerOptionBool, kOptionNoStandardIncludes, false,
+     "Do not use built-in system include paths"},
+    {"-nostdlib", kCompilerOptionBool, kOptionNoStandardLibraries, false,
+     "Do not link the target system library"},
     {"-D", kCompilerOptionString, kOptionDefineMacro, true, "Define a macro -Dmacro[=value]"},
     {"-U", kCompilerOptionString, kOptionUndefineMacro, true, "Undefine a macro"},
     {"-fPIC", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
@@ -1719,7 +1723,11 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
 }
 
 static void ParseStandardOption(Compiler* compiler, Vector* options) {
-  compiler->language_standard = kLanguageStandardC99;
+  compiler->language_standard =
+      StringEndsWith(&compiler->infile, ".cc") ||
+              StringEndsWith(&compiler->infile, ".cpp")
+          ? kLanguageStandardCXX20
+          : kLanguageStandardC99;
   String* value = OptionStringValue(kOptionStandard, options);
   if (value == NULL) {
     return;
@@ -1890,6 +1898,9 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   VectorDestructWithContents(&target_options, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   
   PreprocessorInit(&compiler->preprocessor);
+  if (OptionBoolValue(kOptionNoStandardIncludes, options, false)) {
+    PreprocessorClearSystemIncludePaths(&compiler->preprocessor);
+  }
   SyntaxInit(&compiler->syntax, &compiler->lex);
 }
 

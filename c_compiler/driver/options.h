@@ -23,6 +23,8 @@ typedef enum {
   kOptionOutputFile,         // Output file name.
   kOptionIncludePath,        // Add to user include search path.
   kOptionSystemIncludePath,  // Add to system include search path.
+  kOptionNoStandardIncludes, // Do not use built-in system include paths.
+  kOptionNoStandardLibraries,// Do not link the target system library.
   kOptionDefineMacro,        // Define a macro.
   kOptionUndefineMacro,      // Undefine a macro.
   kOptionPic,                // Position Independent Code.

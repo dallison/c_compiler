@@ -8,9 +8,12 @@
 
 // This is a driver for the C compiler, assembler, linker and interpreter.
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "dstring.h"
 #include "vector.h"
 #include "risc_v_assembler.h"
@@ -34,6 +37,351 @@ Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(Assembler* assembler);
 void AssembleAARCH64Instruction(Assembler* assembler, String* word);
 static bool DriverImportModule(void* ctx, const char* module_name);
+
+typedef struct {
+  String invocation_dir;
+  String executable_dir;
+  String include_dir;
+  String lib_dir;
+} DriverResources;
+
+static bool PathIsDirectory(const char* path) {
+  struct stat st;
+  return path != NULL && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool PathIsFile(const char* path) {
+  struct stat st;
+  return path != NULL && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool SetCanonicalDirectory(String* out, const char* path) {
+  if (!PathIsDirectory(path)) {
+    return false;
+  }
+  char resolved[PATH_MAX];
+  if (realpath(path, resolved) == NULL) {
+    return false;
+  }
+  StringSet(out, resolved);
+  return true;
+}
+
+static void SetPathDirectory(String* out, const char* path) {
+  const char* slash = strrchr(path, '/');
+  if (slash == NULL) {
+    StringSet(out, ".");
+  } else if (slash == path) {
+    StringSet(out, "/");
+  } else {
+    StringInitFromSegment(out, path, (size_t)(slash - path));
+  }
+}
+
+static bool SetInvocationPath(String* out, const char* argv0) {
+  if (strchr(argv0, '/') != NULL) {
+    if (argv0[0] == '/') {
+      StringSet(out, argv0);
+      return true;
+    }
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+      return false;
+    }
+    StringPrintf(out, "%s/%s", cwd, argv0);
+    return true;
+  }
+
+  const char* path_env = getenv("PATH");
+  if (path_env == NULL) {
+    return false;
+  }
+  char* paths = strdup(path_env);
+  if (paths == NULL) {
+    return false;
+  }
+  bool found = false;
+  char* save = NULL;
+  for (char* dir = strtok_r(paths, ":", &save); dir != NULL;
+       dir = strtok_r(NULL, ":", &save)) {
+    String candidate = {0};
+    StringPrintf(&candidate, "%s/%s", dir, argv0);
+    if (access(candidate.value, X_OK) == 0) {
+      StringSetString(out, &candidate);
+      found = true;
+      StringDestruct(&candidate);
+      break;
+    }
+    StringDestruct(&candidate);
+  }
+  free(paths);
+  return found;
+}
+
+static bool TryResourceDirectory(String* out, const char* base,
+                                 const char* relative) {
+  if (base == NULL || base[0] == '\0') {
+    return false;
+  }
+  String candidate = {0};
+  if (relative == NULL || relative[0] == '\0') {
+    StringInit(&candidate, base);
+  } else {
+    StringPrintf(&candidate, "%s/%s", base, relative);
+  }
+  bool found = SetCanonicalDirectory(out, candidate.value);
+  StringDestruct(&candidate);
+  return found;
+}
+
+static bool FindIncludeDirectory(DriverResources* resources) {
+  const char* include_env = getenv("DAVECC_INCLUDE_DIR");
+  if (TryResourceDirectory(&resources->include_dir, include_env, NULL)) {
+    return true;
+  }
+  const char* root_env = getenv("DAVECC_ROOT");
+  if (TryResourceDirectory(&resources->include_dir, root_env, "libc/include")) {
+    return true;
+  }
+
+  // bazel-bin is a symlink. Resolve its lexical parent before probing the
+  // source tree; appending ".." to the symlink would walk the output tree.
+  String invocation_parent = {0};
+  if (resources->invocation_dir.length != 0) {
+    SetPathDirectory(&invocation_parent, resources->invocation_dir.value);
+    if (TryResourceDirectory(&resources->include_dir,
+                             invocation_parent.value, "libc/include")) {
+      StringDestruct(&invocation_parent);
+      return true;
+    }
+  }
+  StringDestruct(&invocation_parent);
+
+  String* roots[] = {
+      &resources->invocation_dir,
+      &resources->executable_dir,
+  };
+  const char* relatives[] = {
+      "libc/include",
+      "../libc/include",
+      "../../include/davecc",
+      "../include/davecc",
+      "../include",
+  };
+  for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+    for (size_t j = 0; j < sizeof(relatives) / sizeof(relatives[0]); j++) {
+      if (TryResourceDirectory(&resources->include_dir, roots[i]->value,
+                               relatives[j])) {
+        return true;
+      }
+    }
+  }
+  return TryResourceDirectory(&resources->include_dir, ".", "libc/include");
+}
+
+static bool FindLibraryDirectory(DriverResources* resources) {
+  const char* lib_env = getenv("DAVECC_LIB_DIR");
+  if (TryResourceDirectory(&resources->lib_dir, lib_env, NULL)) {
+    return true;
+  }
+  const char* root_env = getenv("DAVECC_ROOT");
+  if (TryResourceDirectory(&resources->lib_dir, root_env,
+                           "bazel-bin/libc")) {
+    return true;
+  }
+
+  String* roots[] = {
+      &resources->invocation_dir,
+      &resources->executable_dir,
+  };
+  const char* relatives[] = {
+      "libc",
+      "../../lib/davecc",
+      "../lib/davecc",
+  };
+  for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+    for (size_t j = 0; j < sizeof(relatives) / sizeof(relatives[0]); j++) {
+      if (TryResourceDirectory(&resources->lib_dir, roots[i]->value,
+                               relatives[j])) {
+        return true;
+      }
+    }
+  }
+  return TryResourceDirectory(&resources->lib_dir, ".", "bazel-bin/libc");
+}
+
+static void DriverResourcesInit(DriverResources* resources,
+                                const char* argv0) {
+  StringInit(&resources->invocation_dir, "");
+  StringInit(&resources->executable_dir, "");
+  StringInit(&resources->include_dir, "");
+  StringInit(&resources->lib_dir, "");
+
+  String invocation;
+  StringInit(&invocation, "");
+  if (SetInvocationPath(&invocation, argv0)) {
+    SetPathDirectory(&resources->invocation_dir, invocation.value);
+    char resolved[PATH_MAX];
+    if (realpath(invocation.value, resolved) != NULL) {
+      SetPathDirectory(&resources->executable_dir, resolved);
+    }
+  }
+  StringDestruct(&invocation);
+
+  FindIncludeDirectory(resources);
+  FindLibraryDirectory(resources);
+}
+
+typedef struct {
+  const char* canonical_name;
+  const char* archive_name;
+  const char* bazel_target;
+  bool use_main_entry;
+} TargetRuntime;
+
+static const TargetRuntime target_runtimes[] = {
+    {"pcode", "libcpcode.a", "//:libc_pcode", true},
+    {"riscv", "libcriscv.a", "//:libc_riscv", false},
+    {"aarch64", "libcaarch64.a", "//:libc_aarch64", true},
+    {"arm", "libcarm.a", "//:libc_arm", true},
+    {"x86_64", "libcx86_64.a", "//:libc_x86_64", true},
+    {"6502", "libc65c02.a", "//:libc_65c02", false},
+    {"65c02", "libc65c02.a", "//:libc_65c02", false},
+};
+
+static bool TargetNameMatches(const char* target, const char* canonical) {
+  if (strcmp(target, canonical) == 0) {
+    return true;
+  }
+  if (strcmp(canonical, "pcode") == 0) {
+    return strcmp(target, "p-code") == 0;
+  }
+  if (strcmp(canonical, "riscv") == 0) {
+    return strcmp(target, "risc-v") == 0;
+  }
+  if (strcmp(canonical, "aarch64") == 0) {
+    return strcmp(target, "armv8") == 0;
+  }
+  if (strcmp(canonical, "arm") == 0) {
+    return strcmp(target, "armv7") == 0 ||
+           strcmp(target, "armv7-a") == 0 ||
+           strcmp(target, "arm32") == 0;
+  }
+  if (strcmp(canonical, "x86_64") == 0) {
+    return strcmp(target, "x86-64") == 0;
+  }
+  if (strcmp(canonical, "65c02") == 0) {
+    return strcmp(target, "65C02") == 0;
+  }
+  return false;
+}
+
+static const TargetRuntime* FindTargetRuntime(const char* target) {
+  if (target == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0;
+       i < sizeof(target_runtimes) / sizeof(target_runtimes[0]); i++) {
+    if (TargetNameMatches(target, target_runtimes[i].canonical_name)) {
+      return &target_runtimes[i];
+    }
+  }
+  return NULL;
+}
+
+static bool VectorContainsCString(Vector* values, const char* value) {
+  for (size_t i = 0; i < values->length; i++) {
+    if (strcmp(values->value.p[i], value) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool LinkerArgsContainArchive(Vector* linker_args,
+                                     const char* archive_name) {
+  for (size_t i = 1; i < linker_args->length; i++) {
+    const char* arg = linker_args->value.p[i];
+    const char* basename = strrchr(arg, '/');
+    basename = basename == NULL ? arg : basename + 1;
+    if (strcmp(basename, archive_name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void AddDefaultSystemInclude(Vector* compiler_args,
+                                    DriverResources* resources,
+                                    bool needs_compiler) {
+  if (!needs_compiler ||
+      VectorContainsCString(compiler_args, "-nostdinc")) {
+    return;
+  }
+
+  bool has_explicit_system_path =
+      VectorContainsCString(compiler_args, "-isystem");
+  if (resources->include_dir.length == 0 && !has_explicit_system_path) {
+    fprintf(stderr,
+            "unable to find DaveCC system headers; set DAVECC_INCLUDE_DIR "
+            "or use -nostdinc\n");
+    exit(1);
+  }
+
+  // Suppress the CWD-relative compiled-in fallback. Explicit command-line
+  // -isystem paths are parsed later and therefore remain higher priority.
+  VectorInsertBefore(compiler_args, 1, "-nostdinc");
+  if (resources->include_dir.length != 0) {
+    VectorInsertBefore(compiler_args, 2, "-isystem");
+    VectorInsertBefore(compiler_args, 3, resources->include_dir.value);
+  }
+}
+
+static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
+                              Vector* compiler_options,
+                              DriverResources* resources) {
+  if (OptionBoolValue(kOptionNoStandardLibraries, compiler_options, false) ||
+      VectorContainsCString(linker_args, "-shared")) {
+    return;
+  }
+
+  String* target = OptionStringValue(kOptionTarget, compiler_options);
+  const TargetRuntime* runtime =
+      FindTargetRuntime(target == NULL ? NULL : target->value);
+  if (runtime == NULL) {
+    return;
+  }
+
+  if (runtime->use_main_entry &&
+      !VectorContainsCString(linker_args, "-e")) {
+    VectorAppend(linker_args, "-e");
+    VectorAppend(linker_args, "main");
+  }
+
+  if (LinkerArgsContainArchive(linker_args, runtime->archive_name)) {
+    return;
+  }
+  if (resources->lib_dir.length == 0) {
+    fprintf(stderr,
+            "unable to find DaveCC system libraries; set DAVECC_LIB_DIR "
+            "or use -nostdlib\n");
+    exit(1);
+  }
+
+  String* archive = NewEmptyString();
+  StringPrintf(archive, "%s/%s", resources->lib_dir.value,
+               runtime->archive_name);
+  if (!PathIsFile(archive->value)) {
+    fprintf(stderr,
+            "unable to find DaveCC system library '%s'; build %s, set "
+            "DAVECC_LIB_DIR, or use -nostdlib\n",
+            archive->value, runtime->bazel_target);
+    StringDelete(archive);
+    exit(1);
+  }
+  VectorAppend(owned_paths, archive);
+  VectorAppend(linker_args, archive->value);
+}
 
 static int ParseArg(int i, int argc, char** argv,
                     Vector* compiler_args,
@@ -781,6 +1129,9 @@ static bool DriverImportModule(void* ctx, const char* module_name) {
 }
 
 int main(int argc, char * argv[]) {
+  DriverResources resources;
+  DriverResourcesInit(&resources, argv[0]);
+
   Vector asm_files = {0};
   Vector compiler_args = {0};
   Vector linker_args = {0};
@@ -819,6 +1170,10 @@ int main(int argc, char * argv[]) {
             "'-' (standard input) must be the only input file\n");
     exit(1);
   }
+
+  AddDefaultSystemInclude(&compiler_args, &resources,
+                          run_compiler || asm_files.length > 0);
+
   // Parse compiler options for C and asm files.
   Vector compiler_options;
   VectorInit(&compiler_options);
@@ -1057,6 +1412,8 @@ int main(int argc, char * argv[]) {
   
   int status = 0;
   if (!compile_only) {
+    AddDefaultRuntime(&linker_args, &object_files, &compiler_options,
+                      &resources);
     String* output = Link((int)linker_args.length, (char**)linker_args.value.p);
     if (output == NULL) {
       status = 1;

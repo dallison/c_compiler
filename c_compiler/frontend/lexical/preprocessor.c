@@ -428,14 +428,25 @@ void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path) {
 void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
                                          const char* path) {
 
-   // Ensure only one entry with this path.
-    for (size_t i = 0; i < p->system_include_paths.length; i++) {
-      if (StringEqual(p->system_include_paths.value.p[i], path)) {
-        return;
-      }
+  // Ensure only one entry with this path.
+  for (size_t i = 0; i < p->system_include_paths.length; i++) {
+    if (StringEqual(p->system_include_paths.value.p[i], path)) {
+      return;
     }
-    VectorInsertBefore(&p->system_include_paths, 0, NewString(path));
   }
+  if (index >= (int)p->system_include_paths.length) {
+    VectorAppend(&p->system_include_paths, NewString(path));
+  } else {
+    VectorInsertBefore(&p->system_include_paths, index, NewString(path));
+  }
+}
+
+void PreprocessorClearSystemIncludePaths(Preprocessor* p) {
+  VectorDestructWithContents(&p->system_include_paths,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+  VectorInit(&p->system_include_paths);
+}
 
 static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
   HashTable* to_table = data;
