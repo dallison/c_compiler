@@ -1933,6 +1933,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // first argument holding the address of where the function is to
   // store the result.
   if (returns_struct) {
+    call->flags |= kIRStructReturnCall;
     if ((node->base.flags & kASTRvoCall) != 0) {
       // Return Value Optimization call.
       PushArg(gen, call, gen->struct_return_value, 0, &args_right_to_left);
@@ -2503,7 +2504,36 @@ static IRNode* GenerateBuiltinAtomic(Generator* gen, VectorASTNode* node,
   IRNode* result = NewIR(opcode);
   for (size_t i = 0; i < node->children->length; i++) {
     IRNode* child = GenerateExpression(gen, node->children->value.p[i]);
+    bool is_order =
+        (opcode == IR_OP(atomic_load) && i == 1) ||
+        (opcode == IR_OP(atomic_store) && i == 2) ||
+        ((opcode == IR_OP(atomic_fetch_add) ||
+          opcode == IR_OP(atomic_fetch_sub) ||
+          opcode == IR_OP(atomic_add_fetch) ||
+          opcode == IR_OP(atomic_sub_fetch)) &&
+         i == 2) ||
+        (opcode == IR_OP(atomic_fence) && i == 0);
+    if (is_order && !IRIsConst(child)) {
+      TypeRecord* int_type =
+          NewTypeRecordWithSize(kTypeInt, kQualPlain);
+      child = GeneratorGetIntConstant(gen, int_type, 5);
+    }
     IRAddInput(result, child, i == 0);
+  }
+  // The legacy __sync builtins do not carry an explicit memory order.  Their
+  // contract is sequential consistency, so make that part of the shared IR
+  // rather than asking each target to infer it from a missing operand.
+  bool needs_default_order =
+      opcode == IR_OP(atomic_fence) ||
+      ((opcode == IR_OP(atomic_fetch_add) ||
+        opcode == IR_OP(atomic_fetch_sub) ||
+        opcode == IR_OP(atomic_add_fetch) ||
+        opcode == IR_OP(atomic_sub_fetch)) &&
+       node->children->length == 2);
+  if (needs_default_order) {
+    TypeRecord* int_type =
+        NewTypeRecordWithSize(kTypeInt, kQualPlain);
+    IRAddInput(result, GeneratorGetIntConstant(gen, int_type, 5), false);
   }
   result = GeneratorEmit(gen, result);
   CheckForVarDef(result, &node->base);
@@ -2514,48 +2544,32 @@ static IRNode* GenerateBuiltinAtomicCompareExchange(Generator* gen,
                                                     VectorASTNode* node,
                                                     bool expected_is_pointer,
                                                     bool returns_bool) {
-  ASTNode* ptr_arg = node->children->value.p[0];
-  TypeRecord* value_type = ptr_arg->type->next;
-  IROpcode load_op = GetLoadOpcodeForType(value_type);
-  IROpcode store_op = GetStoreOpcodeForType(value_type);
-
-  IRNode* ptr = GenerateExpression(gen, ptr_arg);
-  IRNode* old_value = IRSetType(GeneratorEmit(gen, NewIR1(load_op, ptr)),
-                                value_type);
-
-  IRNode* expected_value;
-  IRNode* expected_ptr = NULL;
-  if (expected_is_pointer) {
-    expected_ptr = GenerateExpression(gen, node->children->value.p[1]);
-    expected_value = IRSetType(
-        GeneratorEmit(gen, NewIR1(load_op, expected_ptr)), value_type);
-  } else {
-    expected_value = GenerateExpression(gen, node->children->value.p[1]);
+  IROpcode opcode =
+      expected_is_pointer
+          ? IR_OP(atomic_compare_exchange_n)
+          : (returns_bool ? IR_OP(atomic_compare_exchange_bool)
+                          : IR_OP(atomic_compare_exchange_val));
+  IRNode* result = NewIR(opcode);
+  for (size_t i = 0; i < node->children->length; i++) {
+    IRNode* child = GenerateExpression(gen, node->children->value.p[i]);
+    size_t first_order = expected_is_pointer ? 4 : 3;
+    if (i >= first_order && !IRIsConst(child)) {
+      TypeRecord* int_type =
+          NewTypeRecordWithSize(kTypeInt, kQualPlain);
+      child = GeneratorGetIntConstant(gen, int_type, 5);
+    }
+    IRAddInput(result, child, i == 0);
   }
-  IRNode* desired = GenerateExpression(gen, node->children->value.p[2]);
-
-  IROpcode cmp_op = FindIROpcodeForType(value_type, AST_OP(equal));
-  IRNode* matches = IRSetType(
-      GeneratorEmit(gen, NewIR2(cmp_op, old_value, expected_value)),
-      NewTypeRecordWithSize(kTypeBool, kQualPlain));
-
-  IRNode* success_label = NewIR(IR_OP(label));
-  IRNode* end_label = NewIR(IR_OP(label));
-  GeneratorEmit(gen, NewIR2(IR_OP(btrue), matches, success_label));
-
-  if (expected_is_pointer) {
-    IRNode* update_expected =
-        GeneratorEmit(gen, NewIR2(store_op, expected_ptr, old_value));
-    (void)update_expected;
+  if (!expected_is_pointer) {
+    // __sync_* compare/exchange is sequentially consistent on both paths.
+    TypeRecord* int_type =
+        NewTypeRecordWithSize(kTypeInt, kQualPlain);
+    IRAddInput(result, GeneratorGetIntConstant(gen, int_type, 5), false);
+    IRAddInput(result, GeneratorGetIntConstant(gen, int_type, 5), false);
   }
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
-
-  GeneratorEmit(gen, success_label);
-  IRNode* store_desired = GeneratorEmit(gen, NewIR2(store_op, ptr, desired));
-  (void)store_desired;
-  GeneratorEmit(gen, end_label);
-
-  return IRSetType(returns_bool ? matches : old_value, node->base.type);
+  result = GeneratorEmit(gen, result);
+  CheckForVarDef(result, &node->base);
+  return IRSetType(result, node->base.type);
 }
 
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) {

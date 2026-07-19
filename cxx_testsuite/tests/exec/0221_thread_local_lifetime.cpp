@@ -1,11 +1,5 @@
 #include <threads.h>
 
-#if !defined(__x86_64__)
-int main(void) {
-  return 0;
-}
-#else
-
 struct TlsBox {
   int id;
   TlsBox(int v);
@@ -130,5 +124,3 @@ int main(void) {
   }
   return 0;
 }
-
-#endif

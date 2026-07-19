@@ -130,6 +130,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case AARCH64_OP(fp):
     case AARCH64_OP(sp):
     case AARCH64_OP(lr):
+    case AARCH64_OP(xr):
     case AARCH64_OP(zr):
     case AARCH64_OP(literal):
     case AARCH64_OP(structreturn):
@@ -641,6 +642,17 @@ static void RestoreExceptionLandingState(AARCH64Emitter* emitter, FILE* fp) {
     offset -= 8;
     BitSetIteratorNext(&it);
   }
+  if (emitter->g->struct_return_reg >= 0) {
+    bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
+                   !emitter->g->not_leaf;
+    int reg_num = (is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
+                           : AARCH64_FIRST_INT_REG_VAR) +
+                  emitter->g->struct_return_reg;
+    fprintf(fp, "\tldr %s, [x29, #%d]\n",
+            AARCH64RegisterNameFromNum(reg_num, kAARCH64RegTypeInt,
+                                      kSize64Bit, buf, sizeof(buf)),
+            emitter->g->struct_return_spill_offset);
+  }
 }
 
 // In aarch64_codegen.c.
@@ -837,6 +849,228 @@ static void PrintDestMove(AARCH64Emitter* emitter, TargetInstruction* inst,
                               sizeof(buf2)));
 }
 
+static int AtomicSizeLog2(TargetInstruction* inst) {
+  return (inst->flags & AARCH64_ATOMIC_SIZE_MASK) >>
+         AARCH64_ATOMIC_SIZE_SHIFT;
+}
+
+static int AtomicOrder(TargetInstruction* inst) {
+  return (inst->flags & AARCH64_ATOMIC_ORDER_MASK) >>
+         AARCH64_ATOMIC_ORDER_SHIFT;
+}
+
+static int AtomicFailureOrder(TargetInstruction* inst) {
+  return (inst->flags & AARCH64_ATOMIC_FAILURE_ORDER_MASK) >>
+         AARCH64_ATOMIC_FAILURE_ORDER_SHIFT;
+}
+
+static bool AtomicOrderHasAcquire(int order) {
+  return order == 1 || order == 2 || order == 4 || order == 5;
+}
+
+static bool AtomicOrderHasRelease(int order) {
+  return order == 3 || order == 4 || order == 5;
+}
+
+static const char* AtomicLoadMnemonic(int size_log2, bool acquire,
+                                      bool exclusive) {
+  if (exclusive) {
+    if (size_log2 == 0) return acquire ? "ldaxrb" : "ldxrb";
+    if (size_log2 == 1) return acquire ? "ldaxrh" : "ldxrh";
+    return acquire ? "ldaxr" : "ldxr";
+  }
+  if (acquire) {
+    if (size_log2 == 0) return "ldarb";
+    if (size_log2 == 1) return "ldarh";
+    return "ldar";
+  }
+  if (size_log2 == 0) return "ldrb";
+  if (size_log2 == 1) return "ldrh";
+  return "ldr";
+}
+
+static const char* AtomicStoreMnemonic(int size_log2, bool release,
+                                       bool exclusive) {
+  if (exclusive) {
+    if (size_log2 == 0) return release ? "stlxrb" : "stxrb";
+    if (size_log2 == 1) return release ? "stlxrh" : "stxrh";
+    return release ? "stlxr" : "stxr";
+  }
+  if (release) {
+    if (size_log2 == 0) return "stlrb";
+    if (size_log2 == 1) return "stlrh";
+    return "stlr";
+  }
+  if (size_log2 == 0) return "strb";
+  if (size_log2 == 1) return "strh";
+  return "str";
+}
+
+static const char* AtomicRegName(TargetInstruction* inst, int size_log2,
+                                 char* buf, size_t bufsize) {
+  return GetRegisterName(inst,
+                         size_log2 == 3 ? kSize64Bit : kSize32Bit,
+                         buf, bufsize);
+}
+
+static const char* AtomicOperandRegName(TargetInstruction* inst, int operand,
+                                        int size_log2, char* buf,
+                                        size_t bufsize) {
+  assert(inst->operand[operand] != NULL &&
+         inst->operand[operand]->reg != NULL);
+  return AARCH64RegisterName(
+      (AARCH64Register*)inst->operand[operand]->reg,
+      size_log2 == 3 ? kSize64Bit : kSize32Bit, buf, bufsize);
+}
+
+static const char* AtomicAddressRegName(TargetInstruction* inst, int operand,
+                                        char* buf, size_t bufsize) {
+  assert(inst->operand[operand] != NULL &&
+         inst->operand[operand]->reg != NULL);
+  return AARCH64RegisterName((AARCH64Register*)inst->operand[operand]->reg,
+                             kSize64Bit, buf, bufsize);
+}
+
+static void PrintAtomicInstruction(TargetInstruction* inst,
+                                   const char* func_name, FILE* fp) {
+  int size = AtomicSizeLog2(inst);
+  int order = AtomicOrder(inst);
+  int failure_order = AtomicFailureOrder(inst);
+  bool acquire = AtomicOrderHasAcquire(order);
+  bool release = AtomicOrderHasRelease(order);
+  char b0[16], b1[16], b2[16], b3[16];
+  const char* result =
+      inst->reg == NULL ? NULL : AtomicRegName(inst, size, b0, sizeof(b0));
+
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(atomic_load): {
+      const char* addr = AtomicAddressRegName(inst, 0, b1, sizeof(b1));
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, acquire, false), result, addr);
+      return;
+    }
+    case AARCH64_OP(atomic_store): {
+      const char* value =
+          AtomicOperandRegName(inst, 0, size, b0, sizeof(b0));
+      const char* addr = AtomicAddressRegName(inst, 1, b1, sizeof(b1));
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicStoreMnemonic(size, release, false), value, addr);
+      return;
+    }
+    case AARCH64_OP(atomic_fence):
+      if (order == 0) {
+        fprintf(fp, "\t// relaxed atomic fence\n");
+      } else if (order == 1 || order == 2) {
+        fprintf(fp, "\tdmb ishld\n");
+      } else if (order == 3) {
+        fprintf(fp, "\tdmb ishst\n");
+      } else {
+        fprintf(fp, "\tdmb ish\n");
+      }
+      return;
+    case AARCH64_OP(atomic_fetch_add):
+    case AARCH64_OP(atomic_fetch_sub):
+    case AARCH64_OP(atomic_add_fetch):
+    case AARCH64_OP(atomic_sub_fetch): {
+      bool add = inst->opcode == (TargetOpcode)AARCH64_OP(atomic_fetch_add) ||
+                 inst->opcode == (TargetOpcode)AARCH64_OP(atomic_add_fetch);
+      bool return_new =
+          inst->opcode == (TargetOpcode)AARCH64_OP(atomic_add_fetch) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(atomic_sub_fetch);
+      const char* addr = AtomicAddressRegName(inst, 0, b1, sizeof(b1));
+      const char* value =
+          AtomicOperandRegName(inst, 1, size, b2, sizeof(b2));
+      const char* loaded = return_new
+                               ? (size == 3 ? "x16" : "w16")
+                               : result;
+      const char* updated = return_new
+                                ? result
+                                : (size == 3 ? "x16" : "w16");
+      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, acquire, true), loaded, addr);
+      fprintf(fp, "\t%s %s, %s, %s\n", add ? "add" : "sub", updated,
+              loaded, value);
+      fprintf(fp, "\t%s w17, %s, [%s]\n",
+              AtomicStoreMnemonic(size, release, true), updated, addr);
+      fprintf(fp, "\tcbnz w17, .L%s_atomic_retry_%d\n", func_name,
+              inst->id);
+      return;
+    }
+    case AARCH64_OP(atomic_compare_exchange_bool):
+    case AARCH64_OP(atomic_compare_exchange_val):
+    case AARCH64_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          inst->opcode ==
+          (TargetOpcode)AARCH64_OP(atomic_compare_exchange_n);
+      bool returns_bool =
+          inst->opcode !=
+          (TargetOpcode)AARCH64_OP(atomic_compare_exchange_val);
+      acquire = acquire || AtomicOrderHasAcquire(failure_order);
+      const char* addr = AtomicAddressRegName(inst, 0, b1, sizeof(b1));
+      const char* expected;
+      if (expected_is_pointer) {
+        const char* expected_addr =
+            AtomicAddressRegName(inst, 1, b2, sizeof(b2));
+        expected = size == 3 ? "x16" : "w16";
+        fprintf(fp, "\t%s %s, [%s]\n",
+                AtomicLoadMnemonic(size, false, false), expected,
+                expected_addr);
+      } else {
+        expected = AtomicOperandRegName(inst, 1, size, b2, sizeof(b2));
+        if (size == 0) {
+          fprintf(fp, "\tuxtb w16, %s\n", expected);
+          expected = "w16";
+        } else if (size == 1) {
+          fprintf(fp, "\tuxth w16, %s\n", expected);
+          expected = "w16";
+        }
+      }
+      const char* desired =
+          AtomicOperandRegName(inst, 2, size, b3, sizeof(b3));
+      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
+      fprintf(fp, "\t%s %s, [%s]\n",
+              AtomicLoadMnemonic(size, acquire, true), result, addr);
+      fprintf(fp, "\tcmp %s, %s\n", result, expected);
+      fprintf(fp, "\tb.ne .L%s_atomic_mismatch_%d\n", func_name, inst->id);
+      fprintf(fp, "\t%s w17, %s, [%s]\n",
+              AtomicStoreMnemonic(size, release, true), desired, addr);
+      if ((inst->flags & AARCH64_ATOMIC_WEAK) != 0) {
+        fprintf(fp, "\tcbnz w17, .L%s_atomic_spurious_%d\n", func_name,
+                inst->id);
+      } else {
+        fprintf(fp, "\tcbnz w17, .L%s_atomic_retry_%d\n", func_name,
+                inst->id);
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tmov %s, #1\n",
+                AtomicRegName(inst, 2, b0, sizeof(b0)));
+      }
+      fprintf(fp, "\tb .L%s_atomic_done_%d\n", func_name, inst->id);
+      fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
+      fprintf(fp, "\tclrex\n");
+      if ((inst->flags & AARCH64_ATOMIC_WEAK) != 0) {
+        fprintf(fp, ".L%s_atomic_spurious_%d:\n", func_name, inst->id);
+      }
+      if (expected_is_pointer) {
+        const char* expected_addr =
+            AtomicAddressRegName(inst, 1, b2, sizeof(b2));
+        fprintf(fp, "\t%s %s, [%s]\n",
+                AtomicStoreMnemonic(size, false, false), result,
+                expected_addr);
+      }
+      if (returns_bool) {
+        fprintf(fp, "\tmov %s, #0\n",
+                AtomicRegName(inst, 2, b0, sizeof(b0)));
+      }
+      fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+      return;
+    }
+    default:
+      assert(false);
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -889,6 +1123,37 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
   
   // Special case instructions.
   switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(tp):
+      fprintf(fp, "\tmrs %s, tpidr_el0\n",
+              GetRegisterName(inst, kSize64Bit, buf1, sizeof(buf1)));
+      return;
+    case AARCH64_OP(fmv_s):
+    case AARCH64_OP(fmv_d): {
+      assert(inst->dest != NULL);
+      assert(inst->operand[0] != NULL);
+      int size = (AARCH64Opcode)inst->opcode == AARCH64_OP(fmv_d)
+                     ? kSize64Bit
+                     : kSize32Bit;
+      if (inst->reg == inst->operand[0]->reg) {
+        return;
+      }
+      fprintf(fp, "\tfmov        %s, %s\n",
+              GetRegisterName(inst, size, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], size, buf2, sizeof(buf2)));
+      return;
+    }
+    case AARCH64_OP(atomic_load):
+    case AARCH64_OP(atomic_store):
+    case AARCH64_OP(atomic_fetch_add):
+    case AARCH64_OP(atomic_fetch_sub):
+    case AARCH64_OP(atomic_add_fetch):
+    case AARCH64_OP(atomic_sub_fetch):
+    case AARCH64_OP(atomic_compare_exchange_bool):
+    case AARCH64_OP(atomic_compare_exchange_val):
+    case AARCH64_OP(atomic_compare_exchange_n):
+    case AARCH64_OP(atomic_fence):
+      PrintAtomicInstruction(inst, func_name, fp);
+      return;
     case AARCH64_OP(mv):
       // Don't emit mv x, x.
       if (inst->operand[0]->reg == inst->reg) {
@@ -1292,7 +1557,15 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
               fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
             }
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(symbol))) {
-            if ((inst->flags & AARCH64_HI_RELOC) != 0) {
+            if ((inst->flags & AARCH64_TPREL_HI_RELOC) != 0) {
+              fprintf(fp, "%s:tprel_hi12:%s", sep,
+                      TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
+                                       symbuf, sizeof(symbuf)));
+            } else if ((inst->flags & AARCH64_TPREL_LO_RELOC) != 0) {
+              fprintf(fp, "%s:tprel_lo12_nc:%s", sep,
+                      TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
+                                       symbuf, sizeof(symbuf)));
+            } else if ((inst->flags & AARCH64_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
                       TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
                                        symbuf, sizeof(symbuf)));
@@ -1425,10 +1698,14 @@ static void AARCH64PrintExceptionTable(AARCH64Emitter* emitter, FILE* fp,
     PrintExceptionTableLabel(fp, func_name, range->try_end);
     fprintf(fp, "\n\t.8byte ");
     PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    fprintf(fp, "\n\t.8byte %s\n",
-            range->catch_typeinfo != NULL
-                ? range->catch_typeinfo->symbol_name.value
-                : "0");
+    if (range->is_cleanup) {
+      fprintf(fp, "\n\t.8byte %d\n", DAVECC_EH_CLEANUP_MARKER);
+    } else if (range->catch_typeinfo != NULL) {
+      fprintf(fp, "\n\t.8byte %s\n",
+              range->catch_typeinfo->symbol_name.value);
+    } else {
+      fprintf(fp, "\n\t.8byte 0\n");
+    }
   }
   fprintf(fp, "\t.text\n\n");
 }
@@ -1458,5 +1735,36 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
           func_name);
   AARCH64PrintTypeInfoRecords(emitter, fp);
   AARCH64PrintExceptionTable(emitter, fp, func_name);
+}
+
+void AARCH64PrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n", thunk_name);
+    fprintf(fp, "%s:\n", thunk_name);
+    if (thunk->this_adjustment > 0) {
+      fprintf(fp, "\tadd x0, x0, #%d\n", thunk->this_adjustment);
+    } else if (thunk->this_adjustment < 0) {
+      fprintf(fp, "\tsub x0, x0, #%d\n", -thunk->this_adjustment);
+    }
+    fprintf(fp, "\tb %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
 }
 

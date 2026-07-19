@@ -10,6 +10,8 @@
 #define errno_h
 #ifdef __DAVECC__
 
+#include <syscall.h>
+
 #define EDOM 200
 #define EILSEQ 201
 
@@ -35,7 +37,7 @@
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6
 #define errno (*(int*)ERRNO_ADDRESS)
-#elif defined(__x86_64__) && !defined(__p_code__)
+#elif defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
 extern __thread int errno;
 #else
 extern int errno;

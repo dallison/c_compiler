@@ -366,6 +366,8 @@ typedef struct  {
 #define R_AARCH64_TLS_DTPMOD   1028  // Module number, 64 bit.  
 #define R_AARCH64_TLS_DTPREL   1029  // Module-relative offset, 64 bit.  
 #define R_AARCH64_TLS_TPREL    1030  // TP-relative offset, 64 bit.  
+// ELF TLS Variant I reserves a 16-byte TCB at TPIDR_EL0; static TLS follows.
+#define AARCH64_TLS_TCB_SIZE 16
 #define R_AARCH64_TLSDESC      1031  // TLS Descriptor.  
 #define R_AARCH64_IRELATIVE  1032  // STT_GNU_IFUNC relocation.  
 

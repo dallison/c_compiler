@@ -47,6 +47,16 @@ typedef enum {
 // This comparison was generated.  Used to in conditional branch.
 #define kAARCH64ComparisonGenerated (1 << 22)
 
+// Atomic pseudo metadata in the target-instruction flag word.
+#define AARCH64_ATOMIC_SIZE_SHIFT 18
+#define AARCH64_ATOMIC_SIZE_MASK (3 << AARCH64_ATOMIC_SIZE_SHIFT)
+#define AARCH64_ATOMIC_ORDER_SHIFT 23
+#define AARCH64_ATOMIC_ORDER_MASK (7 << AARCH64_ATOMIC_ORDER_SHIFT)
+#define AARCH64_ATOMIC_FAILURE_ORDER_SHIFT 26
+#define AARCH64_ATOMIC_FAILURE_ORDER_MASK \
+  (7 << AARCH64_ATOMIC_FAILURE_ORDER_SHIFT)
+#define AARCH64_ATOMIC_WEAK (1 << 29)
+
 #define AARCH64_OP(op) kAARCH64_##op
 
 // AARCH64 code generator opcodes.
@@ -251,6 +261,29 @@ typedef enum {
   AARCH64_OP(sturb),
   AARCH64_OP(sturh),
 
+  // ARMv8.0 acquire/release, exclusive, and barrier instructions.
+  AARCH64_OP(ldxr),
+  AARCH64_OP(ldaxr),
+  AARCH64_OP(stxr),
+  AARCH64_OP(stlxr),
+  AARCH64_OP(ldar),
+  AARCH64_OP(stlr),
+  AARCH64_OP(dmb),
+  AARCH64_OP(clrex),
+
+  // Atomic operation pseudos.  The emitter expands these to ARMv8.0
+  // load-exclusive/store-exclusive loops after register allocation.
+  AARCH64_OP(atomic_load),
+  AARCH64_OP(atomic_store),
+  AARCH64_OP(atomic_fetch_add),
+  AARCH64_OP(atomic_fetch_sub),
+  AARCH64_OP(atomic_add_fetch),
+  AARCH64_OP(atomic_sub_fetch),
+  AARCH64_OP(atomic_compare_exchange_bool),
+  AARCH64_OP(atomic_compare_exchange_val),
+  AARCH64_OP(atomic_compare_exchange_n),
+  AARCH64_OP(atomic_fence),
+
   AARCH64_OP(fldr),
   AARCH64_OP(fstr),
   AARCH64_OP(fadd),
@@ -333,6 +366,8 @@ typedef enum {
 // value in an FP register instead of defaulting to a general register.
 #define AARCH64_INST_FP (1 << 23)
 #define AARCH64_INST_EXTENDED_ASM (1 << 24)
+#define AARCH64_TPREL_HI_RELOC (1 << 25)
+#define AARCH64_TPREL_LO_RELOC (1 << 26)
 
 #define AARCH64_MAX_ASM_OPERANDS 16
 
@@ -378,6 +413,7 @@ typedef struct {
   TargetInstruction* try_end;
   TargetInstruction* catch_label;
   EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;
 } AARCH64ExceptionRange;
 
 typedef struct AARCH64Generator {
@@ -388,6 +424,7 @@ typedef struct AARCH64Generator {
   int num_int_reg_vars;   // Number of int regs used for variables.
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
+  int struct_return_spill_offset;
   bool not_leaf;          // Not a leaf procedure.
   
   Vector saved_regs;
@@ -402,6 +439,7 @@ typedef struct AARCH64Generator {
   TargetInstruction* zero;  // Explicit zero (register xzr).
   TargetInstruction* tmp;  // Temp reg.
   TargetInstruction* lsl;   // Left shift for register.
+  TargetInstruction* struct_return_argument_register;  // AAPCS64 x8.
   
   Map conditions;       // Map of AARCH64Opcode vs TargetInstruction* for conds.
   

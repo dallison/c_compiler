@@ -4,9 +4,11 @@
 //
 
 #include "aarch64_interpreter.h"
+#include "aarch64_process.h"
 #include "aarch64_syscalls.h"
 #include <inttypes.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,14 +74,32 @@ static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
   return false;
 }
 
+static bool ProcessMemoryOk(AARCH64Interpreter* interpreter, uint64_t addr,
+                            size_t size) {
+  if (interpreter->process == NULL) {
+    return false;
+  }
+  return AARCH64ProcessGuestMemoryOk(interpreter->process, addr, size);
+}
+
 static bool InterpreterAddressOk(AARCH64Interpreter* interpreter, uint64_t addr,
                                  size_t size) {
+  if (interpreter->tp_base != 0 && interpreter->tls_block_size > 0) {
+    uint64_t tls_start = interpreter->tp_base;
+    uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
+    if (addr >= tls_start && addr + size <= tls_end) {
+      return true;
+    }
+  }
   if (interpreter->stack != NULL) {
     uint64_t start = (uint64_t)(uintptr_t)interpreter->stack;
     uint64_t end = start + AARCH64_STACK_SIZE;
     if (addr >= start && addr + size <= end) {
       return true;
     }
+  }
+  if (ProcessMemoryOk(interpreter, addr, size)) {
+    return true;
   }
   return GuestAddressOk(interpreter->loader, addr, size);
 }
@@ -99,72 +119,115 @@ static uint32_t Fetch32(AARCH64Interpreter* interpreter) {
   return *(uint32_t*)(uintptr_t)interpreter->pc;
 }
 
+static void GuestMemoryLock(AARCH64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryUnlock(AARCH64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->memory_mutex);
+  }
+}
+
+static void GuestMemoryDidWrite(AARCH64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    interpreter->process->write_epoch++;
+  }
+  interpreter->reservation_valid = false;
+}
+
 static void Store64(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint64_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
     fprintf(stderr, "Store64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
+  GuestMemoryLock(interpreter);
   *(uint64_t*)(uintptr_t)addr = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static void Store32(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint32_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
     fprintf(stderr, "Store32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
+  GuestMemoryLock(interpreter);
   *(uint32_t*)(uintptr_t)addr = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static uint64_t Load64(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
     fprintf(stderr, "Load64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
-  return *(uint64_t*)(uintptr_t)addr;
+  GuestMemoryLock(interpreter);
+  uint64_t value = *(uint64_t*)(uintptr_t)addr;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static uint32_t Load32(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
     fprintf(stderr, "Load32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
-  return *(uint32_t*)(uintptr_t)addr;
+  GuestMemoryLock(interpreter);
+  uint32_t value = *(uint32_t*)(uintptr_t)addr;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static void Store16(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint16_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
     fprintf(stderr, "Store16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
+  GuestMemoryLock(interpreter);
   *(uint16_t*)(uintptr_t)addr = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static void Store8(AARCH64Interpreter* interpreter, uint64_t addr,
                    uint8_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
     fprintf(stderr, "Store8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
+  GuestMemoryLock(interpreter);
   *(uint8_t*)(uintptr_t)addr = value;
+  GuestMemoryDidWrite(interpreter);
+  GuestMemoryUnlock(interpreter);
 }
 
 static uint16_t Load16(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
     fprintf(stderr, "Load16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
-  return *(uint16_t*)(uintptr_t)addr;
+  GuestMemoryLock(interpreter);
+  uint16_t value = *(uint16_t*)(uintptr_t)addr;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static uint8_t Load8(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
     fprintf(stderr, "Load8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    AARCH64InterpreterFail(interpreter, 1);
   }
-  return *(uint8_t*)(uintptr_t)addr;
+  GuestMemoryLock(interpreter);
+  uint8_t value = *(uint8_t*)(uintptr_t)addr;
+  GuestMemoryUnlock(interpreter);
+  return value;
 }
 
 static int64_t SignExtend64(uint64_t value, int bits) {
@@ -732,6 +795,122 @@ static bool ExecuteCompareBranch(AARCH64Interpreter* interpreter, uint32_t insn,
   return true;
 }
 
+static uint64_t LoadGuestRaw(uint64_t addr, size_t size) {
+  switch (size) {
+    case 1: return *(uint8_t*)(uintptr_t)addr;
+    case 2: return *(uint16_t*)(uintptr_t)addr;
+    case 4: return *(uint32_t*)(uintptr_t)addr;
+    default: return *(uint64_t*)(uintptr_t)addr;
+  }
+}
+
+static void StoreGuestRaw(uint64_t addr, size_t size, uint64_t value) {
+  switch (size) {
+    case 1: *(uint8_t*)(uintptr_t)addr = (uint8_t)value; break;
+    case 2: *(uint16_t*)(uintptr_t)addr = (uint16_t)value; break;
+    case 4: *(uint32_t*)(uintptr_t)addr = (uint32_t)value; break;
+    default: *(uint64_t*)(uintptr_t)addr = value; break;
+  }
+}
+
+static bool ExecuteLoadStoreExclusive(AARCH64Interpreter* interpreter,
+                                      uint32_t insn) {
+  int size_log2 = (insn >> 30) & 3;
+  size_t size = (size_t)1 << size_log2;
+  bool load = ((insn >> 22) & 1) != 0;
+  bool ordered = ((insn >> 15) & 1) != 0;
+  int rs = (insn >> 16) & 0x1f;
+  int rn = (insn >> 5) & 0x1f;
+  int rt = insn & 0x1f;
+  uint64_t addr = ReadX(interpreter, rn);
+  if (!InterpreterAddressOk(interpreter, addr, size)) {
+    fprintf(stderr, "Exclusive access outside mapped memory at 0x%" PRIx64
+                    "\n", addr);
+    AARCH64InterpreterFail(interpreter, 1);
+  }
+
+  if (load) {
+    GuestMemoryLock(interpreter);
+    uint64_t value = LoadGuestRaw(addr, size);
+    interpreter->reservation_valid = true;
+    interpreter->reservation_address = addr;
+    interpreter->reservation_size = (uint32_t)size;
+    interpreter->reservation_epoch =
+        interpreter->process != NULL ? interpreter->process->write_epoch : 0;
+    GuestMemoryUnlock(interpreter);
+    if (ordered) {
+      atomic_thread_fence(memory_order_acquire);
+    }
+    WriteX(interpreter, rt, value);
+    return true;
+  }
+
+  if (ordered) {
+    atomic_thread_fence(memory_order_release);
+  }
+  GuestMemoryLock(interpreter);
+  uint64_t epoch =
+      interpreter->process != NULL ? interpreter->process->write_epoch : 0;
+  bool success = interpreter->reservation_valid &&
+                 interpreter->reservation_address == addr &&
+                 interpreter->reservation_size == size &&
+                 interpreter->reservation_epoch == epoch;
+  if (success) {
+    StoreGuestRaw(addr, size, ReadX(interpreter, rt));
+    if (interpreter->process != NULL) {
+      interpreter->process->write_epoch++;
+    }
+  }
+  interpreter->reservation_valid = false;
+  GuestMemoryUnlock(interpreter);
+  WriteX(interpreter, rs, success ? 0 : 1);
+  return true;
+}
+
+static bool ExecuteAcquireRelease(AARCH64Interpreter* interpreter,
+                                  uint32_t insn) {
+  int size_log2 = (insn >> 30) & 3;
+  size_t size = (size_t)1 << size_log2;
+  bool load = ((insn >> 22) & 1) != 0;
+  int rn = (insn >> 5) & 0x1f;
+  int rt = insn & 0x1f;
+  uint64_t addr = ReadX(interpreter, rn);
+  if (load) {
+    uint64_t value;
+    switch (size) {
+      case 1: value = Load8(interpreter, addr); break;
+      case 2: value = Load16(interpreter, addr); break;
+      case 4: value = Load32(interpreter, addr); break;
+      default: value = Load64(interpreter, addr); break;
+    }
+    atomic_thread_fence(memory_order_acquire);
+    WriteX(interpreter, rt, value);
+  } else {
+    atomic_thread_fence(memory_order_release);
+    uint64_t value = ReadX(interpreter, rt);
+    switch (size) {
+      case 1: Store8(interpreter, addr, (uint8_t)value); break;
+      case 2: Store16(interpreter, addr, (uint16_t)value); break;
+      case 4: Store32(interpreter, addr, (uint32_t)value); break;
+      default: Store64(interpreter, addr, value); break;
+    }
+  }
+  return true;
+}
+
+static bool ExecuteBarrier(AARCH64Interpreter* interpreter, uint32_t insn) {
+  (void)interpreter;
+  int option = (insn >> 8) & 0xf;
+  if (option == 0x9) {
+    atomic_thread_fence(memory_order_acquire);
+  } else if (option == 0xa) {
+    atomic_thread_fence(memory_order_release);
+  } else {
+    atomic_thread_fence(memory_order_seq_cst);
+  }
+  return true;
+}
+
 // Handles the integer load/store register forms: unsigned scaled 12-bit
 // immediate (0x39 group) as well as the unscaled, pre-/post-indexed and
 // register-offset forms (0x38 group), for byte/half/word/dword sizes with
@@ -1100,6 +1279,10 @@ static bool ExecuteFP(AARCH64Interpreter* interpreter, uint32_t insn) {
 static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
                                bool* pc_updated) {
   *pc_updated = false;
+  if ((insn & 0xffffffe0u) == 0xd53bd040u) {
+    WriteX(interpreter, insn & 31, interpreter->tp_base);
+    return true;
+  }
   if ((insn & 0xFF000000) == 0x58000000) {
     return ExecuteLoadLiteral(interpreter, insn);
   }
@@ -1156,6 +1339,23 @@ static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
   if ((insn & 0xFF000010) == 0x54000000) {
     return ExecuteCondBranch(interpreter, insn, pc_updated);
   }
+  if ((insn & 0x3FFFFC00) == 0x085F7C00 ||
+      (insn & 0x3FFFFC00) == 0x085FFC00 ||
+      (insn & 0x3FE0FC00) == 0x08007C00 ||
+      (insn & 0x3FE0FC00) == 0x0800FC00) {
+    return ExecuteLoadStoreExclusive(interpreter, insn);
+  }
+  if ((insn & 0x3FFFFC00) == 0x08DFFC00 ||
+      (insn & 0x3FFFFC00) == 0x089FFC00) {
+    return ExecuteAcquireRelease(interpreter, insn);
+  }
+  if ((insn & 0xFFFFF0FF) == 0xD50330BF) {
+    return ExecuteBarrier(interpreter, insn);
+  }
+  if ((insn & 0xFFFFF0FF) == 0xD503305F) {
+    interpreter->reservation_valid = false;
+    return true;
+  }
   if ((insn & 0x3B000000) == 0x39000000 ||
       (insn & 0x3B000000) == 0x38000000) {
     return ExecuteLoadStoreImm(interpreter, insn);
@@ -1184,16 +1384,60 @@ void AARCH64InterpreterDumpRegisters(AARCH64Interpreter* interpreter) {
   printf("pc 0x%016" PRIx64 "\n", interpreter->pc);
 }
 
-void AARCH64InterpreterInit(AARCH64Interpreter* interpreter, Loader* loader,
-                            uint64_t entry_address, int argc, char** argv,
-                            bool trace_registers, bool trace_instructions) {
+void AARCH64InterpreterWriteX(AARCH64Interpreter* interpreter, int reg,
+                              uint64_t value) {
+  WriteX(interpreter, reg, value);
+}
+
+void AARCH64InterpreterInitForThread(
+    AARCH64Interpreter* interpreter, AARCH64ProcessRuntime* process,
+    AARCH64GuestThread* guest_thread, Loader* loader, uint64_t entry_address,
+    int argc, char** argv, char* stack, uint64_t tp_base, size_t tls_block_size,
+    bool trace_registers, bool trace_instructions) {
   memset(interpreter, 0, sizeof(*interpreter));
   interpreter->loader = loader;
+  interpreter->process = process;
+  interpreter->guest_thread = guest_thread;
+  if (guest_thread != NULL) {
+    interpreter->guest_tid = guest_thread->tid;
+  }
   interpreter->trace_registers = trace_registers;
   interpreter->trace_instructions = trace_instructions;
-  interpreter->stack = malloc(AARCH64_STACK_SIZE);
-  AARCH64InterpreterPrepareMain(interpreter, entry_address, argc, argv,
-                                loader->is_static);
+  if (stack != NULL) {
+    interpreter->stack = stack;
+    interpreter->owns_stack = false;
+  } else {
+    interpreter->stack = malloc(AARCH64_STACK_SIZE);
+    interpreter->owns_stack = true;
+  }
+  interpreter->sp =
+      (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
+  interpreter->sp &= ~0xFULL;
+  if (tp_base != 0) {
+    interpreter->tp_base = tp_base;
+    interpreter->tls_block_size = tls_block_size;
+  } else if (loader->tls.present) {
+    interpreter->tp_base = loader->tls.tp_base;
+    interpreter->tls_block_size = loader->tls.block_size;
+  }
+  interpreter->pc = entry_address;
+  interpreter->running = entry_address != 0;
+  WriteX(interpreter, 0, (uint64_t)argc);
+  if (!loader->is_static) {
+    WriteX(interpreter, 1, entry_address);
+  } else {
+    WriteX(interpreter, 1, (uint64_t)(uintptr_t)argv);
+  }
+  WriteX(interpreter, AARCH64_LR_REG, 0);
+}
+
+void AARCH64InterpreterInit(AARCH64Interpreter* interpreter, Loader* loader,
+                            AARCH64ProcessRuntime* process,
+                            uint64_t entry_address, int argc, char** argv,
+                            bool trace_registers, bool trace_instructions) {
+  AARCH64InterpreterInitForThread(interpreter, process, NULL, loader,
+                                    entry_address, argc, argv, NULL, 0, 0,
+                                    trace_registers, trace_instructions);
 }
 
 void AARCH64InterpreterPrepareMain(AARCH64Interpreter* interpreter,
@@ -1213,18 +1457,20 @@ void AARCH64InterpreterPrepareMain(AARCH64Interpreter* interpreter,
   WriteX(interpreter, AARCH64_LR_REG, 0);
 }
 
-static void AARCH64InterpreterPrepareCall(AARCH64Interpreter* interpreter,
-                                          uint64_t fn) {
+void AARCH64InterpreterPrepareCall(AARCH64Interpreter* interpreter, uint64_t fn,
+                                   uint64_t arg) {
   interpreter->sp =
       (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
   interpreter->sp &= ~0xFULL;
   interpreter->pc = fn;
   interpreter->running = true;
+  WriteX(interpreter, 0, arg);
   WriteX(interpreter, AARCH64_LR_REG, 0);
 }
 
-int AARCH64InterpreterCall(AARCH64Interpreter* interpreter, uint64_t fn) {
-  AARCH64InterpreterPrepareCall(interpreter, fn);
+int AARCH64InterpreterCall(AARCH64Interpreter* interpreter, uint64_t fn,
+                           uint64_t arg) {
+  AARCH64InterpreterPrepareCall(interpreter, fn, arg);
   return AARCH64InterpreterRun(interpreter);
 }
 
@@ -1254,7 +1500,7 @@ int AARCH64InterpreterRun(AARCH64Interpreter* interpreter) {
       fprintf(stderr, "Unsupported instruction 0x%08x at 0x%" PRIx64 "\n", insn,
               interpreter->pc);
       AARCH64InterpreterDumpRegisters(interpreter);
-      exit(1);
+      AARCH64InterpreterFail(interpreter, 1);
     }
     if (!pc_updated) {
       interpreter->pc += 4;
@@ -1276,6 +1522,8 @@ int AARCH64InterpreterRun(AARCH64Interpreter* interpreter) {
 }
 
 void AARCH64InterpreterDestruct(AARCH64Interpreter* interpreter) {
-  free(interpreter->stack);
+  if (interpreter->owns_stack) {
+    free(interpreter->stack);
+  }
   interpreter->stack = NULL;
 }

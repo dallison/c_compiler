@@ -1648,6 +1648,46 @@ static void Assemble_setne(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x
 static void Assemble_setl(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9c); }
 static void Assemble_setb(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x92); }
 static void Assemble_setg(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9f); }
+
+static void EmitAtomicCmpxchg(X86_64Assembler* assembler, X86Size size) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (src.kind != kX86OpReg || src.reg.is_xmm ||
+      dst.kind != kX86OpMem) {
+    AssemblerError(&ASM,
+                   "atomic_cmpxchg expects integer register and memory operands");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EncodeLegacyPrefix(&enc, 0xf0);
+  if (size == kX86Size16) {
+    EncodeLegacyPrefix(&enc, 0x66);
+  } else if (size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, size == kX86Size8 ? 0xb0 : 0xb1);
+  EncodeMemOperand(&enc, src.reg.num, &dst);
+  EncodeFinish(&enc);
+}
+
+static void Assemble_atomic_cmpxchgb(X86_64Assembler* assembler) {
+  EmitAtomicCmpxchg(assembler, kX86Size8);
+}
+static void Assemble_atomic_cmpxchgw(X86_64Assembler* assembler) {
+  EmitAtomicCmpxchg(assembler, kX86Size16);
+}
+static void Assemble_atomic_cmpxchgl(X86_64Assembler* assembler) {
+  EmitAtomicCmpxchg(assembler, kX86Size32);
+}
+static void Assemble_atomic_cmpxchgq(X86_64Assembler* assembler) {
+  EmitAtomicCmpxchg(assembler, kX86Size64);
+}
+
 static void Assemble_cqo(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
 static void Assemble_cdq(X86_64Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
 static void Assemble_cltq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
@@ -1931,6 +1971,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(setl);
   INST(setb);
   INST(setg);
+  INST(atomic_cmpxchgb);
+  INST(atomic_cmpxchgw);
+  INST(atomic_cmpxchgl);
+  INST(atomic_cmpxchgq);
   INST(cqo);
   INST(cdq);
   INST(cltq);

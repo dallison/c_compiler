@@ -111,6 +111,22 @@ static uint32_t EncodeBr(int rn) {
   return 0xD61F0000u | ((uint32_t)rn << 5);
 }
 
+static void PatchImmediate12(char* target_address, uint64_t value,
+                             unsigned scale) {
+  uint32_t instruction = *(uint32_t*)target_address;
+  instruction &= ~(0xfffu << 10);
+  instruction |= (uint32_t)((value >> scale) & 0xfff) << 10;
+  *(uint32_t*)target_address = instruction;
+}
+
+static void PatchMoveWideImmediate(char* target_address, uint64_t value,
+                                   unsigned shift) {
+  uint32_t instruction = *(uint32_t*)target_address;
+  instruction &= ~(0xffffu << 5);
+  instruction |= (uint32_t)((value >> shift) & 0xffff) << 5;
+  *(uint32_t*)target_address = instruction;
+}
+
 static void HandlePICRelocation(
     DynamicLinker* dynamic, LinkerSymbol* symbol, Relocation* reloc,
     int (*append_data_to_got)(DynamicLinker*, LinkerSymbol*),
@@ -145,6 +161,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
   uint64_t P = reloc->section->address + reloc->offset;
   int32_t hi21;
   int32_t lo12;
+  uint64_t tprel = S + A + AARCH64_TLS_TCB_SIZE;
 
   // NOTE: a break in this switch will result in a linker error due to an
   // unsupported relocation.  To support a relocation, use return, not break.
@@ -206,6 +223,55 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_AARCH64_PREL16:
       *((int16_t*)target_address) = (int16_t)(S - P - A);
+      return;
+
+    case R_AARCH64_TLSLE_MOVW_TPREL_G2:
+      PatchMoveWideImmediate(target_address, tprel, 32);
+      return;
+
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1:
+    case R_AARCH64_TLSLE_MOVW_TPREL_G1_NC:
+      PatchMoveWideImmediate(target_address, tprel, 16);
+      return;
+
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0:
+    case R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
+      PatchMoveWideImmediate(target_address, tprel, 0);
+      return;
+
+    case R_AARCH64_TLSLE_ADD_TPREL_HI12:
+      PatchImmediate12(target_address, tprel, 12);
+      return;
+
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12:
+    case R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC:
+      PatchImmediate12(target_address, tprel, 0);
+      return;
+
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC:
+      PatchImmediate12(target_address, tprel, 1);
+      return;
+
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC:
+      PatchImmediate12(target_address, tprel, 2);
+      return;
+
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC:
+      PatchImmediate12(target_address, tprel, 3);
+      return;
+
+    case R_AARCH64_TLSLE_LDST128_TPREL_LO12:
+    case R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC:
+      PatchImmediate12(target_address, tprel, 4);
+      return;
+
+    case R_AARCH64_TLS_TPREL:
+      *(uint64_t*)target_address = tprel;
       return;
 
     case R_AARCH64_MOVW_UABS_G0:
@@ -511,54 +577,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
       break;
 
-    case R_AARCH64_TLSLE_MOVW_TPREL_G2:
-      break;
-
-    case R_AARCH64_TLSLE_MOVW_TPREL_G1:
-      break;
-
-    case R_AARCH64_TLSLE_MOVW_TPREL_G1_NC:
-      break;
-
-    case R_AARCH64_TLSLE_MOVW_TPREL_G0:
-      break;
-
-    case R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
-      break;
-
-    case R_AARCH64_TLSLE_ADD_TPREL_HI12:
-      break;
-
-    case R_AARCH64_TLSLE_ADD_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
-      break;
-
-    case R_AARCH64_TLSLE_LDST8_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC:
-      break;
-
-    case R_AARCH64_TLSLE_LDST16_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC:
-      break;
-
-    case R_AARCH64_TLSLE_LDST32_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC:
-      break;
-
-    case R_AARCH64_TLSLE_LDST64_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC:
-      break;
-
     case R_AARCH64_TLSDESC_LD_PREL19:
       break;
 
@@ -589,12 +607,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_TLSDESC_CALL:
       break;
 
-    case R_AARCH64_TLSLE_LDST128_TPREL_LO12:
-      break;
-
-    case R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC:
-      break;
-
     case R_AARCH64_TLSLD_LDST128_DTPREL_LO12:
       break;
 
@@ -618,9 +630,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_TLS_DTPREL:
-      break;
-
-    case R_AARCH64_TLS_TPREL:
       break;
 
     case R_AARCH64_TLSDESC:

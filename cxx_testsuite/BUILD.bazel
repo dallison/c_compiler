@@ -105,6 +105,36 @@ sh_test(
 )
 
 sh_test(
+    name = "modules_aarch64",
+    srcs = ["run_module_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--moduledump",
+        "$(rootpath //:moduledump)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:aarch64",
+        "//:davecc",
+        "//:libc_aarch64",
+        "//:libc_headers",
+        "//:moduledump",
+    ],
+)
+
+sh_test(
     name = "mangling",
     srcs = ["run_mangling_tests.sh"],
     args = [
@@ -142,6 +172,33 @@ sh_test(
         "//:libc_x86_64",
         "//:libc_headers",
         "//:x86_64",
+    ],
+)
+
+sh_test(
+    name = "exec_aarch64",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:aarch64",
+        "//:davecc",
+        "//:libc_aarch64",
+        "//:libc_headers",
     ],
 )
 
@@ -281,6 +338,35 @@ sh_test(
         "//:libc_x86_64",
         "//:libc_headers",
         "//:x86_64",
+    ],
+)
+
+sh_test(
+    name = "exec_string_aarch64",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--tests-dir",
+        "tests/exec_string",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:aarch64",
+        "//:davecc",
+        "//:libc_aarch64",
+        "//:libc_headers",
     ],
 )
 
@@ -502,15 +588,19 @@ sh_test(
 test_suite(
     name = "all",
     tests = [
+        ":exec_aarch64",
         ":exec_coroutines_aarch64",
         ":exec_coroutines_arm",
         ":exec_coroutines_riscv",
         ":exec_coroutines_x86_64",
         ":exec_spaceship_x86_64",
+        ":exec_string_aarch64",
         ":exec_string_x86_64",
         ":exec_x86_64",
         ":lexical",
         ":mangling",
+        ":modules_aarch64",
+        ":modules_x86_64",
         ":syntax",
         ":weak_bindings_aarch64",
         ":weak_bindings_arm",

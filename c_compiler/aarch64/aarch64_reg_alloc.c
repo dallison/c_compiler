@@ -278,6 +278,7 @@ static bool IsUnspillableFixedReg(TargetInstruction* inst) {
     case AARCH64_OP(d5):
     case AARCH64_OP(d6):
     case AARCH64_OP(d7):
+    case AARCH64_OP(xr):
     case AARCH64_OP(structreturn):
       return true;
     default:
@@ -524,7 +525,12 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->g->base, inst->block, reload, inst);
       inst->operand[i] = reload;
-      AARCH64RegisterType reg_type = RegisterTypeFromInstruction(inst);
+      // A store/load can mix register classes (for example fstr has an FP
+      // value and an integer address).  Reload in the class of the value that
+      // was spilled, not the class implied by the consuming instruction.
+      assert(op->operand[0] != NULL);
+      AARCH64RegisterType reg_type =
+          RegisterTypeFromInstruction(op->operand[0]);
       AARCH64Register *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);
@@ -577,14 +583,6 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
   }
   
   
-  // rmov instructions use the register allocated to their first
-  // operand as their own register.
-  if ((opcode == AARCH64_OP(mv) || opcode == AARCH64_OP(fmv_s) ||
-      opcode == AARCH64_OP(fmv_d)) && inst->dest != NULL) {
-    AllocateForRmov(allocator, inst);
-    return;
-  }
-
   if (AARCH64IsVarRegister(inst)) {
     // Variable regsiter.  Delay allocation until it's assigned to.
     // It will be assigned to by an rmov or from a destination
@@ -598,6 +596,28 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
   EnsureOperandsAllocated(allocator, inst);
 
   AARCH64Register* reg;
+
+  // Atomic pseudos expand to several instructions after allocation.  Their
+  // result register must not alias an address/value operand: the exclusive
+  // load writes the result before the later store-exclusive consumes all of
+  // those operands.
+  if (inst->dest == NULL &&
+      (opcode == AARCH64_OP(atomic_load) ||
+       opcode == AARCH64_OP(atomic_fetch_add) ||
+       opcode == AARCH64_OP(atomic_fetch_sub) ||
+       opcode == AARCH64_OP(atomic_add_fetch) ||
+       opcode == AARCH64_OP(atomic_sub_fetch) ||
+       opcode == AARCH64_OP(atomic_compare_exchange_bool) ||
+       opcode == AARCH64_OP(atomic_compare_exchange_val) ||
+       opcode == AARCH64_OP(atomic_compare_exchange_n))) {
+    reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                   kAARCH64RegTypeInt,
+                                   CanUseTemp(allocator, inst));
+    AssignRegister(reg, inst);
+    FreeRegisters(allocator, inst);
+    inst->flags |= TARGET_INST_PROCESSED;
+    return;
+  }
 
   if (inst->dest != NULL) {
     if (inst->dest->reg == NULL) {
@@ -667,6 +687,10 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     case   AARCH64_OP(al):
     case   AARCH64_OP(cmp):
     case   AARCH64_OP(fcmp):
+    case AARCH64_OP(dmb):
+    case AARCH64_OP(clrex):
+    case AARCH64_OP(atomic_store):
+    case AARCH64_OP(atomic_fence):
     case   AARCH64_OP(oplsl):
     case AARCH64_OP(spill):
     case AARCH64_OP(reload):

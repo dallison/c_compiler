@@ -61,6 +61,7 @@ typedef struct LoaderTlsInfo {
   void* main_thread_block;
   size_t block_size;
   uint64_t fs_base;
+  uint64_t tp_base;
 } LoaderTlsInfo;
 
 typedef struct {

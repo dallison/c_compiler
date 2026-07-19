@@ -1,11 +1,5 @@
 #include <threads.h>
 
-#if !defined(__x86_64__)
-int main() {
-  return 0;
-}
-#else
-
 static int initialization_count;
 
 int make_value() {
@@ -42,5 +36,3 @@ int main() {
   }
   return initialization_count == 1 ? 0 : 5;
 }
-
-#endif

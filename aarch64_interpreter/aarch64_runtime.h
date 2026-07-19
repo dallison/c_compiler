@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 
+#include "aarch64_process.h"
 #include "loader.h"
 #include "loader_arch.h"
 
@@ -25,6 +26,7 @@ typedef struct AARCH64Runtime {
   bool trace_instructions;
   bool trace_registers;
   uint32_t symbol_resolver_code[2];
+  AARCH64ProcessRuntime process;
 } AARCH64Runtime;
 
 bool AARCH64RuntimeInit(AARCH64Runtime* runtime, const char* filename,

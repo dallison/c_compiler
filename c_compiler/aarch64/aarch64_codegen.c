@@ -221,6 +221,29 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(sturb): return "sturb";
   case AARCH64_OP(sturh): return "sturh";
 
+  case AARCH64_OP(ldxr): return "ldxr";
+  case AARCH64_OP(ldaxr): return "ldaxr";
+  case AARCH64_OP(stxr): return "stxr";
+  case AARCH64_OP(stlxr): return "stlxr";
+  case AARCH64_OP(ldar): return "ldar";
+  case AARCH64_OP(stlr): return "stlr";
+  case AARCH64_OP(dmb): return "dmb";
+  case AARCH64_OP(clrex): return "clrex";
+
+  case AARCH64_OP(atomic_load): return "atomic_load";
+  case AARCH64_OP(atomic_store): return "atomic_store";
+  case AARCH64_OP(atomic_fetch_add): return "atomic_fetch_add";
+  case AARCH64_OP(atomic_fetch_sub): return "atomic_fetch_sub";
+  case AARCH64_OP(atomic_add_fetch): return "atomic_add_fetch";
+  case AARCH64_OP(atomic_sub_fetch): return "atomic_sub_fetch";
+  case AARCH64_OP(atomic_compare_exchange_bool):
+    return "atomic_compare_exchange_bool";
+  case AARCH64_OP(atomic_compare_exchange_val):
+    return "atomic_compare_exchange_val";
+  case AARCH64_OP(atomic_compare_exchange_n):
+    return "atomic_compare_exchange_n";
+  case AARCH64_OP(atomic_fence): return "atomic_fence";
+
   case AARCH64_OP(fldr): return "fldr";
   case AARCH64_OP(fstr): return "fstr";
   case AARCH64_OP(fadd): return "fadd";
@@ -306,6 +329,11 @@ bool AARCH64IsExpression(TargetInstruction* inst) {
     case AARCH64_OP(strh):
     case AARCH64_OP(sturb):
     case AARCH64_OP(sturh):
+    case AARCH64_OP(stlr):
+    case AARCH64_OP(dmb):
+    case AARCH64_OP(clrex):
+    case AARCH64_OP(atomic_store):
+    case AARCH64_OP(atomic_fence):
     case AARCH64_OP(loc):
     case AARCH64_OP(named_label):
     case AARCH64_OP(regarg):
@@ -700,10 +728,12 @@ void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {
   g->num_int_reg_vars = 0;
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
+  g->struct_return_spill_offset = 0;
   g->not_leaf = false;
   g->zero = NULL;
   g->tmp = NULL;
   g->lsl = NULL;
+  g->struct_return_argument_register = NULL;
 
   memset(g->int_argument_registers, 0, sizeof(g->int_argument_registers));
   memset(g->fp_argument_registers, 0, sizeof(g->fp_argument_registers));
@@ -756,6 +786,7 @@ static void ResolveExceptionRanges(AARCH64Generator* g, Generator* gen) {
     range->try_end = try_end;
     range->catch_label = catch_label;
     range->catch_typeinfo = ir_range->catch_typeinfo;
+    range->is_cleanup = ir_range->is_cleanup;
     VectorAppend(&g->exception_ranges, range);
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
@@ -909,6 +940,15 @@ static TargetInstruction* ZeroReg(AARCH64Generator* g) {
   return g->zero;
 }
 
+static TargetInstruction* StructReturnArgumentRegister(AARCH64Generator* g) {
+  if (g->struct_return_argument_register == NULL) {
+    g->struct_return_argument_register =
+        Emit(g, SetInstructionSize(NewInstruction(AARCH64_OP(xr)),
+                                   kSize64Bit));
+  }
+  return g->struct_return_argument_register;
+}
+
 static TargetInstruction* ZeroImm(AARCH64Generator* g) {
   return GetIntConstant(g, NULL, kTargetType64Bit, 0);
 }
@@ -1034,12 +1074,15 @@ static TargetInstruction* AddImmediate(AARCH64Generator* g, TargetInstruction* s
     imm = -immed;
   }
   TargetInstruction* immed_inst =
-      GetIntConstant(g, NULL, kTargetType32Bit, immed);
+      GetIntConstant(g, NULL, kTargetType64Bit, immed);
   if (imm <= 0x7ff) {
     return Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(add), src, immed_inst), 0));
   }
-  TargetInstruction* movi = Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), immed_inst), 0));
-  return Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(add), src, movi), 0));
+  TargetInstruction* movi =
+      Emit(g, SetInstructionSize(
+                  NewInstruction1(AARCH64_OP(mov), immed_inst), kSize64Bit));
+  return Emit(g, SetInstructionSize(
+                     NewInstruction2(AARCH64_OP(add), src, movi), kSize64Bit));
 }
 
 static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
@@ -1517,10 +1560,35 @@ static TargetInstruction* MoveImmediate(AARCH64Generator* g, TargetInstruction* 
                                                      kTargetType64Bit, value));
 }
 
+static TargetInstruction* GetTlsVariableAddress(AARCH64Generator* g,
+                                                IRNode* node) {
+  if (compiler->tls_model != TLS(local_exec)) {
+    fprintf(stderr,
+            "error: AArch64 only supports the local-exec TLS model for static "
+            "executables\n");
+    abort();
+  }
+
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  TargetInstruction* high =
+      Emit(g, NewInstruction2(AARCH64_OP(add), TargetThreadPointer(&g->base),
+                              symbol));
+  high->flags |= AARCH64_TPREL_HI_RELOC;
+  TargetInstruction* low =
+      Emit(g, NewInstruction2(AARCH64_OP(add), high, symbol));
+  low->flags |= AARCH64_TPREL_LO_RELOC;
+  return low;
+}
+
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the instruction associated with the node if it's
 // already in a register.
 static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
+  if (IRIsThreadVariable(node)) {
+    return GetTlsVariableAddress(g, node);
+  }
+
   if (IRIsConst(node)) {
     switch (node->opcode) {
       case IR_OP(const8):
@@ -1645,6 +1713,10 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
 // pointer, so its width must not be reduced to the (possibly narrower) object
 // type by CopyOrSetInstructionSize.
 static bool MaterializesToAddress(IRNode* node) {
+  if (IRIsThreadVariable(node)) {
+    return true;
+  }
+
   if (IRIsStaticVariable(node)) {
     return true;
   }
@@ -2297,6 +2369,12 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
                             TargetInstruction** offset,
                             TargetInstruction** scale) {
   *scale = NULL;
+  if (IRIsThreadVariable(addr_node)) {
+    *addr = GetTlsVariableAddress(g, addr_node);
+    *offset = ZeroImm(g);
+    return true;
+  }
+
   if (IRIsAutoVariable(addr_node)) {
     IRVariable* var = (IRVariable*)addr_node;
     if (TypeIsVLA(var->symbol->type)) {
@@ -3210,6 +3288,11 @@ static TargetInstruction* LowerSignExtend(AARCH64Generator* g, IRNode* node) {
     // positives; sxtw performs the arithmetic widening.
     result = Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(sxtw), value),
                                         kSize64Bit));
+  } else if (diff == -32) {
+    // Truncation to a 32-bit result is represented by the low W view of the
+    // source.  A later signed widening emits SXTW when a 64-bit representation
+    // is required.
+    result = value;
   } else {
     int64_t shift = diff < 0 ? -diff : diff;
     // The shift/extend runs in a register as wide as the *larger* of the source
@@ -3228,7 +3311,23 @@ static TargetInstruction* LowerSignExtend(AARCH64Generator* g, IRNode* node) {
   }
   TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL) {
-    result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+    if (diff < 0) {
+      // A narrowing conversion may feed a fixed W argument/result register.
+      // Keep the extension/truncation instruction in its required wider
+      // register width and copy only its low destination-width bits afterward;
+      // redirecting the instruction itself to the W register can make a legal
+      // 64-bit SXTW/shift sequence impossible to encode.
+      int dest_size = node->type != NULL && node->type->size > 4
+                          ? kSize64Bit
+                          : kSize32Bit;
+      TargetInstruction* move =
+          Emit(g, SetInstructionSize(
+                      NewInstruction1(AARCH64_OP(mov), result), dest_size));
+      move->dest = dest;
+      result = move;
+    } else {
+      result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+    }
   }
   SetLoweredNode(node, result);
   return result;
@@ -3497,24 +3596,18 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
   return result;
 }
 
-// The RISC-V calling convention is very complex.  There are 8 integer and 8
-// floating pointer registers that can be used to pass arguments.  Structs are
-// particularly complex and how they are passed depends on their size and
-// contents.
+// AAPCS64 provides eight general-purpose argument registers (x0-x7) and eight
+// SIMD/floating-point argument registers (v0-v7); x8 carries the indirect
+// result address for an aggregate return.  Aggregate classification also
+// depends on size and contents (including HFA/HVA rules):
+// https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
 //
-// This code does not follow the ABI defined in:
-// https://github.com/riscv/riscv-elf-psabi-doc/blob/master/riscv-elf.md
-// exactly.
-// In particular it:
-// 1. passes structs longer than XLEN (8) bytes by reference but first
-//    copies them to the stack so that they are passed by value.
-//    NOTE: I think it's incorrect for the ABI to pass long structs by
-//    reference and allow them to be modified by the callee.  This means
-//    that there is a major difference in behavior between small and large
-//    structs and simply adding another field to a struct will make programs
-//    stop working (TODO: check the C standard for this).
-// 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
-//    register pair.
+// This lowering implements the subset represented by ArgLocation: aggregates
+// up to 8 bytes use one general-purpose register, member-pointer aggregates use
+// a register pair, and larger aggregates are copied to caller-owned stack
+// storage before their address is passed.  Ordinary 9-16-byte aggregate
+// register pairs and HFA/HVA classification require extending ArgLocation and
+// the corresponding callee argument reconstruction together.
 //
 // Variadic arguments follow the normal AAPCS64 rules: integer/pointer
 // arguments in x0-x7, floating-point arguments in d0-d7, and the remainder on
@@ -3528,13 +3621,21 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   size_t next_pushed_arg_offset = 0;
   Vector arg_locations;
   VectorInit(&arg_locations);
+  bool has_hidden_struct_result = (node->flags & kIRStructReturnCall) != 0;
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+    bool is_hidden_struct_result = i == 1 && has_hidden_struct_result;
+    if (is_hidden_struct_result) {
+      // The first synthetic operand of a call returning an aggregate is its
+      // indirect-result address.  AAPCS64 assigns it to x8 regardless of the
+      // source expression used for that address.
+      VectorAppend(&arg_locations,
+                   NewArgLocationRegister(StructReturnArgumentRegister(g)));
+    } else if (TypeIsMemberPointerAggregate(arg_node->type)) {
       if (next_int_arg_reg + 1 < AARCH64_NUM_INT_ARGS) {
         TargetInstruction* first =
             FreshIntArgumentRegister(g, next_int_arg_reg++);
@@ -3548,13 +3649,6 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         next_pushed_arg_offset += 16;
       }
     } else if (TypeIsStructOrUnion(arg_node->type)) {
-      if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
-        // RVO (Return Value Optimization), passing structreturn as arg->base.
-        TargetInstruction* arg_reg =
-             FreshIntArgumentRegister(g, next_int_arg_reg++);
-         VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
-        continue;
-      }
       // Struct or union that fit in a register are passed in a register.  If
       // they are bigger than 8 bytes they are passed by reference (first making
       // a copy on the stack).
@@ -4125,6 +4219,140 @@ static TargetInstruction* LowerStackPointerOps(AARCH64Generator* g, IRNode* node
   }
 }
 
+static int AtomicIRConstant(IRNode* node) {
+  assert(node != NULL && IRIsConst(node));
+  return (int)((IRConstant*)node)->value.ivalue;
+}
+
+static int AtomicAccessLog2(TypeRecord* type) {
+  assert(type != NULL);
+  switch (type->size) {
+    case 1: return 0;
+    case 2: return 1;
+    case 4: return 2;
+    case 8: return 3;
+    default:
+      assert(false && "AArch64 atomics require a 1/2/4/8-byte object");
+      return 2;
+  }
+}
+
+static TargetInstruction* AtomicAddress(AARCH64Generator* g,
+                                        IRNode* addr_node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  TargetInstruction* scale;
+  GetRegAndOffset(g, addr_node, &base, &offset, &scale);
+  int off =
+      offset != NULL && TargetIsConst(offset) ? AARCH64IntValue(offset) : 0;
+  return off == 0 ? base : AddImmediate(g, base, off);
+}
+
+static void SetAtomicMetadata(TargetInstruction* inst, TypeRecord* value_type,
+                              int success_order, int failure_order,
+                              bool weak) {
+  inst->flags |= AtomicAccessLog2(value_type) << AARCH64_ATOMIC_SIZE_SHIFT;
+  inst->flags |= success_order << AARCH64_ATOMIC_ORDER_SHIFT;
+  inst->flags |= failure_order << AARCH64_ATOMIC_FAILURE_ORDER_SHIFT;
+  if (weak) {
+    inst->flags |= AARCH64_ATOMIC_WEAK;
+  }
+}
+
+static TargetInstruction* FinishAtomicValue(AARCH64Generator* g, IRNode* node,
+                                             TargetInstruction* inst) {
+  CopyOrSetInstructionSize(node, inst);
+  Emit(g, inst);
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(g, inst, dest, AARCH64_OP(mov));
+  }
+  return SetLoweredNode(node, inst);
+}
+
+static TargetInstruction* LowerAtomic(AARCH64Generator* g, IRNode* node) {
+  if (node->opcode == IR_OP(atomic_fence)) {
+    TargetInstruction* inst = NewInstruction(AARCH64_OP(atomic_fence));
+    SetAtomicMetadata(inst, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                      AtomicIRConstant(node->inputs.value.p[0]), 0, false);
+    Emit(g, inst);
+    return SetLoweredNode(node, inst);
+  }
+
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  assert(value_type != NULL);
+  TargetInstruction* addr = AtomicAddress(g, addr_node);
+  TargetInstruction* inst = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load):
+      inst = NewInstruction1(AARCH64_OP(atomic_load), addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[1]), 0, false);
+      return FinishAtomicValue(g, node, inst);
+
+    case IR_OP(atomic_store): {
+      TargetInstruction* value = Materialize(g, node->inputs.value.p[1]);
+      inst = NewInstruction2(AARCH64_OP(atomic_store), value, addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      Emit(g, inst);
+      return SetLoweredNode(node, inst);
+    }
+
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch): {
+      AARCH64Opcode opcode =
+          node->opcode == IR_OP(atomic_fetch_add)
+              ? AARCH64_OP(atomic_fetch_add)
+              : node->opcode == IR_OP(atomic_fetch_sub)
+                    ? AARCH64_OP(atomic_fetch_sub)
+                    : node->opcode == IR_OP(atomic_add_fetch)
+                          ? AARCH64_OP(atomic_add_fetch)
+                          : AARCH64_OP(atomic_sub_fetch);
+      TargetInstruction* value = Materialize(g, node->inputs.value.p[1]);
+      inst = NewInstruction2(opcode, addr, value);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      return FinishAtomicValue(g, node, inst);
+    }
+
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          node->opcode == IR_OP(atomic_compare_exchange_n);
+      AARCH64Opcode opcode =
+          expected_is_pointer
+              ? AARCH64_OP(atomic_compare_exchange_n)
+              : node->opcode == IR_OP(atomic_compare_exchange_bool)
+                    ? AARCH64_OP(atomic_compare_exchange_bool)
+                    : AARCH64_OP(atomic_compare_exchange_val);
+      TargetInstruction* expected =
+          Materialize(g, node->inputs.value.p[1]);
+      TargetInstruction* desired =
+          Materialize(g, node->inputs.value.p[2]);
+      inst = NewInstruction3(opcode, addr, expected, desired);
+      int order_index = expected_is_pointer ? 4 : 3;
+      bool weak =
+          expected_is_pointer &&
+          AtomicIRConstant(node->inputs.value.p[3]) != 0;
+      SetAtomicMetadata(
+          inst, value_type,
+          AtomicIRConstant(node->inputs.value.p[order_index]),
+          AtomicIRConstant(node->inputs.value.p[order_index + 1]), weak);
+      return FinishAtomicValue(g, node, inst);
+    }
+
+    default:
+      assert(false);
+      return NULL;
+  }
+}
+
 static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
                                       IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -4159,7 +4387,7 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
       TargetInstruction* result =
           SetLoweredNode(node, EmitSymbol(g, NewInstruction(AARCH64_OP(structreturn))));
       TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov),
-                  IntArgumentRegister(g, 0)));
+                  StructReturnArgumentRegister(g)));
       mv->dest = result;
       return result;
     }
@@ -4442,8 +4670,7 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(atomic_compare_exchange_val):
     case IR_OP(atomic_compare_exchange_n):
     case IR_OP(atomic_fence):
-      assert(false);
-      return NULL;
+      return LowerAtomic(g, node);
       
     case IR_OP(decsp):
     case IR_OP(savesp):
@@ -4502,13 +4729,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   TypeRecord* arg_type =
       var->symbol != NULL ? var->symbol->type : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
-  bool is_struct_return = TypeIsStructOrUnion(
-      compiler->current_function->info.function.symbol->type->next);
   int int_reg = AARCH64_INT_ARG_START;
-  if (is_struct_return) {
-    int_reg +=
-        1;  // For struct returns, the first arg is the address of the struct.
-  }
   int fp_reg = AARCH64_FP_ARG_START;
   // Offset (from the start of the caller-pushed argument area) of the next
   // argument that does not fit in a register.  The caller (see the call-site
@@ -4682,6 +4903,23 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* 
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
                                    Vector* args, int* var_offset) {
+  switch (entry->pooled->opcode) {
+    case IR_OP(argument):
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+    case IR_OP(staticvar):
+    case IR_OP(externvar): {
+      IRVariable* variable = (IRVariable*)entry->pooled;
+      if (variable->symbol != NULL && variable->symbol->type != NULL) {
+        TypeRecordCalculateSize(variable->symbol->type);
+        IRSetType(entry->pooled, variable->symbol->type);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
   // Variable length arrays are not given offsets until their block
   // is entered.
   if (TypeIsVLA(entry->pooled->type)) {
@@ -4815,7 +5053,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
         entry->pooled->data.ivalue = AARCH64_REG_VAR | g->struct_return_reg;
         TargetInstruction* var = IntVariableRegister(g, g->struct_return_reg, entry->value.symbol);
         Emit(g, NewInstruction2(AARCH64_OP(mov), var,
-                    IntArgumentRegister(g, 0)));
+                    StructReturnArgumentRegister(g)));
         SetDebugRegisterLocation(entry, g->struct_return_reg);
       } else {
         AlignOffset(entry, var_offset);
@@ -4952,6 +5190,11 @@ void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
   // register now.
   if (TypeIsStructOrUnion(gen->func->next)) {
     g->struct_return_reg = g->num_int_reg_vars++;
+    g->struct_return_spill_offset = -24;
+    VectorAppend(&g->saved_regs,
+                 NewSavedArgumentRegister(AARCH64_XR_REG, AARCH64_FP_REG,
+                                          g->struct_return_spill_offset,
+                                          /*is_fp=*/false));
   }
   
   IRNode* node = GeneratorFirstInstruction(gen);

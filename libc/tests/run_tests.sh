@@ -74,7 +74,7 @@ if [ "$do_compiler" -eq 1 ]; then
     bash libc/tests/compiler_regression.sh "$davecc" "$target" -O1
 fi
 
-if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv" ] || [ "$target" = "risc-v" ]; } && [ -n "$interpreter" ]; then
+if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "riscv" ] || [ "$target" = "risc-v" ]; } && [ -n "$interpreter" ]; then
   work=$(mktemp -d "${TMPDIR:-/tmp}/libc_runtime_test.XXXXXX")
   trap 'rm -rf "$work"' EXIT
 
@@ -87,6 +87,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
       rt_cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
       link_cflags=(-target x86_64 -O1 -static -Wl,-e -Wl,main)
       ;;
+    aarch64)
+      rt_cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
+      link_cflags=(-target aarch64 -O0 -static -Wl,-e -Wl,main)
+      ;;
     riscv)
       rt_cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
       link_cflags=(-target riscv -O1 -static -Wl,-e -Wl,main)
@@ -98,7 +102,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
   "$davecc" "${rt_cflags[@]}" libc/tests/runtime/smoke.c -o "$smoke_obj"
   "$davecc" "${link_cflags[@]}" "$smoke_obj" -o "$smoke_exe"
   run_step "runtime smoke test" env INTERP="$interpreter" EXE="$smoke_exe" TARGET="$target" bash -c '
-    if [ "$TARGET" = x86_64 ]; then
+    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ]; then
       "$INTERP" -i "$EXE"
     else
       "$INTERP" "$EXE"
@@ -106,7 +110,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
     test $? -eq 0
   '
 
-  if [ "$target" = "x86_64" ]; then
+  if [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ]; then
     tls_exe="$work/tls_local_exec.exe"
     tls_obj="$work/tls_local_exec.o"
     "$davecc" "${rt_cflags[@]}" libc/tests/runtime/tls_local_exec.c -o "$tls_obj"
@@ -118,10 +122,12 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
     threads_obj="$work/threads.o"
     cxx_tls_obj="$work/cxx_tls.o"
     cxx_tls_stubs_obj="$work/cxx_tls_stubs.o"
+    runtime_sources=("aarch64 support/syscall.s")
+    if [ "$target" = "x86_64" ]; then
+      runtime_sources=("x86_64 support/syscall.s" "x86_64 support/abs.s")
+    fi
     runtime_objs=()
-    for src in \
-        "x86_64 support/syscall.s" \
-        "x86_64 support/abs.s"; do
+    for src in "${runtime_sources[@]}"; do
       obj="$work/rt_$(basename "${src%.s}").o"
       "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
       runtime_objs+=("$obj")
@@ -137,7 +143,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
           libc/free.c \
           libc/realloc.c \
           libc/calloc.c \
-          libc/x86_64_heap.c \
+          libc/guest_heap.c \
           libc/memset.c \
           libc/errno.c \
           libc/posix.c; do
@@ -237,7 +243,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
   fi
 
   run_step "runtime libc tests" env INTERP="$interpreter" EXE="$exe" TARGET="$target" bash -c '
-    if [ "$TARGET" = x86_64 ]; then
+    if [ "$TARGET" = x86_64 ] || [ "$TARGET" = aarch64 ]; then
       "$INTERP" -i "$EXE"
     else
       "$INTERP" "$EXE"
@@ -280,11 +286,11 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
   fi
 fi
 
-if [ "$do_runtime" -eq 1 ] && [ "$target" != "x86_64" ] && [ "$target" != "riscv" ] && [ "$target" != "risc-v" ]; then
-  echo "SKIP runtime tests (only supported for x86_64 and riscv)"
+if [ "$do_runtime" -eq 1 ] && [ "$target" != "x86_64" ] && [ "$target" != "aarch64" ] && [ "$target" != "riscv" ] && [ "$target" != "risc-v" ]; then
+  echo "SKIP runtime tests (only supported for x86_64, aarch64 and riscv)"
 fi
 
-if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv" ]; } && [ -z "$interpreter" ]; then
+if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch64" ] || [ "$target" = "riscv" ]; } && [ -z "$interpreter" ]; then
   echo "SKIP runtime tests (no interpreter provided)"
 fi
 

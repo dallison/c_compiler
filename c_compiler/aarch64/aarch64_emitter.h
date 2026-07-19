@@ -29,5 +29,6 @@ void AARCH64EmitterDestruct(AARCH64Emitter* emitter);
 void AARCH64EmitterDelete(AARCH64Emitter* emitter);
 
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp);
+void AARCH64PrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* aarch64_emitter_h */

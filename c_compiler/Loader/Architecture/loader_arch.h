@@ -16,6 +16,8 @@ typedef struct LoaderArchitecture {
   int machine_type;
   const char* platform;
   bool ignore_vaddr;
+  size_t tls_tcb_size;
+  void (*init_tls_tcb)(void* tcb, uint64_t thread_pointer);
   void (*init_got_plt)(LoadedDynamicLibrary* lib, void* data);
   void (*apply_got_data_relocation)(LoadedDynamicLibrary* lib,
                                     const ELFRelocation* reloc,

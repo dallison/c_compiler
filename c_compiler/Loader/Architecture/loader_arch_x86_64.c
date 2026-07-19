@@ -7,6 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 #include "loader_arch_x86_64.h"
+static void InitTlsTcb(void* tcb, uint64_t thread_pointer) {
+  memcpy(tcb, &thread_pointer, sizeof(thread_pointer));
+}
+
 #include "elf.h"
 #include <inttypes.h>
 
@@ -182,6 +186,8 @@ void X86_64LoaderArchitectureInit(LoaderArchitecture* arch) {
   // be mapped at their linked virtual addresses (host == vaddr).  This keeps
   // RIP-relative references across the text and data segments valid.
   arch->ignore_vaddr = false;
+  arch->tls_tcb_size = X86_64_TLS_TP_SLOT_SIZE;
+  arch->init_tls_tcb = InitTlsTcb;
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;
   arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;

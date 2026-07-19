@@ -25,7 +25,7 @@ typedef struct ExitFunction {
 static ExitFunction* exit_functions;
 static unsigned char exit_lock;
 
-#if defined(__x86_64__)
+#if defined(__DAVECC_HAS_ATEXIT_LOCK__)
 void __davecc_atexit_lock(unsigned char* lock);
 void __davecc_atexit_unlock(unsigned char* lock);
 #else
@@ -159,7 +159,7 @@ void __cxa_finalize(void* dso) {
   }
 }
 
-#if !defined(__x86_64__)
+#if !defined(__DAVECC_HAS_ATEXIT_LOCK__)
 void __davecc_finalize(void) {
   __cxa_finalize(NULL);
 }

@@ -6,6 +6,7 @@
 #include "aarch64_runtime.h"
 #include "aarch64_interpreter.h"
 #include "aarch64_native.h"
+#include "aarch64_process.h"
 #include "aarch64_syscalls.h"
 #include "elf.h"
 #include "loader_lifecycle.h"
@@ -101,7 +102,7 @@ void AARCH64GuestCallVoidFunction(AARCH64Interpreter* cpu, uint64_t fn) {
   if (cpu == NULL || fn == 0) {
     return;
   }
-  AARCH64InterpreterCall(cpu, fn);
+  AARCH64InterpreterCall(cpu, fn, 0);
 }
 
 void AARCH64GuestRunProgramFini(Loader* loader, AARCH64Interpreter* cpu) {
@@ -182,23 +183,30 @@ int AARCH64NativeCallVoidFunction(Loader* loader, uint64_t fn) {
 
 static int RunInterpreter(AARCH64Runtime* runtime, int program_argc,
                           char** program_argv) {
-  AARCH64Interpreter interpreter;
-  AARCH64InterpreterInit(&interpreter, &runtime->loader,
-                         runtime->loader.main_address, program_argc,
-                         program_argv, runtime->trace_registers,
-                         runtime->trace_instructions);
-  if (!AARCH64GuestRunInitArrays(&runtime->loader, &interpreter)) {
-    AARCH64InterpreterDestruct(&interpreter);
+  AARCH64ProcessRuntimeInit(&runtime->process, runtime, &runtime->loader);
+  if (!runtime->process.initialized) {
+    return 1;
+  }
+  AARCH64GuestThread* main_thread = AARCH64ProcessCreateMainThread(
+      &runtime->process, runtime->loader.main_address, program_argc,
+      program_argv, runtime->trace_registers,
+      runtime->trace_instructions);
+  if (main_thread == NULL) {
+    AARCH64ProcessRuntimeDestruct(&runtime->process);
+    return 1;
+  }
+  if (!AARCH64GuestRunInitArrays(&runtime->loader, &main_thread->cpu)) {
+    AARCH64ProcessRuntimeDestruct(&runtime->process);
     return 1;
   }
   AARCH64InterpreterPrepareMain(
-      &interpreter, runtime->loader.main_address, program_argc, program_argv,
-      runtime->loader.is_static);
-  int result = AARCH64InterpreterRun(&interpreter);
-  if (!AARCH64GuestRunProgramShutdown(&runtime->loader, &interpreter)) {
+      &main_thread->cpu, runtime->loader.main_address, program_argc,
+      program_argv, runtime->loader.is_static);
+  int result = AARCH64InterpreterRun(&main_thread->cpu);
+  if (!AARCH64GuestRunProgramShutdown(&runtime->loader, &main_thread->cpu)) {
     result = 1;
   }
-  AARCH64InterpreterDestruct(&interpreter);
+  AARCH64ProcessRuntimeDestruct(&runtime->process);
   return result;
 }
 
@@ -229,5 +237,6 @@ int AARCH64RuntimeRun(AARCH64Runtime* runtime, int argc, char** argv,
 }
 
 void AARCH64RuntimeDestruct(AARCH64Runtime* runtime) {
+  AARCH64ProcessRuntimeDestruct(&runtime->process);
   LoaderDestruct(&runtime->loader);
 }

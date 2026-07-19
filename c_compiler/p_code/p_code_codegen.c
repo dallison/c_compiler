@@ -1478,12 +1478,46 @@ static TargetInstruction* LowerAtomicCompareExchange(PCodeGenerator* pcode,
                                                      IRNode* node,
                                                      bool expected_is_pointer,
                                                      bool returns_bool) {
-  (void)pcode;
-  (void)node;
-  (void)expected_is_pointer;
-  (void)returns_bool;
-  assert(false);
-  return NULL;
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  PCodeOpcode load_opcode = AtomicLoadOpcode(value_type);
+  PCodeOpcode store_opcode = AtomicStoreOpcode(value_type);
+  TargetInstruction* old_value = Load(pcode, addr_node, load_opcode);
+
+  TargetInstruction* expected_ptr = NULL;
+  TargetInstruction* expected;
+  if (expected_is_pointer) {
+    expected_ptr = Materialize(pcode, node->inputs.value.p[1]);
+    expected = Load(pcode, node->inputs.value.p[1], load_opcode);
+  } else {
+    expected = Materialize(pcode, node->inputs.value.p[1]);
+  }
+  TargetInstruction* desired = Materialize(pcode, node->inputs.value.p[2]);
+  TargetInstruction* matches =
+      Emit(pcode, NewInstruction2(P_OP(cmpeq), old_value, expected));
+
+  TargetInstruction* failure = NewInstruction(P_OP(label));
+  TargetInstruction* done = NewInstruction(P_OP(label));
+  TargetInstruction* branch_failure =
+      Emit(pcode, NewInstruction1(P_OP(bz), matches));
+  branch_failure->operand[1] = failure;
+
+  Store(pcode, addr_node, desired, store_opcode);
+  Emit(pcode, NewInstruction1(P_OP(bra), done));
+
+  Emit(pcode, failure);
+  if (expected_is_pointer) {
+    // The expected argument is an address value, so store directly through
+    // that register rather than asking Store() to reinterpret the IR node.
+    Emit(pcode, NewInstruction3(store_opcode, old_value, expected_ptr,
+                                GetIntConstant(pcode, NULL,
+                                               kTargetType32Bit, 0)));
+  }
+  Emit(pcode, done);
+
+  TargetInstruction* result = returns_bool ? matches : old_value;
+  ApplyDestInstruction(pcode, node, result);
+  return SetLoweredNode(node, result);
 }
 
 static struct {

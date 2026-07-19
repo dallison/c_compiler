@@ -9,11 +9,12 @@
 
 #include <stddef.h>
 #include <stdlib.h>
+#include <syscall.h>
 
 void __davecc_tls_thread_init_impl(void);
 void __davecc_tls_thread_fini_impl(void);
 
-#if defined(__x86_64__) && !defined(__p_code__)
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
 typedef void (*DaveCCTlsBlockDtorFn)(void*);
 
 typedef struct DaveCCTlsBlockDtorEntry {
@@ -71,7 +72,7 @@ void __davecc_tls_thread_fini(void) {
     return;
   }
   __davecc_tls_lifetime_state = 2;
-#if defined(__x86_64__) && !defined(__p_code__)
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
   RunBlockDestructors();
 #endif
   __davecc_tls_thread_fini_impl();

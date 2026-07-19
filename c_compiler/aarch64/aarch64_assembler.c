@@ -181,6 +181,27 @@ DECLARE_INST_FUNC(strb);
 DECLARE_INST_FUNC(strh);
 DECLARE_INST_FUNC(sturb);
 DECLARE_INST_FUNC(sturh);
+DECLARE_INST_FUNC(ldxr);
+DECLARE_INST_FUNC(ldxrb);
+DECLARE_INST_FUNC(ldxrh);
+DECLARE_INST_FUNC(ldaxr);
+DECLARE_INST_FUNC(ldaxrb);
+DECLARE_INST_FUNC(ldaxrh);
+DECLARE_INST_FUNC(stxr);
+DECLARE_INST_FUNC(stxrb);
+DECLARE_INST_FUNC(stxrh);
+DECLARE_INST_FUNC(stlxr);
+DECLARE_INST_FUNC(stlxrb);
+DECLARE_INST_FUNC(stlxrh);
+DECLARE_INST_FUNC(ldar);
+DECLARE_INST_FUNC(ldarb);
+DECLARE_INST_FUNC(ldarh);
+DECLARE_INST_FUNC(stlr);
+DECLARE_INST_FUNC(stlrb);
+DECLARE_INST_FUNC(stlrh);
+DECLARE_INST_FUNC(dmb);
+DECLARE_INST_FUNC(clrex);
+DECLARE_INST_FUNC(mrs);
 
 DECLARE_INST_FUNC(fldr);
 DECLARE_INST_FUNC(fstr);
@@ -387,6 +408,27 @@ static void InitializeInstructions(Map* instructions) {
   INST(strh);
   INST(sturb);
   INST(sturh);
+  INST(ldxr);
+  INST(ldxrb);
+  INST(ldxrh);
+  INST(ldaxr);
+  INST(ldaxrb);
+  INST(ldaxrh);
+  INST(stxr);
+  INST(stxrb);
+  INST(stxrh);
+  INST(stlxr);
+  INST(stlxrb);
+  INST(stlxrh);
+  INST(ldar);
+  INST(ldarb);
+  INST(ldarh);
+  INST(stlr);
+  INST(stlrb);
+  INST(stlrh);
+  INST(dmb);
+  INST(clrex);
+  INST(mrs);
 
   INST(fldr);
   INST(fstr);
@@ -432,6 +474,7 @@ typedef struct {
   int num;
   RegisterWidth width;
   bool fp_or_simd;
+  bool is_sp;
   int size;     // Size field for load/store.
 } Register;
 
@@ -495,6 +538,15 @@ static Register GetRegister(AARCH64Assembler* assembler) {
     reg.width = kX;
     // AArch64 encodes SP as register 31 in instruction words.
     reg.num = 31;
+    reg.is_sp = true;
+    return reg;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "xzr") ||
+      StringEqualCaseBlind(&ASM.lex.spelling, "wzr")) {
+    reg.width = toupper(ASM.lex.spelling.value[0]) == 'X' ? kX : kW;
+    reg.num = 31;
+    reg.size = reg.width == kX ? 3 : 2;
+    LexNextToken(&ASM.lex);
     return reg;
   }
   char prefix = toupper(ASM.lex.spelling.value[0]);
@@ -776,21 +828,44 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
   } else if (!CheckRegWidths(assembler, &rd, &rn)) {
     return;
   }
-  // Handle ":lo12:symbol" operand used to materialize the low 12 bits of a
-  // symbol address (paired with a preceding adrp).  Emits an ADD #0 with an
-  // R_AARCH64_ADD_ABS_LO12_NC relocation that the linker patches.
+  // Handle symbol relocation modifiers used as ADD immediates.
   if (LexLookingAt(&ASM.lex, TOK(colon))) {
-    LexNextToken(&ASM.lex);          // consume first ':'
-    LexNextToken(&ASM.lex);          // consume 'lo12' identifier
+    LexNextToken(&ASM.lex);  // consume first ':'
+    if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+      AssemblerError(&ASM, "Expected relocation modifier");
+      return;
+    }
+    int reloc_type;
+    bool shifted = false;
+    if (StringEqualCaseBlind(&ASM.lex.spelling, "lo12")) {
+      reloc_type = R_AARCH64_ADD_ABS_LO12_NC;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "tprel_hi12")) {
+      reloc_type = R_AARCH64_TLSLE_ADD_TPREL_HI12;
+      shifted = true;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "tprel_lo12_nc")) {
+      reloc_type = R_AARCH64_TLSLE_ADD_TPREL_LO12_NC;
+    } else {
+      AssemblerError(&ASM, "Unsupported ADD relocation modifier");
+      return;
+    }
+    LexNextToken(&ASM.lex);
     LexMatch(&ASM.lex, TOK(colon));  // consume second ':'
     AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
     int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerRelocation* reloc =
-        NewAssemblerRelocation(sym, R_AARCH64_ADD_ABS_LO12_NC,
+        NewAssemblerRelocation(sym, reloc_type,
                                ASM.current_section, instruction_offset, 0);
     AssemblerAddRelocation(&ASM, reloc);
-    AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode, s);
+    if (shifted) {
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        ((uint32_t)(rd.width == kX) << 31) |
+                            ((uint32_t)opcode << 30) | ((uint32_t)s << 29) |
+                            (0x22u << 23) | (1u << 22) |
+                            ((uint32_t)rn.num << 5) | (uint32_t)rd.num);
+    } else {
+      AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode, s);
+    }
     return;
   }
   Operand src2 = GetOperand(assembler);
@@ -1694,10 +1769,18 @@ static void AssembleMove(AARCH64Assembler* assembler) {
   Operand op = GetOperand(assembler);
   switch (op.type) {
     case kRegister:
-      // Encoded as an ORR immediate with Zero reg as Rn.
       if (!CheckRegWidths(assembler, &rd, &op.reg)) {
         return;
       }
+      // MOV to/from SP is the ADD-immediate alias.  Register 31 means XZR in
+      // logical instructions, so encoding these forms as ORR would silently
+      // read zero or discard the result.
+      if (rd.is_sp || op.reg.is_sp) {
+        AssembleAddSubImmediate(assembler, &rd, &op.reg, 0,
+                                rd.width == kX, /*op=*/0, /*s=*/0);
+        break;
+      }
+      // General-register MOV is the ORR alias with the zero register as Rn.
       Register zero = ZeroReg(rd.width);
       AssembleLogicalShiftedRegister(assembler, &rd, &zero, &op, rd.width == kX, 1, 0);
       break;
@@ -2521,6 +2604,187 @@ void Assemble_str(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, -1, 0, false);
 }
 
+static Register GetAtomicAddress(AARCH64Assembler* assembler) {
+  Register bad = {.width = kBAD};
+  if (!LexMatch(&ASM.lex, TOK(lsquare))) {
+    AssemblerError(&ASM, "Expected [");
+    return bad;
+  }
+  Register rn = GetRegister(assembler);
+  if (rn.fp_or_simd || rn.width != kX) {
+    AssemblerError(&ASM, "Atomic base must be an X register");
+    return bad;
+  }
+  if (!LexMatch(&ASM.lex, TOK(rsquare))) {
+    AssemblerError(&ASM, "Expected ]");
+    return bad;
+  }
+  return rn;
+}
+
+static void AssembleLoadExclusive(AARCH64Assembler* assembler, bool acquire,
+                                  int forced_size) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetAtomicAddress(assembler);
+  if (rt.fp_or_simd || (rt.width != kW && rt.width != kX) ||
+      rn.width == kBAD) {
+    AssemblerError(&ASM, "Invalid exclusive load registers");
+    return;
+  }
+  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+    AssemblerError(&ASM, "Byte/halfword exclusive load requires W register");
+    return;
+  }
+  uint32_t word = ((uint32_t)size << 30) | 0x085f7c00u |
+                  (acquire ? 0x00008000u : 0) |
+                  ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
+  AssemblerEmitWord(&ASM, ASM.current_section, word);
+}
+
+static void AssembleStoreExclusive(AARCH64Assembler* assembler, bool release,
+                                   int forced_size) {
+  Register rs = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetAtomicAddress(assembler);
+  if (rs.fp_or_simd || rs.width != kW || rt.fp_or_simd ||
+      (rt.width != kW && rt.width != kX) || rn.width == kBAD) {
+    AssemblerError(&ASM, "Invalid exclusive store registers");
+    return;
+  }
+  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+    AssemblerError(&ASM, "Byte/halfword exclusive store requires W register");
+    return;
+  }
+  uint32_t word = ((uint32_t)size << 30) | 0x08007c00u |
+                  (release ? 0x00008000u : 0) |
+                  ((uint32_t)rs.num << 16) |
+                  ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
+  AssemblerEmitWord(&ASM, ASM.current_section, word);
+}
+
+static void AssembleAcquireRelease(AARCH64Assembler* assembler, bool load,
+                                   int forced_size) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetAtomicAddress(assembler);
+  if (rt.fp_or_simd || (rt.width != kW && rt.width != kX) ||
+      rn.width == kBAD) {
+    AssemblerError(&ASM, "Invalid acquire/release registers");
+    return;
+  }
+  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+    AssemblerError(&ASM, "Byte/halfword acquire/release requires W register");
+    return;
+  }
+  uint32_t base = load ? 0x08dffc00u : 0x089ffc00u;
+  uint32_t word = ((uint32_t)size << 30) | base |
+                  ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
+  AssemblerEmitWord(&ASM, ASM.current_section, word);
+}
+
+static void Assemble_ldxr(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, false, -1);
+}
+static void Assemble_ldxrb(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, false, 0);
+}
+static void Assemble_ldxrh(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, false, 1);
+}
+static void Assemble_ldaxr(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, true, -1);
+}
+static void Assemble_ldaxrb(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, true, 0);
+}
+static void Assemble_ldaxrh(AARCH64Assembler* assembler) {
+  AssembleLoadExclusive(assembler, true, 1);
+}
+static void Assemble_stxr(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, false, -1);
+}
+static void Assemble_stxrb(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, false, 0);
+}
+static void Assemble_stxrh(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, false, 1);
+}
+static void Assemble_stlxr(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, true, -1);
+}
+static void Assemble_stlxrb(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, true, 0);
+}
+static void Assemble_stlxrh(AARCH64Assembler* assembler) {
+  AssembleStoreExclusive(assembler, true, 1);
+}
+static void Assemble_ldar(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, true, -1);
+}
+static void Assemble_ldarb(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, true, 0);
+}
+static void Assemble_ldarh(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, true, 1);
+}
+static void Assemble_stlr(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, false, -1);
+}
+static void Assemble_stlrb(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, false, 0);
+}
+static void Assemble_stlrh(AARCH64Assembler* assembler) {
+  AssembleAcquireRelease(assembler, false, 1);
+}
+
+static void Assemble_dmb(AARCH64Assembler* assembler) {
+  int option = 0xf;  // sy
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    if (StringEqualCaseBlind(&ASM.lex.spelling, "ish")) {
+      option = 0xb;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ishld")) {
+      option = 0x9;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ishst")) {
+      option = 0xa;
+    } else if (!StringEqualCaseBlind(&ASM.lex.spelling, "sy")) {
+      AssemblerError(&ASM, "Unsupported DMB option");
+      return;
+    }
+    LexNextToken(&ASM.lex);
+  }
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    0xd50330bfu | ((uint32_t)option << 8));
+}
+
+static void Assemble_clrex(AARCH64Assembler* assembler) {
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xd5033f5fu);
+}
+
+static void Assemble_mrs(AARCH64Assembler* assembler) {
+  Register rt = GetRegister(assembler);
+  if (rt.width != kX || rt.is_sp) {
+    AssemblerError(&ASM, "MRS destination must be an X register");
+    return;
+  }
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier)) ||
+      !StringEqualCaseBlind(&ASM.lex.spelling, "tpidr_el0")) {
+    AssemblerError(&ASM, "Only TPIDR_EL0 is supported by MRS");
+    return;
+  }
+  LexNextToken(&ASM.lex);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    0xd53bd040u | (uint32_t)rt.num);
+}
+
 void Assemble_ldp(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 0, 0, true);
 }
@@ -2906,6 +3170,9 @@ bool AARCH64AssemblerInit(AARCH64Assembler* assembler, String* infile, String* o
     R_AARCH64_ABS16, R_AARCH64_ABS32,       R_AARCH64_ABS64,       R_AARCH64_ABS16, R_AARCH64_ABS32,
     R_AARCH64_ABS64,    R_AARCH64_ABS16,    R_AARCH64_ABS32, R_AARCH64_ABS64,
     R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21,
+    R_AARCH64_TLSLE_ADD_TPREL_HI12,
+    R_AARCH64_TLSLE_ADD_TPREL_LO12_NC,
+    R_AARCH64_TLS_TPREL,
   };
   if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_AARCH64, 0, reloc_types, infile, outfile)) {
     return false;

@@ -177,6 +177,16 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
+    case IR_OP(atomic_load):
+    case IR_OP(atomic_store):
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch):
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n):
+    case IR_OP(atomic_fence):
     case IR_OP(inc8):
     case IR_OP(inc16):
     case IR_OP(inc32):

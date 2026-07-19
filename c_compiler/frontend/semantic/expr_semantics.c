@@ -8509,9 +8509,62 @@ static void AnalyzeAtomicBuiltinChildren(VectorASTNode* node) {
   }
 }
 
+typedef enum {
+  kAtomicOrderLoad,
+  kAtomicOrderStore,
+  kAtomicOrderReadModifyWrite,
+  kAtomicOrderFailure,
+  kAtomicOrderFence,
+} AtomicOrderUse;
+
+static int ValidateAtomicMemoryOrder(ASTNode* order, AtomicOrderUse use) {
+  int64_t value = -1;
+  if (order == NULL || !TypeIsIntegral(order->type)) {
+    SemanticError(order, "atomic memory order must have integral type");
+    return 5;
+  }
+  // GCC permits a runtime memory-model expression and conservatively maps it
+  // to sequential consistency.  Validate all constants precisely; dynamic
+  // values retain that documented seq_cst fallback in target lowering.
+  if (!EvaluateIntegerExpression(order, &value)) {
+    return 5;
+  }
+  if (value < 0 || value > 5) {
+    SemanticError(order, "atomic memory order must be a constant from 0 to 5");
+    return 5;
+  }
+  if (use == kAtomicOrderLoad && (value == 3 || value == 4)) {
+    SemanticError(order, "atomic load cannot use release or acq_rel order");
+  } else if (use == kAtomicOrderStore &&
+             (value == 1 || value == 2 || value == 4)) {
+    SemanticError(order,
+                  "atomic store cannot use consume, acquire, or acq_rel order");
+  } else if (use == kAtomicOrderFailure && (value == 3 || value == 4)) {
+    SemanticError(order,
+                  "atomic compare-exchange failure order cannot be release or acq_rel");
+  }
+  return (int)value;
+}
+
+static bool AtomicFailureOrderAllowed(int success, int failure) {
+  if (failure == 0) {
+    return true;
+  }
+  if (failure == 1) {
+    return success == 1 || success == 2 || success == 4 || success == 5;
+  }
+  if (failure == 2) {
+    return success == 2 || success == 4 || success == 5;
+  }
+  return failure == 5 && success == 5;
+}
+
 static void AnalyzeAtomicLoadBuiltin(VectorASTNode* node) {
   AnalyzeAtomicBuiltinChildren(node);
   TypeRecord* value_type = AtomicPointerPointee(node);
+  if (node->children->length > 1) {
+    ValidateAtomicMemoryOrder(node->children->value.p[1], kAtomicOrderLoad);
+  }
   ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
 }
 
@@ -8520,6 +8573,9 @@ static void AnalyzeAtomicStoreBuiltin(VectorASTNode* node) {
   TypeRecord* value_type = AtomicPointerPointee(node);
   if (node->children->length > 1) {
     NormalConversion(node->children->value.p[1], value_type);
+  }
+  if (node->children->length > 2) {
+    ValidateAtomicMemoryOrder(node->children->value.p[2], kAtomicOrderStore);
   }
   ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
@@ -8534,6 +8590,10 @@ static void AnalyzeAtomicFetchBuiltin(VectorASTNode* node, bool returns_new) {
   }
   if (node->children->length > 1) {
     NormalConversion(node->children->value.p[1], value_type);
+  }
+  if (node->children->length > 2) {
+    ValidateAtomicMemoryOrder(node->children->value.p[2],
+                              kAtomicOrderReadModifyWrite);
   }
   ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
 }
@@ -8558,6 +8618,23 @@ static void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
   }
   if (node->children->length > 2) {
     NormalConversion(node->children->value.p[2], value_type);
+  }
+  if (expected_is_pointer && node->children->length > 5) {
+    int64_t weak = -1;
+    ASTNode* weak_node = node->children->value.p[3];
+    if (!EvaluateIntegerExpression(weak_node, &weak) ||
+        (weak != 0 && weak != 1)) {
+      SemanticError(weak_node,
+                    "atomic compare-exchange weak argument must be constant 0 or 1");
+    }
+    int success = ValidateAtomicMemoryOrder(
+        node->children->value.p[4], kAtomicOrderReadModifyWrite);
+    int failure = ValidateAtomicMemoryOrder(
+        node->children->value.p[5], kAtomicOrderFailure);
+    if (!AtomicFailureOrderAllowed(success, failure)) {
+      SemanticError(node->children->value.p[5],
+                    "atomic compare-exchange failure order is stronger than success order");
+    }
   }
   ASTNodeSetType(&node->base,
                  returns_bool ? NewTypeRecordWithSize(kTypeBool, kQualPlain)
@@ -8892,6 +8969,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(builtin_atomic_fence):
       AnalyzeAtomicBuiltinChildren(vector_node);
+      if (vector_node->children->length > 0) {
+        ValidateAtomicMemoryOrder(vector_node->children->value.p[0],
+                                  kAtomicOrderFence);
+      }
       ASTNodeSetType(node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
       break;
 

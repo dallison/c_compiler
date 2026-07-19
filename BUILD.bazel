@@ -649,6 +649,7 @@ cc_library(
     srcs = [
         "aarch64_interpreter/aarch64_interpreter.c",
         "aarch64_interpreter/aarch64_native.c",
+        "aarch64_interpreter/aarch64_process.c",
         "aarch64_interpreter/aarch64_runtime.c",
         "aarch64_interpreter/aarch64_syscalls.c",
     ],
@@ -1191,7 +1192,7 @@ cd "$$work"
 genrule(
     name = "libc_x86_64",
     srcs = LIBC_SRCS + [
-        "libc/x86_64_heap.c",
+        "libc/guest_heap.c",
     ] + glob([
         "libc/include/**/*.h",
         "x86_64 support/*.s",
@@ -1299,7 +1300,7 @@ libc_srcs=(
   "libc/syscall.c"
   "libc/threads.c"
   "libc/ungetc.c"
-  "libc/x86_64_heap.c"
+  "libc/guest_heap.c"
   "libc/acos.c"
   "libc/asin.c"
   "libc/atan.c"
@@ -1456,6 +1457,7 @@ genrule(
         "libc/include/**/*.h",
         "aarch64 support/*.s",
     ]) + [
+        "libc/guest_heap.c",
         ":davecc",
         ":archivist",
     ],
@@ -1473,7 +1475,10 @@ archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "aarch64 support/cxx_guard.s"
   "aarch64 support/eh_transfer.s"
+  "aarch64 support/longjmp.s"
+  "aarch64 support/setjmp.s"
   "aarch64 support/syscall.s"
 )
 
@@ -1555,6 +1560,8 @@ libc_srcs=(
   "libc/strtoul.c"
   "libc/strtoull.c"
   "libc/syscall.c"
+  "libc/threads.c"
+  "libc/guest_heap.c"
   "libc/ungetc.c"
   "libc/acos.c"
   "libc/asin.c"
@@ -1754,8 +1761,9 @@ done
 )
 
 LIBC_TEST_DATA = LIBC_SRCS + [
-    "libc/x86_64_heap.c",
+    "libc/guest_heap.c",
 ] + glob([
+    "aarch64 support/*.s",
     "libc/include/**/*.h",
     "libc/tests/**",
     "x86_64 support/*.s",
@@ -1789,6 +1797,37 @@ sh_test(
         ":davecc",
         ":libc_x86_64",
         ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "libc_aarch64_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "aarch64",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "libc_aarch64_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "all",
+        "$(rootpath :davecc)",
+        "aarch64",
+        "$(rootpath :aarch64)",
+        "$(rootpath :libc_aarch64)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":aarch64",
+        ":davecc",
+        ":libc_aarch64",
     ],
 )
 

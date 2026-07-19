@@ -3142,5 +3142,5 @@ int main(void) {
          box_arrow_static_pre + box_arrow_static_total - 3868 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
-        32890 + template_destructor_trace - 13;
+        33427 + template_destructor_trace - 13;
 }

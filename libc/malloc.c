@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <syscall.h>
 
 #if !defined(__6502__) && !defined(__risc_v__)
 #include <errno.h>
@@ -25,8 +26,8 @@
 #define STATIC
 #endif
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__aarch64__) || \
-    defined(__arm__) || defined(__p_code__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__arm__) || \
+    defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start
@@ -38,7 +39,7 @@ extern char _end[];
 #define Free free
 #define Calloc calloc
 #define Realloc realloc
-#elif defined(__x86_64__)
+#elif defined(__DAVECC_HAS_HEAP_LOCK__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start

@@ -9,7 +9,7 @@
 #include <syscall.h>
 #include <stdlib.h>
 
-#if defined(__x86_64__) && !defined(__p_code__)
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
 void __davecc_tls_thread_init(void);
 void __davecc_tls_thread_fini(void);
 

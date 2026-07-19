@@ -3,8 +3,10 @@
 //  libc
 //
 
+#include <syscall.h>
+
 #if !defined(__6502__)
-#if defined(__x86_64__) && !defined(__p_code__)
+#if defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
 __thread int errno;
 #else
 int errno;

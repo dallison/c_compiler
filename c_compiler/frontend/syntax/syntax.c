@@ -9107,7 +9107,8 @@ static ASTNode* NewCXXLocalStaticGuardedInitializer(
   ASTNode* success_body = NewCompoundStatementASTNode(success, location);
   ASTNode* initialization = success_body;
   if (CompilerExceptionsEnabled() && compiler->target_name != NULL &&
-      StringEqual(compiler->target_name, "x86_64")) {
+      (StringEqual(compiler->target_name, "x86_64") ||
+       StringEqual(compiler->target_name, "aarch64"))) {
     Vector* catches = NewVector();
     Vector* failure = NewVector();
     AppendArrayInitializationCleanup(declaration, constructed_count, failure);

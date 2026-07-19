@@ -86,6 +86,8 @@ void RISCVLoaderArchitectureInit(LoaderArchitecture* arch) {
   arch->machine_type = ELF_MACHINE_TYPE_RISC_V;
   arch->platform = "risc-v";
   arch->ignore_vaddr = false;
+  arch->tls_tcb_size = 0;
+  arch->init_tls_tcb = NULL;
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;
   arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;

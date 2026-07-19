@@ -229,10 +229,10 @@ typedef enum {
   IR_OP(atomic_fetch_sub),             // atomic_fetch_sub(ptr, value, order)
   IR_OP(atomic_add_fetch),             // atomic_add_fetch(ptr, value, order)
   IR_OP(atomic_sub_fetch),             // atomic_sub_fetch(ptr, value, order)
-  IR_OP(atomic_compare_exchange_bool), // atomic_cmpxchg_bool(ptr, old, new)
-  IR_OP(atomic_compare_exchange_val),  // atomic_cmpxchg_val(ptr, old, new)
+  IR_OP(atomic_compare_exchange_bool), // atomic_cmpxchg_bool(ptr, old, new, succ, fail)
+  IR_OP(atomic_compare_exchange_val),  // atomic_cmpxchg_val(ptr, old, new, succ, fail)
   IR_OP(atomic_compare_exchange_n),    // atomic_cmpxchg_n(ptr, expected*, new, weak, succ, fail)
-  IR_OP(atomic_fence),                 // atomic_fence()
+  IR_OP(atomic_fence),                 // atomic_fence(order)
 
   // Increment and decrement.  First input is the operand, second is
   // a constant for the increment or decrement.
@@ -304,6 +304,7 @@ typedef struct IRNode {
 #define kIRFakeUnsigned (1 << 7)  // This type is not really unsigned.
 #define kIRFromCall (1 << 8)  // Struct arg is from a call.
 #define kIRStashedCallResult (1 << 9)  // Scalar call arg result is stashed.
+#define kIRStructReturnCall (1 << 10)  // Call has a hidden aggregate-result arg.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);

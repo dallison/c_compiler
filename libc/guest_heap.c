@@ -1,15 +1,15 @@
 //
-//  x86_64_heap.c
+//  guest_heap.c
 //  libc
 //
-//  Thread-safe guest heap wrappers for the x86_64 interpreter.
+//  Thread-safe wrappers around the guest allocator.
 //
-
-#if defined(__x86_64__) && !defined(__p_code__)
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <syscall.h>
+
+#if defined(__DAVECC_HAS_HEAP_LOCK__)
 
 extern void* Malloc(size_t n);
 extern void Free(void* p);

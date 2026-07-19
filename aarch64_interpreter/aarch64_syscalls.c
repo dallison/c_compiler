@@ -5,15 +5,80 @@
 
 #include "aarch64_syscalls.h"
 #include "aarch64_interpreter.h"
+#include "aarch64_process.h"
 #include "loader_dynamic.h"
 #include "loader.h"
 #include "loader_lifecycle.h"
 #include "elf.h"
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+
+static bool InterpreterIsWorker(AARCH64Interpreter* interpreter) {
+  return interpreter->guest_thread != NULL &&
+         !interpreter->guest_thread->is_main;
+}
+
+static int64_t InterpreterTerminate(AARCH64Interpreter* interpreter,
+                                    int64_t status) {
+  if (InterpreterIsWorker(interpreter)) {
+    AARCH64SyscallThreadExit(interpreter->guest_thread, status);
+    return 0;
+  }
+  exit((int)status);
+  return -1;
+}
+
+static int64_t InterpreterRequestNormalExit(AARCH64Interpreter* interpreter,
+                                            int64_t status) {
+  if (InterpreterIsWorker(interpreter)) {
+    AARCH64SyscallThreadExit(interpreter->guest_thread, status);
+    return 0;
+  }
+  if (interpreter->loader != NULL) {
+    LoaderLifecycleMarkExecutableFiniComplete(interpreter->loader,
+                                              interpreter->loader->lifecycle);
+  }
+  interpreter->exit_code = (int)status;
+  interpreter->running = false;
+  interpreter->pc = 0;
+  return 0;
+}
+
+static void LockGotResolve(AARCH64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
+  }
+}
+
+static void UnlockGotResolve(AARCH64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->got_resolve_mutex);
+  }
+}
+
+static void ResolveFail(AARCH64Interpreter* interpreter, int status) {
+  UnlockGotResolve(interpreter);
+  AARCH64InterpreterFail(interpreter, status);
+}
+
+static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    uint64_t start = (uint64_t)(uintptr_t)region->address;
+    uint64_t end = start + (uint64_t)region->length;
+    if (addr >= start && addr + size <= end) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static bool SectionAddressAndSize(LoadedDynamicLibrary* lib, const char* name,
                                   uint64_t* addr, uint64_t* size) {
@@ -48,8 +113,10 @@ static bool ReadRelaPltEntry(LoadedDynamicLibrary* lib, int64_t index,
     if (strcmp(shstrtab + sh->name, ".rela.plt") != 0) {
       continue;
     }
-    off_t file_offset = (off_t)(sh->offset + (uint64_t)index * sizeof(ELFRelocation));
-    return pread(lib->fd, out, sizeof(*out), file_offset) == (ssize_t)sizeof(*out);
+    off_t file_offset =
+        (off_t)(sh->offset + (uint64_t)index * sizeof(ELFRelocation));
+    return pread(lib->fd, out, sizeof(*out), file_offset) ==
+           (ssize_t)sizeof(*out);
   }
   return false;
 }
@@ -68,8 +135,71 @@ static bool GotPointsIntoPlt(Loader* loader, LoadedDynamicLibrary* lib,
   return got_value >= plt_runtime && got_value < plt_runtime + plt_size;
 }
 
-static void ResolveAndFixupSymbol(AARCH64Interpreter* interpreter) {
+static bool ResolveByPltIndex(AARCH64Interpreter* interpreter,
+                              LoadedDynamicLibrary* lib, int64_t index,
+                              bool* pc_updated) {
+  ELFRelocation reloc;
+  if (!ReadRelaPltEntry(lib, index, &reloc)) {
+    return false;
+  }
+  if (ELF_R_TYPE(reloc.info) != R_AARCH64_JUMP_SLOT) {
+    return false;
+  }
+  int32_t sym_index = ELF_R_SYM(reloc.info);
+  const char* sym_name = lib->dynstr + lib->dynsym[sym_index].name;
+  const ELFSymbol* symbol;
+  LoadedDynamicLibrary* found_lib;
+  bool ok = DynamicLoaderFindSymbol(&lib->loader->loaded_libraries, sym_name,
+                                    &symbol, &found_lib);
+  if (!ok) {
+    fprintf(stderr, "Undefined symbol %s\n", sym_name);
+    return false;
+  }
+  uint64_t symbol_address = 0;
+  if (!LoaderLinkedAddressToRuntime(lib->loader, found_lib, symbol->value,
+                                    &symbol_address)) {
+    fprintf(stderr, "Cannot translate symbol %s\n", sym_name);
+    return false;
+  }
+  uint64_t got_offset = 0;
+  if (!LoaderLinkedAddressToRuntime(lib->loader, lib, reloc.offset,
+                                    &got_offset)) {
+    fprintf(stderr, "Cannot translate GOT slot for %s\n", sym_name);
+    return false;
+  }
+  *(uint64_t*)(uintptr_t)got_offset = symbol_address;
+  interpreter->pc = symbol_address - 4;
+  *pc_updated = true;
+  return true;
+}
+
+static void ResolveAndFixupSymbol(AARCH64Interpreter* interpreter,
+                                  bool* pc_updated) {
+  LockGotResolve(interpreter);
   LoadedDynamicLibrary* lib = (LoadedDynamicLibrary*)interpreter->x[0];
+  int64_t index = (int64_t)interpreter->x[1];
+  if (lib == NULL || index < 0) {
+    if (GuestAddressOk(interpreter->loader, interpreter->sp, 16)) {
+      lib = *(LoadedDynamicLibrary**)(uintptr_t)interpreter->sp;
+      index = *(int64_t*)(uintptr_t)(interpreter->sp + 8);
+    }
+  }
+  if (lib != NULL && index >= 0 &&
+      ResolveByPltIndex(interpreter, lib, index, pc_updated)) {
+    UnlockGotResolve(interpreter);
+    return;
+  }
+
+  lib = (LoadedDynamicLibrary*)interpreter->x[0];
+  if (lib == NULL && GuestAddressOk(interpreter->loader, interpreter->sp, 8)) {
+    lib = *(LoadedDynamicLibrary**)(uintptr_t)interpreter->sp;
+  }
+  if (lib == NULL) {
+    fprintf(stderr, "Undefined symbol\n");
+    ResolveFail(interpreter, 1);
+    return;
+  }
+
   int64_t plt_rel_size = 0;
   const DynamicSection* section = lib->dynamic;
   if (section != NULL) {
@@ -103,7 +233,8 @@ static void ResolveAndFixupSymbol(AARCH64Interpreter* interpreter) {
   }
   if (reloc == NULL) {
     fprintf(stderr, "Undefined symbol\n");
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
 
   int32_t sym_index = ELF_R_SYM(reloc->info);
@@ -114,22 +245,57 @@ static void ResolveAndFixupSymbol(AARCH64Interpreter* interpreter) {
                                     &symbol, &found_lib);
   if (!ok) {
     fprintf(stderr, "Undefined symbol %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   uint64_t symbol_address = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, found_lib, symbol->value,
                                     &symbol_address)) {
     fprintf(stderr, "Cannot translate symbol %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   uint64_t got_offset = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, lib, reloc->offset,
                                     &got_offset)) {
     fprintf(stderr, "Cannot translate GOT slot for %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   *(uint64_t*)(uintptr_t)got_offset = symbol_address;
   interpreter->pc = symbol_address - 4;
+  *pc_updated = true;
+  UnlockGotResolve(interpreter);
+}
+
+static int TranslateGuestOpenFlags(int guest_flags) {
+  enum {
+    kGuestO_ACCMODE   = 00000003,
+    kGuestO_CREAT     = 00000100,
+    kGuestO_EXCL      = 00000200,
+    kGuestO_NOCTTY    = 00000400,
+    kGuestO_TRUNC     = 00001000,
+    kGuestO_APPEND    = 00002000,
+    kGuestO_NONBLOCK  = 00004000,
+    kGuestO_SYNC      = 00010000,
+    kGuestO_DIRECTORY = 00200000,
+    kGuestO_NOFOLLOW  = 00400000,
+    kGuestO_CLOEXEC   = 02000000,
+  };
+  int host = guest_flags & kGuestO_ACCMODE;
+  if (guest_flags & kGuestO_CREAT)     host |= O_CREAT;
+  if (guest_flags & kGuestO_EXCL)      host |= O_EXCL;
+  if (guest_flags & kGuestO_NOCTTY)    host |= O_NOCTTY;
+  if (guest_flags & kGuestO_TRUNC)     host |= O_TRUNC;
+  if (guest_flags & kGuestO_APPEND)    host |= O_APPEND;
+  if (guest_flags & kGuestO_NONBLOCK)  host |= O_NONBLOCK;
+  if (guest_flags & kGuestO_SYNC)      host |= O_SYNC;
+  if (guest_flags & kGuestO_DIRECTORY) host |= O_DIRECTORY;
+  if (guest_flags & kGuestO_NOFOLLOW)  host |= O_NOFOLLOW;
+#ifdef O_CLOEXEC
+  if (guest_flags & kGuestO_CLOEXEC)   host |= O_CLOEXEC;
+#endif
+  return host;
 }
 
 int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
@@ -140,19 +306,12 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
   switch (number) {
     case AARCH64_SYSCALL_HALT:
     case AARCH64_SYSCALL_EXIT:
-      exit((int)a0);
-      break;
+      return InterpreterTerminate(interpreter, a0);
     case AARCH64_SYSCALL_EXIT_CLEAN:
-      if (interpreter->loader != NULL) {
-        LoaderLifecycleMarkExecutableFiniComplete(
-            interpreter->loader, interpreter->loader->lifecycle);
-      }
-      interpreter->exit_code = (int)a0;
-      interpreter->running = false;
-      interpreter->pc = 0;
-      return 0;
+      return InterpreterRequestNormalExit(interpreter, a0);
     case AARCH64_SYSCALL_OPEN:
-      return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
+      return open((const char*)(uintptr_t)a0,
+                  TranslateGuestOpenFlags((int)a1), (mode_t)a2);
     case AARCH64_SYSCALL_CLOSE:
       return close((int)a0);
     case AARCH64_SYSCALL_READ:
@@ -171,12 +330,42 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
     case AARCH64_SYSCALL_ABORT:
       abort();
       break;
-    case AARCH64_SYSCALL_RESOLVE:
-      ResolveAndFixupSymbol(interpreter);
+    case AARCH64_SYSCALL_TIME:
+      return (int64_t)time(NULL);
+    case AARCH64_SYSCALL_CLOCK: {
+      struct timespec now;
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+      }
+      return (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+    }
+    case AARCH64_SYSCALL_RESOLVE: {
+      bool pc_updated = false;
+      ResolveAndFixupSymbol(interpreter, &pc_updated);
+      (void)pc_updated;
       return 0;
+    }
+    case AARCH64_SYSCALL_THREAD_CREATE:
+      return AARCH64SyscallThreadCreate(interpreter->guest_thread, (uint64_t)a0,
+                                        (uint64_t)a1, (uint64_t)a2,
+                                        (uint64_t)a3);
+    case AARCH64_SYSCALL_THREAD_JOIN:
+      return AARCH64SyscallThreadJoin(interpreter->guest_thread, (uint64_t)a0,
+                                      (uint64_t)a1);
+    case AARCH64_SYSCALL_THREAD_SELF:
+      return AARCH64SyscallThreadSelf(interpreter->guest_thread);
+    case AARCH64_SYSCALL_GET_TP:
+      return AARCH64SyscallGetTp(interpreter->guest_thread);
+    case AARCH64_SYSCALL_THREAD_EXIT:
+      InterpreterTerminate(interpreter, a0);
+      return 0;
+    case AARCH64_SYSCALL_HEAP_LOCK:
+      return AARCH64SyscallHeapLock(interpreter->guest_thread);
+    case AARCH64_SYSCALL_HEAP_UNLOCK:
+      return AARCH64SyscallHeapUnlock(interpreter->guest_thread);
     default:
       fprintf(stderr, "Unknown AArch64 syscall %lld\n", (long long)number);
-      exit(1);
+      AARCH64InterpreterFail(interpreter, 1);
   }
   return -1;
 }

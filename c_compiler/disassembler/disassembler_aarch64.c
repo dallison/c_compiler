@@ -149,6 +149,63 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
                XReg((inst >> 5) & 0x1f, true, false));
     return true;
   }
+  if ((inst & 0xffffffe0u) == 0xd53bd040u) {
+    DAsmFormat(out, "mrs %s, tpidr_el0", XReg(inst & 0x1f, true, false));
+    return true;
+  }
+  if ((inst & 0xfffff0ffu) == 0xd50330bfu) {
+    int option = (inst >> 8) & 0xf;
+    const char* name = option == 0x9 ? "ishld"
+                       : option == 0xa ? "ishst"
+                       : option == 0xb ? "ish"
+                       : option == 0xf ? "sy"
+                                       : NULL;
+    if (name != NULL) {
+      DAsmFormat(out, "dmb %s", name);
+    } else {
+      DAsmFormat(out, "dmb #0x%x", option);
+    }
+    return true;
+  }
+  if ((inst & 0xfffff0ffu) == 0xd503305fu) {
+    DAsmFormat(out, "clrex");
+    return true;
+  }
+  if ((inst & 0x3ffffc00u) == 0x085f7c00u ||
+      (inst & 0x3ffffc00u) == 0x085ffc00u) {
+    int size = (inst >> 30) & 3;
+    bool acquire = (inst & 0x8000u) != 0;
+    int rn = (inst >> 5) & 0x1f;
+    int rt = inst & 0x1f;
+    const char* suffix = size == 0 ? "b" : size == 1 ? "h" : "";
+    DAsmFormat(out, "%s%s %s, [%s]", acquire ? "ldaxr" : "ldxr",
+               suffix, XReg(rt, size == 3, false), XReg(rn, true, true));
+    return true;
+  }
+  if ((inst & 0x3fe0fc00u) == 0x08007c00u ||
+      (inst & 0x3fe0fc00u) == 0x0800fc00u) {
+    int size = (inst >> 30) & 3;
+    bool release = (inst & 0x8000u) != 0;
+    int rs = (inst >> 16) & 0x1f;
+    int rn = (inst >> 5) & 0x1f;
+    int rt = inst & 0x1f;
+    const char* suffix = size == 0 ? "b" : size == 1 ? "h" : "";
+    DAsmFormat(out, "%s%s %s, %s, [%s]", release ? "stlxr" : "stxr",
+               suffix, XReg(rs, false, false), XReg(rt, size == 3, false),
+               XReg(rn, true, true));
+    return true;
+  }
+  if ((inst & 0x3ffffc00u) == 0x08dffc00u ||
+      (inst & 0x3ffffc00u) == 0x089ffc00u) {
+    int size = (inst >> 30) & 3;
+    bool load = (inst & 0x00400000u) != 0;
+    int rn = (inst >> 5) & 0x1f;
+    int rt = inst & 0x1f;
+    const char* suffix = size == 0 ? "b" : size == 1 ? "h" : "";
+    DAsmFormat(out, "%s%s %s, [%s]", load ? "ldar" : "stlr", suffix,
+               XReg(rt, size == 3, false), XReg(rn, true, true));
+    return true;
+  }
   if ((inst & 0x1f000000u) == 0x11000000u) {
     bool sf = (inst >> 31) != 0;
     bool sub = (inst >> 30) & 1;

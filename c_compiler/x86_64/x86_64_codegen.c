@@ -125,6 +125,9 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(movslq)
     OPCODE(sete)
     OPCODE(setne)
+    OPCODE(atomic_compare_exchange_bool)
+    OPCODE(atomic_compare_exchange_val)
+    OPCODE(atomic_compare_exchange_n)
     OPCODE(a0)
     OPCODE(a1)
     OPCODE(a2)
@@ -2454,13 +2457,48 @@ static TargetInstruction* LowerAtomicCompareExchange(X86_64Generator* rv,
                                                      IRNode* node,
                                                      bool expected_is_pointer,
                                                      bool returns_bool) {
-  (void)rv;
-  (void)gen;
-  (void)node;
-  (void)expected_is_pointer;
-  (void)returns_bool;
-  assert(false);
-  return NULL;
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  assert(value_type != NULL &&
+         (value_type->size == 1 || value_type->size == 2 ||
+          value_type->size == 4 || value_type->size == 8));
+
+  TargetInstruction* addr = Materialize(rv, addr_node);
+  TargetInstruction* expected_ptr = NULL;
+  TargetInstruction* expected;
+  if (expected_is_pointer) {
+    expected_ptr = Materialize(rv, node->inputs.value.p[1]);
+    expected = Load(rv, node->inputs.value.p[1],
+                    AtomicLoadOpcode(value_type));
+  } else {
+    expected = Materialize(rv, node->inputs.value.p[1]);
+  }
+  TargetInstruction* desired = Materialize(rv, node->inputs.value.p[2]);
+
+  // CMPXCHG has an architectural accumulator operand.  Make the dependency
+  // explicit so register allocation preserves/evicts RAX correctly.
+  TargetInstruction* accumulator =
+      EmitSymbol(rv, NewInstruction(X86_64_OP(resulti)));
+  SetDestOrMove(rv, expected, accumulator, X86_64_OP(mv));
+
+  X86_64Opcode opcode =
+      expected_is_pointer
+          ? X86_64_OP(atomic_compare_exchange_n)
+          : (returns_bool ? X86_64_OP(atomic_compare_exchange_bool)
+                          : X86_64_OP(atomic_compare_exchange_val));
+  TargetInstruction* inst =
+      NewInstruction3(opcode, addr, desired, expected_ptr);
+  int size_log2 = value_type->size == 1 ? 0
+                  : value_type->size == 2 ? 1
+                  : value_type->size == 4 ? 2
+                                          : 3;
+  inst->flags |= size_log2 << X86_64_ATOMIC_SIZE_SHIFT;
+  Emit(rv, inst);
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(rv, inst, dest, X86_64_OP(mv));
+  }
+  return SetLoweredNode(node, inst);
 }
 
 static struct BranchInfo {
@@ -3077,19 +3115,25 @@ static TargetInstruction* LowerSignExtend(X86_64Generator* rv, Generator* gen,
   }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
-  if (diff > 0) {
+  if (diff <= 0) {
+    // Narrowing is represented by the low destination-width view.  If the
+    // narrowed signed value is widened again, that later conversion performs
+    // the required extension.
     if (dest != NULL) {
       value = SetDestOrMove(rv, value, dest, X86_64_OP(mv));
     }
     return SetLoweredNode(node, value);
   }
-  diff = -diff;
-  // Sign-extend by shifting left then arithmetic-shifting right.  This works
-  // for any register, unlike the dedicated cltq (movslq) instruction which is
-  // hard-wired to sign-extend %eax into %rax and therefore produces wrong
-  // results when the value lives in any other register (e.g. a register
-  // variable in r8-r15).
-  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
+  // Integer target instructions operate on 64-bit registers, so shift the
+  // source sign bit to bit 63 rather than using merely the source/destination
+  // width difference.  This also materializes scalar call results out of RAX
+  // before a later call can overwrite them.
+  IRNode* input = node->inputs.value.p[0];
+  int source_bits =
+      input->type != NULL ? (int)input->type->size * 8 : 32;
+  int64_t shift = 64 - source_bits;
+  TargetInstruction* immed =
+      GetIntConstant(rv, NULL, kTargetType32Bit, shift);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(X86_64_OP(shl), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(X86_64_OP(sar), lsl, immed));
   if (dest != NULL) {

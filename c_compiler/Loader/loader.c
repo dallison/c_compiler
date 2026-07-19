@@ -866,36 +866,38 @@ static bool LoaderInitMainThreadTls(Loader* loader) {
   }
 
   uint64_t align = tls_segment->align != 0 ? tls_segment->align : 16;
-  size_t block_size =
-      (size_t)AlignUp(tls_segment->memsz + X86_64_TLS_TP_SLOT_SIZE, align);
+  if (align < sizeof(void*)) {
+    align = sizeof(void*);
+  }
+  size_t tcb_size = loader->arch->tls_tcb_size;
+  size_t block_size = (size_t)AlignUp(tls_segment->memsz + tcb_size, align);
   void* block = NULL;
   if (posix_memalign(&block, (size_t)align, block_size) != 0 || block == NULL) {
     LoaderError("Failed to allocate main-thread TLS block\n");
     return false;
   }
 
-  *(uint64_t*)block = (uint64_t)(uintptr_t)block;
+  memset(block, 0, block_size);
+  uint64_t thread_pointer = (uint64_t)(uintptr_t)block;
+  if (loader->arch->init_tls_tcb != NULL) {
+    loader->arch->init_tls_tcb(block, thread_pointer);
+  }
   if (tls_segment->filesz > 0) {
-    memcpy((char*)block + X86_64_TLS_TP_SLOT_SIZE, template_data,
+    memcpy((char*)block + tcb_size, template_data,
            (size_t)tls_segment->filesz);
   }
-  if (block_size > tls_segment->filesz + X86_64_TLS_TP_SLOT_SIZE) {
-    memset((char*)block + X86_64_TLS_TP_SLOT_SIZE + tls_segment->filesz, 0,
-           block_size - (tls_segment->filesz + X86_64_TLS_TP_SLOT_SIZE));
-  }
-
-  // Linux-style thread pointer: %fs:0 reads the block base address.
 
   loader->tls.present = true;
   loader->tls.template_addr =
-      (uint64_t)(uintptr_t)((char*)block + X86_64_TLS_TP_SLOT_SIZE);
+      (uint64_t)(uintptr_t)((char*)block + tcb_size);
   loader->tls.filesz = tls_segment->filesz;
   loader->tls.memsz = tls_segment->memsz;
   loader->tls.align = align;
   loader->tls.file_offset = tls_segment->offset;
   loader->tls.main_thread_block = block;
   loader->tls.block_size = block_size;
-  loader->tls.fs_base = (uint64_t)(uintptr_t)block;
+  loader->tls.fs_base = thread_pointer;
+  loader->tls.tp_base = thread_pointer;
   return true;
 }
 
@@ -912,8 +914,11 @@ bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
   }
 
   uint64_t align = loader->tls.align != 0 ? loader->tls.align : 16;
-  size_t block_size =
-      (size_t)AlignUp(loader->tls.memsz + X86_64_TLS_TP_SLOT_SIZE, align);
+  if (align < sizeof(void*)) {
+    align = sizeof(void*);
+  }
+  size_t tcb_size = loader->arch->tls_tcb_size;
+  size_t block_size = (size_t)AlignUp(loader->tls.memsz + tcb_size, align);
   void* block = NULL;
   if (posix_memalign(&block, (size_t)align, block_size) != 0 || block == NULL) {
     return false;
@@ -926,19 +931,19 @@ bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
         (const char*)loader->elf_file->base + loader->tls.file_offset;
   }
 
-  *(uint64_t*)block = (uint64_t)(uintptr_t)block;
-  if (loader->tls.filesz > 0 && template_data != NULL) {
-    memcpy((char*)block + X86_64_TLS_TP_SLOT_SIZE, template_data,
-           (size_t)loader->tls.filesz);
+  memset(block, 0, block_size);
+  uint64_t thread_pointer = (uint64_t)(uintptr_t)block;
+  if (loader->arch->init_tls_tcb != NULL) {
+    loader->arch->init_tls_tcb(block, thread_pointer);
   }
-  if (block_size > loader->tls.filesz + X86_64_TLS_TP_SLOT_SIZE) {
-    memset((char*)block + X86_64_TLS_TP_SLOT_SIZE + loader->tls.filesz, 0,
-           block_size - (loader->tls.filesz + X86_64_TLS_TP_SLOT_SIZE));
+  if (loader->tls.filesz > 0 && template_data != NULL) {
+    memcpy((char*)block + tcb_size, template_data,
+           (size_t)loader->tls.filesz);
   }
 
   *block_out = block;
   *block_size_out = block_size;
-  *fs_base_out = (uint64_t)(uintptr_t)block;
+  *fs_base_out = thread_pointer;
   return true;
 }
 

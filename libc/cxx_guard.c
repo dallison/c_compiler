@@ -7,8 +7,9 @@
 //
 
 #include <stdlib.h>
+#include <syscall.h>
 
-#if !defined(__x86_64__)
+#if !defined(__DAVECC_HAS_THREAD_SAFE_GUARDS__)
 
 int __cxa_guard_acquire(unsigned long long* guard) {
   unsigned char* state = (unsigned char*)guard;

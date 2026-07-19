@@ -1808,6 +1808,53 @@ static void PrintRmov(X86_64Emitter* emitter, TargetInstruction* inst, FILE* fp)
   fprintf(fp, "\n");
 }
 
+static void PrintAtomicCompareExchange(TargetInstruction* inst,
+                                       const char* func_name, FILE* fp) {
+  int size_log2 =
+      (inst->flags & X86_64_ATOMIC_SIZE_MASK) >> X86_64_ATOMIC_SIZE_SHIFT;
+  static const char* cmpxchg[] = {
+      "atomic_cmpxchgb", "atomic_cmpxchgw",
+      "atomic_cmpxchgl", "atomic_cmpxchgq"};
+  static const char* stores[] = {"movb", "movw", "movl", "movq"};
+  char b0[16], b1[16], b2[16];
+
+  fprintf(fp, "\t%s ", cmpxchg[size_log2]);
+  PrintPercentRegFromInst(fp, inst->operand[1], b0, sizeof(b0));
+  fprintf(fp, ", (");
+  PrintPercentRegFromInst(fp, inst->operand[0], b1, sizeof(b1));
+  fprintf(fp, ")\n");
+
+  bool expected_is_pointer =
+      inst->opcode == (TargetOpcode)X86_64_OP(atomic_compare_exchange_n);
+  bool returns_bool =
+      inst->opcode !=
+      (TargetOpcode)X86_64_OP(atomic_compare_exchange_val);
+  if (expected_is_pointer) {
+    fprintf(fp, "\tje .L%s_atomic_cmpxchg_done_%d\n", func_name, inst->id);
+    fprintf(fp, "\t%s %%rax, (", stores[size_log2]);
+    PrintPercentRegFromInst(fp, inst->operand[2], b0, sizeof(b0));
+    fprintf(fp, ")\n");
+    fprintf(fp, ".L%s_atomic_cmpxchg_done_%d:\n", func_name, inst->id);
+  }
+  if (returns_bool) {
+    // CMPXCHG returns the observed value in RAX.  Update *expected before SETE
+    // overwrites AL with the boolean result; MOV preserves the comparison
+    // flags, so SETE remains valid on both paths.
+    fprintf(fp, "\tsete ");
+    PrintResultRegFromInst(fp, inst, b2, sizeof(b2));
+    fprintf(fp, "\n");
+    fprintf(fp, "\tmovzbq ");
+    PrintResultRegFromInst(fp, inst, b0, sizeof(b0));
+    fprintf(fp, ", ");
+    PrintResultRegFromInst(fp, inst, b1, sizeof(b1));
+    fprintf(fp, "\n");
+  } else {
+    fprintf(fp, "\tmovq %%rax, ");
+    PrintResultRegFromInst(fp, inst, b0, sizeof(b0));
+    fprintf(fp, "\n");
+  }
+}
+
 static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
                                                    FILE* fp);
 
@@ -1859,6 +1906,11 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
 
   // Special case instructions.
   switch ((X86_64Opcode)inst->opcode) {
+    case X86_64_OP(atomic_compare_exchange_bool):
+    case X86_64_OP(atomic_compare_exchange_val):
+    case X86_64_OP(atomic_compare_exchange_n):
+      PrintAtomicCompareExchange(inst, func_name, fp);
+      return;
 //    case X86_64_OP(rmov):
 //    case X86_64_OP(rmovf):
 //    case X86_64_OP(rmovd):

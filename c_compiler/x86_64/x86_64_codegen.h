@@ -170,6 +170,9 @@ typedef enum {
   X86_64_OP(movslq),
   X86_64_OP(sete),
   X86_64_OP(setne),
+  X86_64_OP(atomic_compare_exchange_bool),
+  X86_64_OP(atomic_compare_exchange_val),
+  X86_64_OP(atomic_compare_exchange_n),
 
   // Integer argument registers.
   X86_64_OP(a0),
@@ -216,6 +219,8 @@ typedef enum {
 #define X86_64_FCMP_SD 0x100000
 #define X86_64_INST_EXTENDED_ASM 0x200000
 #define X86_64_TLS_RELOC 0x400000
+#define X86_64_ATOMIC_SIZE_SHIFT 24
+#define X86_64_ATOMIC_SIZE_MASK (3 << X86_64_ATOMIC_SIZE_SHIFT)
 
 #define X86_64_MAX_ASM_OPERANDS 16
 
