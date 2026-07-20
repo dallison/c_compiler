@@ -440,6 +440,7 @@ TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
   copy->associated_constraint =
       ConceptsCloneConstraint(param->associated_constraint);
   copy->index = param->index;
+  copy->default_argument = TemplateArgumentCopy(param->default_argument);
   return copy;
 }
 
@@ -460,6 +461,11 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   // re-evaluation, so the pointer may be shared across copies.
   copy->dependent_expr = arg->dependent_expr;
   copy->location = arg->location;
+  copy->value_kind = arg->value_kind;
+  copy->value_symbol = arg->value_symbol;
+  copy->value_offset = arg->value_offset;
+  copy->value_adjustment = arg->value_adjustment;
+  copy->member_function = arg->member_function;
   return copy;
 }
 
@@ -477,10 +483,234 @@ TemplateArgument* NewIntegralTemplateArgument(long long value) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterNonType;
+  arg->value_kind = kTemplateValueIntegral;
   arg->int_value = value;
   arg->template_parameter_index = -1;
   arg->location = SOURCE_LOCATION_MISSING;
   return arg;
+}
+
+TemplateValueKind TemplateArgumentConcreteValueKind(
+    const TemplateArgument* arg) {
+  if (arg == NULL || arg->kind != kTemplateParameterNonType) {
+    return kTemplateValueNone;
+  }
+  if (arg->value_kind != kTemplateValueNone) {
+    return arg->value_kind;
+  }
+  // Preserve the meaning of arguments made by old code and old modules.
+  if (arg->template_parameter_index < 0 && arg->dependent_expr == NULL) {
+    return kTemplateValueIntegral;
+  }
+  return kTemplateValueNone;
+}
+
+static ASTNode* TemplatePointerConstantCore(ASTNode* expr) {
+  while (expr != NULL &&
+         (expr->op == AST_OP(cast) || expr->op == AST_OP(expr_init))) {
+    if (expr->op == AST_OP(cast)) {
+      expr = ((CastASTNode*)expr)->expr;
+    } else {
+      expr = ((ExpressionInitializerASTNode*)expr)->expr;
+    }
+  }
+  return expr;
+}
+
+static Symbol* TemplatePointerConstantSymbol(ASTNode* expr) {
+  expr = TemplatePointerConstantCore(expr);
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(address)) {
+    expr = TemplatePointerConstantCore(((UnaryASTNode*)expr)->sub);
+  }
+  if (expr != NULL && expr->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)expr)->symbol;
+  }
+  if (expr != NULL && expr->op == AST_OP(structmember)) {
+    StructMember* member = ((StructMemberASTNode*)expr)->member;
+    return member != NULL && member->is_static ? member->symbol : NULL;
+  }
+  return NULL;
+}
+
+static bool TemplateExpressionIsNullAddress(ASTNode* expr) {
+  ASTNode* core = TemplatePointerConstantCore(expr);
+  if (core == NULL) {
+    return false;
+  }
+  if (core->type != NULL && TypeIsNullPointer(core->type)) {
+    return true;
+  }
+  if (core->op == AST_OP(number) &&
+      ((ConstantASTNode*)core)->value.ivalue == 0) {
+    return true;
+  }
+  int64_t value = 1;
+  return EvaluateIntegerExpression(core, &value) && value == 0;
+}
+
+bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
+  if (arg == NULL || expr == NULL || expr->type == NULL) {
+    return false;
+  }
+  TypeRecordDelete(arg->type);
+  arg->type = TypeRecordCopy(expr->type);
+  arg->value_symbol = NULL;
+  arg->value_offset = 0;
+  arg->value_adjustment = 0;
+  arg->member_function = NULL;
+
+  if (TypeIsNullPointer(expr->type)) {
+    arg->value_kind = kTemplateValueNull;
+    arg->int_value = 0;
+    return true;
+  }
+  if (TypeIsMemberPointer(expr->type)) {
+    MemberPointerValue value;
+    bool is_null = TemplateExpressionIsNullAddress(expr);
+    if (is_null) {
+      MemberPointerEncodeNull(expr->type, &value);
+    } else if (!MemberPointerTryEvaluateConstant(expr, expr->type, &value)) {
+      return false;
+    }
+    StructMember* member = MemberPointerReferencedMember(expr);
+    arg->value_kind = kTemplateValueMemberPointer;
+    arg->value_symbol = member != NULL ? member->symbol : value.fn_symbol;
+    arg->value_offset = value.ptr;
+    arg->value_adjustment = value.adj;
+    arg->member_function = value.fn_symbol;
+    return true;
+  }
+  if (TypeIsPointer(expr->type) || TypeIsFunction(expr->type)) {
+    if (TypeIsPointer(expr->type) &&
+        TemplateExpressionIsNullAddress(expr)) {
+      arg->value_kind = kTemplateValueNull;
+      arg->int_value = 0;
+      return true;
+    }
+    Symbol* symbol = TemplatePointerConstantSymbol(expr);
+    if (symbol == NULL || symbol->flags.is_block_scope) {
+      return false;
+    }
+    arg->value_kind = kTemplateValuePointer;
+    arg->value_symbol = symbol;
+    return true;
+  }
+  if (expr->type->declarator == kDeclPrimitive &&
+      (expr->type->type &
+       (kTypeFloat | kTypeDouble | kTypeLongDouble)) != 0) {
+    return false;
+  }
+
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    return false;
+  }
+  arg->value_kind = kTemplateValueIntegral;
+  arg->int_value = value;
+  return true;
+}
+
+bool TemplateArgumentValuesEqual(const TemplateArgument* left,
+                                 const TemplateArgument* right) {
+  if (left == NULL || right == NULL ||
+      left->kind != right->kind) {
+    return false;
+  }
+  if (left->kind == kTemplateParameterType) {
+    return TypeEqual(left->type, right->type);
+  }
+  if (left->template_parameter_index != right->template_parameter_index) {
+    return false;
+  }
+  TemplateValueKind left_kind = TemplateArgumentConcreteValueKind(left);
+  TemplateValueKind right_kind = TemplateArgumentConcreteValueKind(right);
+  if (left_kind != right_kind) {
+    return false;
+  }
+  if (left->type != NULL && right->type != NULL &&
+      !TypeEqual(left->type, right->type)) {
+    return false;
+  }
+  switch (left_kind) {
+    case kTemplateValueIntegral:
+      return left->int_value == right->int_value;
+    case kTemplateValueNull:
+      return true;
+    case kTemplateValuePointer:
+      return left->value_symbol == right->value_symbol &&
+             left->value_offset == right->value_offset;
+    case kTemplateValueMemberPointer:
+      return left->value_symbol == right->value_symbol &&
+             left->value_offset == right->value_offset &&
+             left->value_adjustment == right->value_adjustment &&
+             left->member_function == right->member_function;
+    case kTemplateValueNone:
+      return left->dependent_expr == right->dependent_expr;
+  }
+  return false;
+}
+
+static StructMember* TemplateArgumentReferencedMember(
+    const TemplateArgument* arg) {
+  if (arg == NULL || arg->value_symbol == NULL || arg->type == NULL) {
+    return NULL;
+  }
+  Struct* owner = TypeMemberPointerClass(arg->type);
+  if (owner == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member != NULL && member->symbol == arg->value_symbol) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+ASTNode* TemplateArgumentMaterializeExpression(
+    const TemplateArgument* arg, SourceLocation location) {
+  if (arg == NULL || arg->kind != kTemplateParameterNonType) {
+    return NULL;
+  }
+  TypeRecord* type = arg->type != NULL
+                         ? TypeRecordCopy(arg->type)
+                         : NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  switch (TemplateArgumentConcreteValueKind(arg)) {
+    case kTemplateValueIntegral:
+      return NewIntConstantASTNode(arg->int_value, type, location);
+    case kTemplateValueNull:
+      return NewIntConstantASTNode(0, type, location);
+    case kTemplateValuePointer: {
+      if (arg->value_symbol == NULL) {
+        TypeRecordDelete(type);
+        return NULL;
+      }
+      ASTNode* id = NewIdentifierASTNode(arg->value_symbol, location);
+      ASTNode* address = NewUnaryASTNode(AST_OP(address), NULL, location, id);
+      ASTNodeSetType(address, type);
+      return address;
+    }
+    case kTemplateValueMemberPointer: {
+      StructMember* member = TemplateArgumentReferencedMember(arg);
+      if (member == NULL) {
+        return NewIntConstantASTNode(arg->value_offset, type, location);
+      }
+      ASTNode* member_node = NewStructMemberASTNode(member, location);
+      ASTNode* member_pointer =
+          NewUnaryASTNode(AST_OP(member_ptr), NULL, location, member_node);
+      ASTNodeSetType(member_pointer, type);
+      return member_pointer;
+    }
+    case kTemplateValueNone:
+      TypeRecordDelete(type);
+      return NULL;
+  }
+  TypeRecordDelete(type);
+  return NULL;
 }
 
 /* Deep-copy a vector of template arguments (NULL-safe). */
@@ -814,6 +1044,7 @@ void TemplateParameterDelete(TemplateParameter* param) {
   StringDestruct(&param->name);
   TypeRecordDelete(param->type);
   TypeRecordDelete(param->default_type);
+  TemplateArgumentDelete(param->default_argument);
   ConstraintExprDelete(param->associated_constraint);
   free(param);
 }

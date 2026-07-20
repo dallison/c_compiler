@@ -7731,7 +7731,13 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
 static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
-  if ((node->right != NULL && node->right->type != NULL &&
+  bool right_is_nttp =
+      node->right != NULL && node->right->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)node->right)->symbol != NULL &&
+      ((IdentifierASTNode*)node->right)->symbol->flags.is_template_parameter &&
+      !((IdentifierASTNode*)node->right)->symbol->flags.is_template_type_parameter;
+  if (right_is_nttp || ExpressionIsTemplateDependent(node->right) ||
+      (node->right != NULL && node->right->type != NULL &&
        (TypeContainsTemplateParameter(node->right->type) ||
         TypeIsUnknown(node->right->type))) ||
       (node->left != NULL && node->left->type != NULL &&

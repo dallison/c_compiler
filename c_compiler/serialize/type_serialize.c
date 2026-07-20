@@ -73,6 +73,11 @@ enum {
   kTArg_pack_arguments = 6,
   kTArg_dependent_expr = 7,
   kTArg_location = 8,
+  kTArg_value_kind = 9,
+  kTArg_value_symbol = 10,
+  kTArg_value_offset = 11,
+  kTArg_value_adjustment = 12,
+  kTArg_member_function = 13,
 };
 
 //
@@ -89,6 +94,7 @@ enum {
   kTParam_default_template_parameter_index = 8,
   kTParam_index = 9,
   kTParam_associated_constraint = 10,
+  kTParam_default_argument = 11,
 };
 
 //
@@ -304,6 +310,35 @@ static const WireFieldDesc kStructFields[] = {
 // ---------------------------------------------------------------------------
 // TemplateParameter (inline).
 // ---------------------------------------------------------------------------
+static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
+                                  TemplateArgument* a);
+static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
+                                              WireBuffer* in);
+
+static void WriteTemplateArgumentField(SerializeContext* ctx, WireBuffer* out,
+                                       int field, TemplateArgument* arg) {
+  if (arg == NULL) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitOwned(&sub, 32);
+  WriteTemplateArgument(ctx, &sub, arg);
+  WireWriteBytes(out, field, WireBufferData(&sub), WireBufferSize(&sub));
+  WireBufferDestruct(&sub);
+}
+
+static TemplateArgument* ReadTemplateArgumentField(DeserializeContext* ctx,
+                                                   WireBuffer* in) {
+  const void* data;
+  size_t length;
+  if (!WireReadBytes(in, &data, &length)) {
+    return NULL;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, length);
+  return ReadTemplateArgument(ctx, &sub);
+}
+
 static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
                                    TemplateParameter* p) {
   SWriteStringVal(ctx, out, kTParam_name, &p->name);
@@ -318,6 +353,8 @@ static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
   WireWriteInt32(out, kTParam_index, p->index);
   SerialWriteConstraint(ctx, out, kTParam_associated_constraint,
                         p->associated_constraint);
+  WriteTemplateArgumentField(ctx, out, kTParam_default_argument,
+                             p->default_argument);
 }
 
 static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
@@ -364,9 +401,20 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
       case kTParam_associated_constraint:
         p->associated_constraint = SerialReadConstraint(ctx, in);
         break;
+      case kTParam_default_argument:
+        p->default_argument = ReadTemplateArgumentField(ctx, in);
+        break;
       default:
         WireSkip(in, wt);
         break;
+    }
+  }
+  if (p->default_argument == NULL && p->has_default_int) {
+    p->default_argument = NewIntegralTemplateArgument(p->default_int_value);
+    p->default_argument->template_parameter_index =
+        p->default_template_parameter_index;
+    if (p->default_template_parameter_index >= 0) {
+      p->default_argument->value_kind = kTemplateValueNone;
     }
   }
   return p;
@@ -443,6 +491,12 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
   }
   SWriteRef(ctx, out, kTArg_dependent_expr, kSerialKindAST, a->dependent_expr);
   WireWriteUint64(out, kTArg_location, (uint64_t)a->location);
+  WireWriteInt32(out, kTArg_value_kind, (int32_t)a->value_kind);
+  SWriteRef(ctx, out, kTArg_value_symbol, kSerialKindSymbol, a->value_symbol);
+  WireWriteInt64(out, kTArg_value_offset, a->value_offset);
+  WireWriteInt64(out, kTArg_value_adjustment, a->value_adjustment);
+  SWriteRef(ctx, out, kTArg_member_function, kSerialKindSymbol,
+            a->member_function);
 }
 
 static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
@@ -487,10 +541,35 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         a->location = (SourceLocation)loc;
         break;
       }
+      case kTArg_value_kind: {
+        int32_t value;
+        WireReadInt32(in, &value);
+        a->value_kind = (TemplateValueKind)value;
+        break;
+      }
+      case kTArg_value_symbol:
+        a->value_symbol = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_value_offset:
+        WireReadInt64(in, &a->value_offset);
+        break;
+      case kTArg_value_adjustment:
+        WireReadInt64(in, &a->value_adjustment);
+        break;
+      case kTArg_member_function:
+        a->member_function =
+            (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
       default:
         WireSkip(in, wt);
         break;
     }
+  }
+  if (a->kind == kTemplateParameterNonType &&
+      a->value_kind == kTemplateValueNone &&
+      a->template_parameter_index < 0 && a->dependent_expr == NULL) {
+    // Modules written before typed NTTPs only carried int_value.
+    a->value_kind = kTemplateValueIntegral;
   }
   return a;
 }

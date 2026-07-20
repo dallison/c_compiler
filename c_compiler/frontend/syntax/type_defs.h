@@ -75,6 +75,14 @@ typedef enum {
   kTemplateParameterNonType,
 } TemplateParameterKind;
 
+typedef enum {
+  kTemplateValueNone,
+  kTemplateValueIntegral,
+  kTemplateValueNull,
+  kTemplateValuePointer,
+  kTemplateValueMemberPointer,
+} TemplateValueKind;
+
 // Serialized as an inline sub-message (see type_serialize.c); the field
 // numbers below are local to that sub-message.
 typedef struct TemplateParameter {
@@ -88,6 +96,7 @@ typedef struct TemplateParameter {
   int default_template_parameter_index;  // >=0 if default names a param. // @wire 8
   struct ConstraintExpr* associated_constraint;  // Optional C++20 constraint. // @wire 10
   int index;                        // @wire 9
+  struct TemplateArgument* default_argument;  // Typed NTTP default. // @wire 11
 } TemplateParameter;
 
 // Serialized as an inline sub-message (see type_serialize.c); the field
@@ -111,6 +120,11 @@ typedef struct TemplateArgument {
   // expansion) must report here rather than at the unrelated instantiation
   // point.  SOURCE_LOCATION_MISSING when unknown (synthesized arguments).
   SourceLocation location;   // @wire 8
+  TemplateValueKind value_kind;  // Concrete NTTP representation. // @wire 9
+  Symbol* value_symbol;      // Object/function address.           // @wire 10
+  int64_t value_offset;      // Pointer byte offset/member ptr.    // @wire 11
+  int64_t value_adjustment;  // Member-function this adjustment.   // @wire 12
+  Symbol* member_function;   // Non-virtual member function.       // @wire 13
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {

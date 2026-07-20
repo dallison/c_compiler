@@ -17,6 +17,7 @@
 #include "ast.h"
 #include "dstring.h"
 #include "compiler.h"
+#include "member_pointer.h"
 #include "module_identity.h"
 #include "symbol_table.h"
 
@@ -423,6 +424,71 @@ static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
 }
 
 static void AppendCXXTypeEncoding(String* out, TypeRecord* type);
+static Namespace* CXXStructNamespace(Struct* str);
+static void AppendCXXStructNameComponents(String* out, Struct* str);
+
+static void AppendCXXTemplateNonTypeArgument(String* out,
+                                             TemplateArgument* arg) {
+  TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
+  if (kind == kTemplateValueIntegral || kind == kTemplateValueNone) {
+    char value[64];
+    long long int_value = arg->int_value;
+    StringAppendChar(out, 'L');
+    if (arg->type != NULL) {
+      AppendCXXTypeEncoding(out, arg->type);
+    } else {
+      StringAppendChar(out, 'i');
+    }
+    if (int_value < 0) {
+      snprintf(value, sizeof(value), "n%lldE", -int_value);
+    } else {
+      snprintf(value, sizeof(value), "%lldE", int_value);
+    }
+    StringAppend(out, value);
+    return;
+  }
+  if (kind == kTemplateValueNull) {
+    if (arg->type != NULL && TypeIsNullPointer(arg->type)) {
+      StringAppend(out, "LDnE");
+    } else {
+      StringAppendChar(out, 'L');
+      AppendCXXTypeEncoding(out, arg->type);
+      StringAppend(out, "0E");
+    }
+    return;
+  }
+  Symbol* symbol = kind == kTemplateValueMemberPointer &&
+                           arg->member_function != NULL
+                       ? arg->member_function
+                       : arg->value_symbol;
+  if (symbol == NULL) {
+    StringAppend(out, "LDnE");
+    return;
+  }
+  if (kind == kTemplateValueMemberPointer) {
+    StringAppend(out, "XadL");
+  } else {
+    StringAppendChar(out, 'L');
+  }
+  if (kind == kTemplateValueMemberPointer &&
+      symbol->asm_name.length == 0 && arg->type != NULL) {
+    Struct* owner = TypeMemberPointerClass(arg->type);
+    StringAppend(out, "_ZN");
+    AppendCXXNestedNamespaceComponents(out, CXXStructNamespace(owner));
+    AppendCXXStructNameComponents(out, owner);
+    AppendCXXNameComponent(out, symbol->name.value);
+    StringAppendChar(out, 'E');
+  } else if (symbol->asm_name.length != 0) {
+    StringAppendString(out, &symbol->asm_name);
+  } else {
+    StringAppend(out, "_Z");
+    AppendCXXNameComponent(out, symbol->name.value);
+  }
+  StringAppendChar(out, 'E');
+  if (kind == kTemplateValueMemberPointer) {
+    StringAppendChar(out, 'E');
+  }
+}
 
 static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
   if (args == NULL) {
@@ -443,14 +509,7 @@ static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
         if (element->kind == kTemplateParameterType) {
           AppendCXXTypeEncoding(out, element->type);
         } else {
-          char value[64];
-          long long int_value = element->int_value;
-          if (int_value < 0) {
-            snprintf(value, sizeof(value), "Lin%lldE", -int_value);
-          } else {
-            snprintf(value, sizeof(value), "Li%lldE", int_value);
-          }
-          StringAppend(out, value);
+          AppendCXXTemplateNonTypeArgument(out, element);
         }
       }
       continue;
@@ -458,14 +517,7 @@ static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
     if (arg->kind == kTemplateParameterType) {
       AppendCXXTypeEncoding(out, arg->type);
     } else {
-      char value[64];
-      long long int_value = arg->int_value;
-      if (int_value < 0) {
-        snprintf(value, sizeof(value), "Lin%lldE", -int_value);
-      } else {
-        snprintf(value, sizeof(value), "Li%lldE", int_value);
-      }
-      StringAppend(out, value);
+      AppendCXXTemplateNonTypeArgument(out, arg);
     }
   }
   StringAppendChar(out, 'E');
@@ -713,14 +765,7 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
         if (element->kind == kTemplateParameterType) {
           AppendCXXTypeEncoding(out, element->type);
         } else {
-          char value[64];
-          long long int_value = element->int_value;
-          if (int_value < 0) {
-            snprintf(value, sizeof(value), "Lin%lldE", -int_value);
-          } else {
-            snprintf(value, sizeof(value), "Li%lldE", int_value);
-          }
-          StringAppend(out, value);
+          AppendCXXTemplateNonTypeArgument(out, element);
         }
       }
       continue;
@@ -728,14 +773,7 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
     if (arg->kind == kTemplateParameterType) {
       AppendCXXTypeEncoding(out, arg->type);
     } else {
-      char value[64];
-      long long int_value = arg->int_value;
-      if (int_value < 0) {
-        snprintf(value, sizeof(value), "Lin%lldE", -int_value);
-      } else {
-        snprintf(value, sizeof(value), "Li%lldE", int_value);
-      }
-      StringAppend(out, value);
+      AppendCXXTemplateNonTypeArgument(out, arg);
     }
   }
   StringAppendChar(out, 'E');

@@ -1881,12 +1881,9 @@ static ASTNode* ReplaceTemplateArgumentPackIdentifier(
     return node;
   }
   *action = kASTTransformSkipChildren;
-  TypeRecord* type =
-      replace->symbol->type != NULL
-          ? TypeRecordCopy(replace->symbol->type)
-          : NewTypeRecordWithSize(kTypeInt, kQualPlain);
-  return NewIntConstantASTNode(replace->argument->int_value, type,
-                               node->location);
+  ASTNode* value =
+      TemplateArgumentMaterializeExpression(replace->argument, node->location);
+  return value != NULL ? value : node;
 }
 
 static ASTNode* CloneTemplateArgumentPackPattern(
@@ -3060,9 +3057,11 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
           clone->args->value.p[id->symbol->template_parameter_index];
       if (arg != NULL && arg->kind == kTemplateParameterNonType &&
           arg->pack_arguments == NULL && arg->template_parameter_index < 0) {
-        return NewIntConstantASTNode(
-            arg->int_value, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-            node->location);
+        ASTNode* value =
+            TemplateArgumentMaterializeExpression(arg, node->location);
+        if (value != NULL) {
+          return value;
+        }
       }
     }
     // A bare reference to a value-dependent static data member of the template

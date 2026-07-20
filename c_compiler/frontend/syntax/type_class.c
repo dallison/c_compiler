@@ -81,6 +81,7 @@ static TemplateArgument* NewTemplateParameterPatternArgument(
     return NULL;
   }
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = param->kind;
   arg->is_pack_expansion = param->is_parameter_pack;
   arg->type = NULL;

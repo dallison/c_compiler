@@ -6556,6 +6556,7 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   param->default_template_parameter_index =
       default_template_parameter_index;
   param->associated_constraint = NULL;
+  param->default_argument = NULL;
   if (type != NULL) {
     TypeRecordIncRef(type);
   }
@@ -6566,30 +6567,36 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   return param;
 }
 
-static bool ParseTemplateNonTypeDefault(Syntax* syntax,
-                                        long long* default_value,
-                                        int* default_parameter_index) {
+static TemplateArgument* ParseTemplateNonTypeDefault(Syntax* syntax) {
   bool old_parsing_template_argument = syntax->parsing_template_argument;
   syntax->parsing_template_argument = true;
   ASTNode* expr = SyntaxParseSingleExpression(syntax,
                                               TC(closebra) | TC(exprsep));
   syntax->parsing_template_argument = old_parsing_template_argument;
+  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  arg->kind = kTemplateParameterNonType;
+  arg->template_parameter_index = -1;
+  arg->location = expr != NULL ? expr->location : SOURCE_LOCATION_MISSING;
   expr = AnalyzeExpression(expr);
-  bool ok = EvaluateIntegerExpression(expr, default_value);
-  if (!ok && expr->op == AST_OP(identifier)) {
+  bool ok = TemplateArgumentSetFromExpression(arg, expr);
+  if (!ok && expr != NULL && expr->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)expr;
     if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
         !id->symbol->flags.is_template_type_parameter) {
-      *default_parameter_index = id->symbol->template_parameter_index;
+      arg->template_parameter_index = id->symbol->template_parameter_index;
+      arg->value_kind = kTemplateValueNone;
+      TypeRecordDelete(arg->type);
+      arg->type = TypeRecordCopy(id->symbol->type);
       ok = true;
     }
   }
   if (!ok) {
-    SyntaxError(syntax,
-                "Template non-type default must be an integer constant expression");
+    SyntaxError(syntax, "Template non-type default must be a constant expression");
+    TemplateArgumentDelete(arg);
+    arg = NULL;
   }
   ASTNodeDelete(expr);
-  return ok;
+  return arg;
 }
 
 static TypeRecord* ParseTemplateTypeDefault(Syntax* syntax) {
@@ -6611,6 +6618,7 @@ static TypeRecord* ParseTemplateTypeDefault(Syntax* syntax) {
 static TemplateArgument* NewTemplateParameterTypeArgument(int index,
                                                          TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(type);
@@ -6724,22 +6732,23 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
     } else {
       VectorInsertBefore(concept_arguments, 0, constrained_arg);
     }
-    bool has_default_int = false;
-    long long default_int_value = 0;
-    int default_template_parameter_index = -1;
+    TemplateArgument* default_argument = NULL;
     if (LexMatch(lex, TOK(equal))) {
       if (is_parameter_pack) {
         SyntaxError(syntax, "Template parameter pack cannot have a default");
       }
-      has_default_int =
-          ParseTemplateNonTypeDefault(syntax, &default_int_value,
-                                      &default_template_parameter_index);
+      default_argument = ParseTemplateNonTypeDefault(syntax);
     }
     TemplateParameter* template_param =
         NewTemplateParameter(param_name.value, kTemplateParameterNonType,
                              is_parameter_pack, placeholder_type, NULL,
-                             has_default_int, default_int_value,
-                             default_template_parameter_index, index);
+                             default_argument != NULL,
+                             default_argument != NULL
+                                 ? default_argument->int_value : 0,
+                             default_argument != NULL
+                                 ? default_argument->template_parameter_index : -1,
+                             index);
+    template_param->default_argument = default_argument;
     template_param->associated_constraint =
         NewConceptIdConstraint(concept_symbol, concept_arguments,
                                constraint_location);
@@ -6975,6 +6984,19 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     SyntaxRecover(syntax, TC(closebra));
     return false;
   }
+  if (param->type != NULL && (param->type->type & kTypeAuto) != 0) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+      SyntaxError(syntax,
+                  "auto non-type template parameters require C++17");
+    }
+    TypeRecord* placeholder =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    placeholder->template_parameter_index = index;
+    placeholder->template_parameter_name = NewString("auto");
+    TypeRecordDelete(param->type);
+    param->type = placeholder;
+    TypeRecordIncRef(param->type);
+  }
   param->flags.invented = true;
   param->flags.is_template_parameter = true;
   param->flags.is_template_type_parameter = false;
@@ -6985,25 +7007,24 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
     SymbolDelete(param);
   }
-  bool has_default_int = false;
-  long long default_int_value = 0;
-  int default_template_parameter_index = -1;
+  TemplateArgument* default_argument = NULL;
   if (LexMatch(lex, TOK(equal))) {
     if (is_parameter_pack) {
       SyntaxError(syntax, "Template parameter pack cannot have a default");
     }
-    has_default_int =
-        ParseTemplateNonTypeDefault(syntax, &default_int_value,
-                                    &default_template_parameter_index);
+    default_argument = ParseTemplateNonTypeDefault(syntax);
   }
-  VectorAppend(params, NewTemplateParameter(param->name.value,
-                                            kTemplateParameterNonType,
-                                            is_parameter_pack,
-                                            param->type, NULL,
-                                            has_default_int,
-                                            default_int_value,
-                                            default_template_parameter_index,
-                                            index));
+  TemplateParameter* template_param =
+      NewTemplateParameter(param->name.value, kTemplateParameterNonType,
+                           is_parameter_pack, param->type, NULL,
+                           default_argument != NULL,
+                           default_argument != NULL
+                               ? default_argument->int_value : 0,
+                           default_argument != NULL
+                               ? default_argument->template_parameter_index : -1,
+                           index);
+  template_param->default_argument = default_argument;
+  VectorAppend(params, template_param);
   return true;
 }
 
@@ -7168,6 +7189,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   Vector* args = NewVector();
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+    memset(arg, 0, sizeof(*arg));
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion = false;
     arg->type = NULL;
@@ -7242,8 +7264,15 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           arg->template_parameter_index = direct_template_parameter_index;
         }
         expr = AnalyzeExpression(expr);
-        int64_t value = 0;
-        if (!EvaluateIntegerExpression(expr, &value)) {
+        bool value_ok = false;
+        if (arg->template_parameter_index >= 0) {
+          arg->type = expr != NULL && expr->type != NULL
+                          ? TypeRecordCopy(expr->type) : NULL;
+          value_ok = true;
+        } else {
+          value_ok = TemplateArgumentSetFromExpression(arg, expr);
+        }
+        if (!value_ok) {
           if (syntax->parsing_template_declaration &&
               expr->op == AST_OP(identifier)) {
             IdentifierASTNode* id = (IdentifierASTNode*)expr;
@@ -7264,13 +7293,11 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
               continue;
             } else {
               SyntaxError(syntax,
-                          "Template non-type argument must be an integer constant expression");
+                          "Template non-type argument must be an integer constant "
+                          "expression, or a pointer/member-pointer argument must "
+                          "be a constant expression");
             }
           }
-        }
-        arg->int_value = value;
-        if (expr->type != NULL) {
-          arg->type = TypeRecordCopy(expr->type);
         }
         ASTNodeDelete(expr);
         arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
@@ -7371,6 +7398,7 @@ static void MoveCurrentTemplateParametersToStruct(Syntax* syntax, Struct* str) {
       continue;
     }
     bool next_has_default = next->default_type != NULL ||
+                            next->default_argument != NULL ||
                             next->has_default_int ||
                             next->default_template_parameter_index >= 0;
     if (next_has_default) {
@@ -7384,6 +7412,8 @@ static void MoveCurrentTemplateParametersToStruct(Syntax* syntax, Struct* str) {
     next->default_int_value = prev->default_int_value;
     next->default_template_parameter_index =
         prev->default_template_parameter_index;
+    next->default_argument = prev->default_argument;
+    prev->default_argument = NULL;
   }
   VectorDestructWithContents(&str->template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,

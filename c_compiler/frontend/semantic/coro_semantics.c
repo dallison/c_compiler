@@ -1564,6 +1564,7 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   }
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   assert(arg != NULL);
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(type);

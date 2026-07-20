@@ -1272,6 +1272,11 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   copy->pack_arguments = TemplateArgumentVectorCopy(arg->pack_arguments);
   copy->dependent_expr = arg->dependent_expr;
   copy->location = arg->location;
+  copy->value_kind = arg->value_kind;
+  copy->value_symbol = arg->value_symbol;
+  copy->value_offset = arg->value_offset;
+  copy->value_adjustment = arg->value_adjustment;
+  copy->member_function = arg->member_function;
   return copy;
 }
 
@@ -1298,8 +1303,7 @@ static bool NormalizationTemplateArgumentsEqual(TemplateArgument* left,
     return TypeEqual(left->type, right->type) &&
            left->template_parameter_index == right->template_parameter_index;
   }
-  return left->int_value == right->int_value &&
-         left->template_parameter_index == right->template_parameter_index;
+  return TemplateArgumentValuesEqual(left, right);
 }
 
 typedef struct NormalizedAtomic {

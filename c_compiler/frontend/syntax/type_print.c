@@ -490,10 +490,36 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
   } else if (argument->template_parameter_index >= 0) {
     StringPrintf(result, "$N%d", argument->template_parameter_index);
   } else {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%lld",
-             (long long)argument->int_value);
-    StringAppend(result, buffer);
+    if (argument->type != NULL) {
+      TypeRecordToTemplateKeyString(argument->type, result);
+      StringAppendChar(result, '=');
+    }
+    switch (TemplateArgumentConcreteValueKind(argument)) {
+      case kTemplateValueIntegral:
+        StringPrintf(result, "I%lld", (long long)argument->int_value);
+        break;
+      case kTemplateValueNull:
+        StringAppend(result, "N");
+        break;
+      case kTemplateValuePointer:
+        StringPrintf(result, "P%d+%lld",
+                     argument->value_symbol != NULL
+                         ? argument->value_symbol->id : -1,
+                     (long long)argument->value_offset);
+        break;
+      case kTemplateValueMemberPointer:
+        StringPrintf(result, "M%d:%lld:%lld:%d",
+                     argument->value_symbol != NULL
+                         ? argument->value_symbol->id : -1,
+                     (long long)argument->value_offset,
+                     (long long)argument->value_adjustment,
+                     argument->member_function != NULL
+                         ? argument->member_function->id : -1);
+        break;
+      case kTemplateValueNone:
+        StringAppend(result, "?");
+        break;
+    }
   }
 }
 

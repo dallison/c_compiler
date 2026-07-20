@@ -413,6 +413,21 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
     if (param->default_template_parameter_index >= rebase_base) {
       param->default_template_parameter_index -= rebase_base;
     }
+    if (param->default_argument != NULL &&
+        param->default_argument->template_parameter_index >= 0) {
+      int default_index =
+          param->default_argument->template_parameter_index;
+      if (default_index < rebase_base && subst_args != NULL &&
+          (size_t)default_index < subst_args->length) {
+        TemplateArgument* actual = subst_args->value.p[default_index];
+        if (actual != NULL) {
+          TemplateArgumentDelete(param->default_argument);
+          param->default_argument = TemplateArgumentCopy(actual);
+        }
+      } else if (default_index >= rebase_base) {
+        param->default_argument->template_parameter_index -= rebase_base;
+      }
+    }
     if (param->index >= rebase_base) {
       param->index -= rebase_base;
     }
@@ -1254,6 +1269,7 @@ static TypeRecord* CopyDeducedTypeSpine(TypeRecord* type) {
  * argument expression because deduction temporaries are destroyed earlier. */
 static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = CopyDeducedTypeSpine(type);
@@ -1268,10 +1284,12 @@ static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
 /* Create a non-type template argument holding a deduced integer value. */
 static TemplateArgument* NewDeducedNonTypeTemplateArgument(long long value) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterNonType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
   arg->int_value = value;
+  arg->value_kind = kTemplateValueIntegral;
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
@@ -1503,6 +1521,25 @@ static bool SetDeducedFunctionTemplateNonTypeArgument(Vector* args,
          existing->int_value == value;
 }
 
+static bool SetDeducedTemplateNonTypeArgument(
+    Vector* args, size_t explicit_arg_count, int index,
+    TemplateArgument* value) {
+  if (index < 0 || (size_t)index >= args->length || value == NULL ||
+      value->kind != kTemplateParameterNonType) {
+    return false;
+  }
+  if ((size_t)index < explicit_arg_count) {
+    TemplateArgument* existing = args->value.p[index];
+    return existing == NULL || TemplateArgumentEqual(existing, value);
+  }
+  TemplateArgument* existing = args->value.p[index];
+  if (existing == NULL) {
+    args->value.p[index] = TemplateArgumentCopy(value);
+    return true;
+  }
+  return TemplateArgumentEqual(existing, value);
+}
+
 /* Unwrap a braced-initializer element to its underlying expression. */
 static ASTNode* CXXBracedInitializerElementExpression(ASTNode* init) {
   if (init == NULL) {
@@ -1617,11 +1654,11 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
                                               actual_arg->type);
   }
   if (formal_arg->template_parameter_index >= 0) {
-    return SetDeducedFunctionTemplateNonTypeArgument(
+    return SetDeducedTemplateNonTypeArgument(
         args, explicit_arg_count, formal_arg->template_parameter_index,
-        actual_arg->int_value);
+        actual_arg);
   }
-  return formal_arg->int_value == actual_arg->int_value;
+  return TemplateArgumentEqual(formal_arg, actual_arg);
 }
 
 // The template-argument list describing a class-template specialization type.
@@ -2289,7 +2326,8 @@ static bool FunctionTemplateCanCompleteDeducedArguments(TypeRecord* func,
       if (param->default_type == NULL) {
         return false;
       }
-    } else if (!param->has_default_int) {
+    } else if (!param->has_default_int &&
+               param->default_argument == NULL) {
       return false;
     }
   }
@@ -3112,10 +3150,10 @@ static bool TemplateArgumentPatternMatchesDeduced(Vector* bindings,
   }
   if (pattern->kind == kTemplateParameterNonType) {
     if (pattern->template_parameter_index >= 0) {
-      return SetDeducedFunctionTemplateNonTypeArgument(
-          bindings, 0, pattern->template_parameter_index, deduced->int_value);
+      return SetDeducedTemplateNonTypeArgument(
+          bindings, 0, pattern->template_parameter_index, deduced);
     }
-    return pattern->int_value == deduced->int_value;
+    return TemplateArgumentEqual(pattern, deduced);
   }
   if (pattern->type == NULL || deduced->type == NULL) {
     return false;
@@ -3145,6 +3183,7 @@ static bool SetDeducedClassTemplateTypeArgument(Vector* bindings, int index,
 
 static TemplateArgument* NewDeducedTypePackTemplateArgument(void) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -3313,10 +3352,10 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
   }
   if (pattern->kind == kTemplateParameterNonType) {
     if (pattern->template_parameter_index >= 0) {
-      return SetDeducedFunctionTemplateNonTypeArgument(
-          bindings, 0, pattern->template_parameter_index, actual->int_value);
+      return SetDeducedTemplateNonTypeArgument(
+          bindings, 0, pattern->template_parameter_index, actual);
     }
-    return pattern->int_value == actual->int_value;
+    return TemplateArgumentEqual(pattern, actual);
   }
   return ClassTemplateTypePatternMatches(bindings, pattern->type, actual->type);
 }
@@ -4444,6 +4483,7 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
 
 static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = type;
@@ -4458,10 +4498,13 @@ static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
 static TemplateArgument* NewDefaultNonTypeTemplateArgument(
     long long int_value, int template_parameter_index) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterNonType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
   arg->int_value = int_value;
+  arg->value_kind = template_parameter_index < 0
+                        ? kTemplateValueIntegral : kTemplateValueNone;
   arg->template_parameter_index = template_parameter_index;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
@@ -4472,6 +4515,7 @@ static TemplateArgument* NewDefaultNonTypeTemplateArgument(
 TemplateArgument* NewEmptyPackTemplateArgument(
     TemplateParameterKind kind) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kind;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -4492,6 +4536,50 @@ static int FindTemplateParameterPackIndex(Vector* template_parameters) {
     }
   }
   return -1;
+}
+
+static bool TemplateNonTypeArgumentMatchesParameter(
+    TemplateParameter* param, TemplateArgument* arg) {
+  if (param == NULL || arg == NULL ||
+      param->kind != kTemplateParameterNonType ||
+      arg->kind != kTemplateParameterNonType) {
+    return false;
+  }
+  if (param->type == NULL || (param->type->type & kTypeAuto) != 0 ||
+      TypeContainsTemplateParameter(param->type)) {
+    return TemplateArgumentConcreteValueKind(arg) != kTemplateValueNone ||
+           arg->template_parameter_index >= 0 ||
+           arg->dependent_expr != NULL;
+  }
+  TemplateValueKind value_kind = TemplateArgumentConcreteValueKind(arg);
+  if (value_kind == kTemplateValueIntegral) {
+    return param->type->declarator == kDeclPrimitive &&
+           (param->type->type &
+            (kTypeFloat | kTypeDouble | kTypeLongDouble |
+             kTypeStruct | kTypeUnion | kTypeVoid)) == 0;
+  }
+  if (arg->type == NULL) {
+    return false;
+  }
+  if (value_kind == kTemplateValueNull) {
+    return TypeIsPointer(param->type) || TypeIsMemberPointer(param->type) ||
+           TypeIsNullPointer(param->type);
+  }
+  if (value_kind == kTemplateValuePointer) {
+    if (!TypeIsPointer(arg->type) || !TypeIsPointer(param->type)) {
+      return false;
+    }
+    bool argument_is_function =
+        arg->type->next != NULL && TypeIsFunction(arg->type->next);
+    bool parameter_is_function =
+        param->type->next != NULL && TypeIsFunction(param->type->next);
+    return argument_is_function == parameter_is_function &&
+           TypeAssignmentCompatible(arg->type, param->type);
+  }
+  if (value_kind == kTemplateValueMemberPointer) {
+    return TypeEqual(arg->type, param->type);
+  }
+  return TypeAssignmentCompatible(arg->type, param->type);
 }
 
 /* Produce a full template argument vector with one entry per declared
@@ -4572,21 +4660,28 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                          completed);
         arg = NewDefaultTypeTemplateArgument(default_type);
       } else if (param->kind == kTemplateParameterNonType &&
-                 param->has_default_int) {
-        long long default_int_value = param->default_int_value;
+                 (param->default_argument != NULL ||
+                  param->has_default_int)) {
+        TemplateArgument* default_argument = param->default_argument;
         int default_template_parameter_index =
-            param->default_template_parameter_index;
+            default_argument != NULL
+                ? default_argument->template_parameter_index
+                : param->default_template_parameter_index;
         if (default_template_parameter_index >= 0 &&
             (size_t)default_template_parameter_index < completed->length) {
           TemplateArgument* actual =
               completed->value.p[default_template_parameter_index];
           if (actual->kind == kTemplateParameterNonType) {
-            default_int_value = actual->int_value;
-            default_template_parameter_index = -1;
+            arg = TemplateArgumentCopy(actual);
           }
         }
-        arg = NewDefaultNonTypeTemplateArgument(default_int_value,
-                                                default_template_parameter_index);
+        if (arg == NULL) {
+          arg = default_argument != NULL
+                    ? TemplateArgumentCopy(default_argument)
+                    : NewDefaultNonTypeTemplateArgument(
+                          param->default_int_value,
+                          default_template_parameter_index);
+        }
       } else {
         if (emit_error) {
           SyntaxError(parser->syntax, "%s", error_message);
@@ -4609,6 +4704,25 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       return NULL;
+    }
+    if (param->kind == kTemplateParameterNonType &&
+        !TemplateNonTypeArgumentMatchesParameter(param, arg)) {
+      if (emit_error) {
+        SyntaxError(parser->syntax,
+                    "Template non-type argument is not compatible with parameter type");
+      }
+      TemplateArgumentDelete(arg);
+      VectorDeleteWithContents(completed,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+    if (param->kind == kTemplateParameterNonType &&
+        param->type != NULL && (param->type->type & kTypeAuto) == 0 &&
+        !TypeContainsTemplateParameter(param->type) &&
+        arg->template_parameter_index < 0 && arg->dependent_expr == NULL) {
+      TypeRecordDelete(arg->type);
+      arg->type = TypeRecordCopy(param->type);
     }
     VectorAppend(completed, arg);
   }
@@ -5518,6 +5632,7 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
   }
   Vector* args = NewVector();
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(element_type);

@@ -31,6 +31,14 @@ void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
 TemplateArgument* NewIntegralTemplateArgument(long long value);
+TemplateValueKind TemplateArgumentConcreteValueKind(
+    const TemplateArgument* arg);
+bool TemplateArgumentSetFromExpression(TemplateArgument* arg,
+                                       struct ASTNode* expr);
+bool TemplateArgumentValuesEqual(const TemplateArgument* left,
+                                 const TemplateArgument* right);
+struct ASTNode* TemplateArgumentMaterializeExpression(
+    const TemplateArgument* arg, SourceLocation location);
 Vector* TemplateArgumentVectorCopy(Vector* args);
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals);

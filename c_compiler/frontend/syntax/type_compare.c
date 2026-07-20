@@ -172,8 +172,7 @@ bool TemplateArgumentEqual(TemplateArgument* left,
     return DependentTemplateArgExprEqual(left->dependent_expr,
                                          right->dependent_expr);
   }
-  return left->int_value == right->int_value &&
-         left->template_parameter_index == right->template_parameter_index;
+  return TemplateArgumentValuesEqual(left, right);
 }
 
 /* Element-wise equality of two concrete template argument vectors. */
@@ -412,8 +411,7 @@ static bool TemplateArgumentPatternEqual(TemplateArgument* left,
   if (left->kind == kTemplateParameterType) {
     return TemplateTypePatternEqual(left->type, right->type);
   }
-  return left->int_value == right->int_value &&
-         left->template_parameter_index == right->template_parameter_index;
+  return TemplateArgumentValuesEqual(left, right);
 }
 
 /* Element-wise equality of two template argument pattern vectors. */

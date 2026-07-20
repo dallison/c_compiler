@@ -150,14 +150,22 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
                                                        TemplateArgument* arg,
                                                        Vector* args) {
   TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
+  memset(concrete, 0, sizeof(*concrete));
   concrete->kind = arg->kind;
   concrete->is_pack_expansion = false;
-  concrete->type = NULL;
+  concrete->type =
+      arg->kind == kTemplateParameterNonType && arg->type != NULL
+          ? TypeRecordCopy(arg->type) : NULL;
   concrete->int_value = arg->int_value;
   concrete->template_parameter_index = arg->template_parameter_index;
   concrete->pack_arguments = NULL;
   concrete->dependent_expr = NULL;
   concrete->location = arg->location;
+  concrete->value_kind = arg->value_kind;
+  concrete->value_symbol = arg->value_symbol;
+  concrete->value_offset = arg->value_offset;
+  concrete->value_adjustment = arg->value_adjustment;
+  concrete->member_function = arg->member_function;
   // A value-dependent non-type argument (e.g. an `enable_if` SFINAE condition):
   // try to fold it now that some parameters are concrete.  If it folds, the
   // argument becomes an ordinary integer; otherwise keep the expression so a
@@ -167,6 +175,7 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     if (TryFoldDependentTemplateArgument(parser, arg->dependent_expr, args,
                                          &folded)) {
       concrete->int_value = folded;
+      concrete->value_kind = kTemplateValueIntegral;
       concrete->template_parameter_index = -1;
     } else {
       // Cannot fold yet (e.g. `Target - I` where the member template's own
@@ -235,11 +244,8 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     TemplateArgument* actual = args->value.p[arg->template_parameter_index];
     if (actual != NULL && actual->kind == kTemplateParameterNonType &&
         actual->pack_arguments == NULL) {
-      concrete->int_value = actual->int_value;
-      concrete->template_parameter_index = actual->template_parameter_index;
-      if (actual->type != NULL) {
-        concrete->type = TypeRecordCopy(actual->type);
-      }
+      TemplateArgumentDelete(concrete);
+      return TemplateArgumentCopy(actual);
     }
   }
   return concrete;
@@ -487,6 +493,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
   // type is re-substituted in an unrelated context.
   if (arg->pack_arguments != NULL) {
     TemplateArgument* pack = malloc(sizeof(TemplateArgument));
+    memset(pack, 0, sizeof(*pack));
     pack->kind = arg->kind;
     pack->is_pack_expansion = false;
     pack->type = NULL;
@@ -1975,6 +1982,7 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
   if (param->kind == kTemplateParameterType && param->default_type != NULL &&
       !TypeContainsTemplateParameter(param->default_type)) {
     TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+    memset(arg, 0, sizeof(*arg));
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion = false;
     arg->type = TypeRecordCopy(param->default_type);
@@ -1985,18 +1993,13 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
     arg->location = SOURCE_LOCATION_MISSING;
     return arg;
   }
+  if (param->kind == kTemplateParameterNonType &&
+      param->default_argument != NULL) {
+    return TemplateArgumentCopy(param->default_argument);
+  }
   if (param->kind == kTemplateParameterNonType && param->has_default_int &&
       param->default_template_parameter_index < 0) {
-    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-    arg->kind = kTemplateParameterNonType;
-    arg->is_pack_expansion = false;
-    arg->type = NULL;
-    arg->int_value = param->default_int_value;
-    arg->template_parameter_index = -1;
-    arg->pack_arguments = NULL;
-    arg->dependent_expr = NULL;
-    arg->location = SOURCE_LOCATION_MISSING;
-    return arg;
+    return NewIntegralTemplateArgument(param->default_int_value);
   }
   return NULL;
 }
@@ -2034,6 +2037,14 @@ static Vector* AliasActualsWithDefaults(Symbol* alias, Vector* actuals) {
   for (size_t i = actual_count; i < parameter_count; i++) {
     TemplateArgument* def =
         AliasDefaultTemplateArgument(parameters->value.p[i]);
+    if (def != NULL && def->kind == kTemplateParameterNonType &&
+        def->template_parameter_index >= 0 &&
+        (size_t)def->template_parameter_index < extended->length) {
+      TemplateArgument* actual =
+          extended->value.p[def->template_parameter_index];
+      TemplateArgumentDelete(def);
+      def = actual != NULL ? TemplateArgumentCopy(actual) : NULL;
+    }
     if (def == NULL) {
       // A trailing parameter has no usable (concrete) default; abandon the
       // extension and let the caller fall back to its prior behaviour.
