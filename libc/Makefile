@@ -18,6 +18,9 @@ OBJS = \
   memmove.o \
   memset.o \
   printf.o \
+  printf_common.o \
+  printf_literal.o \
+  printf_long.o \
   strcat.o \
   strchr.o \
   strcmp.o \

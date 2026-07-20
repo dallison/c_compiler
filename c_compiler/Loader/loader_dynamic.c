@@ -65,6 +65,21 @@ static void MappedSegmentDestruct(MappedSegment* s) {
   munmap(s->address, s->length);
 }
 
+static MappedSegment* FindMappedSegmentContaining(LoadedDynamicLibrary* lib,
+                                                  uint64_t address,
+                                                  uint64_t length) {
+  uint64_t end = address + length;
+  for (size_t i = 0; i < lib->mapped_segments.length; i++) {
+    MappedSegment* mapped = lib->mapped_segments.value.p[i];
+    uint64_t mapped_start = (uint64_t)mapped->address;
+    uint64_t mapped_end = mapped_start + mapped->length;
+    if (address >= mapped_start && end <= mapped_end) {
+      return mapped;
+    }
+  }
+  return NULL;
+}
+
 // Given the name of a dynamic libary, find it in the dynamic linker's
 // library map.
 LoadedDynamicLibrary* DynamicLoaderFindLibrary(DynamicLibraryRegistry* registry,
@@ -452,7 +467,9 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
         // Might not have a symbol (as in the case of RELATIVE relocations).
         found_lib = lib;
       }
-      char* target_address = RelocationTargetAddress(found_lib, reloc->offset);
+      // The relocation target belongs to the library containing the
+      // relocation; found_lib only supplies the resolved symbol's base.
+      char* target_address = RelocationTargetAddress(lib, reloc->offset);
       if (target_address == NULL) {
         continue;
       }
@@ -664,13 +681,20 @@ static bool LoadSegments(LoadedDynamicLibrary* lib,
     // to be loaded.
     if (lib->header->type == ET(exec)) {
       uint64_t first = LoadedDynamicLibraryLoadSegments(lib, 0, end_of_library);
+      if (first == 0) {
+        return false;
+      }
       if (lib->loader == NULL || !lib->loader->arch->ignore_vaddr) {
-        lib->load_address = first;
+        // ET_EXEC dynamic addresses are already absolute.
+        lib->load_address = 0;
       }
     } else if (lib->header->type == ET(dyn)){
       uint64_t first = LoadedDynamicLibraryLoadSegments(lib,
                                                         load_address,
                                                         end_of_library);
+      if (first == 0) {
+        return false;
+      }
       if (lib->loader == NULL || !lib->loader->arch->ignore_vaddr) {
         lib->load_address = first;
       }
@@ -1339,6 +1363,104 @@ static bool MapDynamicIgnoreVaddrSegment(LoadedDynamicLibrary* lib,
   return true;
 }
 
+static ELFProgramHeader* ProgramHeaderForSection(
+    LoadedDynamicLibrary* lib, const ELFSectionHeader* section) {
+  for (int i = 0; i < lib->header->phnum; i++) {
+    ELFProgramHeader* segment = (ELFProgramHeader*)&lib->program_headers[i];
+    if (segment->type != PT(load)) {
+      continue;
+    }
+    uint64_t section_end = section->offset + section->size;
+    uint64_t segment_end = segment->offset + segment->filesz;
+    if (section->offset >= segment->offset && section_end <= segment_end) {
+      return segment;
+    }
+  }
+  return NULL;
+}
+
+static bool MapFixedAddressSection(LoadedDynamicLibrary* lib,
+                                   const ELFSectionHeader* section,
+                                   uint64_t runtime_address) {
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  uint64_t page_start = AlignDown(runtime_address, page_size);
+  uint64_t page_end = AlignUp(runtime_address + section->size, page_size);
+  ELFProgramHeader* segment = ProgramHeaderForSection(lib, section);
+
+  for (uint64_t page = page_start; page < page_end; page += page_size) {
+    if (FindMappedSegmentContaining(lib, page, (uint64_t)page_size) != NULL) {
+      continue;
+    }
+    void* mapped =
+        mmap((void*)page, (size_t)page_size, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
+    if (mapped == MAP_FAILED) {
+      LoaderError("Failed to map dynamic section at address %p: %s\n",
+                  (void*)page, strerror(errno));
+      return false;
+    }
+    VectorAppend(&lib->mapped_segments,
+                 NewMappedSegment(mapped, (size_t)page_size));
+    if (lib->loader != NULL) {
+      VectorAppend(&lib->loader->regions,
+                   NewRegion(mapped, (int64_t)section->offset, page_size,
+                             segment, lib));
+    }
+  }
+
+  if (section->type == SHT(nobits)) {
+    memset((void*)runtime_address, 0, (size_t)section->size);
+  } else if (section->size > 0) {
+    ssize_t bytes = pread(lib->fd, (void*)runtime_address,
+                          (size_t)section->size, (off_t)section->offset);
+    if (bytes != (ssize_t)section->size) {
+      LoaderError("Failed to read dynamic section: %s\n", strerror(errno));
+      return false;
+    }
+  }
+  return true;
+}
+
+static uint64_t LoadFixedAddressSections(
+    LoadedDynamicLibrary* lib, uint64_t load_address,
+    uint64_t* next_available_address) {
+  uint64_t first_address = 0;
+  *next_available_address = 0;
+
+  for (int i = 0; i < lib->header->shnum; i++) {
+    const ELFSectionHeader* section = &lib->section_headers[i];
+    if ((section->flags & SHF(alloc)) == 0 || section->addr == 0 ||
+        section->size == 0) {
+      continue;
+    }
+    uint64_t runtime_address =
+        (lib->header->type == ET(dyn) ? load_address : 0) + section->addr;
+    if (!MapFixedAddressSection(lib, section, runtime_address)) {
+      return 0;
+    }
+    uint64_t page_start =
+        AlignDown(runtime_address, (int)sysconf(_SC_PAGESIZE));
+    if (first_address == 0 || page_start < first_address) {
+      first_address = page_start;
+    }
+    uint64_t section_end = runtime_address + section->size;
+    if (section_end > *next_available_address) {
+      *next_available_address = section_end;
+    }
+  }
+
+  for (int i = 0; i < lib->header->phnum; i++) {
+    const ELFProgramHeader* segment = &lib->program_headers[i];
+    if (segment->type == PT(dynamic)) {
+      uint64_t runtime_address =
+          (lib->header->type == ET(dyn) ? load_address : 0) + segment->vaddr;
+      lib->dynamic = (const DynamicSection*)runtime_address;
+      break;
+    }
+  }
+  return first_address;
+}
+
 // Load a loadable segment.  The load_address is where we want to load
 // a dynamic segment at.  However this might need adjusted to
 // account for segment and page alignments.  Returns the address
@@ -1359,8 +1481,6 @@ static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
     *start_address = (void*)vaddr;
   }
  
-  int64_t segment_loaded_at = addr;
-
   // The address to map at is the current load_address aligned down to
   // the boundary specified in the program header.
   addr = AlignDown(addr, segment->align);
@@ -1373,20 +1493,6 @@ static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
   addr = AlignDown(addr, page_size);
   offset = AlignDown(offset, page_size);
  
-  // Protection for mmap and open.  We have to open the file in order the mmap it.
-  // If the mapping is going to allow writes to the pages we need to open the file
-  // in read-write mode, but we won't be writing to it.
-  int prot = PROT_READ;
-  if ((segment->flags & PF(w)) != 0 ||
-      (lib->loader->flags & LOADER_WRITEABLE_TEXT) != 0) {
-    // Segment is writeable.
-    prot |= PROT_WRITE;
-  }
-  if ((segment->flags & PF(x)) != 0) {
-    // Segment is executable.
-    prot |= PROT_EXEC;
-  }
-  
   // Front porch is the difference between vaddr and aligned address.
   uint64_t front_porch = vaddr - (uint64_t)addr;
   
@@ -1426,52 +1532,50 @@ static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
     VectorAppend(&lib->loader->regions,
                  NewRegion(segment_ptr, offset, (int64_t)map_length,
                            (ELFProgramHeader*)segment, lib));
+    VectorAppend(&lib->mapped_segments,
+                 NewMappedSegment(segment_ptr, map_length));
     return segment_ptr;
   }
 
-  // Calculate end of mapped memory.  The 'length' contains the total length
-  // of the mapped memory.
-  uint64_t end_of_segment = addr + aligned_length;
-
-  int flags = MAP_PRIVATE|MAP_FIXED;
-  // Map in the segment at an address chosen by the OS.  This is done using
-  // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
-  // will be copied to a new physical address if they are written to, otherwise they
-  // are shared with other physical pages that map the same file in.
-  void* segment_ptr = mmap((void*)addr, *length, prot,
-                           flags, lib->fd, offset);
-  if (segment_ptr == MAP_FAILED) {
-    LoaderError("Failed to map in dynamic segment at address %p: %s\n",
-                (void*)addr, strerror(errno));
-    return NULL;
-  }
-
-  // Zero out any difference between memsz and filesz.  This will really only
-  // be the .bss section.  We have mapped the contents of the file but some of
-  // it will need to be zeroed out.  We also need to allocate a contiguous
-  // anonymous region of zeros above the segment.
-  // We need the .bss to be all zeroes before thae program starts.
-  if ((prot & PROT_WRITE) != 0 && segment->memsz > segment->filesz) {
-    void* zeroed_region = (char*)segment_loaded_at +
-        segment->filesz;   // Start of zero memory.
-    int64_t zeroed_region_size = end_of_segment - (uint64_t)zeroed_region;
-    memset(zeroed_region, 0, zeroed_region_size);
-    
-    // Any additional memory beyond the file.
-    int64_t additional_memory = AlignUp(segment->memsz - *length,
-                                        page_size);
-    if (additional_memory > 0) {
-      void* zero = (char*)end_of_segment;
-      zero = mmap(zero, additional_memory, PROT_WRITE,
-                  MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
-      if (zero == MAP_FAILED) {
-        LoaderError("Failed to map in dynamic segment: %s\n",
-                    strerror(errno));
-        return NULL;
-      }
-      VectorAppend(&lib->mapped_segments,
-                   NewMappedSegment(zero, additional_memory));
+  // Fixed-vaddr targets execute with guest addresses equal to host addresses.
+  // Populate an anonymous mapping instead of using a file-backed MAP_FIXED
+  // mapping: DaveCC segments do not require matching vaddr/file-offset page
+  // deltas, and macOS rejects fixed executable file mappings.  Keeping the
+  // mapping writable also allows dynamic relocations before native runtimes
+  // apply final execute permissions.
+  *length = AlignUp(front_porch + segment->memsz, page_size);
+  MappedSegment* containing =
+      FindMappedSegmentContaining(lib, addr, *length);
+  void* segment_ptr = (void*)addr;
+  if (containing == NULL) {
+    segment_ptr =
+        mmap((void*)addr, *length, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
+    if (segment_ptr == MAP_FAILED) {
+      LoaderError("Failed to map in dynamic segment at address %p: %s\n",
+                  (void*)addr, strerror(errno));
+      return NULL;
     }
+    VectorAppend(&lib->mapped_segments,
+                 NewMappedSegment(segment_ptr, *length));
+    if (lib->loader != NULL) {
+      VectorAppend(&lib->loader->regions,
+                   NewRegion(segment_ptr, (int64_t)segment->offset,
+                             (int64_t)*length, (ELFProgramHeader*)segment,
+                             lib));
+    }
+  }
+  if (segment->filesz > 0) {
+    ssize_t bytes =
+        pread(lib->fd, (char*)segment_ptr + front_porch, segment->filesz,
+              (off_t)segment->offset);
+    if (bytes != (ssize_t)segment->filesz) {
+      LoaderError("Failed to read dynamic segment: %s\n", strerror(errno));
+      return NULL;
+    }
+  }
+  if (start_address != NULL) {
+    *start_address = (char*)segment_ptr + front_porch;
   }
   return segment_ptr;
 }
@@ -1501,38 +1605,40 @@ if (segment->type == PT(dynamic)) {
 // all loaded segments.
 uint64_t LoadedDynamicLibraryLoadSegments(LoadedDynamicLibrary* lib,
             uint64_t load_address, uint64_t* next_available_address) {
-  // int page_size = (int)sysconf(_SC_PAGESIZE);
+  if (lib->loader != NULL && !lib->loader->arch->ignore_vaddr) {
+    return LoadFixedAddressSections(lib, load_address,
+                                    next_available_address);
+  }
+
   *next_available_address = 0;
   uint64_t first_loaded_segment = 0;
+  bool saw_load_segment = false;
   for (int i = 0; i < lib->header->phnum; i++) {
     const ELFProgramHeader* segment = &lib->program_headers[i];
-    // Load the PT(load) and PT(dynamic) segments into memory
-    // at the address specified by their alignment.
-    void* addr = NULL;
-    uint64_t length = 0;
-    if (segment->type == PT(load)) {
-      addr = LoadLoadableSegment(lib, segment,  load_address, &length, NULL);
-    } else if (segment->type == PT(dynamic)) {
-      addr = LoadLoadableSegment(lib, segment, load_address, &length,
-                                 (void**)&lib->dynamic);
-    }
-    
-    if (addr == NULL) {
+    if (segment->type != PT(load) && segment->type != PT(dynamic)) {
       continue;
     }
-    if (first_loaded_segment == 0) {
+
+    saw_load_segment = saw_load_segment || segment->type == PT(load);
+    uint64_t length = 0;
+    void* dynamic_address = NULL;
+    void* addr = LoadLoadableSegment(
+        lib, segment, load_address, &length,
+        segment->type == PT(dynamic) ? &dynamic_address : NULL);
+    if (addr == NULL) {
+      return 0;
+    }
+    if (segment->type == PT(dynamic)) {
+      lib->dynamic = (const DynamicSection*)dynamic_address;
+    } else if (first_loaded_segment == 0) {
       first_loaded_segment = (uint64_t)addr;
     }
     uint64_t end_of_segment = (uint64_t)addr + length;
-      
-    // Add a new region to the regions vector so that we can remove it
-    // when destructed.
-    VectorAppend(&lib->mapped_segments, NewMappedSegment(addr, length));
     if (end_of_segment > *next_available_address) {
       *next_available_address = end_of_segment;
     }
   }
-  return first_loaded_segment;
+  return saw_load_segment ? first_loaded_segment : 0;
 }
 
 void LoadedDynamicLibraryRelocate(Loader* loader,

@@ -5,6 +5,7 @@ ROOT="${TEST_SRCDIR:-$(pwd)}/${TEST_WORKSPACE:-}"
 DAVECC="$ROOT/$1"
 INTERPRETER="$ROOT/$2"
 LIBC="$ROOT/$3"
+ARM_INTERPRETER="$ROOT/$4"
 
 WORK="$(mktemp -d "${TEST_TMPDIR:-/tmp}/davecc-defaults.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -21,13 +22,28 @@ SRC
 # A bare hosted link must find DaveCC's headers and target libc, and must use
 # main rather than the linker's _start default.
 "$DAVECC" -target aarch64 hello.cc -o hello
+output="$("$INTERPRETER" -i hello)"
+if [[ "$output" != "driver-defaults-ok" ]]; then
+  echo "unexpected dynamic program output: $output" >&2
+  exit 1
+fi
+
+# ARM uses translated guest addresses and lazy PLT binding. Exercise a hosted
+# C++ program with enough imports to verify GOT-slot selection and argument
+# preservation in its resolver.
+"$DAVECC" -target arm hello.cc -o hello.arm
+output="$("$ARM_INTERPRETER" hello.arm)"
+if [[ "$output" != "driver-defaults-ok" ]]; then
+  echo "unexpected ARM dynamic program output: $output" >&2
+  exit 1
+fi
 
 # Static linkage remains an explicit policy choice. It produces an executable
 # that can be run by the in-tree interpreter.
 "$DAVECC" -target aarch64 -static hello.cc -o hello.static
 output="$("$INTERPRETER" -i hello.static)"
 if [[ "$output" != "driver-defaults-ok" ]]; then
-  echo "unexpected program output: $output" >&2
+  echo "unexpected static program output: $output" >&2
   exit 1
 fi
 

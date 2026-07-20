@@ -114,8 +114,8 @@ static void InitGOTPLT(LoadedDynamicLibrary* lib, void* data) {
     return;
   }
   uint64_t* resolver_data = (uint64_t*)pltgot;
-  resolver_data[0] = (uint64_t)(uintptr_t)data;
   resolver_data[1] = (uint64_t)(uintptr_t)lib;
+  resolver_data[2] = (uint64_t)(uintptr_t)data;
 }
 
 static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,

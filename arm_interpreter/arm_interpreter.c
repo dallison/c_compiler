@@ -576,21 +576,6 @@ static uint64_t BranchTargetPreferDSO(ARMInterpreter* interpreter, uint64_t targ
   return LinkedToRuntimePreferDSO(interpreter, (uint32_t)target);
 }
 
-static bool GotPointsIntoPlt(Loader* loader, LoadedDynamicLibrary* lib,
-                             uint64_t got_value) {
-  uint64_t plt_linked = 0;
-  uint64_t plt_size = 0;
-  if (!SectionAddressAndSize(lib, ".plt", &plt_linked, &plt_size)) {
-    return false;
-  }
-  uint64_t plt_runtime = 0;
-  if (!LoaderLinkedAddressToRuntime(loader, lib, plt_linked, &plt_runtime)) {
-    return false;
-  }
-  return got_value >= plt_runtime &&
-         got_value < plt_runtime + plt_size;
-}
-
 static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated) {
   if (interpreter->process != NULL) {
     pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
@@ -615,6 +600,7 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
 
   const ELFRelocation* reloc = NULL;
   ELFRelocation file_reloc;
+  uint64_t invoked_got_slot = ReadReg(interpreter, ARM_IP_REG);
   for (int64_t i = 0; i < num_relocations; i++) {
     if (!ReadRelaPltEntry(lib, i, &file_reloc)) {
       continue;
@@ -627,9 +613,10 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
                                       &got_slot)) {
       continue;
     }
-    uint32_t got_value = Load32(interpreter, got_slot);
-    if (GotPointsIntoPlt(loader, lib,
-                         LinkedToRuntime(interpreter, got_value))) {
+    // The PLT trampoline leaves r12/ip pointing at the GOT slot it used.
+    // This identifies the exact relocation even though every unresolved GOT
+    // slot initially points at the same resolver stub.
+    if (got_slot == invoked_got_slot) {
       reloc = &file_reloc;
       break;
     }
@@ -1231,15 +1218,20 @@ static bool ExecuteBranchExchange(ARMInterpreter* interpreter, uint32_t insn,
 static bool ExecuteSwi(ARMInterpreter* interpreter, uint32_t insn,
                        bool* pc_updated) {
   (void)insn;
+  int32_t number = (int32_t)ReadReg(interpreter, ARM_SYSCALL_REG);
   int32_t result =
-      HandleSyscall(interpreter, (int32_t)ReadReg(interpreter, ARM_SYSCALL_REG),
+      HandleSyscall(interpreter, number,
                     (int32_t)ReadReg(interpreter, 0),
                     (int32_t)ReadReg(interpreter, 1),
                     (int32_t)ReadReg(interpreter, 2),
                     (int32_t)ReadReg(interpreter, 3),
                     (int32_t)ReadReg(interpreter, 4),
                     (int32_t)ReadReg(interpreter, 5), pc_updated);
-  WriteReg(interpreter, 0, (uint64_t)(uint32_t)result);
+  // Lazy symbol resolution transfers directly to the resolved function, so
+  // preserve r0-r3 as that function's original argument registers.
+  if (number != ARM_SYSCALL_RESOLVE) {
+    WriteReg(interpreter, 0, (uint64_t)(uint32_t)result);
+  }
   return true;
 }
 
@@ -1778,6 +1770,35 @@ static void MapGuestResolver(ARMInterpreter* interpreter) {
       DynamicLoaderFindDynamicSectionAddressEntry(main_lib, DT(pltgot));
   if (pltgot != NULL) {
     ((uint32_t*)pltgot)[0] = ARM_RESOLVER_LINKED;
+  }
+
+  uint64_t plt_linked = 0;
+  uint64_t plt_size = 0;
+  uint64_t rela_linked = 0;
+  uint64_t rela_size = 0;
+  if (!SectionAddressAndSize(main_lib, ".plt", &plt_linked, &plt_size) ||
+      !SectionAddressAndSize(main_lib, ".rela.plt", &rela_linked,
+                             &rela_size)) {
+    return;
+  }
+  (void)rela_linked;
+  int64_t num_relocations =
+      (int64_t)(rela_size / (uint64_t)sizeof(ELFRelocation));
+  for (int64_t i = 0; i < num_relocations; i++) {
+    ELFRelocation reloc;
+    if (!ReadRelaPltEntry(main_lib, i, &reloc) ||
+        ELF_R_TYPE(reloc.info) != R_ARM_JUMP_SLOT) {
+      continue;
+    }
+    uint64_t got_slot = 0;
+    if (!LoaderLinkedAddressToRuntime(loader, main_lib, reloc.offset,
+                                      &got_slot)) {
+      continue;
+    }
+    uint32_t target = *(uint32_t*)(uintptr_t)got_slot;
+    if (target >= plt_linked && target < plt_linked + plt_size) {
+      *(uint32_t*)(uintptr_t)got_slot = ARM_RESOLVER_LINKED;
+    }
   }
 }
 

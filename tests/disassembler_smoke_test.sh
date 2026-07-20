@@ -60,3 +60,25 @@ check_target riscv "$riscvdasm" '^add:' 'add|addi'
 check_target aarch64 "$aarch64dasm" '^add:' 'stp' 'adr' 'printf' ' ret$'
 check_target arm "$armdasm" '^add:' 'add|bl|bx' 'movw' 'movt'
 check_target x86_64 "$x86_64dasm" '^add:' 'mov|add|call|ret'
+
+obj="$work/65c02.o"
+"$davecc" -target 65c02 -O0 -c "$work/smoke.c" -o "$obj"
+"$elfdump" -c "$obj" >"$work/65c02.elfdump"
+for expected in '^add:' 'lda|sta|adc' 'jsr' 'rts'; do
+  if ! grep -E "$expected" "$work/65c02.elfdump" >/dev/null; then
+    echo "missing expected elfdump disassembly for 65c02: $expected" >&2
+    sed -n '1,80p' "$work/65c02.elfdump" >&2
+    exit 1
+  fi
+done
+
+linked="$work/aarch64"
+"$davecc" -target aarch64 "$work/smoke.c" -o "$linked"
+"$elfdump" -c "$linked" >"$work/aarch64-linked.elfdump"
+for symbol in add message main; do
+  count=$(grep -c "^$symbol:$" "$work/aarch64-linked.elfdump" || true)
+  if [[ "$count" -ne 1 ]]; then
+    echo "expected one label for $symbol, found $count" >&2
+    exit 1
+  fi
+done

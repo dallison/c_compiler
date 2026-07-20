@@ -3448,6 +3448,151 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
   (void)conversions;
 }
 
+typedef enum {
+  kPrintfProfileFull,
+  kPrintfProfileLiteral,
+  kPrintfProfileInt,
+  kPrintfProfileLong,
+  kPrintfProfileFP,
+} PrintfProfile;
+
+static int PrintfFormatArgument(const char* name) {
+  if (strcmp(name, "printf") == 0) {
+    return 0;
+  }
+  if (strcmp(name, "fprintf") == 0 || strcmp(name, "sprintf") == 0) {
+    return 1;
+  }
+  if (strcmp(name, "snprintf") == 0) {
+    return 2;
+  }
+  return -1;
+}
+
+static PrintfProfile ClassifyPrintfFormat(const char* format) {
+  PrintfProfile profile = kPrintfProfileLiteral;
+  const char* p = format;
+  while (*p != '\0') {
+    if (*p++ != '%') {
+      continue;
+    }
+    if (*p == '%') {
+      p++;
+      profile = kPrintfProfileInt;
+      continue;
+    }
+    profile = kPrintfProfileInt;
+    while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
+      p++;
+    }
+    if (*p == '*') {
+      p++;
+    } else {
+      while (isdigit((unsigned char)*p)) {
+        p++;
+      }
+    }
+    if (*p == '.') {
+      p++;
+      if (*p == '*') {
+        p++;
+      } else {
+        while (isdigit((unsigned char)*p)) {
+          p++;
+        }
+      }
+    }
+    bool long_value = false;
+    if (*p == 'l') {
+      long_value = true;
+      p++;
+      if (*p == 'l') {
+        p++;
+      }
+    } else if (*p == 'L' || *p == 'j' || *p == 'z' || *p == 't') {
+      long_value = true;
+      p++;
+    } else if (*p == 'h') {
+      p++;
+      if (*p == 'h') {
+        p++;
+      }
+    }
+    if (*p == '\0') {
+      return kPrintfProfileFull;
+    }
+    char conversion = *p++;
+    if (strchr("fFeEgGaA", conversion) != NULL) {
+      profile = kPrintfProfileFP;
+    } else if (long_value && profile != kPrintfProfileFP) {
+      profile = kPrintfProfileLong;
+    } else if (strchr("diuoxXpcsn", conversion) == NULL) {
+      return kPrintfProfileFull;
+    }
+  }
+  return profile;
+}
+
+static Symbol* GetPrintfSpecializationSymbol(Symbol* original,
+                                             const char* name) {
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  Symbol* symbol = FindGlobalSymbol(&symbol_name);
+  StringDestruct(&symbol_name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  symbol = NewSymbol(name, original->type, original->storage);
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.is_c_linkage = true;
+  symbol->flags.used = true;
+  bool inserted = InsertGlobalSymbol(symbol);
+  assert(inserted);
+  (void)inserted;
+  return symbol;
+}
+
+static void SpecializePrintfCall(VectorASTNode* node, Symbol* callee) {
+  if (!compiler->printf_specialize || callee == NULL ||
+      callee->name.value == NULL) {
+    return;
+  }
+  int format_arg = PrintfFormatArgument(callee->name.value);
+  if (format_arg < 0 || (size_t)format_arg >= node->children->length) {
+    return;
+  }
+  ASTNode* arg = node->children->value.p[format_arg];
+  if (arg == NULL || arg->op != AST_OP(string)) {
+    return;
+  }
+  String* value = ((ConstantASTNode*)arg)->value.string;
+  PrintfProfile profile =
+      ClassifyPrintfFormat(value->value == NULL ? "" : value->value);
+  const char* suffix = NULL;
+  switch (profile) {
+    case kPrintfProfileLiteral:
+      suffix = "literal";
+      break;
+    case kPrintfProfileInt:
+      suffix = "int";
+      break;
+    case kPrintfProfileLong:
+      suffix = "long";
+      break;
+    case kPrintfProfileFP:
+      suffix = "fp";
+      break;
+    case kPrintfProfileFull:
+      return;
+  }
+  char specialized_name[64];
+  snprintf(specialized_name, sizeof(specialized_name), "__%s_%s",
+           callee->name.value, suffix);
+  IdentifierASTNode* identifier = (IdentifierASTNode*)node->left;
+  identifier->symbol =
+      GetPrintfSpecializationSymbol(callee, specialized_name);
+}
+
 static void RenumberVectorChildren(VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* child = node->children->value.p[i];
@@ -7505,6 +7650,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     Symbol* callee = ((IdentifierASTNode*)node->left)->symbol;
     if (callee != NULL) {
       CheckFormatCall(node, callee);
+      SpecializePrintfCall(node, callee);
     }
   }
 

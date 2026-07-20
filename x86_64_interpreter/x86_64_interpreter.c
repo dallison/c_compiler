@@ -1467,6 +1467,13 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     return true;
   }
 
+  if (b0 == 0x68) {
+    int32_t immediate = (int32_t)Fetch32(interpreter, &pos);
+    Push64(interpreter, (uint64_t)(int64_t)immediate);
+    *insn_len = pos;
+    return true;
+  }
+
   if (b0 == 0xE8) {
     int32_t disp = (int32_t)Fetch32(interpreter, &pos);
     Push64(interpreter, interpreter->rip + pos);
@@ -1779,12 +1786,17 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       return false;
     }
     int op = modrm.reg & 7;
-    if (op == 2 || op == 4) {
+    if (op == 2 || op == 4 || op == 6) {
       uint64_t target = 0;
       if (modrm.mod == 3) {
         target = ReadReg(interpreter, modrm.rm);
       } else {
         target = Load64(interpreter, EffectiveAddress(interpreter, &modrm, pos));
+      }
+      if (op == 6) {
+        Push64(interpreter, target);
+        *insn_len = pos;
+        return true;
       }
       if (op == 2) {
         Push64(interpreter, interpreter->rip + pos);

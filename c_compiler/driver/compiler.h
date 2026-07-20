@@ -394,6 +394,7 @@ typedef struct {
   bool optimize;
   bool pic;
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
+  bool printf_specialize;    // Rewrite constant printf-family calls by profile.
   bool print_front_end;
   bool print_back_end;
   bool print_preprocessor;

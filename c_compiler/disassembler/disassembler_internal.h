@@ -35,6 +35,8 @@ void DAsmSetTarget(DAsmInstruction* inst, uint64_t target_address);
 void DAsmUnknownInstruction(DAsmInstruction* inst, const char* directive_fmt,
                             uint64_t value);
 
+bool DAsmDisassemble6502(const void* bytes, size_t length, uint64_t address,
+                         DAsmInstruction* inst);
 bool DAsmDisassembleRiscV(const void* bytes, size_t length, uint64_t address,
                           DAsmInstruction* inst);
 bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,

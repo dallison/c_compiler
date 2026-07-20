@@ -209,6 +209,9 @@ LIBC_SRCS = [
     "libc/errno.c",
     "libc/posix.c",
     "libc/printf.c",
+    "libc/printf_common.c",
+    "libc/printf_literal.c",
+    "libc/printf_long.c",
     "libc/qsort.c",
     "libc/rand.c",
     "libc/realloc.c",
@@ -285,6 +288,7 @@ cc_library(
     name = "disassembler",
     srcs = [
         "c_compiler/disassembler/disassembler.c",
+        "c_compiler/disassembler/disassembler_6502.c",
         "c_compiler/disassembler/disassembler_aarch64.c",
         "c_compiler/disassembler/disassembler_arm.c",
         "c_compiler/disassembler/disassembler_riscv.c",
@@ -1139,6 +1143,9 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
   "libc/qsort.c"
   "libc/rand.c"
   "libc/realloc.c"
@@ -1272,6 +1279,9 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
   "libc/qsort.c"
   "libc/rand.c"
   "libc/realloc.c"
@@ -1408,6 +1418,9 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
   "libc/qsort.c"
   "libc/rand.c"
   "libc/realloc.c"
@@ -1540,6 +1553,9 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
   "libc/qsort.c"
   "libc/rand.c"
   "libc/realloc.c"
@@ -1674,6 +1690,9 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
   "libc/qsort.c"
   "libc/rand.c"
   "libc/realloc.c"
@@ -1949,11 +1968,12 @@ sh_test(
         "$(rootpath :x86_64dasm)",
         "$(rootpath :elfdump)",
     ],
-    data = [
+    data = LIBC_TEST_DATA + [
         ":aarch64dasm",
         ":armdasm",
         ":davecc",
         ":elfdump",
+        ":libc_aarch64",
         ":riscvdasm",
         ":x86_64dasm",
     ],
@@ -2111,12 +2131,82 @@ sh_test(
         "$(rootpath :davecc)",
         "$(rootpath :aarch64)",
         "$(rootpath :libc_aarch64)",
+        "$(rootpath :arm)",
     ],
     data = [
         ":aarch64",
+        ":arm",
         ":davecc",
         ":libc_aarch64",
+        ":libc_arm",
         ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "dynamic_interpreters_test",
+    srcs = ["tests/dynamic_interpreters_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :arm)",
+        "$(rootpath :riscv)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :pcode)",
+        "$(rootpath hello_aarch64/libfunc.c)",
+        "$(rootpath hello_aarch64/main_dynamic.c)",
+    ],
+    data = [
+        ":aarch64",
+        ":arm",
+        ":davecc",
+        ":pcode",
+        ":riscv",
+        ":x86_64",
+        "hello_aarch64/libfunc.c",
+        "hello_aarch64/main_dynamic.c",
+    ],
+)
+
+sh_test(
+    name = "65c02_cxx_test",
+    srcs = ["tests/65c02_cxx_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :6502)",
+        "$(rootpath :support_rom_65c02)",
+        "$(rootpath //cxx_testsuite:tests/exec/0055_multiple_inheritance_secondary_virtual_dispatch.cpp)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
+        "//cxx_testsuite:tests/exec/0055_multiple_inheritance_secondary_virtual_dispatch.cpp",
+    ],
+)
+
+sh_test(
+    name = "printf_specialization_test",
+    srcs = ["tests/printf_specialization_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :6502)",
+        "$(rootpath :support_rom_65c02)",
+        "$(rootpath :elfdump)",
+        "$(rootpath :x86_64)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":elfdump",
+        ":libc_65c02",
+        ":libc_aarch64",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":support_rom_65c02",
+        ":x86_64",
     ],
 )
 
@@ -2139,6 +2229,8 @@ davecc="$$(pwd)/$(execpath :davecc)"
   -Wl,-T"6502 support/Interpreter ROM/introm.map" \
   -Wl,-tintrom \
   -static \
+  -nostdinc \
+  -nostdlib \
   "6502 support/Interpreter ROM/introm.s" \
   -o "$@"
 """,

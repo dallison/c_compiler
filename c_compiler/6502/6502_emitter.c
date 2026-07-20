@@ -868,3 +868,49 @@ void W65C02PrintFunction(W65C02Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
 }
+
+void W65C02PrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    uint16_t adjustment = (uint16_t)thunk->this_adjustment;
+
+    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n", thunk_name);
+    fprintf(fp, "%s:\n", thunk_name);
+    // The first software-stack argument is `this`. Preserve X/Y because they
+    // carry the result destination through the tail call.
+    fprintf(fp, "\ttxa\n");
+    fprintf(fp, "\tpha\n");
+    fprintf(fp, "\ttya\n");
+    fprintf(fp, "\tpha\n");
+    fprintf(fp, "\tclc\n");
+    fprintf(fp, "\tlda (__sp)\n");
+    fprintf(fp, "\tadc #0x%02x\n", adjustment & 0xff);
+    fprintf(fp, "\tsta (__sp)\n");
+    fprintf(fp, "\tldy #1\n");
+    fprintf(fp, "\tlda (__sp), y\n");
+    fprintf(fp, "\tadc #0x%02x\n", adjustment >> 8);
+    fprintf(fp, "\tsta (__sp), y\n");
+    fprintf(fp, "\tpla\n");
+    fprintf(fp, "\ttay\n");
+    fprintf(fp, "\tpla\n");
+    fprintf(fp, "\ttax\n");
+    fprintf(fp, "\tjmp %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
+}

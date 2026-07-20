@@ -24,5 +24,6 @@ void W65C02EmitterDestruct(W65C02Emitter* emitter);
 void W65C02EmitterDelete(W65C02Emitter* emitter);
 
 void W65C02PrintFunction(W65C02Emitter* emitter, FILE* fp);
+void W65C02PrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* _502_emitter_h */

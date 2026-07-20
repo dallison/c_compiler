@@ -237,16 +237,17 @@ typedef struct {
   const char* archive_name;
   const char* bazel_target;
   bool use_main_entry;
+  bool static_only;
 } TargetRuntime;
 
 static const TargetRuntime target_runtimes[] = {
-    {"pcode", "libcpcode.a", "//:libc_pcode", true},
-    {"riscv", "libcriscv.a", "//:libc_riscv", false},
-    {"aarch64", "libcaarch64.a", "//:libc_aarch64", true},
-    {"arm", "libcarm.a", "//:libc_arm", true},
-    {"x86_64", "libcx86_64.a", "//:libc_x86_64", true},
-    {"6502", "libc65c02.a", "//:libc_65c02", false},
-    {"65c02", "libc65c02.a", "//:libc_65c02", false},
+    {"pcode", "libcpcode.a", "//:libc_pcode", true, false},
+    {"riscv", "libcriscv.a", "//:libc_riscv", false, false},
+    {"aarch64", "libcaarch64.a", "//:libc_aarch64", true, false},
+    {"arm", "libcarm.a", "//:libc_arm", true, false},
+    {"x86_64", "libcx86_64.a", "//:libc_x86_64", true, false},
+    {"6502", "libc65c02.a", "//:libc_65c02", false, true},
+    {"65c02", "libc65c02.a", "//:libc_65c02", false, true},
 };
 
 static bool TargetNameMatches(const char* target, const char* canonical) {
@@ -350,6 +351,11 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
       FindTargetRuntime(target == NULL ? NULL : target->value);
   if (runtime == NULL) {
     return;
+  }
+
+  if (runtime->static_only &&
+      !VectorContainsCString(linker_args, "-static")) {
+    VectorAppend(linker_args, "-static");
   }
 
   if (runtime->use_main_entry &&

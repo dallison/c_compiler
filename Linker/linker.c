@@ -492,29 +492,24 @@ static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
 }
 
 uint64_t SegmentEndAddress(Segment* segment) {
-  for (ssize_t i = segment->regions.length-1; i >= 0; i--) {
+  uint64_t end = 0;
+  for (size_t i = 0; i < segment->regions.length; i++) {
     SegmentMemoryRegion* region = segment->regions.value.p[i];
-    if (region->start != 0) {
-      if (region->config_end != 0) {
-        return region->config_end;
-      }
-      if (region->next != 0) {
-        return region->next;
-      }
-      // The region has a base address but nothing has been allocated into it
-      // yet (e.g. an empty .data section followed by a dedicated bss region).
-      // Fall back to its computed end, or its start, so callers such as the
-      // .bss/common-symbol placement get a valid address rather than 0.
-      if (region->actual_end != 0) {
-        return region->actual_end;
-      }
-      return region->start;
-    } else if (region->next != 0) {
-      return region->next;
+    uint64_t region_end = region->config_end;
+    if (region->next > region_end) {
+      region_end = region->next;
+    }
+    if (region->actual_end > region_end) {
+      region_end = region->actual_end;
+    }
+    if (region->start > region_end) {
+      region_end = region->start;
+    }
+    if (region_end > end) {
+      end = region_end;
     }
   }
- 
-  return 0;
+  return end;
 }
 
 
@@ -1451,6 +1446,16 @@ static ConfigSegment* FakeConfigSegment() {
   return s;
 }
 
+static void ClearSegmentFixedAddresses(Segment* segment) {
+  for (size_t i = 0; i < segment->regions.length; i++) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    region->start = 0;
+    region->next = 0;
+    region->actual_end = 0;
+    region->config_end = 0;
+  }
+}
+
 // Link all files passed to the linker together.  This gathers the sections
 // with the same names into the same place and assigns addresses to the
 // sections and symbols.
@@ -1490,6 +1495,14 @@ void LinkerLinkAllFiles(Linker* linker) {
   }
   if (!data_init_done) {
     SegmentInit(&linker->data_segment, FakeConfigSegment());
+  }
+  if (linker->building_dso) {
+    // Shared objects use position-independent virtual addresses. The default
+    // program layouts contain fixed executable addresses, so discard those
+    // bases and lay the DSO segments out consecutively from its ELF headers.
+    ClearSegmentFixedAddresses(&linker->code_segment);
+    ClearSegmentFixedAddresses(&linker->dynamic_segment);
+    ClearSegmentFixedAddresses(&linker->data_segment);
   }
   // Resolve all undefined symbols in libraries.
   ResolveUndefinedSymbols(linker);
@@ -1532,12 +1545,13 @@ void LinkerLinkAllFiles(Linker* linker) {
   if (!linker->fully_static) {
     // Assign addresses to the dynamic section.
     AssignSegmentSectionAddresses(linker, &linker->dynamic_segment, end_of_segments, 0);
+    end_of_segments = SegmentEndAddress(&linker->dynamic_segment);
   }
   
   if (!linker->fully_static && !linker->building_dso) {
     // Assign addresses to the interpreter section.
-    end_of_segments = SegmentEndAddress(&linker->dynamic_segment);
     AssignSegmentSectionAddresses(linker, &linker->interpreter_segment, end_of_segments, 0);
+    end_of_segments = SegmentEndAddress(&linker->interpreter_segment);
   }
   
   // Define the '_etext' symbol for the last assigned address.
@@ -1548,7 +1562,9 @@ void LinkerLinkAllFiles(Linker* linker) {
   // last since it also needs to contain the .bss section.
   uint64_t data_file_offset = text_file_offset ;
 
-  AssignSegmentSectionAddresses(linker, &linker->data_segment, end_of_segments, data_file_offset);
+  AssignSegmentSectionAddresses(linker, &linker->data_segment,
+                                (end_of_segments + 7) & ~7ULL,
+                                data_file_offset);
 
   // The TLS segment starts at address 0 and doesn't increment the current
   // address.
@@ -1598,6 +1614,29 @@ void LinkerLinkAllFiles(Linker* linker) {
     LinkerPrintSymbolTables(linker);
   }
   
+  if (linker->elf_machine_type == ELF_MACHINE_TYPEW65C02) {
+    uint64_t image_end = SegmentEndAddress(&linker->code_segment);
+    uint64_t data_end = SegmentEndAddress(&linker->data_segment);
+    if (data_end > image_end) {
+      image_end = data_end;
+    }
+    if (addr > image_end) {
+      image_end = addr;
+    }
+    if (image_end > 0x10000) {
+      ObjectFile* file =
+          linker->files.length == 0 ? NULL : linker->files.value.p[0];
+      LinkerError(file,
+                  "65C02 image ends at 0x%" PRIx64
+                  " and exceeds the 64 KiB address space",
+                  image_end);
+      if (file == NULL) {
+        linker->num_errors++;
+      }
+      return;
+    }
+  }
+
   // We have all the values of the symbols, apply those values to
   // all the relocations in the files.
   LinkerApplyAllRelocations(linker);

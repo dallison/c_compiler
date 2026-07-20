@@ -122,22 +122,12 @@ size_t DAsmDefaultInstructionSize(DAsmArchitecture arch) {
   return 1;
 }
 
-static bool Disassemble6502(const void* bytes, size_t length, uint64_t address,
-                            DAsmInstruction* inst) {
-  if (length == 0) {
-    return false;
-  }
-  DAsmInitInstruction(inst, bytes, length, address, 1);
-  DAsmUnknownInstruction(inst, ".byte 0x%02" PRIx64, inst->bytes[0]);
-  return true;
-}
-
 bool DAsmDisassembleInstruction(DAsmArchitecture arch, const void* bytes,
                                 size_t length, uint64_t address,
                                 DAsmInstruction* inst) {
   switch (arch) {
     case kDAsm6502:
-      return Disassemble6502(bytes, length, address, inst);
+      return DAsmDisassemble6502(bytes, length, address, inst);
     case kDAsmRiscV:
       return DAsmDisassembleRiscV(bytes, length, address, inst);
     case kDAsmAArch64:
@@ -199,7 +189,18 @@ static void PrintFunctionLabels(FILE* fp, const DAsmOptions* options,
     return;
   }
   for (size_t i = 0; i < options->num_symbols; i++) {
-    if (IsFunctionLabel(options, address, i)) {
+    if (!IsFunctionLabel(options, address, i)) {
+      continue;
+    }
+    bool duplicate = false;
+    for (size_t j = 0; j < i; j++) {
+      if (IsFunctionLabel(options, address, j) &&
+          strcmp(options->symbols[j].name, options->symbols[i].name) == 0) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
       fprintf(fp, "%s:\n", options->symbols[i].name);
     }
   }

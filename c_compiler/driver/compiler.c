@@ -60,6 +60,11 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-fpic", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
     {"-fexceptions", kCompilerOptionBool, kOptionExceptions, false, "Enable C++ exception handling (default)"},
     {"-fno-exceptions", kCompilerOptionBool, kOptionNoExceptions, false, "Disable C++ exception handling"},
+    {"-fprintf-specialize", kCompilerOptionBool, kOptionPrintfSpecialize, false,
+     "Select smaller printf-family implementations for constant formats"},
+    {"-fno-printf-specialize", kCompilerOptionBool,
+     kOptionNoPrintfSpecialize, false,
+     "Disable constant printf-family format specialization"},
     // All -W* flags are matched by this single prefix entry and interpreted in
     // InitComplexOptions: -W<name>/-Wno-<name> enable/disable, -Wall, -Werror,
     // -Wno-error, and the per-warning -Werror=<name>/-Wno-error=<name>.
@@ -1822,6 +1827,17 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
       compiler->exceptions_enabled = true;
     } else if (opt->opt == kOptionNoExceptions) {
       compiler->exceptions_enabled = false;
+    }
+  }
+  compiler->printf_specialize =
+      strcmp(target->canonical_name, "6502") == 0 ||
+      strcmp(target->canonical_name, "65c02") == 0;
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt->opt == kOptionPrintfSpecialize) {
+      compiler->printf_specialize = true;
+    } else if (opt->opt == kOptionNoPrintfSpecialize) {
+      compiler->printf_specialize = false;
     }
   }
   compiler->tls_model = compiler->pic ? TLS(global_dynamic) : TLS(local_exec);

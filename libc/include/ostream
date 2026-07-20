@@ -18,6 +18,10 @@
 #include <cstdio>
 #include <string.h>
 
+extern "C" int __snprintf_int(char*, size_t, const char*, ...);
+extern "C" int __snprintf_long(char*, size_t, const char*, ...);
+extern "C" int __snprintf_fp(char*, size_t, const char*, ...);
+
 namespace std {
 
 template <class CharT, class Traits, class Allocator>
@@ -68,28 +72,30 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     if ((this->flags() & ios_base::boolalpha) != 0) {
       return __put_bytes(v ? "true" : "false", v ? 4 : 5, 0);
     }
-    return __put_signed(static_cast<long long>(v ? 1 : 0));
+    return __put_signed_int(v ? 1 : 0);
   }
   basic_ostream& operator<<(short v) {
-    return __put_signed(static_cast<long long>(v));
+    return __put_signed_int(static_cast<int>(v));
   }
   basic_ostream& operator<<(unsigned short v) {
-    return __put_unsigned(static_cast<unsigned long long>(v));
+    return __put_unsigned_int(static_cast<unsigned int>(v));
   }
   basic_ostream& operator<<(int v) {
-    return __put_signed(static_cast<long long>(v));
+    return __put_signed_int(v);
   }
   basic_ostream& operator<<(unsigned int v) {
-    return __put_unsigned(static_cast<unsigned long long>(v));
+    return __put_unsigned_int(v);
   }
   basic_ostream& operator<<(long v) {
-    return __put_signed(static_cast<long long>(v));
+    return __put_signed_long(static_cast<long long>(v));
   }
   basic_ostream& operator<<(unsigned long v) {
-    return __put_unsigned(static_cast<unsigned long long>(v));
+    return __put_unsigned_long(static_cast<unsigned long long>(v));
   }
-  basic_ostream& operator<<(long long v) { return __put_signed(v); }
-  basic_ostream& operator<<(unsigned long long v) { return __put_unsigned(v); }
+  basic_ostream& operator<<(long long v) { return __put_signed_long(v); }
+  basic_ostream& operator<<(unsigned long long v) {
+    return __put_unsigned_long(v);
+  }
   basic_ostream& operator<<(float v) {
     return __put_float(static_cast<double>(v));
   }
@@ -99,7 +105,7 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   }
   basic_ostream& operator<<(const void* v) {
     char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%p", v);
+    int n = __snprintf_int(buf, sizeof(buf), "%p", v);
     if (n < 0) {
       n = 0;
     }
@@ -251,7 +257,7 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   // Build the integer base-conversion format specifier tail (after '%'),
   // honouring basefield / showbase / uppercase / showpos.  Returns the number
   // of characters written into `spec` (always NUL terminated).
-  void __int_base_spec(char* spec, bool is_signed) {
+  void __int_base_spec(char* spec, bool is_signed, bool is_long) {
     ios_base::fmtflags base = this->flags() & ios_base::basefield;
     bool upper = (this->flags() & ios_base::uppercase) != 0;
     bool showbase = (this->flags() & ios_base::showbase) != 0;
@@ -264,8 +270,10 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     if (showpos && is_signed && base == ios_base::dec) {
       *p++ = '+';
     }
-    *p++ = 'l';
-    *p++ = 'l';
+    if (is_long) {
+      *p++ = 'l';
+      *p++ = 'l';
+    }
     if (base == ios_base::hex) {
       *p++ = upper ? 'X' : 'x';
     } else if (base == ios_base::oct) {
@@ -288,22 +296,44 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return i;
   }
 
-  basic_ostream& __put_signed(long long v) {
+  basic_ostream& __put_signed_int(int v) {
     char spec[8];
     char buf[64];
-    __int_base_spec(spec, /*is_signed=*/true);
-    int n = snprintf(buf, sizeof(buf), spec, v);
+    __int_base_spec(spec, /*is_signed=*/true, /*is_long=*/false);
+    int n = __snprintf_int(buf, sizeof(buf), spec, v);
     if (n < 0) {
       n = 0;
     }
     return __put_bytes(buf, static_cast<size_t>(n),
                        __prefix_len(buf, static_cast<size_t>(n)));
   }
-  basic_ostream& __put_unsigned(unsigned long long v) {
+  basic_ostream& __put_unsigned_int(unsigned int v) {
     char spec[8];
     char buf[64];
-    __int_base_spec(spec, /*is_signed=*/false);
-    int n = snprintf(buf, sizeof(buf), spec, v);
+    __int_base_spec(spec, /*is_signed=*/false, /*is_long=*/false);
+    int n = __snprintf_int(buf, sizeof(buf), spec, v);
+    if (n < 0) {
+      n = 0;
+    }
+    return __put_bytes(buf, static_cast<size_t>(n),
+                       __prefix_len(buf, static_cast<size_t>(n)));
+  }
+  basic_ostream& __put_signed_long(long long v) {
+    char spec[8];
+    char buf[64];
+    __int_base_spec(spec, /*is_signed=*/true, /*is_long=*/true);
+    int n = __snprintf_long(buf, sizeof(buf), spec, v);
+    if (n < 0) {
+      n = 0;
+    }
+    return __put_bytes(buf, static_cast<size_t>(n),
+                       __prefix_len(buf, static_cast<size_t>(n)));
+  }
+  basic_ostream& __put_unsigned_long(unsigned long long v) {
+    char spec[8];
+    char buf[64];
+    __int_base_spec(spec, /*is_signed=*/false, /*is_long=*/true);
+    int n = __snprintf_long(buf, sizeof(buf), spec, v);
     if (n < 0) {
       n = 0;
     }
@@ -338,7 +368,7 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     *p++ = conv;
     *p = '\0';
     int prec = static_cast<int>(this->precision());
-    int n = snprintf(buf, sizeof(buf), spec, prec, v);
+    int n = __snprintf_fp(buf, sizeof(buf), spec, prec, v);
     if (n < 0) {
       n = 0;
     }

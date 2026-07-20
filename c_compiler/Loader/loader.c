@@ -247,7 +247,10 @@ bool LoaderLinkedAddressToRuntime(Loader* loader, const LoadedDynamicLibrary* li
                                   uint64_t linked,
                                   uint64_t* runtime) {
   if (!loader->arch->ignore_vaddr) {
-    *runtime = linked;
+    *runtime =
+        lib != NULL && lib->header != NULL && lib->header->type == ET(dyn)
+            ? lib->load_address + linked
+            : linked;
     return true;
   }
   for (size_t i = 0; i < loader->regions.length; i++) {
@@ -692,7 +695,9 @@ static bool LoadDynamic(Loader* loader, bool lazy) {
   
    if (!ok) {
      LoaderError("Unable to find %s", loader->dynamic_lib->libname.value);
-     LoadedDynamicLibraryDelete(loader->dynamic_lib);
+     DynamicLibraryRegistryDestruct(&loader->loaded_libraries);
+     DynamicLibraryRegistryInit(&loader->loaded_libraries);
+     loader->dynamic_lib = NULL;
      return false;
   }
   
@@ -825,7 +830,7 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   memset(&loader->current_symbol, 0, sizeof(SymbolScope));
   loader->lifecycle = calloc(1, sizeof(LoaderLifecycleState));
 
-  if (ok && loader->is_static) {
+  if (ok) {
     ok = LoaderInitMainThreadTls(loader);
   }
 
@@ -957,12 +962,17 @@ void LoaderDestruct(Loader* loader) {
     free(loader->tls.main_thread_block);
     loader->tls.main_thread_block = NULL;
   }
-  // Unmap all regions.
+  // Dynamic libraries own their mapped segments. Their Region entries are
+  // metadata used for address translation and native execute permissions.
+  DynamicLibraryRegistryDestruct(&loader->loaded_libraries);
+
+  // Unmap regions owned directly by the loader.
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
-    munmap(region->address, region->length);
+    if (region->owner == NULL) {
+      munmap(region->address, region->length);
+    }
   }
-  DynamicLibraryRegistryInit(&loader->loaded_libraries);
   
   VectorDestructWithContents(&loader->regions,
                              (VectorElementDestructor)RegionDestruct, /*free_element=*/true);

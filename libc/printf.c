@@ -15,7 +15,9 @@
 #include <string.h>
 #include <stddef.h>
 
-#if 0
+#ifdef PRINTF_SPECIALIZED_LONG
+#define STATIC static
+#elif 0
 #define STATIC static
 #else
 #define STATIC
@@ -24,9 +26,10 @@
 #if 1
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in
 // Break.
-void Break() {}
+STATIC void Break() {}
 #endif
 
+#ifndef PRINTF_DISABLE_FLOAT
 // These are in ftoa.c.
 extern char* __PrintFloatFormat(double f, int precision, char* buf,
                                 size_t size);
@@ -34,6 +37,7 @@ extern char* __PrintScientificFormat(double f, int precision, char* buf,
                                      size_t size);
 extern char* __PrintGeneralFormat(double f, int precision, char* buf,
                                   size_t size);
+#endif
 
 // Values for field_width and precision.  Positive numbers
 // are specified by user.  Negative numbers below -1 mean
@@ -205,8 +209,7 @@ STATIC void FixFloatPrecision(ConversionFormat* fmt, size_t max) {
   }
 }
 
-char* ConvertBinary(unsigned long long v, char* buf,
-            int buflen) {
+STATIC char* ConvertBinary(unsigned long long v, char* buf, int buflen) {
   char* p = &buf[buflen - 1];
   if (v == 0) {
     *p = '0';
@@ -587,6 +590,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           count += WriteFormatted(writer, data, &fmt, v, end - v, false, true);
           break;
         // TODO: support %a
+#ifndef PRINTF_DISABLE_FLOAT
         case 'f':
           FixFloatPrecision(&fmt, sizeof(buf) - 2);
           p++;
@@ -608,6 +612,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           count +=
               WriteFormatted(writer, data, &fmt, v, strlen(v), false, false);
           break;
+#endif
         case 'c': {
           p++;
           char b[1] = {value_c};
@@ -671,6 +676,8 @@ STATIC int StringWriter(const char* s, size_t len, void* data) {
   return (int)len;
 }
 
+#ifndef PRINTF_SPECIALIZED_LONG
+
 #if !defined(__6502__) && !defined(__risc_v__) && !defined(__aarch64__) && \
     !defined(__arm__) && !defined(__x86_64__) && !defined(__p_code__)
 #define fprintf __fprintf
@@ -703,7 +710,32 @@ int vprintf(const char* restrict format, va_list arg) {
   return Printf(FILEWriter, stdout, format, arg);
 }
 
+int __printf_fp(const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  int v = Printf(FILEWriter, stdout, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int __fprintf_fp(FILE* fp, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  int v = Printf(FILEWriter, fp, format, ap);
+  va_end(ap);
+  return v;
+}
+
 int sprintf(char* s, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, -1};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int __sprintf_fp(char* s, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   StringData data = {s, -1};
@@ -728,12 +760,59 @@ int snprintf(char* s, size_t len, const char* format, ...) {
   return v;
 }
 
+int __snprintf_fp(char* s, size_t len, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, len};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
+}
+
 #if 0
 int vsnprintf(char* restrict s, size_t n, const char* restrict format,
               va_list arg) {
   StringData data = {s, n};
   return Printf(StringWriter, &data, format, arg);
 }
+#endif
+
+#else
+
+int __printf_long(const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  int v = Printf(FILEWriter, stdout, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int __fprintf_long(FILE* fp, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  int v = Printf(FILEWriter, fp, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int __sprintf_long(char* s, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, -1};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int __snprintf_long(char* s, size_t len, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, len};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
+}
+
 #endif
 
 #endif

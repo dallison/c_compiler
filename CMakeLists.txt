@@ -95,6 +95,7 @@ target_link_libraries(davecc_elf PUBLIC davecc_utils)
 
 davecc_library(davecc_disassembler
   c_compiler/disassembler/disassembler.c
+  c_compiler/disassembler/disassembler_6502.c
   c_compiler/disassembler/disassembler_aarch64.c
   c_compiler/disassembler/disassembler_arm.c
   c_compiler/disassembler/disassembler_riscv.c

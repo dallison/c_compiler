@@ -46,11 +46,8 @@ bool X86_64RuntimeInit(X86_64Runtime* runtime, const char* filename,
   StringInit(&path, filename);
 
   int32_t loader_flags = trace_instructions ? LOADER_MAP_SYMTAB : 0;
-  char* bind_now = getenv("LD_BIND_NOW");
-  if (mode == kX86_64ModeInterpret &&
-      (bind_now == NULL || bind_now[0] == '\0')) {
-    loader_flags |= LOADER_LAZY_RESOLVE;
-  }
+  // Resolve x86-64 PLT slots while loading. The software interpreter cannot
+  // execute its host-resident resolver trampoline as guest memory.
   char* ld_trace = getenv("LD_TRACE_LOADED_OBJECTS");
   if (ld_trace != NULL && ld_trace[0] != '\0') {
     print_libraries_only = true;

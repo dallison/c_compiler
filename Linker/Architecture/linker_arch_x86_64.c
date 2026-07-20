@@ -172,7 +172,9 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 }
 
 static void InitDynamicLinker(DynamicLinker* dynamic) {
-  dynamic->global_offset_table.num_resolver_data_entries = 2;
+  // The x86-64 PLT reserves GOT[1] for the link map and GOT[2] for the
+  // resolver address. Function slots therefore start at GOT[3].
+  dynamic->global_offset_table.num_resolver_data_entries = 3;
   dynamic->global_offset_table.entry_size = 8;
   dynamic->procedure_linkage_table.num_reserved_entries = 1;
   dynamic->procedure_linkage_table.entry_size = 16;
@@ -256,7 +258,7 @@ static void FixupPLTEntry(ProcedureLinkageTable* plt, GlobalOffsetTable* got,
   int32_t plt_disp = (int32_t)(plt_address - (trampoline_address + 16));
 
   memcpy(p + 2, &got_disp, 4);
-  *(uint32_t*)(p + 7) = (uint32_t)symbol->plt_index;
+  *(uint32_t*)(p + 7) = (uint32_t)(symbol->plt_index - 1);
   memcpy(p + 12, &plt_disp, 4);
 }
 

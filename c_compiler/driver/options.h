@@ -30,6 +30,8 @@ typedef enum {
   kOptionPic,                // Position Independent Code.
   kOptionExceptions,         // -fexceptions: enable C++ exceptions.
   kOptionNoExceptions,       // -fno-exceptions: disable C++ exceptions.
+  kOptionPrintfSpecialize,   // Analyze constant printf-family formats.
+  kOptionNoPrintfSpecialize, // Disable printf-family specialization.
   kOptionWarning,            // Disable warning.
   kOptionWerror,             // All warnings are errors.
   kOptionWall,               // Enable all warnings.

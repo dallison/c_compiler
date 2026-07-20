@@ -69,7 +69,9 @@ static void ResolveFail(X86_64Interpreter* interpreter, int status) {
   X86_64InterpreterFail(interpreter, status);
 }
 
-static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
+static bool GuestAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
+                           size_t size) {
+  Loader* loader = interpreter->loader;
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
     uint64_t start = (uint64_t)(uintptr_t)region->address;
@@ -78,7 +80,8 @@ static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
       return true;
     }
   }
-  return false;
+  return interpreter->process != NULL &&
+         X86_64ProcessGuestMemoryOk(interpreter->process, addr, size);
 }
 
 static bool SectionAddressAndSize(LoadedDynamicLibrary* lib, const char* name,
@@ -181,7 +184,7 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
       (LoadedDynamicLibrary*)interpreter->iregs[X86_REG_RDI];
   int64_t index = (int64_t)interpreter->iregs[X86_REG_RSI];
   if (lib == NULL || index < 0) {
-    if (GuestAddressOk(interpreter->loader, interpreter->rsp, 16)) {
+    if (GuestAddressOk(interpreter, interpreter->rsp, 16)) {
       lib = *(LoadedDynamicLibrary**)(uintptr_t)interpreter->rsp;
       index = *(int64_t*)(uintptr_t)(interpreter->rsp + 8);
     }
@@ -193,7 +196,7 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
   }
 
   lib = (LoadedDynamicLibrary*)interpreter->iregs[X86_REG_RDI];
-  if (lib == NULL && GuestAddressOk(interpreter->loader, interpreter->rsp, 8)) {
+  if (lib == NULL && GuestAddressOk(interpreter, interpreter->rsp, 8)) {
     lib = *(LoadedDynamicLibrary**)(uintptr_t)interpreter->rsp;
   }
   if (lib == NULL) {

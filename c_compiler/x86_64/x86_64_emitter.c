@@ -1962,11 +1962,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       char namebuf[256];
       const char* symname =
           TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
-      if (compiler->pic) {
-        fprintf(fp, "\t%-12s%s@plt\n", "call", symname);
-      } else {
-        fprintf(fp, "\t%-12s%s\n", "call", symname);
-      }
+      // The integrated assembler selects PLT32 for calls in PIC mode.
+      // Keeping "@plt" in the textual name creates a distinct undefined
+      // symbol instead of a relocation suffix.
+      fprintf(fp, "\t%-12s%s\n", "call", symname);
       return;
     }
 
