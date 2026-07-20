@@ -2031,7 +2031,7 @@ void ARMPrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
-    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);
     if (thunk->this_adjustment > 0) {

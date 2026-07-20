@@ -64,6 +64,18 @@ mkdir empty-lib
 DAVECC_LIB_DIR="$WORK/empty-lib" \
   "$DAVECC" -target aarch64 -S hello.cc -o hello.compile-only.s
 
+# Without -o, -S must report success and use the source basename with .s.
+cat > assembly-default.cc <<'SRC'
+int answer() {
+  return 42;
+}
+SRC
+"$DAVECC" -target 65c02 -S assembly-default.cc
+if [[ ! -s assembly-default.s ]]; then
+  echo "-S did not create its default assembly output" >&2
+  exit 1
+fi
+
 cat > freestanding.c <<'SRC'
 int main(void) {
   return 0;

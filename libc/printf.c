@@ -519,7 +519,11 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'f':
     case 'g':
     case 'e':
-      *value_f = va_arg(*ap, double);
+      if (fmt->modifier == kModLongDouble) {
+        *value_f = (double)va_arg(*ap, long double);
+      } else {
+        *value_f = va_arg(*ap, double);
+      }
       break;
     case 's':
       *value_s = va_arg(*ap, const char*);

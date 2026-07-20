@@ -44,7 +44,8 @@ skip=0
 compile_one() {
   local src=$1
   local obj=$2
-  if "$davecc" "${cflags[@]}" "$src" -o "$obj" 2>"$work/err.txt"; then
+  shift 2
+  if "$davecc" "${cflags[@]}" "$@" "$src" -o "$obj" 2>"$work/err.txt"; then
     pass=$((pass + 1))
     return 0
   fi
@@ -93,6 +94,12 @@ for src in libc/*.c; do
   esac
   obj="$work/${base%.c}.o"
   compile_one "$src" "$obj" || true
+done
+
+for src in libc/*.cc; do
+  base=$(basename "$src")
+  obj="$work/cxx_${base%.cc}.o"
+  compile_one "$src" "$obj" -std=c++20 || true
 done
 
 echo "compile summary: pass=$pass fail=$fail skip=$skip"

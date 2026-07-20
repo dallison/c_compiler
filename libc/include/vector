@@ -27,13 +27,8 @@ namespace std {
 
 namespace __vector_detail {
 
-static inline void __throw_out_of_range() {
-  throw out_of_range((const char*)"vector::at");
-}
-
-static inline void __throw_length_error() {
-  throw length_error((const char*)"vector::reserve");
-}
+void __throw_out_of_range();
+void __throw_length_error();
 
 }  // namespace __vector_detail
 

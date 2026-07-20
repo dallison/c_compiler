@@ -887,7 +887,7 @@ void W65C02PrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
     uint16_t adjustment = (uint16_t)thunk->this_adjustment;
 
-    fprintf(fp, "\t.local %s\n", thunk_name);
+    fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);
     // The first software-stack argument is `this`. Preserve X/Y because they

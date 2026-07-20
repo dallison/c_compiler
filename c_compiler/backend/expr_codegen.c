@@ -14,6 +14,10 @@
 #include "member_pointer.h"
 #include "type_template.h"
 
+static bool TypeUsesDoubleIROperations(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
 // Table to translate an AST node and type into an IR operation.
 static struct {
   ASTOpcode node_op;
@@ -23,21 +27,21 @@ static struct {
 } expr_operators[] = {
     {AST_OP(plus), TypeIsIntegral, IR_OP(addi), true},
     {AST_OP(plus), TypeIsFloat, IR_OP(addf), true},
-    {AST_OP(plus), TypeIsDouble, IR_OP(addd), true},
+    {AST_OP(plus), TypeUsesDoubleIROperations, IR_OP(addd), true},
     {AST_OP(plus), TypeIsPointerOrArray, IR_OP(adda), true},
 
     {AST_OP(minus), TypeIsIntegral, IR_OP(subi)},
     {AST_OP(minus), TypeIsFloat, IR_OP(subf)},
-    {AST_OP(minus), TypeIsDouble, IR_OP(subd)},
+    {AST_OP(minus), TypeUsesDoubleIROperations, IR_OP(subd)},
     {AST_OP(minus), TypeIsPointerOrArray, IR_OP(suba)},
 
     {AST_OP(mult), TypeIsIntegral, IR_OP(muli), true},
     {AST_OP(mult), TypeIsFloat, IR_OP(mulf), true},
-    {AST_OP(mult), TypeIsDouble, IR_OP(muld), true},
+    {AST_OP(mult), TypeUsesDoubleIROperations, IR_OP(muld), true},
 
     {AST_OP(div), TypeIsIntegral, IR_OP(divi)},
     {AST_OP(div), TypeIsFloat, IR_OP(divf)},
-    {AST_OP(div), TypeIsDouble, IR_OP(divd)},
+    {AST_OP(div), TypeUsesDoubleIROperations, IR_OP(divd)},
 
     {AST_OP(mod), TypeIsIntegral, IR_OP(modi)},
 
@@ -63,12 +67,12 @@ static struct {
     {AST_OP(greater), TypeIsFloat, IR_OP(cmpgtf)},
     {AST_OP(greatereq), TypeIsFloat, IR_OP(cmpgef)},
 
-    {AST_OP(equal), TypeIsDouble, IR_OP(cmpeqd), true},
-    {AST_OP(noteq), TypeIsDouble, IR_OP(cmpned), true},
-    {AST_OP(less), TypeIsDouble, IR_OP(cmpltd)},
-    {AST_OP(lesseq), TypeIsDouble, IR_OP(cmpled)},
-    {AST_OP(greater), TypeIsDouble, IR_OP(cmpgtd)},
-    {AST_OP(greatereq), TypeIsDouble, IR_OP(cmpged)},
+    {AST_OP(equal), TypeUsesDoubleIROperations, IR_OP(cmpeqd), true},
+    {AST_OP(noteq), TypeUsesDoubleIROperations, IR_OP(cmpned), true},
+    {AST_OP(less), TypeUsesDoubleIROperations, IR_OP(cmpltd)},
+    {AST_OP(lesseq), TypeUsesDoubleIROperations, IR_OP(cmpled)},
+    {AST_OP(greater), TypeUsesDoubleIROperations, IR_OP(cmpgtd)},
+    {AST_OP(greatereq), TypeUsesDoubleIROperations, IR_OP(cmpged)},
 
     {AST_OP(equal), TypeIsPointerOrArray, IR_OP(cmpeqa), true},
     {AST_OP(noteq), TypeIsPointerOrArray, IR_OP(cmpnea), true},
@@ -89,7 +93,7 @@ static struct {
     {AST_OP(onescomp), TypeIsIntegral, IR_OP(onescomp)},
     {AST_OP(uminus), TypeIsIntegral, IR_OP(negi)},
     {AST_OP(uminus), TypeIsFloat, IR_OP(negf)},
-    {AST_OP(uminus), TypeIsDouble, IR_OP(negd)},
+    {AST_OP(uminus), TypeUsesDoubleIROperations, IR_OP(negd)},
  
 
     {AST_OP(bad), NULL, IR_OP(nop)},
@@ -1855,6 +1859,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
           !function_reference_formal;
       if (!IRIsVariable(ref_source) || materialize_prvalue) {
         Symbol* tmp = SyntaxNewTemporary(gen->syntax, arg->type);
+        tmp->flags.address_taken = true;
         IRNode* var = GeneratorGetVariable(gen, tmp);
         IROpcode store = GetStoreOpcodeForType(arg->type);
         IRNode* write = GeneratorEmit(
@@ -1862,6 +1867,12 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
                         RemoveUnnecesaryShortening(gen, arg_value, store)));
         IRSetVarDef(write, tmp);
         ref_source = var;
+      }
+      if (IRIsVariable(ref_source)) {
+        IRVariable* variable = (IRVariable*)ref_source;
+        if (variable->symbol != NULL) {
+          variable->symbol->flags.address_taken = true;
+        }
       }
       arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));

@@ -205,6 +205,7 @@ void SyntaxCheckThreadLocal(Syntax* syntax, Symbol* symbol,
                             ParserContext context, bool is_static_member,
                             bool is_nonstatic_member);
 bool SyntaxLookingAtType(Syntax* syntax);
+bool SyntaxCurrentClassNameStartsType(Syntax* syntax);
 bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);

@@ -96,6 +96,9 @@ static int CallGuestEntry(Loader* loader, uint64_t entry, int argc,
 #endif
 
 bool X86_64NativeNeedsInterpreter(const Loader* loader) {
+  if (loader != NULL && loader->tls.present) {
+    return true;
+  }
 #if defined(__APPLE__)
   return loader != NULL && !loader->is_static;
 #else

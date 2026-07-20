@@ -2529,8 +2529,12 @@ static String* Compile(Compiler* compiler, Vector* options) {
   // If the user specified -S then we don't assemble the output
   // and we keep the output assembly language file.
   if (output_asm_only) {
+    String* result = output_filename;
+    if (result == NULL) {
+      result = NewString(asm_filename.value);
+    }
     StringDestruct(&asm_filename);
-    return output_filename;
+    return result;
   }
 
   // Run the assembler to assemble into the object file.  Return the

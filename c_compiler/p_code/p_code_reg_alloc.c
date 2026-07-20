@@ -492,7 +492,7 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
       break;
 
     case P_OP(f2d):
-      reg = AllocateRegisterWithType(allocator, kPCodeRegTypeFloat);
+      reg = AllocateRegisterWithType(allocator, kPCodeRegTypeDouble);
       break;
 
     case P_OP(f2i):

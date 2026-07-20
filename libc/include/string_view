@@ -342,23 +342,16 @@ std::strong_ordering operator<=>(basic_string_view<CharT, Traits> a,
                        : std::strong_ordering::equal;
 }
 
-namespace __sv_detail {
+namespace __string_hash_detail {
 
-inline size_t __fnv1a(const char* data, size_t n) noexcept {
-  size_t h = static_cast<size_t>(1469598103934665603ULL);
-  for (size_t i = 0; i < n; i++) {
-    h ^= static_cast<size_t>(static_cast<unsigned char>(data[i]));
-    h *= static_cast<size_t>(1099511628211ULL);
-  }
-  return h;
-}
+size_t __fnv1a(const char* data, size_t n) noexcept;
 
-}  // namespace __sv_detail
+}  // namespace __string_hash_detail
 
 template <>
 struct hash<basic_string_view<char> > {
   size_t operator()(basic_string_view<char> s) const noexcept {
-    return __sv_detail::__fnv1a(s.data(), s.size());
+    return __string_hash_detail::__fnv1a(s.data(), s.size());
   }
 };
 

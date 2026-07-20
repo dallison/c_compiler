@@ -72,6 +72,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser, TypeRecord* type,
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals);
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias, TypeRecord* type);
 TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser, String* name);
+bool CurrentClassNameMatchesTypeName(Struct* owner, String* name);
 
 void CheckTagType(TypeParser* parser, Symbol* old, bool is_union, bool is_enum);
 void AddInjectedEnumName(TypeParser* parser, Symbol* tag);

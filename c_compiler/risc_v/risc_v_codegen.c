@@ -18,6 +18,13 @@
 #include "risc_v_optimize.h"
 #include "target_basic_block.h"
 
+// RISC-V currently uses the 64-bit double representation for long double.
+// Keep the source-language distinction, but select double-width instructions
+// and floating-point registers for both types.
+static bool RVFpIsDoubleWidth(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
 static void LowerVariables(RVGenerator* rv, Generator* gen);
 
 static void Trap() {}
@@ -2007,7 +2014,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   }
   RVOpcode mov_opcode = RV_OP(mv);
   if (TypeIsFloatingPoint(node->type)) {
-    mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+    mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
   }
   return FinishWithDest(rv, node, inst, mov_opcode);
 }
@@ -2380,7 +2387,7 @@ static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opco
 
   if (!on_stack) {
     if (TypeIsFloatingPoint(addr_node->type)) {
-      return Emit(rv, NewInstruction1(TypeIsDouble(addr_node->type) ?
+      return Emit(rv, NewInstruction1(RVFpIsDoubleWidth(addr_node->type) ?
                                       RV_OP(fmv_d) : RV_OP(fmv_s), addr));
     }
     return Emit(rv, NewInstruction1(RV_OP(mv), addr));
@@ -2433,7 +2440,7 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
   TargetInstruction* result = Load(rv, addr_node, opcode);
   RVOpcode mov_opcode = RV_OP(mv);
   if (TypeIsFloatingPoint(node->type)) {
-    mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+    mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
   }
   return FinishWithDest(rv, node, result, mov_opcode);
 }
@@ -2919,7 +2926,7 @@ static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? RV_OP(fadd_d) : RV_OP(fadd_s), load, amount));
+    inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fadd_d) : RV_OP(fadd_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, RVIntValue(amount));
   }
@@ -2979,7 +2986,7 @@ static TargetInstruction* LowerDec(RVGenerator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? RV_OP(fsub_d) : RV_OP(fsub_s), load, amount));
+    inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fsub_d) : RV_OP(fsub_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -RVIntValue(amount));
   }
@@ -3337,7 +3344,7 @@ static bool GetFloatingAggregate(TypeRecord* type,
     }
     if (member->bit_size != 0 || member->symbol == NULL ||
         (!TypeIsFloat(member->symbol->type) &&
-         !TypeIsDouble(member->symbol->type)) ||
+         !RVFpIsDoubleWidth(member->symbol->type)) ||
         aggregate->count == 2) {
       return false;
     }
@@ -3565,9 +3572,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         TargetInstruction* address = Materialize(rv, arg_node);
         for (int member = 0; member < aggregate.count; member++) {
           RVOpcode load_opcode =
-              TypeIsDouble(aggregate.type[member]) ? RV_OP(fld) : RV_OP(flw);
+              RVFpIsDoubleWidth(aggregate.type[member]) ? RV_OP(fld) : RV_OP(flw);
           RVOpcode move_opcode =
-              TypeIsDouble(aggregate.type[member]) ? RV_OP(fmv_d)
+              RVFpIsDoubleWidth(aggregate.type[member]) ? RV_OP(fmv_d)
                                                    : RV_OP(fmv_s);
           TargetInstruction* value = Emit(rv, NewInstruction2(
               load_opcode, address,
@@ -3687,7 +3694,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                                          RV_OP(mv)));
           break;
         } else if (TypeIsFloatingPoint(arg_node->type)) {
-          if (TypeIsDouble(arg_node->type)) {
+          if (RVFpIsDoubleWidth(arg_node->type)) {
             mov_opcode = RV_OP(fmv_d);
           } else {
             mov_opcode = RV_OP(fmv_s);
@@ -3778,7 +3785,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   if (!can_be_tail_call) {
     RVOpcode mov_opcode = RV_OP(mv);
     if (node->type != NULL && TypeIsFloatingPoint(node->type)) {
-      mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+      mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
     }
     TargetInstruction* dest = GetDestInstruction(rv, node);
     if (dest != NULL) {
@@ -4568,7 +4575,7 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(RVGenerator* rv,
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
-      RVOpcode move_op = TypeIsDouble(symbol->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+      RVOpcode move_op = RVFpIsDoubleWidth(symbol->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
       Emit(rv, NewInstruction2(move_op, var,
                 FloatingPointArgumentRegister(rv,
                     (int)arg_loc.location.offset - RV_FP_ARG_START)));
@@ -4579,7 +4586,7 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(RVGenerator* rv,
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
       TargetInstruction* load = PopArg(rv, symbol, arg_loc.location.offset);
-      RVOpcode move_op = TypeIsDouble(symbol->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+      RVOpcode move_op = RVFpIsDoubleWidth(symbol->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
       Emit(rv, NewInstruction2(move_op, var, load));
       return var;
     }

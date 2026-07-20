@@ -605,6 +605,10 @@ static TargetInstruction* LoadStaticVariable(PCodeGenerator* pcode,
                                      GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
 }
 
+static bool PCodeFpIsDoubleWidth(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
 static struct {
   bool (*type_func)(TypeRecord*);
   PCodeOpcode load;
@@ -618,7 +622,7 @@ static struct {
     {TypeIsUnsignedShort, P_OP(lduh)},
     {TypeIsUnsignedChar, P_OP(ldub)},
     {TypeIsFloat, P_OP(ldf)},
-    {TypeIsDouble, P_OP(ldd)},
+    {PCodeFpIsDoubleWidth, P_OP(ldd)},
     {TypeIsBool, P_OP(ldb)},
     {TypeIsPointerOrArray, P_OP(ldx)},
     {TypeIsFunction, P_OP(ldx)},
@@ -1418,7 +1422,7 @@ static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
   if (TypeIsFloat(type)) {
     return P_OP(ldf);
   }
-  if (TypeIsDouble(type)) {
+  if (PCodeFpIsDoubleWidth(type)) {
     return P_OP(ldd);
   }
   return TypeIsUnsigned(type) ? P_OP(lduw) : P_OP(ldw);
@@ -1437,7 +1441,7 @@ static PCodeOpcode AtomicStoreOpcode(TypeRecord* type) {
   if (TypeIsFloat(type)) {
     return P_OP(stf);
   }
-  if (TypeIsDouble(type)) {
+  if (PCodeFpIsDoubleWidth(type)) {
     return P_OP(std);
   }
   return P_OP(stw);
@@ -1532,8 +1536,7 @@ static struct {
     {TypeIsLong, P_OP(pushx), 8},
     {TypeIsLongLong, P_OP(pushx), 8},
     {TypeIsFloat, P_OP(pushf), 4},
-    {TypeIsDouble, P_OP(pushd), 8},
-    {TypeIsLongDouble, P_OP(pushd), 8},
+    {PCodeFpIsDoubleWidth, P_OP(pushd), 8},
     {TypeIsPointerOrArray, P_OP(pushx), 8},
     {TypeIsNullPointer, P_OP(pushx), 8},
     {TypeIsFunction, P_OP(pushx), 8},
@@ -1618,7 +1621,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   if (((int)addr->opcode == (int)P_OP(symbol))) {
     if (TypeIsFloat(node->type)) {
       opcode = P_OP(callf);
-    } else if (TypeIsDouble(node->type)) {
+    } else if (PCodeFpIsDoubleWidth(node->type)) {
       opcode = P_OP(calld);
     } else {
       opcode = P_OP(call);
@@ -1626,7 +1629,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   } else {
     if (TypeIsFloat(node->type)) {
       opcode = P_OP(rcallf);
-    } else if (TypeIsDouble(node->type)) {
+    } else if (PCodeFpIsDoubleWidth(node->type)) {
       opcode = P_OP(rcalld);
     } else {
       opcode = P_OP(rcall);
@@ -1642,7 +1645,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
     PCodeOpcode move_opcode = P_OP(mov);
     if (TypeIsFloat(node->type)) {
       move_opcode = P_OP(movf);
-    } else if (TypeIsDouble(node->type)) {
+    } else if (PCodeFpIsDoubleWidth(node->type)) {
       move_opcode = P_OP(movd);
     }
     TargetInstruction* dest = GetDestInstruction(pcode, node);
@@ -1978,7 +1981,10 @@ static TargetInstruction* LowerInc(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* inc;
   if (TypeIsFloatingPoint(node->type)) {
     TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
-    inc =  Emit(pcode, NewInstruction2(TypeIsDouble(node->type) ? P_OP(addd) : P_OP(addf), load, amount));
+    inc = Emit(pcode,
+               NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(addd)
+                                                                : P_OP(addf),
+                               load, amount));
   } else  {
     inc =  AddImmediate(pcode, load, PCodeIntValue(GetLoweredNode(node->inputs.value.p[1])));
   }
@@ -2037,7 +2043,10 @@ static TargetInstruction* LowerDec(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* inc;
   if (TypeIsFloatingPoint(node->type)) {
     TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
-    inc =  Emit(pcode, NewInstruction2(TypeIsDouble(node->type) ? P_OP(subd) : P_OP(subf), load, amount));
+    inc = Emit(pcode,
+               NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(subd)
+                                                                : P_OP(subf),
+                               load, amount));
   } else  {
     inc =  AddImmediate(pcode, load, -PCodeIntValue(GetLoweredNode(node->inputs.value.p[1])));
   }
@@ -2116,7 +2125,7 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
   PCodeOpcode load_opcode = P_OP(ldx);
   if (TypeIsFloat(node->type)) {
     load_opcode = P_OP(ldf);
-  } else if (TypeIsDouble(node->type) || TypeIsLongDouble(node->type)) {
+  } else if (PCodeFpIsDoubleWidth(node->type)) {
     load_opcode = P_OP(ldd);
   } else {
     switch (node->type->size) {
@@ -2521,7 +2530,7 @@ static int64_t CalculateArgumentSize(Symbol* arg) {
     return 0;
   }
   if (TypeIsFloatingPoint(arg->type)) {
-    if (TypeIsDouble(arg->type)) {
+    if (PCodeFpIsDoubleWidth(arg->type)) {
       return 8;
     }
     return 4;

@@ -4,6 +4,8 @@ CC = davecc
 LIB = libc.so
 
 CFLAGS = -target risc-v -fPIC -Xkeep-asm -Werror -O2
+CXX_SRCS = $(wildcard *.cc)
+CXX_OBJS = $(patsubst %.cc,cxx_%.o,$(CXX_SRCS))
 
 OBJS = \
   posix.o \
@@ -32,7 +34,11 @@ OBJS = \
   strrchr.o \
   strstr.o \
   strtol.o \
-  strings.o
+  strings.o \
+  $(CXX_OBJS)
+
+cxx_%.o: %.cc
+	$(CC) $(CFLAGS) -std=c++20 -c $< -o $@
 
 $(LIB): $(OBJS)
 	$(CC) -o $(LIB) -shared $(OBJS)

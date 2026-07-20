@@ -162,6 +162,68 @@ static size_t InstructionSize(DAsm6502AddressMode mode) {
   return 1;
 }
 
+static bool ZeroPageRegisterName(uint8_t address, char* name,
+                                 size_t name_size) {
+  static const struct {
+    uint8_t start;
+    uint8_t size;
+    uint8_t count;
+    char prefix;
+  } classes[] = {
+      {0x00, 1, 8, 'b'}, {0x08, 2, 16, 'i'}, {0x28, 4, 8, 'l'},
+      {0x48, 8, 4, 'x'}, {0x68, 4, 4, 'f'},
+  };
+  for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
+    uint8_t end =
+        (uint8_t)(classes[i].start + classes[i].size * classes[i].count);
+    if (address < classes[i].start || address >= end) {
+      continue;
+    }
+    unsigned int relative = address - classes[i].start;
+    unsigned int index = relative / classes[i].size;
+    unsigned int offset = relative % classes[i].size;
+    if (offset == 0) {
+      snprintf(name, name_size, "__%c%u", classes[i].prefix, index);
+    } else {
+      snprintf(name, name_size, "__%c%u + %u", classes[i].prefix, index,
+               offset);
+    }
+    return true;
+  }
+
+  static const struct {
+    uint8_t start;
+    uint8_t size;
+    const char* name;
+  } special[] = {
+      {0x78, 2, "__sp"},       {0x7a, 2, "__fp"},
+      {0x7c, 2, "__result"},   {0x7e, 1, "__t0"},
+      {0x7f, 1, "__t1"},       {0x80, 1, "__t2"},
+      {0x81, 1, "__t3"},       {0x82, 2, "__mem_src"},
+      {0x84, 2, "__mem_dest"}, {0x86, 2, "__mem_size"},
+  };
+  for (size_t i = 0; i < sizeof(special) / sizeof(special[0]); i++) {
+    if (address < special[i].start ||
+        address >= special[i].start + special[i].size) {
+      continue;
+    }
+    unsigned int offset = address - special[i].start;
+    if (offset == 0) {
+      snprintf(name, name_size, "%s", special[i].name);
+    } else {
+      snprintf(name, name_size, "%s + %u", special[i].name, offset);
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool IsZeroPageMode(DAsm6502AddressMode mode) {
+  return mode == k6502ZeroPage || mode == k6502ZeroPageX ||
+         mode == k6502ZeroPageY || mode == k6502IndexedIndirect ||
+         mode == k6502IndirectIndexed || mode == k6502ZeroPageIndirect;
+}
+
 bool DAsmDisassemble6502(const void* bytes, size_t length, uint64_t address,
                          DAsmInstruction* inst) {
   if (length == 0) {
@@ -184,6 +246,13 @@ bool DAsmDisassemble6502(const void* bytes, size_t length, uint64_t address,
   DAsmInitInstruction(inst, bytes, length, address, size);
 
   uint16_t operand16 = size == 3 ? DAsmRead16LE(p + 1) : 0;
+  char comment[48] = "";
+  if (IsZeroPageMode(opcode->mode)) {
+    char register_name[32];
+    if (ZeroPageRegisterName(p[1], register_name, sizeof(register_name))) {
+      snprintf(comment, sizeof(comment), "     // %s", register_name);
+    }
+  }
   switch (opcode->mode) {
     case k6502Implied:
       DAsmFormat(inst, "%s", opcode->mnemonic);
@@ -195,13 +264,13 @@ bool DAsmDisassemble6502(const void* bytes, size_t length, uint64_t address,
       DAsmFormat(inst, "%s #0x%02x", opcode->mnemonic, p[1]);
       break;
     case k6502ZeroPage:
-      DAsmFormat(inst, "%s 0x%02x", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s 0x%02x%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502ZeroPageX:
-      DAsmFormat(inst, "%s 0x%02x,x", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s 0x%02x,x%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502ZeroPageY:
-      DAsmFormat(inst, "%s 0x%02x,y", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s 0x%02x,y%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502Absolute:
       DAsmFormat(inst, "%s 0x%04x", opcode->mnemonic, operand16);
@@ -219,13 +288,13 @@ bool DAsmDisassemble6502(const void* bytes, size_t length, uint64_t address,
       DAsmFormat(inst, "%s (0x%04x)", opcode->mnemonic, operand16);
       break;
     case k6502IndexedIndirect:
-      DAsmFormat(inst, "%s (0x%02x,x)", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s (0x%02x,x)%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502IndirectIndexed:
-      DAsmFormat(inst, "%s (0x%02x),y", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s (0x%02x),y%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502ZeroPageIndirect:
-      DAsmFormat(inst, "%s (0x%02x)", opcode->mnemonic, p[1]);
+      DAsmFormat(inst, "%s (0x%02x)%s", opcode->mnemonic, p[1], comment);
       break;
     case k6502AbsoluteIndexedIndirect:
       DAsmFormat(inst, "%s (0x%04x,x)", opcode->mnemonic, operand16);

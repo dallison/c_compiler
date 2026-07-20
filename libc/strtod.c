@@ -8,9 +8,8 @@
 
 #include "_fpfuncs.h"
 #include <ctype.h>
+#include <stddef.h>
 #include <string.h>
-
-extern void Break();
 
 // The algorithm for this is:
 // Build a fixed point binary number with the binary point at the
@@ -44,13 +43,16 @@ extern void Break();
 //
 // Finally we assemble the IEEE754 number (either single precision or double
 // precision depending on the architecture).
-double strtod (const char* str, char** endptr) {
+double strtod(const char* str, char** endptr) {
   uint64_t fx[FIXED_SIZE_WORDS] = {0};
   uint64_t n[FIXED_SIZE_HALF] = {0};
 
   uint8_t negative = 0;
   
   const char* p = str;
+  while (isspace(*p)) {
+    p++;
+  }
   if (*p == '-') {
     negative = 0x80;
     p++;
@@ -59,22 +61,24 @@ double strtod (const char* str, char** endptr) {
     p++;
   }
   
+  bool converted = false;
+
   // Convert integral part to binary.  This is put into the top
   // half of the fixed point number - the integral part.
   int fraction_digits = 0;
-  while (isdigit(*p) && *p != '.' && *p != 'e' && *p != 'E') {
+  while (isdigit(*p)) {
+    converted = true;
     n[0] = *p - '0';
     __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
     __AddHalf(fx + FIXED_SIZE_HALF, n);
     p++;
   }
-  Break();
-  
   if (*p == '.') {
     p++;
     // We have a fractional part, continue accumulating and count the
     // number of fractional digits.
-    while (isdigit(*p) && *p != 'e' && *p != 'E') {
+    while (isdigit(*p)) {
+      converted = true;
       n[0] = *p - '0';
       __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
       __AddHalf(fx + FIXED_SIZE_HALF, n);
@@ -89,26 +93,36 @@ double strtod (const char* str, char** endptr) {
     }
   }
   
-  // Check for exponent.
+  if (!converted) {
+    if (endptr != NULL) {
+      *endptr = (char*)str;
+    }
+    return 0.0;
+  }
+
+  // Check for exponent. It is only consumed when at least one exponent digit
+  // follows the optional sign.
   if (*p == 'e' || *p == 'E') {
-    p++;
-    bool negative_exp = *p == '-';
-    if (*p == '+' || *p =='-') {
-      p++;
+    const char* exponent = p + 1;
+    bool negative_exp = *exponent == '-';
+    if (*exponent == '+' || *exponent == '-') {
+      exponent++;
     }
-    int exp = 0;
-    while (isdigit(*p)) {
-      exp = exp * 10 + *p++ - '0';
-    }
-    
-    // Multiply or divide by the exponent.
-    if (negative_exp) {
-      for (int i = 0; i < exp; i++) {
-        __DivideBy10(fx);
-      }
-    } else {
-      for (int i = 0; i < exp; i++) {
-        __MultiplyBy10(fx);
+    if (isdigit(*exponent)) {
+      int decimal_exp = 0;
+      do {
+        decimal_exp = decimal_exp * 10 + *exponent++ - '0';
+      } while (isdigit(*exponent));
+      p = exponent;
+
+      if (negative_exp) {
+        for (int i = 0; i < decimal_exp; i++) {
+          __DivideBy10(fx);
+        }
+      } else {
+        for (int i = 0; i < decimal_exp; i++) {
+          __MultiplyBy10(fx);
+        }
       }
     }
   }
@@ -120,7 +134,7 @@ double strtod (const char* str, char** endptr) {
   // the number.
   int exp = EXP_BIAS;
   if (__IsZero(fx)) {
-    return 0;
+    return 0.0;
   }
   
   // Normalize by making the integer part 1.
@@ -157,6 +171,18 @@ double strtod (const char* str, char** endptr) {
   return *(double*)&packed;
 #endif
   
+}
+
+float strtof(const char* str, char** endptr) {
+  return (float)strtod(str, endptr);
+}
+
+long double strtold(const char* str, char** endptr) {
+  return (long double)strtod(str, endptr);
+}
+
+double atof(const char* str) {
+  return strtod(str, NULL);
 }
 
 #ifndef __6502__

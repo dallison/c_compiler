@@ -30,9 +30,7 @@ namespace std {
 
 namespace __deque_detail {
 
-static inline void __throw_out_of_range() {
-  throw out_of_range((const char*)"deque::at");
-}
+void __throw_out_of_range();
 
 }  // namespace __deque_detail
 

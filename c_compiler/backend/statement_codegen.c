@@ -1699,7 +1699,8 @@ static void GenerateReturnStatement(Generator* gen,
           result = IR_OP(resulti);
         } else if (TypeIsFloat(node->cond->type)) {
           result = IR_OP(resultf);
-        } else if (TypeIsDouble(node->cond->type)) {
+        } else if (TypeIsDouble(node->cond->type) ||
+                   TypeIsLongDouble(node->cond->type)) {
           result = IR_OP(resultd);
         } else {
           result = IR_OP(resulta);

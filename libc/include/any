@@ -179,20 +179,8 @@ class any {
  public:
   constexpr any() noexcept : __storage{}, __ops(nullptr) {}
 
-  any(const any& other) : __storage{}, __ops(nullptr) {
-    if (other.__ops != nullptr) {
-      other.__ops->copy(&__storage, &other.__storage);
-      __ops = other.__ops;
-    }
-  }
-
-  any(any&& other) noexcept : __storage{}, __ops(nullptr) {
-    if (other.__ops != nullptr) {
-      other.__ops->move(&__storage, &other.__storage);
-      __ops = other.__ops;
-      other.__ops = nullptr;
-    }
-  }
+  any(const any& other);
+  any(any&& other) noexcept;
 
   template <class ValueType>
     requires (!is_same<decay_t<ValueType>, any>::value &&
@@ -226,30 +214,10 @@ class any {
         values, std::forward<Args>(args)...);
   }
 
-  ~any() {
-    reset();
-  }
+  ~any();
 
-  any& operator=(const any& other) {
-    if (this == &other) {
-      return *this;
-    }
-    any temporary(other);
-    temporary.swap(*this);
-    return *this;
-  }
-
-  any& operator=(any&& other) noexcept {
-    if (this != &other) {
-      reset();
-      if (other.__ops != nullptr) {
-        other.__ops->move(&__storage, &other.__storage);
-        __ops = other.__ops;
-        other.__ops = nullptr;
-      }
-    }
-    return *this;
-  }
+  any& operator=(const any& other);
+  any& operator=(any&& other) noexcept;
 
   template <class ValueType>
     requires (!is_same<decay_t<ValueType>, any>::value &&
@@ -282,30 +250,8 @@ class any {
         values, std::forward<Args>(args)...);
   }
 
-  void reset() noexcept {
-    if (__ops != nullptr) {
-      const __operations* operations = __ops;
-      __ops = nullptr;
-      operations->destroy(&__storage);
-    }
-  }
-
-  void swap(any& other) noexcept {
-    if (this == &other) {
-      return;
-    }
-    any temporary(static_cast<any&&>(other));
-    if (__ops != nullptr) {
-      __ops->move(&other.__storage, &__storage);
-      other.__ops = __ops;
-      __ops = nullptr;
-    }
-    if (temporary.__ops != nullptr) {
-      temporary.__ops->move(&__storage, &temporary.__storage);
-      __ops = temporary.__ops;
-      temporary.__ops = nullptr;
-    }
-  }
+  void reset() noexcept;
+  void swap(any& other) noexcept;
 
   bool has_value() const noexcept {
     return __ops != nullptr;

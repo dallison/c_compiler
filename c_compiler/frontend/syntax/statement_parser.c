@@ -295,7 +295,8 @@ static bool ConditionStartsWithType(Syntax* syntax) {
         return StorageIs(sym->storage, STO(typedef)) && !sym->flags.is_template;
       }
       Symbol* tag = SyntaxFindTag(syntax, &syntax->lex->spelling);
-      return tag != NULL && !tag->flags.is_template;
+      return (tag != NULL && !tag->flags.is_template) ||
+             SyntaxCurrentClassNameStartsType(syntax);
     }
     default:
       return false;

@@ -713,6 +713,20 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
   return true;
 }
 
+// C and C++ allow the `int` keyword to be omitted from signed and unsigned
+// integer type specifiers.  The parser preserves the spelling in Type bits, so
+// canonicalize those equivalent spellings before comparing types.
+static Type CanonicalPrimitiveType(Type type) {
+  const Type integer_specifiers =
+      kTypeInt | kTypeShort | kTypeLong | kTypeLongLong |
+      kTypeSigned | kTypeUnsigned;
+  if ((type & integer_specifiers) == 0 ||
+      (type & ~integer_specifiers) != 0) {
+    return type;
+  }
+  return (type | kTypeInt) & ~kTypeSigned;
+}
+
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   if (t1 == NULL || t2 == NULL) {
     return t1 == t2;
@@ -888,7 +902,9 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
         return e1 == e2 && t1->qualifiers == t2->qualifiers;
 
       }
-      return t1->type == t2->type && t1->qualifiers == t2->qualifiers;
+      return CanonicalPrimitiveType(t1->type) ==
+                 CanonicalPrimitiveType(t2->type) &&
+             t1->qualifiers == t2->qualifiers;
   }
 }
 
@@ -1234,8 +1250,10 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       }
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive: {
-      Type a = t1->type & ~(kTypeUnsigned | kTypeSigned);
-      Type b = t2->type & ~(kTypeUnsigned | kTypeSigned);
+      Type a =
+          CanonicalPrimitiveType(t1->type) & ~(kTypeUnsigned | kTypeSigned);
+      Type b =
+          CanonicalPrimitiveType(t2->type) & ~(kTypeUnsigned | kTypeSigned);
       return a == b;
     }
   }
@@ -1295,7 +1313,9 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
       return FunctionPrototypesDetails(location, &t1->info.function, &t2->info.function);
       
     case kDeclPrimitive:
-      if (t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
+      if (CanonicalPrimitiveType(t1->type) !=
+              CanonicalPrimitiveType(t2->type) ||
+          t1->qualifiers != t2->qualifiers) {
         ReportNote(filename, lineno, "Types '%s' and '%s' are different",
                    error1.value, error2.value);
 

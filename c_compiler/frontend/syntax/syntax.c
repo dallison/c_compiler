@@ -2670,6 +2670,7 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   Vector* formals = &func->info.function.prototype;
   for (size_t i = 0; i < formals->length; i++) {
     Symbol* formal = formals->value.p[i];
+    formal->flags.is_block_scope = true;
     InsertLocalSymbol(syntax->local_symbol_stack, formal);
   }
 }
@@ -4670,8 +4671,24 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   
   CXXConstructorInitList cxx_initializers;
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
+  bool constructor_scope_open =
+      CompilerIsCXX() && TypeIsFunction(sym->type) &&
+      sym->type->info.function.is_constructor;
+  ParserContext constructor_old_context = syntax->context;
+  TypeRecord* constructor_old_function = compiler->current_function;
+  if (constructor_scope_open) {
+    syntax->context = kParsingBlockScope;
+    compiler->current_function = sym->type;
+    SyntaxOpenScope(syntax);
+    AddFunctionScopeSymbols(syntax, sym->type);
+  }
   SyntaxParseCXXConstructorInitializerList(syntax, sym->type,
                                            &cxx_initializers);
+  if (constructor_scope_open) {
+    SyntaxCloseScope(syntax);
+    compiler->current_function = constructor_old_function;
+    syntax->context = constructor_old_context;
+  }
 
   if (sym->type->info.function.is_defaulted) {
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
@@ -10001,6 +10018,28 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
   return SyntaxCurrentTokenStartsQualifiedName(syntax);
 }
 
+bool SyntaxCurrentClassNameStartsType(Syntax* syntax) {
+  if (!CompilerIsCXX() ||
+      !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  Struct* owner = syntax->cxx_class_head;
+  if (owner == NULL && syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  while (owner != NULL) {
+    if (CurrentClassNameMatchesTypeName(owner, &syntax->lex->spelling) &&
+        owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+        TypeIsStructOrUnion(owner->tag_symbol->type)) {
+      return true;
+    }
+    owner = owner->lexical_parent;
+  }
+  return false;
+}
+
 bool SyntaxLookingAtType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(char):
@@ -10064,6 +10103,9 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         }
         if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
           return false;
+        }
+        if (SyntaxCurrentClassNameStartsType(syntax)) {
+          return true;
         }
         return SyntaxQualifiedNameLooksLikeType(syntax);
       }

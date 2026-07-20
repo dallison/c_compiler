@@ -72,6 +72,29 @@ for expected in '^add:' 'lda|sta|adc' 'jsr' 'rts'; do
   fi
 done
 
+cat >"$work/zero-page.s" <<'EOF'
+  .text
+zero_page_comments:
+  sta 0x9
+  lda 0x82
+  lda (0x8), y
+  rts
+EOF
+
+zp_obj="$work/zero-page.o"
+"$davecc" -target 65c02 -c "$work/zero-page.s" -o "$zp_obj"
+"$elfdump" -c "$zp_obj" >"$work/zero-page.elfdump"
+for expected in \
+    'sta 0x09.*// __i0 \+ 1' \
+    'lda 0x82.*// __mem_src' \
+    'lda \(0x08\),y.*// __i0'; do
+  if ! grep -E "$expected" "$work/zero-page.elfdump" >/dev/null; then
+    echo "missing 65c02 zero-page register comment: $expected" >&2
+    sed -n '1,80p' "$work/zero-page.elfdump" >&2
+    exit 1
+  fi
+done
+
 linked="$work/aarch64"
 "$davecc" -target aarch64 "$work/smoke.c" -o "$linked"
 "$elfdump" -c "$linked" >"$work/aarch64-linked.elfdump"

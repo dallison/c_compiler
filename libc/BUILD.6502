@@ -62,5 +62,13 @@ for f in "${srcfiles[@]}"; do
     ${CC} ${CFLAGS} "$f" -o $objname || exit 1
 done
 
+cxx_objfiles=()
+for f in "$libc_src"/*.cc; do
+    filename=$(basename "$f")
+    objname=cxx_${filename%.cc}.o
+    cxx_objfiles+=( "$objname" )
+    ${CC} ${CFLAGS} -std=c++20 "$f" -o "$objname" || exit 1
+done
+
 rm -f libc65c02.a
-$AR ${ar_opts} libc65c02.a ${runtime_objfiles[@]} ${libc_objfiles[@]}
+$AR ${ar_opts} libc65c02.a ${runtime_objfiles[@]} ${libc_objfiles[@]} ${cxx_objfiles[@]}

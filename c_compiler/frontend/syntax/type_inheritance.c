@@ -595,6 +595,7 @@ static Symbol* RegisterCXXThisAdjustorThunk(TypeParser* parser, Symbol* target,
       NewSymbol(name.value, TypeRecordCopy(target->type), STO(static));
   thunk_symbol->flags.invented = true;
   thunk_symbol->flags.is_defined = true;
+  thunk_symbol->flags.is_weak = true;
   thunk_symbol->location = parser->lex->current_token_location;
   SyntaxAddSymbol(parser->syntax, thunk_symbol);
   StringDestruct(&name);

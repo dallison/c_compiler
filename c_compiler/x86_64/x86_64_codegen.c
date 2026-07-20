@@ -1271,7 +1271,11 @@ static const char* TlsModelName(TlsModel model) {
 }
 
 static TargetInstruction* ThreadPointer(X86_64Generator* rv) {
-  return TargetThreadPointer(&rv->base);
+  // Unlike targets with a dedicated thread-pointer register, x86-64 must load
+  // the current FS base value into a caller-saved general register.  Emit that
+  // load at every use: caching one instruction for the whole function lets a
+  // call clobber its allocated register before a later TLS access.
+  return Emit(rv, NewInstruction(X86_64_OP(tp)));
 }
 
 static TargetInstruction* GetTlsVariableAddress(X86_64Generator* rv, IRNode* node) {

@@ -5,10 +5,7 @@
 //  C++20 <iostream> support for DaveCC: the standard stream objects cin, cout,
 //  cerr and clog (narrow-character only).  Each is backed by a basic_filebuf
 //  that wraps one of the C stdio standard streams (stdin/stdout/stderr) without
-//  taking ownership of it.  The objects are defined as inline variables so the
-//  header can be included in any number of translation units without producing
-//  multiple-definition errors, and their constructors run during static
-//  initialisation.
+//  taking ownership of it. The standard objects are defined by the C++ runtime.
 //
 #ifndef __davecc_iostream__
 #define __davecc_iostream__
@@ -27,11 +24,7 @@ namespace std {
 // An input stream backed by an already-open FILE* (does not own it).
 class __stdio_istream : public basic_istream<char, char_traits<char>> {
  public:
-  explicit __stdio_istream(FILE* f)
-      : basic_istream<char, char_traits<char>>() {
-    __buf_.__attach(f, ios_base::in);
-    this->init(&__buf_);
-  }
+  explicit __stdio_istream(FILE* f);
   ~__stdio_istream() override {}
 
   basic_filebuf<char, char_traits<char>>* rdbuf() const {
@@ -45,11 +38,7 @@ class __stdio_istream : public basic_istream<char, char_traits<char>> {
 // An output stream backed by an already-open FILE* (does not own it).
 class __stdio_ostream : public basic_ostream<char, char_traits<char>> {
  public:
-  explicit __stdio_ostream(FILE* f)
-      : basic_ostream<char, char_traits<char>>() {
-    __buf_.__attach(f, ios_base::out);
-    this->init(&__buf_);
-  }
+  explicit __stdio_ostream(FILE* f);
   ~__stdio_ostream() override {}
 
   basic_filebuf<char, char_traits<char>>* rdbuf() const {
@@ -60,24 +49,20 @@ class __stdio_ostream : public basic_ostream<char, char_traits<char>> {
   basic_filebuf<char, char_traits<char>> __buf_;
 };
 
-inline __stdio_ostream cout(stdout);
-inline __stdio_istream cin(stdin);
-inline __stdio_ostream cerr(stderr);
-inline __stdio_ostream clog(stderr);
+extern __stdio_ostream cout;
+extern __stdio_istream cin;
+extern __stdio_ostream cerr;
+extern __stdio_ostream clog;
 
-// Establish the standard relationships after all four inline objects have
-// completed construction.  Formatted input flushes cout first, and cerr is
+// Establish the standard relationships after all four stream objects have
+// completed construction. Formatted input flushes cout first, and cerr is
 // tied to cout and unbuffered at the C++ stream layer.
 class __iostream_initializer {
  public:
-  __iostream_initializer() {
-    cin.tie(&cout);
-    cerr.tie(&cout);
-    cerr.setf(ios_base::unitbuf);
-  }
+  __iostream_initializer();
 };
 
-inline __iostream_initializer __iostream_init;
+extern __iostream_initializer __iostream_init;
 
 }  // namespace std
 

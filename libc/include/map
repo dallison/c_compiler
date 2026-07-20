@@ -20,9 +20,7 @@ namespace std {
 
 namespace __map_detail {
 
-static inline void __throw_out_of_range() {
-  throw out_of_range((const char*)"map::at");
-}
+void __throw_out_of_range();
 
 template <class Key, class T>
 struct __node {

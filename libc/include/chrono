@@ -385,15 +385,9 @@ class system_clock {
   using time_point = chrono::time_point<system_clock, duration>;
   static constexpr bool is_steady = false;
 
-  static time_point now() noexcept {
-    return time_point(seconds(time(nullptr)));
-  }
-  static time_t to_time_t(const time_point& t) noexcept {
-    return (time_t)duration_cast<seconds>(t.time_since_epoch()).count();
-  }
-  static time_point from_time_t(time_t t) noexcept {
-    return time_point(seconds(t));
-  }
+  static time_point now() noexcept;
+  static time_t to_time_t(const time_point& t) noexcept;
+  static time_point from_time_t(time_t t) noexcept;
 };
 
 class steady_clock {
@@ -404,9 +398,7 @@ class steady_clock {
   using time_point = chrono::time_point<steady_clock, duration>;
   static constexpr bool is_steady = true;
 
-  static time_point now() noexcept {
-    return time_point(duration(clock() / CLOCKS_PER_SEC));
-  }
+  static time_point now() noexcept;
 };
 
 using high_resolution_clock = system_clock;
