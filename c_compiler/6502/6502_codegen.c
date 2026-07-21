@@ -6063,8 +6063,6 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
       // Result is a struct/union.  Pop the first arg (the result address)
       // back into an expr2 so that we know were it was.
       jsr(g, g->pullxy);
-      // TODO: optimize this out of we can.  It might be possible to check
-      // if the result is used somehow.
       stx(g, result, 0);
       call = sty(g, result, 1);
       args_size -= 2;
@@ -6348,6 +6346,9 @@ static TargetInstruction* AddressOfExpression(W65C02Generator* g, IRNode* node, 
 }
 
 static void LowerAddressOf(W65C02Generator* g, IRNode* node) {
+  if (node->outputs.length == 0 && node->dest == NULL) {
+    return;
+  }
   IRNode* src_node = node->inputs.value.p[0];
   bool is_arg = true;
   switch (src_node->opcode) {

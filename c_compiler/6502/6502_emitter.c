@@ -103,6 +103,199 @@ static bool IsPrintable(TargetInstruction* inst) {
   return true;
 }
 
+static TargetInstruction* NextPrintable(TargetInstruction* inst) {
+  for (inst = TargetNext(inst); inst != NULL; inst = TargetNext(inst)) {
+    if (IsPrintable(inst)) {
+      return inst;
+    }
+  }
+  return NULL;
+}
+
+static TargetInstruction* PreviousPrintable(TargetInstruction* inst) {
+  for (inst = TargetPrev(inst); inst != NULL; inst = TargetPrev(inst)) {
+    if (IsPrintable(inst)) {
+      return inst;
+    }
+  }
+  return NULL;
+}
+
+static bool AddressResultDiesBeforeReuse(TargetInstruction* result,
+                                         TargetInstruction* push) {
+  for (TargetInstruction* inst = TargetNext(push); inst != NULL;
+       inst = TargetNext(inst)) {
+    if (!IsPrintable(inst)) {
+      continue;
+    }
+    if (TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) ||
+        TargetOpcodeEq(inst->opcode, W65C02_OP(jmp))) {
+      return true;
+    }
+    if (TargetOpcodeEq(inst->opcode, W65C02_OP(label)) ||
+        TargetOpcodeEq(inst->opcode, W65C02_OP(named_label)) ||
+        W65C02IsBranch(inst)) {
+      return false;
+    }
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (inst->operand[i] == result) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+static bool IsAddressPushPair(TargetInstruction* address,
+                              TargetInstruction* push) {
+  if (address == NULL || push == NULL ||
+      !TargetOpcodeEq(push->opcode, W65C02_OP(pushreg2))) {
+    return false;
+  }
+  switch ((W65C02Opcode)address->opcode) {
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case W65C02_OP(arg_addrb):
+      break;
+    default:
+      return false;
+  }
+
+  TargetInstruction* result = address->operand[0];
+  if (push->operand[0] != result) {
+    return false;
+  }
+  return AddressResultDiesBeforeReuse(result, push);
+}
+
+typedef struct {
+  TargetInstruction* pull;
+  TargetInstruction* store_low;
+  TargetInstruction* store_high;
+  TargetInstruction* result;
+} PullRegisterMatch;
+
+typedef struct {
+  PullRegisterMatch pulled;
+  TargetInstruction* increment;
+  TargetInstruction* address;
+  TargetInstruction* push_result;
+  TargetInstruction* push_address;
+  int drop_size;
+} ReplaceTopMatch;
+
+static bool IsRuntimeCall(TargetInstruction* inst, Symbol* symbol) {
+  return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) &&
+         inst->operand[0] != NULL &&
+         TargetOpcodeEq(inst->operand[0]->opcode, W65C02_OP(symbol)) &&
+         ((TargetSymbol*)inst->operand[0])->symbol == symbol;
+}
+
+static int StackIncrementSize(W65C02Emitter* emitter,
+                              TargetInstruction* inst) {
+  if (IsRuntimeCall(inst, emitter->g->incsp2)) return 2;
+  if (IsRuntimeCall(inst, emitter->g->incsp4)) return 4;
+  if (IsRuntimeCall(inst, emitter->g->incsp6)) return 6;
+  if (IsRuntimeCall(inst, emitter->g->incsp8)) return 8;
+  if (IsRuntimeCall(inst, emitter->g->incsp10)) return 10;
+  if (IsRuntimeCall(inst, emitter->g->incsp12)) return 12;
+  if (IsRuntimeCall(inst, emitter->g->incsp14)) return 14;
+  if (IsRuntimeCall(inst, emitter->g->incsp16)) return 16;
+  return 0;
+}
+
+static bool MatchPullRegister(W65C02Emitter* emitter,
+                              TargetInstruction* pull,
+                              PullRegisterMatch* match) {
+  if (!IsRuntimeCall(pull, emitter->g->pullxy)) {
+    return false;
+  }
+  TargetInstruction* store_low = NextPrintable(pull);
+  if (store_low == NULL) {
+    return false;
+  }
+  TargetInstruction* store_high = NextPrintable(store_low);
+  if (store_high == NULL ||
+      !TargetOpcodeEq(store_low->opcode, W65C02_OP(stx)) ||
+      !TargetOpcodeEq(store_high->opcode, W65C02_OP(sty)) ||
+      store_low->operand[0] != store_high->operand[0] ||
+      TargetIntValue(store_low->operand[1]) != 0 ||
+      TargetIntValue(store_high->operand[1]) != 1) {
+    return false;
+  }
+  *match =
+      (PullRegisterMatch){pull, store_low, store_high, store_low->operand[0]};
+  return true;
+}
+
+static bool FindPullRegisterMatch(W65C02Emitter* emitter,
+                                  TargetInstruction* inst,
+                                  PullRegisterMatch* match) {
+  TargetInstruction* candidate = inst;
+  for (int i = 0; candidate != NULL && i < 3; i++) {
+    if (MatchPullRegister(emitter, candidate, match)) {
+      return true;
+    }
+    candidate = PreviousPrintable(candidate);
+  }
+  return false;
+}
+
+static bool MatchReplaceTop(W65C02Emitter* emitter, TargetInstruction* pull,
+                            ReplaceTopMatch* match) {
+  PullRegisterMatch pulled;
+  if (!MatchPullRegister(emitter, pull, &pulled)) {
+    return false;
+  }
+  TargetInstruction* increment = NextPrintable(pulled.store_high);
+  int drop_size = StackIncrementSize(emitter, increment);
+  if (drop_size == 0) {
+    return false;
+  }
+
+  TargetInstruction* next = NextPrintable(increment);
+  TargetInstruction* result = pulled.result;
+  if (next != NULL && TargetOpcodeEq(next->opcode, W65C02_OP(pushreg2)) &&
+      next->operand[0] == result) {
+    *match =
+        (ReplaceTopMatch){pulled, increment, NULL, next, NULL, drop_size};
+    return true;
+  }
+
+  TargetInstruction* address = next;
+  if (address == NULL) {
+    return false;
+  }
+  TargetInstruction* push_result = NextPrintable(address);
+  if (push_result == NULL) {
+    return false;
+  }
+  TargetInstruction* push_address = NextPrintable(push_result);
+  if (push_address == NULL ||
+      !TargetOpcodeEq(push_result->opcode, W65C02_OP(pushreg2)) ||
+      push_result->operand[0] != result ||
+      !IsAddressPushPair(address, push_address)) {
+    return false;
+  }
+  *match = (ReplaceTopMatch){
+      pulled, increment, address, push_result, push_address, drop_size};
+  return true;
+}
+
+static bool FindReplaceTopMatch(W65C02Emitter* emitter,
+                                TargetInstruction* inst,
+                                ReplaceTopMatch* match) {
+  TargetInstruction* candidate = inst;
+  for (int i = 0; candidate != NULL && i < 7; i++) {
+    if (MatchReplaceTop(emitter, candidate, match)) {
+      return true;
+    }
+    candidate = PreviousPrintable(candidate);
+  }
+  return false;
+}
+
 static COMPILER_UNUSED int RegisterSize(W65C02Register* reg) {
   switch (reg->type) {
     case k6502RegTypeI:
@@ -440,6 +633,32 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
   // Buffers for register name printing.
   static char buf[4096];
   W65C02Opcode opcode = (W65C02Opcode)inst->opcode;
+  PullRegisterMatch pulled;
+  bool has_pulled = FindPullRegisterMatch(emitter, inst, &pulled);
+  ReplaceTopMatch replace_top;
+  bool has_replace_top = FindReplaceTopMatch(emitter, inst, &replace_top);
+  if (has_pulled &&
+      (inst == pulled.store_low || inst == pulled.store_high)) {
+    return;
+  }
+  if (has_replace_top &&
+      (inst == replace_top.increment || inst == replace_top.push_result ||
+       inst == replace_top.push_address)) {
+    return;
+  }
+  if (has_pulled && inst == pulled.pull) {
+    const char* reg_name = W65C02RegisterAsString(
+        (W65C02Register*)pulled.result->reg, 0, buf, sizeof(buf));
+    if (has_replace_top && replace_top.pulled.pull == inst) {
+      fprintf(fp, "\t%-12s #%d\n", "lda", replace_top.drop_size);
+      fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
+      fprintf(fp, "\tjsr         __replace_top_reg2\n");
+    } else {
+      fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
+      fprintf(fp, "\tjsr         __pullreg2\n");
+    }
+    return;
+  }
   switch (opcode) {
     case W65C02_OP(literalreflo): {
       TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
@@ -582,6 +801,23 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       if (offset >= 256) {
         fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
       }
+      TargetInstruction* push = NextPrintable(inst);
+      if ((has_replace_top && replace_top.address == inst) ||
+          IsAddressPushPair(inst, push)) {
+        W65C02Register* reg = (W65C02Register*)result->reg;
+        if (opcode == W65C02_OP(var_addr) &&
+            reg->type == k6502RegTypeI &&
+            reg->base.num < W65C02_NUM_I_REGS) {
+          fprintf(fp, "\tjsr         __var_addr_push_i%d\n", reg->base.num);
+          break;
+        }
+        fprintf(fp, "\t%-12s #%s\n", "lda",
+                W65C02RegisterAsString(reg, 0, buf, sizeof(buf)));
+        fprintf(fp, "\t%-12s __%s\n", "jsr",
+                opcode == W65C02_OP(var_addr) ? "var_addr_push"
+                                              : "var_addrb_push");
+        break;
+      }
       fprintf(fp, "\t%-12s __%s_i%d\t\t\t// %s\n", "jsr",
               opcode == W65C02_OP(var_addr) ? "var_addr" : "var_addrb", result->reg->num,
               ((TargetSymbol*)var)->symbol->name.value);
@@ -603,6 +839,17 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%-12s #%d\n", "ldx", offset & 0xff);
       if (offset >= 256) {
         fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
+      }
+      TargetInstruction* push = NextPrintable(inst);
+      if ((has_replace_top && replace_top.address == inst) ||
+          IsAddressPushPair(inst, push)) {
+        fprintf(fp, "\t%-12s #%s\n", "lda",
+                W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf,
+                                       sizeof(buf)));
+        fprintf(fp, "\t%-12s __%s\n", "jsr",
+                opcode == W65C02_OP(arg_addr) ? "arg_addr_push"
+                                              : "arg_addrb_push");
+        break;
       }
       fprintf(fp, "\t%-12s __%s_i%d\t\t\t// %s\n", "jsr",
               opcode == W65C02_OP(arg_addr) ? "arg_addr" : "arg_addrb", result->reg->num,
@@ -647,6 +894,10 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     case W65C02_OP(pushreg2):
     case W65C02_OP(pushreg4):
     case W65C02_OP(pushreg8): {
+      if (opcode == W65C02_OP(pushreg2) &&
+          IsAddressPushPair(PreviousPrintable(inst), inst)) {
+        break;
+      }
       TargetInstruction* r = inst->operand[0];
       W65C02Register* reg = (W65C02Register*)r->reg;
       int push_size = opcode == W65C02_OP(pushreg2)
@@ -667,14 +918,17 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     }
       
     case W65C02_OP(structreturn): {
-      // lda #dest_addr
-      // ldx #0
-      // JSR __arg_value2
+      W65C02Register* reg = (W65C02Register*)inst->reg;
+      if (reg->type == k6502RegTypeI &&
+          reg->base.num < W65C02_NUM_I_REGS) {
+        fprintf(fp, "\t%-12s #0\n", "ldx");
+        fprintf(fp, "\tjsr         __arg_value2_i%d\n", reg->base.num);
+        break;
+      }
       fprintf(fp, "\t%-12s #%s\t\t\t// struct return address\n", "lda",
-              W65C02RegisterAsString((W65C02Register*)inst->reg, 0, buf, sizeof(buf)));
+              W65C02RegisterAsString(reg, 0, buf, sizeof(buf)));
       fprintf(fp, "\t%-12s #0\n", "ldx");
-      fprintf(fp, "\t%-12s __%s\n", "jsr",
-              "arg_value2");
+      fprintf(fp, "\t%-12s __%s\n", "jsr", "arg_value2");
       break;
     }
       

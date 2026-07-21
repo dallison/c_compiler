@@ -125,5 +125,139 @@ for target in 6502 65c02; do
   fi
 done
 
+REFERENCE_CHAIN_SOURCE="$WORK/reference_chain.cc"
+cat >"$REFERENCE_CHAIN_SOURCE" <<'SRC'
+struct Stream {
+  int value;
+};
+
+[[gnu::noinline]] Stream& write(Stream& output, const char*) {
+  return output;
+}
+
+Stream global_stream;
+
+int main() {
+  return &write(write(global_stream, "first"), "second") == &global_stream
+             ? 0
+             : 1;
+}
+SRC
+
+for target in 6502 65c02; do
+  assembly="$WORK/${target}_reference_chain.s"
+  "$DAVECC" -target "$target" -S -std=c++20 \
+    "$REFERENCE_CHAIN_SOURCE" -o "$assembly"
+  main_body=$(function_body main "$assembly")
+  if [[ $(grep -Ec 'jsr[[:space:]]+__pushi0' <<<"$main_body") -lt 2 ]]; then
+    echo "$target: reference-returning call was copied before being pushed" >&2
+    exit 1
+  fi
+done
+
+ADDRESS_PUSH_SOURCE="$WORK/address_push.c"
+cat >"$ADDRESS_PUSH_SOURCE" <<'SRC'
+__attribute__((noinline)) unsigned short read_value(unsigned short* value) {
+  return *value;
+}
+
+__attribute__((noinline)) unsigned short read_indirect(unsigned short** value) {
+  return **value;
+}
+
+__attribute__((noinline)) unsigned short pass_argument(unsigned short* value) {
+  return read_indirect(&value);
+}
+
+int main(void) {
+  unsigned short value = 37;
+  return read_value(&value) == 37 ? 0 : 1;
+}
+SRC
+
+for target in 6502 65c02; do
+  assembly="$WORK/${target}_address_push.s"
+  "$DAVECC" -target "$target" -S "$ADDRESS_PUSH_SOURCE" -o "$assembly"
+  if ! grep -Eq 'jsr[[:space:]]+__var_addr_push_i[0-9]+' "$assembly" ||
+     ! grep -Eq 'jsr[[:space:]]+__arg_addr_push' "$assembly"; then
+    echo "$target: address materialization and push were not combined" >&2
+    exit 1
+  fi
+done
+
+STACK_REPLACE_SOURCE="$WORK/stack_replace.cc"
+cat >"$STACK_REPLACE_SOURCE" <<'SRC'
+struct Box {
+  int value;
+};
+
+[[gnu::noinline]] Box make_box(int value) {
+  Box result = {value};
+  return result;
+}
+
+[[gnu::noinline]] Box make_box2(int first, int second) {
+  Box result = {first + second};
+  return result;
+}
+
+struct Reader {
+  [[gnu::noinline]] int read(Box&& box) {
+    return box.value;
+  }
+};
+
+[[gnu::noinline]] int make_and_read() {
+  Box box = make_box(41);
+  return box.value;
+}
+
+int main() {
+  Reader reader;
+  if (make_and_read() != 41) {
+    return 1;
+  }
+  if (reader.read(make_box(37)) != 37) {
+    return 2;
+  }
+  return reader.read(make_box2(18, 24)) == 42 ? 0 : 3;
+}
+SRC
+
+for target in 6502 65c02; do
+  assembly="$WORK/${target}_stack_replace.s"
+  "$DAVECC" -target "$target" -S -std=c++20 \
+    "$STACK_REPLACE_SOURCE" -o "$assembly"
+  if ! grep -Eq 'jsr[[:space:]]+__pullreg2' "$assembly" ||
+     ! grep -Eq 'jsr[[:space:]]+__replace_top_reg2' "$assembly" ||
+     ! grep -Eq 'jsr[[:space:]]+__var_addr_push_i[0-9]+' "$assembly"; then
+    echo "$target: struct-result stack operations were not combined" >&2
+    exit 1
+  fi
+  stack_main=$(function_body main "$assembly")
+  if grep -Eq 'jsr[[:space:]]+__var_addr_i[0-9]+' <<<"$stack_main"; then
+    echo "$target: dead argument address was materialized before its push" >&2
+    exit 1
+  fi
+  make_box_body=$(function_body _Z8make_boxi "$assembly")
+  if ! grep -Eq 'jsr[[:space:]]+__arg_value2_i[0-9]+' \
+       <<<"$make_box_body"; then
+    echo "$target: struct return address used generic argument load" >&2
+    exit 1
+  fi
+done
+
 "$DAVECC" -target 65c02 "$SOURCE" "$LIBC" -o "$WORK/tail_call.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/tail_call.exe"
+
+"$DAVECC" -target 65c02 -std=c++20 \
+  "$REFERENCE_CHAIN_SOURCE" "$LIBC" -o "$WORK/reference_chain.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/reference_chain.exe"
+
+"$DAVECC" -target 65c02 \
+  "$ADDRESS_PUSH_SOURCE" "$LIBC" -o "$WORK/address_push.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/address_push.exe"
+
+"$DAVECC" -target 65c02 -std=c++20 \
+  "$STACK_REPLACE_SOURCE" "$LIBC" -o "$WORK/stack_replace.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/stack_replace.exe"

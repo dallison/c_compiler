@@ -1680,6 +1680,13 @@ static IRNode* FreshCallAddress(Generator* gen, IRNode* address) {
   return IRSetType(fresh, address->type);
 }
 
+static bool CanSinkAddressToPush(IRNode* value, IRNode* push) {
+  return value != NULL && value->opcode == IR_OP(addressof) &&
+         value->inputs.length == 1 &&
+         IRIsVariable(value->inputs.value.p[0]) && IRInList(value) &&
+         value->outputs.length == 1 && value->outputs.value.p[0] == push;
+}
+
 static IRNode* GenerateMemberPointerCall(Generator* gen, VectorASTNode* node) {
   BinaryASTNode* access = (BinaryASTNode*)node->left;
   bool receiver_is_pointer = access->base.op == AST_OP(arrowstar);
@@ -1726,7 +1733,12 @@ static IRNode* GenerateMemberPointerCall(Generator* gen, VectorASTNode* node) {
   }
   PushArg(gen, call, this_ptr, node->children->length, &args_right_to_left);
   for (size_t i = 0; i < args_right_to_left.length; i++) {
-    GeneratorEmit(gen, args_right_to_left.value.p[i]);
+    IRNode* push = args_right_to_left.value.p[i];
+    IRNode* value = push->inputs.value.p[0];
+    GeneratorEmit(gen, push);
+    if (CanSinkAddressToPush(value, push)) {
+      GeneratorMoveInstructionBefore(gen, value, push);
+    }
   }
   IRNode* result = GeneratorEmit(gen, call);
   return IRSetType(result, node->base.type);
@@ -1875,8 +1887,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         !TypeIsFunction(arg_value->type) &&
         (!aggregate_actual || stashable_reference_actual)) {
       arg_value = StashValueAcrossCall(gen, arg_value);
-    } else if (((must_survive_later_call && argument_contains_call) ||
-                call_result_reference_actual) &&
+    } else if (must_survive_later_call && argument_contains_call &&
                (!aggregate_actual || stashable_reference_actual ||
                 call_result_reference_actual)) {
       arg_value = StashCallResult(gen, arg_value,
@@ -2008,8 +2019,12 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
               gen, value->aux, value->type);
           IRReplaceInput(push, 0, reload);
           IRSetType(push, reload->type);
+          value = reload;
         }
         GeneratorEmit(gen, push);
+        if (CanSinkAddressToPush(value, push)) {
+          GeneratorMoveInstructionBefore(gen, value, push);
+        }
         break;
       }
     }

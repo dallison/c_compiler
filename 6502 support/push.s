@@ -11,6 +11,8 @@
 .global __push4xy
 .global __push8xy
 .global __pulla
+.global __pullreg2
+.global __replace_top_reg2
 .global __pullxy
 .global __pull4
 .global __pull8
@@ -354,6 +356,57 @@ preg8:
   INY
   CPY #8
   BNE preg8
+  RTS
+
+// X: index of the two-byte register to pull into.
+__pullreg2:
+  LDY #0
+  LDA (__sp),Y
+  STA 0,X
+  INY
+  LDA (__sp),Y
+  STA 1,X
+  LDA 0,X
+  PHA
+  LDA 1,X
+  TAY
+  PLA
+  TAX
+  CLC
+  LDA __sp
+  ADC #2
+  STA __sp
+  LDA __sp+1
+  ADC #0
+  STA __sp+1
+  RTS
+
+// Replace the stack item below the top value while retaining the top value.
+// A: number of bytes to discard below the top value.
+// X: index of the two-byte register that receives the top value.
+__replace_top_reg2:
+  STA __t0
+  STZ __t1
+  LDY #0
+  LDA (__sp),Y
+  STA 0,X
+  LDY __t0
+  STA (__sp),Y
+  LDY #1
+  LDA (__sp),Y
+  STA 1,X
+  LDY __t0
+  INY
+  STA (__sp),Y
+  CLC
+  LDA __sp
+  ADC __t0
+  STA __sp
+  LDA __sp+1
+  ADC #0
+  STA __sp+1
+  LDY #1
+  LDA 1,X
   RTS
 
 __pullxy:

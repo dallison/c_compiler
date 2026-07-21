@@ -10,6 +10,26 @@
 .global __var_addrb_xy
 .global __arg_addr_xy
 .global __arg_addrb_xy
+.global __var_addr_push
+.global __var_addr_push_i0
+.global __var_addr_push_i1
+.global __var_addr_push_i2
+.global __var_addr_push_i3
+.global __var_addr_push_i4
+.global __var_addr_push_i5
+.global __var_addr_push_i6
+.global __var_addr_push_i7
+.global __var_addr_push_i8
+.global __var_addr_push_i9
+.global __var_addr_push_i10
+.global __var_addr_push_i11
+.global __var_addr_push_i12
+.global __var_addr_push_i13
+.global __var_addr_push_i14
+.global __var_addr_push_i15
+.global __var_addrb_push
+.global __arg_addr_push
+.global __arg_addrb_push
 .global __varaddr
 .global __argaddr
 
@@ -413,6 +433,97 @@ __arg_addrb_xy:
   ADC __fp+1
   TAY
   RTS
+
+// Push the address of a variable or argument directly onto the software
+// stack. A is the destination zero-page register. These retain the same
+// register and scratch state as __*_addr followed by __pushreg2.
+__var_addr_push_i0:
+  LDA #__i0
+  BRA __var_addr_push
+
+__var_addr_push_i1:
+  LDA #__i1
+  BRA __var_addr_push
+
+__var_addr_push_i2:
+  LDA #__i2
+  BRA __var_addr_push
+
+__var_addr_push_i3:
+  LDA #__i3
+  BRA __var_addr_push
+
+__var_addr_push_i4:
+  LDA #__i4
+  BRA __var_addr_push
+
+__var_addr_push_i5:
+  LDA #__i5
+  BRA __var_addr_push
+
+__var_addr_push_i6:
+  LDA #__i6
+  BRA __var_addr_push
+
+__var_addr_push_i7:
+  LDA #__i7
+  BRA __var_addr_push
+
+__var_addr_push_i8:
+  LDA #__i8
+  BRA __var_addr_push
+
+__var_addr_push_i9:
+  LDA #__i9
+  BRA __var_addr_push
+
+__var_addr_push_i10:
+  LDA #__i10
+  BRA __var_addr_push
+
+__var_addr_push_i11:
+  LDA #__i11
+  BRA __var_addr_push
+
+__var_addr_push_i12:
+  LDA #__i12
+  BRA __var_addr_push
+
+__var_addr_push_i13:
+  LDA #__i13
+  BRA __var_addr_push
+
+__var_addr_push_i14:
+  LDA #__i14
+  BRA __var_addr_push
+
+__var_addr_push_i15:
+  LDA #__i15
+  BRA __var_addr_push
+
+__var_addr_push:
+  JSR __var_addr
+  TYA
+  TAX
+  JMP __pushreg2
+
+__var_addrb_push:
+  JSR __var_addrb
+  TYA
+  TAX
+  JMP __pushreg2
+
+__arg_addr_push:
+  JSR __arg_addr
+  TYA
+  TAX
+  JMP __pushreg2
+
+__arg_addrb_push:
+  JSR __arg_addrb
+  TYA
+  TAX
+  JMP __pushreg2
 
 // Address of var with offset in X,Y.  Result in t0,t1.  Saves A
 __varaddr:
