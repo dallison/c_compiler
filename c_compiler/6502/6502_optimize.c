@@ -1036,6 +1036,268 @@ void W65C02Optimize(W65C02Generator* g) {
   }
 }
 
+static int RegisterByteAddress(TargetInstruction* value, int byte) {
+  W65C02Register* reg = (W65C02Register*)value->reg;
+  assert(reg != NULL);
+  switch (reg->type) {
+    case k6502RegTypeB:
+      return W65C02_B_REG_START + reg->base.num + byte;
+    case k6502RegTypeI:
+      return W65C02_I_REG_START + reg->base.num * 2 + byte;
+    case k6502RegTypeL:
+      return W65C02_L_REG_START + reg->base.num * 4 + byte;
+    case k6502RegTypeX:
+      return W65C02_X_REG_START + reg->base.num * 8 + byte;
+    case k6502RegTypeF:
+      return W65C02_F_REG_START + reg->base.num * 4 + byte;
+  }
+  abort();
+}
+
+static int OperandByteOffset(TargetInstruction* inst) {
+  return inst->operand[1] == NULL ? 0
+                                  : (int)TargetIntValue(inst->operand[1]);
+}
+
+static int OperandByteAddress(TargetInstruction* inst) {
+  return RegisterByteAddress(inst->operand[0], OperandByteOffset(inst));
+}
+
+static bool IsImmediateY(TargetInstruction* inst, int value) {
+  return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(ldy)) &&
+         GetAddrMode(inst) == kAddrModeImmediate &&
+         ImmediateValue(inst) == value;
+}
+
+static bool IsIndirectCopyMetadata(TargetInstruction* inst) {
+  return TargetOpcodeEq(inst->opcode, W65C02_OP(reloadpoint)) ||
+         W65C02IsExpression(inst);
+}
+
+static TargetInstruction* NextInBlock(TargetInstruction* inst,
+                                      TargetBasicBlock* block) {
+  TargetInstruction* next = TargetNext(inst);
+  while (next != NULL && next->block == block &&
+         IsIndirectCopyMetadata(next)) {
+    next = TargetNext(next);
+  }
+  return next != NULL && next->block == block ? next : NULL;
+}
+
+static bool IsLoadByte(TargetInstruction* inst, TargetInstruction* address,
+                       int byte) {
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(lda)) ||
+      inst->operand[0] == NULL || inst->operand[0]->reg != address->reg ||
+      OperandByteOffset(inst) != byte) {
+    return false;
+  }
+  AddressingMode mode = GetAddrMode(inst);
+  return byte == 0
+             ? mode == kAddrModeIndirect ||
+                   mode == kAddrModeIndirectIndexed
+             : mode == kAddrModeIndirectIndexed;
+}
+
+static bool IsStoreRegisterByte(TargetInstruction* inst, int address) {
+  return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(sta)) &&
+         GetAddrMode(inst) == kAddrModeZeroPage &&
+         OperandByteAddress(inst) == address;
+}
+
+static TargetInstruction* MatchIndirectLoad(TargetInstruction* start, int size,
+                                            TargetInstruction** address,
+                                            TargetInstruction** dest) {
+  TargetBasicBlock* block = start->block;
+  TargetInstruction* inst = start;
+  bool has_initial_y = IsImmediateY(inst, 0);
+  if (has_initial_y) {
+    inst = NextInBlock(inst, block);
+  }
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(lda)) ||
+      inst->operand[0] == NULL || inst->operand[0]->reg == NULL ||
+      OperandByteOffset(inst) != 0 ||
+      (GetAddrMode(inst) != kAddrModeIndirect &&
+       GetAddrMode(inst) != kAddrModeIndirectIndexed)) {
+    return NULL;
+  }
+  if (GetAddrMode(inst) == kAddrModeIndirectIndexed && !has_initial_y) {
+    return NULL;
+  }
+
+  *address = inst->operand[0];
+  inst = NextInBlock(inst, block);
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(sta)) ||
+      GetAddrMode(inst) != kAddrModeZeroPage ||
+      OperandByteOffset(inst) != 0 || inst->operand[0] == NULL ||
+      inst->operand[0]->reg == NULL) {
+    return NULL;
+  }
+  *dest = inst->operand[0];
+  if (*address == *dest) {
+    return NULL;
+  }
+  int first_dest_address = OperandByteAddress(inst);
+
+  for (int byte = 1; byte < size; byte++) {
+    inst = NextInBlock(inst, block);
+    if (!IsImmediateY(inst, byte)) {
+      return NULL;
+    }
+    inst = NextInBlock(inst, block);
+    if (!IsLoadByte(inst, *address, byte)) {
+      return NULL;
+    }
+    inst = NextInBlock(inst, block);
+    if (!IsStoreRegisterByte(inst, first_dest_address + byte)) {
+      return NULL;
+    }
+  }
+  return inst;
+}
+
+static bool IsLoadRegisterByte(TargetInstruction* inst, int address) {
+  return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(lda)) &&
+         GetAddrMode(inst) == kAddrModeZeroPage &&
+         OperandByteAddress(inst) == address;
+}
+
+static bool IsStoreByte(TargetInstruction* inst, TargetInstruction* address,
+                        int byte) {
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(sta)) ||
+      inst->operand[0] == NULL || inst->operand[0]->reg != address->reg ||
+      OperandByteOffset(inst) != byte) {
+    return false;
+  }
+  AddressingMode mode = GetAddrMode(inst);
+  return byte == 0
+             ? mode == kAddrModeIndirect ||
+                   mode == kAddrModeIndirectIndexed
+             : mode == kAddrModeIndirectIndexed;
+}
+
+static TargetInstruction* MatchIndirectStore(TargetInstruction* start, int size,
+                                             TargetInstruction** src,
+                                             TargetInstruction** address) {
+  TargetBasicBlock* block = start->block;
+  TargetInstruction* inst = start;
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(lda)) ||
+      GetAddrMode(inst) != kAddrModeZeroPage ||
+      OperandByteOffset(inst) != 0) {
+    return NULL;
+  }
+  *src = inst->operand[0];
+  int first_src_address = OperandByteAddress(inst);
+
+  inst = NextInBlock(inst, block);
+  bool has_initial_y = IsImmediateY(inst, 0);
+  if (has_initial_y) {
+    inst = NextInBlock(inst, block);
+  }
+  if (inst == NULL || !TargetOpcodeEq(inst->opcode, W65C02_OP(sta)) ||
+      inst->operand[0] == NULL || inst->operand[0]->reg == NULL ||
+      OperandByteOffset(inst) != 0 ||
+      (GetAddrMode(inst) != kAddrModeIndirect &&
+       GetAddrMode(inst) != kAddrModeIndirectIndexed)) {
+    return NULL;
+  }
+  if (GetAddrMode(inst) == kAddrModeIndirectIndexed && !has_initial_y) {
+    return NULL;
+  }
+  *address = inst->operand[0];
+  if (*src == *address) {
+    return NULL;
+  }
+
+  for (int byte = 1; byte < size; byte++) {
+    inst = NextInBlock(inst, block);
+    if (!IsLoadRegisterByte(inst, first_src_address + byte)) {
+      return NULL;
+    }
+    inst = NextInBlock(inst, block);
+    if (!IsImmediateY(inst, byte)) {
+      return NULL;
+    }
+    inst = NextInBlock(inst, block);
+    if (!IsStoreByte(inst, *address, byte)) {
+      return NULL;
+    }
+  }
+  return inst;
+}
+
+static TargetInstruction* ReplaceIndirectCopy(
+    W65C02Generator* g, TargetInstruction* start, TargetInstruction* end,
+    W65C02Opcode opcode, TargetInstruction* x_value,
+    TargetInstruction* y_value) {
+  TargetBasicBlock* block = start->block;
+  TargetInstruction* after = TargetNext(end);
+  TargetInstruction* replacement =
+      TargetNewInstruction2((TargetOpcode)opcode, x_value, y_value);
+  SetAddrMode(replacement, kAddrModeImplied);
+  TargetBasicBlockEmitBefore(&g->base, block, replacement, start);
+
+  for (TargetInstruction* inst = start; inst != after;) {
+    TargetInstruction* next = TargetNext(inst);
+    if (!IsIndirectCopyMetadata(inst)) {
+      TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+    }
+    inst = next;
+  }
+  return replacement;
+}
+
+void W65C02CombineIndirectCopies(W65C02Generator* g) {
+  // Register allocation repurposes `uses` as a countdown while assigning and
+  // freeing registers. Restore the graph reference counts before deleting
+  // instructions in this post-allocation peephole pass.
+  for (TargetInstruction* inst = TargetFirstInstruction(&g->base);
+       inst != NULL; inst = TargetNext(inst)) {
+    inst->uses = (int)inst->users.length;
+  }
+
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* address = NULL;
+      TargetInstruction* value = NULL;
+      TargetInstruction* end = NULL;
+      for (int size = 8; size >= 4; size -= 4) {
+        end = MatchIndirectLoad(inst, size, &address, &value);
+        if (end != NULL) {
+          W65C02Opcode opcode = size == 4 ? W65C02_OP(load_indirect4)
+                                         : W65C02_OP(load_indirect8);
+          TargetInstruction* replacement = ReplaceIndirectCopy(
+              g, inst, end, opcode, address, value);
+          inst = TargetNext(replacement);
+          break;
+        }
+      }
+      if (end != NULL) {
+        continue;
+      }
+
+      for (int size = 8; size >= 4; size -= 4) {
+        end = MatchIndirectStore(inst, size, &value, &address);
+        if (end != NULL) {
+          W65C02Opcode opcode = size == 4 ? W65C02_OP(store_indirect4)
+                                         : W65C02_OP(store_indirect8);
+          TargetInstruction* replacement = ReplaceIndirectCopy(
+              g, inst, end, opcode, value, address);
+          inst = TargetNext(replacement);
+          break;
+        }
+      }
+      if (end != NULL) {
+        continue;
+      }
+      if (inst == block->end_code) {
+        break;
+      }
+      inst = TargetNext(inst);
+    }
+  }
+}
+
 // Variable reference pooler.
 struct PoolerData {
   W65C02Generator* g;

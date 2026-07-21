@@ -17,6 +17,28 @@ int TestAbs(void) {
   return failures;
 }
 
+int TestStrtol(void) {
+  int failures = 0;
+  char* end = NULL;
+  long signed_value;
+  unsigned long unsigned_value;
+
+  signed_value = strtol("123", &end, 10);
+  CHECK_EQ(signed_value, 123, failures);
+  CHECK(*end == '\0', failures);
+  signed_value = strtol("-42tail", &end, 10);
+  CHECK_EQ(signed_value, -42, failures);
+  CHECK(*end == 't', failures);
+  signed_value = strtol("0x2a", &end, 0);
+  CHECK_EQ(signed_value, 42, failures);
+  CHECK(*end == '\0', failures);
+  unsigned_value = strtoul("-1", &end, 10);
+  CHECK_EQ(unsigned_value, (unsigned long)-1, failures);
+  CHECK(*end == '\0', failures);
+  CHECK_EQ(atoi("5"), 5, failures);
+  return failures;
+}
+
 static void JumpWithValue(jmp_buf env, int value) {
   longjmp(env, value);
 }

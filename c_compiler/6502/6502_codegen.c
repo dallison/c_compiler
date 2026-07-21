@@ -52,6 +52,14 @@ const char* W65C02OpcodeName(int op) {
       return "exprd";
     case W65C02_OP(load_result):
       return "load_result";
+    case W65C02_OP(load_indirect4):
+      return "load_indirect4";
+    case W65C02_OP(load_indirect8):
+      return "load_indirect8";
+    case W65C02_OP(store_indirect4):
+      return "store_indirect4";
+    case W65C02_OP(store_indirect8):
+      return "store_indirect8";
     case W65C02_OP(expr_addr_a):
       return "expr_addr_a";
     case W65C02_OP(expr_addr_x):
@@ -1527,6 +1535,17 @@ static void CopyToAbsolute(W65C02Generator* g, TargetInstruction* to,
   
   switch (from_mode) {
     case kAddrModeIndirectIndexed: {  // (zp),Y
+      if ((size == 4 || size == 8) && to != from && to_start_index == 0 &&
+          from_start_index == 0 &&
+          to_mode == kAddrModeZeroPage) {
+        // X is the zero-page address register and Y is the zero-page
+        // destination register. This replaces the repeated indexed
+        // load/store sequence with a compact runtime call.
+        W65C02Opcode opcode = size == 4 ? W65C02_OP(load_indirect4)
+                                       : W65C02_OP(load_indirect8);
+        Emit(g, NewInstruction2(opcode, from, to, kAddrModeImplied));
+        break;
+      }
       if (size > 2) {
         CopyWithLoopXY(g, to, from, size, to_start_index, from_start_index, loop_to_mode, from_mode);
       } else {
@@ -1631,6 +1650,15 @@ static void CopyToMemoryIndirectIndexed(W65C02Generator* g, TargetInstruction* t
       break;
     case kAddrModeZeroPage:
       assert(from_start_index < size);
+      if ((size == 4 || size == 8) && to != from && to_start_index == 0 &&
+          from_start_index == 0) {
+        // X is the zero-page source register and Y is the zero-page address
+        // register. The helper copies the complete value through that pointer.
+        W65C02Opcode opcode = size == 4 ? W65C02_OP(store_indirect4)
+                                       : W65C02_OP(store_indirect8);
+        Emit(g, NewInstruction2(opcode, from, to, kAddrModeImplied));
+        break;
+      }
       // Fall through.
       
    case kAddrModeAbsoluteSymbol:
@@ -7007,6 +7035,8 @@ static void CompareSignedLessOrEqualExpression(W65C02Generator* g, IRNode* lhs,
       NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
       NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  TargetInstruction* end_label =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 0);
   CompareSignedSubtract(g, value1, value2, size);
   EmitResolvedBranch(g, W65C02_OP(bmi), true_label);
@@ -7018,6 +7048,7 @@ static void CompareSignedLessOrEqualExpression(W65C02Generator* g, IRNode* lhs,
   } else {
     stx(g, dest, 0);
   }
+  EmitResolvedBranch(g, W65C02_OP(bra), end_label);
   Emit(g, true_label);
   inx(g);
   if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
@@ -7026,6 +7057,7 @@ static void CompareSignedLessOrEqualExpression(W65C02Generator* g, IRNode* lhs,
   } else {
     stx(g, dest, 0);
   }
+  Emit(g, end_label);
 }
 
 
@@ -7236,7 +7268,7 @@ static void LowerComparison(W65C02Generator* g, IRNode* node) {
     case IR_OP(cmplef):
     case IR_OP(cmpled):
       if (is_unsigned) {
-        CompareGreaterOrEqualUnsignedIntegerExpression(g, lhs, rhs, dest, size);
+        CompareGreaterOrEqualUnsignedIntegerExpression(g, rhs, lhs, dest, size);
       } else {
         CompareSignedLessOrEqualExpression(g, lhs, rhs, dest, size);
       }
@@ -7993,6 +8025,11 @@ void W65C02Lower(W65C02Generator* g, Generator* gen) {
   
   // Allocate registers to the instructions.
   W65C02AllocateRegisters(&g->register_allocator);
+
+  // Register allocation exposes adjacent zero-page registers that originated
+  // as separate IR values. Fold complete four- and eight-byte indirect copies
+  // only after those physical byte ranges are known.
+  W65C02CombineIndirectCopies(g);
 
   // Process branches to check their ranges.
   W65C02ProcessBranches(g);

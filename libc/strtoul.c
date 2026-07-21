@@ -10,12 +10,11 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "strtox.h"
+#include "strtox_long.h"
 
 unsigned long strtoul(const char* str, char** end, int base) {
-  __StrtoxResult parsed =
-      __Strtox(str, end, base, (unsigned long long)ULONG_MAX,
-               (unsigned long long)ULONG_MAX);
+  __StrtoxLongResult parsed =
+      __StrtoxLong(str, end, base, ULONG_MAX, ULONG_MAX);
   if (!parsed.converted) {
     return 0;
   }

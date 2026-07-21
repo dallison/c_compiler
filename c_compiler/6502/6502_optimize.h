@@ -13,5 +13,6 @@
 #include "6502_machine.h"
 
 void W65C02Optimize(W65C02Generator* g);
+void W65C02CombineIndirectCopies(W65C02Generator* g);
 
 #endif /* W65C02_optimize_h */

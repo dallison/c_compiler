@@ -805,6 +805,30 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       break;
     }
 
+    case W65C02_OP(load_indirect4):
+    case W65C02_OP(load_indirect8):
+    case W65C02_OP(store_indirect4):
+    case W65C02_OP(store_indirect8): {
+      TargetInstruction* x_reg = inst->operand[0];
+      TargetInstruction* y_reg = inst->operand[1];
+      fprintf(fp, "\t%-12s #%s\n", "ldx",
+              W65C02RegisterAsString((W65C02Register*)x_reg->reg, 0, buf,
+                                     sizeof(buf)));
+      fprintf(fp, "\t%-12s #%s\n", "ldy",
+              W65C02RegisterAsString((W65C02Register*)y_reg->reg, 0, buf,
+                                     sizeof(buf)));
+      const char* helper =
+          opcode == W65C02_OP(load_indirect4)
+              ? "load_indirect4"
+              : opcode == W65C02_OP(load_indirect8)
+                    ? "load_indirect8"
+                    : opcode == W65C02_OP(store_indirect4)
+                          ? "store_indirect4"
+                          : "store_indirect8";
+      fprintf(fp, "\t%-12s __%s\n", "jsr", helper);
+      break;
+    }
+
     case W65C02_OP(asm): {
       TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
       StringLiteral* lit = CompilerFindStringLiteral(literal->literal_id);

@@ -244,6 +244,7 @@ LIBC_SRCS = [
     "libc/strtoul.c",
     "libc/strtoull.c",
     "libc/strtox.h",
+    "libc/strtox_long.h",
     "libc/string_conversion_helpers.h",
     "libc/syscall.c",
     "libc/cxx_tls.c",
@@ -1077,6 +1078,10 @@ runtime_srcs=(
   "6502 support/enter.s"
   "6502 support/var_addr.s"
   "6502 support/var_value.s"
+  "6502 support/load_indirect.s"
+  "6502 support/load_indirect8.s"
+  "6502 support/store_indirect.s"
+  "6502 support/store_indirect8.s"
   "6502 support/push.s"
   "6502 support/incdec.s"
   "6502 support/jump_table.s"
@@ -2260,6 +2265,13 @@ sh_test(
         ":davecc",
         ":elfdump",
     ],
+)
+
+sh_test(
+    name = "6502_indirect_copy_test",
+    srcs = ["tests/6502_indirect_copy_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
 )
 
 genrule(

@@ -59,6 +59,12 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(expr_addr_y):
       return 2;
 
+    case W65C02_OP(load_indirect4):
+    case W65C02_OP(load_indirect8):
+    case W65C02_OP(store_indirect4):
+    case W65C02_OP(store_indirect8):
+      return 7;  // LDX #reg; LDY #reg; JSR helper
+
     case W65C02_OP(localvar):
     case W65C02_OP(argument):
     case W65C02_OP(ssavar):

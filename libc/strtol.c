@@ -10,12 +10,12 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "strtox.h"
+#include "strtox_long.h"
 
 long strtol(const char* str, char** end, int base) {
-  __StrtoxResult parsed =
-      __Strtox(str, end, base, (unsigned long long)LONG_MAX,
-               (unsigned long long)LONG_MAX + 1);
+  __StrtoxLongResult parsed =
+      __StrtoxLong(str, end, base, (unsigned long)LONG_MAX,
+                   (unsigned long)LONG_MAX + 1);
   if (!parsed.converted) {
     return 0;
   }
@@ -23,7 +23,7 @@ long strtol(const char* str, char** end, int base) {
     return parsed.negative ? LONG_MIN : LONG_MAX;
   }
   if (parsed.negative) {
-    if (parsed.value == (unsigned long long)LONG_MAX + 1) {
+    if (parsed.value == (unsigned long)LONG_MAX + 1) {
       return LONG_MIN;
     }
     return -(long)parsed.value;

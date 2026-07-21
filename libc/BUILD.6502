@@ -20,7 +20,9 @@ function run() {
 }
 
 # Build 6502 runtime
-files=( start.s enter.s var_addr.s var_value.s push.s incdec.s jump_table.s \
+files=( start.s enter.s var_addr.s var_value.s load_indirect.s \
+        load_indirect8.s store_indirect.s store_indirect8.s push.s incdec.s \
+        jump_table.s \
         mul.s longmul.s longlongmul.s div.s longdiv.s longlongdiv.s spill.s \
         fcommon.s fadd.s fconv.s fcmp.s fneg.s fmul.s fdiv.s syscall.s \
         fmodf.s fldexp.s intrinsic.s setjmp.s)

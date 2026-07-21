@@ -1226,10 +1226,6 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
     *argcp++ = (int16_t)(strcpy(argp, argv[i]) - (char*)interpreter->memory);
     argp += strlen(argv[i]) + 1;
   }
-  // Put number of args into i0.
-  interpreter->memory[REG_I0] = num_args & 0xff;
-  interpreter->memory[REG_I0+1] = (num_args >> 8) & 0xff;
-
   // Copy the memory mapped in from the file into the interpreter's
   // memory.
   int memtop = 0;
@@ -1257,6 +1253,12 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
     fprintf(stderr, "Error running guest init arrays\n");
     exit(1);
   }
+
+  // Guest constructors use the normal zero-page calling convention and may
+  // clobber i0. Restore argc only after they finish so _start can push the
+  // correct value for main.
+  interpreter->memory[REG_I0] = num_args & 0xff;
+  interpreter->memory[REG_I0 + 1] = (num_args >> 8) & 0xff;
 
   // Write entry address into zero page 0,1
   interpreter->memory[0] = entry_address & 0xff;
@@ -1585,7 +1587,12 @@ SET_FLAGS(interpreter->reg = *(addr));
   INC_PC(2);\
 }
 
-#define UNIMPLEMENTED(inst) { fprintf(stderr, "Unimplemented instruction %s\n", #inst); abort(); }
+#define UNIMPLEMENTED(inst)                                                    \
+  {                                                                            \
+    fprintf(stderr, "Unimplemented instruction %s at 0x%04x\n", #inst,         \
+            interpreter->pc);                                                  \
+    abort();                                                                   \
+  }
 
 // Instruction definitions.
 
