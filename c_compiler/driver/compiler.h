@@ -366,6 +366,10 @@ typedef struct {
   Vector cxx_thread_destructor_calls;   // ASTNode*, owned by synthetic fini body.
   Vector cxx_tls_block_dtor_thunks;  // CXXTlsBlockDtorThunk* entries.
   Vector cxx_this_adjustor_thunks;  // CXXThisAdjustorThunk* entries.
+  // InitializedStaticVariable* entries for compiler-generated vtables,
+  // virtual-base tables, and RTTI records. These are emitted only when
+  // reachable code references them.
+  Vector cxx_lazy_static_variables;
 
   // De-duplication map for RTTI std::type_info objects: String* mangled key ->
   // Symbol* naming the emitted type_info.  Keys are owned by the map.
@@ -498,6 +502,7 @@ bool CompilerCXXAtLeast(LanguageStandard standard);
 bool CompilerExceptionsEnabled(void);
 void CompilerMarkFunctionReferenced(struct Symbol* symbol);
 void CompilerMarkVariableReferenced(struct Symbol* symbol);
+void CompilerRegisterLazyCXXStatic(InitializedStaticVariable* var);
 
 int CharSize(void);
 int IntSize(void);

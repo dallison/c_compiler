@@ -750,6 +750,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
     VectorAppend(&var->initializers, init);
   }
   VectorAppend(&compiler->initialized_static_variables, var);
+  CompilerRegisterLazyCXXStatic(var);
   CXXVTableInfo* info = malloc(sizeof(CXXVTableInfo));
   info->source = source;
   info->source_offset = source_offset;
@@ -847,6 +848,7 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
     VectorAppend(&var->initializers, init);
   }
   VectorAppend(&compiler->initialized_static_variables, var);
+  CompilerRegisterLazyCXXStatic(var);
 
   CXXVBTableInfo* info = malloc(sizeof(CXXVBTableInfo));
   info->source = source;

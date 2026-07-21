@@ -1303,6 +1303,82 @@ void CompilerMarkVariableReferenced(Symbol* symbol) {
   }
 }
 
+void CompilerRegisterLazyCXXStatic(InitializedStaticVariable* var) {
+  if (compiler == NULL || var == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < compiler->cxx_lazy_static_variables.length; i++) {
+    if (compiler->cxx_lazy_static_variables.value.p[i] == var) {
+      return;
+    }
+  }
+  VectorAppend(&compiler->cxx_lazy_static_variables, var);
+}
+
+static const char* SymbolReferenceName(Symbol* symbol) {
+  if (symbol == NULL) {
+    return NULL;
+  }
+  return symbol->asm_name.length != 0 ? symbol->asm_name.value
+                                      : symbol->name.value;
+}
+
+static bool FunctionSymbolIsReferenced(Symbol* symbol) {
+  return symbol != NULL &&
+         AsmNameInVector(&compiler->referenced_function_asm_names,
+                         SymbolReferenceName(symbol));
+}
+
+static bool VariableSymbolIsReferenced(Symbol* symbol) {
+  return symbol != NULL &&
+         AsmNameInVector(&compiler->referenced_variable_asm_names,
+                         SymbolReferenceName(symbol));
+}
+
+static bool IsLazyCXXStatic(InitializedStaticVariable* var) {
+  for (size_t i = 0; i < compiler->cxx_lazy_static_variables.length; i++) {
+    if (compiler->cxx_lazy_static_variables.value.p[i] == var) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Compiler-generated vtables and RTTI records form a graph through their
+// symbol initializers. Follow that graph only from metadata referenced by real
+// code. A retained vtable also makes each virtual function in its slots
+// reachable; an adjustor thunk in a slot makes its target reachable.
+static void MarkReferencedCXXMetadataDependencies(void) {
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (var == NULL || !IsLazyCXXStatic(var) ||
+        !VariableSymbolIsReferenced(var->symbol)) {
+      continue;
+    }
+    for (size_t j = 0; j < var->initializers.length; j++) {
+      Initializer* init = var->initializers.value.p[j];
+      if (init == NULL || init->type != kInitTypeSymbol ||
+          init->value.symbol == NULL) {
+        continue;
+      }
+      if (TypeIsFunction(init->value.symbol->type)) {
+        CompilerMarkFunctionReferenced(init->value.symbol);
+      } else {
+        CompilerMarkVariableReferenced(init->value.symbol);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk =
+        compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk != NULL && FunctionSymbolIsReferenced(thunk->thunk)) {
+      CompilerMarkFunctionReferenced(thunk->target);
+    }
+  }
+}
+
 static bool FunctionDefinitionIsODRDiscardable(TypeRecord* type) {
   return CompilerIsCXX() && type != NULL && TypeIsFunction(type) &&
          (type->info.function.is_inline ||
@@ -1330,19 +1406,6 @@ static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
   // importers.  Their bodies may reference internal-linkage helpers that are
   // intentionally not imported as names.
   if (symbol->flags.is_exported || compiler->module_header) {
-    return true;
-  }
-  // A vtable names virtual functions even when no ordinary expression takes
-  // their address, so concrete virtual definitions remain eager.
-  if (type->info.function.is_virtual &&
-      !type->info.function.is_pure_virtual) {
-    return true;
-  }
-  // An overriding destructor is not always tagged is_virtual itself, but a
-  // polymorphic class's vtable still names its final destructor.
-  if (type->info.function.is_destructor &&
-      type->info.function.cxx_member_owner != NULL &&
-      type->info.function.cxx_member_owner->virtual_members.length != 0) {
     return true;
   }
   const char* asm_name = symbol->asm_name.length != 0
@@ -1672,6 +1735,7 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
           compiler->referenced_function_asm_names.length;
       previous_variable_reference_count =
           compiler->referenced_variable_asm_names.length;
+      MarkReferencedCXXMetadataDependencies();
       size_t num_roots = compiler->declaration_asts.length;
       for (size_t i = 0; i < num_roots; i++) {
         ASTNode* node = compiler->declaration_asts.value.p[i];
@@ -1725,6 +1789,31 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
       }
     }
   } while (emitted);
+}
+
+static void PruneUnreferencedCXXMetadata(void) {
+  for (size_t i = 0; i < compiler->initialized_static_variables.length;) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (var == NULL || !IsLazyCXXStatic(var) ||
+        VariableSymbolIsReferenced(var->symbol)) {
+      i++;
+      continue;
+    }
+    InitializedStaticVariableDelete(var);
+    VectorDeleteElement(&compiler->initialized_static_variables, i);
+  }
+
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length;) {
+    CXXThisAdjustorThunk* thunk =
+        compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk != NULL && FunctionSymbolIsReferenced(thunk->thunk)) {
+      i++;
+      continue;
+    }
+    free(thunk);
+    VectorDeleteElement(&compiler->cxx_this_adjustor_thunks, i);
+  }
 }
 
 static void PruneUnreferencedInlineVariables(void) {
@@ -2005,6 +2094,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_thread_destructor_calls);
   VectorInit(&compiler->cxx_tls_block_dtor_thunks);
   VectorInit(&compiler->cxx_this_adjustor_thunks);
+  VectorInit(&compiler->cxx_lazy_static_variables);
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
@@ -2527,6 +2617,7 @@ void CompilerDestruct(Compiler* compiler) {
                              /*free_element=*/true);
   VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
                              /*free_element=*/true);
+  VectorDestruct(&compiler->cxx_lazy_static_variables);
   MapDestructWithContents(&compiler->rtti_typeinfo_map, FreeRttiTypeInfoKey);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {
@@ -2915,6 +3006,7 @@ static String* Compile(Compiler* compiler, Vector* options) {
   if (NumErrors() != 0) {
     return NULL;
   }
+  PruneUnreferencedCXXMetadata();
   PruneUnreferencedInlineVariables();
   // Emit the assembly language into a file ending in .s.
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);

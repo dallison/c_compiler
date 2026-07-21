@@ -51,3 +51,23 @@ SRC
 
 "$DAVECC" -target 65c02 "$WORK/atoi_vector.cpp" -o "$WORK/atoi_vector.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/atoi_vector.exe" 5
+
+cat >"$WORK/map_stream.cpp" <<'SRC'
+#include <iostream>
+#include <map>
+#include <string>
+
+int main() {
+  std::map<std::string, int> values;
+  auto it = values.begin();
+  std::cout << it->second << std::endl;
+}
+SRC
+
+# The nested operator-> call and member load route the loaded value into a
+# forward temporary. Verify that 65C02 lowering handles that destination.
+"$DAVECC" -target 65c02 -S "$WORK/map_stream.cpp" -o "$WORK/map_stream.s"
+if grep -q 'bad_exception' "$WORK/map_stream.s"; then
+  echo "unused std::bad_exception RTTI/vtable emitted for <map>" >&2
+  exit 1
+fi

@@ -101,6 +101,7 @@ static Symbol* EmitWeakStatic(const char* name, size_t byte_count,
   var->initializers = *initializers;
   VectorInit(initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
+  CompilerRegisterLazyCXXStatic(var);
   return symbol;
 }
 
@@ -219,6 +220,7 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
   var->is_local = false;
   var->initializers = ti_inits;
   VectorAppend(&compiler->initialized_static_variables, var);
+  CompilerRegisterLazyCXXStatic(var);
 
   StringDestruct(&key);
   return ti_symbol;

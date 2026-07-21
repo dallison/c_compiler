@@ -4313,6 +4313,7 @@ static TargetInstruction* LoadFromStaticVariable(W65C02Generator* g, IRNode* loa
 static TargetInstruction* LoadIndirect(W65C02Generator* g, IRNode* load, IRNode* var, int size, int start_index) {
   TargetInstruction* dest;
   if (load->dest != NULL) {
+    LowerIRNode(g, load->dest);
     dest = GetAddress(g, load->dest, true);
   } else {
     dest = TempRegister(g, load->type, size);
