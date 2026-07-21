@@ -22,7 +22,9 @@
 #include <memory>
 #include <new>
 #include <stddef.h>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 #include <type_traits>
 #include <utility>
 

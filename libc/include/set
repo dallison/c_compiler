@@ -8,12 +8,12 @@
 #ifndef __davecc_set__
 #define __davecc_set__
 
+#include <__exception_support>
 #include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <cstddef>
-#include <stdexcept>
 #include <utility>
 
 namespace std {
@@ -440,22 +440,22 @@ class set {
 
   __node* __create_node(const value_type& value) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
-    try {
+    __DAVECC_TRY {
       new (node) __node(value);
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
     return node;
   }
 
   __node* __create_node(value_type&& value) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
-    try {
+    __DAVECC_TRY {
       new (node) __node(std::move(value));
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
     return node;
   }

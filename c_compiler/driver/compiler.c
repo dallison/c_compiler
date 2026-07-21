@@ -25,6 +25,7 @@
 #include "member_pointer.h"
 #include "type_inheritance.h"
 #include "type_compare.h"
+#include "type_template.h"
 
 #include "6502_target.h"
 #include "p_code_target.h"
@@ -806,6 +807,114 @@ static bool IsFunctionOrInlineDefinition(Symbol* sym) {
                                             sym->flags.is_inline_defn);
 }
 
+static bool CXXTypeHasNoOpDefaultConstructor(TypeRecord* type) {
+  if (!CompilerIsCXX() || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->bases.length != 0 || str->virtual_bases.length != 0 ||
+      str->vptr_member != NULL || str->tag_name == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->is_static || member->is_member_function ||
+        member->is_using_declaration) {
+      continue;
+    }
+    if (member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    return false;
+  }
+  StructMember* ctor = FindStructMember(str, str->tag_name);
+  if (ctor == NULL || !ctor->is_member_function || ctor->symbol == NULL ||
+      ctor->symbol->type == NULL || !TypeIsFunction(ctor->symbol->type) ||
+      !ctor->symbol->type->info.function.is_constructor ||
+      ctor->symbol->type->info.function.is_deleted) {
+    return false;
+  }
+  TypeRecord* func = ctor->symbol->type;
+  if (func->info.function.is_defaulted) {
+    return true;
+  }
+  ASTNode* body = func->info.function.body;
+  return body != NULL && body->op == AST_OP(compound) &&
+         ((CompoundStatementASTNode*)body)->statements != NULL &&
+         ((CompoundStatementASTNode*)body)->statements->length == 0;
+}
+
+static bool CXXInitializerIsNoOpDefaultConstructor(Symbol* symbol,
+                                                   ASTNode* initializer) {
+  if (symbol == NULL || initializer == NULL ||
+      initializer->op != AST_OP(call) ||
+      !CXXTypeHasNoOpDefaultConstructor(symbol->type)) {
+    return false;
+  }
+  ASTNode* callee = ((VectorASTNode*)initializer)->left;
+  Symbol* callee_symbol = NULL;
+  if (callee != NULL && callee->op == AST_OP(identifier)) {
+    callee_symbol = ((IdentifierASTNode*)callee)->symbol;
+  } else if (callee != NULL && callee->op == AST_OP(structmember)) {
+    StructMember* member = ((StructMemberASTNode*)callee)->member;
+    callee_symbol = member != NULL ? member->symbol : NULL;
+  }
+  TypeRecord* callee_type =
+      callee_symbol != NULL ? callee_symbol->type : callee != NULL ? callee->type
+                                                                  : NULL;
+  return callee_type != NULL && TypeIsFunction(callee_type) &&
+         callee_type->info.function.is_constructor;
+}
+
+static bool SymbolPointerInVector(Vector* symbols, Symbol* symbol) {
+  for (size_t i = 0; i < symbols->length; i++) {
+    if (symbols->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void RecordCXXNoOpInitializedVariable(Symbol* symbol) {
+  if (!SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
+                             symbol)) {
+    VectorAppend(&compiler->cxx_no_op_initialized_variables, symbol);
+  }
+}
+
+static void PruneCXXNoOpGlobalConstructorCalls(void) {
+  for (size_t i = 0; i < compiler->cxx_global_constructors.length;) {
+    Symbol* object = compiler->cxx_global_constructors.value.p[i];
+    if (object != NULL &&
+        CXXTypeHasNoOpDefaultConstructor(object->type)) {
+      RecordCXXNoOpInitializedVariable(object);
+    }
+    if (SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
+                              object)) {
+      VectorDeleteElement(&compiler->cxx_global_constructors, i);
+    } else {
+      i++;
+    }
+  }
+  for (size_t i = 0; i < compiler->cxx_global_constructor_objects.length;) {
+    Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
+    if (object != NULL &&
+        CXXTypeHasNoOpDefaultConstructor(object->type)) {
+      RecordCXXNoOpInitializedVariable(object);
+    }
+    if (!SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
+                               object)) {
+      i++;
+      continue;
+    }
+    ASTNodeDelete(compiler->cxx_global_constructor_calls.value.p[i]);
+    VectorDeleteElement(&compiler->cxx_global_constructor_calls, i);
+    VectorDeleteElement(&compiler->cxx_global_constructor_objects, i);
+  }
+}
+
 static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
                                                    bool destructor) {
   if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
@@ -846,6 +955,12 @@ static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
       func->info.function.is_trivial_special_member) {
     return NULL;
   }
+  if (!destructor && CXXTypeHasNoOpDefaultConstructor(sym->type)) {
+    RecordCXXNoOpInitializedVariable(sym);
+    return NULL;
+  }
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax,
+                                             member->symbol);
   return member;
 }
 
@@ -1137,17 +1252,212 @@ static bool FunctionBodyContainsUnexpandedPack(ASTNode* body) {
   return search.found;
 }
 
-static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
+static bool AsmNameInVector(Vector* names, const char* asm_name) {
   if (asm_name == NULL || *asm_name == '\0') {
     return false;
   }
-  for (size_t i = 0; i < compiler->emitted_function_asm_names.length; i++) {
-    String* emitted = compiler->emitted_function_asm_names.value.p[i];
-    if (emitted != NULL && strcmp(emitted->value, asm_name) == 0) {
+  for (size_t i = 0; i < names->length; i++) {
+    String* name = names->value.p[i];
+    if (name != NULL && strcmp(name->value, asm_name) == 0) {
       return true;
     }
   }
   return false;
+}
+
+static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
+  return AsmNameInVector(&compiler->emitted_function_asm_names, asm_name);
+}
+
+static void CompileReferencedInlineFunctions(Syntax* syntax);
+
+void CompilerMarkFunctionReferenced(Symbol* symbol) {
+  if (compiler == NULL || symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type)) {
+    return;
+  }
+  // Do not assign an asm name here.  Compiler-invented runtime declarations
+  // deliberately have an empty asm_name so they retain their ABI spelling
+  // (for example __davecc_throw rather than a C++-mangled name).
+  const char* asm_name = symbol->asm_name.length != 0
+                             ? symbol->asm_name.value
+                             : symbol->name.value;
+  if (!AsmNameInVector(&compiler->referenced_function_asm_names, asm_name)) {
+    VectorAppend(&compiler->referenced_function_asm_names,
+                 NewString(asm_name));
+  }
+}
+
+void CompilerMarkVariableReferenced(Symbol* symbol) {
+  if (compiler == NULL || symbol == NULL || symbol->type == NULL ||
+      TypeIsFunction(symbol->type) || symbol->flags.is_local ||
+      symbol->flags.is_temp || symbol->flags.is_argument) {
+    return;
+  }
+  const char* asm_name = symbol->asm_name.length != 0
+                             ? symbol->asm_name.value
+                             : symbol->name.value;
+  if (!AsmNameInVector(&compiler->referenced_variable_asm_names, asm_name)) {
+    VectorAppend(&compiler->referenced_variable_asm_names,
+                 NewString(asm_name));
+  }
+}
+
+static bool FunctionDefinitionIsODRDiscardable(TypeRecord* type) {
+  return CompilerIsCXX() && type != NULL && TypeIsFunction(type) &&
+         (type->info.function.is_inline ||
+          type->info.function.template_origin != NULL);
+}
+
+static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
+                                              TypeRecord* type) {
+  if (symbol == NULL || type == NULL || !TypeIsFunction(type)) {
+    return false;
+  }
+  // An explicit specialization is an ordinary externally visible definition,
+  // not a discardable implicit instantiation.
+  if (symbol->flags.is_explicit_specialization &&
+      !StorageIs(symbol->storage, STO(static))) {
+    return true;
+  }
+  // C inline linkage has different rules from C++ ODR emission.  Preserve the
+  // existing C behavior; this reachability pass is specifically for C++ inline
+  // definitions.
+  if (!FunctionDefinitionIsODRDiscardable(type)) {
+    return true;
+  }
+  // A module/header-unit object must provide exported inline definitions for
+  // importers.  Their bodies may reference internal-linkage helpers that are
+  // intentionally not imported as names.
+  if (symbol->flags.is_exported || compiler->module_header) {
+    return true;
+  }
+  // A vtable names virtual functions even when no ordinary expression takes
+  // their address, so concrete virtual definitions remain eager.
+  if (type->info.function.is_virtual &&
+      !type->info.function.is_pure_virtual) {
+    return true;
+  }
+  // An overriding destructor is not always tagged is_virtual itself, but a
+  // polymorphic class's vtable still names its final destructor.
+  if (type->info.function.is_destructor &&
+      type->info.function.cxx_member_owner != NULL &&
+      type->info.function.cxx_member_owner->virtual_members.length != 0) {
+    return true;
+  }
+  const char* asm_name = symbol->asm_name.length != 0
+                             ? symbol->asm_name.value
+                             : symbol->name.value;
+  return AsmNameInVector(&compiler->referenced_function_asm_names, asm_name);
+}
+
+static bool VariableDefinitionIsODRDiscardable(Symbol* symbol) {
+  if (!CompilerIsCXX() || symbol == NULL || symbol->flags.is_local ||
+      symbol->flags.is_exported || compiler->module_header ||
+      TypeHasNonTrivialDestructor(symbol->type)) {
+    return false;
+  }
+  if (symbol->flags.is_constexpr && SymbolHasWeakBinding(symbol)) {
+    return true;
+  }
+  bool internal =
+      StorageIs(symbol->storage, STO(static)) ||
+      ((TypeIsConst(symbol->type) || symbol->flags.is_constexpr) &&
+       !StorageIs(symbol->storage, STO(extern)));
+  return SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
+                               symbol) &&
+         (internal || SymbolHasWeakBinding(symbol));
+}
+
+static bool VariableDefinitionNeedsStorage(Symbol* symbol) {
+  if (!VariableDefinitionIsODRDiscardable(symbol)) {
+    return true;
+  }
+  const char* asm_name = symbol->asm_name.length != 0
+                             ? symbol->asm_name.value
+                             : symbol->name.value;
+  return AsmNameInVector(&compiler->referenced_variable_asm_names, asm_name);
+}
+
+static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
+                                      int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren) {
+    return;
+  }
+  Symbol* symbol = NULL;
+  if (node->op == AST_OP(identifier)) {
+    symbol = ((IdentifierASTNode*)node)->symbol;
+  } else if (node->op == AST_OP(structmember)) {
+    StructMember* member = ((StructMemberASTNode*)node)->member;
+    symbol = member != NULL ? member->symbol : NULL;
+  }
+  if (symbol != NULL && symbol->type != NULL &&
+      TypeIsFunction(symbol->type)) {
+    CompilerMarkFunctionReferenced(symbol);
+  } else if (symbol != NULL) {
+    CompilerMarkVariableReferenced(symbol);
+  }
+}
+
+static void MarkReferencesInAST(ASTNode* node) {
+  if (node != NULL) {
+    ASTNodeVisit(node, MarkReferencedSymbolInAST, 0, NULL);
+  }
+}
+
+static void MarkFunctionsReferencedByBody(TypeRecord* function) {
+  if (function != NULL && TypeIsFunction(function) &&
+      function->info.function.body != NULL) {
+    MarkReferencesInAST(function->info.function.body);
+  }
+}
+
+static bool GenerateFunctionDefinition(Syntax* syntax,
+                                       VariableDeclarationASTNode* decl) {
+  if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
+    return false;
+  }
+  bool dependent_function_body =
+      TypeContainsTemplateParameter(decl->base.type) ||
+      FunctionBodyContainsUnexpandedPack(
+          decl->base.type->info.function.body);
+  if (NumErrors() != 0 || dependent_function_body ||
+      (decl->base.type->info.function.is_inline &&
+       !decl->symbol->flags.is_inline_defn) ||
+      !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
+    return false;
+  }
+
+  TypeRecord* saved_current_function = compiler->current_function;
+  Struct* saved_class_access_context =
+      compiler->current_class_access_context;
+  compiler->current_function = decl->base.type;
+  compiler->current_class_access_context =
+      decl->base.type->info.function.cxx_member_owner;
+
+  if (compiler->debug_output) {
+    decl->symbol->die = BuildDebugInfo(&compiler->debug_builder,
+                                      decl->symbol, DW_TAG(subprogram));
+  }
+  SyntaxPrepareCXXLocalStatics(syntax, decl->base.type);
+  Generator codegen;
+  GeneratorInit(&codegen, syntax, compiler->current_function);
+  void* code = GenerateFunction(&codegen);
+  VectorAppend(&compiler->functions, code);
+  VectorAppend(&compiler->emitted_function_asm_names,
+               NewString(decl->symbol->asm_name.value));
+
+  if (compiler->debug_output) {
+    BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
+  }
+  AddLocalStatics(syntax, decl->base.type);
+  GeneratorDestruct(&codegen);
+  SyntaxRegisterFunctionInitFiniAttributes(syntax, decl->symbol);
+  compiler->current_function = saved_current_function;
+  compiler->current_class_access_context = saved_class_access_context;
+  return true;
 }
 
 static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
@@ -1186,46 +1496,14 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           if (compiler->print_front_end) {
             SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
           }
-          bool dependent_function_body =
-              TypeContainsTemplateParameter(decl->base.type) ||
-              FunctionBodyContainsUnexpandedPack(
-                  decl->base.type->info.function.body);
-
-          // Any semantic errors?
-          if (NumErrors() == 0 &&
-              !dependent_function_body &&
-              (!decl->base.type->info.function.is_inline ||
-               decl->symbol->flags.is_inline_defn)) {
-            if (compiler->debug_output) {
-              decl->symbol->die = BuildDebugInfo(&compiler->debug_builder,
-                                           decl->symbol,
-                                           DW_TAG(subprogram));
-            }
-             // Generate code for function.
-            SyntaxPrepareCXXLocalStatics(syntax, decl->base.type);
-            Generator codegen;
-            GeneratorInit(&codegen, syntax, compiler->current_function);
-
-            // Generate code for function with given target.
-            void* code = GenerateFunction(&codegen);
-
-            VectorAppend(&compiler->functions, code);
-            VectorAppend(&compiler->emitted_function_asm_names,
-                         NewString(decl->symbol->asm_name.value));
-
-            if (compiler->debug_output) {
-               BuildDebugInfoAfterCodegen(&compiler->debug_builder,
-                                            decl->symbol);
-             }
-
-            // Handle local static variables.
-            AddLocalStatics(syntax, decl->base.type);
-            GeneratorDestruct(&codegen);
-            SyntaxRegisterFunctionInitFiniAttributes(syntax, decl->symbol);
-          }
           compiler->current_function = saved_current_function;
           compiler->current_class_access_context =
               saved_class_access_context;
+          if (!FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+            MarkFunctionsReferencedByBody(decl->base.type);
+            CompileReferencedInlineFunctions(syntax);
+          }
+          GenerateFunctionDefinition(syntax, decl);
         } else {
           // Declaration is a variable or extern function.
           if (TypeIsFunction(decl->base.type)) {
@@ -1286,6 +1564,12 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   var->is_local = decl->symbol->flags.is_local;
                   VectorAppend(&compiler->uninitialized_static_variables, var);
 
+                  if (CXXInitializerIsNoOpDefaultConstructor(
+                          decl->symbol, decl->initializer)) {
+                    RecordCXXNoOpInitializedVariable(decl->symbol);
+                    decl->initializer = NULL;
+                    continue;
+                  }
                   ASTNode* constructor = decl->initializer;
                   decl->initializer = NULL;
                   if (SymbolIsThreadLocal(decl->symbol)) {
@@ -1325,6 +1609,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                                dynamic_init);
                   RegisterCXXGlobalObject(decl->symbol);
                   continue;
+                }
+                if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
+                  MarkReferencesInAST(decl->initializer);
                 }
                 ASTNode* initializer = ConstexprObjectInitializerForSymbol(
                     decl->symbol, decl->initializer->location);
@@ -1366,6 +1653,100 @@ static void CompilePendingTemplateInstantiations(Syntax* syntax) {
     VectorDeleteElement(&compiler->pending_template_instantiations, 0);
     SyntaxResetForNewDeclaration(syntax);
     CompileDeclarationNode(syntax, node);
+  }
+}
+
+// Code generation itself records every function address it materializes.  Walk
+// the retained inline definitions until that reference set reaches a fixed
+// point: emitting one inline body can make further inline callees reachable.
+static void CompileReferencedInlineFunctions(Syntax* syntax) {
+  bool emitted;
+  do {
+    // First close the reference graph without generating code.  This lets the
+    // subsequent pass emit reachable definitions in their original declaration
+    // order, matching eager compilation while omitting unreachable bodies.
+    size_t previous_function_reference_count;
+    size_t previous_variable_reference_count;
+    do {
+      previous_function_reference_count =
+          compiler->referenced_function_asm_names.length;
+      previous_variable_reference_count =
+          compiler->referenced_variable_asm_names.length;
+      size_t num_roots = compiler->declaration_asts.length;
+      for (size_t i = 0; i < num_roots; i++) {
+        ASTNode* node = compiler->declaration_asts.value.p[i];
+        if (node == NULL || node->op != AST_OP(decl_list)) {
+          continue;
+        }
+        DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
+        for (size_t j = 0; j < decls->declarations->length; j++) {
+          VariableDeclarationASTNode* decl =
+              decls->declarations->value.p[j];
+          if (decl == NULL || decl->symbol == NULL) {
+            continue;
+          }
+          if (IsFunctionOrInlineDefinition(decl->symbol) &&
+              decl->base.type != NULL &&
+              FunctionDefinitionIsODRDiscardable(decl->base.type) &&
+              FunctionDefinitionNeedsNativeCode(decl->symbol,
+                                                decl->base.type)) {
+            MarkFunctionsReferencedByBody(decl->base.type);
+          } else if (VariableDefinitionIsODRDiscardable(decl->symbol) &&
+                     VariableDefinitionNeedsStorage(decl->symbol)) {
+            MarkReferencesInAST(decl->initializer);
+          }
+        }
+      }
+    } while (compiler->referenced_function_asm_names.length !=
+                 previous_function_reference_count ||
+             compiler->referenced_variable_asm_names.length !=
+                 previous_variable_reference_count);
+
+    emitted = false;
+    size_t num_roots = compiler->declaration_asts.length;
+    for (size_t i = 0; i < num_roots; i++) {
+      ASTNode* node = compiler->declaration_asts.value.p[i];
+      if (node == NULL || node->op != AST_OP(decl_list)) {
+        continue;
+      }
+      DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
+      for (size_t j = 0; j < decls->declarations->length; j++) {
+        VariableDeclarationASTNode* decl =
+            decls->declarations->value.p[j];
+        if (decl == NULL || decl->symbol == NULL ||
+            !IsFunctionOrInlineDefinition(decl->symbol) ||
+            decl->base.type == NULL ||
+            !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+          continue;
+        }
+        if (GenerateFunctionDefinition(syntax, decl)) {
+          emitted = true;
+        }
+      }
+    }
+  } while (emitted);
+}
+
+static void PruneUnreferencedInlineVariables(void) {
+  for (size_t i = 0; i < compiler->initialized_static_variables.length;) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (var == NULL || VariableDefinitionNeedsStorage(var->symbol)) {
+      i++;
+      continue;
+    }
+    InitializedStaticVariableDelete(var);
+    VectorDeleteElement(&compiler->initialized_static_variables, i);
+  }
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length;) {
+    UninitializedStaticVariable* var =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (var == NULL || VariableDefinitionNeedsStorage(var->symbol)) {
+      i++;
+      continue;
+    }
+    UninitializedStaticVariableDelete(var);
+    VectorDeleteElement(&compiler->uninitialized_static_variables, i);
   }
 }
 
@@ -1610,11 +1991,14 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   ModuleUnitInfoInit(&compiler->module_unit);
   VectorInit(&compiler->functions);
   VectorInit(&compiler->emitted_function_asm_names);
+  VectorInit(&compiler->referenced_function_asm_names);
+  VectorInit(&compiler->referenced_variable_asm_names);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
+  VectorInit(&compiler->cxx_no_op_initialized_variables);
   VectorInit(&compiler->cxx_global_constructor_calls);
   VectorInit(&compiler->cxx_global_constructor_objects);
   VectorInit(&compiler->cxx_thread_constructor_calls);
@@ -1647,6 +2031,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->current_function = NULL;
   compiler->current_class_access_context = NULL;
   compiler->global_namespace = NULL;
+  compiler->module_header = false;
   
   char dirname[4096];
   char* wd = getcwd(dirname, sizeof(dirname));
@@ -1818,9 +2203,12 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
     exit(1);
   }
 
-  // Exceptions are enabled by default; -fexceptions / -fno-exceptions toggle
-  // the state with last-one-wins semantics.
-  compiler->exceptions_enabled = true;
+  // Exception metadata and unwind support are too large for the 6502 address
+  // space, so those targets default to -fno-exceptions.  An explicit option
+  // still overrides the target default with last-one-wins semantics.
+  compiler->exceptions_enabled =
+      strcmp(target->canonical_name, "6502") != 0 &&
+      strcmp(target->canonical_name, "65c02") != 0;
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* opt = options->value.p[i];
     if (opt->opt == kOptionExceptions) {
@@ -1840,6 +2228,8 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
       compiler->printf_specialize = false;
     }
   }
+  compiler->module_header =
+      OptionBoolValue(kOptionModuleHeader, options, false);
   compiler->tls_model = compiler->pic ? TLS(global_dynamic) : TLS(local_exec);
 
   compiler->pointer_size = compiler->target->pointer_size;
@@ -2077,6 +2467,12 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(
       &compiler->emitted_function_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+  VectorDestructWithContents(
+      &compiler->referenced_function_asm_names,
+      (VectorElementDestructor)StringDelete, /*free_element=*/false);
+  VectorDestructWithContents(
+      &compiler->referenced_variable_asm_names,
+      (VectorElementDestructor)StringDelete, /*free_element=*/false);
 
   // Imported module graphs use heap Symbol/Namespace nodes that must be
   // detached and released after AST/IR teardown has finished using them, but
@@ -2120,6 +2516,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
+  VectorDestruct(&compiler->cxx_no_op_initialized_variables);
   VectorDestruct(&compiler->cxx_global_constructor_calls);
   VectorDestruct(&compiler->cxx_global_constructor_objects);
   VectorDestruct(&cxx_init_array_functions);
@@ -2506,10 +2903,19 @@ static String* Compile(Compiler* compiler, Vector* options) {
     return NULL;
   }
 
+  PruneCXXNoOpGlobalConstructorCalls();
   CompileCXXProcessInitFunction(&compiler->syntax);
   if (NumErrors() != 0) {
     return NULL;
   }
+  // Synthetic initialization functions may instantiate or reference further
+  // inline functions after the ordinary source declarations have been drained.
+  CompilePendingTemplateInstantiations(&compiler->syntax);
+  CompileReferencedInlineFunctions(&compiler->syntax);
+  if (NumErrors() != 0) {
+    return NULL;
+  }
+  PruneUnreferencedInlineVariables();
   // Emit the assembly language into a file ending in .s.
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);
   String asm_filename = {0};

@@ -1,14 +1,18 @@
+#include <__exception_support>
 #include <vector>
+#ifdef __cpp_exceptions
+#include <stdexcept>
+#endif
 
 namespace std {
 namespace __vector_detail {
 
 void __throw_out_of_range() {
-  throw out_of_range("vector::at");
+  __DAVECC_THROW(out_of_range("vector::at"));
 }
 
 void __throw_length_error() {
-  throw length_error("vector::reserve");
+  __DAVECC_THROW(length_error("vector::reserve"));
 }
 
 }  // namespace __vector_detail

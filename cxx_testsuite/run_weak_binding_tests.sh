@@ -177,6 +177,102 @@ compile_obj "$work/weak_missing.c" "$work/weak_missing.o"
 link_and_run "$work/weak_missing.bin" "$work/weak_missing.o"
 echo "ok unresolved weak references resolve to zero"
 
+cat >"$work/inline_reachability.cpp" <<'EOF'
+inline int used_inline_value(void) {
+  return 21;
+}
+inline int unused_inline_value(void) {
+  return 99;
+}
+int inline_reachability(void) {
+  return used_inline_value();
+}
+EOF
+compile_cxx_obj "$work/inline_reachability.cpp" "$work/inline_reachability.o"
+"$ELFDUMP" -s "$work/inline_reachability.o" >"$work/inline_reachability.symbols"
+if ! grep -q "used_inline_value" "$work/inline_reachability.symbols"; then
+  echo "FAIL referenced C++ inline definition was not emitted"
+  sed 's/^/  /' "$work/inline_reachability.symbols"
+  exit 1
+fi
+if grep -q "unused_inline_value" "$work/inline_reachability.symbols"; then
+  echo "FAIL unreferenced C++ inline definition was emitted"
+  sed 's/^/  /' "$work/inline_reachability.symbols"
+  exit 1
+fi
+echo "ok only referenced C++ inline definitions are emitted"
+
+cat >"$work/odr_reachability.cpp" <<'EOF'
+template <class T>
+int used_function_template(T*) {
+  return 23;
+}
+
+template <class T>
+int unused_function_template(T*) {
+  return 29;
+}
+
+inline constexpr int used_inline_constant = 31;
+inline constexpr int unused_inline_constant = 37;
+inline constexpr int initializer_referenced_constant = 41;
+const int* global_constant_pointer = &initializer_referenced_constant;
+
+struct EmptyTag {
+  explicit EmptyTag() = default;
+};
+const EmptyTag used_tag_object{};
+const EmptyTag unused_tag_object{};
+
+const int* used_inline_constant_address(void) {
+  return &used_inline_constant;
+}
+
+const EmptyTag* used_tag_object_address(void) {
+  return &used_tag_object;
+}
+
+int function_template_reachability(int* value) {
+  return used_function_template(value);
+}
+EOF
+compile_cxx_obj "$work/odr_reachability.cpp" "$work/odr_reachability.o"
+"$ELFDUMP" -s "$work/odr_reachability.o" >"$work/odr_reachability.symbols"
+if ! grep -q "used_function_template" "$work/odr_reachability.symbols"; then
+  echo "FAIL referenced function-template specialization was not emitted"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+if grep -q "unused_function_template" "$work/odr_reachability.symbols"; then
+  echo "FAIL unreferenced function-template specialization was emitted"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+if ! grep -q "used_inline_constant" "$work/odr_reachability.symbols"; then
+  echo "FAIL referenced inline constexpr variable was not emitted"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+if ! grep -q "initializer_referenced_constant" \
+    "$work/odr_reachability.symbols" ||
+   ! grep -q "used_tag_object" "$work/odr_reachability.symbols"; then
+  echo "FAIL data-initializer/tag references did not retain required storage"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+if grep -q "unused_inline_constant\\|unused_tag_object" \
+    "$work/odr_reachability.symbols"; then
+  echo "FAIL unreferenced inline/tag variable was emitted"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+if grep -q "EmptyTagC" "$work/odr_reachability.symbols"; then
+  echo "FAIL no-op tag constructor was emitted"
+  sed 's/^/  /' "$work/odr_reachability.symbols"
+  exit 1
+fi
+echo "ok function templates and inline data follow ODR reachability"
+
 cat >"$work/inline_shared.h" <<'EOF'
 extern int local_static_ctor_count;
 

@@ -8,6 +8,7 @@
 #ifndef __davecc_functional__
 #define __davecc_functional__
 
+#include <__exception_support>
 #include <stddef.h>
 #include <stdint.h>
 #include <exception>
@@ -715,7 +716,7 @@ class function<R(Args...)> {
 
   R operator()(Args... args) const {
     if (__ops == nullptr) {
-      throw bad_function_call();
+      __DAVECC_THROW(bad_function_call());
     }
     return __invoke(
         const_cast<__storage_type*>(&__storage),

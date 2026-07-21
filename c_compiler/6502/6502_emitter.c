@@ -648,7 +648,21 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     case W65C02_OP(pushreg4):
     case W65C02_OP(pushreg8): {
       TargetInstruction* r = inst->operand[0];
-      fprintf(fp, "\tjsr         __push%s\n", W65C02RegisterAsString((W65C02Register*)r->reg, 0, buf, sizeof(buf)) + 2);
+      W65C02Register* reg = (W65C02Register*)r->reg;
+      int push_size = opcode == W65C02_OP(pushreg2)
+                          ? 2
+                          : opcode == W65C02_OP(pushreg4) ? 4 : 8;
+      const char* reg_name =
+          W65C02RegisterAsString(reg, 0, buf, sizeof(buf));
+      if (RegisterSize(reg) == push_size) {
+        fprintf(fp, "\tjsr         __push%s\n", reg_name + 2);
+      } else {
+        // A multi-byte value can be allocated to consecutive smaller
+        // zero-page registers.  Push the requested value width, not merely
+        // the native width implied by the first register's name.
+        fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
+        fprintf(fp, "\tjsr         __pushreg%d\n", push_size);
+      }
       break;
     }
       

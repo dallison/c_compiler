@@ -21,6 +21,7 @@
 
 static void LowerIRNode(W65C02Generator* g, IRNode* node);
 static void LowerVariables(W65C02Generator* g);
+static void LowerStructReturn(W65C02Generator* g, IRNode* node);
 static void LowerLiteralReference(W65C02Generator* g,
                                   IRNode* node, bool force);
 #define PRINT_PRELOWER 0
@@ -1852,6 +1853,18 @@ static IRNode* IgnoreCasts(IRNode* node) {
   return node;
 }
 
+static bool IsNRVONode(IRNode* node) {
+  node = IgnoreCasts(node);
+  if ((node->flags & kIRNrvoMarker) != 0) {
+    return true;
+  }
+  if (node->opcode != IR_OP(localvar)) {
+    return false;
+  }
+  Symbol* symbol = ((IRVariable*)node)->symbol;
+  return symbol != NULL && symbol->is_nrvo;
+}
+
 static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size, bool put_in_zero_page) {
   // If the node is an argument push, indirect to its expression.
   if (node->opcode == IR_OP(pusharg)) {
@@ -1904,6 +1917,12 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
     switch ((W65C02Opcode)inst->opcode) {
       case W65C02_OP(argument):
       case W65C02_OP(localvar): {
+        if (IsNRVONode(node)) {
+          // An NRVO object is the caller-provided aggregate result slot, not
+          // storage in this function's local frame.
+          assert(g->struct_return_inst != NULL);
+          return g->struct_return_inst;
+        }
         // Variable or argument.  Load value using one of the runtime helper
         // functions.
         offset = (int)TargetIntValue(inst->operand[0]);
@@ -2020,7 +2039,7 @@ static TargetInstruction* GetAddress(W65C02Generator* g, IRNode* addr_node, bool
   switch ((W65C02Opcode)addr->opcode) {
     case W65C02_OP(argument):
     case W65C02_OP(localvar): {
-      if (addr_node != NULL && (addr_node->flags & kIRNrvoMarker) != 0) {
+      if (addr_node != NULL && IsNRVONode(addr_node)) {
         // This is an Named RVO variable.  It's address is the same
         // as the structreturn address.
         assert(g->struct_return_inst != NULL);
@@ -2081,7 +2100,7 @@ static void GetAddressXY(W65C02Generator* g, IRNode* addr_node) {
   switch ((W65C02Opcode)addr->opcode) {
     case W65C02_OP(argument):
     case W65C02_OP(localvar): {
-      if ((addr_node->flags & kIRNrvoMarker) != 0) {
+      if (IsNRVONode(addr_node)) {
         // This is an Named RVO variable.  It's address is the same
         // as the structreturn address.
         assert(g->struct_return_inst != NULL);
@@ -4232,6 +4251,23 @@ static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRN
   return SetLoweredNode(load, result);
 }
 
+static bool IsLoweredVariableStorage(IRNode* node) {
+  TargetInstruction* inst = GetLoweredNode(node);
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(localvar):
+    case W65C02_OP(argument):
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
+      return true;
+    default:
+      return false;
+  }
+}
+
 
 static TargetInstruction* LoadFromStaticVariable(W65C02Generator* g, IRNode* load, IRNode* var, int size) {
   TargetInstruction* result;
@@ -4303,6 +4339,14 @@ static void LowerLoad(W65C02Generator* g, IRNode* node) {
     return;
   }
   bool is_arg = true;
+  if (src_node->opcode == IR_OP(tempvar)) {
+    if (IsLoweredVariableStorage(src_node)) {
+      LoadFromVariable(g, node, src_node, false, size);
+    } else {
+      LoadIndirect(g, node, src_node, size, start_index);
+    }
+    return;
+  }
   switch (src_node->opcode) {
     case IR_OP(localvar):
       is_arg = false;
@@ -4428,7 +4472,7 @@ static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, I
   bool highzero = offset < 256;
   Symbol* func;
 
-  if ((dest_node->flags & kIRNrvoMarker) != 0) {
+  if (IsNRVONode(dest_node)) {
     // This is an Named RVO variable.  It's address is the same
     // as the structreturn address.
     assert(g->struct_return_inst != NULL);
@@ -4585,6 +4629,14 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
      StoreIndirect(g, node, dest_node, src_node, size, start_index);
     return;
   }
+  if (dest_node->opcode == IR_OP(tempvar)) {
+    if (IsLoweredVariableStorage(dest_node)) {
+      StoreIntoVariable(g, node, dest_node, src_node, false, size);
+    } else {
+      StoreIndirect(g, node, dest_node, src_node, size, start_index);
+    }
+    return;
+  }
   switch (dest_node->opcode) {
     case IR_OP(argument):
       is_arg = true;
@@ -4623,7 +4675,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
           break;
       }
       bool done = false;
-      if (start_index == 0 && (addr_node->flags & kIRNrvoMarker) == 0) {
+      if (start_index == 0 && !IsNRVONode(addr_node)) {
         int offset = (int)TargetIntValue(addr->operand[0]);
         bool highzero = offset < 256;
         Symbol* func;
@@ -4725,7 +4777,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
       
       if (!done) {
         TargetInstruction* addr;
-        if ((addr_node->flags & kIRNrvoMarker) != 0) {
+        if (IsNRVONode(addr_node)) {
           // This is an Named RVO variable.  It's address is the same
           // as the structreturn address.
           assert(g->struct_return_inst != NULL);
@@ -6019,6 +6071,20 @@ static TargetInstruction* AddressOfRegVariable(W65C02Generator* g, IRNode* node,
 }
 
 static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IRNode* var, bool is_arg) {
+  var = IgnoreCasts(var);
+  if (IsNRVONode(var)) {
+    assert(g->struct_return_inst != NULL);
+    TargetInstruction* result = g->struct_return_inst;
+    if (node->dest != NULL) {
+      TargetInstruction* dest = GetLoweredNode(node->dest);
+      Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest),
+           GetAddrMode(result));
+      AddSpillPoint(g, dest);
+      result = dest;
+    }
+    return SetLoweredNode(node, result);
+  }
+
   TargetInstruction* inst = GetLoweredNode(var);
   AddReloadPoint(g, inst);
   
@@ -6036,8 +6102,6 @@ static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IR
   TargetInstruction* result = NULL;
   int offset;
 
-  var = IgnoreCasts(var);
-   
   // Variable or argument.  Load value using one of the runtime helper
   // functions.
   offset = (int)TargetIntValue(inst->operand[0]);
@@ -7401,6 +7465,12 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
         Emit(g, NewInstruction(W65C02_OP(enter_leaf), kAddrModeImplied));
       } else {
         Emit(g, NewInstruction(W65C02_OP(enter), kAddrModeImplied));
+      }
+      // The hidden aggregate-result pointer is loaded by a runtime helper that
+      // uses caller-clobbered value registers. Load it before ordinary
+      // arguments are assigned to those registers.
+      if (g->gen->struct_return_value != NULL) {
+        LowerStructReturn(g, g->gen->struct_return_value);
       }
       LowerVariables(g);
       return ;

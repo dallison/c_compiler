@@ -164,6 +164,11 @@ static void PredefineMacros(Preprocessor* p) {
     }
     PreprocessorDefineMacro(p, "__cplusplus", cplusplus);
 
+    if (CompilerExceptionsEnabled()) {
+      PreprocessorDefineMacro(p, "__cpp_exceptions", "199711L");
+      PreprocessorDefineMacro(p, "__EXCEPTIONS", "1");
+    }
+
     // C++20 feature-test macros for language features implemented by DaveCC.
     if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
       PreprocessorDefineMacro(p, "__cpp_concepts", "202002L");

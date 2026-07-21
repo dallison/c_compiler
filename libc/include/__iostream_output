@@ -1,0 +1,24 @@
+#ifndef __davecc_iostream_output_h__
+#define __davecc_iostream_output_h__
+
+#include <streambuf>
+#include <cstdio>
+
+namespace std {
+
+class __stdio_ostreambuf : public basic_streambuf<char, char_traits<char>> {
+ public:
+  explicit __stdio_ostreambuf(FILE* file);
+
+ protected:
+  int_type overflow(int_type c = traits_type::eof()) override;
+  streamsize xsputn(const char* s, streamsize n) override;
+  int sync() override;
+
+ private:
+  FILE* __file_;
+};
+
+}  // namespace std
+
+#endif

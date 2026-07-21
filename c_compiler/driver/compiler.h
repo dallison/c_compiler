@@ -332,6 +332,12 @@ typedef struct {
   // Retained across draining template-instantiation queues to prevent emitting
   // the same specialization more than once.
   Vector emitted_function_asm_names;
+  // Assembly names referenced by real target code generation.  C++ inline
+  // definitions are semantically checked when parsed but emitted only after a
+  // reachable function or initializer actually materializes their address.
+  Vector referenced_function_asm_names;
+  // Assembly names of namespace/static data referenced by reachable code.
+  Vector referenced_variable_asm_names;
 
   // Vector containing initialized static variables (InitializedStaticVariable*)
   Vector initialized_static_variables;
@@ -351,6 +357,8 @@ typedef struct {
   // Elements are Symbol* owned by the normal symbol tables.
   Vector cxx_global_constructors;
   Vector cxx_global_destructors;
+  // Symbols whose empty defaulted constructor performs no runtime work.
+  Vector cxx_no_op_initialized_variables;
   Vector cxx_global_constructor_calls;  // ASTNode*, owned by init function body.
   Vector cxx_global_constructor_objects;  // Symbol* parallel to constructor_calls.
   // Per-thread C++ thread_local construction/destruction (not process-global).
@@ -395,6 +403,7 @@ typedef struct {
   bool pic;
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool printf_specialize;    // Rewrite constant printf-family calls by profile.
+  bool module_header;        // Compiling the object half of a header unit.
   bool print_front_end;
   bool print_back_end;
   bool print_preprocessor;
@@ -487,6 +496,8 @@ bool OptLevel3(void);
 bool CompilerIsCXX(void);
 bool CompilerCXXAtLeast(LanguageStandard standard);
 bool CompilerExceptionsEnabled(void);
+void CompilerMarkFunctionReferenced(struct Symbol* symbol);
+void CompilerMarkVariableReferenced(struct Symbol* symbol);
 
 int CharSize(void);
 int IntSize(void);

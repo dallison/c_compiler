@@ -1690,6 +1690,7 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
         if (sym != NULL && sym->flags.is_local && !sym->flags.is_argument &&
             !sym->flags.is_temp && !StorageIs(sym->storage, STO(static))) {
           return_value->flags |= kASTNrvoMarker;
+          sym->is_nrvo = true;
         }
       }
     }

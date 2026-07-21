@@ -3,66 +3,21 @@
 //  c_compiler
 //
 //  C++20 <iostream> support for DaveCC: the standard stream objects cin, cout,
-//  cerr and clog (narrow-character only).  Each is backed by a basic_filebuf
-//  that wraps one of the C stdio standard streams (stdin/stdout/stderr) without
-//  taking ownership of it. The standard objects are defined by the C++ runtime.
+//  cerr and clog (narrow-character only). Small dedicated buffers wrap the C
+//  standard streams without pulling the complete <fstream> implementation.
 //
 #ifndef __davecc_iostream__
 #define __davecc_iostream__
 
-#include <ios>
-#include <streambuf>
 #include <istream>
 #include <ostream>
-#include <fstream>
-#include <iosfwd>
-#include <__char_traits>
-#include <cstdio>
 
 namespace std {
 
-// An input stream backed by an already-open FILE* (does not own it).
-class __stdio_istream : public basic_istream<char, char_traits<char>> {
- public:
-  explicit __stdio_istream(FILE* f);
-  ~__stdio_istream() override {}
-
-  basic_filebuf<char, char_traits<char>>* rdbuf() const {
-    return const_cast<basic_filebuf<char, char_traits<char>>*>(&__buf_);
-  }
-
- private:
-  basic_filebuf<char, char_traits<char>> __buf_;
-};
-
-// An output stream backed by an already-open FILE* (does not own it).
-class __stdio_ostream : public basic_ostream<char, char_traits<char>> {
- public:
-  explicit __stdio_ostream(FILE* f);
-  ~__stdio_ostream() override {}
-
-  basic_filebuf<char, char_traits<char>>* rdbuf() const {
-    return const_cast<basic_filebuf<char, char_traits<char>>*>(&__buf_);
-  }
-
- private:
-  basic_filebuf<char, char_traits<char>> __buf_;
-};
-
-extern __stdio_ostream cout;
-extern __stdio_istream cin;
-extern __stdio_ostream cerr;
-extern __stdio_ostream clog;
-
-// Establish the standard relationships after all four stream objects have
-// completed construction. Formatted input flushes cout first, and cerr is
-// tied to cout and unbuffered at the C++ stream layer.
-class __iostream_initializer {
- public:
-  __iostream_initializer();
-};
-
-extern __iostream_initializer __iostream_init;
+extern ostream cout;
+extern istream cin;
+extern ostream cerr;
+extern ostream clog;
 
 }  // namespace std
 

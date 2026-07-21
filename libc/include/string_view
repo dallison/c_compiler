@@ -13,11 +13,14 @@
 #define __davecc_string_view__
 
 #include <__char_traits>
+#include <__exception_support>
 #include <compare>
 #include <cstddef>
 #include <functional>
 #include <iterator>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 
 namespace std {
 
@@ -86,7 +89,7 @@ class basic_string_view {
 
   const_reference at(size_type pos) const {
     if (pos >= __size) {
-      throw out_of_range("basic_string_view::at");
+      __DAVECC_THROW(out_of_range("basic_string_view::at"));
     }
     return __data[pos];
   }
@@ -123,7 +126,7 @@ class basic_string_view {
   // Operations.
   size_type copy(CharT* dest, size_type n, size_type pos = 0) const {
     if (pos > __size) {
-      throw out_of_range("basic_string_view::copy");
+      __DAVECC_THROW(out_of_range("basic_string_view::copy"));
     }
     size_type rn = __size - pos;
     if (n > rn) {
@@ -136,7 +139,7 @@ class basic_string_view {
   constexpr basic_string_view substr(size_type pos = 0,
                                      size_type n = npos) const {
     if (pos > __size) {
-      throw out_of_range("basic_string_view::substr");
+      __DAVECC_THROW(out_of_range("basic_string_view::substr"));
     }
     size_type rn = __size - pos;
     if (n > rn) {

@@ -8,9 +8,12 @@
 #ifndef array_h
 #define array_h
 
+#include <__exception_support>
 #include <stddef.h>
 #include <iterator>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -83,14 +86,14 @@ struct array {
 
   constexpr reference at(size_type index) {
     if (index >= N) {
-      throw out_of_range("array::at");
+      __DAVECC_THROW(out_of_range("array::at"));
     }
     return __elems[index];
   }
 
   constexpr const_reference at(size_type index) const {
     if (index >= N) {
-      throw out_of_range("array::at");
+      __DAVECC_THROW(out_of_range("array::at"));
     }
     return __elems[index];
   }
@@ -215,11 +218,11 @@ struct array<T, 0> {
   }
 
   constexpr reference at(size_type) {
-    throw out_of_range("array::at");
+    __DAVECC_THROW(out_of_range("array::at"));
   }
 
   constexpr const_reference at(size_type) const {
-    throw out_of_range("array::at");
+    __DAVECC_THROW(out_of_range("array::at"));
   }
 
   constexpr reference operator[](size_type) {

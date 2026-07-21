@@ -305,6 +305,7 @@ typedef struct IRNode {
 #define kIRFromCall (1 << 8)  // Struct arg is from a call.
 #define kIRStashedCallResult (1 << 9)  // Scalar call arg result is stashed.
 #define kIRStructReturnCall (1 << 10)  // Call has a hidden aggregate-result arg.
+#define kIRDeferredArgReload (1 << 11)  // Reload after nested argument calls.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);

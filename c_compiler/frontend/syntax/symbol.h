@@ -134,6 +134,7 @@ typedef struct Symbol {
     bool is_exported: 1;           // C++20 module export.            // @wire 41
     bool is_concept: 1;            // C++20 concept definition.       // @wire 43
     bool is_module_private: 1;     // Declared in private fragment.    // @wire 52
+    bool is_explicit_specialization: 1;  // `template <>` function.    // @wire 54
   } flags;
   
   struct {
@@ -181,6 +182,10 @@ typedef struct Symbol {
   // distinguishes "referenced but only written" objects for
   // -Wunused-but-set-variable.  Recomputed during analysis, never serialized.
   bool is_read;                   // @wire - (transient)
+  // Local object selected for named return-value optimization.  Semantic
+  // analysis sets this before IR generation so every reference to the pooled
+  // variable uses the hidden struct-return address.
+  bool is_nrvo;                   // @wire - (transient)
   // Compiler-owned copy of a deserialized function template's parameter list.
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.

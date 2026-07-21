@@ -4046,8 +4046,22 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       !TypeIsFunction(symbol->type) ||
       symbol->flags.is_template ||
       symbol->type->info.function.cxx_member_owner == NULL ||
-      symbol->type->info.function.body != NULL ||
-      symbol->value.func_defn == NULL) {
+      symbol->type->info.function.body != NULL) {
+    return;
+  }
+  if (symbol->type->info.function.is_implicitly_declared &&
+      symbol->type->info.function.is_defaulted) {
+    if (symbol->type->info.function.is_deleted) {
+      return;
+    }
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    SynthesizeDefaultedMemberFunctionBody(&parser, symbol);
+    TypeParserDestruct(&parser);
+    return;
+  }
+  if (symbol->value.func_defn == NULL) {
     return;
   }
   Vector* template_arguments = symbol->type->template_arguments;

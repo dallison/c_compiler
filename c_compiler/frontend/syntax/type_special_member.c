@@ -1040,6 +1040,19 @@ static bool StructHasDeclaredCXXDestructor(Struct* str) {
          destructor->symbol->type->info.function.is_destructor;
 }
 
+static bool CXXTypeHasNonTrivialDestructor(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeHasNonTrivialDestructor(type->next);
+  }
+  StructMember* destructor = FindCXXDestructorForObjectType(type);
+  return destructor != NULL && destructor->symbol != NULL &&
+         destructor->symbol->type != NULL &&
+         !destructor->symbol->type->info.function.is_trivial_special_member;
+}
+
 static bool StructNeedsImplicitCXXDestructor(Struct* str) {
   if (!CompilerIsCXX() || str == NULL || str->is_union) {
     return false;
@@ -1051,7 +1064,7 @@ static bool StructNeedsImplicitCXXDestructor(Struct* str) {
         StructMemberIsNestedType(member)) {
       continue;
     }
-    if (CXXDestructibleElementType(member->symbol->type) != NULL) {
+    if (CXXTypeHasNonTrivialDestructor(member->symbol->type)) {
       return true;
     }
   }
@@ -1060,14 +1073,14 @@ static bool StructNeedsImplicitCXXDestructor(Struct* str) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base != NULL && base->type != NULL &&
-        FindCXXDestructorForObjectType(base->type) != NULL) {
+        CXXTypeHasNonTrivialDestructor(base->type)) {
       return true;
     }
   }
   for (size_t i = 0; i < str->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
     if (base != NULL && base->type != NULL &&
-        FindCXXDestructorForObjectType(base->type) != NULL) {
+        CXXTypeHasNonTrivialDestructor(base->type)) {
       return true;
     }
   }
@@ -1623,21 +1636,20 @@ static void AddCXXSyntheticMemberFunction(TypeParser* parser, Struct* str,
   } else {
     AddStructMember(parser, str, member);
   }
+  // Keep the declaration available for overload resolution and type traits,
+  // but synthesize its body only when an expression odr-uses it.  Eagerly
+  // defining every implicit member emits copy/move functions for every class
+  // mentioned by a header, including hundreds of type-trait helper classes.
+  // A virtual table references its destructor without an expression use, so a
+  // concrete polymorphic class still needs that one member immediately.
   bool dependent_owner =
       StructContainsTemplateParameter(str) ||
       (str->lexical_parent != NULL &&
        (str->lexical_parent->is_template ||
         StructContainsTemplateParameter(str->lexical_parent)));
-  // Previously the body of a base-having copy/move constructor or assignment
-  // was left unsynthesized here ("inherited_copy_or_assign"), on the assumption
-  // that some later pass would materialize it.  Nothing did, so an implicitly
-  // declared copy/move of a derived class was emitted as a weak *declaration*
-  // with no definition -- a call to it resolved to a null address at link time
-  // and crashed.  SyntaxInsertCXXConstructorPreamble (invoked from the synthesis
-  // below) already emits the base-subobject copy/move calls and defers the vptr
-  // initializers until the vtables are registered, so synthesizing now is
-  // correct.  Templates still defer to instantiation via dependent_owner.
-  if (!dependent_owner) {
+  if (!dependent_owner && str->virtual_members.length > 0 &&
+      symbol->type->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberDestructor) {
     SynthesizeDefaultedMemberFunctionBody(parser, symbol);
   }
 }
@@ -1826,11 +1838,6 @@ static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
   symbol->namespace_ = tag->namespace_;
   func->info.function.symbol = symbol;
   if (!deleted) {
-    symbol->flags.is_defined = true;
-    symbol->flags.is_inline_defn = true;
-    if (!StorageIs(symbol->storage, STO(static))) {
-      symbol->flags.is_weak = true;
-    }
     symbol->value.func_defn = symbol;
   }
   (void)parser;

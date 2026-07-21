@@ -1,29 +1,29 @@
-#include <iostream>
+#include <__iostream_output>
 
 namespace std {
 
-__stdio_istream::__stdio_istream(FILE* file)
-    : basic_istream<char, char_traits<char>>() {
-  __buf_.__attach(file, ios_base::in);
-  this->init(&__buf_);
+__stdio_ostreambuf::__stdio_ostreambuf(FILE* file) : __file_(file) {}
+
+int __stdio_ostreambuf::overflow(int c) {
+  if (traits_type::eq_int_type(c, traits_type::eof())) {
+    return traits_type::not_eof(c);
+  }
+  char ch = traits_type::to_char_type(c);
+  return fputc(static_cast<unsigned char>(ch), __file_) < 0
+             ? traits_type::eof()
+             : c;
 }
 
-__stdio_ostream::__stdio_ostream(FILE* file)
-    : basic_ostream<char, char_traits<char>>() {
-  __buf_.__attach(file, ios_base::out);
-  this->init(&__buf_);
+streamsize __stdio_ostreambuf::xsputn(const char* s, streamsize n) {
+  if (n <= 0) {
+    return 0;
+  }
+  return static_cast<streamsize>(
+      fwrite(s, 1, static_cast<size_t>(n), __file_));
 }
 
-__iostream_initializer::__iostream_initializer() {
-  cin.tie(&cout);
-  cerr.tie(&cout);
-  cerr.setf(ios_base::unitbuf);
+int __stdio_ostreambuf::sync() {
+  return fflush(__file_) == 0 ? 0 : -1;
 }
-
-__stdio_ostream cout(stdout);
-__stdio_istream cin(stdin);
-__stdio_ostream cerr(stderr);
-__stdio_ostream clog(stderr);
-__iostream_initializer __iostream_init;
 
 }  // namespace std

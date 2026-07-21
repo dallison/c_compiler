@@ -84,6 +84,7 @@ enum {
   kSym_import_source_module = 51,
   kSym_is_module_private = 52,
   kSym_func_defn = 53,
+  kSym_is_explicit_specialization = 54,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -141,6 +142,7 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_import_source_module, "import_source_module"},
     {kSym_is_module_private, "is_module_private"},
     {kSym_func_defn, "func_defn"},
+    {kSym_is_explicit_specialization, "is_explicit_specialization"},
 };
 
 //
@@ -421,6 +423,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_is_exported, s->flags.is_exported);
   WriteBoolField(buf, kSym_is_concept, s->flags.is_concept);
   WriteBoolField(buf, kSym_is_module_private, s->flags.is_module_private);
+  WriteBoolField(buf, kSym_is_explicit_specialization,
+                 s->flags.is_explicit_specialization);
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -677,6 +681,10 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_is_module_private:
         WireReadBool(buf, &b);
         s->flags.is_module_private = b;
+        break;
+      case kSym_is_explicit_specialization:
+        WireReadBool(buf, &b);
+        s->flags.is_explicit_specialization = b;
         break;
       case kSym_func_defn:
         s->value.func_defn =

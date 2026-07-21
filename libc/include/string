@@ -18,12 +18,14 @@
 #include <__char_traits>
 #include <compare>
 #include <cstddef>
-#include <functional>
 #include <memory>
 #include <stdlib.h>
 #include <string.h>
 
 namespace std {
+
+template <class T>
+struct hash;
 
 // Forward declaration for the string_view conversion operator below; the full
 // definition lives in <string_view>.  A translation unit that actually uses the

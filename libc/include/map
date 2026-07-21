@@ -8,12 +8,15 @@
 #ifndef __davecc_map__
 #define __davecc_map__
 
+#include <__exception_support>
 #include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <stddef.h>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 #include <utility>
 
 namespace std {
@@ -477,33 +480,33 @@ class map {
 
   __node* __create_node(const value_type& value) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
-    try {
+    __DAVECC_TRY {
       new (node) __node(value);
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
     return node;
   }
 
   __node* __create_node(value_type&& value) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
-    try {
+    __DAVECC_TRY {
       new (node) __node(std::move(value));
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
     return node;
   }
 
   __node* __create_node(const key_type& key, const mapped_type& mapped) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
-    try {
+    __DAVECC_TRY {
       new (node) __node(key, mapped);
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
     return node;
   }

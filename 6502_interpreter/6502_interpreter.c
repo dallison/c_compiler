@@ -1145,15 +1145,12 @@ static void StepOneInstruction(W65C02Interpreter* interpreter, bool cycle_accura
   Instruction* inst = &instructions[opcode];
   
   
-  // Execute instruction and determine time.
-  uint64_t start = TimeNow();
+  bool time_instruction = cycle_accurate && interpreter->cycle_accurate;
+  uint64_t start = time_instruction ? TimeNow() : 0;
   (*inst->func)(interpreter);
-  uint64_t end = TimeNow();
 
-  // Calculate time to execute instruction.
-  uint64_t diff = end - start;
-
-  if (cycle_accurate && interpreter->cycle_accurate) {
+  if (time_instruction) {
+    uint64_t diff = TimeNow() - start;
     // Wait for instruction to complete timing.
     int wait_time_ns = (inst->cycles * CPU_CYCLE_NS) -
           (int)diff;

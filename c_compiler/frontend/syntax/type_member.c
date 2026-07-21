@@ -1615,7 +1615,11 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.is_constexpr = is_constexpr;
   func->info.function.is_consteval = is_consteval;
-  func->info.function.is_inline = true;
+  // A constructor/destructor declaration inside the class is not itself an
+  // inline definition.  FinishInlineMemberFunctionBody marks it inline when a
+  // body is actually present; constexpr/consteval declarations are implicitly
+  // inline even when their definition appears elsewhere.
+  func->info.function.is_inline = is_constexpr || is_consteval;
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
   // Only a constructor may be declared explicit; a destructor never converts.

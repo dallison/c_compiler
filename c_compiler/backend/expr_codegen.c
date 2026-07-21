@@ -295,6 +295,9 @@ static IROpcode GetStoreOpcode(ASTNode* node) {
 IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
                                   TypeRecord* type) {
   Symbol* tmp = SyntaxNewTemporary(gen->syntax, type);
+  // The spill is explicitly addressed below and must remain stack-backed.
+  // Register variables do not have an address the target can reload through.
+  tmp->flags.address_taken = true;
   IRNode* var = GeneratorGetVariable(gen, tmp);
   IRNode* addr = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
                            NewPointerTo(kQualPlain, type));
@@ -468,6 +471,15 @@ static IRNode* StashCallResult(Generator* gen, IRNode* node,
   //IRSetType(rmov, node->type);
   IRSetType(tmp, node->type);
   return tmp;
+}
+
+static IRNode* StashValueAcrossCall(Generator* gen, IRNode* value) {
+  IRNode* address = GeneratorSpillValueToTemp(gen, value, value->type);
+  IRNode* marker =
+      IRSetType(GeneratorEmit(gen, NewIR(IR_OP(tmp))), value->type);
+  marker->flags |= kIRDeferredArgReload;
+  marker->aux = address;
+  return marker;
 }
 
 typedef struct {
@@ -1335,27 +1347,21 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
                  GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
     }
   } else {
-    Symbol* dest_tmp = NULL;
-    IRNode* dest_tmp_var = NULL;
+    IRNode* dest_tmp_addr = NULL;
+    TypeRecord* dest_tmp_type = NULL;
     bool dest_was_spilled = false;
     bool dest_needs_spill =
         compiler->call_return_fixed_reg &&
         !IRIsVariable(dest) &&
         (ContainsCall(node->left) || ContainsCall(node->right));
     if (dest_needs_spill) {
-      dest_tmp =
-          SyntaxNewTemporary(gen->syntax,
-                             NewPointerTo(kQualPlain, node->left->type));
-      dest_tmp_var = GeneratorGetVariable(gen, dest_tmp);
-      IRNode* save_dest = GeneratorEmit(gen, NewIR2(IR_OP(storea),
-                                                    dest_tmp_var, dest));
-      IRSetVarDef(save_dest, dest_tmp);
+      dest_tmp_type = NewPointerTo(kQualPlain, node->left->type);
+      dest_tmp_addr =
+          GeneratorSpillValueToTemp(gen, dest, dest_tmp_type);
     }
     value = GenerateExpression(gen, node->right);
-    if (dest_tmp_var != NULL) {
-      dest = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), dest_tmp_var)),
-                       dest->type);
-      IRSetVarUse(dest, dest_tmp);
+    if (dest_tmp_addr != NULL) {
+      dest = GeneratorReloadSpilledValue(gen, dest_tmp_addr, dest_tmp_type);
       dest_was_spilled = true;
     }
     if (IsBitfieldReference(node->left)) {
@@ -1649,7 +1655,17 @@ static void PushArg(Generator* gen, IRNode* call,
   IRNode* arg_num = GeneratorGetIntConstant(gen, NULL, argnum);
   IRNode* push = NewIR2(IR_OP(pusharg), expr, arg_num);
   IRSetType(push, expr->type);
-  VectorAppend(callargs, GeneratorEmit(gen, push));
+  // Do not emit the push yet. A later argument may itself contain a call, and
+  // that nested call must finish before any outer-call arguments are placed on
+  // the stack. The caller emits this vector after every argument expression
+  // has been evaluated.
+  VectorAppend(callargs, push);
+}
+
+static size_t PushArgNumber(IRNode* push) {
+  assert(push != NULL && push->opcode == IR_OP(pusharg) &&
+         push->inputs.length >= 2 && IRIsConst(push->inputs.value.p[1]));
+  return (size_t)((IRConstant*)push->inputs.value.p[1])->value.ivalue;
 }
 
 static IRNode* FreshCallAddress(Generator* gen, IRNode* address) {
@@ -1733,16 +1749,6 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // reaches its own argument register.  Stash each call-bearing scalar
   // argument's result into a temporary so it survives, mirroring
   // GenerateBinaryExpression.
-  int call_arg_count = 0;
-  if (compiler->call_return_fixed_reg) {
-    for (size_t i = 0; i < node->children->length; i++) {
-      if (ContainsCall((ASTNode*)node->children->value.p[i])) {
-        call_arg_count++;
-      }
-    }
-  }
-  bool stash_call_results = call_arg_count >= 2;
-
   Vector args_right_to_left = {0};
   TypeRecord* callee_type = node->left->type;
   if (callee_type == NULL && node->left->op == AST_OP(identifier)) {
@@ -1758,8 +1764,19 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   bool cxx_constructor_call = TypeIsFunction(callee_type) &&
                               callee_type->info.function.is_constructor;
   
-  // All arguments, in reverse order.
-  for (ssize_t i = node->children->length-1; i >= 0; i--) {
+  // Evaluate right-to-left. If an argument to the left contains a call, the
+  // current scalar must be preserved before that later evaluation clobbers
+  // the target's fixed return/value registers.
+  for (ssize_t i = node->children->length - 1; i >= 0; i--) {
+    ASTNode* ordered_arg = node->children->value.p[i];
+    bool argument_contains_call = ContainsCall(ordered_arg);
+    bool must_survive_later_call = false;
+    for (ssize_t j = 0; j < i; j++) {
+      if (ContainsCall((ASTNode*)node->children->value.p[j])) {
+        must_survive_later_call = true;
+        break;
+      }
+    }
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
     IRNode* arg_value = NULL;
@@ -1838,10 +1855,15 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         !TypeIsArray(arg_value->type);
     bool call_result_reference_actual =
         reference_formal && arg_value->opcode == IR_OP(calla);
-    if (((stash_call_results && ContainsCall(arg)) ||
-         call_result_reference_actual) &&
-        (!aggregate_actual || stashable_reference_actual ||
-         call_result_reference_actual)) {
+    if (!compiler->call_return_fixed_reg && must_survive_later_call &&
+        !argument_contains_call &&
+        !TypeIsFunction(arg_value->type) &&
+        (!aggregate_actual || stashable_reference_actual)) {
+      arg_value = StashValueAcrossCall(gen, arg_value);
+    } else if (((must_survive_later_call && argument_contains_call) ||
+                call_result_reference_actual) &&
+               (!aggregate_actual || stashable_reference_actual ||
+                call_result_reference_actual)) {
       arg_value = StashCallResult(gen, arg_value,
                                   /*route_conversion_to_dest=*/true);
     }
@@ -1858,23 +1880,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
           arg->value_category == kValueCategoryPrvalue &&
           !function_reference_formal;
       if (!IRIsVariable(ref_source) || materialize_prvalue) {
-        Symbol* tmp = SyntaxNewTemporary(gen->syntax, arg->type);
-        tmp->flags.address_taken = true;
-        IRNode* var = GeneratorGetVariable(gen, tmp);
-        IROpcode store = GetStoreOpcodeForType(arg->type);
-        IRNode* write = GeneratorEmit(
-            gen, NewIR2(store, var,
-                        RemoveUnnecesaryShortening(gen, arg_value, store)));
-        IRSetVarDef(write, tmp);
-        ref_source = var;
-      }
-      if (IRIsVariable(ref_source)) {
+        arg_value = GeneratorSpillValueToTemp(gen, arg_value, arg->type);
+      } else {
         IRVariable* variable = (IRVariable*)ref_source;
         if (variable->symbol != NULL) {
           variable->symbol->flags.address_taken = true;
         }
+        arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
       }
-      arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
@@ -1965,9 +1978,34 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     }
   }
   
-  // Add all the pusharg instructions, left to right.
-  for (ssize_t i = args_right_to_left.length - 1; i >= 0; i--) {
-    IRAddInput(call, GeneratorEmit(gen, args_right_to_left.value.p[i]), false);
+  // Emit stack/register arguments by formal argument number, independent of
+  // the safe evaluation order above.
+  for (size_t argnum = args_right_to_left.length; argnum > 0; argnum--) {
+    for (size_t i = 0; i < args_right_to_left.length; i++) {
+      IRNode* push = args_right_to_left.value.p[i];
+      if (PushArgNumber(push) == argnum - 1) {
+        IRNode* value = push->inputs.value.p[0];
+        if ((value->flags & kIRDeferredArgReload) != 0) {
+          IRNode* reload = GeneratorReloadSpilledValue(
+              gen, value->aux, value->type);
+          IRReplaceInput(push, 0, reload);
+          IRSetType(push, reload->type);
+        }
+        GeneratorEmit(gen, push);
+        break;
+      }
+    }
+  }
+  // Call inputs remain in formal left-to-right order for register-argument
+  // assignment and other target analyses.
+  for (size_t argnum = 0; argnum < args_right_to_left.length; argnum++) {
+    for (size_t i = 0; i < args_right_to_left.length; i++) {
+      IRNode* push = args_right_to_left.value.p[i];
+      if (PushArgNumber(push) == argnum) {
+        IRAddInput(call, push, false);
+        break;
+      }
+    }
   }
   VectorDestruct(&args_right_to_left);
   
@@ -2237,6 +2275,9 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
 
 static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
   StructMemberASTNode* member = (StructMemberASTNode*)node->right;
+  if (!gen->for_constant_evaluation && member->member->is_member_function) {
+    CompilerMarkFunctionReferenced(member->member->symbol);
+  }
   if (member->member->is_static) {
     Symbol* symbol = member->member->symbol;
     IRNode* var_ref = GeneratorGetVariable(gen, symbol);

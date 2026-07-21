@@ -4586,6 +4586,10 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                              NewCompoundStatementASTNode(statements, location));
   } else if (ctor_actuals != NULL || scalar_initializer != NULL) {
     Symbol* temp = SyntaxNewTemporary(syntax, result_type);
+    // The lowered comma expression assigns through this temporary and then
+    // reuses it as the constructor receiver.  Keep it in addressable storage;
+    // targets cannot represent that sequence with a register-only variable.
+    temp->flags.address_taken = true;
     ASTNode* assign =
         NewBinaryASTNode(AST_OP(assign), result_type, location,
                          NewIdentifierASTNode(temp, location), result);

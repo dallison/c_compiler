@@ -13,13 +13,16 @@
 #ifndef __davecc_vector__
 #define __davecc_vector__
 
+#include <__exception_support>
 #include <compare>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <new>
 #include <stddef.h>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 #include <type_traits>
 #include <utility>
 
@@ -123,62 +126,62 @@ class vector {
 
   void __construct_fill(pointer dst, size_type count, const T& value) {
     size_type i = 0;
-    try {
+    __DAVECC_TRY {
       for (; i < count; i++) {
         __construct_copy_one(dst + i, value);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
   void __construct_default(pointer dst, size_type count) {
     size_type i = 0;
-    try {
+    __DAVECC_TRY {
       for (; i < count; i++) {
         __alloc_traits::construct(__alloc_, dst + i);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
   template <class It>
   void __construct_range(pointer dst, It first, It last) {
     size_type i = 0;
-    try {
+    __DAVECC_TRY {
       for (; first != last; ++first, ++i) {
         __construct_copy_one(dst + i, *first);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
   void __construct_move(pointer dst, pointer first, pointer last) {
     size_type i = 0;
-    try {
+    __DAVECC_TRY {
       for (; first != last; ++first, ++i) {
         __construct_move_one(dst + i, std::move(*first));
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
   void __construct_copy(pointer dst, const_pointer first, const_pointer last) {
     size_type i = 0;
-    try {
+    __DAVECC_TRY {
       for (; first != last; ++first, ++i) {
         __construct_copy_one(dst + i, *first);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
@@ -187,13 +190,13 @@ class vector {
       return;
     }
     pointer fresh = __allocate(new_cap);
-    try {
+    __DAVECC_TRY {
       if (__size_ != 0) {
         __construct_move(fresh, __data_, __data_ + __size_);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     if (__size_ != 0) {
       __destroy_range(__data_, __data_ + __size_);
@@ -221,11 +224,11 @@ class vector {
     pointer fresh = nullptr;
     if (count != 0) {
       fresh = __allocate(count);
-      try {
+      __DAVECC_TRY {
         __construct_move(fresh, other.__data_, other.__data_ + count);
-      } catch (...) {
+      } __DAVECC_CATCH_ALL {
         __deallocate(fresh, count);
-        throw;
+        __DAVECC_RETHROW;
       }
     }
     __destroy_all();
@@ -260,13 +263,13 @@ class vector {
   void __grow_temp_buffer(pointer* data, size_type size, size_type* cap) {
     size_type new_cap = __recommend(*cap, size + 1);
     pointer fresh = __allocate(new_cap);
-    try {
+    __DAVECC_TRY {
       if (size != 0) {
         __construct_move(fresh, *data, *data + size);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     if (*data != nullptr) {
       __destroy_range(*data, *data + size);
@@ -291,11 +294,11 @@ class vector {
     *data = nullptr;
     *size = 0;
     *cap = 0;
-    try {
+    __DAVECC_TRY {
       for (; first != last; ++first) {
         __append_temp_buffer(data, size, cap, *first);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       if (*data != nullptr) {
         __destroy_range(*data, *data + *size);
         __deallocate(*data, *cap);
@@ -303,7 +306,7 @@ class vector {
       *data = nullptr;
       *size = 0;
       *cap = 0;
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
@@ -314,7 +317,7 @@ class vector {
     }
     pointer saved = __allocate(1);
     bool saved_constructed = false;
-    try {
+    __DAVECC_TRY {
       __construct_copy_one(saved, value);
       saved_constructed = true;
       __destroy_all();
@@ -327,12 +330,12 @@ class vector {
       __size_ = count;
       __destroy_one(saved);
       __deallocate(saved, 1);
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       if (saved_constructed) {
         __destroy_one(saved);
       }
       __deallocate(saved, 1);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
@@ -359,7 +362,7 @@ class vector {
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
     pointer out = fresh;
-    try {
+    __DAVECC_TRY {
       for (size_type i = 0; i < index; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
@@ -369,10 +372,10 @@ class vector {
       for (size_type i = index; i < __size_; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(fresh, out);
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     __destroy_all();
     __deallocate_storage();
@@ -392,16 +395,16 @@ class vector {
     if (count == 0) {
       return __data_ + index;
     }
-    try {
+    __DAVECC_TRY {
       iterator result =
           __insert_copies(__data_ + index, copies, copies + count, count);
       __destroy_range(copies, copies + count);
       __deallocate(copies, cap);
       return result;
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(copies, copies + count);
       __deallocate(copies, cap);
-      throw;
+      __DAVECC_RETHROW;
     }
   }
 
@@ -414,7 +417,7 @@ class vector {
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
     pointer out = fresh;
-    try {
+    __DAVECC_TRY {
       for (size_type i = 0; i < index; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
@@ -424,10 +427,10 @@ class vector {
       for (size_type i = index; i < __size_; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(fresh, out);
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     __destroy_all();
     __deallocate_storage();
@@ -443,7 +446,7 @@ class vector {
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
     pointer out = fresh;
-    try {
+    __DAVECC_TRY {
       for (size_type i = 0; i < index; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
@@ -452,10 +455,10 @@ class vector {
       for (size_type i = index; i < __size_; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(fresh, out);
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     __destroy_all();
     __deallocate_storage();
@@ -472,7 +475,7 @@ class vector {
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
     pointer out = fresh;
-    try {
+    __DAVECC_TRY {
       for (size_type i = 0; i < index; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
@@ -481,10 +484,10 @@ class vector {
       for (size_type i = index; i < __size_; i++, out++) {
         __construct_copy_one(out, __data_[i]);
       }
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __destroy_range(fresh, out);
       __deallocate(fresh, new_cap);
-      throw;
+      __DAVECC_RETHROW;
     }
     __destroy_all();
     __deallocate_storage();
@@ -716,11 +719,11 @@ class vector {
     }
     size_type old_size = __size_;
     pointer fresh = __allocate(old_size);
-    try {
+    __DAVECC_TRY {
       __construct_move(fresh, __data_, __data_ + old_size);
-    } catch (...) {
+    } __DAVECC_CATCH_ALL {
       __deallocate(fresh, old_size);
-      throw;
+      __DAVECC_RETHROW;
     }
     __destroy_all();
     __deallocate_storage();

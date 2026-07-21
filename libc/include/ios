@@ -13,7 +13,9 @@
 #include <iosfwd>
 #include <__char_traits>
 #include <cstddef>
+#ifdef __cpp_exceptions
 #include <stdexcept>
+#endif
 
 namespace std {
 
@@ -82,14 +84,28 @@ class ios_base {
   static const seekdir cur = 1;
   static const seekdir end = 2;
 
-  // A stream-error exception.  The standard derives this from system_error;
-  // this library derives it from runtime_error, which shares the observable
-  // catch-as-exception / what() behaviour used by tests.
+  // A stream-error exception.  Exception-enabled targets use the normal
+  // runtime_error hierarchy.  Embedded targets compile with exceptions
+  // disabled, so keep the source-level API without pulling RTTI, vtables,
+  // stdexcept, and string machinery that can never be thrown.
+#ifdef __cpp_exceptions
   class failure : public runtime_error {
    public:
     explicit failure(const string& msg) : runtime_error(msg) {}
     explicit failure(const char* msg) : runtime_error(msg) {}
   };
+#else
+  class failure {
+   public:
+    explicit failure(const char* msg) : __message_(msg) {}
+    template <class StringLike>
+    explicit failure(const StringLike&) : __message_("ios failure") {}
+    const char* what() const noexcept { return __message_; }
+
+   private:
+    const char* __message_;
+  };
+#endif
 
   fmtflags flags() const { return __flags_; }
   fmtflags flags(fmtflags f) {

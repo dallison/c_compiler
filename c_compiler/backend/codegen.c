@@ -571,6 +571,16 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
 }
 
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {
+  // Record symbols materialized by real target code so discardable C++ inline
+  // functions and variables can remain parsed and checked without all being
+  // emitted merely because their headers were included.
+  if (!gen->for_constant_evaluation && sym != NULL && sym->type != NULL) {
+    if (TypeIsFunction(sym->type)) {
+      CompilerMarkFunctionReferenced(sym);
+    } else {
+      CompilerMarkVariableReferenced(sym);
+    }
+  }
   for (size_t i = 0; i < gen->variable_pool.length; i++) {
     PoolEntry* entry = gen->variable_pool.value.p[i];
     if (entry->value.symbol == sym) {
@@ -582,7 +592,11 @@ IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {
   PoolEntry* entry = malloc(sizeof(PoolEntry));
   entry->value.symbol = sym;
   entry->type = sym->type->type;
-  entry->pooled = GeneratorEmitVariable(gen, NewIRVariable(sym));
+  IRNode* variable = NewIRVariable(sym);
+  if (sym->is_nrvo) {
+    variable->flags |= kIRNrvoMarker;
+  }
+  entry->pooled = GeneratorEmitVariable(gen, variable);
   VectorAppend(&gen->variable_pool, entry);
   return entry->pooled;
 }

@@ -8,6 +8,7 @@
 #ifndef variant_h
 #define variant_h
 
+#include <__exception_support>
 #include <compare>
 #include <exception>
 #include <functional>
@@ -952,7 +953,7 @@ template <size_t I, class... Types>
 constexpr variant_alternative_t<I, variant<Types...> >& get(
     variant<Types...>& value) {
   if (get_if<I>(&value) == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return *get_if<I>(&value);
 }
@@ -961,7 +962,7 @@ template <size_t I, class... Types>
 constexpr const variant_alternative_t<I, variant<Types...> >& get(
     const variant<Types...>& value) {
   if (get_if<I>(&value) == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return *get_if<I>(&value);
 }
@@ -970,7 +971,7 @@ template <size_t I, class... Types>
 constexpr variant_alternative_t<I, variant<Types...> >&& get(
     variant<Types...>&& value) {
   if (get_if<I>(&value) == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return std::move(*get_if<I>(&value));
 }
@@ -979,7 +980,7 @@ template <size_t I, class... Types>
 constexpr const variant_alternative_t<I, variant<Types...> >&& get(
     const variant<Types...>&& value) {
   if (get_if<I>(&value) == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return std::move(*get_if<I>(&value));
 }
@@ -990,7 +991,7 @@ constexpr T& get(variant<Types...>& value) {
                 "variant type alternative must appear exactly once");
   T* result = get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
   if (result == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return *result;
 }
@@ -1002,7 +1003,7 @@ constexpr const T& get(const variant<Types...>& value) {
   const T* result =
       get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
   if (result == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return *result;
 }
@@ -1013,7 +1014,7 @@ constexpr T&& get(variant<Types...>&& value) {
                 "variant type alternative must appear exactly once");
   T* result = get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
   if (result == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return std::move(*result);
 }
@@ -1025,7 +1026,7 @@ constexpr const T&& get(const variant<Types...>&& value) {
   const T* result =
       get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
   if (result == nullptr) {
-    throw bad_variant_access();
+    __DAVECC_THROW(bad_variant_access());
   }
   return std::move(*result);
 }

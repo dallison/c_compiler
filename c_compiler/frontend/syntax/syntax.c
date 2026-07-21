@@ -337,6 +337,7 @@ static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
     return;
   }
   sym->type->info.function.template_origin = templ;
+  sym->flags.is_explicit_specialization = true;
 }
 
 static void MarkMemberFunctionTemplateSpecialization(
@@ -357,6 +358,7 @@ static void MarkMemberFunctionTemplateSpecialization(
     return;
   }
   sym->type->info.function.template_origin = templ;
+  sym->flags.is_explicit_specialization = true;
 }
 
 static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right);

@@ -8,6 +8,7 @@
 #ifndef __davecc_any__
 #define __davecc_any__
 
+#include <__exception_support>
 #include <exception>
 #include <initializer_list>
 #include <new>
@@ -307,7 +308,7 @@ T any_cast(const any& operand) {
   using U = remove_cv_t<remove_reference_t<T> >;
   const U* value = any_cast<U>(&operand);
   if (value == nullptr) {
-    throw bad_any_cast();
+    __DAVECC_THROW(bad_any_cast());
   }
   return static_cast<T>(*value);
 }
@@ -319,7 +320,7 @@ T any_cast(any& operand) {
   using U = remove_cv_t<remove_reference_t<T> >;
   U* value = any_cast<U>(&operand);
   if (value == nullptr) {
-    throw bad_any_cast();
+    __DAVECC_THROW(bad_any_cast());
   }
   return static_cast<T>(*value);
 }
@@ -331,7 +332,7 @@ T any_cast(any&& operand) {
   using U = remove_cv_t<remove_reference_t<T> >;
   U* value = any_cast<U>(&operand);
   if (value == nullptr) {
-    throw bad_any_cast();
+    __DAVECC_THROW(bad_any_cast());
   }
   return static_cast<T>(static_cast<U&&>(*value));
 }

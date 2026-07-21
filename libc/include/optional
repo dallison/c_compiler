@@ -8,6 +8,7 @@
 #ifndef optional_h
 #define optional_h
 
+#include <__exception_support>
 #include <compare>
 #include <exception>
 #include <initializer_list>
@@ -194,28 +195,28 @@ class optional {
 
   T& value() & {
     if (!__engaged_) {
-      throw bad_optional_access();
+      __DAVECC_THROW(bad_optional_access());
     }
     return *__ptr();
   }
 
   const T& value() const& {
     if (!__engaged_) {
-      throw bad_optional_access();
+      __DAVECC_THROW(bad_optional_access());
     }
     return *__ptr();
   }
 
   T&& value() && {
     if (!__engaged_) {
-      throw bad_optional_access();
+      __DAVECC_THROW(bad_optional_access());
     }
     return std::move(*__ptr());
   }
 
   const T&& value() const&& {
     if (!__engaged_) {
-      throw bad_optional_access();
+      __DAVECC_THROW(bad_optional_access());
     }
     return std::move(*__ptr());
   }
