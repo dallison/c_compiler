@@ -2274,6 +2274,24 @@ sh_test(
     data = [":davecc"],
 )
 
+sh_test(
+    name = "6502_tail_call_test",
+    srcs = ["tests/6502_tail_call_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :6502)",
+        "$(rootpath :support_rom_65c02)",
+        "$(rootpath :libc_65c02)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
+    ],
+)
+
 genrule(
     name = "support_rom_65c02",
     srcs = [

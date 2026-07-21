@@ -251,10 +251,11 @@ static void DumpRegisters(W65C02RegisterAllocator* allocator) {
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
 static bool CanUseTemp(W65C02RegisterAllocator* allocator, TargetInstruction* inst) {
-//  if ((inst->flags & k6502ExprIsCallResult) != 0) {
-//    // A call result can be in a temp.
-//    return true;
-//  }
+  if ((inst->flags & k6502ExprIsCallResult) != 0) {
+    // A callee writes its result after saving registers.  Keep that result in
+    // caller-saved storage so the callee's epilogue cannot restore over it.
+    return true;
+  }
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 

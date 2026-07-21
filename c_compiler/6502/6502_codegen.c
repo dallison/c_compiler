@@ -1409,8 +1409,8 @@ static void CopyWithLoopXY(W65C02Generator* g, TargetInstruction* to,
     ldxi(g, to_index);
   }
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, -1);
-  sta(g, to, -1);
+  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
   dey(g);
   if (to_index == 0) {
     dex(g);
@@ -1449,8 +1449,8 @@ static void CopyWithLoopYX(W65C02Generator* g, TargetInstruction* to,
   ldxi(g, size + from_index - 1);
 
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, -1);
-  sta(g, to, -1);
+  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
   dey(g);
   dex(g);
   if (from_index != 0) {
@@ -1474,8 +1474,8 @@ static void CopyWithLoopX(W65C02Generator* g, TargetInstruction* to,
 
   ldxi(g, size + to_index - 1);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, -1);
-  sta(g, to, -1);
+  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bpl), loop);
   
@@ -2029,10 +2029,12 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
         // lda symbol+1, Y
         // sta result+1
         AddressingMode mode = kAddrModeAbsoluteSymbol;
+        TargetSymbol* symbol = (TargetSymbol*)inst;
         if (TypeIsArray(node->type) ||
             TypeIsFunction(node->type) ||
+            TypeIsFunction(symbol->symbol->type) ||
             TypeIsStructOrUnion(node->type) ||
-                                (inst->flags & k6502NeedAddress) != 0) {
+            (inst->flags & k6502NeedAddress) != 0) {
           mode = kAddrModeSymbolAddr;
         }
         result = TempRegister(g, node->type, Sizeof(node->type));
@@ -2107,7 +2109,10 @@ static TargetInstruction* GetAddress(W65C02Generator* g, IRNode* addr_node, bool
       Copy(g, result, addr, 0, 0, 2, GetAddrMode(result), kAddrModeSymbolAddr);
      
       AddressingMode mode = kAddrModeIndirectIndexed;
-      if (TypeIsArray(addr_node->type) || TypeIsFunction(addr_node->type) || TypeIsStructOrUnion(addr_node->type)) {
+      if (TypeIsArray(addr_node->type) || TypeIsFunction(addr_node->type) ||
+          TypeIsStructOrUnion(addr_node->type) ||
+          addr_node->opcode == IR_OP(addressof) ||
+          (addr->flags & k6502NeedAddress) != 0) {
         mode = kAddrModeZeroPage;
       }
       SetAddrMode(result, mode);
@@ -5791,6 +5796,10 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
   return NULL;
 }
 
+static bool CanForwardTailCallArguments(W65C02Generator* g, IRNode* call);
+static bool CanElideForwardingTailFrame(W65C02Generator* g);
+static bool IsForwardedTailArgumentLoad(W65C02Generator* g, IRNode* node);
+
 static void LowerPushArg(W65C02Generator* g, IRNode* node) {
   IRNode* call = node->outputs.value.p[0];
   if (IsIntrinsicCall(g, call)) {
@@ -5805,12 +5814,133 @@ static void LowerPushArg(W65C02Generator* g, IRNode* node) {
     return;
   }
   IRNode* arg = node->inputs.value.p[0];
+  if (CanForwardTailCallArguments(g, call)) {
+    return;
+  }
   if (arg->type != NULL && TypeIsStructOrUnion(arg->type)) {
     size_t pushed_size = 0;
     SetLoweredNode(node, PushStructArg(g, arg, &pushed_size));
     return;
   }
   SetLoweredNode(node, PushArg(g, arg));
+}
+
+// A 6502 caller removes its callee's arguments after the call returns. A
+// sibling tail call therefore cannot change the size or layout of that
+// incoming argument area. It is safe to reuse the area only when every
+// outgoing argument is the corresponding unmodified incoming argument.
+static bool CanForwardTailCallArguments(W65C02Generator* g, IRNode* call) {
+  if ((call->flags & kIRTailCall) == 0 || call->inputs.length == 0 ||
+      IsIntrinsicCall(g, call) ||
+      compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function)) {
+    return false;
+  }
+
+  IRNode* callee = call->inputs.value.p[0];
+  if (!IRIsStaticVariable(callee)) {
+    return false;
+  }
+  Symbol* callee_symbol = ((IRVariable*)callee)->symbol;
+  TypeRecord* callee_type = callee_symbol->type;
+  TypeRecord* caller_type = compiler->current_function;
+  if (!TypeIsFunction(callee_type) ||
+      callee_type->info.function.varargs ||
+      callee_type->info.function.unknown_args ||
+      caller_type->info.function.varargs ||
+      caller_type->info.function.unknown_args ||
+      TypeIsStructOrUnion(call->type)) {
+    return false;
+  }
+
+  size_t num_args = call->inputs.length - 1;
+  if (num_args != caller_type->info.function.prototype.length ||
+      num_args != callee_type->info.function.prototype.length) {
+    return false;
+  }
+
+  for (size_t i = 0; i < num_args; i++) {
+    IRNode* push = call->inputs.value.p[i + 1];
+    if (push->opcode != IR_OP(pusharg) || push->inputs.length < 2 ||
+        !IRIsIntConst(push->inputs.value.p[1]) ||
+        (size_t)IRIntConstValue(push->inputs.value.p[1]) != i) {
+      return false;
+    }
+
+    Symbol* caller_formal = caller_type->info.function.prototype.value.p[i];
+    Symbol* callee_formal = callee_type->info.function.prototype.value.p[i];
+    if (caller_formal == NULL || callee_formal == NULL ||
+        TypeIsStructOrUnion(caller_formal->type) ||
+        !TypeEqual(caller_formal->type, callee_formal->type)) {
+      return false;
+    }
+
+    IRNode* value = push->inputs.value.p[0];
+    if (IRIsLoad(value) && value->inputs.length == 1) {
+      value = value->inputs.value.p[0];
+    }
+    if (!IRIsArgument(value) ||
+        ((IRVariable*)value)->symbol != caller_formal) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool IsForwardedTailArgumentLoad(W65C02Generator* g, IRNode* node) {
+  if (!IRIsLoad(node) || node->outputs.length != 1) {
+    return false;
+  }
+  IRNode* push = node->outputs.value.p[0];
+  return push->opcode == IR_OP(pusharg) && push->outputs.length == 1 &&
+         CanForwardTailCallArguments(g, push->outputs.value.p[0]);
+}
+
+// A function consisting solely of an exact argument-forwarding tail call
+// needs no 6502 software-stack frame. Keeping X/Y and the incoming argument
+// area untouched makes the tail call a single jump.
+static bool CanElideForwardingTailFrame(W65C02Generator* g) {
+  size_t num_tail_calls = 0;
+  for (IRNode* inst = GeneratorFirstInstruction(g->gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if (IRIsConstant(inst) || IRIsVariable(inst) ||
+        IsForwardedTailArgumentLoad(g, inst)) {
+      continue;
+    }
+    switch (inst->opcode) {
+      case IR_OP(enter):
+      case IR_OP(label):
+      case IR_OP(leave):
+      case IR_OP(ret):
+      case IR_OP(bra):
+      case IR_OP(nop):
+        break;
+      case IR_OP(pusharg):
+        if (inst->outputs.length != 1 ||
+            !CanForwardTailCallArguments(g, inst->outputs.value.p[0])) {
+          return false;
+        }
+        break;
+      case IR_OP(calla):
+        if (!CanForwardTailCallArguments(g, inst)) {
+          return false;
+        }
+        num_tail_calls++;
+        break;
+      case IR_OP(resulti):
+      case IR_OP(resulta):
+      case IR_OP(resultf):
+      case IR_OP(resultd):
+        if (inst->inputs.length != 1 ||
+            !CanForwardTailCallArguments(g, inst->inputs.value.p[0])) {
+          return false;
+        }
+        break;
+      default:
+        return false;
+    }
+  }
+  return num_tail_calls == 1;
 }
 
 // First push all the args onto the stack right to left.
@@ -5839,6 +5969,28 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
   for (size_t i = 1; i < node->inputs.length;  i++) {
     IRNode* arg_node = node->inputs.value.p[i];
     args_size += GetPushedSize(arg_node);
+  }
+
+  if (CanForwardTailCallArguments(g, node)) {
+    TargetInstruction* addr = Materialize(g, callee, 2, false);
+    if (!CanElideForwardingTailFrame(g)) {
+      Emit(g, NewInstruction(IsLeaf(g) ? W65C02_OP(leave_leaf)
+                                       : W65C02_OP(leave),
+                             kAddrModeImplied));
+      if (!TypeIsVoid(node->type)) {
+        Emit(g, NewInstruction1(
+                    W65C02_OP(ldx), ByteConst(g, W65C02_RESULT_REG),
+                    kAddrModeZeroPageAbsolute));
+        Emit(g, NewInstruction1(
+                    W65C02_OP(ldy), ByteConst(g, W65C02_RESULT_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+      }
+    }
+    TargetInstruction* jump =
+        Emit(g, NewInstruction1(W65C02_OP(jmp), addr, kAddrModeAbsolute));
+    jump->flags |= k6502BlockEnd;
+    SetLoweredNode(node, jump);
+    return;
   }
 
   
@@ -6023,6 +6175,10 @@ static void LowerResult(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   int size = Sizeof(node->type);
   IRNode* result = node->inputs.value.p[0];
+  if (result->opcode == IR_OP(calla) &&
+      CanForwardTailCallArguments(g, result)) {
+    return;
+  }
   TargetInstruction* rnode = Materialize(g, result, -1, true);
   if (!IsLeaf(g)) {
     // For 2 byte frame size:
@@ -7474,6 +7630,10 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       return ;
     }
     case IR_OP(enter): {
+      if (CanElideForwardingTailFrame(g)) {
+        LowerVariables(g);
+        return;
+      }
       // Entry sequence:
       // stx __result (if not void and not struct)
       // sty __result+1 (if not void and not struct)
@@ -7536,6 +7696,9 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
+      if (CanElideForwardingTailFrame(g)) {
+        return;
+      }
       return LowerLoad(g, node);
 
     // stores.
@@ -7870,7 +8033,10 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
       inst->flags |= k6502NeedAddress;
     }
     inst = Emit(g, inst);
-    
+    if (CanElideForwardingTailFrame(g)) {
+      entry->pooled->data.ptr = inst;
+      return;
+    }
     if ((varset = MaybeUseRegister(g, entry)) != NULL) {
       entry->pooled->data.ptr = CreateVariableRegister(g, varset, inst, entry->value.symbol);
       // Load the register from the stacked argument.
@@ -8051,7 +8217,7 @@ void W65C02Print(W65C02Generator* g, FILE* fp) {
 
 bool W65C02IsExpression(TargetInstruction* inst) {
   return ((W65C02Opcode)inst->opcode >= W65C02_OP(expr1) &&
-         (W65C02Opcode)inst->opcode <= W65C02_OP(expr8)) ||
+         (W65C02Opcode)inst->opcode <= W65C02_OP(exprd)) ||
   ((W65C02Opcode)inst->opcode >= W65C02_OP(ivarreg) &&
          (W65C02Opcode)inst->opcode <= W65C02_OP(dvarreg)) ||
   TargetOpcodeEq(inst->opcode, W65C02_OP(structreturn));

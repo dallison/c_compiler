@@ -178,14 +178,15 @@ static struct CompilerTargetDefinition{
   const char* names[kMaxTargetNames];
   CompilerTarget* (*factory)(void);
   bool static_linkage_only;
+  int default_opt_level;
 } compiler_targets[] = {
-  {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false},
-  {"riscv", {"riscv", "risc-v"}, NewRVTarget, false},
-  {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false},
-  {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false},
-  {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false},
-  {"6502", {"6502"}, New6502Target, true},
-  {"65c02", {"65c02", "65C02"}, New65c02Target, true},
+  {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false, 0},
+  {"riscv", {"riscv", "risc-v"}, NewRVTarget, false, 0},
+  {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0},
+  {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false, 0},
+  {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0},
+  {"6502", {"6502"}, New6502Target, true, 2},
+  {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2},
 };
 
 #define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))
@@ -2173,12 +2174,16 @@ static void OpenSaveFiles(Compiler* compiler) {
   }
 }
 
-static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
-  compiler->optimize = false;
+static void ParseOptimizationOption(Compiler* compiler, Vector* options,
+                                    int default_opt_level) {
+  compiler->optimize = default_opt_level > 0;
+  compiler->opt_level = default_opt_level;
   String* value = OptionStringValue(kOptionOptimize, options);
   if (value == NULL) {
     return;
   }
+  compiler->optimize = false;
+  compiler->opt_level = 0;
   if (value->length == 0) {
     compiler->optimize = true;
     compiler->opt_level = 2;
@@ -2286,7 +2291,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
   ParseStandardOption(compiler, options);
-  ParseOptimizationOption(compiler, options);
+  ParseOptimizationOption(compiler, options, target->default_opt_level);
   compiler->pic = OptionBoolValue(kOptionPic, options, false);
   if (target->static_linkage_only && compiler->pic) {
     fprintf(stderr, "-fPIC is not supported on this target");

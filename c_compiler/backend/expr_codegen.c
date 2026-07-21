@@ -1732,6 +1732,34 @@ static IRNode* GenerateMemberPointerCall(Generator* gen, VectorASTNode* node) {
   return IRSetType(result, node->base.type);
 }
 
+static bool ExpressionReturnsReference(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  if (node->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)node;
+    TypeRecord* callee_type = call->left != NULL ? call->left->type : NULL;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      callee_type = ((IdentifierASTNode*)call->left)->symbol->type;
+    }
+    if (TypeIsPointer(callee_type)) {
+      callee_type = callee_type->next;
+    }
+    return TypeIsFunction(callee_type) &&
+           TypeIsReference(callee_type->next);
+  }
+  if (node->op == AST_OP(inline_call)) {
+    InlineCallASTNode* call = (InlineCallASTNode*)node;
+    return call->ret_value != NULL &&
+           TypeIsPointer(call->ret_value->type) &&
+           TypeEqual(call->ret_value->type->next, node->type);
+  }
+  if (node->op == AST_OP(cast)) {
+    return TypeIsReference(((CastASTNode*)node)->cast_type);
+  }
+  return false;
+}
+
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   if (node->left != NULL &&
       (node->left->op == AST_OP(dotstar) || node->left->op == AST_OP(arrowstar))) {
@@ -1779,6 +1807,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     }
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
+    bool reference_returning_call = ExpressionReturnsReference(arg);
     IRNode* arg_value = NULL;
     if (cxx_constructor_call && i == 0 &&
         gen->current_struct_address != NULL) {
@@ -1793,20 +1822,6 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         reference_formal = TypeIsReference(formal->type);
       }
       int old_arg_flags = arg->flags;
-      bool reference_returning_call = false;
-      if (arg->op == AST_OP(call)) {
-        VectorASTNode* actual_call = (VectorASTNode*)arg;
-        TypeRecord* actual_callee_type =
-            actual_call->left != NULL ? actual_call->left->type : NULL;
-        if (actual_callee_type == NULL && actual_call->left != NULL &&
-            actual_call->left->op == AST_OP(identifier)) {
-          actual_callee_type =
-              ((IdentifierASTNode*)actual_call->left)->symbol->type;
-        }
-        reference_returning_call =
-            TypeIsFunction(actual_callee_type) &&
-            TypeIsReference(actual_callee_type->next);
-      }
       if (reference_formal &&
           (arg->value_category == kValueCategoryLvalue ||
            reference_returning_call) &&
@@ -1869,6 +1884,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     }
 
     if (reference_formal &&
+        !reference_returning_call &&
         (!TypeIsPointerOrArray(arg_value->type) ||
          arg->value_category != kValueCategoryLvalue) &&
         (!TypeIsFunction(arg_value->type) || !function_reference_formal) &&
@@ -1891,7 +1907,9 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
-    if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
+    if (reference_formal && reference_returning_call) {
+      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+    } else if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
       arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
       CheckForVarDef(arg_value, arg);
@@ -2240,19 +2258,7 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   // The sub node has the kASTNeedAddress flag set so generating code for
   // it will calculate its address.
   IRNode* expr = GenerateExpression(gen, node->sub);
-  bool sub_returns_reference = false;
-  if (node->sub->op == AST_OP(call)) {
-    VectorASTNode* call = (VectorASTNode*)node->sub;
-    TypeRecord* callee_type = call->left != NULL ? call->left->type : NULL;
-    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
-      callee_type = ((IdentifierASTNode*)call->left)->symbol->type;
-    }
-    if (TypeIsPointer(callee_type)) {
-      callee_type = callee_type->next;
-    }
-    sub_returns_reference =
-        TypeIsFunction(callee_type) && TypeIsReference(callee_type->next);
-  }
+  bool sub_returns_reference = ExpressionReturnsReference(node->sub);
   if (node->sub->op == AST_OP(compound_literal)) {
     IRSetType(expr, node->base.type);
     return expr;

@@ -742,15 +742,6 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           if (Is65c02() && mode != kAddrModeIndirectIndexed && mode != kAddrModeIndirect && mode != kAddrModeZeroPageIndexedX
               && mode != kAddrModeZeroPageIndexedY) {
             inst->opcode = (TargetOpcode)W65C02_OP(stz);
-            TargetInstruction* prev = PrevInstruction(inst);
-            while (prev->opcode == (TargetOpcode)W65C02_OP(lda)) {
-               // STA following an LDA, remove previous.
-               TargetInstruction* p = TargetPrev(prev);
-               TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev);
-               opt_data->modified = true;
-               prev = p;
-             }
-            // We've removed the LDA #0 so we don't know what A is now.
             trackers->A.type = kRegUnknown;
           }
         }

@@ -104,6 +104,9 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       // Check if destination is not in the output filter.
       if (dest != NULL && (((int)dest->opcode == (int)X86_64_OP(tmp)) ||
           X86_64IsFixedRegister(dest) ||
+          (X86_64Opcode)dest->opcode == X86_64_OP(sp) ||
+          (X86_64Opcode)dest->opcode == X86_64_OP(fp) ||
+          (X86_64Opcode)dest->opcode == X86_64_OP(tp) ||
           BitSetContains(&filter, dest->id) ||
           X86_64IsResult(dest))) {
         is_candidate = false;

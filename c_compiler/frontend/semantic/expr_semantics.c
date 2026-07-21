@@ -3078,16 +3078,32 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* 
     MapInsert(&inliner->argument_map, kv);
     
     ASTNode* actual = ASTNodeMove(call->children->value.p[i]);
-    ASTNode* assign = NewBinaryASTNode(AST_OP(assign),
-                                       actual->type,
-                                       actual->location,
-                                       NewIdentifierASTNode(formal, location),
-                                       actual);
-    assign = AnalyzeExpression(assign);
-    VectorAppend(decls,
-                 NewVariableDeclarationASTNode(formal,
-                                               assign,
-                                               location));
+    if (TypeIsReference(formal->type)) {
+      // Bind reference parameters through the normal declaration-initializer
+      // path.  Treating this as `formal = actual` invokes operator= on the
+      // referent instead of binding the reference, and is ill-formed for
+      // `const T&`.
+      ASTNode* formal_id = NewIdentifierASTNode(formal, location);
+      formal_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+      ASTNode* initializer = NewBinaryASTNode(
+          AST_OP(init), formal->type, actual->location, formal_id,
+          NewExpressionInitializerASTNode(actual, actual->location));
+      initializer = AnalyzeExpression(initializer);
+      VectorAppend(
+          decls,
+          NewVariableDeclarationASTNode(formal, initializer, location));
+    } else {
+      ASTNode* assign = NewBinaryASTNode(AST_OP(assign),
+                                         actual->type,
+                                         actual->location,
+                                         NewIdentifierASTNode(formal, location),
+                                         actual);
+      assign = AnalyzeExpression(assign);
+      VectorAppend(decls,
+                   NewVariableDeclarationASTNode(formal,
+                                                 assign,
+                                                 location));
+    }
   }
   
   // Allocate a temporary for the return value if it's not void.
@@ -3097,9 +3113,6 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* 
             ? NewPointerTo(kQualPlain, call->base.type)
             : call->base.type;
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
-    if (inliner->return_is_reference) {
-      TypeRecordDelete(temp_type);
-    }
     inliner->return_value = temp;
     VectorAppend(decls, NewVariableDeclarationASTNode(temp, NULL, location));
   } else {
@@ -3137,6 +3150,15 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   // Clone function body replacing:
   // 1. Variable references to arguments with new symbols.
   // 2. return statements with goto statements to end_label.
+  // Replacement statements analyzed by the clone callback are semantically
+  // part of the inlined function's definition. Without this context, member
+  // and friend access checks run as the caller and wrongly reject private or
+  // protected members used by the inlined body.
+  TypeRecord* saved_function = compiler->current_function;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_function = info->symbol->type;
+  compiler->current_class_access_context =
+      info->symbol->type->info.function.cxx_member_owner;
   ASTNode* new_body = ASTNodeClone(info->body,
                                    InlineFunctionBodyStatement,
                                    &inliner, NULL);
@@ -3149,6 +3171,8 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
     stmt->parent = inlined;
     stmt->child_id = (int)i;
   }
+  compiler->current_function = saved_function;
+  compiler->current_class_access_context = saved_access_context;
   ASTNode* ret_node = NULL;
   if (inliner.return_value != NULL) {
     // Void function, no return value;
@@ -3174,12 +3198,37 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
   }
 }
 
+typedef struct {
+  bool found_unresolved;
+} UnresolvedMemberFinder;
+
+static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  UnresolvedMemberFinder* finder = data;
+  if ((node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
+      ((BinaryASTNode*)node)->right != NULL &&
+      ((BinaryASTNode*)node)->right->op != AST_OP(structmember)) {
+    finder->found_unresolved = true;
+  }
+  if (node->op == AST_OP(init) &&
+      ((BinaryASTNode*)node)->right != NULL &&
+      ((BinaryASTNode*)node)->right->op != AST_OP(braced_init)) {
+    finder->found_unresolved = true;
+  }
+}
+
 // We can only inline a function if:
 // 1. It is defined and has a body
 // 2. It is not the current function.
 // 3. It's not a varargs function or has unknown args.
 // 4. It has no goto statements.
 // 5. The number of AST nodes is reasonably small.
+// 6. It has no unresolved member accesses or unlowered initializers. Template
+//    bodies can retain either until their concrete instantiation is analyzed;
+//    cloning such a body would leave nodes that code generation cannot handle.
 //
 // Why the goto prohibition.  Well, the GotoStatementASTNode contains
 // a resolved reference to its label.  We clone the body to
@@ -3199,11 +3248,18 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   if (func->symbol != NULL && func->symbol->flags.noinline) {
     return false;
   }
+  // Constructors are not inlined because they have no return value; replacing
+  // a constructor call with an inline_call returning void breaks callers that
+  // use the call as a declaration initializer.
+  if (func->is_constructor) {
+    return false;
+  }
   // __attribute__((always_inline)) forces inlining even without the 'inline'
   // keyword (and bypasses the size heuristic below).
   bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
   if ((!func->is_inline && !force_inline) || !func->symbol->flags.is_defined ||
-      func->body == NULL ||
+      func->body == NULL || compiler->current_function == NULL ||
+      compiler->current_function->info.function.is_constexpr ||
       func->symbol == compiler->current_function->info.function.symbol ||
       func->unknown_args || func->varargs) {
     return false;
@@ -3213,6 +3269,11 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
     // Can't inline a function containing a goto regardless of always_inline.
+    return false;
+  }
+  UnresolvedMemberFinder unresolved = {false};
+  ASTNodeVisit(func->body, FindUnresolvedMemberAccess, 0, &unresolved);
+  if (unresolved.found_unresolved) {
     return false;
   }
   if (force_inline) {
