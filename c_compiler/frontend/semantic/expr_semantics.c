@@ -2434,6 +2434,7 @@ ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target) {
   ASTNode* temp_id = NewIdentifierASTNode(temp, location);
   temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
   ASTNode* literal = NewCompoundLiteralASTNode(temp_id, location, braced);
+  literal->flags |= kASTCXXBracedTemporary;
   return AnalyzeExpression(literal);
 }
 
@@ -2972,13 +2973,43 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
 
 // Inliner data.
 typedef struct {
-  Map argument_map;     // Map of argument to new symbol pointers.
+  Map argument_map;     // Map of callee symbols to caller-local clones.
   ASTNode* end_label;   // End label for return conversion.
   Symbol* return_value; // Return value symbol.
   ASTNode* top_stmt;    // Top level compound statement.
   bool return_is_reference;
 } Inliner;
 
+static void AddInlineLocalSymbol(Inliner* inliner, Symbol* symbol) {
+  if (symbol == NULL || !symbol->flags.is_local ||
+      StorageIs(symbol->storage, STO(static))) {
+    return;
+  }
+  MapKeyType key = {.p = symbol};
+  if (MapFind(&inliner->argument_map, key) != NULL) {
+    return;
+  }
+  Symbol* clone = SymbolClone(symbol);
+  clone->is_nrvo = false;
+  VectorAppend(&compiler->syntax.all_local_symbols, clone);
+  MapKeyValue kv = {.key.p = symbol, .value.p = clone};
+  MapInsert(&inliner->argument_map, kv);
+}
+
+static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  Inliner* inliner = data;
+  if (node->op == AST_OP(vardecl)) {
+    AddInlineLocalSymbol(
+        inliner, ((VariableDeclarationASTNode*)node)->symbol);
+  } else if (node->op == AST_OP(catch)) {
+    AddInlineLocalSymbol(inliner, ((CatchASTNode*)node)->symbol);
+  }
+}
 
 // This is called while cloning the function body for inlining.  The
 // data is a pointer to an Inliner.  The node is a cloned node.
@@ -3006,6 +3037,26 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
     void* new_sym = MapFind(&inliner->argument_map, key);
     if (new_sym != NULL) {
       id_node->symbol = new_sym;
+      id_node->base.flags &= ~kASTNrvoMarker;
+    }
+    return node;
+  }
+  if (node->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* declaration =
+        (VariableDeclarationASTNode*)node;
+    MapKeyType key = {.p = declaration->symbol};
+    Symbol* new_sym = MapFind(&inliner->argument_map, key);
+    if (new_sym != NULL) {
+      declaration->symbol = new_sym;
+    }
+    return node;
+  }
+  if (node->op == AST_OP(catch)) {
+    CatchASTNode* catch_node = (CatchASTNode*)node;
+    MapKeyType key = {.p = catch_node->symbol};
+    Symbol* new_sym = MapFind(&inliner->argument_map, key);
+    if (new_sym != NULL) {
+      catch_node->symbol = new_sym;
     }
     return node;
   }
@@ -3159,6 +3210,7 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   compiler->current_function = info->symbol->type;
   compiler->current_class_access_context =
       info->symbol->type->info.function.cxx_member_owner;
+  ASTNodeVisit(info->body, CollectInlineLocalSymbols, 0, &inliner);
   ASTNode* new_body = ASTNodeClone(info->body,
                                    InlineFunctionBodyStatement,
                                    &inliner, NULL);
@@ -3202,6 +3254,25 @@ typedef struct {
   bool found_unresolved;
 } UnresolvedMemberFinder;
 
+typedef struct {
+  bool found_nrvo;
+} NRVOFinder;
+
+static void FindNRVOLocal(ASTNode* node, void* data, int child_id,
+                          VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  NRVOFinder* finder = data;
+  if ((node->flags & kASTNrvoMarker) != 0 ||
+      (node->op == AST_OP(vardecl) &&
+       ((VariableDeclarationASTNode*)node)->symbol != NULL &&
+       ((VariableDeclarationASTNode*)node)->symbol->is_nrvo)) {
+    finder->found_nrvo = true;
+  }
+}
+
 static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   if (mode != kVisitPreChildren) {
@@ -3229,6 +3300,8 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
 // 6. It has no unresolved member accesses or unlowered initializers. Template
 //    bodies can retain either until their concrete instantiation is analyzed;
 //    cloning such a body would leave nodes that code generation cannot handle.
+// 7. It has no named-return-value object. NRVO binds that local directly to the
+//    callee's hidden aggregate-result slot, which does not exist after inlining.
 //
 // Why the goto prohibition.  Well, the GotoStatementASTNode contains
 // a resolved reference to its label.  We clone the body to
@@ -3274,6 +3347,11 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   UnresolvedMemberFinder unresolved = {false};
   ASTNodeVisit(func->body, FindUnresolvedMemberAccess, 0, &unresolved);
   if (unresolved.found_unresolved) {
+    return false;
+  }
+  NRVOFinder nrvo = {false};
+  ASTNodeVisit(func->body, FindNRVOLocal, 0, &nrvo);
+  if (nrvo.found_nrvo) {
     return false;
   }
   if (force_inline) {
@@ -8627,7 +8705,8 @@ static void  AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
                         node->initializer);
   // A C++ lambda-expression is a prvalue that materializes a temporary closure.
   // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
-  if ((node->base.flags & kASTLambdaExpression) != 0) {
+  if ((node->base.flags &
+       (kASTLambdaExpression | kASTCXXBracedTemporary)) != 0) {
     node->base.value_category = kValueCategoryPrvalue;
   } else {
     node->base.value_category = kValueCategoryLvalue;

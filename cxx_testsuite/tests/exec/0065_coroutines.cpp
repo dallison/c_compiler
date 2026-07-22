@@ -58,7 +58,7 @@ struct Promise;
 struct CoroutineFrame {
   int state;
   int done;
-  Task (*resume)(void* handle);
+  void (*resume)(void* handle);
   void (*destroy)(void* handle);
 };
 
@@ -2308,8 +2308,9 @@ void resume_coroutine(void* handle) {
   if (frame->resume == 0) {
     return;
   }
-  Task task = frame->resume(handle);
-  last_resume_value = task.value;
+  frame->resume(handle);
+  last_resume_value =
+      std::coroutine_handle<Promise>::from_address(handle).promise().value;
 }
 
 void resume_yield_coroutine(void* handle) {
@@ -2321,8 +2322,9 @@ void resume_yield_coroutine(void* handle) {
   if (frame->resume == 0) {
     return;
   }
-  Task task = frame->resume(handle);
-  last_resume_value = task.value;
+  frame->resume(handle);
+  last_resume_value =
+      std::coroutine_handle<Promise>::from_address(handle).promise().value;
 }
 
 void destroy_coroutine(void* handle) {

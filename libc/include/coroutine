@@ -15,7 +15,14 @@ struct coroutine_traits {
   using promise_type = typename R::promise_type;
 };
 
-template <class Promise>
+struct __coroutine_frame {
+  int __state;
+  int __done;
+  void (*__resume)(void*);
+  void (*__destroy)(void*);
+};
+
+template <class Promise = void>
 struct coroutine_handle {
   void* __handle;
 
@@ -26,8 +33,8 @@ struct coroutine_handle {
 
   static coroutine_handle from_promise(Promise& promise) {
     char* promise_address = (char*)&promise;
-    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
-    coroutine_handle result = {(void*)(promise_address - prefix_size)};
+    coroutine_handle result = {
+        (void*)(promise_address - sizeof(__coroutine_frame))};
     return result;
   }
 
@@ -37,12 +44,87 @@ struct coroutine_handle {
 
   Promise& promise(void) const {
     char* frame_address = (char*)__handle;
-    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
-    return *(Promise*)(frame_address + prefix_size);
+    return *(Promise*)(frame_address + sizeof(__coroutine_frame));
   }
 
   explicit operator bool() const {
     return __handle != 0;
+  }
+
+  bool done(void) const {
+    return __handle == 0 ||
+           ((__coroutine_frame*)__handle)->__done != 0;
+  }
+
+  void resume(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame = (__coroutine_frame*)__handle;
+    if (!frame->__done && frame->__resume != 0) {
+      frame->__resume(__handle);
+    }
+  }
+
+  void operator()(void) const {
+    resume();
+  }
+
+  void destroy(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame = (__coroutine_frame*)__handle;
+    if (frame->__destroy != 0) {
+      frame->__destroy(__handle);
+    }
+  }
+};
+
+template <>
+struct coroutine_handle<void> {
+  void* __handle;
+
+  static coroutine_handle from_address(void* address) {
+    coroutine_handle result = {address};
+    return result;
+  }
+
+  void* address(void) const {
+    return __handle;
+  }
+
+  explicit operator bool() const {
+    return __handle != 0;
+  }
+
+  bool done(void) const {
+    return __handle == 0 ||
+           ((__coroutine_frame*)__handle)->__done != 0;
+  }
+
+  void resume(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame = (__coroutine_frame*)__handle;
+    if (!frame->__done && frame->__resume != 0) {
+      frame->__resume(__handle);
+    }
+  }
+
+  void operator()(void) const {
+    resume();
+  }
+
+  void destroy(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame = (__coroutine_frame*)__handle;
+    if (frame->__destroy != 0) {
+      frame->__destroy(__handle);
+    }
   }
 };
 

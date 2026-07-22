@@ -362,6 +362,7 @@ struct ConstraintExpr;
 #define kASTScopeExitCleanup (1 << 30)  // Jump statement already had scope-exit destructors inserted.
 #define kASTEHCleanupOnly (1ULL << 31)  // Synthetic destructor statement emitted only in an exception cleanup pad (e.g. a constructor's already-constructed subobjects); never run on the normal path.
 #define kASTForcedTypeAdjustment (1ULL << 32)  // Compiler-synthesized pointer adjustment carrying a forced (already-analyzed) type that must survive template-instantiation re-analysis; re-analysis of `this + byteoffset` would otherwise recompute the type as the receiver's own (element-scaled) pointer type and bind subobject members (e.g. __vbptr) to the wrong offset.
+#define kASTCXXBracedTemporary (1ULL << 33)  // Compound literal synthesized for a C++ braced-init-list expression (prvalue).
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

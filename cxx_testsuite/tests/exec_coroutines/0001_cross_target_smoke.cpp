@@ -7,7 +7,7 @@ struct Promise;
 struct CoroutineFrame {
   int state;
   int done;
-  Task (*resume)(void* handle);
+  void (*resume)(void* handle);
   void (*destroy)(void* handle);
 };
 
@@ -147,8 +147,10 @@ bool frame_done(void* handle) {
 
 void resume_coroutine(void* handle) {
   CoroutineFrame* frame = (CoroutineFrame*)handle;
-  Task task = frame->resume(handle);
-  last_resume_value = task.value;
+  frame->resume(handle);
+  unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+  Promise* promise = (Promise*)((char*)handle + prefix_size);
+  last_resume_value = promise->value;
 }
 
 void destroy_coroutine(void* handle) {

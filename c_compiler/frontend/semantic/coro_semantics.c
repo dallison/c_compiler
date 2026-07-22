@@ -3590,25 +3590,23 @@ static Symbol* NewCoroutineFrameParameter(TypeRecord* frame_type,
   return symbol;
 }
 
-/* Build the function-pointer type for the resume slot: `Ret (*)(FrameType*)`. */
-static TypeRecord* NewCoroutineResumePointerType(TypeRecord* return_type,
-                                                 TypeRecord* frame_type,
+/* Build the function-pointer type for the resume slot: `void (*)(FrameType*)`. */
+static TypeRecord* NewCoroutineResumePointerType(TypeRecord* frame_type,
                                                  SourceLocation location) {
   TypeRecord* func = NewFunctionTypeRecord();
-  TypeRecordChain(func, TypeRecordCopy(return_type));
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   VectorAppend(&func->info.function.prototype,
                NewCoroutineFrameParameter(frame_type, location));
   return NewPointerTo(kQualPlain, func);
 }
 
-/* Build the resume function's type `Ret(FrameType*)` (a definition, not a
+/* Build the resume function's type `void(FrameType*)` (a definition, not a
  * pointer), returning its frame parameter so the body can reference the frame. */
-static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* return_type,
-                                                  TypeRecord* frame_type,
+static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* frame_type,
                                                   Symbol** frame_param_out,
                                                   SourceLocation location) {
   TypeRecord* func = NewFunctionTypeRecord();
-  TypeRecordChain(func, TypeRecordCopy(return_type));
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   Symbol* frame_param = NewCoroutineFrameParameter(frame_type, location);
   VectorAppend(&func->info.function.prototype, frame_param);
   if (frame_param_out != NULL) {
@@ -3648,12 +3646,10 @@ static TypeRecord* NewCoroutineDestroyFunctionType(TypeRecord* frame_type,
 
 /* Add the frame's `__resume` function-pointer slot. */
 static StructMember* AddCoroutineFrameResumeMember(Struct* str,
-                                                   TypeRecord* return_type,
                                                    TypeRecord* frame_type,
                                                    SourceLocation location) {
   Symbol* symbol = NewSymbol("__resume",
-                             NewCoroutineResumePointerType(return_type,
-                                                           frame_type,
+                             NewCoroutineResumePointerType(frame_type,
                                                            location),
                              STO(auto));
   StructMember* member = NewStructMember(symbol);
@@ -3845,8 +3841,7 @@ static ASTNode* NewVariableInitExpression(Symbol* symbol, ASTNode* initializer,
  * the struct as a tag, allocates the frame-pointer temporary, and builds its
  * `frame = (FrameType*)operator new(...)` declaration. Returns the populated
  * CoroutineFrame. */
-static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
-                                        TypeRecord* promise_type,
+static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
                                         TypeRecord* initial_awaiter_type,
                                         TypeRecord* final_awaiter_type,
                                         SuspensionPoints* points,
@@ -3861,8 +3856,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
   VectorInit(&frame.owned_symbols);
   frame.state = AddCoroutineFrameIntMember(str, "__state");
   frame.done = AddCoroutineFrameIntMember(str, "__done");
-  frame.resume = AddCoroutineFrameResumeMember(str, return_type, frame_type,
-                                               location);
+  frame.resume = AddCoroutineFrameResumeMember(str, frame_type, location);
   frame.destroy = AddCoroutineFrameDestroyMember(str, frame_type, location);
   frame.promise = AddCoroutineFrameTypedMember(str, "__promise",
                                                promise_type);
@@ -4148,12 +4142,39 @@ static void RemoveCoroutineFrameStores(CompoundStatementASTNode* compound) {
   ResetCompoundStatementParents(compound);
 }
 
-/* Build the coroutine resume function `Ret resume(FrameType*)`: clone the
+/* Resume functions return void. Replace each synthesized
+ * `{ Ret result = promise.get_return_object(); return result; }` block in the
+ * cloned ramp body with a plain `return;`. The ramp retains the return-object
+ * blocks used to return its Task to the original caller. */
+static ASTNode* ReplaceCoroutineResumeReturnTransform(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL || node->op != AST_OP(compound)) {
+    return node;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
+  if (compound->statements == NULL || compound->statements->length != 2) {
+    return node;
+  }
+  ASTNode* return_stmt = compound->statements->value.p[1];
+  if (return_stmt == NULL || return_stmt->op != AST_OP(return) ||
+      (return_stmt->flags & kASTCoroutineLoweredReturn) == 0) {
+    return node;
+  }
+  ASTNode* void_return =
+      NewCombinedStatementASTNode(AST_OP(return), NULL, NULL, node->location);
+  void_return->flags |= kASTCoroutineLoweredReturn;
+  *action = kASTTransformSkipChildren;
+  return void_return;
+}
+
+/* Build the coroutine resume function `void resume(FrameType*)`: clone the
  * normalized body, drop the frame-allocation declaration and ramp-only frame
- * stores, splice in the initial-suspend await_resume, wrap the body in a
- * try/catch that routes uncaught exceptions to unhandled_exception, retarget the
- * original frame symbol and owned locals to the frame parameter, and register
- * and queue the function for codegen. Returns the new function symbol. */
+ * stores, splice in the initial-suspend await_resume, conditionally wrap the
+ * body in a try/catch that routes uncaught exceptions to unhandled_exception,
+ * retarget the original frame symbol and owned locals to the frame parameter,
+ * and register and queue the function for codegen. Returns the new function
+ * symbol. */
 static Symbol* NewCoroutineResumeFunction(ASTNode* node,
                                           CoroutineFrame* frame,
                                           CompoundStatementASTNode* body,
@@ -4167,8 +4188,8 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
   snprintf(name, sizeof(name), "%s_coroutine_resume",
            SyntaxFakeName(&compiler->syntax));
   Symbol* frame_param = NULL;
-  TypeRecord* func = NewCoroutineResumeFunctionType(return_type, frame->type,
-                                                    &frame_param, location);
+  TypeRecord* func =
+      NewCoroutineResumeFunctionType(frame->type, &frame_param, location);
   ASTNode* cloned = ASTNodeClone((ASTNode*)body, IdentityCloneNode, NULL, NULL);
   CompoundStatementASTNode* resume_body = (CompoundStatementASTNode*)cloned;
   if (resume_body->statements->length > 0) {
@@ -4184,19 +4205,24 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
         NewAwaitResumeStatement(initial_awaiter, location));
     ResetCompoundStatementParents(resume_body);
   }
-  Vector* catches = NewVector();
-  VectorAppend(catches,
-               NewCatchASTNode(
-                   NULL, true,
-                   NewCoroutineUnhandledExceptionStatement(
-                       promise, frame, final_awaiter, return_type,
-                       location),
-                   location));
-  ASTNode* try_stmt = NewTryASTNode((ASTNode*)resume_body, catches, location);
-  Vector* wrapped_statements = NewVector();
-  VectorAppend(wrapped_statements, try_stmt);
-  ASTNode* wrapped_body =
-      NewCompoundStatementASTNode(wrapped_statements, location);
+  ASTNode* wrapped_body = (ASTNode*)resume_body;
+  if (CompilerExceptionsEnabled()) {
+    Vector* catches = NewVector();
+    VectorAppend(catches,
+                 NewCatchASTNode(
+                     NULL, true,
+                     NewCoroutineUnhandledExceptionStatement(
+                         promise, frame, final_awaiter, return_type,
+                         location),
+                     location));
+    ASTNode* try_stmt =
+        NewTryASTNode((ASTNode*)resume_body, catches, location);
+    Vector* wrapped_statements = NewVector();
+    VectorAppend(wrapped_statements, try_stmt);
+    wrapped_body = NewCompoundStatementASTNode(wrapped_statements, location);
+  }
+  wrapped_body = ASTNodeVisitAndTransform(
+      wrapped_body, ReplaceCoroutineResumeReturnTransform, NULL);
   SymbolReplacement replacement = {frame->symbol, frame_param};
   ASTNodeVisit(wrapped_body, ReplaceIdentifierSymbol, 0, &replacement);
   CoroutineFrame resume_frame = *frame;
@@ -4343,7 +4369,6 @@ static ASTNode* NewCoroutineTransferFrameMemberAccess(CoroutineFrame* frame,
  * frame's resume function returns. */
 static ASTNode* NewCoroutineTransferResumeIf(CoroutineFrame* frame,
                                              Symbol* handle,
-                                             TypeRecord* return_type,
                                              SourceLocation location) {
   ASTNode* condition = NewBinaryASTNode(
       AST_OP(noteq), NewTypeRecordWithSize(kTypeBool, kQualPlain), location,
@@ -4354,7 +4379,7 @@ static ASTNode* NewCoroutineTransferResumeIf(CoroutineFrame* frame,
   VectorAppend(actuals,
                NewCoroutineTransferFramePointer(frame, handle, location));
   ASTNode* resume_call = NewVectorASTNode(
-      AST_OP(call), TypeRecordCopy(return_type), location,
+      AST_OP(call), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
       NewCoroutineTransferFrameMemberAccess(frame, handle, frame->resume,
                                             location),
       actuals);
@@ -4414,7 +4439,7 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                    NewDeclarationListASTNode(transfer_decls, location));
       VectorAppend(suspend_statements,
                    NewCoroutineTransferResumeIf(frame, transfer_handle,
-                                                return_type, location));
+                                                location));
       VectorAppend(suspend_statements,
                    NewCoroutineReturnObjectStatement(promise, return_type,
                                                      location));
@@ -4436,7 +4461,7 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                  NewDeclarationListASTNode(transfer_decls, location));
     VectorAppend(suspend_statements,
                  NewCoroutineTransferResumeIf(frame, transfer_handle,
-                                              return_type, location));
+                                              location));
     VectorAppend(suspend_statements,
                  NewCoroutineReturnObjectStatement(promise, return_type,
                                                    location));
@@ -5871,6 +5896,14 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   }
   if (initial_awaiter != NULL) {
     size_t initial_index = (size_t)points->count + 4;
+    while (initial_index < body->statements->length) {
+      ASTNode* statement = body->statements->value.p[initial_index];
+      if (statement == NULL ||
+          (statement->flags & kASTCoroutineFrameStore) == 0) {
+        break;
+      }
+      initial_index++;
+    }
     CompoundASTNodeInsertStatement(
         body, NewInitialSuspendInitialization(frame, promise, node->location),
         initial_index++);
@@ -6010,7 +6043,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     promise_decl = (VariableDeclarationASTNode*)NewVariableDeclarationASTNode(
         promise, NULL, node->location);
   } else {
-    frame = NewCoroutineFrame(node->type->next, info->coroutine_promise_type,
+    frame = NewCoroutineFrame(info->coroutine_promise_type,
                               initial_awaiter_type, final_awaiter_type, &points,
                               &persisted_locals,
                               yield_awaiter_type,

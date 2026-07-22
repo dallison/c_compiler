@@ -232,8 +232,8 @@ static ASTNode* CXXElidableStructReturnInitializer(ASTNode* initializer,
       !TypeIsStructOrUnion(target)) {
     return NULL;
   }
-  if ((expr->op == AST_OP(call) || expr->op == AST_OP(compound_literal) ||
-       expr->op == AST_OP(comma)) &&
+  if ((expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
+       expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma)) &&
       TypeEqual(expr->type, target)) {
     return expr;
   }

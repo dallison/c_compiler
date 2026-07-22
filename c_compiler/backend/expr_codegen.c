@@ -2261,12 +2261,33 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
 // result of the call.
 static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
   extern void GenerateStatement(Generator* gen, ASTNode* node);
-  GenerateStatement(gen, node->inlined);
-  if (node->ret_value != NULL) {
-    return GenerateExpression(gen, node->ret_value);
+  IRNode* destination = NULL;
+  if (gen->current_struct_address != NULL &&
+      TypeIsStructOrUnion(node->base.type)) {
+    destination = gen->current_struct_address;
+    // The inlined body owns its own return temporary. Do not let calls or
+    // compound literals inside it mistake the enclosing initializer's
+    // destination for their destination.
+    gen->current_struct_address = NULL;
   }
-  // No return value, return a zero constant.
-  return GeneratorGetIntConstant(gen, NULL, 0);
+  GenerateStatement(gen, node->inlined);
+  IRNode* result = NULL;
+  if (node->ret_value != NULL) {
+    result = GenerateExpression(gen, node->ret_value);
+  } else {
+    // No return value, return a zero constant.
+    result = GeneratorGetIntConstant(gen, NULL, 0);
+  }
+  if (destination != NULL) {
+    IRNode* source = GeneratorEmit(gen, NewIR1(IR_OP(addressof), result));
+    CheckForVarUse(source, node->ret_value);
+    IRNode* copy = GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), destination, source,
+                    GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
+    CheckForVarDef(copy, &node->base);
+    gen->current_struct_address = destination;
+  }
+  return result;
 }
 
 static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
