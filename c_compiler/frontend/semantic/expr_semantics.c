@@ -1898,6 +1898,17 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
     return (ASTNode*)node;
   }
+  if (TypeIsNullPointer(node->left->type) &&
+      TypeIsNullPointer(node->right->type)) {
+    if (node->base.op != AST_OP(equal) &&
+        node->base.op != AST_OP(noteq)) {
+      SemanticError((ASTNode*)node,
+                    "Only == and != are valid for std::nullptr_t");
+    }
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return (ASTNode*)node;
+  }
   ASTNode* rewritten = TryRewriteComparisonOperator(node);
   if (rewritten != NULL) {
     return rewritten;

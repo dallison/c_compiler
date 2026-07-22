@@ -76,6 +76,8 @@ static struct {
 
     {AST_OP(equal), TypeIsPointerOrArray, IR_OP(cmpeqa), true},
     {AST_OP(noteq), TypeIsPointerOrArray, IR_OP(cmpnea), true},
+    {AST_OP(equal), TypeIsNullPointer, IR_OP(cmpeqa), true},
+    {AST_OP(noteq), TypeIsNullPointer, IR_OP(cmpnea), true},
     {AST_OP(equal), TypeIsMemberPointerScalar, IR_OP(cmpeqa), true},
     {AST_OP(noteq), TypeIsMemberPointerScalar, IR_OP(cmpnea), true},
     {AST_OP(less), TypeIsPointerOrArray, IR_OP(cmplta)},
