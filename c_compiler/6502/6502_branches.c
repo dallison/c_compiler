@@ -142,6 +142,18 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
         }
         return 7;
       }
+    case W65C02_OP(pushmem_xy1):
+      return 4;
+    case W65C02_OP(pushmem1):
+    case W65C02_OP(pushmem_xy2):
+    case W65C02_OP(zeromem1):
+      return 5;
+    case W65C02_OP(pushmem2):
+    case W65C02_OP(copymem1):
+    case W65C02_OP(zeromem2):
+      return 6;
+    case W65C02_OP(copymem2):
+      return 7;
 
     case W65C02_OP(var_addr):
     case W65C02_OP(var_addrb):

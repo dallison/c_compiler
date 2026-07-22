@@ -292,6 +292,93 @@ for target in 6502 65c02; do
   fi
 done
 
+MEMORY_HELPER_SOURCE="$WORK/memory_helpers.c"
+cat >"$MEMORY_HELPER_SOURCE" <<'SRC'
+struct Small {
+  unsigned char bytes[5];
+};
+
+struct Large {
+  unsigned char bytes[300];
+};
+
+__attribute__((noinline)) struct Small make_small(void) {
+  struct Small value = {{5, 0, 0, 0, 9}};
+  return value;
+}
+
+__attribute__((noinline)) struct Large make_large(void) {
+  struct Large value = {{0}};
+  value.bytes[0] = 19;
+  value.bytes[255] = 23;
+  value.bytes[299] = 29;
+  return value;
+}
+
+__attribute__((noinline)) unsigned short consume_small(struct Small value) {
+  return (unsigned short)value.bytes[0] + value.bytes[4];
+}
+
+__attribute__((noinline)) unsigned short consume_large(struct Large value) {
+  return (unsigned short)value.bytes[0] + value.bytes[255] + value.bytes[299];
+}
+
+int main(void) {
+  struct Small small_src = {{3, 0, 0, 0, 7}};
+  struct Small small_dest;
+  struct Small small_zero = {{0}};
+  small_dest = small_src;
+  if (consume_small(small_dest) != 10 || small_zero.bytes[4] != 0) {
+    return 1;
+  }
+  if (consume_small(make_small()) != 14) {
+    return 2;
+  }
+
+  struct Large large_src;
+  struct Large large_dest;
+  struct Large large_zero = {{0}};
+  large_src.bytes[0] = 11;
+  large_src.bytes[255] = 13;
+  large_src.bytes[299] = 17;
+  large_dest = large_src;
+  if (consume_large(large_dest) != 41 ||
+      large_zero.bytes[0] != 0 ||
+      large_zero.bytes[255] != 0 ||
+      large_zero.bytes[299] != 0) {
+    return 3;
+  }
+  if (consume_large(make_large()) != 71) {
+    return 4;
+  }
+  return 0;
+}
+SRC
+
+for target in 6502 65c02; do
+  assembly="$WORK/${target}_memory_helpers.s"
+  "$DAVECC" -target "$target" -S "$MEMORY_HELPER_SOURCE" -o "$assembly"
+  for helper in copymem1 copymem2 pushmem1 pushmem2 zeromem1 zeromem2; do
+    if ! grep -A1 -E "jsr[[:space:]]+__${helper}([[:space:]]|$)" \
+         "$assembly" | grep -Eq '\.byte[[:space:]]'; then
+      echo "$target: __$helper did not use an inline descriptor" >&2
+      exit 1
+    fi
+  done
+  for helper in pushmem_xy1 pushmem_xy2; do
+    if ! grep -A1 -E "jsr[[:space:]]+__${helper}([[:space:]]|$)" \
+         "$assembly" | grep -Eq '\.byte[[:space:]]'; then
+      echo "$target: __$helper did not use an inline descriptor" >&2
+      exit 1
+    fi
+  done
+  if grep -B12 -E 'jsr[[:space:]]+__(copy|push|zero)mem[12]' "$assembly" |
+     grep -Eq 'sta[[:space:]]+__mem_(src|dest|size)'; then
+    echo "$target: memory helper retained zero-page argument setup" >&2
+    exit 1
+  fi
+done
+
 "$DAVECC" -target 65c02 "$SOURCE" "$LIBC" -o "$WORK/tail_call.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/tail_call.exe"
 
@@ -306,3 +393,7 @@ done
 "$DAVECC" -target 65c02 -std=c++20 \
   "$STACK_REPLACE_SOURCE" "$LIBC" -o "$WORK/stack_replace.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/stack_replace.exe"
+
+"$DAVECC" -target 65c02 \
+  "$MEMORY_HELPER_SOURCE" "$LIBC" -o "$WORK/memory_helpers.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/memory_helpers.exe"

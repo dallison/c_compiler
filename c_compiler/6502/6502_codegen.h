@@ -249,6 +249,14 @@ typedef enum {
   W65C02_OP(pushreg2),
   W65C02_OP(pushreg4),
   W65C02_OP(pushreg8),
+  W65C02_OP(pushmem1),
+  W65C02_OP(pushmem2),
+  W65C02_OP(pushmem_xy1),
+  W65C02_OP(pushmem_xy2),
+  W65C02_OP(copymem1),
+  W65C02_OP(copymem2),
+  W65C02_OP(zeromem1),
+  W65C02_OP(zeromem2),
 
     W65C02_OP(brk),
     

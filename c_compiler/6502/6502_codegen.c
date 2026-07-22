@@ -153,6 +153,22 @@ const char* W65C02OpcodeName(int op) {
       return "pushreg4";
     case W65C02_OP(pushreg8):
       return "pushreg8";
+    case W65C02_OP(pushmem1):
+      return "pushmem1";
+    case W65C02_OP(pushmem2):
+      return "pushmem2";
+    case W65C02_OP(pushmem_xy1):
+      return "pushmem_xy1";
+    case W65C02_OP(pushmem_xy2):
+      return "pushmem_xy2";
+    case W65C02_OP(copymem1):
+      return "copymem1";
+    case W65C02_OP(copymem2):
+      return "copymem2";
+    case W65C02_OP(zeromem1):
+      return "zeromem1";
+    case W65C02_OP(zeromem2):
+      return "zeromem2";
 
     case W65C02_OP(fake_bra):
       return "fake_bra";
@@ -5491,51 +5507,22 @@ static TargetInstruction* PushStructArg(W65C02Generator* g, IRNode* node,
   size_t struct_size = Sizeof(node->type);
   *args_size += struct_size;
   bool from_call = (node->flags & kIRFromCall) != 0;
-  Symbol* pushmem = from_call ? g->pushmem_xy1 : g->pushmem1;
-
-  // Put size in __mem_size.
-  Emit(g, NewInstruction1(
-              W65C02_OP(lda),
-              ByteConst(g,  struct_size & 0xff),
-              kAddrModeImmediate));
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g, W65C02_MSZ_REG),
-                       kAddrModeZeroPageAbsolute));
-  if (struct_size >= 256) {
-    pushmem = from_call ? g->pushmem_xy2 : g->pushmem2;
-    Emit(g, NewInstruction1(W65C02_OP(lda),
-                            ByteConst(g,
-                                           (struct_size >> 8) & 0xff),
-                            kAddrModeImmediate));
-    Emit(g, NewInstruction1(
-                W65C02_OP(sta),
-                ByteConst(g, W65C02_MSZ_REG + 1),
-                kAddrModeZeroPageAbsolute));
+  bool large = struct_size >= 256;
+  TargetInstruction* size =
+      GetIntConstant(g, node, kTargetType16Bit, (int64_t)struct_size);
+  if (from_call) {
+    return Emit(g, NewInstruction1(
+                       large ? W65C02_OP(pushmem_xy2)
+                             : W65C02_OP(pushmem_xy1),
+                       size, kAddrModeImplied));
   }
 
-  if (!from_call) {
-  // Put src in __mem_src
   TargetInstruction* src = GetAddress(g, node, true);
   AddReloadPoint(g, src);
-  Emit(g, NewInstruction2(W65C02_OP(lda), src,
-                          Zero(g),
-                          GetAddrMode(src)));
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       GetIntConstant(g, NULL, kTargetType8Bit, W65C02_MSRC_REG),
-                       kAddrModeZeroPageAbsolute));
-  Emit(g, NewInstruction2(W65C02_OP(lda), src,
-                          One(g),
-                          GetAddrMode(src)));
-  Emit(g, NewInstruction1(
-              W65C02_OP(sta),
-              ByteConst(g, W65C02_MSRC_REG + 1),
-              kAddrModeZeroPageAbsolute));
-  }
-  
-  // JSR pushmem
-  return jsr(g, pushmem);
+  return Emit(g, NewInstruction2(
+                     large ? W65C02_OP(pushmem2)
+                           : W65C02_OP(pushmem1),
+                     src, size, kAddrModeImplied));
 }
 
 static bool IsIntrinsicCall(W65C02Generator* g, IRNode* node) {
@@ -6423,94 +6410,28 @@ static void LowerAddressOf(W65C02Generator* g, IRNode* node) {
 
 static void LowerMemcpy(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 3);
-  Symbol* copymem = g->copymem1;
-
-  // Put size in __mem_size.
   TargetInstruction* size_node = GetLoweredNode(node->inputs.value.p[2]);
   int64_t size = TargetIntValue(size_node);
-  ldai(g, size & 0xff);
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g, W65C02_MSZ_REG),
-                       kAddrModeZeroPageAbsolute));
-  if (size >= 256) {
-    copymem = g->copymem2;
-    ldai(g, (size >> 8) & 0xff);
-    Emit(g, NewInstruction1(
-                W65C02_OP(sta),
-                ByteConst(g,  W65C02_MSZ_REG + 1),
-                kAddrModeZeroPageAbsolute));
-  }
-
-  // Put src in __mem_src
   TargetInstruction* src = GetAddress(g, node->inputs.value.p[1], true);
   AddReloadPoint(g, src);
-  lda(g, src, 0);
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g, W65C02_MSRC_REG),
-                       kAddrModeZeroPageAbsolute));
-  lda(g, src, 1);
-  Emit(g, NewInstruction1(
-              W65C02_OP(sta),
-              ByteConst(g,  W65C02_MSRC_REG + 1),
-              kAddrModeZeroPageAbsolute));
-
-  // Put dest in __mem_dest.
   TargetInstruction* dest = GetAddress(g, node->inputs.value.p[0], true);
   AddReloadPoint(g, dest);
-  lda(g, dest, 0);
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g, W65C02_MDST_REG),
-                       kAddrModeZeroPageAbsolute));
-  lda(g, dest, 1);
-  Emit(g, NewInstruction1(
-              W65C02_OP(sta),
-              ByteConst(g,  W65C02_MDST_REG + 1),
-              kAddrModeZeroPageAbsolute));
-
-  // JSR copymem
-  jsr(g, copymem);
+  Emit(g, NewInstruction3(size >= 256 ? W65C02_OP(copymem2)
+                                      : W65C02_OP(copymem1),
+                          dest, src, size_node, kAddrModeImplied));
 }
 
 static void LowerMemzero(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
-  Symbol* zeromem = g->zeromem1;
-
-  // Put size in __mem_size.
   IRNode* dest_node = node->inputs.value.p[0];
   int size = SizeofArray(node->type);
-  ldai(g, size & 0xff);
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g,  W65C02_MSZ_REG),
-                       kAddrModeZeroPageAbsolute));
-  if (size >= 256) {
-    zeromem = g->zeromem2;
-    ldai(g, (size >> 8) & 0xff);
-    Emit(g, NewInstruction1(
-                W65C02_OP(sta),
-                ByteConst(g,  W65C02_MSZ_REG + 1),
-                kAddrModeZeroPageAbsolute));
-  }
-
-  // Put dest in __mem_dest.
   TargetInstruction* dest = GetAddress(g, dest_node, true);
   AddReloadPoint(g, dest);
-  lda(g, dest, 0);
-  Emit(g,
-       NewInstruction1(W65C02_OP(sta),
-                       ByteConst(g, W65C02_MDST_REG),
-                       kAddrModeZeroPageAbsolute));
-  lda(g, dest, 1);
-  Emit(g, NewInstruction1(
-              W65C02_OP(sta),
-              ByteConst(g,  W65C02_MDST_REG + 1),
-              kAddrModeZeroPageAbsolute));
-
-  // JSR zeromem
-  jsr(g, zeromem);
+  TargetInstruction* size_node =
+      GetIntConstant(g, node, kTargetType16Bit, size);
+  Emit(g, NewInstruction2(size >= 256 ? W65C02_OP(zeromem2)
+                                      : W65C02_OP(zeromem1),
+                          dest, size_node, kAddrModeImplied));
 }
 
 static void LowerZeroExtend(W65C02Generator* g, IRNode* node) {

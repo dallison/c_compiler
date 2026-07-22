@@ -282,6 +282,14 @@ static bool ModifiesA(TargetInstruction* inst) {
     case W65C02_OP(and):
     case W65C02_OP(eor):
     case W65C02_OP(jsr):
+    case W65C02_OP(pushmem1):
+    case W65C02_OP(pushmem2):
+    case W65C02_OP(pushmem_xy1):
+    case W65C02_OP(pushmem_xy2):
+    case W65C02_OP(copymem1):
+    case W65C02_OP(copymem2):
+    case W65C02_OP(zeromem1):
+    case W65C02_OP(zeromem2):
     case W65C02_OP(pla):
     case W65C02_OP(tya):
     case W65C02_OP(txa):
@@ -350,6 +358,14 @@ static bool ModifiesFlags(TargetInstruction* inst) {
     case W65C02_OP(and):
     case W65C02_OP(eor):
     case W65C02_OP(jsr):
+    case W65C02_OP(pushmem1):
+    case W65C02_OP(pushmem2):
+    case W65C02_OP(pushmem_xy1):
+    case W65C02_OP(pushmem_xy2):
+    case W65C02_OP(copymem1):
+    case W65C02_OP(copymem2):
+    case W65C02_OP(zeromem1):
+    case W65C02_OP(zeromem2):
     case W65C02_OP(pla):
     case W65C02_OP(ply):
     case W65C02_OP(plx):
@@ -836,6 +852,14 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         break;
         
       case W65C02_OP(jsr):
+      case W65C02_OP(pushmem1):
+      case W65C02_OP(pushmem2):
+      case W65C02_OP(pushmem_xy1):
+      case W65C02_OP(pushmem_xy2):
+      case W65C02_OP(copymem1):
+      case W65C02_OP(copymem2):
+      case W65C02_OP(zeromem1):
+      case W65C02_OP(zeromem2):
         trackers->A.type = kRegUnknown;
         trackers->X.type = kRegUnknown;
         trackers->Y.type = kRegUnknown;

@@ -1010,6 +1010,80 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       break;
     }
       
+    case W65C02_OP(pushmem1):
+    case W65C02_OP(pushmem2): {
+      TargetInstruction* src = inst->operand[0];
+      int64_t size = TargetIntValue(inst->operand[1]);
+      const char* helper =
+          opcode == W65C02_OP(pushmem1) ? "__pushmem1" : "__pushmem2";
+      fprintf(fp, "\tjsr         %s\n", helper);
+      fprintf(fp, "\t.byte        %s, %d",
+              W65C02RegisterAsString((W65C02Register*)src->reg, 0, buf,
+                                     sizeof(buf)),
+              (int)(size & 0xff));
+      if (opcode == W65C02_OP(pushmem2)) {
+        fprintf(fp, ", %d", (int)((size >> 8) & 0xff));
+      }
+      fprintf(fp, "\n");
+      break;
+    }
+
+    case W65C02_OP(pushmem_xy1):
+    case W65C02_OP(pushmem_xy2): {
+      int64_t size = TargetIntValue(inst->operand[0]);
+      const char* helper = opcode == W65C02_OP(pushmem_xy1)
+                               ? "__pushmem_xy1"
+                               : "__pushmem_xy2";
+      fprintf(fp, "\tjsr         %s\n", helper);
+      fprintf(fp, "\t.byte        %d", (int)(size & 0xff));
+      if (opcode == W65C02_OP(pushmem_xy2)) {
+        fprintf(fp, ", %d", (int)((size >> 8) & 0xff));
+      }
+      fprintf(fp, "\n");
+      break;
+    }
+
+    case W65C02_OP(copymem1):
+    case W65C02_OP(copymem2): {
+      TargetInstruction* dest = inst->operand[0];
+      TargetInstruction* src = inst->operand[1];
+      int64_t size = TargetIntValue(inst->operand[2]);
+      char dest_buf[64];
+      char src_buf[64];
+      const char* dest_name = W65C02RegisterAsString(
+          (W65C02Register*)dest->reg, 0, dest_buf, sizeof(dest_buf));
+      const char* src_name = W65C02RegisterAsString(
+          (W65C02Register*)src->reg, 0, src_buf, sizeof(src_buf));
+      const char* helper =
+          opcode == W65C02_OP(copymem1) ? "__copymem1" : "__copymem2";
+      fprintf(fp, "\tjsr         %s\n", helper);
+      fprintf(fp, "\t.byte        %s, %s, %d", dest_name, src_name,
+              (int)(size & 0xff));
+      if (opcode == W65C02_OP(copymem2)) {
+        fprintf(fp, ", %d", (int)((size >> 8) & 0xff));
+      }
+      fprintf(fp, "\n");
+      break;
+    }
+
+    case W65C02_OP(zeromem1):
+    case W65C02_OP(zeromem2): {
+      TargetInstruction* dest = inst->operand[0];
+      int64_t size = TargetIntValue(inst->operand[1]);
+      const char* helper =
+          opcode == W65C02_OP(zeromem1) ? "__zeromem1" : "__zeromem2";
+      fprintf(fp, "\tjsr         %s\n", helper);
+      fprintf(fp, "\t.byte        %s, %d",
+              W65C02RegisterAsString((W65C02Register*)dest->reg, 0, buf,
+                                     sizeof(buf)),
+              (int)(size & 0xff));
+      if (opcode == W65C02_OP(zeromem2)) {
+        fprintf(fp, ", %d", (int)((size >> 8) & 0xff));
+      }
+      fprintf(fp, "\n");
+      break;
+    }
+
     case W65C02_OP(structreturn): {
       W65C02Register* reg = (W65C02Register*)inst->reg;
       if (reg->type == k6502RegTypeI &&
