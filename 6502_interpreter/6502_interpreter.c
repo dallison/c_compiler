@@ -690,7 +690,7 @@ static char irq_handler[] = {
 #define W65C02_INT_EXIT_CLEAN 22
 #define W65C02_GUEST_CALL_RETURN 0x0002
 #define W65C02_GUEST_STACK_BOTTOM 0xc000
-#define W65C02_REG_SP 0x98
+#define W65C02_REG_SP REG_SP
 #define W65C02_INT_OPEN 2
 #define W65C02_INT_CLOSE 3
 #define W65C02_INT_LSEEK 4

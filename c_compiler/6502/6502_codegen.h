@@ -83,6 +83,11 @@ typedef enum {
 // instead of emitting a separate stx/sty pair in every function prologue.
 #define k6502EnterStoresResult (1 << 30)
 
+// Set on an intermediate tail-call leave so only the terminal callee pops
+// the forwarded incoming arguments.  Leave and enter/address instructions
+// use this bit for disjoint opcode-specific meanings.
+#define k6502SkipArgCleanup (1 << 30)
+
 // Need address of symbol, not value.
 #define k6502NeedAddress (1 << 30)
 
@@ -167,6 +172,8 @@ typedef enum {
   W65C02_OP(exprf),
   W65C02_OP(exprd),
   W65C02_OP(load_result),
+  W65C02_OP(load_result_value1),
+  W65C02_OP(load_result_value2),
   W65C02_OP(load_indirect4),
   W65C02_OP(load_indirect8),
   W65C02_OP(store_indirect4),
@@ -392,6 +399,8 @@ typedef struct W65C02Generator {
   TargetGenerator base;
   Generator* gen;
   TargetInstruction* argument_pointer;
+  size_t incoming_arg_size;
+  bool callee_pops_args;
   
   // Runtime helper functions.
   

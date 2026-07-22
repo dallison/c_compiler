@@ -49,7 +49,7 @@ modf_return_0:
   BNE modf_return_0
   LDA fsignA
   STA (__result),Y
-  RTS
+  JMP __incsp6
 
 // Entry:
 // X,Y: address to store fractional part.
@@ -159,7 +159,7 @@ modf_return_fract:
   STA (__result),Y
   DEY
   BPL modf_return_fract
-  RTS
+  JMP __incsp6
 
 modf_no_integer:
   // No integral part.  Return x and write +-0 into (sp)+4
@@ -183,6 +183,6 @@ modf_copy_0:
   // Y = 3, copy sign.
   LDA fsignA
   STA (__t0),Y
-  RTS
+  JMP __incsp6
 
 

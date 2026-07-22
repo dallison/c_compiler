@@ -39,6 +39,18 @@ __attribute__((noinline)) unsigned short changed_argument(unsigned short value) 
   return callee_number(value + 1);
 }
 
+__attribute__((noinline)) unsigned char callee_byte(unsigned char value) {
+  return value;
+}
+
+__attribute__((noinline)) unsigned char changed_byte(unsigned char value) {
+  return callee_byte((unsigned char)(value + 1));
+}
+
+__attribute__((noinline)) void sink(unsigned short value) {
+  marker += (unsigned char)value;
+}
+
 int main(void) {
   const char value[] = {3, 4, 0};
   if (wrapper(value) != 7) {
@@ -49,6 +61,13 @@ int main(void) {
   }
   if (changed_argument(9) != 10) {
     return 3;
+  }
+  if (changed_byte(6) != 7) {
+    return 4;
+  }
+  sink(1);
+  if (marker != 2) {
+    return 5;
   }
   return 0;
 }
@@ -87,6 +106,32 @@ for target in 6502 65c02; do
   if ! grep -Eq 'jsr[[:space:]]+callee_number' <<<"$changed_body" ||
      grep -Eq 'jmp[[:space:]]+callee_number' <<<"$changed_body"; then
     echo "$target: modified argument was incorrectly tail-forwarded" >&2
+    exit 1
+  fi
+  if grep -Eq 'jsr[[:space:]]+__incsp2' <<<"$changed_body"; then
+    echo "$target: fixed scalar callee retained caller cleanup" >&2
+    exit 1
+  fi
+  if ! grep -Eq 'jsr[[:space:]]+__load_result_value2' <<<"$changed_body" ||
+     grep -Eq 'jsr[[:space:]]+__load_result([[:space:]]|$)' <<<"$changed_body"; then
+    echo "$target: scalar return did not use the fused result helper" >&2
+    exit 1
+  fi
+
+  changed_byte_body=$(function_body changed_byte "$assembly")
+  if ! grep -Eq 'jsr[[:space:]]+__load_result_value1' \
+       <<<"$changed_byte_body"; then
+    echo "$target: byte return did not use the fused result helper" >&2
+    exit 1
+  fi
+
+  main_body=$(function_body main "$assembly")
+  if ! awk '/jsr[[:space:]]+sink/ {
+              getline;
+              if ($0 ~ /jsr[[:space:]]+__incsp2/) found=1
+            }
+            END { exit !found }' <<<"$main_body"; then
+    echo "$target: void call did not retain caller cleanup" >&2
     exit 1
   fi
 

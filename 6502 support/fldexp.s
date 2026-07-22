@@ -72,5 +72,5 @@ ldexp_ret_loop:
   STA (__result),Y
   DEY
   BPL ldexp_ret_loop
-  RTS
+  JMP __incsp6
   

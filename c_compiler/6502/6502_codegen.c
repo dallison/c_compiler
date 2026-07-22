@@ -52,6 +52,10 @@ const char* W65C02OpcodeName(int op) {
       return "exprd";
     case W65C02_OP(load_result):
       return "load_result";
+    case W65C02_OP(load_result_value1):
+      return "load_result_value1";
+    case W65C02_OP(load_result_value2):
+      return "load_result_value2";
     case W65C02_OP(load_indirect4):
       return "load_indirect4";
     case W65C02_OP(load_indirect8):
@@ -5825,10 +5829,44 @@ static void LowerPushArg(W65C02Generator* g, IRNode* node) {
   SetLoweredNode(node, PushArg(g, arg));
 }
 
-// A 6502 caller removes its callee's arguments after the call returns. A
-// sibling tail call therefore cannot change the size or layout of that
-// incoming argument area. It is safe to reuse the area only when every
-// outgoing argument is the corresponding unmodified incoming argument.
+static int64_t CalculateArgumentSize(Symbol* arg);
+
+static TypeRecord* CalleeFunctionType(IRNode* callee) {
+  if (callee == NULL || callee->type == NULL) {
+    return NULL;
+  }
+  if (TypeIsFunction(callee->type)) {
+    return callee->type;
+  }
+  if (TypeIsFunctionPointer(callee->type)) {
+    return callee->type->next;
+  }
+  return NULL;
+}
+
+static bool FunctionUsesCalleeArgCleanup(TypeRecord* function_type) {
+  // Keep void functions caller-cleaned for now.  C++ constructor/destructor
+  // variants can have different hidden-argument layouts at their call sites
+  // and emitted definitions.
+  return function_type != NULL && TypeIsFunction(function_type) &&
+         !function_type->info.function.varargs &&
+         !function_type->info.function.unknown_args &&
+         !TypeIsVoid(function_type->next) &&
+         !TypeIsStructOrUnion(function_type->next);
+}
+
+static size_t FunctionArgumentStackSize(TypeRecord* function_type) {
+  size_t size = 0;
+  Vector* prototype = &function_type->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    size += (size_t)CalculateArgumentSize(prototype->value.p[i]);
+  }
+  return size;
+}
+
+// A fixed-arity 6502 callee removes its own arguments when it finally returns.
+// A sibling tail call must therefore preserve the incoming area unchanged so
+// that only the terminal callee pops it.
 static bool CanForwardTailCallArguments(W65C02Generator* g, IRNode* call) {
   if ((call->flags & kIRTailCall) == 0 || call->inputs.length == 0 ||
       IsIntrinsicCall(g, call) ||
@@ -5970,13 +6008,22 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
     IRNode* arg_node = node->inputs.value.p[i];
     args_size += GetPushedSize(arg_node);
   }
+  bool callee_pops_args =
+      FunctionUsesCalleeArgCleanup(CalleeFunctionType(callee));
+  if (callee_pops_args) {
+    assert(args_size ==
+           FunctionArgumentStackSize(CalleeFunctionType(callee)));
+  }
 
   if (CanForwardTailCallArguments(g, node)) {
     TargetInstruction* addr = Materialize(g, callee, 2, false);
     if (!CanElideForwardingTailFrame(g)) {
-      Emit(g, NewInstruction(IsLeaf(g) ? W65C02_OP(leave_leaf)
-                                       : W65C02_OP(leave),
-                             kAddrModeImplied));
+      TargetInstruction* leave =
+          NewInstruction(IsLeaf(g) ? W65C02_OP(leave_leaf)
+                                   : W65C02_OP(leave),
+                         kAddrModeImplied);
+      leave->flags |= k6502SkipArgCleanup;
+      Emit(g, leave);
       if (!TypeIsVoid(node->type)) {
         Emit(g, NewInstruction1(
                     W65C02_OP(ldx), ByteConst(g, W65C02_RESULT_REG),
@@ -6058,7 +6105,7 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
     Emit(g, NewInstruction1(W65C02_OP(jmp), addr, kAddrModeIndirect));
     call = Emit(g, end_label);
   }
-  if (args_size > 0) {
+  if (args_size > 0 && !callee_pops_args) {
     if (TypeIsStructOrUnion(node->type)) {
       // Result is a struct/union.  Pop the first arg (the result address)
       // back into an expr2 so that we know were it was.
@@ -6179,6 +6226,12 @@ static void LowerResult(W65C02Generator* g, IRNode* node) {
   }
   TargetInstruction* rnode = Materialize(g, result, -1, true);
   if (!IsLeaf(g)) {
+    if (size == 1 || size == 2) {
+      Emit(g, NewInstruction1(size == 1 ? W65C02_OP(load_result_value1)
+                                        : W65C02_OP(load_result_value2),
+                              rnode, kAddrModeImplied));
+      return;
+    }
     // For 2 byte frame size:
     // ldx #frame_size LO
     // ldy #frame_size HI
@@ -8131,6 +8184,9 @@ void W65C02Lower(W65C02Generator* g, Generator* gen) {
     int64_t size = CalculateArgumentSize(arg);
     arg_offset += size;
   }
+  g->incoming_arg_size = (size_t)arg_offset;
+  g->callee_pops_args =
+      FunctionUsesCalleeArgCleanup(compiler->current_function);
   
   // Run through IR pre-optimizing it for CISC.
   bool changed;

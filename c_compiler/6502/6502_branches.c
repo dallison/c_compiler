@@ -105,14 +105,22 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     }
       
     case W65C02_OP(leave): {
-      int frame_size = FrameSize(g, false);
+      int frame_size = FrameSize(g, false) + 3;
+      if (g->callee_pops_args &&
+          (inst->flags & k6502SkipArgCleanup) == 0) {
+        frame_size += (int)g->incoming_arg_size;
+      }
       if (frame_size >= 256) {
         return 7;
       }
       return 5;
     }
     case W65C02_OP(leave_leaf): {
-      int frame_size = FrameSize(g, true);
+      int frame_size = FrameSize(g, true) + 3;
+      if (g->callee_pops_args &&
+          (inst->flags & k6502SkipArgCleanup) == 0) {
+        frame_size += (int)g->incoming_arg_size;
+      }
       if (frame_size >= 256) {
         return 7;
       }
@@ -120,11 +128,19 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     }
 
       case W65C02_OP(load_result): {
-        int frame_size = FrameSize(g, true);
+        int frame_size = FrameSize(g, false);
         if (frame_size >= 256) {
           return 7;
         }
         return 5;
+      }
+      case W65C02_OP(load_result_value1):
+      case W65C02_OP(load_result_value2): {
+        int frame_size = FrameSize(g, false);
+        if (frame_size >= 256) {
+          return 9;
+        }
+        return 7;
       }
 
     case W65C02_OP(var_addr):

@@ -150,7 +150,7 @@ setjmploop:
   STA (__result)
   LDY #1
   STA (__result),Y
-  RTS
+  JMP __incsp2
 
 // Entry:
 // sp,sp+1: address of jmp_buf
@@ -247,4 +247,4 @@ result_not0:
   STA 0x102,X
 
   // Return from setjmp.
-  RTS
+  JMP __incsp2

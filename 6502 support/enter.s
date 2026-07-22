@@ -27,6 +27,10 @@
 .global __result4
 .global __result8
 .global __load_result
+.global __load_result_value1
+.global __load_result_value1b
+.global __load_result_value2
+.global __load_result_value2b
 .global __save_regs
 .global __save_reg_set
 .global __save_from_mask
@@ -760,6 +764,7 @@ leave_leaf_nomask_small:
 
 __load_result:
   LDY #0
+load_resultb:
   STX __t0
   STY __t1
   SEC
@@ -775,6 +780,33 @@ __load_result:
   LDA (__t0),Y
   STA __result+1
   RTS
+
+// X[,Y]: offset from fp to the saved result address.
+// A: zero-page register containing the value to return.
+// The b variants accept the high offset byte in Y.
+__load_result_value1:
+  PHA
+  JSR __load_result
+  PLA
+  JMP __result1
+
+__load_result_value1b:
+  PHA
+  JSR load_resultb
+  PLA
+  JMP __result1
+
+__load_result_value2:
+  PHA
+  JSR __load_result
+  PLA
+  JMP __result2
+
+__load_result_value2b:
+  PHA
+  JSR load_resultb
+  PLA
+  JMP __result2
 
 // If the result is going into a zero page location we have to tell the
 // restore_regs subroutine not to restore that location.

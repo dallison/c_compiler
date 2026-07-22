@@ -775,6 +775,24 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       break;
     }
 
+    case W65C02_OP(load_result_value1):
+    case W65C02_OP(load_result_value2): {
+      int offset = FrameSize(emitter, false) + 1;
+      fprintf(fp, "\t%-12s #%d\n", "ldx", offset & 0xff);
+      const char* suffix = "";
+      if (offset >= 256) {
+        suffix = "b";
+        fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
+      }
+      TargetInstruction* result = inst->operand[0];
+      fprintf(fp, "\t%-12s #%s\n", "lda",
+              W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf,
+                                     sizeof(buf)));
+      fprintf(fp, "\tjsr         __load_result_value%d%s\n",
+              opcode == W65C02_OP(load_result_value1) ? 1 : 2, suffix);
+      break;
+    }
+
     case W65C02_OP(enter):
     case W65C02_OP(enter_leaf): {
       // TODO: if the function is void or returns struct there's no need
@@ -825,6 +843,10 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     case W65C02_OP(leave_leaf): {
       int frame_size = FrameSize(emitter, opcode == W65C02_OP(leave_leaf));
       frame_size += 3;                  // Space for reg save mask.
+      if (emitter->g->callee_pops_args &&
+          (inst->flags & k6502SkipArgCleanup) == 0) {
+        frame_size += (int)emitter->g->incoming_arg_size;
+      }
       fprintf(fp, "\t%-12s #%d\n", "ldy", frame_size & 0xff);
       const char* suffix1 = "";
       const char* suffix2 = "";
