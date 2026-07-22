@@ -45,8 +45,7 @@ int main() {
   if (task.handle.done()) {
     return 4;
   }
-  std::coroutine_handle<> handle =
-      std::coroutine_handle<>::from_address(task.handle.address());
+  std::coroutine_handle<> handle = task.handle;
 
   handle.resume();
   if (handle.done()) {

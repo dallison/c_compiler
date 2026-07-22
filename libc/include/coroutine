@@ -23,63 +23,7 @@ struct __coroutine_frame {
 };
 
 template <class Promise = void>
-struct coroutine_handle {
-  void* __handle;
-
-  static coroutine_handle from_address(void* address) {
-    return {address};
-  }
-
-  static coroutine_handle from_promise(Promise& promise) {
-    char* promise_address = reinterpret_cast<char*>(&promise);
-    return {promise_address - sizeof(__coroutine_frame)};
-  }
-
-  void* address(void) const {
-    return __handle;
-  }
-
-  Promise& promise(void) const {
-    char* frame_address = static_cast<char*>(__handle);
-    return *reinterpret_cast<Promise*>(
-        frame_address + sizeof(__coroutine_frame));
-  }
-
-  explicit operator bool() const {
-    return __handle != 0;
-  }
-
-  bool done(void) const {
-    return __handle == 0 ||
-           static_cast<__coroutine_frame*>(__handle)->__done != 0;
-  }
-
-  void resume(void) const {
-    if (__handle == 0) {
-      return;
-    }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (!frame->__done && frame->__resume != 0) {
-      frame->__resume(__handle);
-    }
-  }
-
-  void operator()(void) const {
-    resume();
-  }
-
-  void destroy(void) const {
-    if (__handle == 0) {
-      return;
-    }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (frame->__destroy != 0) {
-      frame->__destroy(__handle);
-    }
-  }
-};
+struct coroutine_handle;
 
 template <>
 struct coroutine_handle<void> {
@@ -129,29 +73,92 @@ struct coroutine_handle<void> {
   }
 };
 
+template <class Promise>
+struct coroutine_handle {
+  void* __handle;
+
+  static coroutine_handle from_address(void* address) {
+    return {address};
+  }
+
+  static coroutine_handle from_promise(Promise& promise) {
+    char* promise_address = reinterpret_cast<char*>(&promise);
+    return {promise_address - sizeof(__coroutine_frame)};
+  }
+
+  void* address(void) const {
+    return __handle;
+  }
+
+  operator coroutine_handle<void>() const noexcept {
+    return coroutine_handle<void>::from_address(__handle);
+  }
+
+  Promise& promise(void) const {
+    char* frame_address = static_cast<char*>(__handle);
+    return *reinterpret_cast<Promise*>(
+        frame_address + sizeof(__coroutine_frame));
+  }
+
+  explicit operator bool() const {
+    return __handle != 0;
+  }
+
+  bool done(void) const {
+    return __handle == 0 ||
+           static_cast<__coroutine_frame*>(__handle)->__done != 0;
+  }
+
+  void resume(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame =
+        static_cast<__coroutine_frame*>(__handle);
+    if (!frame->__done && frame->__resume != 0) {
+      frame->__resume(__handle);
+    }
+  }
+
+  void operator()(void) const {
+    resume();
+  }
+
+  void destroy(void) const {
+    if (__handle == 0) {
+      return;
+    }
+    __coroutine_frame* frame =
+        static_cast<__coroutine_frame*>(__handle);
+    if (frame->__destroy != 0) {
+      frame->__destroy(__handle);
+    }
+  }
+};
+
 struct suspend_never {
-  bool await_ready(void) const {
+  bool await_ready(void) const noexcept {
     return true;
   }
 
-  void await_suspend(void* handle) const {
+  void await_suspend(coroutine_handle<> handle) const noexcept {
     static_cast<void>(handle);
   }
 
-  void await_resume(void) const {
+  void await_resume(void) const noexcept {
   }
 };
 
 struct suspend_always {
-  bool await_ready(void) const {
+  bool await_ready(void) const noexcept {
     return false;
   }
 
-  void await_suspend(void* handle) const {
+  void await_suspend(coroutine_handle<> handle) const noexcept {
     static_cast<void>(handle);
   }
 
-  void await_resume(void) const {
+  void await_resume(void) const noexcept {
   }
 };
 
