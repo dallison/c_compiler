@@ -66,7 +66,8 @@ class deque {
 
   static size_type __block_size() {
     size_type s = sizeof(T);
-    return s < 256 ? (size_type)(4096 / s) : (size_type)16;
+    return s < 256 ? static_cast<size_type>(4096 / s)
+                   : static_cast<size_type>(16);
   }
 
   T* __allocate_block() {
@@ -310,7 +311,8 @@ class deque {
       return iterator(__d_, __i_ - n);
     }
     difference_type operator-(const iterator& other) const {
-      return (difference_type)__i_ - (difference_type)other.__i_;
+      return static_cast<difference_type>(__i_) -
+             static_cast<difference_type>(other.__i_);
     }
 
     bool operator==(const iterator& o) const { return __i_ == o.__i_; }
@@ -379,7 +381,8 @@ class deque {
       return const_iterator(__d_, __i_ - n);
     }
     difference_type operator-(const const_iterator& other) const {
-      return (difference_type)__i_ - (difference_type)other.__i_;
+      return static_cast<difference_type>(__i_) -
+             static_cast<difference_type>(other.__i_);
     }
 
     bool operator==(const const_iterator& o) const { return __i_ == o.__i_; }

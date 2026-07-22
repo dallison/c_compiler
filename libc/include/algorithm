@@ -982,7 +982,9 @@ constexpr void pop_heap(It first, It last, Compare comp) {
   if (n > 1) {
     std::iter_swap(first, last - 1);
     __algorithm_detail::__sift_down(
-        first, (typename iterator_traits<It>::difference_type)0, n - 1, comp);
+        first,
+        static_cast<typename iterator_traits<It>::difference_type>(0),
+        n - 1, comp);
   }
 }
 
@@ -1263,7 +1265,8 @@ constexpr void partial_sort(It first, It middle, It last, Compare comp) {
     if (comp(*i, *first)) {
       std::iter_swap(first, i);
       __algorithm_detail::__sift_down(
-          first, (typename iterator_traits<It>::difference_type)0,
+          first,
+          static_cast<typename iterator_traits<It>::difference_type>(0),
           middle - first, comp);
     }
   }

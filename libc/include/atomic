@@ -85,7 +85,7 @@ using atomic_ulong = atomic<unsigned long>;
 using atomic_ullong = atomic<unsigned long long>;
 
 inline void atomic_thread_fence(memory_order order = memory_order_seq_cst) {
-  (void)order;
+  static_cast<void>(order);
   __sync_synchronize();
 }
 

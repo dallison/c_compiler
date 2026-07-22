@@ -40,7 +40,9 @@ class type_info {
   bool operator!=(const type_info& other) const { return this != &other; }
 
   bool before(const type_info& other) const { return this < &other; }
-  unsigned long hash_code() const { return (unsigned long)(const void*)this; }
+  unsigned long hash_code() const {
+    return reinterpret_cast<unsigned long>(this);
+  }
 };
 
 class bad_cast : public exception {

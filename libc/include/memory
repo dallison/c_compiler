@@ -162,19 +162,22 @@ struct allocator_traits {
   using rebind_traits = allocator_traits<rebind_alloc<T> >;
 
   static bool __propagate_on_container_copy_assignment() {
-    return __alloc_traits_bool((propagate_on_container_copy_assignment*)0);
+    return __alloc_traits_bool(
+        static_cast<propagate_on_container_copy_assignment*>(nullptr));
   }
 
   static bool __propagate_on_container_move_assignment() {
-    return __alloc_traits_bool((propagate_on_container_move_assignment*)0);
+    return __alloc_traits_bool(
+        static_cast<propagate_on_container_move_assignment*>(nullptr));
   }
 
   static bool __propagate_on_container_swap() {
-    return __alloc_traits_bool((propagate_on_container_swap*)0);
+    return __alloc_traits_bool(
+        static_cast<propagate_on_container_swap*>(nullptr));
   }
 
   static bool __is_always_equal() {
-    return __alloc_traits_bool((is_always_equal*)0);
+    return __alloc_traits_bool(static_cast<is_always_equal*>(nullptr));
   }
 
   static pointer allocate(Alloc& alloc, size_type n) {

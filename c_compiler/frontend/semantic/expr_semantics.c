@@ -8505,11 +8505,22 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
 static void ValidateCXXConstCast(CastASTNode* node) {
   TypeRecord* to = node->cast_type;
   TypeRecord* from = node->expr->type;
-  bool to_indirect = TypeIsPointer(to) || TypeIsReference(to);
-  bool from_indirect = TypeIsPointer(from) || TypeIsReference(from);
-  if (!to_indirect || !from_indirect || to->next == NULL ||
-      from->next == NULL ||
-      !TypeEqualIgnoringQualifiers(to->next, from->next)) {
+  bool valid = false;
+  if (TypeIsPointer(to) && TypeIsPointer(from) &&
+      to->next != NULL && from->next != NULL &&
+      !TypeIsFunction(to->next) && !TypeIsFunction(from->next)) {
+    valid = TypeEqualIgnoringQualifiers(to->next, from->next);
+  } else if (TypeIsReference(to) && to->next != NULL &&
+             !TypeIsFunction(to->next)) {
+    TypeRecord* from_object = TypeIsReference(from) ? from->next : from;
+    bool compatible_value_category =
+        to->declarator == kDeclRValueReference
+            ? node->expr->value_category == kValueCategoryXvalue
+            : node->expr->value_category == kValueCategoryLvalue;
+    valid = compatible_value_category && from_object != NULL &&
+            TypeEqualIgnoringQualifiers(to->next, from_object);
+  }
+  if (!valid) {
     SemanticError((ASTNode*)node,
                   "const_cast requires pointer or reference to the same type");
   }

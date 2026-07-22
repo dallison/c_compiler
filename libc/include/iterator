@@ -9,9 +9,9 @@
 //  and to drive range-based construction and insertion.
 //
 //  Category dispatch is done by selecting an overload on a *null pointer* to
-//  the category tag (`(Cat*)0`) rather than on a value-initialized tag object.
-//  Both are standard-conforming implementation details, but the pointer form
-//  avoids needing to value-construct an empty class in dependent context.
+//  the category tag rather than on a value-initialized tag object. Both are
+//  standard-conforming implementation details, but the pointer form avoids
+//  needing to value-construct an empty class in dependent context.
 //
 
 #ifndef __davecc_iterator__
@@ -76,8 +76,9 @@ constexpr typename iterator_traits<It>::difference_type __distance(
 template <class It>
 constexpr typename iterator_traits<It>::difference_type distance(It first,
                                                                  It last) {
-  return __distance(first, last,
-                    (typename iterator_traits<It>::iterator_category*)0);
+  return __distance(
+      first, last,
+      static_cast<typename iterator_traits<It>::iterator_category*>(nullptr));
 }
 
 // advance: O(1) for random-access iterators, O(n) otherwise.
@@ -108,7 +109,9 @@ constexpr void __advance(It& it, Distance n, random_access_iterator_tag*) {
 
 template <class It, class Distance>
 constexpr void advance(It& it, Distance n) {
-  __advance(it, n, (typename iterator_traits<It>::iterator_category*)0);
+  __advance(
+      it, n,
+      static_cast<typename iterator_traits<It>::iterator_category*>(nullptr));
 }
 
 template <class It>

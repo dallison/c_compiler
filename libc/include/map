@@ -184,7 +184,7 @@ class map {
     }
 
     static __node* __next(__node* node, __node* root) {
-      (void)root;
+      static_cast<void>(root);
       if (node == nullptr) {
         return nullptr;
       }
@@ -290,7 +290,7 @@ class map {
     }
 
     static const __node* __next(const __node* node, const __node* root) {
-      (void)root;
+      static_cast<void>(root);
       if (node == nullptr) {
         return nullptr;
       }
@@ -329,7 +329,9 @@ class map {
     explicit operator bool() const noexcept { return node_ptr_ != nullptr; }
 
     allocator_type get_allocator() const { return allocator_type(); }
-    key_type& key() const { return (key_type&)node_ptr_->value.first; }
+    key_type& key() const {
+      return const_cast<key_type&>(node_ptr_->value.first);
+    }
     mapped_type& mapped() const { return node_ptr_->value.second; }
   };
 
@@ -921,22 +923,22 @@ class map {
   }
 
   iterator insert(iterator hint, const value_type& value) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert(value).first;
   }
 
   iterator insert(const_iterator hint, const value_type& value) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert(value).first;
   }
 
   iterator insert(iterator hint, value_type&& value) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert(std::move(value)).first;
   }
 
   iterator insert(const_iterator hint, value_type&& value) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert(std::move(value)).first;
   }
 
@@ -975,7 +977,7 @@ class map {
   }
 
   iterator insert(const_iterator hint, node_type&& nh) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert(std::move(nh)).position;
   }
 
@@ -987,7 +989,7 @@ class map {
 
   template <class... Args>
   iterator emplace_hint(const_iterator hint, Args&&... args) {
-    (void)hint;
+    static_cast<void>(hint);
     return emplace(std::forward<Args>(args)...).first;
   }
 
@@ -1003,7 +1005,7 @@ class map {
 
   template <class... Args>
   iterator try_emplace(const_iterator hint, const key_type& key, Args&&... args) {
-    (void)hint;
+    static_cast<void>(hint);
     return try_emplace(key, std::forward<Args>(args)...).first;
   }
 
@@ -1020,7 +1022,7 @@ class map {
 
   template <class M>
   iterator insert_or_assign(const_iterator hint, const key_type& key, M&& obj) {
-    (void)hint;
+    static_cast<void>(hint);
     return insert_or_assign(key, std::forward<M>(obj)).first;
   }
 
@@ -1153,15 +1155,15 @@ class map {
   }
 
   iterator erase(const_iterator pos) {
-    iterator next((__node*)pos.__node_, __root_);
+    iterator next(const_cast<__node*>(pos.__node_), __root_);
     ++next;
-    __erase_node((__node*)pos.__node_);
+    __erase_node(const_cast<__node*>(pos.__node_));
     return next;
   }
 
   iterator erase(const_iterator first, const_iterator last) {
-    iterator next((__node*)first.__node_, __root_);
-    iterator finish((__node*)last.__node_, __root_);
+    iterator next(const_cast<__node*>(first.__node_), __root_);
+    iterator finish(const_cast<__node*>(last.__node_), __root_);
     while (next != finish) {
       next = erase(next);
     }
@@ -1188,7 +1190,7 @@ class map {
   }
 
   node_type extract(const_iterator pos) {
-    return __extract_node((__node*)pos.__node_);
+    return __extract_node(const_cast<__node*>(pos.__node_));
   }
 
   node_type extract(iterator pos) {
