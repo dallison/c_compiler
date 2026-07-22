@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
+#include "expr_semantics.h"
 #include "semantics.h"
 
 /* Result of walking a function body to decide whether it is a coroutine
@@ -254,14 +255,26 @@ static bool ValidateCoAwaiterType(ASTNode* node, TypeRecord* awaiter_type) {
 }
 
 /* Determine the struct type to use for member lookup on a co_await operand,
- * handling the cases where the operand is a compound literal or a call whose
- * type is carried on its callee rather than the node itself. */
+ * handling member accesses, compound literals, and calls whose type is carried
+ * on a child rather than the node itself. */
 static TypeRecord* CoAwaitOperandMemberLookupType(ASTNode* operand) {
   if (operand == NULL) {
     return NULL;
   }
   if (operand->type != NULL) {
     return operand->type;
+  }
+  if (operand->op == AST_OP(dot) || operand->op == AST_OP(arrow)) {
+    ASTNode* member = ((BinaryASTNode*)operand)->right;
+    if (member != NULL && member->type != NULL) {
+      return member->type;
+    }
+    if (member != NULL && member->op == AST_OP(structmember)) {
+      StructMember* resolved = ((StructMemberASTNode*)member)->member;
+      if (resolved != NULL && resolved->symbol != NULL) {
+        return resolved->symbol->type;
+      }
+    }
   }
   if (operand->op == AST_OP(compound_literal)) {
     CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)operand;
@@ -274,6 +287,20 @@ static TypeRecord* CoAwaitOperandMemberLookupType(ASTNode* operand) {
                : NULL;
   }
   return NULL;
+}
+
+static void SetCoroutineCallResultType(ASTNode* call,
+                                       TypeRecord* return_type) {
+  if (TypeIsReference(return_type)) {
+    ASTNodeSetType(call, TypeRecordCopy(return_type->next));
+    call->value_category =
+        return_type->declarator == kDeclRValueReference
+            ? kValueCategoryXvalue
+            : kValueCategoryLvalue;
+  } else {
+    ASTNodeSetType(call, TypeRecordCopy(return_type));
+    call->value_category = kValueCategoryPrvalue;
+  }
 }
 
 /* If the co_await operand's type provides a member `operator co_await`, rewrite
@@ -323,7 +350,7 @@ static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
     ASTNode* operator_call =
         NewAwaiterMemberCall(NewIdentifierASTNode(temp, co_await->base.location),
                              "operator co_await", co_await->base.location);
-    ASTNodeSetType(operator_call, TypeRecordCopy(member->symbol->type->next));
+    SetCoroutineCallResultType(operator_call, member->symbol->type->next);
     ASTNode* comma =
         NewBinaryASTNode(AST_OP(comma), TypeRecordCopy(member->symbol->type->next),
                          co_await->base.location, constructor_call,
@@ -337,7 +364,7 @@ static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
   ASTNode* call =
       NewAwaiterMemberCall(receiver, "operator co_await",
                            co_await->base.location);
-  ASTNodeSetType(call, TypeRecordCopy(member->symbol->type->next));
+  SetCoroutineCallResultType(call, member->symbol->type->next);
   ASTNodeReplaceChild((ASTNode*)co_await, 0, call, true);
   return true;
 }
@@ -5641,6 +5668,12 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
     SemanticError(point->co_await,
                   "suspending co_await declaration must be isolated");
     return false;
+  }
+  UnaryASTNode* co_await = (UnaryASTNode*)point->co_await;
+  co_await->sub = AnalyzeExpression(co_await->sub);
+  if (co_await->sub != NULL) {
+    co_await->sub->parent = point->co_await;
+    co_await->sub->child_id = 0;
   }
   Symbol* awaitable_temp = NULL;
   bool await_transform_error = false;

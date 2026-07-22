@@ -27,15 +27,12 @@ struct coroutine_handle {
   void* __handle;
 
   static coroutine_handle from_address(void* address) {
-    coroutine_handle result = {address};
-    return result;
+    return {address};
   }
 
   static coroutine_handle from_promise(Promise& promise) {
     char* promise_address = (char*)&promise;
-    coroutine_handle result = {
-        (void*)(promise_address - sizeof(__coroutine_frame))};
-    return result;
+    return {(void*)(promise_address - sizeof(__coroutine_frame))};
   }
 
   void* address(void) const {
@@ -86,8 +83,7 @@ struct coroutine_handle<void> {
   void* __handle;
 
   static coroutine_handle from_address(void* address) {
-    coroutine_handle result = {address};
-    return result;
+    return {address};
   }
 
   void* address(void) const {

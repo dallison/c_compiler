@@ -42,32 +42,57 @@ struct Promise {
   }
 };
 
+struct OneShotEvent {
+  struct Awaiter {
+    OneShotEvent* event;
+
+    bool await_ready() const noexcept {
+      return event->signaled;
+    }
+
+    void await_suspend(std::coroutine_handle<> coroutine) noexcept {
+      event->waiter = coroutine;
+    }
+
+    void await_resume() const noexcept {
+    }
+  };
+
+  bool signaled;
+  std::coroutine_handle<> waiter;
+
+  Awaiter operator co_await() noexcept {
+    return {this};
+  }
+
+  void signal() noexcept {
+    signaled = true;
+    if (waiter) {
+      std::coroutine_handle<> coroutine = waiter;
+      waiter = {};
+      coroutine.resume();
+    }
+  }
+};
+
 struct Mailbox {
   int value;
-  bool ready;
-  bool acknowledged;
+  OneShotEvent ready;
+  OneShotEvent acknowledged;
 };
 
 Task sender(Mailbox* mailbox) {
   mailbox->value = 42;
-  mailbox->ready = true;
-
-  // Give the receiver a chance to consume the value.
-  co_await std::suspend_always{};
-
-  while (!mailbox->acknowledged) {
-    co_await std::suspend_always{};
-  }
+  mailbox->ready.signal();
+  co_await mailbox->acknowledged;
   co_return;
 }
 
 Task receiver(Mailbox* mailbox) {
-  while (!mailbox->ready) {
-    co_await std::suspend_always{};
-  }
+  co_await mailbox->ready;
 
   std::cout << "received: " << mailbox->value << '\n';
-  mailbox->acknowledged = true;
+  mailbox->acknowledged.signal();
   co_return;
 }
 
@@ -76,17 +101,13 @@ int main() {
   Task receive = receiver(&mailbox);
   Task send = sender(&mailbox);
 
-  // Start the receiver first so it waits for the sender.
-  while (!send.done() || !receive.done()) {
-    if (!receive.done()) {
-      receive.resume();
-    }
-    if (!send.done()) {
-      send.resume();
-    }
-  }
+  // The receiver registers itself with ready; signaling ready then drives the
+  // exchange until both coroutines reach their final suspend points.
+  receive.resume();
+  send.resume();
+  bool complete = send.done() && receive.done();
 
   receive.destroy();
   send.destroy();
-  return 0;
+  return complete ? 0 : 1;
 }

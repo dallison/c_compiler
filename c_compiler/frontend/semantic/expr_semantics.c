@@ -2173,8 +2173,9 @@ static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   ASTNode* initializer = NewExpressionInitializerASTNode(expr, location);
   ASTNode* materialized =
       NewCompoundLiteralASTNode(temp_id, location, initializer);
-  materialized->value_category = kValueCategoryLvalue;
-  return AnalyzeExpression(materialized);
+  ASTNode* analyzed = AnalyzeExpression(materialized);
+  analyzed->value_category = kValueCategoryXvalue;
+  return analyzed;
 }
 
 static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
