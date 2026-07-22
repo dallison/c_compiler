@@ -1007,11 +1007,16 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
+static bool FoldExpressionCopyChains(W65C02Generator* g);
+
 void W65C02Optimize(W65C02Generator* g) {
   // return;
   for (;;) {
     struct OptimizerData data = {g, false};
     TargetTraverseDominatorTree(&g->base, OptimizeBlock, kTraversePreOrder, &data);
+    if (FoldExpressionCopyChains(g)) {
+      data.modified = true;
+    }
     
     // Done with all the trackers, delete them all.
     for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
@@ -1235,6 +1240,71 @@ static TargetInstruction* ReplaceIndirectCopy(
     inst = next;
   }
   return replacement;
+}
+
+static bool IsZeroPageByteOp(TargetInstruction* inst, W65C02Opcode op,
+                             int byte) {
+  return inst != NULL && TargetOpcodeEq(inst->opcode, op) &&
+         GetAddrMode(inst) == kAddrModeZeroPage && inst->operand[0] != NULL &&
+         OperandByteOffset(inst) == byte;
+}
+
+// Fold chained two-byte register copies.  Copying a value through an
+// intermediate temporary
+//   lda E1 ; sta E2 ; lda E1+1 ; sta E2+1     (E1 -> E2)
+//   lda E2 ; sta E3 ; lda E2+1 ; sta E3+1     (E2 -> E3)
+// where E2 has no other use collapses to a single E1 -> E3 copy.  The
+// register tracker can't see this because it only models the A register,
+// not memory-to-memory equality.
+static bool FoldExpressionCopyChains(W65C02Generator* g) {
+  bool modified = false;
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* w[8];
+      w[0] = inst;
+      bool match = IsZeroPageByteOp(w[0], W65C02_OP(lda), 0);
+      for (int j = 1; match && j < 8; j++) {
+        w[j] = NextInBlock(w[j - 1], block);
+        match = IsZeroPageByteOp(
+            w[j], (j & 1) != 0 ? W65C02_OP(sta) : W65C02_OP(lda), (j >> 1) & 1);
+      }
+      if (match) {
+        TargetInstruction* src = w[0]->operand[0];
+        TargetInstruction* tmp = w[1]->operand[0];
+        TargetInstruction* dest = w[5]->operand[0];
+        match = TargetOpcodeEq(tmp->opcode, W65C02_OP(expr2)) && tmp != src &&
+                dest != src && dest != tmp && w[2]->operand[0] == src &&
+                w[3]->operand[0] == tmp && w[4]->operand[0] == tmp &&
+                w[6]->operand[0] == tmp && w[7]->operand[0] == dest;
+        // The temporary must be written and read only inside this window,
+        // otherwise its stores are still needed.
+        if (match) {
+          for (size_t u = 0; match && u < tmp->users.length; u++) {
+            TargetInstruction* user = tmp->users.value.p[u];
+            match = user == w[1] || user == w[3] || user == w[4] ||
+                    user == w[6];
+          }
+        }
+        if (match) {
+          // Read the source directly and drop the copy into the temporary.
+          TargetReplaceOperand(w[4], 0, src);
+          TargetReplaceOperand(w[6], 0, src);
+          for (int j = 0; j < 4; j++) {
+            TargetBasicBlockRemoveInstruction(&g->base, block, w[j]);
+          }
+          modified = true;
+          inst = w[4];
+          continue;
+        }
+      }
+      if (inst == block->end_code) {
+        break;
+      }
+      inst = NextInBlock(inst, block);
+    }
+  }
+  return modified;
 }
 
 void W65C02CombineIndirectCopies(W65C02Generator* g) {

@@ -4,17 +4,21 @@
 
 // Regular enter and leave with register save mask.
 .global __enter
+.global __enter_res
 .global __leave
 .global __leave_void
 .global __enter_leaf
+.global __enter_leaf_res
 .global __leave_leaf
 .global __leave_leaf_void
 
 // Enter and leave with no save mask
 .global __enter_nomask
+.global __enter_res_nomask
 .global __leave_nomask
 .global __leave_void_nomask
 .global __enter_leaf_nomask
+.global __enter_leaf_res_nomask
 .global __leave_leaf_nomask
 .global __leave_leaf_void_nomask
 
@@ -329,6 +333,14 @@ save_mask_space:
 
 // Possibly followed by 24-bits of register save mask
 
+// Variant for value-returning functions with frames < 256 bytes.
+// A = frame size, X,Y = result address (stored into __result here rather
+// than in every function prologue).
+__enter_res:
+  STX __result
+  STY __result+1
+  TAX
+
 __enter:
   LDY #0
 
@@ -417,6 +429,14 @@ enter_save_regs:
 // Enter leaf procedure.
 // Followed by 16-bit save mask.
 
+// Variant for value-returning functions with frames < 256 bytes.
+// A = frame size, X,Y = result address (stored into __result here rather
+// than in every function prologue).
+__enter_leaf_res:
+  STX __result
+  STY __result+1
+  TAX
+
 __enter_leaf:
   LDY #0
 
@@ -477,6 +497,14 @@ enter_leaf_skip:
   BRA enter_save_regs
 
 // Enter with no savemask.
+// Variant for value-returning functions with frames < 256 bytes.
+// A = frame size, X,Y = result address (stored into __result here rather
+// than in every function prologue).
+__enter_res_nomask:
+  STX __result
+  STY __result+1
+  TAX
+
 __enter_nomask:
   LDY #0
 
@@ -526,6 +554,14 @@ __enter_nomask:
   RTS
 
 // Enter leaf with no mask.
+// Variant for value-returning functions with frames < 256 bytes.
+// A = frame size, X,Y = result address (stored into __result here rather
+// than in every function prologue).
+__enter_leaf_res_nomask:
+  STX __result
+  STY __result+1
+  TAX
+
 __enter_leaf_nomask:
   LDY #0
 

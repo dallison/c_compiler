@@ -7635,30 +7635,22 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
         LowerVariables(g);
         return;
       }
-      // Entry sequence:
-      // stx __result (if not void and not struct)
-      // sty __result+1 (if not void and not struct)
-      // This macro instruction expands to:
-      // (frame size is size of total frame)
-      // ldx #frame_size lo
-      // ldy #frame-size hi
-      // JSR __enter
-      //
-      if (!TypeIsVoid(compiler->current_function->next) &&
-          !TypeIsStructOrUnion(compiler->current_function->next)) {
-        Emit(g, NewInstruction1(
-                    W65C02_OP(stx),
-                    ByteConst(g,  W65C02_RESULT_REG),
-                    kAddrModeZeroPageAbsolute));
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sty),
-                    ByteConst(g,  W65C02_RESULT_REG+1),
-                    kAddrModeZeroPageAbsolute));
-      }
-      if (IsLeaf(g)) {
-        Emit(g, NewInstruction(W65C02_OP(enter_leaf), kAddrModeImplied));
-      } else {
-        Emit(g, NewInstruction(W65C02_OP(enter), kAddrModeImplied));
+      // Entry sequence.  This macro instruction expands to either
+      //   lda #frame_size ; jsr __enter*_res      (value-returning, <256)
+      // where the runtime stores the X,Y result address into __result, or
+      //   [stx/sty __result] ; ldx/ldy #size ; jsr __enter*
+      // for void/aggregate returns and large frames.  The emitter decides
+      // based on the flag below and the final frame size.
+      {
+        TargetInstruction* enter_inst =
+            NewInstruction(IsLeaf(g) ? W65C02_OP(enter_leaf)
+                                     : W65C02_OP(enter),
+                           kAddrModeImplied);
+        if (!TypeIsVoid(compiler->current_function->next) &&
+            !TypeIsStructOrUnion(compiler->current_function->next)) {
+          enter_inst->flags |= k6502EnterStoresResult;
+        }
+        Emit(g, enter_inst);
       }
       // The hidden aggregate-result pointer is loaded by a runtime helper that
       // uses caller-clobbered value registers. Load it before ordinary

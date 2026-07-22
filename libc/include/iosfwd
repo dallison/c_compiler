@@ -17,7 +17,14 @@
 namespace std {
 
 using streamoff = long;
+#if defined(__6502__)
+// A single I/O transfer can't exceed the 64K address space, and 32-bit
+// arithmetic is expensive on the 6502, so use the native 16-bit int.
+// streamoff stays long so file positions beyond 64K still work.
+using streamsize = int;
+#else
 using streamsize = long;
+#endif
 using streampos = streamoff;
 
 template <class State>

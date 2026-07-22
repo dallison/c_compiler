@@ -31,10 +31,6 @@ long strtol(const char* str, char** end, int base) {
   return (long)parsed.value;
 }
 
-int atoi(const char* s) {
-  return (int)strtol(s, NULL, 10);
-}
-
-long atol(const char* s) {
-  return strtol(s, NULL, 10);
-}
+// atoi and atol live in their own translation units (atoi.c, atol.c) so
+// that linking them doesn't force this file (and the wide arithmetic
+// strtol needs) into the image.

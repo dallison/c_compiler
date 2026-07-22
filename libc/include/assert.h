@@ -17,10 +17,16 @@
 #include <stdlib.h>
 
 #ifndef NDEBUG
+// Implemented in libc/assert_fail.c without printf so that assert() doesn't
+// pull the printf formatting machinery into every program.
+#ifdef __cplusplus
+extern "C" void __davecc_assert_fail(const char* expression, const char* file,
+                                     int line);
+#else
+void __davecc_assert_fail(const char* expression, const char* file, int line);
+#endif
 #define assert(e)  \
-    ((void) ((e) ? ((void)0) : __assert (#e, __FILE__, __LINE__)))
-#define __assert(e, file, line) \
-    ((void)printf ("%s:%d: failed assertion `%s'\n", file, line, e), abort())
+    ((void) ((e) ? ((void)0) : __davecc_assert_fail (#e, __FILE__, __LINE__)))
 
 #else
 #define assert(e)

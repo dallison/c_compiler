@@ -166,6 +166,9 @@ COMMON_INCLUDES = [
 
 LIBC_SRCS = [
     "libc/abs.c",
+    "libc/assert_fail.c",
+    "libc/atoi.c",
+    "libc/atol.c",
     "libc/acos.c",
     "libc/asin.c",
     "libc/atan.c",
@@ -199,6 +202,11 @@ LIBC_SRCS = [
     "libc/fwrite.c",
     "libc/getenv.c",
     "libc/gets.c",
+    "libc/itoa_impl.h",
+    "libc/itoa_int.c",
+    "libc/itoa_long.c",
+    "libc/itoa_longlong.c",
+    "libc/itoa_ptr.c",
     "libc/ldexp.c",
     "libc/libc_test.c",
     "libc/malloc.c",
@@ -211,6 +219,10 @@ LIBC_SRCS = [
     "libc/perror.c",
     "libc/errno.c",
     "libc/posix.c",
+    "libc/posix_close.c",
+    "libc/posix_lseek.c",
+    "libc/posix_open.c",
+    "libc/posix_read.c",
     "libc/printf.c",
     "libc/printf_common.c",
     "libc/printf_literal.c",
@@ -222,6 +234,8 @@ LIBC_SRCS = [
     "libc/sincos.c",
     "libc/sqrt.c",
     "libc/stdio.c",
+    "libc/stdio_flags.c",
+    "libc/stdio_setvbuf.c",
     "libc/strcat.c",
     "libc/strchr.c",
     "libc/strcmp.c",
@@ -1085,6 +1099,7 @@ runtime_srcs=(
   "6502 support/push.s"
   "6502 support/incdec.s"
   "6502 support/jump_table.s"
+  "6502 support/jmpi.s"
   "6502 support/mul.s"
   "6502 support/longmul.s"
   "6502 support/longlongmul.s"
@@ -1115,6 +1130,9 @@ done
 
 libc_srcs=(
   "libc/abs.c"
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
@@ -1142,6 +1160,10 @@ libc_srcs=(
   "libc/ftoa.c"
   "libc/fwrite.c"
   "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
@@ -1154,6 +1176,10 @@ libc_srcs=(
   "libc/perror.c"
   "libc/errno.c"
   "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -1164,6 +1190,8 @@ libc_srcs=(
   "libc/scanf.c"
   "libc/sincos.c"
   "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
   "libc/strcat.c"
   "libc/strchr.c"
   "libc/strcmp.c"
@@ -1255,6 +1283,9 @@ for src in "$${runtime_srcs[@]}"; do
 done
 
 libc_srcs=(
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
@@ -1283,6 +1314,10 @@ libc_srcs=(
   "libc/ftoa.c"
   "libc/fwrite.c"
   "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
@@ -1295,6 +1330,10 @@ libc_srcs=(
   "libc/perror.c"
   "libc/errno.c"
   "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -1305,6 +1344,8 @@ libc_srcs=(
   "libc/scanf.c"
   "libc/sincos.c"
   "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
   "libc/strcat.c"
   "libc/strchr.c"
   "libc/strcmp.c"
@@ -1400,6 +1441,9 @@ done
 
 libc_srcs=(
   "libc/abs.c"
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
@@ -1428,6 +1472,10 @@ libc_srcs=(
   "libc/ftoa.c"
   "libc/fwrite.c"
   "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
@@ -1440,6 +1488,10 @@ libc_srcs=(
   "libc/perror.c"
   "libc/errno.c"
   "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -1450,6 +1502,8 @@ libc_srcs=(
   "libc/scanf.c"
   "libc/sincos.c"
   "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
   "libc/strcat.c"
   "libc/strchr.c"
   "libc/strcmp.c"
@@ -1541,6 +1595,9 @@ done
 
 libc_srcs=(
   "libc/abs.c"
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
@@ -1569,6 +1626,10 @@ libc_srcs=(
   "libc/ftoa.c"
   "libc/fwrite.c"
   "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
@@ -1581,6 +1642,10 @@ libc_srcs=(
   "libc/perror.c"
   "libc/errno.c"
   "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -1591,6 +1656,8 @@ libc_srcs=(
   "libc/scanf.c"
   "libc/sincos.c"
   "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
   "libc/strcat.c"
   "libc/strchr.c"
   "libc/strcmp.c"
@@ -1682,6 +1749,9 @@ done
 
 libc_srcs=(
   "libc/abs.c"
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
@@ -1710,6 +1780,10 @@ libc_srcs=(
   "libc/ftoa.c"
   "libc/fwrite.c"
   "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
@@ -1722,6 +1796,10 @@ libc_srcs=(
   "libc/perror.c"
   "libc/errno.c"
   "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -1732,6 +1810,8 @@ libc_srcs=(
   "libc/scanf.c"
   "libc/sincos.c"
   "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
   "libc/strcat.c"
   "libc/strchr.c"
   "libc/strcmp.c"

@@ -42,32 +42,6 @@ FILE* stderr = &s_stderr;
 FILE* __all_files = &s_stdin;
 FILE* __last_file = &s_stderr;
 
-void setbuf(FILE* restrict stream, char* restrict buf) {
-  setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
-}
-
-int setvbuf(FILE* restrict stream, char* restrict buf, mode_t mode,
-            size_t size) {
-  if (mode != _IONBF && mode != _IOLBF && mode != _IOFBF) {
-    return -1;
-  }
-  if (stream->buf != NULL && stream->buffer_owned) {
-    free(stream->buf);
-  }
-  if (buf == NULL && mode != _IONBF) {
-    stream->buf = malloc(size);
-    stream->buffer_owned = 1;
-  } else {
-    stream->buf = buf;
-    stream->buffer_owned = 0;
-  }
-  stream->bufsize = size;
-  stream->buffering_mode = mode;
-  return 0;
-}
-
-int feof(FILE* stream) { return stream->eof_flag; }
-
-int ferror(FILE* stream) { return stream->error_flag; }
-
-void clearerr(FILE* stream) { stream->error_flag = 0; }
+// setbuf/setvbuf are in stdio_setvbuf.c and feof/ferror/clearerr are in
+// stdio_flags.c so this file (pulled in by the stdin/stdout/stderr globals)
+// stays minimal.

@@ -2,12 +2,12 @@
 
 .text
 
+// Only declare symbols defined in this file.  __umul4/__smul4 live in
+// longmul.s; declaring them here would pull that member into every link.
 .global __umul1
 .global __umul2
-.global __umul4
 .global __smul1
 .global __smul2
-.global __smul4
 .global __umul2_10    // Multiply int by 10.
 .global __smul2_10
 

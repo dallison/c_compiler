@@ -185,6 +185,57 @@ typedef struct {
   int drop_size;
 } ReplaceTopMatch;
 
+// A call through a function pointer is lowered as
+//   jsr .call ; bra .end ; .call: jmp (reg) ; .end:
+// because the 6502 has no "jsr indirect".  Once register allocation has
+// picked the zero-page register we can jsr the shared __jmp_iN trampoline
+// (jmpi.s) instead, saving 5 bytes per call site and the return-path branch.
+static bool EmitIndirectCallTrampoline(W65C02Emitter* emitter,
+                                       TargetInstruction* jsr_inst, FILE* fp) {
+  if (((jsr_inst->flags >> 16) & 0x1f) != kAddrModeAbsolute) {
+    return false;
+  }
+  // The two labels must be private to this pattern: branch optimizations can
+  // retarget other branches at them, in which case they must still be emitted.
+  TargetInstruction* call_label = jsr_inst->operand[0];
+  if (call_label == NULL ||
+      !TargetOpcodeEq(call_label->opcode, W65C02_OP(label)) ||
+      call_label->uses != 1) {
+    return false;
+  }
+  TargetInstruction* skip = NextPrintable(jsr_inst);
+  if (skip == NULL || (!TargetOpcodeEq(skip->opcode, W65C02_OP(bra)) &&
+                       !TargetOpcodeEq(skip->opcode, W65C02_OP(jmp)))) {
+    return false;
+  }
+  TargetInstruction* end_label = skip->operand[0];
+  if (end_label == NULL ||
+      !TargetOpcodeEq(end_label->opcode, W65C02_OP(label)) ||
+      end_label->uses != 1) {
+    return false;
+  }
+  if (NextPrintable(skip) != call_label) {
+    return false;
+  }
+  TargetInstruction* jmp = NextPrintable(call_label);
+  if (jmp == NULL || !TargetOpcodeEq(jmp->opcode, W65C02_OP(jmp)) ||
+      ((jmp->flags >> 16) & 0x1f) != kAddrModeIndirect ||
+      jmp->operand[0] == NULL || NextPrintable(jmp) != end_label) {
+    return false;
+  }
+  W65C02Register* reg = (W65C02Register*)jmp->operand[0]->reg;
+  if (reg == NULL || reg->type != k6502RegTypeI ||
+      reg->base.num >= W65C02_NUM_I_REGS) {
+    return false;
+  }
+  fprintf(fp, "\t%-12s __jmp_i%d\n", "jsr", reg->base.num);
+  skip->flags |= k6502DontEmit;
+  call_label->flags |= k6502DontEmit;
+  jmp->flags |= k6502DontEmit;
+  end_label->flags |= k6502DontEmit;
+  return true;
+}
+
 static bool IsRuntimeCall(TargetInstruction* inst, Symbol* symbol) {
   return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) &&
          inst->operand[0] != NULL &&
@@ -630,6 +681,11 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     fprintf(fp, "/* @%d */ ", inst->id);
   }
 
+  if (TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) &&
+      EmitIndirectCallTrampoline(emitter, inst, fp)) {
+    return;
+  }
+
   // Buffers for register name printing.
   static char buf[4096];
   W65C02Opcode opcode = (W65C02Opcode)inst->opcode;
@@ -724,19 +780,34 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       // TODO: if the function is void or returns struct there's no need
       // for the extra 2 bytes for the return address.
       int frame_size = FrameSize(emitter, opcode == W65C02_OP(enter_leaf));
-      fprintf(fp, "\t%-12s #%d\n", "ldx", frame_size & 0xff);
+      bool stores_result = (inst->flags & k6502EnterStoresResult) != 0;
       const char* suffix1 = "";
       const char* suffix2 = "";
-      if (frame_size >= 256) {
-        suffix2 = "+2";
-        fprintf(fp, "\t%-12s #%d\n", "ldy", (frame_size >> 8) & 0xff);
+      const char* res = "";
+      if (stores_result && frame_size < 256) {
+        // The __enter*_res entry points store the result address (passed in
+        // X,Y by the caller) into __result, saving a stx/sty pair here.
+        // The frame size travels in A instead of X.
+        res = "_res";
+        fprintf(fp, "\t%-12s #%d\n", "lda", frame_size);
+      } else {
+        if (stores_result) {
+          fprintf(fp, "\t%-12s __result\n", "stx");
+          fprintf(fp, "\t%-12s __result+1\n", "sty");
+        }
+        fprintf(fp, "\t%-12s #%d\n", "ldx", frame_size & 0xff);
+        if (frame_size >= 256) {
+          suffix2 = "+2";
+          fprintf(fp, "\t%-12s #%d\n", "ldy", (frame_size >> 8) & 0xff);
+        }
       }
       uint32_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
       if (mask == 0) {
         suffix1 = "_nomask";
       }
-      fprintf(fp, "\t%-12s __%s%s%s\n", "jsr",
-              opcode == W65C02_OP(enter_leaf) ? "enter_leaf" : "enter", suffix1, suffix2);
+      fprintf(fp, "\t%-12s __%s%s%s%s\n", "jsr",
+              opcode == W65C02_OP(enter_leaf) ? "enter_leaf" : "enter",
+              res, suffix1, suffix2);
       
       if (mask != 0) {
         // Write out 24 bit save mask.

@@ -77,6 +77,12 @@ typedef enum {
 // Use JMP instead of JSR for call.
 #define k6502JmpForJSR (1 << 29)
 
+// Set on an enter/enter_leaf instruction when the function returns a value
+// (non-void, non-aggregate).  The emitter then uses the __enter*_res runtime
+// entry points, which store the X,Y result address into __result themselves,
+// instead of emitting a separate stx/sty pair in every function prologue.
+#define k6502EnterStoresResult (1 << 30)
+
 // Need address of symbol, not value.
 #define k6502NeedAddress (1 << 30)
 

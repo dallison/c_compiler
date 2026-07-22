@@ -2,24 +2,18 @@
 
 .text
 
+// Only declare symbols defined in this file.  Declaring symbols that live in
+// other archive members (longdiv.s, longlongdiv.s, fdiv.s) creates undefined
+// references that force the linker to pull those members into every link.
 .global __sdiv1
 .global __sdiv2
-.global __sdiv4
-.global __sdiv8
 .global __udiv1
 .global __udiv2
-.global __udiv4
-.global __udiv8
-.global __fdiv
 
 .global __smod1
 .global __smod2
-.global __smod4
-.global __smod8
 .global __umod1
 .global __umod2
-.global __umod4
-.global __umod8
 
 // C's div function, both quotient and remainder
 .global __cdivmod2

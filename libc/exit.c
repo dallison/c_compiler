@@ -82,9 +82,16 @@ typedef struct {
 
 static void RunCXXDestructors(void* argument) {
   CXXDestructorContext* context = argument;
+  // Find one-past-the-last object by stepping, then destroy in reverse
+  // order.  Stepping avoids a count*stride multiply, which would pull the
+  // wide multiply runtime into every program with a static destructor.
+  unsigned char* object = context->object;
+  for (unsigned long i = 0; i < context->count; i++) {
+    object += context->stride;
+  }
   while (context->count != 0) {
     context->count--;
-    void* object = context->object + context->count * context->stride;
+    object -= context->stride;
     if (context->complete_object_argument) {
       ((void (*)(void*, int))context->destructor)(object, 1);
     } else {

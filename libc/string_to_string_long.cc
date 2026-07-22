@@ -1,13 +1,13 @@
 #include "string_conversion_helpers.h"
 
-#include <cstdio>
+#include <__itoa.h>
 
 namespace std {
 
 string to_string(long value) {
-  char buffer[32];
-  int length = snprintf(buffer, sizeof(buffer), "%ld", value);
-  return __string_detail::FromNumericBuffer(buffer, sizeof(buffer), length);
+  char buffer[__DAVECC_ITOA_CAPACITY(long)];
+  size_t length = __itoa_long(buffer, value, 10, 0);
+  return string(buffer, length);
 }
 
 }  // namespace std

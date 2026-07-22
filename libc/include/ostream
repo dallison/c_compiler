@@ -3,9 +3,11 @@
 //  c_compiler
 //
 //  C++20 <ostream> support for DaveCC: basic_ostream and its formatted /
-//  unformatted output operations.  Numeric formatting is built on snprintf for
-//  the digit conversion, with field width, fill and adjustfield applied here so
-//  arbitrary fill characters and internal padding behave per the standard.
+//  unformatted output operations.  Integer digit conversion uses the compact
+//  __itoa helpers (so iostream doesn't drag in the printf machinery); floating
+//  point still formats through __snprintf_fp.  Field width, fill and
+//  adjustfield are applied here so arbitrary fill characters and internal
+//  padding behave per the standard.
 //
 
 #ifndef __davecc_ostream__
@@ -15,11 +17,10 @@
 #include <streambuf>
 #include <iosfwd>
 #include <__char_traits>
+#include <__itoa.h>
 #include <cstdio>
 #include <string.h>
 
-extern "C" int __snprintf_int(char*, size_t, const char*, ...);
-extern "C" int __snprintf_long(char*, size_t, const char*, ...);
 extern "C" int __snprintf_fp(char*, size_t, const char*, ...);
 
 namespace std {
@@ -104,12 +105,9 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return __put_float(static_cast<double>(v));
   }
   basic_ostream& operator<<(const void* v) {
-    char buf[32];
-    int n = __snprintf_int(buf, sizeof(buf), "%p", v);
-    if (n < 0) {
-      n = 0;
-    }
-    return __put_bytes(buf, static_cast<size_t>(n), 0);
+    char buf[__DAVECC_ITOA_CAPACITY(const void*)];
+    size_t n = __ptrtoa(buf, v);
+    return __put_bytes(buf, n, 0);
   }
 
   // Insert the contents of another buffer.
@@ -218,19 +216,16 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
       streamsize pad = width - static_cast<streamsize>(n);
       ios_base::fmtflags adjust = this->flags() & ios_base::adjustfield;
       if (adjust == ios_base::left) {
-        ok = buf->sputn(s, static_cast<streamsize>(n)) ==
-             static_cast<streamsize>(n);
+        ok = __emit_bytes(buf, s, static_cast<streamsize>(n));
         ok = ok && __emit_fill(buf, fill, pad);
       } else if (adjust == ios_base::internal) {
-        ok = buf->sputn(s, static_cast<streamsize>(prefix)) ==
-             static_cast<streamsize>(prefix);
+        ok = __emit_bytes(buf, s, static_cast<streamsize>(prefix));
         ok = ok && __emit_fill(buf, fill, pad);
-        ok = ok && buf->sputn(s + prefix, static_cast<streamsize>(n - prefix)) ==
-             static_cast<streamsize>(n - prefix);
+        ok = ok && __emit_bytes(buf, s + prefix,
+                                static_cast<streamsize>(n - prefix));
       } else {
         ok = __emit_fill(buf, fill, pad);
-        ok = ok && buf->sputn(s, static_cast<streamsize>(n)) ==
-             static_cast<streamsize>(n);
+        ok = ok && __emit_bytes(buf, s, static_cast<streamsize>(n));
       }
     }
     this->width(0);
@@ -244,6 +239,11 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   basic_ostream() {}
 
  private:
+  [[gnu::noinline]] static bool __emit_bytes(
+      basic_streambuf<CharT, Traits>* buf, const char* s, streamsize count) {
+    return buf->sputn(s, count) == count;
+  }
+
   static bool __emit_fill(basic_streambuf<CharT, Traits>* buf, char fill,
                           streamsize count) {
     for (streamsize i = 0; i < count; i++) {
@@ -254,34 +254,24 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return true;
   }
 
-  // Build the integer base-conversion format specifier tail (after '%'),
-  // honouring basefield / showbase / uppercase / showpos.  Returns the number
-  // of characters written into `spec` (always NUL terminated).
-  void __int_base_spec(char* spec, bool is_signed, bool is_long) {
-    ios_base::fmtflags base = this->flags() & ios_base::basefield;
-    bool upper = (this->flags() & ios_base::uppercase) != 0;
-    bool showbase = (this->flags() & ios_base::showbase) != 0;
-    bool showpos = (this->flags() & ios_base::showpos) != 0;
-    char* p = spec;
-    *p++ = '%';
-    if (showbase) {
-      *p++ = '#';
+  // Compute the numeric base and __itoa flag bits from the stream's
+  // basefield / showbase / uppercase / showpos state.
+  unsigned char __int_base_flags(bool is_signed, unsigned char* flags_out) {
+    ios_base::fmtflags current = this->flags();
+    ios_base::fmtflags base = current & ios_base::basefield;
+    unsigned char flags = 0;
+    if ((current & ios_base::uppercase) != 0) {
+      flags |= __DAVECC_ITOA_UPPER;
     }
-    if (showpos && is_signed && base == ios_base::dec) {
-      *p++ = '+';
+    if ((current & ios_base::showbase) != 0) {
+      flags |= __DAVECC_ITOA_SHOWBASE;
     }
-    if (is_long) {
-      *p++ = 'l';
-      *p++ = 'l';
+    if ((current & ios_base::showpos) != 0 && is_signed &&
+        base == ios_base::dec) {
+      flags |= __DAVECC_ITOA_SHOWPOS;
     }
-    if (base == ios_base::hex) {
-      *p++ = upper ? 'X' : 'x';
-    } else if (base == ios_base::oct) {
-      *p++ = 'o';
-    } else {
-      *p++ = is_signed ? 'd' : 'u';
-    }
-    *p = '\0';
+    *flags_out = flags;
+    return base == ios_base::hex ? 16 : base == ios_base::oct ? 8 : 10;
   }
 
   // Count the leading sign / base-prefix bytes for internal padding.
@@ -297,48 +287,37 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   }
 
   basic_ostream& __put_signed_int(int v) {
-    char spec[8];
-    char buf[64];
-    __int_base_spec(spec, /*is_signed=*/true, /*is_long=*/false);
-    int n = __snprintf_int(buf, sizeof(buf), spec, v);
-    if (n < 0) {
-      n = 0;
-    }
-    return __put_bytes(buf, static_cast<size_t>(n),
-                       __prefix_len(buf, static_cast<size_t>(n)));
+    char buf[__DAVECC_ITOA_CAPACITY(int)];
+    unsigned char flags;
+    unsigned char base = __int_base_flags(/*is_signed=*/true, &flags);
+    size_t n = base == 10 ? __itoa_int(buf, v, base, flags)
+                          : __utoa_uint(buf, static_cast<unsigned int>(v),
+                                        base, flags);
+    return __put_bytes(buf, n, __prefix_len(buf, n));
   }
   basic_ostream& __put_unsigned_int(unsigned int v) {
-    char spec[8];
-    char buf[64];
-    __int_base_spec(spec, /*is_signed=*/false, /*is_long=*/false);
-    int n = __snprintf_int(buf, sizeof(buf), spec, v);
-    if (n < 0) {
-      n = 0;
-    }
-    return __put_bytes(buf, static_cast<size_t>(n),
-                       __prefix_len(buf, static_cast<size_t>(n)));
+    char buf[__DAVECC_ITOA_CAPACITY(unsigned int)];
+    unsigned char flags;
+    unsigned char base = __int_base_flags(/*is_signed=*/false, &flags);
+    size_t n = __utoa_uint(buf, v, base, flags);
+    return __put_bytes(buf, n, __prefix_len(buf, n));
   }
   basic_ostream& __put_signed_long(long long v) {
-    char spec[8];
-    char buf[64];
-    __int_base_spec(spec, /*is_signed=*/true, /*is_long=*/true);
-    int n = __snprintf_long(buf, sizeof(buf), spec, v);
-    if (n < 0) {
-      n = 0;
-    }
-    return __put_bytes(buf, static_cast<size_t>(n),
-                       __prefix_len(buf, static_cast<size_t>(n)));
+    char buf[__DAVECC_ITOA_CAPACITY(long long)];
+    unsigned char flags;
+    unsigned char base = __int_base_flags(/*is_signed=*/true, &flags);
+    size_t n = base == 10
+                   ? __itoa_longlong(buf, v, base, flags)
+                   : __utoa_ulonglong(
+                         buf, static_cast<unsigned long long>(v), base, flags);
+    return __put_bytes(buf, n, __prefix_len(buf, n));
   }
   basic_ostream& __put_unsigned_long(unsigned long long v) {
-    char spec[8];
-    char buf[64];
-    __int_base_spec(spec, /*is_signed=*/false, /*is_long=*/true);
-    int n = __snprintf_long(buf, sizeof(buf), spec, v);
-    if (n < 0) {
-      n = 0;
-    }
-    return __put_bytes(buf, static_cast<size_t>(n),
-                       __prefix_len(buf, static_cast<size_t>(n)));
+    char buf[__DAVECC_ITOA_CAPACITY(unsigned long long)];
+    unsigned char flags;
+    unsigned char base = __int_base_flags(/*is_signed=*/false, &flags);
+    size_t n = __utoa_ulonglong(buf, v, base, flags);
+    return __put_bytes(buf, n, __prefix_len(buf, n));
   }
   basic_ostream& __put_float(double v) {
     char spec[16];
