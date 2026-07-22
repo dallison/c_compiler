@@ -22,8 +22,8 @@ typedef struct ExitFunction {
   unsigned char has_argument;
 } ExitFunction;
 
-static ExitFunction* exit_functions;
-static unsigned char exit_lock;
+static ExitFunction* __davecc_exit_functions;
+static unsigned char __davecc_exit_lock;
 
 #if defined(__DAVECC_HAS_ATEXIT_LOCK__)
 void __davecc_atexit_lock(unsigned char* lock);
@@ -41,10 +41,10 @@ static int RegisterExitFunction(ExitFunction* entry) {
   if (entry == NULL) {
     return -1;
   }
-  __davecc_atexit_lock(&exit_lock);
-  entry->next = exit_functions;
-  exit_functions = entry;
-  __davecc_atexit_unlock(&exit_lock);
+  __davecc_atexit_lock(&__davecc_exit_lock);
+  entry->next = __davecc_exit_functions;
+  __davecc_exit_functions = entry;
+  __davecc_atexit_unlock(&__davecc_exit_lock);
   return 0;
 }
 
@@ -120,17 +120,17 @@ int __davecc_cxa_atexit(void* destructor, void* object, unsigned long count,
 }
 
 static ExitFunction* DetachExitFunctions(void* dso) {
-  __davecc_atexit_lock(&exit_lock);
+  __davecc_atexit_lock(&__davecc_exit_lock);
   if (dso == NULL) {
-    ExitFunction* entries = exit_functions;
-    exit_functions = NULL;
-    __davecc_atexit_unlock(&exit_lock);
+    ExitFunction* entries = __davecc_exit_functions;
+    __davecc_exit_functions = NULL;
+    __davecc_atexit_unlock(&__davecc_exit_lock);
     return entries;
   }
 
   ExitFunction* entries = NULL;
   ExitFunction** entries_tail = &entries;
-  ExitFunction** link = &exit_functions;
+  ExitFunction** link = &__davecc_exit_functions;
   while (*link != NULL) {
     ExitFunction* entry = *link;
     if (entry->dso == dso) {
@@ -142,7 +142,7 @@ static ExitFunction* DetachExitFunctions(void* dso) {
       link = &entry->next;
     }
   }
-  __davecc_atexit_unlock(&exit_lock);
+  __davecc_atexit_unlock(&__davecc_exit_lock);
   return entries;
 }
 

@@ -3,7 +3,7 @@
 
 namespace std {
 
-static __stdio_istreambuf __cin_buffer(stdin);
+static __fd_istreambuf __cin_buffer(STDIN_FILENO);
 istream cin(&__cin_buffer);
 
 class __cin_initializer {

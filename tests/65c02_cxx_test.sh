@@ -19,6 +19,17 @@ mkdir -p "$WORK"
 # this static-only target.
 "$DAVECC" -target 65c02 "$SOURCE" -o "$WORK/test.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/test.exe"
+if grep -aq '__davecc_tls_' "$WORK/test.exe"; then
+  echo "thread-local runtime linked into a threadless 65C02 program" >&2
+  exit 1
+fi
+for symbol in AlignSize ExpandHeap InitFreeList TakeStartOfFreeBlock \
+              exit_functions exit_lock; do
+  if strings "$WORK/test.exe" | grep -x "$symbol" >/dev/null; then
+    echo "internal runtime symbol exported: $symbol" >&2
+    exit 1
+  fi
+done
 
 cat >"$WORK/atoi_vector.cpp" <<'SRC'
 #include <cstdlib>

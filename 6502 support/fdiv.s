@@ -34,7 +34,6 @@
 .set divisor fmanB
 // Result goes directly into fmantissa.  It will be 24 bits wide but will
 // be in the upper 24 bits.
-.global udiv6
 udiv6:
   LDX #24
   BRA udiv61        // First iteration, no shifts.
@@ -77,7 +76,6 @@ udiv6_l2:
   RTS
 
 // 40 bit division.
-.global udiv40
 udiv40:
   LDX #40
   BRA udiv401        // First iteration, no shifts.

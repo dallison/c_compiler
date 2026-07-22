@@ -3,7 +3,7 @@
 
 namespace std {
 
-static __stdio_ostreambuf __clog_buffer(stderr);
+static __fd_ostreambuf __clog_buffer(STDERR_FILENO);
 ostream clog(&__clog_buffer);
 
 }  // namespace std

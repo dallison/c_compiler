@@ -8,15 +8,11 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
-#include <stdio.h>
 #include "_fpfuncs.h"
 
-#if 1
-#define STATIC 
-#else
 #define STATIC static
-#endif
 
 struct FloatPrinter {       // 6502 offset
   uint8_t sign;             // 0

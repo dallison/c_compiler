@@ -11,6 +11,8 @@
 #include <stdlib.h>
 
 extern void Break();
+extern void (*__davecc_stdio_fini_hook)(void);
+void __davecc_stdio_fini(void);
 
 int fputc(char_t c, FILE* stream) {
   if (stream->buf == NULL) {
@@ -24,6 +26,9 @@ int fputc(char_t c, FILE* stream) {
       remaining -= n;
     }
     return c;
+  }
+  if (__davecc_stdio_fini_hook == NULL) {
+    __davecc_stdio_fini_hook = __davecc_stdio_fini;
   }
   // Buffer full?
   if (stream->windex == stream->bufsize) {

@@ -3,12 +3,12 @@
 //  libc
 //
 //  Idempotent guest program lifecycle: preinit/init arrays forward, fini array
-//  reverse, with TLS main fini and __cxa_finalize ordered before fini teardown.
+//  reverse, with supported TLS main fini and __cxa_finalize ordered before
+//  fini teardown.
 //
 
 #include <davecc_lifecycle.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 typedef void (*DaveCCInitFiniFn)(void);
@@ -20,12 +20,15 @@ extern DaveCCInitFiniFn __init_array_end[];
 extern DaveCCInitFiniFn __fini_array_start[];
 extern DaveCCInitFiniFn __fini_array_end[];
 
+#if !defined(__W65C02__)
 void __davecc_tls_thread_fini(void) __attribute__((weak));
+#endif
 void __cxa_finalize(void* dso);
 
 static unsigned char __davecc_preinit_done;
 static unsigned char __davecc_init_done;
 static unsigned char __davecc_fini_done;
+DaveCCInitFiniFn __davecc_stdio_fini_hook;
 
 static DaveCCInitFiniFn* ArrayStart(DaveCCInitFiniFn* start) {
   return start;
@@ -92,10 +95,14 @@ void __davecc_run_fini(void) {
     return;
   }
   __davecc_fini_done = 1;
+#if !defined(__W65C02__)
   if (__davecc_tls_thread_fini != NULL) {
     __davecc_tls_thread_fini();
   }
+#endif
   __cxa_finalize(NULL);
   WalkFiniArrayReverse(__fini_array_start, __fini_array_end);
-  fflush(NULL);
+  if (__davecc_stdio_fini_hook != NULL) {
+    __davecc_stdio_fini_hook();
+  }
 }

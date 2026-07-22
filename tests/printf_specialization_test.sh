@@ -67,9 +67,10 @@ grep -q 'jsr[[:space:]]*__fprintf_int' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__sprintf_long' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__snprintf_fp' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__printf_long' "$WORK/long.s"
-grep -q 'jsr[[:space:]]*__snprintf_int' "$WORK/ostream.s"
-if grep -q 'jsr[[:space:]]*snprintf' "$WORK/ostream.s"; then
-  echo "integer ostream still calls generic snprintf" >&2
+grep -q 'jsr[[:space:]]*__itoa_int' "$WORK/ostream.s"
+if grep -q 'jsr[[:space:]]*__snprintf_int\|jsr[[:space:]]*snprintf' \
+    "$WORK/ostream.s"; then
+  echo "integer ostream still calls a snprintf helper" >&2
   exit 1
 fi
 

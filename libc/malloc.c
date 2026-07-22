@@ -20,11 +20,7 @@
 #include <unistd.h>
 #endif
 
-#if 0
 #define STATIC static
-#else
-#define STATIC
-#endif
 
 #if defined(__6502__) || defined(__p_code__)
 #include "6502/_malloc.h"

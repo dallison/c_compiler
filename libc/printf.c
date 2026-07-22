@@ -15,13 +15,7 @@
 #include <string.h>
 #include <stddef.h>
 
-#ifdef PRINTF_SPECIALIZED_LONG
 #define STATIC static
-#elif 0
-#define STATIC static
-#else
-#define STATIC
-#endif
 
 #if 1
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in

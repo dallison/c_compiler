@@ -2,22 +2,24 @@
 #define __davecc_iostream_input_h__
 
 #include <streambuf>
-#include <cstdio>
+extern "C" {
+#include <unistd.h>
+}
 
 namespace std {
 
-class __stdio_istreambuf : public basic_streambuf<char, char_traits<char>> {
+class __fd_istreambuf : public basic_streambuf<char, char_traits<char>> {
  public:
-  explicit __stdio_istreambuf(FILE* file);
+  explicit __fd_istreambuf(int fd);
 
  protected:
   int_type underflow() override;
-  int_type uflow() override;
   int_type pbackfail(int_type c = traits_type::eof()) override;
-  streamsize xsgetn(char* s, streamsize n) override;
 
  private:
-  FILE* __file_;
+  static const int __buffer_size_ = 64;
+  int __fd_;
+  char __buffer_[__buffer_size_ + 1];
 };
 
 }  // namespace std

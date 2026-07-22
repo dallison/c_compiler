@@ -3,7 +3,7 @@
 
 namespace std {
 
-static __stdio_ostreambuf __cout_buffer(stdout);
+static __fd_ostreambuf __cout_buffer(STDOUT_FILENO);
 ostream cout(&__cout_buffer);
 
 }  // namespace std

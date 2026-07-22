@@ -2,28 +2,45 @@
 
 namespace std {
 
-__stdio_ostreambuf::__stdio_ostreambuf(FILE* file) : __file_(file) {}
+__fd_ostreambuf::__fd_ostreambuf(int fd) : __fd_(fd) {
+  setp(__buffer_, __buffer_ + __buffer_size_);
+}
 
-int __stdio_ostreambuf::overflow(int c) {
+__fd_ostreambuf::~__fd_ostreambuf() {
+  sync();
+}
+
+int __fd_ostreambuf::overflow(int c) {
+  if (sync() != 0) {
+    return traits_type::eof();
+  }
   if (traits_type::eq_int_type(c, traits_type::eof())) {
     return traits_type::not_eof(c);
   }
-  char ch = traits_type::to_char_type(c);
-  return fputc(static_cast<unsigned char>(ch), __file_) < 0
-             ? traits_type::eof()
-             : c;
+  *pptr() = traits_type::to_char_type(c);
+  pbump(1);
+  return c;
 }
 
-streamsize __stdio_ostreambuf::xsputn(const char* s, streamsize n) {
-  if (n <= 0) {
-    return 0;
+int __fd_ostreambuf::sync() {
+  char* current = pbase();
+  char* end = pptr();
+  while (current < end) {
+    ssize_t written =
+        write(__fd_, current, static_cast<size_t>(end - current));
+    if (written <= 0) {
+      int remaining = static_cast<int>(end - current);
+      for (int i = 0; i < remaining; i++) {
+        __buffer_[i] = current[i];
+      }
+      setp(__buffer_, __buffer_ + __buffer_size_);
+      pbump(remaining);
+      return -1;
+    }
+    current += written;
   }
-  return static_cast<streamsize>(
-      fwrite(s, 1, static_cast<size_t>(n), __file_));
-}
-
-int __stdio_ostreambuf::sync() {
-  return fflush(__file_) == 0 ? 0 : -1;
+  setp(__buffer_, __buffer_ + __buffer_size_);
+  return 0;
 }
 
 }  // namespace std

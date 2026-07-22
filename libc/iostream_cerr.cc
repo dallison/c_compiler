@@ -3,7 +3,7 @@
 
 namespace std {
 
-static __stdio_ostreambuf __cerr_buffer(stderr);
+static __fd_ostreambuf __cerr_buffer(STDERR_FILENO);
 ostream cerr(&__cerr_buffer);
 
 class __cerr_initializer {

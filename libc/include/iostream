@@ -3,8 +3,8 @@
 //  c_compiler
 //
 //  C++20 <iostream> support for DaveCC: the standard stream objects cin, cout,
-//  cerr and clog (narrow-character only). Small dedicated buffers wrap the C
-//  standard streams without pulling the complete <fstream> implementation.
+//  cerr and clog (narrow-character only). Small dedicated buffers use the
+//  standard POSIX file descriptors directly.
 //
 #ifndef __davecc_iostream__
 #define __davecc_iostream__

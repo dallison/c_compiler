@@ -1144,8 +1144,6 @@ libc_srcs=(
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
-  "libc/cxx_tls.c"
-  "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
   "libc/eh_throw.c"

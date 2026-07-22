@@ -11,36 +11,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#if 0
 #define STATIC static
-#else
-#define STATIC
-#endif
 
-STATIC char s_stdin_buf[BUFSIZE];
-STATIC char s_stdout_buf[BUFSIZE];
+STATIC char __davecc_stdin_buffer[BUFSIZE];
+STATIC char __davecc_stdout_buffer[BUFSIZE];
 
-STATIC FILE s_stdin, s_stdout, s_stderr;
-STATIC FILE s_stdin = {.fd = 0,
-                       .buf = s_stdin_buf,
-                       .bufsize = BUFSIZE,
-                       .buffering_mode = _IOLBF,
-                       .prev = NULL,
-                       .next = &s_stdout};
-STATIC FILE s_stdout = {.fd = 1,
-                        .buf = s_stdout_buf,
-                        .bufsize = BUFSIZE,
-                        .buffering_mode = _IOLBF,
-                        .prev = &s_stdin,
-                        .next = &s_stderr};
-STATIC FILE s_stderr = {.fd = 2, .buffering_mode = _IONBF, .prev = &s_stdout};
+STATIC FILE __davecc_stdin, __davecc_stdout, __davecc_stderr;
+STATIC FILE __davecc_stdin = {.fd = 0,
+                              .buf = __davecc_stdin_buffer,
+                              .bufsize = BUFSIZE,
+                              .buffering_mode = _IOLBF,
+                              .prev = NULL,
+                              .next = &__davecc_stdout};
+STATIC FILE __davecc_stdout = {.fd = 1,
+                               .buf = __davecc_stdout_buffer,
+                               .bufsize = BUFSIZE,
+                               .buffering_mode = _IOLBF,
+                               .prev = &__davecc_stdin,
+                               .next = &__davecc_stderr};
+STATIC FILE __davecc_stderr = {
+    .fd = 2, .buffering_mode = _IONBF, .prev = &__davecc_stdout};
 
-FILE* stdin = &s_stdin;
-FILE* stdout = &s_stdout;
-FILE* stderr = &s_stderr;
+FILE* stdin = &__davecc_stdin;
+FILE* stdout = &__davecc_stdout;
+FILE* stderr = &__davecc_stderr;
 
-FILE* __all_files = &s_stdin;
-FILE* __last_file = &s_stderr;
+FILE* __all_files = &__davecc_stdin;
+FILE* __last_file = &__davecc_stderr;
+
+void __davecc_stdio_fini(void) {
+  fflush(NULL);
+}
 
 // setbuf/setvbuf are in stdio_setvbuf.c and feof/ferror/clearerr are in
 // stdio_flags.c so this file (pulled in by the stdin/stdout/stderr globals)

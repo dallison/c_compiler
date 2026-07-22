@@ -4,10 +4,10 @@
 //
 //  C++20 <ostream> support for DaveCC: basic_ostream and its formatted /
 //  unformatted output operations.  Integer digit conversion uses the compact
-//  __itoa helpers (so iostream doesn't drag in the printf machinery); floating
-//  point still formats through __snprintf_fp.  Field width, fill and
-//  adjustfield are applied here so arbitrary fill characters and internal
-//  padding behave per the standard.
+//  __itoa helpers, and floating-point conversion uses the lower-level ftoa
+//  helpers, so iostream doesn't drag in the printf machinery. Field width,
+//  fill and adjustfield are applied here so arbitrary fill characters and
+//  internal padding behave per the standard.
 //
 
 #ifndef __davecc_ostream__
@@ -18,10 +18,11 @@
 #include <iosfwd>
 #include <__char_traits>
 #include <__itoa.h>
-#include <cstdio>
 #include <string.h>
 
-extern "C" int __snprintf_fp(char*, size_t, const char*, ...);
+extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
+extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
+extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
 
 namespace std {
 
@@ -320,43 +321,70 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return __put_bytes(buf, n, __prefix_len(buf, n));
   }
   basic_ostream& __put_float(double v) {
-    char spec[16];
-    char buf[64];
+    char raw_buffer[64];
+    char formatted[66];
     ios_base::fmtflags ff = this->flags() & ios_base::floatfield;
     bool upper = (this->flags() & ios_base::uppercase) != 0;
     bool showpos = (this->flags() & ios_base::showpos) != 0;
     bool showpoint = (this->flags() & ios_base::showpoint) != 0;
-    char conv;
+    int precision = static_cast<int>(this->precision());
+    if (precision <= 0) {
+      precision = 6;
+    }
+    char* raw;
     if (ff == ios_base::fixed) {
-      conv = upper ? 'F' : 'f';
+      if (precision > static_cast<int>(sizeof(raw_buffer) - 2)) {
+        precision = sizeof(raw_buffer) - 2;
+      }
+      raw = __PrintFloatFormat(v, precision, raw_buffer, sizeof(raw_buffer));
     } else if (ff == ios_base::scientific) {
-      conv = upper ? 'E' : 'e';
+      if (precision > static_cast<int>(sizeof(raw_buffer) - 5)) {
+        precision = sizeof(raw_buffer) - 5;
+      }
+      raw = __PrintScientificFormat(v, precision, raw_buffer,
+                                    sizeof(raw_buffer));
     } else {
-      conv = upper ? 'G' : 'g';
+      if (precision > static_cast<int>(sizeof(raw_buffer) - 5)) {
+        precision = sizeof(raw_buffer) - 5;
+      }
+      raw = __PrintGeneralFormat(v, precision, raw_buffer, sizeof(raw_buffer));
     }
-    char* p = spec;
-    *p++ = '%';
-    if (showpos) {
-      *p++ = '+';
+
+    size_t raw_length = strlen(raw);
+    bool has_point = false;
+    bool special = false;
+    size_t exponent = raw_length;
+    for (size_t i = 0; i < raw_length; i++) {
+      if (raw[i] == '.') {
+        has_point = true;
+      } else if (raw[i] == 'e' || raw[i] == 'E') {
+        exponent = i;
+      } else if ((raw[i] >= 'a' && raw[i] <= 'z') ||
+                 (raw[i] >= 'A' && raw[i] <= 'Z')) {
+        special = true;
+      }
     }
-    if (showpoint) {
-      *p++ = '#';
+
+    size_t n = 0;
+    if (showpos && (raw_length == 0 || raw[0] != '-')) {
+      formatted[n++] = '+';
     }
-    *p++ = '.';
-    *p++ = '*';
-    *p++ = conv;
-    *p = '\0';
-    int prec = static_cast<int>(this->precision());
-    int n = __snprintf_fp(buf, sizeof(buf), spec, prec, v);
-    if (n < 0) {
-      n = 0;
+    for (size_t i = 0; i < raw_length; i++) {
+      if (showpoint && !has_point && !special && i == exponent) {
+        formatted[n++] = '.';
+      }
+      char c = raw[i];
+      if (upper && c >= 'a' && c <= 'z') {
+        c -= 'a' - 'A';
+      }
+      formatted[n++] = c;
     }
-    size_t un = static_cast<size_t>(n);
-    if (un >= sizeof(buf)) {
-      un = sizeof(buf) - 1;
+    if (showpoint && !has_point && !special && exponent == raw_length) {
+      formatted[n++] = '.';
     }
-    size_t prefix = (un > 0 && (buf[0] == '-' || buf[0] == '+')) ? 1 : 0;
-    return __put_bytes(buf, un, prefix);
+    size_t prefix =
+        (n > 0 && (formatted[0] == '-' || formatted[0] == '+')) ? 1 : 0;
+    return __put_bytes(formatted, n, prefix);
   }
 };
 
