@@ -90,11 +90,13 @@ layout {
   text_segment {
     region {
       name: "text"
+      section: ".ARM.exidx"
       section: ".text"
       section: ".rodata"
       section: ".ARM.exidx"
       section: ".ARM.extab"
       section: ".davecc_except_table"
+      section: ".ARM.extab"
       start_addr: 0x40000000
       alignment: 0x1000
     }

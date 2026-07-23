@@ -206,8 +206,20 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_ARM_ABS32:
     case R_ARM_TARGET1:
+    case R_ARM_TARGET2:
       *(int32_t*)target_address = (int32_t)(S + A);
       return;
+
+    case R_ARM_PREL31: {
+      int64_t value = (int64_t)(S + A - P);
+      if (value < 0 || value > 0x7fffffffLL) {
+        LinkerError(file, "R_ARM_PREL31 relocation out of range at offset 0x%x",
+                    reloc->offset);
+        return;
+      }
+      *(uint32_t*)target_address = (uint32_t)value & 0x7fffffffu;
+      return;
+    }
 
     case R_ARM_REL32:
       *(int32_t*)target_address = (int32_t)(S + A - P);

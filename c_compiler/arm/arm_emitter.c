@@ -12,12 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "codegen.h"
 #include "compiler.h"
 #include "arm_assembler.h"
+#include "elf.h"
 #include "arm_codegen.h"
 #include "arm_reg_alloc.h"
 #include "target_basic_block.h"
-#include "eh_abi_sections.h"
 
 static void Trap() {}
 
@@ -1984,6 +1985,86 @@ static void ARMPrintTypeInfoRecords(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, "\t.text\n\n");
 }
 
+typedef enum {
+  kARMUnwindNone,
+  kARMUnwindFramePointer,
+  kARMUnwindLinkRegister,
+} ARMUnwindKind;
+
+static ARMUnwindKind ARMUnwindKindForFunction(ARMEmitter* emitter) {
+  if (emitter->g->base.varargs) {
+    return kARMUnwindNone;
+  }
+  if (OmitFramePointer(emitter)) {
+    if (EmptyStackFrame(emitter) &&
+        (emitter->g->base.num_calls > 0 || emitter->g->not_leaf)) {
+      return kARMUnwindLinkRegister;
+    }
+    return kARMUnwindNone;
+  }
+  if (EmptyStackFrame(emitter)) {
+    return kARMUnwindLinkRegister;
+  }
+  return kARMUnwindFramePointer;
+}
+
+static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
+                          const char* func_name) {
+  ARMUnwindKind kind = ARMUnwindKindForFunction(emitter);
+  bool has_exceptions = emitter->g->exception_ranges.length > 0;
+
+  fprintf(fp, "\t.section \".ARM.exidx\", \"aL\", @unwind\n");
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, ".Lexidx_%s:\n", func_name);
+  fprintf(fp, "\t.word %s\n", func_name);
+  if (kind == kARMUnwindNone) {
+    fprintf(fp, "\t.word %d\n", EXIDX_CANTUNWIND);
+  } else if (kind == kARMUnwindLinkRegister) {
+    fprintf(fp, "\t.word __davecc_arm_unwind_lr\n");
+  } else {
+    fprintf(fp, "\t.word __davecc_arm_unwind_fp\n");
+  }
+  fprintf(fp, "\t.text\n\n");
+
+  if (!has_exceptions || kind == kARMUnwindNone) {
+    return;
+  }
+
+  fprintf(fp, "\t.section \".ARM.extab\", \"a\", @progbits\n");
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.global __davecc_extab_%s\n", func_name);
+  fprintf(fp, "\t.type __davecc_extab_%s, @object\n", func_name);
+  fprintf(fp, "__davecc_extab_%s:\n", func_name);
+  fprintf(fp, "\t.word 0\n");
+  if (kind == kARMUnwindLinkRegister) {
+    fprintf(fp, "\t.byte 0x90, 0x0e\n");
+  } else {
+    fprintf(fp, "\t.byte 0x90, 0x0b\n");
+    fprintf(fp, "\t.byte 0x90, 0x0f\n");
+  }
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.text\n\n");
+}
+
+void ARMPrintEHABISupport(FILE* fp) {
+  fprintf(fp, "\t.section \".ARM.extab\", \"a\", @progbits\n");
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.weak __davecc_arm_unwind_fp\n");
+  fprintf(fp, "\t.type __davecc_arm_unwind_fp, @object\n");
+  fprintf(fp, "__davecc_arm_unwind_fp:\n");
+  fprintf(fp, "\t.word 0\n");
+  fprintf(fp, "\t.byte 0x90, 0x0b\n");
+  fprintf(fp, "\t.byte 0x90, 0x0f\n");
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.weak __davecc_arm_unwind_lr\n");
+  fprintf(fp, "\t.type __davecc_arm_unwind_lr, @object\n");
+  fprintf(fp, "__davecc_arm_unwind_lr:\n");
+  fprintf(fp, "\t.word 0\n");
+  fprintf(fp, "\t.byte 0x90, 0x0e\n");
+  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.text\n\n");
+}
+
 static void ARMPrintExceptionTable(ARMEmitter* emitter, FILE* fp,
                                    const char* func_name) {
   if (emitter->g->exception_ranges.length == 0) {
@@ -2032,13 +2113,12 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   ARMPrintTypeInfoRecords(emitter, fp);
-  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->g->exception_typeinfos, false);
-  EHABIPrintARMExidxExtab(fp, func_name,
-                          emitter->g->exception_ranges.length > 0);
+  ARMPrintExidx(emitter, fp, func_name);
   ARMPrintExceptionTable(emitter, fp, func_name);
 }
 
 void ARMPrintCXXAdjustorThunks(FILE* fp) {
+  ARMPrintEHABISupport(fp);
   if (compiler->cxx_this_adjustor_thunks.length == 0) {
     return;
   }

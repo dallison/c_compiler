@@ -180,6 +180,9 @@ static void PrintSections(ELFReaderFile* elf) {
       case SHT(gnu_hash):     // GNU hash table.
          type = "gnu_hash";
          break;
+      case SHT(ARM_EXIDX):
+         type = "ARM_EXIDX";
+         break;
     }
     
     String flags;
@@ -191,6 +194,7 @@ static void PrintSections(ELFReaderFile* elf) {
     AddFlag(section->header->flags, SHF(merge), "m", &flags);
     AddFlag(section->header->flags, SHF(strings), "s", &flags);
     AddFlag(section->header->flags, SHF(tls), "t", &flags);
+    AddFlag(section->header->flags, SHF(link_order), "l", &flags);
     
     ELFReaderSection* link = elf->sections.value.p[section->header->link];
     printf("%3zd: %-20s %-8s %-4s %08" PRIx64 " %08" PRIx64 " %08" PRIx64 " %-8s %-3d\n", i, section->name.value, type, flags.value,
@@ -525,6 +529,27 @@ static const char* W65C02RelocType(int32_t reloc_type) {
   return "unknown";
 }
 
+static const char* ARMRelocType(int32_t reloc_type) {
+  switch (reloc_type) {
+    case R_ARM_NONE:
+      return "R_ARM_NONE";
+    case R_ARM_ABS32:
+      return "R_ARM_ABS32";
+    case R_ARM_REL32:
+      return "R_ARM_REL32";
+    case R_ARM_TARGET2:
+      return "R_ARM_TARGET2";
+    case R_ARM_PREL31:
+      return "R_ARM_PREL31";
+    case R_ARM_CALL:
+      return "R_ARM_CALL";
+    case R_ARM_JUMP24:
+      return "R_ARM_JUMP24";
+    default:
+      return "unknown";
+  }
+}
+
 static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
                             const char* symbol_table_address,
                             ELFReaderSection* reloc_section,
@@ -562,6 +587,9 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
     case ELF_MACHINE_TYPEW65C02:
       StringSet(&type, W65C02RelocType(reloc_type));
       break;
+    case ELF_MACHINE_TYPE_ARM:
+      StringSet(&type, ARMRelocType(reloc_type));
+      break;
     default:
       StringPrintf(&type, "%08x", reloc_type);
       break;
@@ -578,6 +606,12 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
          sym_name.value);
   if (addend != 0) {
     printf(" + %" PRId64 "", addend);
+  }
+  if (bad_symbol) {
+    printf("\n");
+    StringDestruct(&type);
+    StringDestruct(&sym_name);
+    return;
   }
   DAsmArchitecture arch;
   if ((target_section->header->flags & SHF(execinstr)) != 0 &&

@@ -548,6 +548,18 @@ int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
     } else if (StringEqual(name, ".data")) {
       flags |= SHF(write);
       type = SHT(progbits);
+    } else if (StringEqual(name, ".ARM.exidx")) {
+      type = SHT(ARM_EXIDX);
+      flags |= SHF(link_order) | SHF(alloc);
+      if (alignment < 4) {
+        alignment = 4;
+      }
+    } else if (StringEqual(name, ".ARM.extab")) {
+      type = SHT(progbits);
+      flags |= SHF(alloc);
+      if (alignment < 2) {
+        alignment = 2;
+      }
     }
   }
   AssemblerSection* section = NewAssemblerSection(name, type, flags, alignment);
@@ -1047,21 +1059,34 @@ static void HandleDirective_size(Assembler* assembler) {
 
 static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-    AssemblerSymbol* sym =
-    AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
+    String spelling = assembler->lex.spelling;
+    AssemblerSymbol* sym = AssemblerFindSymbol(assembler, spelling.value);
     LexNextToken(&assembler->lex);
     if (sym == NULL) {
-      // No symbol found.  In pass 1 this might happen due to a forward
-      // reference.  In pass 2 it's an error.
-      if (assembler->pass == 2) {
-        AssemblerError(assembler, "No such symbol %s",
-                       assembler->lex.spelling.value);
-        return NULL;
-      }
+      sym = NewAssemblerSymbol(spelling.value, 0, SYM_TYPE(none),
+                               SYM_BIND(global), 0);
+      sym->exported = true;
+      sym->defined = false;
+      AssemblerInsertSymbol(assembler, sym);
     }
     return sym;
   }
   return NULL;
+}
+
+static int RelocTypeForWord(Assembler* assembler) {
+  if (assembler->elf_machine_type == ELF_MACHINE_TYPE_ARM &&
+      assembler->current_section >= 0 &&
+      (size_t)assembler->current_section < assembler->sections.length) {
+    AssemblerSection* section =
+        assembler->sections.value.p[assembler->current_section];
+    if (section->name != NULL &&
+        (strcmp(section->name->value, ".ARM.exidx") == 0 ||
+         strcmp(section->name->value, ".ARM.extab") == 0)) {
+      return R_ARM_PREL31;
+    }
+  }
+  return assembler->reloc_types[kRelocSet32];
 }
 
 // We only support simple expressions involving assembler symbols.  These can
@@ -1075,6 +1100,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     return 0;
   }
   int reloc_index = kRelocSet32;
+  (void)reloc_index;
   switch (bits) {
     case 16:
       reloc_index = kRelocSet16;
@@ -1095,7 +1121,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   // label.  Maybe later.  The problem is that the section symbols aren't
   // created until we add the sections to the ELF file.
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-          left, assembler->reloc_types[reloc_index],
+          left, RelocTypeForWord(assembler),
           assembler->current_section,
                   (int32_t)AssemblerCurrentAddress(assembler), 0);
   
@@ -1408,6 +1434,9 @@ static void HandleDirective_section(Assembler* assembler) {
             case 'T':
               flags |= SHF(tls);
               break;
+            case 'L':
+              flags |= SHF(link_order);
+              break;
           }
         }
         LexNextToken(&assembler->lex);
@@ -1427,6 +1456,8 @@ static void HandleDirective_section(Assembler* assembler) {
             } else if (strcmp(assembler->lex.spelling.value,
                               "@preinit_array") == 0) {
               type = SHT(preinit_array);
+            } else if (strcmp(assembler->lex.spelling.value, "@unwind") == 0) {
+              type = SHT(ARM_EXIDX);
             }
             LexNextToken(&assembler->lex);
           }

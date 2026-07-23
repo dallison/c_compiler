@@ -1286,6 +1286,31 @@ static void InventExceptionTableBounds(Linker* linker) {
   InventSymbol(linker, "__davecc_except_table_end", 8, end);
 }
 
+static void InventARMExidxBounds(Linker* linker) {
+  if (linker->elf_machine_type != ELF_MACHINE_TYPE_ARM) {
+    return;
+  }
+  SectionGroup* exidx = FindSectionGroup(linker, ".ARM.exidx");
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (exidx != NULL && exidx->region != NULL) {
+    start = exidx->address;
+    end = start + SectionGroupSize(exidx);
+  }
+  InventSymbol(linker, "__exidx_start", 4, start);
+  InventSymbol(linker, "__exidx_end", 4, end);
+
+  SectionGroup* extab = FindSectionGroup(linker, ".ARM.extab");
+  start = 0;
+  end = 0;
+  if (extab != NULL && extab->region != NULL) {
+    start = extab->address;
+    end = start + SectionGroupSize(extab);
+  }
+  InventSymbol(linker, "__extab_start", 4, start);
+  InventSymbol(linker, "__extab_end", 4, end);
+}
+
 static void LinkerInventArrayBoundsSymbols(Linker* linker) {
   static const struct {
     const char* section_name;
@@ -1544,6 +1569,10 @@ void LinkerLinkAllFiles(Linker* linker) {
   // that have data associated with them in the ELF file.  This also
   // adds the grouped sections to the appropriate segment (code, data or tls).
   GroupSections(linker, SHT(progbits), 0);
+
+  if (linker->elf_machine_type == ELF_MACHINE_TYPE_ARM) {
+    GroupSections(linker, SHT(ARM_EXIDX), 0);
+  }
 
   // Group init/fini/preinit array sections (including legacy .ctors/.dtors).
   LinkerGroupArraySections(linker);

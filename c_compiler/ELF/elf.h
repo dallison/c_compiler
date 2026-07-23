@@ -413,7 +413,10 @@ typedef struct  {
 #define R_ARM_CALL_PLT R_ARM_PLT32
 #define R_ARM_32 R_ARM_ABS32
 #define R_ARM_TARGET1 38
+#define R_ARM_TARGET2 41
+#define R_ARM_PREL31 42
 #define R_ARM_V4BX 40
+#define EXIDX_CANTUNWIND 1
 #define R_ARM_MOVW_ABS_NC 43
 #define R_ARM_MOVT_ABS 44
 #define R_ARM_MOVW_PREL_NC 45
@@ -481,6 +484,7 @@ typedef enum {
   SHT(fini_array) = 15,     // Array of termination function pointers.
   SHT(preinit_array) = 16,  // Array of pre-initialization function pointers.
   SHT(gnu_hash) = 0x6ffffff6,     // GNU hash table.
+  SHT(ARM_EXIDX) = 0x70000001,    // ARM exception index table.
   SHT(num),
 } ELFSectionType;
 
@@ -494,6 +498,7 @@ typedef enum {
   SHF(merge) = 0x10,                 // Mergeable.
   SHF(strings) = 0x20,               // Contains strings.
   SHF(tls) = (1 << 10),              // Thread Local Storage.
+  SHF(link_order) = (1 << 7),        // Preserve section order for linking.
 } ELFSectionFlags;
 
 // A section header.

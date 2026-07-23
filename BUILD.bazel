@@ -182,6 +182,7 @@ LIBC_SRCS = [
     "libc/cxx_rtti.c",
     "libc/davecc_lifecycle.c",
     "libc/eh_frame.c",
+    "libc/eh_arm.c",
     "libc/eh_frame_pointer.c",
     "libc/eh_cxa.c",
     "libc/eh_terminate.c",
@@ -1769,6 +1770,8 @@ cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "arm support/cxx_guard.s"
+  "arm support/eh_personality.s"
+  "arm support/eh_unwind.s"
   "arm support/eh_transfer.s"
   "arm support/longjmp.s"
   "arm support/setjmp.s"
@@ -1795,6 +1798,7 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_arm.c"
   "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
@@ -2267,6 +2271,19 @@ sh_test(
         ":libc_headers",
         ":libc_riscv",
         ":libc_x86_64",
+    ],
+)
+
+sh_test(
+    name = "arm_exidx_smoke_test",
+    srcs = ["tests/arm_exidx_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
     ],
 )
 

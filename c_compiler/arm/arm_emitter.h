@@ -31,5 +31,6 @@ void ARMEmitterDelete(ARMEmitter* emitter);
 
 void ARMPrintFunction(ARMEmitter* emitter, FILE* fp);
 void ARMPrintCXXAdjustorThunks(FILE* fp);
+void ARMPrintEHABISupport(FILE* fp);
 
 #endif /* arm_emitter_h */
