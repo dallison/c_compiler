@@ -2,13 +2,18 @@
 #define DAVECC_UNWIND_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct _Unwind_Context _Unwind_Context;
 typedef struct _Unwind_Exception _Unwind_Exception;
+typedef struct _Unwind_Context _Unwind_Context;
+
+typedef unsigned long long _Unwind_Exception_Class;
+typedef unsigned long _Unwind_Word;
+typedef long _Unwind_Sword;
 
 typedef enum {
   _URC_NO_REASON = 0,
@@ -31,27 +36,31 @@ typedef enum {
 
 typedef _Unwind_Reason_Code (*_Unwind_Personality_Fn)(int version,
                                                       _Unwind_Action actions,
-                                                      uint64_t exception_class,
+                                                      _Unwind_Exception_Class
+                                                          exception_class,
                                                       _Unwind_Exception* exc,
                                                       _Unwind_Context* ctx);
 
+typedef void (*_Unwind_Exception_Cleanup_Fn)(
+    _Unwind_Reason_Code reason, _Unwind_Exception* exc);
+
 struct _Unwind_Exception {
-  uint64_t exception_class;
-  void (*exception_cleanup)(_Unwind_Reason_Code reason,
-                            struct _Unwind_Exception* exc);
-  uintptr_t private_1;
-  uintptr_t private_2;
+  _Unwind_Exception_Class exception_class;
+  _Unwind_Exception_Cleanup_Fn exception_cleanup;
+  _Unwind_Word private_1;
+  _Unwind_Word private_2;
 };
 
 _Unwind_Reason_Code _Unwind_RaiseException(_Unwind_Exception* exc);
 void _Unwind_Resume(_Unwind_Exception* exc);
+void _Unwind_DeleteException(_Unwind_Exception* exc);
 uintptr_t _Unwind_GetIP(_Unwind_Context* ctx);
 void _Unwind_SetIP(_Unwind_Context* ctx, uintptr_t ip);
 uintptr_t _Unwind_GetLanguageSpecificData(_Unwind_Context* ctx);
 uintptr_t _Unwind_GetRegionStart(_Unwind_Context* ctx);
 
 _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
-                                        uint64_t exception_class,
+                                        _Unwind_Exception_Class exception_class,
                                         _Unwind_Exception* exc,
                                         _Unwind_Context* ctx);
 

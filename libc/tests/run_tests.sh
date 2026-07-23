@@ -84,19 +84,19 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
 
   case "$target" in
     x86_64)
-      rt_cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
+      rt_cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc -Ilibc/tests)
       link_cflags=(-target x86_64 -O1 -static -Wl,-e -Wl,main)
       ;;
     aarch64)
-      rt_cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
+      rt_cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc -Ilibc/tests)
       link_cflags=(-target aarch64 -O0 -static -Wl,-e -Wl,main)
       ;;
     arm)
-      rt_cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
+      rt_cflags=(-target arm -O0 -c -isystem libc/include -Ilibc -Ilibc/tests)
       link_cflags=(-target arm -O0 -static -Wl,-e -Wl,main)
       ;;
     riscv)
-      rt_cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
+      rt_cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc -Ilibc/tests)
       link_cflags=(-target riscv -O1 -static -Wl,-e -Wl,main)
       ;;
   esac
@@ -228,9 +228,12 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
       libc/tests/runtime/main.c \
       libc/tests/runtime/test_core.c; do
     obj="$work/$(basename "${src%.c}").o"
-    "$davecc" "${rt_cflags[@]}" -Ilibc/tests "$src" -o "$obj"
+    "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
     test_objs+=("$obj")
   done
+  eh_cxa_obj="$work/test_eh_cxa.o"
+  "$davecc" "${rt_cflags[@]}" -std=c++20 libc/tests/runtime/test_eh_cxa.cc -o "$eh_cxa_obj"
+  test_objs+=("$eh_cxa_obj")
 
   exe="$work/libc_runtime_test.exe"
   if [ -n "${LIBC_ARCHIVE:-}" ] && [ -f "$LIBC_ARCHIVE" ]; then
@@ -253,6 +256,8 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     "$davecc" "${link_cflags[@]}" \
       "${test_objs[@]}" "${runtime_objs[@]}" \
       libc/eh_frame.c \
+      libc/eh_cxa.c \
+      libc/exception.cc \
       -o "$exe"
   else
     abs_obj="$work/abs.o"
@@ -292,14 +297,20 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
         libc/tests/runtime/main.c \
         libc/tests/runtime/test_core.c; do
       obj="$work/$(basename "${src%.c}").o"
-      "$davecc" -target x86_64 -O1 -c -isystem libc/include -Ilibc/tests "$src" -o "$obj"
+      "$davecc" -target x86_64 -O1 -c -isystem libc/include -Ilibc -Ilibc/tests "$src" -o "$obj"
       test_objs+=("$obj")
     done
+    eh_cxa_obj="$work/test_eh_cxa.o"
+    "$davecc" -target x86_64 -O1 -c -isystem libc/include -Ilibc -Ilibc/tests \
+      -std=c++20 libc/tests/runtime/test_eh_cxa.cc -o "$eh_cxa_obj"
+    test_objs+=("$eh_cxa_obj")
 
     exe="$work/libc_runtime_test.exe"
     "$davecc" -target x86_64 -static -Wl,-e -Wl,main \
       "${test_objs[@]}" "${runtime_objs[@]}" \
       libc/eh_frame.c \
+      libc/eh_cxa.c \
+      libc/exception.cc \
       -o "$exe"
 
     run_step "runtime libc tests (full)" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'

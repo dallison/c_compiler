@@ -183,6 +183,7 @@ LIBC_SRCS = [
     "libc/davecc_lifecycle.c",
     "libc/eh_frame.c",
     "libc/eh_frame_pointer.c",
+    "libc/eh_cxa.c",
     "libc/eh_terminate.c",
     "libc/eh_personality.c",
     "libc/eh_throw.c",
@@ -1158,6 +1159,7 @@ libc_srcs=(
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_cxa.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
@@ -1313,6 +1315,7 @@ libc_srcs=(
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
   "libc/eh_frame.c"
+  "libc/eh_cxa.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
