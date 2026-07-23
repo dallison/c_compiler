@@ -2268,7 +2268,7 @@ sh_test(
         ":davecc",
         ":libc_x86_64",
         ":x86_64",
-        "libc/include/typeinfo",
+        ":libc_headers",
         "tests/itanium_rtti_cases.cpp",
         "//cxx_testsuite:tests/exec/0089_typeid.cpp",
         "//cxx_testsuite:tests/exec/0090_dynamic_cast.cpp",

@@ -2176,25 +2176,63 @@ static Symbol* GetDaveCCDynamicCastFunction(bool is_reference,
   return symbol;
 }
 
+static Symbol* GetItaniumDynamicCastFunction(bool is_reference,
+                                             SourceLocation location) {
+  const char* func_name =
+      is_reference ? "__dynamic_cast_ref" : "__dynamic_cast";
+  String name;
+  StringInit(&name, func_name);
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_ptr);
+  symbol = NewSymbol(func_name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
 // Lowers a polymorphic dynamic_cast (downcast/sidecast) into a call to the RTTI
 // runtime.  The pointer form yields the runtime result directly (null on
 // failure); the reference form calls the throwing variant.
 static IRNode* GenerateDynamicCast(Generator* gen, CastASTNode* node) {
   bool is_reference = TypeIsReference(node->cast_type);
-  TypeRecord* dest_class =
-      is_reference ? node->cast_type->next : node->cast_type->next;
+  TypeRecord* dest_class = node->cast_type->next;
+  TypeRecord* from = node->expr->type;
+  TypeRecord* src_class = TypeIsReference(from) ? from->next : from->next;
   IRNode* source = GenerateExpression(gen, node->expr);
 
-  Symbol* type_info_symbol = RttiGetTypeInfoSymbol(dest_class);
-  Symbol* func_symbol =
-      GetDaveCCDynamicCastFunction(is_reference, node->base.location);
+  Symbol* dst_type_info = RttiGetTypeInfoSymbol(dest_class);
+  Symbol* func_symbol = RttiUsesItaniumABI()
+                            ? GetItaniumDynamicCastFunction(
+                                  is_reference, node->base.location)
+                            : GetDaveCCDynamicCastFunction(
+                                  is_reference, node->base.location);
   IRNode* func = GeneratorGetVariable(gen, func_symbol);
-  IRNode* type_info = GeneratorGetVariable(gen, type_info_symbol);
+  IRNode* dst_info = GeneratorGetVariable(gen, dst_type_info);
 
   IRNode* call = NewIR1(IR_OP(calla), func);
   Vector args = {0};
-  PushArg(gen, call, type_info, 1, &args);
-  PushArg(gen, call, source, 0, &args);
+  if (RttiUsesItaniumABI()) {
+    Symbol* src_type_info = RttiGetTypeInfoSymbol(src_class);
+    TypeRecord* ptrdiff_type = NewTypeRecordWithSize(
+        SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
+    IRNode* src2dst = GeneratorGetIntConstant(gen, ptrdiff_type, -1);
+    PushArg(gen, call, src2dst, 3, &args);
+    PushArg(gen, call, dst_info, 2, &args);
+    PushArg(gen, call, GeneratorGetVariable(gen, src_type_info), 1, &args);
+    PushArg(gen, call, source, 0, &args);
+  } else {
+    PushArg(gen, call, dst_info, 1, &args);
+    PushArg(gen, call, source, 0, &args);
+  }
   for (ssize_t i = args.length - 1; i >= 0; i--) {
     IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
   }
