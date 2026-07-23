@@ -2521,22 +2521,29 @@ static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target) {
 }
 
 static ASTNode* AnalyzeInitialization(ASTNode* node,
-                                  IdentifierASTNode* id_node, ASTNode* init) {
-  (void)AnalyzeExpression(&id_node->base);
+                                      ASTNode* target, ASTNode* init) {
+  target = AnalyzeExpression(target);
   init = AnalyzeExpression(init);
-  if (TypeContainsAuto(id_node->symbol->type)) {
-    if (!SemanticDeduceAutoType(id_node->symbol, init, node)) {
+  Symbol* symbol = target != NULL && target->op == AST_OP(identifier)
+                       ? ((IdentifierASTNode*)target)->symbol
+                       : NULL;
+  if (target == NULL || target->type == NULL) {
+    SemanticError(node, "Initialization target has no type");
+    return init;
+  }
+  if (symbol != NULL && TypeContainsAuto(symbol->type)) {
+    if (!SemanticDeduceAutoType(symbol, init, node)) {
       return init;
     }
-    ASTNodeSetType(&id_node->base, id_node->symbol->type);
-    ASTNodeSetType(node, id_node->symbol->type);
+    ASTNodeSetType(target, symbol->type);
+    ASTNodeSetType(node, symbol->type);
   }
-  bool is_reference_init = TypeIsReference(id_node->symbol->type);
+  bool is_reference_init = TypeIsReference(target->type);
   switch (init->op) {
     case AST_OP(expr_init):{
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)init;
       if (is_reference_init) {
-        TypeRecord* reference_type = id_node->symbol->type;
+        TypeRecord* reference_type = target->type;
         bool rvalue_ref =
             reference_type->declarator == kDeclRValueReference;
         bool discards_qualifiers =
@@ -2588,36 +2595,36 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             CompilerIsCXX() && e->expr->op == AST_OP(call) &&
             e->expr->value_category != kValueCategoryXvalue &&
             !constructor_call &&
-            TypeIsStructOrUnion(id_node->base.type) &&
-            TypeEqual(e->expr->type, id_node->base.type);
+            TypeIsStructOrUnion(target->type) &&
+            TypeEqual(e->expr->type, target->type);
         if (!cxx_return_elision_initializer) {
-          NormalConversion(e->expr, id_node->base.type);
+          NormalConversion(e->expr, target->type);
         }
       }
       break;
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced = (BracedInitializerASTNode*)init;
-      if (!is_reference_init && TypeIsCXXInitializerList(id_node->base.type) &&
+      if (!is_reference_init && TypeIsCXXInitializerList(target->type) &&
           !TypeIsCXXInitializerList(init->type)) {
-        init = LowerCXXInitializerListBracedInit(id_node->base.type, braced,
+        init = LowerCXXInitializerListBracedInit(target->type, braced,
                                                 init->location);
         break;
       }
-      if (!is_reference_init && TypeIsScalar(id_node->base.type) &&
+      if (!is_reference_init && TypeIsScalar(target->type) &&
           braced->initializers->length == 1) {
         ASTNode* initializer = braced->initializers->value.p[0];
         if (initializer->op == AST_OP(designated_init)) {
           DesignatedInitializerASTNode* designated =
               (DesignatedInitializerASTNode*)initializer;
-          NormalConversion(designated->init, id_node->base.type);
-          DiagnoseScalarNarrowing(designated->init, id_node->base.type);
+          NormalConversion(designated->init, target->type);
+          DiagnoseScalarNarrowing(designated->init, target->type);
         } else {
           ASTNode* value_expr = initializer;
           if (value_expr->op == AST_OP(expr_init)) {
             value_expr = ((ExpressionInitializerASTNode*)value_expr)->expr;
           }
-          DiagnoseScalarNarrowing(value_expr, id_node->base.type);
+          DiagnoseScalarNarrowing(value_expr, target->type);
         }
       }
       break;
@@ -2625,23 +2632,29 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     default:
       break;
   }
-  ASTNodeSetType((ASTNode*)init, id_node->base.type);
-  ASTNodeSetType(node, id_node->base.type);
+  ASTNodeSetType((ASTNode*)init, target->type);
+  ASTNodeSetType(node, target->type);
 
-  if (!IsAssignable((ASTNode*)id_node, true)) {
-    SemanticError((ASTNode*)id_node,
+  if (!IsAssignable(target, true)) {
+    SemanticError(target,
                   "Cannot initialize a variable of this type");
     return init;
   }
 
+  if (symbol == NULL) {
+    ASTNode* simplified_init = AnalyzeInitializer(node->type, init, false);
+    ASTNodeReplaceChild(node, 1, simplified_init, true);
+    return simplified_init;
+  }
+
   
-  bool is_static_storage = StorageIs(id_node->symbol->storage, STO(static)) ||
-                           StorageIs(id_node->symbol->storage, STO(extern));
+  bool is_static_storage = StorageIs(symbol->storage, STO(static)) ||
+                           StorageIs(symbol->storage, STO(extern));
   bool constants_only = is_static_storage;
-  bool is_thread_local = StorageIs(id_node->symbol->storage, STO(thread));
+  bool is_thread_local = StorageIs(symbol->storage, STO(thread));
   bool is_cxx_local_static =
       CompilerIsCXX() && compiler->current_function != NULL &&
-      StorageIs(id_node->symbol->storage, STO(static)) && !is_thread_local;
+      StorageIs(symbol->storage, STO(static)) && !is_thread_local;
   if (is_thread_local) {
     ASTNode* init_expr = init;
     if (init_expr->op == AST_OP(expr_init)) {
@@ -2651,29 +2664,29 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       constants_only = IsConstantExpression(init_expr);
     }
   }
-  if (is_cxx_local_static && !id_node->symbol->flags.is_constexpr &&
-      !id_node->symbol->flags.is_constinit) {
+  if (is_cxx_local_static && !symbol->flags.is_constexpr &&
+      !symbol->flags.is_constinit) {
     constants_only = false;
   }
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
   // to the constant so we can use it as a constant in further expressions.
-  if (!id_node->symbol->flags.is_template &&
-      (TypeIsConst(id_node->symbol->type) ||
-       id_node->symbol->flags.is_constexpr ||
-       id_node->symbol->flags.is_constinit)) {
-    EvaluateConstantForSymbol(id_node->symbol, init);
+  if (!symbol->flags.is_template &&
+      (TypeIsConst(symbol->type) ||
+       symbol->flags.is_constexpr ||
+       symbol->flags.is_constinit)) {
+    EvaluateConstantForSymbol(symbol, init);
   }
   ASTNode* object_init = ConstexprObjectInitializerForSymbol(
-      id_node->symbol, init->location);
+      symbol, init->location);
   if (object_init != NULL) {
     init = object_init;
   }
   bool requires_constant_initializer =
-      constants_only || id_node->symbol->flags.is_constexpr ||
-      id_node->symbol->flags.is_constinit;
-  if (TypeIsMemberPointer(id_node->symbol->type)) {
+      constants_only || symbol->flags.is_constexpr ||
+      symbol->flags.is_constinit;
+  if (TypeIsMemberPointer(symbol->type)) {
     ASTNode* init_expr = init;
     if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
       init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
@@ -2682,40 +2695,40 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       UnaryASTNode* unary = (UnaryASTNode*)init_expr;
       if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
         StructMember* member = ((StructMemberASTNode*)unary->sub)->member;
-        Struct* class_info = TypeMemberPointerClass(id_node->symbol->type);
+        Struct* class_info = TypeMemberPointerClass(symbol->type);
         MemberPointerValue pm_value;
         if (member != NULL && class_info != NULL &&
             MemberPointerEncodeFromMember(member, class_info, &pm_value)) {
-          id_node->symbol->value.ivalue = pm_value.ptr;
-          id_node->symbol->flags.value_set = true;
-          id_node->symbol->value.other = member;
+          symbol->value.ivalue = pm_value.ptr;
+          symbol->flags.value_set = true;
+          symbol->value.other = member;
         }
       }
     } else if (init_expr != NULL) {
       MemberPointerValue pm_value;
-      if (MemberPointerTryEvaluateConstant(init_expr, id_node->symbol->type,
+      if (MemberPointerTryEvaluateConstant(init_expr, symbol->type,
                                            &pm_value)) {
         StructMember* member = MemberPointerMemberFromExpression(init_expr);
         if (member != NULL) {
-          id_node->symbol->value.other = member;
-        } else if (TypeIsMemberFunctionPointer(id_node->symbol->type) &&
+          symbol->value.other = member;
+        } else if (TypeIsMemberFunctionPointer(symbol->type) &&
             init_expr->op == AST_OP(member_ptr) &&
             ((UnaryASTNode*)init_expr)->sub != NULL &&
             ((UnaryASTNode*)init_expr)->sub->op == AST_OP(structmember)) {
-          id_node->symbol->value.other =
+          symbol->value.other =
               ((StructMemberASTNode*)((UnaryASTNode*)init_expr)->sub)->member;
         }
-        id_node->symbol->value.ivalue = pm_value.ptr;
-        id_node->symbol->flags.value_set = true;
+        symbol->value.ivalue = pm_value.ptr;
+        symbol->flags.value_set = true;
       }
     }
   }
-  if ((id_node->symbol->flags.is_constexpr ||
-       id_node->symbol->flags.is_constinit) &&
-      !id_node->symbol->flags.is_template &&
-      !id_node->symbol->flags.value_set) {
+  if ((symbol->flags.is_constexpr ||
+       symbol->flags.is_constinit) &&
+      !symbol->flags.is_template &&
+      !symbol->flags.value_set) {
     SemanticError(init,
-                  id_node->symbol->flags.is_constinit
+                  symbol->flags.is_constinit
                       ? "constinit variable initializer is not a constant expression"
                       : "constexpr variable initializer is not a constant expression");
   }
@@ -8722,10 +8735,10 @@ static void AnalyzeCastExpression(CastASTNode* node) {
   }
 }
 
-static void  AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
-  node->initializer = AnalyzeInitialization(&node->base,
-                                             (IdentifierASTNode*)node->sym,
-                        node->initializer);
+static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
+  node->initializer =
+      AnalyzeInitialization(&node->base, node->sym,
+                            node->initializer);
   // A C++ lambda-expression is a prvalue that materializes a temporary closure.
   // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
   if ((node->base.flags &
@@ -9224,7 +9237,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(init):
       binary_node->right = AnalyzeInitialization(node,
-                                                 (IdentifierASTNode*)binary_node->left,
+                                                 binary_node->left,
                             binary_node->right);
       break;
 

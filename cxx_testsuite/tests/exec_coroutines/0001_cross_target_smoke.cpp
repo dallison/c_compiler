@@ -6,7 +6,7 @@ struct Promise;
 
 struct CoroutineFrame {
   int state;
-  int done;
+  bool done;
   void (*resume)(void* handle);
   void (*destroy)(void* handle);
 };
@@ -105,7 +105,10 @@ struct Task {
 struct Promise {
   int value;
   Task get_return_object(void) {
-    Task task = {value, last_frame_handle};
+    Task task = {
+        value,
+        (void*)((char*)this - sizeof(CoroutineFrame))
+    };
     return task;
   }
   SuspendNever initial_suspend(void) {
@@ -148,7 +151,7 @@ bool frame_done(void* handle) {
 void resume_coroutine(void* handle) {
   CoroutineFrame* frame = (CoroutineFrame*)handle;
   frame->resume(handle);
-  unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+  unsigned long prefix_size = sizeof(CoroutineFrame);
   Promise* promise = (Promise*)((char*)handle + prefix_size);
   last_resume_value = promise->value;
 }

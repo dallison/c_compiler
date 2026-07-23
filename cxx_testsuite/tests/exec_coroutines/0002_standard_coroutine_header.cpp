@@ -2,6 +2,8 @@
 
 #include <coroutine>
 
+int returned_value;
+
 struct Promise;
 
 struct Task {
@@ -13,7 +15,7 @@ struct Promise {
   int value;
 
   Task get_return_object(void) {
-    Task task = {value};
+    Task task = {0};
     return task;
   }
 
@@ -28,7 +30,7 @@ struct Promise {
   }
 
   void return_value(int result) {
-    value = result;
+    returned_value = result;
   }
 
   void unhandled_exception(void) {
@@ -41,7 +43,7 @@ Task coroutine_header_smoke(int input) {
 
 int main(void) {
   Task result = coroutine_header_smoke(38);
-  if (result.value != 42) {
+  if (result.value != 0 || returned_value != 42) {
     return 1;
   }
 

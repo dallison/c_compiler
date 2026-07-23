@@ -145,10 +145,9 @@ static void AppendPersistedCoroutineLocalDestructors(
     ASTNode* return_statement, SourceLocation location);
 static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                               CoroutineFrame* frame,
-                                              Symbol* promise,
                                               ASTNode* await_suspend,
                                               TypeRecord* await_suspend_return,
-                                              TypeRecord* return_type,
+                                              Symbol* return_object,
                                               SourceLocation location);
 
 /* Clone callback that returns the node unchanged (shallow sharing). */
@@ -824,8 +823,8 @@ static ASTNode* NewFrameMemberAccess(CoroutineFrame* frame,
   return access;
 }
 
-/* Build a statement `frame->member = <int value>;` (e.g. setting the state or a
- * "constructed" flag). */
+/* Build a statement `frame->member = <scalar value>;` using the member's type
+ * for the constant. State is an int, while done/lifetime flags are bool. */
 static ASTNode* NewFrameIntAssignment(CoroutineFrame* frame,
                                       StructMember* member,
                                       int64_t value,
@@ -834,8 +833,7 @@ static ASTNode* NewFrameIntAssignment(CoroutineFrame* frame,
       NewBinaryASTNode(AST_OP(assign), member->symbol->type, location,
                        NewFrameMemberAccess(frame, member, location),
                        NewIntConstantASTNode(
-                           value,
-                           NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                           value, TypeRecordCopy(member->symbol->type),
                            location)),
       location);
 }
@@ -1410,30 +1408,34 @@ static ASTNode* NewFunctionAddress(Symbol* function,
   return address;
 }
 
-/* Build the ramp function's return: declare a temporary initialized from
- * `promise.get_return_object()` and return it (marked as a lowered coroutine
- * return so later passes don't re-lower it). */
-static ASTNode* NewCoroutineReturnObjectStatement(Symbol* promise,
-                                                  TypeRecord* return_type,
-                                                  SourceLocation location) {
-  ASTNode* return_object = NewCoroutinePromiseMemberCall(
-      promise, "get_return_object", NewVector(), location);
-  Symbol* result =
-      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(return_type));
-  result->flags.is_local = true;
-  result->flags.is_defined = true;
-  result->location = location;
+/* Declare the ramp's return object, initialized exactly once from
+ * `promise.get_return_object()`. */
+static ASTNode* NewCoroutineReturnObjectDeclaration(Symbol* promise,
+                                                    Symbol* return_object,
+                                                    SourceLocation location) {
   Vector* decls = NewVector();
   VectorAppend(decls,
                NewVariableDeclarationASTNode(
-                   result, NewExpressionInitializerASTNode(return_object,
-                                                           location),
+                   return_object,
+                   NewExpressionInitializerASTNode(
+                       NewCoroutinePromiseMemberCall(
+                           promise, "get_return_object", NewVector(), location),
+                       location),
                    location));
+  return NewDeclarationListASTNode(decls, location);
+}
+
+/* Return the ramp's previously-created return object. A null symbol is used
+ * while building the void-returning resume function. */
+static ASTNode* NewCoroutineReturnObjectStatement(Symbol* return_object,
+                                                  SourceLocation location) {
   Vector* statements = NewVector();
-  VectorAppend(statements, NewDeclarationListASTNode(decls, location));
   ASTNode* return_stmt =
       NewCombinedStatementASTNode(AST_OP(return),
-                                  NewIdentifierASTNode(result, location),
+                                  return_object != NULL
+                                      ? NewIdentifierASTNode(return_object,
+                                                             location)
+                                      : NULL,
                                   NULL, location);
   return_stmt->flags |= kASTCoroutineLoweredReturn;
   VectorAppend(statements, return_stmt);
@@ -1876,7 +1878,7 @@ static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
 static ASTNode* NewFinalSuspendStatement(Symbol* promise,
                                          CoroutineFrame* frame,
                                          Symbol* final_awaiter,
-                                         TypeRecord* return_type,
+                                         Symbol* return_object,
                                          SourceLocation location) {
   ASTNode* final_suspend = NewCoroutinePromiseMemberCall(
       promise, "final_suspend", NewVector(), location);
@@ -1913,9 +1915,9 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
     ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
   }
   Vector* suspend_statements = NewVector();
-  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
-                                    await_suspend, await_suspend_return,
-                                    return_type, location);
+  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, await_suspend,
+                                    await_suspend_return, return_object,
+                                    location);
 
   Vector* statements = NewVector();
   VectorAppend(statements,
@@ -1938,7 +1940,7 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                        CoroutineFrame* frame,
                                        Vector* persisted_locals,
                                        Symbol* final_awaiter,
-                                       TypeRecord* coroutine_return_type) {
+                                       Symbol* return_object) {
   SourceLocation location = co_return->base.location;
   Vector* statements = NewVector();
   if (co_return->cond != NULL) {
@@ -1974,12 +1976,9 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
   }
   VectorAppend(statements,
                NewFinalSuspendStatement(promise, frame, final_awaiter,
-                                        coroutine_return_type, location));
-
-  ASTNode* return_object =
-      NewCoroutineReturnObjectStatement(promise, coroutine_return_type,
-                                        location);
-  VectorAppend(statements, return_object);
+                                        return_object, location));
+  VectorAppend(statements,
+               NewCoroutineReturnObjectStatement(return_object, location));
   return NewCompoundStatementASTNode(statements, location);
 }
 
@@ -1990,7 +1989,7 @@ static ASTNode* NewCoroutineUnhandledExceptionStatement(
     Symbol* promise,
     CoroutineFrame* frame,
     Symbol* final_awaiter,
-    TypeRecord* coroutine_return_type,
+    Symbol* return_object,
     SourceLocation location) {
   Vector* statements = NewVector();
   AppendCoroutineFrameBodyDestructors(statements, frame, location);
@@ -2014,11 +2013,9 @@ static ASTNode* NewCoroutineUnhandledExceptionStatement(
   }
   VectorAppend(statements,
                NewFinalSuspendStatement(promise, frame, final_awaiter,
-                                        coroutine_return_type, location));
+                                        return_object, location));
   VectorAppend(statements,
-               NewCoroutineReturnObjectStatement(promise,
-                                                 coroutine_return_type,
-                                                 location));
+               NewCoroutineReturnObjectStatement(return_object, location));
   return NewCompoundStatementASTNode(statements, location);
 }
 
@@ -2029,7 +2026,7 @@ typedef struct {
   CoroutineFrame* frame;
   Vector* persisted_locals;
   Symbol* final_awaiter;
-  TypeRecord* coroutine_return_type;
+  Symbol* return_object;
 } CoroutineStatementLowering;
 
 /* Transform callback: rewrite each co_return statement via
@@ -2045,7 +2042,7 @@ static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
                                 lowering->promise, lowering->frame,
                                 lowering->persisted_locals,
                                 lowering->final_awaiter,
-                                lowering->coroutine_return_type);
+                                lowering->return_object);
 }
 
 /* Lower all co_return statements within `node` to their promise/final-suspend
@@ -2054,10 +2051,10 @@ static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
                                       CoroutineFrame* frame,
                                       Vector* persisted_locals,
                                       Symbol* final_awaiter,
-                                      TypeRecord* coroutine_return_type) {
+                                      Symbol* return_object) {
   CoroutineStatementLowering lowering = {
       promise, frame, persisted_locals, final_awaiter,
-      coroutine_return_type};
+      return_object};
   ASTNodeVisitAndTransform(node, LowerCoReturnTransform, &lowering);
 }
 
@@ -2075,9 +2072,9 @@ static ASTNode* LowerCoroutineThrowStatement(ASTNode* throw_stmt,
                                              Symbol* promise,
                                              CoroutineFrame* frame,
                                              Symbol* final_awaiter,
-                                             TypeRecord* coroutine_return_type) {
+                                             Symbol* return_object) {
   return NewCoroutineUnhandledExceptionStatement(
-      promise, frame, final_awaiter, coroutine_return_type,
+      promise, frame, final_awaiter, return_object,
       throw_stmt != NULL ? throw_stmt->location : promise->location);
 }
 
@@ -2096,16 +2093,16 @@ static ASTNode* LowerCoroutineThrowTransform(ASTNode* node, void* data,
   return LowerCoroutineThrowStatement(node, lowering->promise,
                                       lowering->frame,
                                       lowering->final_awaiter,
-                                      lowering->coroutine_return_type);
+                                      lowering->return_object);
 }
 
 /* Lower all uncaught top-level throw statements within `node`. */
 static void LowerCoroutineThrowsInStatement(ASTNode* node, Symbol* promise,
                                             CoroutineFrame* frame,
                                             Symbol* final_awaiter,
-                                            TypeRecord* coroutine_return_type) {
+                                            Symbol* return_object) {
   CoroutineStatementLowering lowering = {
-      promise, frame, NULL, final_awaiter, coroutine_return_type};
+      promise, frame, NULL, final_awaiter, return_object};
   ASTNodeVisitAndTransform(node, LowerCoroutineThrowTransform, &lowering);
 }
 
@@ -3322,12 +3319,22 @@ static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
   return true;
 }
 
-/* Add a synthetic `int` member to the frame struct (state/done/constructed
- * flags). */
+/* Add the synthetic multi-valued state member to the frame struct. */
 static StructMember* AddCoroutineFrameIntMember(Struct* str,
                                                 const char* name) {
   Symbol* symbol = NewSymbol(name,
                              NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                             STO(auto));
+  StructMember* member = NewStructMember(symbol);
+  StructAddSyntheticMember(str, member);
+  return member;
+}
+
+/* Add a synthetic done/lifetime flag to the frame struct. */
+static StructMember* AddCoroutineFrameBoolMember(Struct* str,
+                                                 const char* name) {
+  Symbol* symbol = NewSymbol(name,
+                             NewTypeRecordWithSize(kTypeBool, kQualPlain),
                              STO(auto));
   StructMember* member = NewStructMember(symbol);
   StructAddSyntheticMember(str, member);
@@ -3449,7 +3456,9 @@ static ASTNode* NewCoroutineFrameGuardedDestructor(CoroutineFrame* frame,
                        NewFrameMemberAccess(frame, owned->constructed_member,
                                             location),
                        NewIntConstantASTNode(
-                           0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                           0,
+                           TypeRecordCopy(
+                               owned->constructed_member->symbol->type),
                            location));
   Vector* statements = NewVector();
   VectorAppend(statements, dtor);
@@ -3882,19 +3891,19 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
   CoroutineFrame frame = {0};
   VectorInit(&frame.owned_symbols);
   frame.state = AddCoroutineFrameIntMember(str, "__state");
-  frame.done = AddCoroutineFrameIntMember(str, "__done");
+  frame.done = AddCoroutineFrameBoolMember(str, "__done");
   frame.resume = AddCoroutineFrameResumeMember(str, frame_type, location);
   frame.destroy = AddCoroutineFrameDestroyMember(str, frame_type, location);
   frame.promise = AddCoroutineFrameTypedMember(str, "__promise",
                                                promise_type);
   frame.promise_constructed =
-      AddCoroutineFrameIntMember(str, "__promise_constructed");
+      AddCoroutineFrameBoolMember(str, "__promise_constructed");
   if (initial_awaiter_type != NULL) {
     frame.initial_awaiter =
         AddCoroutineFrameTypedMember(str, "__initial_awaiter",
                                      initial_awaiter_type);
     frame.initial_awaiter_constructed =
-        AddCoroutineFrameIntMember(str, "__initial_awaiter_constructed");
+        AddCoroutineFrameBoolMember(str, "__initial_awaiter_constructed");
   }
   if (final_awaiter_type != NULL &&
       !AwaiterTypeIsAlwaysReady(final_awaiter_type)) {
@@ -3902,7 +3911,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
         AddCoroutineFrameTypedMember(str, "__final_awaiter",
                                      final_awaiter_type);
     frame.final_awaiter_constructed =
-        AddCoroutineFrameIntMember(str, "__final_awaiter_constructed");
+        AddCoroutineFrameBoolMember(str, "__final_awaiter_constructed");
   }
   for (size_t i = 0; persisted_locals != NULL &&
                      i < persisted_locals->length; i++) {
@@ -3917,7 +3926,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
         AddCoroutineFrameTypedMember(str, member_name, local->symbol->type);
     if (TypeIsStructOrUnion(local->symbol->type)) {
       snprintf(member_name, sizeof(member_name), "__local%zu_constructed", i);
-      local->constructed_member = AddCoroutineFrameIntMember(str, member_name);
+      local->constructed_member = AddCoroutineFrameBoolMember(str, member_name);
     }
   }
   for (int i = 0; points != NULL && i < points->count; i++) {
@@ -3934,7 +3943,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
         AddCoroutineFrameTypedMember(str, member_name, awaiter_type);
     snprintf(member_name, sizeof(member_name), "__awaiter%d_constructed", i);
     point->frame_constructed_member =
-        AddCoroutineFrameIntMember(str, member_name);
+        AddCoroutineFrameBoolMember(str, member_name);
   }
   frame_type = TypeRecordCalculateSize(frame_type);
   frame.type = frame_type;
@@ -4169,10 +4178,8 @@ static void RemoveCoroutineFrameStores(CompoundStatementASTNode* compound) {
   ResetCompoundStatementParents(compound);
 }
 
-/* Resume functions return void. Replace each synthesized
- * `{ Ret result = promise.get_return_object(); return result; }` block in the
- * cloned ramp body with a plain `return;`. The ramp retains the return-object
- * blocks used to return its Task to the original caller. */
+/* Resume functions return void. Replace each synthesized ramp return with a
+ * plain `return;`; the ramp itself retains the return-object expression. */
 static ASTNode* ReplaceCoroutineResumeReturnTransform(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)data;
@@ -4180,10 +4187,10 @@ static ASTNode* ReplaceCoroutineResumeReturnTransform(
     return node;
   }
   CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
-  if (compound->statements == NULL || compound->statements->length != 2) {
+  if (compound->statements == NULL || compound->statements->length != 1) {
     return node;
   }
-  ASTNode* return_stmt = compound->statements->value.p[1];
+  ASTNode* return_stmt = compound->statements->value.p[0];
   if (return_stmt == NULL || return_stmt->op != AST_OP(return) ||
       (return_stmt->flags & kASTCoroutineLoweredReturn) == 0) {
     return node;
@@ -4205,7 +4212,6 @@ static ASTNode* ReplaceCoroutineResumeReturnTransform(
 static Symbol* NewCoroutineResumeFunction(ASTNode* node,
                                           CoroutineFrame* frame,
                                           CompoundStatementASTNode* body,
-                                          TypeRecord* return_type,
                                           int suspend_count,
                                           Symbol* promise,
                                           Symbol* initial_awaiter,
@@ -4239,7 +4245,7 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
                  NewCatchASTNode(
                      NULL, true,
                      NewCoroutineUnhandledExceptionStatement(
-                         promise, frame, final_awaiter, return_type,
+                         promise, frame, final_awaiter, NULL,
                          location),
                      location));
     ASTNode* try_stmt =
@@ -4417,23 +4423,22 @@ static ASTNode* NewCoroutineTransferResumeIf(CoroutineFrame* frame,
 
 /* Emit the statements that run after calling await_suspend, dispatching on its
  * return type:
- *   - bool: if it returns true, return the coroutine's return object (suspend);
+ *   - bool: if it returns true, return from the ramp/resume function (suspend);
  *           otherwise fall through (resume immediately).
  *   - coroutine_handle / void*: symmetric transfer to the returned handle, then
- *           return the return object.
- *   - void: just return the return object (unconditional suspend). */
+ *           return.
+ *   - void: just return (unconditional suspend). */
 static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                               CoroutineFrame* frame,
-                                              Symbol* promise,
                                               ASTNode* await_suspend,
                                               TypeRecord* await_suspend_return,
-                                              TypeRecord* return_type,
+                                              Symbol* return_object,
                                               SourceLocation location) {
   if (await_suspend_return != NULL && TypeIsBool(await_suspend_return)) {
     VectorAppend(suspend_statements,
                  NewIfStatementASTNode(
                      await_suspend,
-                     NewCoroutineReturnObjectStatement(promise, return_type,
+                     NewCoroutineReturnObjectStatement(return_object,
                                                        location),
                      NULL, false, location));
     return;
@@ -4468,8 +4473,7 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                    NewCoroutineTransferResumeIf(frame, transfer_handle,
                                                 location));
       VectorAppend(suspend_statements,
-                   NewCoroutineReturnObjectStatement(promise, return_type,
-                                                     location));
+                   NewCoroutineReturnObjectStatement(return_object, location));
       return;
     }
   }
@@ -4490,23 +4494,20 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                  NewCoroutineTransferResumeIf(frame, transfer_handle,
                                               location));
     VectorAppend(suspend_statements,
-                 NewCoroutineReturnObjectStatement(promise, return_type,
-                                                   location));
+                 NewCoroutineReturnObjectStatement(return_object, location));
     return;
   }
   VectorAppend(suspend_statements,
                NewExpressionStatementASTNode(await_suspend, location));
   VectorAppend(suspend_statements,
-               NewCoroutineReturnObjectStatement(promise, return_type,
-                                                 location));
+               NewCoroutineReturnObjectStatement(return_object, location));
 }
 
 /* Build the per-suspension-point suspend block: `if (!awaiter.await_ready()) {
  * frame->__state = N; <await_suspend dispatch>; }`, where the dispatch suspends
  * (returns) or continues based on await_suspend's result. */
-static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* promise,
-                             Symbol* awaiter,
-                             int state_value, TypeRecord* return_type,
+static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* awaiter,
+                             int state_value, Symbol* return_object,
                              SourceLocation location) {
   ASTNode* ready_call =
       NewAwaiterMemberCall(NewIdentifierASTNode(awaiter, location),
@@ -4532,9 +4533,9 @@ static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* promise,
   if (await_suspend_return != NULL) {
     ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
   }
-  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
-                                    await_suspend, await_suspend_return,
-                                    return_type, location);
+  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, await_suspend,
+                                    await_suspend_return, return_object,
+                                    location);
   return NewIfStatementASTNode(
       not_ready, NewCompoundStatementASTNode(suspend_statements, location),
       NULL, false, location);
@@ -4600,8 +4601,8 @@ static ASTNode* NewInitialSuspendInitialization(CoroutineFrame* frame,
 
 /* Build the initial-suspend block, analogous to NewSuspendIf but for the initial
  * awaiter (state 0): `if (!awaiter.await_ready()) { <await_suspend dispatch> }`. */
-static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
-                                    Symbol* awaiter, TypeRecord* return_type,
+static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* awaiter,
+                                    Symbol* return_object,
                                     SourceLocation location) {
   ASTNode* ready_call =
       NewAwaiterMemberCall(NewIdentifierASTNode(awaiter, location),
@@ -4626,9 +4627,9 @@ static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
   if (await_suspend_return != NULL) {
     ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
   }
-  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
-                                    await_suspend, await_suspend_return,
-                                    return_type, location);
+  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, await_suspend,
+                                    await_suspend_return, return_object,
+                                    location);
   return NewIfStatementASTNode(
       not_ready, NewCompoundStatementASTNode(suspend_statements, location),
       NULL, false, location);
@@ -5752,8 +5753,8 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
 static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                            CoroutineScan scan,
                                            SuspensionPoints* points,
-                                           TypeRecord* return_type,
                                            Symbol* promise,
+                                           Symbol* return_object,
                                            CoroutineFrame* frame,
                                            Symbol* initial_awaiter,
                                            Symbol* final_awaiter,
@@ -5830,7 +5831,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                   : point->co_await->location;
     Symbol* awaiter = point->awaiter;
     ASTNode* suspend_if =
-        NewSuspendIf(frame, promise, awaiter, i + 1, return_type, location);
+        NewSuspendIf(frame, awaiter, i + 1, return_object, location);
     ASTNode* reset_state =
         NewFrameIntAssignment(frame, frame->state, 0, location);
     if (point->kind == kSuspensionCoYield) {
@@ -5902,8 +5903,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                  (size_t)points->count + 1);
   RewriteFrameOwnedSymbols((ASTNode*)body, frame);
   Symbol* resume_function =
-      NewCoroutineResumeFunction(node, frame, body, return_type,
-                                 scan.suspend_count, promise,
+      NewCoroutineResumeFunction(node, frame, body, scan.suspend_count, promise,
                                  initial_awaiter, final_awaiter,
                                  node->location);
   Symbol* destroy_function = NewCoroutineDestroyFunction(frame, node->location);
@@ -5938,10 +5938,15 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
       initial_index++;
     }
     CompoundASTNodeInsertStatement(
+        body,
+        NewCoroutineReturnObjectDeclaration(promise, return_object,
+                                            node->location),
+        initial_index++);
+    CompoundASTNodeInsertStatement(
         body, NewInitialSuspendInitialization(frame, promise, node->location),
         initial_index++);
     CompoundASTNodeInsertStatement(
-        body, NewInitialSuspendIf(frame, promise, initial_awaiter, return_type,
+        body, NewInitialSuspendIf(frame, initial_awaiter, return_object,
                                   node->location),
         initial_index++);
     CompoundASTNodeInsertStatement(
@@ -6007,6 +6012,11 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   promise->flags.is_local = true;
   promise->flags.is_defined = true;
   promise->location = node->location;
+  Symbol* return_object =
+      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(node->type->next));
+  return_object->flags.is_local = true;
+  return_object->flags.is_defined = true;
+  return_object->location = node->location;
   points.capacity = scan.suspend_count;
   if (needs_frame && points.capacity > 0) {
     points.points = calloc((size_t)points.capacity, sizeof(SuspensionPoint));
@@ -6161,21 +6171,26 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   if (!needs_frame) {
     CompoundASTNodeInsertStatement(
         body,
+        NewCoroutineReturnObjectDeclaration(promise, return_object,
+                                            node->location),
+        1);
+    CompoundASTNodeInsertStatement(
+        body,
         NewExpressionStatementASTNode(
             NewCoroutinePromiseMemberCall(promise, "initial_suspend",
                                           NewVector(), node->location),
             node->location),
-        1);
+        2);
   }
   LowerCoReturnsInStatement(info->body, promise, needs_frame ? &frame : NULL,
                             &persisted_locals, final_awaiter,
-                            node->type->next);
+                            return_object);
   LowerCoroutineThrowsInStatement(info->body, promise,
                                   needs_frame ? &frame : NULL,
-                                  final_awaiter, node->type->next);
+                                  final_awaiter, return_object);
   if (needs_frame &&
-      !LowerSuspendingCoAwaitFunction(node, scan, &points, node->type->next,
-                                      promise, &frame, initial_awaiter,
+      !LowerSuspendingCoAwaitFunction(node, scan, &points, promise,
+                                      return_object, &frame, initial_awaiter,
                                       final_awaiter,
                                       yield_awaiter_type)) {
     CoroutineFrameOwnedSymbolsDestruct(&frame);

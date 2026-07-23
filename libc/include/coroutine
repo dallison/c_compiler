@@ -17,7 +17,7 @@ struct coroutine_traits {
 
 struct __coroutine_frame {
   int __state;
-  int __done;
+  bool __done;
   void (*__resume)(void*);
   void (*__destroy)(void*);
 };

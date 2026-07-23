@@ -2,6 +2,8 @@
 
 #include <coroutine>
 
+static_assert(sizeof(std::__coroutine_frame) == 7);
+
 struct Promise;
 
 struct Task {

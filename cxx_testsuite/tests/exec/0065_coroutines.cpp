@@ -1,7 +1,11 @@
 // RUN: -std=c++20
-// EXPECT_EXIT: 214
-// DEFERRED (known non-conforming fixture): the check that returns 214,
-// coroutine_await_resume_throw_cleans_awaiter, asserts BOTH
+// EXPECT_EXIT: 1
+// DEFERRED (known non-conforming fixture): Task::get_return_object() snapshots
+// Promise::value, then the first check expects that snapshot to contain the
+// later co_return value. The standard requires get_return_object() to run before
+// initial_suspend() and before the coroutine body, so the snapshot is still 0.
+//
+// A later check, coroutine_await_resume_throw_cleans_awaiter, also asserts BOTH
 // throwing_awaiter_copy_count == 1 AND that exactly one awaiter destructor
 // runs when await_resume() throws.  These are mutually exclusive: per
 // [expr.await], co_await of an lvalue operand copies nothing (the operand IS
@@ -10,8 +14,8 @@
 // correct RAII destroys both -- so +1 destructor is only reachable by leaking
 // one object.  The compiler behaves correctly (both objects destroyed exactly
 // once, no leak, no double free); the fixture bakes in a non-conforming copy
-// and then expects the no-copy lifetime.  Pinned to the current exit so a new
-// regression (a different failing check) is still caught.
+// and then expects the no-copy lifetime. Pinned to the first currently known
+// fixture failure so a new earlier regression is still caught.
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -57,7 +61,7 @@ struct Promise;
 
 struct CoroutineFrame {
   int state;
-  int done;
+  bool done;
   void (*resume)(void* handle);
   void (*destroy)(void* handle);
 };
@@ -78,7 +82,7 @@ struct coroutine_handle {
 
   static coroutine_handle from_promise(Promise& promise) {
     char* promise_address = (char*)&promise;
-    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+    unsigned long prefix_size = sizeof(CoroutineFrame);
     coroutine_handle result = {(void*)(promise_address - prefix_size)};
     return result;
   }
@@ -89,7 +93,7 @@ struct coroutine_handle {
 
   Promise& promise(void) const {
     char* frame_address = (char*)handle;
-    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+    unsigned long prefix_size = sizeof(CoroutineFrame);
     return *(Promise*)(frame_address + prefix_size);
   }
 
