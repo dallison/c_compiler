@@ -1,5 +1,7 @@
 #include <eh_frame.h>
 
+#if !defined(__x86_64__)
+
 // DaveCC's hardware ABIs maintain a frame-pointer chain in every generated
 // non-leaf function. Exception unwinding on these targets does not need to
 // decode DWARF CFI: the saved frame pointer and return address live at fixed
@@ -49,3 +51,5 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
 #endif
   return out->caller_pc != 0;
 }
+
+#endif /* !__x86_64__ */

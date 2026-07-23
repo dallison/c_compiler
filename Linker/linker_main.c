@@ -174,6 +174,8 @@ const char default_config[] = {
 "        name: \"text\"\n"
 "        section: \".text\"\n"
 "        section: \".rodata\"\n"
+"        section: \".eh_frame\"\n"
+"        section: \".gcc_except_table\"\n"
 "        section: \".davecc_except_table\"\n"
 "        start_addr: 0x400000000\n"
 "        falign: 1\n"

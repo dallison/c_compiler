@@ -1,0 +1,41 @@
+#ifndef eh_metadata_h
+#define eh_metadata_h
+
+#include <stdbool.h>
+#include <stdio.h>
+
+// Itanium/GCC LSDA and EH-frame constants shared by target emitters.
+
+#define DAVECC_EH_PERSONALITY "__gxx_personality_v0"
+
+// Negative type_filter values in the action table denote cleanups.
+#define DAVECC_EH_LSDA_CLEANUP_FILTER (-1)
+
+typedef struct {
+  long long try_start_id;
+  long long try_end_id;
+  long long landing_pad_id;
+  const char* catch_typeinfo;  // NULL = catch(...); ignored when is_cleanup
+  bool is_cleanup;
+} DaveEHLSDARange;
+
+typedef struct {
+  const DaveEHLSDARange* ranges;
+  size_t range_count;
+  const char* func_name;
+  bool has_frame;
+  int cie_ra_reg;
+  int cie_cfa_reg;
+  int cie_fp_reg;
+} DaveEHFrameEmitInfo;
+
+void DaveEHPrintUleb128(FILE* fp, unsigned long long value);
+void DaveEHPrintSleb128(FILE* fp, long long value);
+
+void DaveEHPrintGCCExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info);
+void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
+                           const char* cie_label_suffix);
+void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
+                           const char* cie_label_suffix);
+
+#endif /* eh_metadata_h */

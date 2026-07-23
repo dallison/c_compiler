@@ -13,11 +13,11 @@
 #include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
+#include "eh_metadata.h"
 #include "aarch64_assembler.h"
 #include "aarch64_codegen.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
-#include "eh_abi_sections.h"
 
 static void Trap() {}
 
@@ -442,7 +442,13 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
     // Empty stack frame, no need to store frame pointer.
   } else {
     fprintf(fp, "\tstp x29, x30, [sp, #-16]!\n");
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_push:\n", emitter->g->base.function_name.value);
+    }
     fprintf(fp, "\tmov x29, sp\n");
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_leaq:\n", emitter->g->base.function_name.value);
+    }
     DecrementStackPointer(emitter, stack_frame_size, fp);
 
     if (varargs && space_above_frame_pointer > 0) {
@@ -1703,6 +1709,49 @@ static void AARCH64PrintExceptionTable(AARCH64Emitter* emitter, FILE* fp,
   fprintf(fp, "\t.text\n\n");
 }
 
+static void AARCH64FillLSDAInfo(AARCH64Emitter* emitter, const char* func_name,
+                                DaveEHLSDARange* lsda_ranges, size_t* count) {
+  *count = 0;
+  for (size_t i = 0; i < emitter->g->exception_ranges.length &&
+                     *count < 64;
+       i++) {
+    AARCH64ExceptionRange* range = emitter->g->exception_ranges.value.p[i];
+    DaveEHLSDARange* out = &lsda_ranges[(*count)++];
+    out->try_start_id = range->try_start->id;
+    out->try_end_id = range->try_end->id;
+    out->landing_pad_id = range->catch_label->id;
+    out->is_cleanup = range->is_cleanup;
+    out->catch_typeinfo =
+        range->is_cleanup
+            ? NULL
+            : (range->catch_typeinfo != NULL
+                   ? range->catch_typeinfo->symbol_name.value
+                   : NULL);
+  }
+}
+
+static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
+                                   const char* func_name) {
+  if (emitter->g->base.varargs) {
+    return;
+  }
+  DaveEHLSDARange lsda_ranges[64];
+  size_t lsda_count = 0;
+  AARCH64FillLSDAInfo(emitter, func_name, lsda_ranges, &lsda_count);
+  DaveEHFrameEmitInfo info = {
+      .ranges = lsda_ranges,
+      .range_count = lsda_count,
+      .func_name = func_name,
+      .has_frame = !EmptyStackFrame(emitter),
+      .cie_ra_reg = 30,
+      .cie_cfa_reg = 31,
+      .cie_fp_reg = 29,
+  };
+  DaveEHPrintGCCExceptTable(fp, &info);
+  DaveEHPrintEHFrameCIE(fp, &info, "");
+  DaveEHPrintEHFrameFDE(fp, &info, "");
+}
+
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
   if (emitter->g->base.is_weak) {
@@ -1727,20 +1776,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   AARCH64PrintTypeInfoRecords(emitter, fp);
-  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->g->exception_typeinfos, true);
-  EHABIPrintGccExceptTable(fp, func_name,
-                           emitter->g->exception_ranges.length > 0, true);
-  if (!emitter->g->base.varargs) {
-    EHABIFrameParams params = {
-        .func_name = func_name,
-        .has_stack_frame = false,
-        .has_exceptions = emitter->g->exception_ranges.length > 0,
-        .return_address_reg = 30,
-        .data_align_sleb = -8,
-        .is_64bit = true,
-    };
-    EHABIPrintDwarfEHFrame(fp, &params);
-  }
+  AARCH64PrintEHMetadata(emitter, fp, func_name);
   AARCH64PrintExceptionTable(emitter, fp, func_name);
 }
 

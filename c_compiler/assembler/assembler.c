@@ -54,6 +54,8 @@ DECLARE_DIRECTIVE_FUNC(loc);
 DECLARE_DIRECTIVE_FUNC(option);
 DECLARE_DIRECTIVE_FUNC(set);
 DECLARE_DIRECTIVE_FUNC(chkaddr);
+DECLARE_DIRECTIVE_FUNC(uleb128);
+DECLARE_DIRECTIVE_FUNC(sleb128);
 
 #undef DECLARE_DIRECTIVE_FUNC
 
@@ -97,6 +99,8 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(option);
   DIRECTIVE(set);
   DIRECTIVE(chkaddr);
+  DIRECTIVE(uleb128);
+  DIRECTIVE(sleb128);
 }
 
 #undef DIRECTIVE
@@ -1254,6 +1258,46 @@ static void StringDirective(Assembler* assembler, bool append_zero) {
 
 static void HandleDirective_asciz(Assembler* assembler) {
   StringDirective(assembler, true);
+}
+
+static void AssemblerEmitUleb128(Assembler* assembler, uint64_t value) {
+  do {
+    uint8_t byte = (uint8_t)(value & 0x7f);
+    value >>= 7;
+    if (value != 0) {
+      byte |= 0x80;
+    }
+    AssemblerEmitByte(assembler, assembler->current_section, byte);
+  } while (value != 0);
+}
+
+static void AssemblerEmitSleb128(Assembler* assembler, int64_t value) {
+  int more = 1;
+  while (more) {
+    uint8_t byte = (uint8_t)(value & 0x7f);
+    value >>= 7;
+    if ((value == 0 && (byte & 0x40) == 0) ||
+        (value == -1 && (byte & 0x40) != 0)) {
+      more = 0;
+    } else {
+      byte |= 0x80;
+    }
+    AssemblerEmitByte(assembler, assembler->current_section, byte);
+  }
+}
+
+static void HandleDirective_uleb128(Assembler* assembler) {
+  int64_t value = AssemblerEvaluateExpression(assembler);
+  if (value < 0) {
+    AssemblerError(assembler, "Invalid .uleb128 value %" PRId64 "", value);
+    return;
+  }
+  AssemblerEmitUleb128(assembler, (uint64_t)value);
+}
+
+static void HandleDirective_sleb128(Assembler* assembler) {
+  int64_t value = AssemblerEvaluateExpression(assembler);
+  AssemblerEmitSleb128(assembler, value);
 }
 
 static void HandleDirective_string(Assembler* assembler) {

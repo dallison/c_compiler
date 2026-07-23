@@ -4,7 +4,9 @@ int TestAbs(void);
 int TestStrtol(void);
 int TestSetjmp(void);
 int TestEHFrame(void);
+int TestLSDAParser(void);
 
 int main(void) {
-  return TestAbs() + TestStrtol() + TestSetjmp() + TestEHFrame();
+  return TestAbs() + TestStrtol() + TestSetjmp() + TestEHFrame() +
+         TestLSDAParser();
 }

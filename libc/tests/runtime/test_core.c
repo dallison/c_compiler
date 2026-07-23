@@ -2,6 +2,7 @@
 
 #if defined(__x86_64__)
 #include <eh_frame.h>
+#include <lsda.h>
 #endif
 #include <setjmp.h>
 #include <stdlib.h>
@@ -168,6 +169,26 @@ int TestEHFrame(void) {
   }
   if (walk.caller_rsp != (uintptr_t)&fake_stack[1]) {
     return 19;
+  }
+#endif
+  return failures;
+}
+
+int TestLSDAParser(void) {
+  int failures = 0;
+#if defined(__x86_64__)
+  static const uint8_t kLsda[] = {
+      0xff, 0xff, 0x04, 0x00, 0x10, 0x20, 0x01, 0x7f, 0x00,
+  };
+  DaveLSDAAction action;
+  if (!DaveLSDAFindAction(kLsda, 0x1000, 0x1008, 0x1008, 0x1008, 0, &action)) {
+    return 1;
+  }
+  if (!action.is_cleanup || action.is_catch) {
+    return 2;
+  }
+  if (action.landing_pad != 0x1020) {
+    return 3;
   }
 #endif
   return failures;

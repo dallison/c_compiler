@@ -3,14 +3,6 @@
 extern char __eh_frame_start[];
 extern char __eh_frame_end[];
 
-static uint32_t ReadU32(const uint8_t* p) {
-  return *(const uint32_t*)p;
-}
-
-static uint64_t ReadU64(const uint8_t* p) {
-  return *(const uint64_t*)p;
-}
-
 int DaveEHFrameGetRange(DaveEHFrameRange* range) {
   if (range == 0) {
     return 0;
@@ -50,6 +42,11 @@ int DaveEHFrameCountFDEs(void) {
   return count;
 }
 
+static const uint8_t* DecodeLsdaPointer(const uint8_t* aug_ptr) {
+  int32_t offset = *(const int32_t*)aug_ptr;
+  return aug_ptr + offset;
+}
+
 int DaveEHFrameNextFDE(uintptr_t* cursor,
                        uintptr_t end,
                        DaveEHFDE* out) {
@@ -83,14 +80,25 @@ int DaveEHFrameNextFDE(uintptr_t* cursor,
   const uint8_t* fde = entry_body + 4;
   uintptr_t pc_begin = (uintptr_t)(*(const uint64_t*)fde);
   uintptr_t pc_range = (uintptr_t)(*(const uint64_t*)(fde + 8));
-  const uint8_t* instructions = fde + 17;
+  const uint8_t* cursor_in_fde = fde + 16;
+  const uint8_t* instructions = cursor_in_fde + 1;
+  const uint8_t* lsda = 0;
+  int has_lsda = 0;
+
+  if (*cursor_in_fde == 4) {
+    lsda = DecodeLsdaPointer(cursor_in_fde + 1);
+    has_lsda = 1;
+    instructions = cursor_in_fde + 5;
+  }
 
   out->pc_begin = pc_begin;
   out->pc_end = pc_begin + pc_range;
   out->fde_start = entry;
   out->instructions = instructions;
   out->instructions_end = entry_end;
+  out->lsda = lsda;
   out->has_frame = instructions < entry_end;
+  out->has_lsda = has_lsda;
   *cursor = (uintptr_t)entry_end;
   return 1;
 }
@@ -107,12 +115,7 @@ int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
   while (DaveEHFrameNextFDE(&cursor, (uintptr_t)range.end, &fde)) {
     if (pc >= fde.pc_begin && pc < fde.pc_end) {
       if (out != 0) {
-        out->pc_begin = fde.pc_begin;
-        out->pc_end = fde.pc_end;
-        out->fde_start = fde.fde_start;
-        out->instructions = fde.instructions;
-        out->instructions_end = fde.instructions_end;
-        out->has_frame = fde.has_frame;
+        *out = fde;
       }
       return 1;
     }
@@ -121,21 +124,11 @@ int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
 }
 
 static void InitCFI(DaveEHFrameCFI* cfi) {
-  cfi->cfa_reg = 7;  // rsp
+  cfi->cfa_reg = 7;
   cfi->cfa_offset = 8;
   cfi->return_address_offset = -8;
   cfi->has_saved_rbp = 0;
   cfi->saved_rbp_offset = 0;
-}
-
-static uintptr_t RegisterValue(const DaveEHFrameRegisters* regs, int reg) {
-  if (reg == 6) {
-    return regs->rbp;
-  }
-  if (reg == 7) {
-    return regs->rsp;
-  }
-  return 0;
 }
 
 int DaveEHFrameCFIAtPC(const DaveEHFDE* fde,
@@ -155,9 +148,21 @@ int DaveEHFrameCFIAtPC(const DaveEHFDE* fde,
   if (pc < fde->pc_begin + 7) {
     return 1;
   }
-  out->cfa_reg = 6;  // rbp
+  out->cfa_reg = 6;
   out->cfa_offset = 8;
   return 1;
+}
+
+#if defined(__x86_64__)
+
+static uintptr_t RegisterValue(const DaveEHFrameRegisters* regs, int reg) {
+  if (reg == 6) {
+    return regs->rbp;
+  }
+  if (reg == 7) {
+    return regs->rsp;
+  }
+  return 0;
 }
 
 int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
@@ -189,3 +194,5 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
   }
   return out->caller_pc != 0;
 }
+
+#endif /* __x86_64__ */

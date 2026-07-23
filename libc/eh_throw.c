@@ -183,6 +183,10 @@ static DaveExceptionTableEntry* FindInnermostAction(uintptr_t pc, uintptr_t cs,
   return best;
 }
 
+const CXXTypeInfo* DaveCurrentExceptionTypeInfo(void) {
+  return current_exception_typeinfo;
+}
+
 // State handed to a cleanup landing pad so __davecc_resume can continue the
 // containment chain in the same frame after the pad runs its destructor.
 // Unwinding is sequential, so a single set of slots suffices.

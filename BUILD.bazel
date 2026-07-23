@@ -186,6 +186,9 @@ LIBC_SRCS = [
     "libc/eh_terminate.c",
     "libc/eh_personality.c",
     "libc/eh_throw.c",
+    "libc/gxx_personality.c",
+    "libc/lsda.c",
+    "libc/unwind_api.c",
     "libc/exit.c",
     "libc/fabs.c",
     "libc/fclose.c",
@@ -539,6 +542,7 @@ cc_library(
         "c_compiler/backend/basic_block.c",
         "c_compiler/backend/codegen.c",
         "c_compiler/backend/eh_abi_sections.c",
+        "c_compiler/backend/eh_metadata.c",
         "c_compiler/optimization/alias.c",
         "c_compiler/optimization/codemotion.c",
         "c_compiler/optimization/copyprop.c",
@@ -1312,6 +1316,9 @@ libc_srcs=(
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1467,10 +1474,14 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1622,10 +1633,14 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1777,10 +1792,14 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
   "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -2129,6 +2148,104 @@ sh_test(
     data = [
         ":davecc",
         ":elfdump",
+        ":libc_headers",
+        ":libc_x86_64",
+    ],
+)
+
+sh_test(
+    name = "eh_itianium_layout_x86_64_test",
+    srcs = ["tests/eh_itianium_layout_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+        "x86_64",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "eh_itianium_layout_aarch64_test",
+    srcs = ["tests/eh_itianium_layout_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+        "aarch64",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "eh_itianium_layout_risc_v_test",
+    srcs = ["tests/eh_itianium_layout_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+        "riscv",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "eh_lsda_runtime_x86_64_test",
+    srcs = ["tests/eh_lsda_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "x86_64",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "eh_lsda_runtime_aarch64_test",
+    srcs = ["tests/eh_lsda_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :libc_aarch64)",
+        "aarch64",
+    ],
+    data = [
+        ":davecc",
+        ":libc_aarch64",
+        ":libc_headers",
+        ":aarch64",
+    ],
+)
+
+sh_test(
+    name = "eh_lsda_runtime_risc_v_test",
+    srcs = ["tests/eh_lsda_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv)",
+        "riscv",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv",
+        ":riscv",
     ],
 )
 

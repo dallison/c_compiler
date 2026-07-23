@@ -18,12 +18,12 @@
 #include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
+#include "eh_metadata.h"
 #include "x86_64_assembler.h"
 #include "x86_64_codegen.h"
 #include "x86_64_machine.h"
 #include "x86_64_reg_alloc.h"
 #include "target_basic_block.h"
-#include "eh_abi_sections.h"
 
 // In assembler mode, $ introduces a hexadecimal immediate (see CollectHex in
 // lex.c), not a decimal value as in GNU as AT&T syntax.
@@ -2707,15 +2707,68 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
     return;
   }
 
-  EHABIFrameParams params = {
+  DaveEHLSDARange lsda_ranges[64];
+  size_t lsda_count = 0;
+  for (size_t i = 0; i < emitter->rv->exception_ranges.length &&
+                     lsda_count < sizeof(lsda_ranges) / sizeof(lsda_ranges[0]);
+       i++) {
+    X86_64ExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
+    DaveEHLSDARange* out = &lsda_ranges[lsda_count++];
+    out->try_start_id = range->try_start->id;
+    out->try_end_id = range->try_end->id;
+    out->landing_pad_id = range->catch_label->id;
+    out->is_cleanup = range->is_cleanup;
+    out->catch_typeinfo =
+        range->is_cleanup
+            ? NULL
+            : (range->catch_typeinfo != NULL
+                   ? range->catch_typeinfo->symbol_name.value
+                   : NULL);
+  }
+
+  DaveEHFrameEmitInfo info = {
+      .ranges = lsda_ranges,
+      .range_count = lsda_count,
       .func_name = func_name,
-      .has_stack_frame = !EmptyStackFrame(emitter),
-      .has_exceptions = emitter->rv->exception_ranges.length > 0,
-      .return_address_reg = 16,
-      .data_align_sleb = -8,
-      .is_64bit = true,
+      .has_frame = !EmptyStackFrame(emitter),
+      .cie_ra_reg = 16,
+      .cie_cfa_reg = 7,
+      .cie_fp_reg = 6,
   };
-  EHABIPrintDwarfEHFrame(fp, &params);
+  DaveEHPrintEHFrameCIE(fp, &info, "");
+  DaveEHPrintEHFrameFDE(fp, &info, "");
+}
+
+static void X86_64PrintGCCExceptTable(X86_64Emitter* emitter, FILE* fp,
+                                      const char* func_name) {
+  DaveEHLSDARange lsda_ranges[64];
+  size_t lsda_count = 0;
+  for (size_t i = 0; i < emitter->rv->exception_ranges.length &&
+                     lsda_count < sizeof(lsda_ranges) / sizeof(lsda_ranges[0]);
+       i++) {
+    X86_64ExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
+    DaveEHLSDARange* out = &lsda_ranges[lsda_count++];
+    out->try_start_id = range->try_start->id;
+    out->try_end_id = range->try_end->id;
+    out->landing_pad_id = range->catch_label->id;
+    out->is_cleanup = range->is_cleanup;
+    out->catch_typeinfo =
+        range->is_cleanup
+            ? NULL
+            : (range->catch_typeinfo != NULL
+                   ? range->catch_typeinfo->symbol_name.value
+                   : NULL);
+  }
+  DaveEHFrameEmitInfo info = {
+      .ranges = lsda_ranges,
+      .range_count = lsda_count,
+      .func_name = func_name,
+      .has_frame = !EmptyStackFrame(emitter),
+      .cie_ra_reg = 16,
+      .cie_cfa_reg = 7,
+      .cie_fp_reg = 6,
+  };
+  DaveEHPrintGCCExceptTable(fp, &info);
 }
 
 static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
@@ -2863,9 +2916,7 @@ void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   X86_64PrintTypeInfoRecords(emitter, fp);
-  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->rv->exception_typeinfos, true);
-  EHABIPrintGccExceptTable(fp, func_name,
-                           emitter->rv->exception_ranges.length > 0, true);
+  X86_64PrintGCCExceptTable(emitter, fp, func_name);
   X86_64PrintEHFrame(emitter, fp, func_name);
   X86_64PrintExceptionTable(emitter, fp, func_name);
 }

@@ -15,7 +15,9 @@ typedef struct {
   const uint8_t* fde_start;
   const uint8_t* instructions;
   const uint8_t* instructions_end;
+  const uint8_t* lsda;
   int has_frame;
+  int has_lsda;
 } DaveEHFDE;
 
 typedef struct {

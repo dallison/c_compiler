@@ -17,11 +17,11 @@
 #include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
+#include "eh_metadata.h"
 #include "risc_v_assembler.h"
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
 #include "target_basic_block.h"
-#include "eh_abi_sections.h"
 
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
@@ -356,6 +356,9 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
         fprintf(fp, "\tsd ra, 8(sp)\n");
       }
       fprintf(fp, "\tsd s0, 0(sp)\n");
+      if (!varargs) {
+        fprintf(fp, ".Leh_%s_after_push:\n", emitter->rv->base.function_name.value);
+      }
       DecrementStackPointer(emitter, stack_frame_size - 16, fp);
     } else {
       DecrementStackPointer(emitter, stack_frame_size, fp);
@@ -366,6 +369,9 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
         fprintf(fp, "\tsd ra, %d(sp)\n", return_address_offset);
       }
       fprintf(fp, "\tsd s0, %d(sp)\n", frame_pointer_offset);
+      if (!varargs) {
+        fprintf(fp, ".Leh_%s_after_push:\n", emitter->rv->base.function_name.value);
+      }
     }
     
     // Set new frame pointer to original top of stack.
@@ -379,6 +385,9 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
     } else {
       fprintf(fp, "\taddi s0, sp, %d\n",
               stack_frame_size - space_above_frame_pointer);
+    }
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_leaq:\n", emitter->rv->base.function_name.value);
     }
 
     if (varargs) {
@@ -1584,6 +1593,48 @@ static void RVPrintExceptionTable(RVEmitter* emitter, FILE* fp,
   fprintf(fp, "\t.text\n\n");
 }
 
+static void RVFillLSDAInfo(RVEmitter* emitter, DaveEHLSDARange* lsda_ranges,
+                           size_t* count) {
+  *count = 0;
+  for (size_t i = 0; i < emitter->rv->exception_ranges.length && *count < 64;
+       i++) {
+    RVExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
+    DaveEHLSDARange* out = &lsda_ranges[(*count)++];
+    out->try_start_id = range->try_start->id;
+    out->try_end_id = range->try_end->id;
+    out->landing_pad_id = range->catch_label->id;
+    out->is_cleanup = range->is_cleanup;
+    out->catch_typeinfo =
+        range->is_cleanup
+            ? NULL
+            : (range->catch_typeinfo != NULL
+                   ? range->catch_typeinfo->symbol_name.value
+                   : NULL);
+  }
+}
+
+static void RVPrintEHMetadata(RVEmitter* emitter, FILE* fp,
+                              const char* func_name) {
+  if (emitter->rv->base.varargs) {
+    return;
+  }
+  DaveEHLSDARange lsda_ranges[64];
+  size_t lsda_count = 0;
+  RVFillLSDAInfo(emitter, lsda_ranges, &lsda_count);
+  DaveEHFrameEmitInfo info = {
+      .ranges = lsda_ranges,
+      .range_count = lsda_count,
+      .func_name = func_name,
+      .has_frame = !EmptyStackFrame(emitter),
+      .cie_ra_reg = 1,
+      .cie_cfa_reg = 2,
+      .cie_fp_reg = 8,
+  };
+  DaveEHPrintGCCExceptTable(fp, &info);
+  DaveEHPrintEHFrameCIE(fp, &info, "");
+  DaveEHPrintEHFrameFDE(fp, &info, "");
+}
+
 void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
   if (emitter->rv->base.is_weak) {
@@ -1604,20 +1655,7 @@ void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   RVPrintTypeInfoRecords(emitter, fp);
-  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->rv->exception_typeinfos, true);
-  EHABIPrintGccExceptTable(fp, func_name,
-                           emitter->rv->exception_ranges.length > 0, true);
-  if (!emitter->rv->base.varargs) {
-    EHABIFrameParams params = {
-        .func_name = func_name,
-        .has_stack_frame = false,
-        .has_exceptions = emitter->rv->exception_ranges.length > 0,
-        .return_address_reg = 1,
-        .data_align_sleb = -8,
-        .is_64bit = true,
-    };
-    EHABIPrintDwarfEHFrame(fp, &params);
-  }
+  RVPrintEHMetadata(emitter, fp, func_name);
   RVPrintExceptionTable(emitter, fp, func_name);
 }
 
