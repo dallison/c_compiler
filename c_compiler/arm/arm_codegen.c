@@ -2755,11 +2755,16 @@ static TargetInstruction* LowerWideLoad(ARMGenerator* g, IRNode* node) {
     assert(TargetIsConst(offset) &&
            "wide load with non-constant offset not supported");
     int off = (int)TargetIntValue(offset);
-    lo = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), addr, offset),
+    // Give each load its own single-use address value.  Otherwise the allocator
+    // can assign the low result to the address register and the following high
+    // load becomes `ldr hi, [lo, #4]`.
+    TargetInstruction* lo_addr = WideMov(g, addr);
+    TargetInstruction* hi_addr = WideMov(g, addr);
+    lo = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), lo_addr, offset),
                                     kSize32Bit));
     TargetInstruction* offset_hi =
         GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
-    hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), addr, offset_hi),
+    hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), hi_addr, offset_hi),
                                     kSize32Bit));
   }
   SetLoweredHi(node, hi);

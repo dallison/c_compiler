@@ -400,5 +400,6 @@ bool IRIsLoadOnly(IRNode* node);
 bool IRIsIncDec(IRNode* node);
 
 bool IRIsResult(IRNode* node);
+bool IRHasSideEffects(IRNode* node);
 
 #endif /* ir_h */

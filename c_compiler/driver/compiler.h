@@ -162,8 +162,14 @@ typedef enum {
 typedef struct {
   int gvn : 1;
   int code_motion : 1;
+  int sccp : 1;
   int const_prop : 1;
   int tail_call : 1;
+  int dce : 1;
+  int copy_prop : 1;
+  int loop_preheaders : 1;
+  int induction_vars : 1;
+  int derived_induction_vars : 1;
 } IROptimizations;
 
 // A compiler target back-end.  This contains pointers to
@@ -404,6 +410,7 @@ typedef struct {
   // Flags.
   bool debug_output;
   bool optimize;
+  bool optimize_for_size;
   bool pic;
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool printf_specialize;    // Rewrite constant printf-family calls by profile.

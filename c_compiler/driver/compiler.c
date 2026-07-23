@@ -44,7 +44,8 @@ static Vector cxx_fini_array_functions;
 
 static CompilerOptionDefinition compiler_options[] = {
     {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info"},
-    {"-O", kCompilerOptionString, kOptionOptimize, true, "Optimize with level (-O0, -O1, -O2)"},
+    {"-O", kCompilerOptionString, kOptionOptimize, true,
+     "Optimize with level (-O0, -O1, -O2, -O3, -Os)"},
     {"-target", kCompilerOptionString, kOptionTarget, false, "Specify one target architecture"},
     {"-c", kCompilerOptionBool, kOptionCompileOnly, false, "Compile only to object file"},
     {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false, "Generate assembly language"},
@@ -2177,6 +2178,7 @@ static void OpenSaveFiles(Compiler* compiler) {
 static void ParseOptimizationOption(Compiler* compiler, Vector* options,
                                     int default_opt_level) {
   compiler->optimize = default_opt_level > 0;
+  compiler->optimize_for_size = false;
   compiler->opt_level = default_opt_level;
   String* value = OptionStringValue(kOptionOptimize, options);
   if (value == NULL) {
@@ -2188,6 +2190,10 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options,
     compiler->optimize = true;
     compiler->opt_level = 2;
   } else {
+    if (value->length != 1) {
+      fprintf(stderr, "Invalid optimization level -O%s\n", value->value);
+      exit(1);
+    }
     char level = value->value[0];
     switch (level) {
       case '0':
@@ -2197,6 +2203,11 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options,
       case '3':
         compiler->optimize = true;
         compiler->opt_level = level - '0';
+        break;
+      case 's':
+        compiler->optimize = true;
+        compiler->optimize_for_size = true;
+        compiler->opt_level = 2;
         break;
       default:
         fprintf(stderr, "Invalid optimization level -O%c\n", level);
@@ -2340,6 +2351,12 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   compiler->call_return_fixed_reg = compiler->target->call_return_fixed_reg;
   compiler->keep_ssa = compiler->target->keep_ssa;
   compiler->ir_optimizations = compiler->target->ir_optimizations;
+  if (compiler->optimize_for_size) {
+    compiler->code_preference = kCodeForSize;
+    compiler->ir_optimizations.code_motion = false;
+    compiler->ir_optimizations.dce = true;
+    compiler->ir_optimizations.copy_prop = true;
+  }
   compiler->prepend_underscore = compiler->target->prepend_underscore;
   compiler->plain_char_is_signed = compiler->target->plain_char_is_signed;
   compiler->target_flags = compiler->target->flags;

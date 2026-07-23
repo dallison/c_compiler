@@ -1438,6 +1438,23 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     break;
   }
       
+    case AARCH64_OP(cbz):
+    case AARCH64_OP(cbnz): {
+      assert(inst->operand[0] != NULL);
+      assert(inst->operand[1] != NULL);
+      assert(inst->operand[0]->reg != NULL);
+      TargetInstruction* dest = inst->operand[1];
+      fprintf(fp, "%s, ",
+              GetRegisterName(inst->operand[0], reg_size, buf1,
+                              sizeof(buf1)));
+      if (dest->opcode == (TargetOpcode)AARCH64_OP(named_label)) {
+        fprintf(fp, "%s\n", ((TargetNamedLabel*)dest)->name);
+      } else {
+        fprintf(fp, ".%s_label_%d\n", func_name, dest->id);
+      }
+      break;
+    }
+
     case AARCH64_OP(br):
       fprintf(fp, "%s\n",
               GetRegisterName(inst->operand[0], kSize64Bit, buf1,

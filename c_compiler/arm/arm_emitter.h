@@ -20,6 +20,7 @@ typedef struct {
   int saved_reg_offset;
   int spill_region_size;
   int first_spill_offset;
+  int struct_return_fp_offset;
   void* current_block;
 } ARMEmitter;
 

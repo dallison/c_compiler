@@ -292,6 +292,8 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
       type == kAARCH64RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
+  int min_var_cost = INT_MAX;
+  TargetInstruction* var_victim = NULL;
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
@@ -300,8 +302,25 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
           TargetInstruction* owner = regs[j].base.owner;
           if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
               ((int)owner->opcode == (int)AARCH64_OP(spill)) ||
-              ((int)owner->opcode == (int)AARCH64_OP(reload)) ||
-              IsUnspillableFixedReg(owner)) {
+              ((int)owner->opcode == (int)AARCH64_OP(reload))) {
+            regs[j].base.owner = NULL;
+            continue;
+          }
+          if (IsUnspillableFixedReg(owner)) {
+            continue;
+          }
+          if (AARCH64IsVarRegister(owner)) {
+            if (owner->users.length == 0) {
+              // A write-only variable has no valid first-use spill site and no
+              // future read that requires its physical register.
+              regs[j].base.owner = NULL;
+              continue;
+            }
+            int cost = SpillCost(owner);
+            if (cost < min_var_cost) {
+              min_var_cost = cost;
+              var_victim = owner;
+            }
             continue;
           }
           int cost = SpillCost(owner);
@@ -314,19 +333,7 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
     }
   }
   if (victim == NULL) {
-    // All spill candidates may already be spilled; pick any occupied register.
-    for (size_t i = 0; i < NUM_REG_RANGES; i++) {
-      if (register_ranges[i].type == type) {
-        for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
-          if (!regs[j].base.reserved && regs[j].base.owner != NULL &&
-              !IsUnspillableFixedReg(regs[j].base.owner)) {
-            return regs[j].base.owner;
-          }
-        }
-      }
-    }
-    DumpRegisters(allocator);
-    abort();
+    victim = var_victim;
   }
   return victim;
 }
@@ -389,9 +396,16 @@ static AARCH64Register* AllocateRegisterWithType(AARCH64RegisterAllocator* alloc
 
   if (reg == NULL) {
     TargetInstruction* victim = FindSpillVictim(allocator, type);
-    reg = SpillInstruction(allocator, victim);
+    // FindSpillVictim can release a stale/dead owner while scanning.
+    reg = FindFreeRegister(allocator, type, can_use_temp);
+    if (reg == NULL && victim != NULL) {
+      reg = SpillInstruction(allocator, victim);
+    }
   }
-  assert(reg != NULL);
+  if (reg == NULL) {
+    DumpRegisters(allocator);
+    abort();
+  }
 
   if (reg->base.reserved) {
     return reg;

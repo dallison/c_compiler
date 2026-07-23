@@ -11,12 +11,9 @@
 
 #include "codegen.h"
 
-// This optimization moves code from inside loops to outside the
-// loop when it can.  If the code doesn't have any dependency on
-// things inside the loop it can be moved to a dominator block with
-// the assumption that code inside the loop will be executed more than
-// once and it is faster not to have to repeat code that doesn't need
-// to be.
+// This optimization moves loop-invariant code to the loop's dedicated
+// preheader.  Explicit natural-loop block sets make nested-loop invariance and
+// memory effects local to each loop rather than global to the function.
 //
 // It does, however, increase register pressure and might lead to more
 // register spilling.

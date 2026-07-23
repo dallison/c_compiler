@@ -83,9 +83,17 @@ CompilerTarget* NewARMTarget() {
   target->call_return_fixed_reg = true;
   target->keep_ssa = false;
   target->ir_optimizations.gvn = true;
+  target->ir_optimizations.sccp = true;
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
+  target->ir_optimizations.dce = true;
+  target->ir_optimizations.copy_prop = true;
+  target->ir_optimizations.loop_preheaders = true;
+  target->ir_optimizations.induction_vars = true;
+  // ARM benefits from replacing a per-iteration multiply/add with a pointer
+  // recurrence; its allocator keeps the invented pointer out of memory.
+  target->ir_optimizations.derived_induction_vars = true;
   target->prepend_underscore = false;
   target->plain_char_is_signed = false;
 

@@ -1,4 +1,4 @@
-// RUN: -std=c++20
+// RUN: -std=c++20 -O2
 
 #include <coroutine>
 

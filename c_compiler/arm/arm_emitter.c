@@ -257,6 +257,12 @@ static bool OmitFramePointer(ARMEmitter* emitter) {
          emitter->g->saved_regs.length == 0;
 }
 
+static bool NeedsStructReturnHome(ARMEmitter* emitter) {
+  return emitter->g->struct_return_reg >= 0 &&
+         (emitter->g->base.num_calls > 0 ||
+          emitter->g->exception_ranges.length > 0);
+}
+
 static int StackFrameSize(ARMEmitter* emitter) {
   // Start off with local variable space.  This normally also includes 8 bytes
   // for the saved fp and lr, but a frame-pointer-less leaf saves neither.
@@ -283,11 +289,10 @@ static int StackFrameSize(ARMEmitter* emitter) {
   stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 4;
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
-  if (emitter->g->struct_return_reg >= 0 &&
-      emitter->g->exception_ranges.length > 0) {
-    // Keep a stable home for the hidden result pointer. Exception landing pads
-    // cannot recover it from the prologue's callee-save slot, which contains
-    // the caller's old value of the reserved register.
+  if (NeedsStructReturnHome(emitter)) {
+    // Keep a stable home for the hidden result pointer.  Besides exception
+    // landing pads, this protects post-call uses from a callee that exhausts
+    // or corrupts the register save area in a deep variadic call chain.
     stack_frame_size += 8;
   }
   
@@ -425,6 +430,16 @@ static int StructReturnPhysicalRegister(ARMEmitter* emitter) {
   bool is_leaf = emitter->g->base.num_calls == 0 && compiler->optimize;
   return (is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR : ARM_FIRST_INT_REG_VAR) +
          emitter->g->struct_return_reg;
+}
+
+static void ReloadStructReturnAfterCall(ARMEmitter* emitter, FILE* fp) {
+  int reg = StructReturnPhysicalRegister(emitter);
+  if (reg < 0) {
+    return;
+  }
+  assert(emitter->struct_return_fp_offset < 0);
+  LoadRegisterFromFrame(emitter, reg, -emitter->struct_return_fp_offset,
+                        false, "hidden result pointer", fp);
 }
 
 static bool IsCombinedSavedIntArg(SavedArgumentRegister* saved, int count) {
@@ -712,11 +727,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
             offset);
     BitSetIteratorNext(&it);
   }
-  if (StructReturnPhysicalRegister(emitter) >= 0 &&
-      emitter->g->exception_ranges.length > 0) {
+  if (NeedsStructReturnHome(emitter)) {
     assert(saved_reg_offset >= 0);
     fprintf(fp, "\tstr r0, [sp, #%d]\t// hidden result pointer\n",
             saved_reg_offset);
+    emitter->struct_return_fp_offset =
+        saved_reg_offset - stack_frame_size + space_above_frame_pointer;
   }
 
   if (!is_leaf) {
@@ -1442,6 +1458,7 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       char symbuf[256];
       fprintf(fp, "\t%-12s%s\n", "bl",
               TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
+      ReloadStructReturnAfterCall(emitter, fp);
       return;
     }
 
@@ -1790,6 +1807,7 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\tblx %s\n",
               GetRegisterName(inst->operand[0], reg_size, buf1,
                              sizeof(buf1)));
+      ReloadStructReturnAfterCall(emitter, fp);
       break;
 
     case ARM_OP(movw):
@@ -1885,6 +1903,7 @@ void ARMEmitterInit(ARMEmitter* emitter, ARMGenerator* g) {
   emitter->saved_reg_offset = 0;
   emitter->spill_region_size = g->register_allocator.max_spilled_region_size;
   emitter->first_spill_offset = 0;
+  emitter->struct_return_fp_offset = 0;
   emitter->current_block = NULL;
 }
 

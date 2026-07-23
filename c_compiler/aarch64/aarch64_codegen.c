@@ -7,6 +7,7 @@
 //
 
 #include "aarch64_codegen.h"
+#include "aarch64_optimize.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -539,6 +540,8 @@ bool AARCH64IsBranch(TargetInstruction* inst) {
   switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(b):
     case AARCH64_OP(br):
+    case AARCH64_OP(cbz):
+    case AARCH64_OP(cbnz):
       return true;
     default:
       return false;
@@ -553,6 +556,10 @@ bool AARCH64IsConditionalBranch(TargetInstruction* inst) {
  
     case AARCH64_OP(br):
       return false;
+
+    case AARCH64_OP(cbz):
+    case AARCH64_OP(cbnz):
+      return true;
       
     default:
       return false;
@@ -1571,9 +1578,14 @@ static TargetInstruction* GetTlsVariableAddress(AARCH64Generator* g,
 
   IRVariable* variable = (IRVariable*)node;
   TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  // TPIDR_EL0 is read into an ordinary allocatable register.  Do not reuse a
+  // function-wide cached value here: later code may legally clobber that
+  // register before another TLS access (for example, strtoll's second errno
+  // assignment on its overflow path).
+  TargetInstruction* thread_pointer =
+      Emit(g, NewInstruction(AARCH64_OP(tp)));
   TargetInstruction* high =
-      Emit(g, NewInstruction2(AARCH64_OP(add), TargetThreadPointer(&g->base),
-                              symbol));
+      Emit(g, NewInstruction2(AARCH64_OP(add), thread_pointer, symbol));
   high->flags |= AARCH64_TPREL_HI_RELOC;
   TargetInstruction* low =
       Emit(g, NewInstruction2(AARCH64_OP(add), high, symbol));
@@ -2577,16 +2589,30 @@ static TargetInstruction* CompareImmediate(AARCH64Generator* g, TargetInstructio
   return Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(cmp), lhs, rhs), size));
 }
 
+static TargetInstruction* EmitCompareZeroBranch(
+    AARCH64Generator* g, AARCH64Opcode opcode, TargetInstruction* value,
+    IRNode* target_node, int size) {
+  TargetInstruction* branch =
+      Emit(g, SetInstructionSize(NewInstruction1(opcode, value), size));
+  if (target_node->data.ptr == NULL) {
+    VectorAppend(&g->base.fixups, NewBranchFixup(branch, target_node, 1));
+  } else {
+    branch->operand[1] = target_node->data.ptr;
+    TargetAddUser(target_node->data.ptr, branch);
+  }
+  return branch;
+}
+
 static void CompareEqualZero(AARCH64Generator* g, IRNode* value_node,
                              IRNode* target_node, int size) {
-  CompareImmediate(g, Materialize(g, value_node), ZeroImm(g), size);
-  EmitBranch(g, AARCH64_OP(eq), target_node);
+  EmitCompareZeroBranch(g, AARCH64_OP(cbz), Materialize(g, value_node),
+                        target_node, size);
 }
 
 static void CompareNotEqualZero(AARCH64Generator* g, IRNode* value_node,
                              IRNode* target_node, int size) {
-  CompareImmediate(g, Materialize(g, value_node), ZeroImm(g), size);
-  EmitBranch(g, AARCH64_OP(ne), target_node);
+  EmitCompareZeroBranch(g, AARCH64_OP(cbnz), Materialize(g, value_node),
+                        target_node, size);
 }
 
 enum ComparisonOp {
@@ -3047,15 +3073,16 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
     SetLoweredNode(node, value);
     return value;
   }
-  int64_t mask = (1LL << (keep_bytes * 8)) - 1;
   int size = node->type->size > 4 ? kSize64Bit : kSize32Bit;
-  TargetType type = size == kSize64Bit ? kTargetType64Bit : kTargetType32Bit;
-  // Materialize the mask into a register and use the register form of AND.  The
-  // immediate form requires a pre-encoded bitmask field, which the constant
-  // does not carry, so we avoid it here.
-  TargetInstruction* mask_reg = movi(g, size, GetIntConstant(g, NULL, type, mask));
+  // UBFX with a zero lsb is the architectural zero-extension operation.  It
+  // replaces the previous mask-materialization plus AND sequence.
   value = Emit(g, SetInstructionSize(
-                      NewInstruction2(AARCH64_OP(and), value, mask_reg), size));
+                      NewInstruction3(
+                          AARCH64_OP(ubfx), value,
+                          GetIntConstant(g, NULL, kTargetType32Bit, 0),
+                          GetIntConstant(g, NULL, kTargetType32Bit,
+                                         keep_bytes * 8)),
+                      size));
   TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL) {
     value = SetDestOrMove(g, value, dest, AARCH64_OP(mov));
@@ -5217,7 +5244,7 @@ void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
   
   if (OptLevel2()) {
     // Optimize the code sequence for -O2 and above.
-    // AARCH64Optimize(g);
+    AARCH64Optimize(g);
   
     if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
       fprintf(compiler->ir_output_file, "\n After AARCH64 optimization\n");

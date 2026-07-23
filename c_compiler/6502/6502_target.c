@@ -115,9 +115,15 @@ CompilerTarget* New6502Target() {
   target->options = options;
   
   target->ir_optimizations.gvn = false;      // Makes 6502 worse.
+  target->ir_optimizations.sccp = true;
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = false;  // Increases spills.
   target->ir_optimizations.tail_call = true;
+  target->ir_optimizations.dce = true;
+  target->ir_optimizations.copy_prop = false;  // Enable explicitly with -Os.
+  target->ir_optimizations.loop_preheaders = false;
+  target->ir_optimizations.induction_vars = true;
+  target->ir_optimizations.derived_induction_vars = false;
 
   target->prepend_underscore = false;
   target->flags = 0;

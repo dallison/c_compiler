@@ -19,6 +19,7 @@
 struct Generator;
 struct IRnode;
 struct Symbol;
+struct LoopInfo;
 
 typedef size_t BlockId;
 
@@ -52,6 +53,7 @@ typedef struct BasicBlock {
   bool return_block;     // Block returns from function.
   bool reachability_known;
   bool is_unreachable;
+  struct LoopInfo* innermost_loop;
   int loop_nesting;
 } BasicBlock;
 

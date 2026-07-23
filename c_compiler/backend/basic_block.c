@@ -43,6 +43,7 @@ BasicBlock* NewBasicBlock(BlockId id) {
   b->return_block = false;
   b->reachability_known = false;
   b->is_unreachable = false;
+  b->innermost_loop = NULL;
   b->loop_nesting = 0;
   return b;
 }

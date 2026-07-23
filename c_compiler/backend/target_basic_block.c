@@ -784,32 +784,57 @@ static void RemoveUnreachableBlocks(TargetGenerator* gen) {
   }
 }
 
-static void IncrementLoopNesting(TargetBasicBlock* block, void* data) {
-  block->loop_nesting++;
-}
-
-// Detect loops in the control flow graph by looking for back edges and
-// incrementing the loop_nesting counter for all blocks inside the loop
-// body.
-//
-// A back edge from A to B is an out edge from A to B for which A is
-// a dominator of B.
-//
-// For each back edge detected we traverse the dominator tree for
-// the loop header block (A in this example) and increment its
-// loop_nesting counter.
+// Detect natural loops from latch -> header back edges.  Build the union of
+// every latch belonging to one header before incrementing loop_nesting so
+// multiple latches do not look like nested loops.
 static void DetectLoops(TargetGenerator* gen) {
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    for (size_t j = 0; j < b->out_edges.length; j++) {
-      BlockId out_id = b->out_edges.value.w[j];
-      if (BitSetContains(&b->dominators, out_id)) {
-        // Out edge is a dominator, therefore this is a back-edge.
-        TargetBasicBlock* loop_head = VectorGet(&gen->basic_blocks, out_id);
-        TargetBasicBlockTraverseDominatorTree(gen, loop_head,
-                                        IncrementLoopNesting, kTraversePreOrder, NULL);
+  for (size_t header_id = 0; header_id < gen->basic_blocks.length;
+       header_id++) {
+    Vector work;
+    VectorInit(&work);
+    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+      TargetBasicBlock* latch = gen->basic_blocks.value.p[i];
+      for (size_t j = 0; j < latch->out_edges.length; j++) {
+        TargetBlockId out_id = latch->out_edges.value.w[j];
+        if (out_id == header_id &&
+            BitSetContains(&latch->dominators, header_id)) {
+          VectorAppend(&work, latch);
+        }
       }
     }
+
+    if (work.length == 0) {
+      VectorDestruct(&work);
+      continue;
+    }
+
+    BitSet loop_blocks;
+    BitSetInit(&loop_blocks);
+    BitSetInsert(&loop_blocks, header_id);
+    while (work.length > 0) {
+      TargetBasicBlock* block = VectorLast(&work);
+      VectorPop(&work);
+      if (BitSetContains(&loop_blocks, block->block_id)) {
+        continue;
+      }
+      BitSetInsert(&loop_blocks, block->block_id);
+      for (size_t i = 0; i < block->in_edges.length; i++) {
+        TargetBasicBlock* predecessor =
+            VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
+        VectorAppend(&work, predecessor);
+      }
+    }
+    VectorDestruct(&work);
+
+    BitSetIterator it;
+    BitSetIteratorStart(&it, &loop_blocks);
+    while (!BitSetIteratorDone(&it)) {
+      TargetBasicBlock* block = VectorGet(
+          &gen->basic_blocks, (TargetBlockId)BitSetIteratorValue(&it));
+      block->loop_nesting++;
+      BitSetIteratorNext(&it);
+    }
+    BitSetDestruct(&loop_blocks);
   }
 }
 

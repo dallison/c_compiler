@@ -88,6 +88,7 @@ typedef struct Generator {
   Vector cleanup_pads;       // PendingCleanupPad* entries, emitted at fn end.
 
   Vector basic_blocks;      // Basic Blocks (indexed by block id).
+  Vector loops;             // LoopInfo* records for natural loops.
   BasicBlock* entry_block;  // Entry block.
   BasicBlock* exit_block;   // Exit block.
 

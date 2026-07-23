@@ -20,5 +20,8 @@ unsigned long long strtoull(const char* str, char** end, int base) {
   if (parsed.overflow) {
     return ULLONG_MAX;
   }
-  return parsed.negative ? 0ULL - parsed.value : parsed.value;
+  if (parsed.negative) {
+    return 0ULL - parsed.value;
+  }
+  return parsed.value;
 }

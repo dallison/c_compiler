@@ -79,6 +79,7 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
   allocator->current_spilled_region_size = 0;
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
+  MapInitForPointerKeys(&allocator->reassignable_spills);
 }
 
 RVRegisterAllocator* NewRVRegisterAllocator(RVGenerator* pcode) {
@@ -91,6 +92,7 @@ void RVRegisterAllocatorDestruct(RVRegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
   BitSetDestruct(&allocator->preserved_instructions);
+  MapDestruct(&allocator->reassignable_spills);
 }
 
 void RVRegisterAllocatorDelete(RVRegisterAllocator* alloc) {
@@ -304,6 +306,43 @@ static int SpillCost(TargetInstruction* inst) {
   return cost;
 }
 
+// A bare tmp can be defined by other instructions through ->dest (not through
+// its users list), notably the merged value of a conditional expression.  The
+// RISC-V spill model stores an instruction once at its declaration point, so
+// spilling such a tmp captures an undefined/stale value instead of the later
+// branch definition.  Keep externally-defined values in registers until the
+// allocator has a store-back model for every definition.
+static bool IsReassignableDefinition(TargetInstruction* inst,
+                                     TargetInstruction* target) {
+  if (inst->dest == target) {
+    return true;
+  }
+  RVOpcode opcode = (RVOpcode)inst->opcode;
+  return (opcode == RV_OP(mv) || opcode == RV_OP(fmv_s) ||
+          opcode == RV_OP(fmv_d)) &&
+         inst->dest == NULL && inst->operand[0] == target &&
+         inst->operand[1] != NULL;
+}
+
+static bool InstructionHasExternalDefs(RVRegisterAllocator* allocator,
+                                       TargetInstruction* target) {
+  TargetGenerator* gen = &allocator->rv->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code;
+         inst != NULL && inst != block->end_code;
+         inst = TargetNext(inst)) {
+      if (inst == target) {
+        continue;
+      }
+      if (IsReassignableDefinition(inst, target)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
                                    RVRegisterType type) {
   RVRegister* regs =
@@ -343,6 +382,49 @@ static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
+static void InsertReassignableStoreBacks(
+    RVRegisterAllocator* allocator, TargetInstruction* target,
+    TargetInstruction* spill, TargetInstruction* initial_definition) {
+  TargetGenerator* gen = &allocator->rv->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code;
+         inst != NULL && inst != block->end_code;
+         inst = TargetNext(inst)) {
+      if (inst == initial_definition ||
+          (inst->flags & TARGET_INST_PROCESSED) == 0 || inst->reg == NULL ||
+          !IsReassignableDefinition(inst, target)) {
+        continue;
+      }
+      TargetInstruction* store = TargetNewInstruction2(
+          (TargetOpcode)RV_OP(spill), target, spill->operand[1]);
+      store->reg = inst->reg;
+      store->flags |= TARGET_INST_PROCESSED;
+      TargetBasicBlockEmitAfter(gen, block, store, inst);
+      inst = store;
+    }
+  }
+}
+
+static void SyncReassignableSpill(RVRegisterAllocator* allocator,
+                                  TargetInstruction* definition,
+                                  TargetInstruction* target) {
+  if (target == NULL || definition->reg == NULL) {
+    return;
+  }
+  TargetInstruction* spill =
+      MapFindPointerKey(&allocator->reassignable_spills, target);
+  if (spill == NULL) {
+    return;
+  }
+  TargetInstruction* store = TargetNewInstruction2(
+      (TargetOpcode)RV_OP(spill), target, spill->operand[1]);
+  store->reg = definition->reg;
+  store->flags |= TARGET_INST_PROCESSED;
+  TargetBasicBlockEmitAfter(&allocator->rv->base, definition->block, store,
+                            definition);
+}
+
 static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstruction* inst) {
   RVRegister* reg = (RVRegister*)inst->reg;    // Current register.
   
@@ -376,12 +458,7 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
       }
     }
   }
-  if (defined_before_save && save != NULL) {
-    // ABI argument and symbol pseudos are defined before the prologue.  Their
-    // spill slot is frame-pointer-relative, so the store must execute only
-    // after the save instruction has established the frame.
-    TargetBasicBlockEmitAfter(&allocator->rv->base, save->block, spill, save);
-  } else if (RVIsVarRegister(inst)) {
+  if (RVIsVarRegister(inst)) {
     // Spilling a varreg.  This instruction is in the entry block but
     // it can't be spilled there.  It needs to be spilled at its first
     // use (the assignment to it).  This is going to be the first user
@@ -389,6 +466,22 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
     assert(inst->users.length > 0);
     TargetInstruction* first_use = inst->users.value.p[0];
     TargetBasicBlockEmitAfter(&allocator->rv->base, first_use->block, spill, first_use);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    InsertReassignableStoreBacks(allocator, inst, spill, first_use);
+  } else if (InstructionHasExternalDefs(allocator, inst)) {
+    // The declaration of a merge tmp has no value to store.  Keep the spill
+    // instruction only as a handle for its slot and write the slot after each
+    // real definition instead.
+    TargetTrackOrphanInstruction(&allocator->rv->base, spill);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+  } else if (defined_before_save && save != NULL) {
+    // ABI argument and symbol pseudos are defined before the prologue.  Their
+    // spill slot is frame-pointer-relative, so the store must execute only
+    // after the save instruction has established the frame.
+    TargetBasicBlockEmitAfter(&allocator->rv->base, save->block, spill, save);
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, spill, inst);
@@ -594,6 +687,7 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
   
   inst->reg = &reg->base;
   inst->flags |= TARGET_INST_PROCESSED;
+  SyncReassignableSpill(allocator, inst, dest);
 }
 
 static void ReloadSpills(RVRegisterAllocator* allocator,
@@ -657,6 +751,7 @@ static bool AllocateUsingDest(RVRegisterAllocator* allocator,
   }
   FreeRegisters(allocator, inst);
   inst->flags |= TARGET_INST_PROCESSED;
+  SyncReassignableSpill(allocator, inst, inst->dest);
   return true;
 }
 

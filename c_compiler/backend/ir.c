@@ -1113,3 +1113,53 @@ bool IRIsResult(IRNode* node) {
       return false;
   }
 }
+
+static bool TypeChainIsVolatile(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsVolatile(current)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IRHasSideEffects(IRNode* node) {
+  if (IRIsBranch(node) || IRIsReturn(node) || IRIsCall(node) ||
+      IRIsResult(node)) {
+    return true;
+  }
+
+  // IRIsStore also covers atomics, va_list mutation, inc/dec, memcpy and
+  // memzero.  addressof and cast are included by that historical predicate
+  // even though they are pure, so exclude those two.
+  if (IRIsStore(node) && node->opcode != IR_OP(addressof) &&
+      node->opcode != IR_OP(cast)) {
+    return true;
+  }
+
+  switch (node->opcode) {
+    case IR_OP(enter):
+    case IR_OP(leave):
+    case IR_OP(pusharg):
+    case IR_OP(asm):
+    case IR_OP(decsp):
+    case IR_OP(savesp):
+    case IR_OP(restoresp):
+      return true;
+    default:
+      break;
+  }
+
+  if (IRIsLoadOnly(node)) {
+    if (TypeChainIsVolatile(node->type)) {
+      return true;
+    }
+    for (size_t i = 0; i < node->inputs.length; i++) {
+      IRNode* input = node->inputs.value.p[i];
+      if (input != NULL && TypeChainIsVolatile(input->type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}

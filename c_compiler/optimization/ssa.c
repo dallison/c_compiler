@@ -233,7 +233,6 @@ static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
 // to obtain the latest SSA variable for the given symbol.
 static void AddPhiInputs(Generator* gen, BasicBlock* block) {
   IRNode* inst = block->code;
-  BitSet visited = {0};
   // ssavar nodes in the block are before the phi nodes.
   while (inst != NULL && inst->opcode == IR_OP(ssavar)) {
     inst = IRNext(inst);
@@ -246,14 +245,20 @@ static void AddPhiInputs(Generator* gen, BasicBlock* block) {
     for (size_t i = 0; i < block->in_edges.length; i++) {
       BasicBlock* input =
           VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
+      // Each predecessor lookup is an independent graph search.  Reusing one
+      // visited set across edges (or across phi nodes) can suppress a valid
+      // path merely because an earlier lookup traversed it.
+      BitSet visited;
+      BitSetInit(&visited);
+      BitSetInsert(&visited, block->block_id);
       void* latest_var = FindSSAVar(gen, input, sym, &visited);
+      BitSetDestruct(&visited);
       if (latest_var != NULL) {
         IRAddInput((IRNode*)phi, latest_var, false);
       }
     }
     inst = IRNext(inst);
   }
-  BitSetDestruct(&visited);
 }
 
 // Map entry comparison function for comparing a map whose

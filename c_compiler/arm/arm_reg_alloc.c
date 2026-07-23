@@ -82,6 +82,7 @@ void ARMRegisterAllocatorInit(ARMRegisterAllocator* allocator,
   allocator->current_spilled_region_size = 0;
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
+  MapInitForPointerKeys(&allocator->reassignable_spills);
 }
 
 ARMRegisterAllocator* NewARMRegisterAllocator(struct ARMGenerator* g) {
@@ -94,6 +95,7 @@ void ARMRegisterAllocatorDestruct(ARMRegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
   BitSetDestruct(&allocator->preserved_instructions);
+  MapDestruct(&allocator->reassignable_spills);
 }
 
 void ARMRegisterAllocatorDelete(ARMRegisterAllocator* alloc) {
@@ -291,6 +293,9 @@ static int SpillCost(TargetInstruction* inst) {
   return cost;
 }
 
+static bool InstructionHasExternalDefs(ARMRegisterAllocator* allocator,
+                                       TargetInstruction* target);
+
 static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
                                    ARMRegisterType type) {
   ARMRegister* regs =
@@ -330,6 +335,13 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
           if (ARMIsFixedRegister(owner)) {
             continue;
           }
+          // A 64-bit merge value occupies a register pair, while the current
+          // spill pseudo stores only one 32-bit register.  Spilling it would
+          // preserve the low half and silently lose the high half.
+          if (ARMGetRegisterSize(owner) == kSize64Bit &&
+              InstructionHasExternalDefs(allocator, owner)) {
+            continue;
+          }
           if (ARMIsVarRegister(owner)) {
             // A variable register with no users cannot be spilled (there is no
             // use site to reload it at, see SpillInstruction).  Such a register
@@ -364,8 +376,72 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
   return victim;
 }
 
+static bool IsReassignableDefinition(TargetInstruction* inst,
+                                     TargetInstruction* target) {
+  return inst->dest == target;
+}
+
+static bool InstructionHasExternalDefs(ARMRegisterAllocator* allocator,
+                                       TargetInstruction* target) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code;
+         inst != NULL && inst != block->end_code;
+         inst = TargetNext(inst)) {
+      if (inst != target && IsReassignableDefinition(inst, target)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
+}
+
+static void InsertReassignableStoreBacks(
+    ARMRegisterAllocator* allocator, TargetInstruction* target,
+    TargetInstruction* spill, TargetInstruction* initial_definition) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code;
+         inst != NULL && inst != block->end_code;
+         inst = TargetNext(inst)) {
+      if (inst == initial_definition ||
+          (inst->flags & TARGET_INST_PROCESSED) == 0 || inst->reg == NULL ||
+          !IsReassignableDefinition(inst, target)) {
+        continue;
+      }
+      TargetInstruction* store = TargetNewInstruction2(
+          (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
+      store->reg = inst->reg;
+      store->flags |= TARGET_INST_PROCESSED;
+      TargetBasicBlockEmitAfter(gen, block, store, inst);
+      inst = store;
+    }
+  }
+}
+
+static void SyncReassignableSpill(ARMRegisterAllocator* allocator,
+                                  TargetInstruction* definition,
+                                  TargetInstruction* target) {
+  if (target == NULL || definition->reg == NULL) {
+    return;
+  }
+  TargetInstruction* spill =
+      MapFindPointerKey(&allocator->reassignable_spills, target);
+  if (spill == NULL) {
+    return;
+  }
+  TargetInstruction* store = TargetNewInstruction2(
+      (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
+  store->reg = definition->reg;
+  store->flags |= TARGET_INST_PROCESSED;
+  TargetBasicBlockEmitAfter(&allocator->g->base, definition->block, store,
+                            definition);
 }
 
 static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInstruction* inst) {
@@ -386,6 +462,21 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
+
+  TargetInstruction* save = NULL;
+  bool defined_before_save = false;
+  if (inst->block == allocator->g->base.entry_block) {
+    for (TargetInstruction* current = inst->block->code; current != NULL;
+         current = TargetNext(current)) {
+      if (current == inst) {
+        defined_before_save = true;
+      }
+      if ((ARMOpcode)current->opcode == ARM_OP(save)) {
+        save = current;
+        break;
+      }
+    }
+  }
   if (ARMIsVarRegister(inst)) {
     // Spilling a varreg->base.  This instruction is in the entry block but
     // it can't be spilled there.  It needs to be spilled at its first
@@ -394,6 +485,19 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
     assert(inst->users.length > 0);
     TargetInstruction* first_use = inst->users.value.p[0];
     TargetBasicBlockEmitAfter(&allocator->g->base, first_use->block, spill, first_use);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    InsertReassignableStoreBacks(allocator, inst, spill, first_use);
+  } else if (InstructionHasExternalDefs(allocator, inst)) {
+    TargetTrackOrphanInstruction(&allocator->g->base, spill);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+  } else if (defined_before_save && save != NULL) {
+    // ABI argument and symbol pseudos are defined before the prologue.  Their
+    // spill slots are frame-pointer-relative, so defer the store until save has
+    // established fp.
+    TargetBasicBlockEmitAfter(&allocator->g->base, save->block, spill, save);
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, spill, inst);
@@ -564,6 +668,7 @@ static COMPILER_UNUSED void AllocateForRmov(ARMRegisterAllocator* allocator,
   
   inst->reg = &reg->base;
   inst->flags |= TARGET_INST_PROCESSED;
+  SyncReassignableSpill(allocator, inst, inst->dest);
 }
 
 
@@ -690,6 +795,7 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     AssignRegister(reg, inst);
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
+    SyncReassignableSpill(allocator, inst, inst->dest);
     return;
   }
 
@@ -720,6 +826,7 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     }
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
+    SyncReassignableSpill(allocator, inst, inst->dest);
     return;
   }
 

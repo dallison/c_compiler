@@ -76,9 +76,17 @@ CompilerTarget* NewPCodeTarget() {
   target->call_return_fixed_reg = true;
   target->keep_ssa = false;
   target->ir_optimizations.gvn = true;
+  target->ir_optimizations.sccp = true;
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
+  target->ir_optimizations.dce = true;
+  target->ir_optimizations.copy_prop = true;
+  // The p-code lowering depends on the existing loop/phi shape.  Keep the new
+  // analysis available, but do not mutate that shape yet.
+  target->ir_optimizations.loop_preheaders = false;
+  target->ir_optimizations.induction_vars = false;
+  target->ir_optimizations.derived_induction_vars = false;
   target->prepend_underscore = false;
   target->plain_char_is_signed = false;
 

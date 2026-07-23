@@ -9,6 +9,8 @@
 #include "constprop.h"
 #include "map.h"
 #include <assert.h>
+#include <limits.h>
+#include <stdint.h>
 
 // Constant propagation and folding.
 //
@@ -68,6 +70,52 @@ static bool AllConstantInputs(IRNode* node) {
   return true;
 }
 
+static int64_t FoldZeroExtension(IRNode* inst, int64_t value,
+                                 int64_t operand) {
+  IRNode* source = inst->inputs.value.p[0];
+  if (source->type == NULL || inst->type == NULL ||
+      source->type->size == inst->type->size) {
+    // Same-width zeroextendi nodes are explicit bit masks.
+    return value & operand;
+  }
+  int bytes = source->type->size;
+  if (inst->type->size < bytes) {
+    bytes = inst->type->size;
+  }
+  int bits = bytes * 8;
+  uint64_t mask = bits >= 64 ? UINT64_MAX : ((1ULL << bits) - 1);
+  return (int64_t)((uint64_t)value & mask);
+}
+
+static bool FoldSignExtension(IRNode* inst, int64_t value, int64_t operand,
+                              int64_t* result) {
+  IRNode* source = inst->inputs.value.p[0];
+  if (source->type != NULL && inst->type != NULL &&
+      source->type->size != inst->type->size) {
+    int bytes = source->type->size;
+    if (inst->type->size < bytes) {
+      bytes = inst->type->size;
+    }
+    int bits = bytes * 8;
+    if (bits >= 64) {
+      *result = value;
+      return true;
+    }
+    uint64_t mask = (1ULL << bits) - 1;
+    uint64_t extended = (uint64_t)value & mask;
+    if ((extended & (1ULL << (bits - 1))) != 0) {
+      extended |= ~mask;
+    }
+    *result = (int64_t)extended;
+    return true;
+  }
+  if (operand < 0 || operand >= 64) {
+    return false;
+  }
+  *result = (int64_t)((uint64_t)value << operand) >> operand;
+  return true;
+}
+
 
 static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst) {
   if (inst->inputs.length < 2 ||
@@ -76,53 +124,40 @@ static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst
       !IRIsIntConst(inst->inputs.value.p[1])) {
     return;
   }
-  // We are adding a constant.
   IRNode* src = inst->inputs.value.p[0];
-    if (src->opcode == IR_OP(addi) && IRIsIntConst(src->inputs.value.p[1])) {
-      // The source of this node is also an addi and it's adding a constant.
-      if (src->outputs.length == 1) {
-        // We are the only user of this instruction.
-        // Retarget to the source's source.
-        IRReplaceInput(inst, 0, src->inputs.value.p[0]);
-        
-        // Calculate new value and replace constant with it.
-        int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
-        int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
-        int64_t new_value = src_value + my_value;
-        IRNode* value_node = inst->inputs.value.p[1];
-        if (new_value < 0) {
-          // Convert to subi.
-          inst->opcode = IR_OP(subi);
-          new_value = -new_value;
-        }
-        value_node = GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
-        IRReplaceInput(inst, 1, value_node);
-        
-        BasicBlockRemoveInstruction(gen, block, src);
-      } else if (src->opcode == IR_OP(subi) && IRIsIntConst(src->inputs.value.p[1])) {
-        // The source of this node is a subi and it's subtracting a constant.
-        if (src->outputs.length == 1) {
-          // We are the only user of this instruction.
-          // Retarget to the source's source.
-          IRReplaceInput(inst, 0, src->inputs.value.p[0]);
-          
-          // Calculate new value and replace constant with it.
-          int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
-          int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
-          int64_t new_value = my_value - src_value;
-          IRNode* value_node = inst->inputs.value.p[1];
-          if (new_value < 0) {
-            // Convert to subi.
-            inst->opcode = IR_OP(subi);
-            new_value = -new_value;
-          }
-          value_node = GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
-          IRReplaceInput(inst, 1, value_node);
-          
-          BasicBlockRemoveInstruction(gen, block, src);
-        }
-      }
+  if (src->outputs.length != 1 || src->inputs.length < 2 ||
+      !IRIsIntConst(src->inputs.value.p[1])) {
+    return;
+  }
+
+  int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
+  int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
+  int64_t new_value;
+  if (src->opcode == IR_OP(addi)) {
+    if (__builtin_add_overflow(src_value, my_value, &new_value)) {
+      return;
     }
+  } else if (src->opcode == IR_OP(subi)) {
+    if (__builtin_sub_overflow(my_value, src_value, &new_value)) {
+      return;
+    }
+  } else {
+    return;
+  }
+  if (new_value == INT64_MIN) {
+    return;
+  }
+
+  IRReplaceInput(inst, 0, src->inputs.value.p[0]);
+  if (new_value < 0) {
+    inst->opcode = IR_OP(subi);
+    new_value = -new_value;
+  }
+  IRNode* value_node = inst->inputs.value.p[1];
+  value_node =
+      GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
+  IRReplaceInput(inst, 1, value_node);
+  BasicBlockRemoveInstruction(gen, block, src);
 }
 
 static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst) {
@@ -134,49 +169,39 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
   }
   // We are subtracting a constant.
   IRNode* src = inst->inputs.value.p[0];
-    if (src->opcode == IR_OP(addi) && IRIsIntConst(src->inputs.value.p[1])) {
-      if (src->outputs.length == 1) {
-        // We are the only user of this instruction.
-        // Retarget to the source's source.
-        IRReplaceInput(inst, 0, src->inputs.value.p[0]);
-        
-        // Calculate new value and replace constant with it.
-        int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
-        int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
-        int64_t new_value = my_value - src_value;
-        IRNode* value_node = inst->inputs.value.p[1];
-        if (new_value < 0) {
-          // Convert to addi.
-          inst->opcode = IR_OP(addi);
-          new_value = -new_value;
-        }
-       value_node = GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
-        IRReplaceInput(inst, 1, value_node);
-        
-        BasicBlockRemoveInstruction(gen, block, src);
-      } else if (src->opcode == IR_OP(subi) && IRIsIntConst(src->inputs.value.p[1])) {
-        if (src->outputs.length == 1) {
-          // We are the only user of this instruction.
-          // Retarget to the source's source.
-          IRReplaceInput(inst, 0, src->inputs.value.p[0]);
-          
-          // Calculate new value and replace constant with it.
-          int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
-          int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
-          int64_t new_value = my_value + src_value;
-          if (new_value < 0) {
-            // Convert to addi.
-            inst->opcode = IR_OP(addi);
-            new_value = -new_value;
-          }
-          IRNode* value_node = inst->inputs.value.p[1];
-          value_node = GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
-          IRReplaceInput(inst, 1, value_node);
-          
-          BasicBlockRemoveInstruction(gen, block, src);
-        }
-      }
+  if (src->outputs.length != 1 || src->inputs.length < 2 ||
+      !IRIsIntConst(src->inputs.value.p[1])) {
+    return;
+  }
+
+  int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
+  int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
+  int64_t new_value;
+  if (src->opcode == IR_OP(addi)) {
+    if (__builtin_sub_overflow(my_value, src_value, &new_value)) {
+      return;
     }
+  } else if (src->opcode == IR_OP(subi)) {
+    if (__builtin_add_overflow(my_value, src_value, &new_value)) {
+      return;
+    }
+  } else {
+    return;
+  }
+  if (new_value == INT64_MIN) {
+    return;
+  }
+
+  IRReplaceInput(inst, 0, src->inputs.value.p[0]);
+  if (new_value < 0) {
+    inst->opcode = IR_OP(addi);
+    new_value = -new_value;
+  }
+  IRNode* value_node = inst->inputs.value.p[1];
+  value_node =
+      GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, new_value));
+  IRReplaceInput(inst, 1, value_node);
+  BasicBlockRemoveInstruction(gen, block, src);
 }
  
 // General case for a single constant operation.
@@ -199,6 +224,64 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
       }\
     }\
   }
+
+static void PropagateDivConstant(Generator* gen, BasicBlock* block,
+                                 IRNode* inst) {
+  if (inst->inputs.length < 2 || !IRIsIntConst(inst->inputs.value.p[1])) {
+    return;
+  }
+  IRNode* src = inst->inputs.value.p[0];
+  if (src == NULL || src->opcode != IR_OP(divi) ||
+      src->outputs.length != 1 || src->inputs.length < 2 ||
+      !IRIsIntConst(src->inputs.value.p[1])) {
+    return;
+  }
+
+  int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);
+  int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
+  int64_t combined;
+  if (src_value == 0 || my_value == 0 ||
+      __builtin_mul_overflow(src_value, my_value, &combined) ||
+      combined == 0) {
+    return;
+  }
+
+  IRReplaceInput(inst, 0, src->inputs.value.p[0]);
+  IRNode* value_node = inst->inputs.value.p[1];
+  value_node =
+      GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, combined));
+  IRReplaceInput(inst, 1, value_node);
+  BasicBlockRemoveInstruction(gen, block, src);
+}
+
+static void PropagateShiftConstant(Generator* gen, BasicBlock* block,
+                                   IRNode* inst, IROpcode opcode) {
+  if (inst->inputs.length < 2 || !IRIsIntConst(inst->inputs.value.p[1])) {
+    return;
+  }
+  IRNode* src = inst->inputs.value.p[0];
+  if (src == NULL || src->opcode != opcode || src->outputs.length != 1 ||
+      src->inputs.length < 2 || !IRIsIntConst(src->inputs.value.p[1])) {
+    return;
+  }
+
+  int64_t src_count = IRIntConstValue(src->inputs.value.p[1]);
+  int64_t my_count = IRIntConstValue(inst->inputs.value.p[1]);
+  int64_t combined;
+  int width = inst->type == NULL ? 0 : inst->type->size * 8;
+  if (src_count < 0 || my_count < 0 ||
+      __builtin_add_overflow(src_count, my_count, &combined) ||
+      combined >= width) {
+    return;
+  }
+
+  IRReplaceInput(inst, 0, src->inputs.value.p[0]);
+  IRNode* value_node = inst->inputs.value.p[1];
+  value_node =
+      GeneratorEmitConstant(gen, NewIntIRConstant(value_node->type, combined));
+  IRReplaceInput(inst, 1, value_node);
+  BasicBlockRemoveInstruction(gen, block, src);
+}
 
 static void PropagateConstants(Generator* gen, ConstantPropagator* p,
                                   BasicBlock* block) {
@@ -295,6 +378,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
     IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, lhs op rhs); \
     GeneratorReplaceInstruction(gen, inst, const_inst); \
     BasicBlockRemoveInstruction(gen, block, inst); \
+    continue; \
   }
 
 #define FOLD_DIV(op) \
@@ -305,6 +389,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
             IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, lhs op rhs); \
             GeneratorReplaceInstruction(gen, inst, const_inst); \
             BasicBlockRemoveInstruction(gen, block, inst); \
+            continue; \
           } \
         }
 #define FOLD_UNARY(op) \
@@ -313,6 +398,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
           IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, op sub); \
           GeneratorReplaceInstruction(gen, inst, const_inst); \
           BasicBlockRemoveInstruction(gen, block, inst); \
+          continue; \
         }
 
       case IR_OP(addi):
@@ -329,7 +415,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         break;
       case IR_OP(divi):
         FOLD_DIV(/);
-        PROP_CONST_OP(divi, *);
+        PropagateDivConstant(gen, block, inst);
         break;
       case IR_OP(modi):
         FOLD_DIV(%);
@@ -340,11 +426,11 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
        break;
       case IR_OP(andi):
         FOLD_BINARY(&);
-        PROP_CONST_OP(xori, &);
+        PROP_CONST_OP(andi, &);
         break;
       case IR_OP(ori):
         FOLD_BINARY(|);
-        PROP_CONST_OP(xori, |);
+        PROP_CONST_OP(ori, |);
         break;
       case IR_OP(lsri):
          if (AllConstantInputs(inst)) {
@@ -353,16 +439,17 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
            IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, lhs >> rhs);
            GeneratorReplaceInstruction(gen, inst, const_inst);
            BasicBlockRemoveInstruction(gen, block, inst);
+           continue;
          }
-         PROP_CONST_OP(lsri, +);
+         PropagateShiftConstant(gen, block, inst, IR_OP(lsri));
          break;
       case IR_OP(asri):
         FOLD_BINARY(>>);
-        PROP_CONST_OP(asri, +);
+        PropagateShiftConstant(gen, block, inst, IR_OP(asri));
         break;
       case IR_OP(lsli):
         FOLD_BINARY(<<);
-        PROP_CONST_OP(lsli, +);
+        PropagateShiftConstant(gen, block, inst, IR_OP(lsli));
         break;
       case IR_OP(cmpeqi):
         FOLD_BINARY(==);
@@ -392,15 +479,28 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         FOLD_UNARY(!);
         break;
       case IR_OP(zeroextendi):
-        FOLD_BINARY(&);
+        if (AllConstantInputs(inst)) {
+          int64_t lhs = IRIntConstValue(inst->inputs.value.p[0]);
+          int64_t rhs = IRIntConstValue(inst->inputs.value.p[1]);
+          IRNode* const_inst = GeneratorGetIntConstant(
+              gen, inst->type, FoldZeroExtension(inst, lhs, rhs));
+          GeneratorReplaceInstruction(gen, inst, const_inst);
+          BasicBlockRemoveInstruction(gen, block, inst);
+          continue;
+        }
         break;
       case IR_OP(signextendi):
         if (AllConstantInputs(inst)) {
           int64_t lhs = IRIntConstValue(inst->inputs.value.p[0]);
           int64_t rhs = IRIntConstValue(inst->inputs.value.p[1]);
-          IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, (lhs << rhs) >> rhs);
-          GeneratorReplaceInstruction(gen, inst, const_inst);
-          BasicBlockRemoveInstruction(gen, block, inst);
+          int64_t value;
+          if (FoldSignExtension(inst, lhs, rhs, &value)) {
+            IRNode* const_inst =
+                GeneratorGetIntConstant(gen, inst->type, value);
+            GeneratorReplaceInstruction(gen, inst, const_inst);
+            BasicBlockRemoveInstruction(gen, block, inst);
+            continue;
+          }
         }
         break;
       case IR_OP(btrue):

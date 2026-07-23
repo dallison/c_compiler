@@ -7,143 +7,164 @@
 //
 
 #include "codemotion.h"
-#include <assert.h>
 
-static void Trap() {}
-static void TrapInstructionMove(IRNode* node) {
-  if (node->id == 561) {
-    Trap();
+#include "alias.h"
+#include "loop_info.h"
+#include "symbol.h"
+
+typedef struct {
+  bool writes_memory;
+  bool calls;
+} LoopMemoryEffects;
+
+static LoopMemoryEffects GetLoopMemoryEffects(Generator* gen,
+                                              const LoopInfo* loop) {
+  LoopMemoryEffects effects = {false, false};
+  BitSetIterator it;
+  BitSetIteratorStart(&it, (BitSet*)&loop->blocks);
+  while (!BitSetIteratorDone(&it)) {
+    BasicBlock* block =
+        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      effects.calls |= IRIsCall(inst);
+      effects.writes_memory |= IRIsStore(inst);
+    }
+    BitSetIteratorNext(&it);
   }
+  return effects;
 }
 
-// Given an instruction that has no inputs in this block, move it
-// to a dominator block.  The block chosen is the one closest to the
-// current block (looking up the tree) that contains one of the inputs.
-static void HoistInstruction(Generator* gen, IRNode* inst) {
-  TrapInstructionMove(inst);
-  BasicBlock* block = inst->block->idom;
-  while (block != NULL) {
-    IRNode* first_input = NULL;
-    for (size_t i = 0; i < inst->inputs.length; i++) {
-      IRNode* input = inst->inputs.value.p[i];
-      if (block == input->block) {
-        first_input = input;
-        break;
+static bool LoopDefinesSymbol(Generator* gen, const LoopInfo* loop,
+                              const Symbol* symbol) {
+  BitSetIterator it;
+  BitSetIteratorStart(&it, (BitSet*)&loop->blocks);
+  while (!BitSetIteratorDone(&it)) {
+    BasicBlock* block =
+        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      if (IRIsVarDef(inst) && inst->var.def == symbol) {
+        return true;
       }
     }
-    if (first_input != NULL) {
-      IRNode* last_in_block = first_input->block->end_code;
-      // If the block ends in a control-transfer instruction (any branch --
-      // conditional bfalse/btrue, unconditional bra, computed cbra -- or a
-      // return) the hoisted instruction must go BEFORE it: code placed after a
-      // conditional branch lands on the fall-through path only, so a value used
-      // on the taken path (e.g. the hoisted argument of a call further down the
-      // dominator tree) is never computed there.  Otherwise append it at the
-      // end of the block.
-      if (IRIsBranch(last_in_block) || IRIsReturn(last_in_block)) {
-        BasicBlockMoveInstructionBefore(gen, inst, last_in_block);
-      } else {
-        BasicBlockMoveInstructionAfter(gen, inst, last_in_block);
-      }
-      return;
-    }
-    block = block->idom;
+    BitSetIteratorNext(&it);
   }
-  assert(false);
+  return false;
 }
 
-typedef struct CodeMotionContext {
-  Generator* gen;
-  // True if any block inside a loop contains a call or a memory write.  When
-  // set we must not hoist memory LOADS out of loops: a load is only loop
-  // invariant if nothing in the loop can change the loaded location, and we
-  // have no alias analysis to prove that.  (A call may modify any global, and a
-  // store may alias the loaded address.)  Pure register expressions remain
-  // hoistable.
-  bool loop_writes_memory;
-} CodeMotionContext;
-
-// Pre-pass: detect whether any loop block performs a call or a memory write.
-static void ScanLoopWrites(BasicBlock* block, void* data) {
-  CodeMotionContext* ctx = data;
-  if (block->loop_nesting == 0 || ctx->loop_writes_memory) {
-    return;
+// SSA-backed, non-address-taken locals cannot alias an unrelated store.  This
+// lets a loop hoist invariant argument/local reads without pretending that an
+// arbitrary pointer load is safe across stores or calls.
+static bool IsSafeVariableLoad(Generator* gen, const LoopInfo* loop,
+                               IRNode* inst) {
+  if (!IRIsVarRef(inst) || inst->var.use == NULL ||
+      IRHasSideEffects(inst)) {
+    return false;
   }
-  for (IRNode* inst = BasicBlockBegin(block);
-       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
-       inst = IRNext(inst)) {
-    if (IRIsCall(inst) || IRIsStore(inst)) {
-      ctx->loop_writes_memory = true;
-      return;
-    }
+  Symbol* symbol = inst->var.use;
+  if (symbol->flags.address_taken ||
+      (!symbol->flags.is_local && !symbol->flags.is_argument &&
+       !symbol->flags.is_temp) ||
+      LoopDefinesSymbol(gen, loop, symbol)) {
+    return false;
   }
+  return true;
 }
 
-// Given a basic block, check that it's in a loop and if so,
-// look for instructions that have no side effects but have all their inputs
-// coming from a dominator block (not this block).  For each of these,
-// move them to the closest dominator block that satisfies all their
-// inputs.
-void PerformCodeMotion(BasicBlock* block, void* data) {
-  CodeMotionContext* ctx = data;
-  Generator* gen = ctx->gen;
-  if (block->loop_nesting == 0) {
-    return;
-  }
-  IRNode* next = NULL;
-  for (IRNode* inst = BasicBlockBegin(block);
-       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
-       inst = next) {
-    next = IRNext(inst);
-    bool is_candidate = (IRIsLoad(inst) || IRIsExpression(inst)) &&
-            !IRIsStore(inst) &&
-            !IRIsCall(inst) &&
-            !IRIsVariable(inst) && inst->opcode != IR_OP(literalref) &&
-            inst->inputs.length > 0;
-    // A memory load may only be hoisted out of a loop if nothing in the loop
-    // writes memory; otherwise the hoisted value goes stale (e.g. a global read
-    // in a loop that also calls a function which updates that global).
-    if (is_candidate && IRIsLoad(inst) && ctx->loop_writes_memory) {
-      is_candidate = false;
+static bool IsLoopInvariant(const LoopInfo* loop, IRNode* inst) {
+  for (size_t i = 0; i < inst->inputs.length; i++) {
+    IRNode* input = inst->inputs.value.p[i];
+    if (input->block != NULL && LoopInfoContainsBlock(loop, input->block)) {
+      return false;
     }
-    if (is_candidate) {
-      for (size_t i = 0; i < inst->inputs.length; i++) {
-        IRNode* input = inst->inputs.value.p[i];
-        // If the input comes from this block then this is not a
-        // code motion candidate.  If it comes from another block then
-        // it can only come from a dominator block.
-        if (input->block == block) {
-          is_candidate = false;
-          break;
+  }
+  return true;
+}
+
+static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
+                             LoopMemoryEffects effects, Set* moved,
+                             IRNode* inst) {
+  if (inst->dest != NULL || inst->inputs.length == 0 ||
+      IRHasSideEffects(inst) || IRIsVariable(inst) ||
+      inst->opcode == IR_OP(literalref) ||
+      SetContains(moved, inst) ||
+      (!IRIsLoad(inst) && !IRIsExpression(inst)) ||
+      !IsLoopInvariant(loop, inst)) {
+    return false;
+  }
+  if (IRIsLoadOnly(inst) && (effects.writes_memory || effects.calls) &&
+      !IsSafeVariableLoad(gen, loop, inst)) {
+    IRMemoryLocation location;
+    if (!IRAliasDecode(inst, &location) ||
+        location.volatile_access || location.atomic_access ||
+        IRAliasLoopMayClobber(gen, loop, &location)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void HoistToPreheader(Generator* gen, const LoopInfo* loop,
+                             IRNode* inst) {
+  BasicBlock* preheader = loop->preheader;
+  BasicBlockMoveInstructionBefore(gen, inst, preheader->end_code);
+}
+
+static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
+  if (loop->parent != NULL || loop->children.length != 0 ||
+      loop->preheader == NULL || BasicBlockIsEmpty(loop->preheader)) {
+    return false;
+  }
+  LoopMemoryEffects effects = GetLoopMemoryEffects(gen, loop);
+  bool changed = false;
+  bool local_change;
+  do {
+    local_change = false;
+    BitSetIterator it;
+    BitSetIteratorStart(&it, &loop->blocks);
+    while (!BitSetIteratorDone(&it)) {
+      BasicBlock* block =
+          VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+      IRNode* next = NULL;
+      for (IRNode* inst = BasicBlockBegin(block);
+           !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+           inst = next) {
+        next = IRNext(inst);
+        if (IsHoistCandidate(gen, loop, effects, moved, inst)) {
+          HoistToPreheader(gen, loop, inst);
+          SetInsert(moved, inst);
+          local_change = true;
+          changed = true;
         }
       }
-      // Moving to another block with the same loop nesting isn't useful
-      // and just increases register pressure, so eliminate that.
-      if (is_candidate) {
-        // If all of the inputs come from a block with a different
-        // loop nesting it's worth moving it.
-        is_candidate = true;
-        for (size_t i = 0; i < inst->inputs.length; i++) {
-           IRNode* input = inst->inputs.value.p[i];
-          if (input->block->loop_nesting == block->loop_nesting) {
-            is_candidate = false;
-            break;
-          }
-        }
-      }
-      if (is_candidate) {
-        // printf("Found loop invariant instruction $%d\n", inst->id);
-        HoistInstruction(gen, inst);
-      }
+      BitSetIteratorNext(&it);
     }
-  }
-  
+  } while (local_change);
+  return changed;
 }
 
 void CodeMotionOptimization(Generator* gen) {
-  CodeMotionContext ctx = {gen, false};
-  BasicBlockTraverseDominatorTree(gen, gen->entry_block, ScanLoopWrites,
-                                  kTraversePreOrder, &ctx);
-  BasicBlockTraverseDominatorTree(gen, gen->entry_block, PerformCodeMotion,
-                                  kTraversePreOrder, &ctx);
+  Set moved;
+  SetInitForPointers(&moved);
+  int max_depth = 0;
+  for (size_t i = 0; i < gen->loops.length; i++) {
+    LoopInfo* loop = gen->loops.value.p[i];
+    if (loop->depth > max_depth) {
+      max_depth = loop->depth;
+    }
+  }
+  // Inner loops first.  An invariant moved to an inner preheader can then be
+  // considered for movement out of its parent loop.
+  for (int depth = max_depth; depth > 0; depth--) {
+    for (size_t i = 0; i < gen->loops.length; i++) {
+      LoopInfo* loop = gen->loops.value.p[i];
+      if (loop->depth == depth) {
+        HoistLoopInvariants(gen, loop, &moved);
+      }
+    }
+  }
+  SetDestruct(&moved);
 }

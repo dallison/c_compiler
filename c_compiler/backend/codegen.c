@@ -18,11 +18,16 @@
 #include "gvn.h"
 #include "list.h"
 #include "optimizer.h"
+#include "sccp.h"
 #include "ssa.h"
 #include "statement_codegen.h"
 #include <assert.h>
 #include "constprop.h"
 #include "codemotion.h"
+#include "copyprop.h"
+#include "dce.h"
+#include "induction.h"
+#include "loop_info.h"
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
@@ -217,6 +222,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->exception_typeinfos);
   VectorInit(&gen->cleanup_pads);
   VectorInit(&gen->basic_blocks);
+  VectorInit(&gen->loops);
   gen->for_constant_evaluation = false;
 
   IRResetNodeId();
@@ -261,6 +267,8 @@ void GeneratorDestruct(Generator* gen) {
   VectorDestruct(&gen->exception_typeinfos);
 
   // Delete the basic blocks.
+  LoopInfoClear(gen);
+  VectorDestruct(&gen->loops);
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* block = gen->basic_blocks.value.p[i];
     BasicBlockDelete(block);
@@ -794,34 +802,26 @@ static void BuildDominatorTree(Generator* gen) {
   }
 }
 
-static void IncrementLoopNesting(BasicBlock* block, void* data) {
-  block->loop_nesting++;
+static void ResetCFGAnalysis(Generator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    BitSetClear(&block->dominators);
+    block->num_dominators = 0;
+    VectorClear(&block->dominatees);
+    BitSetClear(&block->dominance_frontier);
+    block->idom = NULL;
+    block->reachability_known = false;
+    block->is_unreachable = false;
+  }
 }
 
-// Detect loops in the control flow graph by looking for back edges and
-// incrementing the loop_nesting counter for all blocks inside the loop
-// body.
-//
-// A back edge from A to B is an out edge from A to B for which A is
-// a dominator of B.
-//
-// For each back edge detected we traverse the dominator tree for
-// the loop header block (A in this example) and increment its
-// loop_nesting counter.
-static void DetectLoops(Generator* gen) {
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value.p[i];
-    for (size_t j = 0; j < b->out_edges.length; j++) {
-      BlockId out_id = b->out_edges.value.w[j];
-      if (BitSetContains(&b->dominators, out_id)) {
-        // Out edge is a dominator, therefore this is a back-edge.
-        BasicBlock* loop_head = VectorGet(&gen->basic_blocks, out_id);
-        BasicBlockAddBackEdge(b, loop_head);
-        BasicBlockTraverseDominatorTree(gen, loop_head,
-                                        IncrementLoopNesting, kTraversePreOrder, NULL);
-      }
-    }
-  }
+static void AnalyzeCFG(Generator* gen) {
+  ResetCFGAnalysis(gen);
+  CalculateDominators(gen);
+  CalculateImmediateDominator(gen);
+  CalculateDominanceFrontier(gen);
+  BuildDominatorTree(gen);
+  LoopInfoBuild(gen);
 }
 
 static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
@@ -970,23 +970,17 @@ static void BuildBasicBlocks(Generator* gen) {
   // Straighten graph, coalescing blocks that just link to each other.
   StraightenGraph(gen);
 
-  // Calculate dominators, dominance frontier and idom.
-  // Cominators.
-  CalculateDominators(gen);
- 
-  // PrintBasicBlocks(gen, stdout);
-  
-  // PImmediate dominator.
-  CalculateImmediateDominator(gen);
- 
-  // Dominance frontier.
-  CalculateDominanceFrontier(gen);
-  
-  // Build dominator tree.
-  BuildDominatorTree(gen);
- 
-  // Detect loops.
-  DetectLoops(gen);
+  // Build dominators and persistent natural-loop information.  Dedicated
+  // preheaders are inserted before SSA conversion, so no phi repair is needed.
+  // Recompute the analysis after each insertion because nested loops can make
+  // one another's entry edges change.
+  AnalyzeCFG(gen);
+  if (OptLevel2() && compiler->ir_optimizations.code_motion &&
+      compiler->ir_optimizations.loop_preheaders) {
+    while (LoopInfoCreatePreheaders(gen)) {
+      AnalyzeCFG(gen);
+    }
+  }
 
   // Tidy up.
   // Delete the branches vector.
@@ -1383,6 +1377,14 @@ void* GenerateFunction(Generator* gen) {
   // Remove any unreachable blocks before we go into SSA conversion.
   RemoveUnreachableBlocks(gen);
 
+  if (OptLevel2() && compiler->ir_optimizations.code_motion &&
+      compiler->ir_optimizations.derived_induction_vars &&
+      compiler->ir_optimizations.loop_preheaders) {
+    // Build derived pointer recurrences while the IR still uses ordinary
+    // variables; the following SSA conversion then creates their phis.
+    DerivedInductionVariableOptimization(gen);
+  }
+
   //  printf("Before SSA\n");
   //  PrintBasicBlocks(gen);
   // Convert the IR graph to Static Single Assignment form.  This enables
@@ -1405,15 +1407,50 @@ void* GenerateFunction(Generator* gen) {
      // Do Global Value Numbering.  This finds and uses common subexpressions.
       GlobalValueNumberingOptimization(gen);
     }
+
+    if (compiler->ir_optimizations.sccp) {
+      // Propagate constants through SSA names, phis, and executable edges.
+      if (SparseConditionalConstantPropagation(gen, NULL)) {
+        // SCCP can remove infeasible CFG edges.  Downstream LICM and induction
+        // passes consume dominators and LoopInfo, so do not leave them pointing
+        // at the pre-SCCP graph.
+        AnalyzeCFG(gen);
+      }
+    }
     
     if (compiler->ir_optimizations.const_prop) {
     // Propagate constants.
       ConstantPropagationOptimization(gen);
     }
-    
-    if (compiler->ir_optimizations.code_motion) {
+
+    if (compiler->ir_optimizations.copy_prop) {
+      CopyPropagationOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.dce) {
+      DeadCodeEliminationOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.code_motion &&
+        compiler->ir_optimizations.loop_preheaders) {
       // Perform code motion for loops.
       CodeMotionOptimization(gen);
+    }
+
+    // Canonical induction updates already produce the post-update value.  Use
+    // it directly instead of reloading the induction variable in the latch.
+    if (compiler->ir_optimizations.induction_vars) {
+      InductionVariableOptimization(gen);
+    }
+
+    // Code motion and copy propagation can expose another short chain of dead
+    // computations.  Keep this bounded rather than introducing an implicit
+    // pass-manager fixed point.
+    if (compiler->ir_optimizations.copy_prop) {
+      CopyPropagationOptimization(gen);
+    }
+    if (compiler->ir_optimizations.dce) {
+      DeadCodeEliminationOptimization(gen);
     }
   }
     

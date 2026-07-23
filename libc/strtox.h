@@ -59,16 +59,20 @@ static __StrtoxResult __Strtox(const char* nptr, char** endptr, int base,
     base = *p == '0' ? 8 : 10;
   }
 
-  unsigned long long limit =
-      result.negative ? negative_limit : positive_limit;
+  unsigned long long limit = positive_limit;
+  if (result.negative) {
+    limit = negative_limit;
+  }
+  unsigned long long cutoff = limit / (unsigned int)base;
+  unsigned int cutlim = (unsigned int)(limit % (unsigned int)base);
   while (true) {
     int digit = __StrtoxDigit(*p);
     if (digit < 0 || digit >= base) {
       break;
     }
     result.converted = true;
-    if (result.value >
-        (limit - (unsigned int)digit) / (unsigned int)base) {
+    if (result.value > cutoff ||
+        (result.value == cutoff && (unsigned int)digit > cutlim)) {
       result.overflow = true;
       result.value = limit;
     } else if (!result.overflow) {

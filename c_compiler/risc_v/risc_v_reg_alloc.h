@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
+#include "map.h"
 #include "risc_v_machine.h"
 #include "target_generator.h"
 
@@ -53,6 +54,9 @@ typedef struct {
   int current_spilled_region_size;
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preserved regs.
+  // Reassignable values (variable registers and merge temporaries) need their
+  // spill slot refreshed after every target instruction that defines them.
+  Map reassignable_spills;
 } RVRegisterAllocator;
 
 void RVRegisterAllocatorInit(RVRegisterAllocator* alloc,

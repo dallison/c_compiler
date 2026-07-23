@@ -8,6 +8,7 @@
 
 #include "optimizer.h"
 #include "basic_block.h"
+#include <stdint.h>
 
 // Is the node an integer constant with the value given?
 static bool IsIntConstantWithValue(IRNode* node, int value) {
@@ -37,40 +38,35 @@ static bool IsIntConstantPowerOf2(IRNode* node, int maxbits) {
     return false;
   }
   IRConstant* c = (IRConstant*)node;
-  int mask = (1 << maxbits) - 1;
-  int64_t value = c->value.ivalue & mask;
-  return value != 0 &&
-      c->value.ivalue >> maxbits == 0 &&
-      (value & (value - 1)) == 0;
+  if (maxbits <= 0 || maxbits > 64) {
+    return false;
+  }
+  if (!TypeIsUnsigned(node->type) && c->value.ivalue <= 0) {
+    return false;
+  }
+  uint64_t value = (uint64_t)c->value.ivalue;
+  if (maxbits < 64) {
+    uint64_t mask = (UINT64_C(1) << maxbits) - 1;
+    if ((value & ~mask) != 0) {
+      return false;
+    }
+    value &= mask;
+  }
+  return value != 0 && (value & (value - 1)) == 0;
 }
 
 // The node is an integer power of 2.  What is its log?  This is the
 // number of zero bits up to the first one bit.
 // For example, the value 128 (0x80) is 7.
-// This comes from:
-// https://graphics.stanford.edu/~seander/bithacks.html#IntegerLogDeBruijn
 static int LogBase2(IRNode* node) {
   IRConstant* c = (IRConstant*)node;
-  int64_t value = c->value.ivalue;
-  static const int MultiplyDeBruijnBitPosition2[32] =
-  {
-    0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
-    31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
-  };
-  return MultiplyDeBruijnBitPosition2[(uint32_t)(value * 0x077CB531U) >> 27];
-
-#if 0
   int zerocount = 0;
-  int64_t value = c->value.ivalue;
-  for (int i = 0; i < 64; i++) {
-    if ((value & (1 << i)) == 0) {
-      zerocount++;
-    } else {
-      break;
-    }
+  uint64_t value = (uint64_t)c->value.ivalue;
+  while ((value & 1) == 0) {
+    zerocount++;
+    value >>= 1;
   }
   return zerocount;
-#endif
 }
 
 
@@ -164,7 +160,8 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       } else {
         // Division by a power of 2 less than the word width is a right shift.
         int maxbits = node->type->size * 8;
-        if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
+        if (TypeIsUnsigned(node->type) &&
+            IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to shift with left input moved to
           // the right and replaced by its log (base 2).
           node->opcode = TypeIsUnsigned(node->type) ? IR_OP(lsri) : IR_OP(asri);
@@ -184,7 +181,8 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
         // Modulus with a power of 2 is an AND (with the value - 1)
         // For example, x % 8 is the same as x & 0x7
         int maxbits = node->type->size * 8;
-        if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
+        if (TypeIsUnsigned(node->type) &&
+            IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to AND with mask.
           node->opcode = IR_OP(andi);
           IRNode* c = (IRNode*)node->inputs.value.p[1];

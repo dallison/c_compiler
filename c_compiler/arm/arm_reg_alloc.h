@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
+#include "map.h"
 #include "arm_machine.h"
 #include "target_generator.h"
 
@@ -51,6 +52,7 @@ typedef struct {
   int current_spilled_region_size;
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preseARMed regs.
+  Map reassignable_spills;
 } ARMRegisterAllocator;
 
 void ARMRegisterAllocatorInit(ARMRegisterAllocator* alloc,
