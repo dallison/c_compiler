@@ -2416,6 +2416,7 @@ sh_test(
         ":riscv",
         ":support_rom_65c02",
         ":x86_64",
+        "tests/aarch64_coroutine_exchange_test.cc",
         "tests/aarch64_peephole_cases.c",
         "tests/ir_optimizer_cases.c",
         "tests/ir_optimizer_cases.cc",

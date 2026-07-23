@@ -1070,6 +1070,22 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
   }
 }
 
+static void PrintSpillSlotAddress(int offset, FILE* fp) {
+  const char* spill = "x16";
+  const char* frame = "x29";
+  if (offset <= 4095) {
+    fprintf(fp, "\tsub %s, %s, #%d\n", spill, frame, offset);
+    return;
+  }
+
+  uint32_t value = (uint32_t)offset;
+  fprintf(fp, "\tmovz %s, #%u\n", spill, value & 0xffffu);
+  if ((value >> 16) != 0) {
+    fprintf(fp, "\tmovk %s, #%u, lsl #16\n", spill, value >> 16);
+  }
+  fprintf(fp, "\tsub %s, %s, %s\n", spill, frame, spill);
+}
+
 // Main instruction printer.
 static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1229,65 +1245,25 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     }
 
     case AARCH64_OP(spill): {
-#if 0
       AARCH64Register* reg = (AARCH64Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
-      const int spill_addr = AARCH64_SPILL_ADDR;
-      if (!AARCH64IsPossibleImmediate(offset)) {
-        fprintf(fp, "\t%-12s%s, %d\n",
-                "lui",
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, reg_size, buf1, sizeof(buf1)),
-                offset >> 12);
-        fprintf(fp, "\t%-12s%s, s0, %s\n",
-                "sub",
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, reg_size, buf1, sizeof(buf1)),
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, reg_size, buf2, sizeof(buf2)));
-        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Spilled @%d\n",
-                 reg->type == kAARCH64RegTypeInt ? "sd" : "fsd",
-                 AARCH64RegisterName(reg, buf1, sizeof(buf1)),
-                 offset & 0xfff,
-                 AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, reg_size, buf2, sizeof(buf2)),
-                 inst->operand[0]->id);
-      } else {
-        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
-                 reg->type == kAARCH64RegTypeInt ? "sd" : "fsd",
-                 AARCH64RegisterName(reg, buf1, sizeof(buf1)),
-                 offset,
-                 inst->operand[0]->id);
-      }
-#endif
+      PrintSpillSlotAddress(offset, fp);
+      fprintf(fp, "\t%s %s, [x16, #0]\t// Spilled @%d\n",
+              reg->type == kAARCH64RegTypeInt ? "str" : "fstr",
+              AARCH64RegisterName(reg, kSize64Bit, buf1, sizeof(buf1)),
+              inst->operand[0]->id);
       return;
     }
       
     case AARCH64_OP(reload): {
-#if 0
       AARCH64Register* reg = (AARCH64Register*)inst->reg;
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
-      const int spill_addr = AARCH64_SPILL_ADDR;
-      if (!AARCH64IsPossibleImmediate(offset)) {
-        fprintf(fp, "\t%-12s%s, %d\n",
-                "lui",
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, buf1, sizeof(buf1)),
-                offset >> 12);
-        fprintf(fp, "\t%-12s%s, s0, %s\n",
-                "sub",
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, buf1, sizeof(buf1)),
-                AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, buf2, sizeof(buf2)));
-        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Reloaded spilled @%d\n",
-                 reg->type == kAARCH64RegTypeInt ? "ld" : "fld",
-                 AARCH64RegisterName(reg, buf1, sizeof(buf1)),
-                 offset & 0xfff,
-                 AARCH64RegisterNameFromNum(spill_addr, kAARCH64RegTypeInt, buf2, sizeof(buf2)),
-                 spill->operand[0]->id);
-      } else {
-        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Reloaded spilled @%d\n",
-                 reg->type == kAARCH64RegTypeInt ? "ld" : "fld",
-                 AARCH64RegisterName(reg, buf1, sizeof(buf1)),
-                 offset,
-                 spill->operand[0]->id);
-      }
-#endif
+      PrintSpillSlotAddress(offset, fp);
+      fprintf(fp, "\t%s %s, [x16, #0]\t// Reloaded spilled @%d\n",
+              reg->type == kAARCH64RegTypeInt ? "ldr" : "fldr",
+              AARCH64RegisterName(reg, kSize64Bit, buf1, sizeof(buf1)),
+              spill->operand[0]->id);
       return;
     }
     default:

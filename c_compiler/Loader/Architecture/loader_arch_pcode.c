@@ -43,6 +43,10 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
     case R_PCODE_GOT_FUNC:
       LoaderError("Unexpected GOT_FUNC relocation in .rela.dyn");
       break;
+    case R_PCODE_RELATIVE:
+      *(uint64_t*)target_address =
+          lib->load_address + *(uint64_t*)target_address + reloc->addend;
+      break;
     default:
       abort();
   }

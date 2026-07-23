@@ -61,7 +61,7 @@ typedef struct ARMInterpreter {
   float sregs[ARM_NUM_FLOAT_REGS];
   uint64_t old_regs[ARM_NUM_INT_REGS];
   float old_sregs[ARM_NUM_FLOAT_REGS];
-  uint32_t symbol_resolver_code[2];
+  uint32_t symbol_resolver_code[3];
   char* stack;
   uint32_t stack_guest_base;
   bool owns_stack;

@@ -1720,6 +1720,24 @@ static TargetInstruction* LowerAddressOf(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, address);
 }
 
+static TargetInstruction* LowerCast(PCodeGenerator* pcode, IRNode* node) {
+  TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
+  TargetInstruction* dest = GetDestInstruction(pcode, node);
+  if (dest == NULL) {
+    return SetLoweredNode(node, value);
+  }
+
+  PCodeOpcode opcode = P_OP(mov);
+  if (TypeIsFloat(node->type)) {
+    opcode = P_OP(movf);
+  } else if (PCodeFpIsDoubleWidth(node->type)) {
+    opcode = P_OP(movd);
+  }
+  TargetInstruction* result = NewInstruction1(opcode, value);
+  result->dest = dest;
+  return SetLoweredNode(node, Emit(pcode, result));
+}
+
 static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
   // The memcpy IR node's inputs are the same as those for the memcpy
   // function.  However, there are no load nodes for the desination
@@ -2455,7 +2473,7 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
       return LowerMemcpy(pcode, node);
       
     case IR_OP(cast):
-      return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
+      return LowerCast(pcode, node);
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(pcode, node);

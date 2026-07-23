@@ -71,7 +71,7 @@ CompilerTarget* NewRVTarget() {
   StringInit(&target->name, "RISC-V");
   target->pointer_size = 8;
   target->int_size = 4;
-  target->bool_size = 4;
+  target->bool_size = 1;
   target->short_size = 2;
   target->long_size = 8;
   target->long_long_size = 8;

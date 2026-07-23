@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
+#include "map.h"
 #include "aarch64_machine.h"
 #include "target_generator.h"
 
@@ -51,6 +52,8 @@ typedef struct {
   int current_spilled_region_size;
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preseAARCH64ed regs.
+  BitSet short_lived_varregs;
+  Map reassignable_spills;
 } AARCH64RegisterAllocator;
 
 void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* alloc,

@@ -376,10 +376,18 @@ void W65C02CalculateInstructionAddresses(W65C02Generator* g) {
 // Except:
 // bra label -> jmp label
 
+#define k6502BranchExpanded 128
+
 static bool ConvertBranch(W65C02Generator* g, TargetInstruction* bra,
                           TargetInstruction* target) {
   if (bra->opcode == (TargetOpcode)W65C02_OP(jmp)) {
     // Already converted.
+    return false;
+  }
+  if ((bra->flags & k6502BranchExpanded) != 0) {
+    // This inverted branch targets the skip label immediately after the
+    // inserted absolute jump, so it is necessarily in range.  Do not expand
+    // it again while the new label still has address zero in this pass.
     return false;
   }
   if (bra->opcode == (TargetOpcode)W65C02_OP(bra)) {
@@ -421,6 +429,7 @@ static bool ConvertBranch(W65C02Generator* g, TargetInstruction* bra,
       abort();
   }
   bra->opcode = (TargetOpcode)new_op;
+  bra->flags |= k6502BranchExpanded;
   TargetReplaceOperand(bra, 0, label);
   TargetInstruction* jmp =
       TargetNewInstruction1((TargetOpcode)W65C02_OP(jmp), target);

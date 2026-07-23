@@ -505,6 +505,8 @@ static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_typ
 
 static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
+static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node,
+                                  IRNode* input);
 
 static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
   // If the left and right nodes contains a call then we need to move their
@@ -558,7 +560,12 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
           ? &node->base
           : rhs;
   IROpcode opcode = FindIROpcode(opcode_type_node, node->base.op);
-  return IRSetType(GeneratorEmit(gen, NewIR2(opcode, left, right)), node->base.type);
+  IRNode* result = GeneratorEmit(gen, NewIR2(opcode, left, right));
+  if (IRIsComparison(result) && !TypeIsBool(node->base.type)) {
+    IRSetType(result, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return GenerateZeroExtend(gen, &node->base, result);
+  }
+  return IRSetType(result, node->base.type);
 }
 
 // Pick the cmp3way IR opcode for the (converted, common) operand type.
@@ -610,7 +617,12 @@ static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
     return sub;
   }
   IROpcode opcode = FindIROpcode(&node->base, node->base.op);
-  return IRSetType(GeneratorEmit(gen, NewIR1(opcode, sub)), node->base.type);
+  IRNode* result = GeneratorEmit(gen, NewIR1(opcode, sub));
+  if (node->base.op == AST_OP(not) && !TypeIsBool(node->base.type)) {
+    IRSetType(result, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return GenerateZeroExtend(gen, (ASTNode*)node, result);
+  }
+  return IRSetType(result, node->base.type);
 }
 
 
@@ -1220,9 +1232,39 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
   }
 }
 
-// We can omit the memzero if:
-// There is one initializer and the type of the only initializer
-// is array or struct.
+static bool InitializerCoversWholeObject(
+    TypeRecord* type, DesignatedInitializerASTNode* init) {
+  if (type == NULL || init == NULL || init->base.type == NULL ||
+      type->size <= 0 || init->base.type->size != type->size) {
+    return false;
+  }
+
+  int64_t offset = 0;
+  if (init->designators != NULL) {
+    for (size_t i = 0; i < init->designators->length; i++) {
+      Designator* designator = init->designators->value.p[i];
+      switch (designator->designator_type) {
+        case kDesignatorStruct:
+          if (designator->value.struct_member->bit_size != 0) {
+            return false;
+          }
+          offset += designator->value.struct_member->byte_offset;
+          break;
+        case kDesignatorBase:
+          offset += designator->value.base->byte_offset;
+          break;
+        case kDesignatorArray:
+          return false;
+      }
+    }
+  }
+  return offset == 0;
+}
+
+// We can omit the memzero if the single initializer either initializes from
+// another complete aggregate or writes one non-bitfield member/base that spans
+// the entire object.  The latter handles one-word wrapper structs without
+// weakening zero initialization for padding or omitted members.
 static bool CanElideMemzero(BracedInitializerASTNode* node) {
   if (node->initializers->length != 1) {
     return false;
@@ -1241,7 +1283,8 @@ static bool CanElideMemzero(BracedInitializerASTNode* node) {
       }
     }
   }
-  return TypeIsStructOrUnion(init->init->type) ||
+  return InitializerCoversWholeObject(type, init) ||
+         TypeIsStructOrUnion(init->init->type) ||
          TypeIsMemberPointerAggregate(init->init->type) ||
          TypeIsArray(init->init->type);
 }
@@ -2410,8 +2453,53 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
   }
 }
 
+static IRNode* GenerateBooleanValue(Generator* gen, IRNode* value) {
+  if (TypeIsBool(value->type)) {
+    return value;
+  }
+  IRNode* input =
+      value->inputs.length != 0 ? value->inputs.value.p[0] : NULL;
+  if (value->opcode == IR_OP(zeroextendi) && input != NULL &&
+      TypeIsBool(input->type)) {
+    return input;
+  }
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  if (IRIsConst(value)) {
+    bool truth = TypeIsFloatingPoint(value->type)
+                     ? ((IRConstant*)value)->value.fvalue != 0.0
+                     : IRIntConstValue(value) != 0;
+    return GeneratorGetIntConstant(gen, bool_type, truth ? 1 : 0);
+  }
+  IROpcode opcode = IR_OP(cmpnei);
+  IRNode* zero = NULL;
+  if (TypeIsFloat(value->type)) {
+    opcode = IR_OP(cmpnef);
+    zero = GeneratorGetFloatingPointConstant(gen, value->type, 0.0);
+  } else if (TypeIsDouble(value->type) || TypeIsLongDouble(value->type)) {
+    opcode = IR_OP(cmpned);
+    zero = GeneratorGetFloatingPointConstant(gen, value->type, 0.0);
+  } else {
+    if (TypeIsPointerOrArray(value->type) || TypeIsFunction(value->type) ||
+        TypeIsReference(value->type)) {
+      opcode = IR_OP(cmpnea);
+    }
+    zero = GeneratorGetIntConstant(gen, value->type, 0);
+  }
+  return IRSetType(GeneratorEmit(gen, NewIR2(opcode, value, zero)), bool_type);
+}
 
-
+static IRNode* AssignBooleanToTmp(Generator* gen, IRNode* value, IRNode* tmp) {
+  if (value == tmp) {
+    return value;
+  }
+  if (value->opcode == IR_OP(tmp) || !IRIsExpression(value) ||
+      IRIsConstant(value) || IRIsVariable(value)) {
+    value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(movi), value)),
+                      NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  }
+  value->dest = tmp;
+  return value;
+}
 
 static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // If the left node is constant we can omit the comparison and branches.
@@ -2421,20 +2509,28 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
      if (c->value.ivalue == 0) {
        // Left of && is zero, no need to evaluate the right, result is
        // zero.
-       return GenerateExpression(gen, node->left);
+       return GeneratorGetIntConstant(gen, node->base.type, 0);
      }
      // Left of && is non-zero, result is the right.
-     return GenerateExpression(gen, node->right);
+     IRNode* result =
+         GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
+     return TypeIsBool(node->base.type)
+                ? result
+                : GenerateZeroExtend(gen, (ASTNode*)node, result);
    }
    
    // Logical OR
    if (c->value.ivalue != 0) {
      // Left of || is non-zero, no need to evaluate the right, result is
      // left.
-     return GenerateExpression(gen, node->left);
+     return GeneratorGetIntConstant(gen, node->base.type, 1);
    }
    // Left of || is zero, result is the right.
-   return GenerateExpression(gen, node->right);
+   IRNode* result =
+       GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
+   return TypeIsBool(node->base.type)
+              ? result
+              : GenerateZeroExtend(gen, (ASTNode*)node, result);
  }
  bool value_is_used = OptLevel0() ||
        ASTNodeUsesValue(node->base.parent, &node->base);
@@ -2449,17 +2545,8 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  IRNode* left = GenerateExpression(gen, node->left);
  
  if (value_is_used) {
-   // If left is a tmp, use it as our temp, ignoring the one we've allocated.
-   if (left->opcode == IR_OP(tmp)) {
-     GeneratorRemoveInstruction(gen, tmp);
-     tmp = left;
-   } else {
-     if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left)) {
-       left = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(node->left->type), left)),
-                        node->left->type);
-     }
-     left->dest = tmp;
-   }
+   IRNode* left_bool = GenerateBooleanValue(gen, left);
+   AssignBooleanToTmp(gen, left_bool, tmp);
  }
 
 
@@ -2471,25 +2558,16 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // Evaluate right node and place result in tmp.
  IRNode* right = GenerateExpression(gen, node->right);
  if (value_is_used) {
-   if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right)) {
-     right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(node->right->type), right)),
-                       node->right->type);
-   }
-   if (right->opcode != IR_OP(tmp)) {
-     right->dest = tmp;
-   } else {
-     // Right is in a tmp, if this isn't the same temp as left, copy
-     // it.
-     if (right != tmp) {
-       IRNode* copy = GeneratorEmit(gen, NewIR1(IR_OP(movi), right));
-       copy->dest = tmp;
-     }
-   }
+   right = GenerateBooleanValue(gen, right);
+   AssignBooleanToTmp(gen, right, tmp);
  }
 
  GeneratorEmit(gen, label);
  if (tmp != NULL) {
    IRSetType(tmp, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+   if (!TypeIsBool(node->base.type)) {
+     return GenerateZeroExtend(gen, (ASTNode*)node, tmp);
+   }
  }
  return value_is_used ? tmp : right;
 }
@@ -2775,14 +2853,15 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
     case AST_OP(ll2s):
       return ShortenInt(gen, node, sub);
     case AST_OP(i2c):
-    case AST_OP(i2b):
     case AST_OP(s2c):
-    case AST_OP(s2b):
     case AST_OP(l2c):
-    case AST_OP(l2b):
     case AST_OP(ll2c):
-    case AST_OP(ll2b):
       return ShortenInt(gen, node, sub);
+    case AST_OP(i2b):
+    case AST_OP(s2b):
+    case AST_OP(l2b):
+    case AST_OP(ll2b):
+      return GenerateBooleanValue(gen, sub);
     case AST_OP(i2l):
       return ShortenInt(gen, node, sub);
     case AST_OP(i2ll):
@@ -2808,13 +2887,14 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
     case AST_OP(c2s):
     case AST_OP(c2l):
     case AST_OP(c2ll):
-    case AST_OP(c2b):
     case AST_OP(l2ll):
     case AST_OP(ll2l):
     case AST_OP(s2i):
     case AST_OP(s2l):
     case AST_OP(s2ll):
       return LengthenInt(gen, node, sub);
+    case AST_OP(c2b):
+      return GenerateBooleanValue(gen, sub);
     case AST_OP(l2i):
     case AST_OP(ll2i):
       return ShortenInt(gen, node, sub);
@@ -2830,17 +2910,19 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
     case AST_OP(f2d):
     case AST_OP(f2ld):
       return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(f2d), sub)), node->type);
-    case AST_OP(f2b):
     case AST_OP(f2c):
       return GenerateToInt(gen, node, IR_OP(f2i), sub, 0xff);
+    case AST_OP(f2b):
+      return GenerateBooleanValue(gen, sub);
     case AST_OP(d2i):
     case AST_OP(ld2i):
       return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xffffffff);
     case AST_OP(d2c):
-    case AST_OP(d2b):
     case AST_OP(ld2c):
-    case AST_OP(ld2b):
       return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xff);
+    case AST_OP(d2b):
+    case AST_OP(ld2b):
+      return GenerateBooleanValue(gen, sub);
     case AST_OP(d2s):
     case AST_OP(ld2s):
       return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xfffff);

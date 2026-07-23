@@ -96,6 +96,123 @@ static bool WritesRegisterOperand(TargetInstruction* inst) {
   }
 }
 
+static bool IsUserOf(TargetInstruction* value, TargetInstruction* inst) {
+  for (size_t i = 0; i < value->users.length; i++) {
+    if (value->users.value.p[i] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool WritesFixedValue(TargetInstruction* inst,
+                             TargetInstruction* value) {
+  return inst->dest == value ||
+         (WritesRegisterOperand(inst) && inst->operand[0] == value);
+}
+
+static bool IsPointerSizedVariable(TargetInstruction* inst) {
+  if (!AARCH64IsVarRegister(inst)) {
+    return false;
+  }
+  Symbol* symbol = ((TargetSymbol*)inst)->symbol;
+  if (symbol == NULL || symbol->type == NULL) {
+    return false;
+  }
+  TypeRecordCalculateSize(symbol->type);
+  return symbol->type->size == 8;
+}
+
+static bool HasUnusedVariableDestination(TargetInstruction* inst) {
+  if (inst->dest == NULL ||
+      !AARCH64IsVarRegister(inst->dest) ||
+      inst->dest->users.length != 0) {
+    return false;
+  }
+  Symbol* symbol = ((TargetSymbol*)inst->dest)->symbol;
+  return symbol != NULL && symbol->type != NULL &&
+         !symbol->flags.address_taken && !TypeIsVolatile(symbol->type) &&
+         !TypeIsArray(symbol->type) &&
+         (symbol->flags.is_local || symbol->flags.is_temp ||
+          symbol->flags.is_argument);
+}
+
+static bool IsUnusedVariableMove(TargetInstruction* move) {
+  return IsMove(move) && HasUnusedVariableDestination(move);
+}
+
+// A true leaf can consume an incoming ABI register directly when the value has
+// one definition and remains in the entry block.  Argument registers are
+// reserved throughout that block by the allocator, while x8 is outside the
+// general allocation pool.  Reject any explicit overwrite before the final
+// use so this remains a local, allocation-independent coalescing decision.
+static bool EliminateLeafIncomingMove(AARCH64Generator* generator,
+                                      TargetBasicBlock* block,
+                                      TargetInstruction* move) {
+  if (block != generator->base.entry_block ||
+      generator->base.num_calls != 0 ||
+      generator->exception_ranges.length != 0 || !IsMove(move) ||
+      move->dest == NULL ||
+      (!AARCH64IsVarRegister(move->dest) &&
+       move->dest->opcode != (TargetOpcode)AARCH64_OP(structreturn))) {
+    return false;
+  }
+
+  TargetInstruction* source = MoveSource(move);
+  bool incoming_argument =
+      source != NULL && (source->flags & TARGET_INST_INCOMING_ARG) != 0 &&
+      IsPointerSizedVariable(move->dest);
+  bool indirect_result =
+      source != NULL &&
+      source->opcode == (TargetOpcode)AARCH64_OP(xr) &&
+      move->dest->opcode == (TargetOpcode)AARCH64_OP(structreturn);
+  int source_size = source != NULL ? InstructionSize(source) : 0;
+  int move_size = InstructionSize(move);
+  if ((!incoming_argument && !indirect_result) ||
+      (source_size != 0 && move_size != 0 && source_size != move_size) ||
+      move->dest->users.length == 0) {
+    return false;
+  }
+
+  // The destination must represent exactly this assignment.  A shared
+  // variable-register pseudo with another definition cannot be coalesced.
+  for (TargetInstruction* inst = TargetFirstInstruction(&generator->base);
+       inst != NULL; inst = TargetNext(inst)) {
+    if (inst != move && inst->dest == move->dest) {
+      return false;
+    }
+  }
+
+  size_t remaining_users = move->dest->users.length;
+  for (TargetInstruction* inst = TargetNext(move);
+       inst != NULL && inst->block == block; inst = TargetNext(inst)) {
+    if (IsUserOf(move->dest, inst)) {
+      remaining_users--;
+      if (remaining_users == 0) {
+        break;
+      }
+    }
+    if (WritesFixedValue(inst, source) ||
+        inst->opcode == (TargetOpcode)AARCH64_OP(asm)) {
+      return false;
+    }
+  }
+  if (remaining_users != 0) {
+    return false;
+  }
+
+  while (move->dest->users.length != 0) {
+    TargetInstruction* user = move->dest->users.value.p[0];
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (user->operand[i] == move->dest) {
+        TargetReplaceOperand(user, (int)i, source);
+      }
+    }
+  }
+  TargetBasicBlockRemoveInstruction(&generator->base, block, move);
+  return true;
+}
+
 // Fold only adjacent, single-use move chains.  The adjacency and width checks
 // avoid extending a value's live range or dropping a meaningful 32/64-bit
 // truncation.
@@ -111,6 +228,17 @@ static bool EliminateMovesInBlock(AARCH64Generator* generator,
          inst = TargetNext(inst)) {
       if (!IsMove(inst) || inst->dest == NULL) {
         continue;
+      }
+      if (IsUnusedVariableMove(inst)) {
+        TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+        local_change = true;
+        changed = true;
+        break;
+      }
+      if (EliminateLeafIncomingMove(generator, block, inst)) {
+        local_change = true;
+        changed = true;
+        break;
       }
       TargetInstruction* prev = TargetPrev(inst);
       if (prev == NULL || prev->block != block ||
@@ -170,7 +298,8 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
          inst = prev) {
       prev = TargetPrev(inst);
       AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
-      if (inst->dest == NULL && inst->users.length == 0 &&
+      if ((inst->dest == NULL || HasUnusedVariableDestination(inst)) &&
+          inst->users.length == 0 &&
           AARCH64IsExpression(inst) &&
           !AARCH64HasImplicitEffect(inst) &&
           !WritesRegisterOperand(inst) &&

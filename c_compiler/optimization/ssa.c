@@ -120,8 +120,12 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
         IRNode* ref = FindVariableReference(inst, inst->var.def);
         assert(ref != NULL);
         
-        // Returning a struct doesn't create an SSA var.
-        if (ref->opcode != IR_OP(structreturn)) {
+        // Returning a struct doesn't create an SSA var.  Neither does a store
+        // through a loaded pointer (for example `this->member = value`): that
+        // mutates the pointee, not the pointer variable used to form the
+        // address.  Treating the latter as a pointer definition leaves the
+        // newly-created SSA version uninitialized.
+        if (ref->opcode != IR_OP(structreturn) && ref == inst) {
           IRNode* ssavar = NewIRSSAVar(inst->var.def);
 #if 0
           // Emit ssavar at beginning of entry basic block.

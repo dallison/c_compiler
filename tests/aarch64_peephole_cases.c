@@ -26,3 +26,11 @@ __attribute__((noinline)) int load_small_offset(const int* pointer) {
 __attribute__((noinline)) int load_large_offset(const int* pointer) {
   return pointer[100];
 }
+
+__attribute__((noinline)) void store_zero32(unsigned int* pointer) {
+  *pointer = 0;
+}
+
+__attribute__((noinline)) void store_zero64(unsigned long* pointer) {
+  *pointer = 0;
+}

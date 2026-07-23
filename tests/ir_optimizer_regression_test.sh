@@ -27,6 +27,7 @@ mkdir -p "$WORK"
 C_SOURCE="$ROOT/tests/ir_optimizer_cases.c"
 SCCP_ALIAS_SOURCE="$ROOT/tests/sccp_alias_execution_cases.c"
 CXX_SOURCE="$ROOT/tests/ir_optimizer_cases.cc"
+AARCH64_COROUTINE_SOURCE="$ROOT/tests/aarch64_coroutine_exchange_test.cc"
 
 run_target() {
   local target=$1
@@ -85,6 +86,60 @@ run_target aarch64 "$INTERP_A64" "$LIBC_A64" integrated "" -Wl,-e -Wl,main
 run_target arm "$INTERP_ARM" "$LIBC_ARM" integrated "" -Wl,-e -Wl,main
 run_target x86_64 "$INTERP_X86" "$LIBC_X86" integrated "" -Wl,-e -Wl,main
 run_target pcode "$INTERP_PCODE" "$LIBC_PCODE" plain "" -Wl,-e -Wl,main
+
+# Exercise coroutine lowering, mixed-size C++ calls, register pressure, branch
+# relaxation, and dynamic relocation handling on every backend and at every
+# supported optimization level.
+run_coroutine_target() {
+  local target=$1
+  local interpreter=$2
+  local interpreter_mode=$3
+  local rom=${4:-}
+
+  for opt in -O0 -O1 -O2 -O3 -Os; do
+    local executable="$WORK/${target}_coroutine_${opt#-}.exe"
+    local output="$WORK/${target}_coroutine_${opt#-}.out"
+    "$DAVECC" -target "$target" "$opt" -std=c++20 \
+      -isystem "$ROOT/libc/include" \
+      "$AARCH64_COROUTINE_SOURCE" -o "$executable"
+
+    local command=("$interpreter")
+    if [[ -n "$rom" ]]; then
+      command+=(-rom "$rom")
+    fi
+    if [[ "$interpreter_mode" == "integrated" ]]; then
+      command+=(-i)
+    fi
+    command+=("$executable")
+    "${command[@]}" >"$output"
+    if [[ "$(cat "$output")" != "received: 42" ]]; then
+      echo "$target coroutine $opt produced unexpected output:" >&2
+      cat "$output" >&2
+      exit 1
+    fi
+  done
+}
+
+run_coroutine_target 65c02 "$INTERP_65" plain "$ROM_65"
+run_coroutine_target riscv "$INTERP_RV" plain ""
+run_coroutine_target aarch64 "$INTERP_A64" integrated ""
+run_coroutine_target arm "$INTERP_ARM" integrated ""
+run_coroutine_target x86_64 "$INTERP_X86" integrated ""
+run_coroutine_target pcode "$INTERP_PCODE" plain ""
+
+# A lowering-created `this` pseudo used only to copy the co_await operand into
+# its stack temporary is dead before the following call. It should use a
+# caller-saved temporary rather than consume and spill a callee-saved register.
+AARCH64_COROUTINE_ASM="$WORK/aarch64_coroutine.s"
+"$DAVECC" -target aarch64 -O2 -std=c++20 \
+  -isystem "$ROOT/libc/include" -S \
+  "$AARCH64_COROUTINE_SOURCE" -o "$AARCH64_COROUTINE_ASM"
+if ! grep -Eq \
+    '[[:space:]]add[[:space:]]+x1[0-5],[[:space:]]*x10,[[:space:]]*#24' \
+    "$AARCH64_COROUTINE_ASM"; then
+  echo "AArch64 assigned the short-lived coroutine operand a saved register" >&2
+  exit 1
+fi
 
 # Keep one shape assertion architecture-neutral at the IR level.  The final
 # optimized dump must not retain the deliberately dead multiply.
@@ -345,5 +400,62 @@ if ! grep -Eq '[[:space:]]add[[:space:]].*#400' <<<"$large_offset_body" ||
    grep -Eq '[[:space:]]ldr[[:space:]].*\[[^]]+, #400\]' \
       <<<"$large_offset_body"; then
   echo "AArch64 out-of-range load offset was folded unsafely" >&2
+  exit 1
+fi
+
+zero32_body=$(function_body store_zero32 "$AARCH64_PEEPHOLE_ASM")
+zero64_body=$(function_body store_zero64 "$AARCH64_PEEPHOLE_ASM")
+if ! grep -Eq '[[:space:]]str[[:space:]]+wzr,' <<<"$zero32_body" ||
+   ! grep -Eq '[[:space:]]str[[:space:]]+xzr,' <<<"$zero64_body" ||
+   grep -Eq '(^|[^[:alnum:]_])(x31|w31)([^[:alnum:]_]|$)' \
+      "$AARCH64_PEEPHOLE_ASM"; then
+  echo "AArch64 emitter did not use architectural zero-register names" >&2
+  exit 1
+fi
+
+# A leaf returning a small aggregate receives its hidden result pointer in x8.
+# Taking the address of a reference argument uses the pointer already in x0;
+# neither value needs a stack home or a callee-saved register.
+AARCH64_LEAF_SOURCE="$WORK/aarch64_leaf_frame.cc"
+AARCH64_LEAF_ASM="$WORK/aarch64_leaf_frame.s"
+AARCH64_LEAF_IR="${AARCH64_LEAF_SOURCE%.cc}.ir"
+cat >"$AARCH64_LEAF_SOURCE" <<'EOF'
+struct LeafResult {
+  char* value;
+};
+
+extern "C" LeafResult leaf_reference(int& value) {
+  char* address = reinterpret_cast<char*>(&value);
+  return {address - 24};
+}
+EOF
+"$DAVECC" -target aarch64 -std=c++20 -O2 -Xsave-ir -S \
+  "$AARCH64_LEAF_SOURCE" -o "$AARCH64_LEAF_ASM"
+
+leaf_reference_ir=$(
+  awk '/IR for function leaf_reference/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$AARCH64_LEAF_IR"
+)
+if grep -Eq 'memzero\(|loada\(.*REF address' \
+    <<<"$leaf_reference_ir"; then
+  echo "IR copy propagation retained a redundant aggregate zero/load" >&2
+  exit 1
+fi
+
+leaf_reference_body=$(function_body leaf_reference "$AARCH64_LEAF_ASM")
+if grep -Eq '(^|[^[:alnum:]_])(x29|x30|sp)([^[:alnum:]_]|$)|Saved (argument|integer|floating-point) registers' \
+    <<<"$leaf_reference_body"; then
+  echo "AArch64 leaf reference return unnecessarily created a stack frame" >&2
+  exit 1
+fi
+if grep -Eq '[[:space:]]mov[[:space:]]|[[:space:]]str[[:space:]]+(x31|xzr)' \
+    <<<"$leaf_reference_body" ||
+   ! grep -Eq '[[:space:]]sub[[:space:]]+[^,]+,[[:space:]]*x0,[[:space:]]*#24' \
+      <<<"$leaf_reference_body" ||
+   ! grep -Eq '[[:space:]]str[[:space:]]+[^,]+,[[:space:]]*\[x8,[[:space:]]*#0\]' \
+      <<<"$leaf_reference_body"; then
+  echo "AArch64 leaf reference return retained redundant register copies" >&2
   exit 1
 fi

@@ -280,11 +280,21 @@ static void FreeRegisters(PCodeRegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      bool duplicate = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
-      if (reg != NULL && !reg->reserved) {
+      if (reg != NULL && !reg->reserved && op->uses > 0) {
         op->uses--;
         assert(op->uses >= 0);
-        if (op->uses == 0) {
+        if (op->uses == 0 && reg->owner == op) {
           FreeRegister(allocator, (PCodeRegister*)reg);
         }
       }
@@ -410,6 +420,12 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
      assert(inst->dest->reg != NULL);
      reg = (PCodeRegister*)inst->dest->reg;
      inst->reg = inst->dest->reg;
+     if (!reg->base.reserved) {
+       // The source of an in-place operation can own the same register as the
+       // destination. Transfer ownership before releasing operands so the
+       // source's last use does not make the destination register available.
+       reg->base.owner = inst->dest;
+     }
      FreeRegisters(allocator, inst);
      return;
    }

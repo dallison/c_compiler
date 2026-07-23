@@ -16,6 +16,7 @@
 
 static void AllocateRegister(ARMRegisterAllocator* allocator,
                              TargetInstruction* inst);
+static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst);
 
 static const char* ARMRegisterNameFromNum1(int num, ARMRegisterType type, int size,
                                     bool allow_no_size,
@@ -332,13 +333,15 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
           // typically defined at function entry, before the prologue establishes
           // fp.  Spilling it would emit the store there (referencing fp before
           // it is valid, at a bogus offset), so never choose one as a victim.
-          if (ARMIsFixedRegister(owner)) {
+          if (ARMIsFixedRegister(owner) || ARMIsResult(owner)) {
             continue;
           }
-          // A 64-bit merge value occupies a register pair, while the current
-          // spill pseudo stores only one 32-bit register.  Spilling it would
-          // preserve the low half and silently lose the high half.
-          if (ARMGetRegisterSize(owner) == kSize64Bit &&
+          // VFP spills preserve a double with vstr/vldr dN. Integer spills,
+          // however, currently store one 32-bit register, so a reassignable
+          // 64-bit integer merge cannot be spilled without losing its high
+          // half.
+          if (RegisterTypeFromInstruction(owner) == kARMRegTypeInt &&
+              ARMGetRegisterSize(owner) == kSize64Bit &&
               InstructionHasExternalDefs(allocator, owner)) {
             continue;
           }
@@ -386,11 +389,14 @@ static bool InstructionHasExternalDefs(ARMRegisterAllocator* allocator,
   TargetGenerator* gen = &allocator->g->base;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
+    for (TargetInstruction* inst = block->code; inst != NULL;
          inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
       if (inst != target && IsReassignableDefinition(inst, target)) {
         return true;
+      }
+      if (is_end) {
+        break;
       }
     }
   }
@@ -407,20 +413,23 @@ static void InsertReassignableStoreBacks(
   TargetGenerator* gen = &allocator->g->base;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
+    for (TargetInstruction* inst = block->code; inst != NULL;
          inst = TargetNext(inst)) {
-      if (inst == initial_definition ||
-          (inst->flags & TARGET_INST_PROCESSED) == 0 || inst->reg == NULL ||
-          !IsReassignableDefinition(inst, target)) {
-        continue;
+      bool is_end = inst == block->end_code;
+      if (inst != initial_definition &&
+          (initial_definition == NULL || inst->id > initial_definition->id) &&
+          (inst->flags & TARGET_INST_PROCESSED) != 0 && inst->reg != NULL &&
+          IsReassignableDefinition(inst, target)) {
+        TargetInstruction* store = TargetNewInstruction2(
+            (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
+        store->reg = inst->reg;
+        store->flags |= TARGET_INST_PROCESSED;
+        TargetBasicBlockEmitAfter(gen, block, store, inst);
+        inst = store;
       }
-      TargetInstruction* store = TargetNewInstruction2(
-          (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
-      store->reg = inst->reg;
-      store->flags |= TARGET_INST_PROCESSED;
-      TargetBasicBlockEmitAfter(gen, block, store, inst);
-      inst = store;
+      if (is_end) {
+        break;
+      }
     }
   }
 }
@@ -478,21 +487,30 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
     }
   }
   if (ARMIsVarRegister(inst)) {
-    // Spilling a varreg->base.  This instruction is in the entry block but
-    // it can't be spilled there.  It needs to be spilled at its first
-    // use (the assignment to it).  This is going to be the first user
-    // of the instruction.
-    assert(inst->users.length > 0);
-    TargetInstruction* first_use = inst->users.value.p[0];
-    TargetBasicBlockEmitAfter(&allocator->g->base, first_use->block, spill, first_use);
-    MapKeyValue kv = {.key.p = inst, .value.p = spill};
-    MapInsert(&allocator->reassignable_spills, kv);
-    InsertReassignableStoreBacks(allocator, inst, spill, first_use);
-  } else if (InstructionHasExternalDefs(allocator, inst)) {
+    // A varreg is a pseudo whose executable definitions are instructions with
+    // `dest == inst`.  Keep this spill only as a slot handle and store back
+    // after every real definition; emitting it after users[0] is unsafe because
+    // user order is not instruction order and the first user is not the
+    // defining assignment.
     TargetTrackOrphanInstruction(&allocator->g->base, spill);
     MapKeyValue kv = {.key.p = inst, .value.p = spill};
     MapInsert(&allocator->reassignable_spills, kv);
     InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+  } else if (InstructionHasExternalDefs(allocator, inst)) {
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    if (ARMGeneratesOutput(inst) &&
+        inst->opcode != (TargetOpcode)ARM_OP(tmp)) {
+      // An instruction can be built in stages by earlier instructions that
+      // target its destination (for example movw -> movt).  Spill only after
+      // the final instruction, then synchronize later redefinitions; storing
+      // after an earlier partial definition loses the remaining bytes.
+      TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, spill, inst);
+      InsertReassignableStoreBacks(allocator, inst, spill, inst);
+    } else {
+      TargetTrackOrphanInstruction(&allocator->g->base, spill);
+      InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+    }
   } else if (defined_before_save && save != NULL) {
     // ABI argument and symbol pseudos are defined before the prologue.  Their
     // spill slots are frame-pointer-relative, so defer the store until save has
@@ -1010,7 +1028,9 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
     // value.  Only claim the register if it is not already owned by another
     // live-in value processed above.
     assert(inst->reg != NULL);
-    if (inst->reg->owner == NULL || inst->reg->owner == inst) {
+    if (inst->reg->owner == NULL || inst->reg->owner == inst ||
+        (ARMIsVarRegister(inst) &&
+         !ARMIsVarRegister(inst->reg->owner))) {
       inst->reg->owner = inst;
     }
   }
@@ -1137,6 +1157,7 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
 
   int dst[ARM_MAX_ARG_MOVES];
   int src[ARM_MAX_ARG_MOVES];
+  bool src_reads_register[ARM_MAX_ARG_MOVES];
   TargetInstruction* src_ref[ARM_MAX_ARG_MOVES];
   TargetInstruction* dst_ref[ARM_MAX_ARG_MOVES];
   bool done[ARM_MAX_ARG_MOVES];
@@ -1144,15 +1165,21 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
   for (int i = 0; i < count; i++) {
     TargetInstruction* m = moves[i];
     // Bail out if anything is unexpected; leave the run untouched.
-    if (m->dest == NULL || m->dest->reg == NULL || m->operand[0] == NULL ||
-        m->operand[0]->reg == NULL) {
+    if (m->dest == NULL || m->dest->reg == NULL || m->operand[0] == NULL) {
       return;
     }
     dst[i] = m->dest->reg->num;
-    src[i] = m->operand[0]->reg->num;
+    src_reads_register[i] = !ARMIsConst(m->operand[0]);
+    if (src_reads_register[i] && m->operand[0]->reg == NULL) {
+      return;
+    }
+    src[i] =
+        src_reads_register[i] ? m->operand[0]->reg->num : -1;
     src_ref[i] = m->operand[0];
     dst_ref[i] = m->dest;
-    done[i] = (dst[i] == src[i]);  // Self-moves emit nothing.
+    // A constant assigned to its destination register still needs an emitted
+    // materialization; its allocator register does not contain the value yet.
+    done[i] = src_reads_register[i] && dst[i] == src[i];
   }
 
   TargetInstruction* r9ref = RegRef(allocator, ARM_TMP_REG);
@@ -1172,7 +1199,7 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
       bool safe = true;
       for (int j = 0; j < count; j++) {
         if (j == i || done[j]) continue;
-        if (src[j] == dst[i]) {
+        if (src_reads_register[j] && src[j] == dst[i]) {
           safe = false;
           break;
         }
@@ -1198,7 +1225,7 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
       }
       EmitResolvedMove(allocator, block, pos, r9ref, dst_ref[c], size_flags);
       for (int j = 0; j < count; j++) {
-        if (!done[j] && src[j] == dst[c]) {
+        if (!done[j] && src_reads_register[j] && src[j] == dst[c]) {
           src[j] = ARM_TMP_REG;
           src_ref[j] = r9ref;
         }
@@ -1212,23 +1239,38 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
   }
 }
 
-// Scan the instruction stream for contiguous runs of tagged integer argument
-// moves and resolve each as a parallel move (see ResolveArgMoveRun).
+static bool IsIntegerArgumentMove(TargetInstruction* inst) {
+  if (inst == NULL || (ARMOpcode)inst->opcode != ARM_OP(mov) ||
+      inst->dest == NULL || inst->dest->reg == NULL) {
+    return false;
+  }
+  ARMRegister* dest = (ARMRegister*)inst->dest->reg;
+  return dest->type == kARMRegTypeInt &&
+         dest->base.num >= ARM_INT_ARG_START &&
+         dest->base.num <= ARM_INT_ARG_END;
+}
+
+// Scan the instruction stream for contiguous runs of integer argument moves
+// and resolve each run containing a tagged move as a parallel move.  Constants
+// can reach a fixed argument destination through ordinary destination lowering
+// rather than SetDestOrMoveToArgReg, so include those adjacent untagged moves.
 static void ResolveArgumentMoves(ARMRegisterAllocator* allocator) {
   TargetInstruction* inst = TargetFirstInstruction(&allocator->g->base);
   while (inst != NULL) {
-    if ((inst->flags & kARMArgMove) != 0 &&
-        ((int)inst->opcode == (int)ARM_OP(mov))) {
+    if (IsIntegerArgumentMove(inst)) {
       TargetInstruction* moves[ARM_MAX_ARG_MOVES];
       int count = 0;
+      bool has_tagged_move = false;
       TargetInstruction* run = inst;
-      while (run != NULL && (run->flags & kARMArgMove) != 0 &&
-             ((int)run->opcode == (int)ARM_OP(mov)) &&
+      while (IsIntegerArgumentMove(run) &&
              count < ARM_MAX_ARG_MOVES) {
         moves[count++] = run;
+        has_tagged_move |= (run->flags & kARMArgMove) != 0;
         run = TargetNext(run);
       }
-      ResolveArgMoveRun(allocator, moves, count);
+      if (has_tagged_move) {
+        ResolveArgMoveRun(allocator, moves, count);
+      }
       inst = run;  // Continue after the run (resolved moves were inserted
                    // before it and are not re-tagged).
     } else {

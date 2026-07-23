@@ -402,6 +402,11 @@ static int GetRank(TypeRecord* type) {
   return -1;
 }
 
+static TypeRecord* NewLogicalResultType(void) {
+  return NewTypeRecordWithSize(CompilerIsCXX() ? kTypeBool : kTypeInt,
+                               kQualPlain);
+}
+
 // Analyze a unary expression by analyzing the sub expression
 // and propagating the type up.  Also checks that the expression
 // is scalar and promotes types smaller than int to int if needed.
@@ -435,7 +440,9 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
       break;
       
   }
-  ASTNodeSetType((ASTNode*)node, node->sub->type);
+  ASTNodeSetType((ASTNode*)node, node->base.op == AST_OP(not)
+                                      ? NewLogicalResultType()
+                                      : node->sub->type);
 }
 
 static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
@@ -1809,8 +1816,7 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
         node->base.op != AST_OP(noteq)) {
       SemanticError((ASTNode*)node,
                     "Only == and != are valid for pointers to members");
-      ASTNodeSetType((ASTNode*)node,
-                     NewTypeRecordWithSize(kTypeBool, kQualPlain));
+      ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
       return (ASTNode*)node;
     }
     TypeRecord* comparison_type = node->left->type;
@@ -1854,11 +1860,10 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
         equal = !equal;
       }
       return NewIntConstantASTNode(
-          equal ? 1 : 0,
-          NewTypeRecordWithSize(kTypeBool, kQualPlain),
+          equal ? 1 : 0, NewLogicalResultType(),
           node->base.location);
     }
-    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
     return (ASTNode*)node;
   }
   if (TypeIsMemberPointer(node->right->type) &&
@@ -1870,8 +1875,7 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
         node->base.op != AST_OP(noteq)) {
       SemanticError((ASTNode*)node,
                     "Only == and != are valid for pointers to members");
-      ASTNodeSetType((ASTNode*)node,
-                     NewTypeRecordWithSize(kTypeBool, kQualPlain));
+      ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
       return (ASTNode*)node;
     }
     SemanticCheckScalarType(node->right);
@@ -1891,11 +1895,10 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
         equal = !equal;
       }
       return NewIntConstantASTNode(
-          equal ? 1 : 0,
-          NewTypeRecordWithSize(kTypeBool, kQualPlain),
+          equal ? 1 : 0, NewLogicalResultType(),
           node->base.location);
     }
-    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
     return (ASTNode*)node;
   }
   if (TypeIsNullPointer(node->left->type) &&
@@ -1905,8 +1908,7 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
       SemanticError((ASTNode*)node,
                     "Only == and != are valid for std::nullptr_t");
     }
-    ASTNodeSetType((ASTNode*)node,
-                   NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
     return (ASTNode*)node;
   }
   ASTNode* rewritten = TryRewriteComparisonOperator(node);
@@ -1927,8 +1929,8 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   }
   InsertNumericConversions(node, true);
 
-  // Comparison operators produce boolean values.
-  ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  // Comparisons produce bool in C++ and int in C.
+  ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
   return (ASTNode*)node;
 }
 
@@ -8760,7 +8762,7 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
 
-  ASTNodeSetType((ASTNode*)node, bool_type);
+  ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
 }
 
 static void AnalyzeThrowExpression(ThrowASTNode* node) {

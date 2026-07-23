@@ -1,3 +1,11 @@
+static_assert(sizeof(bool) == 1);
+static_assert(alignof(bool) == 1);
+struct BoolAbiLayout {
+  bool value;
+  char next;
+};
+static_assert(sizeof(BoolAbiLayout) == 2);
+
 struct Accumulator {
   int value;
 

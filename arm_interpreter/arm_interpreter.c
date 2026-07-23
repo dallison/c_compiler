@@ -577,6 +577,14 @@ static uint64_t BranchTargetPreferDSO(ARMInterpreter* interpreter, uint64_t targ
 }
 
 static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated) {
+  // The resolver trampoline saves r7 before loading the private resolver
+  // syscall number.  r7 is callee-saved in AAPCS32, so restore it (and sp)
+  // before transferring directly to the resolved function.
+  uint32_t resolver_sp = (uint32_t)ReadReg(interpreter, ARM_SP_REG);
+  uint32_t saved_r7 = Load32(interpreter, resolver_sp);
+  WriteReg(interpreter, ARM_SYSCALL_REG, saved_r7);
+  WriteReg(interpreter, ARM_SP_REG, resolver_sp + sizeof(uint32_t));
+
   if (interpreter->process != NULL) {
     pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
   }
@@ -1855,10 +1863,13 @@ void ARMInterpreterInitForThread(
   interpreter->trace_instructions = trace_instructions;
   interpreter->num_steps = -1;
 
-  interpreter->symbol_resolver_code[0] = ARM_AL | (1u << 25) | (0xdu << 21) |
-                                         (0u << 16) | (ARM_SYSCALL_REG << 12) |
-                                         ARM_SYSCALL_RESOLVE;
-  interpreter->symbol_resolver_code[1] = ARM_AL | 0x0f000000u;
+  // stmdb sp!, {r7}; mov r7, #ARM_SYSCALL_RESOLVE; svc #0.  The host-side
+  // resolver restores r7 and sp because svc transfers directly to the target.
+  interpreter->symbol_resolver_code[0] = 0xe92d0080u;
+  interpreter->symbol_resolver_code[1] =
+      ARM_AL | (1u << 25) | (0xdu << 21) | (0u << 16) |
+      (ARM_SYSCALL_REG << 12) | ARM_SYSCALL_RESOLVE;
+  interpreter->symbol_resolver_code[2] = ARM_AL | 0x0f000000u;
 
   if (stack != NULL) {
     interpreter->stack = stack;

@@ -1,3 +1,10 @@
+struct BoolAbiLayoutC {
+  _Bool value;
+  char next;
+};
+typedef char BoolAbiSizeCheck[sizeof(_Bool) == 1 ? 1 : -1];
+typedef char BoolAbiLayoutCheck[sizeof(struct BoolAbiLayoutC) == 2 ? 1 : -1];
+
 volatile int volatile_value = 3;
 int loop_update;
 static int induction_values[6] = {2, 3, 5, 7, 11, 13};

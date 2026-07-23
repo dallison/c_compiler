@@ -329,14 +329,14 @@ static bool InstructionHasExternalDefs(RVRegisterAllocator* allocator,
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
+    for (TargetInstruction* inst = block->code; inst != NULL;
          inst = TargetNext(inst)) {
-      if (inst == target) {
-        continue;
-      }
-      if (IsReassignableDefinition(inst, target)) {
+      bool is_end = inst == block->end_code;
+      if (inst != target && IsReassignableDefinition(inst, target)) {
         return true;
+      }
+      if (is_end) {
+        break;
       }
     }
   }
@@ -388,20 +388,23 @@ static void InsertReassignableStoreBacks(
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
+    for (TargetInstruction* inst = block->code; inst != NULL;
          inst = TargetNext(inst)) {
-      if (inst == initial_definition ||
-          (inst->flags & TARGET_INST_PROCESSED) == 0 || inst->reg == NULL ||
-          !IsReassignableDefinition(inst, target)) {
-        continue;
+      bool is_end = inst == block->end_code;
+      if (inst != initial_definition &&
+          (initial_definition == NULL || inst->id > initial_definition->id) &&
+          (inst->flags & TARGET_INST_PROCESSED) != 0 && inst->reg != NULL &&
+          IsReassignableDefinition(inst, target)) {
+        TargetInstruction* store = TargetNewInstruction2(
+            (TargetOpcode)RV_OP(spill), target, spill->operand[1]);
+        store->reg = inst->reg;
+        store->flags |= TARGET_INST_PROCESSED;
+        TargetBasicBlockEmitAfter(gen, block, store, inst);
+        inst = store;
       }
-      TargetInstruction* store = TargetNewInstruction2(
-          (TargetOpcode)RV_OP(spill), target, spill->operand[1]);
-      store->reg = inst->reg;
-      store->flags |= TARGET_INST_PROCESSED;
-      TargetBasicBlockEmitAfter(gen, block, store, inst);
-      inst = store;
+      if (is_end) {
+        break;
+      }
     }
   }
 }
@@ -459,16 +462,14 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
     }
   }
   if (RVIsVarRegister(inst)) {
-    // Spilling a varreg.  This instruction is in the entry block but
-    // it can't be spilled there.  It needs to be spilled at its first
-    // use (the assignment to it).  This is going to be the first user
-    // of the instruction.
-    assert(inst->users.length > 0);
-    TargetInstruction* first_use = inst->users.value.p[0];
-    TargetBasicBlockEmitAfter(&allocator->rv->base, first_use->block, spill, first_use);
+    // A varreg pseudo has no executable definition of its own. Its users are
+    // not guaranteed to be in instruction order, and the first user need not
+    // be an assignment, so keep this spill only as a slot handle and store
+    // back after every real definition.
+    TargetTrackOrphanInstruction(&allocator->rv->base, spill);
     MapKeyValue kv = {.key.p = inst, .value.p = spill};
     MapInsert(&allocator->reassignable_spills, kv);
-    InsertReassignableStoreBacks(allocator, inst, spill, first_use);
+    InsertReassignableStoreBacks(allocator, inst, spill, NULL);
   } else if (InstructionHasExternalDefs(allocator, inst)) {
     // The declaration of a merge tmp has no value to store.  Keep the spill
     // instruction only as a handle for its slot and write the slot after each

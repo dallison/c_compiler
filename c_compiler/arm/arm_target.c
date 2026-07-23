@@ -71,7 +71,7 @@ CompilerTarget* NewARMTarget() {
   StringInit(&target->name, "arm");
   target->pointer_size = 4;
   target->int_size = 4;
-  target->bool_size = 4;
+  target->bool_size = 1;
   target->short_size = 2;
   target->long_size = 4;
   target->long_long_size = 8;

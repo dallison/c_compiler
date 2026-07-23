@@ -4304,7 +4304,10 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(cmpled):
     case IR_OP(cmpgtd):
     case IR_OP(cmpged):
-      return LowerComparison(rv, node);
+      // Floating comparisons also participate in && / || / ?: merges. Route
+      // their 0/1 result into an explicit IR destination just like integer
+      // comparisons; otherwise the merge temporary retains a stale register.
+      return RouteResultToDest(rv, gen, node, LowerComparison(rv, node));
 
     case IR_OP(cmp3wayi):
     case IR_OP(cmp3wayu):

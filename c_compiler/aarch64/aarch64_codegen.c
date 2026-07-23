@@ -1489,9 +1489,16 @@ static bool UseRegisterForVariable(AARCH64Generator* g, IRNode* var_node) {
     // When not optimizing, all variables are on the stack.
     return false;
   }
-  // Can't use a register if its address has been taken.
+  // A normal object whose address is taken needs stable stack storage.  A
+  // reference is already represented by an address, however, so taking the
+  // address of its referent only reads that pointer value and does not require
+  // a home slot for the reference itself.
   IRVariable* var = (IRVariable*)var_node;
-  if (var->symbol->flags.address_taken) {
+  if (TypeIsVolatile(var->symbol->type)) {
+    return false;
+  }
+  if (var->symbol->flags.address_taken &&
+      !TypeIsReference(var->symbol->type)) {
     return false;
   }
 
@@ -2837,6 +2844,34 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];
   IRNode* input = node->inputs.value.p[0];
+
+  // A boolean conversion is represented as (value == 0) or (value != 0).
+  // Branch directly on the original integer/address value so the target can
+  // use cbz/cbnz instead of materializing or re-testing the boolean.
+  if (!HasLoweredNode(input) &&
+      (input->opcode == IR_OP(cmpeqi) || input->opcode == IR_OP(cmpeqa) ||
+       input->opcode == IR_OP(cmpnei) || input->opcode == IR_OP(cmpnea))) {
+    IRNode* value = NULL;
+    if (IRIsConst(input->inputs.value.p[1]) &&
+        IRIntConstValue(input->inputs.value.p[1]) == 0) {
+      value = input->inputs.value.p[0];
+    } else if (IRIsConst(input->inputs.value.p[0]) &&
+               IRIntConstValue(input->inputs.value.p[0]) == 0) {
+      value = input->inputs.value.p[1];
+    }
+    if (value != NULL) {
+      bool comparison_is_equal =
+          input->opcode == IR_OP(cmpeqi) || input->opcode == IR_OP(cmpeqa);
+      bool branch_when_zero =
+          comparison_is_equal != (node->opcode == IR_OP(bfalse));
+      int size = value->type->size > 4 ? kSize64Bit : kSize32Bit;
+      EmitCompareZeroBranch(g,
+                            branch_when_zero ? AARCH64_OP(cbz)
+                                             : AARCH64_OP(cbnz),
+                            Materialize(g, value), target_node, size);
+      return NULL;
+    }
+  }
 
   // Check if the branch comes from a comparison.  If not, we compare with
   // zero.
@@ -4957,6 +4992,11 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
       is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
           ? ((IRVariable*)entry->pooled)->symbol->type
           : entry->pooled->type;
+  // Optimized-away locals remain in the variable pool for debug/type
+  // bookkeeping, but they need neither a register nor a stack slot.
+  if (!is_arg && OptLevel1() && entry->pooled->outputs.length == 0) {
+    return;
+  }
   TypeRecordCalculateSize(entry->pooled->type);
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
@@ -5218,10 +5258,16 @@ void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
   if (TypeIsStructOrUnion(gen->func->next)) {
     g->struct_return_reg = g->num_int_reg_vars++;
     g->struct_return_spill_offset = -24;
-    VectorAppend(&g->saved_regs,
-                 NewSavedArgumentRegister(AARCH64_XR_REG, AARCH64_FP_REG,
-                                          g->struct_return_spill_offset,
-                                          /*is_fp=*/false));
+    // The hidden x8 result pointer is copied into its dedicated variable
+    // register by IR_OP(structreturn).  It only needs an additional stack home
+    // when an exception landing pad must reconstruct this function's state
+    // after unwinding.
+    if (gen->exception_ranges.length != 0) {
+      VectorAppend(&g->saved_regs,
+                   NewSavedArgumentRegister(AARCH64_XR_REG, AARCH64_FP_REG,
+                                            g->struct_return_spill_offset,
+                                            /*is_fp=*/false));
+    }
   }
   
   IRNode* node = GeneratorFirstInstruction(gen);

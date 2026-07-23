@@ -7467,6 +7467,12 @@ static void LowerComparison(W65C02Generator* g, IRNode* node) {
     default:
       abort();
   }
+  // C comparison and logical-not expressions have int type.  The comparison
+  // helpers produce their canonical 0/1 value in the low byte, so clear any
+  // remaining result bytes rather than leaving stale register contents.
+  for (int i = 1; i < Sizeof(node->type); i++) {
+    stz(g, dest, i);
+  }
   // Mark result as having comparison generated.
   dest->flags |= k6502ComparisonGenerated;
    SetLoweredNode(node, dest);

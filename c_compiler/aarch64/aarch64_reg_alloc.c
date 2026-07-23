@@ -79,6 +79,8 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   allocator->current_spilled_region_size = 0;
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
+  BitSetInit(&allocator->short_lived_varregs);
+  MapInitForPointerKeys(&allocator->reassignable_spills);
 }
 
 AARCH64RegisterAllocator* NewAARCH64RegisterAllocator(struct AARCH64Generator* g) {
@@ -91,6 +93,8 @@ void AARCH64RegisterAllocatorDestruct(AARCH64RegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
   BitSetDestruct(&allocator->preserved_instructions);
+  BitSetDestruct(&allocator->short_lived_varregs);
+  MapDestruct(&allocator->reassignable_spills);
 }
 
 void AARCH64RegisterAllocatorDelete(AARCH64RegisterAllocator* alloc) {
@@ -184,6 +188,12 @@ static void FreeRegister(AARCH64RegisterAllocator* allocator, AARCH64Register* r
   reg->base.owner = NULL;
 }
 
+static bool IsShortLivedVarReg(AARCH64RegisterAllocator* allocator,
+                               TargetInstruction* inst) {
+  return AARCH64IsVarRegister(inst) &&
+         BitSetContains(&allocator->short_lived_varregs, inst->id);
+}
+
 
 // Free up any registers that are no longer needed by the instruction.  This
 // frees up all now-unused operands and destination.
@@ -199,7 +209,8 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
       // variable for its entire live range (which may span loop back edges that
       // the static use count cannot model).  It must not be freed by the use
       // counter, or it could be reassigned and clobber the variable.
-      if (AARCH64IsVarRegister(op)) {
+      if (AARCH64IsVarRegister(op) &&
+          !IsShortLivedVarReg(allocator, op)) {
         continue;
       }
       TargetRegister* reg = op->reg;
@@ -219,9 +230,13 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
 // Is the register meant to be saved by the callee?
 static bool IsSavedReg(AARCH64Register* reg) {
   int num = reg->base.num;
-  if ((num >= AARCH64_INT_SAVED_START && num <= AARCH64_INT_SAVED_END) ||
-      (num >= AARCH64_FP_SAVED_START && num <= AARCH64_FP_SAVED_END)) {
-    return true;
+  switch (reg->type) {
+    case kAARCH64RegTypeInt:
+      return num >= AARCH64_INT_SAVED_START &&
+             num <= AARCH64_INT_SAVED_END;
+    case kAARCH64RegTypeFloat:
+      return num >= AARCH64_FP_SAVED_START &&
+             num <= AARCH64_FP_SAVED_END;
   }
   return false;
 }
@@ -287,7 +302,8 @@ static bool IsUnspillableFixedReg(TargetInstruction* inst) {
 }
 
 static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
-                                   AARCH64RegisterType type) {
+                                          AARCH64RegisterType type,
+                                          bool can_use_temp) {
   AARCH64Register* regs =
       type == kAARCH64RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
@@ -297,6 +313,9 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
+      if (!can_use_temp && register_ranges[i].temp) {
+        continue;
+      }
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
@@ -342,6 +361,74 @@ static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
+static bool IsReassignableDefinition(TargetInstruction* inst,
+                                     TargetInstruction* target) {
+  return inst->dest == target;
+}
+
+static bool InstructionHasExternalDefs(
+    AARCH64RegisterAllocator* allocator, TargetInstruction* target) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
+      if (inst != target && IsReassignableDefinition(inst, target)) {
+        return true;
+      }
+      if (is_end) {
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+static void InsertReassignableStoreBacks(
+    AARCH64RegisterAllocator* allocator, TargetInstruction* target,
+    TargetInstruction* spill) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
+      if ((inst->flags & TARGET_INST_PROCESSED) != 0 && inst->reg != NULL &&
+          IsReassignableDefinition(inst, target)) {
+        TargetInstruction* store = TargetNewInstruction2(
+            (TargetOpcode)AARCH64_OP(spill), target, spill->operand[1]);
+        store->reg = inst->reg;
+        store->flags |= TARGET_INST_PROCESSED;
+        TargetBasicBlockEmitAfter(gen, block, store, inst);
+        inst = store;
+      }
+      if (is_end) {
+        break;
+      }
+    }
+  }
+}
+
+static void SyncReassignableSpill(AARCH64RegisterAllocator* allocator,
+                                  TargetInstruction* definition,
+                                  TargetInstruction* target) {
+  if (target == NULL || definition->reg == NULL) {
+    return;
+  }
+  TargetInstruction* spill =
+      MapFindPointerKey(&allocator->reassignable_spills, target);
+  if (spill == NULL) {
+    return;
+  }
+  TargetInstruction* store = TargetNewInstruction2(
+      (TargetOpcode)AARCH64_OP(spill), target, spill->operand[1]);
+  store->reg = definition->reg;
+  store->flags |= TARGET_INST_PROCESSED;
+  TargetBasicBlockEmitAfter(&allocator->g->base, definition->block, store,
+                            definition);
+}
+
 static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
   AARCH64Register* reg = (AARCH64Register*)inst->reg;    // Current register.
   
@@ -361,14 +448,15 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
  
-  if (AARCH64IsVarRegister(inst)) {
-    // Spilling a varreg->base.  This instruction is in the entry block but
-    // it can't be spilled there.  It needs to be spilled at its first
-    // use (the assignment to it).  This is going to be the first user
-    // of the instruction.
-    assert(inst->users.length > 0);
-    TargetInstruction* first_use = inst->users.value.p[0];
-    TargetBasicBlockEmitAfter(&allocator->g->base, first_use->block, spill, first_use);
+  if (AARCH64IsVarRegister(inst) ||
+      InstructionHasExternalDefs(allocator, inst)) {
+    // Variable and merge pseudos have no executable definition of their own.
+    // Keep the spill only as a slot handle and write that slot after every
+    // real assignment, including assignments already allocated.
+    TargetTrackOrphanInstruction(&allocator->g->base, spill);
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->reassignable_spills, kv);
+    InsertReassignableStoreBacks(allocator, inst, spill);
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, spill, inst);
@@ -395,7 +483,8 @@ static AARCH64Register* AllocateRegisterWithType(AARCH64RegisterAllocator* alloc
   AARCH64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim = FindSpillVictim(allocator, type);
+    TargetInstruction* victim =
+        FindSpillVictim(allocator, type, can_use_temp);
     // FindSpillVictim can release a stale/dead owner while scanning.
     reg = FindFreeRegister(allocator, type, can_use_temp);
     if (reg == NULL && victim != NULL) {
@@ -481,6 +570,9 @@ static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) 
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
 static bool CanUseTemp(AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
+  if (IsShortLivedVarReg(allocator, inst)) {
+    return true;
+  }
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 
@@ -659,6 +751,7 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     }
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
+    SyncReassignableSpill(allocator, inst, inst->dest);
     return;
   }
 
@@ -773,7 +866,9 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
       reg = &allocator->int_regs[(is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
                                           : AARCH64_FIRST_INT_REG_VAR) +
                                  allocator->g->struct_return_reg];
-      BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      if (IsSavedReg(reg)) {
+        BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      }
       break;
 
     case AARCH64_OP(resulti):
@@ -837,6 +932,12 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
   // Now allocate the registers to the inputs.
   for (size_t i = 0; i < block->inputs.length; i++) {
     TargetInstruction* inst = block->inputs.value.p[i];
+    // Target liveness conservatively places variable-register pseudos in many
+    // blocks. A proven block-local variable is defined and consumed entirely
+    // within one block, so it must not be re-owned on unrelated block entries.
+    if (IsShortLivedVarReg(allocator, inst)) {
+      continue;
+    }
     if (inst->reg == NULL) {
       continue;
     }
@@ -932,6 +1033,102 @@ static void ProcessBasicBlock(AARCH64RegisterAllocator* allocator,
                           kTraversePreOrder, allocator);
 }
 
+static bool IsListedUser(TargetInstruction* value,
+                         TargetInstruction* candidate) {
+  for (size_t i = 0; i < value->users.length; i++) {
+    if (value->users.value.p[i] == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Variable-register liveness is intentionally conservative because a C
+// variable can be reassigned or carried around a loop. Some lowering-created
+// pseudos, however, have exactly one definition and are consumed linearly in
+// that same block before any call. They are ordinary temporaries in all but
+// name and can safely use a caller-saved register.
+static bool HasShortBlockLocalLifetime(AARCH64RegisterAllocator* allocator,
+                                       TargetInstruction* value) {
+  if (!AARCH64IsVarRegister(value) || value->users.length == 0) {
+    return false;
+  }
+
+  TargetInstruction* definition = NULL;
+  TargetBasicBlock* definition_block = NULL;
+  int definitions = 0;
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
+      if (inst->dest == value) {
+        definition = inst;
+        definition_block = block;
+        definitions++;
+      }
+      if (is_end) {
+        break;
+      }
+    }
+  }
+  if (definitions != 1 || definition == NULL) {
+    return false;
+  }
+
+  for (size_t i = 0; i < value->users.length; i++) {
+    TargetInstruction* user = value->users.value.p[i];
+    if (user->block != definition_block) {
+      return false;
+    }
+  }
+
+  size_t remaining_users = value->users.length;
+  bool saw_definition = false;
+  for (TargetInstruction* inst = definition_block->code; inst != NULL;
+       inst = TargetNext(inst)) {
+    bool is_end = inst == definition_block->end_code;
+    if (inst == definition) {
+      saw_definition = true;
+    }
+    if (IsListedUser(value, inst)) {
+      if (!saw_definition) {
+        return false;
+      }
+      remaining_users--;
+      if (remaining_users == 0) {
+        return true;
+      }
+    }
+    if (saw_definition && AARCH64IsCall(inst)) {
+      return false;
+    }
+    if (is_end) {
+      break;
+    }
+  }
+  return false;
+}
+
+static void BuildShortLivedVarRegSet(AARCH64RegisterAllocator* allocator) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
+      if (inst->dest != NULL &&
+          HasShortBlockLocalLifetime(allocator, inst->dest)) {
+        BitSetInsert(&allocator->short_lived_varregs, inst->dest->id);
+      }
+      if (is_end) {
+        break;
+      }
+    }
+  }
+}
+
 
 // Build the preserved_instructions set, instructions that need their
 // register to be preserved across calls.  If the block contains a call
@@ -946,6 +1143,7 @@ static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
 }
 
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
+  BuildShortLivedVarRegSet(allocator);
   TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
 
@@ -978,6 +1176,10 @@ static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type
       }
       if (num == AARCH64_LR_REG) {
         snprintf(buf, len, "x30");
+        break;
+      }
+      if (num == AARCH64_INT_ZERO_REG) {
+        snprintf(buf, len, "%s", size == kSize32Bit ? "wzr" : "xzr");
         break;
       }
 
