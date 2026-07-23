@@ -421,6 +421,8 @@ a64_entry:
   ldursw x10, [sp, #-20]
   stp x29, x30, [sp, #16]
   ldp x29, x30, [sp, #16]
+  stp x29, x30, [sp, #-16]!
+  ldp x29, x30, [sp], #16
   ldpsw x11, x12, [sp, #32]
   fldr d0, [sp, #8]
   fstr d1, [sp, #16]

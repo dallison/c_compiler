@@ -191,14 +191,14 @@ static bool IsPrintable(TargetInstruction* inst) {
 // .         pushed args          .
 // .                              .
 // +------------------------------+  <-- previous sp
-// |                              |
-// |      saved varargs regs      |
-// |                              |
-// +------------------------------+  <-- current frame pointer (s0)
 // |      saved return address    |
 // +------------------------------+
 // |      saved frame pointer     |
-// +------------------------------+ }-+
+// +------------------------------+  <-- established x29
+// |                              |
+// |      saved varargs regs      |
+// |                              |
+// +------------------------------+ }-+ <-- effective x29 for varargs functions
 // |                              |   | Arguments passed in registers
 // |       saved args             |   | that are not assigned to registers
 // |                              |   | in the procedure
@@ -223,10 +223,9 @@ static bool IsPrintable(TargetInstruction* inst) {
 // address range for those arguments passed after the
 // last declared argument.
 //
-// All local variables are accessed as a negative offset from
-// the frame pointer (s0).
+// All local variables are accessed as a negative offset from x29.
 //
-// Spilled register values are a negative offset from s0.
+// Spilled register values are a negative offset from x29.
 // The only potentially large area is the space for
 // local variables.  The rest are small and bounded.
 
@@ -343,10 +342,9 @@ static COMPILER_UNUSED void GenerateOffsetFromFrame(AARCH64Emitter* emitter, int
 // Save all used registers on the stack.
 static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // Entry sequence:
-  // LET S = stack frame size + 8 (for frame pointer save)
+  // stp x29, x30, [sp, #-16]!
+  // mov x29, sp
   // sub sp, sp, #S
-  // stp x29,x30, [sp, #-16]
-  // add x29, sp, #S-16
  
   int stack_frame_size = StackFrameSize(emitter);
 
@@ -442,9 +440,8 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame, no need to store frame pointer.
   } else {
-    fprintf(fp, "sub sp, sp, #32\n");
-    fprintf(fp, "stp x29, x30, [sp, #16]\n");
-    fprintf(fp, "add x29, sp, #16\n");
+    fprintf(fp, "\tstp x29, x30, [sp, #-16]!\n");
+    fprintf(fp, "\tmov x29, sp\n");
     DecrementStackPointer(emitter, stack_frame_size, fp);
 
     if (varargs && space_above_frame_pointer > 0) {
@@ -556,8 +553,8 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
 static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // Exit sequence:
-  // ldr s0, S-8(sp)   - restore frame pointer.
-  // addi sp, sp, S   - increment sp
+  // add sp, sp, #S
+  // ldp x29, x30, [sp], #16
 
   int stack_frame_size = StackFrameSize(emitter);
   char buf1[8];
@@ -603,15 +600,17 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
     // Empty stack frame.
   } else {
     IncrementStackPointer(emitter, stack_frame_size, fp);
-    fprintf(fp, "\tldp x29, x30, [sp, #16]\n");
-    fprintf(fp, "\tadd sp, sp, #32\n");
+    fprintf(fp, "\tldp x29, x30, [sp], #16\n");
   }
 }
 
 static void RestoreExceptionLandingState(AARCH64Emitter* emitter, FILE* fp) {
   int stack_frame_size = StackFrameSize(emitter);
+  // x29 points at the saved x29/x30 pair. Varargs functions lower x29 by
+  // their register-save area after establishing the frame, so exclude that
+  // area when reconstructing the current sp from x29.
   int frame_adjustment =
-      stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+      stack_frame_size - VarargsSaveAreaSize(emitter);
   if (frame_adjustment <= 4095) {
     fprintf(fp, "\tsub sp, x29, #%d\n", frame_adjustment);
   } else {

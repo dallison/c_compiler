@@ -334,8 +334,10 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
-  if ((inst & 0x3f000000u) == 0x29000000u) {
+  if ((inst & 0x3e000000u) == 0x28000000u &&
+      ((inst >> 26) & 1) == 0) {
     int opc = (inst >> 30) & 3;
+    int mode = (inst >> 23) & 3;
     bool load = ((inst >> 22) & 1) != 0;
     int imm7 = (int)DAsmSignExtend((inst >> 15) & 0x7f, 7);
     int rt2 = (inst >> 10) & 0x1f;
@@ -345,11 +347,18 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     bool reg_width_64 = is_64 || (load && opc == 1);
     int scale = is_64 ? 8 : 4;
     const char* op = load ? (opc == 1 ? "ldpsw" : "ldp") : "stp";
-    if (opc != 3) {
-      DAsmFormat(out, "%s %s, %s, [%s, #%d]", op,
-                 XReg(rt, reg_width_64, false),
-                 XReg(rt2, reg_width_64, false), XReg(rn, true, true),
-                 imm7 * scale);
+    if (opc != 3 && mode >= 1) {
+      if (mode == 1) {
+        DAsmFormat(out, "%s %s, %s, [%s], #%d", op,
+                   XReg(rt, reg_width_64, false),
+                   XReg(rt2, reg_width_64, false), XReg(rn, true, true),
+                   imm7 * scale);
+      } else {
+        DAsmFormat(out, "%s %s, %s, [%s, #%d]%s", op,
+                   XReg(rt, reg_width_64, false),
+                   XReg(rt2, reg_width_64, false), XReg(rn, true, true),
+                   imm7 * scale, mode == 3 ? "!" : "");
+      }
       return true;
     }
   }

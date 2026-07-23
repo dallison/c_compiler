@@ -2393,13 +2393,14 @@ static void AssembleLoadStoreRegister(AARCH64Assembler* assembler, Register* rt,
 static void AssembleLoadStorePair(AARCH64Assembler* assembler, Register* rt,
                                   Register* rt2,
                                   Register* rn,
-                                int opc, int v, int l,
-                                int32_t imm7) {
+                                  int opc, int v, int l, int mode,
+                                  int32_t imm7) {
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (opc << 30) |
-                    (0x29 << 24) |
+                    (0x28 << 24) |
                     (v << 26) |
+                    (mode << 23) |
                     (l << 22) |
                     ((imm7 & 0x7f) << 15) |
                     (rt2->num << 10) |
@@ -2463,8 +2464,24 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
     }
 
     if (is_pair) {
-      int imm7 = offset.i / (rt.width == kX ? 8 : 4);
-      AssembleLoadStorePair(assembler, &rt, &rt2, &rn, rt.width == kX ? 2 : 0, 0, is_load, imm7);
+      if (offset.type != kIntImmediate) {
+        AssemblerError(&ASM, "LDP/STP require an immediate offset");
+        return;
+      }
+      int scale = rt.width == kX ? 8 : 4;
+      if ((offset.i % scale) != 0) {
+        AssemblerError(&ASM, "LDP/STP offset must be naturally aligned");
+        return;
+      }
+      int imm7 = offset.i / scale;
+      if (imm7 < -64 || imm7 > 63) {
+        AssemblerError(&ASM, "LDP/STP offset is out of range");
+        return;
+      }
+      // bits[24:23]: 1 = post-index, 2 = signed offset, 3 = pre-index.
+      int mode = post_indexed ? 1 : (writeback ? 3 : 2);
+      AssembleLoadStorePair(assembler, &rt, &rt2, &rn,
+                            rt.width == kX ? 2 : 0, 0, is_load, mode, imm7);
     } else {
       if (offset.type == kRegister) {
         // Register offset.
