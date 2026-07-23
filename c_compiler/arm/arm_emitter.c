@@ -17,6 +17,7 @@
 #include "arm_codegen.h"
 #include "arm_reg_alloc.h"
 #include "target_basic_block.h"
+#include "eh_abi_sections.h"
 
 static void Trap() {}
 
@@ -2031,6 +2032,9 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   ARMPrintTypeInfoRecords(emitter, fp);
+  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->g->exception_typeinfos, false);
+  EHABIPrintARMExidxExtab(fp, func_name,
+                          emitter->g->exception_ranges.length > 0);
   ARMPrintExceptionTable(emitter, fp, func_name);
 }
 

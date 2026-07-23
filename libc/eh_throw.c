@@ -343,3 +343,18 @@ void __davecc_throw_f8(double exception_object, const CXXTypeInfo* typeinfo) {
   current_exception_kind = kExceptionF8;
   UnwindCurrentException();
 }
+
+// Keep canonical Itanium/ARM personality symbols linked while the runtime still
+// uses DaveCC tables during the ABI migration.
+extern int __gxx_personality_v0(int version, int actions,
+                                unsigned long long exception_class,
+                                void* exception_object, void* context);
+static int (*const __davecc_eh_personality_anchor)(
+    int, int, unsigned long long, void*, void*) = __gxx_personality_v0;
+
+#if defined(__arm__)
+extern int __aeabi_unwind_cpp_pr1(int state, int reason, void* unwind_data);
+static int (*const __davecc_eh_arm_personality_anchor)(int, int,
+                                                         void*) =
+    __aeabi_unwind_cpp_pr1;
+#endif

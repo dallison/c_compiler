@@ -28,8 +28,8 @@ EOF
 obj="$work/eh_frame_smoke.o"
 exe="$work/eh_frame_smoke.exe"
 
-"$davecc" -target x86_64 -O1 -c "$work/eh_frame_smoke.c" -o "$obj"
-"$davecc" -target x86_64 -O1 -static -Wl,-e -Wl,main \
+"$davecc" -target x86_64 -O1 -nostdinc -c "$work/eh_frame_smoke.c" -o "$obj"
+"$davecc" -target x86_64 -O1 -nostdinc -nostdlib -static -Wl,-e -Wl,main \
   "$work/eh_frame_smoke.c" -o "$exe"
 
 "$elfdump" -S "$obj" >"$work/obj.sections"

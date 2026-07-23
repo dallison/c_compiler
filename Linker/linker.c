@@ -1241,6 +1241,39 @@ static void InventEHFrameBounds(Linker* linker) {
   InventSymbol(linker, "__eh_frame_end", 8, end);
 }
 
+static void InventGccExceptTableBounds(Linker* linker) {
+  SectionGroup* table = FindSectionGroup(linker, ".gcc_except_table");
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (table != NULL && table->region != NULL) {
+    start = table->address;
+    end = start + SectionGroupSize(table);
+  }
+  InventSymbol(linker, "__gcc_except_table_start", 8, start);
+  InventSymbol(linker, "__gcc_except_table_end", 8, end);
+}
+
+static void InventARMExidxBounds(Linker* linker) {
+  SectionGroup* exidx = FindSectionGroup(linker, ".ARM.exidx");
+  SectionGroup* extab = FindSectionGroup(linker, ".ARM.extab");
+  uint64_t exidx_start = 0;
+  uint64_t exidx_end = 0;
+  uint64_t extab_start = 0;
+  uint64_t extab_end = 0;
+  if (exidx != NULL && exidx->region != NULL) {
+    exidx_start = exidx->address;
+    exidx_end = exidx_start + SectionGroupSize(exidx);
+  }
+  if (extab != NULL && extab->region != NULL) {
+    extab_start = extab->address;
+    extab_end = extab_start + SectionGroupSize(extab);
+  }
+  InventSymbol(linker, "__exidx_start", 8, exidx_start);
+  InventSymbol(linker, "__exidx_end", 8, exidx_end);
+  InventSymbol(linker, "__extab_start", 8, extab_start);
+  InventSymbol(linker, "__extab_end", 8, extab_end);
+}
+
 static void InventExceptionTableBounds(Linker* linker) {
   SectionGroup* table = FindSectionGroup(linker, ".davecc_except_table");
   uint64_t start = 0;
@@ -1597,7 +1630,9 @@ void LinkerLinkAllFiles(Linker* linker) {
 
   // Expose the linked .eh_frame range to the in-process unwind runtime.
   InventEHFrameBounds(linker);
+  InventGccExceptTableBounds(linker);
   InventExceptionTableBounds(linker);
+  InventARMExidxBounds(linker);
   LinkerInventArrayBoundsSymbols(linker);
   
   if (!linker->fully_static) {

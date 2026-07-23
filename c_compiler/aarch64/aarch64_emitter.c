@@ -17,6 +17,7 @@
 #include "aarch64_codegen.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
+#include "eh_abi_sections.h"
 
 static void Trap() {}
 
@@ -1726,6 +1727,20 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   AARCH64PrintTypeInfoRecords(emitter, fp);
+  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->g->exception_typeinfos, true);
+  EHABIPrintGccExceptTable(fp, func_name,
+                           emitter->g->exception_ranges.length > 0, true);
+  if (!emitter->g->base.varargs) {
+    EHABIFrameParams params = {
+        .func_name = func_name,
+        .has_stack_frame = false,
+        .has_exceptions = emitter->g->exception_ranges.length > 0,
+        .return_address_reg = 30,
+        .data_align_sleb = -8,
+        .is_64bit = true,
+    };
+    EHABIPrintDwarfEHFrame(fp, &params);
+  }
   AARCH64PrintExceptionTable(emitter, fp, func_name);
 }
 

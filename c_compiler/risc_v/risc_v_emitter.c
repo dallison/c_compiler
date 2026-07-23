@@ -21,6 +21,7 @@
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
 #include "target_basic_block.h"
+#include "eh_abi_sections.h"
 
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
@@ -1603,6 +1604,20 @@ void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   RVPrintTypeInfoRecords(emitter, fp);
+  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->rv->exception_typeinfos, true);
+  EHABIPrintGccExceptTable(fp, func_name,
+                           emitter->rv->exception_ranges.length > 0, true);
+  if (!emitter->rv->base.varargs) {
+    EHABIFrameParams params = {
+        .func_name = func_name,
+        .has_stack_frame = false,
+        .has_exceptions = emitter->rv->exception_ranges.length > 0,
+        .return_address_reg = 1,
+        .data_align_sleb = -8,
+        .is_64bit = true,
+    };
+    EHABIPrintDwarfEHFrame(fp, &params);
+  }
   RVPrintExceptionTable(emitter, fp, func_name);
 }
 

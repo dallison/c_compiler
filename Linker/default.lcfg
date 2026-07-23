@@ -63,6 +63,8 @@ layout {
       name: "text"
       section: ".text"
       section: ".rodata"
+      section: ".eh_frame"
+      section: ".gcc_except_table"
       section: ".davecc_except_table"
       start_addr: 0x400000000
       alignment: 0x1000
@@ -90,6 +92,8 @@ layout {
       name: "text"
       section: ".text"
       section: ".rodata"
+      section: ".ARM.exidx"
+      section: ".ARM.extab"
       section: ".davecc_except_table"
       start_addr: 0x40000000
       alignment: 0x1000

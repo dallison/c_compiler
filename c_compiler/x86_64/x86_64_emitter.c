@@ -23,6 +23,7 @@
 #include "x86_64_machine.h"
 #include "x86_64_reg_alloc.h"
 #include "target_basic_block.h"
+#include "eh_abi_sections.h"
 
 // In assembler mode, $ introduces a hexadecimal immediate (see CollectHex in
 // lex.c), not a decimal value as in GNU as AT&T syntax.
@@ -2706,47 +2707,15 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
     return;
   }
 
-  bool has_frame = !EmptyStackFrame(emitter);
-
-  fprintf(fp, "\t.section \".eh_frame\", \"a\", @progbits\n");
-
-  // CIE: absolute FDE pointers, code alignment 1, data alignment -8, return
-  // address register 16 (RIP). Initial CFA at function entry is rsp+8.
-  fprintf(fp, ".Leh_%s_cie:\n", func_name);
-  fprintf(fp, "\t.4byte 18\n");
-  fprintf(fp, ".Leh_%s_cie_start:\n", func_name);
-  fprintf(fp, "\t.4byte 0\n");
-  fprintf(fp, "\t.byte 1\n");
-  fprintf(fp, "\t.asciz \"zR\"\n");
-  fprintf(fp, "\t.byte 1\n");
-  fprintf(fp, "\t.byte 120\n");
-  fprintf(fp, "\t.byte 16\n");
-  fprintf(fp, "\t.byte 1\n");
-  fprintf(fp, "\t.byte 0\n");
-  fprintf(fp, "\t.byte 12, 7, 8\n");
-  fprintf(fp, "\t.byte 144, 1\n");
-  fprintf(fp, ".Leh_%s_cie_end:\n", func_name);
-
-  fprintf(fp, ".Leh_%s_fde:\n", func_name);
-  fprintf(fp, "\t.4byte %d\n", has_frame ? 38 : 21);
-  fprintf(fp, ".Leh_%s_fde_start:\n", func_name);
-  fprintf(fp, "\t.4byte .Leh_%s_fde_start-.Leh_%s_cie\n", func_name,
-          func_name);
-  fprintf(fp, "\t.8byte %s\n", func_name);
-  fprintf(fp, "\t.8byte (.func_end_%s-%s)\n", func_name, func_name);
-  fprintf(fp, "\t.byte 0\n");
-  if (has_frame) {
-    fprintf(fp, "\t.byte 4\n");
-    fprintf(fp, "\t.4byte (.Leh_%s_after_push-%s)\n", func_name, func_name);
-    fprintf(fp, "\t.byte 14, 16\n");
-    fprintf(fp, "\t.byte 134, 2\n");
-    fprintf(fp, "\t.byte 4\n");
-    fprintf(fp, "\t.4byte (.Leh_%s_after_leaq-.Leh_%s_after_push)\n",
-            func_name, func_name);
-    fprintf(fp, "\t.byte 12, 6, 8\n");
-  }
-  fprintf(fp, ".Leh_%s_fde_end:\n", func_name);
-  fprintf(fp, "\t.text\n\n");
+  EHABIFrameParams params = {
+      .func_name = func_name,
+      .has_stack_frame = !EmptyStackFrame(emitter),
+      .has_exceptions = emitter->rv->exception_ranges.length > 0,
+      .return_address_reg = 16,
+      .data_align_sleb = -8,
+      .is_64bit = true,
+  };
+  EHABIPrintDwarfEHFrame(fp, &params);
 }
 
 static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
@@ -2894,6 +2863,9 @@ void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   X86_64PrintTypeInfoRecords(emitter, fp);
+  EHABIPrintItaniumTypeInfoAliases(fp, &emitter->rv->exception_typeinfos, true);
+  EHABIPrintGccExceptTable(fp, func_name,
+                           emitter->rv->exception_ranges.length > 0, true);
   X86_64PrintEHFrame(emitter, fp, func_name);
   X86_64PrintExceptionTable(emitter, fp, func_name);
 }

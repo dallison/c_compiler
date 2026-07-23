@@ -184,6 +184,7 @@ LIBC_SRCS = [
     "libc/eh_frame.c",
     "libc/eh_frame_pointer.c",
     "libc/eh_terminate.c",
+    "libc/eh_personality.c",
     "libc/eh_throw.c",
     "libc/exit.c",
     "libc/fabs.c",
@@ -537,6 +538,7 @@ cc_library(
         "c_compiler/frontend/syntax/ast.c",
         "c_compiler/backend/basic_block.c",
         "c_compiler/backend/codegen.c",
+        "c_compiler/backend/eh_abi_sections.c",
         "c_compiler/optimization/alias.c",
         "c_compiler/optimization/codemotion.c",
         "c_compiler/optimization/copyprop.c",
@@ -1153,6 +1155,7 @@ libc_srcs=(
   "libc/cxx_rtti.c"
   "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
+  "libc/eh_personality.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1307,6 +1310,7 @@ libc_srcs=(
   "libc/davecc_lifecycle.c"
   "libc/eh_frame.c"
   "libc/eh_terminate.c"
+  "libc/eh_personality.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1465,6 +1469,7 @@ libc_srcs=(
   "libc/davecc_lifecycle.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_personality.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1619,6 +1624,7 @@ libc_srcs=(
   "libc/davecc_lifecycle.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_personality.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1773,6 +1779,7 @@ libc_srcs=(
   "libc/davecc_lifecycle.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_personality.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -2126,6 +2133,24 @@ sh_test(
 )
 
 sh_test(
+    name = "exception_abi_gates_test",
+    srcs = ["tests/exception_abi_gates_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":libc_aarch64",
+        ":libc_arm",
+        ":libc_headers",
+        ":libc_riscv",
+        ":libc_x86_64",
+    ],
+)
+
+sh_test(
     name = "init_fini_multitu_test",
     srcs = ["tests/init_fini_multitu_test.sh"],
     args = [
@@ -2225,6 +2250,28 @@ sh_test(
     data = [
         ":aarch64",
         ":davecc",
+    ],
+)
+
+sh_test(
+    name = "itanium_rtti_test",
+    srcs = ["tests/itanium_rtti_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :tests/itanium_rtti_cases.cpp)",
+        "$(rootpath //cxx_testsuite:tests/exec/0089_typeid.cpp)",
+        "$(rootpath //cxx_testsuite:tests/exec/0090_dynamic_cast.cpp)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_x86_64",
+        ":x86_64",
+        "libc/include/typeinfo",
+        "tests/itanium_rtti_cases.cpp",
+        "//cxx_testsuite:tests/exec/0089_typeid.cpp",
+        "//cxx_testsuite:tests/exec/0090_dynamic_cast.cpp",
     ],
 )
 
