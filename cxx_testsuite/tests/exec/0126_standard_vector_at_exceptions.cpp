@@ -11,7 +11,7 @@ int test_vector_at_throws(void) {
   try {
     (void)values.at(2);
     return 1;
-  } catch (const std::out_of_range& ex) {
+  } catch (const std::exception& ex) {
     const char* msg = ex.what();
     if (msg == 0 || msg[0] != 'v') {
       return 2;
@@ -59,7 +59,7 @@ int test_vector_at_catch_all(void) {
 int test_direct_stdexcept_throw(void) {
   try {
     throw std::out_of_range((const char*)"direct");
-  } catch (const std::exception& ex) {
+  } catch (const std::out_of_range& ex) {
     const char* msg = ex.what();
     if (msg == 0 || msg[0] != 'd') {
       return 10;

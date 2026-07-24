@@ -11,6 +11,8 @@ extern "C" {
 #endif
 
 #define DAVECC_EH_EXCEPTION_CLASS 0x434C4E47432B2B00ULL /* "CLNGC++\0" */
+#define DAVECC_CXA_UNWIND_OFFSET \
+  (sizeof(struct __cxa_exception) - sizeof(_Unwind_Exception))
 
 typedef struct DaveCXXTypeInfoBase {
   const char* name;
@@ -45,6 +47,14 @@ void __davecc_eh_sync_legacy_current_exception(void* object,
 
 void __davecc_eh_read_legacy_current_exception(void** object,
                                                const DaveCXXTypeInfo** typeinfo);
+
+void __davecc_eh_set_landing_pad_state(_Unwind_Exception* exc, long selector,
+                                       long type_offset);
+
+void* __davecc_eh_landing_pad_exception_object(void);
+
+_Unwind_Exception* __davecc_eh_landing_pad_unwind_header(void);
+long __davecc_eh_landing_pad_selector(void);
 
 void* __davecc_eh_current_adjusted_ptr(void);
 

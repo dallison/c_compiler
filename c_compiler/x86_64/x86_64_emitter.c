@@ -2701,6 +2701,17 @@ void X86_64EmitterDelete(X86_64Emitter* emitter) {
   free(emitter);
 }
 
+static const char* LSDATypeInfoSymbol(EHTypeInfo* info) {
+  if (info == NULL) {
+    return NULL;
+  }
+  if (info->canonical_typeinfo != NULL &&
+      info->canonical_typeinfo->asm_name.length > 0) {
+    return info->canonical_typeinfo->asm_name.value;
+  }
+  return NULL;
+}
+
 static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
                                const char* func_name) {
   if (emitter->rv->base.varargs) {
@@ -2719,11 +2730,7 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
     out->landing_pad_id = range->catch_label->id;
     out->is_cleanup = range->is_cleanup;
     out->catch_typeinfo =
-        range->is_cleanup
-            ? NULL
-            : (range->catch_typeinfo != NULL
-                   ? range->catch_typeinfo->symbol_name.value
-                   : NULL);
+        range->is_cleanup ? NULL : LSDATypeInfoSymbol(range->catch_typeinfo);
   }
 
   DaveEHFrameEmitInfo info = {
@@ -2731,6 +2738,7 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
       .range_count = lsda_count,
       .func_name = func_name,
       .has_frame = !EmptyStackFrame(emitter),
+      .is_64bit = true,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
       .cie_fp_reg = 6,
@@ -2753,27 +2761,19 @@ static void X86_64PrintGCCExceptTable(X86_64Emitter* emitter, FILE* fp,
     out->landing_pad_id = range->catch_label->id;
     out->is_cleanup = range->is_cleanup;
     out->catch_typeinfo =
-        range->is_cleanup
-            ? NULL
-            : (range->catch_typeinfo != NULL
-                   ? range->catch_typeinfo->symbol_name.value
-                   : NULL);
+        range->is_cleanup ? NULL : LSDATypeInfoSymbol(range->catch_typeinfo);
   }
   DaveEHFrameEmitInfo info = {
       .ranges = lsda_ranges,
       .range_count = lsda_count,
       .func_name = func_name,
       .has_frame = !EmptyStackFrame(emitter),
+      .is_64bit = true,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
       .cie_fp_reg = 6,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
-}
-
-static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
-                                     TargetInstruction* label) {
-  fprintf(fp, ".%s_label_%d", func_name, label->id);
 }
 
 static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
@@ -2793,106 +2793,6 @@ static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
                           struct_return_slot, kX86_64RegTypeInt,
                           buf, sizeof(buf)));
   fprintf(fp, "\n");
-}
-
-static void PrintEscapedAsmString(FILE* fp, const char* s) {
-  for (; *s != '\0'; s++) {
-    unsigned char ch = (unsigned char)*s;
-    if (ch == '"' || ch == '\\') {
-      fprintf(fp, "\\%c", ch);
-    } else if (ch >= 32 && ch < 127) {
-      fputc(ch, fp);
-    } else {
-      fprintf(fp, "\\%03o", ch);
-    }
-  }
-}
-
-// Emits the exception type_info objects.  The layout must match `CXXTypeInfo`
-// in libc/eh_throw.c:
-//
-//   struct CXXTypeInfoBase { const char* name; long offset; };
-//   struct CXXTypeInfo { const char* name; long base_count;
-//                        const CXXTypeInfoBase* bases; };
-//
-// The public label is `symbol_name` (the CXXTypeInfo object); the throw site
-// and exception table reference it by address.
-static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
-  if (emitter->rv->exception_typeinfos.length == 0) {
-    return;
-  }
-  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
-  for (size_t i = 0; i < emitter->rv->exception_typeinfos.length; i++) {
-    EHTypeInfo* info = emitter->rv->exception_typeinfos.value.p[i];
-    const char* name = info->symbol_name.value;
-
-    fprintf(fp, "\t.p2align 3\n");
-    fprintf(fp, "\t.local %s_name\n", name);
-    fprintf(fp, "%s_name:\n\t.asciz \"", name);
-    PrintEscapedAsmString(fp, info->type_name.value);
-    fprintf(fp, "\"\n");
-
-    for (size_t b = 0; b < info->bases.length; b++) {
-      EHTypeInfoBase* base = info->bases.value.p[b];
-      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
-      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
-      PrintEscapedAsmString(fp, base->base_name.value);
-      fprintf(fp, "\"\n");
-    }
-
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.p2align 3\n");
-      fprintf(fp, "\t.local %s_bases\n", name);
-      fprintf(fp, "%s_bases:\n", name);
-      for (size_t b = 0; b < info->bases.length; b++) {
-        EHTypeInfoBase* base = info->bases.value.p[b];
-        fprintf(fp, "\t.8byte %s_base%zu_name\n", name, b);
-        fprintf(fp, "\t.8byte %lld\n", (long long)base->offset);
-      }
-    }
-
-    fprintf(fp, "\t.p2align 3\n");
-    fprintf(fp, "\t.weak %s\n", name);
-    fprintf(fp, "%s:\n", name);
-    fprintf(fp, "\t.8byte %s_name\n", name);
-    fprintf(fp, "\t.8byte %zu\n", info->bases.length);
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.8byte %s_bases\n", name);
-    } else {
-      fprintf(fp, "\t.8byte 0\n");
-    }
-    fprintf(fp, "\t.8byte %lld\n", (long long)info->object_size);
-    fprintf(fp, "\t.8byte %d\n", info->object_is_class ? 1 : 0);
-  }
-  fprintf(fp, "\t.text\n\n");
-}
-
-static void X86_64PrintExceptionTable(X86_64Emitter* emitter, FILE* fp,
-                                      const char* func_name) {
-  if (emitter->rv->exception_ranges.length == 0) {
-    return;
-  }
-
-  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
-  fprintf(fp, "\t.p2align 3\n");
-  for (size_t i = 0; i < emitter->rv->exception_ranges.length; i++) {
-    X86_64ExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
-    fprintf(fp, "\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_start);
-    fprintf(fp, "\n\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_end);
-    fprintf(fp, "\n\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    if (range->is_cleanup) {
-      fprintf(fp, "\n\t.8byte %d", DAVECC_EH_CLEANUP_MARKER);
-    } else if (range->catch_typeinfo != NULL) {
-      fprintf(fp, "\n\t.8byte %s", range->catch_typeinfo->symbol_name.value);
-    } else {
-      fprintf(fp, "\n\t.8byte 0");
-    }
-    fprintf(fp, "\n");
-  }
-  fprintf(fp, "\t.text\n\n");
 }
 
 void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
@@ -2915,10 +2815,8 @@ void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
-  X86_64PrintTypeInfoRecords(emitter, fp);
   X86_64PrintGCCExceptTable(emitter, fp, func_name);
   X86_64PrintEHFrame(emitter, fp, func_name);
-  X86_64PrintExceptionTable(emitter, fp, func_name);
 }
 
 void X86_64PrintCXXAdjustorThunks(FILE* fp) {

@@ -8,8 +8,8 @@
 
 #define DAVECC_EH_PERSONALITY "__gxx_personality_v0"
 
-// Negative type_filter values in the action table denote cleanups.
-#define DAVECC_EH_LSDA_CLEANUP_FILTER (-1)
+// Itanium action filter zero denotes cleanup-only.
+#define DAVECC_EH_LSDA_CLEANUP_FILTER 0
 
 typedef struct {
   long long try_start_id;
@@ -24,6 +24,7 @@ typedef struct {
   size_t range_count;
   const char* func_name;
   bool has_frame;
+  bool is_64bit;
   int cie_ra_reg;
   int cie_cfa_reg;
   int cie_fp_reg;
@@ -33,6 +34,7 @@ void DaveEHPrintUleb128(FILE* fp, unsigned long long value);
 void DaveEHPrintSleb128(FILE* fp, long long value);
 
 void DaveEHPrintGCCExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info);
+void DaveEHPrintARMExtabLSDA(FILE* fp, const DaveEHFrameEmitInfo* info);
 void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix);
 void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,

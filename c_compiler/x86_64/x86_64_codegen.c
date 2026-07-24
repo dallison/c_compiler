@@ -2697,7 +2697,9 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
 }
 
 static TargetInstruction* LowerBranch(X86_64Generator* rv, IRNode* node) {
-  assert(node->inputs.length == 1);
+  if (node->inputs.length == 0) {
+    return NULL;
+  }
   IRNode* target_node = node->inputs.value.p[0];
 
   // Return branches must go through the shared epilogue.  This lowering happens

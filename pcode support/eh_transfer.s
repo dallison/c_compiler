@@ -21,3 +21,13 @@ __davecc_jump_to_landing_pad:
 	mov ap, r2
 	mov fp, r3
 	rcall r1
+
+.global __davecc_unwind_install_context
+.type __davecc_unwind_install_context, @function
+__davecc_unwind_install_context:
+	ldx r1, [sp, #8]
+	ldx r2, [sp, #16]
+	ldx r3, [sp, #24]
+	mov ap, r2
+	mov fp, r3
+	rcall r1

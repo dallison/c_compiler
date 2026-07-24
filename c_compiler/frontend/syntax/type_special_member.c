@@ -1790,6 +1790,56 @@ static bool CXXImplicitSpecialMemberIsNoexcept(Struct* str,
   return true;
 }
 
+static bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
+                                          CXXSpecialMemberKind kind) {
+  if (type == NULL) {
+    return true;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeSpecialMemberIsTrivial(type->next, kind);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return true;
+  }
+  TypeRecord* func =
+      CXXFindSpecialMemberFunction(type->info.struct_info, kind);
+  if (func == NULL && kind == kCXXSpecialMemberMoveConstructor) {
+    func = CXXFindSpecialMemberFunction(type->info.struct_info,
+                                        kCXXSpecialMemberCopyConstructor);
+  } else if (func == NULL && kind == kCXXSpecialMemberMoveAssignment) {
+    func = CXXFindSpecialMemberFunction(type->info.struct_info,
+                                        kCXXSpecialMemberCopyAssignment);
+  }
+  return func != NULL && !func->info.function.is_deleted &&
+         func->info.function.is_trivial_special_member;
+}
+
+static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
+                                              CXXSpecialMemberKind kind) {
+  if (str == NULL || str->virtual_bases.length != 0) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        !CXXTypeSpecialMemberIsTrivial(base->type, kind)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    if (!CXXTypeSpecialMemberIsTrivial(member->symbol->type, kind)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
                                             Symbol* tag,
                                             const char* name,
@@ -1817,10 +1867,7 @@ static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
   func->info.function.is_noexcept =
       !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
   func->info.function.is_trivial_special_member =
-      !deleted &&
-      (kind != kCXXSpecialMemberDestructor ||
-       (!StructNeedsImplicitCXXDestructor(str) && str->bases.length == 0 &&
-        str->virtual_bases.length == 0));
+      !deleted && CXXImplicitSpecialMemberIsTrivial(str, kind);
   TypeRecordChain(func, return_type);
   TypeRecordAddCXXThisParameter(func, str, location);
   if (!is_destructor && (source_is_const || source_is_rvalue)) {

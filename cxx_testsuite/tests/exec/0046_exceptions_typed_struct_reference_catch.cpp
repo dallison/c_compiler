@@ -12,6 +12,6 @@ int main(void) {
     return 1;
   } catch (Payload& value) {
     value.value = value.value + 1;
-    return payload.value - 12;
+    return value.value - 12;
   }
 }

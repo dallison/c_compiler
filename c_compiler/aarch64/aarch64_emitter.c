@@ -1621,92 +1621,15 @@ void AARCH64EmitterDelete(AARCH64Emitter* emitter) {
   free(emitter);
 }
 
-static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
-                                     TargetInstruction* label) {
-  fprintf(fp, ".%s_label_%d", func_name, label->id);
-}
-
-static void PrintEscapedAsmString(FILE* fp, const char* s) {
-  for (; *s != '\0'; s++) {
-    unsigned char ch = (unsigned char)*s;
-    if (ch == '"' || ch == '\\') {
-      fprintf(fp, "\\%c", ch);
-    } else if (ch >= 32 && ch < 127) {
-      fputc(ch, fp);
-    } else {
-      fprintf(fp, "\\%03o", ch);
-    }
+static const char* LSDATypeInfoSymbol(EHTypeInfo* info) {
+  if (info == NULL) {
+    return NULL;
   }
-}
-
-static void AARCH64PrintTypeInfoRecords(AARCH64Emitter* emitter, FILE* fp) {
-  if (emitter->g->exception_typeinfos.length == 0) {
-    return;
+  if (info->canonical_typeinfo != NULL &&
+      info->canonical_typeinfo->asm_name.length > 0) {
+    return info->canonical_typeinfo->asm_name.value;
   }
-  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
-  for (size_t i = 0; i < emitter->g->exception_typeinfos.length; i++) {
-    EHTypeInfo* info = emitter->g->exception_typeinfos.value.p[i];
-    const char* name = info->symbol_name.value;
-    fprintf(fp, "\t.p2align 3\n");
-    fprintf(fp, "\t.local %s_name\n", name);
-    fprintf(fp, "%s_name:\n\t.asciz \"", name);
-    PrintEscapedAsmString(fp, info->type_name.value);
-    fprintf(fp, "\"\n");
-    for (size_t b = 0; b < info->bases.length; b++) {
-      EHTypeInfoBase* base = info->bases.value.p[b];
-      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
-      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
-      PrintEscapedAsmString(fp, base->base_name.value);
-      fprintf(fp, "\"\n");
-    }
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.p2align 3\n\t.local %s_bases\n%s_bases:\n", name,
-              name);
-      for (size_t b = 0; b < info->bases.length; b++) {
-        EHTypeInfoBase* base = info->bases.value.p[b];
-        fprintf(fp, "\t.8byte %s_base%zu_name\n", name, b);
-        fprintf(fp, "\t.8byte %lld\n", (long long)base->offset);
-      }
-    }
-    fprintf(fp, "\t.p2align 3\n\t.weak %s\n%s:\n", name, name);
-    fprintf(fp, "\t.8byte %s_name\n", name);
-    fprintf(fp, "\t.8byte %zu\n", info->bases.length);
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.8byte %s_bases\n", name);
-    } else {
-      fprintf(fp, "\t.8byte 0\n");
-    }
-    fprintf(fp, "\t.8byte %lld\n", (long long)info->object_size);
-    fprintf(fp, "\t.8byte %d\n", info->object_is_class ? 1 : 0);
-  }
-  fprintf(fp, "\t.text\n\n");
-}
-
-static void AARCH64PrintExceptionTable(AARCH64Emitter* emitter, FILE* fp,
-                                       const char* func_name) {
-  if (emitter->g->exception_ranges.length == 0) {
-    return;
-  }
-  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
-  fprintf(fp, "\t.p2align 3\n");
-  for (size_t i = 0; i < emitter->g->exception_ranges.length; i++) {
-    AARCH64ExceptionRange* range = emitter->g->exception_ranges.value.p[i];
-    fprintf(fp, "\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_start);
-    fprintf(fp, "\n\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_end);
-    fprintf(fp, "\n\t.8byte ");
-    PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    if (range->is_cleanup) {
-      fprintf(fp, "\n\t.8byte %d\n", DAVECC_EH_CLEANUP_MARKER);
-    } else if (range->catch_typeinfo != NULL) {
-      fprintf(fp, "\n\t.8byte %s\n",
-              range->catch_typeinfo->symbol_name.value);
-    } else {
-      fprintf(fp, "\n\t.8byte 0\n");
-    }
-  }
-  fprintf(fp, "\t.text\n\n");
+  return NULL;
 }
 
 static void AARCH64FillLSDAInfo(AARCH64Emitter* emitter, const char* func_name,
@@ -1722,11 +1645,7 @@ static void AARCH64FillLSDAInfo(AARCH64Emitter* emitter, const char* func_name,
     out->landing_pad_id = range->catch_label->id;
     out->is_cleanup = range->is_cleanup;
     out->catch_typeinfo =
-        range->is_cleanup
-            ? NULL
-            : (range->catch_typeinfo != NULL
-                   ? range->catch_typeinfo->symbol_name.value
-                   : NULL);
+        range->is_cleanup ? NULL : LSDATypeInfoSymbol(range->catch_typeinfo);
   }
 }
 
@@ -1743,6 +1662,7 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
       .range_count = lsda_count,
       .func_name = func_name,
       .has_frame = !EmptyStackFrame(emitter),
+      .is_64bit = true,
       .cie_ra_reg = 30,
       .cie_cfa_reg = 31,
       .cie_fp_reg = 29,
@@ -1775,9 +1695,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
-  AARCH64PrintTypeInfoRecords(emitter, fp);
   AARCH64PrintEHMetadata(emitter, fp, func_name);
-  AARCH64PrintExceptionTable(emitter, fp, func_name);
 }
 
 void AARCH64PrintCXXAdjustorThunks(FILE* fp) {

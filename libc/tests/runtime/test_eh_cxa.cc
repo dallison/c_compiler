@@ -54,12 +54,12 @@ int TestEHCxaHandlerCount(void) {
   header->exceptionDestructor = TestDestructor;
   *(int*)object = 7;
 
-  void* caught = __cxa_begin_catch(object);
+  void* caught = __cxa_begin_catch(&header->unwindHeader);
   CHECK(caught == object, failures);
   CHECK_EQ((long)__davecc_eh_current_caught_header()->handlerCount, 1,
            failures);
 
-  void* caught_again = __cxa_begin_catch(object);
+  void* caught_again = __cxa_begin_catch(&header->unwindHeader);
   CHECK(caught_again == object, failures);
   CHECK_EQ((long)__davecc_eh_current_caught_header()->handlerCount, 2,
            failures);
@@ -83,7 +83,7 @@ int TestEHCxaRethrowState(void) {
   header->exceptionDestructor = (void (*)(void*))0;
   *(int*)object = 99;
 
-  __cxa_begin_catch(object);
+  __cxa_begin_catch(&header->unwindHeader);
   CHECK_EQ((long)__davecc_eh_uncaught_exceptions(), 0, failures);
 
   header->handlerCount--;
@@ -106,8 +106,17 @@ int TestEHCxaTerminateHooks(void) {
   return failures;
 }
 
+int TestUnwindEndOfStack(void) {
+  int failures = 0;
+  _Unwind_Exception exception = {};
+  exception.exception_class = DAVECC_EH_EXCEPTION_CLASS;
+  CHECK_EQ((long)_Unwind_RaiseException(&exception),
+           (long)_URC_END_OF_STACK, failures);
+  return failures;
+}
+
 extern "C" int TestEHCxa(void) {
   return TestEHCxaAllocateFree() + TestEHCxaGlobalsTLS() +
          TestEHCxaHandlerCount() + TestEHCxaRethrowState() +
-         TestEHCxaTerminateHooks();
+         TestEHCxaTerminateHooks() + TestUnwindEndOfStack();
 }

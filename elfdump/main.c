@@ -330,11 +330,12 @@ static void PrintSymbols(ELFReaderFile* elf) {
     }
     ELFReaderSection* strtab = elf->sections.value.p[strtab_index];
     size_t num_symbols = symtab->header->size / symtab->header->entsize;
-    const char* symbol_addr = (const char*)elf->header + symtab->header->offset;
+    const char* symbol_addr = elf->base + symtab->header->offset;
     
     for (size_t i = 0; i < num_symbols; i++) {
-      ELFSymbol* sym = (ELFSymbol*)symbol_addr;
-      PrintSymbol(elf, sym, i, strtab);
+      ELFSymbol sym;
+      elf->ops->ReadSymbol(&sym, symbol_addr);
+      PrintSymbol(elf, &sym, i, strtab);
       symbol_addr += symtab->header->entsize;
     }
 

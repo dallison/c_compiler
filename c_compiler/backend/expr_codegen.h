@@ -13,6 +13,8 @@
 #include "codegen.h"
 
 IRNode* GenerateExpression(Generator* gen, ASTNode* node);
+IROpcode GetLoadOpcodeForType(TypeRecord* type);
+IROpcode GetStoreOpcodeForType(TypeRecord* type);
 
 // Spill a scalar/pointer value into a fresh stack temporary (returns its
 // address) and reload it, so it survives intervening calls.

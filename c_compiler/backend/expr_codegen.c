@@ -182,7 +182,7 @@ static struct {
     {NULL, IR_OP(nop), IR_OP(nop), IR_OP(nop)},
 };
 
-static IROpcode GetLoadOpcodeForType(TypeRecord* type) {
+IROpcode GetLoadOpcodeForType(TypeRecord* type) {
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
@@ -257,7 +257,7 @@ static COMPILER_UNUSED IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_siz
   return IR_OP(nop);
 }
 
-static IROpcode GetStoreOpcodeForType(TypeRecord* type) {
+IROpcode GetStoreOpcodeForType(TypeRecord* type) {
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
@@ -2206,7 +2206,8 @@ static IRNode* GenerateDynamicCast(Generator* gen, CastASTNode* node) {
   bool is_reference = TypeIsReference(node->cast_type);
   TypeRecord* dest_class = node->cast_type->next;
   TypeRecord* from = node->expr->type;
-  TypeRecord* src_class = TypeIsReference(from) ? from->next : from->next;
+  TypeRecord* src_class =
+      (TypeIsReference(from) || TypeIsPointer(from)) ? from->next : from;
   IRNode* source = GenerateExpression(gen, node->expr);
 
   Symbol* dst_type_info = RttiGetTypeInfoSymbol(dest_class);
@@ -2251,6 +2252,219 @@ static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
   return symbol;
 }
 
+static Symbol* GetCxaAllocateExceptionFunction(SourceLocation location) {
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
+                                      NewTypeRecordWithSize(kTypeVoid,
+                                                            kQualPlain));
+  TypeRecord* size_type = NewTypeRecordWithSize(
+      SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
+  size_type->type |= kTypeUnsigned;
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_ptr);
+  TypeRecordChain(func_type, size_type);
+  String name;
+  StringInit(&name, "__cxa_allocate_exception");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  symbol = NewSymbol("__cxa_allocate_exception", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetCxaThrowFunction(SourceLocation location) {
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
+                                      NewTypeRecordWithSize(kTypeVoid,
+                                                            kQualPlain));
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  TypeRecordChain(func_type, void_ptr);
+  TypeRecordChain(func_type, void_ptr);
+  TypeRecordChain(func_type, void_ptr);
+  String name;
+  StringInit(&name, "__cxa_throw");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+  symbol = NewSymbol("__cxa_throw", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetCxaRethrowFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__cxa_rethrow");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__cxa_rethrow", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* FindExceptionSpecialMember(TypeRecord* type,
+                                          CXXSpecialMemberKind kind) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    for (StructMember* candidate = member; candidate != NULL;
+         candidate = candidate->overload_next) {
+      Symbol* symbol = candidate->symbol;
+      if (symbol != NULL && TypeIsFunction(symbol->type) &&
+          symbol->type->info.function.cxx_special_member_kind == kind &&
+          !symbol->type->info.function.is_deleted) {
+        return symbol;
+      }
+    }
+  }
+  return NULL;
+}
+
+static bool ExceptionSpecialMemberIsTrivial(Symbol* symbol) {
+  return symbol == NULL ||
+         symbol->type->info.function.is_trivial_special_member;
+}
+
+static void EmitExceptionConstructorCall(Generator* gen, Symbol* constructor,
+                                         IRNode* object, IRNode* source) {
+  IRNode* call =
+      NewIR1(IR_OP(calla), GeneratorGetVariable(gen, constructor));
+  Vector args = {0};
+  PushArg(gen, call, source, 1, &args);
+  PushArg(gen, call, object, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  IRSetType(GeneratorEmit(gen, call), constructor->type->next);
+}
+
+static bool CanElideExceptionCopy(ASTNode* expr) {
+  return expr != NULL && expr->value_category == kValueCategoryPrvalue &&
+         (expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
+          expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma));
+}
+
+static IRNode* GenerateItaniumThrowExpression(Generator* gen,
+                                              ThrowASTNode* node) {
+  SourceLocation location = node->base.location;
+
+  if (node->expr == NULL) {
+    Symbol* rethrow = GetCxaRethrowFunction(location);
+    IRNode* call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, rethrow));
+    return IRSetType(GeneratorEmit(gen, call),
+                     NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  }
+
+  TypeRecord* throw_type = node->expr->type;
+  TypeRecordCalculateSize(throw_type);
+  int64_t thrown_size = throw_type->size > 0 ? throw_type->size : 1;
+
+  Symbol* alloc_fn = GetCxaAllocateExceptionFunction(location);
+  IRNode* alloc_call =
+      NewIR1(IR_OP(calla), GeneratorGetVariable(gen, alloc_fn));
+  TypeRecord* size_type = NewTypeRecordWithSize(
+      SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
+  size_type->type |= kTypeUnsigned;
+  IRNode* size_node = GeneratorGetIntConstant(gen, size_type, thrown_size);
+  IRAddInput(alloc_call, size_node, false);
+  IRNode* object = IRSetType(GeneratorEmit(gen, alloc_call), alloc_fn->type);
+  TypeRecord* object_pointer_type = NewPointerTo(kQualPlain, throw_type);
+  IRSetType(object, object_pointer_type);
+  IRNode* object_slot =
+      GeneratorSpillValueToTemp(gen, object, object_pointer_type);
+  object =
+      GeneratorReloadSpilledValue(gen, object_slot, object_pointer_type);
+
+  bool elide_copy =
+      TypeIsStructOrUnion(throw_type) && CanElideExceptionCopy(node->expr);
+  IRNode* thrown_value;
+  if (elide_copy) {
+    IRNode* old_struct_address = gen->current_struct_address;
+    gen->current_struct_address = object;
+    thrown_value = GenerateExpression(gen, node->expr);
+    gen->current_struct_address = old_struct_address;
+  } else {
+    thrown_value = GenerateExpression(gen, node->expr);
+  }
+  if (TypeIsStructOrUnion(throw_type)) {
+    if (!elide_copy) {
+      IRNode* source = thrown_value;
+      if (source->opcode != IR_OP(addressof)) {
+        source = GeneratorEmit(gen, NewIR1(IR_OP(addressof), source));
+        IRSetType(source, NewPointerTo(kQualPlain, throw_type));
+      }
+      CXXSpecialMemberKind preferred =
+          node->expr->value_category == kValueCategoryLvalue
+              ? kCXXSpecialMemberCopyConstructor
+              : kCXXSpecialMemberMoveConstructor;
+      Symbol* constructor = FindExceptionSpecialMember(throw_type, preferred);
+      if (constructor == NULL &&
+          preferred == kCXXSpecialMemberMoveConstructor) {
+        constructor = FindExceptionSpecialMember(
+            throw_type, kCXXSpecialMemberCopyConstructor);
+      }
+      if (ExceptionSpecialMemberIsTrivial(constructor)) {
+        GeneratorEmit(gen,
+                      NewIR3(IR_OP(memcpy), object, source,
+                             GeneratorGetIntConstant(gen, NULL, thrown_size)));
+      } else {
+        EmitExceptionConstructorCall(gen, constructor, object, source);
+      }
+    }
+  } else {
+    IROpcode store_op = GetStoreOpcode((ASTNode*)node->expr);
+    GeneratorEmit(gen, NewIR2(store_op, object, thrown_value));
+  }
+
+  Symbol* throw_fn = GetCxaThrowFunction(location);
+  IRNode* throw_call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, throw_fn));
+  Symbol* typeinfo = RttiGetTypeInfoSymbol(throw_type);
+  IRNode* destructor = GeneratorGetIntConstant(gen, NULL, 0);
+  if (TypeIsStructOrUnion(throw_type)) {
+    Symbol* destructor_symbol = FindExceptionSpecialMember(
+        throw_type, kCXXSpecialMemberDestructor);
+    if (!ExceptionSpecialMemberIsTrivial(destructor_symbol)) {
+      destructor = GeneratorGetVariable(gen, destructor_symbol);
+    }
+  }
+  Vector args = {0};
+  object = GeneratorReloadSpilledValue(gen, object_slot, object_pointer_type);
+  PushArg(gen, throw_call, destructor, 2, &args);
+  PushArg(gen, throw_call, GeneratorGetVariable(gen, typeinfo), 1, &args);
+  PushArg(gen, throw_call, object, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(throw_call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  return IRSetType(GeneratorEmit(gen, throw_call),
+                   NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
   if (gen->for_constant_evaluation) {
     Symbol* throw_symbol =
@@ -2259,6 +2473,10 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
     IRNode* call = NewIR1(IR_OP(calla), func);
     return IRSetType(GeneratorEmit(gen, call),
                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  }
+
+  if (RttiUsesItaniumABI()) {
+    return GenerateItaniumThrowExpression(gen, node);
   }
 
   IRNode* exception_object = NULL;

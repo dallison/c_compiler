@@ -89,32 +89,53 @@ require_absent_section() {
   fi
 }
 
+require_absent_symbol() {
+  local file=$1
+  local symbol=$2
+  local label=$3
+  if grep -F "$symbol" "$file" >/dev/null; then
+    echo "$label unexpectedly contains symbol $symbol" >&2
+    sed -n '1,160p' "$file" >&2
+    return 1
+  fi
+}
+
 check_elf64_target() {
   local target=$1
   local obj="$work/$target.o"
   local exe="$work/$target.exe"
+  local dso="$work/$target.so"
 
   compile_cpp "$target" -c "$work/abi_gates.cpp" -o "$obj"
   compile_cpp "$target" -static -Wl,-e -Wl,main \
     "$work/abi_gates.cpp" -o "$exe"
+  compile_cpp "$target" -shared "$work/abi_gates.cpp" -o "$dso"
 
   "$elfdump" -S "$obj" >"$work/$target.obj.sections"
   "$elfdump" -s "$obj" >"$work/$target.obj.symbols"
   "$elfdump" -S "$exe" >"$work/$target.exe.sections"
   "$elfdump" -s "$exe" >"$work/$target.exe.symbols"
+  "$elfdump" -S "$dso" >"$work/$target.dso.sections"
+  "$elfdump" -s "$dso" >"$work/$target.dso.symbols"
 
   require_section "$work/$target.obj.sections" ".eh_frame" "$target object"
   require_section "$work/$target.obj.sections" ".gcc_except_table" "$target object"
-  require_section "$work/$target.obj.sections" ".davecc_except_table" \
-    "$target object (dual-emission migration gate)"
+  require_absent_section "$work/$target.obj.sections" ".davecc_except_table" \
+    "$target object"
   require_symbol "$work/$target.obj.symbols" "_ZTS" "$target object RTTI gate"
   require_symbol "$work/$target.obj.symbols" "_ZTI" "$target object RTTI gate"
+  require_absent_symbol "$work/$target.obj.symbols" "__davecc_typeinfo_" \
+    "$target object"
+  require_absent_symbol "$work/$target.obj.symbols" \
+    "__davecc_current_exception_" "$target object"
+  require_absent_symbol "$work/$target.obj.symbols" "__davecc_throw" \
+    "$target object"
 
   require_section "$work/$target.exe.sections" ".eh_frame" "$target executable"
   require_section "$work/$target.exe.sections" ".gcc_except_table" \
     "$target executable"
-  require_section "$work/$target.exe.sections" ".davecc_except_table" \
-    "$target executable (dual-emission migration gate)"
+  require_absent_section "$work/$target.exe.sections" ".davecc_except_table" \
+    "$target executable"
   require_symbol "$work/$target.exe.symbols" "__eh_frame_start" \
     "$target executable"
   require_symbol "$work/$target.exe.symbols" "__eh_frame_end" \
@@ -123,42 +144,50 @@ check_elf64_target() {
     "$target executable"
   require_symbol "$work/$target.exe.symbols" "__gcc_except_table_end" \
     "$target executable"
-  require_symbol "$work/$target.exe.symbols" "__davecc_except_table_start" \
-    "$target executable (legacy table still linked during migration)"
-  require_symbol "$work/$target.exe.symbols" "__davecc_except_table_end" \
-    "$target executable (legacy table still linked during migration)"
+  require_absent_symbol "$work/$target.exe.symbols" \
+    "__davecc_except_table_start" "$target executable"
+  require_absent_symbol "$work/$target.exe.symbols" \
+    "__davecc_except_table_end" "$target executable"
   require_symbol "$work/$target.exe.symbols" "__gxx_personality_v0" \
     "$target executable"
+  require_absent_symbol "$work/$target.exe.symbols" "__davecc_typeinfo_" \
+    "$target executable"
+  require_absent_symbol "$work/$target.exe.symbols" \
+    "__davecc_current_exception_" "$target executable"
+  require_absent_symbol "$work/$target.exe.symbols" "__davecc_throw" \
+    "$target executable"
+  require_section "$work/$target.dso.sections" ".eh_frame" "$target DSO"
+  require_section "$work/$target.dso.sections" ".gcc_except_table" "$target DSO"
+  require_symbol "$work/$target.dso.symbols" "__eh_frame_start" "$target DSO"
+  require_symbol "$work/$target.dso.symbols" "__eh_frame_end" "$target DSO"
 }
 
 check_arm_target() {
   local obj="$work/arm.o"
-  local exe="$work/arm.exe"
+  local dso="$work/arm.so"
 
   compile_cpp arm -c "$work/abi_gates.cpp" -o "$obj"
-  compile_cpp arm -static -Wl,-e -Wl,main \
-    "$work/abi_gates.cpp" -o "$exe"
+  compile_cpp arm -shared "$work/abi_gates.cpp" -o "$dso"
 
   "$elfdump" -S "$obj" >"$work/arm.obj.sections"
-  "$elfdump" -S "$exe" >"$work/arm.exe.sections"
+  "$elfdump" -s "$obj" >"$work/arm.obj.symbols"
+  "$elfdump" -S "$dso" >"$work/arm.dso.sections"
+  "$elfdump" -s "$dso" >"$work/arm.dso.symbols"
 
   require_section "$work/arm.obj.sections" ".ARM.exidx" "arm object"
   require_section "$work/arm.obj.sections" ".ARM.extab" "arm object"
-  require_section "$work/arm.obj.sections" ".davecc_except_table" \
-    "arm object (dual-emission migration gate)"
+  require_absent_section "$work/arm.obj.sections" ".davecc_except_table" \
+    "arm object"
   require_absent_section "$work/arm.obj.sections" ".eh_frame" \
     "arm object (EHABI target)"
   require_absent_section "$work/arm.obj.sections" ".gcc_except_table" \
     "arm object (EHABI target)"
-
-  require_section "$work/arm.exe.sections" ".ARM.exidx" "arm executable"
-  require_section "$work/arm.exe.sections" ".ARM.extab" "arm executable"
-  require_section "$work/arm.exe.sections" ".davecc_except_table" \
-    "arm executable (dual-emission migration gate)"
-  require_absent_section "$work/arm.exe.sections" ".eh_frame" \
-    "arm executable (EHABI target)"
-  require_absent_section "$work/arm.exe.sections" ".gcc_except_table" \
-    "arm executable (EHABI target)"
+  require_absent_symbol "$work/arm.obj.symbols" "__davecc_typeinfo_" \
+    "arm object"
+  require_section "$work/arm.dso.sections" ".ARM.exidx" "arm DSO"
+  require_section "$work/arm.dso.sections" ".ARM.extab" "arm DSO"
+  require_symbol "$work/arm.dso.symbols" "__exidx_start" "arm DSO"
+  require_symbol "$work/arm.dso.symbols" "__exidx_end" "arm DSO"
 }
 
 check_elf64_target x86_64

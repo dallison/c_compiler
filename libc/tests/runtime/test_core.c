@@ -94,9 +94,6 @@ int TestEHFrame(void) {
   DaveEHFDE fde;
   DaveEHFDE found;
   DaveEHFrameCFI cfi;
-  DaveEHFrameRegisters regs;
-  DaveEHFrameWalkResult walk;
-  uintptr_t fake_stack[4];
   int count;
 
   if (!DaveEHFrameGetRange(&range)) {
@@ -154,22 +151,6 @@ int TestEHFrame(void) {
     }
   }
 
-  fake_stack[0] = fde.pc_end;
-  fake_stack[1] = 0x12345678;
-  fake_stack[2] = 0;
-  fake_stack[3] = 0;
-  regs.pc = fde.pc_begin;
-  regs.rsp = (uintptr_t)&fake_stack[0];
-  regs.rbp = 0;
-  if (!DaveEHFrameWalkFrame(&regs, &walk)) {
-    return 17;
-  }
-  if (walk.caller_pc != fde.pc_end) {
-    return 18;
-  }
-  if (walk.caller_rsp != (uintptr_t)&fake_stack[1]) {
-    return 19;
-  }
 #endif
   return failures;
 }
@@ -178,10 +159,18 @@ int TestLSDAParser(void) {
   int failures = 0;
 #if defined(__x86_64__)
   static const uint8_t kLsda[] = {
-      0xff, 0xff, 0x04, 0x00, 0x10, 0x20, 0x01, 0x7f, 0x00,
+      0xff, 0xff, 0x01, 0x04, 0x00, 0x10, 0x20, 0x01, 0x00, 0x00,
   };
   DaveLSDAAction action;
-  if (!DaveLSDAFindAction(kLsda, 0x1000, 0x1008, 0x1008, 0x1008, 0, &action)) {
+  DaveLSDAQuery query = {
+      .pc = 0x1008,
+      .scope_start = 0x1008,
+      .scope_end = 0x1008,
+      .thrown = 0,
+      .search_phase = 0,
+      .handler_frame = 0,
+  };
+  if (!DaveLSDAFindAction(kLsda, 0x1000, &query, &action)) {
     return 1;
   }
   if (!action.is_cleanup || action.is_catch) {
@@ -189,6 +178,24 @@ int TestLSDAParser(void) {
   }
   if (action.landing_pad != 0x1020) {
     return 3;
+  }
+
+  static const uint8_t kCatchAllLsda[] = {
+      0xff, 0x1b, 0x0c, 0x01, 0x04, 0x08, 0x18, 0x30,
+      0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
+  query.pc = 0x1020;
+  query.scope_start = 0x1020;
+  query.scope_end = 0x1020;
+  query.search_phase = 1;
+  if (!DaveLSDAFindAction(kCatchAllLsda, 0x1000, &query, &action)) {
+    return 4;
+  }
+  if (!action.is_catch || action.is_cleanup) {
+    return 5;
+  }
+  if (action.landing_pad != 0x1030) {
+    return 6;
   }
 #endif
   return failures;

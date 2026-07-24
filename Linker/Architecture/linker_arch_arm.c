@@ -212,7 +212,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_ARM_PREL31: {
       int64_t value = (int64_t)(S + A - P);
-      if (value < 0 || value > 0x7fffffffLL) {
+      if (value < -(1LL << 30) || value >= (1LL << 30)) {
         LinkerError(file, "R_ARM_PREL31 relocation out of range at offset 0x%x",
                     reloc->offset);
         return;

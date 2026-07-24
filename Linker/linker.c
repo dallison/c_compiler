@@ -1253,28 +1253,10 @@ static void InventGccExceptTableBounds(Linker* linker) {
   InventSymbol(linker, "__gcc_except_table_end", 8, end);
 }
 
-static void InventARMExidxBounds(Linker* linker) {
-  SectionGroup* exidx = FindSectionGroup(linker, ".ARM.exidx");
-  SectionGroup* extab = FindSectionGroup(linker, ".ARM.extab");
-  uint64_t exidx_start = 0;
-  uint64_t exidx_end = 0;
-  uint64_t extab_start = 0;
-  uint64_t extab_end = 0;
-  if (exidx != NULL && exidx->region != NULL) {
-    exidx_start = exidx->address;
-    exidx_end = exidx_start + SectionGroupSize(exidx);
-  }
-  if (extab != NULL && extab->region != NULL) {
-    extab_start = extab->address;
-    extab_end = extab_start + SectionGroupSize(extab);
-  }
-  InventSymbol(linker, "__exidx_start", 8, exidx_start);
-  InventSymbol(linker, "__exidx_end", 8, exidx_end);
-  InventSymbol(linker, "__extab_start", 8, extab_start);
-  InventSymbol(linker, "__extab_end", 8, extab_end);
-}
-
 static void InventExceptionTableBounds(Linker* linker) {
+  if (linker->elf_machine_type != ELF_MACHINE_TYPE_PCODE) {
+    return;
+  }
   SectionGroup* table = FindSectionGroup(linker, ".davecc_except_table");
   uint64_t start = 0;
   uint64_t end = 0;
@@ -1309,6 +1291,84 @@ static void InventARMExidxBounds(Linker* linker) {
   }
   InventSymbol(linker, "__extab_start", 4, start);
   InventSymbol(linker, "__extab_end", 4, end);
+}
+
+typedef struct {
+  uint64_t function;
+  uint64_t unwind;
+  bool cant_unwind;
+} ARMExidxRecord;
+
+static int CompareARMExidxRecord(const void* a, const void* b) {
+  const ARMExidxRecord* left = a;
+  const ARMExidxRecord* right = b;
+  return left->function < right->function
+             ? -1
+             : (left->function > right->function ? 1 : 0);
+}
+
+static uint64_t DecodeARMPrel31(uint64_t place, uint32_t value) {
+  int32_t offset = (int32_t)(value << 1) >> 1;
+  return place + (int64_t)offset;
+}
+
+static uint32_t EncodeARMPrel31(uint64_t place, uint64_t target) {
+  return (uint32_t)((int64_t)target - (int64_t)place) & 0x7fffffffu;
+}
+
+static void SortARMExidx(Linker* linker) {
+  if (linker->elf_machine_type != ELF_MACHINE_TYPE_ARM) {
+    return;
+  }
+  SectionGroup* group = FindSectionGroup(linker, ".ARM.exidx");
+  if (group == NULL) {
+    return;
+  }
+  size_t count = SectionGroupSize(group) / 8;
+  if (count < 2) {
+    return;
+  }
+  ARMExidxRecord* records = calloc(count, sizeof(*records));
+  size_t record = 0;
+  for (size_t i = 0; i < group->components.length; i++) {
+    GroupedSection* component = group->components.value.p[i];
+    if (component->source != kGroupedSectionExisting) {
+      continue;
+    }
+    ELFReaderSection* section = component->section.existing;
+    uint32_t* words = section->contents;
+    for (size_t offset = 0; offset + 8 <= section->header->size; offset += 8) {
+      uint64_t place = section->address + offset;
+      records[record].function = DecodeARMPrel31(place, words[offset / 4]);
+      records[record].cant_unwind = words[offset / 4 + 1] == 1;
+      if (!records[record].cant_unwind) {
+        records[record].unwind =
+            DecodeARMPrel31(place + 4, words[offset / 4 + 1]);
+      }
+      record++;
+    }
+  }
+  qsort(records, record, sizeof(*records), CompareARMExidxRecord);
+  record = 0;
+  for (size_t i = 0; i < group->components.length; i++) {
+    GroupedSection* component = group->components.value.p[i];
+    if (component->source != kGroupedSectionExisting) {
+      continue;
+    }
+    ELFReaderSection* section = component->section.existing;
+    uint32_t* words = section->contents;
+    for (size_t offset = 0; offset + 8 <= section->header->size; offset += 8) {
+      uint64_t place = section->address + offset;
+      words[offset / 4] =
+          EncodeARMPrel31(place, records[record].function);
+      words[offset / 4 + 1] =
+          records[record].cant_unwind
+              ? 1
+              : EncodeARMPrel31(place + 4, records[record].unwind);
+      record++;
+    }
+  }
+  free(records);
 }
 
 static void LinkerInventArrayBoundsSymbols(Linker* linker) {
@@ -1704,6 +1764,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   // We have all the values of the symbols, apply those values to
   // all the relocations in the files.
   LinkerApplyAllRelocations(linker);
+  SortARMExidx(linker);
 
   if (!linker->building_dso) {
     // Check if we have any undefined symbols and report errors if found.
@@ -1735,10 +1796,7 @@ static void BuildOutputSection(Linker* linker, ELFWriterFile* elf, Segment* segm
     switch (gsect->source) {
       case kGroupedSectionExisting: {
         ELFReaderSection* part = gsect->section.existing;
-        if (part->header->type == SHT(progbits) ||
-            part->header->type == SHT(init_array) ||
-            part->header->type == SHT(fini_array) ||
-            part->header->type == SHT(preinit_array)) {
+        if (part->header->type != SHT(nobits)) {
           part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
           part_contents->size = part->header->size;
           part_contents->data.raw = part->contents;
@@ -1782,7 +1840,8 @@ static Buffer* FindDynamicSymbolTableBuffer(ELFWriterFile* elf) {
 }
 
 static void AssignGroupSectionIndexes(SectionGroup* group, int32_t* index_ptr) {
-  if (group->region == NULL && (group->flags & SHF(tls)) == 0) {
+  if (group->components.length == 0 ||
+      (group->region == NULL && (group->flags & SHF(tls)) == 0)) {
     return;
   }
   for (size_t i = 0; i < group->components.length; i++) {

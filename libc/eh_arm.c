@@ -1,4 +1,5 @@
 #include <eh_arm.h>
+#include <stddef.h>
 
 extern char __exidx_start[];
 extern char __exidx_end[];
@@ -35,6 +36,71 @@ int DaveARMExidxCountEntries(void) {
     count++;
   }
   return count;
+}
+
+static uintptr_t DecodePrel31(const uint32_t* place) {
+  int32_t offset = (int32_t)(*place << 1) >> 1;
+  return (uintptr_t)place + (intptr_t)offset;
+}
+
+int DaveARMFindUnwindInfoInRange(uintptr_t pc, const uint8_t* exidx_start,
+                                 const uint8_t* exidx_end,
+                                 uintptr_t* pc_begin, uintptr_t* pc_end,
+                                 const uint8_t** lsda) {
+  const uint32_t* selected = 0;
+  const uint32_t* entries;
+  size_t count;
+  if (exidx_start == 0 || exidx_end <= exidx_start) {
+    return 0;
+  }
+  entries = (const uint32_t*)exidx_start;
+  count = (size_t)(exidx_end - exidx_start) / 8;
+  for (size_t i = 0; i < count; i++) {
+    const uint32_t* entry = entries + i * 2;
+    uintptr_t start = DecodePrel31(entry);
+    if (start <= pc &&
+        (selected == 0 || start > DecodePrel31(selected))) {
+      selected = entry;
+    }
+  }
+  if (selected == 0 || selected[1] == 1) {
+    return 0;
+  }
+  uintptr_t start = DecodePrel31(selected);
+  uintptr_t end = ~(uintptr_t)0;
+  for (size_t i = 0; i < count; i++) {
+    uintptr_t candidate = DecodePrel31(entries + i * 2);
+    if (candidate > start && candidate < end) {
+      end = candidate;
+    }
+  }
+  const uint32_t* extab = (const uint32_t*)DecodePrel31(selected + 1);
+  const uint8_t* table = 0;
+  if (extab[0] != 0) {
+    // DaveCC's generic EHABI descriptor contains the personality PREL31 word,
+    // one unwind-instruction word, then a PREL31 pointer to the Itanium LSDA.
+    table = (const uint8_t*)DecodePrel31(extab + 2);
+  }
+  if (pc_begin != 0) {
+    *pc_begin = start;
+  }
+  if (pc_end != 0) {
+    *pc_end = end;
+  }
+  if (lsda != 0) {
+    *lsda = table;
+  }
+  return 1;
+}
+
+int DaveARMFindUnwindInfo(uintptr_t pc, uintptr_t* pc_begin,
+                          uintptr_t* pc_end, const uint8_t** lsda) {
+  DaveARMExidxRange range;
+  if (!DaveARMExidxGetRange(&range)) {
+    return 0;
+  }
+  return DaveARMFindUnwindInfoInRange(pc, range.start, range.end, pc_begin,
+                                      pc_end, lsda);
 }
 
 static uint32_t* VRSWord(_Unwind_Context* context, uint32_t regno) {

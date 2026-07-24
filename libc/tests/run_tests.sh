@@ -234,6 +234,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
   eh_cxa_obj="$work/test_eh_cxa.o"
   "$davecc" "${rt_cflags[@]}" -std=c++20 libc/tests/runtime/test_eh_cxa.cc -o "$eh_cxa_obj"
   test_objs+=("$eh_cxa_obj")
+  eh_itanium_obj="$work/test_eh_itanium.o"
+  "$davecc" "${rt_cflags[@]}" -std=c++20 \
+    libc/tests/runtime/test_eh_itanium.cc -o "$eh_itanium_obj"
+  test_objs+=("$eh_itanium_obj")
 
   exe="$work/libc_runtime_test.exe"
   if [ -n "${LIBC_ARCHIVE:-}" ] && [ -f "$LIBC_ARCHIVE" ]; then
@@ -304,6 +308,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     "$davecc" -target x86_64 -O1 -c -isystem libc/include -Ilibc -Ilibc/tests \
       -std=c++20 libc/tests/runtime/test_eh_cxa.cc -o "$eh_cxa_obj"
     test_objs+=("$eh_cxa_obj")
+    eh_itanium_obj="$work/test_eh_itanium.o"
+    "$davecc" -target x86_64 -O1 -c -isystem libc/include -Ilibc -Ilibc/tests \
+      -std=c++20 libc/tests/runtime/test_eh_itanium.cc -o "$eh_itanium_obj"
+    test_objs+=("$eh_itanium_obj")
 
     exe="$work/libc_runtime_test.exe"
     "$davecc" -target x86_64 -static -Wl,-e -Wl,main \

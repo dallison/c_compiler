@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "eh_cxa_internal.h"
 
 #if defined(__DAVECC_LEGACY_RTTI__)
 
@@ -203,22 +204,16 @@ void* __davecc_dynamic_cast(void* p, const __class_type_info* dst) {
 
 #endif
 
+extern void __davecc_raise_bad_cast(void);
+
+static void RaiseBadCast(void) {
 #if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
     defined(__risc_v__)
-typedef struct __davecc_eh_type_info {
-  const char* name;
-  long base_count;
-  const void* bases;
-  long object_size;
-  long object_is_class;
-} __davecc_eh_type_info;
-void __davecc_throw(intptr_t exception_object,
-                    const __davecc_eh_type_info* typeinfo);
-static char __davecc_bad_cast_object;
-static const char __davecc_bad_cast_name[] = "bad_cast";
-static const __davecc_eh_type_info __davecc_bad_cast_typeinfo = {
-    __davecc_bad_cast_name, 0, 0, 1, 0};
+  __davecc_raise_bad_cast();
+#else
+  abort();
 #endif
+}
 
 void* __davecc_dynamic_cast_ref(void* p, const void* dst) {
 #if !defined(__DAVECC_LEGACY_RTTI__)
@@ -227,13 +222,7 @@ void* __davecc_dynamic_cast_ref(void* p, const void* dst) {
   void* result = __davecc_dynamic_cast(p, (const __davecc_type_info*)dst);
 #endif
   if (result == 0) {
-#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
-    defined(__risc_v__)
-    __davecc_throw((intptr_t)&__davecc_bad_cast_object,
-                   &__davecc_bad_cast_typeinfo);
-#else
-    abort();
-#endif
+    RaiseBadCast();
   }
   return result;
 }
@@ -243,13 +232,7 @@ void* __dynamic_cast_ref(const void* sub, const __class_type_info* src,
                          const __class_type_info* dst, ptrdiff_t src2dst) {
   void* result = __dynamic_cast(sub, src, dst, src2dst);
   if (result == 0) {
-#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
-    defined(__risc_v__)
-    __davecc_throw((intptr_t)&__davecc_bad_cast_object,
-                   &__davecc_bad_cast_typeinfo);
-#else
-    abort();
-#endif
+    RaiseBadCast();
   }
   return result;
 }

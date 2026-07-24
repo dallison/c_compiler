@@ -1,7 +1,24 @@
 #include <eh_frame.h>
+#if defined(__arm__)
+#include <eh_arm.h>
+#endif
 
 extern char __eh_frame_start[];
 extern char __eh_frame_end[];
+
+#define DAVECC_EH_MAX_MODULES 32
+
+typedef struct {
+  uintptr_t eh_frame_start;
+  uintptr_t eh_frame_end;
+  uintptr_t gcc_except_table_start;
+  uintptr_t gcc_except_table_end;
+  uintptr_t arm_exidx_start;
+  uintptr_t arm_exidx_end;
+} DaveEHModuleRange;
+
+DaveEHModuleRange __davecc_eh_modules[DAVECC_EH_MAX_MODULES];
+size_t __davecc_eh_module_count;
 
 int DaveEHFrameGetRange(DaveEHFrameRange* range) {
   if (range == 0) {
@@ -14,30 +31,16 @@ int DaveEHFrameGetRange(DaveEHFrameRange* range) {
 
 int DaveEHFrameCountFDEs(void) {
   DaveEHFrameRange range;
-  const uint8_t* entry;
+  uintptr_t cursor;
+  DaveEHFDE fde;
   int count = 0;
 
   if (!DaveEHFrameGetRange(&range)) {
     return 0;
   }
-  entry = range.start;
-  while (entry + 8 <= range.end) {
-    uint32_t cie_length = *(const unsigned int*)entry;
-    if (cie_length == 0 || cie_length < 4) {
-      break;
-    }
-    entry = entry + 4 + cie_length;
-    if (entry + 8 > range.end) {
-      break;
-    }
-    uint32_t fde_length = *(const unsigned int*)entry;
-    if (fde_length == 0 || fde_length < 4) {
-      break;
-    }
-    if (*(const unsigned int*)(entry + 4) != 0) {
-      count++;
-    }
-    entry = entry + 4 + fde_length;
+  cursor = (uintptr_t)range.start;
+  while (DaveEHFrameNextFDE(&cursor, (uintptr_t)range.end, &fde)) {
+    count++;
   }
   return count;
 }
@@ -52,27 +55,39 @@ int DaveEHFrameNextFDE(uintptr_t* cursor,
                        DaveEHFDE* out) {
   uintptr_t entry_addr = *cursor;
   const uint8_t* entry = (const uint8_t*)entry_addr;
-  while (entry_addr < end && *(const uint8_t*)entry_addr == 0) {
+  if (cursor == 0 || out == 0) {
+    return 0;
+  }
+  // Input .eh_frame fragments may be padded to their section alignment.
+  // Skip padding byte-by-byte; treating it as a 32-bit length can combine a
+  // trailing zero with the next CIE length and manufacture an enormous entry.
+  while (entry_addr + 8 <= end && *(const uint8_t*)entry_addr == 0) {
     entry_addr++;
   }
   entry = (const uint8_t*)entry_addr;
-  if (entry_addr >= end) {
+  if (entry_addr + 8 > end) {
     *cursor = end;
     return 0;
   }
   if (*(const unsigned int*)(entry + 4) == 0) {
     unsigned int cie_length = *(const unsigned int*)entry;
-    if (cie_length == 0) {
+    if (cie_length < 4 || entry_addr + 4 + cie_length > end) {
       *cursor = end;
       return 0;
     }
     entry = entry + 4 + cie_length;
+    entry_addr = (uintptr_t)entry;
+    if (entry_addr + 8 > end) {
+      *cursor = end;
+      return 0;
+    }
   }
 
   unsigned int fde_length = *(const unsigned int*)entry;
   const uint8_t* entry_body = entry + 4;
   const uint8_t* entry_end = entry_body + fde_length;
-  if (fde_length == 0 || *(const unsigned int*)entry_body == 0) {
+  if (fde_length < 20 || (uintptr_t)entry_end > end ||
+      *(const unsigned int*)entry_body == 0) {
     *cursor = end;
     return 0;
   }
@@ -103,16 +118,14 @@ int DaveEHFrameNextFDE(uintptr_t* cursor,
   return 1;
 }
 
-int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
-  DaveEHFrameRange range;
-  uintptr_t cursor;
+static int FindFDEInRange(uintptr_t pc, const uint8_t* start,
+                          const uint8_t* end, DaveEHFDE* out) {
+  uintptr_t cursor = (uintptr_t)start;
   DaveEHFDE fde;
-
-  if (!DaveEHFrameGetRange(&range)) {
+  if (start == 0 || end <= start) {
     return 0;
   }
-  cursor = (uintptr_t)range.start;
-  while (DaveEHFrameNextFDE(&cursor, (uintptr_t)range.end, &fde)) {
+  while (DaveEHFrameNextFDE(&cursor, (uintptr_t)end, &fde)) {
     if (pc >= fde.pc_begin && pc < fde.pc_end) {
       if (out != 0) {
         *out = fde;
@@ -121,6 +134,57 @@ int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
     }
   }
   return 0;
+}
+
+int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
+#if defined(__arm__)
+  uintptr_t pc_begin;
+  uintptr_t pc_end;
+  const uint8_t* lsda;
+  int found = DaveARMFindUnwindInfo(pc, &pc_begin, &pc_end, &lsda);
+  size_t count = __davecc_eh_module_count;
+  if (count > DAVECC_EH_MAX_MODULES) {
+    count = DAVECC_EH_MAX_MODULES;
+  }
+  for (size_t i = 0; !found && i < count; i++) {
+    DaveEHModuleRange* module = &__davecc_eh_modules[i];
+    found = DaveARMFindUnwindInfoInRange(
+        pc, (const uint8_t*)module->arm_exidx_start,
+        (const uint8_t*)module->arm_exidx_end, &pc_begin, &pc_end, &lsda);
+  }
+  if (!found) {
+    return 0;
+  }
+  if (out != 0) {
+    out->pc_begin = pc_begin;
+    out->pc_end = pc_end;
+    out->fde_start = 0;
+    out->instructions = 0;
+    out->instructions_end = 0;
+    out->lsda = lsda;
+    out->has_frame = 1;
+    out->has_lsda = lsda != 0;
+  }
+  return 1;
+#else
+  DaveEHFrameRange range;
+  if (DaveEHFrameGetRange(&range) &&
+      FindFDEInRange(pc, range.start, range.end, out)) {
+    return 1;
+  }
+  size_t count = __davecc_eh_module_count;
+  if (count > DAVECC_EH_MAX_MODULES) {
+    count = DAVECC_EH_MAX_MODULES;
+  }
+  for (size_t i = 0; i < count; i++) {
+    DaveEHModuleRange* module = &__davecc_eh_modules[i];
+    if (FindFDEInRange(pc, (const uint8_t*)module->eh_frame_start,
+                       (const uint8_t*)module->eh_frame_end, out)) {
+      return 1;
+    }
+  }
+  return 0;
+#endif
 }
 
 static void InitCFI(DaveEHFrameCFI* cfi) {

@@ -15,3 +15,13 @@ __davecc_jump_to_landing_pad:
 	mov sp, x1
 	mov x29, x2
 	br x0
+
+.global __davecc_unwind_install_context
+.type __davecc_unwind_install_context, @function
+__davecc_unwind_install_context:
+	mov sp, x1
+	mov x29, x2
+	mov x5, x0
+	mov x0, x3
+	mov x1, x4
+	br x5

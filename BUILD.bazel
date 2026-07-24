@@ -1478,6 +1478,7 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_cxa.c"
   "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
@@ -1637,6 +1638,7 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_cxa.c"
   "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
@@ -1798,6 +1800,7 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_cxa.c"
   "libc/eh_arm.c"
   "libc/eh_frame.c"
   "libc/eh_frame_pointer.c"
@@ -2253,6 +2256,77 @@ sh_test(
         ":libc_headers",
         ":libc_riscv",
         ":riscv",
+    ],
+)
+
+sh_test(
+    name = "eh_lsda_runtime_arm_test",
+    srcs = ["tests/eh_lsda_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+        "arm",
+    ],
+    data = [
+        ":arm",
+        ":davecc",
+        ":libc_arm",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "eh_archive_runtime_x86_64_test",
+    srcs = ["tests/eh_archive_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :archivist)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "x86_64",
+    ],
+    data = [
+        ":archivist",
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "eh_archive_runtime_arm_test",
+    srcs = ["tests/eh_archive_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :archivist)",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+        "arm",
+    ],
+    data = [
+        ":archivist",
+        ":arm",
+        ":davecc",
+        ":libc_arm",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "eh_dso_runtime_x86_64_test",
+    srcs = ["tests/eh_dso_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
     ],
 )
 

@@ -568,6 +568,14 @@ static int MapDynamicLibraryHeader(String* filename,
   off_t max_offset = end_program_headers > end_section_headers ?
           end_program_headers :
           end_section_headers;
+  struct stat st;
+  if (fstat(fd, &st) != 0) {
+    close(fd);
+    return -1;
+  }
+  if (st.st_size > max_offset) {
+    max_offset = st.st_size;
+  }
   
   off_t map_size = AlignUp(max_offset,
                         page_size);

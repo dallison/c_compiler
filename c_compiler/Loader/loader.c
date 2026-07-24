@@ -678,6 +678,85 @@ static DynamicSection* FindDynamicSection(Loader* loader) {
   return NULL;
 }
 
+static const ELFSectionHeader* FindLoadedSection(
+    const LoadedDynamicLibrary* lib, const char* name) {
+  if (lib == NULL || lib->header == NULL || lib->section_headers == NULL ||
+      lib->header->shstrndx >= lib->header->shnum) {
+    return NULL;
+  }
+  const ELFSectionHeader* names =
+      &lib->section_headers[lib->header->shstrndx];
+  const char* strings = (const char*)lib->addr + names->offset;
+  for (size_t i = 0; i < lib->header->shnum; i++) {
+    const ELFSectionHeader* section = &lib->section_headers[i];
+    if (section->name < names->size &&
+        strcmp(strings + section->name, name) == 0) {
+      return section;
+    }
+  }
+  return NULL;
+}
+
+static void StoreGuestPointer(unsigned char* address, size_t pointer_size,
+                              uint64_t value) {
+  if (pointer_size == 8) {
+    *(uint64_t*)address = value;
+  } else {
+    *(uint32_t*)address = (uint32_t)value;
+  }
+}
+
+static void RegisterDynamicEHModules(Loader* loader) {
+  enum { kFieldsPerModule = 6, kMaxModules = 32 };
+  uint64_t modules_address =
+      LoaderLookupSymbol(loader, "__davecc_eh_modules");
+  uint64_t count_address =
+      LoaderLookupSymbol(loader, "__davecc_eh_module_count");
+  if (modules_address == 0 || count_address == 0) {
+    return;
+  }
+  size_t pointer_size = loader->elf_file->ops->is_64_bit ? 8 : 4;
+  unsigned char* modules = (unsigned char*)(uintptr_t)modules_address;
+  size_t count = 0;
+  for (size_t i = 0;
+       i < loader->loaded_libraries.search.length && count < kMaxModules; i++) {
+    LoadedDynamicLibrary* lib = loader->loaded_libraries.search.value.p[i];
+    const char* section_names[kFieldsPerModule / 2] = {
+        ".eh_frame", ".gcc_except_table", ".ARM.exidx"};
+    uint64_t fields[kFieldsPerModule] = {0};
+    bool has_unwind = false;
+    for (size_t section_index = 0;
+         section_index < kFieldsPerModule / 2; section_index++) {
+      const ELFSectionHeader* section =
+          FindLoadedSection(lib, section_names[section_index]);
+      if (section == NULL || section->size == 0) {
+        continue;
+      }
+      uint64_t runtime_start = 0;
+      if (!LoaderLinkedAddressToRuntime(loader, lib, section->addr,
+                                        &runtime_start)) {
+        continue;
+      }
+      fields[section_index * 2] = runtime_start;
+      fields[section_index * 2 + 1] = runtime_start + section->size;
+      if (section_index == 0 || section_index == 2) {
+        has_unwind = true;
+      }
+    }
+    if (!has_unwind) {
+      continue;
+    }
+    for (size_t field = 0; field < kFieldsPerModule; field++) {
+      StoreGuestPointer(
+          modules + (count * kFieldsPerModule + field) * pointer_size,
+          pointer_size, fields[field]);
+    }
+    count++;
+  }
+  StoreGuestPointer((unsigned char*)(uintptr_t)count_address, pointer_size,
+                    count);
+}
+
 
 static bool LoadDynamic(Loader* loader, bool lazy) {
   // Create a new LoaddedDynamicLibrary from the currently loaded
@@ -714,6 +793,7 @@ static bool LoadDynamic(Loader* loader, bool lazy) {
   if (loader->arch->ignore_vaddr) {
     LoaderFixupStaticAddresses(loader);
   }
+  RegisterDynamicEHModules(loader);
   return true;
 }
 

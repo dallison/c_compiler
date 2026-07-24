@@ -57,6 +57,12 @@ typedef struct {
 int DaveARMExidxGetRange(DaveARMExidxRange* range);
 int DaveARMExtabGetRange(DaveARMExtabRange* range);
 int DaveARMExidxCountEntries(void);
+int DaveARMFindUnwindInfo(uintptr_t pc, uintptr_t* pc_begin,
+                          uintptr_t* pc_end, const uint8_t** lsda);
+int DaveARMFindUnwindInfoInRange(uintptr_t pc, const uint8_t* exidx_start,
+                                 const uint8_t* exidx_end,
+                                 uintptr_t* pc_begin, uintptr_t* pc_end,
+                                 const uint8_t** lsda);
 
 int _Unwind_VRS_Get(const _Unwind_Context* context,
                     _Unwind_VRS_RegClass regclass,

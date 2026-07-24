@@ -18,6 +18,7 @@
 #include "gvn.h"
 #include "list.h"
 #include "optimizer.h"
+#include "rtti.h"
 #include "sccp.h"
 #include "ssa.h"
 #include "statement_codegen.h"
@@ -151,6 +152,15 @@ static void CollectExceptionBaseTypes(TypeRecord* type, int64_t base_offset,
 }
 
 EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
+  TypeRecord* rtti_type =
+      type != NULL && TypeIsReference(type) ? type->next : type;
+  Symbol* canonical_typeinfo = NULL;
+  // LSDA type tables name canonical Itanium type_info objects, never the
+  // legacy DaveCC matching records.
+  if (RttiUsesItaniumABI() && rtti_type != NULL) {
+    canonical_typeinfo = RttiGetTypeInfoSymbol(rtti_type);
+    CompilerMarkVariableReferenced(canonical_typeinfo);
+  }
   String type_name = {0};
   CXXExceptionTypeName(type, &type_name);
   for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
@@ -162,6 +172,8 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   }
 
   EHTypeInfo* info = malloc(sizeof(EHTypeInfo));
+  info->canonical_typeinfo = canonical_typeinfo;
+  info->lsda_type_filter = gen->exception_typeinfos.length + 1;
   StringInit(&info->type_name, type_name.value);
   StringDestruct(&type_name);
   if (type != NULL) {

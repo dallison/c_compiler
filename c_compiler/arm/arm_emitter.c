@@ -19,6 +19,7 @@
 #include "arm_codegen.h"
 #include "arm_reg_alloc.h"
 #include "target_basic_block.h"
+#include "eh_metadata.h"
 
 static void Trap() {}
 
@@ -321,6 +322,9 @@ static bool EmptyStackFrame(ARMEmitter* emitter) {
 
 static void DecrementStackPointer(ARMEmitter* emitter, int stack_frame_size,
                                   FILE* fp) {
+  if (stack_frame_size <= 0) {
+    return;
+  }
   AddSubImmediate(emitter, "sp",  NULL, /*add=*/false, stack_frame_size, NULL, fp);
 }
 
@@ -548,6 +552,11 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
                      ARM_STACK_FRAME_HEADER_SIZE;
 
   int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
+  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
+  bool writeback_int_save =
+      used_int_count > 0 && used_float_count == 0 &&
+      !NeedsStructReturnHome(emitter);
+  int writeback_int_bytes = writeback_int_save ? used_int_count * 4 : 0;
   int first_saved_slot_size = used_int_count > 0 ? 4 : 8;
 
   // Offset from sp of first saved register.  When the frame pointer is omitted
@@ -558,11 +567,16 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
                           space_above_frame_pointer -
                           emitter->spill_region_size +
                           (8 - first_saved_slot_size);  // First saved register.
+  if (writeback_int_save) {
+    // Put an integer-only save area at the bottom of the frame. This lets the
+    // block store allocate that portion of the frame with writeback.
+    saved_reg_offset = writeback_int_bytes - 4;
+  }
 
   if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
     // Frame-pointer-less leaf: reserve the callee-saved register area only.
     // fp and lr are left untouched; everything is addressed via sp.
-    DecrementStackPointer(emitter, stack_frame_size, fp);
+    DecrementStackPointer(emitter, stack_frame_size - writeback_int_bytes, fp);
   } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
@@ -615,7 +629,7 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
     DecrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
                               space_above_frame_pointer -
-                              combined_int_arg_bytes,
+                              combined_int_arg_bytes - writeback_int_bytes,
                           fp);
   }
 
@@ -685,7 +699,9 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   }
   if (num_int > 0) {
     fprintf(fp, "\t// Saved integer registers.\n");
-    if (num_int >= 3) {
+    if (writeback_int_save) {
+      EmitIntRegBlock(fp, "stmdb", "sp!", int_regs, num_int);
+    } else if (num_int >= 3) {
       int base_low = saved_reg_offset - 4 * (num_int - 1);
       const char* base = "sp";
       if (base_low != 0) {
@@ -755,6 +771,12 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   bool varargs = emitter->g->base.varargs;
   int combined_int_args = CombinedSavedIntArgCount(emitter);
   int combined_int_arg_bytes = combined_int_args * 4;
+  int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
+  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
+  bool writeback_int_restore =
+      used_int_count > 0 && used_float_count == 0 &&
+      !NeedsStructReturnHome(emitter);
+  int writeback_int_bytes = writeback_int_restore ? used_int_count * 4 : 0;
   // The variadic register save area holds all four core argument registers in
   // contiguous 4-byte slots so va_arg can walk them like a packed argument
   // list (honouring 8-byte alignment for double / long long).
@@ -794,7 +816,9 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     int_regs[num_int++] = (int)BitSetIteratorValue(&it);
     BitSetIteratorNext(&it);
   }
-  if (num_int >= 3) {
+  if (writeback_int_restore) {
+    EmitIntRegBlock(fp, "ldmia", "sp!", int_regs, num_int);
+  } else if (num_int >= 3) {
     int base_low = offset - 4 * (num_int - 1);
     const char* base = "sp";
     if (base_low != 0) {
@@ -829,7 +853,7 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
 
   if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
     // Frame-pointer-less leaf: just release the callee-saved register area.
-    IncrementStackPointer(emitter, stack_frame_size, fp);
+    IncrementStackPointer(emitter, stack_frame_size - writeback_int_bytes, fp);
   } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
@@ -839,7 +863,7 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     IncrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
                               space_above_frame_pointer -
-                              combined_int_arg_bytes,
+                              combined_int_arg_bytes - writeback_int_bytes,
                           fp);
     if (combined_int_arg_bytes > 0) {
       IncrementStackPointer(emitter, combined_int_arg_bytes, fp);
@@ -870,12 +894,18 @@ static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
   BitSetIterator it;
   int int_regs[16];
   int num_int = 0;
+  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
     int_regs[num_int++] = (int)BitSetIteratorValue(&it);
     BitSetIteratorNext(&it);
   }
-  if (num_int >= 3) {
+  bool writeback_int_layout =
+      num_int > 0 && used_float_count == 0 &&
+      !NeedsStructReturnHome(emitter);
+  if (writeback_int_layout) {
+    EmitIntRegBlock(fp, "ldmia", "sp", int_regs, num_int);
+  } else if (num_int >= 3) {
     int base_low = offset - 4 * (num_int - 1);
     const char* base = "sp";
     if (base_low != 0) {
@@ -1924,67 +1954,6 @@ void ARMEmitterDelete(ARMEmitter* emitter) {
 }
 
 
-static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
-                                     TargetInstruction* label) {
-  fprintf(fp, ".%s_label_%d", func_name, label->id);
-}
-
-static void PrintEscapedAsmString(FILE* fp, const char* s) {
-  for (; *s != '\0'; s++) {
-    unsigned char ch = (unsigned char)*s;
-    if (ch == '"' || ch == '\\') {
-      fprintf(fp, "\\%c", ch);
-    } else if (ch >= 32 && ch < 127) {
-      fputc(ch, fp);
-    } else {
-      fprintf(fp, "\\%03o", ch);
-    }
-  }
-}
-
-static void ARMPrintTypeInfoRecords(ARMEmitter* emitter, FILE* fp) {
-  if (emitter->g->exception_typeinfos.length == 0) {
-    return;
-  }
-  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
-  for (size_t i = 0; i < emitter->g->exception_typeinfos.length; i++) {
-    EHTypeInfo* info = emitter->g->exception_typeinfos.value.p[i];
-    const char* name = info->symbol_name.value;
-    fprintf(fp, "\t.p2align 2\n");
-    fprintf(fp, "\t.local %s_name\n", name);
-    fprintf(fp, "%s_name:\n\t.asciz \"", name);
-    PrintEscapedAsmString(fp, info->type_name.value);
-    fprintf(fp, "\"\n");
-    for (size_t b = 0; b < info->bases.length; b++) {
-      EHTypeInfoBase* base = info->bases.value.p[b];
-      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
-      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
-      PrintEscapedAsmString(fp, base->base_name.value);
-      fprintf(fp, "\"\n");
-    }
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.p2align 2\n\t.local %s_bases\n%s_bases:\n", name,
-              name);
-      for (size_t b = 0; b < info->bases.length; b++) {
-        EHTypeInfoBase* base = info->bases.value.p[b];
-        fprintf(fp, "\t.4byte %s_base%zu_name\n", name, b);
-        fprintf(fp, "\t.4byte %lld\n", (long long)base->offset);
-      }
-    }
-    fprintf(fp, "\t.p2align 2\n\t.weak %s\n%s:\n", name, name);
-    fprintf(fp, "\t.4byte %s_name\n", name);
-    fprintf(fp, "\t.4byte %zu\n", info->bases.length);
-    if (info->bases.length > 0) {
-      fprintf(fp, "\t.4byte %s_bases\n", name);
-    } else {
-      fprintf(fp, "\t.4byte 0\n");
-    }
-    fprintf(fp, "\t.4byte %lld\n", (long long)info->object_size);
-    fprintf(fp, "\t.4byte %d\n", info->object_is_class ? 1 : 0);
-  }
-  fprintf(fp, "\t.text\n\n");
-}
-
 typedef enum {
   kARMUnwindNone,
   kARMUnwindFramePointer,
@@ -2019,6 +1988,8 @@ static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
   fprintf(fp, "\t.word %s\n", func_name);
   if (kind == kARMUnwindNone) {
     fprintf(fp, "\t.word %d\n", EXIDX_CANTUNWIND);
+  } else if (has_exceptions) {
+    fprintf(fp, "\t.word __davecc_extab_%s\n", func_name);
   } else if (kind == kARMUnwindLinkRegister) {
     fprintf(fp, "\t.word __davecc_arm_unwind_lr\n");
   } else {
@@ -2032,18 +2003,56 @@ static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
 
   fprintf(fp, "\t.section \".ARM.extab\", \"a\", @progbits\n");
   fprintf(fp, "\t.align 2\n");
-  fprintf(fp, "\t.global __davecc_extab_%s\n", func_name);
+  // Inline and weak functions can be emitted in multiple translation units.
+  // Give their associated extab records matching weak linkage so those copies
+  // coalesce with the function instead of becoming duplicate strong symbols.
+  fprintf(fp, "\t.weak __davecc_extab_%s\n", func_name);
   fprintf(fp, "\t.type __davecc_extab_%s, @object\n", func_name);
   fprintf(fp, "__davecc_extab_%s:\n", func_name);
-  fprintf(fp, "\t.word 0\n");
+  fprintf(fp, "\t.word __aeabi_unwind_cpp_pr1\n");
   if (kind == kARMUnwindLinkRegister) {
-    fprintf(fp, "\t.byte 0x90, 0x0e\n");
+    fprintf(fp, "\t.byte 0x90, 0x0e, 0xb0, 0xb0\n");
   } else {
-    fprintf(fp, "\t.byte 0x90, 0x0b\n");
-    fprintf(fp, "\t.byte 0x90, 0x0f\n");
+    fprintf(fp, "\t.byte 0x90, 0x0b, 0x90, 0x0f\n");
   }
-  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.word .Leh_%s_lsda\n", func_name);
   fprintf(fp, "\t.text\n\n");
+}
+
+static const char* ARMLSDATypeInfoSymbol(EHTypeInfo* info) {
+  if (info == NULL || info->canonical_typeinfo == NULL ||
+      info->canonical_typeinfo->asm_name.length == 0) {
+    return NULL;
+  }
+  return info->canonical_typeinfo->asm_name.value;
+}
+
+static void ARMPrintGCCExceptTable(ARMEmitter* emitter, FILE* fp,
+                                   const char* func_name) {
+  DaveEHLSDARange ranges[64];
+  size_t count = 0;
+  for (size_t i = 0; i < emitter->g->exception_ranges.length && count < 64;
+       i++) {
+    ARMExceptionRange* range = emitter->g->exception_ranges.value.p[i];
+    DaveEHLSDARange* out = &ranges[count++];
+    out->try_start_id = range->try_start->id;
+    out->try_end_id = range->try_end->id;
+    out->landing_pad_id = range->catch_label->id;
+    out->is_cleanup = range->is_cleanup;
+    out->catch_typeinfo =
+        range->is_cleanup ? NULL : ARMLSDATypeInfoSymbol(range->catch_typeinfo);
+  }
+  DaveEHFrameEmitInfo info = {
+      .ranges = ranges,
+      .range_count = count,
+      .func_name = func_name,
+      .has_frame = !EmptyStackFrame(emitter),
+      .is_64bit = false,
+      .cie_ra_reg = 14,
+      .cie_cfa_reg = 13,
+      .cie_fp_reg = 11,
+  };
+  DaveEHPrintARMExtabLSDA(fp, &info);
 }
 
 void ARMPrintEHABISupport(FILE* fp) {
@@ -2062,34 +2071,6 @@ void ARMPrintEHABISupport(FILE* fp) {
   fprintf(fp, "\t.word 0\n");
   fprintf(fp, "\t.byte 0x90, 0x0e\n");
   fprintf(fp, "\t.align 2\n");
-  fprintf(fp, "\t.text\n\n");
-}
-
-static void ARMPrintExceptionTable(ARMEmitter* emitter, FILE* fp,
-                                   const char* func_name) {
-  if (emitter->g->exception_ranges.length == 0) {
-    return;
-  }
-  fprintf(fp,
-          "\t.section \".davecc_except_table\", \"a\", @progbits\n");
-  fprintf(fp, "\t.p2align 2\n");
-  for (size_t i = 0; i < emitter->g->exception_ranges.length; i++) {
-    ARMExceptionRange* range = emitter->g->exception_ranges.value.p[i];
-    fprintf(fp, "\t.4byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_start);
-    fprintf(fp, "\n\t.4byte ");
-    PrintExceptionTableLabel(fp, func_name, range->try_end);
-    fprintf(fp, "\n\t.4byte ");
-    PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    if (range->is_cleanup) {
-      fprintf(fp, "\n\t.4byte %d\n", DAVECC_EH_CLEANUP_MARKER);
-    } else if (range->catch_typeinfo != NULL) {
-      fprintf(fp, "\n\t.4byte %s\n",
-              range->catch_typeinfo->symbol_name.value);
-    } else {
-      fprintf(fp, "\n\t.4byte 0\n");
-    }
-  }
   fprintf(fp, "\t.text\n\n");
 }
 
@@ -2112,9 +2093,8 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
-  ARMPrintTypeInfoRecords(emitter, fp);
+  ARMPrintGCCExceptTable(emitter, fp, func_name);
   ARMPrintExidx(emitter, fp, func_name);
-  ARMPrintExceptionTable(emitter, fp, func_name);
 }
 
 void ARMPrintCXXAdjustorThunks(FILE* fp) {

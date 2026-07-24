@@ -2,6 +2,14 @@
 
 #if !defined(__x86_64__)
 
+#if defined(__p_code__)
+int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
+  (void)pc;
+  (void)out;
+  return 0;
+}
+#endif
+
 // DaveCC's hardware ABIs maintain a frame-pointer chain in every generated
 // non-leaf function. Exception unwinding on these targets does not need to
 // decode DWARF CFI: the saved frame pointer and return address live at fixed
@@ -20,7 +28,8 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
   // especially important for a constructor call immediately followed by the
   // "object is fully constructed" cleanup-range start label: using LR itself
   // would run the complete object's destructor after a throwing constructor.
-  out->caller_pc = frame[1] - 4;
+  // The personality applies the ABI-standard IP-before-instruction adjustment.
+  out->caller_pc = frame[1];
   out->caller_rsp = regs->rbp + 2 * sizeof(uintptr_t);
 #elif defined(__risc_v__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;
@@ -30,7 +39,7 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
 #elif defined(__arm__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;
   out->caller_rbp = frame[-2];
-  out->caller_pc = frame[-1] - 4;
+  out->caller_pc = frame[-1];
   out->caller_rsp = regs->rbp;
 #elif defined(__x86_64__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;

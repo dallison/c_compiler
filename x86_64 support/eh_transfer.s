@@ -30,3 +30,16 @@ __davecc_jump_to_landing_pad:
 	mov %rdx, %rbp
 	mov %rsi, %rsp
 	jmp *%rdi
+
+.global __davecc_unwind_install_context
+.type __davecc_unwind_install_context, @function
+
+// void __davecc_unwind_install_context(uintptr_t target, uintptr_t rsp,
+//     uintptr_t rbp, _Unwind_Exception* exception, uintptr_t selector);
+// The Itanium x86-64 landing-pad ABI passes exception/selector in rax/rdx.
+__davecc_unwind_install_context:
+	mov %rdx, %rbp
+	mov %rcx, %rax
+	mov %r8, %rdx
+	mov %rsi, %rsp
+	jmp *%rdi

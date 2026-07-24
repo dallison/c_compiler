@@ -21,6 +21,9 @@
 #include "type_traits_semantics.h"
 #include "type_compare.h"
 #include "member_pointer.h"
+#include "type_parse.h"
+
+void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -8455,18 +8458,29 @@ static ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
 
   ASTNode* result;
   if (polymorphic) {
-    // *(const type_info*)( (&operand)->__vptr[-1] )
+    // The Itanium address point is the first virtual function entry, with the
+    // type_info pointer exactly one pointer-width before it. Do the byte
+    // adjustment explicitly: applying the ordinary subscript lowering to the
+    // compiler-invented void** member can inherit the vtable aggregate stride.
     ASTNode* address =
         NewUnaryASTNode(AST_OP(address), NULL, location, operand);
     ASTNode* vptr = NewBinaryASTNode(
         AST_OP(arrow), NULL, location, address,
         NewStringConstantASTNode(NewString("__vptr"), NULL, location));
-    ASTNode* slot = NewBinaryASTNode(
-        AST_OP(subscript), NULL, location, vptr,
-        NewIntConstantASTNode(-1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+    TypeRecord* byte_ptr = NewPointerTo(
+        kQualPlain, NewTypeRecordWithSize(kTypeChar, kQualPlain));
+    ASTNode* vptr_bytes = NewCastASTNode(byte_ptr, location, vptr);
+    ASTNode* slot_address = NewBinaryASTNode(
+        AST_OP(minus), NULL, location, vptr_bytes,
+        NewIntConstantASTNode(SizeofPointer(),
+                              NewTypeRecordWithSize(kTypeInt, kQualPlain),
                               location));
-    ASTNode* as_ptr = NewCastASTNode(type_info_ptr, location, slot);
-    result = NewUnaryASTNode(AST_OP(contents), NULL, location, as_ptr);
+    TypeRecord* type_info_ptr_ptr =
+        NewPointerTo(kQualPlain, TypeRecordCopy(type_info_ptr));
+    ASTNode* slot = NewUnaryASTNode(
+        AST_OP(contents), NULL, location,
+        NewCastASTNode(type_info_ptr_ptr, location, slot_address));
+    result = NewUnaryASTNode(AST_OP(contents), NULL, location, slot);
   } else {
     Symbol* type_info_symbol = RttiGetTypeInfoSymbol(static_type);
     if (type_info_symbol == NULL) {
@@ -8765,6 +8779,27 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
 }
 
+static void EnsureThrowCopyConstructor(ThrowASTNode* node) {
+  if (node == NULL || node->expr == NULL ||
+      !TypeIsStructOrUnion(node->expr->type) ||
+      node->expr->value_category == kValueCategoryPrvalue) {
+    return;
+  }
+  StructMember* constructor = FindConvertingConstructorCandidate(
+      node->expr->type, node->expr, false, true);
+  Symbol* symbol = constructor != NULL ? constructor->symbol : NULL;
+  if (symbol == NULL || symbol->type == NULL ||
+      !symbol->type->info.function.is_defaulted ||
+      symbol->type->info.function.body != NULL) {
+    return;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                 STO(implicit), compiler->syntax.context);
+  SynthesizeDefaultedMemberFunctionBody(&parser, symbol);
+  TypeParserDestruct(&parser);
+}
+
 static void AnalyzeThrowExpression(ThrowASTNode* node) {
   if (!CompilerExceptionsEnabled()) {
     SemanticError((ASTNode*)node,
@@ -8781,6 +8816,7 @@ static void AnalyzeThrowExpression(ThrowASTNode* node) {
     if (TypeIsVoid(node->expr->type) || TypeIsFunction(node->expr->type)) {
       SemanticError(node->expr, "Cannot throw expression of this type");
     }
+    EnsureThrowCopyConstructor(node);
   }
   // A throw in a 'noexcept' function is well-formed: per [except.spec], if the
   // exception escapes the function at runtime std::terminate is called.  That

@@ -4,6 +4,8 @@
 
 #include "eh_cxa_internal.h"
 
+#if defined(__p_code__)
+
 typedef struct {
   uintptr_t try_start;
   uintptr_t try_end;
@@ -214,18 +216,34 @@ void __davecc_resume(void) {
 }
 
 char __davecc_current_exception_i1(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(char*)adjusted;
+  }
   return (char)current_exception_object;
 }
 
 short __davecc_current_exception_i2(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(short*)adjusted;
+  }
   return (short)current_exception_object;
 }
 
 int __davecc_current_exception_i4(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(int*)adjusted;
+  }
   return (int)current_exception_object;
 }
 
 long long __davecc_current_exception_i8(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(long long*)adjusted;
+  }
   if (current_exception_kind == kExceptionI8) {
     return current_exception_i8;
   }
@@ -233,10 +251,18 @@ long long __davecc_current_exception_i8(void) {
 }
 
 float __davecc_current_exception_f4(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(float*)adjusted;
+  }
   return current_exception_f4;
 }
 
 double __davecc_current_exception_f8(void) {
+  void* adjusted = __davecc_eh_current_adjusted_ptr();
+  if (adjusted != NULL) {
+    return *(double*)adjusted;
+  }
   return current_exception_f8;
 }
 
@@ -273,10 +299,6 @@ static void UnwindCurrentException(void) {
   DaveEHFrameRegisters regs;
   __davecc_capture_regs(&regs);
   UnwindStep(regs.pc, regs.rsp, regs.rbp, regs.pc, regs.pc);
-}
-
-void __davecc_eh_unwind_from_throw(void) {
-  UnwindCurrentException();
 }
 
 static void MarkUncaught(void) {
@@ -340,17 +362,4 @@ void __davecc_throw_f8(double exception_object, const CXXTypeInfo* typeinfo) {
   UnwindCurrentException();
 }
 
-// Keep canonical Itanium/ARM personality symbols linked while the runtime still
-// uses DaveCC tables during the ABI migration.
-extern int __gxx_personality_v0(int version, int actions,
-                                unsigned long long exception_class,
-                                void* exception_object, void* context);
-static int (*const __davecc_eh_personality_anchor)(
-    int, int, unsigned long long, void*, void*) = __gxx_personality_v0;
-
-#if defined(__arm__)
-extern int __aeabi_unwind_cpp_pr1(int state, int reason, void* unwind_data);
-static int (*const __davecc_eh_arm_personality_anchor)(int, int,
-                                                         void*) =
-    __aeabi_unwind_cpp_pr1;
-#endif
+#endif /* __p_code__ */

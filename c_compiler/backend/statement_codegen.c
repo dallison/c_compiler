@@ -12,6 +12,7 @@
 #include <string.h>
 #include "compiler.h"
 #include "expr_codegen.h"
+#include "rtti.h"
 
 static void GenerateDeclarationList(Generator* gen,
                                     DeclarationListASTNode* node) {
@@ -19,6 +20,120 @@ static void GenerateDeclarationList(Generator* gen,
   for (size_t i = 0; i < num_decls; i++) {
     GenerateStatement(gen, node->declarations->value.p[i]);
   }
+}
+
+static bool UsesItaniumUnwind(Generator* gen) {
+  return RttiUsesItaniumABI() && !gen->for_constant_evaluation &&
+         CompilerExceptionsEnabled();
+}
+
+static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol);
+
+static Symbol* GetInventedRuntimeFunction(const char* function_name,
+                                          TypeRecord* return_type,
+                                          SourceLocation location) {
+  String name;
+  StringInit(&name, function_name);
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, return_type);
+  symbol = NewSymbol(function_name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetCxaBeginCatchFunction(SourceLocation location) {
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
+                                      NewTypeRecordWithSize(kTypeVoid,
+                                                            kQualPlain));
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_ptr);
+  TypeRecordChain(func_type, void_ptr);
+  return GetInventedRuntimeFunction("__cxa_begin_catch", void_ptr, location);
+}
+
+static Symbol* GetCxaEndCatchFunction(SourceLocation location) {
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  String name;
+  StringInit(&name, "__cxa_end_catch");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  symbol = NewSymbol("__cxa_end_catch", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetLandingPadUnwindHeaderFunction(SourceLocation location) {
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
+                                      NewTypeRecordWithSize(kTypeVoid,
+                                                            kQualPlain));
+  return GetInventedRuntimeFunction("__davecc_eh_landing_pad_unwind_header",
+                                    void_ptr, location);
+}
+
+static Symbol* GetLandingPadSelectorFunction(SourceLocation location) {
+  TypeRecord* selector_type = NewTypeRecordWithSize(
+      SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
+  return GetInventedRuntimeFunction("__davecc_eh_landing_pad_selector",
+                                    selector_type, location);
+}
+
+static Symbol* GetUnwindResumeFunction(SourceLocation location) {
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
+                                      NewTypeRecordWithSize(kTypeVoid,
+                                                            kQualPlain));
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  TypeRecordChain(func_type, void_ptr);
+  Symbol* symbol =
+      GetInventedRuntimeFunction("_Unwind_Resume",
+                                 NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+                                 location);
+  symbol->flags.noreturn = true;
+  return symbol;
+}
+
+static IRNode* EmitCxaBeginCatch(Generator* gen, SourceLocation location) {
+  Symbol* begin_catch = GetCxaBeginCatchFunction(location);
+  Symbol* object_fn = GetLandingPadUnwindHeaderFunction(location);
+  IRNode* func = GeneratorGetVariable(gen, begin_catch);
+  IRNode* call = NewIR1(IR_OP(calla), func);
+  IRNode* object = GeneratorGetVariable(gen, object_fn);
+  IRNode* object_call = NewIR1(IR_OP(calla), object);
+  object_call = IRSetType(GeneratorEmit(gen, object_call), object_fn->type);
+  IRAddInput(call, object_call, false);
+  return GeneratorEmit(gen, IRSetType(call, begin_catch->type->next));
+}
+
+static void EmitCxaEndCatch(Generator* gen, SourceLocation location) {
+  GenerateNoArgRuntimeCall(gen, GetCxaEndCatchFunction(location));
+}
+
+static void EmitUnwindResume(Generator* gen, SourceLocation location) {
+  Symbol* resume = GetUnwindResumeFunction(location);
+  Symbol* header_fn = GetLandingPadUnwindHeaderFunction(location);
+  IRNode* func = GeneratorGetVariable(gen, resume);
+  IRNode* call = NewIR1(IR_OP(calla), func);
+  IRNode* header = GeneratorGetVariable(gen, header_fn);
+  IRNode* header_call = NewIR1(IR_OP(calla), header);
+  header_call = IRSetType(GeneratorEmit(gen, header_call), header_fn->type);
+  IRAddInput(call, header_call, false);
+  GeneratorEmit(gen, call);
 }
 
 static bool IsSupportedTypedCatch(Symbol* symbol) {
@@ -195,6 +310,47 @@ static void GenerateCatchBinding(Generator* gen, CatchASTNode* handler) {
   ASTNode* assignment = NewBinaryASTNode(AST_OP(assign), handler->symbol->type,
                                         location, lhs, rhs);
   GenerateExpression(gen, assignment);
+}
+
+static void GenerateItaniumCatchBinding(Generator* gen, CatchASTNode* handler,
+                                        IRNode* caught_object) {
+  if (handler == NULL || handler->is_catch_all || handler->symbol == NULL ||
+      !IsSupportedTypedCatch(handler->symbol) || caught_object == NULL) {
+    return;
+  }
+  if (TypeIsReference(handler->symbol->type)) {
+    TypeRecord* referred_type = handler->symbol->type->next;
+    IRSetType(caught_object, NewPointerTo(kQualPlain, referred_type));
+    IRNode* ref_storage = GeneratorGetVariable(gen, handler->symbol);
+    IRNode* store = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(storea), ref_storage, caught_object)),
+        handler->symbol->type);
+    IRSetVarDef(store, handler->symbol);
+    return;
+  }
+
+  IRSetType(caught_object,
+            NewPointerTo(kQualPlain, handler->symbol->type));
+  IRNode* dest = GeneratorGetVariable(gen, handler->symbol);
+  if (TypeIsStructOrUnion(handler->symbol->type)) {
+    IRNode* copy = GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), dest, caught_object,
+                    GeneratorGetIntConstant(gen, NULL,
+                                            handler->symbol->type->size)));
+    IRSetVarDef(copy, handler->symbol);
+    return;
+  }
+
+  IRNode* value = IRSetType(
+      GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(handler->symbol->type),
+                                caught_object)),
+      handler->symbol->type);
+  IRNode* store = IRSetType(
+      GeneratorEmit(gen,
+                    NewIR2(GetStoreOpcodeForType(handler->symbol->type), dest,
+                           value)),
+      handler->symbol->type);
+  IRSetVarDef(store, handler->symbol);
 }
 
 static ASTNode* UnwrapExpressionInitializer(ASTNode* node) {
@@ -474,14 +630,18 @@ void GenerateCleanupLandingPads(Generator* gen) {
     return;
   }
   SourceLocation location = gen->func->info.function.symbol->location;
-  Symbol* resume = GetDaveCCResumeFunction(location);
   for (size_t i = 0; i < gen->cleanup_pads.length; i++) {
     PendingCleanupPad* pad = gen->cleanup_pads.value.p[i];
     GeneratorEmit(gen, pad->pad_label);
     for (size_t j = 0; j < pad->dtor_stmts.length; j++) {
       GenerateStatement(gen, pad->dtor_stmts.value.p[j]);
     }
-    GenerateNoArgRuntimeCall(gen, resume);
+    if (UsesItaniumUnwind(gen)) {
+      EmitUnwindResume(gen, location);
+    } else {
+      Symbol* resume = GetDaveCCResumeFunction(location);
+      GenerateNoArgRuntimeCall(gen, resume);
+    }
     // __davecc_resume never returns, but the block still needs a terminator so
     // the CFG builder does not treat it as falling through.  Unreachable.
     GeneratorEmit(gen, NewIR(IR_OP(leave)));
@@ -1100,6 +1260,8 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
   IRNode* try_start = NewIR(IR_OP(label));
   IRNode* try_end = NewIR(IR_OP(label));
   IRNode* after_try = NewIR(IR_OP(label));
+  IRNode* dispatch_label =
+      UsesItaniumUnwind(gen) ? NewIR(IR_OP(label)) : NULL;
   Vector catch_labels;
   Vector catch_typeinfos;
   VectorInit(&catch_labels);
@@ -1122,11 +1284,45 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
   // and libc/eh_throw.c): the runtime runs those inner cleanups before it enters
   // the handler recorded here, and only for the objects actually constructed.
   for (size_t i = 0; i < catch_labels.length; i++) {
-    RecordExceptionRange(gen, try_start, try_end, catch_labels.value.p[i],
+    RecordExceptionRange(gen, try_start, try_end,
+                         dispatch_label != NULL ? dispatch_label
+                                                : catch_labels.value.p[i],
                          catch_typeinfos.value.p[i]);
   }
   if (StatementMayFallThrough(node->try_stmt)) {
     GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
+  }
+
+  if (dispatch_label != NULL) {
+    SourceLocation location = node->base.location;
+    GeneratorEmit(gen, dispatch_label);
+    IRNode* selector = GenerateNoArgRuntimeCall(
+        gen, GetLandingPadSelectorFunction(location));
+    IRNode* catch_all_label = NULL;
+    for (size_t i = 0; i < catch_labels.length; i++) {
+      EHTypeInfo* typeinfo = catch_typeinfos.value.p[i];
+      if (typeinfo == NULL) {
+        if (catch_all_label == NULL) {
+          catch_all_label = catch_labels.value.p[i];
+        }
+        continue;
+      }
+      IRNode* expected = GeneratorGetIntConstant(
+          gen, selector->type, (int64_t)typeinfo->lsda_type_filter);
+      IRNode* matches =
+          GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), selector, expected));
+      GeneratorEmit(gen,
+                    NewIR2(IR_OP(btrue), matches, catch_labels.value.p[i]));
+    }
+    if (catch_all_label != NULL) {
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), catch_all_label));
+    } else {
+      // The personality only installs this dispatcher after matching a typed
+      // action. Keep a defensive terminator for malformed/foreign metadata.
+      GenerateNoArgRuntimeCall(gen, GetDaveCCTerminateFunction(location));
+      GeneratorEmit(gen, NewIR(IR_OP(leave)));
+      GeneratorEmit(gen, NewIR(IR_OP(ret)));
+    }
   }
 
   size_t catch_index = 0;
@@ -1137,10 +1333,21 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     }
     IRNode* catch_label = catch_labels.value.p[catch_index++];
     GeneratorEmit(gen, catch_label);
-    GenerateCatchBinding(gen, handler);
+    IRNode* caught_object = NULL;
+    if (UsesItaniumUnwind(gen)) {
+      caught_object = EmitCxaBeginCatch(gen, handler->base.location);
+      GenerateItaniumCatchBinding(gen, handler, caught_object);
+    } else {
+      GenerateCatchBinding(gen, handler);
+    }
     GenerateStatement(gen, handler->stmt);
     if (StatementMayFallThrough(handler->stmt)) {
+      if (UsesItaniumUnwind(gen)) {
+        EmitCxaEndCatch(gen, handler->base.location);
+      }
       GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
+    } else if (UsesItaniumUnwind(gen)) {
+      EmitCxaEndCatch(gen, handler->base.location);
     }
   }
   GeneratorEmit(gen, after_try);

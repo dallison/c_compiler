@@ -58,6 +58,8 @@ typedef struct EHTypeInfoBase {
 typedef struct EHTypeInfo {
   String symbol_name;
   String type_name;
+  Symbol* canonical_typeinfo;
+  size_t lsda_type_filter;
   Vector bases;  // EHTypeInfoBase* entries (flattened public base graph).
   int64_t object_size;
   bool object_is_class;

@@ -2916,7 +2916,9 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
 }
 
 static TargetInstruction* LowerBranch(AARCH64Generator* g, IRNode* node) {
-  assert(node->inputs.length == 1);
+  if (node->inputs.length == 0) {
+    return NULL;
+  }
   IRNode* target_node = node->inputs.value.p[0];
 
   // A return jump must branch to the shared epilogue: even a function that

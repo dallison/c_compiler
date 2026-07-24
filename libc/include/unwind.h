@@ -56,8 +56,13 @@ void _Unwind_Resume(_Unwind_Exception* exc);
 void _Unwind_DeleteException(_Unwind_Exception* exc);
 uintptr_t _Unwind_GetIP(_Unwind_Context* ctx);
 void _Unwind_SetIP(_Unwind_Context* ctx, uintptr_t ip);
+_Unwind_Word _Unwind_GetGR(_Unwind_Context* ctx, int index);
+void _Unwind_SetGR(_Unwind_Context* ctx, int index, _Unwind_Word value);
 uintptr_t _Unwind_GetLanguageSpecificData(_Unwind_Context* ctx);
 uintptr_t _Unwind_GetRegionStart(_Unwind_Context* ctx);
+
+/* DaveCC runtime-private coordination for nested cleanup ranges. */
+void DaveUnwindSetInstalledCleanup(_Unwind_Context* ctx, int is_cleanup);
 
 _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
                                         _Unwind_Exception_Class exception_class,

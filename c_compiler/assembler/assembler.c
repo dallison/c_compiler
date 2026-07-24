@@ -15,6 +15,8 @@
 #include "asm_expr.h"
 #include "errors.h"
 
+#define ASSEMBLER_FINAL_PASS 3
+
 // Default label defining function.
 static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling);
 
@@ -279,10 +281,10 @@ void AssemblerTrackOrphanSymbol(Assembler* assembler, AssemblerSymbol* sym) {
 }
 
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
-  // In pass 2 we don't insert any more symbols, but the caller has already
-  // allocated this one (e.g. a symbol referenced only in pass 2).  Track it so
+  // After pass 1 we don't insert any more symbols, but the caller has already
+  // allocated this one (e.g. a symbol referenced only in a later pass). Track it so
   // it can be freed at destruct rather than leaked.
-  if (assembler->pass == 2) {
+  if (assembler->pass != 1) {
     AssemblerTrackOrphanSymbol(assembler, sym);
     return;
   }
@@ -291,7 +293,7 @@ void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
 
 void AssemblerEmitWord(Assembler* assembler, int section, int32_t word) {
   AssemblerSection* sect = assembler->sections.value.p[section];
-  if (assembler->pass == 2) {
+  if (assembler->pass == ASSEMBLER_FINAL_PASS) {
     BufferAppend(&sect->contents.data.buffered, (char*)&word, 4);
     sect->contents.size += 4;
   }
@@ -300,7 +302,7 @@ void AssemblerEmitWord(Assembler* assembler, int section, int32_t word) {
 
 void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte) {
   AssemblerSection* sect = assembler->sections.value.p[section];
-  if (assembler->pass == 2) {
+  if (assembler->pass == ASSEMBLER_FINAL_PASS) {
     BufferAppend(&sect->contents.data.buffered, (char*)&byte, 1);
     sect->contents.size += 1;
   }
@@ -309,7 +311,7 @@ void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte) {
 
 void AssemblerEmitHalf(Assembler* assembler, int section, uint16_t half) {
   AssemblerSection* sect = assembler->sections.value.p[section];
-  if (assembler->pass == 2) {
+  if (assembler->pass == ASSEMBLER_FINAL_PASS) {
     BufferAppend(&sect->contents.data.buffered, (char*)&half, 2);
     sect->contents.size += 2;
   }
@@ -318,7 +320,7 @@ void AssemblerEmitHalf(Assembler* assembler, int section, uint16_t half) {
 
 void AssemblerEmitLong(Assembler* assembler, int section, uint64_t l) {
   AssemblerSection* sect = assembler->sections.value.p[section];
-  if (assembler->pass == 2) {
+  if (assembler->pass == ASSEMBLER_FINAL_PASS) {
     BufferAppend(&sect->contents.data.buffered, (char*)&l, 8);
     sect->contents.size += 8;
   }
@@ -335,7 +337,7 @@ int64_t AssemblerEvaluateKnownExpression(Assembler* assembler, bool* known) {
   if (known != NULL) {
     *known = ok;
   }
-  if (!ok && assembler->pass == 2) {
+  if (!ok && assembler->pass == ASSEMBLER_FINAL_PASS) {
     AssemblerError(assembler, "Invalid expression");
   }
   return value;
@@ -527,8 +529,8 @@ void AssemblerDestruct(Assembler* assembler) {
 }
 
 void AssemblerAddRelocation(Assembler* assembler, AssemblerRelocation* reloc) {
-  // We only add relocations in pass 2, so delete the reloc in pass 1.
-  if (assembler->pass == 1) {
+  // Only final-pass relocations describe the emitted section contents.
+  if (assembler->pass != ASSEMBLER_FINAL_PASS) {
     // Delete it.
     AssemblerRelocationDelete(reloc);
     return;
@@ -667,6 +669,7 @@ static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
   if (sym != NULL) {
     if (!sym->defined) {
       sym->defined = true;
+      sym->is_label = true;
       sym->section = assembler->current_section;
       sym->value = AssemblerCurrentAddress(assembler);
     } else {
@@ -697,9 +700,18 @@ static void Assemble(Assembler* assembler,
       if (LexMatch(&assembler->lex, TOK(colon))) {
         // Defining a label.
         if (assembler->pass == 1) {
-          // Only define labels in pass 1.
           assembler->define_label(assembler, &word);
-         }
+        } else {
+          // Variable-length directives can make pass-two offsets differ from
+          // the provisional pass-one layout. Refresh labels as they are
+          // encountered so following relocations use the emitted location.
+          AssemblerSymbol* symbol =
+              AssemblerFindSymbol(assembler, word.value);
+          if (symbol != NULL) {
+            symbol->section = assembler->current_section;
+            symbol->value = AssemblerCurrentAddress(assembler);
+          }
+        }
       } else {
         // Try as a directive name.
         void* dir_func = MapFindPointerKey(&assembler->directives, word.value);
@@ -814,13 +826,15 @@ void AssemblerReset(Assembler* assembler, bool clear_symbols) {
 }
 
 void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
-  // We do two passes, numbered 1 and 2.
+  // Pass 1 discovers symbols, pass 2 converges variable-length directive
+  // offsets, and pass 3 emits the final contents.
   assembler->pass = 1;
   LexNextToken(&assembler->lex);
-  while (assembler->num_errors == 0 && assembler->pass < 3) {
+  while (assembler->num_errors == 0 &&
+         assembler->pass <= ASSEMBLER_FINAL_PASS) {
     Assemble(assembler, run_func);  // Run the assembly pass.
     assembler->pass++;
-    if (assembler->pass == 2) {
+    if (assembler->pass <= ASSEMBLER_FINAL_PASS) {
       AssemblerReset(assembler, false);
     }
   }
@@ -1065,8 +1079,15 @@ static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
     if (sym == NULL) {
       sym = NewAssemblerSymbol(spelling.value, 0, SYM_TYPE(none),
                                SYM_BIND(global), 0);
-      sym->exported = true;
-      sym->defined = false;
+      if (strcmp(spelling.value, ".") == 0) {
+        sym->is_label = true;
+        sym->defined = true;
+        sym->section = assembler->current_section;
+        sym->value = AssemblerCurrentAddress(assembler);
+      } else {
+        sym->exported = true;
+        sym->defined = false;
+      }
       AssemblerInsertSymbol(assembler, sym);
     }
     return sym;
@@ -1074,17 +1095,48 @@ static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
   return NULL;
 }
 
-static int RelocTypeForWord(Assembler* assembler) {
+static int EhTableWordRelocType(Assembler* assembler) {
+  switch (assembler->elf_machine_type) {
+    case ELF_MACHINE_TYPE_X86_64:
+      return R_X86_64_PC32;
+    case ELF_MACHINE_TYPE_AARCH64:
+      return R_AARCH64_PREL32;
+    default:
+      return assembler->reloc_types[kRelocSet32];
+  }
+}
+
+static bool IsEhTableSection(const Assembler* assembler) {
+  if (assembler->current_section < 0 ||
+      (size_t)assembler->current_section >= assembler->sections.length) {
+    return false;
+  }
+  AssemblerSection* section =
+      assembler->sections.value.p[assembler->current_section];
+  if (section->name == NULL) {
+    return false;
+  }
   if (assembler->elf_machine_type == ELF_MACHINE_TYPE_ARM &&
-      assembler->current_section >= 0 &&
-      (size_t)assembler->current_section < assembler->sections.length) {
-    AssemblerSection* section =
-        assembler->sections.value.p[assembler->current_section];
-    if (section->name != NULL &&
-        (strcmp(section->name->value, ".ARM.exidx") == 0 ||
-         strcmp(section->name->value, ".ARM.extab") == 0)) {
-      return R_ARM_PREL31;
+      (strcmp(section->name->value, ".ARM.exidx") == 0 ||
+       strcmp(section->name->value, ".ARM.extab") == 0)) {
+    return true;
+  }
+  return strcmp(section->name->value, ".gcc_except_table") == 0 ||
+         strcmp(section->name->value, ".eh_frame") == 0;
+}
+
+static int RelocTypeForWord(Assembler* assembler) {
+  if (IsEhTableSection(assembler)) {
+    if (assembler->elf_machine_type == ELF_MACHINE_TYPE_ARM) {
+      AssemblerSection* section =
+          assembler->sections.value.p[assembler->current_section];
+      if (strcmp(section->name->value, ".ARM.exidx") == 0 ||
+          strcmp(section->name->value, ".ARM.extab") == 0) {
+        return R_ARM_PREL31;
+      }
+      return R_ARM_REL32;
     }
+    return EhTableWordRelocType(assembler);
   }
   return assembler->reloc_types[kRelocSet32];
 }
@@ -1120,10 +1172,12 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   // and use its section symbol plus an addend instead of exporting the
   // label.  Maybe later.  The problem is that the section symbols aren't
   // created until we add the sections to the ELF file.
+  int initial_reloc_type =
+      bits == 32 ? RelocTypeForWord(assembler)
+                 : assembler->reloc_types[reloc_index];
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-          left, RelocTypeForWord(assembler),
-          assembler->current_section,
-                  (int32_t)AssemblerCurrentAddress(assembler), 0);
+      left, initial_reloc_type, assembler->current_section,
+      (int32_t)AssemblerCurrentAddress(assembler), 0);
   
   VectorAppend(&relocations, reloc);
   bool known_values = left->is_label && left->type == SYM_TYPE(none) &&
@@ -1159,7 +1213,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     AssemblerRelocation* reloc = NewAssemblerRelocation(
                 right, assembler->reloc_types[reloc_type], assembler->current_section,
                             (int32_t)AssemblerCurrentAddress(assembler), 0);
-    known_values &= right->is_label && left->type == SYM_TYPE(none) &&
+    known_values &= right->is_label && right->type == SYM_TYPE(none) &&
         assembler->current_section == right->section;
     if (tok == TOK(plus)) {
       additive_terms++;
@@ -1183,6 +1237,37 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     }
     VectorDestructWithContents(&relocations,
                                (VectorElementDestructor)AssemblerRelocationDestruct, /*free_element=*/true);
+  } else if (relocations.length == 2 && additive_terms == 1 &&
+             subtractive_terms == 1) {
+    AssemblerRelocation* add_reloc = relocations.value.p[0];
+    AssemblerRelocation* sub_reloc = relocations.value.p[1];
+    bool sub_is_dot = sub_reloc->symbol->name.value[0] == '.' &&
+                      sub_reloc->symbol->name.value[1] == '\0';
+    bool direct_pcrel32 =
+        assembler->elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
+        assembler->elf_machine_type == ELF_MACHINE_TYPE_AARCH64 ||
+        assembler->elf_machine_type == ELF_MACHINE_TYPE_ARM;
+    if (direct_pcrel32 &&
+        (sub_is_dot ||
+         (sub_reloc->symbol->is_label && sub_reloc->symbol->defined &&
+          sub_reloc->symbol->section == assembler->current_section &&
+          sub_reloc->type == assembler->reloc_types[kRelocSub32] &&
+          sub_reloc->symbol->value ==
+              (uint64_t)AssemblerCurrentAddress(assembler)))) {
+      AssemblerRelocation* merged = NewAssemblerRelocation(
+          add_reloc->symbol, RelocTypeForWord(assembler),
+          assembler->current_section,
+          (int32_t)AssemblerCurrentAddress(assembler), add_reloc->addend);
+      VectorDestructWithContents(
+          &relocations, (VectorElementDestructor)AssemblerRelocationDestruct,
+          /*free_element=*/true);
+      AssemblerAddRelocation(assembler, merged);
+    } else {
+      for (size_t i = 0; i < relocations.length; i++) {
+        AssemblerAddRelocation(assembler, relocations.value.p[i]);
+      }
+    }
+    VectorDestruct(&relocations);
   } else {
     for (size_t i = 0; i < relocations.length; i++) {
       AssemblerAddRelocation(assembler, relocations.value.p[i]);
@@ -1204,7 +1289,7 @@ static void HandleDirective_p2align(Assembler* assembler) {
         assembler->sections.value.p[assembler->current_section];
     size_t next_address = (sect->address + alignment) & ~alignment;
     size_t num_bytes = next_address - sect->address;
-    if (assembler->pass == 2) {
+    if (assembler->pass == ASSEMBLER_FINAL_PASS) {
       BufferAddSpace(&sect->contents.data.buffered, num_bytes);
       sect->contents.size += num_bytes;
     }
@@ -1255,7 +1340,7 @@ static void HandleDirective_space(Assembler* assembler) {
   }
   AssemblerSection* sect =
       assembler->sections.value.p[assembler->current_section];
-  if (assembler->pass == 2) {
+  if (assembler->pass == ASSEMBLER_FINAL_PASS) {
     BufferFill(&sect->contents.data.buffered, num_bytes, value);
     sect->contents.size += num_bytes;
   }
@@ -1363,8 +1448,16 @@ static void HandleDirective_short(Assembler* assembler) {
 static void HandleDirective_word(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
     if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+      size_t reloc_count = assembler->relocations.length;
       int32_t value = (int32_t)SimpleSymbolExpression(assembler, 32);
       AssemblerEmitWord(assembler, assembler->current_section, value);
+      int32_t field_offset =
+          (int32_t)AssemblerCurrentAddress(assembler) - (int32_t)sizeof(int32_t);
+      for (size_t i = reloc_count; i < assembler->relocations.length; i++) {
+        AssemblerRelocation* reloc =
+            (AssemblerRelocation*)assembler->relocations.value.p[i];
+        reloc->offset = field_offset;
+      }
     } else {
       int32_t value = (int32_t)AssemblerEvaluateExpression(assembler);
       AssemblerEmitWord(assembler, assembler->current_section, value);

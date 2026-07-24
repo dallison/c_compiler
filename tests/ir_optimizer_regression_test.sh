@@ -141,6 +141,18 @@ if ! grep -Eq \
   exit 1
 fi
 
+# An integer-only ARM save area at the bottom of a frame should use block
+# transfer writeback to allocate and release that portion of the frame.
+ARM_COROUTINE_ASM="$WORK/arm_coroutine.s"
+"$DAVECC" -target arm -O2 -std=c++20 \
+  -isystem "$ROOT/libc/include" -S \
+  "$AARCH64_COROUTINE_SOURCE" -o "$ARM_COROUTINE_ASM"
+if ! grep -Fq 'stmdb sp!, {r0, r4, r5}' "$ARM_COROUTINE_ASM" ||
+   ! grep -Fq 'ldmia sp!, {r0, r4, r5}' "$ARM_COROUTINE_ASM"; then
+  echo "ARM did not combine integer saves/restores with stack writeback" >&2
+  exit 1
+fi
+
 # Keep one shape assertion architecture-neutral at the IR level.  The final
 # optimized dump must not retain the deliberately dead multiply.
 DUMP_SOURCE="$WORK/optimizer_dump.c"
