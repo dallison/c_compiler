@@ -164,14 +164,32 @@ static void AssignRegister(ARMRegister* reg, TargetInstruction* inst) {
   inst->flags |= TARGET_INST_PROCESSED;
 }
 
+static bool IsFrameFreeStructReturnLeaf(ARMRegisterAllocator* allocator) {
+  return OptLevel1() && allocator->g->base.num_calls == 0 &&
+         !allocator->g->not_leaf && !allocator->g->base.varargs &&
+         !allocator->g->uses_dynamic_stack && !allocator->g->has_stack_args &&
+         allocator->g->exception_ranges.length == 0 &&
+         allocator->g->base.stack_frame_size == 0 &&
+         allocator->g->saved_regs.length == 0 &&
+         allocator->g->struct_return_reg >= 0;
+}
+
 static ARMRegister* FindFreeRegister(ARMRegisterAllocator* allocator,
                                     ARMRegisterType type, bool can_use_temp) {
   ARMRegister* regs =
       type == kARMRegTypeInt ? allocator->int_regs : allocator->float_regs;
-  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
-    if (register_ranges[i].type == type) {
-      // If we are told not to use a temp register, ignore any that are
-      // marked as temp.
+  bool frame_free_leaf = type == kARMRegTypeInt && can_use_temp &&
+                         IsFrameFreeStructReturnLeaf(allocator);
+  int passes = frame_free_leaf ? 2 : 1;
+  for (int pass = 0; pass < passes; pass++) {
+    bool want_temp = frame_free_leaf && pass == 0;
+    for (size_t i = 0; i < NUM_REG_RANGES; i++) {
+      if (register_ranges[i].type != type) {
+        continue;
+      }
+      if (frame_free_leaf && register_ranges[i].temp != want_temp) {
+        continue;
+      }
       if (!can_use_temp && register_ranges[i].temp) {
         continue;
       }
@@ -798,6 +816,24 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
 
   ARMRegister* reg;
 
+  // A register-passed value copied into a dedicated variable in a frame-free
+  // struct-return leaf can remain in its incoming caller-saved register. This
+  // coalesces the entry copy (for example r1 -> reference variable) and leaves
+  // the other caller-saved registers available for short-lived expressions.
+  if (opcode == ARM_OP(mov) && inst->dest != NULL &&
+      ARMIsVarRegister(inst->dest) && inst->dest->reg == NULL &&
+      inst->operand[0] != NULL && ARMIsFixedRegister(inst->operand[0]) &&
+      inst->operand[0]->reg != NULL &&
+      inst->operand[0]->users.length == 1 &&
+      RegisterTypeFromInstruction(inst->dest) == kARMRegTypeInt &&
+      IsFrameFreeStructReturnLeaf(allocator)) {
+    ARMRegister* source_reg = (ARMRegister*)inst->operand[0]->reg;
+    if (source_reg->base.num >= ARM_INT_ARG_START &&
+        source_reg->base.num <= ARM_INT_ARG_END) {
+      AssignRegister(source_reg, inst->dest);
+    }
+  }
+
   if (inst->dest == NULL &&
       (opcode == ARM_OP(atomic_load) ||
        opcode == ARM_OP(atomic_fetch_add) ||
@@ -948,7 +984,9 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
       reg = &allocator->int_regs[(is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR
                                           : ARM_FIRST_INT_REG_VAR) +
                                  allocator->g->struct_return_reg];
-      BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      if (IsSavedReg(reg)) {
+        BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      }
       break;
 
     case ARM_OP(resulti):

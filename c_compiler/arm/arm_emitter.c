@@ -1616,6 +1616,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
   }
 
   // General case for instruction printing->base.
+  if ((ARMOpcode)inst->opcode == ARM_OP(mov) && inst->reg != NULL &&
+      inst->operand[0] != NULL && inst->operand[0]->reg == inst->reg) {
+    return;
+  }
+
   bool negative_fp_offset =
       inst->operand[0] != NULL && inst->operand[1] != NULL &&
       TargetIsConst(inst->operand[1]) &&

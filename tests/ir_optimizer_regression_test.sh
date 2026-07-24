@@ -141,16 +141,23 @@ if ! grep -Eq \
   exit 1
 fi
 
-# A framed ARM function should construct the canonical AAPCS frame record and
-# save its integer registers with the same block transfer.
+# An optimized ARM struct-return leaf should use caller-saved temporaries, keep
+# reference arguments in registers, and omit all frame/save traffic.
 ARM_COROUTINE_ASM="$WORK/arm_coroutine.s"
 "$DAVECC" -target arm -O2 -std=c++20 \
   -isystem "$ROOT/libc/include" -S \
   "$AARCH64_COROUTINE_SOURCE" -o "$ARM_COROUTINE_ASM"
-if ! grep -Fq 'stmdb sp!, {r0, r4, r5, fp, lr}' "$ARM_COROUTINE_ASM" ||
-   ! grep -Fq 'add fp, sp, #12' "$ARM_COROUTINE_ASM" ||
-   ! grep -Fq 'ldmia sp!, {r0, r4, r5, fp, lr}' "$ARM_COROUTINE_ASM"; then
-  echo "ARM did not emit the canonical combined frame save/restore" >&2
+ARM_FROM_PROMISE=$(
+  awk '/^_ZN3std16coroutine_handleI7PromiseE12from_promiseER7Promise:/{inside=1} \
+       inside{print} \
+       /^\.func_end__ZN3std16coroutine_handleI7PromiseE12from_promiseER7Promise:/{exit}' \
+      "$ARM_COROUTINE_ASM"
+)
+if grep -Eq 'stmdb sp|ldmia sp|add fp|str[[:space:]]+r1,|mov[[:space:]]+r[0-3],[[:space:]]*r[0-3]' \
+       <<<"$ARM_FROM_PROMISE" ||
+   ! grep -Eq 'sub[[:space:]]+r[23],[[:space:]]*r[12],[[:space:]]*#16' \
+       <<<"$ARM_FROM_PROMISE"; then
+  echo "ARM generated saved-register traffic for from_promise leaf" >&2
   exit 1
 fi
 

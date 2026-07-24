@@ -1421,9 +1421,16 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
   if (TypeIsWideInt(var_node->type)) {
     return false;
   }
-  // Can't use a register if its address has been taken.
+  // A normal object whose address is taken needs stable stack storage. A
+  // reference is already represented by an address, however, so taking the
+  // address of its referent only reads that pointer and does not require a
+  // home slot for the reference itself.
   IRVariable* var = (IRVariable*)var_node;
-  if (var->symbol->flags.address_taken) {
+  if (TypeIsVolatile(var->symbol->type)) {
+    return false;
+  }
+  if (var->symbol->flags.address_taken &&
+      !TypeIsReference(var->symbol->type)) {
     return false;
   }
 
