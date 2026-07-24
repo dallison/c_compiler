@@ -38,9 +38,9 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
   out->caller_rsp = regs->rbp;
 #elif defined(__arm__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;
-  out->caller_rbp = frame[-2];
-  out->caller_pc = frame[-1];
-  out->caller_rsp = regs->rbp;
+  out->caller_rbp = frame[0];
+  out->caller_pc = frame[1];
+  out->caller_rsp = regs->rbp + 2 * sizeof(uintptr_t);
 #elif defined(__x86_64__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;
   out->caller_rbp = frame[0];

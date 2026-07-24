@@ -141,15 +141,16 @@ if ! grep -Eq \
   exit 1
 fi
 
-# An integer-only ARM save area at the bottom of a frame should use block
-# transfer writeback to allocate and release that portion of the frame.
+# A framed ARM function should construct the canonical AAPCS frame record and
+# save its integer registers with the same block transfer.
 ARM_COROUTINE_ASM="$WORK/arm_coroutine.s"
 "$DAVECC" -target arm -O2 -std=c++20 \
   -isystem "$ROOT/libc/include" -S \
   "$AARCH64_COROUTINE_SOURCE" -o "$ARM_COROUTINE_ASM"
-if ! grep -Fq 'stmdb sp!, {r0, r4, r5}' "$ARM_COROUTINE_ASM" ||
-   ! grep -Fq 'ldmia sp!, {r0, r4, r5}' "$ARM_COROUTINE_ASM"; then
-  echo "ARM did not combine integer saves/restores with stack writeback" >&2
+if ! grep -Fq 'stmdb sp!, {r0, r4, r5, fp, lr}' "$ARM_COROUTINE_ASM" ||
+   ! grep -Fq 'add fp, sp, #12' "$ARM_COROUTINE_ASM" ||
+   ! grep -Fq 'ldmia sp!, {r0, r4, r5, fp, lr}' "$ARM_COROUTINE_ASM"; then
+  echo "ARM did not emit the canonical combined frame save/restore" >&2
   exit 1
 fi
 

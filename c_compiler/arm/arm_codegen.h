@@ -75,6 +75,12 @@ typedef enum {
 #define kARMIndirectCallTarget (1 << 21)
 #define kARMExtendedAsm (1 << 26)
 
+// The offset operand was assigned relative to the pre-prologue frame-pointer
+// convention and must be rebased by the emitter after register allocation has
+// determined the size of the combined integer save block.
+#define kARMFrameStorageOffset (1 << 7)
+#define kARMIncomingFrameOffset (1 << 8)
+
 #define ARM_MAX_ASM_OPERANDS 16
 
 typedef struct {

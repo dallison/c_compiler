@@ -1098,6 +1098,29 @@ static int LocalVariableOffset(ARMGenerator* g, int32_t var_offset) {
       ARM_STACK_FRAME_HEADER_SIZE;
 }
 
+static uint32_t FrameOffsetFlagForNode(IRNode* node) {
+  if (IRIsAutoVariable(node)) {
+    if (TypeIsVLA(node->type) || (node->flags & kIRNrvoMarker) != 0 ||
+        ARM_IS_REG_VAR(node->data.ivalue)) {
+      return 0;
+    }
+    return kARMFrameStorageOffset;
+  }
+  if (IRIsArgument(node) && !ARM_IS_REG_VAR(node->data.ivalue)) {
+    return node->data.ivalue < 0 ? kARMFrameStorageOffset
+                                 : kARMIncomingFrameOffset;
+  }
+  return 0;
+}
+
+static TargetInstruction* MarkFrameOffset(TargetInstruction* inst,
+                                          uint32_t flag) {
+  if (inst != NULL) {
+    inst->flags |= flag;
+  }
+  return inst;
+}
+
 static TargetInstruction* PagedOffsetFrom(ARMGenerator* g, TargetInstruction* src,
                                           int32_t offset, int32_t* page_offset) {
   // Offset is not in range.  Need to calculate an offset in a register.
@@ -1176,7 +1199,9 @@ static TargetInstruction* StoreImmediate(ARMGenerator* g, ARMOpcode opcode,
 
 static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
                                  TargetInstruction* src_addr, int length,
-                                 int src_offset, int dest_offset, bool count_as_call) {
+                                 int src_offset, int dest_offset,
+                                 bool count_as_call, uint32_t src_frame_flag,
+                                 uint32_t dest_frame_flag) {
   if (length <= 40) {
     // Length is short, copy using sequence of ld/sd and lb/sb instructions.
     int num_bytes = length & 3;
@@ -1184,11 +1209,15 @@ static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
     TargetInstruction* result = NULL;
     for (int i = 0; i < num_words; i++, src_offset += 4, dest_offset += 4) {
       TargetInstruction* load = LoadImmediate(g, ARM_OP(ldr), src_addr, src_offset);
+      load->flags |= src_frame_flag;
       result = StoreImmediate(g, ARM_OP(str), load, dest_addr, dest_offset);
+      result->flags |= dest_frame_flag;
     }
     for (int i = 0; i < num_bytes; i++, src_offset += 1, dest_offset += 1) {
       TargetInstruction* load = LoadImmediate(g, ARM_OP(ldrb), src_addr, src_offset);
+      load->flags |= src_frame_flag;
       result = StoreImmediate(g, ARM_OP(strb), load, dest_addr, dest_offset);
+      result->flags |= dest_frame_flag;
     }
     if (count_as_call) {
       g->base.num_calls--;
@@ -1205,14 +1234,16 @@ static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
                                            ARM_OP(mov));
   // Source in a1.
   if (src_offset != 0) {
-    src_addr = OffsetFrom(g, src_addr, src_offset);
+    src_addr = MarkFrameOffset(OffsetFrom(g, src_addr, src_offset),
+                               src_frame_flag);
   }
   TargetInstruction* arg1 = SetDestOrMove(g, src_addr, IntArgumentRegister(g, 1),
                                            ARM_OP(mov));
 
   // Dest in a0.
   if (dest_offset != 0) {
-    dest_addr = OffsetFrom(g, dest_addr, dest_offset);
+    dest_addr = MarkFrameOffset(OffsetFrom(g, dest_addr, dest_offset),
+                                dest_frame_flag);
   }
   TargetInstruction* arg0 = SetDestOrMove(g, dest_addr, IntArgumentRegister(g, 0),
                                           ARM_OP(mov));
@@ -1230,7 +1261,8 @@ static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
 }
 
 static TargetInstruction* Memzero(ARMGenerator* g, TargetInstruction* dest_addr,
-                                  int length, int offset) {
+                                  int length, int offset,
+                                  uint32_t dest_frame_flag) {
   if (length <= 40) {
     // Length is short, zero it inline with a sequence of word (str) and byte
     // (strb) stores.  ARM is a 32-bit machine, so a word is 4 bytes: stride by
@@ -1241,9 +1273,11 @@ static TargetInstruction* Memzero(ARMGenerator* g, TargetInstruction* dest_addr,
     TargetInstruction* result = NULL;
     for (int i = 0; i < num_words; i++, offset += 4) {
       result = StoreImmediate(g, ARM_OP(str), ZeroReg(g), dest_addr, offset);
+      result->flags |= dest_frame_flag;
     }
     for (int i = 0; i < num_bytes; i++, offset += 1) {
       result = StoreImmediate(g, ARM_OP(strb), ZeroReg(g), dest_addr, offset);
+      result->flags |= dest_frame_flag;
     }
     g->base.num_calls--;
     return result;
@@ -1266,7 +1300,8 @@ static TargetInstruction* Memzero(ARMGenerator* g, TargetInstruction* dest_addr,
   // zero-fill targets the bare frame pointer instead of the variable's slot.
   TargetInstruction* base = dest_addr;
   if (offset != 0) {
-    base = AddImmediate(g, dest_addr, offset);
+    base = MarkFrameOffset(AddImmediate(g, dest_addr, offset),
+                           dest_frame_flag);
   }
   TargetInstruction* arg0 = SetDestOrMove(g, base, IntArgumentRegister(g, 0), ARM_OP(mov));
 
@@ -1569,7 +1604,9 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       // Auto variable is in the stack frame.  These are accessed through
       // the frame pointer with a negative offset.
       TargetInstruction* addr = FramePointer(g);
-      return OffsetFrom(g, addr, LocalVariableOffset(g, var_offset));
+      return MarkFrameOffset(
+          OffsetFrom(g, addr, LocalVariableOffset(g, var_offset)),
+          kARMFrameStorageOffset);
     }
   } else if (IRIsArgument(node)) {
     // TODO: structs passed by reference.
@@ -1587,7 +1624,10 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       // Argument is on the stack.
       TargetInstruction* addr = FramePointer(g);
       int32_t var_offset = node->data.ivalue;
-      return OffsetFrom(g, addr, var_offset);
+      return MarkFrameOffset(
+          OffsetFrom(g, addr, var_offset),
+          var_offset < 0 ? kARMFrameStorageOffset
+                         : kARMIncomingFrameOffset);
     }
   } else if (IRIsStaticVariable(node)) {
     // The address of static variables need to be moved into a register.
@@ -2714,6 +2754,7 @@ static TargetInstruction* Load(ARMGenerator* g, IRNode* addr_node, ARMOpcode opc
   }
 
   TargetInstruction* result = Emit(g, SetInstructionSize(NewInstruction2(opcode, addr, offset), size));
+  result->flags |= FrameOffsetFlagForNode(addr_node);
 
 #if 0
   TargetInstruction* result = NULL;
@@ -2766,6 +2807,9 @@ static TargetInstruction* LowerWideLoad(ARMGenerator* g, IRNode* node) {
         GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
     hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), hi_addr, offset_hi),
                                     kSize32Bit));
+    uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
+    lo->flags |= frame_flag;
+    hi->flags |= frame_flag;
   }
   SetLoweredHi(node, hi);
   TargetInstruction* dest = GetDestInstruction(g, node);
@@ -2854,7 +2898,11 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
     return result;
   }
 
-  return Emit(g, SetInstructionSize(NewInstruction4(opcode, src, addr, offset, scale), size));
+  TargetInstruction* result =
+      Emit(g, SetInstructionSize(
+                  NewInstruction4(opcode, src, addr, offset, scale), size));
+  result->flags |= FrameOffsetFlagForNode(addr_node);
+  return result;
 }
 
 static TargetInstruction* Compare(ARMGenerator* g, TargetInstruction* lhs, TargetInstruction* rhs,
@@ -3071,15 +3119,19 @@ static TargetInstruction* LowerWideStore(ARMGenerator* g, IRNode* node) {
   assert(TargetIsConst(offset) &&
          "wide store with non-constant offset not supported");
   int off = (int)TargetIntValue(offset);
-  Emit(g, SetInstructionSize(
-              NewInstruction4(ARM_OP(str), src_lo, addr, offset, NULL),
-              kSize32Bit));
+  uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
+  TargetInstruction* low_store =
+      Emit(g, SetInstructionSize(
+                  NewInstruction4(ARM_OP(str), src_lo, addr, offset, NULL),
+                  kSize32Bit));
+  low_store->flags |= frame_flag;
   TargetInstruction* offset_hi =
       GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
   TargetInstruction* last = Emit(
       g, SetInstructionSize(
              NewInstruction4(ARM_OP(str), src_hi, addr, offset_hi, NULL),
              kSize32Bit));
+  last->flags |= frame_flag;
   return SetLoweredNode(node, last);
 }
 
@@ -3776,7 +3828,9 @@ static TargetInstruction* LowerMemcpy(ARMGenerator* g, IRNode* node) {
 
   int length = (int)((IRConstant*)node->inputs.value.p[2])->value.ivalue;
   TargetInstruction* result = Memcpy(g, dest_addr, src_addr, length,
-                                     src_offset_value, dest_offset_value, true);
+                                     src_offset_value, dest_offset_value, true,
+                                     FrameOffsetFlagForNode(src_node),
+                                     FrameOffsetFlagForNode(dest_node));
 
   SetLoweredNode(node, result);
   return result;
@@ -3813,7 +3867,8 @@ static TargetInstruction* LowerMemzero(ARMGenerator* g, IRNode* node) {
                           ? var->symbol->type->size
                           : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* result =
-      Memzero(g, dest_addr, zero_size, offset_value);
+      Memzero(g, dest_addr, zero_size, offset_value,
+              FrameOffsetFlagForNode(dest_node));
 
   SetLoweredNode(node, result);
   return result;
@@ -4237,14 +4292,15 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
           // registers).  Phase 4 then leaves this argument alone.
           TargetInstruction* arg = Materialize(g, arg_node);
           Memcpy(g, StackPointer(g), arg, (int)size, 0,
-                 (int)arg_location->location.offset, false);
+                 (int)arg_location->location.offset, false, 0, 0);
         }
         break;
       case kArgLocationPassedByReferenceInRegister:
       case kArgLocationPassedByReferenceOnStack: {
         TargetInstruction* arg = Materialize(g, arg_node);
         Memcpy(g, StackPointer(g), arg, (int)size, 0,
-               (int)(arg_location->reference_offset + next_pushed_arg_offset), false);
+               (int)(arg_location->reference_offset + next_pushed_arg_offset),
+               false, 0, 0);
         break;
       }
       default:
@@ -4602,12 +4658,11 @@ static TargetInstruction* LowerComputedBranch(ARMGenerator* g, IRNode* node) {
 // in the first input.
 static TargetInstruction* LowerBuiltinVaStart(ARMGenerator* g, IRNode* node) {
   TargetInstruction* s0 = Emit(g, NewInstruction(ARM_OP(fp)));
-  // fp points at the r0 slot of the variadic register save area (see the
-  // prologue in arm_emitter.c).  Skip the named integer-register arguments so
-  // ap points at the first variadic slot.  Subsequent 8-byte arguments are then
-  // 8-byte aligned relative to the (8-byte aligned) fp, which va_arg relies on.
+  // The canonical frame record is at [fp, fp+8), followed by the r0 slot of
+  // the variadic register save area. Skip the record and the named integer
+  // arguments so ap points at the first variadic slot.
   TargetInstruction* ap_value = s0;
-  int named_offset = g->num_int_arg_regs * 4;
+  int named_offset = ARM_STACK_FRAME_HEADER_SIZE + g->num_int_arg_regs * 4;
   if (named_offset != 0) {
     ap_value = AddImmediate(g, s0, named_offset);
   }
@@ -4620,8 +4675,11 @@ static TargetInstruction* LowerBuiltinVaStart(ARMGenerator* g, IRNode* node) {
     mv->dest = addr;
     return SetLoweredNode(node, addr);
   }
-  return SetLoweredNode(node,
-                        Emit(g, CopyInstructionSize(NewInstruction3(ARM_OP(str), ap_value, addr, offset), 0)));
+  TargetInstruction* store = Emit(
+      g, CopyInstructionSize(
+             NewInstruction3(ARM_OP(str), ap_value, addr, offset), 0));
+  store->flags |= FrameOffsetFlagForNode(node->inputs.value.p[0]);
+  return SetLoweredNode(node, store);
 }
 
 // The first input is &ap.  The 'ap' variable contains the address of the
@@ -4642,6 +4700,7 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
     ap_load = ap_addr;
   } else {
     ap_load = Emit(g, NewInstruction2(ARM_OP(ldr), ap_addr, ap_offset));
+    ap_load->flags |= FrameOffsetFlagForNode(node->inputs.value.p[0]);
   }
 
   // Variadic structs are passed by reference (see LowerCall): the save-area
@@ -4658,7 +4717,9 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
         Emit(g, NewInstruction2(ARM_OP(add), ap_load,
                                 GetIntConstant(g, NULL, kTargetType32Bit, 4)));
     if (on_stack) {
-      Emit(g, NewInstruction3(ARM_OP(str), next, ap_addr, ap_offset));
+      TargetInstruction* store =
+          Emit(g, NewInstruction3(ARM_OP(str), next, ap_addr, ap_offset));
+      store->flags |= FrameOffsetFlagForNode(node->inputs.value.p[0]);
     } else {
       TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(mov), next));
       mv->dest = ap_addr;
@@ -4707,7 +4768,9 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
                                GetIntConstant(g, NULL, kTargetType32Bit,
                                               is_eight ? 8 : 4)));
   if (on_stack) {
-    Emit(g, NewInstruction3(ARM_OP(str), addi, ap_addr, ap_offset));
+    TargetInstruction* store =
+        Emit(g, NewInstruction3(ARM_OP(str), addi, ap_addr, ap_offset));
+    store->flags |= FrameOffsetFlagForNode(node->inputs.value.p[0]);
   } else {
     TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(mov), addi));
     mv->dest = ap_addr;
@@ -4789,7 +4852,11 @@ static TargetInstruction* AtomicAddress(ARMGenerator* g, IRNode* addr_node) {
   TargetInstruction* scale;
   GetRegAndOffset(g, addr_node, &base, &offset, &scale);
   int off = offset != NULL && TargetIsConst(offset) ? ARMIntValue(offset) : 0;
-  return off == 0 ? base : AddImmediate(g, base, off);
+  uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
+  if (off == 0 && frame_flag == 0) {
+    return base;
+  }
+  return MarkFrameOffset(AddImmediate(g, base, off), frame_flag);
 }
 
 static void SetAtomicMetadata(TargetInstruction* inst, TypeRecord* value_type,
@@ -5487,6 +5554,31 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(ARMGenerator* g,
   return NULL;
 }
 
+static void NoteNamedIntArgumentRegisters(ARMGenerator* g,
+                                          const ArgLocation* location,
+                                          TypeRecord* type) {
+  int end = 0;
+  switch (location->type) {
+    case kArgLocationRegister:
+      if (!TypeIsFloatingPoint(type)) {
+        end = (int)location->location.offset + 1;
+      }
+      break;
+    case kArgLocationIntPair:
+      end = (int)location->location.offset + 2;
+      break;
+    case kArgLocationIntPairSplit:
+    case kArgLocationPassedByReferenceInRegister:
+      end = (int)location->location.offset + 1;
+      break;
+    default:
+      break;
+  }
+  if (end > g->num_int_arg_regs) {
+    g->num_int_arg_regs = end;
+  }
+}
+
 // Assign a register to a variable or argument if possible.  The
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
@@ -5530,6 +5622,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   // so the function must set one up (see EmptyStackFrame / OmitFramePointer).
   if (is_arg) {
     ArgLocation loc = ArgumentLocation(entry, args);
+    NoteNamedIntArgumentRegisters(g, &loc, effective_type);
     if (loc.type == kArgLocationPushed ||
         loc.type == kArgLocationPassedByReferenceOnStack ||
         loc.type == kArgLocationIntPairSplit) {
@@ -5599,7 +5692,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
                      NewSavedArgumentRegister(lo_reg + 1, ARM_FP_REG, offset + 4,
                                               false));
         entry->pooled->data.ivalue = offset;
-        g->num_int_arg_regs += 2;
       } else if (location.type == kArgLocationIntPairSplit) {
         int offset = AllocateSavedArgumentHome(g, 8, 4);
         int lo_reg = (int)location.location.offset;
@@ -5612,13 +5704,14 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
                     g, NULL, kTargetType32Bit,
                     ARM_STACK_FRAME_HEADER_SIZE + (int)location.second_offset)),
             kSize32Bit));
-        Emit(g, SetInstructionSize(
-                    NewInstruction3(
-                        ARM_OP(str), hi, FramePointer(g),
-                        GetIntConstant(g, NULL, kTargetType32Bit, offset + 4)),
-                    kSize32Bit));
+        hi->flags |= kARMIncomingFrameOffset;
+        TargetInstruction* store = Emit(g, SetInstructionSize(
+            NewInstruction3(
+                ARM_OP(str), hi, FramePointer(g),
+                GetIntConstant(g, NULL, kTargetType32Bit, offset + 4)),
+            kSize32Bit));
+        store->flags |= kARMFrameStorageOffset;
         entry->pooled->data.ivalue = offset;
-        g->num_int_arg_regs++;
       } else {
         entry->pooled->data.ivalue =
             ARM_STACK_FRAME_HEADER_SIZE + (int)location.location.offset;
@@ -5713,7 +5806,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
                        NewSavedArgumentRegister(lo_reg + 1, ARM_FP_REG, offset + 4,
                                                 false));
           entry->pooled->data.ivalue = offset;
-          g->num_int_arg_regs += 2;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else if (location.type == kArgLocationRegister) {
           // Argument is in a register so we need to save it to the stack. These
@@ -5726,7 +5818,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
               (int)location.location.offset, ARM_FP_REG, offset, false);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
-          g->num_int_arg_regs++;  // Argument was passed in a register.
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else {
           // Argument was passed on the stack (above the frame pointer).  The

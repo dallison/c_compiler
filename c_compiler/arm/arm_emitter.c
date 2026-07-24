@@ -275,12 +275,10 @@ static int StackFrameSize(ARMEmitter* emitter) {
   bool varargs = emitter->g->base.varargs;
 
   if (varargs) {
-    if (emitter->g->num_int_arg_regs < ARM_NUM_INT_ARGS) {
-      // All args other than those declared and in registers must
-      // be saved to the stack above the frame pointer and directly
-      // under the first pushed arg->base.  This adds to the stack frame size.
-      stack_frame_size += (ARM_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8;
-    }
+    // The prologue saves r0-r3 as four contiguous 32-bit words.  Reserve that
+    // exact area independently of how many registers contain named arguments;
+    // num_int_arg_regs only determines where va_start begins traversing it.
+    stack_frame_size += ARM_NUM_INT_ARGS * 4;
   }
   // A non-leaf procedure saves register variables on the stack as these
   // will be in saved registers.
@@ -387,48 +385,6 @@ static void EmitIntRegBlock(FILE* fp, const char* op, const char* base,
   fprintf(fp, "}\n");
 }
 
-static int CombinedSavedIntArgCount(ARMEmitter* emitter) {
-  if (emitter->g->base.varargs) {
-    return 0;
-  }
-  bool seen[ARM_NUM_INT_ARGS] = {false};
-  int max_reg = -1;
-  for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
-    SavedArgumentRegister* saved = emitter->g->saved_regs.value.p[i];
-    if (saved->is_fp || saved->base_reg_num != ARM_FP_REG ||
-        saved->reg_num < 0 || saved->reg_num >= ARM_NUM_INT_ARGS) {
-      continue;
-    }
-    seen[saved->reg_num] = true;
-    if (saved->reg_num > max_reg) {
-      max_reg = saved->reg_num;
-    }
-  }
-  if (max_reg < 0) {
-    return 0;
-  }
-  int count = max_reg + 1;
-  int base = -(count + 2) * 4;
-  for (int reg = 0; reg < count; reg++) {
-    if (!seen[reg]) {
-      return 0;
-    }
-    bool found = false;
-    for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
-      SavedArgumentRegister* saved = emitter->g->saved_regs.value.p[i];
-      if (!saved->is_fp && saved->base_reg_num == ARM_FP_REG &&
-          saved->reg_num == reg && saved->offset == base + reg * 4) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      return 0;
-    }
-  }
-  return count;
-}
-
 static int StructReturnPhysicalRegister(ARMEmitter* emitter) {
   if (emitter->g->struct_return_reg < 0) {
     return -1;
@@ -448,10 +404,64 @@ static void ReloadStructReturnAfterCall(ARMEmitter* emitter, FILE* fp) {
                         false, "hidden result pointer", fp);
 }
 
-static bool IsCombinedSavedIntArg(SavedArgumentRegister* saved, int count) {
-  return count > 0 && !saved->is_fp && saved->base_reg_num == ARM_FP_REG &&
-         saved->reg_num >= 0 && saved->reg_num < count &&
-         saved->offset == -(count + 2) * 4 + saved->reg_num * 4;
+static int CollectUsedIntRegisters(ARMEmitter* emitter, int* regs) {
+  BitSetIterator it;
+  int count = 0;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    regs[count++] = (int)BitSetIteratorValue(&it);
+    BitSetIteratorNext(&it);
+  }
+  return count;
+}
+
+static bool HasCanonicalFrameRecord(ARMEmitter* emitter) {
+  return !OmitFramePointer(emitter) && !EmptyStackFrame(emitter);
+}
+
+static int CanonicalIntSaveBytes(ARMEmitter* emitter) {
+  return HasCanonicalFrameRecord(emitter)
+             ? BitSetCount(&emitter->regs->used_int_regs) * 4
+             : 0;
+}
+
+static int FrameStorageOffsetDelta(ARMEmitter* emitter) {
+  // Code generation assigns frame offsets relative to the incoming sp. The
+  // AAPCS frame record is eight bytes below that point, and the integer
+  // callee-save block now sits between the record and local storage.
+  return ARM_STACK_FRAME_HEADER_SIZE - CanonicalIntSaveBytes(emitter);
+}
+
+static int AdjustFrameOffset(ARMEmitter* emitter, int offset) {
+  if (!HasCanonicalFrameRecord(emitter)) {
+    return offset;
+  }
+  return offset < 0 ? offset + FrameStorageOffsetDelta(emitter)
+                    : offset + ARM_STACK_FRAME_HEADER_SIZE;
+}
+
+static int AdjustInstructionFrameOffset(ARMEmitter* emitter,
+                                        const TargetInstruction* inst,
+                                        int offset) {
+  if ((inst->flags & kARMFrameStorageOffset) != 0) {
+    return HasCanonicalFrameRecord(emitter)
+               ? offset + FrameStorageOffsetDelta(emitter)
+               : offset;
+  }
+  if ((inst->flags & kARMIncomingFrameOffset) != 0) {
+    return HasCanonicalFrameRecord(emitter)
+               ? offset + ARM_STACK_FRAME_HEADER_SIZE
+               : offset;
+  }
+  return offset;
+}
+
+static bool IsFramePointerRegister(const TargetInstruction* inst) {
+  if (inst == NULL || inst->reg == NULL) {
+    return false;
+  }
+  const ARMRegister* reg = (const ARMRegister*)inst->reg;
+  return reg->type == kARMRegTypeInt && reg->base.num == ARM_FP_REG;
 }
 
 // Save all used registers on the stack.
@@ -467,8 +477,6 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
-  int combined_int_args = CombinedSavedIntArgCount(emitter);
-  int combined_int_arg_bytes = combined_int_args * 4;
   // The variadic register save area holds all four core argument registers in
   // contiguous 4-byte slots so va_arg can walk them like a packed argument
   // list (honouring 8-byte alignment for double / long long).
@@ -552,11 +560,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
                      ARM_STACK_FRAME_HEADER_SIZE;
 
   int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
-  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
-  bool writeback_int_save =
-      used_int_count > 0 && used_float_count == 0 &&
-      !NeedsStructReturnHome(emitter);
-  int writeback_int_bytes = writeback_int_save ? used_int_count * 4 : 0;
+  bool canonical_frame = HasCanonicalFrameRecord(emitter);
+  int canonical_int_bytes = CanonicalIntSaveBytes(emitter);
+  bool leaf_writeback_int_save =
+      OmitFramePointer(emitter) && used_int_count > 0;
+  int leaf_writeback_int_bytes =
+      leaf_writeback_int_save ? used_int_count * 4 : 0;
   int first_saved_slot_size = used_int_count > 0 ? 4 : 8;
 
   // Offset from sp of first saved register.  When the frame pointer is omitted
@@ -567,16 +576,11 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
                           space_above_frame_pointer -
                           emitter->spill_region_size +
                           (8 - first_saved_slot_size);  // First saved register.
-  if (writeback_int_save) {
-    // Put an integer-only save area at the bottom of the frame. This lets the
-    // block store allocate that portion of the frame with writeback.
-    saved_reg_offset = writeback_int_bytes - 4;
-  }
-
   if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
     // Frame-pointer-less leaf: reserve the callee-saved register area only.
     // fp and lr are left untouched; everything is addressed via sp.
-    DecrementStackPointer(emitter, stack_frame_size - writeback_int_bytes, fp);
+    DecrementStackPointer(emitter,
+                          stack_frame_size - leaf_writeback_int_bytes, fp);
   } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
@@ -604,32 +608,19 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
       }
       EmitIntRegBlock(fp, "stmia", "sp", arg_regs, ARM_NUM_INT_ARGS);
     }
-    if (combined_int_args > 0) {
-      int regs[ARM_NUM_INT_ARGS + 2];
-      for (int i = 0; i < combined_int_args; i++) {
-        regs[i] = i;
-      }
-      regs[combined_int_args] = ARM_FP_REG;
-      regs[combined_int_args + 1] = ARM_LR_REG;
-      EmitIntRegBlock(fp, "stmdb", "sp!", regs, combined_int_args + 2);
-    } else {
-      int regs[] = {ARM_FP_REG, ARM_LR_REG};
-      EmitIntRegBlock(fp, "stmdb", "sp!", regs, 2);
-    }
-    // Point fp at the slot just above the saved fp/lr, so the 8-byte header
-    // occupies offsets [-8,-1] from fp.  Every offset convention in this file
-    // (saved-arg base of -16, local vars at var_offset - stack_frame_size -
-    // HEADER, the callee-saved offset, etc.) assumes the header sits below fp.
-    // Using "add fp, sp, #0" would place fp at the saved fp, pushing every
-    // fp-relative region down by 8 bytes and making the lowest saved-arg slot
-    // overlap the top callee-saved spill slot.  For a varargs function this also
-    // lands fp at the base of the register save area reserved above.
-    fprintf(fp, "\tadd fp, sp, #%d\n",
-            ARM_STACK_FRAME_HEADER_SIZE + combined_int_arg_bytes);
+    int frame_regs[ARM_NUM_INT_REGS + 2];
+    int frame_reg_count = CollectUsedIntRegisters(emitter, frame_regs);
+    frame_regs[frame_reg_count++] = ARM_FP_REG;
+    frame_regs[frame_reg_count++] = ARM_LR_REG;
+    EmitIntRegBlock(fp, "stmdb", "sp!", frame_regs, frame_reg_count);
+    // AAPCS32 requires fp to point at the two-word frame record: previous fp at
+    // [fp] and entry lr at [fp,#4]. Integer callee-saves precede that record in
+    // the same block transfer.
+    fprintf(fp, "\tadd fp, sp, #%d\n", canonical_int_bytes);
     DecrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
                               space_above_frame_pointer -
-                              combined_int_arg_bytes - writeback_int_bytes,
+                              canonical_int_bytes,
                           fp);
   }
 
@@ -641,10 +632,9 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   }
   for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
     SavedArgumentRegister* saved_reg = emitter->g->saved_regs.value.p[i];
-    if (IsCombinedSavedIntArg(saved_reg, combined_int_args)) {
-      continue;
-    }
-    int offset = saved_reg->offset;
+    int offset = saved_reg->base_reg_num == ARM_FP_REG
+                     ? AdjustFrameOffset(emitter, saved_reg->offset)
+                     : saved_reg->offset;
     ARMRegisterType reg_type =
         saved_reg->is_fp ? kARMRegTypeFloat : kARMRegTypeInt;
     int saved_reg_size =
@@ -660,7 +650,8 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   }
   
   if (!is_leaf) {
-    fprintf(fp, "\t// Local vars at offset -%d(s0)\n", local_vars);
+    int local_offset = AdjustFrameOffset(emitter, -local_vars);
+    fprintf(fp, "\t// Local vars at offset %d(fp)\n", local_offset);
   }
   
   // Space for spilled registers.
@@ -671,6 +662,9 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   //
   int spilled_region_hi_addr = local_vars;
   int first_spill_offset = spilled_region_hi_addr + 8;
+  if (canonical_frame) {
+    first_spill_offset -= FrameStorageOffsetDelta(emitter);
+  }
   emitter->first_spill_offset = first_spill_offset;
   if (emitter->spill_region_size > 0) {
      fprintf(fp, "\t// Spilled register region: %d bytes at -%d(s0) to -%d(s0)\n",
@@ -690,16 +684,13 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   // transfer.  Integer registers are 32-bit on ARM, so the save area uses
   // a 4-byte stride (lowest register at the lowest address, matching
   // stmia/ldmia and the interpreter).
-  int int_regs[16];
-  int num_int = 0;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
-    BitSetIteratorNext(&it);
-  }
+  int int_regs[ARM_NUM_INT_REGS];
+  int num_int = CollectUsedIntRegisters(emitter, int_regs);
   if (num_int > 0) {
     fprintf(fp, "\t// Saved integer registers.\n");
-    if (writeback_int_save) {
+    if (canonical_frame) {
+      // Saved alongside fp/lr above.
+    } else if (leaf_writeback_int_save) {
       EmitIntRegBlock(fp, "stmdb", "sp!", int_regs, num_int);
     } else if (num_int >= 3) {
       int base_low = saved_reg_offset - 4 * (num_int - 1);
@@ -749,8 +740,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
     assert(saved_reg_offset >= 0);
     fprintf(fp, "\tstr r0, [sp, #%d]\t// hidden result pointer\n",
             saved_reg_offset);
+    // This slot remains sp-relative at the bottom of the completed frame. The
+    // canonical frame record moves fp down by eight bytes, but relocating the
+    // integer save block does not move this slot.
     emitter->struct_return_fp_offset =
-        saved_reg_offset - stack_frame_size + space_above_frame_pointer;
+        saved_reg_offset - stack_frame_size + space_above_frame_pointer +
+        (canonical_frame ? ARM_STACK_FRAME_HEADER_SIZE : 0);
   }
 
   if (!is_leaf) {
@@ -769,14 +764,13 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
-  int combined_int_args = CombinedSavedIntArgCount(emitter);
-  int combined_int_arg_bytes = combined_int_args * 4;
   int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
-  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
-  bool writeback_int_restore =
-      used_int_count > 0 && used_float_count == 0 &&
-      !NeedsStructReturnHome(emitter);
-  int writeback_int_bytes = writeback_int_restore ? used_int_count * 4 : 0;
+  bool canonical_frame = HasCanonicalFrameRecord(emitter);
+  int canonical_int_bytes = CanonicalIntSaveBytes(emitter);
+  bool leaf_writeback_int_restore =
+      OmitFramePointer(emitter) && used_int_count > 0;
+  int leaf_writeback_int_bytes =
+      leaf_writeback_int_restore ? used_int_count * 4 : 0;
   // The variadic register save area holds all four core argument registers in
   // contiguous 4-byte slots so va_arg can walk them like a packed argument
   // list (honouring 8-byte alignment for double / long long).
@@ -798,7 +792,8 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   // allocation.  Post-prologue: sp = fp - stack_frame_size + space_above.
   if (emitter->g->uses_dynamic_stack && !EmptyStackFrame(emitter)) {
     AddSubImmediate(emitter, "sp", "fp", /*add=*/false,
-                    stack_frame_size - space_above_frame_pointer,
+                    stack_frame_size - space_above_frame_pointer -
+                        (canonical_frame ? ARM_STACK_FRAME_HEADER_SIZE : 0),
                     "restore sp (dynamic stack)", fp);
   }
 
@@ -809,14 +804,11 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   // Restore in the same order and with the same layout SaveRegisters used:
   // integer registers (a single ldmia when there are >= 3) first, then floating
   // point.
-  int int_regs[16];
-  int num_int = 0;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
-    BitSetIteratorNext(&it);
-  }
-  if (writeback_int_restore) {
+  int int_regs[ARM_NUM_INT_REGS];
+  int num_int = CollectUsedIntRegisters(emitter, int_regs);
+  if (canonical_frame) {
+    // Restored with fp/lr after releasing local storage.
+  } else if (leaf_writeback_int_restore) {
     EmitIntRegBlock(fp, "ldmia", "sp!", int_regs, num_int);
   } else if (num_int >= 3) {
     int base_low = offset - 4 * (num_int - 1);
@@ -853,7 +845,8 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
 
   if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
     // Frame-pointer-less leaf: just release the callee-saved register area.
-    IncrementStackPointer(emitter, stack_frame_size - writeback_int_bytes, fp);
+    IncrementStackPointer(emitter,
+                          stack_frame_size - leaf_writeback_int_bytes, fp);
   } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
@@ -863,13 +856,13 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     IncrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
                               space_above_frame_pointer -
-                              combined_int_arg_bytes - writeback_int_bytes,
+                              canonical_int_bytes,
                           fp);
-    if (combined_int_arg_bytes > 0) {
-      IncrementStackPointer(emitter, combined_int_arg_bytes, fp);
-    }
-      int regs[] = {ARM_FP_REG, ARM_LR_REG};
-      EmitIntRegBlock(fp, "ldmia", "sp!", regs, 2);
+    int frame_regs[ARM_NUM_INT_REGS + 2];
+    int frame_reg_count = CollectUsedIntRegisters(emitter, frame_regs);
+    frame_regs[frame_reg_count++] = ARM_FP_REG;
+    frame_regs[frame_reg_count++] = ARM_LR_REG;
+    EmitIntRegBlock(fp, "ldmia", "sp!", frame_regs, frame_reg_count);
     // Release the variadic register save area reserved above the saved fp/lr.
     if (varargs && space_above_frame_pointer > 0) {
       IncrementStackPointer(emitter, space_above_frame_pointer, fp);
@@ -886,40 +879,18 @@ static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
   // fixed-frame sp so VLA/alloca adjustments made inside the try block cannot
   // affect the saved-register addresses.
   AddSubImmediate(emitter, "sp", "fp", /*add=*/false,
-                  stack_frame_size - space_above_frame_pointer,
+                  stack_frame_size - space_above_frame_pointer -
+                      ARM_STACK_FRAME_HEADER_SIZE,
                   "restore exception landing sp", fp);
 
   int offset = emitter->saved_reg_offset;
   char buf[8];
   BitSetIterator it;
-  int int_regs[16];
-  int num_int = 0;
-  int used_float_count = BitSetCount(&emitter->regs->used_float_regs);
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
-    BitSetIteratorNext(&it);
-  }
-  bool writeback_int_layout =
-      num_int > 0 && used_float_count == 0 &&
-      !NeedsStructReturnHome(emitter);
-  if (writeback_int_layout) {
-    EmitIntRegBlock(fp, "ldmia", "sp", int_regs, num_int);
-  } else if (num_int >= 3) {
-    int base_low = offset - 4 * (num_int - 1);
-    const char* base = "sp";
-    if (base_low != 0) {
-      AddSubImmediate(emitter, "ip", "sp", /*add=*/true, base_low, NULL, fp);
-      base = "ip";
-    }
-    EmitIntRegBlock(fp, "ldmia", base, int_regs, num_int);
-  } else {
-    for (int i = 0; i < num_int; i++) {
-      fprintf(fp, "\tldr %s, [sp, #%d]\n",
-              ARMRegisterNameFromNum(int_regs[i], kARMRegTypeInt, kSize32Bit,
-                                     buf, sizeof(buf)),
-              offset - 4 * i);
-    }
+  int int_regs[ARM_NUM_INT_REGS];
+  int num_int = CollectUsedIntRegisters(emitter, int_regs);
+  if (num_int > 0) {
+    AddSubImmediate(emitter, "ip", "fp", /*add=*/false, num_int * 4, NULL, fp);
+    EmitIntRegBlock(fp, "ldmia", "ip", int_regs, num_int);
   }
   offset -= 4 * num_int;
   if (num_int > 0) {
@@ -1645,6 +1616,38 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
   }
 
   // General case for instruction printing->base.
+  bool negative_fp_offset =
+      inst->operand[0] != NULL && inst->operand[1] != NULL &&
+      TargetIsConst(inst->operand[1]) &&
+      (((ARMOpcode)inst->opcode == ARM_OP(sub) &&
+        TargetIntValue(inst->operand[1]) > 0) ||
+       ((ARMOpcode)inst->opcode == ARM_OP(add) &&
+        TargetIntValue(inst->operand[1]) < 0));
+  if (((ARMOpcode)inst->opcode == ARM_OP(add) ||
+       (ARMOpcode)inst->opcode == ARM_OP(sub)) &&
+      inst->reg != NULL && inst->operand[0] != NULL &&
+      (((inst->flags &
+         (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) ||
+       (negative_fp_offset &&
+        IsFramePointerRegister(inst->operand[0]))) &&
+      inst->operand[1] != NULL && TargetIsConst(inst->operand[1]) &&
+      inst->operand[2] == NULL) {
+    int offset = (int)TargetIntValue(inst->operand[1]);
+    if ((ARMOpcode)inst->opcode == ARM_OP(sub)) {
+      offset = -offset;
+    }
+    if ((inst->flags &
+         (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) {
+      offset = AdjustInstructionFrameOffset(emitter, inst, offset);
+    } else {
+      offset = AdjustFrameOffset(emitter, offset);
+    }
+    fprintf(fp, "\t%s %s, %s, #%d\n", offset < 0 ? "sub" : "add",
+            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[0], kSize32Bit, buf2, sizeof(buf2)),
+            offset < 0 ? -offset : offset);
+    return;
+  }
 
   TrapInstruction(inst);
 
@@ -1722,6 +1725,13 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0]->reg != NULL);
       if (TargetIsConst(inst->operand[1])) {
         int offset = (int)TargetIntValue(inst->operand[1]);
+        if ((inst->flags &
+             (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) {
+          offset = AdjustInstructionFrameOffset(emitter, inst, offset);
+        } else if (offset < 0 &&
+                   IsFramePointerRegister(inst->operand[0])) {
+          offset = AdjustFrameOffset(emitter, offset);
+        }
         assert(ARMIsPossibleImmediate(offset));
         fprintf(fp, "%s, [%s, #%d]\n",
                 GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
@@ -1761,6 +1771,13 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[1]->reg != NULL);
       if (TargetIsConst(inst->operand[2])) {
         int offset = (int)TargetIntValue(inst->operand[2]);
+        if ((inst->flags &
+             (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) {
+          offset = AdjustInstructionFrameOffset(emitter, inst, offset);
+        } else if (offset < 0 &&
+                   IsFramePointerRegister(inst->operand[1])) {
+          offset = AdjustFrameOffset(emitter, offset);
+        }
         assert(ARMIsPossibleImmediate(offset));
         fprintf(fp, "%s, [%s, #%d]\n",
                 GetRegisterName(inst->operand[0], reg_size, buf1,
