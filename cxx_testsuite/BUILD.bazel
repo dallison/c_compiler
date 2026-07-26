@@ -8,6 +8,8 @@ load("//:davecc/modules.bzl", "davecc_binary", "davecc_module")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["tests/exec/0282_standard_mutex.cpp"])
+
 davecc_module(
     name = "bazel_hello_module",
     src = "tests/modules/hello.cppm",

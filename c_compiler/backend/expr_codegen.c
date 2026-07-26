@@ -561,8 +561,13 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
           : rhs;
   IROpcode opcode = FindIROpcode(opcode_type_node, node->base.op);
   IRNode* result = GeneratorEmit(gen, NewIR2(opcode, left, right));
-  if (IRIsComparison(result) && !TypeIsBool(node->base.type)) {
-    IRSetType(result, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  if (IRIsComparison(result)) {
+    TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+    if (node->base.type == NULL || TypeIsBool(node->base.type)) {
+      return IRSetType(result,
+                       node->base.type == NULL ? bool_type : node->base.type);
+    }
+    IRSetType(result, bool_type);
     return GenerateZeroExtend(gen, &node->base, result);
   }
   return IRSetType(result, node->base.type);

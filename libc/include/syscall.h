@@ -30,6 +30,8 @@
 #define SYS_THREAD_EXIT 19
 #define SYS_HEAP_LOCK 20
 #define SYS_HEAP_UNLOCK 21
+#define SYS_THREAD_YIELD 23
+#define SYS_MONOTONIC_TIME 24
 
 #elif defined(__x86_64__)
 #define SYS_OPEN 2
@@ -52,6 +54,8 @@
 #define SYS_THREAD_EXIT 19
 #define SYS_HEAP_LOCK 20
 #define SYS_HEAP_UNLOCK 21
+#define SYS_THREAD_YIELD 23
+#define SYS_MONOTONIC_TIME 24
 
 #elif defined(__p_code__)
 #define SYS_OPEN 2
@@ -86,6 +90,8 @@
 #define SYS_THREAD_EXIT 19
 #define SYS_HEAP_LOCK 20
 #define SYS_HEAP_UNLOCK 21
+#define SYS_THREAD_YIELD 23
+#define SYS_MONOTONIC_TIME 24
 
 #elif defined(__arm__)
 #define SYS_OPEN 2
@@ -108,6 +114,8 @@
 #define SYS_THREAD_EXIT 19
 #define SYS_HEAP_LOCK 20
 #define SYS_HEAP_UNLOCK 21
+#define SYS_THREAD_YIELD 23
+#define SYS_MONOTONIC_TIME 24
 
 #elif defined(__W65C02__)
 #define SYS_EXIT 1

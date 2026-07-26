@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -742,6 +743,18 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       return ARMSyscallHeapLock(interpreter->guest_thread);
     case ARM_SYSCALL_HEAP_UNLOCK:
       return ARMSyscallHeapUnlock(interpreter->guest_thread);
+    case ARM_SYSCALL_THREAD_YIELD:
+      return sched_yield();
+    case ARM_SYSCALL_MONOTONIC_TIME: {
+      struct timespec now;
+      int64_t* result =
+          (int64_t*)ResolveHostPtr(interpreter, (uint32_t)a1, sizeof(int64_t));
+      if (result == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+      }
+      *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+      return 0;
+    }
     case ARM_SYSCALL_RESOLVE:
       ResolveAndFixupSymbol(interpreter, pc_updated);
       return 0;

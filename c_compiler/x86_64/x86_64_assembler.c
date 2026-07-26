@@ -1848,6 +1848,13 @@ static void Assemble_nop(X86_64Assembler* assembler) {
   AssemblerEmitByte(&ASM, ASM.current_section, 0x90);
 }
 
+static void Assemble_mfence(X86_64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASM.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASM.current_section, 0xae);
+  AssemblerEmitByte(&ASM, ASM.current_section, 0xf0);
+}
+
 #define JCC(name, opcode)                                                    \
   static void Assemble_##name(X86_64Assembler* assembler) {                  \
     EmitBranch(assembler, opcode, false);                                    \
@@ -1954,6 +1961,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(jmp);
   INST(ret);
   INST(nop);
+  INST(mfence);
   INST(je);
   INST(jz);
   INST(jne);

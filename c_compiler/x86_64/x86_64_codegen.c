@@ -2413,6 +2413,17 @@ static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
   return X86_64_OP(storel);
 }
 
+static int AtomicIRConstant(IRNode* node) {
+  assert(node != NULL && IRIsConst(node));
+  return (int)((IRConstant*)node)->value.ivalue;
+}
+
+static TargetInstruction* EmitAtomicFence(X86_64Generator* rv) {
+  TargetInstruction* fence = NewInstruction(X86_64_OP(nop));
+  fence->flags |= X86_64_MFENCE;
+  return Emit(rv, fence);
+}
+
 static TargetInstruction* LowerAtomicLoad(X86_64Generator* rv, Generator* gen,
                                           IRNode* node) {
   TargetInstruction* result =
@@ -2429,8 +2440,12 @@ static TargetInstruction* LowerAtomicStore(X86_64Generator* rv, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src = Materialize(rv, src_node);
-  return SetLoweredNode(node, Store(rv, addr_node, src,
-                                    AtomicStoreOpcode(src_node->type)));
+  TargetInstruction* store =
+      Store(rv, addr_node, src, AtomicStoreOpcode(src_node->type));
+  if (AtomicIRConstant(node->inputs.value.p[2]) == 5) {
+    EmitAtomicFence(rv);
+  }
+  return SetLoweredNode(node, store);
 }
 
 static TargetInstruction* LowerAtomicFetchAddSub(X86_64Generator* rv,
@@ -4432,7 +4447,11 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       return LowerAtomicCompareExchange(rv, gen, node, true, true);
 
     case IR_OP(atomic_fence):
-      return SetLoweredNode(node, GetIntConstant(rv, node, kTargetType32Bit, 0));
+      if (AtomicIRConstant(node->inputs.value.p[0]) == 5) {
+        return SetLoweredNode(node, EmitAtomicFence(rv));
+      }
+      return SetLoweredNode(node,
+                            GetIntConstant(rv, node, kTargetType32Bit, 0));
       
     case IR_OP(decsp):
     case IR_OP(savesp):

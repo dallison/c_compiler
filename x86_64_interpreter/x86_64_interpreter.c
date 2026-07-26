@@ -1266,6 +1266,11 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
 
   if (b0 == 0x0F) {
     uint8_t b1 = Fetch8(interpreter, &pos);
+    if (b1 == 0xAE && Fetch8(interpreter, &pos) == 0xF0) {
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      *insn_len = pos;
+      return true;
+    }
     bool sse_ok = false;
     if (ExecuteSSE(interpreter, &pos, rex, sse_prefix, b1, &sse_ok)) {
       *insn_len = pos;
@@ -1360,25 +1365,51 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
         destination = ReadReg(interpreter, modrm.rm) & mask;
       } else {
         address = EffectiveAddress(interpreter, &modrm, pos);
-        destination = width == 1 ? Load8(interpreter, address)
-                      : width == 2 ? Load16(interpreter, address)
-                      : width == 4 ? Load32(interpreter, address)
-                                   : Load64(interpreter, address);
+        if (!InterpreterAddressOk(interpreter, address, (size_t)width)) {
+          fprintf(stderr, "CMPXCHG outside mapped memory at 0x%" PRIx64 "\n",
+                  address);
+          X86_64InterpreterFail(interpreter, 1);
+          return false;
+        }
+        destination = 0;
       }
       uint64_t rax = ReadReg(interpreter, X86_REG_RAX);
       uint64_t accumulator = rax & mask;
       uint64_t source = ReadReg(interpreter, modrm.reg) & mask;
-      interpreter->zf = accumulator == destination;
+      if (modrm.mod != 3) {
+        if (width == 1) {
+          uint8_t expected = (uint8_t)accumulator;
+          interpreter->zf = __atomic_compare_exchange_n(
+              (uint8_t*)(uintptr_t)address, &expected, (uint8_t)source, false,
+              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          destination = expected;
+        } else if (width == 2) {
+          uint16_t expected = (uint16_t)accumulator;
+          interpreter->zf = __atomic_compare_exchange_n(
+              (uint16_t*)(uintptr_t)address, &expected, (uint16_t)source, false,
+              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          destination = expected;
+        } else if (width == 4) {
+          uint32_t expected = (uint32_t)accumulator;
+          interpreter->zf = __atomic_compare_exchange_n(
+              (uint32_t*)(uintptr_t)address, &expected, (uint32_t)source, false,
+              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          destination = expected;
+        } else {
+          uint64_t expected = accumulator;
+          interpreter->zf = __atomic_compare_exchange_n(
+              (uint64_t*)(uintptr_t)address, &expected, source, false,
+              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          destination = expected;
+        }
+      } else {
+        interpreter->zf = accumulator == destination;
+      }
       interpreter->cf = accumulator < destination;
       if (interpreter->zf) {
         if (modrm.mod == 3) {
           uint64_t value = ReadReg(interpreter, modrm.rm);
           WriteReg(interpreter, modrm.rm, (value & ~mask) | source);
-        } else {
-          if (width == 1) Store8(interpreter, address, (uint8_t)source);
-          else if (width == 2) Store16(interpreter, address, (uint16_t)source);
-          else if (width == 4) Store32(interpreter, address, (uint32_t)source);
-          else Store64(interpreter, address, source);
         }
       } else {
         WriteReg(interpreter, X86_REG_RAX,

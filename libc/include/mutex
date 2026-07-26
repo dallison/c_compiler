@@ -1,0 +1,457 @@
+//
+//  mutex
+//  libc
+//
+//  C++20 mutex support for DaveCC.
+//
+
+#ifndef mutex_h
+#define mutex_h
+
+#include <chrono>
+#include <cstdlib>
+#include <functional>
+#include <threads.h>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+struct defer_lock_t {
+  explicit constexpr defer_lock_t() = default;
+};
+struct try_to_lock_t {
+  explicit constexpr try_to_lock_t() = default;
+};
+struct adopt_lock_t {
+  explicit constexpr adopt_lock_t() = default;
+};
+
+inline constexpr defer_lock_t defer_lock{};
+inline constexpr try_to_lock_t try_to_lock{};
+inline constexpr adopt_lock_t adopt_lock{};
+
+template <class Mutex1, class Mutex2, class... Mutexes>
+void lock(Mutex1& first, Mutex2& second, Mutexes&... mutexes);
+
+namespace __mutex_detail {
+
+inline void __check(int result) {
+  if (result != thrd_success) {
+    abort();
+  }
+}
+
+template <class Rep, class Period>
+long long __timeout_us(const chrono::duration<Rep, Period>& timeout) {
+  if (timeout <= chrono::duration<Rep, Period>::zero()) {
+    return 0;
+  }
+  long double value =
+      static_cast<long double>(timeout.count()) *
+      static_cast<long double>(Period::num) * 1000000.0L /
+      static_cast<long double>(Period::den);
+  if (value >= 9223372036854775807.0L) {
+    return 0x7fffffffffffffffLL;
+  }
+  if (value < 1.0L) {
+    return 1;
+  }
+  long long rounded = static_cast<long long>(value);
+  return static_cast<long double>(rounded) < value ? rounded + 1 : rounded;
+}
+
+template <class Mutex, class Rep, class Period>
+bool __try_lock_for(Mutex& mutex,
+                    const chrono::duration<Rep, Period>& timeout) {
+  return mutex.try_lock_for(timeout);
+}
+
+template <class Mutex, class Clock, class Duration>
+bool __try_lock_until(
+    Mutex& mutex, const chrono::time_point<Clock, Duration>& timeout) {
+  return mutex.try_lock_until(timeout);
+}
+
+template <class... Mutexes>
+struct __mutex_pack;
+
+template <>
+struct __mutex_pack<> {
+  __mutex_pack() {}
+  void unlock() {}
+};
+
+template <class Mutex, class... Mutexes>
+struct __mutex_pack<Mutex, Mutexes...> {
+  Mutex& first;
+  __mutex_pack<Mutexes...> rest;
+
+  __mutex_pack(Mutex& mutex, Mutexes&... mutexes)
+      : first(mutex), rest(mutexes...) {}
+
+  void unlock() {
+    first.unlock();
+    rest.unlock();
+  }
+};
+
+}  // namespace __mutex_detail
+
+class mutex {
+ public:
+  using native_handle_type = mtx_t*;
+
+  mutex() { __mutex_detail::__check(mtx_init(&__mutex_, mtx_plain)); }
+  ~mutex() { mtx_destroy(&__mutex_); }
+  mutex(const mutex&) = delete;
+  mutex& operator=(const mutex&) = delete;
+
+  void lock() { __mutex_detail::__check(mtx_lock(&__mutex_)); }
+  bool try_lock() { return mtx_trylock(&__mutex_) == thrd_success; }
+  void unlock() { __mutex_detail::__check(mtx_unlock(&__mutex_)); }
+  native_handle_type native_handle() { return &__mutex_; }
+
+ private:
+  mtx_t __mutex_;
+};
+
+class recursive_mutex {
+ public:
+  using native_handle_type = mtx_t*;
+
+  recursive_mutex() {
+    __mutex_detail::__check(mtx_init(&__mutex_, mtx_recursive));
+  }
+  ~recursive_mutex() { mtx_destroy(&__mutex_); }
+  recursive_mutex(const recursive_mutex&) = delete;
+  recursive_mutex& operator=(const recursive_mutex&) = delete;
+
+  void lock() { __mutex_detail::__check(mtx_lock(&__mutex_)); }
+  bool try_lock() { return mtx_trylock(&__mutex_) == thrd_success; }
+  void unlock() { __mutex_detail::__check(mtx_unlock(&__mutex_)); }
+  native_handle_type native_handle() { return &__mutex_; }
+
+ private:
+  mtx_t __mutex_;
+};
+
+class timed_mutex {
+ public:
+  using native_handle_type = mtx_t*;
+
+  timed_mutex() { __mutex_detail::__check(mtx_init(&__mutex_, mtx_timed)); }
+  ~timed_mutex() { mtx_destroy(&__mutex_); }
+  timed_mutex(const timed_mutex&) = delete;
+  timed_mutex& operator=(const timed_mutex&) = delete;
+
+  void lock() { __mutex_detail::__check(mtx_lock(&__mutex_)); }
+  bool try_lock() { return mtx_trylock(&__mutex_) == thrd_success; }
+
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    return __davecc_mtx_timedlock_for(
+               &__mutex_, __mutex_detail::__timeout_us(timeout)) ==
+           thrd_success;
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    auto now = Clock::now();
+    return timeout <= now ? try_lock() : try_lock_for(timeout - now);
+  }
+
+  void unlock() { __mutex_detail::__check(mtx_unlock(&__mutex_)); }
+  native_handle_type native_handle() { return &__mutex_; }
+
+ private:
+  mtx_t __mutex_;
+};
+
+class recursive_timed_mutex {
+ public:
+  using native_handle_type = mtx_t*;
+
+  recursive_timed_mutex() {
+    __mutex_detail::__check(
+        mtx_init(&__mutex_, mtx_recursive | mtx_timed));
+  }
+  ~recursive_timed_mutex() { mtx_destroy(&__mutex_); }
+  recursive_timed_mutex(const recursive_timed_mutex&) = delete;
+  recursive_timed_mutex& operator=(const recursive_timed_mutex&) = delete;
+
+  void lock() { __mutex_detail::__check(mtx_lock(&__mutex_)); }
+  bool try_lock() { return mtx_trylock(&__mutex_) == thrd_success; }
+
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    return __davecc_mtx_timedlock_for(
+               &__mutex_, __mutex_detail::__timeout_us(timeout)) ==
+           thrd_success;
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    auto now = Clock::now();
+    return timeout <= now ? try_lock() : try_lock_for(timeout - now);
+  }
+
+  void unlock() { __mutex_detail::__check(mtx_unlock(&__mutex_)); }
+  native_handle_type native_handle() { return &__mutex_; }
+
+ private:
+  mtx_t __mutex_;
+};
+
+template <class Mutex>
+class lock_guard {
+ public:
+  using mutex_type = Mutex;
+
+  explicit lock_guard(mutex_type& mutex) : __mutex_(mutex) {
+    __mutex_.lock();
+  }
+  lock_guard(mutex_type& mutex, adopt_lock_t) : __mutex_(mutex) {}
+  ~lock_guard() { __mutex_.unlock(); }
+  lock_guard(const lock_guard&) = delete;
+  lock_guard& operator=(const lock_guard&) = delete;
+
+ private:
+  mutex_type& __mutex_;
+};
+
+template <class Mutex>
+class unique_lock {
+ public:
+  using mutex_type = Mutex;
+
+  unique_lock() noexcept : __mutex_(nullptr), __owns_(false) {}
+  explicit unique_lock(mutex_type& mutex) : __mutex_(&mutex), __owns_(false) {
+    lock();
+  }
+  unique_lock(mutex_type& mutex, defer_lock_t) noexcept
+      : __mutex_(&mutex), __owns_(false) {}
+  unique_lock(mutex_type& mutex, try_to_lock_t)
+      : __mutex_(&mutex), __owns_(mutex.try_lock()) {}
+  unique_lock(mutex_type& mutex, adopt_lock_t)
+      : __mutex_(&mutex), __owns_(true) {}
+
+  template <class Clock, class Duration>
+  unique_lock(mutex_type& mutex,
+              const chrono::time_point<Clock, Duration>& timeout)
+      : __mutex_(&mutex),
+        __owns_(__mutex_detail::__try_lock_until(mutex, timeout)) {}
+
+  template <class Rep, class Period>
+  unique_lock(mutex_type& mutex,
+              const chrono::duration<Rep, Period>& timeout)
+      : __mutex_(&mutex),
+        __owns_(__mutex_detail::__try_lock_for(mutex, timeout)) {}
+
+  ~unique_lock() {
+    if (__owns_) {
+      __mutex_->unlock();
+    }
+  }
+
+  unique_lock(unique_lock&& other) noexcept
+      : __mutex_(other.__mutex_), __owns_(other.__owns_) {
+    other.__mutex_ = nullptr;
+    other.__owns_ = false;
+  }
+
+  unique_lock& operator=(unique_lock&& other) noexcept {
+    if (this != &other) {
+      if (__owns_) {
+        __mutex_->unlock();
+      }
+      __mutex_ = other.__mutex_;
+      __owns_ = other.__owns_;
+      other.__mutex_ = nullptr;
+      other.__owns_ = false;
+    }
+    return *this;
+  }
+
+  unique_lock(const unique_lock&) = delete;
+  unique_lock& operator=(const unique_lock&) = delete;
+
+  void lock() {
+    if (__mutex_ == nullptr || __owns_) {
+      abort();
+    }
+    __mutex_->lock();
+    __owns_ = true;
+  }
+
+  bool try_lock() {
+    if (__mutex_ == nullptr || __owns_) {
+      abort();
+    }
+    __owns_ = __mutex_->try_lock();
+    return __owns_;
+  }
+
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    if (__mutex_ == nullptr || __owns_) {
+      abort();
+    }
+    __owns_ = __mutex_detail::__try_lock_for(*__mutex_, timeout);
+    return __owns_;
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    if (__mutex_ == nullptr || __owns_) {
+      abort();
+    }
+    __owns_ = __mutex_detail::__try_lock_until(*__mutex_, timeout);
+    return __owns_;
+  }
+
+  void unlock() {
+    if (__mutex_ == nullptr || !__owns_) {
+      abort();
+    }
+    __mutex_->unlock();
+    __owns_ = false;
+  }
+
+  void swap(unique_lock& other) noexcept {
+    std::swap(__mutex_, other.__mutex_);
+    std::swap(__owns_, other.__owns_);
+  }
+
+  mutex_type* release() noexcept {
+    mutex_type* result = __mutex_;
+    __mutex_ = nullptr;
+    __owns_ = false;
+    return result;
+  }
+
+  bool owns_lock() const noexcept { return __owns_; }
+  explicit operator bool() const noexcept { return __owns_; }
+  mutex_type* mutex() const noexcept { return __mutex_; }
+
+ private:
+  mutex_type* __mutex_;
+  bool __owns_;
+};
+
+template <class Mutex>
+void swap(unique_lock<Mutex>& left, unique_lock<Mutex>& right) noexcept {
+  left.swap(right);
+}
+
+inline int try_lock() { return -1; }
+
+template <class Mutex>
+int try_lock(Mutex& mutex) {
+  return mutex.try_lock() ? -1 : 0;
+}
+
+template <class Mutex1, class Mutex2, class... Mutexes>
+int try_lock(Mutex1& first, Mutex2& second, Mutexes&... mutexes) {
+  if (!first.try_lock()) {
+    return 0;
+  }
+  int result = std::try_lock(second, mutexes...);
+  if (result != -1) {
+    first.unlock();
+    return result + 1;
+  }
+  return -1;
+}
+
+template <class Mutex1, class Mutex2, class... Mutexes>
+void lock(Mutex1& first, Mutex2& second, Mutexes&... mutexes) {
+  for (;;) {
+    first.lock();
+    int result = std::try_lock(second, mutexes...);
+    if (result == -1) {
+      return;
+    }
+    first.unlock();
+    thrd_yield();
+  }
+}
+
+template <class... Mutexes>
+class scoped_lock {
+ public:
+  explicit scoped_lock(Mutexes&... mutexes) : __mutexes_(mutexes...) {
+    std::lock(mutexes...);
+  }
+  scoped_lock(adopt_lock_t, Mutexes&... mutexes)
+      : __mutexes_(mutexes...) {}
+  ~scoped_lock() { __mutexes_.unlock(); }
+  scoped_lock(const scoped_lock&) = delete;
+  scoped_lock& operator=(const scoped_lock&) = delete;
+
+ private:
+  __mutex_detail::__mutex_pack<Mutexes...> __mutexes_;
+};
+
+template <class Mutex>
+class scoped_lock<Mutex> {
+ public:
+  using mutex_type = Mutex;
+
+  explicit scoped_lock(mutex_type& mutex) : __mutex_(mutex) {
+    __mutex_.lock();
+  }
+  scoped_lock(adopt_lock_t, mutex_type& mutex) : __mutex_(mutex) {}
+  ~scoped_lock() { __mutex_.unlock(); }
+  scoped_lock(const scoped_lock&) = delete;
+  scoped_lock& operator=(const scoped_lock&) = delete;
+
+ private:
+  mutex_type& __mutex_;
+};
+
+template <>
+class scoped_lock<> {
+ public:
+  explicit scoped_lock() = default;
+  explicit scoped_lock(adopt_lock_t) {}
+};
+
+class once_flag {
+ public:
+  constexpr once_flag() noexcept : __flag_() {}
+  once_flag(const once_flag&) = delete;
+  once_flag& operator=(const once_flag&) = delete;
+
+ private:
+  ::dave_once_flag_t __flag_;
+
+  template <class Callable, class... Args>
+  friend void call_once(once_flag&, Callable&&, Args&&...);
+};
+
+template <class Callable, class... Args>
+void call_once(once_flag& flag, Callable&& callable, Args&&... args) {
+  ::dave_once_flag_t* native = &flag.__flag_;
+  if (!__davecc_once_begin(native)) {
+    return;
+  }
+#ifdef __cpp_exceptions
+  try {
+    std::invoke(std::forward<Callable>(callable),
+                std::forward<Args>(args)...);
+    __davecc_once_complete(native);
+  } catch (...) {
+    __davecc_once_abort(native);
+    throw;
+  }
+#else
+  std::invoke(std::forward<Callable>(callable),
+              std::forward<Args>(args)...);
+  __davecc_once_complete(native);
+#endif
+}
+
+}  // namespace std
+
+#endif /* mutex_h */

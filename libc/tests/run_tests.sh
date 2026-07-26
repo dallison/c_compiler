@@ -221,6 +221,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
 
     link_thread_libc_test thread_heap_stress libc/tests/runtime/thread_heap_stress.c
     link_thread_libc_test thread_errno_isolation libc/tests/runtime/thread_errno_isolation.c
+    link_thread_libc_test thread_mutex libc/tests/runtime/thread_mutex.c
   fi
 
   test_objs=()

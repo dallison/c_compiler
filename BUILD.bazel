@@ -50,6 +50,7 @@ filegroup(
         "libc/include/list",
         "libc/include/map",
         "libc/include/memory",
+        "libc/include/mutex",
         "libc/include/new",
         "libc/include/optional",
         "libc/include/ostream",
@@ -1232,6 +1233,8 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/syscall.c"
+  "libc/threads.c"
   "libc/ungetc.c"
   "libc/acos.c"
   "libc/asin.c"
@@ -1243,7 +1246,7 @@ libc_srcs=(
 )
 
 for src in "$${libc_srcs[@]}"; do
-  obj="$$work/$$(basename "$${src%.c}").o"
+  obj="$$work/libc_$$(basename "$${src%.c}").o"
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
 done
 for src in libc/*.cc; do
@@ -2106,6 +2109,42 @@ sh_test(
         ":davecc",
         ":libc_pcode",
         ":pcode",
+    ],
+)
+
+sh_test(
+    name = "mutex_pcode_test",
+    srcs = ["tests/mutex_single_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "pcode",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+        ":libc_pcode",
+        ":pcode",
+        "//cxx_testsuite:tests/exec/0282_standard_mutex.cpp",
+    ],
+)
+
+sh_test(
+    name = "mutex_65c02_test",
+    srcs = ["tests/mutex_single_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "65c02",
+        "$(rootpath :6502)",
+        "$(rootpath :libc_65c02)",
+        "$(rootpath :support_rom_65c02)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":6502",
+        ":davecc",
+        ":libc_65c02",
+        ":support_rom_65c02",
+        "//cxx_testsuite:tests/exec/0282_standard_mutex.cpp",
     ],
 )
 

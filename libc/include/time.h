@@ -39,6 +39,11 @@ typedef unsigned long off_t;
 typedef long time_t;
 typedef long clock_t;
 
+struct timespec {
+   time_t tv_sec;
+   long tv_nsec;
+};
+
 extern time_t   time(time_t *);
 
 struct tm {

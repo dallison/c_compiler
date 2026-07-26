@@ -1,5 +1,7 @@
 #include <chrono>
 
+extern "C" long long __davecc_monotonic_time_us(void);
+
 namespace std {
 namespace chrono {
 
@@ -17,7 +19,7 @@ system_clock::time_point system_clock::from_time_t(time_t value) noexcept {
 }
 
 steady_clock::time_point steady_clock::now() noexcept {
-  return time_point(duration(clock() / CLOCKS_PER_SEC));
+  return time_point(duration(__davecc_monotonic_time_us()));
 }
 
 }  // namespace chrono

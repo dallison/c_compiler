@@ -9,11 +9,13 @@
 #include "risc_v_interpreter.h"
 #include <fcntl.h>
 #include <math.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <time.h>
 #include <unistd.h>
 #include "elf.h"
 #include "loader_lifecycle.h"
@@ -265,6 +267,20 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       interpreter->iregs[REG(a0)] =
           RISCVSyscallHeapUnlock(interpreter->guest_thread);
       break;
+    case RISC_V_ECALL_THREAD_YIELD:
+      interpreter->iregs[REG(a0)] = sched_yield();
+      break;
+    case RISC_V_ECALL_MONOTONIC_TIME: {
+      struct timespec now;
+      int64_t* result = (int64_t*)interpreter->iregs[REG(a1)];
+      if (result == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        interpreter->iregs[REG(a0)] = (uint64_t)-1;
+      } else {
+        *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        interpreter->iregs[REG(a0)] = 0;
+      }
+      break;
+    }
     default:
       DumpStateAndExit(interpreter);
   }

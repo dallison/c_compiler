@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -377,6 +378,17 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
       return X86_64SyscallHeapLock(interpreter->guest_thread);
     case X86_64_SYSCALL_HEAP_UNLOCK:
       return X86_64SyscallHeapUnlock(interpreter->guest_thread);
+    case X86_64_SYSCALL_THREAD_YIELD:
+      return sched_yield();
+    case X86_64_SYSCALL_MONOTONIC_TIME: {
+      struct timespec now;
+      int64_t* result = (int64_t*)(uintptr_t)a0;
+      if (result == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+      }
+      *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+      return 0;
+    }
     default:
       fprintf(stderr, "Unknown x86_64 syscall %lld\n", (long long)number);
       X86_64InterpreterFail(interpreter, 1);
