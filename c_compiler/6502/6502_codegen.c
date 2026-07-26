@@ -5458,6 +5458,19 @@ static TargetInstruction* Push(W65C02Generator* g, IRNode* node, int size) {
       if (IRIsConst(node)) {
         return PushConstant(g, node, size);
       } else {
+        TargetInstruction* lowered = GetLoweredNode(node);
+        if (size == 2 && lowered != NULL &&
+            TargetOpcodeEq(lowered->opcode, W65C02_OP(symbol))) {
+          TargetSymbol* symbol = (TargetSymbol*)lowered;
+          if (TypeIsArray(node->type) || TypeIsFunction(node->type) ||
+              TypeIsFunction(symbol->symbol->type) ||
+              (lowered->flags & k6502NeedAddress) != 0) {
+            // Keep symbolic addresses in X:Y through the push instead of
+            // copying them through a temporary zero-page register.
+            GetAddressXY(g, node);
+            return jsr(g, g->pushxy);
+          }
+        }
         inst = Materialize(g, node, size, true);
         AddReloadPoint(g, inst);
         return PushExpression(g, node, inst, size);

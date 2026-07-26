@@ -2661,6 +2661,20 @@ sh_test(
 )
 
 sh_test(
+    name = "6502_codegen_cleanup_test",
+    srcs = ["tests/6502_codegen_cleanup_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        "tests/6502_constant_materialization_cases.cpp",
+    ],
+)
+
+sh_test(
     name = "6502_tail_call_test",
     srcs = ["tests/6502_tail_call_test.sh"],
     args = [

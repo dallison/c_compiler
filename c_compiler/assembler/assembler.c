@@ -1495,6 +1495,13 @@ static void HandleDirective_long(Assembler* assembler) {
   }
 }
 
+static int DefaultSectionAlignment(const Assembler* assembler) {
+  // The 6502 can fetch instructions and data at any byte address.  Requiring
+  // eight-byte input-section alignment only inserts unreachable zero padding
+  // between linked objects.
+  return assembler->elf_machine_type == ELF_MACHINE_TYPEW65C02 ? 1 : 8;
+}
+
 static void HandleDirective_section(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
       LexLookingAt(&assembler->lex, TOK(string))) {
@@ -1503,7 +1510,7 @@ static void HandleDirective_section(Assembler* assembler) {
 
     int32_t flags = 0;
     int32_t type = SHT(null);
-    int alignment = 8;
+    int alignment = DefaultSectionAlignment(assembler);
     if (LexMatch(&assembler->lex, TOK(comma))) {
       if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
           LexLookingAt(&assembler->lex, TOK(string))) {
@@ -1590,7 +1597,8 @@ static void HandleDirective_text(Assembler* assembler) {
     section = AssemblerFindSection(assembler, name);
     if (section == -1) {
       section = AssemblerAddSection(assembler, name, SHT(progbits),
-                                    SHF(alloc) | SHF(execinstr), 8);
+                                    SHF(alloc) | SHF(execinstr),
+                                    DefaultSectionAlignment(assembler));
     } else {
       StringDelete(name);
     }
@@ -1608,8 +1616,9 @@ static void HandleDirective_data(Assembler* assembler) {
   if (assembler->pass == 1) {
     section = AssemblerFindSection(assembler, name);
     if (section == -1) {
-      section =
-      AssemblerAddSection(assembler, name, SHT(progbits), SHF(write)|SHF(alloc), 8);
+      section = AssemblerAddSection(
+          assembler, name, SHT(progbits), SHF(write) | SHF(alloc),
+          DefaultSectionAlignment(assembler));
     } else {
       StringDelete(name);
     }

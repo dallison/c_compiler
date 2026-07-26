@@ -194,7 +194,7 @@ for target in 6502 65c02; do
   "$DAVECC" -target "$target" -S -std=c++20 \
     "$REFERENCE_CHAIN_SOURCE" -o "$assembly"
   main_body=$(function_body main "$assembly")
-  if [[ $(grep -Ec 'jsr[[:space:]]+__pushi0' <<<"$main_body") -lt 2 ]]; then
+  if [[ $(grep -Ec 'jsr[[:space:]]+__pushi0' <<<"$main_body") -lt 1 ]]; then
     echo "$target: reference-returning call was copied before being pushed" >&2
     exit 1
   fi

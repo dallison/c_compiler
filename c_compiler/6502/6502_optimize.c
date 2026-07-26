@@ -555,6 +555,81 @@ static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
   return prev;
 }
 
+static bool IsTrackingMetadata(TargetInstruction* inst) {
+  return TargetOpcodeEq(inst->opcode, W65C02_OP(reloadpoint)) ||
+         W65C02IsExpression(inst) || (inst->flags & k6502DontEmit) != 0;
+}
+
+static TargetInstruction* NextEffectiveInstruction(TargetInstruction* inst) {
+  TargetInstruction* next = TargetNext(inst);
+  while (next != NULL && IsTrackingMetadata(next)) {
+    next = TargetNext(next);
+  }
+  return next;
+}
+
+// On the fallthrough edge of BNE following CMP/CPX/CPY, the compared register
+// is equal to the immediate operand. Remove a matching load directly on that
+// edge when there is no other entry to it. The following instruction must
+// overwrite the load's N/Z flags, since the compare and load produce different
+// Z values for a nonzero constant.
+static bool RemoveCompareFallthroughLoad(struct OptimizerData* opt_data,
+                                         TargetBasicBlock* block,
+                                         TargetInstruction* branch) {
+  if (!TargetOpcodeEq(branch->opcode, W65C02_OP(bne))) {
+    return false;
+  }
+
+  TargetInstruction* compare = PrevInstruction(branch);
+  if (compare == NULL) {
+    return false;
+  }
+
+  W65C02Opcode load_opcode;
+  if (TargetOpcodeEq(compare->opcode, W65C02_OP(cmp))) {
+    load_opcode = W65C02_OP(lda);
+  } else if (TargetOpcodeEq(compare->opcode, W65C02_OP(cpx))) {
+    load_opcode = W65C02_OP(ldx);
+  } else if (TargetOpcodeEq(compare->opcode, W65C02_OP(cpy))) {
+    load_opcode = W65C02_OP(ldy);
+  } else {
+    return false;
+  }
+  if (GetAddrMode(compare) != kAddrModeImmediate) {
+    return false;
+  }
+
+  TargetInstruction* fallthrough = TargetNext(branch);
+  if (fallthrough == NULL) {
+    return false;
+  }
+  TargetBasicBlock* fallthrough_block = fallthrough->block;
+  if (fallthrough_block != block &&
+      (fallthrough_block->in_edges.length != 1 ||
+       fallthrough_block->in_edges.value.w[0] != block->block_id)) {
+    return false;
+  }
+
+  TargetInstruction* load = NextEffectiveInstruction(branch);
+  if (load == NULL || load->block != fallthrough_block ||
+      !TargetOpcodeEq(load->opcode, load_opcode) ||
+      GetAddrMode(load) != kAddrModeImmediate ||
+      ImmediateValue(load) != ImmediateValue(compare)) {
+    return false;
+  }
+
+  TargetInstruction* flags_overwrite = NextEffectiveInstruction(load);
+  if (flags_overwrite == NULL || flags_overwrite->block != fallthrough_block ||
+      !ModifiesFlags(flags_overwrite)) {
+    return false;
+  }
+
+  TargetBasicBlockRemoveInstruction(&opt_data->g->base, fallthrough_block,
+                                    load);
+  opt_data->modified = true;
+  return true;
+}
+
 // Do we pass over inst between start and end, going backwards.
 static bool PassesOverBackwards(TargetInstruction* start, TargetInstruction* end, TargetInstruction* inst) {
   TargetInstruction* prev = TargetPrev(start);
@@ -1007,6 +1082,9 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
       case W65C02_OP(bvs):
       case W65C02_OP(bcs):
       case W65C02_OP(bcc): {
+        if (RemoveCompareFallthroughLoad(opt_data, block, inst)) {
+          next = TargetNext(inst);
+        }
         trackers->A.type = kRegUnknown;
         trackers->X.type = kRegUnknown;
         trackers->Y.type = kRegUnknown;
@@ -1081,6 +1159,130 @@ static int OperandByteOffset(TargetInstruction* inst) {
 
 static int OperandByteAddress(TargetInstruction* inst) {
   return RegisterByteAddress(inst->operand[0], OperandByteOffset(inst));
+}
+
+static bool IsPostAllocationMetadata(TargetInstruction* inst) {
+  if (TargetIsConst(inst) || W65C02IsExpression(inst) ||
+      (inst->flags & k6502DontEmit) != 0) {
+    return true;
+  }
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(tmp):
+    case W65C02_OP(fp):
+    case W65C02_OP(sp):
+    case W65C02_OP(ap):
+    case W65C02_OP(tp):
+    case W65C02_OP(literal):
+    case W65C02_OP(resulti):
+    case W65C02_OP(resultf):
+    case W65C02_OP(resultd):
+    case W65C02_OP(ret):
+    case W65C02_OP(localvar):
+    case W65C02_OP(argument):
+    case W65C02_OP(symbol):
+    case W65C02_OP(fake_bra):
+    case W65C02_OP(ssavar):
+    case W65C02_OP(phi):
+    case W65C02_OP(reloadpoint):
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
+    case W65C02_OP(literalrefX):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static TargetInstruction* PreviousPostAllocationInstruction(
+    TargetInstruction* inst) {
+  TargetInstruction* prev = TargetPrev(inst);
+  while (prev != NULL && IsPostAllocationMetadata(prev)) {
+    prev = TargetPrev(prev);
+  }
+  return prev;
+}
+
+// Register allocation can assign consecutive temporary values to the same
+// physical zero-page register.  Constant materialization then sometimes leaves
+// runs such as:
+//
+//   sta __i0
+//   sta __i0+1
+//   sta __i0
+//   sta __i0+1
+//
+// Since STA does not modify A and nothing observes memory between these
+// contiguous stores, retain only the first write to each physical byte.
+static void RemoveRepeatedZeroPageStores(W65C02Generator* g) {
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* next =
+          inst == block->end_code ? NULL : TargetNext(inst);
+      if (TargetOpcodeEq(inst->opcode, W65C02_OP(sta)) &&
+          GetAddrMode(inst) == kAddrModeZeroPage &&
+          inst->operand[0] != NULL && inst->operand[0]->reg != NULL) {
+        int address = OperandByteAddress(inst);
+        for (TargetInstruction* prev =
+                 PreviousPostAllocationInstruction(inst);
+             prev != NULL && TargetOpcodeEq(prev->opcode, W65C02_OP(sta)) &&
+             GetAddrMode(prev) == kAddrModeZeroPage &&
+             prev->operand[0] != NULL && prev->operand[0]->reg != NULL;
+             prev = PreviousPostAllocationInstruction(prev)) {
+          if (OperandByteAddress(prev) == address) {
+            TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+            break;
+          }
+        }
+      }
+      inst = next;
+    }
+  }
+}
+
+// After register allocation, distinct byte temporaries can become the same
+// physical zero-page register. Fold
+//
+//   lda source
+//   sta temporary
+//   lda temporary
+//
+// by removing the reload. The first LDA already leaves both A and its N/Z
+// flags in exactly the state produced by the third instruction.
+static void RemoveZeroPageStoreReloads(W65C02Generator* g) {
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* next =
+          inst == block->end_code ? NULL : TargetNext(inst);
+      if (TargetOpcodeEq(inst->opcode, W65C02_OP(lda)) &&
+          GetAddrMode(inst) == kAddrModeZeroPage &&
+          inst->operand[0] != NULL && inst->operand[0]->reg != NULL) {
+        TargetInstruction* store =
+            PreviousPostAllocationInstruction(inst);
+        TargetInstruction* producer =
+            store == NULL ? NULL
+                          : PreviousPostAllocationInstruction(store);
+        while (producer != NULL &&
+               TargetOpcodeEq(producer->opcode, W65C02_OP(sta))) {
+          producer = PreviousPostAllocationInstruction(producer);
+        }
+        if (store != NULL && producer != NULL &&
+            TargetOpcodeEq(store->opcode, W65C02_OP(sta)) &&
+            GetAddrMode(store) == kAddrModeZeroPage &&
+            store->operand[0] != NULL && store->operand[0]->reg != NULL &&
+            OperandByteAddress(store) == OperandByteAddress(inst) &&
+            TargetOpcodeEq(producer->opcode, W65C02_OP(lda))) {
+          TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+        }
+      }
+      inst = next;
+    }
+  }
 }
 
 static bool IsImmediateY(TargetInstruction* inst, int value) {
@@ -1339,6 +1541,9 @@ void W65C02CombineIndirectCopies(W65C02Generator* g) {
        inst != NULL; inst = TargetNext(inst)) {
     inst->uses = (int)inst->users.length;
   }
+
+  RemoveRepeatedZeroPageStores(g);
+  RemoveZeroPageStoreReloads(g);
 
   for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
     TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
