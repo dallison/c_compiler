@@ -210,20 +210,20 @@ round_up:
 
 // X: offset of A in zero page in IEE754 format.
 __fcheckA0:
-  LDA 0,X
+  LDA 3,X
   AND #0x7f   // Mask off sign bit.
+  ORA 0,X
   ORA 1,X
   ORA 2,X
-  ORA 3,X
   RTS
 
 // Y: offset of B in zero page in IEE754 format.
 __fcheckB0:
-  LDA 0,Y
+  LDA 3,Y
   AND #0x7f   // Mask off sign bit.
+  ORA 0,Y
   ORA 1,Y
   ORA 2,Y
-  ORA 3,Y
   RTS
 
 // Result is B.

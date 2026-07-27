@@ -668,6 +668,12 @@ static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
   AssemblerSymbol* sym = AssemblerFindSymbol(assembler, spelling->value);
   if (sym != NULL) {
     if (!sym->defined) {
+      // Dot-prefixed labels are object-local.  A forward reference initially
+      // creates an undefined global symbol so it can be relocated, but once
+      // its definition is seen it must not remain globally visible.
+      if (spelling->value[0] == '.') {
+        sym->binding = SYM_BIND(local);
+      }
       sym->defined = true;
       sym->is_label = true;
       sym->section = assembler->current_section;

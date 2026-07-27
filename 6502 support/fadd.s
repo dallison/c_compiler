@@ -158,13 +158,12 @@ fadd_pos_result:
 
 // Result is zero.
 fadd_res_0:
-  PLY
+  PLX
   LDA #0
-  LDX #4
-fadd_res0_loop:
   STA 0,X
-  DEY
-  BNE fadd_res0_loop
+  STA 1,X
+  STA 2,X
+  STA 3,X
   RTS
 
 // A is zero.  Result is 0 - B or -B.

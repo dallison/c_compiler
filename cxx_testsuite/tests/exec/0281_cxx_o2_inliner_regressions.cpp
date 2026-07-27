@@ -27,6 +27,18 @@ inline int read_reference(const ReferencedValue& value) {
   return value.value;
 }
 
+struct AggregateResult {
+  int value;
+};
+
+inline AggregateResult make_aggregate(int value) {
+  return AggregateResult{value};
+}
+
+inline AggregateResult forward_aggregate(int value) {
+  return make_aggregate(value);
+}
+
 // This function is compiled but not executed. Its postfix increment body
 // contains a template initializer that must keep the inliner from cloning an
 // unresolved body.
@@ -62,6 +74,11 @@ int main() {
 
   if (preserve_across_call(1, 2, 3, 4, 5) != 56) {
     return 4;
+  }
+
+  AggregateResult aggregate = forward_aggregate(13);
+  if (aggregate.value != 13) {
+    return 5;
   }
 
   return 0;

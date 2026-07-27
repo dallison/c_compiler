@@ -616,7 +616,13 @@ concept common_range =
     range<T> && same_as<iterator_t<T>, sentinel_t<T>>;
 
 // [range.view] ----------------------------------------------------------------
-struct view_base {};
+struct view_base {
+  constexpr view_base() = default;
+  constexpr view_base(const view_base&) = default;
+  constexpr view_base(view_base&&) = default;
+  constexpr view_base& operator=(const view_base&) noexcept { return *this; }
+  constexpr view_base& operator=(view_base&&) noexcept { return *this; }
+};
 
 template <class T>
 inline constexpr bool enable_view =
@@ -1584,13 +1590,13 @@ iota_view(W, Bound) -> iota_view<W, Bound>;
 namespace __detail {
 struct __iota_fn {
   template <class W>
-  constexpr auto operator()(W&& value) const {
-    return iota_view<decay_t<W>>(static_cast<W&&>(value));
+  constexpr iota_view<W> operator()(W value) const {
+    return iota_view<W>(static_cast<W&&>(value));
   }
   template <class W, class Bound>
-  constexpr auto operator()(W&& value, Bound&& bound) const {
-    return iota_view<decay_t<W>, decay_t<Bound>>(static_cast<W&&>(value),
-                                                  static_cast<Bound&&>(bound));
+  constexpr iota_view<W, Bound> operator()(W value, Bound bound) const {
+    return iota_view<W, Bound>(static_cast<W&&>(value),
+                               static_cast<Bound&&>(bound));
   }
 };
 }  // namespace __detail
@@ -2678,6 +2684,21 @@ auto __apply_adaptor(__elements_fn<N>&, R&& r) {
 template <class R>
 auto __apply_adaptor(__all_fn&, R&& r) {
   return views::all(static_cast<R&&>(r));
+}
+
+template <class R, class F>
+  requires(!is_lvalue_reference_v<R>) && (!__is_closure<R>)
+constexpr transform_view<all_t<R>, F> operator|(
+    R&& range, __transform_closure<F>&& closure) {
+  using Base = all_t<R>;
+  if constexpr (view<remove_cvref_t<R>>) {
+    return transform_view<Base, F>(
+        static_cast<R&&>(range), static_cast<F&&>(closure.__fun));
+  } else {
+    return transform_view<Base, F>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<F&&>(closure.__fun));
+  }
 }
 
 template <class R, class C>

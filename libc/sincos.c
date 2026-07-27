@@ -11,6 +11,7 @@
 
 
 static const double
+pio2 = 1.57079632679489661923,
 twoopi = 0.63661977236758134308,
 p0 = 0.1357884097877375669092680e8,
 p1 = -0.4942908100902844161158627e7,
@@ -28,7 +29,12 @@ static double __sin(double x, int quad) {
     x = -x;
     quad += 2;
   }
+#if defined(__6502__)
+  // Avoid the 65C02 multiplier's normalization edge when x is pi/2.
+  x /= pio2;
+#else
   x *= twoopi;
+#endif
   double y;
   if (x > LLONG_MAX-1) {
     double e;

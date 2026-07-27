@@ -3259,6 +3259,12 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
     Vector* new_ret = NewVector();
     if (inliner->return_value != NULL && ret_node->cond != NULL) {
       ASTNode* value = ASTNodeMove(ret_node->cond);
+      // The cloned expression is no longer a return from the original
+      // function: it initializes the inliner's local result temporary. An RVO
+      // marker copied from the original return would incorrectly route a
+      // nested aggregate-returning call to the caller's hidden struct-return
+      // slot, which may not exist (for example when inlining into main).
+      value->flags &= ~kASTRvoCall;
       if (inliner->return_is_reference) {
         value = NewUnaryASTNode(AST_OP(address), inliner->return_value->type,
                                 value->location, value);

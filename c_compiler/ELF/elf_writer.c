@@ -418,18 +418,11 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     for (size_t i = 0; i < elf->segments.length; i++) {
       ELFWriterSegment* segment = elf->segments.value.p[i];
       bool start_address_assigned = false;
+      uint64_t memory_end = 0;
+      uint64_t file_end = 0;
       for (size_t j = 0; j < segment->sections.length; j++) {
         ELFWriterSection* section = segment->sections.value.p[j];
-        
-        // Add section size to the memory size.
-        segment->header.memsz += section->header.size;
-        
-        // If the section is present in the file (not NOBITS), add its
-        // size to the filesz.
-        if (section->header.type != SHT(nobits)) {
-          segment->header.filesz += section->header.size;
-        }
-        
+
         // The first section gives us the offset and addresses for the segment.
         if (!start_address_assigned) {
           segment->header.offset = section->header.offset;
@@ -437,6 +430,27 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
           segment->header.paddr = segment->header.vaddr;
           start_address_assigned = true;
         }
+
+        uint64_t section_memory_end = section->address + section->header.size;
+        if (section_memory_end > memory_end) {
+          memory_end = section_memory_end;
+        }
+        if (section->header.type != SHT(nobits)) {
+          uint64_t section_file_end =
+              section->header.offset + section->header.size;
+          if (section_file_end > file_end) {
+            file_end = section_file_end;
+          }
+        }
+      }
+      if (start_address_assigned) {
+        // Section alignment can leave holes within a segment.  Segment sizes
+        // are spans, not sums of section sizes, and must include those holes.
+        segment->header.memsz = memory_end - segment->header.vaddr;
+        segment->header.filesz =
+            file_end > segment->header.offset
+                ? file_end - segment->header.offset
+                : 0;
       }
       
       elf->ops->WriteProgramHeader(&segment->header, fp);
@@ -733,6 +747,15 @@ void ELFWriterSegmentDelete(ELFWriterSegment* segment) {
 }
 
 void ELFWriterSegmentAddSection(ELFWriterSegment* segment, ELFWriterSection* section) {
+  if (segment->sections.length > 0) {
+    ELFWriterSection* first = segment->sections.value.p[0];
+    if (section->header.addralign > first->header.addralign) {
+      first->header.addralign = section->header.addralign;
+    }
+  }
+  if (section->header.addralign > segment->header.align) {
+    segment->header.align = section->header.addralign;
+  }
   VectorAppend(&segment->sections, section);
 }
 

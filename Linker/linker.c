@@ -472,9 +472,21 @@ static void AssignGroupRegion(Segment* segment, SectionGroup* group) {
 
 static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
                                 uint64_t size, uint64_t last_segment_end) {
-  // Make sure we have enough space in the region.
   SegmentMemoryRegion* region = group->region;
   assert(region != NULL);
+  if (region->next == 0) {
+    region->next = last_segment_end;
+  }
+  // The ELF writer aligns each output section's file offset.  Apply the same
+  // alignment to its virtual address so the offset-to-address delta remains
+  // constant throughout the containing PT_LOAD segment.
+  if (region->next == group->address && group->alignment > 1) {
+    region->next =
+        ((region->next + group->alignment - 1) / group->alignment) *
+        group->alignment;
+    group->address = region->next;
+  }
+  // Make sure we have enough space in the region, including alignment.
   if (region->config_end != 0) {
     uint64_t next = region->next + size;
     if (next > region->config_end) {
@@ -482,9 +494,6 @@ static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
                   group->name.value, (size_t)size, region->name.value);
       return 0;
     }
-  }
-  if (region->next == 0) {
-    region->next = last_segment_end;
   }
   uint64_t addr = region->next;
   region->next += size;
@@ -1440,6 +1449,26 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
   }
   // Sort regions in address order.
   VectorSortPointers(&segment->sections, CompareGroupRegion);
+  SectionGroup* first_output_group = NULL;
+  int64_t segment_section_alignment = 1;
+  for (size_t i = 0; i < segment->sections.length; i++) {
+    SectionGroup* group = segment->sections.value.p[i];
+    if (group->region == NULL && (group->flags & SHF(tls)) == 0) {
+      continue;
+    }
+    if (first_output_group == NULL) {
+      first_output_group = group;
+    }
+    if (group->alignment > segment_section_alignment) {
+      segment_section_alignment = group->alignment;
+    }
+  }
+  if (first_output_group != NULL &&
+      first_output_group->alignment < segment_section_alignment) {
+    // Give the segment's file offset and virtual address the same residue for
+    // every alignment required by a section later in the segment.
+    first_output_group->alignment = segment_section_alignment;
+  }
   uint64_t addr = last_segment_end;
   if (addr != 0) {
     // If we know the start address, set it now.  Otherwise we delay until we
@@ -1521,7 +1550,7 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
                                                     addr);
           section->offset = offset;
           offset += section->header->size;
-          addr += section->header->size;
+          addr = section->address + section->header->size;
           break;
         }
         case kGroupedSectionNew: {
@@ -1530,7 +1559,7 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
                                                     group,
                                                     section->contents->data.buffered.length,
                                                     addr);
-          addr += section->contents->size;
+          addr = section->address + section->contents->size;
           break;
         }
         case kGroupedSectionPadding:

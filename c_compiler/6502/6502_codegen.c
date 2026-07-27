@@ -971,7 +971,8 @@ static int Sizeof(TypeRecord* type) {
   if (type == NULL) {
     return 2;
   }
-  if (TypeIsPointerOrArray(type) || TypeIsFunction(type)) {
+  if (TypeIsPointerOrArray(type) || TypeIsReference(type) ||
+      TypeIsFunction(type)) {
     return 2;
   }
   assert(type->size != 0);
@@ -4297,6 +4298,9 @@ static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRN
   AddSpillPoint(g, result);
   if (load->dest != NULL) {
     // We have a location to put the result.
+    if (!HasLoweredNode(load->dest)) {
+      LowerIRNode(g, load->dest);
+    }
     TargetInstruction* dest = GetAddress(g, load->dest, true);
     Copy(g, dest, result, 0, 0, size, GetAddrMode(dest), kAddrModeZeroPage);
     AddSpillPoint(g, dest);
@@ -7990,8 +7994,10 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
     varset = MaybeUseRegister(g, entry);
     if (varset == NULL) {
       // Make space for variable on the stack.
-      int32_t size = entry->value.symbol->type->size;
-       *var_offset += size;
+      // References occupy an address-sized slot even when the referred-to
+      // object is smaller.  The raw type size describes the referent.
+      int32_t size = Sizeof(entry->value.symbol->type);
+      *var_offset += size;
     }
     IRVariable* var = (IRVariable*)entry->pooled;
     inst = NewTargetSymbol(var->symbol);

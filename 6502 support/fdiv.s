@@ -213,8 +213,13 @@ fdiv_loop:
   BRA fdiv_loop
 
 fdiv_end:
-  // For some reason we need to decrement the exponent.  I don't know why.
-  DEC fexp
+  // udiv40 leaves the normalized quotient seven bits farther left than the
+  // old 24-bit divider.  Account for that position as well as the division's
+  // one-bit normalization adjustment.
+  SEC
+  LDA fexp
+  SBC #8
+  STA fexp
   // Normalize result and assemble into destination.
   JSR __fnormalize
   JSR __fround

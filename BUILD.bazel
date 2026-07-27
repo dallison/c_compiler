@@ -1113,6 +1113,7 @@ runtime_srcs=(
   "6502 support/store_indirect.s"
   "6502 support/store_indirect8.s"
   "6502 support/push.s"
+  "6502 support/frame_push.s"
   "6502 support/inline_mem_params.s"
   "6502 support/pushmem.s"
   "6502 support/copymem.s"
@@ -2606,6 +2607,7 @@ sh_test(
         "$(rootpath :6502)",
         "$(rootpath :support_rom_65c02)",
         "$(rootpath //cxx_testsuite:tests/exec/0055_multiple_inheritance_secondary_virtual_dispatch.cpp)",
+        "$(rootpath //cxx_testsuite:tests/exec_ranges/0004_ranges_math.cpp)",
     ],
     data = [
         ":6502",
@@ -2614,6 +2616,24 @@ sh_test(
         ":libc_headers",
         ":support_rom_65c02",
         "//cxx_testsuite:tests/exec/0055_multiple_inheritance_secondary_virtual_dispatch.cpp",
+        "//cxx_testsuite:tests/exec_ranges/0004_ranges_math.cpp",
+    ],
+)
+
+sh_test(
+    name = "ranges_math_pcode_test",
+    srcs = ["tests/ranges_math_pcode_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_pcode",
+        ":pcode",
+        "//cxx_testsuite:tests/exec_ranges/0004_ranges_math.cpp",
     ],
 )
 
@@ -2671,6 +2691,16 @@ sh_test(
         ":davecc",
         ":elfdump",
         "tests/6502_constant_materialization_cases.cpp",
+    ],
+)
+
+sh_test(
+    name = "6502_frame_push_helpers_test",
+    srcs = ["tests/6502_frame_push_helpers_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
+        ":libc_65c02",
     ],
 )
 

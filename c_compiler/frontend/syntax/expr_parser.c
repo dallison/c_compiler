@@ -4627,9 +4627,11 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     // reuses it as the constructor receiver.  Keep it in addressable storage;
     // targets cannot represent that sequence with a register-only variable.
     temp->flags.address_taken = true;
+    ASTNode* temp_lhs = NewIdentifierASTNode(temp, location);
+    temp_lhs->flags |= kASTNeedAddress;
     ASTNode* assign =
         NewBinaryASTNode(AST_OP(assign), result_type, location,
-                         NewIdentifierASTNode(temp, location), result);
+                         temp_lhs, result);
     ASTNode* init = ctor_actuals != NULL
         ? NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
                                           location)

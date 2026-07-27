@@ -1949,6 +1949,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         (!TypeIsPointerOrArray(arg_value->type) ||
          arg->value_category != kValueCategoryLvalue) &&
         (!TypeIsFunction(arg_value->type) || !function_reference_formal) &&
+        !TypeIsStructOrUnion(arg->type) &&
+        !TypeIsArray(arg->type) &&
         !TypeIsStructOrUnion(arg_value->type) &&
         !TypeIsArray(arg_value->type) &&
         !TypeIsMemberPointerAggregate(arg_value->type)) {
@@ -1969,6 +1971,11 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     }
 
     if (reference_formal && reference_returning_call) {
+      if (TypeIsStructOrUnion(arg_value->type) ||
+          TypeIsArray(arg_value->type)) {
+        arg_value =
+            GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
+      }
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     } else if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
       arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
@@ -2037,7 +2044,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // store the result.
   if (returns_struct) {
     call->flags |= kIRStructReturnCall;
-    if ((node->base.flags & kASTRvoCall) != 0) {
+    if ((node->base.flags & kASTRvoCall) != 0 &&
+        gen->struct_return_value != NULL) {
       // Return Value Optimization call.
       PushArg(gen, call, gen->struct_return_value, 0, &args_right_to_left);
       call->flags |= kIRRvoCall;
