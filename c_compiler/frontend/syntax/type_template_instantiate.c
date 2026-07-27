@@ -72,6 +72,9 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(TypeParser* parser,
 static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
                                                    Symbol* alias, Vector* args,
                                                    bool emit_constraint_error);
+static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
+                                                   Symbol* alias, Vector* args,
+                                                   bool emit_constraint_error);
 TypeRecord* TypeInstantiateClassTemplateQuiet(Syntax* syntax, Symbol* templ,
                                               Vector* args);
 static bool TypeInstantiateVariableTemplateConstantImpl(
@@ -1019,6 +1022,67 @@ static void PopFunctionInstantiationInProgress(
   g_function_instantiations_in_progress = node->next;
 }
 
+static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
+                                             Symbol* symbol,
+                                             Vector* member_args) {
+  if (template_definition == NULL || template_definition->type == NULL ||
+      symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(template_definition->type) ||
+      !TypeIsFunction(symbol->type)) {
+    return member_args;
+  }
+  int enclosing_count =
+      template_definition->type->info.function.template_parameter_base;
+  for (size_t i = 0;
+       enclosing_count > 0 &&
+       i < template_definition->type->info.function.prototype.length;
+       i++) {
+    Symbol* formal =
+        template_definition->type->info.function.prototype.value.p[i];
+    int parameter_index =
+        formal != NULL ? FirstTemplateParameterIndexInType(formal->type) : -1;
+    if (parameter_index >= 0 && parameter_index < enclosing_count) {
+      // This body belongs to the member as cloned into an already-instantiated
+      // class.  Its own parameters have been rebased to zero, so its argument
+      // vector must stay member-local.  Argument completion may nevertheless
+      // have retained the enclosing arguments in front of the member arguments;
+      // strip that prefix or parameter zero binds to the class argument instead
+      // of the member specialization's first argument.
+      size_t own_count =
+          template_definition->type->info.function.template_parameters.length;
+      if (member_args == NULL || own_count == 0 ||
+          member_args->length <= own_count) {
+        return member_args;
+      }
+      Vector* local_args = NewVector();
+      size_t first = member_args->length - own_count;
+      for (size_t j = first; j < member_args->length; j++) {
+        VectorAppend(local_args,
+                     TemplateArgumentCopy(member_args->value.p[j]));
+      }
+      return local_args;
+    }
+  }
+  Symbol* member_template = symbol->type->info.function.template_origin;
+  Vector* enclosing_args =
+      member_template != NULL && member_template->type != NULL
+          ? member_template->type->template_arguments
+          : NULL;
+  if (enclosing_count <= 0 || enclosing_args == NULL ||
+      enclosing_args->length < (size_t)enclosing_count) {
+    return member_args;
+  }
+  Vector* combined = NewVector();
+  for (int i = 0; i < enclosing_count; i++) {
+    VectorAppend(combined,
+                 TemplateArgumentCopy(enclosing_args->value.p[i]));
+  }
+  for (size_t i = 0; member_args != NULL && i < member_args->length; i++) {
+    VectorAppend(combined, TemplateArgumentCopy(member_args->value.p[i]));
+  }
+  return combined;
+}
+
 static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
                                                       Symbol* template_definition,
                                                       Symbol* symbol,
@@ -1034,10 +1098,17 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
   }
   FunctionInstantiationInProgress in_progress;
   PushFunctionInstantiationInProgress(&in_progress, symbol);
+  Vector* body_args =
+      FunctionTemplateBodyArguments(template_definition, symbol, args);
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
-                                symbol->type, args);
+                                symbol->type, body_args);
   PopFunctionInstantiationInProgress(&in_progress);
+  if (body_args != args) {
+    VectorDeleteWithContents(body_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                 symbol, args);
   symbol->type->info.function.definition = true;
@@ -1100,6 +1171,16 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     return templ;
   }
   if (templ->type->info.function.template_origin != NULL &&
+      templ->type->template_arguments != NULL &&
+      templ->type->info.function.body != NULL &&
+      !TypeContainsTemplateParameter(templ->type)) {
+    // This is already a concrete specialization.  Re-instantiating it with its
+    // retained arguments substitutes pointer/reference declarators a second
+    // time (for example allocator<T>::destroy<U>(U*) becoming U**).
+    return templ;
+  }
+  if (templ->type->info.function.template_origin != NULL &&
+      templ->type->template_arguments == NULL &&
       (!templ->is_imported_module_symbol ||
        templ->type->info.function.template_parameters.length == 0)) {
     templ = templ->type->info.function.template_origin;
@@ -1126,7 +1207,6 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
                              /*free_element=*/false);
     return templ;
   }
-
   Symbol* template_definition = templ;
   if ((template_definition->type == NULL ||
        template_definition->type->info.function.body == NULL) &&
@@ -1218,9 +1298,12 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       compiler->speculative_template_instantiation_depth == 0) {
     FunctionInstantiationInProgress in_progress;
     PushFunctionInstantiationInProgress(&in_progress, symbol);
+    Vector* body_args =
+        FunctionTemplateBodyArguments(template_definition, symbol,
+                                      completed_args);
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
-                                  symbol->type, completed_args);
+                                  symbol->type, body_args);
     PopFunctionInstantiationInProgress(&in_progress);
     // A member function *template* constructor has its member-initializer
     // preamble intentionally deferred from class instantiation (see
@@ -1228,7 +1311,12 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     // member's own template arguments are concrete, or its base/member
     // subobjects (and any constexpr evaluation of them) would be skipped.
     SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
-                                                  symbol, completed_args);
+                                                  symbol, body_args);
+    if (body_args != completed_args) {
+      VectorDeleteWithContents(body_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     ReanalyzeDeferredDependentAssignments(parser, symbol->type);
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
@@ -2428,13 +2516,14 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
       !TypeIsFunction(templ->type)) {
     return NULL;
   }
-  TypeRecord* func =
-      templ->type->template_arguments != NULL &&
-              templ->type->info.function.cxx_member_owner != NULL
-          ? templ->type
-          : templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
-                ? templ->value.func_defn->type
-                : templ->type;
+  // Deduce against the candidate's current signature.  In particular, a
+  // member template of an instantiated class has already had the enclosing
+  // class arguments substituted and its own parameter indices rebased to
+  // zero.  Falling back to value.func_defn here selects the primary class's
+  // stale signature (whose member parameters still start after the enclosing
+  // parameters), so deduction writes past the argument vector and rejects
+  // valid calls such as a range-adaptor closure's operator()(R&&).
+  TypeRecord* func = templ->type;
   if (first_formal_arg > func->info.function.prototype.length) {
     return NULL;
   }
@@ -2774,9 +2863,12 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   }
   bool saved_substitution_failed = parser.template_substitution_failed;
   parser.template_substitution_failed = false;
-  TypeRecord* func = InstantiateFunctionTemplateType(&parser,
-                                                     template_definition->type,
-                                                     completed_args);
+  // Member templates of an instantiated class carry a current signature with
+  // the enclosing arguments substituted and their own parameters rebased.
+  // Instantiate that signature; the primary definition remains the body source.
+  TypeRecord* candidate_type = templ->type;
+  TypeRecord* func =
+      InstantiateFunctionTemplateType(&parser, candidate_type, completed_args);
   bool substitution_failed = parser.template_substitution_failed;
   parser.template_substitution_failed = saved_substitution_failed;
   if (substitution_failed || TypeContainsTemplateParameter(func)) {
@@ -4650,6 +4742,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
       VectorAppend(completed, pack);
       continue;
     }
+    bool argument_from_default = false;
     TemplateArgument* arg =
         i < args->length ? TemplateArgumentCopy(args->value.p[i]) : NULL;
     if (arg == NULL) {
@@ -4662,6 +4755,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
       } else if (param->kind == kTemplateParameterNonType &&
                  (param->default_argument != NULL ||
                   param->has_default_int)) {
+        argument_from_default = true;
         TemplateArgument* default_argument = param->default_argument;
         int default_template_parameter_index =
             default_argument != NULL
@@ -4677,7 +4771,8 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
         }
         if (arg == NULL) {
           arg = default_argument != NULL
-                    ? TemplateArgumentCopy(default_argument)
+                    ? NewSubstitutedTemplateArgument(parser, default_argument,
+                                                     completed)
                     : NewDefaultNonTypeTemplateArgument(
                           param->default_int_value,
                           default_template_parameter_index);
@@ -4691,6 +4786,14 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                  /*free_element=*/false);
         return NULL;
       }
+    }
+    if (argument_from_default &&
+        param->kind == kTemplateParameterNonType &&
+        param->type != NULL && (param->type->type & kTypeAuto) == 0 &&
+        !TypeContainsTemplateParameter(param->type) &&
+        arg != NULL && arg->dependent_expr == NULL) {
+      TypeRecordDelete(arg->type);
+      arg->type = TypeRecordCopy(param->type);
     }
     if (param->kind != arg->kind) {
       if (emit_error) {
@@ -4966,9 +5069,14 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     TypeRecord* func = InstantiateMemberFunctionType(
         parser, /*owner=*/NULL, /*is_static_member=*/true, ftpl->type, args,
         ftpl->location);
+    bool constraints_satisfied =
+        func->info.function.associated_constraint == NULL ||
+        ConceptsConstraintSatisfied(
+            func->info.function.associated_constraint, args);
     func->info.function.cxx_member_owner = NULL;
 
     Symbol* sym = NewSymbol(ftpl->name.value, func, ftpl->storage);
+    sym->flags = ftpl->flags;
     sym->location = ftpl->location;
     sym->namespace_ = ftpl->namespace_;
     func->info.function.symbol = sym;
@@ -4980,6 +5088,7 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
 
     bool is_new_symbol = (in_scope == sym);
     if (is_new_symbol && ftpl->type->info.function.body != NULL &&
+        constraints_satisfied &&
         !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
       sym->type->info.function.body = CloneTemplateFunctionBody(
           parser, ftpl->type, sym->type, args);
@@ -4998,6 +5107,8 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
                    NewDeclarationListASTNode(declarations, sym->location));
       VectorAppend(&compiler->declaration_asts,
                    sym->type->info.function.body);
+    } else if (is_new_symbol && ftpl->type->info.function.body != NULL) {
+      sym->value.func_defn = ftpl;
     }
 
     parser->template_substitution_source = saved_source;
@@ -5036,6 +5147,11 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   }
   if (templ == NULL || templ->type == NULL) {
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  alias_type = InstantiateGenericAliasTemplate(parser, templ, args,
+                                               emit_constraint_error);
+  if (alias_type != NULL) {
+    return alias_type;
   }
   if (!TypeIsStructOrUnion(templ->type) ||
       templ->type->info.struct_info == NULL ||
@@ -5808,6 +5924,58 @@ static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
   return instantiated;
+}
+
+/* Expand an alias template whose pattern is not a bare class-template
+ * template-id (the shape `InstantiateAliasClassTemplateImpl` handles), for
+ * example `template <class R> using all_t = decltype(views::all(declval<R>()))`
+ * whose pattern is an already-formed specialization such as `ref_view<R>`.
+ *
+ * The pattern must be substituted with the alias's own arguments.  Returning it
+ * unsubstituted leaves the alias's parameter indices in the result, and those
+ * indices then bind to whatever occupies the same index in the enclosing
+ * template -- so inside a member function template of a class template, the
+ * alias parameter silently resolves to the class's argument.
+ *
+ * Returns NULL when `templ` is not an alias template, leaving the caller's
+ * class-template path in charge. */
+static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
+                                                   Symbol* alias, Vector* args,
+                                                   bool emit_constraint_error) {
+  if (!CompilerIsCXX() || alias == NULL || !alias->flags.is_template ||
+      !StorageIs(alias->storage, STO(typedef)) || alias->type == NULL) {
+    return NULL;
+  }
+  // A struct-typed pattern that is still the *primary* class template belongs to
+  // the ordinary class-template path, not here.
+  if (TypeIsStructOrUnion(alias->type) &&
+      alias->type->info.struct_info != NULL &&
+      alias->type->info.struct_info->is_template) {
+    return NULL;
+  }
+  Vector* completed_args = CompleteAliasTemplateArguments(alias, args);
+  if (completed_args == NULL) {
+    return NULL;
+  }
+  if (!ConceptsConstraintSatisfied(alias->associated_constraint,
+                                   completed_args)) {
+    if (emit_constraint_error) {
+      ReportAliasTemplateConstraintFailure(parser, alias, completed_args);
+    }
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  TypeRecord* subst =
+      SubstituteTemplateParameters(parser, alias->type, completed_args);
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (subst == NULL) {
+    return NULL;
+  }
+  return TypeRecordCalculateSize(subst);
 }
 
 /* Public: build a CTAD placeholder type from a class-template (or alias

@@ -118,6 +118,7 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol);
 // caller must keep the symbol alive until the scope closes.
 bool SyntaxAddBorrowedSymbol(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name);
+Symbol* SyntaxFindTopScopeSymbol(Syntax* syntax, String* name);
 void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name);
 void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name);
 bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,

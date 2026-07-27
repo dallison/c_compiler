@@ -13,6 +13,12 @@
 
 ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers);
 
+// Replaces a deferred range-for begin-expr / end-expr (AST_OP(range_begin) /
+// AST_OP(range_end), emitted for a loop whose range type was dependent at parse
+// time) with the form [stmt.ranged] prescribes for the now-known range type.
+// The returned node is unanalyzed.
+ASTNode* SyntaxResolveRangeForIterator(ASTNode* node);
+
 // Appends C++ scope-exit destructor calls for the block-scope automatic objects
 // declared directly in `statements` (in reverse construction order) to the end
 // of the vector.  Used both when closing a nested compound statement and for a

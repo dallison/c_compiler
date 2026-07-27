@@ -14,13 +14,18 @@
 #include "set.h"
 #include "symbol.h"
 
-// Compare variable defintions.  The pointers are Symbol**.
+// Compare variable defintions.  The pointers are Symbol**.  Order by address,
+// but never by a truncated difference: two symbols far apart in memory can have
+// a difference whose low 32 bits are zero (or of the wrong sign), which would
+// make the map treat distinct symbols as equal and break its binary search.
 static int CompareVariable(const void* a, const void* b) {
-  Symbol* s1 = *(Symbol**)a;
-  Symbol* s2 = *(Symbol**)b;
+  uintptr_t s1 = (uintptr_t)*(Symbol**)a;
+  uintptr_t s2 = (uintptr_t)*(Symbol**)b;
 
-  ptrdiff_t diff = s1 - s2;
-  return (int)diff;
+  if (s1 == s2) {
+    return 0;
+  }
+  return s1 < s2 ? -1 : 1;
 }
 
 BasicBlock* NewBasicBlock(BlockId id) {

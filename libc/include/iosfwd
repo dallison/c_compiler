@@ -30,37 +30,37 @@ using streampos = streamoff;
 template <class State>
 class fpos;
 
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_streambuf;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_ios;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_istream;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_ostream;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_iostream;
 
 template <class CharT, class Traits = char_traits<CharT>,
-          class Allocator = allocator<CharT> >
+          class Allocator = allocator<CharT>>
 class basic_stringbuf;
 template <class CharT, class Traits = char_traits<CharT>,
-          class Allocator = allocator<CharT> >
+          class Allocator = allocator<CharT>>
 class basic_istringstream;
 template <class CharT, class Traits = char_traits<CharT>,
-          class Allocator = allocator<CharT> >
+          class Allocator = allocator<CharT>>
 class basic_ostringstream;
 template <class CharT, class Traits = char_traits<CharT>,
-          class Allocator = allocator<CharT> >
+          class Allocator = allocator<CharT>>
 class basic_stringstream;
 
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_filebuf;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_ifstream;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_ofstream;
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_fstream;
 
 class ios_base;

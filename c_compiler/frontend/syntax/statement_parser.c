@@ -10,11 +10,13 @@
 #include <string.h>
 
 #include "expr_parser.h"
+#include "expr_semantics.h"
 #include "statement_parser.h"
 #include "compiler.h"
 #include "errors.h"
 #include "type.h"
 #include "type_inheritance.h"
+#include "type_template.h"
 
 static ASTNode* NewRangeForInitExpression(Symbol* sym, ASTNode* initializer,
                                           SourceLocation location) {
@@ -45,6 +47,13 @@ static TypeRecord* NewRangeForAutoType(void) {
   return NewTypeRecord(kTypeAuto, kQualPlain);
 }
 
+static TypeRecord* NewRangeForAutoReferenceType(bool rvalue) {
+  TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
+  TypeRecordChain(ref, NewRangeForAutoType());
+  TypeRecordCalculateSize(ref);
+  return ref;
+}
+
 static Symbol* NewRangeForAutoSymbol(Syntax* syntax, const char* name,
                                      SourceLocation location) {
   Symbol* sym = NewSymbol(name != NULL ? name : SyntaxFakeName(syntax),
@@ -52,6 +61,29 @@ static Symbol* NewRangeForAutoSymbol(Syntax* syntax, const char* name,
   sym->location = location;
   sym->flags.is_local = true;
   sym->flags.is_defined = true;
+  return sym;
+}
+
+static Symbol* NewRangeForRangeSymbol(Syntax* syntax,
+                                      SourceLocation location,
+                                      bool rvalue,
+                                      TypeRecord* concrete_type) {
+  TypeRecord* type = NULL;
+  if (concrete_type != NULL && !TypeIsUnknown(concrete_type) &&
+      (concrete_type->type & kTypeAuto) == 0 &&
+      !TypeContainsTemplateParameter(concrete_type)) {
+    type = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecordChain(type, TypeRecordCopy(concrete_type));
+    TypeRecordCalculateSize(type);
+  } else {
+    type = NewRangeForAutoReferenceType(rvalue);
+  }
+  Symbol* sym =
+      NewSymbol(SyntaxFakeName(syntax), type, STO(auto));
+  sym->location = location;
+  sym->flags.is_local = true;
+  sym->flags.is_defined = true;
+  SyntaxAddSymbol(syntax, sym);
   return sym;
 }
 
@@ -783,6 +815,30 @@ static ASTNode* NewRangeForMemberCall(Symbol* range_sym, const char* name,
   return NewVectorASTNode(AST_OP(call), NULL, location, access, NewVector());
 }
 
+static ASTNode* NewRangeForADLCall(Syntax* syntax, Symbol* range_sym,
+                                   const char* name,
+                                   SourceLocation location) {
+  String function_name;
+  StringInit(&function_name, name);
+  Symbol* function = SyntaxFindSymbol(syntax, &function_name);
+  if (function == NULL) {
+    TypeRecord* return_type =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    TypeRecord* function_type = NewFunctionTypeRecord();
+    function_type->info.function.unknown_args = true;
+    TypeRecordChain(function_type, return_type);
+    function = NewSymbol(name, function_type, STO(implicit));
+    function->flags.is_forward_declared = true;
+    function->flags.invented = true;
+    SyntaxAddSymbol(syntax, function);
+  }
+  StringDestruct(&function_name);
+  Vector* args = NewVector();
+  VectorAppend(args, NewIdentifierASTNode(range_sym, location));
+  return NewVectorASTNode(AST_OP(call), NULL, location,
+                          NewIdentifierASTNode(function, location), args);
+}
+
 static ASTNode* NewRangeForMemberAccess(Symbol* object, const char* name,
                                         SourceLocation location) {
   return NewBinaryASTNode(
@@ -803,18 +859,27 @@ static void AppendRangeForBindingDeclarations(Syntax* syntax,
     return;
   }
 
-  Symbol* item = NewRangeForAutoSymbol(syntax, NULL, location);
-  SyntaxAddSymbol(syntax, item);
-  VectorAppend(body_statements, NewRangeForDeclarationList(item, current,
-                                                           location));
-  for (size_t i = 0; i < binding->symbols.length; i++) {
-    Symbol* sym = binding->symbols.value.p[i];
-    VectorAppend(body_statements,
-                 NewRangeForDeclarationList(
-                     sym,
-                     NewRangeForMemberAccess(item, sym->name.value, location),
-                     location));
+  // `for ([a, b] : r)` decomposes each element exactly as `auto&& [a, b] = *it;`
+  // does, so emit a real structured-binding declaration and let the ordinary
+  // lowering apply the [dcl.struct.bind] rules: array elements, the tuple-like
+  // `get<I>` protocol (std::pair and std::tuple, hence map iteration), or
+  // otherwise the class's non-static data members in declaration order.
+  Vector* names = NewVector();
+  for (size_t i = 0; i < binding->names.length; i++) {
+    String* name = binding->names.value.p[i];
+    VectorAppend(names, NewString(name->value));
   }
+  Vector* symbols = NewVector();
+  VectorAppendVector(symbols, &binding->symbols);
+  Vector* declarations = NewVector();
+  VectorAppend(declarations,
+               NewStructuredBindingASTNode(
+                   NewRangeForAutoReferenceType(/*rvalue=*/true), names,
+                   symbols,
+                   NewExpressionInitializerASTNode(current, location),
+                   location));
+  VectorAppend(body_statements,
+               NewDeclarationListASTNode(declarations, location));
 }
 
 static ASTNode* NewRangeForIteratorLoop(Syntax* syntax,
@@ -890,6 +955,114 @@ static ASTNode* NewRangeForMemberIteratorLoop(Syntax* syntax,
       syntax, binding, NULL,
       NewRangeForMemberCall(range_sym, "begin", location),
       NewRangeForMemberCall(range_sym, "end", location), stmt, location);
+}
+
+static ASTNode* NewRangeForADLIteratorLoop(Syntax* syntax,
+                                           RangeForBinding* binding,
+                                           Symbol* range_sym, ASTNode* stmt,
+                                           SourceLocation location) {
+  return NewRangeForIteratorLoop(
+      syntax, binding, NULL,
+      NewRangeForADLCall(syntax, range_sym, "begin", location),
+      NewRangeForADLCall(syntax, range_sym, "end", location), stmt, location);
+}
+
+static bool RangeTypeHasMemberBeginEnd(TypeRecord* range_type) {
+  if (range_type == NULL || !TypeIsStructOrUnion(range_type) ||
+      range_type->info.struct_info == NULL) {
+    return false;
+  }
+  String begin_name;
+  String end_name;
+  StringInit(&begin_name, "begin");
+  StringInit(&end_name, "end");
+  bool result =
+      FindStructMember(range_type->info.struct_info, &begin_name) != NULL &&
+      FindStructMember(range_type->info.struct_info, &end_name) != NULL;
+  StringDestruct(&begin_name);
+  StringDestruct(&end_name);
+  return result;
+}
+
+// Build the deferred begin-expr / end-expr for a loop over a dependent range.
+// The ADL form is built here, at the loop's point of definition, because that is
+// where the unqualified lookup of `begin` and `end` has to happen; the array and
+// member forms need nothing but the range itself and are synthesized on
+// resolution.
+static ASTNode* NewRangeForDependentIterator(Syntax* syntax, ASTOpcode op,
+                                            Symbol* range_sym,
+                                            SourceLocation location) {
+  const char* name = op == AST_OP(range_begin) ? "begin" : "end";
+  return NewBinaryASTNode(
+      op, NULL, location, NewIdentifierASTNode(range_sym, location),
+      NewRangeForADLCall(syntax, range_sym, name, location));
+}
+
+static ASTNode* NewRangeForDependentIteratorLoop(Syntax* syntax,
+                                                RangeForBinding* binding,
+                                                Symbol* range_sym,
+                                                ASTNode* stmt,
+                                                SourceLocation location) {
+  return NewRangeForIteratorLoop(
+      syntax, binding, NULL,
+      NewRangeForDependentIterator(syntax, AST_OP(range_begin), range_sym,
+                                   location),
+      NewRangeForDependentIterator(syntax, AST_OP(range_end), range_sym,
+                                   location),
+      stmt, location);
+}
+
+// Puts |replacement| where the deferred |iterator| node sat, so that later
+// analysis -- which rewrites a node by replacing it in its parent -- updates the
+// live tree rather than the discarded one.
+static ASTNode* RangeForIteratorReplacement(ASTNode* iterator,
+                                            ASTNode* replacement) {
+  if (iterator->parent != NULL) {
+    ASTNodeReplaceChild(iterator->parent, iterator->child_id, replacement,
+                        /*delete_old_child=*/false);
+  }
+  return replacement;
+}
+
+ASTNode* SyntaxResolveRangeForIterator(ASTNode* node) {
+  BinaryASTNode* iterator = (BinaryASTNode*)node;
+  bool is_begin = node->op == AST_OP(range_begin);
+  ASTNode* range = iterator->left;
+  Symbol* range_sym = range != NULL && range->op == AST_OP(identifier)
+                          ? ((IdentifierASTNode*)range)->symbol
+                          : NULL;
+  TypeRecord* range_type = range_sym != NULL ? range_sym->type : NULL;
+  if (range_type != NULL && TypeIsReference(range_type)) {
+    range_type = range_type->next;
+  }
+  // The range may still be the class-template primary plus arguments (a view
+  // type such as `transform_view<ref_view<int[6]>, F>` named inside another
+  // template).  Its members only exist on the specialization, so materialize
+  // that before asking whether the class has `begin`/`end`; otherwise the loop
+  // falls through to the ADL form and no `begin` is found.
+  range_type =
+      TypeMaterializeClassTemplateSpecialization(&compiler->syntax, range_type);
+  SourceLocation location = node->location;
+
+  if (range_sym != NULL && range_type != NULL && TypeIsArray(range_type) &&
+      !TypeIsVLA(range_type)) {
+    // `__range + 0` and `__range + N`: the array decays and both bounds are
+    // pointers into it, matching the array form of [stmt.ranged].
+    int offset = is_begin ? 0 : range_type->info.array.size.fixed;
+    return RangeForIteratorReplacement(
+        node,
+        NewBinaryASTNode(AST_OP(plus), NULL, location,
+                         NewIdentifierASTNode(range_sym, location),
+                         NewIntConstantASTNode(
+                             offset, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                             location)));
+  }
+  if (range_sym != NULL && RangeTypeHasMemberBeginEnd(range_type)) {
+    return RangeForIteratorReplacement(
+        node,
+        NewRangeForMemberCall(range_sym, is_begin ? "begin" : "end", location));
+  }
+  return RangeForIteratorReplacement(node, iterator->right);
 }
 
 static bool TryParseRangeForStructuredBinding(Syntax* syntax,
@@ -971,39 +1144,64 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   ASTNode* range = SyntaxParseExpression(syntax, followers | TC(closebra));
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
 
-  Symbol* range_sym = NULL;
-  TypeRecord* range_type = NULL;
-  if (range != NULL && range->op == AST_OP(identifier)) {
-    range_sym = ((IdentifierASTNode*)range)->symbol;
-    range_type = range_sym != NULL ? range_sym->type : NULL;
+  TypeRecord* range_type = range != NULL ? range->type : NULL;
+  if (range_type == NULL && range != NULL &&
+      range->op == AST_OP(identifier)) {
+    Symbol* original = ((IdentifierASTNode*)range)->symbol;
+    range_type = original != NULL ? original->type : NULL;
   }
-  bool valid_named_range = range_type != NULL;
-  if (!valid_named_range) {
-    SyntaxError(syntax,
-                "range-based for currently supports named ranges");
+  if (range_type != NULL && TypeIsReference(range_type)) {
+    range_type = range_type->next;
   }
-  if (range != NULL) {
-    ASTNodeDelete(range);
+  bool reuse_named_range =
+      range != NULL && range->op == AST_OP(identifier);
+  if (!reuse_named_range && range != NULL) {
+    range = AnalyzeExpression(range);
   }
+  bool range_is_lvalue =
+      range != NULL && range->value_category == kValueCategoryLvalue;
+  Symbol* range_sym =
+      reuse_named_range ? ((IdentifierASTNode*)range)->symbol
+                        : NewRangeForRangeSymbol(syntax, location,
+                                                 !range_is_lvalue,
+                                                 range != NULL ? range->type
+                                                               : NULL);
 
   location = syntax->lex->current_token_location;
   syntax->loop_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   syntax->loop_count--;
-  ASTNode* result = NULL;
-  if (!valid_named_range) {
-    result = NewCompoundStatementASTNode(NewVector(), location);
-  } else if (TypeIsArray(range_type) && !TypeIsVLA(range_type)) {
-    result = NewRangeForArrayLoop(syntax, &binding, range_sym, range_type, stmt,
-                                  location);
-  } else if (TypeIsStructOrUnion(range_type)) {
-    result = NewRangeForMemberIteratorLoop(syntax, &binding, range_sym, stmt,
-                                           location);
+  ASTNode* loop = NULL;
+  if (range_type != NULL && TypeIsArray(range_type) &&
+      !TypeIsVLA(range_type)) {
+    loop = NewRangeForArrayLoop(syntax, &binding, range_sym, range_type, stmt,
+                                location);
+  } else if (range_type == NULL ||
+             RangeTypeHasMemberBeginEnd(
+                 TypeMaterializeClassTemplateSpecialization(syntax,
+                                                            range_type))) {
+    loop = NewRangeForMemberIteratorLoop(syntax, &binding, range_sym, stmt,
+                                         location);
   } else {
-    SyntaxError(syntax,
-                "range-based for supports fixed arrays or member begin/end ranges");
-    result = NewCompoundStatementASTNode(NewVector(), location);
+    // The type is either dependent or not yet deduced (a range named by an
+    // `auto` variable whose initializer returns `auto` is only typed during
+    // analysis).  Which of the three [stmt.ranged] forms applies then depends on
+    // a type this parse cannot see, so emit a deferred begin/end pair carrying
+    // the ADL fallback -- unqualified lookup of `begin`/`end` has to happen
+    // here, at the loop's point of definition -- and choose between the array,
+    // member and ADL forms once the range's type is known.
+    loop = NewRangeForDependentIteratorLoop(syntax, &binding, range_sym, stmt,
+                                            location);
   }
+  Vector* statements = NewVector();
+  if (!reuse_named_range) {
+    VectorAppend(statements,
+                 NewRangeForDeclarationList(range_sym, range, location));
+  } else {
+    ASTNodeDelete(range);
+  }
+  VectorAppend(statements, loop);
+  ASTNode* result = NewCompoundStatementASTNode(statements, location);
   RangeForBindingDestruct(&binding);
   return result;
 }

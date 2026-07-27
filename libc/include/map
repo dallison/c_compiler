@@ -61,13 +61,13 @@ struct __is_transparent_compare : false_type {
 
 template <class Compare>
 struct __is_transparent_compare<
-    Compare, void_t<typename Compare::is_transparent> > : true_type {
+    Compare, void_t<typename Compare::is_transparent>> : true_type {
 };
 
 }  // namespace __map_detail
 
 template <class Key, class T, class Compare = less<Key>,
-          class Allocator = allocator<pair<const Key, T> > >
+          class Allocator = allocator<pair<const Key, T>>>
 class map {
  public:
   using key_type = Key;

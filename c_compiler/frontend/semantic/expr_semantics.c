@@ -21,6 +21,7 @@
 #include "type_traits_semantics.h"
 #include "type_compare.h"
 #include "member_pointer.h"
+#include "statement_parser.h"
 #include "type_parse.h"
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
@@ -97,8 +98,10 @@ static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
 
 static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func) ||
-      !TypeFunctionReturnContainsAuto(func) ||
-      func->info.function.body == NULL) {
+      !TypeFunctionReturnContainsAuto(func)) {
+    return;
+  }
+  if (func->info.function.body == NULL) {
     return;
   }
   TypeRecord* saved_function = compiler->current_function;
@@ -175,7 +178,13 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
           NewCompoundLiteralASTNode(temp_id, location, initializer);
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, literal, true);
       ASTNode* analyzed = AnalyzeExpression(literal);
-      analyzed->value_category = kValueCategoryPrvalue;
+      // A variable template specialization names a variable, so referring to it
+      // yields an lvalue -- a const one, these objects being `constexpr`.
+      // Calling it a prvalue made `T&&` deduce `T = X` instead of
+      // `T = const X&`, and binding the const object to the resulting `X&&`
+      // was then rejected (`std::views::empty<int>` passed to a generic range
+      // parameter).
+      analyzed->value_category = kValueCategoryLvalue;
       return analyzed;
     }
   }
@@ -1449,6 +1458,16 @@ static TypeRecord* PointerArithmeticResultType(TypeRecord* pointer_type) {
   return plain;
 }
 
+// True if `node` is the multiply-by-element-size node that pointer arithmetic
+// inserts, so a re-analyzed `p + n` does not scale `n` twice.  A pointer
+// *difference* is also a ptr_scale node, but a dividing one, and it is an
+// ordinary integer operand that still needs scaling: without this distinction
+// `p + (q - r)` would advance `p` by bytes instead of elements.
+static bool ASTNodeIsPointerScaleMultiply(ASTNode* node) {
+  return node != NULL && node->op == AST_OP(ptr_scale) &&
+         ((PtrScaleASTNode*)node)->scale_op == AST_OP(mult);
+}
+
 static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   if (node == NULL) {
     return NULL;
@@ -1465,7 +1484,7 @@ static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   if (TypeIsPointerOrArray(node->left->type)) {
     ASTNodeSetType((ASTNode*)node,
                    PointerArithmeticResultType(node->left->type));
-    if (node->right->op == AST_OP(ptr_scale)) {
+    if (ASTNodeIsPointerScaleMultiply(node->right)) {
       return &node->base;
     }
     if (TypeIsIntegral(node->right->type)) {
@@ -1490,7 +1509,7 @@ static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   } else if (TypeIsPointerOrArray(node->right->type)) {
     ASTNodeSetType((ASTNode*)node,
                    PointerArithmeticResultType(node->right->type));
-    if (node->left->op == AST_OP(ptr_scale)) {
+    if (ASTNodeIsPointerScaleMultiply(node->left)) {
       return &node->base;
     }
     if (TypeIsIntegral(node->left->type)) {
@@ -1801,6 +1820,35 @@ static ASTNode* TryReversedComparisonOperator(BinaryASTNode* node) {
   return ReplaceBinaryWithCall(node, reversed);
 }
 
+// A pointer only compares against another pointer or a null pointer constant.
+// C++ has no implicit conversion between pointers and integers, so an operand
+// pair like `int* != long` makes the comparison ill-formed -- which is what
+// makes `sentinel_for<long, int*>` false and therefore what keeps overload sets
+// such as `ranges::advance(i, n)` versus `ranges::advance(i, bound)`
+// unambiguous.  C only makes it a constraint violation, so warn there.
+static void CheckComparisonOfPointerAndInteger(BinaryASTNode* node) {
+  ASTNode* pointer = NULL;
+  ASTNode* integer = NULL;
+  if (TypeIsPointer(node->left->type) && TypeIsIntegral(node->right->type)) {
+    pointer = node->left;
+    integer = node->right;
+  } else if (TypeIsIntegral(node->left->type) &&
+             TypeIsPointer(node->right->type)) {
+    pointer = node->right;
+    integer = node->left;
+  }
+  if (pointer == NULL || IsNullPointer(integer)) {
+    return;
+  }
+  if (CompilerIsCXX()) {
+    SemanticError((ASTNode*)node,
+                  "Comparison between a pointer and an integer");
+  } else {
+    SemanticWarning((ASTNode*)node, "int-conversion",
+                    "comparison between a pointer and an integer");
+  }
+}
+
 static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
@@ -1924,6 +1972,7 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
+  CheckComparisonOfPointerAndInteger(node);
   if (TypeIsIntegral(node->left->type) && TypeIsIntegral(node->right->type) &&
       TypeIsUnsigned(node->left->type) != TypeIsUnsigned(node->right->type) &&
       !IsZeroIntegerConstant(node->left) && !IsZeroIntegerConstant(node->right)) {
@@ -2402,6 +2451,115 @@ static ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
 
 static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target);
 
+static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
+
+// True if any constructor in the overload set headed by `ctor` takes a
+// std::initializer_list, in which case a braced-init-list is passed to it whole
+// rather than element-by-element ([over.match.list]).
+static bool CXXConstructorSetTakesInitializerList(StructMember* ctor) {
+  for (StructMember* candidate = ctor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        !candidate->symbol->type->info.function.is_constructor) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    for (size_t i = 0; i < info->prototype.length; i++) {
+      Symbol* formal = info->prototype.value.p[i];
+      TypeRecord* formal_type = formal->type;
+      if (TypeIsReference(formal_type)) {
+        formal_type = formal_type->next;
+      }
+      if (TypeIsCXXInitializerList(formal_type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// List-initialization of a non-aggregate class type selects a constructor
+// ([dcl.init.list]/3.6): the elements of the braced-init-list are its
+// arguments.  Build `(temp.T(elements...), temp)`, mirroring what the
+// functional-cast form `T(elements...)` lowers to.  Returns NULL when the
+// target is not such a class, leaving the caller's aggregate-initialization
+// path in charge -- that path only ever initializes members positionally, so
+// without this a `return {a, b}` for a class with a constructor would skip the
+// constructor entirely (silently leaving members with default values) or, when
+// the constructor takes fewer arguments than the class has members, fail with
+// "Too many initializers".
+static ASTNode* LowerCXXBracedInitToConstructorCall(
+    BracedInitializerASTNode* braced, TypeRecord* target,
+    SourceLocation location) {
+  if (!CompilerIsCXX() || !TypeIsStructOrUnion(target) ||
+      target->info.struct_info == NULL ||
+      target->info.struct_info->tag_name == NULL ||
+      target->info.struct_info->is_aggregate ||
+      TypeIsCXXInitializerList(target)) {
+    return NULL;
+  }
+  // `T{}` value-initializes, which the aggregate path already lowers to a
+  // zero-initialized temporary plus (where needed) a default constructor call.
+  if (braced->initializers == NULL || braced->initializers->length == 0) {
+    return NULL;
+  }
+  StructMember* constructor = FindCXXMemberOverloadHead(
+      target->info.struct_info, target->info.struct_info->tag_name);
+  if (constructor == NULL || !constructor->is_member_function ||
+      constructor->symbol == NULL || constructor->symbol->type == NULL ||
+      !TypeIsFunction(constructor->symbol->type) ||
+      !constructor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+
+  Vector* actuals = NewVector();
+  if (CXXConstructorSetTakesInitializerList(constructor)) {
+    VectorAppend(actuals, ASTNodeMove((ASTNode*)braced));
+  } else {
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* element = braced->initializers->value.p[i];
+      if (element == NULL) {
+        continue;
+      }
+      if (element->op == AST_OP(expr_init)) {
+        element = ((ExpressionInitializerASTNode*)element)->expr;
+      }
+      VectorAppend(actuals, ASTNodeMove(element));
+    }
+    braced->initializers->length = 0;
+  }
+  if (TypeIsStructOrUnion(target) && target->info.struct_info != NULL &&
+      StructHasVirtualBases(target->info.struct_info)) {
+    VectorInsertBefore(
+        actuals, 0,
+        NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                              location));
+  }
+
+  TypeRecord* type = TypeRecordCopy(target);
+  type->qualifiers = kQualPlain;
+  TypeRecordCalculateSize(type);
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+  temp->location = location;
+  ASTNode* member = NewStringConstantASTNode(
+      NewString(constructor->symbol->name.value), NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location,
+                       NewIdentifierASTNode(temp, location), member);
+  ASTNode* constructor_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  ASTNode* comma =
+      NewBinaryASTNode(AST_OP(comma), TypeRecordCopy(type), location,
+                       constructor_call, NewIdentifierASTNode(temp, location));
+  ASTNode* analyzed = AnalyzeExpression(comma);
+  if (analyzed != NULL) {
+    analyzed->value_category = kValueCategoryPrvalue;
+  }
+  return analyzed;
+}
+
 // Lower a bare braced-init-list that appears where an expression of a known
 // type is required (a function argument, a return value, or the right-hand
 // side of an assignment) into a temporary of that `target` type, initialized
@@ -2442,6 +2600,12 @@ ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target) {
     DiagnoseScalarNarrowing(element, target);
     ASTNode* cast = NewCastASTNode(TypeRecordCopy(target), location, element);
     return AnalyzeExpression(cast);
+  }
+  // A class with constructors is list-initialized by calling one of them, not
+  // by initializing its members positionally.
+  ASTNode* constructed = LowerCXXBracedInitToConstructorCall(b, target, location);
+  if (constructed != NULL) {
+    return constructed;
   }
   // Aggregate / class target: build a temporary of `target` initialized by the
   // braces, reusing the compound-literal machinery (which routes through
@@ -3765,6 +3929,9 @@ static void SpecializePrintfCall(VectorASTNode* node, Symbol* callee) {
 static void RenumberVectorChildren(VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* child = node->children->value.p[i];
+    if (child == NULL) {
+      continue;
+    }
     child->parent = &node->base;
     child->child_id = (int)i;
   }
@@ -3975,7 +4142,9 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   }
 
   member = ResolveMemberFunctionOverload(member, node, member_access);
-  member_node->member = member;
+  if (member != NULL) {
+    StructMemberASTNodeSetMember(member_node, member);
+  }
   if (member != NULL) {
     if (member->symbol != NULL && member->symbol->type != NULL &&
         TypeIsFunction(member->symbol->type) &&
@@ -4043,7 +4212,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
             }
             if (same_formals) {
               member = candidate;
-              member_node->member = candidate;
+              StructMemberASTNodeSetMember(member_node, candidate);
               break;
             }
           }
@@ -4054,7 +4223,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
             member->symbol->type->info.function.cxx_special_member_kind ==
                 kCXXSpecialMemberNone) {
           member = arity_fallback;
-          member_node->member = arity_fallback;
+          StructMemberASTNodeSetMember(member_node, arity_fallback);
         }
       }
       if (same_constructor_owner && concrete_owner != NULL) {
@@ -5671,7 +5840,11 @@ static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
       name, &candidates, actuals, NULL,
       /*diagnose_no_match=*/false, diagnose_ambiguous, diagnostic_node);
   VectorDestruct(&candidates);
-  return InstantiateSelectedFunctionTemplateCandidate(best);
+  // ResolveFunctionCandidateVector already turns the selected temporary
+  // template candidate into its concrete specialization.  Instantiating that
+  // specialization a second time reuses its argument vector against the
+  // primary template and can permute dependent operands in operator templates.
+  return best;
 }
 
 /* Public entry used when instantiating a cloned template body: a call whose
@@ -6219,12 +6392,15 @@ static void DeleteTemporaryMemberTemplateCandidates(Vector* members,
   if (members == NULL) {
     return;
   }
-  for (size_t i = 0; i < members->length; i++) {
-    StructMember* member = members->value.p[i];
-    if (member != NULL && member != keep) {
-      StructMemberDelete(member);
-    }
-  }
+  // Candidate members can be installed into member-access ASTs while an
+  // enclosing expression is still being re-analysed (notably auto-return and
+  // requires-expression instantiation).  A later pass may retain one that was
+  // not the final `keep` value observed by this invocation.  Reclaiming the
+  // rejected wrappers here leaves that AST with a dangling StructMember and
+  // eventually corrupts code generation.  Their symbols/types are already
+  // compilation-lifetime template candidates, so keep these tiny wrappers for
+  // the same lifetime.
+  (void)keep;
   VectorDestruct(members);
 }
 
@@ -7423,6 +7599,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     return destructor_call;
   }
   node->left = AnalyzeExpression(node->left);
+  // A dependent pseudo-destructor can become scalar only while the member
+  // access above is being instantiated.  Re-run the explicit-destructor path
+  // after that access has acquired its concrete receiver type.
+  destructor_call = TryAnalyzeCXXExplicitDestructorCall(node);
+  if (destructor_call != NULL) {
+    return destructor_call;
+  }
   // A member-function-template call named with dependent explicit template
   // arguments (e.g. `rest.template ctor<Target>(std::forward<Args>(args)...)`
   // inside a member template whose parameter `Target` is not yet concrete)
@@ -7628,6 +7811,19 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (CompilerIsCXX() && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, id->symbol);
+  } else if (CompilerIsCXX() &&
+             (node->left->op == AST_OP(dot) ||
+              node->left->op == AST_OP(arrow))) {
+    BinaryASTNode* access = (BinaryASTNode*)node->left;
+    if (access->right != NULL &&
+        access->right->op == AST_OP(structmember)) {
+      StructMemberASTNode* member =
+          (StructMemberASTNode*)access->right;
+      if (member->member != NULL && member->member->symbol != NULL) {
+        TypeEnsureTemplateMemberFunctionDefinition(
+            &compiler->syntax, member->member->symbol);
+      }
+    }
   }
 
   // Set node type by dereferencing the function.  We've already checked that
@@ -8181,6 +8377,22 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     ASTNodeSetType((ASTNode*)node, placeholder);
     return;
   }
+  if (CompilerIsCXX() && node->base.op == AST_OP(arrow) &&
+      TypeIsPointer(receiver_type) &&
+      !TypeIsStructOrUnion(receiver_type->next) && node->right != NULL &&
+      node->right->op == AST_OP(string)) {
+    String* member_name = ((ConstantASTNode*)node->right)->value.string;
+    if (member_name != NULL && member_name->length != 0 &&
+        member_name->value[0] == '~') {
+      // Leave a scalar pseudo-destructor member access deferred to its
+      // enclosing call.  AnalyzeFunctionCall will replace the complete call
+      // with the required object-evaluating void expression.
+      TypeRecord* placeholder =
+          NewTypeRecordWithSize(kTypeUnknown, kQualPlain);
+      ASTNodeSetType((ASTNode*)node, placeholder);
+      return;
+    }
+  }
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
     if (!TypeIsStructOrUnionPointer(receiver_type)) {
@@ -8226,6 +8438,21 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       FindStructMemberWithAccessAndOffsetByName(
           struct_info, member_name->value, &access, &member_owner,
           &member_offset);
+  if (member == NULL && CompilerIsCXX() && member_name->length > 1 &&
+      member_name->value[0] == '~') {
+    String* base_tag = CXXFindBaseTagNameForDestructorSpelling(
+        struct_info, member_name->value + 1);
+    if (base_tag != NULL) {
+      String concrete_name;
+      StringInit(&concrete_name, "~");
+      StringAppendString(&concrete_name, base_tag);
+      StringSet(member_name, concrete_name.value);
+      StringDestruct(&concrete_name);
+      member = FindStructMemberWithAccessAndOffsetByName(
+          struct_info, member_name->value, &access, &member_owner,
+          &member_offset);
+    }
+  }
   if (member == NULL) {
     SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
                   member_name->value, struct_info->tag_name->value);
@@ -8255,10 +8482,20 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   // Replace the right node with a StructMember AST node.
   ASTNode* old_right = node->right;
   node->right = NewStructMemberASTNode(member, node->right->location);
-  ((StructMemberASTNode*)node->right)->access = access;
-  ((StructMemberASTNode*)node->right)->byte_offset = member_offset;
-  ((StructMemberASTNode*)node->right)->template_arguments =
+  StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
+  member_node->access = access;
+  member_node->byte_offset = member_offset;
+  member_node->template_arguments =
       TemplateArgumentVectorCopy(explicit_template_arguments);
+  member_node->owner_type =
+      member->symbol != NULL && member->symbol->type != NULL &&
+              TypeIsFunction(member->symbol->type) &&
+              member->symbol->type->info.function.cxx_member_owner != NULL &&
+              member->symbol->type->info.function.cxx_member_owner->tag_symbol !=
+                  NULL
+          ? member->symbol->type->info.function.cxx_member_owner->tag_symbol->type
+          : receiver_type;
+  TypeRecordIncRef(member_node->owner_type);
   ASTNodeDelete(old_right);
   // A data member named in a member-access expression counts as used for
   // -Wunused-private-field.
@@ -8356,6 +8593,13 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   node->base.value_category = kValueCategoryLvalue;
 }
 
+static TypeRecord* SizeofOperandType(TypeRecord* type) {
+  // Per [expr.sizeof] and [expr.alignof], applying either operator to a
+  // reference measures the referenced type, not the compiler's pointer-sized
+  // representation of the reference.
+  return CompilerIsCXX() && TypeIsReference(type) ? type->next : type;
+}
+
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   bool is_alignof = node->base.base.op == AST_OP(alignof);
   if (node->is_pack_size) {
@@ -8374,21 +8618,21 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   }
   if (node->expr != NULL) {
     node->expr = AnalyzeExpression(node->expr);
-    if (TypeIsVLA(node->expr->type)) {
+    TypeRecord* operand_type = SizeofOperandType(node->expr->type);
+    if (TypeIsVLA(operand_type)) {
       // sizeof(vla) is calculated at runtime.
     } else {
       node->base.value.ivalue =
-          is_alignof ? TypeRecordAlignment(node->expr->type)
-                     : node->expr->type->size;
+          is_alignof ? TypeRecordAlignment(operand_type) : operand_type->size;
     }
   } else if (node->type_operand != NULL &&
              !TypeContainsTemplateParameter(node->type_operand)) {
     // A `sizeof(type-id)` / `alignof(type-id)` whose operand has become
     // concrete (e.g. after template instantiation): re-measure now.
-    TypeRecordCalculateSize(node->type_operand);
+    TypeRecord* operand_type = SizeofOperandType(node->type_operand);
+    TypeRecordCalculateSize(operand_type);
     node->base.value.ivalue =
-        is_alignof ? TypeRecordAlignment(node->type_operand)
-                   : node->type_operand->size;
+        is_alignof ? TypeRecordAlignment(operand_type) : operand_type->size;
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
@@ -9227,6 +9471,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(call):  // Function call.
       node = AnalyzeFunctionCall(vector_node);
+      break;
+
+    case AST_OP(range_begin):
+    case AST_OP(range_end):
+      // A range-for over a dependent range: now that the range's type is known,
+      // pick the array, member or ADL form and analyze that instead.
+      node = AnalyzeExpression(SyntaxResolveRangeForIterator(node));
       break;
 
     case AST_OP(dot):

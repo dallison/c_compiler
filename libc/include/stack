@@ -19,7 +19,7 @@
 
 namespace std {
 
-template <class T, class Container = deque<T> >
+template <class T, class Container = deque<T>>
 class stack {
  public:
   using container_type = Container;

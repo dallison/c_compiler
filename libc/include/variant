@@ -76,22 +76,22 @@ template <class T>
 struct variant_size;
 
 template <class... Types>
-struct variant_size<variant<Types...> >
+struct variant_size<variant<Types...>>
     : integral_constant<size_t, sizeof...(Types)> {
 };
 
 template <class... Types>
-struct variant_size<const variant<Types...> > : variant_size<variant<Types...> > {
+struct variant_size<const variant<Types...>> : variant_size<variant<Types...>> {
 };
 
 template <class... Types>
-struct variant_size<volatile variant<Types...> >
-    : variant_size<variant<Types...> > {
+struct variant_size<volatile variant<Types...>>
+    : variant_size<variant<Types...>> {
 };
 
 template <class... Types>
-struct variant_size<const volatile variant<Types...> >
-    : variant_size<variant<Types...> > {
+struct variant_size<const volatile variant<Types...>>
+    : variant_size<variant<Types...>> {
 };
 
 template <class T>
@@ -155,7 +155,7 @@ struct __is_variant : false_type {
 };
 
 template <class... Types>
-struct __is_variant<variant<Types...> > : true_type {
+struct __is_variant<variant<Types...>> : true_type {
 };
 
 template <class T>
@@ -163,7 +163,7 @@ struct __is_in_place_type : false_type {
 };
 
 template <class T>
-struct __is_in_place_type<in_place_type_t<T> > : true_type {
+struct __is_in_place_type<in_place_type_t<T>> : true_type {
 };
 
 template <class T>
@@ -171,16 +171,16 @@ struct __is_in_place_index : false_type {
 };
 
 template <size_t I>
-struct __is_in_place_index<in_place_index_t<I> > : true_type {
+struct __is_in_place_index<in_place_index_t<I>> : true_type {
 };
 
 template <class T, class... Types>
 struct __converting_candidate
     : bool_constant<
           __exactly_once<decay_t<T>, Types...>::value &&
-          !__is_variant<remove_cvref_t<T> >::value &&
-          !__is_in_place_type<remove_cvref_t<T> >::value &&
-          !__is_in_place_index<remove_cvref_t<T> >::value> {
+          !__is_variant<remove_cvref_t<T>>::value &&
+          !__is_in_place_type<remove_cvref_t<T>>::value &&
+          !__is_in_place_index<remove_cvref_t<T>>::value> {
 };
 
 template <size_t I, class... Types>
@@ -638,22 +638,22 @@ auto __compare(const __storage<I, T, Rest...>& left,
 }  // namespace __variant_detail
 
 template <size_t I, class... Types>
-struct variant_alternative<I, variant<Types...> > {
+struct variant_alternative<I, variant<Types...>> {
   using type = typename __variant_detail::__type_at<I, Types...>::type;
 };
 
 template <size_t I, class... Types>
-struct variant_alternative<I, const variant<Types...> > {
+struct variant_alternative<I, const variant<Types...>> {
   using type = typename __variant_detail::__type_at<I, const Types...>::type;
 };
 
 template <size_t I, class... Types>
-struct variant_alternative<I, volatile variant<Types...> > {
+struct variant_alternative<I, volatile variant<Types...>> {
   using type = typename __variant_detail::__type_at<I, volatile Types...>::type;
 };
 
 template <size_t I, class... Types>
-struct variant_alternative<I, const volatile variant<Types...> > {
+struct variant_alternative<I, const volatile variant<Types...>> {
   using type =
       typename __variant_detail::__type_at<I, const volatile Types...>::type;
 };
@@ -942,15 +942,15 @@ constexpr bool holds_alternative(const variant<Types...>& value) noexcept {
 }
 
 template <size_t I, class... Types>
-constexpr variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr variant_alternative_t<I, variant<Types...>>* get_if(
     variant<Types...>* value) noexcept;
 
 template <size_t I, class... Types>
-constexpr const variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr const variant_alternative_t<I, variant<Types...>>* get_if(
     const variant<Types...>* value) noexcept;
 
 template <size_t I, class... Types>
-constexpr variant_alternative_t<I, variant<Types...> >& get(
+constexpr variant_alternative_t<I, variant<Types...>>& get(
     variant<Types...>& value) {
   if (get_if<I>(&value) == nullptr) {
     __DAVECC_THROW(bad_variant_access());
@@ -959,7 +959,7 @@ constexpr variant_alternative_t<I, variant<Types...> >& get(
 }
 
 template <size_t I, class... Types>
-constexpr const variant_alternative_t<I, variant<Types...> >& get(
+constexpr const variant_alternative_t<I, variant<Types...>>& get(
     const variant<Types...>& value) {
   if (get_if<I>(&value) == nullptr) {
     __DAVECC_THROW(bad_variant_access());
@@ -968,7 +968,7 @@ constexpr const variant_alternative_t<I, variant<Types...> >& get(
 }
 
 template <size_t I, class... Types>
-constexpr variant_alternative_t<I, variant<Types...> >&& get(
+constexpr variant_alternative_t<I, variant<Types...>>&& get(
     variant<Types...>&& value) {
   if (get_if<I>(&value) == nullptr) {
     __DAVECC_THROW(bad_variant_access());
@@ -977,7 +977,7 @@ constexpr variant_alternative_t<I, variant<Types...> >&& get(
 }
 
 template <size_t I, class... Types>
-constexpr const variant_alternative_t<I, variant<Types...> >&& get(
+constexpr const variant_alternative_t<I, variant<Types...>>&& get(
     const variant<Types...>&& value) {
   if (get_if<I>(&value) == nullptr) {
     __DAVECC_THROW(bad_variant_access());
@@ -1032,7 +1032,7 @@ constexpr const T&& get(const variant<Types...>&& value) {
 }
 
 template <size_t I, class... Types>
-constexpr variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr variant_alternative_t<I, variant<Types...>>* get_if(
     variant<Types...>* value) noexcept {
   if (value == nullptr) {
     return nullptr;
@@ -1041,7 +1041,7 @@ constexpr variant_alternative_t<I, variant<Types...> >* get_if(
 }
 
 template <size_t I, class... Types>
-constexpr const variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr const variant_alternative_t<I, variant<Types...>>* get_if(
     const variant<Types...>* value) noexcept {
   if (value == nullptr) {
     return nullptr;
@@ -1339,7 +1339,7 @@ size_t __variant_hash_value(const T& value) {
 }  // namespace __variant_detail
 
 template <class... Types>
-struct hash<variant<Types...> > {
+struct hash<variant<Types...>> {
   size_t operator()(const variant<Types...>& value) const {
     if (value.valueless_by_exception()) {
       return variant_npos;

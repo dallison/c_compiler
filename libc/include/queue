@@ -23,7 +23,7 @@
 
 namespace std {
 
-template <class T, class Container = deque<T> >
+template <class T, class Container = deque<T>>
 class queue {
  public:
   using container_type = Container;
@@ -109,7 +109,7 @@ void swap(queue<T, Container>& a, queue<T, Container>& b) noexcept {
 }
 
 template <class T, class Container = vector<T>,
-          class Compare = less<typename Container::value_type> >
+          class Compare = less<typename Container::value_type>>
 class priority_queue {
  public:
   using container_type = Container;

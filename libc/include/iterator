@@ -280,10 +280,14 @@ constexpr reverse_iterator<Iter> make_reverse_iterator(Iter it) {
 // ------------------------------------------------------------------
 
 template <class T>
-using iter_value_t = typename iterator_traits<remove_cvref_t<T> >::value_type;
+using iter_value_t = typename iterator_traits<remove_cvref_t<T>>::value_type;
 
 template <class T>
 using iter_reference_t = decltype(*declval<T&>());
+
+template <class T>
+using iter_common_reference_t =
+    common_reference_t<iter_reference_t<T>, iter_value_t<T>&>;
 
 // [incrementable.traits]  The associated "difference" type of an incrementable
 // type.  Class iterators expose a `difference_type` member, raw pointers use
@@ -326,7 +330,7 @@ struct incrementable_traits<T> {
 
 template <class T>
 using iter_difference_t =
-    typename incrementable_traits<remove_cvref_t<T> >::difference_type;
+    typename incrementable_traits<remove_cvref_t<T>>::difference_type;
 
 // ITER_CONCEPT(I): prefer iterator_traits<I>::iterator_concept when present,
 // otherwise fall back to iterator_category.
@@ -337,12 +341,12 @@ struct __iter_concept_of {
 
 template <class I>
 struct __iter_concept_of<
-    I, void_t<typename iterator_traits<I>::iterator_concept> > {
+    I, void_t<typename iterator_traits<I>::iterator_concept>> {
   using type = typename iterator_traits<I>::iterator_concept;
 };
 
 template <class I>
-using __iter_concept = typename __iter_concept_of<remove_cvref_t<I> >::type;
+using __iter_concept = typename __iter_concept_of<remove_cvref_t<I>>::type;
 
 template <class T>
 using __with_reference = T&;
@@ -434,18 +438,20 @@ inline constexpr bool disable_sized_sentinel_for = false;
 template <class S, class I>
 concept sized_sentinel_for =
     sentinel_for<S, I> &&
-    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I> > &&
+    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I>> &&
     requires(const I& i, const S& s) {
-      { s - i } -> same_as<iter_difference_t<I> >;
-      { i - s } -> same_as<iter_difference_t<I> >;
+      { s - i } -> same_as<iter_difference_t<I>>;
+      { i - s } -> same_as<iter_difference_t<I>>;
     };
 
 // [iterator.concept.input]
 template <class I>
 concept input_iterator =
     input_or_output_iterator<I> && indirectly_readable<I> &&
-    requires { typename __iter_concept<I>; } &&
-    derived_from<__iter_concept<I>, input_iterator_tag>;
+    requires { typename iterator_traits<remove_cvref_t<I>>::iterator_category; } &&
+    derived_from<
+        typename iterator_traits<remove_cvref_t<I>>::iterator_category,
+        input_iterator_tag>;
 
 // [iterator.concept.output]
 template <class I, class T>
@@ -459,14 +465,18 @@ concept output_iterator =
 template <class I>
 concept forward_iterator =
     input_iterator<I> &&
-    derived_from<__iter_concept<I>, forward_iterator_tag> &&
+    derived_from<
+        typename iterator_traits<remove_cvref_t<I>>::iterator_category,
+        forward_iterator_tag> &&
     incrementable<I> && sentinel_for<I, I>;
 
 // [iterator.concept.bidir]
 template <class I>
 concept bidirectional_iterator =
     forward_iterator<I> &&
-    derived_from<__iter_concept<I>, bidirectional_iterator_tag> &&
+    derived_from<
+        typename iterator_traits<remove_cvref_t<I>>::iterator_category,
+        bidirectional_iterator_tag> &&
     requires(I i) {
       { --i } -> same_as<I&>;
       { i-- } -> same_as<I>;
@@ -476,7 +486,9 @@ concept bidirectional_iterator =
 template <class I>
 concept random_access_iterator =
     bidirectional_iterator<I> &&
-    derived_from<__iter_concept<I>, random_access_iterator_tag> &&
+    derived_from<
+        typename iterator_traits<remove_cvref_t<I>>::iterator_category,
+        random_access_iterator_tag> &&
     totally_ordered<I> && sized_sentinel_for<I, I> &&
     requires(I i, const I j, const iter_difference_t<I> n) {
       { i += n } -> same_as<I&>;
@@ -484,16 +496,18 @@ concept random_access_iterator =
       { n + j } -> same_as<I>;
       { i -= n } -> same_as<I&>;
       { j - n } -> same_as<I>;
-      { j[n] } -> same_as<iter_reference_t<I> >;
+      { j[n] } -> same_as<iter_reference_t<I>>;
     };
 
 // [iterator.concept.contiguous]
 template <class I>
 concept contiguous_iterator =
     random_access_iterator<I> &&
-    derived_from<__iter_concept<I>, contiguous_iterator_tag> &&
-    is_lvalue_reference_v<iter_reference_t<I> > &&
-    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I> > >;
+    derived_from<
+        typename iterator_traits<remove_cvref_t<I>>::iterator_concept,
+        contiguous_iterator_tag> &&
+    is_lvalue_reference_v<iter_reference_t<I>> &&
+    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I>>>;
 
 // [std.iterator.tags] sentinels
 struct default_sentinel_t {};
@@ -512,22 +526,22 @@ inline constexpr unreachable_sentinel_t unreachable_sentinel{};
 template <class F, class I>
 concept indirectly_unary_invocable =
     indirectly_readable<I> && invocable<F&, iter_value_t<I>&> &&
-    invocable<F&, iter_reference_t<I> >;
+    invocable<F&, iter_reference_t<I>>;
 
 template <class F, class I>
 concept indirectly_regular_unary_invocable =
     indirectly_readable<I> && regular_invocable<F&, iter_value_t<I>&> &&
-    regular_invocable<F&, iter_reference_t<I> >;
+    regular_invocable<F&, iter_reference_t<I>>;
 
 template <class F, class I>
 concept indirect_unary_predicate =
     indirectly_readable<I> && predicate<F&, iter_value_t<I>&> &&
-    predicate<F&, iter_reference_t<I> >;
+    predicate<F&, iter_reference_t<I>>;
 
 template <class F, class I1, class I2>
 concept indirect_binary_predicate =
     indirectly_readable<I1> && indirectly_readable<I2> &&
-    predicate<F&, iter_reference_t<I1>, iter_reference_t<I2> >;
+    predicate<F&, iter_reference_t<I1>, iter_reference_t<I2>>;
 
 // [projected]
 template <class I, class Proj>
@@ -544,6 +558,73 @@ struct __projected {
 template <class I, class Proj>
 using projected = typename __projected<I, Proj>::__type;
 
+template <class In, class Out>
+concept indirectly_movable =
+    indirectly_readable<In> &&
+    indirectly_writable<Out, iter_rvalue_reference_t<In>>;
+
+template <class In, class Out>
+concept indirectly_movable_storable =
+    indirectly_movable<In, Out> &&
+    indirectly_writable<Out, iter_value_t<In>> &&
+    movable<iter_value_t<In>>;
+
+template <class In, class Out>
+concept indirectly_copyable =
+    indirectly_readable<In> &&
+    indirectly_writable<Out, iter_reference_t<In>>;
+
+template <class In, class Out>
+concept indirectly_copyable_storable =
+    indirectly_copyable<In, Out> &&
+    indirectly_writable<Out, iter_value_t<In>&> &&
+    copyable<iter_value_t<In>>;
+
+template <class I1, class I2 = I1>
+concept indirectly_swappable =
+    indirectly_readable<I1> && indirectly_readable<I2> &&
+    requires(const I1 i1, const I2 i2) {
+      ranges::swap(*i1, *i1);
+      ranges::swap(*i2, *i2);
+      ranges::swap(*i1, *i2);
+      ranges::swap(*i2, *i1);
+    };
+
+template <class I>
+concept permutable =
+    forward_iterator<I> && indirectly_movable_storable<I, I> &&
+    indirectly_swappable<I, I>;
+
+template <class F, class I1, class I2 = I1>
+concept indirect_strict_weak_order =
+    indirectly_readable<I1> && indirectly_readable<I2> &&
+    strict_weak_order<F&, iter_reference_t<I1>, iter_reference_t<I2>>;
+
+struct __iter_identity {
+  template <class T>
+  constexpr T&& operator()(T&& value) const {
+    return static_cast<T&&>(value);
+  }
+};
+
+struct __iter_less {
+  template <class T, class U>
+  constexpr bool operator()(const T& left, const U& right) const {
+    return left < right;
+  }
+};
+
+template <class I, class R = __iter_less, class P = __iter_identity>
+concept sortable =
+    permutable<I> && indirect_strict_weak_order<R, projected<I, P>>;
+
+template <class I1, class I2, class Out, class R = __iter_less,
+          class P1 = __iter_identity, class P2 = __iter_identity>
+concept mergeable =
+    input_iterator<I1> && input_iterator<I2> && weakly_incrementable<Out> &&
+    indirectly_copyable<I1, Out> && indirectly_copyable<I2, Out> &&
+    indirect_strict_weak_order<R, projected<I1, P1>, projected<I2, P2>>;
+
 namespace ranges {
 namespace __iter_swap {
 
@@ -559,6 +640,153 @@ struct __fn {
 inline namespace __cpo {
 inline constexpr __iter_swap::__fn iter_swap{};
 }  // namespace __cpo
+
+struct __advance_fn {
+  template <input_or_output_iterator I>
+  constexpr void operator()(I& i, iter_difference_t<I> n) const {
+    if constexpr (random_access_iterator<I>) {
+      i += n;
+    } else if constexpr (bidirectional_iterator<I>) {
+      while (n > 0) {
+        ++i;
+        --n;
+      }
+      while (n < 0) {
+        --i;
+        ++n;
+      }
+    } else {
+      while (n > 0) {
+        ++i;
+        --n;
+      }
+    }
+  }
+
+  template <input_or_output_iterator I, sentinel_for<I> S>
+  constexpr void operator()(I& i, S bound) const {
+    if constexpr (assignable_from<I&, S>) {
+      i = static_cast<S&&>(bound);
+    } else {
+      while (i != bound) {
+        ++i;
+      }
+    }
+  }
+
+  template <input_or_output_iterator I, sentinel_for<I> S>
+  constexpr iter_difference_t<I> operator()(I& i, iter_difference_t<I> n,
+                                            S bound) const {
+    if constexpr (sized_sentinel_for<S, I>) {
+      iter_difference_t<I> d = bound - i;
+      if ((n >= 0 && n >= d) || (n < 0 && n <= d)) {
+        (*this)(i, bound);
+        return n - d;
+      }
+      if constexpr (random_access_iterator<I>) {
+        i += n;
+      } else if constexpr (bidirectional_iterator<I>) {
+        while (n > 0) {
+          ++i;
+          --n;
+        }
+        while (n < 0) {
+          --i;
+          ++n;
+        }
+      } else {
+        while (n > 0) {
+          ++i;
+          --n;
+        }
+      }
+      return 0;
+    } else {
+      while (n > 0 && i != bound) {
+        ++i;
+        --n;
+      }
+      if constexpr (bidirectional_iterator<I> && same_as<I, S>) {
+        while (n < 0 && i != bound) {
+          --i;
+          ++n;
+        }
+      }
+      return n;
+    }
+  }
+};
+
+struct __distance_fn {
+  template <input_or_output_iterator I, sentinel_for<I> S>
+  constexpr iter_difference_t<I> operator()(I first, S last) const {
+    if constexpr (sized_sentinel_for<S, I>) {
+      return last - first;
+    } else {
+      iter_difference_t<I> result = 0;
+      while (first != last) {
+        ++first;
+        ++result;
+      }
+      return result;
+    }
+  }
+
+  template <class R>
+  constexpr auto operator()(R&& range) const;
+};
+
+struct __next_fn {
+  template <input_or_output_iterator I>
+  constexpr I operator()(I i) const {
+    ++i;
+    return i;
+  }
+
+  template <input_or_output_iterator I>
+  constexpr I operator()(I i, iter_difference_t<I> n) const {
+    __advance_fn fn;
+    fn(i, n);
+    return i;
+  }
+
+  template <input_or_output_iterator I, sentinel_for<I> S>
+  constexpr I operator()(I i, S bound) const {
+    __advance_fn fn;
+    fn(i, bound);
+    return i;
+  }
+
+  template <input_or_output_iterator I, sentinel_for<I> S>
+  constexpr I operator()(I i, iter_difference_t<I> n, S bound) const {
+    __advance_fn fn;
+    fn(i, n, bound);
+    return i;
+  }
+};
+
+struct __prev_fn {
+  template <bidirectional_iterator I>
+  constexpr I operator()(I i, iter_difference_t<I> n = 1) const {
+    __advance_fn fn;
+    fn(i, -n);
+    return i;
+  }
+
+  template <bidirectional_iterator I>
+  constexpr I operator()(I i, iter_difference_t<I> n, I bound) const {
+    __advance_fn fn;
+    fn(i, -n, bound);
+    return i;
+  }
+};
+
+inline namespace __cpo {
+inline constexpr __advance_fn advance{};
+inline constexpr __distance_fn distance{};
+inline constexpr __next_fn next{};
+inline constexpr __prev_fn prev{};
+}
 }  // namespace ranges
 
 }  // namespace std

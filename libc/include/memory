@@ -64,7 +64,9 @@ struct allocator {
 
   template <class U>
   void destroy(U* ptr) {
-    ptr->~U();
+    if constexpr (!is_trivially_destructible<U>::value) {
+      ptr->~U();
+    }
   }
 
   size_type max_size() const noexcept {
@@ -97,7 +99,7 @@ struct __alloc_traits_copy_propagate {
 
 template <class Alloc>
 struct __alloc_traits_copy_propagate<
-    Alloc, __void_t<typename Alloc::propagate_on_container_copy_assignment> > {
+    Alloc, __void_t<typename Alloc::propagate_on_container_copy_assignment>> {
   using type = typename Alloc::propagate_on_container_copy_assignment;
 };
 
@@ -108,7 +110,7 @@ struct __alloc_traits_move_propagate {
 
 template <class Alloc>
 struct __alloc_traits_move_propagate<
-    Alloc, __void_t<typename Alloc::propagate_on_container_move_assignment> > {
+    Alloc, __void_t<typename Alloc::propagate_on_container_move_assignment>> {
   using type = typename Alloc::propagate_on_container_move_assignment;
 };
 
@@ -119,7 +121,7 @@ struct __alloc_traits_swap_propagate {
 
 template <class Alloc>
 struct __alloc_traits_swap_propagate<
-    Alloc, __void_t<typename Alloc::propagate_on_container_swap> > {
+    Alloc, __void_t<typename Alloc::propagate_on_container_swap>> {
   using type = typename Alloc::propagate_on_container_swap;
 };
 
@@ -130,7 +132,7 @@ struct __alloc_traits_always_equal {
 
 template <class Alloc>
 struct __alloc_traits_always_equal<
-    Alloc, __void_t<typename Alloc::is_always_equal> > {
+    Alloc, __void_t<typename Alloc::is_always_equal>> {
   using type = typename Alloc::is_always_equal;
 };
 
@@ -159,7 +161,7 @@ struct allocator_traits {
   using rebind_alloc = typename __alloc_traits_rebind<Alloc, T>::type;
 
   template <class T>
-  using rebind_traits = allocator_traits<rebind_alloc<T> >;
+  using rebind_traits = allocator_traits<rebind_alloc<T>>;
 
   static bool __propagate_on_container_copy_assignment() {
     return __alloc_traits_bool(
@@ -252,7 +254,7 @@ struct default_delete<T[]> {
   }
 };
 
-template <class T, class Deleter = default_delete<T> >
+template <class T, class Deleter = default_delete<T>>
 struct unique_ptr {
   using pointer = T*;
   using element_type = T;

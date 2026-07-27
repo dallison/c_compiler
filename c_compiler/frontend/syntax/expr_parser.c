@@ -522,25 +522,33 @@ static bool FoldLessStartsTemplateArgument(Syntax* syntax) {
   LexCheckpointSave(syntax->lex, &checkpoint);
   int angle_depth = 0;
   int paren_depth = 0;
+  int square_depth = 0;
+  int brace_depth = 0;
   bool matched = false;
   while (!LexEof(syntax->lex)) {
     Token token = syntax->lex->current_token;
-    if (token == TOK(rparen) && paren_depth == 0) {
+    if (token == TOK(rparen) && paren_depth == 0 &&
+        square_depth == 0 && brace_depth == 0) {
       break;
     }
-    if (token == TOK(less)) {
-      angle_depth++;
-    } else if (token == TOK(greater)) {
-      angle_depth--;
-    } else if (token == TOK(greatergreater) ||
-               token == TOK(greatergreatereq)) {
-      angle_depth -= 2;
-    } else if (token == TOK(greatereq)) {
-      angle_depth--;
-    } else if (token == TOK(lparen)) {
+    if (token == TOK(lparen)) {
       paren_depth++;
     } else if (token == TOK(rparen)) {
       paren_depth--;
+    } else if (token == TOK(lsquare)) {
+      square_depth++;
+    } else if (token == TOK(rsquare)) {
+      square_depth--;
+    } else if (token == TOK(lbrace)) {
+      brace_depth++;
+    } else if (token == TOK(rbrace)) {
+      brace_depth--;
+    } else if (paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
+      if (token == TOK(less)) {
+        angle_depth++;
+      } else {
+        angle_depth -= LexClosingAngleCount(token);
+      }
     }
     LexNextToken(syntax->lex);
     if (angle_depth <= 0) {
@@ -586,23 +594,7 @@ static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
         break;
       }
     }
-    if (token == TOK(less) && angle_depth == 0 &&
-        FoldLessStartsTemplateArgument(syntax)) {
-      angle_depth++;
-    } else if (token == TOK(less) && angle_depth > 0) {
-      angle_depth++;
-    } else if (token == TOK(greater) && angle_depth > 0) {
-      angle_depth--;
-    } else if ((token == TOK(greatergreater) ||
-                token == TOK(greatergreatereq)) &&
-               angle_depth > 0) {
-      angle_depth -= 2;
-      if (angle_depth < 0) {
-        angle_depth = 0;
-      }
-    } else if (token == TOK(greatereq) && angle_depth > 0) {
-      angle_depth--;
-    } else if (token == TOK(lparen)) {
+    if (token == TOK(lparen)) {
       paren_depth++;
     } else if (token == TOK(rparen)) {
       paren_depth--;
@@ -614,6 +606,19 @@ static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
       brace_depth++;
     } else if (token == TOK(rbrace)) {
       brace_depth--;
+    } else if (token == TOK(less) && angle_depth == 0 &&
+               paren_depth == 0 && square_depth == 0 && brace_depth == 0 &&
+        FoldLessStartsTemplateArgument(syntax)) {
+      angle_depth++;
+    } else if (token == TOK(less) && angle_depth > 0 &&
+               paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
+      angle_depth++;
+    } else if (LexClosingAngleCount(token) != 0 && angle_depth > 0 &&
+               paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
+      angle_depth -= LexClosingAngleCount(token);
+      if (angle_depth < 0) {
+        angle_depth = 0;
+      }
     }
     if (paren_depth == 0 && square_depth == 0 && brace_depth == 0 &&
         angle_depth == 0) {
@@ -833,6 +838,9 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
     LexNextToken(syntax->lex);
     if (LexLookingAt(syntax->lex, TOK(less))) {
       int depth = 0;
+      int paren_depth = 0;
+      int square_depth = 0;
+      int brace_depth = 0;
       do {
         // A `;` or brace can never appear at the top level of a
         // template-argument list, so this `<` is a less-than operator rather
@@ -844,15 +852,26 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
             LexLookingAt(syntax->lex, TOK(rbrace))) {
           break;
         }
-        if (LexLookingAt(syntax->lex, TOK(less))) {
-          depth++;
-        } else if (LexLookingAt(syntax->lex, TOK(greater))) {
-          depth--;
-        } else if (LexLookingAt(syntax->lex, TOK(greatergreater)) ||
-                   LexLookingAt(syntax->lex, TOK(greatergreatereq))) {
-          depth -= 2;
-        } else if (LexLookingAt(syntax->lex, TOK(greatereq))) {
-          depth--;
+        Token token = syntax->lex->current_token;
+        if (token == TOK(lparen)) {
+          paren_depth++;
+        } else if (token == TOK(rparen)) {
+          paren_depth--;
+        } else if (token == TOK(lsquare)) {
+          square_depth++;
+        } else if (token == TOK(rsquare)) {
+          square_depth--;
+        } else if (token == TOK(lbrace)) {
+          brace_depth++;
+        } else if (token == TOK(rbrace)) {
+          brace_depth--;
+        } else if (paren_depth == 0 && square_depth == 0 &&
+                   brace_depth == 0) {
+          if (token == TOK(less)) {
+            depth++;
+          } else {
+            depth -= LexClosingAngleCount(token);
+          }
         }
         LexNextToken(syntax->lex);
       } while (!LexEof(syntax->lex) && depth > 0);
@@ -3325,6 +3344,9 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);
     int depth = 0;
+    int paren_depth = 0;
+    int square_depth = 0;
+    int brace_depth = 0;
     // True once we see a token that cannot appear at the top level of a
     // template-argument list, which means this `<` is a less-than operator
     // rather than the start of a template-id.
@@ -3341,12 +3363,26 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
         not_a_template_id = true;
         break;
       }
-      if (LexLookingAt(syntax->lex, TOK(less))) {
-        depth++;
-      } else if (LexLookingAt(syntax->lex, TOK(greater))) {
-        depth--;
-      } else if (LexLookingAt(syntax->lex, TOK(greatergreater))) {
-        depth -= 2;
+      Token token = syntax->lex->current_token;
+      if (token == TOK(lparen)) {
+        paren_depth++;
+      } else if (token == TOK(rparen)) {
+        paren_depth--;
+      } else if (token == TOK(lsquare)) {
+        square_depth++;
+      } else if (token == TOK(rsquare)) {
+        square_depth--;
+      } else if (token == TOK(lbrace)) {
+        brace_depth++;
+      } else if (token == TOK(rbrace)) {
+        brace_depth--;
+      } else if (paren_depth == 0 && square_depth == 0 &&
+                 brace_depth == 0) {
+        if (token == TOK(less)) {
+          depth++;
+        } else {
+          depth -= LexClosingAngleCount(token);
+        }
       }
       LexNextToken(syntax->lex);
     } while (depth > 0 && !LexEof(syntax->lex));
@@ -3418,7 +3454,8 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
   IdentifierASTNode* id = (IdentifierASTNode*)type_expr;
   TypeRecord* type = id->symbol->type;
   SourceLocation location = type_expr->location;
-  if (TypeIsClassTemplatePlaceholder(type) ||
+  if (id->template_arguments != NULL ||
+      TypeIsClassTemplatePlaceholder(type) ||
       FindCXXConstructorForType(type) != NULL) {
     Vector* actuals =
         ParseCXXBracedTemporaryActuals(syntax, type, followers);
@@ -5257,10 +5294,11 @@ static ASTNode* ParseRelationalExpression(Syntax* syntax,
     } else if (syntax->parsing_template_argument &&
                (LexLookingAt(syntax->lex, TOK(greater)) ||
                 LexLookingAt(syntax->lex, TOK(greatergreater)) ||
-                LexLookingAt(syntax->lex, TOK(greatergreatereq)) ||
-                LexLookingAt(syntax->lex, TOK(greatereq)))) {
-      // A top-level '>' (possibly merged into >>, >>= or >=) ends the current
-      // template argument; hand it back to the list's closer.
+                LexLookingAt(syntax->lex, TOK(greatergreatereq)))) {
+      // A top-level '>' (possibly merged into >> or >>=) ends the current
+      // template argument; hand it back to the list's closer.  A genuine `>=`
+      // remains a relational operator; `>=` produced by splitting `>>=` is
+      // only observed by the enclosing template-list parser.
       break;
     } else if (LexMatch(syntax->lex, TOK(greater))) {
       ASTNode* right = ParseCompareExpression(syntax, followers);

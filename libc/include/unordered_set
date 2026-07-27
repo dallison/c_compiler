@@ -22,7 +22,7 @@
 namespace std {
 
 template <class Key, class Hash = hash<Key>, class KeyEqual = equal_to<Key>,
-          class Allocator = allocator<Key> >
+          class Allocator = allocator<Key>>
 class unordered_set {
  private:
   using __table =

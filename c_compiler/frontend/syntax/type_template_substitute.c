@@ -146,9 +146,9 @@ Vector* TemplateArgumentVectorCopyWithPackElement(Vector* args,
 // unevaluated at parse time, e.g. `!is_integral<It>::value`) against concrete
 // template arguments; defined after the template-body clone machinery it relies
 // on.
-static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
-                                                       TemplateArgument* arg,
-                                                       Vector* args) {
+TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
+                                                 TemplateArgument* arg,
+                                                 Vector* args) {
   TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
   memset(concrete, 0, sizeof(*concrete));
   concrete->kind = arg->kind;
@@ -1218,6 +1218,30 @@ static bool DependentDecltypeStackContains(ASTNode* expr) {
   return false;
 }
 
+/* True when `type` is a *named use* of an alias template whose pattern is a
+ * dependent `decltype`, e.g. `all_t<R>` where
+ * `template<class T> using all_t = decltype(views::all(declval<T>()))`.
+ *
+ * Naming such an alias inside another template copies the alias's pattern (the
+ * deferred decltype operand) onto the use site and records origin/arguments on
+ * the side.  The copied operand still refers to the *alias's* parameters, so it
+ * must not be substituted with the enclosing template's argument list: alias
+ * parameter 0 would silently bind to the enclosing template's argument 0.  The
+ * arguments recorded on the use site (`[R]`) are what map the alias's parameter
+ * space onto the enclosing one, so the template-id path -- which substitutes
+ * those first and only then expands the pattern -- must handle this. */
+static bool TypeIsDecltypeAliasTemplateId(TypeRecord* type) {
+  return CompilerIsCXX() && type != NULL &&
+         type->dependent_decltype_expr != NULL &&
+         type->template_origin != NULL && type->template_arguments != NULL &&
+         type->template_origin->flags.is_template &&
+         StorageIs(type->template_origin->storage, STO(typedef)) &&
+         type->template_origin->type != NULL &&
+         type->template_origin->type != type &&
+         type->template_origin->type->dependent_decltype_expr ==
+             type->dependent_decltype_expr;
+}
+
 static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)data;
@@ -1250,6 +1274,14 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   if (!g_dependent_decltype_stack_initialized) {
     VectorInit(&g_dependent_decltype_stack);
     g_dependent_decltype_stack_initialized = true;
+  }
+  if (TypeIsDecltypeAliasTemplateId(type)) {
+    TemplateIdSubstitutionInfo alias_id = {type->template_origin,
+                                           type->template_arguments};
+    TypeRecord* subst = SubstituteTemplateIdType(parser, type, args, alias_id);
+    if (subst != NULL) {
+      return subst;
+    }
   }
   if (type->dependent_decltype_expr != NULL &&
       !DependentDecltypeStackContains(type->dependent_decltype_expr)) {
@@ -1642,7 +1674,9 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
     // Only walk non-function data members, and only along each field's type
     // spine: descending into a pointed-to/referenced struct would corrupt
     // captured visitor closures' own template parameters.
-    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+        t->info.struct_info->tag_symbol != NULL &&
+        t->info.struct_info->tag_symbol->flags.invented) {
       Struct* str = t->info.struct_info;
       for (size_t i = 0; i < str->members.length; i++) {
         StructMember* member = str->members.value.p[i];

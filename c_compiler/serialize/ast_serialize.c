@@ -614,7 +614,9 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
     case kASTShapeStructMember: {
       StructMemberASTNode* sm = (StructMemberASTNode*)n;
       if (field == 16) {
-        sm->member = (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        StructMember* member =
+            (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        StructMemberASTNodeSetMember(sm, member);
         return;
       }
       if (field == 17) {

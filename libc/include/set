@@ -49,13 +49,13 @@ struct __is_transparent_compare : false_type {
 
 template <class Compare>
 struct __is_transparent_compare<
-    Compare, void_t<typename Compare::is_transparent> > : true_type {
+    Compare, void_t<typename Compare::is_transparent>> : true_type {
 };
 
 }  // namespace __set_detail
 
 template <class Key, class Compare = less<Key>,
-          class Allocator = allocator<Key> >
+          class Allocator = allocator<Key>>
 class set {
  public:
   using key_type = Key;

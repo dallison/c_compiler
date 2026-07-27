@@ -50,12 +50,12 @@ struct __is_in_place_type : false_type {
 };
 
 template <class T>
-struct __is_in_place_type<in_place_type_t<T> > : true_type {
+struct __is_in_place_type<in_place_type_t<T>> : true_type {
 };
 
 template <class T>
 struct __valid_stored_type
-    : bool_constant<is_same<T, decay_t<T> >::value &&
+    : bool_constant<is_same<T, decay_t<T>>::value &&
                     is_copy_constructible<T>::value> {
 };
 
@@ -186,8 +186,8 @@ class any {
   template <class ValueType>
     requires (!is_same<decay_t<ValueType>, any>::value &&
               !__any_detail::__is_in_place_type<
-                  decay_t<ValueType> >::value &&
-              is_copy_constructible<decay_t<ValueType> >::value &&
+                  decay_t<ValueType>>::value &&
+              is_copy_constructible<decay_t<ValueType>>::value &&
               is_constructible<decay_t<ValueType>, ValueType&&>::value)
   any(ValueType&& value) : __storage{}, __ops(nullptr) {
     using T = decay_t<ValueType>;
@@ -195,7 +195,7 @@ class any {
   }
 
   template <class T, class... Args>
-    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+    requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
               is_constructible<decay_t<T>, Args&&...>::value)
   explicit any(in_place_type_t<T>, Args&&... args)
       : __storage{}, __ops(nullptr) {
@@ -204,7 +204,7 @@ class any {
   }
 
   template <class T, class U, class... Args>
-    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+    requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
               is_constructible<decay_t<T>,
                                initializer_list<U>&, Args&&...>::value)
   explicit any(in_place_type_t<T>, initializer_list<U> values,
@@ -222,7 +222,7 @@ class any {
 
   template <class ValueType>
     requires (!is_same<decay_t<ValueType>, any>::value &&
-              is_copy_constructible<decay_t<ValueType> >::value &&
+              is_copy_constructible<decay_t<ValueType>>::value &&
               is_constructible<decay_t<ValueType>, ValueType&&>::value)
   any& operator=(ValueType&& value) {
     any temporary(static_cast<ValueType&&>(value));
@@ -231,7 +231,7 @@ class any {
   }
 
   template <class T, class... Args>
-    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+    requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
               is_constructible<decay_t<T>, Args&&...>::value)
   decay_t<T>& emplace(Args&&... args) {
     using ValueType = decay_t<T>;
@@ -241,7 +241,7 @@ class any {
   }
 
   template <class T, class U, class... Args>
-    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+    requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
               is_constructible<decay_t<T>,
                                initializer_list<U>&, Args&&...>::value)
   decay_t<T>& emplace(initializer_list<U> values, Args&&... args) {
@@ -303,9 +303,9 @@ const T* any_cast(const any* operand) noexcept {
 
 template <class T>
   requires (is_constructible<
-            T, const remove_cv_t<remove_reference_t<T> >&>::value)
+            T, const remove_cv_t<remove_reference_t<T>>&>::value)
 T any_cast(const any& operand) {
-  using U = remove_cv_t<remove_reference_t<T> >;
+  using U = remove_cv_t<remove_reference_t<T>>;
   const U* value = any_cast<U>(&operand);
   if (value == nullptr) {
     __DAVECC_THROW(bad_any_cast());
@@ -315,9 +315,9 @@ T any_cast(const any& operand) {
 
 template <class T>
   requires (is_constructible<
-            T, remove_cv_t<remove_reference_t<T> >&>::value)
+            T, remove_cv_t<remove_reference_t<T>>&>::value)
 T any_cast(any& operand) {
-  using U = remove_cv_t<remove_reference_t<T> >;
+  using U = remove_cv_t<remove_reference_t<T>>;
   U* value = any_cast<U>(&operand);
   if (value == nullptr) {
     __DAVECC_THROW(bad_any_cast());
@@ -327,9 +327,9 @@ T any_cast(any& operand) {
 
 template <class T>
   requires (is_constructible<
-            T, remove_cv_t<remove_reference_t<T> >&&>::value)
+            T, remove_cv_t<remove_reference_t<T>>&&>::value)
 T any_cast(any&& operand) {
-  using U = remove_cv_t<remove_reference_t<T> >;
+  using U = remove_cv_t<remove_reference_t<T>>;
   U* value = any_cast<U>(&operand);
   if (value == nullptr) {
     __DAVECC_THROW(bad_any_cast());
@@ -338,14 +338,14 @@ T any_cast(any&& operand) {
 }
 
 template <class T, class... Args>
-  requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+  requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
             is_constructible<decay_t<T>, Args&&...>::value)
 any make_any(Args&&... args) {
   return any(in_place_type<T>, std::forward<Args>(args)...);
 }
 
 template <class T, class U, class... Args>
-  requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+  requires (__any_detail::__valid_stored_type<decay_t<T>>::value &&
             is_constructible<decay_t<T>,
                              initializer_list<U>&, Args&&...>::value)
 any make_any(initializer_list<U> values, Args&&... args) {

@@ -2621,6 +2621,20 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                      node->location);
       }
     }
+    if (sizeof_node->expr != NULL && !sizeof_node->is_pack_size &&
+        sizeof_node->expr->type != NULL &&
+        !TypeContainsTemplateParameter(sizeof_node->expr->type)) {
+      TypeRecord* concrete = sizeof_node->expr->type;
+      if (CompilerIsCXX() && TypeIsReference(concrete)) {
+        concrete = concrete->next;
+      }
+      TypeRecordCalculateSize(concrete);
+      if (!TypeIsVLA(concrete)) {
+        sizeof_node->base.value.ivalue =
+            node->op == AST_OP(alignof) ? TypeRecordAlignment(concrete)
+                                       : concrete->size;
+      }
+    }
     // `sizeof(dependent-type)`: substitute the retained operand type and
     // recompute the size for this instantiation.
     if (sizeof_node->type_operand != NULL) {
@@ -2633,10 +2647,14 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         TypeRecordDelete(sizeof_node->type_operand);
         sizeof_node->type_operand = concrete;
       }
-      TypeRecordCalculateSize(concrete);
+      TypeRecord* measured = concrete;
+      if (CompilerIsCXX() && TypeIsReference(measured)) {
+        measured = measured->next;
+      }
+      TypeRecordCalculateSize(measured);
       sizeof_node->base.value.ivalue =
-          node->op == AST_OP(alignof) ? TypeRecordAlignment(concrete)
-                                     : concrete->size;
+          node->op == AST_OP(alignof) ? TypeRecordAlignment(measured)
+                                     : measured->size;
     }
   }
   if (node->op == AST_OP(typeid)) {
@@ -2788,7 +2806,8 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         id->symbol->type != NULL &&
         id->symbol->type->dependent_member_name != NULL &&
         (id->symbol->type->template_parameter_index >= 0 ||
-         id->symbol->type->template_origin != NULL)) {
+         id->symbol->type->template_origin != NULL ||
+         TypeContainsTemplateParameter(id->symbol->type))) {
       TypeRecord* scope = TypeRecordCopy(id->symbol->type);
       StringDelete(scope->dependent_member_name);
       scope->dependent_member_name = NULL;
@@ -3152,6 +3171,22 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     }
   }
   bool node_type_substituted = false;
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_template &&
+        id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.cxx_member_owner == NULL) {
+      // A named function template that is not being instantiated here (a callee
+      // such as `ranges::partition(first, last, ...)` inside another template's
+      // body).  Its type mentions *its own* template parameters, which have
+      // nothing to do with the enclosing template's, so substituting them
+      // positionally against `clone->args` would silently bind, say, the
+      // callee's `I` to the caller's `R`.  Leave the pattern type alone;
+      // overload resolution deduces the callee's arguments from the cloned
+      // actuals when the instantiated body is analyzed.
+      node_type_substituted = true;
+    }
+  }
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
     // A cast whose type still names a pack (e.g. `static_cast<Ts&&>(args)...`)

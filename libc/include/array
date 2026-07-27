@@ -277,11 +277,11 @@ struct array<T, 0> {
 };
 
 template <class T, size_t N>
-struct tuple_size<array<T, N> > : integral_constant<size_t, N> {
+struct tuple_size<array<T, N>> : integral_constant<size_t, N> {
 };
 
 template <size_t I, class T, size_t N>
-struct tuple_element<I, array<T, N> > {
+struct tuple_element<I, array<T, N>> {
   static_assert(I < N, "array index out of range");
   using type = T;
 };

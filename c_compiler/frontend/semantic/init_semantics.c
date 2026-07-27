@@ -310,6 +310,14 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
   if (!CompilerIsCXX() || inode == NULL) {
     return;
   }
+  // The whole (sub)object is initialized by a single expression, e.g. copy-
+  // initialization from another object of the same class, or a call whose
+  // return value is constructed directly into this storage.  That expression
+  // supplies every member, so applying the class's default member initializers
+  // here would emit them *after* the initializing expression and overwrite it.
+  if (inode->expr != NULL) {
+    return;
+  }
   if (inode->kind != kIStruct) {
     for (size_t i = 0; i < inode->children.length; i++) {
       ApplyCXXDefaultMemberInitializers(inode->children.value.p[i],

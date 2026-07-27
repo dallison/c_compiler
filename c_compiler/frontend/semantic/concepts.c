@@ -1233,6 +1233,42 @@ void ConceptsReportAssociatedConstraintFailure(ConstraintExpr* constraint,
 
 bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
                                                  Vector* arguments) {
+  Symbol* definition =
+      templ != NULL && templ->value.func_defn != NULL
+          ? templ->value.func_defn
+          : templ;
+  int enclosing_count =
+      definition != NULL && definition->type != NULL &&
+              TypeIsFunction(definition->type)
+          ? definition->type->info.function.template_parameter_base
+          : 0;
+  Vector* enclosing_args =
+      templ != NULL && templ->type != NULL
+          ? templ->type->template_arguments
+          : NULL;
+  if (definition != templ &&
+      ConceptsFunctionTemplateHasAssociatedConstraint(definition)) {
+    if (enclosing_count <= 0) {
+      return ConceptsConstraintSatisfied(
+          definition->type->info.function.associated_constraint, arguments);
+    }
+    if (enclosing_args == NULL ||
+        enclosing_args->length < (size_t)enclosing_count) {
+      return false;
+    }
+    Vector combined;
+    VectorInit(&combined);
+    for (int i = 0; i < enclosing_count; i++) {
+      VectorAppend(&combined, enclosing_args->value.p[i]);
+    }
+    for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
+      VectorAppend(&combined, arguments->value.p[i]);
+    }
+    bool satisfied = ConceptsConstraintSatisfied(
+        definition->type->info.function.associated_constraint, &combined);
+    VectorDestruct(&combined);
+    return satisfied;
+  }
   if (!ConceptsFunctionTemplateHasAssociatedConstraint(templ)) {
     return true;
   }
@@ -2400,6 +2436,54 @@ static ConstraintExpr* NewConstraintFromExpression(ASTNode* expr,
   return NewAtomicConstraint(expr, location);
 }
 
+// Parse a concept-id named by a nested-name-specifier, such as
+// `std::default_initializable<V>` or `::my::pred<T>`.  A concept-id is not an
+// expression, so the generic expression fallback cannot parse one; without this
+// a qualified concept in a requires-clause is a syntax error.  Returns NULL with
+// the lexer restored to its starting position when the tokens do not name a
+// concept, letting the caller fall back to the expression form.
+static ConstraintExpr* TryParseQualifiedConceptIdConstraint(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  if (!LexLookingAt(lex, TOK(identifier)) &&
+      !LexLookingAt(lex, TOK(coloncolon))) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  SourceLocation concept_location = lex->current_token_location;
+
+  FullyQualifiedIdentifier concept_id;
+  FullyQualifiedIdentifierInit(&concept_id);
+  Symbol* symbol = NULL;
+  if (SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &concept_id,
+                                                         TC(semicolon))) {
+    symbol = SyntaxFindQualifiedSymbol(syntax, &concept_id);
+  }
+  if (symbol == NULL || !symbol->flags.is_concept) {
+    FullyQualifiedIdentifierDestruct(&concept_id);
+    LexCheckpointRestore(lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+
+  // Only the trailing component's template arguments belong to the concept; any
+  // earlier ones qualify the enclosing class or namespace template.
+  Vector* args = NULL;
+  if (concept_id.template_arguments.length > 0) {
+    Vector* concept_args = concept_id.template_arguments.value.p
+        [concept_id.template_arguments.length - 1];
+    if (concept_args != NULL) {
+      args = TemplateArgumentVectorCopy(concept_args);
+    }
+  }
+  if (args == NULL) {
+    args = NewVector();
+  }
+  FullyQualifiedIdentifierDestruct(&concept_id);
+  return NewConceptIdConstraint(symbol, args, concept_location);
+}
+
 static ConstraintExpr* ParseConceptPrimaryConstraint(Syntax* syntax,
                                                      SourceLocation location) {
   if (LexLookingAt(syntax->lex, TOK(requires))) {
@@ -2421,6 +2505,10 @@ static ConstraintExpr* ParseConceptPrimaryConstraint(Syntax* syntax,
       }
       return NewConceptIdConstraint(symbol, args, concept_location);
     }
+  }
+  ConstraintExpr* qualified = TryParseQualifiedConceptIdConstraint(syntax);
+  if (qualified != NULL) {
+    return qualified;
   }
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(semicolon));
   return NewConstraintFromExpression(expr, location);

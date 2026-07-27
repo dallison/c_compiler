@@ -2,13 +2,18 @@
 //  algorithm
 //  c_compiler
 //
-//  Classic (non-ranges, non-parallel) C++20 <algorithm> for DaveCC.
+//  C++20 <algorithm> for DaveCC.
 //
-//  This provides the header-only sequence algorithms operating on iterator
-//  pairs.  The ranges:: overloads and the ExecutionPolicy overloads are not
-//  included (they require <ranges> integration and a parallelism runtime).
-//  Randomized algorithms (shuffle, sample) are omitted because they need
-//  <random>, which is not yet available.
+//  The first half provides the classic header-only sequence algorithms
+//  operating on iterator pairs.  The second half provides the constrained
+//  (std::ranges) algorithms, which add sentinel and projection support and hand
+//  the heavy lifting -- introsort, insertion sort, heap sifting -- to the
+//  classic implementations above.  The ExecutionPolicy overloads are not
+//  included; they require a parallelism runtime.
+//
+//  The classic randomized algorithms (std::shuffle, std::sample) are omitted
+//  because <random> is not yet available; their ranges:: counterparts are
+//  present since the caller supplies the generator.
 //
 //  min/max/minmax and swap-family helpers that the standard also lists in
 //  other headers are kept where the standard primarily places them: swap,
@@ -21,6 +26,8 @@
 
 #include <initializer_list>
 #include <iterator>
+#include <functional>
+#include <ranges>
 #include <stddef.h>
 #include <type_traits>
 #include <utility>
@@ -1655,6 +1662,1616 @@ constexpr bool is_permutation(It1 first1, It1 last1, It2 first2) {
   return std::is_permutation(first1, last1, first2,
                              __algorithm_detail::__equal_to());
 }
+
+namespace ranges {
+
+template <class Proj, class T>
+  requires is_member_object_pointer<remove_cvref_t<Proj>>::value
+constexpr decltype(auto) __project(Proj projection, T&& value) {
+  return value.*projection;
+}
+
+template <class Proj, class T>
+  requires is_member_function_pointer<remove_cvref_t<Proj>>::value
+constexpr decltype(auto) __project(Proj projection, T&& value) {
+  return (value.*projection)();
+}
+
+template <class Proj, class T>
+  requires(!is_member_pointer<remove_cvref_t<Proj>>::value)
+constexpr decltype(auto) __project(Proj& projection, T&& value) {
+  return projection(static_cast<T&&>(value));
+}
+
+template <class Comp, class T, class U>
+constexpr bool __compare(Comp& comp, T&& left, U&& right) {
+  return comp(static_cast<T&&>(left), static_cast<U&&>(right));
+}
+
+// Folds a comparator and a projection into one comparator, so the constrained
+// algorithms can hand the work to the unconstrained implementations above,
+// which know nothing about projections.
+template <class Comp, class Proj>
+struct __projected_comparator {
+  Comp comp;
+  Proj proj;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) {
+    return __compare(comp, __project(proj, static_cast<T&&>(left)),
+                     __project(proj, static_cast<U&&>(right)));
+  }
+};
+
+template <class Comp, class Proj>
+constexpr __projected_comparator<Comp, Proj> __project_comparator(Comp comp,
+                                                                 Proj proj) {
+  return {comp, proj};
+}
+
+template <class I, class O>
+struct in_out_result {
+  I in;
+  O out;
+};
+template <class I1, class I2>
+using in_in_result = in_out_result<I1, I2>;
+template <class I, class F>
+struct in_fun_result {
+  I in;
+  F fun;
+};
+template <class I, class O1, class O2>
+struct in_out_out_result {
+  I in;
+  O1 out1;
+  O2 out2;
+};
+template <class I1, class I2, class O>
+struct in_in_out_result {
+  I1 in1;
+  I2 in2;
+  O out;
+};
+template <class T>
+struct min_max_result {
+  T min;
+  T max;
+};
+template <class I>
+struct next_permutation_result {
+  I in;
+  bool found;
+};
+template <class I>
+using prev_permutation_result = next_permutation_result<I>;
+
+template <class I, class O>
+using copy_result = in_out_result<I, O>;
+template <class I, class O>
+using move_result = in_out_result<I, O>;
+template <class I, class O>
+using copy_backward_result = in_out_result<I, O>;
+template <class I, class O>
+using move_backward_result = in_out_result<I, O>;
+template <class I, class O>
+using unary_transform_result = in_out_result<I, O>;
+template <class I1, class I2, class O>
+using binary_transform_result = in_in_out_result<I1, I2, O>;
+template <class I, class O1, class O2>
+using partition_copy_result = in_out_out_result<I, O1, O2>;
+template <class I1, class I2>
+using mismatch_result = in_in_result<I1, I2>;
+template <class I1, class I2>
+using swap_ranges_result = in_in_result<I1, I2>;
+template <class I1, class I2, class O>
+using merge_result = in_in_out_result<I1, I2, O>;
+template <class I1, class I2, class O>
+using set_union_result = in_in_out_result<I1, I2, O>;
+template <class I1, class I2, class O>
+using set_intersection_result = in_in_out_result<I1, I2, O>;
+template <class I1, class I2, class O>
+using set_difference_result = in_in_out_result<I1, I2, O>;
+template <class I1, class I2, class O>
+using set_symmetric_difference_result = in_in_out_result<I1, I2, O>;
+template <class I, class F>
+using for_each_result = in_fun_result<I, F>;
+template <class I, class F>
+using for_each_n_result = in_fun_result<I, F>;
+template <class I, class O>
+using remove_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using remove_copy_if_result = in_out_result<I, O>;
+template <class I, class O>
+using replace_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using replace_copy_if_result = in_out_result<I, O>;
+template <class I, class O>
+using reverse_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using rotate_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using unique_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using partial_sort_copy_result = in_out_result<I, O>;
+
+template <class I, class S, class Pred, class Proj = identity>
+constexpr bool all_of(I first, S last, Pred pred, Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (!pred(__project(proj, *first))) return false;
+  }
+  return true;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr bool all_of(R&& r, Pred pred, Proj proj = {}) {
+  return ranges::all_of(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr bool any_of(I first, S last, Pred pred, Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (pred(__project(proj, *first))) return true;
+  }
+  return false;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr bool any_of(R&& r, Pred pred, Proj proj = {}) {
+  return ranges::any_of(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr bool none_of(I first, S last, Pred pred, Proj proj = {}) {
+  return !ranges::any_of(first, last, pred, proj);
+}
+template <range R, class Pred, class Proj = identity>
+constexpr bool none_of(R&& r, Pred pred, Proj proj = {}) {
+  return !ranges::any_of(r, pred, proj);
+}
+
+template <class I, class S, class F, class Proj = identity>
+constexpr in_fun_result<I, F> for_each(I first, S last, F fun,
+                                       Proj proj = {}) {
+  for (; first != last; ++first) fun(__project(proj, *first));
+  return {first, static_cast<F&&>(fun)};
+}
+template <range R, class F, class Proj = identity>
+constexpr in_fun_result<borrowed_iterator_t<R>, F> for_each(
+    R&& r, F fun, Proj proj = {}) {
+  auto result = ranges::for_each(ranges::begin(r), ranges::end(r),
+                                 static_cast<F&&>(fun), proj);
+  return {result.in, static_cast<F&&>(result.fun)};
+}
+template <class I, class F, class Proj = identity>
+constexpr in_fun_result<I, F> for_each_n(I first, iter_difference_t<I> n,
+                                         F fun, Proj proj = {}) {
+  while (n-- > 0) {
+    fun(__project(proj, *first));
+    ++first;
+  }
+  return {first, static_cast<F&&>(fun)};
+}
+
+template <class I, class S, class T, class Proj = identity>
+constexpr I find(I first, S last, const T& value, Proj proj = {}) {
+  while (first != last && !(__project(proj, *first) == value)) ++first;
+  return first;
+}
+template <range R, class T, class Proj = identity>
+constexpr borrowed_iterator_t<R> find(R&& r, const T& value, Proj proj = {}) {
+  return ranges::find(ranges::begin(r), ranges::end(r), value, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr I find_if(I first, S last, Pred pred, Proj proj = {}) {
+  while (first != last && !pred(__project(proj, *first))) ++first;
+  return first;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_iterator_t<R> find_if(R&& r, Pred pred, Proj proj = {}) {
+  return ranges::find_if(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr I find_if_not(I first, S last, Pred pred, Proj proj = {}) {
+  while (first != last && pred(__project(proj, *first))) ++first;
+  return first;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_iterator_t<R> find_if_not(R&& r, Pred pred,
+                                              Proj proj = {}) {
+  return ranges::find_if_not(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class T, class Proj = identity>
+constexpr iter_difference_t<I> count(I first, S last, const T& value,
+                                     Proj proj = {}) {
+  iter_difference_t<I> n = 0;
+  for (; first != last; ++first) if (__project(proj, *first) == value) ++n;
+  return n;
+}
+template <range R, class T, class Proj = identity>
+constexpr range_difference_t<R> count(R&& r, const T& value, Proj proj = {}) {
+  return ranges::count(ranges::begin(r), ranges::end(r), value, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr iter_difference_t<I> count_if(I first, S last, Pred pred,
+                                        Proj proj = {}) {
+  iter_difference_t<I> n = 0;
+  for (; first != last; ++first) if (pred(__project(proj, *first))) ++n;
+  return n;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr range_difference_t<R> count_if(R&& r, Pred pred, Proj proj = {}) {
+  return ranges::count_if(ranges::begin(r), ranges::end(r), pred, proj);
+}
+
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity, class P2 = identity>
+constexpr mismatch_result<I1, I2> mismatch(I1 first1, S1 last1,
+                                           I2 first2, S2 last2,
+                                           Pred pred = {}, P1 p1 = {},
+                                           P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2 &&
+         pred(__project(p1, *first1), __project(p2, *first2))) {
+    ++first1;
+    ++first2;
+  }
+  return {first1, first2};
+}
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr mismatch_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>>
+mismatch(R1&& r1, R2&& r2, Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::mismatch(ranges::begin(r1), ranges::end(r1),
+                          ranges::begin(r2), ranges::end(r2), pred, p1, p2);
+}
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity, class P2 = identity>
+constexpr bool equal(I1 first1, S1 last1, I2 first2, S2 last2,
+                     Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  auto result = ranges::mismatch(first1, last1, first2, last2, pred, p1, p2);
+  return result.in1 == last1 && result.in2 == last2;
+}
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr bool equal(R1&& r1, R2&& r2, Pred pred = {},
+                     P1 p1 = {}, P2 p2 = {}) {
+  return ranges::equal(ranges::begin(r1), ranges::end(r1),
+                       ranges::begin(r2), ranges::end(r2), pred, p1, p2);
+}
+
+template <class I, class S, class O>
+constexpr copy_result<I, O> copy(I first, S last, O out) {
+  for (; first != last; ++first, ++out) *out = *first;
+  return {first, out};
+}
+template <range R, class O>
+constexpr copy_result<borrowed_iterator_t<R>, O> copy(R&& r, O out) {
+  return ranges::copy(ranges::begin(r), ranges::end(r), out);
+}
+template <class I, class O>
+constexpr copy_result<I, O> copy_n(I first, iter_difference_t<I> n, O out) {
+  while (n-- > 0) {
+    *out = *first;
+    ++first;
+    ++out;
+  }
+  return {first, out};
+}
+template <class I, class S, class O, class Pred, class Proj = identity>
+constexpr copy_result<I, O> copy_if(I first, S last, O out, Pred pred,
+                                    Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (pred(__project(proj, *first))) {
+      *out = *first;
+      ++out;
+    }
+  }
+  copy_result<I, O> result;
+  result.in = first;
+  result.out = out;
+  return result;
+}
+template <range CopyRange, class CopyOutput, class CopyPredicate,
+          class CopyProjection = identity>
+constexpr copy_result<borrowed_iterator_t<CopyRange>, CopyOutput> copy_if(
+    CopyRange&& r, CopyOutput out, CopyPredicate pred,
+    CopyProjection proj = {}) {
+  auto first = ranges::begin(r);
+  auto last = ranges::end(r);
+  CopyOutput current_out = out;
+  for (; first != last; ++first) {
+    if (pred(__project(proj, *first))) {
+      *current_out = *first;
+      ++current_out;
+    }
+  }
+  copy_result<borrowed_iterator_t<CopyRange>, CopyOutput> result;
+  result.in = first;
+  result.out = current_out;
+  return result;
+}
+template <class I, class S, class O>
+constexpr move_result<I, O> move(I first, S last, O out) {
+  for (; first != last; ++first, ++out) *out = ranges::iter_move(first);
+  return {first, out};
+}
+template <range R, class O>
+constexpr move_result<borrowed_iterator_t<R>, O> move(R&& r, O out) {
+  return ranges::move(ranges::begin(r), ranges::end(r), out);
+}
+template <class I, class S, class O>
+constexpr copy_backward_result<I, O> copy_backward(I first, S last, O out) {
+  I end = ranges::next(first, last);
+  I current = end;
+  while (current != first) {
+    --current;
+    --out;
+    *out = *current;
+  }
+  return {end, out};
+}
+template <range R, class O>
+constexpr copy_backward_result<borrowed_iterator_t<R>, O> copy_backward(
+    R&& r, O out) {
+  return ranges::copy_backward(ranges::begin(r), ranges::end(r), out);
+}
+template <class I, class S, class O>
+constexpr move_backward_result<I, O> move_backward(I first, S last, O out) {
+  I end = ranges::next(first, last);
+  I current = end;
+  while (current != first) {
+    --current;
+    --out;
+    *out = ranges::iter_move(current);
+  }
+  return {end, out};
+}
+template <range R, class O>
+constexpr move_backward_result<borrowed_iterator_t<R>, O> move_backward(
+    R&& r, O out) {
+  return ranges::move_backward(ranges::begin(r), ranges::end(r), out);
+}
+
+template <class I, class S, class O, class F, class Proj = identity>
+constexpr unary_transform_result<I, O> transform(I first, S last, O out,
+                                                 F fun, Proj proj = {}) {
+  for (; first != last; ++first, ++out) *out = fun(__project(proj, *first));
+  return {first, out};
+}
+template <range TransformRange, class TransformOutput,
+          class TransformFunction, class TransformProjection = identity>
+constexpr unary_transform_result<borrowed_iterator_t<TransformRange>,
+                                 TransformOutput>
+transform(TransformRange&& r, TransformOutput out, TransformFunction fun,
+          TransformProjection proj = {}) {
+  auto first = ranges::begin(r);
+  auto last = ranges::end(r);
+  TransformOutput current_out = out;
+  for (; first != last; ++first, ++current_out) {
+    *current_out = fun(__project(proj, *first));
+  }
+  unary_transform_result<borrowed_iterator_t<TransformRange>,
+                         TransformOutput> result;
+  result.in = first;
+  result.out = current_out;
+  return result;
+}
+template <class I1, class S1, class I2, class S2, class O, class F,
+          class P1 = identity, class P2 = identity>
+constexpr binary_transform_result<I1, I2, O> transform(
+    I1 first1, S1 last1, I2 first2, S2 last2, O out, F fun,
+    P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    *out = fun(__project(p1, *first1), __project(p2, *first2));
+    ++first1;
+    ++first2;
+    ++out;
+  }
+  return {first1, first2, out};
+}
+template <range R1, range R2, class O, class F,
+          class P1 = identity, class P2 = identity>
+constexpr binary_transform_result<borrowed_iterator_t<R1>,
+                                  borrowed_iterator_t<R2>, O>
+transform(R1&& r1, R2&& r2, O out, F fun, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::transform(ranges::begin(r1), ranges::end(r1),
+                           ranges::begin(r2), ranges::end(r2), out,
+                           fun, p1, p2);
+}
+
+template <class I, class S, class T>
+constexpr I fill(I first, S last, const T& value) {
+  for (; first != last; ++first) *first = value;
+  return first;
+}
+template <range R, class T>
+constexpr borrowed_iterator_t<R> fill(R&& r, const T& value) {
+  return ranges::fill(ranges::begin(r), ranges::end(r), value);
+}
+template <class O, class T>
+constexpr O fill_n(O first, iter_difference_t<O> n, const T& value) {
+  while (n-- > 0) {
+    *first = value;
+    ++first;
+  }
+  return first;
+}
+template <class I, class S, class Gen>
+constexpr I generate(I first, S last, Gen gen) {
+  for (; first != last; ++first) *first = gen();
+  return first;
+}
+template <range R, class Gen>
+constexpr borrowed_iterator_t<R> generate(R&& r, Gen gen) {
+  return ranges::generate(ranges::begin(r), ranges::end(r), gen);
+}
+template <class O, class Gen>
+constexpr O generate_n(O first, iter_difference_t<O> n, Gen gen) {
+  while (n-- > 0) {
+    *first = gen();
+    ++first;
+  }
+  return first;
+}
+
+template <class I, class S, class T, class Proj = identity>
+constexpr I remove(I first, S last, const T& value, Proj proj = {}) {
+  first = ranges::find(first, last, value, proj);
+  if (first == last) return first;
+  I out = first;
+  for (++first; first != last; ++first) {
+    if (!(__project(proj, *first) == value)) {
+      *out = ranges::iter_move(first);
+      ++out;
+    }
+  }
+  return out;
+}
+template <range R, class T, class Proj = identity>
+constexpr borrowed_iterator_t<R> remove(R&& r, const T& value,
+                                        Proj proj = {}) {
+  return ranges::remove(ranges::begin(r), ranges::end(r), value, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr I remove_if(I first, S last, Pred pred, Proj proj = {}) {
+  first = ranges::find_if(first, last, pred, proj);
+  if (first == last) return first;
+  I out = first;
+  for (++first; first != last; ++first) {
+    if (!pred(__project(proj, *first))) {
+      *out = ranges::iter_move(first);
+      ++out;
+    }
+  }
+  return out;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_iterator_t<R> remove_if(R&& r, Pred pred,
+                                           Proj proj = {}) {
+  return ranges::remove_if(ranges::begin(r), ranges::end(r), pred, proj);
+}
+
+template <class I, class S, class T1, class T2, class Proj = identity>
+constexpr I replace(I first, S last, const T1& old_value,
+                    const T2& new_value, Proj proj = {}) {
+  for (; first != last; ++first)
+    if (__project(proj, *first) == old_value) *first = new_value;
+  return first;
+}
+template <range R, class T1, class T2, class Proj = identity>
+constexpr borrowed_iterator_t<R> replace(R&& r, const T1& old_value,
+                                         const T2& new_value,
+                                         Proj proj = {}) {
+  return ranges::replace(ranges::begin(r), ranges::end(r), old_value,
+                         new_value, proj);
+}
+template <class I, class S, class Pred, class T, class Proj = identity>
+constexpr I replace_if(I first, S last, Pred pred, const T& new_value,
+                       Proj proj = {}) {
+  for (; first != last; ++first)
+    if (pred(__project(proj, *first))) *first = new_value;
+  return first;
+}
+template <range R, class Pred, class T, class Proj = identity>
+constexpr borrowed_iterator_t<R> replace_if(R&& r, Pred pred,
+                                            const T& new_value,
+                                            Proj proj = {}) {
+  return ranges::replace_if(ranges::begin(r), ranges::end(r), pred, new_value,
+                            proj);
+}
+template <class I, class S, class O, class T, class Proj = identity>
+constexpr remove_copy_result<I, O> remove_copy(I first, S last, O out,
+                                               const T& value,
+                                               Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (!(__project(proj, *first) == value)) {
+      *out = *first;
+      ++out;
+    }
+  }
+  return {first, out};
+}
+template <range R, class O, class T, class Proj = identity>
+constexpr remove_copy_result<borrowed_iterator_t<R>, O> remove_copy(
+    R&& r, O out, const T& value, Proj proj = {}) {
+  return ranges::remove_copy(ranges::begin(r), ranges::end(r), out, value,
+                             proj);
+}
+template <class I, class S, class O, class Pred, class Proj = identity>
+constexpr remove_copy_if_result<I, O> remove_copy_if(I first, S last, O out,
+                                                     Pred pred,
+                                                     Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (!pred(__project(proj, *first))) {
+      *out = *first;
+      ++out;
+    }
+  }
+  return {first, out};
+}
+template <range R, class O, class Pred, class Proj = identity>
+constexpr remove_copy_if_result<borrowed_iterator_t<R>, O> remove_copy_if(
+    R&& r, O out, Pred pred, Proj proj = {}) {
+  return ranges::remove_copy_if(ranges::begin(r), ranges::end(r), out, pred,
+                                proj);
+}
+template <class I, class S, class O, class T1, class T2,
+          class Proj = identity>
+constexpr replace_copy_result<I, O> replace_copy(I first, S last, O out,
+                                                 const T1& old_value,
+                                                 const T2& new_value,
+                                                 Proj proj = {}) {
+  for (; first != last; ++first, ++out) {
+    if (__project(proj, *first) == old_value) {
+      *out = new_value;
+    } else {
+      *out = *first;
+    }
+  }
+  return {first, out};
+}
+template <range R, class O, class T1, class T2, class Proj = identity>
+constexpr replace_copy_result<borrowed_iterator_t<R>, O> replace_copy(
+    R&& r, O out, const T1& old_value, const T2& new_value, Proj proj = {}) {
+  return ranges::replace_copy(ranges::begin(r), ranges::end(r), out, old_value,
+                              new_value, proj);
+}
+template <class I, class S, class O, class Pred, class T,
+          class Proj = identity>
+constexpr replace_copy_if_result<I, O> replace_copy_if(I first, S last, O out,
+                                                       Pred pred,
+                                                       const T& new_value,
+                                                       Proj proj = {}) {
+  for (; first != last; ++first, ++out) {
+    if (pred(__project(proj, *first))) {
+      *out = new_value;
+    } else {
+      *out = *first;
+    }
+  }
+  return {first, out};
+}
+template <range R, class O, class Pred, class T, class Proj = identity>
+constexpr replace_copy_if_result<borrowed_iterator_t<R>, O> replace_copy_if(
+    R&& r, O out, Pred pred, const T& new_value, Proj proj = {}) {
+  return ranges::replace_copy_if(ranges::begin(r), ranges::end(r), out, pred,
+                                 new_value, proj);
+}
+
+template <class I, class S, class Pred = equal_to, class Proj = identity>
+constexpr I adjacent_find(I first, S last, Pred pred = {}, Proj proj = {}) {
+  if (first == last) return first;
+  I next = first;
+  ++next;
+  while (next != last) {
+    if (pred(__project(proj, *first), __project(proj, *next))) return first;
+    first = next;
+    ++next;
+  }
+  return next;
+}
+template <range R, class Pred = equal_to, class Proj = identity>
+constexpr borrowed_iterator_t<R> adjacent_find(R&& r, Pred pred = {},
+                                                Proj proj = {}) {
+  return ranges::adjacent_find(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity, class P2 = identity>
+constexpr subrange<I1, I1> search(I1 first1, S1 last1, I2 first2, S2 last2,
+                                  Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  if (first2 == last2) return {first1, first1};
+  for (; first1 != last1; ++first1) {
+    I1 a = first1;
+    I2 b = first2;
+    while (a != last1 && b != last2 &&
+           pred(__project(p1, *a), __project(p2, *b))) {
+      ++a;
+      ++b;
+    }
+    if (b == last2) return {first1, a};
+    if (a == last1) return {a, a};
+  }
+  return {first1, first1};
+}
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr borrowed_subrange_t<R1> search(R1&& r1, R2&& r2, Pred pred = {},
+                                         P1 p1 = {}, P2 p2 = {}) {
+  return ranges::search(ranges::begin(r1), ranges::end(r1),
+                        ranges::begin(r2), ranges::end(r2), pred, p1, p2);
+}
+template <class I, class S, class T, class Pred = equal_to,
+          class Proj = identity>
+constexpr subrange<I, I> search_n(I first, S last, iter_difference_t<I> count,
+                                  const T& value, Pred pred = {},
+                                  Proj proj = {}) {
+  if (count <= 0) return {first, first};
+  while (first != last) {
+    I start = first;
+    iter_difference_t<I> n = 0;
+    while (first != last && n < count &&
+           pred(__project(proj, *first), value)) {
+      ++first;
+      ++n;
+    }
+    if (n == count) return {start, first};
+    if (first == last) return {first, first};
+    ++first;
+  }
+  return {first, first};
+}
+template <range R, class T, class Pred = equal_to, class Proj = identity>
+constexpr borrowed_subrange_t<R> search_n(R&& r, range_difference_t<R> count,
+                                          const T& value, Pred pred = {},
+                                          Proj proj = {}) {
+  return ranges::search_n(ranges::begin(r), ranges::end(r), count, value, pred,
+                          proj);
+}
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity, class P2 = identity>
+constexpr subrange<I1, I1> find_end(I1 first1, S1 last1, I2 first2, S2 last2,
+                                    Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  I1 end1 = ranges::next(first1, last1);
+  if (first2 == last2) return {end1, end1};
+  subrange<I1, I1> result{end1, end1};
+  for (;;) {
+    subrange<I1, I1> next =
+        ranges::search(first1, end1, first2, last2, pred, p1, p2);
+    if (next.begin() == end1) return result;
+    result = next;
+    first1 = next.begin();
+    ++first1;
+  }
+}
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr borrowed_subrange_t<R1> find_end(R1&& r1, R2&& r2, Pred pred = {},
+                                           P1 p1 = {}, P2 p2 = {}) {
+  return ranges::find_end(ranges::begin(r1), ranges::end(r1),
+                          ranges::begin(r2), ranges::end(r2), pred, p1, p2);
+}
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity, class P2 = identity>
+constexpr I1 find_first_of(I1 first1, S1 last1, I2 first2, S2 last2,
+                           Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  for (; first1 != last1; ++first1)
+    for (I2 i = first2; i != last2; ++i)
+      if (pred(__project(p1, *first1), __project(p2, *i))) return first1;
+  return first1;
+}
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr borrowed_iterator_t<R1> find_first_of(R1&& r1, R2&& r2,
+                                                Pred pred = {}, P1 p1 = {},
+                                                P2 p2 = {}) {
+  return ranges::find_first_of(ranges::begin(r1), ranges::end(r1),
+                               ranges::begin(r2), ranges::end(r2), pred, p1,
+                               p2);
+}
+
+template <class I1, class S1, class I2, class S2>
+constexpr swap_ranges_result<I1, I2> swap_ranges(I1 first1, S1 last1,
+                                                I2 first2, S2 last2) {
+  for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+    ranges::iter_swap(first1, first2);
+  return {first1, first2};
+}
+template <range R1, range R2>
+constexpr swap_ranges_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>>
+swap_ranges(R1&& r1, R2&& r2) {
+  return ranges::swap_ranges(ranges::begin(r1), ranges::end(r1),
+                             ranges::begin(r2), ranges::end(r2));
+}
+template <class I, class S>
+constexpr I reverse(I first, S last) {
+  I end = first;
+  while (end != last) ++end;
+  I result = end;
+  while (first != end && first != --end) {
+    ranges::iter_swap(first, end);
+    ++first;
+  }
+  return result;
+}
+template <range R>
+constexpr borrowed_iterator_t<R> reverse(R&& r) {
+  return ranges::reverse(ranges::begin(r), ranges::end(r));
+}
+template <class I, class S, class O>
+constexpr copy_result<I, O> reverse_copy(I first, S last, O out) {
+  I end = first;
+  while (end != last) ++end;
+  while (first != end) {
+    --end;
+    *out = *end;
+    ++out;
+  }
+  I in_end = first;
+  while (in_end != last) ++in_end;
+  return {in_end, out};
+}
+template <range R, class O>
+constexpr reverse_copy_result<borrowed_iterator_t<R>, O> reverse_copy(R&& r,
+                                                                     O out) {
+  return ranges::reverse_copy(ranges::begin(r), ranges::end(r), out);
+}
+template <class I, class S>
+constexpr subrange<I, I> rotate(I first, I middle, S last) {
+  I end = first;
+  while (end != last) ++end;
+  if (first == middle) return {end, end};
+  if (middle == end) return {first, end};
+  I write = first;
+  I read = middle;
+  while (read != end) {
+    ranges::iter_swap(write, read);
+    ++write;
+    ++read;
+    if (write == middle) middle = read;
+    else if (read == end) read = middle;
+  }
+  return {write, end};
+}
+template <range R>
+constexpr borrowed_subrange_t<R> rotate(R&& r, iterator_t<R> middle) {
+  return ranges::rotate(ranges::begin(r), middle, ranges::end(r));
+}
+template <class I, class S, class O>
+constexpr copy_result<I, O> rotate_copy(I first, I middle, S last, O out) {
+  I current = middle;
+  while (current != last) {
+    *out = *current;
+    ++out;
+    ++current;
+  }
+  current = first;
+  while (current != middle) {
+    *out = *current;
+    ++out;
+    ++current;
+  }
+  I end = middle;
+  while (end != last) ++end;
+  return {end, out};
+}
+template <range R, class O>
+constexpr rotate_copy_result<borrowed_iterator_t<R>, O> rotate_copy(
+    R&& r, iterator_t<R> middle, O out) {
+  return ranges::rotate_copy(ranges::begin(r), middle, ranges::end(r), out);
+}
+template <class I, class S, class Pred = equal_to, class Proj = identity>
+constexpr subrange<I, I> unique(I first, S last, Pred pred = {},
+                                Proj proj = {}) {
+  I end = first;
+  while (end != last) ++end;
+  first = ranges::adjacent_find(first, end, pred, proj);
+  if (first == end) return {end, end};
+  I result = first;
+  while (++first != end) {
+    if (!pred(__project(proj, *result), __project(proj, *first))) {
+      ++result;
+      *result = ranges::iter_move(first);
+    }
+  }
+  ++result;
+  return {result, end};
+}
+template <range R, class Pred = equal_to, class Proj = identity>
+constexpr borrowed_subrange_t<R> unique(R&& r, Pred pred = {},
+                                        Proj proj = {}) {
+  return ranges::unique(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class O, class Pred = equal_to,
+          class Proj = identity>
+constexpr copy_result<I, O> unique_copy(I first, S last, O out,
+                                        Pred pred = {}, Proj proj = {}) {
+  if (first == last) return {first, out};
+  auto value = *first;
+  *out = value;
+  ++out;
+  ++first;
+  for (; first != last; ++first) {
+    if (!pred(__project(proj, value), __project(proj, *first))) {
+      value = *first;
+      *out = value;
+      ++out;
+    }
+  }
+  return {first, out};
+}
+template <range R, class O, class Pred = equal_to, class Proj = identity>
+constexpr unique_copy_result<borrowed_iterator_t<R>, O> unique_copy(
+    R&& r, O out, Pred pred = {}, Proj proj = {}) {
+  return ranges::unique_copy(ranges::begin(r), ranges::end(r), out, pred, proj);
+}
+template <class I, class S, class Gen>
+constexpr I shuffle(I first, S last, Gen&& gen) {
+  I end = ranges::next(first, last);
+  iter_difference_t<I> count = ranges::distance(first, end);
+  for (iter_difference_t<I> i = count; i > 1; --i) {
+    iter_difference_t<I> pick = static_cast<iter_difference_t<I>>(
+        static_cast<unsigned long long>(gen()) %
+        static_cast<unsigned long long>(i));
+    ranges::iter_swap(ranges::next(first, i - 1), ranges::next(first, pick));
+  }
+  return end;
+}
+template <range R, class Gen>
+constexpr borrowed_iterator_t<R> shuffle(R&& r, Gen&& gen) {
+  return ranges::shuffle(ranges::begin(r), ranges::end(r),
+                         static_cast<Gen&&>(gen));
+}
+// Selection sampling: walk the population once, keeping each element with
+// probability (wanted / remaining), which needs the population size up front
+// and therefore a forward range.
+template <class I, class S, class O, class Gen>
+O sample(I first, S last, O out, iter_difference_t<I> n, Gen&& gen) {
+  iter_difference_t<I> remaining = ranges::distance(first, last);
+  for (; first != last && n > 0; ++first) {
+    if (remaining <= n) {
+      *out = *first;
+      ++out;
+      --n;
+    } else if (static_cast<iter_difference_t<I>>(
+                   static_cast<unsigned long long>(gen()) %
+                   static_cast<unsigned long long>(remaining)) < n) {
+      *out = *first;
+      ++out;
+      --n;
+    }
+    --remaining;
+  }
+  return out;
+}
+template <range R, class O, class Gen>
+O sample(R&& r, O out, range_difference_t<R> n, Gen&& gen) {
+  return ranges::sample(ranges::begin(r), ranges::end(r), out, n,
+                        static_cast<Gen&&>(gen));
+}
+
+template <class I, class S, class Pred, class Proj = identity>
+constexpr bool is_partitioned(I first, S last, Pred pred, Proj proj = {}) {
+  while (first != last && pred(__project(proj, *first))) ++first;
+  while (first != last) {
+    if (pred(__project(proj, *first))) return false;
+    ++first;
+  }
+  return true;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr bool is_partitioned(R&& r, Pred pred, Proj proj = {}) {
+  return ranges::is_partitioned(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr subrange<I, I> partition(I first, S last, Pred pred,
+                                   Proj proj = {}) {
+  I end = first;
+  while (end != last) ++end;
+  first = ranges::find_if_not(first, end, pred, proj);
+  if (first == end) return {end, end};
+  for (I i = first; ++i != end;) {
+    if (pred(__project(proj, *i))) {
+      ranges::iter_swap(i, first);
+      ++first;
+    }
+  }
+  return {first, end};
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_subrange_t<R> partition(R&& r, Pred pred,
+                                           Proj proj = {}) {
+  return ranges::partition(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class O1, class O2, class Pred,
+          class Proj = identity>
+constexpr partition_copy_result<I, O1, O2> partition_copy(
+    I first, S last, O1 out_true, O2 out_false, Pred pred, Proj proj = {}) {
+  for (; first != last; ++first) {
+    if (pred(__project(proj, *first))) {
+      *out_true = *first;
+      ++out_true;
+    } else {
+      *out_false = *first;
+      ++out_false;
+    }
+  }
+  return {first, out_true, out_false};
+}
+template <range R, class O1, class O2, class Pred, class Proj = identity>
+constexpr partition_copy_result<borrowed_iterator_t<R>, O1, O2> partition_copy(
+    R&& r, O1 out_true, O2 out_false, Pred pred, Proj proj = {}) {
+  return ranges::partition_copy(ranges::begin(r), ranges::end(r), out_true,
+                                out_false, pred, proj);
+}
+// Stable partition by rotating each satisfying element down to the partition
+// point, which preserves the relative order of both groups.
+template <class I, class S, class Pred, class Proj = identity>
+constexpr subrange<I, I> stable_partition(I first, S last, Pred pred,
+                                          Proj proj = {}) {
+  I end = ranges::next(first, last);
+  I result = first;
+  for (I i = first; i != end; ++i) {
+    if (!pred(__project(proj, *i))) continue;
+    for (I j = i; j != result;) {
+      I previous = j;
+      --previous;
+      ranges::iter_swap(j, previous);
+      j = previous;
+    }
+    ++result;
+  }
+  return {result, end};
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_subrange_t<R> stable_partition(R&& r, Pred pred,
+                                                  Proj proj = {}) {
+  return ranges::stable_partition(ranges::begin(r), ranges::end(r), pred, proj);
+}
+template <class I, class S, class Pred, class Proj = identity>
+constexpr I partition_point(I first, S last, Pred pred, Proj proj = {}) {
+  while (first != last && pred(__project(proj, *first))) ++first;
+  return first;
+}
+template <range R, class Pred, class Proj = identity>
+constexpr borrowed_iterator_t<R> partition_point(R&& r, Pred pred,
+                                                 Proj proj = {}) {
+  return ranges::partition_point(ranges::begin(r), ranges::end(r), pred, proj);
+}
+
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I is_sorted_until(I first, S last, Comp comp = {}, Proj proj = {}) {
+  if (first == last) return first;
+  I next = first;
+  ++next;
+  while (next != last) {
+    if (comp(__project(proj, *next), __project(proj, *first))) return next;
+    first = next;
+    ++next;
+  }
+  return next;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> is_sorted_until(R&& r, Comp comp = {},
+                                                Proj proj = {}) {
+  return ranges::is_sorted_until(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr bool is_sorted(I first, S last, Comp comp = {}, Proj proj = {}) {
+  return ranges::is_sorted_until(first, last, comp, proj) == last;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr bool is_sorted(R&& r, Comp comp = {}, Proj proj = {}) {
+  return ranges::is_sorted(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I sort(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::sort(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> sort(R&& r, Comp comp = {}, Proj proj = {}) {
+  return ranges::sort(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I stable_sort(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::stable_sort(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> stable_sort(R&& r, Comp comp = {},
+                                             Proj proj = {}) {
+  return ranges::stable_sort(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I partial_sort(I first, I middle, S last, Comp comp = {},
+                         Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::partial_sort(first, middle, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> partial_sort(R&& r, iterator_t<R> middle,
+                                              Comp comp = {},
+                                              Proj proj = {}) {
+  return ranges::partial_sort(ranges::begin(r), middle, ranges::end(r), comp,
+                              proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I nth_element(I first, I nth, S last, Comp comp = {},
+                        Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::nth_element(first, nth, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> nth_element(R&& r, iterator_t<R> nth,
+                                             Comp comp = {}, Proj proj = {}) {
+  return ranges::nth_element(ranges::begin(r), nth, ranges::end(r), comp,
+                             proj);
+}
+// Copies the smallest elements of the input into the output range, in order,
+// keeping the output sorted by insertion as it fills and then only accepting
+// elements that beat its current largest.
+template <class I1, class S1, class I2, class S2, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr partial_sort_copy_result<I1, I2> partial_sort_copy(
+    I1 first, S1 last, I2 result_first, S2 result_last, Comp comp = {},
+    P1 p1 = {}, P2 p2 = {}) {
+  I2 out = result_first;
+  if (out == result_last) {
+    return {ranges::next(first, last), out};
+  }
+  while (first != last && out != result_last) {
+    *out = *first;
+    ++out;
+    ++first;
+  }
+  std::sort(result_first, out, __project_comparator(comp, p2));
+  for (; first != last; ++first) {
+    I2 largest = out;
+    --largest;
+    if (!__compare(comp, __project(p1, *first), __project(p2, *largest))) {
+      continue;
+    }
+    *largest = *first;
+    for (I2 j = largest; j != result_first;) {
+      I2 previous = j;
+      --previous;
+      if (!__compare(comp, __project(p2, *j), __project(p2, *previous))) break;
+      ranges::iter_swap(j, previous);
+      j = previous;
+    }
+  }
+  return {first, out};
+}
+template <range R1, range R2, class Comp = less, class P1 = identity,
+          class P2 = identity>
+constexpr partial_sort_copy_result<borrowed_iterator_t<R1>,
+                                   borrowed_iterator_t<R2>>
+partial_sort_copy(R1&& r, R2&& result, Comp comp = {}, P1 p1 = {},
+                  P2 p2 = {}) {
+  return ranges::partial_sort_copy(ranges::begin(r), ranges::end(r),
+                                   ranges::begin(result), ranges::end(result),
+                                   comp, p1, p2);
+}
+
+template <class I, class S, class T, class Comp = less,
+          class Proj = identity>
+constexpr I lower_bound(I first, S last, const T& value,
+                        Comp comp = {}, Proj proj = {}) {
+  while (first != last && comp(__project(proj, *first), value)) ++first;
+  return first;
+}
+template <range R, class T, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> lower_bound(R&& r, const T& value,
+                                              Comp comp = {}, Proj proj = {}) {
+  return ranges::lower_bound(ranges::begin(r), ranges::end(r), value,
+                             comp, proj);
+}
+template <class I, class S, class T, class Comp = less,
+          class Proj = identity>
+constexpr I upper_bound(I first, S last, const T& value,
+                        Comp comp = {}, Proj proj = {}) {
+  while (first != last && !comp(value, __project(proj, *first))) ++first;
+  return first;
+}
+template <range R, class T, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> upper_bound(R&& r, const T& value,
+                                             Comp comp = {}, Proj proj = {}) {
+  return ranges::upper_bound(ranges::begin(r), ranges::end(r), value, comp,
+                             proj);
+}
+template <class I, class S, class T, class Comp = less,
+          class Proj = identity>
+constexpr subrange<I, I> equal_range(I first, S last, const T& value,
+                                     Comp comp = {}, Proj proj = {}) {
+  I lower = ranges::lower_bound(first, last, value, comp, proj);
+  I upper = ranges::upper_bound(lower, last, value, comp, proj);
+  return {lower, upper};
+}
+template <range R, class T, class Comp = less, class Proj = identity>
+constexpr borrowed_subrange_t<R> equal_range(R&& r, const T& value,
+                                             Comp comp = {}, Proj proj = {}) {
+  return ranges::equal_range(ranges::begin(r), ranges::end(r), value, comp,
+                             proj);
+}
+template <class I, class S, class T, class Comp = less,
+          class Proj = identity>
+constexpr bool binary_search(I first, S last, const T& value,
+                             Comp comp = {}, Proj proj = {}) {
+  I found = ranges::lower_bound(first, last, value, comp, proj);
+  return found != last && !comp(value, std::invoke(proj, *found));
+}
+template <range R, class T, class Comp = less, class Proj = identity>
+constexpr bool binary_search(R&& r, const T& value,
+                             Comp comp = {}, Proj proj = {}) {
+  auto first = ranges::begin(r);
+  auto last = ranges::end(r);
+  for (; first != last; ++first) {
+    if (__compare(comp, __project(proj, *first), value)) {
+      continue;
+    }
+    return !__compare(comp, value, __project(proj, *first));
+  }
+  return false;
+}
+
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I make_heap(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::make_heap(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> make_heap(R&& r, Comp comp = {},
+                                           Proj proj = {}) {
+  return ranges::make_heap(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I sort_heap(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::sort_heap(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> sort_heap(R&& r, Comp comp = {},
+                                           Proj proj = {}) {
+  return ranges::sort_heap(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr bool is_heap(I first, S last, Comp comp = {}, Proj proj = {}) {
+  if (first == last) return true;
+  I child = first;
+  ++child;
+  iter_difference_t<I> index = 1;
+  for (; child != last; ++child, ++index) {
+    I parent = first;
+    ranges::advance(parent, (index - 1) / 2);
+    if (__compare(comp, __project(proj, *parent), __project(proj, *child))) {
+      return false;
+    }
+  }
+  return true;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr bool is_heap(R&& r, Comp comp = {}, Proj proj = {}) {
+  return ranges::is_heap(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I is_heap_until(I first, S last, Comp comp = {}, Proj proj = {}) {
+  if (first == last) return first;
+  I child = first;
+  ++child;
+  iter_difference_t<I> index = 1;
+  for (; child != last; ++child, ++index) {
+    I parent = first;
+    ranges::advance(parent, (index - 1) / 2);
+    if (__compare(comp, __project(proj, *parent), __project(proj, *child))) {
+      return child;
+    }
+  }
+  return child;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> is_heap_until(R&& r, Comp comp = {},
+                                               Proj proj = {}) {
+  return ranges::is_heap_until(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I push_heap(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::push_heap(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> push_heap(R&& r, Comp comp = {},
+                                           Proj proj = {}) {
+  return ranges::push_heap(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I pop_heap(I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::pop_heap(first, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> pop_heap(R&& r, Comp comp = {},
+                                          Proj proj = {}) {
+  return ranges::pop_heap(ranges::begin(r), ranges::end(r), comp, proj);
+}
+
+template <class I1, class S1, class I2, class S2, class O,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr merge_result<I1, I2, O> merge(I1 first1, S1 last1,
+                                        I2 first2, S2 last2, O out,
+                                        Comp comp = {}, P1 p1 = {},
+                                        P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (comp(__project(p2, *first2), __project(p1, *first1))) {
+      *out = *first2;
+      ++first2;
+    } else {
+      *out = *first1;
+      ++first1;
+    }
+    ++out;
+  }
+  auto left = ranges::copy(first1, last1, out);
+  auto right = ranges::copy(first2, last2, left.out);
+  return {left.in, right.in, right.out};
+}
+template <range R1, range R2, class O, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr merge_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>, O>
+merge(R1&& r1, R2&& r2, O out, Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::merge(ranges::begin(r1), ranges::end(r1),
+                       ranges::begin(r2), ranges::end(r2), out,
+                       comp, p1, p2);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I inplace_merge(I first, I middle, S last, Comp comp = {},
+                          Proj proj = {}) {
+  I end = ranges::next(first, last);
+  std::inplace_merge(first, middle, end, __project_comparator(comp, proj));
+  return end;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> inplace_merge(R&& r, iterator_t<R> middle,
+                                               Comp comp = {},
+                                               Proj proj = {}) {
+  return ranges::inplace_merge(ranges::begin(r), middle, ranges::end(r), comp,
+                               proj);
+}
+
+template <class I1, class S1, class I2, class S2,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr bool includes(I1 first1, S1 last1, I2 first2, S2 last2,
+                        Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first2 != last2) {
+    if (first1 == last1 || comp(__project(p2, *first2), __project(p1, *first1))) return false;
+    if (!comp(__project(p1, *first1), __project(p2, *first2))) ++first2;
+    ++first1;
+  }
+  return true;
+}
+template <range R1, range R2, class Comp = less, class P1 = identity,
+          class P2 = identity>
+constexpr bool includes(R1&& r1, R2&& r2, Comp comp = {}, P1 p1 = {},
+                        P2 p2 = {}) {
+  return ranges::includes(ranges::begin(r1), ranges::end(r1),
+                          ranges::begin(r2), ranges::end(r2), comp, p1, p2);
+}
+template <class I1, class S1, class I2, class S2, class O,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr set_union_result<I1, I2, O> set_union(
+    I1 first1, S1 last1, I2 first2, S2 last2, O out,
+    Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (comp(__project(p1, *first1), __project(p2, *first2))) {
+      *out++ = *first1++;
+    } else if (comp(__project(p2, *first2), __project(p1, *first1))) {
+      *out++ = *first2++;
+    } else {
+      *out++ = *first1++;
+      ++first2;
+    }
+  }
+  auto a = ranges::copy(first1, last1, out);
+  auto b = ranges::copy(first2, last2, a.out);
+  return {a.in, b.in, b.out};
+}
+template <range R1, range R2, class O, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr set_union_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>, O>
+set_union(R1&& r1, R2&& r2, O out, Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::set_union(ranges::begin(r1), ranges::end(r1),
+                           ranges::begin(r2), ranges::end(r2), out, comp, p1,
+                           p2);
+}
+template <class I1, class S1, class I2, class S2, class O,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr set_intersection_result<I1, I2, O> set_intersection(
+    I1 first1, S1 last1, I2 first2, S2 last2, O out,
+    Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (comp(__project(p1, *first1), __project(p2, *first2))) ++first1;
+    else if (comp(__project(p2, *first2), __project(p1, *first1))) ++first2;
+    else {
+      *out++ = *first1++;
+      ++first2;
+    }
+  }
+  return {first1, first2, out};
+}
+template <range R1, range R2, class O, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr set_intersection_result<borrowed_iterator_t<R1>,
+                                  borrowed_iterator_t<R2>, O>
+set_intersection(R1&& r1, R2&& r2, O out, Comp comp = {}, P1 p1 = {},
+                 P2 p2 = {}) {
+  return ranges::set_intersection(ranges::begin(r1), ranges::end(r1),
+                                  ranges::begin(r2), ranges::end(r2), out,
+                                  comp, p1, p2);
+}
+template <class I1, class S1, class I2, class S2, class O,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr set_difference_result<I1, I2, O> set_difference(
+    I1 first1, S1 last1, I2 first2, S2 last2, O out,
+    Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1) {
+    if (first2 == last2) {
+      auto rest = ranges::copy(first1, last1, out);
+      return {rest.in, first2, rest.out};
+    }
+    if (comp(__project(p1, *first1), __project(p2, *first2))) *out++ = *first1++;
+    else if (comp(__project(p2, *first2), __project(p1, *first1))) ++first2;
+    else {
+      ++first1;
+      ++first2;
+    }
+  }
+  return {first1, first2, out};
+}
+template <range R1, range R2, class O, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr set_difference_result<borrowed_iterator_t<R1>,
+                                borrowed_iterator_t<R2>, O>
+set_difference(R1&& r1, R2&& r2, O out, Comp comp = {}, P1 p1 = {},
+               P2 p2 = {}) {
+  return ranges::set_difference(ranges::begin(r1), ranges::end(r1),
+                                ranges::begin(r2), ranges::end(r2), out, comp,
+                                p1, p2);
+}
+template <class I1, class S1, class I2, class S2, class O,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr set_symmetric_difference_result<I1, I2, O>
+set_symmetric_difference(I1 first1, S1 last1, I2 first2, S2 last2,
+                         O out, Comp comp = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (comp(__project(p1, *first1), __project(p2, *first2))) *out++ = *first1++;
+    else if (comp(__project(p2, *first2), __project(p1, *first1))) *out++ = *first2++;
+    else {
+      ++first1;
+      ++first2;
+    }
+  }
+  auto a = ranges::copy(first1, last1, out);
+  auto b = ranges::copy(first2, last2, a.out);
+  return {a.in, b.in, b.out};
+}
+template <range R1, range R2, class O, class Comp = less,
+          class P1 = identity, class P2 = identity>
+constexpr set_symmetric_difference_result<borrowed_iterator_t<R1>,
+                                          borrowed_iterator_t<R2>, O>
+set_symmetric_difference(R1&& r1, R2&& r2, O out, Comp comp = {}, P1 p1 = {},
+                         P2 p2 = {}) {
+  return ranges::set_symmetric_difference(ranges::begin(r1), ranges::end(r1),
+                                          ranges::begin(r2), ranges::end(r2),
+                                          out, comp, p1, p2);
+}
+
+template <class T, class Proj = identity, class Comp = less>
+constexpr const T& min(const T& a, const T& b, Comp comp = {},
+                       Proj proj = {}) {
+  return comp(__project(proj, b), __project(proj, a)) ? b : a;
+}
+template <class T, class Proj = identity, class Comp = less>
+constexpr const T& max(const T& a, const T& b, Comp comp = {},
+                       Proj proj = {}) {
+  return comp(__project(proj, a), __project(proj, b)) ? b : a;
+}
+template <class T, class Proj = identity, class Comp = less>
+constexpr min_max_result<const T&> minmax(const T& a, const T& b,
+                                          Comp comp = {}, Proj proj = {}) {
+  return comp(__project(proj, b), __project(proj, a)) ? min_max_result<const T&>{b, a}
+                                : min_max_result<const T&>{a, b};
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr min_max_result<range_value_t<R>> minmax(
+    R&& r, Comp comp = {}, Proj proj = {}) {
+  auto first = ranges::begin(r);
+  auto last = ranges::end(r);
+  range_value_t<R> minimum = *first;
+  range_value_t<R> maximum = *first;
+  ++first;
+  for (; first != last; ++first) {
+    if (__compare(comp, __project(proj, *first),
+                  __project(proj, minimum))) {
+      minimum = *first;
+    }
+    if (__compare(comp, __project(proj, maximum),
+                  __project(proj, *first))) {
+      maximum = *first;
+    }
+  }
+  min_max_result<range_value_t<R>> result;
+  result.min = minimum;
+  result.max = maximum;
+  return result;
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I min_element(I first, S last, Comp comp = {}, Proj proj = {}) {
+  if (first == last) return first;
+  I result = first;
+  while (++first != last)
+    if (comp(__project(proj, *first), __project(proj, *result))) result = first;
+  return result;
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr I max_element(I first, S last, Comp comp = {}, Proj proj = {}) {
+  if (first == last) return first;
+  I result = first;
+  while (++first != last)
+    if (comp(__project(proj, *result), __project(proj, *first))) result = first;
+  return result;
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> min_element(R&& r, Comp comp = {},
+                                             Proj proj = {}) {
+  return ranges::min_element(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr borrowed_iterator_t<R> max_element(R&& r, Comp comp = {},
+                                             Proj proj = {}) {
+  return ranges::max_element(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr min_max_result<I> minmax_element(I first, S last,
+                                           Comp comp = {}, Proj proj = {}) {
+  return {ranges::min_element(first, last, comp, proj),
+          ranges::max_element(first, last, comp, proj)};
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr min_max_result<borrowed_iterator_t<R>> minmax_element(
+    R&& r, Comp comp = {}, Proj proj = {}) {
+  return {ranges::min_element(ranges::begin(r), ranges::end(r), comp, proj),
+          ranges::max_element(ranges::begin(r), ranges::end(r), comp, proj)};
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr range_value_t<R> min(R&& r, Comp comp = {}, Proj proj = {}) {
+  return *ranges::min_element(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr range_value_t<R> max(R&& r, Comp comp = {}, Proj proj = {}) {
+  return *ranges::max_element(ranges::begin(r), ranges::end(r), comp, proj);
+}
+template <class T, class Comp = less, class Proj = identity>
+constexpr const T& clamp(const T& value, const T& low, const T& high,
+                         Comp comp = {}, Proj proj = {}) {
+  return comp(__project(proj, value), __project(proj, low)) ? low
+       : comp(__project(proj, high), __project(proj, value)) ? high : value;
+}
+template <class I1, class S1, class I2, class S2,
+          class Comp = less, class P1 = identity, class P2 = identity>
+constexpr bool lexicographical_compare(I1 first1, S1 last1,
+                                       I2 first2, S2 last2,
+                                       Comp comp = {}, P1 p1 = {},
+                                       P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (comp(__project(p1, *first1), __project(p2, *first2))) return true;
+    if (comp(__project(p2, *first2), __project(p1, *first1))) return false;
+    ++first1;
+    ++first2;
+  }
+  return first1 == last1 && first2 != last2;
+}
+template <range R1, range R2, class Comp = less, class P1 = identity,
+          class P2 = identity>
+constexpr bool lexicographical_compare(R1&& r1, R2&& r2, Comp comp = {},
+                                       P1 p1 = {}, P2 p2 = {}) {
+  return ranges::lexicographical_compare(ranges::begin(r1), ranges::end(r1),
+                                         ranges::begin(r2), ranges::end(r2),
+                                         comp, p1, p2);
+}
+template <class I1, class S1, class I2, class S2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr bool is_permutation(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  I1 end1 = ranges::next(first1, last1);
+  I2 end2 = ranges::next(first2, last2);
+  if (ranges::distance(first1, end1) != ranges::distance(first2, end2)) {
+    return false;
+  }
+  for (I1 i = first1; i != end1; ++i) {
+    bool counted = false;
+    for (I1 seen = first1; seen != i; ++seen) {
+      if (pred(__project(p1, *seen), __project(p1, *i))) {
+        counted = true;
+        break;
+      }
+    }
+    if (counted) continue;
+    iter_difference_t<I1> in_first = 0;
+    for (I1 j = i; j != end1; ++j) {
+      if (pred(__project(p1, *i), __project(p1, *j))) ++in_first;
+    }
+    iter_difference_t<I1> in_second = 0;
+    for (I2 j = first2; j != end2; ++j) {
+      if (pred(__project(p1, *i), __project(p2, *j))) ++in_second;
+    }
+    if (in_first != in_second) return false;
+  }
+  return true;
+}
+template <range R1, range R2, class Pred = equal_to, class P1 = identity,
+          class P2 = identity>
+constexpr bool is_permutation(R1&& r1, R2&& r2, Pred pred = {}, P1 p1 = {},
+                              P2 p2 = {}) {
+  return ranges::is_permutation(ranges::begin(r1), ranges::end(r1),
+                                ranges::begin(r2), ranges::end(r2), pred, p1,
+                                p2);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr next_permutation_result<I> next_permutation(
+    I first, S last, Comp comp = {}, Proj proj = {}) {
+  I end = first;
+  while (end != last) ++end;
+  if (first == end) return {end, false};
+  I i = end;
+  --i;
+  if (i == first) return {end, false};
+  for (;;) {
+    I previous = i;
+    --previous;
+    if (comp(__project(proj, *previous), __project(proj, *i))) {
+      I j = end;
+      do { --j; } while (!comp(__project(proj, *previous), __project(proj, *j)));
+      ranges::iter_swap(previous, j);
+      ranges::reverse(i, end);
+      return {end, true};
+    }
+    if (previous == first) {
+      ranges::reverse(first, end);
+      return {end, false};
+    }
+    i = previous;
+  }
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr next_permutation_result<borrowed_iterator_t<R>> next_permutation(
+    R&& r, Comp comp = {}, Proj proj = {}) {
+  return ranges::next_permutation(ranges::begin(r), ranges::end(r),
+                                  comp, proj);
+}
+template <class I, class S, class Comp = less, class Proj = identity>
+constexpr prev_permutation_result<I> prev_permutation(
+    I first, S last, Comp comp = {}, Proj proj = {}) {
+  struct __reverse_comp {
+    Comp comp;
+    constexpr bool operator()(const auto& a, const auto& b) {
+      return comp(b, a);
+    }
+  };
+  auto result =
+      ranges::next_permutation(first, last, __reverse_comp{comp}, proj);
+  return {result.in, result.found};
+}
+template <range R, class Comp = less, class Proj = identity>
+constexpr prev_permutation_result<borrowed_iterator_t<R>> prev_permutation(
+    R&& r, Comp comp = {}, Proj proj = {}) {
+  return ranges::prev_permutation(ranges::begin(r), ranges::end(r),
+                                  comp, proj);
+}
+
+}  // namespace ranges
 
 }  // namespace std
 

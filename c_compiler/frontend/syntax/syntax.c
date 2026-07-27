@@ -1075,18 +1075,34 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
     LexNextToken(syntax->lex);
     if (LexLookingAt(syntax->lex, TOK(less))) {
       int depth = 0;
+      int paren_depth = 0;
+      int square_depth = 0;
+      int brace_depth = 0;
       Token previous = TOK(identifier);
       do {
         Token current = syntax->lex->current_token;
-        if (LexLookingAt(syntax->lex, TOK(less))) {
-          if (previous == TOK(identifier) || previous == TOK(greater) ||
-              previous == TOK(greatergreater)) {
-            depth++;
+        if (current == TOK(lparen)) {
+          paren_depth++;
+        } else if (current == TOK(rparen)) {
+          paren_depth--;
+        } else if (current == TOK(lsquare)) {
+          square_depth++;
+        } else if (current == TOK(rsquare)) {
+          square_depth--;
+        } else if (current == TOK(lbrace)) {
+          brace_depth++;
+        } else if (current == TOK(rbrace)) {
+          brace_depth--;
+        } else if (paren_depth == 0 && square_depth == 0 &&
+                   brace_depth == 0) {
+          if (current == TOK(less)) {
+            if (previous == TOK(identifier) || previous == TOK(greater) ||
+                previous == TOK(greatergreater)) {
+              depth++;
+            }
+          } else {
+            depth -= LexClosingAngleCount(current);
           }
-        } else if (LexLookingAt(syntax->lex, TOK(greater))) {
-          depth--;
-        } else if (LexLookingAt(syntax->lex, TOK(greatergreater))) {
-          depth -= 2;
         }
         LexNextToken(syntax->lex);
         previous = current;
@@ -1686,7 +1702,7 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
 // whether a using-declaration collides with something already declared in the
 // very region it targets, which is the only place a redeclaration check
 // applies ([namespace.udecl]).
-static Symbol* SyntaxFindTopScopeSymbol(Syntax* syntax, String* name) {
+Symbol* SyntaxFindTopScopeSymbol(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_symbol_stack;
   if (scope != NULL) {
     return FindSymbol(&scope->table, name);
@@ -6569,6 +6585,10 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   return param;
 }
 
+static bool ExpressionContainsDependentTemplateParameter(ASTNode* node);
+static bool ExpressionIsNonTypeTemplateParameter(ASTNode* node,
+                                                 int* parameter_index);
+
 static TemplateArgument* ParseTemplateNonTypeDefault(Syntax* syntax) {
   bool old_parsing_template_argument = syntax->parsing_template_argument;
   syntax->parsing_template_argument = true;
@@ -6579,18 +6599,22 @@ static TemplateArgument* ParseTemplateNonTypeDefault(Syntax* syntax) {
   arg->kind = kTemplateParameterNonType;
   arg->template_parameter_index = -1;
   arg->location = expr != NULL ? expr->location : SOURCE_LOCATION_MISSING;
+  int direct_parameter_index = -1;
+  bool is_direct_parameter =
+      ExpressionIsNonTypeTemplateParameter(expr, &direct_parameter_index);
+  if (!is_direct_parameter &&
+      ExpressionContainsDependentTemplateParameter(expr)) {
+    arg->dependent_expr = expr;
+    return arg;
+  }
   expr = AnalyzeExpression(expr);
   bool ok = TemplateArgumentSetFromExpression(arg, expr);
-  if (!ok && expr != NULL && expr->op == AST_OP(identifier)) {
-    IdentifierASTNode* id = (IdentifierASTNode*)expr;
-    if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
-        !id->symbol->flags.is_template_type_parameter) {
-      arg->template_parameter_index = id->symbol->template_parameter_index;
-      arg->value_kind = kTemplateValueNone;
-      TypeRecordDelete(arg->type);
-      arg->type = TypeRecordCopy(id->symbol->type);
-      ok = true;
-    }
+  if (!ok && is_direct_parameter) {
+    arg->template_parameter_index = direct_parameter_index;
+    arg->value_kind = kTemplateValueNone;
+    TypeRecordDelete(arg->type);
+    arg->type = expr != NULL ? TypeRecordCopy(expr->type) : NULL;
+    ok = true;
   }
   if (!ok) {
     SyntaxError(syntax, "Template non-type default must be a constant expression");
@@ -6835,18 +6859,29 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
   // the ordinary parameter parser would reject with a misleading diagnostic.
   if (LexLookingAt(lex, TOK(less))) {
     int depth = 0;
+    int paren_depth = 0;
+    int square_depth = 0;
+    int brace_depth = 0;
     while (!LexEof(lex)) {
       Token t = lex->current_token;
-      if (t == TOK(less)) {
-        depth++;
-      } else if (t == TOK(lessless)) {
-        depth += 2;
-      } else if (t == TOK(greater)) {
-        depth--;
-      } else if (t == TOK(greatergreater) || t == TOK(greatergreatereq)) {
-        depth -= 2;
-      } else if (t == TOK(greatereq)) {
-        depth -= 1;
+      if (t == TOK(lparen)) {
+        paren_depth++;
+      } else if (t == TOK(rparen)) {
+        paren_depth--;
+      } else if (t == TOK(lsquare)) {
+        square_depth++;
+      } else if (t == TOK(rsquare)) {
+        square_depth--;
+      } else if (t == TOK(lbrace)) {
+        brace_depth++;
+      } else if (t == TOK(rbrace)) {
+        brace_depth--;
+      } else if (paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
+        if (t == TOK(less)) {
+          depth++;
+        } else {
+          depth -= LexClosingAngleCount(t);
+        }
       }
       LexNextToken(lex);
       if (depth <= 0) {
@@ -9594,6 +9629,28 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
   ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
 }
 
+// True if any element of a braced initializer is a pack expansion, so the
+// element count at parse time is not the number of values it will produce.
+static bool BracedInitializerHasPackExpansion(
+    BracedInitializerASTNode* braced) {
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* init = braced->initializers->value.p[i];
+    if (init == NULL) {
+      continue;
+    }
+    if ((init->flags & kASTPackExpansion) != 0) {
+      return true;
+    }
+    if (init->op == AST_OP(expr_init)) {
+      ASTNode* expr = ((ExpressionInitializerASTNode*)init)->expr;
+      if (expr != NULL && (expr->flags & kASTPackExpansion) != 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -9786,6 +9843,27 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (LexMatch(syntax->lex, TOK(equal))) {
         syntax->init_storage = storage;
         initializer = SyntaxParseInitializer(syntax, sym, storage);
+        // Complete a C++ array of unknown bound as soon as its braced
+        // initializer has been parsed.  Local declarations are normally
+        // analyzed after the whole function body, but a following `auto`
+        // declaration is analyzed eagerly so that later `decltype(auto_var)`
+        // works.  Leaving the earlier array flexible until that later pass
+        // makes calls in the eager initializer see `T[0]` instead of `T[N]`.
+        // C++ has no array designators, so the top-level initializer count is
+        // the array bound -- unless an element is an unexpanded pack, whose
+        // length is only known once the template is instantiated.
+        if (CompilerIsCXX() && initializer != NULL &&
+            initializer->op == AST_OP(braced_init) &&
+            sym->type != NULL && sym->type->declarator == kDeclArray &&
+            sym->type->info.array.is_flexible) {
+          BracedInitializerASTNode* braced =
+              (BracedInitializerASTNode*)initializer;
+          if (!BracedInitializerHasPackExpansion(braced)) {
+            sym->type->info.array.size.fixed = (int)braced->initializers->length;
+            sym->type->info.array.is_flexible = false;
+            TypeRecordCalculateSize(sym->type);
+          }
+        }
         ResolveCXXClassTemplateArgumentDeductionFromInitializer(
             syntax, sym, initializer);
         initializer =
@@ -10165,19 +10243,30 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         LexNextToken(syntax->lex);
         if (LexLookingAt(syntax->lex, TOK(less))) {
           int depth = 0;
+          int paren_depth = 0;
+          int square_depth = 0;
+          int brace_depth = 0;
           while (!LexEof(syntax->lex)) {
             Token t = syntax->lex->current_token;
-            if (t == TOK(less)) {
-              depth++;
-            } else if (t == TOK(lessless)) {
-              depth += 2;
-            } else if (t == TOK(greater)) {
-              depth--;
-            } else if (t == TOK(greatergreater) ||
-                       t == TOK(greatergreatereq)) {
-              depth -= 2;
-            } else if (t == TOK(greatereq)) {
-              depth -= 1;
+            if (t == TOK(lparen)) {
+              paren_depth++;
+            } else if (t == TOK(rparen)) {
+              paren_depth--;
+            } else if (t == TOK(lsquare)) {
+              square_depth++;
+            } else if (t == TOK(rsquare)) {
+              square_depth--;
+            } else if (t == TOK(lbrace)) {
+              brace_depth++;
+            } else if (t == TOK(rbrace)) {
+              brace_depth--;
+            } else if (paren_depth == 0 && square_depth == 0 &&
+                       brace_depth == 0) {
+              if (t == TOK(less)) {
+                depth++;
+              } else {
+                depth -= LexClosingAngleCount(t);
+              }
             }
             LexNextToken(syntax->lex);
             if (depth <= 0) {
@@ -10377,6 +10466,8 @@ TokenClass ClassifyToken(Token tok) {
       }
       return TC(exprsep);
 
+    case TOK(greatergreatereq):
+      return CompilerIsCXX() ? TC(exprsep) | TC(closebra) : TC(exprsep);
 
     case TOK(equal):
       return TC(stmt) | TC(exprsep);
@@ -10455,6 +10546,10 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(plusplus):
     case TOK(question):
     case TOK(greatergreater):
+      if (CompilerIsCXX() && tok == TOK(greatergreater)) {
+        return TC(exprsep) | TC(closebra);
+      }
+      return TC(exprsep);
     case TOK(slash):
     case TOK(slasheq):
     case TOK(star):

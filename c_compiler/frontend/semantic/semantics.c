@@ -220,6 +220,15 @@ void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
   VReportWarning(filename, lineno, warn, format, ap);
 }
 
+// True for the declared type `auto&&`, which is a forwarding reference rather
+// than a plain rvalue reference ([dcl.type.auto.deduct]/[temp.deduct.call]).
+static bool AutoTypeIsForwardingReference(TypeRecord* type) {
+  return CompilerIsCXX() && type != NULL &&
+         type->declarator == kDeclRValueReference && type->next != NULL &&
+         type->next->declarator == kDeclPrimitive &&
+         (type->next->type & kTypeAuto) != 0;
+}
+
 bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                             ASTNode* diagnostic_node) {
   if (sym == NULL || !TypeContainsAuto(sym->type)) {
@@ -237,16 +246,29 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     SymbolSetType(sym, deduced);
     return true;
   }
+  ASTNode* initializer_expr = initializer;
   if (initializer->op == AST_OP(expr_init)) {
     ExpressionInitializerASTNode* expr_init =
         (ExpressionInitializerASTNode*)initializer;
+    initializer_expr = expr_init->expr;
     initializer_type = expr_init->expr->type;
   }
+  bool forwarding_reference = AutoTypeIsForwardingReference(sym->type);
   deduced = TypeDeduceAuto(sym->type, initializer_type);
   if (deduced == NULL) {
     SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
                   sym->name.value);
     return false;
+  }
+  // Collapse `T& &&` to `T&`: `auto&& x = lvalue;` declares an lvalue
+  // reference.  Without this the idiomatic `for (auto&& x : range)` -- and the
+  // `auto&&` hidden variables the range-for lowering itself introduces -- are
+  // rejected for binding an rvalue reference to an lvalue.
+  if (forwarding_reference && deduced->declarator == kDeclRValueReference &&
+      initializer_expr != NULL &&
+      initializer_expr->value_category == kValueCategoryLvalue) {
+    deduced->declarator = kDeclReference;
+    TypeRecordCalculateSize(deduced);
   }
   SymbolSetType(sym, deduced);
   return true;

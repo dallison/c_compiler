@@ -43,9 +43,15 @@ void SetClearWithContents(Set* set, SetElementDestructor destructor, bool free_c
 }
 
 static int ComparePointers(const void* a, const void* b) {
-  const void* v1 = *(const void**)a;
-  const void* v2 = *(const void**)b;
-  return (int)(v1 - v2);
+  // Order by address.  The difference of two pointers does not survive being
+  // truncated to `int`: elements more than 2GB apart would compare equal or in
+  // the wrong order, breaking the set's binary search.
+  uintptr_t v1 = (uintptr_t)*(const void**)a;
+  uintptr_t v2 = (uintptr_t)*(const void**)b;
+  if (v1 == v2) {
+    return 0;
+  }
+  return v1 < v2 ? -1 : 1;
 }
 
 static int CompareIntegers(const void* a, const void* b) {

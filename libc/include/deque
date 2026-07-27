@@ -36,7 +36,7 @@ void __throw_out_of_range();
 
 }  // namespace __deque_detail
 
-template <class T, class Allocator = allocator<T> >
+template <class T, class Allocator = allocator<T>>
 class deque {
  private:
   using __alloc_traits = allocator_traits<Allocator>;

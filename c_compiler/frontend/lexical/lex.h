@@ -52,6 +52,10 @@ typedef struct Lex {
   Preprocessor* preprocessor;
 
   Token current_token;  // Current token.
+  // True only when current_token is `>=` left after consuming the first `>`
+  // from a `>>=` token as a template closer. A source-written `>=` is a
+  // relational operator and must never be mistaken for a template close.
+  bool current_greatereq_is_split;
 
   String spelling;      // Spelling for identifier or string literal.
   String literal_spelling;  // Exact numeric spelling for C++ UDL fallback.
@@ -90,6 +94,7 @@ typedef struct {
   size_t pos;
   SourceLocation current_token_location;
   Token current_token;
+  bool current_greatereq_is_split;
   String spelling;
   String literal_spelling;
   int64_t number;
@@ -147,8 +152,12 @@ bool LexMatchIdentifier(Lex* lex, String* spelling);
 
 bool LexLookingAt(Lex* lex, Token tok);
 
-// True when the current token begins with a closing angle bracket, including
-// a merged `>>`, `>>=`, or `>=` token.
+// Number of template-closing '>' characters represented by an unsplit source
+// token. A source-written `>=` returns zero: it is a relational operator.
+int LexClosingAngleCount(Token token);
+
+// True when the current token begins with a template-closing angle bracket,
+// including a merged `>>` / `>>=` token or the `>=` residue of splitting `>>=`.
 bool LexLookingAtClosingAngle(Lex* lex);
 
 // Consumes exactly one closing '>' when a template-argument or

@@ -78,7 +78,7 @@ class __hash_iterator {
         __node_(node) {}
 
   // A mutable iterator converts to a const iterator (but not the reverse).
-  template <bool C2, class = enable_if_t<IsConst && !C2> >
+  template <bool C2, class = enable_if_t<IsConst && !C2>>
   __hash_iterator(const __hash_iterator<Value, C2>& other)
       : __buckets_(other.__buckets_),
         __bucket_count_(other.__bucket_count_),

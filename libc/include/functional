@@ -73,6 +73,57 @@ struct equal_to<void> {
   }
 };
 
+template <class T = void>
+struct not_equal_to {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return left != right;
+  }
+};
+
+template <>
+struct not_equal_to<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return !(static_cast<T&&>(left) == static_cast<U&&>(right));
+  }
+};
+
+template <class T = void>
+struct less_equal {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return !(right < left);
+  }
+};
+
+template <>
+struct less_equal<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return !(static_cast<U&&>(right) < static_cast<T&&>(left));
+  }
+};
+
+template <class T = void>
+struct greater_equal {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return !(left < right);
+  }
+};
+
+template <>
+struct greater_equal<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return !(static_cast<T&&>(left) < static_cast<U&&>(right));
+  }
+};
+
 namespace __functional_detail {
 
 static inline size_t __hash_integral(unsigned long long value) {
@@ -167,7 +218,7 @@ template <class T>
 struct __is_reference_wrapper : false_type {};
 
 template <class T>
-struct __is_reference_wrapper<reference_wrapper<T> > : true_type {};
+struct __is_reference_wrapper<reference_wrapper<T>> : true_type {};
 
 template <class T>
 struct __is_reference_wrapper<T&> : __is_reference_wrapper<T> {};
@@ -265,7 +316,7 @@ struct __invoke_dispatch<Function, Object, false, true, false, false> {
   template <class Argument>
   static __davecc_invoke_result_t(Function, Argument)
   call(Function& function, Argument&& object) {
-    return static_cast<Argument&&>(object).*function;
+    return object.*function;
   }
 };
 

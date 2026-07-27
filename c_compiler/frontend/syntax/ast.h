@@ -238,6 +238,13 @@ typedef enum {
   AST_OP(b2f),
   AST_OP(b2d),
   AST_OP(b2ld),
+
+  // The begin-expr / end-expr of a range-based for whose range type was
+  // dependent when the loop was parsed.  Resolved to the array, member-begin or
+  // ADL form once the concrete range type is known.  See
+  // SyntaxResolveRangeForIterator.
+  AST_OP(range_begin),
+  AST_OP(range_end),
 } ASTOpcode;
 
 const char* ASTOpcodeName(ASTOpcode op);
@@ -529,9 +536,12 @@ typedef struct {
   CXXAccess access;            // @wire 17
   int byte_offset;             // @wire 18
   Vector* template_arguments;  // @wire - (not serialized; re-derived)
+  TypeRecord* owner_type;      // @wire - (keeps instantiated member storage alive)
 } StructMemberASTNode;
 
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location);
+void StructMemberASTNodeSetMember(StructMemberASTNode* node,
+                                  StructMember* member);
 bool IsBitfieldReference(ASTNode* node);
 
 // A constant node.  This contains a constant that can be either an integer,

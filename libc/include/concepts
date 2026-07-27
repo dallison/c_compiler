@@ -43,13 +43,13 @@ concept common_with =
       static_cast<typename common_type<T, U>::type>(declval<T>());
       static_cast<typename common_type<T, U>::type>(declval<U>());
     } &&
-    common_reference_with<add_lvalue_reference_t<const remove_cvref_t<T> >,
-                          add_lvalue_reference_t<const remove_cvref_t<U> > > &&
+    common_reference_with<add_lvalue_reference_t<const remove_cvref_t<T>>,
+                          add_lvalue_reference_t<const remove_cvref_t<U>>> &&
     common_reference_with<
         add_lvalue_reference_t<const typename common_type<T, U>::type>,
         common_reference_t<
-            add_lvalue_reference_t<const remove_cvref_t<T> >,
-            add_lvalue_reference_t<const remove_cvref_t<U> > > >;
+            add_lvalue_reference_t<const remove_cvref_t<T>>,
+            add_lvalue_reference_t<const remove_cvref_t<U>>>>;
 
 // [concepts.arithmetic]
 
@@ -84,7 +84,7 @@ concept __comparison_common_type_with_impl =
     same_as<common_reference_t<const remove_reference_t<T>&,
                                const remove_reference_t<U>&>,
             common_reference_t<const remove_reference_t<U>&,
-                               const remove_reference_t<T>&> > &&
+                               const remove_reference_t<T>&>> &&
     requires {
       requires is_convertible_v<const T&, const C&> ||
                is_convertible_v<T, const C&>;
@@ -94,7 +94,7 @@ concept __comparison_common_type_with_impl =
 
 template <class T, class U>
 concept __comparison_common_type_with =
-    __comparison_common_type_with_impl<remove_cvref_t<T>, remove_cvref_t<U> >;
+    __comparison_common_type_with_impl<remove_cvref_t<T>, remove_cvref_t<U>>;
 
 template <class T>
 concept __class_or_enum = is_class_v<T> || is_union_v<T> || is_enum_v<T>;
@@ -137,7 +137,7 @@ template <class Lhs, class Rhs>
 concept assignable_from =
     is_lvalue_reference_v<Lhs> &&
     common_reference_with<__detail::__make_const_lvalue_ref<Lhs>,
-                          __detail::__make_const_lvalue_ref<Rhs> > &&
+                          __detail::__make_const_lvalue_ref<Rhs>> &&
     is_assignable_v<Lhs, Rhs>;
 
 // [concept.swappable]
@@ -150,8 +150,8 @@ void swap(T&, T&) = delete;
 
 template <class T, class U>
 concept __unqualified_swappable_with =
-    (__detail::__class_or_enum<remove_cvref_t<T> > ||
-     __detail::__class_or_enum<remove_cvref_t<U> >) &&
+    (__detail::__class_or_enum<remove_cvref_t<T>> ||
+     __detail::__class_or_enum<remove_cvref_t<U>>) &&
     requires(T&& t, U&& u) {
       swap(static_cast<T&&>(t), static_cast<U&&>(u));
     };
@@ -164,15 +164,10 @@ concept __exchangeable =
     assignable_from<T&, T>;
 
 struct __fn {
-  template <class T, class U>
-    requires __unqualified_swappable_with<T, U>
-  constexpr void operator()(T&& t, U&& u) const {
-    swap(static_cast<T&&>(t), static_cast<U&&>(u));
-  }
-
-  template <__exchangeable T>
+  template <class T>
+    requires move_constructible<T> && assignable_from<T&, T>
   constexpr void operator()(T& x, T& y) const {
-    y = exchange(x, move(y));
+    std::swap(x, y);
   }
 };
 
@@ -210,7 +205,7 @@ concept equality_comparable_with =
     __detail::__comparison_common_type_with<T, U> &&
     equality_comparable<common_reference_t<
         __detail::__make_const_lvalue_ref<T>,
-        __detail::__make_const_lvalue_ref<U> > > &&
+        __detail::__make_const_lvalue_ref<U>>> &&
     __weakly_equality_comparable_with<T, U>;
 
 // [concept.totallyordered]
@@ -238,7 +233,7 @@ concept totally_ordered_with =
     equality_comparable_with<T, U> &&
     totally_ordered<common_reference_t<
         __detail::__make_const_lvalue_ref<T>,
-        __detail::__make_const_lvalue_ref<U> > > &&
+        __detail::__make_const_lvalue_ref<U>>> &&
     __partially_ordered_with<T, U>;
 
 // [concepts.object]

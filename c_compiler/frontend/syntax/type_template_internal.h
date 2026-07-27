@@ -51,6 +51,9 @@ struct ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
                                                Vector* args);
 bool TryFoldDependentTemplateArgument(TypeParser* parser, struct ASTNode* expr,
                                       Vector* args, int64_t* out);
+TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
+                                                 TemplateArgument* arg,
+                                                 Vector* args);
 
 bool FindPackExpansionInType(TypeRecord* type, Vector* args, int* pack_index,
                              size_t* pack_length);

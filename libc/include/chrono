@@ -28,13 +28,13 @@ struct duration_values {
   static constexpr Rep max() { return Rep(9223372036854775807LL); }
 };
 
-template <class Rep, class Period = ratio<1> >
+template <class Rep, class Period = ratio<1>>
 class duration;
 
 template <class ToDuration, class Rep, class Period>
 constexpr ToDuration duration_cast(const duration<Rep, Period>& d);
 
-template <class Rep, class Period = ratio<1> >
+template <class Rep, class Period = ratio<1>>
 class duration {
  public:
   using rep = Rep;
@@ -49,7 +49,7 @@ class duration {
 
   template <class Rep2, class Period2>
   constexpr duration(const duration<Rep2, Period2>& other)
-      : __rep_(duration_cast<duration<Rep, Period> >(other).count()) {}
+      : __rep_(duration_cast<duration<Rep, Period>>(other).count()) {}
 
   constexpr rep count() const { return __rep_; }
 
@@ -128,7 +128,7 @@ using __common_period =
 
 template <class Rep1, class Period1, class Rep2, class Period2>
 using __common_duration =
-    duration<common_type_t<Rep1, Rep2>, __common_period<Period1, Period2> >;
+    duration<common_type_t<Rep1, Rep2>, __common_period<Period1, Period2>>;
 
 }  // namespace __chrono_detail
 
@@ -143,11 +143,11 @@ constexpr ToDuration duration_cast(const duration<Rep, Period>& d) {
 
 template <class Rep1, class Period1, class Rep2, class Period2>
 constexpr typename common_type<duration<Rep1, Period1>,
-                               duration<Rep2, Period2> >::type
+                               duration<Rep2, Period2>>::type
 operator+(const duration<Rep1, Period1>& lhs,
           const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   cd result =
       cd(duration_cast<cd>(lhs).count() + duration_cast<cd>(rhs).count());
   return result;
@@ -155,11 +155,11 @@ operator+(const duration<Rep1, Period1>& lhs,
 
 template <class Rep1, class Period1, class Rep2, class Period2>
 constexpr typename common_type<duration<Rep1, Period1>,
-                               duration<Rep2, Period2> >::type
+                               duration<Rep2, Period2>>::type
 operator-(const duration<Rep1, Period1>& lhs,
           const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   cd result =
       cd(duration_cast<cd>(lhs).count() - duration_cast<cd>(rhs).count());
   return result;
@@ -190,7 +190,7 @@ constexpr common_type_t<Rep1, Rep2>
 operator/(const duration<Rep1, Period1>& lhs,
           const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   return cd(lhs).count() / cd(rhs).count();
 }
 
@@ -203,11 +203,11 @@ operator%(const duration<Rep1, Period>& d, const Rep2& scalar) {
 
 template <class Rep1, class Period1, class Rep2, class Period2>
 constexpr typename common_type<duration<Rep1, Period1>,
-                               duration<Rep2, Period2> >::type
+                               duration<Rep2, Period2>>::type
 operator%(const duration<Rep1, Period1>& lhs,
           const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   return cd(cd(lhs).count() % cd(rhs).count());
 }
 
@@ -215,7 +215,7 @@ template <class Rep1, class Period1, class Rep2, class Period2>
 constexpr bool operator==(const duration<Rep1, Period1>& lhs,
                           const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   return cd(lhs).count() == cd(rhs).count();
 }
 
@@ -229,7 +229,7 @@ template <class Rep1, class Period1, class Rep2, class Period2>
 constexpr bool operator<(const duration<Rep1, Period1>& lhs,
                          const duration<Rep2, Period2>& rhs) {
   using cd = typename common_type<duration<Rep1, Period1>,
-                                  duration<Rep2, Period2> >::type;
+                                  duration<Rep2, Period2>>::type;
   return cd(lhs).count() < cd(rhs).count();
 }
 
@@ -294,11 +294,11 @@ time_point_cast(const time_point<Clock, Duration>& t) {
 
 template <class Clock, class Duration1, class Rep2, class Period2>
 constexpr time_point<Clock, typename common_type<Duration1,
-                                                 duration<Rep2, Period2> >::type>
+                                                 duration<Rep2, Period2>>::type>
 operator+(const time_point<Clock, Duration1>& t,
           const duration<Rep2, Period2>& d) {
   using result_duration =
-      typename common_type<Duration1, duration<Rep2, Period2> >::type;
+      typename common_type<Duration1, duration<Rep2, Period2>>::type;
   return time_point<Clock, result_duration>(
       result_duration(t.time_since_epoch()) + result_duration(d));
 }
@@ -313,11 +313,11 @@ operator+(const duration<Rep1, Period1>& d,
 
 template <class Clock, class Duration1, class Rep2, class Period2>
 constexpr time_point<Clock, typename common_type<Duration1,
-                                                 duration<Rep2, Period2> >::type>
+                                                 duration<Rep2, Period2>>::type>
 operator-(const time_point<Clock, Duration1>& t,
           const duration<Rep2, Period2>& d) {
   using result_duration =
-      typename common_type<Duration1, duration<Rep2, Period2> >::type;
+      typename common_type<Duration1, duration<Rep2, Period2>>::type;
   return time_point<Clock, result_duration>(
       result_duration(t.time_since_epoch()) - result_duration(d));
 }
@@ -370,12 +370,12 @@ using nanoseconds = duration<long long, nano>;
 using microseconds = duration<long long, micro>;
 using milliseconds = duration<long long, milli>;
 using seconds = duration<long long>;
-using minutes = duration<long long, ratio<60> >;
-using hours = duration<long long, ratio<3600> >;
-using days = duration<long long, ratio<86400> >;
-using weeks = duration<long long, ratio<604800> >;
-using years = duration<long long, ratio<31556952> >;
-using months = duration<long long, ratio<2629746> >;
+using minutes = duration<long long, ratio<60>>;
+using hours = duration<long long, ratio<3600>>;
+using days = duration<long long, ratio<86400>>;
+using weeks = duration<long long, ratio<604800>>;
+using years = duration<long long, ratio<31556952>>;
+using months = duration<long long, ratio<2629746>>;
 
 class system_clock {
  public:
@@ -407,14 +407,14 @@ using high_resolution_clock = system_clock;
 
 template <class Rep1, class Period1, class Rep2, class Period2>
 struct common_type<chrono::duration<Rep1, Period1>,
-                   chrono::duration<Rep2, Period2> > {
+                   chrono::duration<Rep2, Period2>> {
   using type =
       chrono::__chrono_detail::__common_duration<Rep1, Period1, Rep2, Period2>;
 };
 
 template <class Clock, class Duration1, class Duration2>
 struct common_type<chrono::time_point<Clock, Duration1>,
-                   chrono::time_point<Clock, Duration2> > {
+                   chrono::time_point<Clock, Duration2>> {
   using type =
       chrono::time_point<Clock, typename common_type<Duration1, Duration2>::type>;
 };
@@ -425,14 +425,14 @@ inline namespace chrono_literals {
 constexpr chrono::hours operator""h(unsigned long long value) {
   return chrono::hours((long long)value);
 }
-constexpr chrono::duration<long double, ratio<3600> > operator""h(long double value) {
-  return chrono::duration<long double, ratio<3600> >(value);
+constexpr chrono::duration<long double, ratio<3600>> operator""h(long double value) {
+  return chrono::duration<long double, ratio<3600>>(value);
 }
 constexpr chrono::minutes operator""min(unsigned long long value) {
   return chrono::minutes((long long)value);
 }
-constexpr chrono::duration<long double, ratio<60> > operator""min(long double value) {
-  return chrono::duration<long double, ratio<60> >(value);
+constexpr chrono::duration<long double, ratio<60>> operator""min(long double value) {
+  return chrono::duration<long double, ratio<60>>(value);
 }
 constexpr chrono::seconds operator""s(unsigned long long value) {
   return chrono::seconds((long long)value);

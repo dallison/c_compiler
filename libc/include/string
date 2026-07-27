@@ -34,7 +34,7 @@ template <class CharT, class Traits>
 class basic_string_view;
 
 template <class CharT, class Traits = char_traits<CharT>,
-          class Allocator = allocator<CharT> >
+          class Allocator = allocator<CharT>>
 class basic_string {
  public:
   using traits_type = Traits;
@@ -542,7 +542,7 @@ size_t __fnv1a(const char* data, size_t n) noexcept;
 }  // namespace __string_hash_detail
 
 template <>
-struct hash<basic_string<char> > {
+struct hash<basic_string<char>> {
   size_t operator()(const basic_string<char>& s) const noexcept {
     return __string_hash_detail::__fnv1a(s.data(), s.size());
   }

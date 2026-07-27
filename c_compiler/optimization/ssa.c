@@ -265,14 +265,19 @@ static void AddPhiInputs(Generator* gen, BasicBlock* block) {
   }
 }
 
-// Map entry comparison function for comparing a map whose
-// keys are Symbol pointers.
+// Map entry comparison function for comparing a map whose keys are Symbol
+// pointers.  Order by address rather than by the (truncated) difference between
+// the two: symbols allocated far enough apart differ by a multiple of 2^32, so
+// the low 32 bits of the difference can be zero or carry the wrong sign, making
+// the map's binary search miss a key that is present.
 static int SymbolCompare(const void* a, const void* b) {
-  MapKeyValue* s1 = (MapKeyValue*)a;
-  MapKeyValue* s2 = (MapKeyValue*)b;
+  uintptr_t s1 = (uintptr_t)((MapKeyValue*)a)->key.p;
+  uintptr_t s2 = (uintptr_t)((MapKeyValue*)b)->key.p;
 
-  ptrdiff_t diff = s1->key.p - s2->key.p;
-  return (int)diff;
+  if (s1 == s2) {
+    return 0;
+  }
+  return s1 < s2 ? -1 : 1;
 }
 
 // Rename all variables in basic blocks to generate a Static Single Assignment

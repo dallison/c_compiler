@@ -1193,6 +1193,7 @@ static void CollectOperator(Lex* lex) {
 
 static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->current_token = TOK(bad);
+  lex->current_greatereq_is_split = false;
   StringInit(&lex->line, NULL);
   StringInit(&lex->spelling, NULL);
   StringInit(&lex->literal_spelling, NULL);
@@ -1268,6 +1269,7 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->pos = lex->pos;
   checkpoint->current_token_location = lex->current_token_location;
   checkpoint->current_token = lex->current_token;
+  checkpoint->current_greatereq_is_split = lex->current_greatereq_is_split;
   StringInitFromSegment(&checkpoint->spelling, lex->spelling.value,
                         lex->spelling.length);
   StringInitFromSegment(&checkpoint->literal_spelling,
@@ -1303,6 +1305,7 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->pos = checkpoint->pos;
   lex->current_token_location = checkpoint->current_token_location;
   lex->current_token = checkpoint->current_token;
+  lex->current_greatereq_is_split = checkpoint->current_greatereq_is_split;
   StringSetString(&lex->spelling, &checkpoint->spelling);
   StringSetString(&lex->literal_spelling, &checkpoint->literal_spelling);
   lex->number = checkpoint->number;
@@ -1538,6 +1541,7 @@ static void CollectNumber(Lex* lex, char ch) {
 // Reads another token into current_token.
 void LexNextToken(Lex* lex) {
   // lex->current_token = TOK(eof);
+  lex->current_greatereq_is_split = false;
   StringClear(&lex->ud_suffix);
   lex->literal_encoding = kLiteralEncodingNone;
   lex->literal_is_raw = false;
@@ -1628,11 +1632,22 @@ bool LexMatchIdentifier(Lex* lex, String* string) {
 
 bool LexLookingAt(Lex* lex, Token tok) { return lex->current_token == tok; }
 
+int LexClosingAngleCount(Token token) {
+  switch (token) {
+    case TOK(greater):
+      return 1;
+    case TOK(greatergreater):
+    case TOK(greatergreatereq):
+      return 2;
+    default:
+      return 0;
+  }
+}
+
 bool LexLookingAtClosingAngle(Lex* lex) {
-  return lex->current_token == TOK(greater) ||
-         lex->current_token == TOK(greatergreater) ||
-         lex->current_token == TOK(greatergreatereq) ||
-         lex->current_token == TOK(greatereq);
+  return LexClosingAngleCount(lex->current_token) != 0 ||
+         (lex->current_token == TOK(greatereq) &&
+          lex->current_greatereq_is_split);
 }
 
 bool LexConsumeClosingAngle(Lex* lex) {
@@ -1650,11 +1665,16 @@ bool LexConsumeClosingAngle(Lex* lex) {
     case TOK(greatergreatereq):
       // `>>=` -> consume one '>', leaving `>=`.
       lex->current_token = TOK(greatereq);
+      lex->current_greatereq_is_split = true;
       return true;
     case TOK(greatereq):
       // `>=` -> consume the '>', leaving '='.  This only arises as the residue
       // of splitting `>>=`; a genuine `>=` never closes a template list.
+      if (!lex->current_greatereq_is_split) {
+        return false;
+      }
       lex->current_token = TOK(equal);
+      lex->current_greatereq_is_split = false;
       return true;
     default:
       return false;
@@ -1895,5 +1915,6 @@ void LexRewind(Lex* lex) {
   SourceRewind(lex->source);
   lex->pos = 0;
   lex->current_token = TOK(bad);
+  lex->current_greatereq_is_split = false;
   StringSet(&lex->line, "");
 }

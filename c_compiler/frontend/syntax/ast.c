@@ -340,6 +340,10 @@ const char* ASTOpcodeName(ASTOpcode op) {
         return "compound_literal";
     case AST_OP(stmt_expr):
       return "stmt-expr";
+    case AST_OP(range_begin):
+      return "range-begin";
+    case AST_OP(range_end):
+      return "range-end";
 
     // Integer to...
     case AST_OP(i2s):
@@ -1090,6 +1094,7 @@ static void StructMemberASTNodeDelete(ASTNode* node) {
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
+  TypeRecordDelete(mnode->owner_type);
   ASTNodeBaseDelete(node);
 }
 
@@ -1099,11 +1104,11 @@ static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
   StructMemberASTNode* from = (StructMemberASTNode*)node;
   StructMemberASTNode* to = ASTArenaAlloc(sizeof(StructMemberASTNode));
   ASTNodeBaseCopy(&to->base, node);
-  to->member = from->member;
-  to->access = from->access;
-  to->byte_offset = from->byte_offset;
+  StructMemberASTNodeSetMember(to, from->member);
   to->template_arguments =
       TemplateArgumentVectorCopy(from->template_arguments);
+  to->owner_type = from->owner_type;
+  TypeRecordIncRef(to->owner_type);
   return func(&to->base, data);
 }
 
@@ -1113,14 +1118,23 @@ static ASTNodeVirtuals struct_member_vtbl = {StructMemberASTNodeDelete,
                                              NULL,
 };
 
+void StructMemberASTNodeSetMember(StructMemberASTNode* node,
+                                  StructMember* member) {
+  if (node == NULL || member == NULL) {
+    return;
+  }
+  node->member = member;
+  node->access = member->access;
+  node->byte_offset = member->byte_offset;
+}
+
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location) {
   StructMemberASTNode* node = ASTArenaAlloc(sizeof(StructMemberASTNode));
   ASTNodeInit(&node->base, AST_OP(structmember), member->symbol->type, location,
               &struct_member_vtbl);
-  node->member = member;
-  node->access = member->access;
-  node->byte_offset = member->byte_offset;
+  StructMemberASTNodeSetMember(node, member);
   node->template_arguments = NULL;
+  node->owner_type = NULL;
   return (ASTNode*)node;
 }
 

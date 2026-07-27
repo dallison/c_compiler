@@ -26,7 +26,7 @@ namespace std {
 
 template <class Key, class T, class Hash = hash<Key>,
           class KeyEqual = equal_to<Key>,
-          class Allocator = allocator<pair<const Key, T> > >
+          class Allocator = allocator<pair<const Key, T>>>
 class unordered_map {
  private:
   using __table =
@@ -115,7 +115,7 @@ class unordered_map {
 
   template <class P,
             class = enable_if_t<is_constructible<value_type, P&&>::value &&
-                                !is_same<decay_t<P>, value_type>::value> >
+                                !is_same<decay_t<P>, value_type>::value>>
   pair<iterator, bool> insert(P&& value) {
     return emplace(std::forward<P>(value));
   }

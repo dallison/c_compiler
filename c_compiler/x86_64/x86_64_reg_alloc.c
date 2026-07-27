@@ -1139,6 +1139,103 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
   }
 }
 
+// Give |inst|, a live-in value of |block|, ownership of the register it was
+// allocated.
+//
+// A block input is live-in.  It must retain its register when it is live-out of
+// this block too (i.e. it appears in the block's output set), because such a
+// value is live *through* the block and its register may not be reused for
+// another value defined here.  The running `uses` counter cannot be trusted for
+// this test: it is decremented globally as the dominator-tree traversal
+// descends into sibling subtrees and is never restored per subtree, so a value
+// that is still live on a later path can read as `uses == 0`.  Relying on it
+// alone let a value defined after a call (e.g. the call result) steal the
+// register of a parameter that is still needed further down the block's own
+// subtree.  Keep ownership whenever the value is live-out; only drop it when it
+// is neither live-out nor has any remaining recorded use.
+//
+// Because liveness is over-approximated that way, two inputs can name the same
+// physical register: one whose reads are all done -- so the allocator handed its
+// register to a value defined in a later block -- and the value that took it
+// over.  Both are recorded live-in, so ownership must not simply go to whichever
+// input the loop visits last.  Handing it to the exhausted value loses the live
+// one: a later spill of the exhausted value releases the register
+// (SpillInstruction clears its owner) and the next definition in this block is
+// then handed the same register, clobbering the live value.  Resolve such a
+// clash the way the value flowed at run time instead: a value with reads still
+// pending outranks an exhausted one, and between two equal claimants the later
+// definition -- the one that took the register over -- outranks the earlier.
+static bool BetterInputClaim(TargetInstruction* candidate,
+                             TargetInstruction* owner) {
+  if (owner == NULL || owner == candidate) {
+    return owner == NULL;
+  }
+  if ((candidate->uses > 0) != (owner->uses > 0)) {
+    return candidate->uses > 0;
+  }
+  return candidate->id > owner->id;
+}
+
+// The value holding the physical register denoted by logical slot |slot|, which
+// may have been allocated through any of the logical slots aliasing it.  Returns
+// NULL when the register is free; *holder is the slot recording the ownership.
+static TargetInstruction* X86_64PhysicalOwner(X86_64RegisterAllocator* allocator,
+                                              X86_64RegisterType type, int slot,
+                                              X86_64Register** holder) {
+  X86_64Register* regs =
+      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  int num_regs =
+      type == kX86_64RegTypeInt ? X86_64_NUM_INT_REGS : X86_64_NUM_FLOAT_REGS;
+  int phys = type == kX86_64RegTypeInt ? X86_64IntPhysical(slot)
+                                       : X86_64FloatPhysical(slot);
+  *holder = NULL;
+  for (int k = 0; k < num_regs; k++) {
+    int other = type == kX86_64RegTypeInt ? X86_64IntPhysical(k)
+                                          : X86_64FloatPhysical(k);
+    if (other != phys || regs[k].base.owner == NULL) {
+      continue;
+    }
+    *holder = &regs[k];
+    return regs[k].base.owner;
+  }
+  return NULL;
+}
+
+static void ClaimInputRegister(X86_64RegisterAllocator* allocator,
+                               TargetBasicBlock* block,
+                               TargetInstruction* inst) {
+  if (inst->reg == NULL) {
+    return;
+  }
+  if (((int)inst->opcode == (int)X86_64_OP(spill)) ||
+      (inst->flags & TARGET_INST_SPILLED) != 0) {
+    return;
+  }
+  if (inst->uses == 0 && !TargetBasicBlockOutputs(block, inst)) {
+    return;
+  }
+  X86_64RegisterType type = ((X86_64Register*)inst->reg)->type;
+  X86_64Register* holder = NULL;
+  TargetInstruction* owner =
+      X86_64PhysicalOwner(allocator, type, inst->reg->num, &holder);
+  if (owner == inst) {
+    return;
+  }
+  // A reserved slot's ownership survives block entry (a register variable, the
+  // struct-return pointer): it is pinned there for the whole function and is
+  // never up for grabs.
+  if (holder != NULL && holder->base.reserved) {
+    return;
+  }
+  if (!BetterInputClaim(inst, owner)) {
+    return;
+  }
+  if (holder != NULL) {
+    holder->base.owner = NULL;
+  }
+  inst->reg->owner = inst;
+}
+
 static void InitializeBasicBlockRegisters(X86_64RegisterAllocator* allocator,
                                           TargetBasicBlock* block) {
   for (int i = 0; i < X86_64_NUM_INT_REGS; i++) {
@@ -1158,31 +1255,7 @@ static void InitializeBasicBlockRegisters(X86_64RegisterAllocator* allocator,
     
   // Now allocate the registers to the inputs.
   for (size_t i = 0; i < block->inputs.length; i++) {
-    TargetInstruction* inst = block->inputs.value.p[i];
-    if (inst->reg == NULL) {
-      continue;
-    }
-    if (((int)inst->opcode == (int)X86_64_OP(spill)) ||
-        (inst->flags & TARGET_INST_SPILLED) != 0) {
-      continue;
-    }
-    // A block input is live-in.  It must retain its register when it is
-    // live-out of this block too (i.e. it appears in the block's output set),
-    // because such a value is live *through* the block and its register may
-    // not be reused for another value defined here.  The running `uses`
-    // counter cannot be trusted for this test: it is decremented globally as
-    // the dominator-tree traversal descends into sibling subtrees and is never
-    // restored per subtree, so a value that is still live on a later path can
-    // read as `uses == 0`.  Relying on it alone let a value defined after a
-    // call (e.g. the call result) steal the register of a parameter that is
-    // still needed further down the block's own subtree.  Keep ownership
-    // whenever the value is live-out; only drop it when it is neither live-out
-    // nor has any remaining recorded use.
-    if (inst->uses == 0 && !TargetBasicBlockOutputs(block, inst)) {
-      continue;
-    }
-    assert(inst->reg != NULL);
-    inst->reg->owner = inst;
+    ClaimInputRegister(allocator, block, block->inputs.value.p[i]);
   }
 }
 

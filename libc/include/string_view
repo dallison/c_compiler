@@ -24,7 +24,7 @@
 
 namespace std {
 
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>>
 class basic_string_view {
  public:
   using traits_type = Traits;
@@ -352,7 +352,7 @@ size_t __fnv1a(const char* data, size_t n) noexcept;
 }  // namespace __string_hash_detail
 
 template <>
-struct hash<basic_string_view<char> > {
+struct hash<basic_string_view<char>> {
   size_t operator()(basic_string_view<char> s) const noexcept {
     return __string_hash_detail::__fnv1a(s.data(), s.size());
   }

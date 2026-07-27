@@ -1863,9 +1863,14 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
         SyntaxError(proto_parser->syntax,
                     "function parameter pack cannot have a default argument");
       }
-      formal->default_argument =
-          SyntaxParseSingleExpression(proto_parser->syntax,
-                                      TC(closebra) | TC(exprsep));
+      if (LexMatch(proto_parser->lex, TOK(lbrace))) {
+        formal->default_argument =
+            SyntaxParseBracedInitializer(proto_parser->syntax);
+      } else {
+        formal->default_argument =
+            SyntaxParseSingleExpression(proto_parser->syntax,
+                                        TC(closebra) | TC(exprsep));
+      }
       *seen_default_argument = true;
     } else if (*seen_default_argument && !formal->flags.is_parameter_pack) {
       SyntaxError(proto_parser->syntax,

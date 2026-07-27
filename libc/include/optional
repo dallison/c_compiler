@@ -274,8 +274,8 @@ void swap(optional<T>& left, optional<T>& right) {
 }
 
 template <class T>
-optional<remove_cvref_t<T> > make_optional(T&& value) {
-  return optional<remove_cvref_t<T> >(std::forward<T>(value));
+optional<remove_cvref_t<T>> make_optional(T&& value) {
+  return optional<remove_cvref_t<T>>(std::forward<T>(value));
 }
 
 template <class T, class... Args>

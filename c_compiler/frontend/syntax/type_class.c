@@ -405,7 +405,8 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   // like `ClassName(args)` inside member bodies would then fail to resolve as a
   // self-construction and degrade to an implicit member access, which breaks
   // once the member is instantiated.
-  Symbol* shadowing = SyntaxFindSymbol(parser->syntax, &tag->name);
+  Symbol* shadowing =
+      SyntaxFindTopScopeSymbol(parser->syntax, &tag->name);
   if (shadowing != NULL && shadowing != tag &&
       !(shadowing->type != NULL && TypeIsStructOrUnion(shadowing->type) &&
         shadowing->type->info.struct_info == str)) {

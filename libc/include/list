@@ -48,7 +48,7 @@ void __transfer(__node_base* pos, __node_base* first, __node_base* last);
 
 }  // namespace __list_detail
 
-template <class T, class Allocator = allocator<T> >
+template <class T, class Allocator = allocator<T>>
 class list {
  public:
   using value_type = T;

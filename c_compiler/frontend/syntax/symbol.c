@@ -679,7 +679,18 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       return;
     }
     case kDeclArray:
-      StringAppendChar(out, 'P');
+      // Itanium ABI array encoding is `A <bound> _ <element>`.  Encoding an
+      // array as a pointer aliases `T(&)[N]` with `T*&`, which can make template
+      // instantiation caching emit one specialization while a call references
+      // the other.
+      StringAppendChar(out, 'A');
+      if (!type->info.array.is_flexible && !type->info.array.is_vla &&
+          !type->info.array.is_placeholder_vla) {
+        char bound[32];
+        snprintf(bound, sizeof(bound), "%d", type->info.array.size.fixed);
+        StringAppend(out, bound);
+      }
+      StringAppendChar(out, '_');
       AppendCXXTypeEncoding(out, type->next);
       return;
     case kDeclFunction:
