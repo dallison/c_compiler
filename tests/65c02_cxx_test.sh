@@ -176,3 +176,4 @@ SRC
 # control-flow labels. Those labels must remain local to each object.
 "$DAVECC" -target 65c02 -O2 "$WORK/printf_local_labels.cpp" \
   -o "$WORK/printf_local_labels.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/printf_local_labels.exe"

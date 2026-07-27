@@ -277,10 +277,10 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           iregs[DEST(inst)] = iregs[SRC1(inst)] - iregs[SRC2(inst)];
           break;
         case PCODE_OP(addf):
-          fregs[DEST(inst)] = fregs[SRC1(inst)] - fregs[SRC2(inst)];
+          fregs[DEST(inst)] = fregs[SRC1(inst)] + fregs[SRC2(inst)];
           break;
         case PCODE_OP(addd):
-          dregs[DEST(inst)] = dregs[SRC1(inst)] - dregs[SRC2(inst)];
+          dregs[DEST(inst)] = dregs[SRC1(inst)] + dregs[SRC2(inst)];
           break;
         case PCODE_OP(subf):
           fregs[DEST(inst)] = fregs[SRC1(inst)] - fregs[SRC2(inst)];
@@ -322,7 +322,7 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           if (dregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
-            dregs[DEST(inst)] = dregs[SRC1(inst)] - dregs[SRC2(inst)];
+            dregs[DEST(inst)] = dregs[SRC1(inst)] / dregs[SRC2(inst)];
           }
           break;
         case PCODE_OP(mod):
@@ -425,7 +425,7 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           iregs[DEST(inst)] = dregs[SRC1(inst)] <= dregs[SRC2(inst)];
           break;
         case PCODE_OP(cmpgtd):
-          iregs[DEST(inst)] = dregs[SRC1(inst)] < dregs[SRC2(inst)];
+          iregs[DEST(inst)] = dregs[SRC1(inst)] > dregs[SRC2(inst)];
           break;
         case PCODE_OP(cmpged):
           iregs[DEST(inst)] = dregs[SRC1(inst)] >= dregs[SRC2(inst)];

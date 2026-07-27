@@ -316,7 +316,8 @@ static bool InstructionHasExternalDefs(ARMRegisterAllocator* allocator,
                                        TargetInstruction* target);
 
 static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
-                                   ARMRegisterType type) {
+                                          ARMRegisterType type,
+                                          bool can_use_temp) {
   ARMRegister* regs =
       type == kARMRegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
@@ -334,10 +335,20 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
+      if (!can_use_temp && register_ranges[i].temp) {
+        continue;
+      }
       int step = (type == kARMRegTypeFloat) ? 2 : 1;
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j += step) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
+          // A staged definition such as movw/movt may own the physical
+          // register while its destination is the logical variable that
+          // remains live. Spill and retarget the variable, not the final
+          // definition instruction.
+          if (owner->dest != NULL && ARMIsVarRegister(owner->dest)) {
+            owner = owner->dest;
+          }
           if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
               owner->opcode == (TargetOpcode)ARM_OP(spill) ||
               owner->opcode == (TargetOpcode)ARM_OP(reload)) {
@@ -560,7 +571,8 @@ static ARMRegister* AllocateRegisterWithType(ARMRegisterAllocator* allocator,
   ARMRegister* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim = FindSpillVictim(allocator, type);
+    TargetInstruction* victim =
+        FindSpillVictim(allocator, type, can_use_temp);
     // FindSpillVictim may have released a stale owner from an earlier spill.
     reg = FindFreeRegister(allocator, type, can_use_temp);
     if (reg == NULL && victim != NULL) {
@@ -734,9 +746,15 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
   }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
-    if (op != NULL && ((int)op->opcode == (int)ARM_OP(spill))) {
+    TargetInstruction* spill = NULL;
+    if (op != NULL && (int)op->opcode == (int)ARM_OP(spill)) {
+      spill = op;
+    } else if (op != NULL && ARMIsVarRegister(op)) {
+      spill = MapFindPointerKey(&allocator->reassignable_spills, op);
+    }
+    if (spill != NULL) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)ARM_OP(reload),
-                                                        op);
+                                                        spill);
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->g->base, inst->block, reload, inst);
       inst->operand[i] = reload;
@@ -745,10 +763,10 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
       // double constant / variadic-double argument to `vmov Dn, Rlo, Rhi`: the
       // instruction is float-typed but its two operands are the int halves.
       // Using the user's (float) type here would reload an int half into a VFP
-      // register and emit an invalid `vmov d, d, r`.  op->operand[0] is the
+      // register and emit an invalid `vmov d, d, r`.  spill->operand[0] is the
       // original spilled instruction (see SpillInstruction).
       TargetInstruction* spilled_value =
-          (op->operand[0] != NULL) ? op->operand[0] : inst;
+          (spill->operand[0] != NULL) ? spill->operand[0] : inst;
       ARMRegisterType reg_type = RegisterTypeFromInstruction(spilled_value);
       ARMRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));

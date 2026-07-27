@@ -7995,8 +7995,12 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
     if (varset == NULL) {
       // Make space for variable on the stack.
       // References occupy an address-sized slot even when the referred-to
-      // object is smaller.  The raw type size describes the referent.
-      int32_t size = Sizeof(entry->value.symbol->type);
+      // object is smaller. Arrays, however, occupy their complete object
+      // size; Sizeof() treats them as addresses for load/store lowering.
+      TypeRecord* type = entry->value.symbol->type;
+      TypeRecordCalculateSize(type);
+      int32_t size = TypeIsReference(type) ? Sizeof(type) : type->size;
+      assert(size > 0);
       *var_offset += size;
     }
     IRVariable* var = (IRVariable*)entry->pooled;

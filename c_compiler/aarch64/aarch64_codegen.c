@@ -1826,6 +1826,13 @@ static TargetInstruction* MultiplyByConstant(AARCH64Generator* g,
                                IRConstant* constant) {
   int64_t value = constant->value.ivalue;
   int numbits = PopulationCount(value);
+  // The register allocator may coalesce the first add's destination with the
+  // original input.  A later shifted term would then shift the partial sum
+  // instead of the multiplicand (for example, x * 15 became x * 63).  One
+  // shift-plus-add has no later use of the input and remains safe.
+  if (numbits > 2) {
+    return NULL;
+  }
   int num_cycles = numbits * 2 - 1;
   if ((value & 1) == 1) {
     // If the bottom bit is 1 we can subtract one instruction.

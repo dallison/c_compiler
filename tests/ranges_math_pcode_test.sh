@@ -13,6 +13,6 @@ LIBC="$ROOT/$3"
 SOURCE="$ROOT/cxx_testsuite/tests/exec_ranges/0004_ranges_math.cpp"
 EXE="${TEST_TMPDIR:-/tmp}/ranges-math-pcode.exe"
 
-"$DAVECC" -target pcode -static -std=c++20 -isystem "$ROOT/libc/include" \
+"$DAVECC" -target pcode -O2 -static -std=c++20 -isystem "$ROOT/libc/include" \
   -Wl,-e -Wl,main "$SOURCE" "$LIBC" -o "$EXE"
 "$INTERPRETER" "$EXE"

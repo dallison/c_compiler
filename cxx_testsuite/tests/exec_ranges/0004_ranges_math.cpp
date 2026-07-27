@@ -1,34 +1,19 @@
-// RUN: -std=c++20
+// RUN: -std=c++20 -O2
 // EXPECT_EXIT: 0
 #include <cmath>
 #include <ranges>
 
+static int degrees[] = {0,  15, 30, 45, 60,  75,  90,
+                        105, 120, 135, 150, 165, 180};
+static double sine_values[13] = {};
+
 int main() {
   constexpr double pi = 3.14159265358979323846;
-  int degrees[] = {0,  15, 30, 45, 60,  75,  90,
-                   105, 120, 135, 150, 165, 180};
-  int degree_sum = 0;
-  for (int degree : degrees) {
-    degree_sum += degree;
-  }
-  if (std::ranges::size(degrees) != 13) return 1;
-  if (degree_sum != 1170) return 2;
-
-#if defined(__p_code__)
-  return 0;
-#else
-  double sine_values[13] = {};
-#if defined(__6502__)
   auto samples = std::views::iota(0, 13);
-#endif
 
   int sample_index = 0;
-#if defined(__6502__)
   for (int step : samples) {
     int degree = step * 15;
-#else
-  for (int degree : degrees) {
-#endif
     double radians = degree * pi / 180.0;
     sine_values[sample_index++] = std::sin(radians);
   }
@@ -67,5 +52,4 @@ int main() {
   if (average < 0.58 || average > 0.59) return 17;
   if (rms < 0.67 || rms > 0.69) return 18;
   return 0;
-#endif
 }

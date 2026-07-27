@@ -538,6 +538,10 @@ static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, Targ
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, spill, inst);
+    // Keep the slot discoverable if an already-tagged future user was not
+    // retargeted by TargetRetargetInstructionIf.
+    MapKeyValue kv = {.key.p = inst, .value.p = spill};
+    MapInsert(&allocator->varreg_spills, kv);
   }
   
   // Retarget all uses of the original instruction to the spill.  If the
@@ -872,13 +876,22 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
-    if (op != NULL && ((int)op->opcode == (int)X86_64_OP(spill))) {
+    TargetInstruction* spill = NULL;
+    if (op != NULL && (int)op->opcode == (int)X86_64_OP(spill)) {
+      spill = op;
+    } else if (op != NULL && (op->flags & TARGET_INST_SPILLED) != 0) {
+      spill = MapFindPointerKey(&allocator->varreg_spills, op);
+    }
+    if (spill != NULL) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)X86_64_OP(reload),
-                                                        op);
+                                                        spill);
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
       inst->operand[i] = reload;
-      X86_64RegisterType reg_type = RegisterTypeFromInstruction(inst);
+      TargetInstruction* spilled_value =
+          spill->operand[0] != NULL ? spill->operand[0] : op;
+      X86_64RegisterType reg_type =
+          RegisterTypeFromInstruction(spilled_value);
       X86_64Register *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);
@@ -977,8 +990,7 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
   if (inst->reg != NULL) {
     return;
   }
-  
-  
+
   // rmov instructions use the register allocated to their first
   // operand as their own register.
   if ((opcode == X86_64_OP(mv) || opcode == X86_64_OP(fmv_s) ||
@@ -995,12 +1007,13 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
     return;
   }
 
+  // Destination-coalesced instructions return early from allocation, but
+  // their source operands still need to be restored from spill slots first.
+  ReloadSpills(allocator, inst);
+
   if (AllocateUsingDest(allocator, inst)) {
     return;
   }
-
-  // Reload any spilled expressions.
-  ReloadSpills(allocator, inst);
 
   X86_64Register* reg;
 

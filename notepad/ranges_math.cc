@@ -2,20 +2,7 @@
 #include <cstdio>
 #include <ranges>
 
-#if defined(__6502__)
-#define PRINT_VALUE(value)                         \
-  do {                                             \
-    std::printf("[");                              \
-    for (int marker = 1; marker <= 20; ++marker) { \
-      if ((value) >= marker * 0.05) {              \
-        std::printf("#");                          \
-      }                                            \
-    }                                              \
-    std::printf("]");                              \
-  } while (false)
-#else
 #define PRINT_VALUE(value) std::printf("%.6f", value)
-#endif
 
 static int degrees[] = {0,  15, 30, 45, 60,  75,  90,
                         105, 120, 135, 150, 165, 180};
@@ -52,7 +39,8 @@ int main() {
   std::printf("samples: %zu\n", std::ranges::size(sine_values));
   std::printf("average: ");
   PRINT_VALUE(average);
-  std::printf("\nrms: ");
+  std::printf("\n");
+  std::printf("rms: ");
   PRINT_VALUE(rms);
   std::printf("\n");
   return 0;
