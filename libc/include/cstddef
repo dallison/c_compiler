@@ -10,12 +10,84 @@
 #define cstddef_h
 
 #include <stddef.h>
+#if __cplusplus >= 201703L
+#include <type_traits>
+#endif
 
 namespace std {
 
 using ::size_t;
 using ::ptrdiff_t;
 // std::nullptr_t is already provided directly by <stddef.h> in namespace std.
+
+#if __cplusplus >= 201703L
+
+enum class byte : unsigned char {};
+
+template <class IntegerType>
+constexpr enable_if_t<is_integral<IntegerType>::value, IntegerType> to_integer(
+    byte value) noexcept {
+  return static_cast<IntegerType>(value);
+}
+
+template <class IntegerType>
+constexpr enable_if_t<is_integral<IntegerType>::value, byte> operator<<(
+    byte value, IntegerType shift) noexcept {
+  return static_cast<byte>(
+      static_cast<unsigned char>(value) << static_cast<unsigned int>(shift));
+}
+
+template <class IntegerType>
+constexpr enable_if_t<is_integral<IntegerType>::value, byte> operator>>(
+    byte value, IntegerType shift) noexcept {
+  return static_cast<byte>(
+      static_cast<unsigned char>(value) >> static_cast<unsigned int>(shift));
+}
+
+constexpr byte operator|(byte left, byte right) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(left) |
+                           static_cast<unsigned char>(right));
+}
+
+constexpr byte operator&(byte left, byte right) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(left) &
+                           static_cast<unsigned char>(right));
+}
+
+constexpr byte operator^(byte left, byte right) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(left) ^
+                           static_cast<unsigned char>(right));
+}
+
+constexpr byte operator~(byte value) noexcept {
+  return static_cast<byte>(~static_cast<unsigned char>(value));
+}
+
+template <class IntegerType>
+constexpr enable_if_t<is_integral<IntegerType>::value, byte&> operator<<=(
+    byte& value, IntegerType shift) noexcept {
+  return value = value << shift;
+}
+
+template <class IntegerType>
+constexpr enable_if_t<is_integral<IntegerType>::value, byte&> operator>>=(
+    byte& value, IntegerType shift) noexcept {
+  return value = value >> shift;
+}
+
+constexpr byte& operator|=(byte& left, byte right) noexcept {
+  return left = left | right;
+}
+
+constexpr byte& operator&=(byte& left, byte right) noexcept {
+  return left = left & right;
+}
+
+constexpr byte& operator^=(byte& left, byte right) noexcept {
+  return left = left ^ right;
+}
+
+#endif
 
 }  // namespace std
 

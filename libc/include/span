@@ -1,0 +1,221 @@
+//
+//  span
+//  c_compiler
+//
+//  C++20 std::span support for DaveCC.
+//
+
+#ifndef __davecc_span__
+#define __davecc_span__
+
+#include <array>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+
+#ifndef __cpp_lib_span
+#define __cpp_lib_span 202002L
+#endif
+
+namespace std {
+
+inline constexpr size_t dynamic_extent = static_cast<size_t>(-1);
+
+template <size_t Extent, size_t Offset, size_t Count>
+struct __span_subspan_extent {
+  static constexpr size_t value = Count;
+};
+
+template <size_t Extent, size_t Offset>
+struct __span_subspan_extent<Extent, Offset, dynamic_extent> {
+  static constexpr size_t value =
+      Extent == dynamic_extent ? dynamic_extent : Extent - Offset;
+};
+
+template <class T, size_t Extent>
+struct __span_byte_extent {
+  static constexpr size_t value = sizeof(T) * Extent;
+};
+
+template <class T>
+struct __span_byte_extent<T, dynamic_extent> {
+  static constexpr size_t value = dynamic_extent;
+};
+
+template <class T>
+struct __span_is_array : false_type {};
+
+template <class T, size_t N>
+struct __span_is_array<array<T, N>> : true_type {};
+
+struct __span_unchecked_t {};
+
+template <class ElementType, size_t Extent = dynamic_extent>
+class span {
+ public:
+  using element_type = ElementType;
+  using value_type = remove_cv_t<ElementType>;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using pointer = element_type*;
+  using reference = element_type&;
+  using iterator = pointer;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+
+  static constexpr size_type extent = Extent;
+
+ private:
+  template <class, size_t>
+  friend class span;
+
+  pointer __data;
+  size_type __size;
+
+  constexpr span(pointer data, size_type size, __span_unchecked_t) noexcept
+      : __data(data), __size(size) {}
+
+ public:
+  constexpr span() noexcept
+    requires(Extent == dynamic_extent || Extent == 0)
+      : __data(nullptr), __size(0) {}
+
+  explicit(Extent != dynamic_extent)
+      constexpr span(pointer first, size_type count)
+      : __data(first), __size(count) {}
+
+  explicit(Extent != dynamic_extent)
+      constexpr span(pointer first, pointer last)
+      : __data(first), __size(static_cast<size_type>(last - first)) {}
+
+  template <class U, size_t N>
+    requires((Extent == dynamic_extent || Extent == N) &&
+             is_convertible_v<U (*)[], element_type (*)[]>)
+  constexpr span(U (&arr)[N]) noexcept : __data(arr), __size(N) {}
+
+  template <class U, size_t N>
+    requires((Extent == dynamic_extent || Extent == N) &&
+             is_convertible_v<U (*)[], element_type (*)[]>)
+  constexpr span(array<U, N>& arr) noexcept
+      : __data(arr.data()), __size(N) {}
+
+  template <class U, size_t N>
+    requires((Extent == dynamic_extent || Extent == N) &&
+             is_convertible_v<const U (*)[], element_type (*)[]>)
+  constexpr span(const array<U, N>& arr) noexcept
+      : __data(arr.data()), __size(N) {}
+
+  template <class U, size_t OtherExtent>
+    requires((Extent == dynamic_extent || Extent == OtherExtent) &&
+             is_convertible_v<U (*)[], element_type (*)[]>)
+  constexpr span(const span<U, OtherExtent>& other) noexcept
+      : __data(other.data()), __size(other.size()) {}
+
+  template <class U>
+    requires(Extent != dynamic_extent &&
+             is_convertible_v<U (*)[], element_type (*)[]>)
+  explicit constexpr span(const span<U, dynamic_extent>& other) noexcept
+      : __data(other.data()), __size(other.size()) {}
+
+  template <class Range>
+    requires(!is_array_v<remove_reference_t<Range>> &&
+             !__span_is_array<remove_cv_t<Range>>::value &&
+             requires(Range& range) {
+               range.data();
+               range.size();
+             } &&
+             is_convertible_v<decltype(declval<Range&>().data()), pointer>)
+  explicit(Extent != dynamic_extent) constexpr span(Range& range)
+      : __data(range.data()), __size(static_cast<size_type>(range.size())) {}
+
+  constexpr iterator begin() const noexcept { return __data; }
+  constexpr iterator end() const noexcept { return __data + __size; }
+  constexpr reverse_iterator rbegin() const noexcept {
+    return reverse_iterator(end());
+  }
+  constexpr reverse_iterator rend() const noexcept {
+    return reverse_iterator(begin());
+  }
+
+  constexpr reference front() const { return __data[0]; }
+  constexpr reference back() const { return __data[__size - 1]; }
+  constexpr reference operator[](size_type index) const {
+    return __data[index];
+  }
+  constexpr pointer data() const noexcept { return __data; }
+
+  constexpr size_type size() const noexcept { return __size; }
+  constexpr size_type size_bytes() const noexcept {
+    return __size * sizeof(element_type);
+  }
+  constexpr bool empty() const noexcept { return __size == 0; }
+
+  template <size_t Count>
+  constexpr span<element_type, Count> first() const {
+    return {__data, Count, __span_unchecked_t{}};
+  }
+
+  constexpr span<element_type, dynamic_extent> first(size_type count) const {
+    return span<element_type, dynamic_extent>(__data, count);
+  }
+
+  template <size_t Count>
+  constexpr span<element_type, Count> last() const {
+    return {__data + (__size - Count), Count, __span_unchecked_t{}};
+  }
+
+  constexpr span<element_type, dynamic_extent> last(size_type count) const {
+    return span<element_type, dynamic_extent>(__data + (__size - count),
+                                              count);
+  }
+
+  template <size_t Offset, size_t Count = dynamic_extent>
+  constexpr span<
+      element_type,
+      __span_subspan_extent<Extent, Offset, Count>::value> subspan() const {
+    size_type result_size =
+        Count != dynamic_extent ? Count : __size - Offset;
+    return {__data + Offset, result_size, __span_unchecked_t{}};
+  }
+
+  constexpr span<element_type, dynamic_extent> subspan(
+      size_type offset, size_type count = dynamic_extent) const {
+    if (count == dynamic_extent) {
+      count = __size - offset;
+    }
+    return span<element_type, dynamic_extent>(__data + offset, count);
+  }
+};
+
+template <class T, size_t N>
+span(T (&)[N]) -> span<T, N>;
+
+template <class T, size_t N>
+span(array<T, N>&) -> span<T, N>;
+
+template <class T, size_t N>
+span(const array<T, N>&) -> span<const T, N>;
+
+template <class T>
+span(T*, size_t) -> span<T>;
+
+template <class T>
+span(T*, T*) -> span<T>;
+
+template <class T, size_t Extent>
+constexpr span<const byte, __span_byte_extent<T, Extent>::value> as_bytes(
+    span<T, Extent> value) noexcept {
+  return span<const byte, __span_byte_extent<T, Extent>::value>(
+      reinterpret_cast<const byte*>(value.data()), value.size_bytes());
+}
+
+template <class T, size_t Extent>
+  requires(!is_const_v<T>)
+constexpr span<byte, __span_byte_extent<T, Extent>::value> as_writable_bytes(
+    span<T, Extent> value) noexcept {
+  return span<byte, __span_byte_extent<T, Extent>::value>(
+      reinterpret_cast<byte*>(value.data()), value.size_bytes());
+}
+
+}  // namespace std
+
+#endif /* __davecc_span__ */

@@ -63,6 +63,7 @@ filegroup(
         "libc/include/ratio",
         "libc/include/set",
         "libc/include/source_location",
+        "libc/include/span",
         "libc/include/sstream",
         "libc/include/stack",
         "libc/include/stdexcept",
