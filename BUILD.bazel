@@ -3,6 +3,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//:davecc/modules.bzl", "davecc_module")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -78,6 +79,53 @@ filegroup(
         "libc/include/vector",
     ],
     visibility = ["//visibility:public"],
+)
+
+davecc_module(
+    name = "std_module_x86_64",
+    src = "libc/modules/std.hpp",
+    module_name = "std",
+    header_unit = True,
+    standard = "c++23",
+    output_stem = "modules/x86_64/std",
+    inputs = [":libc_headers"],
+    copts = ["-isystem", "libc/include"],
+)
+
+davecc_module(
+    name = "std_module_aarch64",
+    src = "libc/modules/std.hpp",
+    module_name = "std",
+    header_unit = True,
+    target = "aarch64",
+    standard = "c++23",
+    output_stem = "modules/aarch64/std",
+    inputs = [":libc_headers"],
+    copts = ["-isystem", "libc/include"],
+)
+
+davecc_module(
+    name = "std_module_arm",
+    src = "libc/modules/std.hpp",
+    module_name = "std",
+    header_unit = True,
+    target = "arm",
+    standard = "c++23",
+    output_stem = "modules/arm/std",
+    inputs = [":libc_headers"],
+    copts = ["-isystem", "libc/include"],
+)
+
+davecc_module(
+    name = "std_module_riscv",
+    src = "libc/modules/std.hpp",
+    module_name = "std",
+    header_unit = True,
+    target = "riscv",
+    standard = "c++23",
+    output_stem = "modules/riscv/std",
+    inputs = [":libc_headers"],
+    copts = ["-isystem", "libc/include"],
 )
 
 filegroup(

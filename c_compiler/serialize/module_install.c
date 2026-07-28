@@ -288,8 +288,7 @@ static Symbol* FindExistingSymbol(Namespace* dest, String* name, bool is_tag) {
   if (dest == compiler->global_namespace) {
     return is_tag ? FindGlobalTag(name) : FindGlobalSymbol(name);
   }
-  return is_tag ? NamespaceFindTagInScope(dest, name)
-                : NamespaceFindSymbolInScope(dest, name);
+  return is_tag ? NamespaceFindTag(dest, name) : NamespaceFindSymbol(dest, name);
 }
 
 static bool TrackInsertedSymbol(Namespace* dest, Symbol* sym, bool is_tag,
@@ -403,6 +402,9 @@ static bool InstallSymbolIntoTracked(Namespace* dest, Symbol* sym, bool is_tag,
       continue;
     }
     StampImportProvenance(incoming, source_module);
+    if (existing == incoming) {
+      continue;
+    }
     if (CanOverloadFunctions(existing, incoming)) {
       if (FindMatchingOverload(existing, incoming) != NULL) {
         continue;
@@ -413,7 +415,11 @@ static bool InstallSymbolIntoTracked(Namespace* dest, Symbol* sym, bool is_tag,
     if (SymbolsCompatibleRedeclaration(existing, incoming)) {
       continue;
     }
-    SetInstallError("conflicting export '%s' from module '%s'", sym->name.value,
+    SetInstallError("conflicting export '%s' in namespace '%s' from module '%s'",
+                    sym->name.value,
+                    dest->qualified_name.length > 0
+                        ? dest->qualified_name.value
+                        : "::",
                     source_module != NULL ? source_module : "");
     return false;
   }

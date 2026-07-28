@@ -43,6 +43,8 @@ typedef struct {
   String executable_dir;
   String include_dir;
   String lib_dir;
+  String module_root;
+  String module_dir;
 } DriverResources;
 
 static bool PathIsDirectory(const char* path) {
@@ -210,12 +212,46 @@ static bool FindLibraryDirectory(DriverResources* resources) {
   return TryResourceDirectory(&resources->lib_dir, ".", "bazel-bin/libc");
 }
 
+static bool FindModuleRoot(DriverResources* resources) {
+  const char* module_env = getenv("DAVECC_MODULE_DIR");
+  if (TryResourceDirectory(&resources->module_root, module_env, NULL)) {
+    return true;
+  }
+  const char* root_env = getenv("DAVECC_ROOT");
+  if (TryResourceDirectory(&resources->module_root, root_env,
+                           "bazel-bin/modules")) {
+    return true;
+  }
+
+  String* roots[] = {
+      &resources->invocation_dir,
+      &resources->executable_dir,
+      &resources->lib_dir,
+  };
+  const char* relatives[] = {
+      "modules",
+      "../modules",
+  };
+  for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+    for (size_t j = 0; j < sizeof(relatives) / sizeof(relatives[0]); j++) {
+      if (TryResourceDirectory(&resources->module_root, roots[i]->value,
+                               relatives[j])) {
+        return true;
+      }
+    }
+  }
+  return TryResourceDirectory(&resources->module_root, ".",
+                              "bazel-bin/modules");
+}
+
 static void DriverResourcesInit(DriverResources* resources,
                                 const char* argv0) {
   StringInit(&resources->invocation_dir, "");
   StringInit(&resources->executable_dir, "");
   StringInit(&resources->include_dir, "");
   StringInit(&resources->lib_dir, "");
+  StringInit(&resources->module_root, "");
+  StringInit(&resources->module_dir, "");
 
   String invocation;
   StringInit(&invocation, "");
@@ -230,6 +266,7 @@ static void DriverResourcesInit(DriverResources* resources,
 
   FindIncludeDirectory(resources);
   FindLibraryDirectory(resources);
+  FindModuleRoot(resources);
 }
 
 typedef struct {
@@ -336,6 +373,45 @@ static void AddDefaultSystemInclude(Vector* compiler_args,
     VectorInsertBefore(compiler_args, 2, "-isystem");
     VectorInsertBefore(compiler_args, 3, resources->include_dir.value);
   }
+}
+
+static const char* DriverTargetName(Vector* compiler_args) {
+  const char* target = "x86_64";
+  for (size_t i = 1; i < compiler_args->length; i++) {
+    const char* arg = (const char*)VectorGet(compiler_args, i);
+    if (strcmp(arg, "-target") == 0 && i + 1 < compiler_args->length) {
+      target = (const char*)VectorGet(compiler_args, i + 1);
+    } else if (strncmp(arg, "-target=", 8) == 0) {
+      target = arg + 8;
+    }
+  }
+  if (strcmp(target, "x86-64") == 0) {
+    return "x86_64";
+  }
+  if (strcmp(target, "p-code") == 0) {
+    return "pcode";
+  }
+  if (strcmp(target, "6502") == 0) {
+    return "65c02";
+  }
+  return target;
+}
+
+static void AddDefaultStandardModulePath(Vector* compiler_args,
+                                         DriverResources* resources,
+                                         bool needs_compiler) {
+  if (!needs_compiler ||
+      VectorContainsCString(compiler_args, "-nostdinc") ||
+      resources->module_root.length == 0) {
+    return;
+  }
+  const char* target = DriverTargetName(compiler_args);
+  if (!TryResourceDirectory(&resources->module_dir,
+                            resources->module_root.value, target)) {
+    return;
+  }
+  VectorAppend(compiler_args, "-fprebuilt-module-path");
+  VectorAppend(compiler_args, resources->module_dir.value);
 }
 
 static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
@@ -1177,6 +1253,8 @@ int main(int argc, char * argv[]) {
     exit(1);
   }
 
+  AddDefaultStandardModulePath(&compiler_args, &resources,
+                               run_compiler || asm_files.length > 0);
   AddDefaultSystemInclude(&compiler_args, &resources,
                           run_compiler || asm_files.length > 0);
 

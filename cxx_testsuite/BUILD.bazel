@@ -96,12 +96,15 @@ sh_test(
         "-Wl,main",
         "--interp-arg",
         "-i",
+        "--std-artifacts",
+        "$(rootpaths //:std_module_x86_64)",
     ],
     data = CXX_TEST_DATA + [
         "//:davecc",
         "//:libc_headers",
         "//:libc_x86_64",
         "//:moduledump",
+        "//:std_module_x86_64",
         "//:x86_64",
     ],
 )
@@ -126,6 +129,8 @@ sh_test(
         "-Wl,main",
         "--interp-arg",
         "-i",
+        "--std-artifacts",
+        "$(rootpaths //:std_module_aarch64)",
     ],
     data = CXX_TEST_DATA + [
         "//:aarch64",
@@ -133,6 +138,7 @@ sh_test(
         "//:libc_aarch64",
         "//:libc_headers",
         "//:moduledump",
+        "//:std_module_aarch64",
     ],
 )
 
@@ -156,6 +162,8 @@ sh_test(
         "-Wl,main",
         "--interp-arg",
         "-i",
+        "--std-artifacts",
+        "$(rootpaths //:std_module_arm)",
     ],
     data = CXX_TEST_DATA + [
         "//:arm",
@@ -163,6 +171,7 @@ sh_test(
         "//:libc_arm",
         "//:libc_headers",
         "//:moduledump",
+        "//:std_module_arm",
     ],
 )
 
@@ -180,12 +189,15 @@ sh_test(
         "$(rootpath //:libc_riscv)",
         "--interpreter",
         "$(rootpath //:riscv)",
+        "--std-artifacts",
+        "$(rootpaths //:std_module_riscv)",
     ],
     data = CXX_TEST_DATA + [
         "//:davecc",
         "//:libc_headers",
         "//:libc_riscv",
         "//:moduledump",
+        "//:std_module_riscv",
         "//:riscv",
     ],
 )

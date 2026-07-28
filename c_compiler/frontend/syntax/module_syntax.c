@@ -422,6 +422,13 @@ static void PerformModuleImport(Syntax* syntax, const ModuleId* import_id,
     ModuleIdDestruct(&resolved);
     return;
   }
+  if (!is_header_unit && resolved.partition.length == 0 &&
+      StringEqual(&resolved.name, "std") &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    SyntaxError(syntax, "The standard library module 'std' requires C++23");
+    ModuleIdDestruct(&resolved);
+    return;
+  }
   ModuleUnitAddImport(info, &resolved, is_partition_import, is_export_import,
                       is_header_unit, location);
 

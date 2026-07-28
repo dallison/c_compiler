@@ -7,12 +7,15 @@ MODULEDUMP=""
 TARGET=""
 LIBC=""
 INTERPRETER=""
+STD_MODULE=""
+STD_OBJECT=""
+STD_ARTIFACTS=""
 SUITE_ROOT=""
 declare -a COMPILE_ARGS=()
 declare -a INTERP_ARGS=()
 
 usage() {
-  echo "usage: $0 --davecc PATH --moduledump PATH --target NAME --libc PATH --interpreter PATH" >&2
+  echo "usage: $0 --davecc PATH --moduledump PATH --target NAME --libc PATH --interpreter PATH --std-artifacts PATHS" >&2
   exit 2
 }
 
@@ -23,16 +26,18 @@ while [ "$#" -gt 0 ]; do
     --target) TARGET=$2; shift 2 ;;
     --libc) LIBC=$2; shift 2 ;;
     --interpreter) INTERPRETER=$2; shift 2 ;;
+    --std-artifacts) STD_ARTIFACTS=$2; shift 2 ;;
     --suite-root) SUITE_ROOT=$2; shift 2 ;;
     --compile-arg) COMPILE_ARGS+=("$2"); shift 2 ;;
     --interp-arg) INTERP_ARGS+=("$2"); shift 2 ;;
+    *.dcm|*.o) STD_ARTIFACTS="$STD_ARTIFACTS $1"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
 done
 
 if [ -z "$DAVECC" ] || [ -z "$MODULEDUMP" ] || [ -z "$TARGET" ] ||
-   [ -z "$LIBC" ] || [ -z "$INTERPRETER" ]; then
+   [ -z "$LIBC" ] || [ -z "$INTERPRETER" ] || [ -z "$STD_ARTIFACTS" ]; then
   usage
 fi
 
@@ -52,6 +57,16 @@ DAVECC=$(resolve_runfile "$DAVECC")
 MODULEDUMP=$(resolve_runfile "$MODULEDUMP")
 LIBC=$(resolve_runfile "$LIBC")
 INTERPRETER=$(resolve_runfile "$INTERPRETER")
+for artifact in $STD_ARTIFACTS; do
+  artifact=$(resolve_runfile "$artifact")
+  case "$artifact" in
+    *.dcm) STD_MODULE=$artifact ;;
+    *.o) STD_OBJECT=$artifact ;;
+  esac
+done
+if [ -z "$STD_MODULE" ] || [ -z "$STD_OBJECT" ]; then
+  usage
+fi
 if [ -n "$SUITE_ROOT" ]; then
   SUITE_ROOT=$(resolve_runfile "$SUITE_ROOT")
 elif [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-}" ]; then
@@ -113,6 +128,25 @@ run "$DAVECC" -target "$TARGET" -static \
 "$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/hello.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S "$FIXTURES/use_std.cpp" \
+  -o "$work/use_std_cxx20.s"
+if ! grep -Fq "requires C++23" "$work/command.log"; then
+  fail "import std was not rejected before C++23"
+fi
+
+run "$DAVECC" -target "$TARGET" -std=c++23 -c "$FIXTURES/use_std.cpp" \
+  -o "$work/use_std.o" ||
+  fail "compile standard library module importer"
+
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std.o" "$STD_OBJECT" "$LIBC" -o "$work/std.bin" ||
+  fail "link standard library module executable"
+
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/std.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute standard library module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fmodule-output "$work/template_template.dcm" \

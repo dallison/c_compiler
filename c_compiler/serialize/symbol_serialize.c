@@ -444,7 +444,9 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kSym_dependent_value_template_parameter_index,
                  s->dependent_value_template_parameter_index);
   WireWriteUint64(buf, kSym_location, (uint64_t)s->location);
-  WireWriteInt64(buf, kSym_value_ivalue, s->value.ivalue);
+  if (s->type == NULL || !TypeIsFunction(s->type)) {
+    WireWriteInt64(buf, kSym_value_ivalue, s->value.ivalue);
+  }
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);
   SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol, s->alias_target);
   Symbol* overload_next =
@@ -453,7 +455,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
           ? NextVisibleOverload(ctx, s->overload_next)
           : s->overload_next;
   SWriteRef(ctx, buf, kSym_overload_next, kSerialKindSymbol, overload_next);
-  if (s->flags.is_template && s->type != NULL && TypeIsFunction(s->type) &&
+  if (s->type != NULL && TypeIsFunction(s->type) &&
       s->value.func_defn != NULL &&
       s->value.func_defn != s) {
     SWriteRef(ctx, buf, kSym_func_defn, kSerialKindSymbol,

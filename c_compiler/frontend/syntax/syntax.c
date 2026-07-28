@@ -6013,7 +6013,11 @@ static void AppendDeclarationsFromNode(Vector* declarations, ASTNode* node) {
 
 static Symbol* NewUsingAliasSymbol(const char* name, Symbol* target,
                                    SourceLocation location) {
-  Symbol* alias = NewSymbol(name, NULL, target != NULL ? target->storage : STO(implicit));
+  Symbol* alias =
+      target != NULL && target->type != NULL && TypeIsFunction(target->type)
+          ? SymbolClone(target)
+          : NewSymbol(name, NULL,
+                      target != NULL ? target->storage : STO(implicit));
   alias->flags.is_using_alias = true;
   alias->alias_target = target;
   alias->location = location;
@@ -6044,6 +6048,14 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
                                                      : NULL;
     if (existing_target != NULL && existing_target == new_target) {
       SymbolDelete(alias);
+      return true;
+    }
+    if (!is_tag && CanOverloadFunctions(existing, alias)) {
+      if (FindMatchingOverload(existing, alias->type, alias) != NULL) {
+        SymbolDelete(alias);
+        return true;
+      }
+      AppendOverload(existing, alias);
       return true;
     }
     SyntaxError(syntax, "Duplicate symbol from using declaration: %s",

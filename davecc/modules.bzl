@@ -14,7 +14,7 @@ DaveccModuleInfo = provider(
 
 def _module_args(ctx, args):
     args.add("-target", ctx.attr.target)
-    args.add("-std=c++20")
+    args.add("-std=" + ctx.attr.standard)
     args.add("-c")
     all_mappings = depset(
         transitive = [dep[DaveccModuleInfo].mappings for dep in ctx.attr.deps],
@@ -25,8 +25,11 @@ def _module_args(ctx, args):
 
 def _davecc_module_impl(ctx):
     src = ctx.file.src
-    bmi = ctx.actions.declare_file(ctx.label.name + ".dcm")
-    obj = ctx.actions.declare_file(ctx.label.name + ".o")
+    output_stem = ctx.attr.output_stem
+    if not output_stem:
+        output_stem = ctx.label.name
+    bmi = ctx.actions.declare_file(output_stem + ".dcm")
+    obj = ctx.actions.declare_file(output_stem + ".o")
     transitive_bmis = [dep[DaveccModuleInfo].bmis for dep in ctx.attr.deps]
     transitive_objects = [dep[DaveccModuleInfo].objects for dep in ctx.attr.deps]
     transitive_mappings = [
@@ -47,7 +50,7 @@ def _davecc_module_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._davecc,
         arguments = [args],
-        inputs = depset([src], transitive = [input_bmis]),
+        inputs = depset([src] + ctx.files.inputs, transitive = [input_bmis]),
         outputs = [bmi, obj],
         mnemonic = "DaveccModule",
         progress_message = "Compiling DaveCC module %s" % ctx.attr.module_name,
@@ -82,6 +85,9 @@ davecc_module = rule(
         "deps": attr.label_list(providers = [DaveccModuleInfo]),
         "header_unit": attr.bool(default = False),
         "target": attr.string(default = "x86_64"),
+        "standard": attr.string(default = "c++20"),
+        "output_stem": attr.string(),
+        "inputs": attr.label_list(allow_files = True),
         "copts": attr.string_list(),
         "_davecc": attr.label(
             default = Label("//:davecc"),
@@ -104,7 +110,7 @@ def _davecc_binary_impl(ctx):
 
     compile_args = ctx.actions.args()
     compile_args.add("-target", ctx.attr.target)
-    compile_args.add("-std=c++20")
+    compile_args.add("-std=" + ctx.attr.standard)
     compile_args.add("-c")
     for mapping in sorted(mappings.to_list()):
         compile_args.add("-fmodule-file", mapping)
@@ -151,6 +157,7 @@ davecc_binary = rule(
         "modules": attr.label_list(providers = [DaveccModuleInfo]),
         "link_inputs": attr.label_list(allow_files = True),
         "target": attr.string(default = "x86_64"),
+        "standard": attr.string(default = "c++20"),
         "static": attr.bool(default = True),
         "copts": attr.string_list(),
         "linkopts": attr.string_list(),
