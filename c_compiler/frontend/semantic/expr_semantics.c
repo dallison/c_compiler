@@ -75,6 +75,7 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
                                                         bool allow_same_class);
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
+static bool TypeIsEffectivelyConst(TypeRecord* type);
 static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
                                                 TypeRecord* referent);
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
@@ -2716,7 +2717,8 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
         bool rvalue_ref =
             reference_type->declarator == kDeclRValueReference;
         bool discards_qualifiers =
-            TypeIsConst(e->expr->type) && !TypeIsConst(reference_type->next);
+            TypeIsEffectivelyConst(e->expr->type) &&
+            !TypeIsEffectivelyConst(reference_type->next);
         if (!TypeEqualIgnoringQualifiers(e->expr->type,
                                          reference_type->next)) {
           ASTNode* base_bound =
@@ -4262,6 +4264,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   }
 
   ASTNode* receiver = NULL;
+  ASTNode* discarded_static_receiver = NULL;
   bool use_virtual_dispatch =
       member->symbol->type->info.function.is_virtual &&
       !member->is_static && !CurrentFunctionIsCXXCtorOrDtor();
@@ -4325,6 +4328,11 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
       ASTNodeSetType(receiver, receiver_type);
       receiver->flags |= kASTAnalyzed;
     }
+  } else {
+    // A static member selected through an object expression still evaluates
+    // that object expression for side effects.  Preserve it as the left side
+    // of a comma expression while omitting it from the function's arguments.
+    discarded_static_receiver = ASTNodeMove(member_access->left);
   }
 
   ASTNode* old_left = node->left;
@@ -4352,6 +4360,27 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
       VectorInsertBefore(node->children, 0, receiver);
     }
     RenumberVectorChildren(node);
+  } else if (discarded_static_receiver != NULL) {
+    if (node->children->length > 0) {
+      ASTNode* first_actual = ASTNodeMove(node->children->value.p[0]);
+      ASTNode* comma = NewBinaryASTNode(
+          AST_OP(comma), NULL, discarded_static_receiver->location,
+          discarded_static_receiver, first_actual);
+      comma = AnalyzeExpression(comma);
+      VectorSet(node->children, 0, comma);
+      comma->parent = &node->base;
+      comma->child_id = 0;
+    } else {
+      ASTNode* callee = node->left;
+      node->left = NULL;
+      callee->parent = NULL;
+      ASTNode* comma = NewBinaryASTNode(
+          AST_OP(comma), NULL, discarded_static_receiver->location,
+          discarded_static_receiver, callee);
+      node->left = AnalyzeExpression(comma);
+      node->left->parent = &node->base;
+      node->left->child_id = 0;
+    }
   }
   return true;
 }
@@ -4704,11 +4733,24 @@ static void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node,
   }
 }
 
+static bool TypeIsEffectivelyConst(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsConst(t)) {
+      return true;
+    }
+    if (t->declarator != kDeclArray) {
+      break;
+    }
+  }
+  return false;
+}
+
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
   if (!TypeIsReference(reference_type)) {
     return false;
   }
-  if (TypeIsConst(actual->type) && !TypeIsConst(reference_type->next)) {
+  if (TypeIsEffectivelyConst(actual->type) &&
+      !TypeIsEffectivelyConst(reference_type->next)) {
     return false;
   }
   if (reference_type->declarator == kDeclRValueReference) {
@@ -4717,14 +4759,14 @@ static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
   if (ASTNodeIsLValue(actual)) {
     return true;
   }
-  return TypeIsConst(reference_type->next);
+  return TypeIsEffectivelyConst(reference_type->next);
 }
 
 static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   if (!ReferenceCanBind(actual, reference_type)) {
     return -1;
   }
-  bool target_const = TypeIsConst(reference_type->next);
+  bool target_const = TypeIsEffectivelyConst(reference_type->next);
   if (reference_type->declarator == kDeclRValueReference) {
     return target_const && !TypeIsConst(actual->type) ? 1 : 0;
   }
@@ -7604,7 +7646,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (destructor_call != NULL) {
     return destructor_call;
   }
-  node->left = AnalyzeExpression(node->left);
+  // A call node stores its callee separately from its argument vector, but its
+  // legacy child replacer indexes only that argument vector.  Detach the callee
+  // while analyzing it so a transformation such as `T{}` -> a materialized
+  // class temporary cannot accidentally replace argument zero.  This is
+  // especially important for immediate functor calls (`T{}(arg)`).
+  ASTNode* old_callee = node->left;
+  node->left = NULL;
+  if (old_callee != NULL) {
+    old_callee->parent = NULL;
+  }
+  ASTNode* analyzed_callee = AnalyzeExpression(old_callee);
+  if (analyzed_callee != old_callee) {
+    ASTNodeDelete(old_callee);
+  }
+  node->left = analyzed_callee;
+  if (analyzed_callee != NULL) {
+    analyzed_callee->parent = &node->base;
+    analyzed_callee->child_id = 0;
+  }
   // A dependent pseudo-destructor can become scalar only while the member
   // access above is being instantiated.  Re-run the explicit-destructor path
   // after that access has acquired its concrete receiver type.
@@ -7918,7 +7978,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (TypeIsReference(formal->type)) {
         TypeRecord* reference_type = formal->type;
         bool discards_qualifiers =
-            TypeIsConst(actual->type) && !TypeIsConst(reference_type->next);
+            TypeIsEffectivelyConst(actual->type) &&
+            !TypeIsEffectivelyConst(reference_type->next);
         if (!polymorphic_special_this &&
             !TypeEqualIgnoringQualifiers(actual->type,
                                          reference_type->next)) {

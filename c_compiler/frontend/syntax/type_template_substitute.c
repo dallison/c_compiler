@@ -69,6 +69,16 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
         RecordPackExpansionIndex(index, args, pack_index, pack_length)) {
       found = true;
     }
+    if (t->template_origin != NULL &&
+        t->template_origin->flags.is_template_template_parameter &&
+        RecordPackExpansionIndex(
+            t->template_parameter_index >= 0
+                ? t->template_parameter_index
+                : t->template_origin->template_parameter_index,
+            args,
+            pack_index, pack_length)) {
+      found = true;
+    }
     if (t->declarator == kDeclArray &&
         RecordPackExpansionIndex(t->info.array.template_parameter_index, args,
                                  pack_index, pack_length)) {
@@ -109,7 +119,8 @@ bool FindPackExpansionInTemplateArgument(TemplateArgument* arg,
                                pack_length)) {
     return true;
   }
-  if (arg->kind == kTemplateParameterType &&
+  if ((arg->kind == kTemplateParameterType ||
+       arg->kind == kTemplateParameterTemplate) &&
       RecordPackExpansionIndex(arg->template_parameter_index, args, pack_index,
                                pack_length)) {
     return true;
@@ -166,6 +177,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   concrete->value_offset = arg->value_offset;
   concrete->value_adjustment = arg->value_adjustment;
   concrete->member_function = arg->member_function;
+  concrete->template_symbol = arg->template_symbol;
   // A value-dependent non-type argument (e.g. an `enable_if` SFINAE condition):
   // try to fold it now that some parameters are concrete.  If it folds, the
   // argument becomes an ordinary integer; otherwise keep the expression so a
@@ -192,7 +204,15 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     }
     return concrete;
   }
-  if (arg->kind == kTemplateParameterType && arg->type != NULL) {
+  if (arg->kind == kTemplateParameterTemplate &&
+      arg->template_parameter_index >= 0 &&
+      (size_t)arg->template_parameter_index < args->length) {
+    TemplateArgument* actual = args->value.p[arg->template_parameter_index];
+    if (actual != NULL && actual->kind == kTemplateParameterTemplate) {
+      TemplateArgumentDelete(concrete);
+      return TemplateArgumentCopy(actual);
+    }
+  } else if (arg->kind == kTemplateParameterType && arg->type != NULL) {
     concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
     concrete->type =
         TypeMaterializeClassTemplateSpecialization(parser->syntax,
@@ -427,6 +447,10 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
         index >= 0 && (size_t)index < args->length) {
       pack = args->value.p[index];
     } else if (arg->kind == kTemplateParameterNonType &&
+               arg->template_parameter_index >= 0 &&
+               (size_t)arg->template_parameter_index < args->length) {
+      pack = args->value.p[arg->template_parameter_index];
+    } else if (arg->kind == kTemplateParameterTemplate &&
                arg->template_parameter_index >= 0 &&
                (size_t)arg->template_parameter_index < args->length) {
       pack = args->value.p[arg->template_parameter_index];
@@ -830,6 +854,20 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                                             TemplateIdSubstitutionInfo info) {
   if (info.origin == NULL || info.args == NULL) {
     return NULL;
+  }
+  if (info.origin->flags.is_template_template_parameter) {
+    int index = type->template_parameter_index >= 0
+                    ? type->template_parameter_index
+                    : info.origin->template_parameter_index;
+    if (index < 0 || args == NULL || (size_t)index >= args->length) {
+      return TypeRecordCopy(type);
+    }
+    TemplateArgument* actual = args->value.p[index];
+    if (actual == NULL || actual->kind != kTemplateParameterTemplate ||
+        actual->template_symbol == NULL) {
+      return TypeRecordCopy(type);
+    }
+    info.origin = actual->template_symbol;
   }
   Vector* concrete_args =
       SubstituteTemplateArgumentVectorForTypes(parser, info.args, args);
@@ -1385,12 +1423,18 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     if (subst != NULL) {
       return subst;
     }
-    subst = SubstituteNestedTypeFromActiveInstantiation(parser, type);
-    if (subst != NULL) {
-      return subst;
-    }
-    if (TypeNamesActiveNestedTemplateStruct(parser, type)) {
-      return SubstituteNestedStructTemplateParameters(parser, type, args);
+    // An explicitly specialized nested template (for example
+    // `nested<Outer>`) must pass through template-id substitution so its
+    // arguments are completed and validated.  The active-nested shortcuts
+    // below are only valid for an unadorned injected nested type name.
+    if (type->template_arguments == NULL) {
+      subst = SubstituteNestedTypeFromActiveInstantiation(parser, type);
+      if (subst != NULL) {
+        return subst;
+      }
+      if (TypeNamesActiveNestedTemplateStruct(parser, type)) {
+        return SubstituteNestedStructTemplateParameters(parser, type, args);
+      }
     }
   }
 
@@ -1567,6 +1611,10 @@ int FirstTemplateParameterIndexInType(TypeRecord* type) {
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     if (t->template_parameter_index >= 0) {
       return t->template_parameter_index;
+    }
+    if (t->template_origin != NULL &&
+        t->template_origin->flags.is_template_template_parameter) {
+      return t->template_origin->template_parameter_index;
     }
     if (t->template_arguments != NULL) {
       for (size_t i = 0; i < t->template_arguments->length; i++) {
@@ -2034,6 +2082,11 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
   if (param->kind == kTemplateParameterNonType && param->has_default_int &&
       param->default_template_parameter_index < 0) {
     return NewIntegralTemplateArgument(param->default_int_value);
+  }
+  if (param->kind == kTemplateParameterTemplate &&
+      param->default_argument != NULL &&
+      param->default_argument->template_parameter_index < 0) {
+    return TemplateArgumentCopy(param->default_argument);
   }
   return NULL;
 }

@@ -487,6 +487,14 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
     } else {
       StringPrintf(result, "$T%d", argument->template_parameter_index);
     }
+  } else if (argument->kind == kTemplateParameterTemplate) {
+    if (argument->template_parameter_index >= 0) {
+      StringPrintf(result, "$TT%d", argument->template_parameter_index);
+    } else if (argument->template_symbol != NULL) {
+      StringPrintf(result, "TT%d", argument->template_symbol->id);
+    } else {
+      StringAppend(result, "TT?");
+    }
   } else if (argument->template_parameter_index >= 0) {
     StringPrintf(result, "$N%d", argument->template_parameter_index);
   } else {

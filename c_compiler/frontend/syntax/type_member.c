@@ -1066,10 +1066,47 @@ void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
   func->info.function.is_pure_virtual = true;
 }
 
+static bool CXXMemberExplicitParameterListsEqual(StructMember* left,
+                                                 StructMember* right) {
+  if (left == NULL || right == NULL || left->symbol == NULL ||
+      right->symbol == NULL || !TypeIsFunction(left->symbol->type) ||
+      !TypeIsFunction(right->symbol->type)) {
+    return false;
+  }
+  Vector* left_params = &left->symbol->type->info.function.prototype;
+  Vector* right_params = &right->symbol->type->info.function.prototype;
+  size_t left_start = left->is_static ? 0 : 1;
+  size_t right_start = right->is_static ? 0 : 1;
+  if (left_params->length < left_start ||
+      right_params->length < right_start ||
+      left_params->length - left_start != right_params->length - right_start) {
+    return false;
+  }
+  for (size_t i = 0; i < left_params->length - left_start; i++) {
+    Symbol* left_param = left_params->value.p[left_start + i];
+    Symbol* right_param = right_params->value.p[right_start + i];
+    if (left_param == NULL || right_param == NULL ||
+        !TypeEqual(left_param->type, right_param->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool CanOverloadStructMember(StructMember* existing,
                                     StructMember* member) {
-  return CompilerIsCXX() && existing != NULL && member != NULL &&
-         existing->is_member_function && member->is_member_function;
+  if (!CompilerIsCXX() || existing == NULL || member == NULL ||
+      !existing->is_member_function || !member->is_member_function) {
+    return false;
+  }
+  for (StructMember* candidate = existing; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->is_static != member->is_static &&
+        CXXMemberExplicitParameterListsEqual(candidate, member)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 static bool ParseCXXExplicitSpecifier(TypeParser* parser, bool* saw_explicit) {
@@ -2109,6 +2146,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     bool is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+    bool is_constinit_member =
+        CompilerIsCXX() && LexMatch(parser->lex, TOK(constinit));
     bool is_constexpr_member = false;
     bool is_consteval_member = false;
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(consteval))) {
@@ -2120,6 +2159,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     parser->is_inline = is_inline_member;
     parser->is_constexpr = is_constexpr_member;
     parser->is_consteval = is_consteval_member;
+    parser->is_constinit = is_constinit_member;
     bool saw_explicit_member = false;
     bool is_explicit_member =
         ParseCXXExplicitSpecifier(parser, &saw_explicit_member);
@@ -2137,6 +2177,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->is_constexpr = is_constexpr_member;
       parser->is_consteval = is_consteval_member;
     }
+    if (!is_constinit_member &&
+        CompilerIsCXX() && LexMatch(parser->lex, TOK(constinit))) {
+      is_constinit_member = true;
+      parser->is_constinit = true;
+    }
     bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
     if (!is_inline_member) {
       is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
@@ -2148,6 +2193,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                 is_member_template, member_template_parameters,
                                 member_template_requires_clause,
                                 member_template_parameter_base)) {
+      if (is_constinit_member) {
+        SyntaxError(parser->syntax,
+                    "'constinit' cannot be applied to a function");
+      }
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
         // A constructor template consumes the parameter entries (moving them
@@ -2182,6 +2231,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         LexNextToken(parser->lex);
       } else if (!is_static_member && LexLookingAt(parser->lex, TOK(static))) {
         is_static_member = LexMatch(parser->lex, TOK(static));
+      } else if (!is_constinit_member &&
+                 CompilerIsCXX() &&
+                 LexMatch(parser->lex, TOK(constinit))) {
+        is_constinit_member = true;
+        parser->is_constinit = true;
       } else {
         break;
       }
@@ -2208,6 +2262,16 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->is_constexpr = is_constexpr_member;
       parser->is_consteval = is_consteval_member;
     }
+    if (!is_constinit_member &&
+        CompilerIsCXX() && LexMatch(parser->lex, TOK(constinit))) {
+      is_constinit_member = true;
+      parser->is_constinit = true;
+    }
+    if (is_constinit_member &&
+        (is_constexpr_member || is_consteval_member)) {
+      SyntaxError(parser->syntax,
+                  "'constexpr' and 'constinit' cannot be combined");
+    }
     if (is_virtual_member && is_static_member) {
       SyntaxError(parser->syntax, "static member functions cannot be virtual");
     }
@@ -2218,6 +2282,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                          member_template_parameters,
                                          member_template_requires_clause,
                                          member_template_parameter_base)) {
+      if (is_constinit_member) {
+        SyntaxError(parser->syntax,
+                    "'constinit' cannot be applied to a function");
+      }
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
         // The conversion operator template consumed the parameter entries
@@ -2318,11 +2386,29 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         StructMember* member = NewStructMember(member_symbol);
         member_symbol->flags.is_constexpr = is_constexpr_member &&
                                             !TypeIsFunction(member_symbol->type);
+        member_symbol->flags.is_constinit =
+            is_constinit_member && !TypeIsFunction(member_symbol->type);
         if (member_symbol->flags.is_constexpr) {
           member_symbol->type->qualifiers |= kQualConst;
         }
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
+        if (is_static_member && member->is_member_function &&
+            (StringEqual(&member_symbol->name, "operator()") ||
+             StringEqual(&member_symbol->name, "operator[]")) &&
+            !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+          SyntaxError(
+              parser->syntax,
+              "static operator() and operator[] require C++23");
+        }
+        if (is_constinit_member &&
+            (member->is_member_function || !member->is_static)) {
+          SyntaxError(
+              parser->syntax,
+              member->is_member_function
+                  ? "'constinit' cannot be applied to a function"
+                  : "'constinit' variable must have static or thread storage duration");
+        }
         if (is_thread_member) {
           member_symbol->storage |= STO(thread);
         }

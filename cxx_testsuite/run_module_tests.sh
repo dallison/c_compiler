@@ -114,6 +114,27 @@ run "$DAVECC" -target "$TARGET" -static \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fmodule-output "$work/template_template.dcm" \
+  "$FIXTURES/template_template.cppm" -o "$work/template_template.o" ||
+  fail "compile template-template parameter module"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fmodule-file "template_template=$work/template_template.dcm" \
+  "$FIXTURES/use_template_template.cpp" \
+  -o "$work/use_template_template.o" ||
+  fail "import template-template parameter module"
+
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_template_template.o" "$work/template_template.o" "$LIBC" \
+  -o "$work/template_template.bin" ||
+  fail "link template-template parameter module executable"
+
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/template_template.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute template-template parameter module"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 -S \
   -fprebuilt-module-path "$work" "$FIXTURES/use_hidden.cpp" \
   -o "$work/use_hidden.s"

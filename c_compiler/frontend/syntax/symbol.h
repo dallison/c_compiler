@@ -126,6 +126,7 @@ typedef struct Symbol {
     bool is_template: 1;           // C++ template declaration.       // @wire 24
     bool is_template_parameter: 1; // C++ template parameter.         // @wire 25
     bool is_template_type_parameter: 1; // typename/class parameter.  // @wire 26
+    bool is_template_template_parameter: 1; // template<...> class.   // @wire 55
     bool is_parameter_pack: 1;     // Template/function param pack.   // @wire 27
     bool is_constexpr: 1;          // C++ constexpr variable.         // @wire 28
     bool is_constinit: 1;          // C++ constinit variable.         // @wire 29
@@ -163,6 +164,8 @@ typedef struct Symbol {
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
+  // Owned signature copy for a template-template parameter placeholder.
+  Vector* template_template_parameters;  // TemplateParameter*.          // @wire 56
   struct Concept* concept_definition;  // C++20 concept body when flags.is_concept. // @wire 45
   // C++20 requires-clause for alias templates (`template<...> using A = ...`).
   // Function/class/variable templates store constraints on their type bodies;

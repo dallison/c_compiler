@@ -28,9 +28,12 @@ void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
+Vector* TemplateParameterVectorCopy(Vector* params);
 void TemplateArgumentDelete(TemplateArgument* arg);
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
 TemplateArgument* NewIntegralTemplateArgument(long long value);
+TemplateArgument* NewTemplateTemplateArgument(Symbol* symbol,
+                                               int parameter_index);
 TemplateValueKind TemplateArgumentConcreteValueKind(
     const TemplateArgument* arg);
 bool TemplateArgumentSetFromExpression(TemplateArgument* arg,

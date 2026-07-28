@@ -11,6 +11,7 @@
 #include "codegen.h"
 #include "compiler.h"
 #include "elf.h"
+#include "member_pointer.h"
 #include "p_code_assembler.h"
 #include "p_code_emitter.h"
 #include "p_code_reg_alloc.h"
@@ -1393,9 +1394,27 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     return true;
   }
   *sp -= size;
+  if (TypeIsMemberDataPointer(type)) {
+    MemberPointerValue value;
+    if (!MemberPointerTryEvaluateConstant(arg, type, &value)) {
+      *reason = "could not evaluate member-pointer constexpr argument";
+      return false;
+    }
+    if (size == 4) {
+      int32_t narrowed = (int32_t)value.ptr;
+      memcpy(*sp, &narrowed, sizeof(narrowed));
+    } else {
+      memcpy(*sp, &value.ptr, sizeof(value.ptr));
+    }
+    return true;
+  }
   if (TypeIsStructOrUnion(type)) {
     ConstexprObject* object = ConstexprObjectArgument(arg);
     bool delete_object = false;
+    if (object == NULL && ctx != NULL && arg != NULL) {
+      // The evaluation context owns successfully materialized arguments.
+      (void)ConstexprMaterializeClassArgument(ctx, arg, type, &object);
+    }
     if (object == NULL && arg != NULL && arg->op == AST_OP(call) &&
         ConstexprPCodeEvaluateCallObjectResult(ctx, arg, &object)) {
       delete_object = true;

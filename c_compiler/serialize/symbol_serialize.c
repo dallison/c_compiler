@@ -85,6 +85,8 @@ enum {
   kSym_is_module_private = 52,
   kSym_func_defn = 53,
   kSym_is_explicit_specialization = 54,
+  kSym_is_template_template_parameter = 55,
+  kSym_template_template_parameters = 56,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -143,6 +145,9 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_is_module_private, "is_module_private"},
     {kSym_func_defn, "func_defn"},
     {kSym_is_explicit_specialization, "is_explicit_specialization"},
+    {kSym_is_template_template_parameter,
+     "is_template_template_parameter"},
+    {kSym_template_template_parameters, "template_template_parameters"},
 };
 
 //
@@ -415,6 +420,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                  s->flags.is_template_parameter);
   WriteBoolField(buf, kSym_is_template_type_parameter,
                  s->flags.is_template_type_parameter);
+  WriteBoolField(buf, kSym_is_template_template_parameter,
+                 s->flags.is_template_template_parameter);
   WriteBoolField(buf, kSym_is_parameter_pack, s->flags.is_parameter_pack);
   WriteBoolField(buf, kSym_is_constexpr, s->flags.is_constexpr);
   WriteBoolField(buf, kSym_is_constinit, s->flags.is_constinit);
@@ -425,6 +432,11 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_is_module_private, s->flags.is_module_private);
   WriteBoolField(buf, kSym_is_explicit_specialization,
                  s->flags.is_explicit_specialization);
+  if (s->template_template_parameters != NULL) {
+    SerialWriteTemplateParameterVector(
+        ctx, buf, kSym_template_template_parameters,
+        s->template_template_parameters);
+  }
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -589,6 +601,15 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_is_template_type_parameter:
         WireReadBool(buf, &b);
         s->flags.is_template_type_parameter = b;
+        break;
+      case kSym_is_template_template_parameter:
+        WireReadBool(buf, &b);
+        s->flags.is_template_template_parameter = b;
+        break;
+      case kSym_template_template_parameters:
+        s->template_template_parameters = NewVector();
+        SerialReadTemplateParameterVector(
+            ctx, buf, s->template_template_parameters);
         break;
       case kSym_is_parameter_pack:
         WireReadBool(buf, &b);

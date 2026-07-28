@@ -860,7 +860,8 @@ class subrange : public view_interface<subrange<I, S, K>> {
         __size_(n) {}
 
   template <borrowed_range R>
-    requires convertible_to<iterator_t<R>, I> &&
+    requires(!same_as<remove_cvref_t<R>, subrange>) &&
+             convertible_to<iterator_t<R>, I> &&
              convertible_to<sentinel_t<R>, S> &&
              (K == subrange_kind::unsized || sized_range<R>)
   constexpr subrange(R&& r)
@@ -871,7 +872,8 @@ class subrange : public view_interface<subrange<I, S, K>> {
   }
 
   template <borrowed_range R>
-    requires(K == subrange_kind::sized) &&
+    requires(!same_as<remove_cvref_t<R>, subrange>) &&
+            (K == subrange_kind::sized) &&
             convertible_to<iterator_t<R>, I> &&
             convertible_to<sentinel_t<R>, S>
   constexpr subrange(R&& r, iter_difference_t<I> n)

@@ -1234,7 +1234,8 @@ static bool TemplateArgumentIsDependent(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;
   }
-  if (arg->kind == kTemplateParameterNonType) {
+  if (arg->kind == kTemplateParameterNonType ||
+      arg->kind == kTemplateParameterTemplate) {
     return arg->template_parameter_index >= 0;
   }
   return TypeContainsTemplateParameterReference(arg->type);
@@ -2800,9 +2801,11 @@ static ASTNode* NewCXXSourceBaseSubobject(Symbol* source,
   // Reading the reference parameter yields the underlying pointer to the
   // referent (references are lowered to pointers), so treat the identifier as a
   // `owner*` directly -- exactly as the `this` pointer is used for the receiver.
-  // Taking its address instead would yield the address of the reference slot.
+  // kASTNeedAddress tells codegen to load the pointer held by the reference
+  // parameter without then loading the referenced object.  The latter would
+  // pass the source object's first word as the base address.
   ASTNode* source_ptr = NewIdentifierASTNode(source, location);
-  source_ptr->flags |= kASTAnalyzed;
+  source_ptr->flags |= kASTAnalyzed | kASTNeedAddress;
   ASTNodeSetType(source_ptr, source_pointer);
   TypeRecord* base_pointer =
       NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
@@ -2816,6 +2819,10 @@ static ASTNode* NewCXXSourceBaseSubobject(Symbol* source,
                                       TypeRecordCopy(base->type), location,
                                       base_ptr);
   base_ref->flags |= kASTAnalyzed;
+  base_ref->value_category =
+      source->type->declarator == kDeclRValueReference
+          ? kValueCategoryXvalue
+          : kValueCategoryLvalue;
   ASTNodeSetType(base_ref, TypeRecordCopy(base->type));
   return base_ref;
 }
@@ -5320,11 +5327,17 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       if (*is_constexpr) {
         SyntaxError(syntax, "Duplicate 'constexpr' specifier");
       }
+      if (*is_constinit) {
+        SyntaxError(syntax, "'constexpr' and 'constinit' cannot be combined");
+      }
       *is_constexpr = true;
     } else if (LexMatch(syntax->lex, TOK(consteval))) {
       if (*is_consteval) {
         SyntaxWarning(syntax, "duplicate-decl-specifier",
                       "Duplicate 'consteval' specifier");
+      }
+      if (*is_constinit) {
+        SyntaxError(syntax, "'consteval' and 'constinit' cannot be combined");
       }
       *is_consteval = true;
       *is_constexpr = true;
@@ -5332,6 +5345,9 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       if (*is_constinit) {
         SyntaxWarning(syntax, "duplicate-decl-specifier",
                       "Duplicate 'constinit' specifier");
+      }
+      if (*is_constexpr || *is_consteval) {
+        SyntaxError(syntax, "'constexpr' and 'constinit' cannot be combined");
       }
       *is_constinit = true;
     } else if (!(type_specifier.type != kTypeImplicit &&
@@ -5862,7 +5878,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     bool skip_cxx_function_redeclaration =
         CompilerIsCXX() && old_sym != NULL && TypeIsFunction(sym->type) &&
         sym->flags.is_defined && sym->type->info.function.definition;
-    if (!TypeIsFunction(sym->type)) {
+    if (TypeIsFunction(sym->type)) {
+      if (parser->is_constinit) {
+        SyntaxError(syntax, "'constinit' cannot be applied to a function");
+      }
+    } else {
       sym->flags.is_constexpr = parser->is_constexpr;
       sym->flags.is_constinit = parser->is_constinit;
       if (CompilerIsCXX() && parser->is_inline) {
@@ -6575,6 +6595,7 @@ static TemplateParameter* NewTemplateParameter(const char* name,
       default_template_parameter_index;
   param->associated_constraint = NULL;
   param->default_argument = NULL;
+  param->template_parameters = NULL;
   if (type != NULL) {
     TypeRecordIncRef(type);
   }
@@ -6639,6 +6660,24 @@ static TypeRecord* ParseTemplateTypeDefault(Syntax* syntax) {
     return result;
   }
   return type;
+}
+
+static TemplateArgument* TemplateTemplateArgumentFromType(
+    Syntax* syntax, TypeRecord* type, SourceLocation location) {
+  Symbol* origin = type != NULL ? type->template_origin : NULL;
+  if (origin == NULL || !origin->flags.is_template) {
+    SyntaxError(syntax, "Template argument must name a template");
+    TypeRecordDelete(type);
+    return NULL;
+  }
+  int parameter_index =
+      origin->flags.is_template_template_parameter
+          ? origin->template_parameter_index : -1;
+  TemplateArgument* arg =
+      NewTemplateTemplateArgument(origin, parameter_index);
+  arg->location = location;
+  TypeRecordDelete(type);
+  return arg;
 }
 
 static TemplateArgument* NewTemplateParameterTypeArgument(int index,
@@ -6842,10 +6881,6 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
 }
 
 // Parses a template template parameter (`template <parameter-list> class C`).
-// The construct is consumed cleanly and `C` is introduced as a type-parameter
-// placeholder so later references resolve, but full support -- using `C<...>`
-// as a template-id and binding a class-template argument -- is not implemented
-// yet, so a clear diagnostic is reported instead of the parser crashing.
 static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
                                            int base) {
   Lex* lex = syntax->lex;
@@ -6853,49 +6888,24 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
   SourceLocation location = lex->current_token_location;
   LexNextToken(lex);  // template
 
-  // Skip the inner template-parameter-list by balancing angle brackets.  A full
-  // parse is avoided because it is discarded anyway and because the inner list
-  // legitimately contains unnamed parameters (`template <class> class C`) that
-  // the ordinary parameter parser would reject with a misleading diagnostic.
-  if (LexLookingAt(lex, TOK(less))) {
-    int depth = 0;
-    int paren_depth = 0;
-    int square_depth = 0;
-    int brace_depth = 0;
-    while (!LexEof(lex)) {
-      Token t = lex->current_token;
-      if (t == TOK(lparen)) {
-        paren_depth++;
-      } else if (t == TOK(rparen)) {
-        paren_depth--;
-      } else if (t == TOK(lsquare)) {
-        square_depth++;
-      } else if (t == TOK(rsquare)) {
-        square_depth--;
-      } else if (t == TOK(lbrace)) {
-        brace_depth++;
-      } else if (t == TOK(rbrace)) {
-        brace_depth--;
-      } else if (paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
-        if (t == TOK(less)) {
-          depth++;
-        } else {
-          depth -= LexClosingAngleCount(t);
-        }
-      }
-      LexNextToken(lex);
-      if (depth <= 0) {
-        break;
-      }
-    }
-  } else {
+  if (!LexLookingAt(lex, TOK(less))) {
     SyntaxError(syntax, "Expected '<' in template template parameter");
+    return false;
   }
+  // Inner parameter names have their own scope and are only visible while
+  // parsing their parameter list.
+  SyntaxOpenScope(syntax);
+  Vector* inner_parameters =
+      SyntaxParseTemplateParameterListWithBase(syntax, 0);
+  SyntaxCloseScope(syntax);
 
   if (!LexMatch(lex, TOK(class)) && !LexMatch(lex, TOK(typename))) {
     SyntaxError(syntax,
                 "Expected 'class' or 'typename' in template template parameter");
     SyntaxRecover(syntax, TC(closebra));
+    VectorDeleteWithContents(
+        inner_parameters, (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
     return false;
   }
   bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
@@ -6907,11 +6917,6 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
     LexNextToken(lex);
   }
 
-  SyntaxError(syntax, "template template parameters are not yet supported");
-
-  // Register the name as a type-parameter placeholder so downstream references
-  // resolve and index bookkeeping stays consistent.  The TU already carries an
-  // error, so no code is generated regardless.
   if (param_name.length > 0) {
     TypeRecord* placeholder =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
@@ -6919,30 +6924,37 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
     placeholder->template_parameter_name = NewString(param_name.value);
     Symbol* param = NewSymbol(param_name.value, placeholder, STO(typedef));
     param->flags.invented = true;
+    param->flags.is_template = true;
     param->flags.is_template_parameter = true;
-    param->flags.is_template_type_parameter = true;
+    param->flags.is_template_type_parameter = false;
+    param->flags.is_template_template_parameter = true;
     param->flags.is_parameter_pack = is_parameter_pack;
     param->template_parameter_index = index;
+    param->template_template_parameters =
+        TemplateParameterVectorCopy(inner_parameters);
     param->location = location;
     if (!SyntaxAddSymbol(syntax, param)) {
       SymbolDelete(param);
     }
   }
 
-  // Consume an optional default template argument in this error-recovery path.
+  TemplateArgument* default_argument = NULL;
   if (LexMatch(lex, TOK(equal))) {
-    while (!LexEof(lex) && !LexLookingAt(lex, TOK(comma)) &&
-           !LexLookingAt(lex, TOK(greater)) &&
-           !LexLookingAt(lex, TOK(greatergreater)) &&
-           !LexLookingAt(lex, TOK(greatergreatereq))) {
-      LexNextToken(lex);
+    if (is_parameter_pack) {
+      SyntaxError(syntax, "Template parameter pack cannot have a default");
     }
+    SourceLocation default_location = lex->current_token_location;
+    TypeRecord* default_type = ParseTemplateTypeDefault(syntax);
+    default_argument = TemplateTemplateArgumentFromType(
+        syntax, default_type, default_location);
   }
 
-  VectorAppend(params,
-               NewTemplateParameter(param_name.value, kTemplateParameterType,
-                                    is_parameter_pack, NULL, NULL, false, 0, -1,
-                                    index));
+  TemplateParameter* template_param =
+      NewTemplateParameter(param_name.value, kTemplateParameterTemplate,
+                           is_parameter_pack, NULL, NULL, false, 0, -1, index);
+  template_param->template_parameters = inner_parameters;
+  template_param->default_argument = default_argument;
+  VectorAppend(params, template_param);
   StringDestruct(&param_name);
   return true;
 }
@@ -7218,6 +7230,80 @@ static bool SyntaxTemplateArgumentLooksLikeType(Syntax* syntax) {
   return true;
 }
 
+static bool SymbolNamesTemplateArgument(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  if (symbol->flags.is_template_template_parameter ||
+      symbol->alias_template != NULL) {
+    return true;
+  }
+  return symbol->flags.is_template && symbol->type != NULL &&
+         TypeIsStructOrUnion(symbol->type) &&
+         symbol->type->info.struct_info != NULL &&
+         symbol->type->info.struct_info->is_template;
+}
+
+static Symbol* SyntaxBareTemplateArgumentSymbol(Syntax* syntax) {
+  Token tok = syntax->lex->current_token;
+  if (tok != TOK(identifier) && tok != TOK(coloncolon)) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+      syntax, &name, TC(closebra) | TC(exprsep));
+  bool has_template_id = false;
+  for (size_t i = 0; i < name.template_arguments.length; i++) {
+    if (name.template_arguments.value.p[i] != NULL) {
+      has_template_id = true;
+      break;
+    }
+  }
+  Symbol* symbol = NULL;
+  if (!has_template_id) {
+    if (!name.is_qualified && !name.absolute) {
+      symbol = FindLocalSymbol(syntax->local_symbol_stack, &name.spelling);
+      if (symbol == NULL) {
+        symbol = FindGlobalSymbol(&name.spelling);
+      }
+    }
+    if (symbol == NULL) {
+      symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+      if (!SymbolNamesTemplateArgument(symbol)) {
+        symbol = SyntaxFindQualifiedTag(syntax, &name);
+      }
+    }
+    if (!SymbolNamesTemplateArgument(symbol)) {
+      symbol = NULL;
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return symbol;
+}
+
+static void NormalizeTemplateNameArgument(TemplateArgument* arg,
+                                          Symbol* bare_template) {
+  if (arg == NULL || arg->kind != kTemplateParameterType || arg->type == NULL) {
+    return;
+  }
+  if (!SymbolNamesTemplateArgument(bare_template)) {
+    return;
+  }
+  Symbol* origin = bare_template;
+  TypeRecordDelete(arg->type);
+  arg->type = NULL;
+  arg->kind = kTemplateParameterTemplate;
+  arg->template_symbol = origin;
+  arg->template_parameter_index =
+      origin->flags.is_template_template_parameter
+          ? origin->template_parameter_index : -1;
+}
+
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
   if (!LexMatch(lex, TOK(less))) {
@@ -7238,6 +7324,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     // substituted (possibly in a far-removed instantiation) points back here.
     arg->location = lex->current_token_location;
     if (SyntaxTemplateArgumentLooksLikeType(syntax)) {
+      Symbol* bare_template = SyntaxBareTemplateArgumentSymbol(syntax);
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
       TypeRecord* type = TypeParserParseType(&parser, true);
@@ -7271,6 +7358,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           arg->is_pack_expansion = true;
         }
       }
+      NormalizeTemplateNameArgument(arg, bare_template);
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;
       syntax->parsing_template_argument = true;
@@ -9662,9 +9750,19 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     }
     Symbol* sym = TypeParserParseDeclarator(parser, type);
     if (sym != NULL) {
-      if (!TypeIsFunction(sym->type)) {
+      if (TypeIsFunction(sym->type)) {
+        if (parser->is_constinit) {
+          SyntaxError(syntax, "'constinit' cannot be applied to a function");
+        }
+      } else {
         sym->flags.is_constexpr = parser->is_constexpr;
         sym->flags.is_constinit = parser->is_constinit;
+        if (parser->is_constinit &&
+            !StorageIs(storage, STO(static) | STO(extern) | STO(thread))) {
+          SyntaxError(
+              syntax,
+              "'constinit' variable must have static or thread storage duration");
+        }
         if (sym->flags.is_constexpr) {
           sym->type->qualifiers |= kQualConst;
         }

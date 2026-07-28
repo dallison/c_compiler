@@ -107,6 +107,10 @@ struct Pair {
   }
 };
 
+constexpr int read_pair_member(int Pair::*member, Pair value) {
+  return value.*member;
+}
+
 struct Math {
   static constexpr int triple(int value) {
     return value * 3;
@@ -313,6 +317,10 @@ consteval int immediate_value(int value) {
   return value + 8;
 }
 
+struct ConstinitMembers {
+  inline static constinit int value = immediate_value(5);
+};
+
 consteval MixedNestedObject immediate_mixed_nested_object(int bias) {
   return make_mixed_nested_object(bias);
 }
@@ -347,8 +355,20 @@ constexpr int if_constexpr_discarded_branch(void) {
 constexpr int base = 4;
 constexpr int total = add(base, 5);
 constinit int initialized = immediate_value(2);
+thread_local constinit int thread_initialized = immediate_value(3);
 constexpr MixedNestedObject global_immediate_mixed =
     immediate_mixed_nested_object(1);
+
+template <int N>
+constexpr int sum_const_array(const int (&values)[N]) {
+  int result = 0;
+  for (int i = 0; i < N; ++i) {
+    result += values[i];
+  }
+  return result;
+}
+
+constexpr int const_array_values[3] = {1, 2, 3};
 
 static_assert(add(2, 3) == 5, "constexpr function call");
 static_assert(with_local(4) == 7, "constexpr local declaration");
@@ -367,6 +387,8 @@ static_assert(comma_sequence() == 9, "constexpr comma");
 static_assert(sum_to(5) == 15, "constexpr for mutation");
 static_assert(count_down(4) == 4, "constexpr while mutation");
 static_assert(aggregate_values() == 11, "constexpr aggregate objects");
+static_assert(read_pair_member(&Pair::right, Pair{4, 7}) == 7,
+              "constexpr member-pointer and aggregate arguments");
 static_assert(mutate_aggregate() == 13, "constexpr aggregate mutation");
 static_assert(constructed_object() == 5, "constexpr constructor");
 static_assert(global_point.sum() == 15, "global constexpr constructor");
@@ -399,6 +421,8 @@ static_assert(by_value_mixed_nested_object_values() == 112,
               "constexpr mixed nested object by-value parameter");
 static_assert(pointer_reference_values() == 15,
               "constexpr pointer and reference values");
+static_assert(sum_const_array(const_array_values) == 6,
+              "constexpr const array reference deduction");
 static_assert(scoped_destructor_value() == 19,
               "constexpr scoped destructor");
 static_assert(Math::triple(4) == 12, "constexpr static member");
@@ -422,6 +446,7 @@ struct ExplicitByConstant {
 };
 
 int main(void) {
+  static constinit int local_static_initialized = immediate_value(4);
   ExplicitByConstant value;
   value.value = 1;
   int as_int = static_cast<int>(value);
@@ -429,5 +454,6 @@ int main(void) {
   auto lambda = [](int value) constexpr {
     return value + 1;
   };
-  return as_int + as_bool + lambda(1);
+  return as_int + as_bool + lambda(1) + thread_initialized +
+         local_static_initialized + ConstinitMembers::value;
 }

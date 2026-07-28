@@ -73,6 +73,7 @@ typedef struct Struct Struct;
 typedef enum {
   kTemplateParameterType,
   kTemplateParameterNonType,
+  kTemplateParameterTemplate,
 } TemplateParameterKind;
 
 typedef enum {
@@ -97,6 +98,7 @@ typedef struct TemplateParameter {
   struct ConstraintExpr* associated_constraint;  // Optional C++20 constraint. // @wire 10
   int index;                        // @wire 9
   struct TemplateArgument* default_argument;  // Typed NTTP default. // @wire 11
+  Vector* template_parameters;  // Inner parameters for template-template params. // @wire 12
 } TemplateParameter;
 
 // Serialized as an inline sub-message (see type_serialize.c); the field
@@ -125,6 +127,7 @@ typedef struct TemplateArgument {
   int64_t value_offset;      // Pointer byte offset/member ptr.    // @wire 11
   int64_t value_adjustment;  // Member-function this adjustment.   // @wire 12
   Symbol* member_function;   // Non-virtual member function.       // @wire 13
+  Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {

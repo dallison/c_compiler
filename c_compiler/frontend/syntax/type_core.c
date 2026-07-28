@@ -441,6 +441,19 @@ TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
       ConceptsCloneConstraint(param->associated_constraint);
   copy->index = param->index;
   copy->default_argument = TemplateArgumentCopy(param->default_argument);
+  copy->template_parameters =
+      TemplateParameterVectorCopy(param->template_parameters);
+  return copy;
+}
+
+Vector* TemplateParameterVectorCopy(Vector* params) {
+  if (params == NULL) {
+    return NULL;
+  }
+  Vector* copy = NewVector();
+  for (size_t i = 0; i < params->length; i++) {
+    VectorAppend(copy, TemplateParameterCopy(params->value.p[i]));
+  }
   return copy;
 }
 
@@ -466,6 +479,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->value_offset = arg->value_offset;
   copy->value_adjustment = arg->value_adjustment;
   copy->member_function = arg->member_function;
+  copy->template_symbol = arg->template_symbol;
   return copy;
 }
 
@@ -486,6 +500,16 @@ TemplateArgument* NewIntegralTemplateArgument(long long value) {
   arg->value_kind = kTemplateValueIntegral;
   arg->int_value = value;
   arg->template_parameter_index = -1;
+  arg->location = SOURCE_LOCATION_MISSING;
+  return arg;
+}
+
+TemplateArgument* NewTemplateTemplateArgument(Symbol* symbol,
+                                               int parameter_index) {
+  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  arg->kind = kTemplateParameterTemplate;
+  arg->template_parameter_index = parameter_index;
+  arg->template_symbol = symbol;
   arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
@@ -621,6 +645,11 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
   }
   if (left->kind == kTemplateParameterType) {
     return TypeEqual(left->type, right->type);
+  }
+  if (left->kind == kTemplateParameterTemplate) {
+    return left->template_symbol == right->template_symbol &&
+           left->template_parameter_index ==
+               right->template_parameter_index;
   }
   if (left->template_parameter_index != right->template_parameter_index) {
     return false;
@@ -1045,6 +1074,12 @@ void TemplateParameterDelete(TemplateParameter* param) {
   TypeRecordDelete(param->type);
   TypeRecordDelete(param->default_type);
   TemplateArgumentDelete(param->default_argument);
+  if (param->template_parameters != NULL) {
+    VectorDeleteWithContents(
+        param->template_parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+  }
   ConstraintExprDelete(param->associated_constraint);
   free(param);
 }

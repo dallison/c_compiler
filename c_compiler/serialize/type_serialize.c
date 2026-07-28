@@ -78,6 +78,7 @@ enum {
   kTArg_value_offset = 11,
   kTArg_value_adjustment = 12,
   kTArg_member_function = 13,
+  kTArg_template_symbol = 14,
 };
 
 //
@@ -95,6 +96,7 @@ enum {
   kTParam_index = 9,
   kTParam_associated_constraint = 10,
   kTParam_default_argument = 11,
+  kTParam_template_parameters = 12,
 };
 
 //
@@ -355,6 +357,10 @@ static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
                         p->associated_constraint);
   WriteTemplateArgumentField(ctx, out, kTParam_default_argument,
                              p->default_argument);
+  if (p->template_parameters != NULL) {
+    SerialWriteTemplateParameterVector(
+        ctx, out, kTParam_template_parameters, p->template_parameters);
+  }
 }
 
 static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
@@ -403,6 +409,10 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
         break;
       case kTParam_default_argument:
         p->default_argument = ReadTemplateArgumentField(ctx, in);
+        break;
+      case kTParam_template_parameters:
+        p->template_parameters = NewVector();
+        SerialReadTemplateParameterVector(ctx, in, p->template_parameters);
         break;
       default:
         WireSkip(in, wt);
@@ -497,6 +507,8 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
   WireWriteInt64(out, kTArg_value_adjustment, a->value_adjustment);
   SWriteRef(ctx, out, kTArg_member_function, kSerialKindSymbol,
             a->member_function);
+  SWriteRef(ctx, out, kTArg_template_symbol, kSerialKindSymbol,
+            a->template_symbol);
 }
 
 static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
@@ -558,6 +570,10 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         break;
       case kTArg_member_function:
         a->member_function =
+            (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_template_symbol:
+        a->template_symbol =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
       default:

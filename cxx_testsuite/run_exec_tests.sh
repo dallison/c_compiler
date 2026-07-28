@@ -79,12 +79,24 @@ trap 'rm -rf "$work"' EXIT
 pass=0
 fail=0
 
-read_expected_exit() {
+read_test_directives() {
   local file=$1
   local line
   EXPECT_EXIT=""
+  TEST_STANDARD="-std=c++20"
   while IFS= read -r line; do
     case "$line" in
+      "// RUN:"*)
+        local run_line="${line#// RUN: }"
+        local -a run_args=()
+        read -r -a run_args <<< "$run_line"
+        local arg
+        for arg in "${run_args[@]}"; do
+          case "$arg" in
+            -std=*) TEST_STANDARD="$arg" ;;
+          esac
+        done
+        ;;
       "// EXPECT_EXIT:"*)
         EXPECT_EXIT="${line#// EXPECT_EXIT: }"
         ;;
@@ -111,11 +123,11 @@ echo
 for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   [ -e "$src" ] || continue
   base=$(basename "$src")
-  read_expected_exit "$src"
+  read_test_directives "$src"
   exp="${src}.expected"
   bin="$work/test.bin"
   out="$work/test.out"
-  compile_cmd=("$DAVECC" -target "$TARGET" -static -std=c++20
+  compile_cmd=("$DAVECC" -target "$TARGET" -static "$TEST_STANDARD"
                -isystem "$INCLUDE_DIR")
   compile_cmd+=("${COMPILE_ARGS[@]}" "$src" "$LIBC" -o "$bin")
   if ! "${compile_cmd[@]}" >"$work/compile.log" 2>&1; then

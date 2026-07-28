@@ -148,6 +148,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_template = false;
   sym->flags.is_template_parameter = false;
   sym->flags.is_template_type_parameter = false;
+  sym->flags.is_template_template_parameter = false;
   sym->flags.is_parameter_pack = false;
   sym->flags.is_constexpr = false;
   sym->flags.is_constinit = false;
@@ -164,6 +165,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->default_argument = NULL;
   sym->variable_template = NULL;
   sym->alias_template = NULL;
+  sym->template_template_parameters = NULL;
   sym->associated_constraint = NULL;
   sym->cxx_linkage = kCXXLinkageExternal;
   StringInit(&sym->owning_module_name, NULL);
@@ -268,6 +270,13 @@ void SymbolDestruct(Symbol* symbol) {
         /*free_element=*/false);
     free(symbol->alias_template);
     symbol->alias_template = NULL;
+  }
+  if (symbol->template_template_parameters != NULL) {
+    VectorDeleteWithContents(
+        symbol->template_template_parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    symbol->template_template_parameters = NULL;
   }
   ConstraintExprDelete(symbol->associated_constraint);
   symbol->associated_constraint = NULL;
@@ -425,6 +434,8 @@ static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
 }
 
 static void AppendCXXTypeEncoding(String* out, TypeRecord* type);
+static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
+                                    String* tag_name, Struct* str);
 static Namespace* CXXStructNamespace(Struct* str);
 static void AppendCXXStructNameComponents(String* out, Struct* str);
 
@@ -491,6 +502,34 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
   }
 }
 
+static void AppendCXXTemplateTemplateArgument(String* out,
+                                              TemplateArgument* arg) {
+  if (arg == NULL) {
+    return;
+  }
+  if (arg->template_parameter_index >= 0) {
+    StringAppendChar(out, 'T');
+    if (arg->template_parameter_index > 0) {
+      StringPrintf(out, "%d", arg->template_parameter_index - 1);
+    }
+    StringAppendChar(out, '_');
+    return;
+  }
+  Symbol* symbol = arg->template_symbol;
+  if (symbol == NULL) {
+    StringAppend(out, "Ut0_");
+    return;
+  }
+  if (symbol->alias_template != NULL) {
+    AppendCXXTaggedTypeName(out, symbol, &symbol->name, NULL);
+    return;
+  }
+  Struct* str =
+      symbol->type != NULL && TypeIsStructOrUnion(symbol->type)
+          ? symbol->type->info.struct_info : NULL;
+  AppendCXXTaggedTypeName(out, symbol, &symbol->name, str);
+}
+
 static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
   if (args == NULL) {
     return;
@@ -509,6 +548,8 @@ static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
         }
         if (element->kind == kTemplateParameterType) {
           AppendCXXTypeEncoding(out, element->type);
+        } else if (element->kind == kTemplateParameterTemplate) {
+          AppendCXXTemplateTemplateArgument(out, element);
         } else {
           AppendCXXTemplateNonTypeArgument(out, element);
         }
@@ -517,6 +558,8 @@ static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
     }
     if (arg->kind == kTemplateParameterType) {
       AppendCXXTypeEncoding(out, arg->type);
+    } else if (arg->kind == kTemplateParameterTemplate) {
+      AppendCXXTemplateTemplateArgument(out, arg);
     } else {
       AppendCXXTemplateNonTypeArgument(out, arg);
     }
@@ -776,6 +819,8 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
         TemplateArgument* element = arg->pack_arguments->value.p[j];
         if (element->kind == kTemplateParameterType) {
           AppendCXXTypeEncoding(out, element->type);
+        } else if (element->kind == kTemplateParameterTemplate) {
+          AppendCXXTemplateTemplateArgument(out, element);
         } else {
           AppendCXXTemplateNonTypeArgument(out, element);
         }
@@ -784,6 +829,8 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
     }
     if (arg->kind == kTemplateParameterType) {
       AppendCXXTypeEncoding(out, arg->type);
+    } else if (arg->kind == kTemplateParameterTemplate) {
+      AppendCXXTemplateTemplateArgument(out, arg);
     } else {
       AppendCXXTemplateNonTypeArgument(out, arg);
     }
@@ -869,6 +916,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->overload_next = NULL;
   new_sym->default_argument =
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
+  new_sym->template_template_parameters =
+      TemplateParameterVectorCopy(sym->template_template_parameters);
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;

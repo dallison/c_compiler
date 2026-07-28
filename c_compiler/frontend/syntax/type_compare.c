@@ -69,7 +69,8 @@ bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;
   }
-  if (arg->kind == kTemplateParameterNonType &&
+  if ((arg->kind == kTemplateParameterNonType ||
+       arg->kind == kTemplateParameterTemplate) &&
       arg->template_parameter_index >= 0) {
     return true;
   }
@@ -113,6 +114,10 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     }
     if (t->dependent_member_name != NULL &&
         (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
+      return true;
+    }
+    if (t->template_origin != NULL &&
+        t->template_origin->flags.is_template_template_parameter) {
       return true;
     }
     if (t->declarator == kDeclArray &&
@@ -164,6 +169,11 @@ bool TemplateArgumentEqual(TemplateArgument* left,
   }
   if (left->kind == kTemplateParameterType) {
     return TypeEqual(left->type, right->type);
+  }
+  if (left->kind == kTemplateParameterTemplate) {
+    return left->template_symbol == right->template_symbol &&
+           left->template_parameter_index ==
+               right->template_parameter_index;
   }
   // Value-dependent non-type arguments (e.g. two `enable_if` SFINAE conditions)
   // are distinguished by comparing their stored expressions structurally, so

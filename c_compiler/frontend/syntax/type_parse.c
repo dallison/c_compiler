@@ -458,6 +458,11 @@ static bool TypeReferencesTemplateParameterAtLeast(TypeRecord* type,
   if (type->template_parameter_index >= threshold) {
     return true;
   }
+  if (type->template_origin != NULL &&
+      type->template_origin->flags.is_template_template_parameter &&
+      type->template_origin->template_parameter_index >= threshold) {
+    return true;
+  }
   if (TypeIsArray(type) &&
       type->info.array.template_parameter_index >= threshold) {
     return true;
@@ -918,7 +923,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
         }
-        if (symbol->flags.is_template && args != NULL &&
+        if (symbol->flags.is_template &&
+            !symbol->flags.is_template_template_parameter && args != NULL &&
             !TypeIsStructOrUnion(symbol->type) &&
             !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
             !TemplateArgumentVectorContainsTemplateParameter(args)) {
@@ -950,6 +956,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else {
           type_record = TypeRecordCopy(symbol->type);
+          if (symbol->flags.is_template_template_parameter) {
+            type_record->template_origin = symbol;
+          }
           if (symbol->flags.is_template && args == NULL &&
               !parser->syntax->parsing_template_declaration &&
               TypeIsStructOrUnion(symbol->type)) {
@@ -960,7 +969,19 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             }
           }
           if (symbol->flags.is_template && args != NULL &&
-              parser->syntax->current_template_parameters != NULL) {
+              (parser->syntax->current_template_parameters != NULL ||
+               TemplateArgumentVectorContainsTemplateParameter(args))) {
+            if (symbol->alias_template == NULL &&
+                TypeIsStructOrUnion(symbol->type) &&
+                symbol->type->info.struct_info != NULL) {
+              Vector* completed = CompleteClassTemplateArguments(
+                  parser, symbol->type->info.struct_info, args);
+              if (completed != NULL) {
+                VectorDeleteWithContents(
+                    completed, (VectorElementDestructor)TemplateArgumentDelete,
+                    /*free_element=*/false);
+              }
+            }
             type_record->template_origin = symbol;
             type_record->template_arguments = args;
             args = NULL;
@@ -1006,7 +1027,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           if (symbol->flags.is_template && LexLookingAt(lex, TOK(less))) {
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
-          if (symbol->flags.is_template && args != NULL &&
+          if (symbol->flags.is_template &&
+              !symbol->flags.is_template_template_parameter && args != NULL &&
               !TypeIsStructOrUnion(symbol->type) &&
               !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
               !TemplateArgumentVectorContainsTemplateParameter(args)) {
@@ -1040,6 +1062,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = TypeRecordCopy(symbol->type);
+            if (symbol->flags.is_template_template_parameter) {
+              type_record->template_origin = symbol;
+            }
             if (symbol->flags.is_template && args == NULL &&
                 !parser->syntax->parsing_template_declaration &&
                 TypeIsStructOrUnion(symbol->type)) {

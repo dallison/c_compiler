@@ -99,6 +99,7 @@ static const char* TemplateParameterKindName(TemplateParameterKind k) {
   switch (k) {
     case kTemplateParameterType: return "type";
     case kTemplateParameterNonType: return "non-type";
+    case kTemplateParameterTemplate: return "template";
   }
   return "?";
 }

@@ -972,6 +972,10 @@ static bool TemplateArgumentListIsDependent(Vector* args) {
     if (a->kind == kTemplateParameterNonType && a->template_parameter_index >= 0) {
       return true;
     }
+    if (a->kind == kTemplateParameterTemplate &&
+        a->template_parameter_index >= 0) {
+      return true;
+    }
   }
   return false;
 }
@@ -3448,12 +3452,19 @@ static Vector* ParseCXXBracedTemporaryActuals(Syntax* syntax, TypeRecord* type,
 static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
                                                   Syntax* syntax,
                                                   TokenClass followers) {
-  if (!CXXPostfixExpressionNamesType(type_expr)) {
+  bool dependent_type =
+      CXXExpressionNamesTemplateTypeParameter(type_expr);
+  if (!CXXPostfixExpressionNamesType(type_expr) && !dependent_type) {
     return NULL;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)type_expr;
   TypeRecord* type = id->symbol->type;
   SourceLocation location = type_expr->location;
+  if (dependent_type) {
+    Vector* actuals =
+        ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
+    return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
+  }
   if (id->template_arguments != NULL ||
       TypeIsClassTemplatePlaceholder(type) ||
       FindCXXConstructorForType(type) != NULL) {

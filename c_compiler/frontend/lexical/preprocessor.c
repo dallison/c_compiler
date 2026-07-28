@@ -159,6 +159,9 @@ static void PredefineMacros(Preprocessor* p) {
       case kLanguageStandardCXX20:
         cplusplus = "202002L";
         break;
+      case kLanguageStandardCXX23:
+        cplusplus = "202302L";
+        break;
       default:
         break;
     }
@@ -172,6 +175,18 @@ static void PredefineMacros(Preprocessor* p) {
     // C++20 feature-test macros for language features implemented by DaveCC.
     if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
       PreprocessorDefineMacro(p, "__cpp_concepts", "202002L");
+      PreprocessorDefineMacro(p, "__cpp_consteval", "201811L");
+      PreprocessorDefineMacro(p, "__cpp_constinit", "201907L");
+      PreprocessorDefineMacro(p, "__cpp_impl_coroutine", "201902L");
+      PreprocessorDefineMacro(p, "__cpp_modules", "201907L");
+      PreprocessorDefineMacro(p, "__cpp_char8_t", "201811L");
+      PreprocessorDefineMacro(p, "__cpp_impl_three_way_comparison", "201907L");
+      PreprocessorDefineMacro(p, "__cpp_using_enum", "201907L");
+      PreprocessorDefineMacro(p, "__cpp_conditional_explicit", "201806L");
+      PreprocessorDefineMacro(p, "__cpp_constexpr_dynamic_alloc", "201907L");
+    }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      PreprocessorDefineMacro(p, "__cpp_static_call_operator", "202207L");
     }
   }
 
@@ -2256,6 +2271,15 @@ static void Endif(Preprocessor* p, String* line, size_t pos) {
   UpdateState(p);
 }
 
+static bool MacroNameIsDefined(Preprocessor* p, String* name) {
+  if (StringEqual(name, "__has_include") ||
+      StringEqual(name, "__has_cpp_attribute")) {
+    return true;
+  }
+  Macro* macro = HashTableSearch(&p->macros, name->value);
+  return macro != NULL && !macro->undefined;
+}
+
 static void Ifndef(Preprocessor* p, String* line, size_t pos) {
   static int macro_not_defined;
 
@@ -2266,8 +2290,8 @@ static void Ifndef(Preprocessor* p, String* line, size_t pos) {
     // An empty macro name will always be missing.
   }
  
-  Macro* macro = HashTableSearch(&p->macros, macro_name.value);
-  VectorPush(&p->if_stack, macro == NULL ? &macro_not_defined : NULL);
+  VectorPush(&p->if_stack, MacroNameIsDefined(p, &macro_name)
+                                ? NULL : &macro_not_defined);
   StringDestruct(&macro_name);
 
   pos = SkipSpacesAndComments(p, pos, line, NULL);
@@ -2278,6 +2302,8 @@ static void Ifndef(Preprocessor* p, String* line, size_t pos) {
 }
 
 static void Ifdef(Preprocessor* p, String* line, size_t pos) {
+  static int macro_defined;
+
   String macro_name;
   pos = ReadIdentifier(line, pos, &macro_name);
   if (macro_name.length == 0) {
@@ -2285,12 +2311,8 @@ static void Ifdef(Preprocessor* p, String* line, size_t pos) {
     // An empty macro name will always be missing from the table
     // of macros so it won't be found.
   }
-  Macro* macro = HashTableSearch(&p->macros, macro_name.value);
-  // #undef marks the macro as being undefined
-  if (macro != NULL && macro->undefined) {
-    macro = NULL;
-  }
-  VectorPush(&p->if_stack, macro);
+  VectorPush(&p->if_stack,
+             MacroNameIsDefined(p, &macro_name) ? &macro_defined : NULL);
   StringDestruct(&macro_name);
 
   pos = SkipSpacesAndComments(p, pos, line, NULL);
@@ -2342,6 +2364,58 @@ static void Elif(Preprocessor* p, String* line, size_t pos) {
   StringDestruct(&controlling_expr);
 
   UpdateState(p);
+}
+
+static void ElifMacroTest(Preprocessor* p, String* line, size_t pos,
+                          bool require_defined, const char* directive) {
+  static int condition_true;
+
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    if (p->is_compiled_in) {
+      PreprocessorError(p, "Invalid preprocessor directive %s", directive);
+    }
+    return;
+  }
+  if (p->if_stack.length == 0) {
+    PreprocessorError(p, "#%s outside #if..#endif", directive);
+    return;
+  }
+
+  void* top_value = p->if_stack.value.p[p->if_stack.length - 1];
+  if (top_value == (void*)(-1LL)) {
+    return;
+  }
+  if (top_value != NULL) {
+    p->if_stack.value.p[p->if_stack.length - 1] = (void*)(-1LL);
+    UpdateState(p);
+    return;
+  }
+
+  String macro_name;
+  pos = ReadIdentifier(line, pos, &macro_name);
+  if (macro_name.length == 0) {
+    PreprocessorError(p, "Expected macro name after #%s", directive);
+  }
+  bool is_defined = MacroNameIsDefined(p, &macro_name);
+  p->if_stack.value.p[p->if_stack.length - 1] =
+      require_defined ? (is_defined ? &condition_true : NULL)
+                      : (is_defined ? NULL : &condition_true);
+  StringDestruct(&macro_name);
+
+  pos = SkipSpacesAndComments(p, pos, line, NULL);
+  if (pos < line->length) {
+    PreprocessorWarning(p, "extra-tokens", "Extra tokens after #%s",
+                        directive);
+  }
+  UpdateState(p);
+}
+
+static void Elifdef(Preprocessor* p, String* line, size_t pos) {
+  ElifMacroTest(p, line, pos, true, "elifdef");
+}
+
+static void Elifndef(Preprocessor* p, String* line, size_t pos) {
+  ElifMacroTest(p, line, pos, false, "elifndef");
 }
 
 static void Else(Preprocessor* p, String* line, size_t pos) {
@@ -2816,7 +2890,8 @@ static struct {
     {"define", Define},   {"include", Include},
     {"if", If},           {"ifdef", Ifdef},
     {"ifndef", Ifndef},   {"endif", Endif},
-    {"elif", Elif},       {"else", Else},
+    {"elif", Elif},       {"elifdef", Elifdef},
+    {"elifndef", Elifndef}, {"else", Else},
     {"line", Line},       {"error", Error},
     {"pragma", Pragma},   {"undef", Undef},
     {"warning", Warning}, {"include_next", IncludeNext},
