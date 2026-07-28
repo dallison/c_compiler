@@ -879,6 +879,23 @@ TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member) {
   return type;
 }
 
+bool FunctionHasImplicitThisParameter(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.has_explicit_object_parameter ||
+      func->info.function.prototype.length == 0) {
+    return false;
+  }
+  Symbol* first = func->info.function.prototype.value.p[0];
+  return first != NULL && first->flags.invented &&
+         StringEqual(&first->name, "this");
+}
+
+bool FunctionHasExplicitObjectParameter(TypeRecord* func) {
+  return func != NULL && TypeIsFunction(func) &&
+         func->info.function.has_explicit_object_parameter &&
+         func->info.function.prototype.length > 0;
+}
+
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue) {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
   t->declarator = rvalue ? kDeclRValueReference : kDeclReference;
@@ -991,6 +1008,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_destructor = false;
   t->info.function.is_const_member = false;
   t->info.function.is_volatile_member = false;
+  t->info.function.has_explicit_object_parameter = false;
   t->info.function.ref_qualifier = kCXXRefQualifierNone;
   t->info.function.is_explicit = false;
   t->info.function.is_explicit_conversion = false;

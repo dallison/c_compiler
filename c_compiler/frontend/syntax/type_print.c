@@ -391,6 +391,9 @@ static void AppendFunctionParameterList(TypeRecord* func, String* out) {
       continue;
     }
     StringAppend(out, sep);
+    if (i == 0 && func->info.function.has_explicit_object_parameter) {
+      StringAppend(out, "this ");
+    }
     TypeRecordToStringWithTemplateParameters(
         formal->type, &func->info.function.template_parameters, out);
     sep = ", ";

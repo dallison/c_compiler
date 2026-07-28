@@ -214,6 +214,7 @@ typedef struct {
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
   bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49
+  bool has_explicit_object_parameter;  // C++23 `this T self`.       // @wire 50
 } FunctionInfo;
 
 typedef enum {

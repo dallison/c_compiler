@@ -595,6 +595,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_const_member = from->info.function.is_const_member;
   func->info.function.is_volatile_member =
       from->info.function.is_volatile_member;
+  func->info.function.has_explicit_object_parameter =
+      from->info.function.has_explicit_object_parameter;
   func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
@@ -693,13 +695,17 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   RebaseTemplateParameterIndices(return_type, member_template_base);
   TypeRecordChain(func, return_type);
 
-  if (is_static_member) {
+  if (is_static_member ||
+      from->info.function.has_explicit_object_parameter) {
     func->info.function.cxx_member_owner = owner;
   } else {
     TypeRecordAddCXXThisParameter(func, owner, location);
   }
   size_t first_formal =
-      from->info.function.cxx_member_owner != NULL && !is_static_member ? 1 : 0;
+      from->info.function.cxx_member_owner != NULL && !is_static_member &&
+              !from->info.function.has_explicit_object_parameter
+          ? 1
+          : 0;
   for (size_t i = first_formal; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
     // The implicit `__complete_object` flag (present on constructors/destructors
@@ -878,6 +884,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_const_member = from->info.function.is_const_member;
   func->info.function.is_volatile_member =
       from->info.function.is_volatile_member;
+  func->info.function.has_explicit_object_parameter =
+      from->info.function.has_explicit_object_parameter;
   func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   // Preserve constructor/destructor-ness so an instantiated constructor
   // template is still recognized as a constructor (its call is void-typed and

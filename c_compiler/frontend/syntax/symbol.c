@@ -639,17 +639,21 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   }
 
   StringAppendChar(out, 'N');
-  if (symbol->type->info.function.is_volatile_member) {
-    StringAppendChar(out, 'V');
-  }
-  if (symbol->type->info.function.is_const_member) {
-    StringAppendChar(out, 'K');
-  }
-  if (symbol->type->info.function.ref_qualifier == kCXXRefQualifierLValue) {
-    StringAppendChar(out, 'R');
-  } else if (symbol->type->info.function.ref_qualifier ==
-             kCXXRefQualifierRValue) {
-    StringAppendChar(out, 'O');
+  if (symbol->type->info.function.has_explicit_object_parameter) {
+    StringAppendChar(out, 'H');
+  } else {
+    if (symbol->type->info.function.is_volatile_member) {
+      StringAppendChar(out, 'V');
+    }
+    if (symbol->type->info.function.is_const_member) {
+      StringAppendChar(out, 'K');
+    }
+    if (symbol->type->info.function.ref_qualifier == kCXXRefQualifierLValue) {
+      StringAppendChar(out, 'R');
+    } else if (symbol->type->info.function.ref_qualifier ==
+               kCXXRefQualifierRValue) {
+      StringAppendChar(out, 'O');
+    }
   }
   AppendCXXNestedNamespaceComponents(out, ns);
   if (owner != NULL) {

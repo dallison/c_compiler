@@ -277,6 +277,11 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   func->info.function.is_destructor = is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   ParseFunctionPrototype(&proto_parser, func);
+  if (func->info.function.has_explicit_object_parameter) {
+    SyntaxError(
+        parser->syntax,
+        "constructors and destructors cannot have an explicit object parameter");
+  }
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   if (LexMatch(parser->lex, TOK(const))) {
     SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
@@ -284,7 +289,11 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   ParseCXXExceptionSpecifier(parser, func);
   ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
-  TypeRecordAddCXXThisParameter(func, parser->cxx_member_owner, location);
+  if (func->info.function.has_explicit_object_parameter) {
+    func->info.function.cxx_member_owner = parser->cxx_member_owner;
+  } else {
+    TypeRecordAddCXXThisParameter(func, parser->cxx_member_owner, location);
+  }
 
   Symbol* sym = NewSymbol(member_name.value, func, STO(implicit));
   sym->location = location;

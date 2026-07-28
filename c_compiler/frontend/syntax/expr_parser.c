@@ -2279,7 +2279,25 @@ static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
   }
   int arg_number = 0;
   while (!LexLookingAt(syntax->lex, TOK(rparen)) && !LexEof(syntax->lex)) {
+    bool explicit_object_parameter =
+        CompilerIsCXX() && LexMatch(syntax->lex, TOK(this));
+    if (explicit_object_parameter) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        SyntaxError(syntax, "explicit object parameters require C++23");
+      }
+      if (arg_number != 0) {
+        SyntaxError(syntax,
+                    "explicit object parameter must be the first parameter");
+      }
+      func->info.function.has_explicit_object_parameter = true;
+    }
     if (ParseLambdaAbbreviatedParameter(syntax, func, arg_number, followers)) {
+      Symbol* formal = func->info.function.prototype.value.p[
+          func->info.function.prototype.length - 1];
+      if (explicit_object_parameter && formal->flags.is_parameter_pack) {
+        SyntaxError(syntax,
+                    "explicit object parameter cannot be a parameter pack");
+      }
       arg_number++;
     } else {
       TypeParser parser;
@@ -2294,6 +2312,10 @@ static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
         formal->flags.is_defined = true;
         formal->flags.is_argument = true;
         formal->value.arg_number = arg_number++;
+        if (explicit_object_parameter && formal->flags.is_parameter_pack) {
+          SyntaxError(syntax,
+                      "explicit object parameter cannot be a parameter pack");
+        }
         VectorAppend(&func->info.function.prototype, formal);
       }
     }
@@ -2450,11 +2472,20 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   return_type = ParseLambdaSpecifiersAndReturnType(syntax, func, &is_mutable,
                                                    &is_constexpr, &is_noexcept,
                                                    return_type, TC(closebra));
-  func->info.function.is_const_member = !is_mutable;
+  func->info.function.is_const_member =
+      !func->info.function.has_explicit_object_parameter && !is_mutable;
   func->info.function.is_constexpr = is_constexpr;
   func->info.function.is_noexcept = is_noexcept;
   TypeRecordChain(func, return_type);
-  TypeRecordAddCXXThisParameter(func, closure, location);
+  if (func->info.function.has_explicit_object_parameter) {
+    func->info.function.cxx_member_owner = closure;
+    if (is_mutable) {
+      SyntaxError(syntax,
+                  "lambda with an explicit object parameter cannot be mutable");
+    }
+  } else {
+    TypeRecordAddCXXThisParameter(func, closure, location);
+  }
 
   Symbol* op = NewSymbol("operator()", func, STO(implicit));
   op->location = location;
@@ -5063,6 +5094,13 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
   // Forming a pointer-to-member (&Class::field) counts as a use of the data
   // member for -Wunused-private-field.
   member->symbol->flags.used = true;
+  if (member->is_member_function &&
+      FunctionHasExplicitObjectParameter(member->symbol->type)) {
+    member->symbol->flags.address_taken = true;
+    SourceLocation location = syntax->lex->current_token_location;
+    ASTNode* function = NewIdentifierASTNode(member->symbol, location);
+    return NewUnaryASTNode(AST_OP(address), NULL, location, function);
+  }
   TypeRecord* member_type = TypeMemberPointerPointeeFromMember(member);
   TypeRecord* mptr = NewMemberPointerTypeRecord(class_info, kQualPlain);
   TypeRecordChain(mptr, member_type);

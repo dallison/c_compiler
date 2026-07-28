@@ -1075,8 +1075,16 @@ static bool CXXMemberExplicitParameterListsEqual(StructMember* left,
   }
   Vector* left_params = &left->symbol->type->info.function.prototype;
   Vector* right_params = &right->symbol->type->info.function.prototype;
-  size_t left_start = left->is_static ? 0 : 1;
-  size_t right_start = right->is_static ? 0 : 1;
+  size_t left_start =
+      left->is_static ||
+              FunctionHasExplicitObjectParameter(left->symbol->type)
+          ? 0
+          : 1;
+  size_t right_start =
+      right->is_static ||
+              FunctionHasExplicitObjectParameter(right->symbol->type)
+          ? 0
+          : 1;
   if (left_params->length < left_start ||
       right_params->length < right_start ||
       left_params->length - left_start != right_params->length - right_start) {
@@ -1672,6 +1680,11 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   func->info.function.is_virtual = is_virtual && is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   ParseFunctionPrototype(&proto_parser, func);
+  if (func->info.function.has_explicit_object_parameter) {
+    SyntaxError(
+        parser->syntax,
+        "constructors and destructors cannot have an explicit object parameter");
+  }
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   if (LexMatch(parser->lex, TOK(const))) {
     SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
@@ -1681,7 +1694,11 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   ParseCXXSpecialMemberTrailingRequires(parser, func);
   ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
-  TypeRecordAddCXXThisParameter(func, str, location);
+  if (func->info.function.has_explicit_object_parameter) {
+    func->info.function.cxx_member_owner = str;
+  } else {
+    TypeRecordAddCXXThisParameter(func, str, location);
+  }
 
   String member_name;
   StringInit(&member_name, is_destructor ? "~" : "");
@@ -2448,8 +2465,46 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           if (is_constexpr_member || is_consteval_member) {
             member_symbol->type->info.function.is_inline = true;
           }
+          if (member_symbol->type->info.function.template_parameters.length >
+                  0 &&
+              !member_symbol->flags.is_template) {
+            member_symbol->flags.is_template = true;
+            member_symbol->type->info.function.template_parameter_count =
+                (int)member_symbol->type->info.function.template_parameters
+                    .length;
+          }
         }
-        if (member->is_member_function && !member->is_static) {
+        bool has_explicit_object =
+            member->is_member_function &&
+            member_symbol->type->info.function.has_explicit_object_parameter;
+        if (has_explicit_object) {
+          member_symbol->type->info.function.cxx_member_owner = str;
+          Symbol* object_parameter =
+              member_symbol->type->info.function.prototype.value.p[0];
+          TypeRecord* object_type =
+              object_parameter != NULL ? object_parameter->type : NULL;
+          if (TypeIsReference(object_type)) {
+            object_type = object_type->next;
+          }
+          if (object_type != NULL &&
+              !TypeContainsTemplateParameter(object_type) &&
+              (!TypeIsStructOrUnion(object_type) ||
+               (object_type->info.struct_info != str &&
+                !StructIsDerivedFrom(object_type->info.struct_info, str,
+                                     /*public_only=*/false)))) {
+            SyntaxError(
+                parser->syntax,
+                "explicit object parameter type must name the member's class or a derived class");
+          }
+          if (member->is_static) {
+            SyntaxError(parser->syntax,
+                        "explicit object member function cannot be static");
+          }
+          if (is_virtual_member) {
+            SyntaxError(parser->syntax,
+                        "explicit object member function cannot be virtual");
+          }
+        } else if (member->is_member_function && !member->is_static) {
           member_symbol->type->info.function.is_virtual = is_virtual_member;
           TypeRecordAddCXXThisParameter(member_symbol->type, str,
                                         member_symbol->location);
@@ -2504,6 +2559,13 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           ParseCXXVirtSpecifiers(parser, member_symbol->type);
           ParseCXXPureSpecifier(parser, member_symbol->type);
           CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
+          if (has_explicit_object &&
+              (member_symbol->type->info.function.is_constructor ||
+               member_symbol->type->info.function.is_destructor)) {
+            SyntaxError(
+                parser->syntax,
+                "constructors and destructors cannot have an explicit object parameter");
+          }
           if (member->is_static &&
               (member_symbol->type->info.function.is_override ||
                member_symbol->type->info.function.is_final ||

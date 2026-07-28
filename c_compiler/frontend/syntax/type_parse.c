@@ -1861,6 +1861,23 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
     SyntaxError(proto_parser->syntax, "Illegal use of %s", keyword);
     LexNextToken(proto_parser->lex);
   }
+  bool explicit_object_parameter =
+      CompilerIsCXX() && LexMatch(proto_parser->lex, TOK(this));
+  if (explicit_object_parameter) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(proto_parser->syntax,
+                  "explicit object parameters require C++23");
+    }
+    if (arg_number != 0) {
+      SyntaxError(proto_parser->syntax,
+                  "explicit object parameter must be the first parameter");
+    }
+    if (proto_parser->cxx_member_owner == NULL) {
+      SyntaxError(proto_parser->syntax,
+                  "explicit object parameter is only allowed in a member function");
+    }
+    func->info.function.has_explicit_object_parameter = true;
+  }
   if (ParseAbbreviatedFunctionParameter(proto_parser, func, arg_number)) {
     if (style == kStyleUnknown) {
       style = kStyleNew;
@@ -1868,6 +1885,27 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
     if (style == kStyleOld) {
       SyntaxError(proto_parser->syntax,
                   "Cannot mix function prototype with old-style function args");
+    }
+    Symbol* formal = func->info.function.prototype.value.p[
+        func->info.function.prototype.length - 1];
+    if (explicit_object_parameter && formal->flags.is_parameter_pack) {
+      SyntaxError(proto_parser->syntax,
+                  "explicit object parameter cannot be a parameter pack");
+    }
+    if (CompilerIsCXX() && LexMatch(proto_parser->lex, TOK(equal))) {
+      if (explicit_object_parameter) {
+        SyntaxError(proto_parser->syntax,
+                    "explicit object parameter cannot have a default argument");
+      }
+      if (LexMatch(proto_parser->lex, TOK(lbrace))) {
+        formal->default_argument =
+            SyntaxParseBracedInitializer(proto_parser->syntax);
+      } else {
+        formal->default_argument =
+            SyntaxParseSingleExpression(proto_parser->syntax,
+                                        TC(closebra) | TC(exprsep));
+      }
+      *seen_default_argument = true;
     }
   } else if (proto_parser->found_void ||
         SyntaxLookingAtType(proto_parser->syntax)) {
@@ -1883,7 +1921,15 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
     Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
     assert(formal != NULL);
     ParseFormalArgument(proto_parser, func, formal, arg_number);
+    if (explicit_object_parameter && formal->flags.is_parameter_pack) {
+      SyntaxError(proto_parser->syntax,
+                  "explicit object parameter cannot be a parameter pack");
+    }
     if (CompilerIsCXX() && LexMatch(proto_parser->lex, TOK(equal))) {
+      if (explicit_object_parameter) {
+        SyntaxError(proto_parser->syntax,
+                    "explicit object parameter cannot have a default argument");
+      }
       if (formal->flags.is_parameter_pack) {
         SyntaxError(proto_parser->syntax,
                     "function parameter pack cannot have a default argument");
@@ -2120,6 +2166,13 @@ static void ParseFunctionDecl(TypeParser* parser) {
     }
   }
   func->info.function.ref_qualifier = ParseCXXRefQualifier(parser);
+  if (func->info.function.has_explicit_object_parameter &&
+      (func->info.function.is_const_member ||
+       func->info.function.is_volatile_member ||
+       func->info.function.ref_qualifier != kCXXRefQualifierNone)) {
+    SyntaxError(parser->syntax,
+                "explicit object member function cannot have cv or ref qualifiers");
+  }
   ParseCXXExceptionSpecifier(parser, func);
   if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
       LexMatch(parser->lex, TOK(arrow))) {
@@ -2129,7 +2182,8 @@ static void ParseFunctionDecl(TypeParser* parser) {
   ParseCXXTrailingRequiresClause(parser, func);
   SyntaxCloseScope(parser->syntax);
   if (parser->cxx_member_definition != NULL &&
-      !parser->cxx_member_definition->is_static) {
+      !parser->cxx_member_definition->is_static &&
+      !func->info.function.has_explicit_object_parameter) {
     TypeRecordAddCXXThisParameter(
         func, parser->cxx_member_owner, parser->symbol->location);
   } else if (parser->cxx_member_definition != NULL) {

@@ -54,6 +54,8 @@ TypeRecord* NewFunctionTypeRecord(void);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
 Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
                          bool is_volatile_member, SourceLocation location);
+bool FunctionHasImplicitThisParameter(TypeRecord* func);
+bool FunctionHasExplicitObjectParameter(TypeRecord* func);
 void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location);
 

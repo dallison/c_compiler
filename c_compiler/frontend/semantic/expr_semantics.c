@@ -4340,15 +4340,19 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
 
   ASTNode* receiver = NULL;
   ASTNode* discarded_static_receiver = NULL;
+  bool explicit_object =
+      FunctionHasExplicitObjectParameter(member->symbol->type);
   bool use_virtual_dispatch =
       member->symbol->type->info.function.is_virtual &&
-      !member->is_static && !CurrentFunctionIsCXXCtorOrDtor();
+      !member->is_static && !explicit_object &&
+      !CurrentFunctionIsCXXCtorOrDtor();
   bool polymorphic_special_member =
       (member->symbol->type->info.function.is_constructor ||
        member->symbol->type->info.function.is_destructor) &&
       owner != NULL && owner->virtual_members.length > 0;
   if (!member->is_static) {
-    if (!member->symbol->type->info.function.is_const_member &&
+    if (!explicit_object &&
+        !member->symbol->type->info.function.is_const_member &&
         !member->symbol->type->info.function.is_constructor &&
         !member->symbol->type->info.function.is_destructor &&
         MemberReceiverIsConst(member_access)) {
@@ -4360,7 +4364,8 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
                     member->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
     }
-    if (!member->symbol->type->info.function.is_volatile_member &&
+    if (!explicit_object &&
+        !member->symbol->type->info.function.is_volatile_member &&
         !member->symbol->type->info.function.is_constructor &&
         !member->symbol->type->info.function.is_destructor &&
         MemberReceiverIsVolatile(member_access)) {
@@ -4373,17 +4378,24 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
           member->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
     }
-    if (!MemberReceiverMatchesRefQualifier(member->symbol->type, member_access)) {
+    if (!explicit_object &&
+        !MemberReceiverMatchesRefQualifier(member->symbol->type, member_access)) {
       SemanticError((ASTNode*)member_access,
                     "Cannot call ref-qualified member function %s on this "
                     "object value category",
                     member->symbol->name.value);
     }
     receiver = ASTNodeMove(member_access->left);
-    if (member_access->base.op == AST_OP(dot)) {
+    if (explicit_object && member_access->base.op == AST_OP(arrow)) {
+      TypeRecord* object_type =
+          receiver->type != NULL ? receiver->type->next : NULL;
+      receiver = NewUnaryASTNode(AST_OP(contents), object_type,
+                                 receiver->location, receiver);
+      receiver = AnalyzeExpression(receiver);
+    } else if (!explicit_object && member_access->base.op == AST_OP(dot)) {
       receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
     }
-    int this_adjustment = member_node->byte_offset;
+    int this_adjustment = explicit_object ? 0 : member_node->byte_offset;
     if (use_virtual_dispatch && member->cxx_vcall_offset != 0) {
       this_adjustment = member->cxx_vcall_offset;
     }
@@ -6363,10 +6375,61 @@ static bool MemberFunctionConstraintsSatisfied(StructMember* candidate,
   return ConceptsConstraintSatisfied(constraint, class_args);
 }
 
+static ASTNode* ExplicitObjectReceiverForCall(BinaryASTNode* member_access,
+                                              ASTNode* scratch) {
+  if (member_access == NULL || member_access->left == NULL) {
+    return NULL;
+  }
+  if (member_access->base.op == AST_OP(dot)) {
+    return member_access->left;
+  }
+  if (!TypeIsPointer(member_access->left->type) ||
+      member_access->left->type->next == NULL) {
+    return NULL;
+  }
+  *scratch = *member_access->left;
+  scratch->op = AST_OP(contents);
+  scratch->type = member_access->left->type->next;
+  scratch->value_category = kValueCategoryLvalue;
+  return scratch;
+}
+
+static void BuildExplicitObjectCallActuals(VectorASTNode* call,
+                                           BinaryASTNode* member_access,
+                                           ASTNode* receiver_scratch,
+                                           Vector* actuals) {
+  VectorInit(actuals);
+  ASTNode* receiver =
+      ExplicitObjectReceiverForCall(member_access, receiver_scratch);
+  if (receiver != NULL) {
+    VectorAppend(actuals, receiver);
+  }
+  for (size_t i = 0; call->children != NULL &&
+                     i < call->children->length; i++) {
+    VectorAppend(actuals, call->children->value.p[i]);
+  }
+}
+
 static int MemberOverloadCallScore(StructMember* candidate,
                                    VectorASTNode* node,
                                    BinaryASTNode* member_access,
                                    bool check_receiver_const) {
+  TypeRecord* function_type = candidate->symbol->type;
+  if (FunctionHasExplicitObjectParameter(function_type)) {
+    ASTNode receiver_scratch;
+    Vector actuals;
+    BuildExplicitObjectCallActuals(node, member_access, &receiver_scratch,
+                                   &actuals);
+    VectorASTNode explicit_call = *node;
+    explicit_call.children = &actuals;
+    int score = FunctionCallScore(function_type, &explicit_call, 0);
+    VectorDestruct(&actuals);
+    if (score >= 0 &&
+        !MemberFunctionConstraintsSatisfied(candidate, member_access)) {
+      return -1;
+    }
+    return score;
+  }
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
   if (check_receiver_const && !candidate->is_static &&
       !candidate->symbol->type->info.function.is_const_member &&
@@ -6457,6 +6520,7 @@ static void EmitMemberCandidateNotes(StructMember* first, VectorASTNode* node,
 
 static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
                                                      VectorASTNode* node,
+                                                     BinaryASTNode* member_access,
                                                      Vector* explicit_args,
                                                      Vector* temporary_members) {
   if (candidate == NULL || candidate->symbol == NULL ||
@@ -6470,12 +6534,22 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
   if (!candidate->symbol->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
   }
-  size_t first_formal_arg = candidate->is_static ? 0 : 1;
+  bool explicit_object =
+      FunctionHasExplicitObjectParameter(candidate->symbol->type);
+  size_t first_formal_arg = candidate->is_static || explicit_object ? 0 : 1;
+  ASTNode receiver_scratch;
+  Vector explicit_object_actuals;
+  Vector* deduction_actuals = node->children;
+  if (explicit_object) {
+    BuildExplicitObjectCallActuals(node, member_access, &receiver_scratch,
+                                   &explicit_object_actuals);
+    deduction_actuals = &explicit_object_actuals;
+  }
   Vector* prototype = &candidate->symbol->type->info.function.prototype;
-  for (size_t i = 0; node->children != NULL && i < node->children->length &&
+  for (size_t i = 0; deduction_actuals != NULL && i < deduction_actuals->length &&
                      i + first_formal_arg < prototype->length; i++) {
     Symbol* formal = prototype->value.p[i + first_formal_arg];
-    ASTNode* actual = node->children->value.p[i];
+    ASTNode* actual = deduction_actuals->value.p[i];
     TypeRecord* target =
         formal != NULL && TypeIsReference(formal->type) ? formal->type->next
                                                         : formal->type;
@@ -6489,14 +6563,20 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
         !TypeIsCXXInitializerList(TypeIsReference(actual->type)
                                       ? actual->type->next
                                       : actual->type)) {
+      if (explicit_object) {
+        VectorDestruct(&explicit_object_actuals);
+      }
       return NULL;
     }
   }
   DiagnosticSuppressBegin();
   Symbol* instantiated = TypeCreateFunctionTemplateCandidate(
-      &compiler->syntax, candidate->symbol, explicit_args, node->children,
+      &compiler->syntax, candidate->symbol, explicit_args, deduction_actuals,
       first_formal_arg);
   DiagnosticSuppressEnd();
+  if (explicit_object) {
+    VectorDestruct(&explicit_object_actuals);
+  }
   if (instantiated == NULL) {
     return NULL;
   }
@@ -6599,7 +6679,8 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     for (StructMember* candidate = first; candidate != NULL;
          candidate = candidate->overload_next) {
       StructMember* effective =
-          MemberTemplateOverloadCandidate(candidate, node, explicit_args,
+          MemberTemplateOverloadCandidate(candidate, node, member_access,
+                                          explicit_args,
                                           &temporary_members);
       if (effective == NULL) {
         continue;

@@ -8,6 +8,10 @@
 #error "__cpp_if_consteval must not be defined before C++23"
 #endif
 
+#ifdef __cpp_explicit_this_parameter
+#error "__cpp_explicit_this_parameter must not be defined before C++23"
+#endif
+
 int main(void) {
   return 0;
 }

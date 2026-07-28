@@ -52,6 +52,10 @@
 #error "__cpp_if_consteval has the wrong value"
 #endif
 
+#if __cpp_explicit_this_parameter != 202110L
+#error "__cpp_explicit_this_parameter has the wrong value"
+#endif
+
 int main(void) {
   return 0;
 }
