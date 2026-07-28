@@ -940,6 +940,21 @@ static void AnalyzeAsmStatement(AsmASTNode* node) {
 }
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
+  if (node->is_consteval) {
+    node->cond = AnalyzeExpression(node->cond);
+    if (node->consteval_negated) {
+      AnalyzeStatement(node->if_part);
+      compiler->immediate_function_context_depth++;
+      AnalyzeStatement(node->else_part);
+      compiler->immediate_function_context_depth--;
+    } else {
+      compiler->immediate_function_context_depth++;
+      AnalyzeStatement(node->if_part);
+      compiler->immediate_function_context_depth--;
+      AnalyzeStatement(node->else_part);
+    }
+    return;
+  }
   node->cond = AnalyzeExpression(node->cond);
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);

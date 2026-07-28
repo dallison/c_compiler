@@ -422,6 +422,8 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 17, kSerialKindAST, i->if_part);
       SWriteRef(ctx, buf, 18, kSerialKindAST, i->else_part);
       WireWriteBool(buf, 19, i->is_constexpr);
+      WireWriteBool(buf, 20, i->is_consteval);
+      WireWriteBool(buf, 21, i->consteval_negated);
       break;
     }
     case kASTShapeCombined: {
@@ -733,6 +735,14 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 19) {
         WireReadBool(buf, &i->is_constexpr);
+        return;
+      }
+      if (field == 20) {
+        WireReadBool(buf, &i->is_consteval);
+        return;
+      }
+      if (field == 21) {
+        WireReadBool(buf, &i->consteval_negated);
         return;
       }
       break;

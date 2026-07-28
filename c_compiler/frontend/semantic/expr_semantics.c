@@ -294,6 +294,71 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   return &node->base;
 }
 
+typedef struct {
+  Vector visited_functions;
+  bool found;
+} ConstevalContextQuery;
+
+static void FindConstevalContextUse(ASTNode* node, void* data, int child_id,
+                                    VisitorMode mode);
+
+static bool FunctionMayObserveConstantEvaluation(
+    Symbol* symbol, ConstevalContextQuery* query) {
+  if (symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.is_consteval) {
+    return false;
+  }
+  Symbol* definition =
+      symbol->value.func_defn != NULL ? symbol->value.func_defn : symbol;
+  if (definition == NULL || definition->type == NULL ||
+      !TypeIsFunction(definition->type) ||
+      definition->type->info.function.body == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < query->visited_functions.length; i++) {
+    if (query->visited_functions.value.p[i] == definition) {
+      return false;
+    }
+  }
+  VectorAppend(&query->visited_functions, definition);
+  ASTNodeVisit(definition->type->info.function.body, FindConstevalContextUse, 0,
+               query);
+  return query->found;
+}
+
+static void FindConstevalContextUse(ASTNode* node, void* data, int child_id,
+                                    VisitorMode mode) {
+  (void)child_id;
+  ConstevalContextQuery* query = data;
+  if (mode != kVisitPreChildren || query->found || node == NULL) {
+    return;
+  }
+  if (node->op == AST_OP(if) &&
+      ((IfStatementASTNode*)node)->is_consteval) {
+    query->found = true;
+    return;
+  }
+  if (node->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier)) {
+    return;
+  }
+  FunctionMayObserveConstantEvaluation(
+      ((IdentifierASTNode*)call->left)->symbol, query);
+}
+
+static bool ExpressionMayObserveConstantEvaluation(ASTNode* node) {
+  ConstevalContextQuery query;
+  VectorInit(&query.visited_functions);
+  query.found = false;
+  ASTNodeVisit(node, FindConstevalContextUse, 0, &query);
+  VectorDestruct(&query.visited_functions);
+  return query.found;
+}
+
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
 static ASTNode* FoldConstantExpression(ASTNode* node) {
@@ -301,6 +366,16 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   // arguments are known. Folding it now would freeze placeholder properties
   // such as the provisional size of a dependent type into the template body.
   if (CompilerIsCXX() && ExpressionIsTemplateDependent(node)) {
+    return NULL;
+  }
+  // Speculative runtime folding is not a manifestly constant-evaluated
+  // context. Keep calls that can reach `if consteval` intact so target codegen
+  // selects their runtime arms. Constant-required consumers (static_assert,
+  // constexpr initialization, template arguments) evaluate the retained tree
+  // explicitly and therefore still select the constant-evaluation arms.
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+      compiler->constant_evaluation_required_depth == 0 &&
+      ExpressionMayObserveConstantEvaluation(node)) {
     return NULL;
   }
   switch (node->op) {
@@ -8056,7 +8131,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   
-  if (call_ok && subtype->info.function.is_consteval) {
+  bool in_immediate_function_context =
+      compiler->immediate_function_context_depth > 0 ||
+      (compiler->current_function != NULL &&
+       TypeIsFunction(compiler->current_function) &&
+       compiler->current_function->info.function.is_consteval);
+  if (call_ok && subtype->info.function.is_consteval &&
+      !in_immediate_function_context) {
     bool ok = false;
     if (TypeIsFloatingPoint(return_type)) {
       double value;

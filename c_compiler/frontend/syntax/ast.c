@@ -2347,6 +2347,8 @@ static ASTNode* IfStatementASTNodeClone(const ASTNode* node,
   to->if_part = ASTNodeClone(from->if_part, func, data, &to->base);
   to->else_part = ASTNodeClone(from->else_part, func, data, &to->base);
   to->is_constexpr = from->is_constexpr;
+  to->is_consteval = from->is_consteval;
+  to->consteval_negated = from->consteval_negated;
   return func(&to->base, data);
 }
 
@@ -2402,6 +2404,8 @@ ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
     else_part->child_id = 2;
   }
   node->is_constexpr = is_constexpr;
+  node->is_consteval = false;
+  node->consteval_negated = false;
   return (ASTNode*)node;
 }
 

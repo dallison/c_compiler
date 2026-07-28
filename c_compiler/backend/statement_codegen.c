@@ -1158,6 +1158,13 @@ static bool StatementContainsLabel(ASTNode* node) {
 }
 
 static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
+  if (node->is_consteval) {
+    bool select_if_part =
+        gen->for_constant_evaluation != node->consteval_negated;
+    GenerateStatement(gen,
+                      select_if_part ? node->if_part : node->else_part);
+    return;
+  }
   // If the condition is a constant we can omit the expression,
   // comparison and the statement as appropriate -- but only when the dead arm
   // contains no labels.  A label inside the dead arm is a valid goto/switch

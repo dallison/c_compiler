@@ -446,6 +446,16 @@ typedef struct {
   // This is the primary guard; the constexpr_codegen_recover longjmp above is
   // kept only as defense in depth.
   Vector functions_being_analyzed;
+
+  // Nonzero while semantically analyzing an immediate-function context, such
+  // as the constant-evaluation arm of a C++23 `if consteval`. Calls to
+  // immediate functions are permitted to depend on enclosing parameters there.
+  int immediate_function_context_depth;
+
+  // Nonzero while analyzing an expression whose value is required at compile
+  // time. This distinguishes manifest constant evaluation from speculative
+  // runtime folding for context-sensitive constructs such as `if consteval`.
+  int constant_evaluation_required_depth;
 } Compiler;
 
 // Globals to avoid passing these around.

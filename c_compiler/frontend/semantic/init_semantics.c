@@ -10,6 +10,7 @@
 #include "init_semantics.h"
 #include <stdlib.h>
 #include "compiler.h"
+#include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "list.h"
 
@@ -438,6 +439,35 @@ bool InitializerIsLinkTimeConstant(ASTNode* init) {
 
 // Initialize the current node and advance to the next.  Returns true
 // if the initialization is valid.
+static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
+  ASTNode* folded = NULL;
+  if (TypeIsIntegral(expr->type)) {
+    int64_t value;
+    if (EvaluateIntegerExpression(expr, &value)) {
+      folded =
+          NewIntConstantASTNode(value, expr->type, expr->location);
+    }
+  } else if (TypeIsFloatingPoint(expr->type)) {
+    double value;
+    if (EvaluateFloatingPointExpression(expr, &value)) {
+      folded =
+          NewRealConstantASTNode(value, expr->type, expr->location);
+    }
+  }
+  if (folded == NULL) {
+    return expr;
+  }
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, folded, true);
+  } else {
+    ASTNodeDelete(expr);
+  }
+  folded->flags |= kASTAnalyzed;
+  return folded;
+}
+
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
   if (inode == NULL) {
     return false;
@@ -455,7 +485,14 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
     CompoundLiteralASTNode* cl = (CompoundLiteralASTNode*)expr;
     return InitializeINode(inode, cl->initializer, constants_only);
   }
+  if (constants_only) {
+    compiler->constant_evaluation_required_depth++;
+  }
   expr = AnalyzeExpression(expr);
+  if (constants_only) {
+    compiler->constant_evaluation_required_depth--;
+    expr = FoldRequiredScalarConstant(expr);
+  }
   switch (inode->kind) {
     case kIScalar:
       if (constants_only) {

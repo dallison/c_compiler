@@ -2664,6 +2664,13 @@ static ConstexprStatementResult EvaluateConstexprStatement(
                                        return_type, result);
     case AST_OP(if): {
       IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
+      if (if_stmt->is_consteval) {
+        return EvaluateConstexprStatement(
+            ctx,
+            if_stmt->consteval_negated ? if_stmt->else_part
+                                       : if_stmt->if_part,
+            return_type, result);
+      }
       bool condition;
       if (!EvaluateConstexprCondition(ctx, if_stmt->cond, &condition)) {
         return kConstexprStmtInvalid;

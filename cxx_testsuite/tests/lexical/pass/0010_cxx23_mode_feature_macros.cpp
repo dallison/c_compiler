@@ -48,6 +48,10 @@
 #error "__cpp_static_call_operator has the wrong value"
 #endif
 
+#if __cpp_if_consteval != 202106L
+#error "__cpp_if_consteval has the wrong value"
+#endif
+
 int main(void) {
   return 0;
 }

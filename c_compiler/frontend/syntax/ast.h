@@ -659,6 +659,8 @@ typedef struct {
   ASTNode* if_part;     // @wire 17
   ASTNode* else_part;   // @wire 18
   bool is_constexpr;    // @wire 19
+  bool is_consteval;    // @wire 20
+  bool consteval_negated;  // @wire 21
 } IfStatementASTNode;
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,

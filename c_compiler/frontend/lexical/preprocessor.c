@@ -186,6 +186,7 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_constexpr_dynamic_alloc", "201907L");
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      PreprocessorDefineMacro(p, "__cpp_if_consteval", "202106L");
       PreprocessorDefineMacro(p, "__cpp_static_call_operator", "202207L");
     }
   }

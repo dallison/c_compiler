@@ -562,11 +562,64 @@ static ASTNode* FinishInitScope(Syntax* syntax, ASTNode* init,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static bool ParseIfConstevalPrefix(Syntax* syntax, bool* negated) {
+  *negated = false;
+  if (LexMatch(syntax->lex, TOK(consteval))) {
+    return true;
+  }
+  if (!LexLookingAt(syntax->lex, TOK(bang))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  if (LexMatch(syntax->lex, TOK(consteval))) {
+    *negated = true;
+    LexCheckpointDestruct(&checkpoint);
+    return true;
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return false;
+}
+
 static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
                                  SourceLocation location) {
   bool is_constexpr = false;
   if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
     is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
+  }
+  bool consteval_negated = false;
+  bool is_consteval =
+      !is_constexpr && CompilerIsCXX() &&
+      ParseIfConstevalPrefix(syntax, &consteval_negated);
+  if (is_consteval) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax, "'if consteval' requires C++23");
+    }
+    if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+      SyntaxError(
+          syntax,
+          "'if consteval' substatements must be compound statements");
+    }
+    ASTNode* if_part = SyntaxParseStatement(syntax, followers);
+    ASTNode* else_part = NULL;
+    if (LexMatch(syntax->lex, TOK(else))) {
+      if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+        SyntaxError(
+            syntax,
+            "'if consteval' substatements must be compound statements");
+      }
+      else_part = SyntaxParseStatement(syntax, followers);
+    }
+    ASTNode* cond = NewIntConstantASTNode(
+        1, NewTypeRecordWithSize(kTypeBool, kQualPlain), location);
+    ASTNode* stmt =
+        NewIfStatementASTNode(cond, if_part, else_part, false, location);
+    IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
+    if_stmt->is_consteval = true;
+    if_stmt->consteval_negated = consteval_negated;
+    return stmt;
   }
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
   ASTNode* decl = NULL;
