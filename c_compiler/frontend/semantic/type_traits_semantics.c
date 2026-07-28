@@ -556,7 +556,8 @@ static bool TypeTraitSameClassSpecialMemberConstruction(
                 arg->declarator == kDeclRValueReference;
   TypeRecord* object = TypeIsReference(arg) ? arg->next : arg;
   if (object == NULL || !TypeIsStructOrUnion(object) ||
-      object->info.struct_info != target->info.struct_info) {
+      (object->info.struct_info != target->info.struct_info &&
+       !TypeEqualIgnoringQualifiers(object, target))) {
     return false;
   }
   *handled = true;
@@ -601,6 +602,42 @@ static bool TypeTraitSameClassSpecialMemberConstruction(
     if (source_object == NULL || !TypeIsConst(source_object)) {
       return false;
     }
+  }
+  return !check_nothrow ||
+         member->symbol->type->info.function.is_noexcept;
+}
+
+static bool TypeTraitSameClassSpecialMemberAssignment(
+    TypeRecord* lhs, TypeRecord* rhs, bool check_nothrow, bool* handled) {
+  *handled = false;
+  if (!TypeIsReference(lhs) || lhs->declarator != kDeclReference) {
+    return false;
+  }
+  TypeRecord* target = lhs->next;
+  TypeRecord* source = TypeIsReference(rhs) ? rhs->next : rhs;
+  if (target == NULL || source == NULL || !TypeIsStructOrUnion(target) ||
+      !TypeIsStructOrUnion(source) || TypeIsConst(target) ||
+      (source->info.struct_info != target->info.struct_info &&
+       !TypeEqualIgnoringQualifiers(source, target))) {
+    return false;
+  }
+
+  *handled = true;
+  bool use_move =
+      (!TypeIsReference(rhs) || rhs->declarator == kDeclRValueReference) &&
+      !TypeIsConst(source);
+  StructMember* member = TypeTraitFindSpecialMember(
+      target->info.struct_info,
+      use_move ? kCXXSpecialMemberMoveAssignment
+               : kCXXSpecialMemberCopyAssignment);
+  if (member == NULL && use_move) {
+    member = TypeTraitFindSpecialMember(target->info.struct_info,
+                                        kCXXSpecialMemberCopyAssignment);
+  }
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL || member->access != kAccessPublic ||
+      member->symbol->type->info.function.is_deleted) {
+    return false;
   }
   return !check_nothrow ||
          member->symbol->type->info.function.is_noexcept;
@@ -751,8 +788,14 @@ static bool TypeTraitIsAssignable(Syntax* syntax, Vector* type_args,
       TypeIsFunction(lhs) || TypeIsArray(lhs)) {
     return false;
   }
-  ASTNode* left = NewSyntheticLvalue(syntax, lhs);
-  ASTNode* right = NewSyntheticValue(syntax, rhs);
+  bool handled_special_member = false;
+  bool special_member_result = TypeTraitSameClassSpecialMemberAssignment(
+      lhs, rhs, check_nothrow, &handled_special_member);
+  if (handled_special_member) {
+    return special_member_result;
+  }
+  ASTNode* left = TypeTraitSyntheticExpressionFromType(syntax, lhs);
+  ASTNode* right = TypeTraitSyntheticExpressionFromType(syntax, rhs);
   if (left == NULL || right == NULL) {
     ASTNodeDelete(left);
     ASTNodeDelete(right);

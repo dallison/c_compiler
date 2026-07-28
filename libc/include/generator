@@ -1,0 +1,191 @@
+//
+//  generator
+//  c_compiler
+//
+//  C++23 std::generator support for DaveCC.
+//
+
+#ifndef __davecc_generator__
+#define __davecc_generator__
+
+#include <coroutine>
+#include <exception>
+#include <iterator>
+#include <optional>
+#include <ranges>
+#include <stddef.h>
+#include <type_traits>
+#include <utility>
+
+#define __cpp_lib_generator 202207L
+
+extern "C" void __cxa_rethrow(void);
+
+namespace std {
+
+template <class Ref, class Value = void, class Allocator = void>
+class generator {
+ public:
+  using value_type =
+      conditional_t<is_void_v<Value>, remove_cvref_t<Ref>, Value>;
+  using reference = conditional_t<is_void_v<Value>, Ref&&, Ref>;
+  using yielded =
+      conditional_t<is_reference_v<reference>, reference, const reference&>;
+
+  struct promise_type;
+  using handle_type = coroutine_handle<promise_type>;
+
+ private:
+  friend struct promise_type;
+  handle_type __coroutine_;
+
+ public:
+  class iterator {
+    handle_type __coroutine_;
+
+   public:
+    using value_type = generator::value_type;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = generator::reference;
+    using iterator_category = input_iterator_tag;
+    using iterator_concept = input_iterator_tag;
+
+    iterator() noexcept : __coroutine_{} {}
+
+    explicit iterator(handle_type coroutine) noexcept
+        : __coroutine_(coroutine) {}
+
+    reference operator*() const noexcept {
+      return static_cast<reference>(*__coroutine_.promise().__value_);
+    }
+
+    iterator& operator++() {
+      __coroutine_.resume();
+      return *this;
+    }
+
+    void operator++(int) {
+      __coroutine_.resume();
+    }
+
+    friend bool operator==(const iterator& current,
+                           default_sentinel_t) noexcept {
+      return current.__coroutine_.done();
+    }
+
+    friend bool operator==(default_sentinel_t sentinel,
+                           const iterator& current) noexcept {
+      return current == sentinel;
+    }
+
+    friend bool operator!=(const iterator& current,
+                           default_sentinel_t sentinel) noexcept {
+      return !(current == sentinel);
+    }
+
+    friend bool operator!=(default_sentinel_t sentinel,
+                           const iterator& current) noexcept {
+      return !(current == sentinel);
+    }
+  };
+
+  struct promise_type {
+    using stored_type = remove_reference_t<yielded>;
+
+    stored_type* __value_;
+    optional<value_type> __copy_;
+
+    promise_type() noexcept : __value_(nullptr), __copy_() {}
+
+    generator get_return_object() noexcept {
+      generator result;
+      result.__coroutine_.__handle =
+          reinterpret_cast<char*>(this) - sizeof(__coroutine_frame);
+      return static_cast<generator&&>(result);
+    }
+
+    suspend_always initial_suspend() const noexcept {
+      return {};
+    }
+
+    suspend_always final_suspend() const noexcept {
+      return {};
+    }
+
+    suspend_always yield_value(yielded value) noexcept {
+      __copy_.reset();
+      __value_ = &value;
+      return {};
+    }
+
+    suspend_always yield_value(const value_type& value)
+      requires is_rvalue_reference_v<reference>
+    {
+      __value_ = &__copy_.emplace(value);
+      return {};
+    }
+
+    void return_void() const noexcept {}
+
+    void unhandled_exception() {
+#ifdef __cpp_exceptions
+      __cxa_rethrow();
+#else
+      terminate();
+#endif
+    }
+
+    template <class Awaitable>
+    void await_transform(Awaitable&&) = delete;
+  };
+
+  generator() noexcept : __coroutine_{} {}
+
+  generator(const generator&) = delete;
+  generator& operator=(const generator&) = delete;
+
+  generator(generator&& other) noexcept
+      : __coroutine_(other.__coroutine_) {
+    other.__coroutine_ = {};
+  }
+
+  generator& operator=(generator&& other) noexcept {
+    if (this != &other) {
+      if (__coroutine_) {
+        __coroutine_.destroy();
+      }
+      __coroutine_ = other.__coroutine_;
+      other.__coroutine_ = {};
+    }
+    return *this;
+  }
+
+  ~generator() {
+    if (__coroutine_) {
+      __coroutine_.destroy();
+    }
+  }
+
+  iterator begin() {
+    if (__coroutine_) {
+      __coroutine_.resume();
+    }
+    return iterator(__coroutine_);
+  }
+
+  default_sentinel_t end() const noexcept {
+    return default_sentinel;
+  }
+};
+
+namespace ranges {
+
+template <class Ref, class Value, class Allocator>
+inline constexpr bool enable_view<generator<Ref, Value, Allocator>> = true;
+
+}  // namespace ranges
+
+}  // namespace std
+
+#endif /* __davecc_generator__ */

@@ -307,7 +307,7 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
   *victim = NULL;
   // Find the instruction with the lowest spill cost.
   for (int i = 0; i < num_regs; i++) {
-    if (regs[i].base.owner != NULL) {
+    if (!regs[i].base.reserved && regs[i].base.owner != NULL) {
       TargetInstruction* owner = regs[i].base.owner;
       assert(owner != NULL);
       // A locked register variable holds a value for its whole live range and

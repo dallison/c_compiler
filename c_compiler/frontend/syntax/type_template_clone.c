@@ -492,6 +492,34 @@ static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
   return false;
 }
 
+/* Substitute a type in a nested class-template member body.  Besides the
+ * nested class itself, such a body can name the injected class name of its
+ * enclosing specialization (for example `outer result;` inside
+ * `outer<T>::promise_type`).  The normal source/target mapping covers the
+ * nested class; temporarily use its lexical-parent mapping when this exact
+ * type chain names the enclosing class. */
+static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
+                                              TypeRecord* type) {
+  Struct* source =
+      clone->from_owner != NULL ? clone->from_owner->lexical_parent : NULL;
+  Struct* target =
+      clone->to_owner != NULL ? clone->to_owner->lexical_parent : NULL;
+  if (source == NULL || target == NULL || source == target ||
+      !TypeChainReferencesStruct(type, source)) {
+    return SubstituteTemplateParameters(clone->parser, type, clone->args);
+  }
+
+  Struct* saved_source = clone->parser->template_substitution_source;
+  Struct* saved_target = clone->parser->template_substitution_target;
+  clone->parser->template_substitution_source = source;
+  clone->parser->template_substitution_target = target;
+  TypeRecord* substituted =
+      SubstituteTemplateParameters(clone->parser, type, clone->args);
+  clone->parser->template_substitution_source = saved_source;
+  clone->parser->template_substitution_target = saved_target;
+  return substituted;
+}
+
 static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone,
                                                 ASTNode* node) {
   if (node->op != AST_OP(vardecl)) {
@@ -530,7 +558,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   }
 
   TypeRecord* type =
-      SubstituteTemplateParameters(clone->parser, old_symbol->type, clone->args);
+      SubstituteTemplateBodyType(clone, old_symbol->type);
   RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
   Symbol* replacement =
       NewSymbol(old_symbol->name.value, type, old_symbol->storage);
@@ -582,7 +610,7 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
     return existing;
   }
   TypeRecord* type =
-      SubstituteTemplateParameters(clone->parser, old_symbol->type, clone->args);
+      SubstituteTemplateBodyType(clone, old_symbol->type);
   RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
   Symbol* replacement =
       NewSymbol(old_symbol->name.value, type, old_symbol->storage);
@@ -3210,8 +3238,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                           clone->from_owner))) {
       node->flags |= kASTDependentCast;
       TypeRecord* cast_type =
-          SubstituteTemplateParameters(clone->parser, cast->cast_type,
-                                       clone->args);
+          SubstituteTemplateBodyType(clone, cast->cast_type);
       RebaseTemplateParameterIndices(cast_type,
                                      clone->rebase_template_parameter_base);
       TypeRecordCalculateSize(cast_type);

@@ -1433,8 +1433,8 @@ static ASTNode* NewCoroutineReturnObjectStatement(Symbol* return_object,
   ASTNode* return_stmt =
       NewCombinedStatementASTNode(AST_OP(return),
                                   return_object != NULL
-                                      ? NewIdentifierASTNode(return_object,
-                                                             location)
+                                      ? NewCoroutineMoveExpression(return_object,
+                                                                   location)
                                       : NULL,
                                   NULL, location);
   return_stmt->flags |= kASTCoroutineLoweredReturn;
@@ -5078,6 +5078,47 @@ static void AddPersistedCoroutineLocal(Vector* persisted_locals,
   VectorAppend(persisted_locals, local);
 }
 
+static void CollectPersistedCoroutineDeclarationList(
+    CompoundStatementASTNode* root,
+    DeclarationListASTNode* decls,
+    SuspensionPoint* point,
+    Vector* persisted_locals,
+    bool is_for_initializer,
+    bool* ok) {
+  if (decls == NULL || decls->declarations == NULL) {
+    return;
+  }
+  for (size_t decl_index = 0; decl_index < decls->declarations->length;
+       decl_index++) {
+    VariableDeclarationASTNode* decl =
+        decls->declarations->value.p[decl_index];
+    Symbol* symbol = decl != NULL ? decl->symbol : NULL;
+    if (!SuspensionPointUsesSymbolAfter(root, point, symbol)) {
+      continue;
+    }
+    /* Initializers in a `for` header cannot currently host the guarded
+     * destruction sequence required by a frame-backed class object.  Reject
+     * that case instead of silently extending or skipping its lifetime. */
+    if (is_for_initializer && symbol != NULL &&
+        TypeIsStructOrUnion(symbol->type)) {
+      SemanticError(
+          (ASTNode*)decl,
+          "coroutine class local in for initializer cannot cross suspension");
+      *ok = false;
+      continue;
+    }
+    if (!CoroutineLocalCanBePersisted(symbol)) {
+      SemanticError(
+          (ASTNode*)decl,
+          "coroutine local live across suspension has unsupported type");
+      *ok = false;
+      continue;
+    }
+    AddPersistedCoroutineLocal(persisted_locals, symbol, false, false,
+                               false, NULL);
+  }
+}
+
 /* Examine declarations in `compound` before `limit` and, for any local that is
  * used after `point`, mark it for direct construction in the frame. Clears *ok
  * when the local has a representation that cannot be persisted. */
@@ -5097,25 +5138,9 @@ static void CollectPersistedCoroutineLocalsBeforeIndex(
     if (stmt == NULL || stmt->op != AST_OP(decl_list)) {
       continue;
     }
-    DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
-    for (size_t decl_index = 0; decl_index < decls->declarations->length;
-         decl_index++) {
-      VariableDeclarationASTNode* decl =
-          decls->declarations->value.p[decl_index];
-      Symbol* symbol = decl != NULL ? decl->symbol : NULL;
-      if (!SuspensionPointUsesSymbolAfter(root, point, symbol)) {
-        continue;
-      }
-      if (!CoroutineLocalCanBePersisted(symbol)) {
-        SemanticError(
-            (ASTNode*)decl,
-            "coroutine local live across suspension has unsupported type");
-        *ok = false;
-        continue;
-      }
-      AddPersistedCoroutineLocal(persisted_locals, symbol, false, false,
-                                 false, NULL);
-    }
+    CollectPersistedCoroutineDeclarationList(
+        root, (DeclarationListASTNode*)stmt, point, persisted_locals, false,
+        ok);
   }
 }
 
@@ -5146,6 +5171,13 @@ static void CollectPersistedCoroutineLocalsFromAncestors(
         search->root, (CompoundStatementASTNode*)parent,
         (size_t)current->child_id, search->point, search->persisted_locals,
         search->ok);
+  } else if (parent->op == AST_OP(for)) {
+    ForStatementASTNode* loop = (ForStatementASTNode*)parent;
+    if (loop->c1 != NULL && loop->c1->op == AST_OP(decl_list)) {
+      CollectPersistedCoroutineDeclarationList(
+          search->root, (DeclarationListASTNode*)loop->c1, search->point,
+          search->persisted_locals, true, search->ok);
+    }
   }
 }
 
@@ -5462,6 +5494,41 @@ static CoroutinePersistedLocal* PersistedLocalDestroyedByStatement(
   return local;
 }
 
+/* Retarget persisted scalar declarations in a `for` initializer directly to
+ * their frame slots.  Unlike a declaration in a compound, the initializer
+ * cannot be followed by a separately inserted statement, which is why class
+ * objects requiring a constructed flag are rejected during collection. */
+static void RewritePersistedCoroutineForInitializer(
+    ForStatementASTNode* loop,
+    CoroutineFrame* frame,
+    Vector* persisted_locals) {
+  if (loop == NULL || loop->c1 == NULL ||
+      loop->c1->op != AST_OP(decl_list)) {
+    return;
+  }
+  DeclarationListASTNode* decls = (DeclarationListASTNode*)loop->c1;
+  for (size_t i = 0; decls->declarations != NULL &&
+                     i < decls->declarations->length; i++) {
+    VariableDeclarationASTNode* decl = decls->declarations->value.p[i];
+    CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
+        persisted_locals, decl != NULL ? decl->symbol : NULL);
+    if (local == NULL || local->member == NULL || local->is_parameter ||
+        local->is_catch_parameter) {
+      continue;
+    }
+    ASTNode* trailing = NewPersistedCoroutineLocalFrameInitialization(
+        decl, local, frame, true);
+    /* Class locals were rejected before frame construction; scalar
+     * declarations need no separate constructed-flag statement. */
+    if (trailing != NULL) {
+      SemanticError(
+          (ASTNode*)decl,
+          "coroutine class local in for initializer cannot cross suspension");
+      ASTNodeDelete(trailing);
+    }
+  }
+}
+
 /* Recurse into a statement's sub-statements to insert direct frame-local
  * initializations within nested blocks. */
 static void InsertPersistedCoroutineLocalStoresInStatementChildren(
@@ -5469,6 +5536,10 @@ static void InsertPersistedCoroutineLocalStoresInStatementChildren(
     CoroutineFrame* frame,
     Vector* persisted_locals,
     SuspensionPoints* points) {
+  if (stmt != NULL && stmt->op == AST_OP(for)) {
+    RewritePersistedCoroutineForInitializer(
+        (ForStatementASTNode*)stmt, frame, persisted_locals);
+  }
   CoroutineStatementChildCollector collector = {
       .root = stmt,
   };
@@ -6182,12 +6253,27 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
             node->location),
         2);
   }
+  /* Flowing off the end of a coroutine is equivalent to `co_return;`.  Add the
+   * implicit statement before the co_return lowering pass so return_void(),
+   * frame completion, and final_suspend all run on the fallthrough path. */
+  if (!scan.has_co_return_value) {
+    VectorAppend(body->statements,
+                 NewCombinedStatementASTNode(AST_OP(co_return), NULL, NULL,
+                                             node->location));
+    ResetCompoundStatementParents(body);
+  }
   LowerCoReturnsInStatement(info->body, promise, needs_frame ? &frame : NULL,
                             &persisted_locals, final_awaiter,
                             return_object);
-  LowerCoroutineThrowsInStatement(info->body, promise,
-                                  needs_frame ? &frame : NULL,
-                                  final_awaiter, return_object);
+  /* A suspending coroutine's generated resume function has a catch-all that
+   * invokes unhandled_exception() while the active exception is established.
+   * Keep explicit throws intact so that handler performs the standard
+   * propagation path.  The no-frame path has no generated resume wrapper and
+   * still needs direct lowering. */
+  if (!needs_frame) {
+    LowerCoroutineThrowsInStatement(info->body, promise, NULL, final_awaiter,
+                                    return_object);
+  }
   if (needs_frame &&
       !LowerSuspendingCoAwaitFunction(node, scan, &points, promise,
                                       return_object, &frame, initial_awaiter,
@@ -6294,7 +6380,7 @@ static bool ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
   }
   if (scan.has_co_return_value) {
     ok &= RequireCoroutinePromiseMember(node, promise, "return_value");
-  } else if (scan.has_co_return) {
+  } else {
     ok &= RequireCoroutinePromiseMember(node, promise, "return_void");
   }
   ok &= RequireCoroutinePromiseMember(node, promise, "unhandled_exception");
