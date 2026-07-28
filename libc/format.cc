@@ -5,8 +5,6 @@ namespace __format_detail {
 
 [[noreturn]] void __fail(const char* message) {
   __DAVECC_THROW(format_error(message));
-  for (;;) {
-  }
 }
 
 void __append_repeat(string& output, char value, size_t count) {

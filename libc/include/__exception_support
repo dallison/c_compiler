@@ -7,7 +7,9 @@
 #define __DAVECC_RETHROW throw
 #define __DAVECC_THROW(value) throw value
 #else
-extern "C" void abort(void);
+extern "C" {
+[[noreturn]] void abort(void);
+}
 #define __DAVECC_TRY if (true)
 #define __DAVECC_CATCH_ALL if (false)
 #define __DAVECC_RETHROW ((void)0)

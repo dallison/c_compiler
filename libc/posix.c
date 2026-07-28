@@ -26,7 +26,7 @@ int write(int fd, const char* buffer, size_t len) {
       "esc #2");
 }
 
-void abort() {
+__attribute__((noreturn)) void abort() {
   asm("esc #11");
 }
 
@@ -41,7 +41,7 @@ int write(int fd, const char* buffer, size_t len) {
   return syscall(SYS_WRITE, fd, buffer, len);
 }
 
-void abort() {
+__attribute__((noreturn)) void abort() {
   syscall(SYS_ABORT);
 }
 
