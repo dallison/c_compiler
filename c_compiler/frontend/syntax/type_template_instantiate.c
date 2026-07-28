@@ -1885,6 +1885,27 @@ static TypeRecord* FindTemplateBaseForDeduction(TypeRecord* actual,
   return found;
 }
 
+static bool TemplateArgumentHasDependentMemberName(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      if (TemplateArgumentHasDependentMemberName(
+              arg->pack_arguments->value.p[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  for (TypeRecord* type = arg->type; type != NULL; type = type->next) {
+    if (type->dependent_member_name != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
                                                     size_t explicit_arg_count,
                                                     TypeRecord* formal,
@@ -1899,6 +1920,7 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   }
   bool formal_is_template_parameter =
       formal_origin->flags.is_template_template_parameter;
+  Vector* formal_args = SpecializationTemplateArguments(formal);
   if (formal_is_template_parameter) {
     if (actual_origin == NULL ||
         !TemplateTemplateParameterListsCompatible(
@@ -1929,7 +1951,6 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
     }
     return false;
   }
-  Vector* formal_args = SpecializationTemplateArguments(formal);
   Vector* actual_args = SpecializationTemplateArguments(actual);
   if (formal_args == NULL || actual_args == NULL) {
     return false;
@@ -2384,6 +2405,14 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
         p->declarator != kDeclPointer) {
       break;
     }
+  }
+  Vector* specialization_args = SpecializationTemplateArguments(formal);
+  for (size_t i = 0;
+       !non_deduced_member && specialization_args != NULL &&
+       i < specialization_args->length;
+       i++) {
+    non_deduced_member = TemplateArgumentHasDependentMemberName(
+        specialization_args->value.p[i]);
   }
   int placeholder_index = -1;
   if (formal->declarator == kDeclRValueReference &&

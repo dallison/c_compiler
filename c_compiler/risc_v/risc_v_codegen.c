@@ -3385,6 +3385,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                          callee_type->info.function.varargs;
   size_t num_fixed_args =
       is_varargs_call ? callee_type->info.function.prototype.length : 0;
+  bool has_hidden_struct_result = (node->flags & kIRStructReturnCall) != 0;
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
@@ -3392,12 +3393,17 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
     bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
+    bool is_hidden_struct_result = i == 1 && has_hidden_struct_result;
     RVFloatingAggregate floating_aggregate;
     bool pass_floating_aggregate =
         !is_variadic_arg &&
         GetFloatingAggregate(arg_node->type, &floating_aggregate) &&
         next_fp_arg_reg + floating_aggregate.count <= RV_NUM_FP_ARGS;
-    if (pass_floating_aggregate) {
+    if (is_hidden_struct_result) {
+      TargetInstruction* arg_reg =
+          IntArgumentRegister(rv, next_int_arg_reg++);
+      VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
+    } else if (pass_floating_aggregate) {
       TargetInstruction* first =
           FloatingPointArgumentRegister(rv, next_fp_arg_reg++);
       TargetInstruction* second =
@@ -3429,7 +3435,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         next_pushed_arg_offset += 16;
       }
     } else if (TypeIsStructOrUnion(arg_node->type)) {
-      if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
+      if (i == 1 && arg_node->opcode == IR_OP(structreturn) &&
+          !has_hidden_struct_result) {
         // RVO (Return Value Optimization), passing structreturn as arg.
         TargetInstruction* arg_reg =
              IntArgumentRegister(rv, next_int_arg_reg++);
@@ -4710,6 +4717,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
+          rv->not_leaf = true;
           entry->pooled->data.ivalue = (int32_t)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
@@ -4732,7 +4740,8 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
       } else if (location.type == kArgLocationRegisterPair) {
         int offset =
-            -24 - ((int)rv->saved_regs.length + 1) * 8;
+            -24 - ((int)rv->saved_regs.length + 2) * 8;
+        offset = (offset + 15) & ~(int)15;
         entry->pooled->data.ivalue = offset;
         SetDebugStackLocation(entry, offset);
         VectorAppend(
@@ -4745,6 +4754,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
                                      offset + 8, 8, false));
         rv->num_int_arg_regs += 2;
       } else {
+        rv->not_leaf = true;
         entry->pooled->data.ivalue = (int32_t)location.location.offset;
         SetDebugStackLocation(entry, entry->pooled->data.ivalue);
       }
@@ -4780,6 +4790,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
+          rv->not_leaf = true;
           entry->pooled->data.ivalue = (int32_t)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else {
@@ -4801,6 +4812,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
+          rv->not_leaf = true;
           entry->pooled->data.ivalue = (int32_t)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
@@ -4870,6 +4882,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
+          rv->not_leaf = true;
           entry->pooled->data.ivalue = (int32_t)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }

@@ -39,6 +39,10 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                      double* result);
 bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node);
+bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node);
+bool ConstexprEvaluateConstructorCallForSymbol(ConstEvalContext* ctx,
+                                               ASTNode* node,
+                                               Symbol* symbol);
 bool ConstexprEvaluateMutationAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                         TypeRecord* type, int64_t* result);
 bool ConstexprEvaluateMutationAsFloating(ConstEvalContext* ctx, ASTNode* node,

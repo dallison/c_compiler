@@ -166,6 +166,8 @@ struct ConstexprValue {
   ConstexprObject* object;
   void* address_binding;
   ConstexprValue* address_slot;
+  ConstexprObject* address_object;
+  size_t address_index;
 };
 
 struct ConstexprObject {

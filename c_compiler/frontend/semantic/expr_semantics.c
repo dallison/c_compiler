@@ -5326,8 +5326,60 @@ static bool TryConvertWithConvertingConstructorImpl(
   // another converting constructor.
   bool saved_suppress = g_suppress_user_defined_conversion_rank;
   g_suppress_user_defined_conversion_rank = true;
+  int errors_before_analysis = compiler->num_errors;
   ASTNode* analyzed = AnalyzeExpression(comma);
   g_suppress_user_defined_conversion_rank = saved_suppress;
+  if (ctor->symbol != NULL && ctor->symbol->type != NULL &&
+      TypeIsFunction(ctor->symbol->type) &&
+      ctor->symbol->type->info.function.is_consteval &&
+      compiler->num_errors == errors_before_analysis &&
+      compiler->immediate_function_context_depth == 0 &&
+      (compiler->current_function == NULL ||
+       !TypeIsFunction(compiler->current_function) ||
+       !compiler->current_function->info.function.is_consteval) &&
+      analyzed != NULL && analyzed->op == AST_OP(comma)) {
+    ASTNode* converted_call = ((BinaryASTNode*)analyzed)->left;
+    if (converted_call != NULL && converted_call->op == AST_OP(call)) {
+      VectorASTNode* call = (VectorASTNode*)converted_call;
+      if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+        IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+        if (id->symbol != NULL && id->symbol->flags.is_template) {
+          Symbol* instantiated =
+              TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+                  &compiler->syntax, id->symbol, id->template_arguments,
+                  call->children);
+          if (instantiated != NULL && instantiated != id->symbol) {
+            id->symbol = instantiated;
+            ASTNodeSetInstantiatedCalleeType(call->left, instantiated->type);
+          }
+        }
+      }
+    }
+    ConstEvalContext context;
+    ConstEvalContextInit(&context);
+    bool constant =
+        converted_call != NULL && converted_call->op == AST_OP(call) &&
+        ConstexprEvaluateConstructorCallForSymbol(&context, converted_call,
+                                                  temp);
+    ASTNode* initializer =
+        constant ? ConstexprObjectInitializerForSymbol(temp, location) : NULL;
+    temp->flags.value_set = false;
+    temp->value.other = NULL;
+    ConstEvalContextDestruct(&context);
+    if (!constant) {
+      SemanticError(converted_call != NULL ? converted_call : analyzed,
+                    "consteval function call is not a constant expression");
+    } else if (initializer != NULL) {
+      ASTNode* simplified =
+          AnalyzeInitializer(temp->type, initializer, true);
+      ASTNode* destination = NewIdentifierASTNode(temp, location);
+      destination->flags |= kASTNeedAddress | kASTIsDeclaration;
+      ASTNode* materialized =
+          NewBinaryASTNode(AST_OP(init), TypeRecordCopy(temp->type), location,
+                           destination, simplified);
+      ASTNodeReplaceChild(analyzed, 0, materialized, true);
+    }
+  }
   analyzed->value_category = kValueCategoryPrvalue;
   if (parent != NULL) {
     ASTNodeReplaceChild(parent, child_id, analyzed, false);
@@ -8212,12 +8264,20 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   
+  TypeRecord* immediate_function_type = subtype;
+  if (node->left->op == AST_OP(identifier)) {
+    Symbol* resolved = ((IdentifierASTNode*)node->left)->symbol;
+    if (resolved != NULL && resolved->type != NULL &&
+        TypeIsFunction(resolved->type)) {
+      immediate_function_type = resolved->type;
+    }
+  }
   bool in_immediate_function_context =
       compiler->immediate_function_context_depth > 0 ||
       (compiler->current_function != NULL &&
        TypeIsFunction(compiler->current_function) &&
        compiler->current_function->info.function.is_consteval);
-  if (call_ok && subtype->info.function.is_consteval &&
+  if (call_ok && immediate_function_type->info.function.is_consteval &&
       !in_immediate_function_context) {
     bool ok = false;
     if (TypeIsFloatingPoint(return_type)) {
@@ -8230,6 +8290,11 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       ConstEvalContext ctx;
       ConstEvalContextInit(&ctx);
       ok = ConstexprEvaluateCallAsObject(&ctx, (ASTNode*)node);
+      ConstEvalContextDestruct(&ctx);
+    } else if (TypeIsVoid(return_type)) {
+      ConstEvalContext ctx;
+      ConstEvalContextInit(&ctx);
+      ok = ConstexprEvaluateCall(&ctx, (ASTNode*)node);
       ConstEvalContextDestruct(&ctx);
     }
     if (!ok) {

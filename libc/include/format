@@ -1,0 +1,1068 @@
+#ifndef __davecc_format__
+#define __davecc_format__
+
+#include <__exception_support>
+#include <__itoa.h>
+#include <cstddef>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+#define __cpp_lib_format 201907L
+
+extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
+extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
+extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
+
+namespace std {
+
+template <class Container>
+class back_insert_iterator {
+ protected:
+  Container* container;
+
+ public:
+  using iterator_category = output_iterator_tag;
+  using value_type = void;
+  using difference_type = ptrdiff_t;
+  using pointer = void;
+  using reference = void;
+
+  explicit back_insert_iterator(Container& value) : container(&value) {}
+  back_insert_iterator& operator=(const typename Container::value_type& value) {
+    container->push_back(value);
+    return *this;
+  }
+  back_insert_iterator& operator*() { return *this; }
+  back_insert_iterator& operator++() { return *this; }
+  back_insert_iterator operator++(int) { return *this; }
+};
+
+template <class Container>
+back_insert_iterator<Container> back_inserter(Container& container) {
+  return back_insert_iterator<Container>(container);
+}
+
+class format_error : public runtime_error {
+ public:
+  explicit format_error(const char* message) : runtime_error(message) {}
+  explicit format_error(const string& message) : runtime_error(message) {}
+};
+
+template <class T, class CharT = char>
+struct formatter;
+
+template <class CharT>
+class basic_format_parse_context {
+ public:
+  using char_type = CharT;
+  using const_iterator = const CharT*;
+  using iterator = const_iterator;
+
+ private:
+  const_iterator __begin;
+  const_iterator __end;
+  size_t __next;
+
+ public:
+  constexpr explicit basic_format_parse_context(
+      basic_string_view<CharT> text, size_t argument_count = 0) noexcept
+      : __begin(text.data()), __end(text.data() + text.size()), __next(0) {
+    (void)argument_count;
+  }
+
+  constexpr const_iterator begin() const noexcept { return __begin; }
+  constexpr const_iterator end() const noexcept { return __end; }
+  constexpr void advance_to(const_iterator it) { __begin = it; }
+  constexpr size_t next_arg_id() { return __next++; }
+  constexpr void check_arg_id(size_t id) { (void)id; }
+};
+
+using format_parse_context = basic_format_parse_context<char>;
+
+namespace __format_detail {
+
+template <class T>
+struct __non_deduced {
+  using type = T;
+};
+
+struct __format_args;
+struct __spec;
+struct __format_specification;
+
+struct __format_arg {
+  const void* value;
+  void (*format_value)(const void*, const __format_specification*, string&,
+                       const __format_args*);
+  bool (*integer_value)(const void*, long long*);
+
+  __format_arg()
+      : value(nullptr),
+        format_value(nullptr),
+        integer_value(nullptr) {}
+};
+
+struct __format_args {
+  const __format_arg* values;
+  size_t count;
+  mutable size_t next_dynamic;
+
+  __format_args() : values(nullptr), count(0), next_dynamic(0) {}
+  __format_args(const __format_arg* v, size_t n)
+      : values(v), count(n), next_dynamic(0) {}
+
+  const __format_arg* get(size_t index) const {
+    if (index >= count) return nullptr;
+    return values + index;
+  }
+};
+
+[[noreturn]] void __fail(const char* message);
+
+constexpr bool __is_digit(char c) { return c >= '0' && c <= '9'; }
+
+void __append_repeat(string& output, char value, size_t count);
+
+struct __spec {
+  char fill;
+  char align;
+  char sign;
+  char type;
+  bool alternate;
+  bool zero;
+  int width;
+  int precision;
+
+  __spec()
+      : fill(' '),
+        align(0),
+        sign(0),
+        type(0),
+        alternate(false),
+        zero(false),
+        width(-1),
+        precision(-1) {}
+};
+
+struct __format_specification {
+  const __spec* parsed;
+  const char* data;
+  size_t size;
+};
+
+int __dynamic_integer(const __format_args* args, size_t index);
+__spec __parse_spec(string_view text, const __format_args* args);
+size_t __prefix_length(const string& value);
+void __append_padded(string* output, const string* value, const __spec* spec,
+                     bool numeric);
+void __unsigned_integer_to(unsigned long long value, char type, bool alternate,
+                           string* output);
+void __signed_integer_to(long long value, const __spec& spec, string* output);
+void __unsigned_integer_with_sign_to(unsigned long long value,
+                                     const __spec& spec, string* output);
+void __floating_to(double value, const __spec& spec, string* output);
+
+string __unsigned_integer(unsigned long long value, char type, bool alternate);
+string __signed_integer(long long value, const __spec& spec);
+string __unsigned_integer_with_sign(unsigned long long value,
+                                    const __spec& spec);
+string __floating(double value, const __spec& spec);
+
+template <class T>
+inline bool __integer_argument(const void* pointer, long long* output) {
+  if constexpr (is_integral<T>::value) {
+    *output = static_cast<long long>(*static_cast<const T*>(pointer));
+    return true;
+  } else {
+    (void)pointer;
+    (void)output;
+    return false;
+  }
+}
+
+template <class T>
+inline void __format_builtin(const T& value, const __spec& spec,
+                             string& output, const __format_args* args) {
+  using U = remove_cv_t<T>;
+  (void)args;
+  string converted;
+  bool numeric = false;
+  if constexpr (is_same<U, bool>::value) {
+    if (spec.type == 0 || spec.type == 's') {
+      converted = value ? "true" : "false";
+    } else {
+      __unsigned_integer_with_sign_to(value ? 1 : 0, spec, &converted);
+      numeric = true;
+    }
+  } else if constexpr (is_same<U, char>::value ||
+                       is_same<U, signed char>::value ||
+                       is_same<U, unsigned char>::value) {
+    if (spec.type == 0 || spec.type == 'c') {
+      converted = string(1, static_cast<char>(value));
+    } else if constexpr (is_signed<U>::value) {
+      __signed_integer_to(static_cast<long long>(value), spec, &converted);
+      numeric = true;
+    } else {
+      __unsigned_integer_with_sign_to(static_cast<unsigned long long>(value),
+                                      spec, &converted);
+      numeric = true;
+    }
+  } else if constexpr (is_integral<U>::value && is_signed<U>::value) {
+    __signed_integer_to(static_cast<long long>(value), spec, &converted);
+    numeric = true;
+  } else if constexpr (is_integral<U>::value) {
+    __unsigned_integer_with_sign_to(static_cast<unsigned long long>(value),
+                                    spec, &converted);
+    numeric = true;
+  } else if constexpr (is_floating_point<U>::value) {
+    __floating_to(static_cast<double>(value), spec, &converted);
+    numeric = true;
+  } else if constexpr (is_same<U, string>::value) {
+    if (spec.type != 0 && spec.type != 's') {
+      __fail("invalid string presentation type");
+    }
+    size_t length = value.size();
+    if (spec.precision >= 0 &&
+        static_cast<size_t>(spec.precision) < length) {
+      length = static_cast<size_t>(spec.precision);
+    }
+    converted = string(value.data(), length);
+  } else if constexpr (is_same<U, string_view>::value) {
+    if (spec.type != 0 && spec.type != 's') {
+      __fail("invalid string presentation type");
+    }
+    size_t length = value.size();
+    if (spec.precision >= 0 &&
+        static_cast<size_t>(spec.precision) < length) {
+      length = static_cast<size_t>(spec.precision);
+    }
+    converted = string(value.data(), length);
+  } else if constexpr (is_array<U>::value) {
+    const char* text = value;
+    size_t length = char_traits<char>::length(text);
+    if (spec.precision >= 0 &&
+        static_cast<size_t>(spec.precision) < length) {
+      length = static_cast<size_t>(spec.precision);
+    }
+    converted = string(text, length);
+  } else if constexpr (is_pointer<U>::value &&
+                       is_same<remove_cv_t<remove_pointer_t<U>>, char>::value) {
+    const char* text = value;
+    if (text == nullptr) {
+      __fail("null string pointer");
+    }
+    size_t length = char_traits<char>::length(text);
+    if (spec.precision >= 0 &&
+        static_cast<size_t>(spec.precision) < length) {
+      length = static_cast<size_t>(spec.precision);
+    }
+    converted = string(text, length);
+  } else if constexpr (is_same<U, nullptr_t>::value) {
+    if (spec.type != 0 && spec.type != 'p') {
+      __fail("invalid pointer presentation type");
+    }
+    converted = "0x0";
+    numeric = true;
+  } else if constexpr (is_pointer<U>::value) {
+    if (spec.type != 0 && spec.type != 'p') {
+      __fail("invalid pointer presentation type");
+    }
+    unsigned long long address =
+        reinterpret_cast<unsigned long long>(value);
+    __unsigned_integer_to(address, 'x', true, &converted);
+    numeric = true;
+  } else {
+    __fail("type is not formattable");
+  }
+  __append_padded(&output, &converted, &spec, numeric);
+}
+
+}  // namespace __format_detail
+
+template <class Context>
+class basic_format_arg {
+  __format_detail::__format_arg __value;
+
+  template <class>
+  friend class basic_format_args;
+
+ public:
+  basic_format_arg() {}
+  explicit operator bool() const noexcept {
+    return __value.format_value != nullptr;
+  }
+};
+
+template <class Context>
+class basic_format_args {
+  __format_detail::__format_args __values;
+
+ public:
+  basic_format_args() noexcept {}
+  explicit basic_format_args(
+      const __format_detail::__format_args& implementation) noexcept
+      : __values(implementation) {}
+
+  template <class Store>
+  basic_format_args(const Store& store) noexcept
+      : __values(store.__data(), store.__size()) {}
+
+  basic_format_arg<Context> get(size_t index) const noexcept {
+    basic_format_arg<Context> result;
+    const __format_detail::__format_arg* value = __values.get(index);
+    if (value != nullptr) {
+      result.__value = *value;
+    }
+    return result;
+  }
+
+  const __format_detail::__format_args& __implementation() const {
+    return __values;
+  }
+};
+
+template <class OutputIt, class CharT>
+class basic_format_context {
+ public:
+  using iterator = OutputIt;
+  using char_type = CharT;
+
+ private:
+  OutputIt __out;
+  basic_format_args<basic_format_context> __args;
+  string* __buffer_pointer;
+
+ public:
+  basic_format_context(OutputIt out,
+                       basic_format_args<basic_format_context> args,
+                       string* buffer = nullptr)
+      : __out(out), __args(args), __buffer_pointer(buffer) {}
+
+  basic_format_arg<basic_format_context> arg(size_t id) const {
+    return __args.get(id);
+  }
+  iterator out() { return __out; }
+  void advance_to(iterator it) { __out = it; }
+  string& __buffer() { return *__buffer_pointer; }
+  const __format_detail::__format_args& __arguments() const {
+    return __args.__implementation();
+  }
+};
+
+using format_context =
+    basic_format_context<back_insert_iterator<string>, char>;
+using format_args = basic_format_args<format_context>;
+
+template <class T, class CharT>
+struct formatter {
+  basic_string_view<CharT> __specification;
+
+  constexpr typename basic_format_parse_context<CharT>::iterator parse(
+      basic_format_parse_context<CharT>& context) {
+    __specification = basic_string_view<CharT>(
+        context.begin(), static_cast<size_t>(context.end() - context.begin()));
+    return context.end();
+  }
+
+  typename basic_format_context<back_insert_iterator<string>, CharT>::iterator
+  format(const T& value,
+         basic_format_context<back_insert_iterator<string>, CharT>& context)
+      const {
+    __format_detail::__spec specification =
+        __format_detail::__parse_spec(
+            string_view(__specification.data(), __specification.size()),
+            &context.__arguments());
+    __format_detail::__format_builtin(
+        value, specification, context.__buffer(), &context.__arguments());
+    return context.out();
+  }
+};
+
+namespace __format_detail {
+
+template <class T>
+struct __is_builtin_format_type {
+  using U = remove_cv_t<T>;
+  static constexpr bool value =
+      is_integral<U>::value || is_floating_point<U>::value ||
+      is_pointer<U>::value || is_array<U>::value ||
+      is_same<U, nullptr_t>::value || is_same<U, string>::value ||
+      is_same<U, string_view>::value;
+};
+
+template <class T>
+constexpr bool __builtin_presentation_valid(char presentation) {
+  using U = remove_cv_t<remove_reference_t<T>>;
+  if constexpr (is_same<U, bool>::value) {
+    return presentation == 0 || presentation == 's' || presentation == 'd' ||
+           presentation == 'x' || presentation == 'X' ||
+           presentation == 'o' || presentation == 'b' ||
+           presentation == 'B';
+  } else if constexpr (is_same<U, char>::value ||
+                       is_same<U, signed char>::value ||
+                       is_same<U, unsigned char>::value) {
+    return presentation == 0 || presentation == 'c' || presentation == 'd' ||
+           presentation == 'x' || presentation == 'X' ||
+           presentation == 'o' || presentation == 'b' ||
+           presentation == 'B';
+  } else if constexpr (is_integral<U>::value) {
+    return presentation == 0 || presentation == 'd' || presentation == 'c' ||
+           presentation == 'x' || presentation == 'X' ||
+           presentation == 'o' || presentation == 'b' ||
+           presentation == 'B';
+  } else if constexpr (is_floating_point<U>::value) {
+    return presentation == 0 || presentation == 'f' || presentation == 'F' ||
+           presentation == 'e' || presentation == 'E' ||
+           presentation == 'g' || presentation == 'G';
+  } else if constexpr (is_same<U, string>::value ||
+                       is_same<U, string_view>::value ||
+                       is_array<U>::value ||
+                       (is_pointer<U>::value &&
+                        is_same<remove_cv_t<remove_pointer_t<U>>, char>::value)) {
+    return presentation == 0 || presentation == 's';
+  } else if constexpr (is_pointer<U>::value ||
+                       is_same<U, nullptr_t>::value) {
+    return presentation == 0 || presentation == 'p';
+  } else {
+    return false;
+  }
+}
+
+template <class T>
+constexpr bool __format_specification_valid(bool syntax_valid,
+                                            char presentation) {
+  using U = remove_cv_t<remove_reference_t<T>>;
+  if constexpr (__is_builtin_format_type<U>::value) {
+    return syntax_valid && __builtin_presentation_valid<U>(presentation);
+  } else {
+    return true;
+  }
+}
+
+struct __no_format_type {};
+
+template <unsigned Position, class CharT, class T0 = __no_format_type,
+          class T1 = __no_format_type, class T2 = __no_format_type,
+          class T3 = __no_format_type, class T4 = __no_format_type>
+struct __format_type_checker {
+  static constexpr bool specification(unsigned index, bool syntax_valid,
+                                      char presentation) {
+    if (index == Position &&
+        !is_same<T0, __no_format_type>::value) {
+      return __format_specification_valid<T0>(syntax_valid, presentation);
+    }
+    if (index == Position + 1 &&
+        !is_same<T1, __no_format_type>::value) {
+      return __format_specification_valid<T1>(syntax_valid, presentation);
+    }
+    if (index == Position + 2 &&
+        !is_same<T2, __no_format_type>::value) {
+      return __format_specification_valid<T2>(syntax_valid, presentation);
+    }
+    if (index == Position + 3 &&
+        !is_same<T3, __no_format_type>::value) {
+      return __format_specification_valid<T3>(syntax_valid, presentation);
+    }
+    if (index == Position + 4 &&
+        !is_same<T4, __no_format_type>::value) {
+      return __format_specification_valid<T4>(syntax_valid, presentation);
+    }
+    return false;
+  }
+
+  static constexpr bool dynamic_integer(unsigned index) {
+    if (index == Position) {
+      return is_integral<remove_cv_t<remove_reference_t<T0>>>::value;
+    }
+    if (index == Position + 1) {
+      return is_integral<remove_cv_t<remove_reference_t<T1>>>::value;
+    }
+    if (index == Position + 2) {
+      return is_integral<remove_cv_t<remove_reference_t<T2>>>::value;
+    }
+    if (index == Position + 3) {
+      return is_integral<remove_cv_t<remove_reference_t<T3>>>::value;
+    }
+    if (index == Position + 4) {
+      return is_integral<remove_cv_t<remove_reference_t<T4>>>::value;
+    }
+    return false;
+  }
+};
+
+template <class T>
+void __format_builtin_callback(const void* pointer,
+                               const __format_specification* specification,
+                               string& output,
+                               const __format_args* arguments) {
+  __format_builtin(*static_cast<const T*>(pointer), *specification->parsed,
+                   output,
+                   arguments);
+}
+
+template <class T>
+void __format_with_formatter(const void* pointer,
+                             const __format_specification* specification,
+                             string& output, const __format_args* arguments) {
+  string_view text(specification->data, specification->size);
+  formatter<T, char> value_formatter;
+  format_parse_context parse_context(text);
+  auto parsed = value_formatter.parse(parse_context);
+  if (parsed != parse_context.end()) {
+    __fail("format specifier was not fully consumed");
+  }
+  format_args public_arguments(*arguments);
+  basic_format_context<back_insert_iterator<string>, char> context(
+      back_inserter(output), public_arguments, &output);
+  auto end = value_formatter.format(*static_cast<const T*>(pointer), context);
+  context.advance_to(end);
+}
+
+template <class T>
+struct __custom_format_callback {
+  static void call(const void* pointer,
+                   const __format_specification* specification,
+                   string& output, const __format_args* arguments) {
+    __format_with_formatter<T>(pointer, specification, output, arguments);
+  }
+};
+
+class __format_arg_store {
+  __format_arg __values[32];
+  size_t __count;
+
+ public:
+  __format_arg_store() : __count(0) {}
+
+  template <class T>
+  void __push(T&& value) {
+    if (__count >= 32) {
+      __fail("too many format arguments");
+    }
+    __format_arg* slot = __values + __count;
+    using U = remove_cv_t<remove_reference_t<T>>;
+    if constexpr (is_array<U>::value) {
+      slot->value = static_cast<const void*>(value);
+    } else {
+      slot->value = &value;
+    }
+    if constexpr (__is_builtin_format_type<U>::value) {
+      slot->format_value = __format_builtin_callback<U>;
+    } else {
+      slot->format_value = __custom_format_callback<U>::call;
+    }
+    slot->integer_value = __integer_argument<U>;
+    ++__count;
+  }
+  const __format_arg* __data() const { return __values; }
+  size_t __size() const { return __count; }
+};
+
+void __vformat_to(const char* text_data, size_t text_size,
+                  const __format_args* arguments, string* output);
+
+__format_args __make_runtime_args(const __format_arg_store& store);
+string __format_invoke(const char* text_data, size_t text_size);
+
+template <class A0>
+inline string __format_invoke(const char* text_data, size_t text_size,
+                              A0&& a0) {
+  __format_arg_store store;
+  store.__push(static_cast<A0&&>(a0));
+  string output;
+  __format_args runtime_args = __make_runtime_args(store);
+  __vformat_to(text_data, text_size, &runtime_args, &output);
+  return output;
+}
+
+template <class A0, class A1>
+inline string __format_invoke(const char* text_data, size_t text_size,
+                              A0&& a0, A1&& a1) {
+  __format_arg_store store;
+  store.__push(static_cast<A0&&>(a0));
+  store.__push(static_cast<A1&&>(a1));
+  string output;
+  __format_args runtime_args = __make_runtime_args(store);
+  __vformat_to(text_data, text_size, &runtime_args, &output);
+  return output;
+}
+
+template <class A0, class A1, class A2>
+inline string __format_invoke(const char* text_data, size_t text_size,
+                              A0&& a0, A1&& a1, A2&& a2) {
+  __format_arg_store store;
+  store.__push(static_cast<A0&&>(a0));
+  store.__push(static_cast<A1&&>(a1));
+  store.__push(static_cast<A2&&>(a2));
+  string output;
+  __format_args runtime_args = __make_runtime_args(store);
+  __vformat_to(text_data, text_size, &runtime_args, &output);
+  return output;
+}
+
+template <class A0, class A1, class A2, class A3>
+inline string __format_invoke(const char* text_data, size_t text_size,
+                              A0&& a0, A1&& a1, A2&& a2, A3&& a3) {
+  __format_arg_store store;
+  store.__push(static_cast<A0&&>(a0));
+  store.__push(static_cast<A1&&>(a1));
+  store.__push(static_cast<A2&&>(a2));
+  store.__push(static_cast<A3&&>(a3));
+  string output;
+  __format_args runtime_args = __make_runtime_args(store);
+  __vformat_to(text_data, text_size, &runtime_args, &output);
+  return output;
+}
+
+template <class A0, class A1, class A2, class A3, class A4>
+inline string __format_invoke(const char* text_data, size_t text_size,
+                              A0&& a0, A1&& a1, A2&& a2, A3&& a3, A4&& a4) {
+  __format_arg_store store;
+  store.__push(static_cast<A0&&>(a0));
+  store.__push(static_cast<A1&&>(a1));
+  store.__push(static_cast<A2&&>(a2));
+  store.__push(static_cast<A3&&>(a3));
+  store.__push(static_cast<A4&&>(a4));
+  string output;
+  __format_args runtime_args = __make_runtime_args(store);
+  __vformat_to(text_data, text_size, &runtime_args, &output);
+  return output;
+}
+
+}  // namespace __format_detail
+
+__format_detail::__format_arg_store make_format_args();
+template <class A0>
+auto make_format_args(A0& a0) {
+  __format_detail::__format_arg_store store;
+  store.__push(a0);
+  return store;
+}
+template <class A0, class A1>
+auto make_format_args(A0& a0, A1& a1) {
+  __format_detail::__format_arg_store store;
+  store.__push(a0);
+  store.__push(a1);
+  return store;
+}
+template <class A0, class A1, class A2>
+auto make_format_args(A0& a0, A1& a1, A2& a2) {
+  __format_detail::__format_arg_store store;
+  store.__push(a0);
+  store.__push(a1);
+  store.__push(a2);
+  return store;
+}
+template <class A0, class A1, class A2, class A3>
+auto make_format_args(A0& a0, A1& a1, A2& a2, A3& a3) {
+  __format_detail::__format_arg_store store;
+  store.__push(a0);
+  store.__push(a1);
+  store.__push(a2);
+  store.__push(a3);
+  return store;
+}
+template <class A0, class A1, class A2, class A3, class A4>
+auto make_format_args(A0& a0, A1& a1, A2& a2, A3& a3, A4& a4) {
+  __format_detail::__format_arg_store store;
+  store.__push(a0);
+  store.__push(a1);
+  store.__push(a2);
+  store.__push(a3);
+  store.__push(a4);
+  return store;
+}
+
+namespace __format_detail {
+}  // namespace __format_detail
+
+template <class CharT, class... Args>
+class basic_format_string;
+
+template <class CharT, class... Args>
+class basic_format_string {
+  const CharT* __data;
+  size_t __size;
+
+ public:
+  template <size_t N>
+  consteval basic_format_string(const CharT (&text)[N])
+      : __data(text), __size(N - 1) {
+    size_t next_automatic = 0;
+    bool automatic = false;
+    bool manual = false;
+    for (size_t i = 0; i < __size; ++i) {
+      if (text[i] == '}') {
+        if (i + 1 < __size && text[i + 1] == '}') {
+          ++i;
+          continue;
+        }
+        throw format_error("unmatched '}' in format string");
+      }
+      if (text[i] != '{') {
+        continue;
+      }
+      if (i + 1 < __size && text[i + 1] == '{') {
+        ++i;
+        continue;
+      }
+
+      size_t position = i + 1;
+      size_t argument = 0;
+      bool explicit_argument = false;
+      while (position < __size && text[position] >= '0' &&
+             text[position] <= '9') {
+        explicit_argument = true;
+        argument =
+            argument * 10 + static_cast<size_t>(text[position] - '0');
+        ++position;
+      }
+      if (explicit_argument) {
+        manual = true;
+        if (automatic) {
+          throw format_error(
+              "cannot mix automatic and manual argument indices");
+        }
+      } else {
+        automatic = true;
+        if (manual) {
+          throw format_error(
+              "cannot mix automatic and manual argument indices");
+        }
+        argument = next_automatic++;
+      }
+      if (argument >= sizeof...(Args)) {
+        throw format_error("format argument index out of range");
+      }
+
+      size_t specification_start = position;
+      size_t specification_size = 0;
+      if (position < __size && text[position] == ':') {
+        specification_start = ++position;
+        while (position < __size && text[position] != '}') {
+          CharT specification_character = text[position];
+          if (specification_character == '{') {
+            ++position;
+            size_t dynamic_argument = 0;
+            bool explicit_dynamic = false;
+            while (position < __size && text[position] >= '0' &&
+                   text[position] <= '9') {
+              explicit_dynamic = true;
+              dynamic_argument =
+                  dynamic_argument * 10 +
+                  static_cast<size_t>(text[position] - '0');
+              ++position;
+            }
+            if (position >= __size || text[position] != '}') {
+              throw format_error("invalid dynamic format specification");
+            }
+            if (explicit_dynamic) {
+              manual = true;
+              if (automatic) {
+                throw format_error(
+                    "cannot mix automatic and manual argument indices");
+              }
+            } else {
+              automatic = true;
+              if (manual) {
+                throw format_error(
+                    "cannot mix automatic and manual argument indices");
+              }
+              dynamic_argument = next_automatic++;
+            }
+            if (dynamic_argument >= sizeof...(Args) ||
+                !__format_detail::__format_type_checker<
+                    0, CharT, Args...>::dynamic_integer(dynamic_argument)) {
+              throw format_error("invalid dynamic format argument");
+            }
+            ++position;
+          } else {
+            ++position;
+          }
+        }
+        specification_size = position - specification_start;
+      }
+      if (position >= __size || text[position] != '}') {
+        throw format_error("unmatched '{' in format string");
+      }
+      bool builtin_syntax_valid = true;
+      char presentation = 0;
+      size_t spec_position = specification_start;
+      size_t spec_end = specification_start + specification_size;
+      if (spec_position + 1 < spec_end &&
+          (text[spec_position + 1] == '<' ||
+           text[spec_position + 1] == '>' ||
+           text[spec_position + 1] == '^')) {
+        spec_position += 2;
+      } else if (spec_position < spec_end &&
+                 (text[spec_position] == '<' ||
+                  text[spec_position] == '>' ||
+                  text[spec_position] == '^')) {
+        ++spec_position;
+      }
+      if (spec_position < spec_end &&
+          (text[spec_position] == '+' || text[spec_position] == '-' ||
+           text[spec_position] == ' ')) {
+        ++spec_position;
+      }
+      if (spec_position < spec_end && text[spec_position] == '#') {
+        ++spec_position;
+      }
+      if (spec_position < spec_end && text[spec_position] == '0') {
+        ++spec_position;
+      }
+      if (spec_position < spec_end && text[spec_position] == '{') {
+        while (spec_position < spec_end && text[spec_position] != '}') {
+          ++spec_position;
+        }
+        if (spec_position < spec_end) {
+          ++spec_position;
+        } else {
+          builtin_syntax_valid = false;
+        }
+      } else {
+        while (spec_position < spec_end &&
+               text[spec_position] >= '0' && text[spec_position] <= '9') {
+          ++spec_position;
+        }
+      }
+      if (spec_position < spec_end && text[spec_position] == '.') {
+        ++spec_position;
+        if (spec_position < spec_end && text[spec_position] == '{') {
+          while (spec_position < spec_end && text[spec_position] != '}') {
+            ++spec_position;
+          }
+          if (spec_position < spec_end) {
+            ++spec_position;
+          } else {
+            builtin_syntax_valid = false;
+          }
+        } else {
+          size_t precision_start = spec_position;
+          while (spec_position < spec_end &&
+                 text[spec_position] >= '0' && text[spec_position] <= '9') {
+            ++spec_position;
+          }
+          if (spec_position == precision_start) {
+            builtin_syntax_valid = false;
+          }
+        }
+      }
+      if (spec_position < spec_end) {
+        presentation = static_cast<char>(text[spec_position++]);
+      }
+      if (spec_position != spec_end) {
+        builtin_syntax_valid = false;
+      }
+      if (!__format_detail::__format_type_checker<
+              0, CharT, Args...>::specification(
+              argument, builtin_syntax_valid, presentation)) {
+        throw format_error(
+            "format presentation is incompatible with argument type");
+      }
+      i = position;
+    }
+  }
+
+  constexpr const CharT* data() const noexcept { return __data; }
+
+  constexpr size_t size() const noexcept { return __size; }
+
+  constexpr basic_string_view<CharT> get() const noexcept {
+    return basic_string_view<CharT>(__data, __size);
+  }
+};
+
+template <class... Args>
+using format_string = basic_format_string<char, Args...>;
+
+string vformat(string_view text, format_args args);
+
+template <class OutputIt>
+OutputIt vformat_to(OutputIt out, string_view text, format_args args) {
+  string result = vformat(text, args);
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+string format(
+    const typename __format_detail::__non_deduced<format_string<>>::type& text);
+
+template <class A0>
+inline string format(
+    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+    A0&& a0) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  const char* data = text.data();
+  size_t size = text.size();
+  return __format_detail::__format_invoke(data, size, arg0);
+}
+
+template <class A0, class A1>
+inline string format(
+    const typename __format_detail::__non_deduced<format_string<A0, A1>>::type& text,
+    A0&& a0, A1&& a1) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
+  const char* data = text.data();
+  size_t size = text.size();
+  return __format_detail::__format_invoke(data, size, arg0, arg1);
+}
+
+template <class A0, class A1, class A2>
+inline string format(
+    const typename __format_detail::__non_deduced<
+        format_string<A0, A1, A2>>::type& text,
+    A0&& a0, A1&& a1, A2&& a2) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
+  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
+  const char* data = text.data();
+  size_t size = text.size();
+  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2);
+}
+
+template <class A0, class A1, class A2, class A3>
+inline string format(
+    const typename __format_detail::__non_deduced<
+        format_string<A0, A1, A2, A3>>::type& text,
+    A0&& a0, A1&& a1, A2&& a2, A3&& a3) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
+  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
+  typename decay<A3>::type arg3 = static_cast<A3&&>(a3);
+  const char* data = text.data();
+  size_t size = text.size();
+  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2, arg3);
+}
+
+template <class A0, class A1, class A2, class A3, class A4>
+inline string format(
+    const typename __format_detail::__non_deduced<
+        format_string<A0, A1, A2, A3, A4>>::type& text,
+    A0&& a0, A1&& a1, A2&& a2, A3&& a3, A4&& a4) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
+  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
+  typename decay<A3>::type arg3 = static_cast<A3&&>(a3);
+  typename decay<A4>::type arg4 = static_cast<A4&&>(a4);
+  const char* data = text.data();
+  size_t size = text.size();
+  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2, arg3,
+                                          arg4);
+}
+
+template <class OutputIt>
+OutputIt format_to(OutputIt out,
+                   const typename __format_detail::__non_deduced<
+                       format_string<>>::type& text) {
+  string result =
+      __format_detail::__format_invoke(
+          text.data(), text.size());
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class OutputIt, class A0>
+OutputIt format_to(OutputIt out,
+                   const typename __format_detail::__non_deduced<
+                       format_string<A0>>::type& text,
+                   A0&& a0) {
+  string result = __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0));
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class OutputIt, class A0, class A1>
+OutputIt format_to(OutputIt out,
+                   const typename __format_detail::__non_deduced<
+                       format_string<A0, A1>>::type& text,
+                   A0&& a0, A1&& a1) {
+  string result = __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0), static_cast<A1&&>(a1));
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class OutputIt>
+struct format_to_n_result {
+  OutputIt out;
+  size_t size;
+};
+
+template <class OutputIt, class A0>
+format_to_n_result<OutputIt> format_to_n(
+    OutputIt out, size_t n,
+    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+    A0&& a0) {
+  string result = __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0));
+  size_t count = result.size() < n ? result.size() : n;
+  for (size_t i = 0; i < count; ++i) {
+    *out++ = result[i];
+  }
+  return {out, result.size()};
+}
+
+template <class OutputIt, class A0, class A1>
+format_to_n_result<OutputIt> format_to_n(
+    OutputIt out, size_t n,
+    const typename __format_detail::__non_deduced<
+        format_string<A0, A1>>::type& text,
+    A0&& a0, A1&& a1) {
+  string result = __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0), static_cast<A1&&>(a1));
+  size_t count = result.size() < n ? result.size() : n;
+  for (size_t i = 0; i < count; ++i) {
+    *out++ = result[i];
+  }
+  return {out, result.size()};
+}
+
+template <class A0>
+size_t formatted_size(
+    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+    A0&& a0) {
+  return __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0))
+      .size();
+}
+
+template <class A0, class A1>
+size_t formatted_size(
+    const typename __format_detail::__non_deduced<
+        format_string<A0, A1>>::type& text,
+    A0&& a0, A1&& a1) {
+  return __format_detail::__format_invoke(
+      text.data(), text.size(),
+      static_cast<A0&&>(a0), static_cast<A1&&>(a1))
+      .size();
+}
+
+template <class Visitor, class Context>
+decltype(auto) visit_format_arg(Visitor&& visitor,
+                                basic_format_arg<Context> argument) {
+  return static_cast<Visitor&&>(visitor)(argument);
+}
+
+}  // namespace std
+
+#endif

@@ -1,0 +1,96 @@
+#ifndef __davecc_print__
+#define __davecc_print__
+
+#include <cstdio>
+#include <format>
+
+#define __cpp_lib_print 202207L
+
+extern "C" int write(int fd, const char* buffer, size_t size);
+
+namespace std {
+
+namespace __print_detail {
+
+inline void __write_stdout(const string& value) {
+  size_t position = 0;
+  while (position < value.size()) {
+    int written = ::write(1, value.data() + position, value.size() - position);
+    if (written <= 0) {
+      __format_detail::__fail("failed to write formatted output");
+    }
+    position += static_cast<size_t>(written);
+  }
+}
+
+inline void __write_file(FILE* file, const string& value) {
+  if (file == nullptr ||
+      ::fwrite(value.data(), 1, value.size(), file) != value.size()) {
+    __format_detail::__fail("failed to write formatted output");
+  }
+}
+
+}  // namespace __print_detail
+
+inline void vprint_nonunicode(string_view text, format_args args) {
+  __print_detail::__write_stdout(vformat(text, args));
+}
+
+inline void vprint_nonunicode(FILE* file, string_view text, format_args args) {
+  __print_detail::__write_file(file, vformat(text, args));
+}
+
+void print(const typename __format_detail::__non_deduced<format_string<>>::type& text) {
+  __print_detail::__write_stdout(
+      __format_detail::__format_invoke(text.data(), text.size()));
+}
+
+template <class A0>
+void print(const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+           A0&& a0) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  __print_detail::__write_stdout(
+      __format_detail::__format_invoke(text.data(), text.size(), arg0));
+}
+
+template <class A0>
+void print(FILE* file,
+           const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+           A0&& a0) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  __print_detail::__write_file(file,
+      __format_detail::__format_invoke(text.data(), text.size(), arg0));
+}
+
+template <class A0>
+void println(const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+             A0&& a0) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  string output =
+      __format_detail::__format_invoke(text.data(), text.size(), arg0);
+  output.push_back('\n');
+  __print_detail::__write_stdout(output);
+}
+
+inline void println() {
+  __print_detail::__write_stdout(string("\n", 1));
+}
+
+template <class A0>
+void println(FILE* file,
+             const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
+             A0&& a0) {
+  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
+  string output =
+      __format_detail::__format_invoke(text.data(), text.size(), arg0);
+  output.push_back('\n');
+  __print_detail::__write_file(file, output);
+}
+
+inline void println(FILE* file) {
+  __print_detail::__write_file(file, string("\n", 1));
+}
+
+}  // namespace std
+
+#endif
