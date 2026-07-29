@@ -1364,8 +1364,38 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
   return dest;
 }
 
+/* C++ assignment expressions are lvalues. The outer operation in a
+ * left-assignment fold therefore needs the inner assignment's destination,
+ * rather than its stored value, as its own left operand. */
+static bool AssignmentResultIsOuterAssignmentLHS(ASTNode* node) {
+  if (node == NULL || (node->flags & kASTNeedAddress) == 0 ||
+      node->parent == NULL || node->child_id != 0) {
+    return false;
+  }
+  switch (node->parent->op) {
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Simple assignment.
 static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
+  bool result_address_needed =
+      AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
   IRNode* dest = GenerateExpression(gen, node->left);
 
   IRNode* value;
@@ -1382,7 +1412,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       gen->current_struct_address = ref;
       value = GenerateExpression(gen, node->right);
       gen->current_struct_address = old_struct_address;
-      return value;
+      return result_address_needed ? dest : value;
     } else {
       // Struct or union assignment, use memcpy.  A call that returns a
       // reference already yields a pointer to the source object; any other
@@ -1435,13 +1465,13 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     assignment = GeneratorEmit(gen, NewIR2(store, dest,
                                        RemoveUnnecesaryShortening(gen, value, store)));
     if (dest_was_spilled) {
-      return value;
+      return result_address_needed ? dest : value;
     }
   }
 
   CheckForVarDef(assignment, node->left);
 
-  return value;
+  return result_address_needed ? dest : value;
 }
 
 static struct {
@@ -1451,6 +1481,7 @@ static struct {
     {AST_OP(pluseq), AST_OP(plus)},       {AST_OP(minuseq), AST_OP(minus)},
     {AST_OP(multeq), AST_OP(mult)},       {AST_OP(diveq), AST_OP(div)},
     {AST_OP(percenteq), AST_OP(mod)}, {AST_OP(lshifteq), AST_OP(lshift)},
+    {AST_OP(rshifteq), AST_OP(rshifta)},
     {AST_OP(rshifteqa), AST_OP(rshifta)},  {AST_OP(rshifteql), AST_OP(rshiftl)},
     {AST_OP(andeq), AST_OP(and)},
     {AST_OP(oreq), AST_OP(bitor)},        {AST_OP(exoreq), AST_OP(exor)},
@@ -1460,6 +1491,8 @@ static struct {
 // Compound assignment.
 static IRNode* GenerateCompoundAssignment(Generator* gen,
                                            BinaryASTNode* node) {
+  bool result_address_needed =
+      AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
   // Get value of operation.
   IRNode* value = GenerateExpression(gen, node->right);
 
@@ -1532,7 +1565,10 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   IRNode* result = GeneratorEmit(gen, NewIR2(store_op, dest,
                                              RemoveUnnecesaryShortening(gen, value, store_op)));
   CheckForVarDef(result, node->left);
-    
+
+  if (result_address_needed) {
+    return dest;
+  }
   return IRSetType(result, node->base.type);
 }
 
@@ -3542,6 +3578,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(diveq):
     case AST_OP(percenteq):
     case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
     case AST_OP(rshifteqa):
     case AST_OP(rshifteql):
     case AST_OP(andeq):

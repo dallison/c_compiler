@@ -2523,31 +2523,49 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         default:
           break;
       }
-      if (inst->operand[0]->reg != NULL &&
-          inst->reg != NULL &&
+      bool constant_count = TargetIsConst(inst->operand[1]);
+      if (!constant_count) {
+        // Variable shifts require %cl. Use reserved scratch register %r11 for
+        // the result and save %rcx around the operation. This handles every
+        // overlap between lhs, count, destination, and an unrelated live value
+        // in %rcx without requiring allocator constraints.
+        fprintf(fp, "\tmovq ");
+        PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", %%r11\n\tpushq %%rcx\n\tmovq ");
+        PrintPercentRegFromInst(fp, inst->operand[1], buf1, sizeof(buf1));
+        fprintf(fp, ", %%rcx\n");
+        bool shift32 = (X86_64Opcode)inst->opcode == X86_64_OP(shll) ||
+                       (X86_64Opcode)inst->opcode == X86_64_OP(shrl) ||
+                       (X86_64Opcode)inst->opcode == X86_64_OP(sarl);
+        fprintf(fp, "\t%s %%cl, %s\n\tpopq %%rcx\n\tmovq %%r11, ", op,
+                shift32 ? "%r11d" : "%r11");
+        if (inst->dest != NULL && inst->dest->reg != NULL) {
+          PrintPercentReg(
+              fp, X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,
+                                     sizeof(buf2)));
+        } else {
+          PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        }
+        fprintf(fp, "\n");
+        break;
+      }
+      if (inst->operand[0]->reg != NULL && inst->reg != NULL &&
           inst->operand[0]->reg != inst->reg) {
         fprintf(fp, "\tmovq ");
         PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
         fprintf(fp, ", ");
         if (inst->dest != NULL && inst->dest->reg != NULL) {
-        PrintPercentReg(fp,
-                        X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,
-                                           sizeof(buf2)));
-      } else {
-        PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
-      }
+          PrintPercentReg(
+              fp, X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,
+                                     sizeof(buf2)));
+        } else {
+          PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        }
         fprintf(fp, "\n");
       }
-      if (TargetIsConst(inst->operand[1])) {
-        fprintf(fp, "\t%s ", op);
-        PrintAsmImmediate(fp, TargetIntValue(inst->operand[1]));
-        fprintf(fp, ", ");
-      } else {
-        fprintf(fp, "\tmovq ");
-        PrintPercentRegFromInst(fp, inst->operand[1], buf1, sizeof(buf1));
-        fprintf(fp, ", %%rcx\n");
-        fprintf(fp, "\t%s %%cl, ", op);
-      }
+      fprintf(fp, "\t%s ", op);
+      PrintAsmImmediate(fp, TargetIntValue(inst->operand[1]));
+      fprintf(fp, ", ");
       if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,

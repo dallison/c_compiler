@@ -1823,8 +1823,8 @@ static void ExpandClonedBracedInitializerPackElements(
   }
 }
 
-/* The identity value for an empty fold expression: `&&` folds to true, `||` to
- * false; any other operator over an empty pack is an error. */
+/* The identity value for an empty unary fold expression: `&&` folds to true,
+ * `||` to false, and `,` to void(). Any other operator is ill-formed. */
 static ASTNode* NewFoldIdentity(ASTOpcode op, SourceLocation location,
                                 TypeParser* parser) {
   if (op == AST_OP(logand)) {
@@ -1835,9 +1835,59 @@ static ASTNode* NewFoldIdentity(ASTOpcode op, SourceLocation location,
     return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                                  location);
   }
+  if (op == AST_OP(comma)) {
+    ASTNode* zero = NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+    ASTNode* result = NewCastASTNode(
+        NewTypeRecordWithSize(kTypeVoid, kQualPlain), location, zero);
+    ((CastASTNode*)result)->kind = kCastStatic;
+    return result;
+  }
   SyntaxError(parser->syntax, "Empty fold expression is not supported for this operator");
   return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                location);
+}
+
+static bool IsFoldOperatorOpcode(ASTOpcode op) {
+  switch (op) {
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(lshift):
+    case AST_OP(rshift):
+    case AST_OP(and):
+    case AST_OP(exor):
+    case AST_OP(bitor):
+    case AST_OP(logand):
+    case AST_OP(logor):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(less):
+    case AST_OP(greater):
+    case AST_OP(lesseq):
+    case AST_OP(greatereq):
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(comma):
+    case AST_OP(dotstar):
+    case AST_OP(arrowstar):
+      return true;
+    default:
+      return false;
+  }
 }
 
 typedef enum {
@@ -2047,16 +2097,15 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
 static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
                                            ASTNode* node) {
   if (node == NULL || (node->flags & kASTFoldExpression) == 0 ||
-      (node->op != AST_OP(mult) && node->op != AST_OP(plus) &&
-       node->op != AST_OP(minus) && node->op != AST_OP(div) &&
-       node->op != AST_OP(mod) && node->op != AST_OP(lshift) &&
-       node->op != AST_OP(rshift) && node->op != AST_OP(and) &&
-       node->op != AST_OP(exor) && node->op != AST_OP(bitor) &&
-       node->op != AST_OP(logand) && node->op != AST_OP(logor))) {
+      !IsFoldOperatorOpcode(node->op)) {
     return node;
   }
 
   BinaryASTNode* fold = (BinaryASTNode*)node;
+  ASTOpcode fold_op =
+      node->op == AST_OP(rshifteql) || node->op == AST_OP(rshifteqa)
+          ? AST_OP(rshifteq)
+          : node->op;
   bool pack_on_left = (node->flags & kASTFoldPackOnLeft) != 0;
   ASTNode* pack_node = pack_on_left ? fold->left : fold->right;
   ASTNode* seed = pack_on_left ? fold->right : fold->left;
@@ -2090,7 +2139,7 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
     if (seed != NULL) {
       return seed;
     }
-    return NewFoldIdentity(node->op, node->location, clone->parser);
+    return NewFoldIdentity(fold_op, node->location, clone->parser);
   }
 
   if (pack_on_left) {
@@ -2102,7 +2151,7 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
     for (size_t i = start; i > 0; i--) {
       ASTNode* left =
           CloneFoldPackElement(clone, pack_node, &packs, i - 1);
-      result = NewBinaryASTNode(node->op, NULL, node->location, left, result);
+      result = NewBinaryASTNode(fold_op, NULL, node->location, left, result);
     }
     DeleteFoldPackBindings(&packs);
     return result;
@@ -2114,7 +2163,7 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
   size_t start = seed != NULL ? 0 : 1;
   for (size_t i = start; i < packs.length; i++) {
     ASTNode* right = CloneFoldPackElement(clone, pack_node, &packs, i);
-    result = NewBinaryASTNode(node->op, NULL, node->location, result, right);
+    result = NewBinaryASTNode(fold_op, NULL, node->location, result, right);
   }
   DeleteFoldPackBindings(&packs);
   return result;
