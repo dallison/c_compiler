@@ -176,6 +176,7 @@ static struct {
   Type type;
   int (*func)(void);
 } type_sizes[] = {
+  {kTypeChar8, SizeofChar},
   {kTypeChar, SizeofChar},
   {kTypeBool, SizeofBool},
   {kTypeShort, SizeofShort},

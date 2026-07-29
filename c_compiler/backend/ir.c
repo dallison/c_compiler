@@ -471,7 +471,7 @@ static IROpcode IntConstOpcode(TypeRecord* type) {
     size = compiler->short_size;
   } else if (TypeIsBool(type)) {
     size = compiler->bool_size;
-  } else if (TypeIsChar(type)) {
+  } else if (TypeIsCharFamily(type)) {
     size = 1;
   } else if (TypeIsLong(type)) {
     size = compiler->long_size;

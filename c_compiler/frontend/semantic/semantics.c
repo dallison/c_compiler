@@ -463,22 +463,23 @@ struct {
     {TypeIsInt, TypeIsShort, AST_OP(i2s)},
     {TypeIsInt, TypeIsLong, AST_OP(i2l)},
     {TypeIsInt, TypeIsLongLong, AST_OP(i2ll)},
-    {TypeIsInt, TypeIsChar, AST_OP(i2c)},
+    {TypeIsInt, TypeIsCharFamily, AST_OP(i2c)},
     {TypeIsInt, TypeIsFloat, AST_OP(i2f)},
     {TypeIsInt, TypeIsDouble, AST_OP(i2d)},
     {TypeIsInt, TypeIsLongDouble, AST_OP(i2ld)},
     {TypeIsInt, TypeIsBool, AST_OP(i2b)},
 
-    {TypeIsChar, TypeIsShort, AST_OP(c2s)},
-    {TypeIsChar, TypeIsLong, AST_OP(c2l)},
-    {TypeIsChar, TypeIsLongLong, AST_OP(c2ll)},
-    {TypeIsChar, TypeIsInt, AST_OP(c2i)},
-    {TypeIsChar, TypeIsFloat, AST_OP(c2f)},
-    {TypeIsChar, TypeIsDouble, AST_OP(c2d)},
-    {TypeIsChar, TypeIsLongDouble, AST_OP(c2ld)},
-    {TypeIsChar, TypeIsBool, AST_OP(c2b)},
+    {TypeIsCharFamily, TypeIsCharFamily, AST_OP(i2c)},
+    {TypeIsCharFamily, TypeIsShort, AST_OP(c2s)},
+    {TypeIsCharFamily, TypeIsLong, AST_OP(c2l)},
+    {TypeIsCharFamily, TypeIsLongLong, AST_OP(c2ll)},
+    {TypeIsCharFamily, TypeIsInt, AST_OP(c2i)},
+    {TypeIsCharFamily, TypeIsFloat, AST_OP(c2f)},
+    {TypeIsCharFamily, TypeIsDouble, AST_OP(c2d)},
+    {TypeIsCharFamily, TypeIsLongDouble, AST_OP(c2ld)},
+    {TypeIsCharFamily, TypeIsBool, AST_OP(c2b)},
 
-    {TypeIsShort, TypeIsChar, AST_OP(s2c)},
+    {TypeIsShort, TypeIsCharFamily, AST_OP(s2c)},
     {TypeIsShort, TypeIsLong, AST_OP(s2l)},
     {TypeIsShort, TypeIsLongLong, AST_OP(s2ll)},
     {TypeIsShort, TypeIsInt, AST_OP(s2i)},
@@ -487,7 +488,7 @@ struct {
     {TypeIsShort, TypeIsLongDouble, AST_OP(s2ld)},
     {TypeIsShort, TypeIsBool, AST_OP(s2b)},
 
-    {TypeIsLong, TypeIsChar, AST_OP(l2c)},
+    {TypeIsLong, TypeIsCharFamily, AST_OP(l2c)},
     {TypeIsLong, TypeIsShort, AST_OP(l2s)},
     {TypeIsLong, TypeIsLongLong, AST_OP(l2ll)},
     {TypeIsLong, TypeIsInt, AST_OP(l2i)},
@@ -496,7 +497,7 @@ struct {
     {TypeIsLong, TypeIsLongDouble, AST_OP(l2ld)},
     {TypeIsLong, TypeIsBool, AST_OP(l2b)},
 
-    {TypeIsLongLong, TypeIsChar, AST_OP(ll2c)},
+    {TypeIsLongLong, TypeIsCharFamily, AST_OP(ll2c)},
     {TypeIsLongLong, TypeIsShort, AST_OP(ll2s)},
     {TypeIsLongLong, TypeIsLong, AST_OP(ll2l)},
     {TypeIsLongLong, TypeIsInt, AST_OP(ll2i)},
@@ -505,7 +506,7 @@ struct {
     {TypeIsLongLong, TypeIsLongDouble, AST_OP(ll2ld)},
     {TypeIsLongLong, TypeIsBool, AST_OP(ll2b)},
 
-    {TypeIsFloat, TypeIsChar, AST_OP(f2c)},
+    {TypeIsFloat, TypeIsCharFamily, AST_OP(f2c)},
     {TypeIsFloat, TypeIsShort, AST_OP(f2s)},
     {TypeIsFloat, TypeIsLongLong, AST_OP(f2ll)},
     {TypeIsFloat, TypeIsInt, AST_OP(f2i)},
@@ -514,7 +515,7 @@ struct {
     {TypeIsFloat, TypeIsLongDouble, AST_OP(f2ld)},
     {TypeIsFloat, TypeIsBool, AST_OP(f2b)},
 
-    {TypeIsDouble, TypeIsChar, AST_OP(d2c)},
+    {TypeIsDouble, TypeIsCharFamily, AST_OP(d2c)},
     {TypeIsDouble, TypeIsLong, AST_OP(d2l)},
     {TypeIsDouble, TypeIsLongLong, AST_OP(d2ll)},
     {TypeIsDouble, TypeIsInt, AST_OP(d2i)},
@@ -523,7 +524,7 @@ struct {
     {TypeIsDouble, TypeIsLongDouble, AST_OP(d2ld)},
     {TypeIsDouble, TypeIsBool, AST_OP(d2b)},
 
-    {TypeIsLongDouble, TypeIsChar, AST_OP(ld2c)},
+    {TypeIsLongDouble, TypeIsCharFamily, AST_OP(ld2c)},
     {TypeIsLongDouble, TypeIsLong, AST_OP(ld2l)},
     {TypeIsLongDouble, TypeIsLongLong, AST_OP(ld2ll)},
     {TypeIsLongDouble, TypeIsInt, AST_OP(ld2i)},
@@ -532,7 +533,7 @@ struct {
     {TypeIsLongDouble, TypeIsDouble, AST_OP(ld2d)},
     {TypeIsLongDouble, TypeIsBool, AST_OP(ld2b)},
 
-    {TypeIsBool, TypeIsChar, AST_OP(b2c)},
+    {TypeIsBool, TypeIsCharFamily, AST_OP(b2c)},
     {TypeIsBool, TypeIsShort, AST_OP(b2s)},
     {TypeIsBool, TypeIsLongLong, AST_OP(b2ll)},
     {TypeIsBool, TypeIsInt, AST_OP(b2i)},
@@ -959,7 +960,7 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   }
   // Integral and floating-point promotions rank above ordinary conversions.
   if (TypeIsInt(to) &&
-      (TypeIsChar(result) || TypeIsShort(result) || TypeIsBool(result) ||
+      (TypeIsCharFamily(result) || TypeIsShort(result) || TypeIsBool(result) ||
        (TypeIsEnum(result) && !TypeIsScopedEnum(result)))) {
     return 2;
   }
@@ -1323,6 +1324,13 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         }
       }
       if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
+        if (CompilerIsCXX() &&
+            TypeChar8IdentityDiffers(from->type, to)) {
+          SemanticTypeConversionError(from, to,
+                                      "Illegal pointer conversion; "
+                                      "from '%s' to '%s'");
+          return;
+        }
         if (TypeDiscardsQualifiers(from->type->next, to->next)) {
           SemanticTypeConversionWarning(from, to, "discarded-qualifiers",
                                         "Pointer conversion discards qualifiers; "

@@ -1475,6 +1475,7 @@ static struct {
 } load_opcodes[] = {
     {TypeIsInt, ARM_OP(ldr)},
     {TypeIsShort, ARM_OP(ldrh)},
+    {TypeIsChar8, ARM_OP(ldurb)},
     {TypeIsChar, ARM_OP(ldrb)},
     {TypeIsLong, ARM_OP(ldr)},
     {TypeIsLongLong, ARM_OP(ldr)},

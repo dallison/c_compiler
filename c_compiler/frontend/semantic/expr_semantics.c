@@ -471,7 +471,7 @@ static void AnalyzeBinaryExpression(BinaryASTNode* node) {
 // of the array.  These are pointers to functions that return true
 // if the type is of the requested value.
 bool (*type_ranks[])(TypeRecord*) = {
-    TypeIsBool,       TypeIsChar,     TypeIsShort, TypeIsInt,
+    TypeIsBool,       TypeIsCharFamily, TypeIsShort, TypeIsInt,
     TypeIsLong,       TypeIsLongLong, TypeIsFloat, TypeIsDouble,
     TypeIsLongDouble, TypeIsVoid,     NULL,
 };
@@ -517,11 +517,8 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
     case AST_OP(uminus): {
       int rank = GetRank(node->sub->type);
       if (rank < kIntRank) {
-        Type t = kTypeInt;
-        if (TypeIsUnsigned(node->sub->type)) {
-          t |= kTypeUnsigned;
-        }
-        NormalConversion(node->sub, NewTypeRecordWithSize(t, kQualPlain));
+        NormalConversion(
+            node->sub, NewTypeRecordWithSize(kTypeInt, kQualPlain));
       }
       break;
     }
@@ -710,20 +707,14 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       // constants such as `(short)1`) before any of the constant-adaption
       // below, otherwise small constants would skip promotion.
       if (left_rank > 0 && left_rank < kIntRank) {
-        Type t = kTypeInt;
-        if (TypeIsUnsigned(node->left->type)) {
-          t |= kTypeUnsigned;
-        }
-        NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
+        NormalConversion(
+            node->left, NewTypeRecordWithSize(kTypeInt, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->left->type);
         left_rank = GetRank(node->left->type);
       }
       if (right_rank > 0 && right_rank < kIntRank) {
-        Type t = kTypeInt;
-        if (TypeIsUnsigned(node->right->type)) {
-          t |= kTypeUnsigned;
-        }
-        NormalConversion(node->right, NewTypeRecordWithSize(t, kQualPlain));
+        NormalConversion(
+            node->right, NewTypeRecordWithSize(kTypeInt, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->right->type);
         right_rank = GetRank(node->right->type);
       }
@@ -4900,10 +4891,18 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   if (TypeIsEnum(actual) && TypeIsIntegral(target)) {
     return 2;
   }
+  if (TypeIsInt(target) && !TypeIsUnsigned(target) &&
+      (TypeIsCharFamily(actual) || TypeIsShort(actual) ||
+       TypeIsBool(actual))) {
+    return 1;
+  }
   if (TypeIsIntegral(actual) && TypeIsIntegral(target)) {
     return 2;
   }
   if (TypeIsPointerOrArray(actual) && TypeIsPointerOrArray(target)) {
+    if (TypeChar8IdentityDiffers(actual, target)) {
+      return -1;
+    }
     if (CompilerIsCXX() && TypeIsVoidPointer(actual) &&
         TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
       return -1;

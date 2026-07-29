@@ -5272,7 +5272,8 @@ static struct {
   int size;
   int pushed_size;
 } push_map[] = {
-    {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},         {TypeIsChar, 1, 2},
+    {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},
+    {TypeIsCharFamily, 1, 2},
     {TypeIsLong, 4, 4},     {TypeIsLongLong, 8, 8},      {TypeIsFloat, 4, 4},
     {TypeIsDouble, 4, 4},   {TypeIsLongDouble, 4, 4},    {TypeIsPointerOrArray, 2, 2},
   {TypeIsFunction, 2, 2}, {TypeIsStructOrUnion, 2, 2},
@@ -7929,7 +7930,7 @@ static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord*
   W65C02RegisterType reg_type;
   if (TypeIsFloat(type) || TypeIsDouble(type)) {
     reg_type = k6502RegTypeF;
-  } else if (TypeIsChar(type) || TypeIsBool(type)) {
+  } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
     reg_type = k6502RegTypeB;
   } else if (TypeIsLong(type) || TypeIsMemberPointerAggregate(type)) {
     reg_type = k6502RegTypeL;

@@ -10263,6 +10263,7 @@ bool SyntaxCurrentClassNameStartsType(Syntax* syntax) {
 bool SyntaxLookingAtType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(char):
+    case TOK(char8_t):
     case TOK(int):
     case TOK(short):
     case TOK(long):
@@ -10612,6 +10613,7 @@ TokenClass ClassifyToken(Token tok) {
 
     case TOK(bool):
     case TOK(char):
+    case TOK(char8_t):
     case TOK(class):
     case TOK(complex):
     case TOK(const):

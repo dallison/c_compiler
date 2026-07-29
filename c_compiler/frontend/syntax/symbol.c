@@ -757,6 +757,8 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, 'v');
   } else if (TypeIsBool(type)) {
     StringAppendChar(out, 'b');
+  } else if (TypeIsChar8(type)) {
+    StringAppend(out, "Du");
   } else if (TypeIsChar(type)) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 'h' : 'c');
   } else if (TypeIsShort(type)) {

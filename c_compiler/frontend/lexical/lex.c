@@ -398,8 +398,9 @@ size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
 
 // Perform escape processing on a char.  This handles
 // backslashes inside a string literal or character constant.
-static int EscapeChar(Lex* lex, int* size) {
+static int EscapeChar(Lex* lex, int* size, bool* universal) {
   *size = 1;
+  *universal = false;
   char ch = lex->line.value[lex->pos];
   if (ch == 'x' || ch == 'X') {
     lex->pos++;
@@ -417,8 +418,9 @@ static int EscapeChar(Lex* lex, int* size) {
     return n;
   } else if (ch == 'u' || ch == 'U') {
     // Universal character.
-    int n = 0;
-    int count = 4;
+    uint32_t n = 0;
+    int digits = ch == 'U' ? 8 : 4;
+    int count = digits;
     lex->pos++;
     while (count > 0 && lex->pos < lex->line.length &&
            isxdigit((unsigned char)lex->line.value[lex->pos])) {
@@ -432,10 +434,14 @@ static int EscapeChar(Lex* lex, int* size) {
       count--;
     }
     if (count != 0) {
-      LexError(lex, "A universal-character must have 4 hex digits");
+      LexError(lex, "A universal-character must have %d hex digits", digits);
     }
-    *size = 4;
-    return n;
+    if (n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) {
+      LexError(lex, "Invalid universal-character value");
+      n = 0xfffd;
+    }
+    *universal = true;
+    return (int)n;
   } else if (ch >= '0' && ch <= '7') {
     // Octal constant.
     int n = 0;
@@ -475,6 +481,29 @@ static int EscapeChar(Lex* lex, int* size) {
     }
   }
   return ch;
+}
+
+static int AppendUTF8CodePoint(String* output, uint32_t cp) {
+  if (cp <= 0x7f) {
+    StringAppendChar(output, (char)cp);
+    return 1;
+  }
+  if (cp <= 0x7ff) {
+    StringAppendChar(output, (char)(0xc0 | (cp >> 6)));
+    StringAppendChar(output, (char)(0x80 | (cp & 0x3f)));
+    return 2;
+  }
+  if (cp <= 0xffff) {
+    StringAppendChar(output, (char)(0xe0 | (cp >> 12)));
+    StringAppendChar(output, (char)(0x80 | ((cp >> 6) & 0x3f)));
+    StringAppendChar(output, (char)(0x80 | (cp & 0x3f)));
+    return 3;
+  }
+  StringAppendChar(output, (char)(0xf0 | (cp >> 18)));
+  StringAppendChar(output, (char)(0x80 | ((cp >> 12) & 0x3f)));
+  StringAppendChar(output, (char)(0x80 | ((cp >> 6) & 0x3f)));
+  StringAppendChar(output, (char)(0x80 | (cp & 0x3f)));
+  return 4;
 }
 
 // Collect an integer suffix.
@@ -654,8 +683,8 @@ static void CollectRawStringLiteral(Lex* lex, LiteralEncoding encoding) {
 
 // Collect a string literal into lex->spelling, omitting enclosing quotes.
 // lex->pos is pointing at the open quote
-static void CollectStringLiteral(Lex* lex) {
-  lex->literal_encoding = kLiteralEncodingNone;
+static void CollectStringLiteral(Lex* lex, LiteralEncoding encoding) {
+  lex->literal_encoding = encoding;
   lex->literal_is_raw = false;
   lex->pos++;
   StringClear(&lex->spelling);
@@ -668,9 +697,17 @@ static void CollectStringLiteral(Lex* lex) {
     }
     if (ch == '\\') {
       int size;
-      int v = EscapeChar(lex, &size);
-      for (int i = 0; i < size; i++) {
-        StringAppendChar(&lex->spelling, (v >> i*8) & 0xff);
+      bool universal;
+      int v = EscapeChar(lex, &size, &universal);
+      if (universal) {
+        AppendUTF8CodePoint(&lex->spelling, (uint32_t)v);
+      } else {
+        if (encoding == kLiteralEncodingUTF8 && size == 1 && v > 0xff) {
+          LexError(lex, "Escape value is not representable in char8_t");
+        }
+        for (int i = 0; i < size; i++) {
+          StringAppendChar(&lex->spelling, (v >> i*8) & 0xff);
+        }
       }
     } else if (ch == '"') {
       break;
@@ -698,7 +735,8 @@ static void CollectWideStringLiteral(Lex* lex) {
     }
     if (ch == '\\') {
       int size;
-      int v = EscapeChar(lex, &size);
+      bool universal;
+      int v = EscapeChar(lex, &size, &universal);
       // Size is ignored.
       for (int i = 0; i < compiler->wchar_size; i++) {
         StringAppendChar(&lex->spelling, (v >> i*8) & 0xff);
@@ -743,13 +781,14 @@ static void CollectWideStringLiteral(Lex* lex) {
 }
 // Collect a character constant.  The current pos is the open single quote.
 // Returns the binary value of the character constant.
-static int CollectCharConst(Lex* lex) {
-  lex->literal_encoding = kLiteralEncodingNone;
+static int CollectCharConst(Lex* lex, LiteralEncoding encoding) {
+  lex->literal_encoding = encoding;
   lex->literal_is_raw = false;
   lex->pos++;
   int value = 0;
   int nchars = 0;
   bool newline = false;
+  bool utf8_width_error = false;
   while (lex->pos < lex->line.length) {
     char ch = lex->line.value[lex->pos++];
     if (ch == '\n') {
@@ -758,16 +797,43 @@ static int CollectCharConst(Lex* lex) {
     }
     if (ch == '\\') {
       int size;
-      int v = EscapeChar(lex, &size);
-      for (int i = 0; i < size; i++) {
-        value = (value << 8) | ((v >> i*8) & 0xff);
+      bool universal;
+      int v = EscapeChar(lex, &size, &universal);
+      if (universal) {
+        String encoded;
+        StringInit(&encoded, NULL);
+        int units = AppendUTF8CodePoint(&encoded, (uint32_t)v);
+        if (encoding == kLiteralEncodingUTF8 && units != 1) {
+          LexError(lex,
+                   "UTF-8 character literal must contain exactly one code unit");
+          utf8_width_error = true;
+        }
+        for (int i = 0; i < units; i++) {
+          value = (value << 8) | (unsigned char)encoded.value[i];
+        }
+        nchars += units;
+        StringDestruct(&encoded);
+      } else {
+        if (encoding == kLiteralEncodingUTF8 && size == 1 && v > 0xff) {
+          LexError(lex, "Escape value is not representable in char8_t");
+          utf8_width_error = true;
+        }
+        for (int i = 0; i < size; i++) {
+          value = (value << 8) | ((v >> i*8) & 0xff);
+        }
+        nchars += size;
       }
-      nchars += size;
     } else if (ch == '\'') {
       break;
     } else {
       value = (value << 8) | ch;
       nchars++;
+      if (encoding == kLiteralEncodingUTF8 && (unsigned char)ch >= 0x80 &&
+          !utf8_width_error) {
+        LexError(lex,
+                 "UTF-8 character literal must contain exactly one code unit");
+        utf8_width_error = true;
+      }
     }
   }
   if (nchars > 4) {
@@ -798,7 +864,8 @@ static int CollectWideCharConst(Lex* lex) {
     }
     if (ch == '\\') {
       int size;
-      int v = EscapeChar(lex, &size);
+      bool universal;
+      int v = EscapeChar(lex, &size, &universal);
       // Size is ignored.
       value = v;
       nchars ++;
@@ -908,8 +975,7 @@ static void CollectIdentifierOrWide(Lex* lex) {
       if (raw) {
         CollectRawStringLiteral(lex, encoding);
       } else {
-        CollectStringLiteral(lex);
-        lex->literal_encoding = encoding;
+        CollectStringLiteral(lex, encoding);
       }
       lex->current_token = encoding == kLiteralEncodingWide ? TOK(string_wide)
                                                             : TOK(string);
@@ -917,8 +983,7 @@ static void CollectIdentifierOrWide(Lex* lex) {
     }
     if (char_literal) {
       lex->pos += prefix_len;
-      lex->number = CollectCharConst(lex);
-      lex->literal_encoding = encoding;
+      lex->number = CollectCharConst(lex, encoding);
       lex->current_token = TOK(charconst);
       return;
     }
@@ -1584,14 +1649,14 @@ void LexNextToken(Lex* lex) {
 
   // String literal?
   if (ch == '"') {
-    CollectStringLiteral(lex);
+    CollectStringLiteral(lex, kLiteralEncodingNone);
     lex->current_token = TOK(string);
     goto record_token_location;
   }
 
   // Character constant?
   if (ch == '\'') {
-    lex->number = CollectCharConst(lex);
+    lex->number = CollectCharConst(lex, kLiteralEncodingNone);
     lex->current_token = TOK(charconst);
     goto record_token_location;
   }

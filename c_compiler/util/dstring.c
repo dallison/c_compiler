@@ -403,7 +403,7 @@ void StringEscape(String* in, String* out) {
   // via `.asciz "%s"`.
   LazyInit(out);
   for (size_t i = 0; i < in->length; i++) {
-    char ch = in->value[i];
+    unsigned char ch = (unsigned char)in->value[i];
     if (ch < ' ' || ch >= 127) {
       char escape_char = '\0';
       switch (ch) {
@@ -432,7 +432,10 @@ void StringEscape(String* in, String* out) {
       if (escape_char != '\0') {
         StringPrintf(out, "\\%c", escape_char);
       } else {
-        StringPrintf(out, "\\%x", ch);
+        // Assembly string syntax accepts a three-digit octal byte escape.
+        // Fixed width prevents a following digit from being consumed as part
+        // of the same escape and avoids sign-extending bytes >= 0x80.
+        StringPrintf(out, "\\%03o", ch);
       }
     } else {
       switch (ch) {

@@ -450,6 +450,9 @@ __DAVECC_INTEGRAL(bool);
 __DAVECC_INTEGRAL(char);
 __DAVECC_INTEGRAL(signed char);
 __DAVECC_INTEGRAL(unsigned char);
+#if __cplusplus >= 202002L
+__DAVECC_INTEGRAL(char8_t);
+#endif
 __DAVECC_INTEGRAL(short);
 __DAVECC_INTEGRAL(unsigned short);
 __DAVECC_INTEGRAL(int);
@@ -533,6 +536,9 @@ struct is_unsigned : false_type {
 
 __DAVECC_UNSIGNED(bool);
 __DAVECC_UNSIGNED(unsigned char);
+#if __cplusplus >= 202002L
+__DAVECC_UNSIGNED(char8_t);
+#endif
 __DAVECC_UNSIGNED(unsigned short);
 __DAVECC_UNSIGNED(unsigned int);
 __DAVECC_UNSIGNED(unsigned long);
@@ -899,6 +905,9 @@ __DAVECC_TRIVIALLY_DESTRUCTIBLE(bool);
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(char);
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(signed char);
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned char);
+#if __cplusplus >= 202002L
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(char8_t);
+#endif
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(short);
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned short);
 __DAVECC_TRIVIALLY_DESTRUCTIBLE(int);

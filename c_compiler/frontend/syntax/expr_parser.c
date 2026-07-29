@@ -1391,12 +1391,16 @@ static ASTNode* NewCXXLiteralOperatorIdentifier(Syntax* syntax, String* name,
 
 static ASTNode* NewStringLiteralArgument(String* contents,
                                          SourceLocation location,
-                                         bool wide) {
+                                         LiteralEncoding encoding) {
+  bool wide = encoding == kLiteralEncodingWide;
+  bool utf8 = encoding == kLiteralEncodingUTF8 &&
+              CompilerCXXAtLeast(kLanguageStandardCXX20);
   int terminator_size = wide ? compiler->wchar_size : 1;
   TypeRecord* array = NewBasicArrayTypeRecord(
       kQualPlain, (int)contents->length + terminator_size, false);
-  TypeRecord* element = NewTypeRecordWithSize(wide ? kTypeInt : kTypeChar,
-                                              wide ? kQualPlain : kQualConst);
+  Type element_type = wide ? kTypeInt : (utf8 ? kTypeChar8 : kTypeChar);
+  TypeRecord* element = NewTypeRecordWithSize(
+      element_type, wide ? kQualPlain : kQualConst);
   TypeRecordChain(array, element);
   TypeRecordCalculateSize(array);
   return wide ? NewWideStringConstantASTNode(contents, array, location)
@@ -1546,8 +1550,9 @@ static ASTNode* ParseCXXUserDefinedIntegerLiteral(Syntax* syntax) {
   Vector* actuals = NewVector();
   Vector* template_arguments = NULL;
   if (literal_operator.kind == kCXXNumericLiteralOperatorRaw) {
-    VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
-                                                  location, false));
+    VectorAppend(actuals, NewStringLiteralArgument(
+                              NewString(spelling.value), location,
+                              kLiteralEncodingNone));
   } else if (literal_operator.kind == kCXXNumericLiteralOperatorTemplate) {
     template_arguments = CXXNumericLiteralTemplateArguments(&spelling);
   } else {
@@ -1603,8 +1608,9 @@ static ASTNode* ParseCXXUserDefinedFloatingLiteral(Syntax* syntax) {
   Vector* actuals = NewVector();
   Vector* template_arguments = NULL;
   if (literal_operator.kind == kCXXNumericLiteralOperatorRaw) {
-    VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
-                                                  location, false));
+    VectorAppend(actuals, NewStringLiteralArgument(
+                              NewString(spelling.value), location,
+                              kLiteralEncodingNone));
   } else if (literal_operator.kind == kCXXNumericLiteralOperatorTemplate) {
     template_arguments = CXXNumericLiteralTemplateArguments(&spelling);
   } else {
@@ -1623,6 +1629,7 @@ static ASTNode* ParseCXXUserDefinedFloatingLiteral(Syntax* syntax) {
 static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
   SourceLocation location = lex->current_token_location;
+  LiteralEncoding encoding = lex->literal_encoding;
   bool user_defined = lex->ud_suffix.length != 0;
   String suffix;
   StringInit(&suffix, NULL);
@@ -1634,6 +1641,20 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   
   // Adjacent string literals are joined together.
   while (LexLookingAt(lex, TOK(string))) {
+    LiteralEncoding next_encoding = lex->literal_encoding;
+    if (next_encoding != encoding) {
+      if (CompilerCXXAtLeast(kLanguageStandardCXX23) ||
+          (encoding != kLiteralEncodingNone &&
+           next_encoding != kLiteralEncodingNone)) {
+        SyntaxError(syntax,
+                    "Cannot concatenate string literals with different "
+                    "encoding prefixes");
+      } else if (encoding == kLiteralEncodingNone) {
+        // Before C++23 an ordinary literal adjacent to a prefixed literal
+        // adopts the prefixed literal's encoding.
+        encoding = next_encoding;
+      }
+    }
     StringAppend(contents, lex->spelling.value);
     if (lex->ud_suffix.length != 0) {
       user_defined = true;
@@ -1644,7 +1665,8 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   if (user_defined) {
     Vector* actuals = NewVector();
     size_t length = contents->length;
-    VectorAppend(actuals, NewStringLiteralArgument(contents, location, false));
+    VectorAppend(actuals,
+                 NewStringLiteralArgument(contents, location, encoding));
     VectorAppend(actuals,
                  NewIntConstantASTNode((int64_t)length, NewSizeTypeRecord(),
                                        location));
@@ -1660,12 +1682,17 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   // In C++ a narrow string literal has type `const char[N]`; in C it is a
   // non-const `char[N]` (modifying it is undefined behavior, but the type is
   // not const-qualified).
+  Type element_type =
+      encoding == kLiteralEncodingUTF8 &&
+              CompilerCXXAtLeast(kLanguageStandardCXX20)
+          ? kTypeChar8
+          : kTypeChar;
   TypeRecord* type = NewTypeRecordWithSize(
-      kTypeChar, CompilerIsCXX() ? kQualConst : kQualPlain);
+      element_type, CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, type);
   TypeRecordCalculateSize(array);
   return NewStringConstantASTNode(contents, array,
-                                  syntax->lex->current_token_location);
+                                  location);
   
 }
 
@@ -1698,7 +1725,8 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
                         ? (contents->length - compiler->wchar_size) /
                               compiler->wchar_size
                         : 0;
-    VectorAppend(actuals, NewStringLiteralArgument(contents, location, true));
+    VectorAppend(actuals, NewStringLiteralArgument(
+                              contents, location, kLiteralEncodingWide));
     VectorAppend(actuals,
                  NewIntConstantASTNode((int64_t)length, NewSizeTypeRecord(),
                                        location));
@@ -1721,14 +1749,20 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
                                                    TokenClass followers) {
   Lex* lex = syntax->lex;
   int value = (int)lex->number;
+  SourceLocation location = lex->current_token_location;
+  LiteralEncoding encoding = lex->literal_encoding;
+  Type literal_type =
+      encoding == kLiteralEncodingUTF8 &&
+              CompilerCXXAtLeast(kLanguageStandardCXX20)
+          ? kTypeChar8
+          : kTypeChar;
   if (lex->ud_suffix.length != 0) {
-    SourceLocation location = lex->current_token_location;
     String suffix;
     StringInit(&suffix, NULL);
     StringSetString(&suffix, &lex->ud_suffix);
     LexNextToken(lex);
     Vector* actuals = NewVector();
-    TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
+    TypeRecord* type = NewTypeRecordWithSize(literal_type, kQualPlain);
     VectorAppend(actuals, NewCharConstantASTNode(value, type, location));
     ASTNode* call =
         NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
@@ -1736,9 +1770,8 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
     return call;
   }
   LexNextToken(lex);
-  TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
-  return NewCharConstantASTNode(value, type,
-                                syntax->lex->current_token_location);
+  TypeRecord* type = NewTypeRecordWithSize(literal_type, kQualPlain);
+  return NewCharConstantASTNode(value, type, location);
 }
 
 static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
@@ -1803,9 +1836,12 @@ static TypeRecord* GenericControllingType(TypeRecord* ctype) {
 
 // Canonicalize a primitive type's specifier bits for _Generic matching so that
 // equivalent spellings compare equal (e.g. "long" == "signed long int").  The
-// char family (char/signed char/unsigned char) stays distinct, as does
-// signedness for the other integer types.
+// Character types (char/signed char/unsigned char/char8_t) stay distinct, as
+// does signedness for the other integer types.
 static int CanonicalPrimitive(int t) {
+  if (t & kTypeChar8) {
+    return kTypeChar8;
+  }
   if (t & kTypeChar) {
     return t & (kTypeChar | kTypeSigned | kTypeUnsigned);
   }
@@ -2947,6 +2983,7 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
 static bool TokenStartsFundamentalTypeSpecifier(Token token) {
   switch (token) {
     case TOK(char):
+    case TOK(char8_t):
     case TOK(short):
     case TOK(int):
     case TOK(long):

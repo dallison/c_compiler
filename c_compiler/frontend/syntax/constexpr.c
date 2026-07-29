@@ -277,7 +277,7 @@ static ConstexprObject* ConstexprStringObject(ConstEvalContext* ctx,
                                               ASTNode* node,
                                               TypeRecord* array_type) {
   if (node == NULL || node->op != AST_OP(string) || array_type == NULL ||
-      !TypeIsFixedArray(array_type) || !TypeIsChar(array_type->next)) {
+      !TypeIsFixedArray(array_type) || !TypeIsCharFamily(array_type->next)) {
     return NULL;
   }
   ConstantASTNode* literal = (ConstantASTNode*)node;
@@ -685,7 +685,7 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
   if (TypeIsPointer(type) && value->is_address &&
       value->address_object != NULL &&
       TypeIsFixedArray(value->address_object->type) &&
-      TypeIsChar(value->address_object->type->next)) {
+      TypeIsCharFamily(value->address_object->type->next)) {
     String* contents = NewString("");
     for (size_t i = value->address_index;
          i < value->address_object->slots.length; i++) {

@@ -35,7 +35,8 @@ static struct {
   Type type;
   const char* name;
 } type_names[] = {
-    {kTypeChar, "char"},          {kTypeShort, "short"},
+    {kTypeChar, "char"},          {kTypeChar8, "char8_t"},
+    {kTypeShort, "short"},
     {kTypeLong, "long"},          {kTypeLongLong, "long long"},
     {kTypeInt, "int"},            {kTypeFloat, "float"},
     {kTypeDouble, "double"},      {kTypeLongDouble, "long double"},

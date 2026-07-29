@@ -1540,6 +1540,7 @@ static struct {
 } load_opcodes[] = {
     {TypeIsInt, AARCH64_OP(ldr)},
     {TypeIsShort, AARCH64_OP(ldrh)},
+    {TypeIsChar8, AARCH64_OP(ldurb)},
     {TypeIsChar, AARCH64_OP(ldrb)},
     {TypeIsLong, AARCH64_OP(ldr)},
     {TypeIsLongLong, AARCH64_OP(ldr)},

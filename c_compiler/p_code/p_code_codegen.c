@@ -615,6 +615,7 @@ static struct {
 } load_opcodes[] = {
     {TypeIsInt, P_OP(ldw)},
     {TypeIsShort, P_OP(ldh)},
+    {TypeIsChar8, P_OP(ldub)},
     {TypeIsChar, P_OP(ldb)},
     {TypeIsLong, P_OP(ldx)},
     {TypeIsLongLong, P_OP(ldx)},
@@ -1410,7 +1411,7 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
 }
 
 static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
-  if (TypeIsChar(type)) {
+  if (TypeIsCharFamily(type)) {
     return TypeIsUnsigned(type) ? P_OP(ldub) : P_OP(ldb);
   }
   if (TypeIsShort(type)) {
@@ -1429,7 +1430,7 @@ static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
 }
 
 static PCodeOpcode AtomicStoreOpcode(TypeRecord* type) {
-  if (TypeIsChar(type)) {
+  if (TypeIsCharFamily(type)) {
     return P_OP(stb);
   }
   if (TypeIsShort(type)) {
@@ -1532,7 +1533,7 @@ static struct {
     {TypeIsInt, P_OP(push), 4},
     {TypeIsBool, P_OP(push), 4},
     {TypeIsShort, P_OP(push), 4},
-    {TypeIsChar, P_OP(push), 4},
+    {TypeIsCharFamily, P_OP(push), 4},
     {TypeIsLong, P_OP(pushx), 8},
     {TypeIsLongLong, P_OP(pushx), 8},
     {TypeIsFloat, P_OP(pushf), 4},

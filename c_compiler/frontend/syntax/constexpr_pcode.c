@@ -853,7 +853,7 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
     return 0;
   }
   if (TypeIsFloat(type) || TypeIsInt(type) || TypeIsShort(type) ||
-      TypeIsChar(type)) {
+      TypeIsCharFamily(type)) {
     return 4;
   }
   if (TypeIsDouble(type) || TypeIsLong(type) || TypeIsLongLong(type) ||

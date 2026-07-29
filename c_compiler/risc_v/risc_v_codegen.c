@@ -1472,6 +1472,7 @@ static struct {
 } load_opcodes[] = {
     {TypeIsInt, RV_OP(lw)},
     {TypeIsShort, RV_OP(lh)},
+    {TypeIsChar8, RV_OP(lbu)},
     {TypeIsChar, RV_OP(lb)},
     {TypeIsLong, RV_OP(ld)},
     {TypeIsLongLong, RV_OP(ld)},

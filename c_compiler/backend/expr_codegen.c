@@ -145,6 +145,7 @@ static struct {
   {TypeIsLong, LongSize},
   {TypeIsLongLong, LongLongSize},
   {TypeIsInt, IntSize},
+  {TypeIsChar8, CharSize},
   {TypeIsChar, CharSize},
   {TypeIsBool, BoolSize},
   {NULL, NULL},

@@ -42,12 +42,16 @@ typedef enum {
   // so the existing auto-placeholder machinery treats it as a deduced type; the
   // extra bit selects decltype (value-category preserving) deduction rules.
   kTypeDecltypeAuto = 1 << 18,
+  // C++20 UTF-8 code unit type.  This is a distinct fundamental type, not an
+  // alias for char or unsigned char, even though it has the same representation
+  // and conversion rank as unsigned char.
+  kTypeChar8 = 1 << 19,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 17
+#define TYPE_LAST_BIT 19
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {

@@ -108,7 +108,8 @@ static struct {
   Token token;
   Type type;
 } type_map[] = {
-    {TOK(char), kTypeChar},         {TOK(int), kTypeInt},
+    {TOK(char), kTypeChar},         {TOK(char8_t), kTypeChar8},
+    {TOK(int), kTypeInt},
     {TOK(short), kTypeShort},       {TOK(long), kTypeLong},
     {TOK(float), kTypeFloat},       {TOK(double), kTypeDouble},
     {TOK(class), kTypeStruct},      {TOK(struct), kTypeStruct},
@@ -1170,6 +1171,8 @@ static Type valid_types[] = {
   kTypeChar | kTypeSigned,
   kTypeChar | kTypeUnsigned,
   
+  kTypeChar8,
+
   kTypeShort,
   kTypeShort | kTypeSigned,
   kTypeShort | kTypeInt,

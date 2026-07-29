@@ -350,8 +350,16 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
   if (expr->op == AST_OP(string)) {
     // Array initialized by string?
-    if (TypeIsChar(inode->type->next)) {
+    if (TypeIsCharFamily(inode->type->next)) {
       ConstantASTNode* c = (ConstantASTNode*)expr;
+      TypeRecord* literal_element =
+          TypeIsArray(expr->type) ? expr->type->next : NULL;
+      if (literal_element == NULL ||
+          TypeIsChar8(inode->type->next) != TypeIsChar8(literal_element)) {
+        SemanticError(expr,
+                      "String literal encoding does not match character array "
+                      "element type");
+      }
       if (!inode->type->info.array.is_flexible) {
         // Length with terminating zero.
         size_t string_length = c->value.string->length + 1;
@@ -391,7 +399,7 @@ static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only
       inode->expr = ASTNodeMove(expr);
       expr->type->size = inode->type->size;
       return AdvanceCurrent(inode->parent);
-    } else if (TypeIsChar(inode->type->next)) {
+    } else if (TypeIsCharFamily(inode->type->next)) {
       SemanticError(expr,
                       "Initializing a char array with a wide string literal");
     }

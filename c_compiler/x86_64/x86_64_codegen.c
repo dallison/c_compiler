@@ -2376,7 +2376,7 @@ static TargetInstruction* LowerStore(X86_64Generator* rv, IRNode* node) {
 }
 
 static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
-  if (TypeIsChar(type)) {
+  if (TypeIsCharFamily(type)) {
     return TypeIsUnsigned(type) ? X86_64_OP(loadb_z) : X86_64_OP(loadb);
   }
   if (TypeIsShort(type)) {
@@ -2395,7 +2395,7 @@ static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
 }
 
 static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
-  if (TypeIsChar(type)) {
+  if (TypeIsCharFamily(type)) {
     return X86_64_OP(storeb);
   }
   if (TypeIsShort(type)) {

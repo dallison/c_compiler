@@ -519,7 +519,7 @@ static W65C02RegisterType RegisterTypeFromTypeRecord(TypeRecord* type) {
     return k6502RegTypeF;
   } else if (TypeIsBool(type)) {
     return k6502RegTypeB;
-  } else if (TypeIsChar(type)) {
+  } else if (TypeIsCharFamily(type)) {
     return k6502RegTypeB;
   } else if (TypeIsLong(type)) {
     return k6502RegTypeL;

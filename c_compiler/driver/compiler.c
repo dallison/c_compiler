@@ -256,7 +256,7 @@ static void InitInteger(ASTNode* expr,
   int64_t value = 0;
   TypeRecord* type = expr->type;
   if (EvaluateIntegerExpression(expr, &value)) {
-    if (TypeIsChar(type) || TypeIsBool(type)) {
+    if (TypeIsCharFamily(type) || TypeIsBool(type)) {
       init_out->type = kInitTypeByte;
       init_out->value.byte = (uint8_t)value;
     } else if (TypeIsShort(type)) {
