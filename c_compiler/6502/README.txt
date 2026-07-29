@@ -1,3 +1,52 @@
+65C02 C++ execution profile
+============================
+
+The runnable embedded target is `-target 65c02`.  The Bazel target `//:6502`
+is the interpreter used to execute both 6502 and 65C02 programs; it is not the
+compiler target name.  Executables use `//:libc_65c02`,
+`//:support_rom_65c02`, and the normal `_start` entry point.  Do not override
+the entry point with `main` as the other interpreted backends do.
+
+The target data model is intentionally different from the primary backends:
+
+* pointers and `int` are 16 bits;
+* `bool` is 8 bits;
+* `long` is 32 bits;
+* `double` has the same 32-bit representation as `float`;
+* aggregate and stack alignment is one byte; and
+* programs are statically linked into the 64 KiB address space, with the heap
+  and software stack sharing the available memory.
+
+C++ exception handling is disabled by default.  `-fexceptions` can enable the
+frontend syntax, but exception execution is not part of the supported profile:
+the 6502 backend/runtime does not emit the required unwind metadata, frame
+walker, landing-pad transfer support, or throw runtime.  Tests and libraries
+must use `__cpp_exceptions` when an exception-dependent path has an
+exception-free alternative.
+
+C++20 coroutines are supported in the exception-free profile.  The
+`//cxx_testsuite:exec_coroutines_65c02` gate exercises every file in
+`cxx_testsuite/tests/exec_coroutines`, with only the throw/unhandled-exception
+branch conditionally absent.  Covered behavior includes:
+
+* coroutine frame allocation and destruction;
+* indirect resume/destroy calls and `std::coroutine_handle`;
+* initial, final, and body suspension;
+* reference, class, unused class, and implicit `this` parameters;
+* non-trivial local lifetime on completion, early destroy, `break`, and
+  `continue`;
+* class `for` initializer and range-for state across suspension; and
+* promise/parameter construction and destruction ordering.
+
+Run the profile gate with:
+
+  bazel test //cxx_testsuite:exec_coroutines_65c02 --test_output=errors
+
+The cross-optimization coroutine smoke test remains:
+
+  bazel test //:ir_optimizer_regression_test --test_output=errors
+
+
 Zero page regs:
 sp   stack pointer
 fp   frame pointer

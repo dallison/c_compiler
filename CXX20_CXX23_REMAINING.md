@@ -118,7 +118,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 ## Recommended order
 
 - [x] 1. Close the AArch64 and RISC-V validation gaps.
-- [ ] 2. Finish the C++20 language tail: multi-pack folds and the
+- [x] 2. Finish the C++20 language tail: multi-pack folds and the
       coroutine/constexpr audit.
 - [ ] 3. Add `counted_iterator` and `common_iterator`.
 - [ ] 4. Implement `<mdspan>` now that `<span>` exists.
