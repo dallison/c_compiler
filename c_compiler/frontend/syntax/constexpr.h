@@ -24,6 +24,8 @@ void ConstEvalContextDestruct(ConstEvalContext* ctx);
 bool ConstEvalStep(ConstEvalContext* ctx);
 
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
+ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
+                                                 ASTNode* expression);
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);

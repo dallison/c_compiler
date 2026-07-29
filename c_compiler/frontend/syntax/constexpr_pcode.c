@@ -1954,6 +1954,25 @@ static void ValidationReject(ValidationState* state, const char* reason) {
   }
 }
 
+static bool PointerExpressionUsesFixedArray(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  if (TypeIsFixedArray(node->type)) {
+    return true;
+  }
+  switch (node->op) {
+    case AST_OP(address):
+      return PointerExpressionUsesFixedArray(((UnaryASTNode*)node)->sub);
+    case AST_OP(subscript):
+    case AST_OP(plus):
+    case AST_OP(minus):
+      return PointerExpressionUsesFixedArray(((BinaryASTNode*)node)->left);
+    default:
+      return false;
+  }
+}
+
 static void ValidateASTNode(ASTNode* node, void* data, int child_id,
                             VisitorMode mode) {
   (void)child_id;
@@ -2017,6 +2036,37 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
       return;
     }
     case AST_OP(subscript): {
+      return;
+    }
+    case AST_OP(dot):
+    case AST_OP(arrow): {
+      BinaryASTNode* access = (BinaryASTNode*)node;
+      TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
+      if (node->op == AST_OP(arrow) && TypeIsPointer(receiver)) {
+        receiver = receiver->next;
+      }
+      if (TypeIsStructOrUnion(receiver) &&
+          receiver->info.struct_info != NULL &&
+          receiver->info.struct_info->is_union) {
+        // The byte-oriented p-code VM does not track a union's active member.
+        // Route union member evaluation through the AST object model, which
+        // does, rather than treating the shared storage as type-punnable.
+        ValidationReject(
+            state, "union member access requires AST constexpr evaluation");
+      }
+      return;
+    }
+    case AST_OP(plus):
+    case AST_OP(minus): {
+      BinaryASTNode* binary = (BinaryASTNode*)node;
+      if (TypeIsPointer(node->type) && binary->left != NULL &&
+          PointerExpressionUsesFixedArray(binary->left)) {
+        // The p-code VM stores pointers as raw machine values, so it cannot
+        // diagnose formation of an out-of-bounds array pointer before a
+        // dereference. The AST evaluator retains the source array and index.
+        ValidationReject(
+            state, "array pointer arithmetic requires AST constexpr evaluation");
+      }
       return;
     }
     default:

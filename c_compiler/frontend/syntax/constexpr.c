@@ -51,6 +51,9 @@ struct ConstexprObject {
   StructMember* active_union_member;
 };
 
+#define CONSTEXPR_MAX_CALL_DEPTH 512
+#define CONSTEXPR_MAX_STEPS 1000000
+
 static bool ConstexprDereferenceAddress(ConstexprValue address,
                                         ConstexprValue* result);
 static ConstexprValue* ConstexprObjectSlot(ConstexprObject* object,
@@ -69,7 +72,7 @@ void ConstEvalContextInit(ConstEvalContext* ctx) {
   VectorInit(&ctx->objects);
   ctx->call_depth = 0;
   ctx->steps = 0;
-  ctx->max_steps = 100000;
+  ctx->max_steps = CONSTEXPR_MAX_STEPS;
 }
 
 void ConstEvalContextDestruct(ConstEvalContext* ctx) {
@@ -313,9 +316,8 @@ static size_t ConstexprMemberSlotIndex(ConstexprObject* object,
 
 static bool ConstexprUnionMemberActive(ConstexprObject* object,
                                        StructMember* member) {
-  (void)object;
-  (void)member;
-  return true;
+  return !ConstexprObjectIsUnion(object) ||
+         object->active_union_member == member;
 }
 
 static void ConstexprActivateUnionMember(ConstexprObject* object,
@@ -1391,6 +1393,23 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   return true;
 }
 
+ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
+                                                 ASTNode* expression) {
+  if (type == NULL || expression == NULL ||
+      (!TypeIsFixedArray(type) && !TypeIsStructOrUnion(type))) {
+    return NULL;
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  ConstexprValue value = {0};
+  bool ok = EvaluateConstexprInitializer(&ctx, type, expression, &value) &&
+            value.is_object && value.object != NULL;
+  ASTNode* initializer =
+      ok ? ConstexprValueInitializer(&value, type, expression->location) : NULL;
+  ConstEvalContextDestruct(&ctx);
+  return initializer;
+}
+
 bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           ConstexprValue* result) {
@@ -1747,6 +1766,24 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(address)) {
     UnaryASTNode* address = (UnaryASTNode*)node;
+    if (address->sub != NULL && address->sub->op == AST_OP(subscript)) {
+      BinaryASTNode* subscript = (BinaryASTNode*)address->sub;
+      ConstexprValue base;
+      int64_t index;
+      if (EvaluateConstexprAddressValue(ctx, subscript->left, &base) &&
+          base.address_object != NULL &&
+          EvaluateIntegerExpressionInContext(ctx, subscript->right, &index) &&
+          index >= 0 &&
+          (uint64_t)index <= SIZE_MAX - base.address_index) {
+        size_t address_index = base.address_index + (size_t)index;
+        if (address_index < base.address_object->slots.length) {
+          base.address_index = address_index;
+          *result = base;
+          return true;
+        }
+      }
+      return false;
+    }
     ConstexprBinding* binding = NULL;
     ConstexprValue* slot = NULL;
     if (EvaluateConstexprLValue(ctx, address->sub, &binding)) {
@@ -1790,8 +1827,10 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     ConstexprValue base;
     int64_t offset;
     ASTNode* offset_expr = arithmetic->right;
+    bool offset_is_elements = false;
     if (offset_expr != NULL && offset_expr->op == AST_OP(ptr_scale)) {
       offset_expr = ((PtrScaleASTNode*)offset_expr)->expr;
+      offset_is_elements = true;
     }
     if (!EvaluateConstexprAddressValue(ctx, arithmetic->left, &base) ||
         base.address_object == NULL ||
@@ -1804,13 +1843,28 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
       offset = -offset;
     }
+    TypeRecord* pointer_type = node->type;
+    if (!offset_is_elements && TypeIsPointer(pointer_type) &&
+        pointer_type->next != NULL &&
+        pointer_type->next->size > 1) {
+      int element_size = pointer_type->next->size;
+      if (offset % element_size != 0) {
+        return false;
+      }
+      offset /= element_size;
+    }
     if ((offset < 0 && (uint64_t)(-offset) > base.address_index) ||
         (offset >= 0 && (uint64_t)offset > SIZE_MAX - base.address_index)) {
       return false;
     }
-    base.address_index =
+    size_t new_index =
         offset < 0 ? base.address_index - (size_t)(-offset)
                    : base.address_index + (size_t)offset;
+    if (base.address_object != NULL &&
+        new_index > base.address_object->slots.length) {
+      return false;
+    }
+    base.address_index = new_index;
     *result = base;
     return true;
   }
@@ -1920,7 +1974,9 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result) {
   if (node == NULL ||
-      (node->op != AST_OP(equal) && node->op != AST_OP(noteq))) {
+      (node->op != AST_OP(equal) && node->op != AST_OP(noteq) &&
+       node->op != AST_OP(less) && node->op != AST_OP(lesseq) &&
+       node->op != AST_OP(greater) && node->op != AST_OP(greatereq))) {
     return false;
   }
   BinaryASTNode* binary = (BinaryASTNode*)node;
@@ -1931,7 +1987,25 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   bool equal = ConstexprAddressEqual(left, right);
-  *result = node->op == AST_OP(equal) ? equal : !equal;
+  if (node->op == AST_OP(equal) || node->op == AST_OP(noteq)) {
+    *result = node->op == AST_OP(equal) ? equal : !equal;
+    return true;
+  }
+  // Relational pointer comparisons are constant only when both pointers name
+  // elements (or the one-past element) of the same array object.
+  if (left.address_object == NULL ||
+      left.address_object != right.address_object) {
+    return false;
+  }
+  if (node->op == AST_OP(less)) {
+    *result = left.address_index < right.address_index;
+  } else if (node->op == AST_OP(lesseq)) {
+    *result = left.address_index <= right.address_index;
+  } else if (node->op == AST_OP(greater)) {
+    *result = left.address_index > right.address_index;
+  } else {
+    *result = left.address_index >= right.address_index;
+  }
   return true;
 }
 
@@ -2867,6 +2941,13 @@ static ConstexprStatementResult EvaluateConstexprStatement(
     case AST_OP(compound):
       return EvaluateConstexprCompound(ctx, (CompoundStatementASTNode*)stmt,
                                        return_type, result);
+    case AST_OP(try):
+      // Before C++26 a reached throw-expression is not a core constant
+      // expression, even when a handler could catch it.  A try block whose
+      // evaluated path does not throw is nevertheless permitted in a constexpr
+      // function, so evaluate that path and leave handlers unreachable here.
+      return EvaluateConstexprStatement(ctx, ((TryASTNode*)stmt)->try_stmt,
+                                        return_type, result);
     case AST_OP(if): {
       IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
       if (if_stmt->is_consteval) {
@@ -2903,9 +2984,20 @@ static ConstexprStatementResult EvaluateConstexprStatement(
     }
     case AST_OP(return): {
       CombinedStatementASTNode* ret = (CombinedStatementASTNode*)stmt;
-      return EvaluateConstexprValue(ctx, ret->cond, return_type, result)
-                 ? kConstexprStmtReturn
-                 : kConstexprStmtInvalid;
+      ConstexprValue return_value = {0};
+      if (!EvaluateConstexprValue(ctx, ret->cond, return_type, &return_value)) {
+        return kConstexprStmtInvalid;
+      }
+      if (ret->stmt != NULL) {
+        ConstexprValue cleanup_value = {0};
+        ConstexprStatementResult cleanup = EvaluateConstexprStatement(
+            ctx, ret->stmt, return_type, &cleanup_value);
+        if (cleanup != kConstexprStmtNormal) {
+          return kConstexprStmtInvalid;
+        }
+      }
+      *result = return_value;
+      return kConstexprStmtReturn;
     }
     case AST_OP(break):
       return kConstexprStmtBreak;
@@ -2959,7 +3051,7 @@ static Symbol* ConstexprMemberCallSymbol(ASTNode* node, ASTNode** receiver) {
 
 bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
                                   ConstexprValue* result) {
-  if (ctx->call_depth > 32) {
+  if (ctx->call_depth >= CONSTEXPR_MAX_CALL_DEPTH) {
     return false;
   }
   ASTNode* receiver = NULL;

@@ -6412,6 +6412,15 @@ static ASTNode* RecoverInvalidCoroutineExpression(ASTNode* node, void* data,
  * invalid promise it performs error recovery instead. */
 void SemanticAnalyzeCoroutineFunction(ASTNode* node) {
   CoroutineScan coroutine_scan = MarkAndValidateCoroutineFunction(node);
+  if (coroutine_scan.is_coroutine && node != NULL && node->type != NULL &&
+      TypeIsFunction(node->type) &&
+      (node->type->info.function.is_constexpr ||
+       node->type->info.function.is_consteval)) {
+    // The declaration is already ill-formed. Keep the coroutine marker so
+    // co_return/co_await/co_yield receive normal body analysis, but do not
+    // cascade into promise validation or state-machine lowering.
+    return;
+  }
   bool promise_ok = ValidateCoroutinePromise(node, coroutine_scan);
   CoroutineScan lowering_scan = coroutine_scan;
   if (!promise_ok && coroutine_scan.is_coroutine && node != NULL &&

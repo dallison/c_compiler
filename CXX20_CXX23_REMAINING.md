@@ -3,7 +3,7 @@
 Updated from the C++23 readiness canvas on 2026-07-28.
 
 The original C++20 correctness gates are now green on x86-64: the main
-execution suite passes 260/260 and the ranges suite passes 4/4. C++23 mode,
+execution suite passes 261/261 and the ranges suite passes 4/4. C++23 mode,
 template-template parameters, static call/subscript operators, `if consteval`,
 explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 `import std`, and `<span>` have been implemented.
@@ -30,13 +30,17 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
     `c_compiler/frontend/syntax/type_template_clone.c`.
   - Diagnose mismatched pack lengths and cover mixed fold patterns,
     associativity, empty seeded folds, and mismatched packs.
-- [ ] Audit remaining `constexpr` and `consteval` restrictions.
-  - Separate intentional standard diagnostics from evaluator limitations.
-  - Cover aggregate arguments, recursion, exceptions, and coroutine interaction.
+- [x] Audit remaining `constexpr` and `consteval` restrictions.
+  - Constant-evaluate aggregate arguments/returns and same-type static aggregate
+    initializers.
+  - Support non-throwing `try` paths, deeper recursive AST evaluation, immediate
+    lambdas, same-array pointer ordering, and active-union-member tracking.
+  - Reject reached throws, out-of-bounds array pointers, inactive union reads,
+    and `constexpr`/`consteval` coroutines with focused diagnostics.
+  - Advertise the implemented C++20 `__cpp_constexpr` feature level.
 - [ ] Audit and complete coroutine suspension/lifetime cases.
   - Class parameters and non-trivial locals live across suspension.
   - `for` initializer lifetimes across suspension.
-  - `constexpr`/`consteval` coroutine diagnostics.
 
 ## Remaining C++20 library work
 

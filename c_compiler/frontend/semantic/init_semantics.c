@@ -10,6 +10,7 @@
 #include "init_semantics.h"
 #include <stdlib.h>
 #include "compiler.h"
+#include "constexpr.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "list.h"
@@ -523,8 +524,13 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
         // A struct/union can be initialized by an expression of the same
         // struct/union type (ignoring top-level qualifiers on the source).
         if (constants_only) {
-          SemanticError(expr, "Expression is not a compile-time constant");
-          return true;
+          ASTNode* constant = ConstexprObjectInitializerForExpression(
+              inode->type, expr);
+          if (constant == NULL) {
+            SemanticError(expr, "Expression is not a compile-time constant");
+            return true;
+          }
+          return InitializeINode(inode, constant, true);
         }
         inode->expr = ASTNodeMove(expr);
         return AdvanceCurrent(inode->parent);

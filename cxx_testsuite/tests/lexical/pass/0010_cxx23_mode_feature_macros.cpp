@@ -40,6 +40,10 @@
 #error "__cpp_conditional_explicit has the wrong value"
 #endif
 
+#if __cpp_constexpr != 202002L
+#error "__cpp_constexpr has the wrong value"
+#endif
+
 #if __cpp_constexpr_dynamic_alloc != 201907L
 #error "__cpp_constexpr_dynamic_alloc has the wrong value"
 #endif

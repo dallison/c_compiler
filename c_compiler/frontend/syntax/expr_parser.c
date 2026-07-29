@@ -2403,24 +2403,30 @@ static bool SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
 }
 
 // Parse the specifiers that follow a lambda's parameter list (`mutable`,
-// `constexpr`, `noexcept`) in any order, then optional trailing return type and
-// trailing requires-clause.  Returns the trailing return type if present,
-// otherwise `default_type`, and reports each specifier through its out-parameter.
+// `constexpr`, `consteval`, `noexcept`) in any order, then optional trailing
+// return type and trailing requires-clause. Returns the trailing return type if
+// present, otherwise `default_type`, and reports each specifier through its
+// out-parameter.
 static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
                                                       TypeRecord* func,
                                                       bool* is_mutable,
                                                       bool* is_constexpr,
+                                                      bool* is_consteval,
                                                       bool* is_noexcept,
                                                       TypeRecord* default_type,
                                                       TokenClass followers) {
   *is_mutable = false;
   *is_constexpr = false;
+  *is_consteval = false;
   *is_noexcept = false;
   bool keep_parsing = true;
   while (keep_parsing) {
     if (LexMatch(syntax->lex, TOK(mutable))) {
       *is_mutable = true;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
+      *is_constexpr = true;
+    } else if (LexMatch(syntax->lex, TOK(consteval))) {
+      *is_consteval = true;
       *is_constexpr = true;
     } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {
       *is_noexcept = SkipNoexceptSpecifier(syntax, followers);
@@ -2504,13 +2510,16 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   }
   ParseLambdaParameterList(syntax, func, TC(closebra));
   bool is_constexpr = false;
+  bool is_consteval = false;
   bool is_noexcept = false;
   return_type = ParseLambdaSpecifiersAndReturnType(syntax, func, &is_mutable,
-                                                   &is_constexpr, &is_noexcept,
-                                                   return_type, TC(closebra));
+                                                   &is_constexpr, &is_consteval,
+                                                   &is_noexcept, return_type,
+                                                   TC(closebra));
   func->info.function.is_const_member =
       !func->info.function.has_explicit_object_parameter && !is_mutable;
   func->info.function.is_constexpr = is_constexpr;
+  func->info.function.is_consteval = is_consteval;
   func->info.function.is_noexcept = is_noexcept;
   TypeRecordChain(func, return_type);
   if (func->info.function.has_explicit_object_parameter) {

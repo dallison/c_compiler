@@ -386,6 +386,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
     case AST_OP(lesseq):
     case AST_OP(greater):
     case AST_OP(greatereq):
+      if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
+        return true;
+      }
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
         double fleft;
         double fright;

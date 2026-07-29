@@ -183,6 +183,7 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_impl_three_way_comparison", "201907L");
       PreprocessorDefineMacro(p, "__cpp_using_enum", "201907L");
       PreprocessorDefineMacro(p, "__cpp_conditional_explicit", "201806L");
+      PreprocessorDefineMacro(p, "__cpp_constexpr", "202002L");
       PreprocessorDefineMacro(p, "__cpp_constexpr_dynamic_alloc", "201907L");
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
