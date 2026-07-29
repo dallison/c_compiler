@@ -57,6 +57,7 @@ static bool MemberReceiverIsConst(BinaryASTNode* node);
 static bool MemberReceiverIsVolatile(BinaryASTNode* node);
 static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
                                               BinaryASTNode* member_access);
+static bool LowerMemberFunctionCall(VectorASTNode* node);
 
 // A user-defined conversion (via a converting constructor) involves a standard
 // conversion of the argument to the constructor's parameter.  While ranking
@@ -7289,12 +7290,7 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
   temp->location = location;
   ASTNode* receiver = NewIdentifierASTNode(temp, location);
-  const char* constructor_member_name = constructor->symbol != NULL
-                                            ? constructor->symbol->name.value
-                                            : constructor_name->value;
-  ASTNode* member =
-      NewStringConstantASTNode(NewString(constructor_member_name), NULL,
-                               location);
+  ASTNode* member = NewStructMemberASTNode(constructor, location);
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
 
@@ -7304,6 +7300,7 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   }
   ASTNode* constructor_call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  LowerMemberFunctionCall((VectorASTNode*)constructor_call);
   ASTNode* result = NewIdentifierASTNode(temp, location);
   ASTNode* comma =
       NewBinaryASTNode(AST_OP(comma), type, location, constructor_call, result);

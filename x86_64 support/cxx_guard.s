@@ -37,8 +37,18 @@ __cxa_guard_acquire:
 	.byte 0xf3, 0x90
 	jmp .Lguard_wait
 .Lguard_owner:
+	// A previous owner can publish initialization and clear the pending byte
+	// between our initialized-byte check and cmpxchg.  If that happened, drop
+	// the claim instead of running the initializer a second time.
+	movb (%rdi), %al
+	cmpb $0, %al
+	jne .Lguard_initialized_after_claim
 	movl %edx, 4(%rdi)
 	mov $1, %eax
+	ret
+.Lguard_initialized_after_claim:
+	movb $0, 1(%rdi)
+	xor %eax, %eax
 	ret
 .Lguard_recursive:
 	subq $8, %rsp

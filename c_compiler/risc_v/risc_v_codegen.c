@@ -4641,11 +4641,41 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
   return NULL;
 }
 
+static int SavedArgumentAreaLowAddress(const RVGenerator* rv) {
+  int low = -RV_STACK_FRAME_HEADER_SIZE;
+  for (size_t i = 0; i < rv->saved_regs.length; i++) {
+    const SavedArgumentRegister* saved = rv->saved_regs.value.p[i];
+    if (saved->offset < low) {
+      low = saved->offset;
+    }
+  }
+  return low;
+}
+
+static int AllocateSavedArgumentArea(const RVGenerator* rv, int size,
+                                     int alignment) {
+  assert(size > 0);
+  assert(alignment > 0 && (alignment & (alignment - 1)) == 0);
+  int offset = SavedArgumentAreaLowAddress(rv) - size;
+  return offset & ~(alignment - 1);
+}
+
+static int SavedArgumentAreaSize(const RVGenerator* rv) {
+  return -RV_STACK_FRAME_HEADER_SIZE - SavedArgumentAreaLowAddress(rv);
+}
+
 static void HomeFloatingAggregateArgument(
     RVGenerator* rv, PoolEntry* entry, ArgLocation location,
     const RVFloatingAggregate* aggregate) {
-  int offset =
-      -24 - ((int)rv->saved_regs.length + aggregate->count - 1) * 8;
+  int size = 0;
+  for (int member = 0; member < aggregate->count; member++) {
+    int end = aggregate->offset[member] + aggregate->type[member]->size;
+    if (end > size) {
+      size = end;
+    }
+  }
+  int offset = AllocateSavedArgumentArea(
+      rv, size, TypeRecordAlignment(entry->pooled->type));
   entry->pooled->data.ivalue = offset;
   SetDebugStackLocation(entry, offset);
   for (int member = 0; member < aggregate->count; member++) {
@@ -4706,7 +4736,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         if (location.type == kArgLocationRegister) {
-          int offset = -24 - (int)rv->saved_regs.length * 8;
+          int offset = AllocateSavedArgumentArea(rv, 8, 8);
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, RV_FP_REG, offset,
               entry->pooled->type->size,
@@ -4739,18 +4769,19 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         assert(ok);
         HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
       } else if (location.type == kArgLocationRegisterPair) {
-        int offset =
-            -24 - ((int)rv->saved_regs.length + 2) * 8;
-        offset = (offset + 15) & ~(int)15;
+        int offset = AllocateSavedArgumentArea(
+            rv, 16, TypeRecordAlignment(variable_type));
         entry->pooled->data.ivalue = offset;
         SetDebugStackLocation(entry, offset);
         VectorAppend(
             &rv->saved_regs,
-            NewSavedArgumentRegister((int)location.location.offset, RV_FP_REG,
+            NewSavedArgumentRegister((int)location.location.offset,
+                                     RV_FP_REG,
                                      offset, 8, false));
         VectorAppend(
             &rv->saved_regs,
-            NewSavedArgumentRegister((int)location.second_offset, RV_FP_REG,
+            NewSavedArgumentRegister((int)location.second_offset,
+                                     RV_FP_REG,
                                      offset + 8, 8, false));
         rv->num_int_arg_regs += 2;
       } else {
@@ -4781,7 +4812,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           assert(ok);
           HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
         } else if (location.type == kArgLocationRegister) {
-          int offset = -24 - (int)rv->saved_regs.length * 8;
+          int offset = AllocateSavedArgumentArea(rv, 8, 8);
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, RV_FP_REG, offset, 8, false);
           entry->pooled->data.ivalue = offset;
@@ -4873,7 +4904,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           // Argument is in a register so we need to save it to the stack. These
           // are stored immediately below the saved frame pointer (24 bytes
           // below the previous stack pointer).
-          int offset = -24 - (int)rv->saved_regs.length * 8;
+          int offset = AllocateSavedArgumentArea(rv, 8, 8);
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, RV_FP_REG, offset, 8, false);
           entry->pooled->data.ivalue = offset;
@@ -4914,10 +4945,10 @@ static void AssignRegisterVars(RVGenerator* rv, Vector* vars, Vector* args) {
     AssignRegisterOrOffset(rv, entry, args, &var_offset);
   }
   
-  // We now know the stack frame size.  This includes the length of the saved
-  // registers.
+  // Include the complete argument-home area, including any alignment gaps
+  // between homed aggregate arguments.
   rv->base.stack_frame_size =
-      (int32_t)var_offset + (int)rv->saved_regs.length * 8;
+      (int32_t)var_offset + SavedArgumentAreaSize(rv);
   // Align to 16 byte boundary.
   rv->base.stack_frame_size = (rv->base.stack_frame_size + 15) & ~15;
 }

@@ -16,9 +16,22 @@ __cxa_guard_acquire:
 	mov w1, #1
 	stlxrb w2, w1, [x3]
 	cbnz w2, .Lguard_claim
+	// The initializer may have completed after the initialized-byte check but
+	// before this thread claimed the now-cleared pending byte.  Recheck after
+	// claiming so only one thread can be told to run the initializer.
+	ldarb w1, [x19]
+	cbnz w1, .Lguard_initialized_after_claim
 	bl thrd_current
 	str w0, [x19, #4]
 	mov w0, #1
+	ldp x19, x30, [sp, #0]
+	add sp, sp, #16
+	ret
+
+.Lguard_initialized_after_claim:
+	add x0, x19, #1
+	stlrb wzr, [x0]
+	mov w0, #0
 	ldp x19, x30, [sp, #0]
 	add sp, sp, #16
 	ret
@@ -48,7 +61,7 @@ __cxa_guard_acquire:
 __cxa_guard_release:
 	str wzr, [x0, #4]
 	mov w1, #1
-	strb w1, [x0, #0]
+	stlrb w1, [x0]
 	add x0, x0, #1
 	stlrb wzr, [x0]
 	ret

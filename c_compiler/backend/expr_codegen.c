@@ -1931,7 +1931,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
         !TypeIsArray(arg_value->type);
     bool call_result_reference_actual =
-        reference_formal && arg_value->opcode == IR_OP(calla);
+        reference_returning_call && arg_value->opcode == IR_OP(calla);
     if (!compiler->call_return_fixed_reg && must_survive_later_call &&
         !argument_contains_call &&
         !TypeIsFunction(arg_value->type) &&
