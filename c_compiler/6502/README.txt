@@ -17,6 +17,12 @@ The target data model is intentionally different from the primary backends:
 * programs are statically linked into the 64 KiB address space, with the heap
   and software stack sharing the available memory.
 
+The 6502 and 65C02 profiles are intentionally single-threaded.  They do not
+provide the standard atomic or threading surfaces: including `<atomic>` or
+using a compiler atomic builtin is diagnosed at compile time.  Atomic
+wait/notify execution tests therefore run only on the hosted x86-64, AArch64,
+ARM, and RISC-V profiles.
+
 C++ exception handling is disabled by default.  `-fexceptions` can enable the
 frontend syntax, but exception execution is not part of the supported profile:
 the 6502 backend/runtime does not emit the required unwind metadata, frame

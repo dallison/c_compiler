@@ -173,6 +173,7 @@ typedef enum {
   X86_64_OP(atomic_compare_exchange_bool),
   X86_64_OP(atomic_compare_exchange_val),
   X86_64_OP(atomic_compare_exchange_n),
+  X86_64_OP(atomic_fetch_add_sub),
 
   // Integer argument registers.
   X86_64_OP(a0),

@@ -1349,6 +1349,53 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       *insn_len = pos;
       return ExecuteSetcc(interpreter, b1 & 0x0F, modrm);
     }
+    if (b1 == 0xC0 || b1 == 0xC1) {  // XADD r/m, r
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      int width = b1 == 0xC0 ? 1 : (rex.w ? 8 : (sse_prefix == 0x66 ? 2 : 4));
+      uint64_t mask = width == 8 ? UINT64_MAX
+                      : width == 4 ? 0xffffffffULL
+                      : width == 2 ? 0xffffULL
+                                   : 0xffULL;
+      uint64_t source = ReadReg(interpreter, modrm.reg) & mask;
+      uint64_t old;
+      if (modrm.mod == 3) {
+        old = ReadReg(interpreter, modrm.rm) & mask;
+        uint64_t destination = (old + source) & mask;
+        uint64_t current = ReadReg(interpreter, modrm.rm);
+        WriteReg(interpreter, modrm.rm,
+                 width == 4 ? destination
+                            : (current & ~mask) | destination);
+      } else {
+        uint64_t address = EffectiveAddress(interpreter, &modrm, pos);
+        if (!InterpreterAddressOk(interpreter, address, (size_t)width)) {
+          fprintf(stderr, "XADD outside mapped memory at 0x%" PRIx64 "\n",
+                  address);
+          X86_64InterpreterFail(interpreter, 1);
+          return false;
+        }
+        if (width == 1) {
+          old = __atomic_fetch_add((uint8_t*)(uintptr_t)address,
+                                   (uint8_t)source, __ATOMIC_SEQ_CST);
+        } else if (width == 2) {
+          old = __atomic_fetch_add((uint16_t*)(uintptr_t)address,
+                                   (uint16_t)source, __ATOMIC_SEQ_CST);
+        } else if (width == 4) {
+          old = __atomic_fetch_add((uint32_t*)(uintptr_t)address,
+                                   (uint32_t)source, __ATOMIC_SEQ_CST);
+        } else {
+          old = __atomic_fetch_add((uint64_t*)(uintptr_t)address,
+                                   source, __ATOMIC_SEQ_CST);
+        }
+      }
+      uint64_t current = ReadReg(interpreter, modrm.reg);
+      WriteReg(interpreter, modrm.reg,
+               width == 4 ? old : (current & ~mask) | old);
+      *insn_len = pos;
+      return true;
+    }
     if (b1 == 0xB0 || b1 == 0xB1) {  // CMPXCHG r/m, r
       ModRM modrm;
       if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {

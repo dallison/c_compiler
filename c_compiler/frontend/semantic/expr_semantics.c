@@ -9402,7 +9402,20 @@ static TypeRecord* AtomicPointerPointee(VectorASTNode* node) {
   return ptr->type->next;
 }
 
+static void ValidateAtomicTarget(VectorASTNode* node) {
+  if (compiler == NULL || compiler->target_name == NULL) {
+    return;
+  }
+  if (StringEqual(compiler->target_name, "6502") ||
+      StringEqual(compiler->target_name, "65c02")) {
+    SemanticError((ASTNode*)node,
+                  "atomic operations are unavailable in the single-threaded "
+                  "65(C)02 profile");
+  }
+}
+
 static void AnalyzeAtomicBuiltinChildren(VectorASTNode* node) {
+  ValidateAtomicTarget(node);
   for (size_t i = 0; i < node->children->length; i++) {
     node->children->value.p[i] =
         AnalyzeExpression((ASTNode*)node->children->value.p[i]);

@@ -1688,6 +1688,45 @@ static void Assemble_atomic_cmpxchgq(X86_64Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size64);
 }
 
+static void EmitAtomicXadd(X86_64Assembler* assembler, X86Size size) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (src.kind != kX86OpReg || src.reg.is_xmm ||
+      dst.kind != kX86OpMem) {
+    AssemblerError(&ASM,
+                   "atomic_xadd expects integer register and memory operands");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EncodeLegacyPrefix(&enc, 0xf0);
+  if (size == kX86Size16) {
+    EncodeLegacyPrefix(&enc, 0x66);
+  } else if (size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, size == kX86Size8 ? 0xc0 : 0xc1);
+  EncodeMemOperand(&enc, src.reg.num, &dst);
+  EncodeFinish(&enc);
+}
+
+static void Assemble_atomic_xaddb(X86_64Assembler* assembler) {
+  EmitAtomicXadd(assembler, kX86Size8);
+}
+static void Assemble_atomic_xaddw(X86_64Assembler* assembler) {
+  EmitAtomicXadd(assembler, kX86Size16);
+}
+static void Assemble_atomic_xaddl(X86_64Assembler* assembler) {
+  EmitAtomicXadd(assembler, kX86Size32);
+}
+static void Assemble_atomic_xaddq(X86_64Assembler* assembler) {
+  EmitAtomicXadd(assembler, kX86Size64);
+}
+
 static void Assemble_cqo(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
 static void Assemble_cdq(X86_64Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
 static void Assemble_cltq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
@@ -1983,6 +2022,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(atomic_cmpxchgw);
   INST(atomic_cmpxchgl);
   INST(atomic_cmpxchgq);
+  INST(atomic_xaddb);
+  INST(atomic_xaddw);
+  INST(atomic_xaddl);
+  INST(atomic_xaddq);
   INST(cqo);
   INST(cdq);
   INST(cltq);

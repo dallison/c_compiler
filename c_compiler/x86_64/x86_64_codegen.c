@@ -128,6 +128,7 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(atomic_compare_exchange_bool)
     OPCODE(atomic_compare_exchange_val)
     OPCODE(atomic_compare_exchange_n)
+    OPCODE(atomic_fetch_add_sub)
     OPCODE(a0)
     OPCODE(a1)
     OPCODE(a2)
@@ -2459,20 +2460,32 @@ static TargetInstruction* LowerAtomicFetchAddSub(X86_64Generator* rv,
                                                  bool add, bool return_new) {
   IRNode* addr_node = node->inputs.value.p[0];
   IRNode* value_node = node->inputs.value.p[1];
-  TargetInstruction* old_value =
-      Load(rv, addr_node, AtomicLoadOpcode(node->type));
+  TargetInstruction* addr = Materialize(rv, addr_node);
   TargetInstruction* value = Materialize(rv, value_node);
-  TargetInstruction* new_value = Emit(
-      rv, NewInstruction2((TypeIsLongLong(node->type) ||
-                           TypeIsPointerOrArray(node->type))
-                              ? (add ? X86_64_OP(add) : X86_64_OP(sub))
-                              : (add ? X86_64_OP(addl) : X86_64_OP(subl)),
-                          old_value, value));
-  Store(rv, addr_node, new_value, AtomicStoreOpcode(node->type));
-  TargetInstruction* result = return_new ? new_value : old_value;
+  TargetInstruction* delta =
+      Emit(rv, NewInstruction1(add ? X86_64_OP(mv) : X86_64_OP(neg), value));
+  TargetInstruction* atomic =
+      NewInstruction2(X86_64_OP(atomic_fetch_add_sub), addr, delta);
+  atomic->dest = delta;
+  int size_log2 = node->type->size == 1 ? 0
+                  : node->type->size == 2 ? 1
+                  : node->type->size == 4 ? 2
+                                          : 3;
+  atomic->flags |= size_log2 << X86_64_ATOMIC_SIZE_SHIFT;
+  Emit(rv, atomic);
+  TargetInstruction* result = atomic;
+  if (return_new) {
+    result = Emit(
+        rv, NewInstruction2((TypeIsLongLong(node->type) ||
+                             TypeIsPointerOrArray(node->type))
+                                ? (add ? X86_64_OP(add) : X86_64_OP(sub))
+                                : (add ? X86_64_OP(addl) : X86_64_OP(subl)),
+                            atomic, value));
+  }
   TargetInstruction* dest = GetDestInstruction(rv, gen, node);
   if (dest != NULL) {
-    result = SetDestOrMove(rv, result, dest, MoveOpcodeForLoad(AtomicLoadOpcode(node->type)));
+    result = SetDestOrMove(rv, result, dest,
+                           MoveOpcodeForLoad(AtomicLoadOpcode(node->type)));
   }
   return SetLoweredNode(node, result);
 }

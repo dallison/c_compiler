@@ -53,10 +53,12 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 - [x] Implement `std::common_iterator`.
 - [x] Harden `common_view`, `views::counted`, and related iterator/ranges
       interoperability after those iterator types exist.
-- [ ] Complete the atomics surface.
+- [x] Complete the atomics surface.
   - `atomic_ref`.
   - `wait`, `notify_one`, and `notify_all`.
-  - Backend and freestanding-profile audit, especially 65C02 and RISC-V.
+  - Backend and freestanding-profile audit, with hosted support on x86-64,
+    AArch64, ARM, and RISC-V; 65(C)02 intentionally diagnoses atomics because
+    its embedded profile has no threading support.
 - [ ] Add the standard threading surface where supported.
   - `<thread>` and `std::thread`.
   - `jthread` and stop tokens.

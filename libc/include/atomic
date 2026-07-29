@@ -8,6 +8,24 @@
 #ifndef atomic_h
 #define atomic_h
 
+#if defined(__6502__) || defined(__W65C02__)
+#error "<atomic> is unavailable in the single-threaded 65(C)02 profile"
+#else
+
+#include <stddef.h>
+#include <string.h>
+#include <syscall.h>
+#include <type_traits>
+
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#include <threads.h>
+#endif
+
+#define __cpp_lib_atomic_ref 201806L
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#define __cpp_lib_atomic_wait 201907L
+#endif
+
 namespace std {
 
 enum memory_order {
@@ -19,60 +37,422 @@ enum memory_order {
   memory_order_seq_cst = 5,
 };
 
+namespace __atomic_detail {
+
+constexpr memory_order failure_order(memory_order order) noexcept {
+  return order == memory_order_acq_rel
+             ? memory_order_acquire
+             : (order == memory_order_release ? memory_order_relaxed : order);
+}
+
+template <class T>
+constexpr bool always_lock_free() noexcept {
+#if defined(__p_code__)
+  return false;
+#elif defined(__arm__)
+  return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4;
+#else
+  return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+         sizeof(T) == 8;
+#endif
+}
+
+template <class T>
+struct difference_type {
+  using type = T;
+};
+
+template <class T>
+struct difference_type<T*> {
+  using type = ptrdiff_t;
+};
+
+template <class T>
+using difference_type_t = typename difference_type<T>::type;
+
+template <class T>
+bool representation_differs(const T& left, const T& right) noexcept {
+  return memcmp(&left, &right, sizeof(T)) != 0;
+}
+
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+template <class Atomic>
+void wait(const Atomic& object, typename Atomic::value_type old,
+          memory_order order) noexcept {
+  for (;;) {
+    typename Atomic::value_type current = object.load(order);
+    if (representation_differs(current, old)) {
+      return;
+    }
+    thrd_yield();
+  }
+}
+#endif
+
+}  // namespace __atomic_detail
+
 template <class T>
 struct atomic {
+  using value_type = T;
+  using difference_type = __atomic_detail::difference_type_t<T>;
+  static constexpr bool is_always_lock_free =
+      __atomic_detail::always_lock_free<T>();
+
   T __value;
 
-  atomic(void) {
+  constexpr atomic() noexcept : __value() {
   }
 
-  atomic(T value) : __value(value) {
+  constexpr atomic(T value) noexcept : __value(value) {
   }
 
-  T load(memory_order order = memory_order_seq_cst) const {
+  atomic(const atomic&) = delete;
+  atomic& operator=(const atomic&) = delete;
+
+  bool is_lock_free() const noexcept {
+    return is_always_lock_free;
+  }
+
+  T load(memory_order order = memory_order_seq_cst) const noexcept {
     return __atomic_load_n(&__value, order);
   }
 
-  void store(T value, memory_order order = memory_order_seq_cst) {
+  void store(T value, memory_order order = memory_order_seq_cst) noexcept {
     __atomic_store_n(&__value, value, order);
   }
 
-  T fetch_add(T value, memory_order order = memory_order_seq_cst) {
-    return __atomic_fetch_add(&__value, value, order);
+  T exchange(T desired,
+             memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    while (!compare_exchange_weak(expected, desired, order,
+                                  memory_order_relaxed)) {
+    }
+    return expected;
   }
 
-  T fetch_sub(T value, memory_order order = memory_order_seq_cst) {
-    return __atomic_fetch_sub(&__value, value, order);
+  T fetch_add(difference_type value,
+              memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected + value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_sub(difference_type value,
+              memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected - value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_and(T value,
+              memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected & value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_or(T value,
+             memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected | value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_xor(T value,
+              memory_order order = memory_order_seq_cst) noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected ^ value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
   }
 
   bool compare_exchange_strong(
       T& expected, T desired,
-      memory_order success = memory_order_seq_cst,
-      memory_order failure = memory_order_seq_cst) {
+      memory_order success,
+      memory_order failure) noexcept {
     return __atomic_compare_exchange_n(&__value, &expected, desired, false,
+                                       success, failure);
+  }
+
+  bool compare_exchange_strong(
+      T& expected, T desired,
+      memory_order order = memory_order_seq_cst) noexcept {
+    return compare_exchange_strong(
+        expected, desired, order, __atomic_detail::failure_order(order));
+  }
+
+  bool compare_exchange_weak(
+      T& expected, T desired,
+      memory_order success,
+      memory_order failure) noexcept {
+    return __atomic_compare_exchange_n(&__value, &expected, desired, true,
                                        success, failure);
   }
 
   bool compare_exchange_weak(
       T& expected, T desired,
-      memory_order success = memory_order_seq_cst,
-      memory_order failure = memory_order_seq_cst) {
-    return __atomic_compare_exchange_n(&__value, &expected, desired, true,
-                                       success, failure);
+      memory_order order = memory_order_seq_cst) noexcept {
+    return compare_exchange_weak(
+        expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-  T operator++(void) {
-    return __atomic_add_fetch(&__value, 1, memory_order_seq_cst);
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
+    __atomic_detail::wait(*this, old, order);
   }
 
-  T operator--(void) {
-    return __atomic_sub_fetch(&__value, 1, memory_order_seq_cst);
+  void notify_one() noexcept {
   }
 
-  T operator=(T value) {
+  void notify_all() noexcept {
+  }
+#endif
+
+  T operator++() noexcept {
+    return fetch_add(1) + 1;
+  }
+
+  T operator++(int) noexcept {
+    return fetch_add(1);
+  }
+
+  T operator--() noexcept {
+    return fetch_sub(1) - 1;
+  }
+
+  T operator--(int) noexcept {
+    return fetch_sub(1);
+  }
+
+  T operator+=(difference_type value) noexcept {
+    return fetch_add(value) + value;
+  }
+
+  T operator-=(difference_type value) noexcept {
+    return fetch_sub(value) - value;
+  }
+
+  T operator&=(T value) noexcept {
+    return fetch_and(value) & value;
+  }
+
+  T operator|=(T value) noexcept {
+    return fetch_or(value) | value;
+  }
+
+  T operator^=(T value) noexcept {
+    return fetch_xor(value) ^ value;
+  }
+
+  T operator=(T value) noexcept {
     store(value);
     return value;
   }
+};
+
+template <class T>
+struct atomic_ref {
+  using value_type = T;
+  using difference_type = __atomic_detail::difference_type_t<T>;
+  static constexpr size_t required_alignment = alignof(T);
+  static constexpr bool is_always_lock_free =
+      __atomic_detail::always_lock_free<T>();
+
+  explicit atomic_ref(T& object) noexcept : __ptr(&object) {
+  }
+
+  atomic_ref(const atomic_ref&) noexcept = default;
+  atomic_ref& operator=(const atomic_ref&) = delete;
+
+  bool is_lock_free() const noexcept {
+    return is_always_lock_free;
+  }
+
+  T load(memory_order order = memory_order_seq_cst) const noexcept {
+    return __atomic_load_n(__ptr, order);
+  }
+
+  void store(T value,
+             memory_order order = memory_order_seq_cst) const noexcept {
+    __atomic_store_n(__ptr, value, order);
+  }
+
+  T exchange(T desired,
+             memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    while (!compare_exchange_weak(expected, desired, order,
+                                  memory_order_relaxed)) {
+    }
+    return expected;
+  }
+
+  T fetch_add(difference_type value,
+              memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected + value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_sub(difference_type value,
+              memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected - value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_and(T value,
+              memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected & value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_or(T value,
+             memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected | value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  T fetch_xor(T value,
+              memory_order order = memory_order_seq_cst) const noexcept {
+    T expected = load(memory_order_relaxed);
+    for (;;) {
+      T desired = expected ^ value;
+      if (compare_exchange_weak(expected, desired, order,
+                                memory_order_relaxed)) {
+        return expected;
+      }
+    }
+  }
+
+  bool compare_exchange_strong(
+      T& expected, T desired, memory_order success,
+      memory_order failure) const noexcept {
+    return __atomic_compare_exchange_n(__ptr, &expected, desired, false,
+                                       success, failure);
+  }
+
+  bool compare_exchange_strong(
+      T& expected, T desired,
+      memory_order order = memory_order_seq_cst) const noexcept {
+    return compare_exchange_strong(
+        expected, desired, order, __atomic_detail::failure_order(order));
+  }
+
+  bool compare_exchange_weak(
+      T& expected, T desired, memory_order success,
+      memory_order failure) const noexcept {
+    return __atomic_compare_exchange_n(__ptr, &expected, desired, true,
+                                       success, failure);
+  }
+
+  bool compare_exchange_weak(
+      T& expected, T desired,
+      memory_order order = memory_order_seq_cst) const noexcept {
+    return compare_exchange_weak(
+        expected, desired, order, __atomic_detail::failure_order(order));
+  }
+
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
+    __atomic_detail::wait(*this, old, order);
+  }
+
+  void notify_one() const noexcept {
+  }
+
+  void notify_all() const noexcept {
+  }
+#endif
+
+  T operator++() const noexcept {
+    return fetch_add(1) + 1;
+  }
+
+  T operator++(int) const noexcept {
+    return fetch_add(1);
+  }
+
+  T operator--() const noexcept {
+    return fetch_sub(1) - 1;
+  }
+
+  T operator--(int) const noexcept {
+    return fetch_sub(1);
+  }
+
+  T operator+=(difference_type value) const noexcept {
+    return fetch_add(value) + value;
+  }
+
+  T operator-=(difference_type value) const noexcept {
+    return fetch_sub(value) - value;
+  }
+
+  T operator&=(T value) const noexcept {
+    return fetch_and(value) & value;
+  }
+
+  T operator|=(T value) const noexcept {
+    return fetch_or(value) | value;
+  }
+
+  T operator^=(T value) const noexcept {
+    return fetch_xor(value) ^ value;
+  }
+
+  T operator=(T value) const noexcept {
+    store(value);
+    return value;
+  }
+
+ private:
+  T* __ptr;
 };
 
 using atomic_bool = atomic<bool>;
@@ -84,11 +464,39 @@ using atomic_uint = atomic<unsigned int>;
 using atomic_ulong = atomic<unsigned long>;
 using atomic_ullong = atomic<unsigned long long>;
 
-inline void atomic_thread_fence(memory_order order = memory_order_seq_cst) {
-  static_cast<void>(order);
-  __sync_synchronize();
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+template <class T>
+void atomic_wait(const atomic<T>* object,
+                 typename atomic<T>::value_type old) noexcept {
+  object->wait(old);
+}
+
+template <class T>
+void atomic_wait_explicit(const atomic<T>* object,
+                          typename atomic<T>::value_type old,
+                          memory_order order) noexcept {
+  object->wait(old, order);
+}
+
+template <class T>
+void atomic_notify_one(atomic<T>* object) noexcept {
+  object->notify_one();
+}
+
+template <class T>
+void atomic_notify_all(atomic<T>* object) noexcept {
+  object->notify_all();
+}
+#endif
+
+inline void atomic_thread_fence(
+    memory_order order = memory_order_seq_cst) noexcept {
+  if (order != memory_order_relaxed) {
+    __sync_synchronize();
+  }
 }
 
 }  // namespace std
 
+#endif /* supported atomic profile */
 #endif /* atomic_h */

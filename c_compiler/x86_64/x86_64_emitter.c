@@ -1856,6 +1856,20 @@ static void PrintAtomicCompareExchange(TargetInstruction* inst,
   }
 }
 
+static void PrintAtomicFetchAddSub(TargetInstruction* inst, FILE* fp) {
+  int size_log2 =
+      (inst->flags & X86_64_ATOMIC_SIZE_MASK) >> X86_64_ATOMIC_SIZE_SHIFT;
+  static const char* xadd[] = {
+      "atomic_xaddb", "atomic_xaddw", "atomic_xaddl", "atomic_xaddq"};
+  char b0[16], b1[16];
+
+  fprintf(fp, "\t%s ", xadd[size_log2]);
+  PrintPercentRegFromInst(fp, inst->operand[1], b0, sizeof(b0));
+  fprintf(fp, ", (");
+  PrintPercentRegFromInst(fp, inst->operand[0], b1, sizeof(b1));
+  fprintf(fp, ")\n");
+}
+
 static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
                                                    FILE* fp);
 
@@ -1911,6 +1925,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     case X86_64_OP(atomic_compare_exchange_val):
     case X86_64_OP(atomic_compare_exchange_n):
       PrintAtomicCompareExchange(inst, func_name, fp);
+      return;
+    case X86_64_OP(atomic_fetch_add_sub):
+      PrintAtomicFetchAddSub(inst, fp);
       return;
 //    case X86_64_OP(rmov):
 //    case X86_64_OP(rmovf):
