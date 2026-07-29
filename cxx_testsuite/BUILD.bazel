@@ -567,6 +567,34 @@ sh_test(
 )
 
 sh_test(
+    name = "exec_counted_iterator_65c02",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "65c02",
+        "--libc",
+        "$(rootpath //:libc_65c02)",
+        "--interpreter",
+        "$(rootpath //:6502)",
+        "--rom",
+        "$(rootpath //:support_rom_65c02)",
+        "--tests-dir",
+        "tests/exec_counted_iterator",
+        "--timeout",
+        "90",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:6502",
+        "//:davecc",
+        "//:libc_65c02",
+        "//:libc_headers",
+        "//:support_rom_65c02",
+    ],
+)
+
+sh_test(
     name = "exec_ranges_x86_64",
     srcs = ["run_exec_tests.sh"],
     args = [
@@ -1016,6 +1044,7 @@ test_suite(
         ":exec_format_arm",
         ":exec_format_riscv",
         ":exec_format_x86_64",
+        ":exec_counted_iterator_65c02",
         ":exec_ranges_aarch64",
         ":exec_ranges_arm",
         ":exec_ranges_riscv",

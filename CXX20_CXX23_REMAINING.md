@@ -49,7 +49,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 
 ## Remaining C++20 library work
 
-- [ ] Implement `std::counted_iterator`.
+- [x] Implement `std::counted_iterator`.
 - [ ] Implement `std::common_iterator`.
 - [ ] Harden `common_view`, `views::counted`, and related iterator/ranges
       interoperability after those iterator types exist.

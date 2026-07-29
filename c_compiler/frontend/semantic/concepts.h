@@ -101,6 +101,7 @@ typedef struct Concept {
   String name;
   Vector* template_parameters;  // TemplateParameter* entries (owned).
   ConstraintExpr* constraint;   // The concept's constraint expression.
+  Vector* satisfaction_cache;   // Concrete satisfaction results (transient).
   SourceLocation location;
 } Concept;
 

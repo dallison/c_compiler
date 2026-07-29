@@ -583,7 +583,12 @@ using range_size_t = decltype(ranges::size(declval<R&>()));
 
 template <class R>
 constexpr auto __distance_fn::operator()(R&& range) const {
-  return (*this)(ranges::begin(range), ranges::end(range));
+  if constexpr (sized_range<R>) {
+    auto size = ranges::size(range);
+    return static_cast<range_difference_t<R>>(size);
+  } else {
+    return (*this)(ranges::begin(range), ranges::end(range));
+  }
 }
 
 template <class R, class T>
@@ -2585,11 +2590,9 @@ struct __split_fn {
 struct __counted_fn {
   template <input_or_output_iterator I>
   constexpr auto operator()(I first, iter_difference_t<I> count) const {
-    I last = first;
-    for (iter_difference_t<I> i = 0; i < count; ++i) {
-      ++last;
-    }
-    return subrange<I, I>(first, last);
+    return subrange<counted_iterator<I>, default_sentinel_t>(
+        counted_iterator<I>(static_cast<I&&>(first), count),
+        default_sentinel);
   }
 };
 

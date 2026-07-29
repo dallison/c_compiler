@@ -145,6 +145,23 @@ Concept* NewConcept(const char* name, Vector* template_parameters,
   return c;
 }
 
+typedef struct ConceptSatisfactionCacheEntry {
+  Vector* arguments;
+  bool ok;
+  int64_t result;
+} ConceptSatisfactionCacheEntry;
+
+static void ConceptSatisfactionCacheEntryDelete(
+    ConceptSatisfactionCacheEntry* entry) {
+  if (entry == NULL) {
+    return;
+  }
+  VectorDeleteWithContents(
+      entry->arguments, (VectorElementDestructor)TemplateArgumentDelete,
+      /*free_element=*/false);
+  free(entry);
+}
+
 void ConstraintExprDelete(ConstraintExpr* constraint) {
   if (constraint == NULL) {
     return;
@@ -208,6 +225,12 @@ void ConceptDelete(Concept* concept) {
     VectorDeleteWithContents(
         concept->template_parameters,
         (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+  }
+  if (concept->satisfaction_cache != NULL) {
+    VectorDeleteWithContents(
+        concept->satisfaction_cache,
+        (VectorElementDestructor)ConceptSatisfactionCacheEntryDelete,
         /*free_element=*/false);
   }
   ConstraintExprDelete(concept->constraint);
@@ -1125,6 +1148,35 @@ static bool EvaluateConstraintInteger(ConstraintExpr* constraint,
   return true;
 }
 
+static ConceptSatisfactionCacheEntry* FindConceptSatisfactionCacheEntry(
+    Concept* concept, Vector* arguments) {
+  if (concept == NULL || concept->satisfaction_cache == NULL ||
+      arguments == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < concept->satisfaction_cache->length; i++) {
+    ConceptSatisfactionCacheEntry* entry =
+        concept->satisfaction_cache->value.p[i];
+    if (entry != NULL &&
+        TypeTemplateArgumentVectorEqual(entry->arguments, arguments)) {
+      return entry;
+    }
+  }
+  return NULL;
+}
+
+static void CacheConceptSatisfaction(Concept* concept, Vector* arguments,
+                                     bool ok, int64_t result) {
+  if (concept->satisfaction_cache == NULL) {
+    concept->satisfaction_cache = NewVector();
+  }
+  ConceptSatisfactionCacheEntry* entry = malloc(sizeof(*entry));
+  entry->arguments = TemplateArgumentVectorCopy(arguments);
+  entry->ok = ok;
+  entry->result = result;
+  VectorAppend(concept->satisfaction_cache, entry);
+}
+
 static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
                                              Vector* arguments,
                                              SourceLocation location,
@@ -1150,6 +1202,22 @@ static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
         &compiler->syntax, definition->template_parameters, arguments);
   }
   Vector* eval_arguments = completed != NULL ? completed : arguments;
+  bool cacheable =
+      eval_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(eval_arguments);
+  if (cacheable) {
+    ConceptSatisfactionCacheEntry* cached =
+        FindConceptSatisfactionCacheEntry(definition, eval_arguments);
+    if (cached != NULL) {
+      *result = cached->result;
+      if (completed != NULL) {
+        VectorDeleteWithContents(
+            completed, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      return cached->ok;
+    }
+  }
 
   bool ok;
   if (eval_arguments == NULL || constraint->kind != kConstraintAtomic) {
@@ -1157,6 +1225,13 @@ static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
   } else {
     ok = EvaluateAtomicConstraintInteger(constraint->as.atomic.expr,
                                          eval_arguments, location, result);
+  }
+  // Failed checks can be observed during a re-entrant, speculative
+  // substitution while requires-expression parameter symbols are temporarily
+  // rebound.  A later check from the owning context may succeed, so only
+  // memoize stable successful satisfactions.
+  if (cacheable && ok && *result != 0) {
+    CacheConceptSatisfaction(definition, eval_arguments, ok, *result);
   }
   if (completed != NULL) {
     VectorDeleteWithContents(completed,

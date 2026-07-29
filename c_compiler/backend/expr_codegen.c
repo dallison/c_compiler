@@ -2602,6 +2602,15 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
     CheckForVarDef(copy, &node->base);
     gen->current_struct_address = destination;
   }
+  if (ExpressionReturnsReference((ASTNode*)node) &&
+      (node->base.flags & kASTNeedAddress) == 0 &&
+      !TypeIsStructOrUnion(node->base.type) &&
+      !TypeIsArray(node->base.type) &&
+      !TypeIsFunction(node->base.type)) {
+    IROpcode load = GetLoadOpcodeForType(node->base.type);
+    return IRSetType(GeneratorEmit(gen, NewIR1(load, result)),
+                     node->base.type);
+  }
   return result;
 }
 
