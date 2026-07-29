@@ -429,56 +429,76 @@ static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* actual) {
   actual->flags |= kASTPackExpansion;
 }
 
+/* Map exactly the binary operators permitted as fold-operators by
+ * [expr.prim.fold]. Keep this as the single source of truth for both parsing
+ * and the top-level-ellipsis lookahead. In particular, <=> is not a permitted
+ * fold-operator. */
+static bool FoldOperatorOpcode(Token token, ASTOpcode* op) {
+  ASTOpcode result = AST_OP(bad);
+  switch (token) {
+    case TOK(star): result = AST_OP(mult); break;
+    case TOK(slash): result = AST_OP(div); break;
+    case TOK(percent): result = AST_OP(mod); break;
+    case TOK(plus): result = AST_OP(plus); break;
+    case TOK(minus): result = AST_OP(minus); break;
+    case TOK(lessless): result = AST_OP(lshift); break;
+    case TOK(greatergreater): result = AST_OP(rshift); break;
+    case TOK(amp): result = AST_OP(and); break;
+    case TOK(caret): result = AST_OP(exor); break;
+    case TOK(bar): result = AST_OP(bitor); break;
+    case TOK(ampamp): result = AST_OP(logand); break;
+    case TOK(barbar): result = AST_OP(logor); break;
+    case TOK(equalequal): result = AST_OP(equal); break;
+    case TOK(bangeq): result = AST_OP(noteq); break;
+    case TOK(less): result = AST_OP(less); break;
+    case TOK(greater): result = AST_OP(greater); break;
+    case TOK(lesseq): result = AST_OP(lesseq); break;
+    case TOK(greatereq): result = AST_OP(greatereq); break;
+    case TOK(equal): result = AST_OP(assign); break;
+    case TOK(pluseq): result = AST_OP(pluseq); break;
+    case TOK(minuseq): result = AST_OP(minuseq); break;
+    case TOK(stareq): result = AST_OP(multeq); break;
+    case TOK(slasheq): result = AST_OP(diveq); break;
+    case TOK(percenteq): result = AST_OP(percenteq); break;
+    case TOK(lesslesseq): result = AST_OP(lshifteq); break;
+    case TOK(greatergreatereq): result = AST_OP(rshifteq); break;
+    case TOK(ampeq): result = AST_OP(andeq); break;
+    case TOK(bareq): result = AST_OP(oreq); break;
+    case TOK(careteq): result = AST_OP(exoreq); break;
+    case TOK(comma): result = AST_OP(comma); break;
+    case TOK(dotstar): result = AST_OP(dotstar); break;
+    case TOK(arrowstar): result = AST_OP(arrowstar); break;
+    default: return false;
+  }
+  if (op != NULL) {
+    *op = result;
+  }
+  return true;
+}
+
 static bool ParseFoldOperator(Syntax* syntax, ASTOpcode* op) {
-  if (LexMatch(syntax->lex, TOK(star))) {
-    *op = AST_OP(mult);
-    return true;
+  if (!FoldOperatorOpcode(syntax->lex->current_token, op)) {
+    return false;
   }
-  if (LexMatch(syntax->lex, TOK(slash))) {
-    *op = AST_OP(div);
-    return true;
+  LexNextToken(syntax->lex);
+  return true;
+}
+
+/* davecc parses .* and ->* in its postfix-expression loop. Do not let that
+ * loop consume the first operator of `(pack .* ... [.* init])` or
+ * `(pack ->* ... [->* init])`; it belongs to the surrounding fold grammar. */
+static bool MemberPointerOperatorPrecedesFoldEllipsis(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(dotstar)) &&
+      !LexLookingAt(syntax->lex, TOK(arrowstar))) {
+    return false;
   }
-  if (LexMatch(syntax->lex, TOK(percent))) {
-    *op = AST_OP(mod);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(plus))) {
-    *op = AST_OP(plus);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(minus))) {
-    *op = AST_OP(minus);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(lessless))) {
-    *op = AST_OP(lshift);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(greatergreater))) {
-    *op = AST_OP(rshift);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(amp))) {
-    *op = AST_OP(and);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(caret))) {
-    *op = AST_OP(exor);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(bar))) {
-    *op = AST_OP(bitor);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(ampamp))) {
-    *op = AST_OP(logand);
-    return true;
-  }
-  if (LexMatch(syntax->lex, TOK(barbar))) {
-    *op = AST_OP(logor);
-    return true;
-  }
-  return false;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = LexLookingAt(syntax->lex, TOK(ellipsis));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
 }
 
 typedef struct {
@@ -562,12 +582,7 @@ static bool FoldLessStartsTemplateArgument(Syntax* syntax) {
 }
 
 static bool TokenIsFoldOperator(Token token) {
-  return token == TOK(star) || token == TOK(slash) ||
-         token == TOK(percent) || token == TOK(plus) ||
-         token == TOK(minus) || token == TOK(lessless) ||
-         token == TOK(greatergreater) || token == TOK(amp) ||
-         token == TOK(caret) || token == TOK(bar) ||
-         token == TOK(ampamp) || token == TOK(barbar);
+  return FoldOperatorOpcode(token, NULL);
 }
 
 static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
@@ -3601,7 +3616,12 @@ static ASTNode* ParsePostfixOperators(Syntax* syntax, ASTNode* result,
     } else if (LexMatch(syntax->lex, TOK(dot))) {
       result = ParseStructMember(result, AST_OP(dot), syntax,
                                  followers);
-    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(dotstar))) {
+    } else if (CompilerIsCXX() &&
+               LexLookingAt(syntax->lex, TOK(dotstar))) {
+      if (MemberPointerOperatorPrecedesFoldEllipsis(syntax)) {
+        break;
+      }
+      LexMatch(syntax->lex, TOK(dotstar));
       ASTNode* pm = ParseCastExpression(syntax, followers);
       result = NewBinaryASTNode(AST_OP(dotstar), NULL,
                                 syntax->lex->current_token_location, result,
@@ -3609,7 +3629,12 @@ static ASTNode* ParsePostfixOperators(Syntax* syntax, ASTNode* result,
     } else if (LexMatch(syntax->lex, TOK(arrow))) {
       result = ParseStructMember(result, AST_OP(arrow), syntax,
                                  followers);
-    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(arrowstar))) {
+    } else if (CompilerIsCXX() &&
+               LexLookingAt(syntax->lex, TOK(arrowstar))) {
+      if (MemberPointerOperatorPrecedesFoldEllipsis(syntax)) {
+        break;
+      }
+      LexMatch(syntax->lex, TOK(arrowstar));
       ASTNode* pm = ParseCastExpression(syntax, followers);
       result = NewBinaryASTNode(AST_OP(arrowstar), NULL,
                                 syntax->lex->current_token_location, result,
