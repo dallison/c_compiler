@@ -1,5 +1,4 @@
 // RUN: -std=c++23
-// EXPECT: coroutine class local in for initializer cannot cross suspension
 
 #include <coroutine>
 
@@ -19,7 +18,7 @@ struct state {
   ~state();
 };
 
-task invalid() {
+task valid() {
   for (state current{0}; current.value != 2; ++current.value) {
     co_yield current.value;
   }

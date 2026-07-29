@@ -101,6 +101,7 @@ typedef struct {
   StructMember* member;
   StructMember* constructed_member;
   bool construct_at_start;
+  bool body_lifetime;
 } FrameOwnedSymbol;
 
 static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
@@ -134,7 +135,8 @@ static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          Symbol* symbol,
                                          StructMember* member,
                                          StructMember* constructed_member,
-                                         bool construct_at_start);
+                                         bool construct_at_start,
+                                         bool body_lifetime);
 static CoroutinePersistedLocal* FindPersistedCoroutineLocal(Vector* locals,
                                                             Symbol* symbol);
 static void AppendCoroutineFrameBodyDestructors(Vector* statements,
@@ -3287,7 +3289,7 @@ static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
   point->awaiter = awaiter;
   CoroutineFrameAddOwnedSymbol(frame, awaiter, point->frame_member,
                                point->frame_constructed_member,
-                               false);
+                               false, true);
 
   Vector* actuals = NewVector();
   VectorAppend(actuals, ASTNodeMove(((UnaryASTNode*)point->co_yield)->sub));
@@ -3360,7 +3362,8 @@ static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          Symbol* symbol,
                                          StructMember* member,
                                          StructMember* constructed_member,
-                                         bool construct_at_start) {
+                                         bool construct_at_start,
+                                         bool body_lifetime) {
   if (frame == NULL || symbol == NULL || member == NULL) {
     return;
   }
@@ -3370,6 +3373,7 @@ static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
   owned->member = member;
   owned->constructed_member = constructed_member;
   owned->construct_at_start = construct_at_start;
+  owned->body_lifetime = body_lifetime;
   VectorAppend(&frame->owned_symbols, owned);
 }
 
@@ -3420,6 +3424,15 @@ static void InsertCoroutineFrameStarterInitializers(
     CompoundASTNodeInsertStatement(
         body, NewFrameIntAssignment(frame, owned->constructed_member, 0,
                                     location), index++);
+  }
+  /* Parameter copies are ramp-only frame stores. They are initialized before
+   * the promise object, as required by coroutine-state construction order. */
+  while (index < body->statements->length) {
+    ASTNode* stmt = body->statements->value.p[index];
+    if (stmt == NULL || (stmt->flags & kASTCoroutineFrameStore) == 0) {
+      break;
+    }
+    index++;
   }
   for (size_t i = 0; i < frame->owned_symbols.length; i++) {
     FrameOwnedSymbol* owned = frame->owned_symbols.value.p[i];
@@ -3480,6 +3493,7 @@ static ASTNode* NewCoroutineFrameMemberGuardedDestructor(
       .member = member,
       .constructed_member = constructed_member,
       .construct_at_start = false,
+      .body_lifetime = true,
   };
   return NewCoroutineFrameGuardedDestructor(frame, &owned, location);
 }
@@ -3506,16 +3520,14 @@ static void AppendCoroutineFrameDestructors(Vector* statements,
   }
 }
 
-/* True if a frame-owned object has body lifetime (i.e. is not the promise or the
- * initial/final awaiters, which outlive the body and are destroyed separately). */
+/* True if a frame-owned object has body lifetime. Promise/initial/final awaiters
+ * and function-parameter copies outlive the body until the frame is destroyed. */
 static bool CoroutineFrameOwnedSymbolIsBodyLifetime(CoroutineFrame* frame,
                                                     FrameOwnedSymbol* owned) {
   if (frame == NULL || owned == NULL) {
     return false;
   }
-  return owned->member != frame->promise &&
-         owned->member != frame->initial_awaiter &&
-         owned->member != frame->final_awaiter;
+  return owned->body_lifetime;
 }
 
 /* Append guarded destructors for only the body-lifetime frame objects, in
@@ -3604,6 +3616,110 @@ static void AppendPersistedCoroutineLocalDestructors(
     }
     current = parent;
   }
+}
+
+static void AppendPersistedCoroutineCompoundRangeDestructors(
+    Vector* statements, CoroutineFrame* frame, Vector* persisted_locals,
+    CompoundStatementASTNode* compound, size_t first, size_t limit,
+    SourceLocation location) {
+  if (compound == NULL || compound->statements == NULL) {
+    return;
+  }
+  if (limit > compound->statements->length) {
+    limit = compound->statements->length;
+  }
+  for (size_t i = limit; i > first; i--) {
+    ASTNode* stmt = compound->statements->value.p[i - 1];
+    if (stmt == NULL || stmt->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* declarations = (DeclarationListASTNode*)stmt;
+    for (size_t j = declarations->declarations->length; j > 0; j--) {
+      ASTNode* declaration = declarations->declarations->value.p[j - 1];
+      if (declaration == NULL || declaration->op != AST_OP(vardecl)) {
+        continue;
+      }
+      AppendPersistedCoroutineLocalDestructor(
+          statements, frame, persisted_locals,
+          ((VariableDeclarationASTNode*)declaration)->symbol, location);
+    }
+  }
+}
+
+static ASTNode* EnclosingCoroutineLoopOrSwitch(ASTNode* node,
+                                               bool loop_only) {
+  for (ASTNode* parent = node != NULL ? node->parent : NULL;
+       parent != NULL; parent = parent->parent) {
+    if (parent->op == AST_OP(for) || parent->op == AST_OP(while) ||
+        parent->op == AST_OP(do) ||
+        (!loop_only && parent->op == AST_OP(switch))) {
+      return parent;
+    }
+  }
+  return NULL;
+}
+
+static void CollectCoroutineBreakContinue(ASTNode* node, void* data,
+                                          int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      (node->op == AST_OP(break) || node->op == AST_OP(continue))) {
+    VectorAppend((Vector*)data, node);
+  }
+}
+
+/* Coroutines bypass the ordinary scope-exit insertion pass because persisted
+ * objects must be destroyed through frame slots. Add guarded frame destructors
+ * before break/continue for every lexical compound exited by the jump. */
+static void InsertPersistedCoroutineJumpDestructors(
+    ASTNode* body, CoroutineFrame* frame, Vector* persisted_locals) {
+  if (body == NULL || frame == NULL || persisted_locals == NULL ||
+      persisted_locals->length == 0) {
+    return;
+  }
+  Vector jumps;
+  VectorInit(&jumps);
+  ASTNodeVisit(body, CollectCoroutineBreakContinue, 0, &jumps);
+  for (size_t i = 0; i < jumps.length; i++) {
+    ASTNode* jump = jumps.value.p[i];
+    if (jump == NULL || (jump->flags & kASTScopeExitCleanup) != 0) {
+      continue;
+    }
+    jump->flags |= kASTScopeExitCleanup;
+    ASTNode* limit = EnclosingCoroutineLoopOrSwitch(
+        jump, jump->op == AST_OP(continue));
+    if (limit == NULL) {
+      continue;
+    }
+    Vector* destructors = NewVector();
+    ASTNode* child = jump;
+    ASTNode* parent = jump->parent;
+    while (parent != NULL) {
+      if (parent->op == AST_OP(compound)) {
+        size_t child_index =
+            child->child_id >= 0 ? (size_t)child->child_id : 0;
+        AppendPersistedCoroutineCompoundRangeDestructors(
+            destructors, frame, persisted_locals,
+            (CompoundStatementASTNode*)parent, 0, child_index, jump->location);
+      }
+      if (parent == limit) {
+        break;
+      }
+      child = parent;
+      parent = parent->parent;
+    }
+    if (destructors->length == 0) {
+      VectorDelete(destructors);
+      continue;
+    }
+    ASTNode* old_parent = jump->parent;
+    int old_child_id = jump->child_id;
+    VectorAppend(destructors, jump);
+    ASTNode* compound =
+        NewCompoundStatementASTNode(destructors, jump->location);
+    ASTNodeReplaceChild(old_parent, old_child_id, compound, false);
+  }
+  VectorDestruct(&jumps);
 }
 
 /* Build the `FrameType*` pointer type. */
@@ -3922,8 +4038,14 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
     }
     char member_name[32];
     snprintf(member_name, sizeof(member_name), "__local%zu", i);
+    TypeRecord* member_type =
+        TypeIsReference(local->symbol->type)
+            ? NewPointerTo(kQualPlain,
+                           TypeRecordCopy(local->symbol->type->next))
+            : TypeRecordCopy(local->symbol->type);
     local->member =
-        AddCoroutineFrameTypedMember(str, member_name, local->symbol->type);
+        AddCoroutineFrameTypedMember(str, member_name, member_type);
+    TypeRecordDelete(member_type);
     if (TypeIsStructOrUnion(local->symbol->type)) {
       snprintf(member_name, sizeof(member_name), "__local%zu_constructed", i);
       local->constructed_member = AddCoroutineFrameBoolMember(str, member_name);
@@ -4120,6 +4242,18 @@ static bool IsInsideDeclarationOfSymbol(ASTNode* node, Symbol* symbol) {
   return search.found;
 }
 
+static bool IsInsideCoroutineFrameStore(ASTNode* node) {
+  for (ASTNode* current = node; current != NULL; current = current->parent) {
+    if ((current->flags & kASTCoroutineFrameStore) != 0) {
+      return true;
+    }
+    if (current->op == AST_OP(compound)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 /* Visitor that rewrites references to frame-owned locals into `frame->slot`
  * accesses, skipping the declaration itself, self-copy assignment RHSs, and
  * in-place construction arguments to avoid clobbering construction semantics. */
@@ -4133,7 +4267,8 @@ static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
   }
   CoroutineFrame* frame = data;
   IdentifierASTNode* identifier = (IdentifierASTNode*)node;
-  if (IsInsideDeclarationOfSymbol(node, identifier->symbol)) {
+  if (IsInsideDeclarationOfSymbol(node, identifier->symbol) ||
+      IsInsideCoroutineFrameStore(node)) {
     return;
   }
   StructMember* member =
@@ -4143,6 +4278,11 @@ static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
     return;
   }
   ASTNode* access = NewFrameMemberAccess(frame, member, node->location);
+  if (TypeIsReference(identifier->symbol->type)) {
+    access = NewUnaryASTNode(
+        AST_OP(contents), TypeRecordCopy(identifier->symbol->type->next),
+        node->location, access);
+  }
   ASTNodeReplaceChild(node->parent, node->child_id, access, true);
 }
 
@@ -4917,6 +5057,9 @@ static bool CoroutineParameterCanBePersisted(Symbol* symbol,
   if (move_parameter != NULL) {
     *move_parameter = false;
   }
+  if (symbol != NULL && TypeIsReference(symbol->type)) {
+    return true;
+  }
   if (CoroutineScalarCanBePersisted(symbol)) {
     return true;
   }
@@ -4951,6 +5094,9 @@ static bool CoroutineCatchParameterCanBePersisted(Symbol* symbol,
                                                   bool* move_parameter) {
   if (move_parameter != NULL) {
     *move_parameter = false;
+  }
+  if (symbol != NULL && TypeIsReference(symbol->type)) {
+    return true;
   }
   if (CoroutineScalarCanBePersisted(symbol)) {
     return true;
@@ -5096,17 +5242,7 @@ static void CollectPersistedCoroutineDeclarationList(
     if (!SuspensionPointUsesSymbolAfter(root, point, symbol)) {
       continue;
     }
-    /* Initializers in a `for` header cannot currently host the guarded
-     * destruction sequence required by a frame-backed class object.  Reject
-     * that case instead of silently extending or skipping its lifetime. */
-    if (is_for_initializer && symbol != NULL &&
-        TypeIsStructOrUnion(symbol->type)) {
-      SemanticError(
-          (ASTNode*)decl,
-          "coroutine class local in for initializer cannot cross suspension");
-      *ok = false;
-      continue;
-    }
+    (void)is_for_initializer;
     if (!CoroutineLocalCanBePersisted(symbol)) {
       SemanticError(
           (ASTNode*)decl,
@@ -5286,22 +5422,23 @@ static bool CollectPersistedCoroutineLocals(
   return ok;
 }
 
-/* Persist every function parameter that the body references (parameters always
- * outlive the ramp and so are copied/moved into the frame). Returns false if a
- * parameter type can be neither copied nor moved. */
+/* Persist every referenced function parameter, plus every class parameter even
+ * when unused because its copy/move construction and destruction are observable.
+ * Parameters outlive the ramp and so are copied/moved into the frame. */
 static bool CollectPersistedCoroutineParameters(
     FunctionInfo* info,
     CompoundStatementASTNode* body,
     SuspensionPoints* points,
     Vector* persisted_locals) {
   if (info == NULL || body == NULL || points == NULL ||
-      points->count == 0 || persisted_locals == NULL) {
+      persisted_locals == NULL) {
     return true;
   }
   bool ok = true;
   for (size_t i = 0; i < info->prototype.length; i++) {
     Symbol* symbol = info->prototype.value.p[i];
-    if (!ASTUsesSymbol((ASTNode*)body, symbol)) {
+    if (!ASTUsesSymbol((ASTNode*)body, symbol) &&
+        !TypeIsStructOrUnion(symbol->type)) {
       continue;
     }
     bool move_parameter = false;
@@ -5494,10 +5631,113 @@ static CoroutinePersistedLocal* PersistedLocalDestroyedByStatement(
   return local;
 }
 
+typedef struct {
+  CoroutineFrame* frame;
+  Vector* persisted_locals;
+  Vector loops;
+} PersistedForInitializerHoist;
+
+static bool PersistedCoroutineForInitializerNeedsHoist(
+    ForStatementASTNode* loop, Vector* persisted_locals) {
+  if (loop == NULL || loop->c1 == NULL ||
+      loop->c1->op != AST_OP(decl_list)) {
+    return false;
+  }
+  DeclarationListASTNode* decls = (DeclarationListASTNode*)loop->c1;
+  for (size_t i = 0; decls->declarations != NULL &&
+                     i < decls->declarations->length; i++) {
+    VariableDeclarationASTNode* decl = decls->declarations->value.p[i];
+    CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
+        persisted_locals, decl != NULL ? decl->symbol : NULL);
+    if (local != NULL && local->member != NULL && !local->is_parameter &&
+        !local->is_catch_parameter && local->constructed_member != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void CollectPersistedCoroutineForInitializers(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(for)) {
+    return;
+  }
+  PersistedForInitializerHoist* hoist = data;
+  if (PersistedCoroutineForInitializerNeedsHoist(
+          (ForStatementASTNode*)node, hoist->persisted_locals)) {
+    VectorAppend(&hoist->loops, node);
+  }
+}
+
+/* A class object declared in a for-init statement has the lifetime of the
+ * entire loop. Hoist an initializer containing a persisted class object into a
+ * synthetic enclosing compound:
+ *
+ *   for (T value = init; cond; step) body
+ * becomes
+ *   { T value = init; for (; cond; step) body; guarded-destroy(value); }
+ *
+ * This gives frame construction and every exit path a real lexical scope while
+ * preserving continue semantics (the increment remains on the inner for). */
+static void HoistPersistedCoroutineForInitializer(
+    ForStatementASTNode* loop, PersistedForInitializerHoist* hoist) {
+  if (!PersistedCoroutineForInitializerNeedsHoist(
+          loop, hoist->persisted_locals) ||
+      loop->base.parent == NULL) {
+    return;
+  }
+  DeclarationListASTNode* decls = (DeclarationListASTNode*)loop->c1;
+  ASTNode* old_parent = loop->base.parent;
+  int old_child_id = loop->base.child_id;
+  Vector* statements = NewVector();
+  VectorAppend(statements, loop->c1);
+  loop->c1 = NULL;
+  VectorAppend(statements, (ASTNode*)loop);
+  for (size_t i = decls->declarations->length; i > 0; i--) {
+    VariableDeclarationASTNode* decl = decls->declarations->value.p[i - 1];
+    CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
+        hoist->persisted_locals, decl != NULL ? decl->symbol : NULL);
+    if (local == NULL || local->member == NULL || local->is_parameter ||
+        local->is_catch_parameter || local->constructed_member == NULL) {
+      continue;
+    }
+    ASTNode* dtor = NewCoroutineFrameMemberGuardedDestructor(
+        hoist->frame, local->member, local->constructed_member,
+        loop->base.location);
+    if (dtor != NULL) {
+      VectorAppend(statements, dtor);
+    }
+  }
+  ASTNode* compound =
+      NewCompoundStatementASTNode(statements, loop->base.location);
+  ASTNodeReplaceChild(old_parent, old_child_id, compound, false);
+}
+
+static void HoistPersistedCoroutineForInitializers(
+    CompoundStatementASTNode* body, CoroutineFrame* frame,
+    Vector* persisted_locals) {
+  if (body == NULL || frame == NULL || persisted_locals == NULL) {
+    return;
+  }
+  PersistedForInitializerHoist hoist = {
+      .frame = frame,
+      .persisted_locals = persisted_locals,
+  };
+  VectorInit(&hoist.loops);
+  ASTNodeVisit((ASTNode*)body, CollectPersistedCoroutineForInitializers, 0,
+               &hoist);
+  for (size_t i = hoist.loops.length; i > 0; i--) {
+    HoistPersistedCoroutineForInitializer(hoist.loops.value.p[i - 1], &hoist);
+  }
+  VectorDestruct(&hoist.loops);
+}
+
 /* Retarget persisted scalar declarations in a `for` initializer directly to
  * their frame slots.  Unlike a declaration in a compound, the initializer
- * cannot be followed by a separately inserted statement, which is why class
- * objects requiring a constructed flag are rejected during collection. */
+ * cannot be followed by a separately inserted statement. Persisted class
+ * initializers have already been hoisted into a surrounding compound. */
 static void RewritePersistedCoroutineForInitializer(
     ForStatementASTNode* loop,
     CoroutineFrame* frame,
@@ -5518,8 +5758,8 @@ static void RewritePersistedCoroutineForInitializer(
     }
     ASTNode* trailing = NewPersistedCoroutineLocalFrameInitialization(
         decl, local, frame, true);
-    /* Class locals were rejected before frame construction; scalar
-     * declarations need no separate constructed-flag statement. */
+    /* Only scalar declarations remain in the header, so no separate
+     * constructed-flag statement is expected. */
     if (trailing != NULL) {
       SemanticError(
           (ASTNode*)decl,
@@ -5633,8 +5873,26 @@ static void InsertPersistedCoroutineLocalStores(
     CoroutineFrame* frame,
     Vector* persisted_locals,
     SuspensionPoints* points) {
+  HoistPersistedCoroutineForInitializers(body, frame, persisted_locals);
   InsertPersistedCoroutineLocalStoresInCompound(body, frame, persisted_locals,
                                                points);
+}
+
+static ASTNode* NewPersistedCoroutineTransferValue(
+    CoroutinePersistedLocal* local) {
+  if (local == NULL || local->symbol == NULL) {
+    return NULL;
+  }
+  ASTNode* value =
+      local->move_parameter
+          ? NewCoroutineMoveExpression(local->symbol, local->symbol->location)
+          : NewIdentifierASTNode(local->symbol, local->symbol->location);
+  if (TypeIsReference(local->symbol->type)) {
+    value = NewUnaryASTNode(
+        AST_OP(address), TypeRecordCopy(local->member->symbol->type),
+        local->symbol->location, value);
+  }
+  return value;
 }
 
 /* For persisted catch-clause parameters, insert a frame store at the top of the
@@ -5653,11 +5911,7 @@ static void InsertPersistedCoroutineCatchParameterStores(
         !local->is_catch_parameter || local->store_compound == NULL) {
       continue;
     }
-    ASTNode* value = local->move_parameter
-                         ? NewCoroutineMoveExpression(local->symbol,
-                                                      local->symbol->location)
-                         : NewIdentifierASTNode(local->symbol,
-                                                local->symbol->location);
+    ASTNode* value = NewPersistedCoroutineTransferValue(local);
     ASTNode* store = TypeIsStructOrUnion(local->symbol->type)
                          ? NewFrameMemberInitialization(
                                frame, local->member,
@@ -5689,11 +5943,7 @@ static void InsertPersistedCoroutineParameterStores(
     if (local == NULL || local->member == NULL || !local->is_parameter) {
       continue;
     }
-    ASTNode* value = local->move_parameter
-                         ? NewCoroutineMoveExpression(local->symbol,
-                                                      local->symbol->location)
-                         : NewIdentifierASTNode(local->symbol,
-                                                local->symbol->location);
+    ASTNode* value = NewPersistedCoroutineTransferValue(local);
     ASTNode* store = TypeIsStructOrUnion(local->symbol->type)
                          ? NewFrameMemberInitialization(
                                frame, local->member,
@@ -6119,13 +6369,18 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
         return false;
       }
     }
-    if (!CollectPersistedCoroutineLocals(body, &points, &persisted_locals) ||
-        !CollectPersistedCoroutineParameters(info, body, &points,
-                                             &persisted_locals)) {
+    if (!CollectPersistedCoroutineLocals(body, &points, &persisted_locals)) {
       PersistedCoroutineLocalsDestruct(&persisted_locals);
       free(points.points);
       return false;
     }
+  }
+  if (needs_frame &&
+      !CollectPersistedCoroutineParameters(info, body, &points,
+                                           &persisted_locals)) {
+    PersistedCoroutineLocalsDestruct(&persisted_locals);
+    free(points.points);
+    return false;
   }
   if (needs_frame && initial_awaiter_type != NULL &&
       !ValidateCoroutineFrameOwnedAwaiterConstructible(node,
@@ -6162,23 +6417,23 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                               &persisted_locals,
                               yield_awaiter_type,
                               node->location);
-    CoroutineFrameAddOwnedSymbol(&frame, promise, frame.promise,
-                                 frame.promise_constructed, true);
-    /* Parameter copies are constructed before the coroutine body begins and
-     * therefore register before body locals, so reverse teardown destroys active
-     * locals first. */
+    /* Register parameter copies before the promise. Reverse teardown then
+     * destroys active body locals first, followed by the promise and finally
+     * parameter copies, matching coroutine-state destruction order. */
     for (size_t i = 0; i < persisted_locals.length; i++) {
       CoroutinePersistedLocal* local = persisted_locals.value.p[i];
       if (local != NULL && local->member != NULL && local->is_parameter) {
         CoroutineFrameAddOwnedSymbol(&frame, local->symbol, local->member,
-                                     local->constructed_member, false);
+                                     local->constructed_member, false, false);
       }
     }
+    CoroutineFrameAddOwnedSymbol(&frame, promise, frame.promise,
+                                 frame.promise_constructed, true, false);
     for (size_t i = 0; i < persisted_locals.length; i++) {
       CoroutinePersistedLocal* local = persisted_locals.value.p[i];
       if (local != NULL && local->member != NULL && !local->is_parameter) {
         CoroutineFrameAddOwnedSymbol(&frame, local->symbol, local->member,
-                                     local->constructed_member, false);
+                                     local->constructed_member, false, true);
       }
     }
     if (initial_awaiter_type != NULL) {
@@ -6191,7 +6446,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
       CoroutineFrameAddOwnedSymbol(&frame, initial_awaiter,
                                    frame.initial_awaiter,
                                    frame.initial_awaiter_constructed,
-                                   false);
+                                   false, false);
     }
     if (frame.final_awaiter != NULL) {
       final_awaiter =
@@ -6202,14 +6457,15 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
       final_awaiter->location = node->location;
       CoroutineFrameAddOwnedSymbol(&frame, final_awaiter,
                                    frame.final_awaiter,
-                                   frame.final_awaiter_constructed, false);
+                                   frame.final_awaiter_constructed, false,
+                                   false);
     }
     for (int i = 0; i < points.count; i++) {
       if (points.points[i].kind == kSuspensionCoAwait) {
         CoroutineFrameAddOwnedSymbol(
             &frame, points.points[i].awaiter,
             points.points[i].frame_member,
-            points.points[i].frame_constructed_member, false);
+            points.points[i].frame_constructed_member, false, true);
       }
     }
   }
@@ -6238,6 +6494,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                                                  &points);
     InsertPersistedCoroutineLocalStores(body, &frame, &persisted_locals,
                                         &points);
+    InsertPersistedCoroutineJumpDestructors(
+        (ASTNode*)body, &frame, &persisted_locals);
   }
   if (!needs_frame) {
     CompoundASTNodeInsertStatement(

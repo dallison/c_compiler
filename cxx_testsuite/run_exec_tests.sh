@@ -6,6 +6,7 @@ DAVECC=""
 TARGET=""
 LIBC=""
 INTERPRETER=""
+ROM=""
 TESTS_DIR="tests/exec"
 SUITE_ROOT=""
 TIMEOUT=30
@@ -13,7 +14,7 @@ declare -a INTERP_ARGS=()
 declare -a COMPILE_ARGS=()
 
 usage() {
-  echo "usage: $0 --davecc PATH --target NAME --libc PATH --interpreter PATH [--tests-dir PATH]" >&2
+  echo "usage: $0 --davecc PATH --target NAME --libc PATH --interpreter PATH [--rom PATH] [--tests-dir PATH]" >&2
   exit 2
 }
 
@@ -23,6 +24,7 @@ while [ "$#" -gt 0 ]; do
     --target) TARGET=$2; shift 2 ;;
     --libc) LIBC=$2; shift 2 ;;
     --interpreter) INTERPRETER=$2; shift 2 ;;
+    --rom) ROM=$2; shift 2 ;;
     --suite-root) SUITE_ROOT=$2; shift 2 ;;
     --tests-dir) TESTS_DIR=$2; shift 2 ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
@@ -53,6 +55,9 @@ resolve_runfile() {
 DAVECC=$(resolve_runfile "$DAVECC")
 LIBC=$(resolve_runfile "$LIBC")
 INTERPRETER=$(resolve_runfile "$INTERPRETER")
+if [ -n "$ROM" ]; then
+  ROM=$(resolve_runfile "$ROM")
+fi
 if [ -n "$SUITE_ROOT" ]; then
   SUITE_ROOT=$(resolve_runfile "$SUITE_ROOT")
 elif [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-}" ]; then
@@ -118,6 +123,9 @@ echo "=== cxx_testsuite exec: target=$TARGET ==="
 echo "davecc=$DAVECC"
 echo "libc=$LIBC"
 echo "interpreter=$INTERPRETER"
+if [ -n "$ROM" ]; then
+  echo "rom=$ROM"
+fi
 echo
 
 for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
@@ -138,6 +146,9 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   fi
 
   run_cmd=("${TIMEOUT_CMD[@]}" "$INTERPRETER")
+  if [ -n "$ROM" ]; then
+    run_cmd+=(-rom "$ROM")
+  fi
   run_cmd+=("${INTERP_ARGS[@]}" "$bin")
   "${run_cmd[@]}" >"$out" 2>"$work/run.err"
   run_status=$?

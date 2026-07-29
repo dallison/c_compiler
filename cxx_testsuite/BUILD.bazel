@@ -348,6 +348,34 @@ sh_test(
 )
 
 sh_test(
+    name = "exec_coroutines_65c02",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "65c02",
+        "--libc",
+        "$(rootpath //:libc_65c02)",
+        "--interpreter",
+        "$(rootpath //:6502)",
+        "--rom",
+        "$(rootpath //:support_rom_65c02)",
+        "--tests-dir",
+        "tests/exec_coroutines",
+        "--timeout",
+        "90",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:6502",
+        "//:davecc",
+        "//:libc_65c02",
+        "//:libc_headers",
+        "//:support_rom_65c02",
+    ],
+)
+
+sh_test(
     name = "exec_coroutines_riscv",
     srcs = ["run_exec_tests.sh"],
     args = [
@@ -979,6 +1007,7 @@ test_suite(
         ":exec_aarch64",
         ":exec_arm",
         ":exec_riscv",
+        ":exec_coroutines_65c02",
         ":exec_coroutines_aarch64",
         ":exec_coroutines_arm",
         ":exec_coroutines_riscv",

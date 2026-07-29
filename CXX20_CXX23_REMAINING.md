@@ -38,9 +38,14 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
   - Reject reached throws, out-of-bounds array pointers, inactive union reads,
     and `constexpr`/`consteval` coroutines with focused diagnostics.
   - Advertise the implemented C++20 `__cpp_constexpr` feature level.
-- [ ] Audit and complete coroutine suspension/lifetime cases.
-  - Class parameters and non-trivial locals live across suspension.
-  - `for` initializer lifetimes across suspension.
+- [x] Audit and complete coroutine suspension/lifetime cases.
+  - Persist class and reference parameters even when only initial/final suspend
+    requires a frame, and retain parameter copies through exceptional completion
+    until frame destruction.
+  - Destroy frame-backed non-trivial locals on `break` and `continue`, including
+    early frame destruction and exception paths.
+  - Support class `for` initializers across suspension by preserving their full
+    loop scope; cover scalar/range-for state and member-coroutine `this`.
 
 ## Remaining C++20 library work
 
