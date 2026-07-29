@@ -1840,60 +1840,138 @@ static ASTNode* NewFoldIdentity(ASTOpcode op, SourceLocation location,
                                location);
 }
 
+typedef enum {
+  kFoldPackFunction,
+  kFoldPackTemplateArgument,
+  kFoldPackLambdaCapture,
+} FoldPackKind;
+
+typedef struct {
+  FoldPackKind kind;
+  Symbol* symbol;
+  const char* capture_name;
+  Vector* replacements;
+  bool owns_replacements;
+} FoldPackBinding;
+
 typedef struct {
   TemplateFunctionBodyClone* clone;
-  Symbol* symbol;
-  TemplateArgument* argument;
-  bool multiple_packs;
-} TemplateArgumentPackSearch;
+  Vector bindings;
+  size_t length;
+  bool has_length;
+  bool mismatched_lengths;
+  bool unresolved_pack;
+} FoldPackSearch;
 
-static void FindTemplateArgumentPack(ASTNode* node, void* data, int child_id,
-                                     VisitorMode mode) {
-  (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
-    return;
+static void DeleteFoldPackBindings(FoldPackSearch* search) {
+  for (size_t i = 0; i < search->bindings.length; i++) {
+    FoldPackBinding* binding = search->bindings.value.p[i];
+    if (binding->owns_replacements) {
+      VectorDelete(binding->replacements);
+    }
+    free(binding);
   }
-  TemplateArgumentPackSearch* search = data;
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
-  if (id->symbol == NULL || !id->symbol->flags.is_parameter_pack) {
-    return;
-  }
-  int pack_index = id->symbol->template_parameter_index;
-  if (pack_index < 0) {
-    TypeIsTemplateParameterPlaceholder(id->symbol->type, &pack_index);
-  }
-  if (pack_index < 0 ||
-      (size_t)pack_index >= search->clone->args->length) {
-    return;
-  }
-  TemplateArgument* argument =
-      search->clone->args->value.p[pack_index];
-  if (argument == NULL ||
-      argument->kind != kTemplateParameterNonType ||
-      argument->pack_arguments == NULL) {
-    return;
-  }
-  if (search->symbol != NULL && search->symbol != id->symbol) {
-    search->multiple_packs = true;
-    return;
-  }
-  search->symbol = id->symbol;
-  search->argument = argument;
+  VectorDestruct(&search->bindings);
 }
 
-static TemplateArgument* FindConcreteTemplateArgumentPack(
-    TemplateFunctionBodyClone* clone, ASTNode* pattern, Symbol** symbol,
-    bool* multiple_packs) {
-  TemplateArgumentPackSearch search = {.clone = clone};
-  ASTNodeVisit(pattern, FindTemplateArgumentPack, 0, &search);
-  if (symbol != NULL) {
-    *symbol = search.symbol;
+static bool FoldPackBindingMatches(FoldPackBinding* binding, FoldPackKind kind,
+                                   Symbol* symbol,
+                                   const char* capture_name) {
+  if (binding->kind != kind) {
+    return false;
   }
-  if (multiple_packs != NULL) {
-    *multiple_packs = search.multiple_packs;
+  if (kind != kFoldPackLambdaCapture) {
+    return binding->symbol == symbol;
   }
-  return search.argument;
+  return binding->capture_name != NULL && capture_name != NULL &&
+         strcmp(binding->capture_name, capture_name) == 0;
+}
+
+static void AddFoldPackBinding(FoldPackSearch* search, FoldPackKind kind,
+                               Symbol* symbol, const char* capture_name,
+                               Vector* replacements, size_t length,
+                               bool owns_replacements) {
+  for (size_t i = 0; i < search->bindings.length; i++) {
+    FoldPackBinding* existing = search->bindings.value.p[i];
+    if (FoldPackBindingMatches(existing, kind, symbol, capture_name)) {
+      if (owns_replacements) {
+        VectorDelete(replacements);
+      }
+      return;
+    }
+  }
+  FoldPackBinding* binding = calloc(1, sizeof(FoldPackBinding));
+  binding->kind = kind;
+  binding->symbol = symbol;
+  binding->capture_name = capture_name;
+  binding->replacements = replacements;
+  binding->owns_replacements = owns_replacements;
+  VectorAppend(&search->bindings, binding);
+  if (!search->has_length) {
+    search->length = length;
+    search->has_length = true;
+  } else if (search->length != length) {
+    search->mismatched_lengths = true;
+  }
+}
+
+static TemplateArgument* ConcreteNonTypeTemplatePack(
+    TemplateFunctionBodyClone* clone, Symbol* symbol) {
+  if (clone == NULL || symbol == NULL || clone->args == NULL) {
+    return NULL;
+  }
+  int pack_index = symbol->template_parameter_index;
+  if (pack_index < 0) {
+    TypeIsTemplateParameterPlaceholder(symbol->type, &pack_index);
+  }
+  if (pack_index < 0 || (size_t)pack_index >= clone->args->length) {
+    return NULL;
+  }
+  TemplateArgument* argument = clone->args->value.p[pack_index];
+  return argument != NULL && argument->kind == kTemplateParameterNonType &&
+                 argument->pack_arguments != NULL
+             ? argument
+             : NULL;
+}
+
+static void FindFoldPacks(ASTNode* node, void* data, int child_id,
+                          VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  FoldPackSearch* search = data;
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol == NULL || !id->symbol->flags.is_parameter_pack) {
+      return;
+    }
+    Vector* replacements =
+        MapFindPointerKey(&search->clone->pack_symbol_map, id->symbol);
+    if (replacements != NULL) {
+      AddFoldPackBinding(search, kFoldPackFunction, id->symbol, NULL,
+                         replacements, replacements->length, false);
+      return;
+    }
+    TemplateArgument* argument =
+        ConcreteNonTypeTemplatePack(search->clone, id->symbol);
+    if (argument != NULL) {
+      AddFoldPackBinding(search, kFoldPackTemplateArgument, id->symbol, NULL,
+                         argument->pack_arguments,
+                         argument->pack_arguments->length, false);
+      return;
+    }
+    search->unresolved_pack = true;
+    return;
+  }
+}
+
+static void CollectFoldPacks(TemplateFunctionBodyClone* clone, ASTNode* pattern,
+                             FoldPackSearch* search) {
+  memset(search, 0, sizeof(*search));
+  search->clone = clone;
+  VectorInit(&search->bindings);
+  ASTNodeVisit(pattern, FindFoldPacks, 0, search);
 }
 
 typedef struct {
@@ -1914,37 +1992,53 @@ static ASTNode* ReplaceTemplateArgumentPackIdentifier(
   return value != NULL ? value : node;
 }
 
-static ASTNode* CloneTemplateArgumentPackPattern(
-    TemplateFunctionBodyClone* clone, ASTNode* pattern, Symbol* pack_symbol,
-    TemplateArgument* argument) {
+static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
+                                    ASTNode* pattern, FoldPackSearch* packs,
+                                    size_t index) {
   ASTNode* pattern_clone =
       ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
-  ReplaceTemplateArgumentPackData replace = {
-      .symbol = pack_symbol,
-      .argument = argument,
-  };
-  pattern_clone = ASTNodeVisitAndTransform(
-      pattern_clone, ReplaceTemplateArgumentPackIdentifier, &replace);
+  ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
+
+  bool replaced_function_pack = false;
+  bool only_capture_packs = true;
+  for (size_t i = 0; i < packs->bindings.length; i++) {
+    FoldPackBinding* binding = packs->bindings.value.p[i];
+    if (binding->kind == kFoldPackFunction && !replaced_function_pack) {
+      only_capture_packs = false;
+      ReplacePackIdentifierData replace = {
+          .clone = clone,
+          .from = binding->symbol,
+          .to = binding->replacements->value.p[index],
+          .element_index = index,
+      };
+      ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &replace);
+      replaced_function_pack = true;
+    } else if (binding->kind == kFoldPackTemplateArgument) {
+      only_capture_packs = false;
+      ReplaceTemplateArgumentPackData replace = {
+          .symbol = binding->symbol,
+          .argument = binding->replacements->value.p[index],
+      };
+      pattern_clone = ASTNodeVisitAndTransform(
+          pattern_clone, ReplaceTemplateArgumentPackIdentifier, &replace);
+    } else if (binding->kind == kFoldPackLambdaCapture) {
+      ReplaceLambdaCapturePackFieldData replace = {
+          .clone = clone,
+          .from_name = binding->capture_name,
+          .to = binding->replacements->value.p[index],
+          .element_index = index,
+      };
+      ASTNodeVisit(pattern_clone, ReplaceLambdaCapturePackFieldVisitor, 0,
+                   &replace);
+    }
+  }
+  if (only_capture_packs) {
+    return pattern_clone;
+  }
   ASTNodeVisit(pattern_clone, InstantiateClonedFunctionTemplateCallVisitor, 0,
                clone);
   return ASTNodeVisitAndTransform(
       pattern_clone, ReanalyzeClonedDependentFunctorCall, NULL);
-}
-
-static ASTNode* CloneFoldPackElement(
-    TemplateFunctionBodyClone* clone, ASTNode* pattern, Symbol* pack_symbol,
-    Vector* replacements, size_t index, bool capture_pack,
-    const char* capture_name, bool template_argument_pack) {
-  if (template_argument_pack) {
-    return CloneTemplateArgumentPackPattern(
-        clone, pattern, pack_symbol, replacements->value.p[index]);
-  }
-  if (capture_pack) {
-    return CloneLambdaCapturePackPattern(
-        clone, pattern, capture_name, replacements->value.p[index], index);
-  }
-  return ClonePackExpansionPattern(
-      clone, pattern, pack_symbol, replacements->value.p[index], index);
 }
 
 /* Expand a fold expression (`(... op pack)` / `(pack op ...)` / binary folds)
@@ -1966,46 +2060,33 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
   bool pack_on_left = (node->flags & kASTFoldPackOnLeft) != 0;
   ASTNode* pack_node = pack_on_left ? fold->left : fold->right;
   ASTNode* seed = pack_on_left ? fold->right : fold->left;
-  bool multiple_packs = false;
-  Symbol* pack_symbol =
-      PackExpansionExpressionSymbol(clone, pack_node, &multiple_packs);
-  if (multiple_packs) {
-    SyntaxError(clone->parser->syntax,
-                "pack expansion with multiple parameter packs is not supported yet");
-  }
-  Vector* replacements =
-      pack_symbol != NULL
-          ? MapFindPointerKey(&clone->pack_symbol_map, pack_symbol)
-          : NULL;
-  const char* capture_name = NULL;
-  bool capture_pack = false;
-  bool template_argument_pack = false;
-  if (replacements == NULL) {
-    bool multiple_template_packs = false;
-    TemplateArgument* argument = FindConcreteTemplateArgumentPack(
-        clone, pack_node, &pack_symbol, &multiple_template_packs);
-    if (multiple_template_packs) {
-      SyntaxError(clone->parser->syntax,
-                  "fold expression with multiple template parameter packs is "
-                  "not supported yet");
-    }
-    if (argument != NULL) {
-      replacements = argument->pack_arguments;
-      template_argument_pack = true;
-    }
-  }
-  if (replacements == NULL) {
-    replacements = LambdaCapturePackFieldReplacements(pack_node, CloneLambdaClosureOwner(clone));
-    capture_name = LambdaCapturePackMemberName(pack_node);
-    capture_pack = replacements != NULL && capture_name != NULL;
-  }
-  if (replacements == NULL) {
-    return node;
-  }
-  if (replacements->length == 0) {
-    if (capture_pack) {
+  FoldPackSearch packs;
+  CollectFoldPacks(clone, pack_node, &packs);
+  if (packs.bindings.length == 0) {
+    const char* capture_name = LambdaCapturePackMemberName(pack_node);
+    Vector* replacements = LambdaCapturePackFieldReplacements(
+        pack_node, CloneLambdaClosureOwner(clone));
+    if (capture_name != NULL && replacements != NULL) {
+      AddFoldPackBinding(&packs, kFoldPackLambdaCapture, NULL, capture_name,
+                         replacements, replacements->length, true);
+      packs.unresolved_pack = false;
+    } else if (replacements != NULL) {
       VectorDelete(replacements);
     }
+  }
+  if (packs.bindings.length == 0 || packs.unresolved_pack) {
+    DeleteFoldPackBindings(&packs);
+    return node;
+  }
+  if (packs.mismatched_lengths) {
+    SyntaxError(clone->parser->syntax,
+                "pack expansion argument packs have different lengths");
+    DeleteFoldPackBindings(&packs);
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), node->location);
+  }
+  if (packs.length == 0) {
+    DeleteFoldPackBindings(&packs);
     if (seed != NULL) {
       return seed;
     }
@@ -2015,40 +2096,27 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
   if (pack_on_left) {
     ASTNode* result = seed != NULL
                           ? seed
-                          : CloneFoldPackElement(
-                                clone, pack_node, pack_symbol, replacements,
-                                replacements->length - 1, capture_pack,
-                                capture_name, template_argument_pack);
-    size_t start = seed != NULL ? replacements->length
-                                : replacements->length - 1;
+                          : CloneFoldPackElement(clone, pack_node, &packs,
+                                                 packs.length - 1);
+    size_t start = seed != NULL ? packs.length : packs.length - 1;
     for (size_t i = start; i > 0; i--) {
-      ASTNode* left = CloneFoldPackElement(
-          clone, pack_node, pack_symbol, replacements, i - 1, capture_pack,
-          capture_name, template_argument_pack);
+      ASTNode* left =
+          CloneFoldPackElement(clone, pack_node, &packs, i - 1);
       result = NewBinaryASTNode(node->op, NULL, node->location, left, result);
     }
-    if (capture_pack) {
-      VectorDelete(replacements);
-    }
+    DeleteFoldPackBindings(&packs);
     return result;
   }
 
   ASTNode* result = seed != NULL
                         ? seed
-                        : CloneFoldPackElement(
-                              clone, pack_node, pack_symbol, replacements, 0,
-                              capture_pack, capture_name,
-                              template_argument_pack);
+                        : CloneFoldPackElement(clone, pack_node, &packs, 0);
   size_t start = seed != NULL ? 0 : 1;
-  for (size_t i = start; i < replacements->length; i++) {
-    ASTNode* right = CloneFoldPackElement(
-        clone, pack_node, pack_symbol, replacements, i, capture_pack,
-        capture_name, template_argument_pack);
+  for (size_t i = start; i < packs.length; i++) {
+    ASTNode* right = CloneFoldPackElement(clone, pack_node, &packs, i);
     result = NewBinaryASTNode(node->op, NULL, node->location, result, right);
   }
-  if (capture_pack) {
-    VectorDelete(replacements);
-  }
+  DeleteFoldPackBindings(&packs);
   return result;
 }
 

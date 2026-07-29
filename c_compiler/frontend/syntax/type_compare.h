@@ -174,23 +174,6 @@ inline bool TypeIsCharFamily(TypeRecord* type) {
   return TypeIsChar(type) || TypeIsChar8(type);
 }
 
-inline bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right) {
-  if (left == NULL || right == NULL) {
-    return false;
-  }
-  bool left_char8 = TypeIsChar8(left) && !TypeIsEnum(left);
-  bool right_char8 = TypeIsChar8(right) && !TypeIsEnum(right);
-  if (left_char8 || right_char8) {
-    return left_char8 != right_char8;
-  }
-  if (left->next != NULL && right->next != NULL &&
-      (TypeIsPointerOrArray(left) || TypeIsReference(left)) &&
-      (TypeIsPointerOrArray(right) || TypeIsReference(right))) {
-    return TypeChar8IdentityDiffers(left->next, right->next);
-  }
-  return false;
-}
-
 inline bool TypeIsShort(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeShort) != 0;
 }
@@ -233,6 +216,23 @@ inline bool TypeIsBool(TypeRecord* type) {
 
 inline bool TypeIsEnum(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeEnum) != 0;
+}
+
+inline bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  bool left_char8 = TypeIsChar8(left) && !TypeIsEnum(left);
+  bool right_char8 = TypeIsChar8(right) && !TypeIsEnum(right);
+  if (left_char8 || right_char8) {
+    return left_char8 != right_char8;
+  }
+  if (left->next != NULL && right->next != NULL &&
+      (TypeIsPointerOrArray(left) || TypeIsReference(left)) &&
+      (TypeIsPointerOrArray(right) || TypeIsReference(right))) {
+    return TypeChar8IdentityDiffers(left->next, right->next);
+  }
+  return false;
 }
 
 bool TypeIsScopedEnum(TypeRecord* type);

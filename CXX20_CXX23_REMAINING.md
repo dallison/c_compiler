@@ -3,7 +3,7 @@
 Updated from the C++23 readiness canvas on 2026-07-28.
 
 The original C++20 correctness gates are now green on x86-64: the main
-execution suite passes 259/259 and the ranges suite passes 4/4. C++23 mode,
+execution suite passes 260/260 and the ranges suite passes 4/4. C++23 mode,
 template-template parameters, static call/subscript operators, `if consteval`,
 explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 `import std`, and `<span>` have been implemented.
@@ -25,10 +25,11 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
   - Give UTF-8 character and string literals the correct semantic types.
   - Add semantic, overload-resolution, template-deduction, and execution tests.
   - Audit the advertised `__cpp_char8_t` feature macro against actual support.
-- [ ] Support fold expressions involving multiple parameter packs.
-  - Remove the unsupported path in
+- [x] Support fold expressions involving multiple parameter packs.
+  - Simultaneously expand every pack referenced by a fold pattern in
     `c_compiler/frontend/syntax/type_template_clone.c`.
-  - Add positive and diagnostic coverage for mixed and mismatched packs.
+  - Diagnose mismatched pack lengths and cover mixed fold patterns,
+    associativity, empty seeded folds, and mismatched packs.
 - [ ] Audit remaining `constexpr` and `consteval` restrictions.
   - Separate intentional standard diagnostics from evaluator limitations.
   - Cover aggregate arguments, recursion, exceptions, and coroutine interaction.
