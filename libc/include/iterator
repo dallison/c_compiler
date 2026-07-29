@@ -18,6 +18,7 @@
 #define __davecc_iterator__
 
 #include <concepts>
+#include <optional>
 #include <stddef.h>  // size_t, ptrdiff_t
 #include <type_traits>
 
@@ -834,6 +835,187 @@ struct iterator_traits<counted_iterator<I>> {
   using iterator_concept = __iter_concept<I>;
 };
 
+// [iterators.common] An iterator/sentinel union that presents one common type
+// to legacy algorithms.  Two optionals provide tagged lifetime management
+// without requiring either alternative to be default-constructible.
+template <input_or_output_iterator I, sentinel_for<I> S>
+  requires(!same_as<I, S>) && copyable<I>
+class common_iterator {
+ private:
+  optional<I> __iterator_;
+  optional<S> __sentinel_;
+
+  struct __arrow_proxy {
+    iter_value_t<I> __value;
+    constexpr const iter_value_t<I>* operator->() const noexcept {
+      return &__value;
+    }
+  };
+
+ public:
+  using difference_type = iter_difference_t<I>;
+  using value_type = iter_value_t<I>;
+  using reference = iter_reference_t<I>;
+  using pointer = typename iterator_traits<I>::pointer;
+  using iterator_category =
+      conditional_t<forward_iterator<I>, forward_iterator_tag,
+                    input_iterator_tag>;
+  using iterator_concept = iterator_category;
+
+  constexpr common_iterator()
+    requires default_initializable<I>
+      : __iterator_(in_place), __sentinel_() {}
+
+  constexpr common_iterator(I iterator)
+      : __iterator_(in_place, static_cast<I&&>(iterator)), __sentinel_() {}
+
+  constexpr common_iterator(S sentinel)
+      : __iterator_(), __sentinel_(in_place, static_cast<S&&>(sentinel)) {}
+
+  template <input_or_output_iterator I2, sentinel_for<I2> S2>
+    requires(!same_as<I2, S2>) && copyable<I2> &&
+            convertible_to<const I2&, I> &&
+            convertible_to<const S2&, S>
+  constexpr common_iterator(const common_iterator<I2, S2>& other)
+      : __iterator_(), __sentinel_() {
+    if (other.__holds_iterator()) {
+      __iterator_.emplace(other.__iterator_value());
+    } else {
+      __sentinel_.emplace(other.__sentinel_value());
+    }
+  }
+
+  template <input_or_output_iterator I2, sentinel_for<I2> S2>
+    requires(!same_as<I2, S2>) && copyable<I2> &&
+            convertible_to<const I2&, I> &&
+            convertible_to<const S2&, S> &&
+            is_assignable_v<I&, const I2&> &&
+            is_assignable_v<S&, const S2&>
+  constexpr common_iterator& operator=(
+      const common_iterator<I2, S2>& other) {
+    if (other.__holds_iterator()) {
+      __sentinel_.reset();
+      if (__iterator_) {
+        *__iterator_ = other.__iterator_value();
+      } else {
+        __iterator_.emplace(other.__iterator_value());
+      }
+    } else {
+      __iterator_.reset();
+      if (__sentinel_) {
+        *__sentinel_ = other.__sentinel_value();
+      } else {
+        __sentinel_.emplace(other.__sentinel_value());
+      }
+    }
+    return *this;
+  }
+
+  constexpr bool __holds_iterator() const noexcept {
+    return __iterator_.has_value();
+  }
+  constexpr I& __iterator_value() { return *__iterator_; }
+  constexpr const I& __iterator_value() const { return *__iterator_; }
+  constexpr S& __sentinel_value() { return *__sentinel_; }
+  constexpr const S& __sentinel_value() const { return *__sentinel_; }
+
+  constexpr decltype(auto) operator*() { return **__iterator_; }
+
+  constexpr decltype(auto) operator*() const
+    requires indirectly_readable<const I>
+  {
+    return **__iterator_;
+  }
+
+  constexpr auto operator->() const
+    requires indirectly_readable<const I>
+  {
+    if constexpr (is_pointer_v<I>) {
+      return *__iterator_;
+    } else if constexpr (requires(const I& iterator) {
+                           iterator.operator->();
+                         }) {
+      return __iterator_->operator->();
+    } else if constexpr (is_reference_v<iter_reference_t<I>>) {
+      return &**__iterator_;
+    } else {
+      return __arrow_proxy{**__iterator_};
+    }
+  }
+
+  constexpr common_iterator& operator++() {
+    ++*__iterator_;
+    return *this;
+  }
+
+  constexpr common_iterator operator++(int)
+    requires forward_iterator<I>
+  {
+    common_iterator copy = *this;
+    ++*this;
+    return copy;
+  }
+
+  constexpr decltype(auto) operator++(int)
+    requires(!forward_iterator<I>)
+  {
+    return (*__iterator_)++;
+  }
+};
+
+template <class I1, class S1, class I2, class S2>
+  requires sentinel_for<S1, I2> && sentinel_for<S2, I1>
+constexpr bool operator==(const common_iterator<I1, S1>& left,
+                          const common_iterator<I2, S2>& right) {
+  if (left.__holds_iterator() && right.__holds_iterator()) {
+    if constexpr (equality_comparable_with<I1, I2>) {
+      return left.__iterator_value() == right.__iterator_value();
+    } else {
+      return true;
+    }
+  }
+  if (!left.__holds_iterator() && !right.__holds_iterator()) {
+    return true;
+  }
+  if (left.__holds_iterator()) {
+    return left.__iterator_value() == right.__sentinel_value();
+  }
+  return left.__sentinel_value() == right.__iterator_value();
+}
+
+template <class I1, class S1, class I2, class S2>
+  requires sentinel_for<S1, I2> && sentinel_for<S2, I1>
+constexpr bool operator!=(const common_iterator<I1, S1>& left,
+                          const common_iterator<I2, S2>& right) {
+  return !(left == right);
+}
+
+template <class I1, class S1, class I2, class S2>
+  requires sized_sentinel_for<I2, I1> &&
+           sized_sentinel_for<S1, I2> &&
+           sized_sentinel_for<S2, I1>
+constexpr iter_difference_t<I2> operator-(
+    const common_iterator<I1, S1>& left,
+    const common_iterator<I2, S2>& right) {
+  if (left.__holds_iterator() && right.__holds_iterator()) {
+    return left.__iterator_value() - right.__iterator_value();
+  }
+  if (!left.__holds_iterator() && !right.__holds_iterator()) {
+    return 0;
+  }
+  if (left.__holds_iterator()) {
+    return left.__iterator_value() - right.__sentinel_value();
+  }
+  return left.__sentinel_value() - right.__iterator_value();
+}
+
+template <class I, class S>
+  requires input_iterator<I>
+constexpr decltype(auto) iter_move(
+    const common_iterator<I, S>& iterator) {
+  return ranges::iter_move(iterator.__iterator_value());
+}
+
 // [alg.req] indirect callable concepts.
 template <class F, class I>
 concept indirectly_unary_invocable =
@@ -936,6 +1118,13 @@ concept mergeable =
     input_iterator<I1> && input_iterator<I2> && weakly_incrementable<Out> &&
     indirectly_copyable<I1, Out> && indirectly_copyable<I2, Out> &&
     indirect_strict_weak_order<R, projected<I1, P1>, projected<I2, P2>>;
+
+template <class I1, class S1, class I2, class S2>
+  requires indirectly_swappable<I1, I2>
+constexpr void iter_swap(const common_iterator<I1, S1>& left,
+                         const common_iterator<I2, S2>& right) {
+  ranges::swap(*left, *right);
+}
 
 namespace ranges {
 namespace __iter_swap {

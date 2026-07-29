@@ -847,7 +847,11 @@ static TargetInstruction* SetDestOrMove(X86_64Generator* rv,
   if (from == to) {
     return to;
   }
-  bool can_set_dest = from->dest == NULL && X86_64GeneratesOutput(from);
+  X86_64Opcode from_opcode = (X86_64Opcode)from->opcode;
+  bool fixed_pointer =
+      from_opcode == X86_64_OP(sp) || from_opcode == X86_64_OP(fp);
+  bool can_set_dest =
+      !fixed_pointer && from->dest == NULL && X86_64GeneratesOutput(from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);
@@ -1009,8 +1013,8 @@ static TargetInstruction* Memcpy(X86_64Generator* rv, TargetInstruction* dest_ad
   TargetInstruction* size = Emit(
       rv, NewInstruction1(X86_64_OP(mov),
                           GetIntConstant(rv, NULL, kTargetType32Bit, length)));
-  TargetInstruction* arg2 = SetDestOrMove(rv, size, IntArgumentRegister(rv, 2),
-                                           X86_64_OP(mv));
+  TargetInstruction* arg2 = SetDestOrMoveToArgReg(
+      rv, NULL, size, IntArgumentRegister(rv, 2), X86_64_OP(mv));
   //TargetInstruction* arg2 =
   //    Emit(rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 2), size));
 
@@ -1018,8 +1022,8 @@ static TargetInstruction* Memcpy(X86_64Generator* rv, TargetInstruction* dest_ad
   if (src_offset != 0) {
     src_addr = OffsetFrom(rv, src_addr, src_offset);
   }
-  TargetInstruction* arg1 = SetDestOrMove(rv, src_addr, IntArgumentRegister(rv, 1),
-                                           X86_64_OP(mv));
+  TargetInstruction* arg1 = SetDestOrMoveToArgReg(
+      rv, NULL, src_addr, IntArgumentRegister(rv, 1), X86_64_OP(mv));
       //Emit(
       //rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 1), src_addr));
 
@@ -1027,8 +1031,8 @@ static TargetInstruction* Memcpy(X86_64Generator* rv, TargetInstruction* dest_ad
   if (dest_offset != 0) {
     dest_addr = OffsetFrom(rv, dest_addr, dest_offset);
   }
-  TargetInstruction* arg0 = SetDestOrMove(rv, dest_addr, IntArgumentRegister(rv, 0),
-                                          X86_64_OP(mv));
+  TargetInstruction* arg0 = SetDestOrMoveToArgReg(
+      rv, NULL, dest_addr, IntArgumentRegister(rv, 0), X86_64_OP(mv));
       //Emit(
       //rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 0), dest_addr));
 
@@ -1065,7 +1069,8 @@ static TargetInstruction* Memzero(X86_64Generator* rv, TargetInstruction* dest_a
   TargetInstruction* size = Emit(
       rv, NewInstruction1(X86_64_OP(mov),
                           GetIntConstant(rv, NULL, kTargetType32Bit, length)));
-  TargetInstruction* arg2 = SetDestOrMove(rv, size, IntArgumentRegister(rv, 2), X86_64_OP(mv));
+  TargetInstruction* arg2 = SetDestOrMoveToArgReg(
+      rv, NULL, size, IntArgumentRegister(rv, 2), X86_64_OP(mv));
   //TargetInstruction* arg2 =
   //    Emit(rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 2), size));
 
@@ -1081,7 +1086,8 @@ static TargetInstruction* Memzero(X86_64Generator* rv, TargetInstruction* dest_a
   if (offset != 0) {
     dest_addr = OffsetFrom(rv, dest_addr, offset);
   }
-  TargetInstruction* arg0 = SetDestOrMove(rv, dest_addr, IntArgumentRegister(rv, 0), X86_64_OP(mv));
+  TargetInstruction* arg0 = SetDestOrMoveToArgReg(
+      rv, NULL, dest_addr, IntArgumentRegister(rv, 0), X86_64_OP(mv));
   //TargetInstruction* arg0 = Emit(
   //    rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 0), dest_addr));
 

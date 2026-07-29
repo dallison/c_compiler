@@ -2074,37 +2074,73 @@ class reverse_view : public view_interface<reverse_view<V>> {
 
 // [range.common]
 template <view V>
-  requires input_range<V> && copyable<iterator_t<V>>
+  requires(!common_range<V>) && copyable<iterator_t<V>>
 class common_view : public view_interface<common_view<V>> {
  private:
   V __base_;
 
  public:
-  using iterator = iterator_t<V>;
+  using iterator = common_iterator<iterator_t<V>, sentinel_t<V>>;
   using sentinel = iterator;
   using const_iterator = iterator;
 
   common_view() requires default_initializable<V> = default;
   constexpr explicit common_view(V base)
       : __base_(static_cast<V&&>(base)) {}
-  static constexpr common_view __make(V base) {
-    return common_view(static_cast<V&&>(base));
+
+  constexpr V base() const&
+    requires copy_constructible<V>
+  {
+    return __base_;
   }
-  constexpr iterator begin() { return ranges::begin(__base_); }
-  constexpr iterator end() {
-    iterator current = ranges::begin(__base_);
-    auto last = ranges::end(__base_);
-    while (current != last) {
-      ++current;
+
+  constexpr V base() && { return static_cast<V&&>(__base_); }
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_));
+  }
+  constexpr iterator end() { return iterator(ranges::end(__base_)); }
+
+  constexpr auto begin() const
+    requires range<const V> && copyable<iterator_t<const V>>
+  {
+    if constexpr (common_range<const V>) {
+      return ranges::begin(__base_);
+    } else {
+      using ConstIterator =
+          common_iterator<iterator_t<const V>, sentinel_t<const V>>;
+      return ConstIterator(ranges::begin(__base_));
     }
-    return current;
   }
+
+  constexpr auto end() const
+    requires range<const V> && copyable<iterator_t<const V>>
+  {
+    if constexpr (common_range<const V>) {
+      return ranges::end(__base_);
+    } else {
+      using ConstIterator =
+          common_iterator<iterator_t<const V>, sentinel_t<const V>>;
+      return ConstIterator(ranges::end(__base_));
+    }
+  }
+
   constexpr auto size()
     requires sized_range<V>
   {
     return ranges::size(__base_);
   }
+
+  constexpr auto size() const
+    requires sized_range<const V>
+  {
+    return ranges::size(__base_);
+  }
 };
+
+template <class V>
+inline constexpr bool enable_borrowed_range<common_view<V>> =
+    enable_borrowed_range<V>;
 
 // [range.join]
 template <class OuterI, class OuterS, class InnerI, class InnerS>
@@ -2550,7 +2586,11 @@ struct __common_fn : __adaptor_closure_base {
   template <viewable_range R>
   constexpr auto operator()(R&& r) const {
     using V = all_t<R>;
-    return common_view<V>(views::all(static_cast<R&&>(r)));
+    if constexpr (common_range<remove_cvref_t<R>>) {
+      return views::all(static_cast<R&&>(r));
+    } else {
+      return common_view<V>(views::all(static_cast<R&&>(r)));
+    }
   }
 };
 
@@ -2660,7 +2700,8 @@ auto __apply_adaptor(__reverse_fn&, R&& r) {
 
 template <class R>
 auto __apply_adaptor(__common_fn&, R&& r) {
-  return common_view<all_t<R>>(views::all(static_cast<R&&>(r)));
+  __common_fn common_fn;
+  return common_fn(static_cast<R&&>(r));
 }
 
 template <class R>

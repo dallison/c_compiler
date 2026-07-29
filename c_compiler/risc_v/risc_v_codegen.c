@@ -1093,7 +1093,15 @@ static TargetInstruction* SetDestOrMove(RVGenerator* rv,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
                                         RVOpcode mov_opcode) {
-  bool can_set_dest = from->dest == NULL && RVGeneratesOutput(from);
+  // The stack and frame pointer pseudos denote fixed architectural registers.
+  // Coalescing one directly into an ABI argument destination changes the
+  // pseudo's physical register instead of moving its value (notably when a
+  // large aggregate copy passes sp to memcpy).
+  RVOpcode from_opcode = (RVOpcode)from->opcode;
+  bool fixed_pointer =
+      from_opcode == RV_OP(sp) || from_opcode == RV_OP(fp);
+  bool can_set_dest =
+      !fixed_pointer && from->dest == NULL && RVGeneratesOutput(from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);

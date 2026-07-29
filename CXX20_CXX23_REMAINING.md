@@ -50,8 +50,8 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 ## Remaining C++20 library work
 
 - [x] Implement `std::counted_iterator`.
-- [ ] Implement `std::common_iterator`.
-- [ ] Harden `common_view`, `views::counted`, and related iterator/ranges
+- [x] Implement `std::common_iterator`.
+- [x] Harden `common_view`, `views::counted`, and related iterator/ranges
       interoperability after those iterator types exist.
 - [ ] Complete the atomics surface.
   - `atomic_ref`.
