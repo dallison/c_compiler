@@ -191,6 +191,25 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     }
   }
 
+  if (CompilerIsCXX() && node->symbol != NULL &&
+      node->symbol->flags.is_template && !node->symbol->flags.is_overloaded &&
+      !DiagnosticsSuppressed() &&
+      TypeIsFunction(node->symbol->type) &&
+      (compiler->current_function == NULL ||
+       compiler->current_function->info.function.symbol == NULL ||
+       !compiler->current_function->info.function.symbol->flags.is_template) &&
+      node->base.parent != NULL &&
+      node->base.parent->op == AST_OP(address) &&
+      node->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          node->template_arguments)) {
+    Symbol* instantiated = TypeInstantiateFunctionTemplate(
+        &compiler->syntax, node->symbol, node->template_arguments);
+    if (instantiated != NULL) {
+      node->symbol = instantiated;
+    }
+  }
+
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
     // Symbol has now been used.
     node->symbol->flags.used = true;
@@ -4214,6 +4233,34 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
       (member->symbol == NULL || member->symbol->type == NULL ||
        !TypeIsFunction(member->symbol->type))) {
     return false;
+  }
+
+  TypeRecord* concrete_receiver_type = member_access->left->type;
+  if (member_access->base.op == AST_OP(arrow) &&
+      TypeIsStructOrUnionPointer(concrete_receiver_type)) {
+    concrete_receiver_type = concrete_receiver_type->next;
+  }
+  Struct* concrete_receiver =
+      concrete_receiver_type != NULL &&
+              TypeIsStructOrUnion(concrete_receiver_type)
+          ? concrete_receiver_type->info.struct_info
+          : NULL;
+  Struct* member_owner =
+      member->symbol != NULL && member->symbol->type != NULL &&
+              TypeIsFunction(member->symbol->type)
+          ? member->symbol->type->info.function.cxx_member_owner
+          : NULL;
+  if (concrete_receiver != NULL && member->symbol != NULL) {
+    StructMember* concrete_member =
+        FindStructMember(concrete_receiver, &member->symbol->name);
+    if (concrete_member != NULL && concrete_member->symbol != NULL &&
+        concrete_member->symbol->type != NULL &&
+        TypeIsFunction(concrete_member->symbol->type) &&
+        (concrete_receiver != member_owner ||
+         concrete_member->symbol != member->symbol)) {
+      member = concrete_member;
+      StructMemberASTNodeSetMember(member_node, concrete_member);
+    }
   }
 
   member = ResolveMemberFunctionOverload(member, node, member_access);

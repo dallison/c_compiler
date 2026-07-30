@@ -28,6 +28,8 @@ extern bool (*type_ranks[])(TypeRecord*);
 static Symbol* g_invoke_result_placeholder_origin;
 static Symbol* g_common_type_placeholder_origin;
 
+static bool TypeVectorHasDependentTemplateParameter(Vector* types);
+
 static Symbol* InvokeResultPlaceholderOrigin(void) {
   if (g_invoke_result_placeholder_origin == NULL) {
     g_invoke_result_placeholder_origin =
@@ -110,6 +112,14 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
     return NULL;
   }
   Vector* types = TypeVectorFromTemplateArguments(substituted);
+  if (types != NULL && TypeVectorHasDependentTemplateParameter(types)) {
+    TypeRecord* dependent =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    dependent->template_origin = InvokeResultPlaceholderOrigin();
+    dependent->template_arguments = substituted;
+    VectorDelete(types);
+    return dependent;
+  }
   VectorDeleteWithContents(substituted,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
@@ -205,7 +215,7 @@ static bool TypeVectorHasDependentTemplateParameter(Vector* types) {
   }
   for (size_t i = 0; i < types->length; i++) {
     TypeRecord* type = (TypeRecord*)types->value.p[i];
-    if (type == NULL || type->template_parameter_index >= 0 ||
+    if (type == NULL || TypeContainsTemplateParameter(type) ||
         (type->type & kTypeUnknown) != 0) {
       return true;
     }

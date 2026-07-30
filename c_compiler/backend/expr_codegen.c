@@ -413,7 +413,8 @@ static struct {
   IROpcode opcode;
 } mov_opcodes[] = {
     {TypeIsIntegral, IR_OP(movi)},       {TypeIsFloat, IR_OP(movf)},
-    {TypeIsDouble, IR_OP(movd)},         {TypeIsStructOrUnion, IR_OP(mova)},
+    {TypeUsesDoubleIROperations, IR_OP(movd)},
+    {TypeIsStructOrUnion, IR_OP(mova)},
     {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsMemberPointerScalar, IR_OP(mova)},
     {TypeIsMemberPointerAggregate, IR_OP(mova)},
     {TypeIsFunction, IR_OP(mova)},       {TypeIsVoid, IR_OP(mova)},
@@ -1110,7 +1111,8 @@ static bool CXXDesignatedInitFunctionalCastConstructor(ASTNode* init,
 
 static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
                                       BracedInitializerASTNode* init,
-                                      IRNode* dest) {
+                                      IRNode* dest,
+                                      bool destination_was_zeroed) {
   for (size_t i = 0; i < init->initializers->length; i++) {
     IRNode* destaddr = dest;
     ASTNode* subinit = (ASTNode*)init->initializers->value.p[i];
@@ -1216,7 +1218,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // but if it was from a scalar initailizer;
       //    int i = 0;
       // we have to store it.
-      if (init->base.type != NULL &&
+      if (destination_was_zeroed && init->base.type != NULL &&
           (TypeIsArray(init->base.type) || TypeIsStructOrUnion(init->base.type) ||
            TypeIsMemberPointerAggregate(init->base.type)) &&
           IRIsZero(value)) {
@@ -1315,6 +1317,7 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
   IRNode* dest = GenerateExpression(gen, node->left);
 
   BracedInitializerASTNode* init = (BracedInitializerASTNode*)node->right;
+  bool destination_was_zeroed = false;
 
   // Zero the memory if we are initializing a struct or an array.  The
   // standard says that all non-initialized members should be initialized
@@ -1329,9 +1332,11 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
       // recovered from the destination operand during lowering.
       IRSetType(memzero, node->base.type);
       CheckForVarDef(memzero, &node->base);
+      destination_was_zeroed = true;
     }
   }
-  GenerateBracedInitializer(gen, (ASTNode*)node, init, dest);
+  GenerateBracedInitializer(gen, (ASTNode*)node, init, dest,
+                            destination_was_zeroed);
   return dest;
 }
 
@@ -1346,6 +1351,7 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
                      : GenerateExpression(gen, node->sym);
 
   BracedInitializerASTNode* init = (BracedInitializerASTNode*)node->initializer;
+  bool destination_was_zeroed = false;
 
   // Zero the memory if we are initializing a struct or an array.  The
   // standard says that all non-initialized members should be initialized
@@ -1358,9 +1364,11 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
       // is available even when the destination is a symbol-less pointer slot.
       IRSetType(memzero, node->base.type);
       CheckForVarDef(memzero, &node->base);
+      destination_was_zeroed = true;
     }
   }
-  GenerateBracedInitializer(gen, (ASTNode*)node, init, dest);
+  GenerateBracedInitializer(gen, (ASTNode*)node, init, dest,
+                            destination_was_zeroed);
   return dest;
 }
 
@@ -2174,6 +2182,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       (node->base.flags & kASTNeedAddress) == 0 &&
       !TypeIsStructOrUnion(node->base.type) &&
       !TypeIsArray(node->base.type) &&
+      !TypeIsMemberPointerAggregate(node->base.type) &&
       !TypeIsFunction(node->base.type)) {
     IROpcode load = GetLoadOpcodeForType(node->base.type);
     return IRSetType(GeneratorEmit(gen, NewIR1(load, call)), node->base.type);

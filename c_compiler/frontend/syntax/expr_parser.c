@@ -397,8 +397,59 @@ static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
                                                TokenClass followers);
 
 typedef struct {
+  Syntax* syntax;
   bool found;
 } CXXPackExpressionSearch;
+
+static void FindCXXParameterPackExpression(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode);
+
+static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index) {
+  Vector* parameters = syntax != NULL ? syntax->current_template_parameters
+                                      : NULL;
+  for (size_t i = 0; parameters != NULL && i < parameters->length; i++) {
+    TemplateParameter* parameter = parameters->value.p[i];
+    if (parameter != NULL && parameter->index == index) {
+      return parameter->is_parameter_pack;
+    }
+  }
+  TypeRecord* function = compiler->current_function;
+  if (function != NULL && TypeIsFunction(function)) {
+    parameters = &function->info.function.template_parameters;
+    for (size_t i = 0; i < parameters->length; i++) {
+      TemplateParameter* parameter = parameters->value.p[i];
+      if (parameter != NULL && parameter->index == index) {
+        return parameter->is_parameter_pack;
+      }
+    }
+  }
+  return false;
+}
+
+static bool CXXTemplateArgumentReferencesParameterPack(
+    CXXPackExpressionSearch* search, TemplateArgument* argument) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (argument->template_parameter_index >= 0 &&
+      CXXTemplateParameterIndexIsPack(
+          search->syntax, argument->template_parameter_index)) {
+    return true;
+  }
+  for (size_t i = 0;
+       argument->pack_arguments != NULL &&
+       i < argument->pack_arguments->length; i++) {
+    if (CXXTemplateArgumentReferencesParameterPack(
+            search, argument->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  if (argument->dependent_expr != NULL) {
+    ASTNodeVisit(argument->dependent_expr, FindCXXParameterPackExpression, 0,
+                 search);
+  }
+  return search->found;
+}
 
 static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
@@ -410,11 +461,21 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
     ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
+  CXXPackExpressionSearch* search = data;
+  for (size_t i = 0; id->template_arguments != NULL &&
+                     i < id->template_arguments->length; i++) {
+    if (CXXTemplateArgumentReferencesParameterPack(
+            search, id->template_arguments->value.p[i])) {
+      search->found = true;
+      return;
+    }
   }
 }
 
-static bool CXXExpressionContainsParameterPack(ASTNode* node) {
-  CXXPackExpressionSearch search = {0};
+static bool CXXExpressionContainsParameterPack(Syntax* syntax, ASTNode* node) {
+  CXXPackExpressionSearch search = {.syntax = syntax, .found = false};
   ASTNodeVisit(node, FindCXXParameterPackExpression, 0, &search);
   return search.found;
 }
@@ -423,7 +484,7 @@ static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* actual) {
   if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(ellipsis))) {
     return;
   }
-  if (!CXXExpressionContainsParameterPack(actual)) {
+  if (!CXXExpressionContainsParameterPack(syntax, actual)) {
     SyntaxError(syntax, "pack expansion requires a function parameter pack");
   }
   actual->flags |= kASTPackExpansion;

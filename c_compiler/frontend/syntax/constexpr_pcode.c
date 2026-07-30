@@ -852,6 +852,7 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
   if (type == NULL) {
     return 0;
   }
+  TypeRecordCalculateSize(type);
   if (TypeIsFloat(type) || TypeIsInt(type) || TypeIsShort(type) ||
       TypeIsCharFamily(type)) {
     return 4;
@@ -1158,7 +1159,13 @@ static ConstexprObject* ConstexprObjectArgument(ASTNode* arg) {
   }
   if (arg->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)arg)->symbol;
-    if (symbol != NULL && symbol->flags.value_set && symbol->value.other != NULL) {
+    TypeRecord* symbol_type = symbol != NULL ? symbol->type : NULL;
+    if (TypeIsReference(symbol_type)) {
+      symbol_type = symbol_type->next;
+    }
+    if (symbol != NULL && symbol->flags.value_set &&
+        (TypeIsStructOrUnion(symbol_type) || TypeIsFixedArray(symbol_type)) &&
+        symbol->value.other != NULL) {
       return (ConstexprObject*)symbol->value.other;
     }
   }

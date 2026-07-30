@@ -1,0 +1,276 @@
+//
+//  system_error
+//  libc
+//
+//  C++20 error-code and system-error support used by hosted threading.
+//
+
+#ifndef __davecc_system_error__
+#define __davecc_system_error__
+
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+
+namespace std {
+
+class error_category;
+class error_condition;
+
+const error_category& generic_category() noexcept;
+const error_category& system_category() noexcept;
+
+enum class errc {
+  operation_not_permitted = EPERM,
+  no_such_process = ESRCH,
+  not_enough_memory = ENOMEM,
+  resource_unavailable_try_again = EAGAIN,
+  invalid_argument = EINVAL,
+  resource_deadlock_would_occur = EDEADLK,
+};
+
+class error_code {
+ public:
+  error_code() noexcept : __value_(0), __category_(nullptr) {}
+  error_code(int value, const error_category& category) noexcept
+      : __value_(value), __category_(&category) {}
+
+  void assign(int value, const error_category& category) noexcept {
+    __value_ = value;
+    __category_ = &category;
+  }
+  void clear() noexcept;
+  int value() const noexcept { return __value_; }
+  const error_category& category() const noexcept {
+    return __category_ == nullptr ? system_category() : *__category_;
+  }
+  string message() const;
+  explicit operator bool() const noexcept { return __value_ != 0; }
+
+ private:
+  int __value_;
+  const error_category* __category_;
+};
+
+class error_condition {
+ public:
+  error_condition() noexcept : __value_(0), __category_(nullptr) {}
+  error_condition(int value, const error_category& category) noexcept
+      : __value_(value), __category_(&category) {}
+
+  void assign(int value, const error_category& category) noexcept {
+    __value_ = value;
+    __category_ = &category;
+  }
+  void clear() noexcept;
+  int value() const noexcept { return __value_; }
+  const error_category& category() const noexcept {
+    return __category_ == nullptr ? generic_category() : *__category_;
+  }
+  string message() const;
+  explicit operator bool() const noexcept { return __value_ != 0; }
+
+ private:
+  int __value_;
+  const error_category* __category_;
+};
+
+class error_category {
+ public:
+  constexpr error_category() noexcept = default;
+  error_category(const error_category&) = delete;
+  error_category& operator=(const error_category&) = delete;
+  virtual ~error_category() = default;
+
+  virtual const char* name() const noexcept = 0;
+  virtual string message(int value) const = 0;
+  virtual error_condition default_error_condition(int value) const noexcept;
+  virtual bool equivalent(int value, const error_condition& condition) const
+      noexcept;
+  virtual bool equivalent(const error_code& code, int condition) const noexcept;
+
+  bool operator==(const error_category& other) const noexcept {
+    return this == &other;
+  }
+  bool operator!=(const error_category& other) const noexcept {
+    return this != &other;
+  }
+  bool operator<(const error_category& other) const noexcept {
+    return this < &other;
+  }
+};
+
+namespace __system_error_detail {
+
+class __generic_category final : public error_category {
+ public:
+  const char* name() const noexcept override { return "generic"; }
+  string message(int value) const override {
+    const char* text = ::strerror(value);
+    return string(text == nullptr ? "Unknown error" : text);
+  }
+};
+
+class __system_category final : public error_category {
+ public:
+  const char* name() const noexcept override { return "system"; }
+  string message(int value) const override {
+    const char* text = ::strerror(value);
+    return string(text == nullptr ? "Unknown error" : text);
+  }
+};
+
+inline const __generic_category __generic_category_object{};
+inline const __system_category __system_category_object{};
+
+inline string __system_error_message(const error_code& code,
+                                     const char* what_arg) {
+  string result(what_arg == nullptr ? "" : what_arg);
+  if (!result.empty()) {
+    result += ": ";
+  }
+  result += code.message();
+  return result;
+}
+
+}  // namespace __system_error_detail
+
+inline const error_category& generic_category() noexcept {
+  return __system_error_detail::__generic_category_object;
+}
+
+inline const error_category& system_category() noexcept {
+  return __system_error_detail::__system_category_object;
+}
+
+inline void error_code::clear() noexcept {
+  __value_ = 0;
+  __category_ = nullptr;
+}
+
+inline string error_code::message() const {
+  return category().message(__value_);
+}
+
+inline void error_condition::clear() noexcept {
+  __value_ = 0;
+  __category_ = nullptr;
+}
+
+inline string error_condition::message() const {
+  return category().message(__value_);
+}
+
+inline error_condition error_category::default_error_condition(
+    int value) const noexcept {
+  return error_condition(value, *this);
+}
+
+inline bool error_category::equivalent(
+    int value, const error_condition& condition) const noexcept {
+  return default_error_condition(value).value() == condition.value() &&
+         default_error_condition(value).category() == condition.category();
+}
+
+inline bool error_category::equivalent(const error_code& code,
+                                       int condition) const noexcept {
+  return *this == code.category() && code.value() == condition;
+}
+
+inline bool operator==(const error_code& left,
+                       const error_code& right) noexcept {
+  return left.value() == right.value() && left.category() == right.category();
+}
+
+inline bool operator!=(const error_code& left,
+                       const error_code& right) noexcept {
+  return !(left == right);
+}
+
+inline bool operator==(const error_condition& left,
+                       const error_condition& right) noexcept {
+  return left.value() == right.value() && left.category() == right.category();
+}
+
+inline bool operator!=(const error_condition& left,
+                       const error_condition& right) noexcept {
+  return !(left == right);
+}
+
+inline bool operator==(const error_code& code,
+                       const error_condition& condition) noexcept {
+  return code.category().equivalent(code.value(), condition) ||
+         condition.category().equivalent(code, condition.value());
+}
+
+inline bool operator==(const error_condition& condition,
+                       const error_code& code) noexcept {
+  return code == condition;
+}
+
+inline bool operator!=(const error_code& code,
+                       const error_condition& condition) noexcept {
+  return !(code == condition);
+}
+
+inline bool operator!=(const error_condition& condition,
+                       const error_code& code) noexcept {
+  return !(code == condition);
+}
+
+inline error_code make_error_code(errc value) noexcept {
+  return error_code(static_cast<int>(value), generic_category());
+}
+
+inline error_condition make_error_condition(errc value) noexcept {
+  return error_condition(static_cast<int>(value), generic_category());
+}
+
+template <class T>
+struct is_error_code_enum : false_type {};
+
+template <>
+struct is_error_code_enum<errc> : true_type {};
+
+template <class T>
+inline constexpr bool is_error_code_enum_v = is_error_code_enum<T>::value;
+
+class system_error : public runtime_error {
+ public:
+  explicit system_error(error_code code)
+      : runtime_error(__system_error_detail::__system_error_message(code, "")),
+        __code_(code) {}
+  system_error(error_code code, const string& what_arg)
+      : runtime_error(
+            __system_error_detail::__system_error_message(code,
+                                                          what_arg.c_str())),
+        __code_(code) {}
+  system_error(error_code code, const char* what_arg)
+      : runtime_error(
+            __system_error_detail::__system_error_message(code, what_arg)),
+        __code_(code) {}
+  system_error(int value, const error_category& category)
+      : runtime_error(__system_error_detail::__system_error_message(
+            error_code(value, category), "")),
+        __code_(value, category) {}
+  system_error(int value, const error_category& category,
+               const string& what_arg)
+      : runtime_error(__system_error_detail::__system_error_message(
+            error_code(value, category), what_arg.c_str())),
+        __code_(value, category) {}
+  system_error(int value, const error_category& category, const char* what_arg)
+      : runtime_error(__system_error_detail::__system_error_message(
+            error_code(value, category), what_arg)),
+        __code_(value, category) {}
+
+  const error_code& code() const noexcept { return __code_; }
+
+ private:
+  error_code __code_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_system_error__ */

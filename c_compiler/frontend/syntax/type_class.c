@@ -208,12 +208,17 @@ static bool CXXAggregateDeductionMember(StructMember* member) {
          !StructMemberIsNestedType(member);
 }
 
-static bool CollectCXXAggregateDeductionElements(Struct* str,
-                                                 SourceLocation location,
-                                                 Vector* elements) {
+static bool CollectCXXAggregateDeductionElementsImpl(
+    Struct* str, SourceLocation location, Vector* elements, Vector* visiting) {
   if (str == NULL) {
     return false;
   }
+  for (size_t i = 0; i < visiting->length; i++) {
+    if (visiting->value.p[i] == str) {
+      return false;
+    }
+  }
+  VectorAppend(visiting, str);
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base == NULL || base->is_virtual || base->access != kAccessPublic ||
@@ -223,8 +228,8 @@ static bool CollectCXXAggregateDeductionElements(Struct* str,
     if (TypeIsStructOrUnion(base->type) &&
         base->type->info.struct_info != NULL &&
         base->type->info.struct_info->is_aggregate &&
-        CollectCXXAggregateDeductionElements(base->type->info.struct_info,
-                                             location, elements)) {
+        CollectCXXAggregateDeductionElementsImpl(
+            base->type->info.struct_info, location, elements, visiting)) {
       continue;
     } else {
       VectorAppend(elements,
@@ -245,7 +250,19 @@ static bool CollectCXXAggregateDeductionElements(Struct* str,
                      member->symbol->location,
                      member->default_initializer != NULL));
   }
+  VectorDeleteElement(visiting, visiting->length - 1);
   return true;
+}
+
+static bool CollectCXXAggregateDeductionElements(Struct* str,
+                                                 SourceLocation location,
+                                                 Vector* elements) {
+  Vector visiting;
+  VectorInit(&visiting);
+  bool result = CollectCXXAggregateDeductionElementsImpl(
+      str, location, elements, &visiting);
+  VectorDestruct(&visiting);
+  return result;
 }
 
 static void AddImplicitCXXAggregateDeductionGuideForPrefix(Struct* str,
@@ -582,7 +599,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   UpdateCXXAbstractStatus(str);
   AddCXXVPtrMember(parser, str);
   AddCXXVBPtrMember(parser, str);
-  str->non_virtual_size = str->size;
+  str->non_virtual_size = str->next_offset;
   LayoutCXXVirtualBaseSpecifiers(str);
   RegisterCXXVTable(parser, str);
   RegisterCXXVBTables(parser, str);

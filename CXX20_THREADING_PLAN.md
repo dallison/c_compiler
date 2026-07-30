@@ -33,13 +33,13 @@ and approves the runtime foundation.
 
 ## Step 2: `std::thread`
 
-- [ ] Add `std::thread`, `thread::id`, join/detach, native handles, and
+- [x] Add `std::thread`, `thread::id`, join/detach, native handles, and
       hardware concurrency.
-- [ ] Add `this_thread::get_id`, `yield`, `sleep_for`, and `sleep_until`.
-- [ ] Support move-only callables and arguments with exactly-once cleanup.
-- [ ] Add the minimal `system_error` support required for thread failures.
-- [ ] Add syntax, execution, and unsupported-profile tests.
-- [ ] Review Step 2 before proceeding.
+- [x] Add `this_thread::get_id`, `yield`, `sleep_for`, and `sleep_until`.
+- [x] Support move-only callables and arguments with exactly-once cleanup.
+- [x] Add the minimal `system_error` support required for thread failures.
+- [x] Add syntax, execution, and unsupported-profile tests.
+- [x] Review Step 2 before proceeding.
 
 ## Step 3: Blocking synchronization
 

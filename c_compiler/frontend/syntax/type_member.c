@@ -667,7 +667,8 @@ StructMember* FindStructMember(Struct* str, String* name) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL) {
+        base->type->info.struct_info != NULL &&
+        !TypeContainsTemplateParameter(base->type)) {
       member = FindStructMember(base->type->info.struct_info, name);
       if (member != NULL) {
         return member;

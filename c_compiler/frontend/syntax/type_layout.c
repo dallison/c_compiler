@@ -74,6 +74,7 @@ void FinalizeStructAlignment(Struct* str) {
     str->alignment = align;
   }
   str->size = (str->size + (align - 1)) & ~(align - 1);
+  TypeRecordSyncStructSizes(str);
 }
 
 void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {

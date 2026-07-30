@@ -70,6 +70,8 @@ filegroup(
         "libc/include/streambuf",
         "libc/include/string",
         "libc/include/string_view",
+        "libc/include/system_error",
+        "libc/include/thread",
         "libc/include/tuple",
         "libc/include/type_traits",
         "libc/include/typeinfo",

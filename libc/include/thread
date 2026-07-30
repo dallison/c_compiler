@@ -1,0 +1,318 @@
+//
+//  thread
+//  libc
+//
+//  C++20 hosted thread support for DaveCC.
+//
+
+#ifndef __davecc_thread__
+#define __davecc_thread__
+
+#include <chrono>
+#include <compare>
+#include <exception>
+#include <functional>
+#include <new>
+#include <syscall.h>
+#include <system_error>
+#include <threads.h>
+#include <type_traits>
+#include <utility>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<thread> is unavailable in this single-threaded target profile"
+#endif
+
+namespace std {
+
+namespace __thread_detail {
+
+template <class Value>
+decay_t<Value> __decay_copy(Value&& value) {
+  return std::forward<Value>(value);
+}
+
+template <class... Values>
+struct __argument_pack;
+
+template <>
+struct __argument_pack<> {};
+
+template <class Head, class... Tail>
+struct __argument_pack<Head, Tail...> {
+  Head __head;
+  __argument_pack<Tail...> __tail;
+
+  explicit __argument_pack(Head&& head, Tail&&... tail)
+      : __head(std::move(head)), __tail(std::move(tail)...) {}
+};
+
+template <class Function, class Arguments>
+struct __apply;
+
+template <class Function>
+struct __apply<Function, __argument_pack<>> {
+  template <class... Collected>
+  static void __call(Function& function, __argument_pack<>&,
+                     Collected&&... collected) {
+    std::invoke(std::move(function),
+                std::forward<Collected>(collected)...);
+  }
+};
+
+template <class Function, class Head, class... Tail>
+struct __apply<Function, __argument_pack<Head, Tail...>> {
+  template <class... Collected>
+  static void __call(Function& function,
+                     __argument_pack<Head, Tail...>& arguments,
+                     Collected&&... collected) {
+    __apply<Function, __argument_pack<Tail...>>::__call(
+        function, arguments.__tail,
+        std::forward<Collected>(collected)...,
+        std::move(arguments.__head));
+  }
+};
+
+template <class Function, class... Args>
+struct __state {
+  Function __function;
+  __argument_pack<Args...> __arguments;
+
+  explicit __state(Function&& function, Args&&... arguments)
+      : __function(std::move(function)),
+        __arguments(std::move(arguments)...) {}
+
+  void __call() {
+    __apply<Function, __argument_pack<Args...>>::__call(
+        __function, __arguments);
+  }
+};
+
+[[noreturn]] inline void __throw_thread_error(errc error,
+                                              const char* operation) {
+  throw system_error(make_error_code(error), operation);
+}
+
+template <class Rep, class Period>
+void __sleep_for(const chrono::duration<Rep, Period>& relative_time) {
+  long double seconds =
+      static_cast<long double>(relative_time.count()) *
+      static_cast<long double>(Period::num) /
+      static_cast<long double>(Period::den);
+  if (!(seconds > 0.0L)) {
+    return;
+  }
+
+  const long double maximum_seconds =
+      sizeof(time_t) <= 4 ? 2147483647.0L : 9223372036854775807.0L;
+  while (seconds > 0.0L) {
+    long double chunk =
+        seconds < maximum_seconds ? seconds : maximum_seconds;
+    time_t whole_seconds = static_cast<time_t>(chunk);
+    long double fractional_seconds =
+        chunk - static_cast<long double>(whole_seconds);
+    long nanoseconds =
+        static_cast<long>(fractional_seconds * 1000000000.0L);
+    if (nanoseconds < 0) {
+      nanoseconds = 0;
+    } else if (nanoseconds >= 1000000000L) {
+      nanoseconds = 999999999L;
+    }
+    if (whole_seconds == 0 && nanoseconds == 0) {
+      nanoseconds = 1;
+    }
+
+    timespec requested{whole_seconds, nanoseconds};
+    timespec remaining{};
+    int result;
+    do {
+      result = thrd_sleep(&requested, &remaining);
+      if (result == -2) {
+        requested = remaining;
+      }
+    } while (result == -2);
+
+    if (result != 0) {
+      return;
+    }
+    seconds -= chunk;
+  }
+}
+
+}  // namespace __thread_detail
+
+class thread {
+  template <class State>
+  static int __run(void* opaque) {
+    State* state = static_cast<State*>(opaque);
+    try {
+      state->__call();
+    } catch (...) {
+      try {
+        delete state;
+      } catch (...) {
+      }
+      terminate();
+    }
+    try {
+      delete state;
+    } catch (...) {
+      terminate();
+    }
+    return 0;
+  }
+
+ public:
+  class id {
+   public:
+    constexpr id() noexcept : __value_(0) {}
+
+    friend constexpr bool operator==(id left, id right) noexcept {
+      return left.__value_ == right.__value_;
+    }
+    friend constexpr strong_ordering operator<=>(id left, id right) noexcept {
+      return left.__value_ <=> right.__value_;
+    }
+
+   private:
+    explicit constexpr id(thrd_t value) noexcept : __value_(value) {}
+    thrd_t __value_;
+
+    friend class thread;
+    friend struct hash<id>;
+  };
+
+  using native_handle_type = thrd_t;
+
+  thread() noexcept : __handle_(0) {}
+
+  template <class Function, class... Args>
+    requires (!is_same_v<remove_cvref_t<Function>, thread>)
+  explicit thread(Function&& function, Args&&... arguments) : __handle_(0) {
+    using state_type =
+        __thread_detail::__state<decay_t<Function>, decay_t<Args>...>;
+    state_type* state =
+        new state_type(
+            __thread_detail::__decay_copy(std::forward<Function>(function)),
+            __thread_detail::__decay_copy(
+                std::forward<Args>(arguments))...);
+
+    thrd_t handle = 0;
+    int result = thrd_create(&handle, &__run<state_type>, state);
+    if (result != thrd_success) {
+      delete state;
+      errc error = result == thrd_nomem
+                       ? errc::resource_unavailable_try_again
+                       : errc::operation_not_permitted;
+      __thread_detail::__throw_thread_error(error, "thread");
+    }
+    __handle_ = handle;
+  }
+
+  ~thread() {
+    if (joinable()) {
+      terminate();
+    }
+  }
+
+  thread(const thread&) = delete;
+  thread& operator=(const thread&) = delete;
+
+  thread(thread&& other) noexcept
+      : __handle_(std::exchange(other.__handle_, 0)) {}
+
+  thread& operator=(thread&& other) noexcept {
+    if (joinable()) {
+      terminate();
+    }
+    __handle_ = std::exchange(other.__handle_, 0);
+    return *this;
+  }
+
+  void swap(thread& other) noexcept {
+    std::swap(__handle_, other.__handle_);
+  }
+
+  bool joinable() const noexcept { return __handle_ != 0; }
+
+  void join() {
+    if (!joinable()) {
+      __thread_detail::__throw_thread_error(errc::invalid_argument,
+                                            "thread::join");
+    }
+    if (__handle_ == thrd_current()) {
+      __thread_detail::__throw_thread_error(
+          errc::resource_deadlock_would_occur, "thread::join");
+    }
+    if (thrd_join(__handle_, nullptr) != thrd_success) {
+      __thread_detail::__throw_thread_error(errc::no_such_process,
+                                            "thread::join");
+    }
+    __handle_ = 0;
+  }
+
+  void detach() {
+    if (!joinable()) {
+      __thread_detail::__throw_thread_error(errc::invalid_argument,
+                                            "thread::detach");
+    }
+    if (thrd_detach(__handle_) != thrd_success) {
+      __thread_detail::__throw_thread_error(errc::no_such_process,
+                                            "thread::detach");
+    }
+    __handle_ = 0;
+  }
+
+  id get_id() const noexcept { return id(__handle_); }
+  native_handle_type native_handle() { return __handle_; }
+
+  static unsigned int hardware_concurrency() noexcept {
+    return __davecc_hardware_concurrency();
+  }
+
+  static id __id_from_native_handle(thrd_t handle) noexcept {
+    return id(handle);
+  }
+
+ private:
+  thrd_t __handle_;
+};
+
+inline void swap(thread& left, thread& right) noexcept {
+  left.swap(right);
+}
+
+template <>
+struct hash<thread::id> {
+  size_t operator()(thread::id value) const noexcept {
+    return hash<thrd_t>{}(value.__value_);
+  }
+};
+
+namespace this_thread {
+
+inline thread::id get_id() noexcept {
+  return thread::__id_from_native_handle(thrd_current());
+}
+
+inline void yield() noexcept {
+  thrd_yield();
+}
+
+template <class Rep, class Period>
+void sleep_for(const chrono::duration<Rep, Period>& relative_time) {
+  __thread_detail::__sleep_for(relative_time);
+}
+
+template <class Clock, class Duration>
+void sleep_until(const chrono::time_point<Clock, Duration>& absolute_time) {
+  while (Clock::now() < absolute_time) {
+    sleep_for(absolute_time - Clock::now());
+  }
+}
+
+}  // namespace this_thread
+
+}  // namespace std
+
+#endif /* __davecc_thread__ */

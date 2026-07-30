@@ -32,8 +32,15 @@ char* strerror(int errnum) {
     case EBADF: return  "Bad file number";
     case ENOEXEC: return  "Exec format error";
     case EUNKNOWN: return  "Unknown OS specific error";
+    case EPERM: return "Operation not permitted";
+    case ESRCH: return "No such process";
+    case EDEADLK: return "Resource deadlock would occur";
     default: {
-      char buf[32];
+#if defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
+      static __thread char buf[32];
+#else
+      static char buf[32];
+#endif
       char* s = "Unknown error: ";
       char* p = buf;
       while (*s != '\0') {

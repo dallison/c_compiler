@@ -2870,7 +2870,10 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
                               location);
     receiver = NewBinaryASTNode(AST_OP(plus), base_pointer, location,
                                 receiver, offset);
-    receiver->flags |= kASTAnalyzed;
+    // base->byte_offset is already measured in bytes.  Preserve this forced
+    // adjustment when a template special member body is cloned; re-analyzing
+    // it as ordinary pointer arithmetic would scale the offset by sizeof(*this).
+    receiver->flags |= kASTAnalyzed | kASTForcedTypeAdjustment;
     ASTNodeSetType(receiver, base_pointer);
   }
   ASTNode* member_node =
@@ -8541,14 +8544,20 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   if (constructor_name == NULL) {
     return NULL;
   }
-  if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
-      sym->type->info.struct_info->is_aggregate) {
-    return NULL;
-  }
   StructMember* ctor =
       FindStructMemberByName(sym->type->info.struct_info, constructor_name);
   if (ctor == NULL || !ctor->is_member_function ||
       !ctor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  // Calling a trivial implicit default constructor has no observable effect,
+  // so aggregate default-initialization can omit it.  A non-trivial implicit
+  // constructor must still run: in particular, aggregates may have default
+  // member initializers or members with non-trivial default constructors.
+  if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
+      sym->type->info.struct_info->is_aggregate &&
+      (ctor->symbol->type->info.function.is_deleted ||
+       ctor->symbol->type->info.function.is_trivial_special_member)) {
     return NULL;
   }
   return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);

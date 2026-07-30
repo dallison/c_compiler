@@ -3587,14 +3587,8 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
   return ClassTemplateTypePatternMatches(bindings, pattern->type, actual->type);
 }
 
-/* Match a partial-specialization argument-pattern vector against the actual
- * argument vector, accumulating parameter bindings. */
-static bool ClassTemplateArgumentVectorPatternMatches(Vector* bindings,
-                                                      Vector* pattern_args,
-                                                      Vector* actual_args) {
-  if (pattern_args == NULL || actual_args == NULL) {
-    return pattern_args == actual_args;
-  }
+static bool ClassTemplateArgumentVectorPatternMatchesExpanded(
+    Vector* bindings, Vector* pattern_args, Vector* actual_args) {
   // A template-parameter pack in the pattern (e.g. `box<T...>`) absorbs a
   // variable number of actual arguments, so the pattern and actual argument
   // counts need not match exactly. Locate a pack pattern (at most one) and let
@@ -3644,6 +3638,35 @@ static bool ClassTemplateArgumentVectorPatternMatches(Vector* bindings,
   return SetDeducedClassTemplateTypePackArgument(
       bindings, pack_index, actual_args, leading,
       actual_args->length - trailing);
+}
+
+/* Match a partial-specialization argument-pattern vector against the actual
+ * argument vector, accumulating parameter bindings.  Concrete variadic
+ * specializations store their expanded arguments in one pack bundle; expose
+ * those elements as the logical argument sequence while matching patterns such
+ * as `wrapper<Head, Tail...>`. */
+static bool ClassTemplateArgumentVectorPatternMatches(Vector* bindings,
+                                                      Vector* pattern_args,
+                                                      Vector* actual_args) {
+  if (pattern_args == NULL || actual_args == NULL) {
+    return pattern_args == actual_args;
+  }
+  Vector expanded_actuals;
+  VectorInit(&expanded_actuals);
+  for (size_t i = 0; i < actual_args->length; i++) {
+    TemplateArgument* actual = actual_args->value.p[i];
+    if (actual != NULL && actual->pack_arguments != NULL) {
+      for (size_t j = 0; j < actual->pack_arguments->length; j++) {
+        VectorAppend(&expanded_actuals, actual->pack_arguments->value.p[j]);
+      }
+    } else {
+      VectorAppend(&expanded_actuals, actual);
+    }
+  }
+  bool result = ClassTemplateArgumentVectorPatternMatchesExpanded(
+      bindings, pattern_args, &expanded_actuals);
+  VectorDestruct(&expanded_actuals);
+  return result;
 }
 
 /* Match a partial-specialization type pattern (e.g. `T*`, `vector<T>`) against
@@ -5811,7 +5834,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   UpdateCXXAbstractStatus(str);
   AddCXXVPtrMember(parser, str);
   AddCXXVBPtrMember(parser, str);
-  str->non_virtual_size = str->size;
+  str->non_virtual_size = str->next_offset;
   LayoutCXXVirtualBaseSpecifiers(str);
   RegisterCXXVTable(parser, str);
   RegisterCXXVBTables(parser, str);

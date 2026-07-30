@@ -211,8 +211,7 @@ void LayoutCXXBaseSpecifiers(Struct* str) {
     base->byte_offset = str->next_offset;
     int base_size = base->type->size;
     if (TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL &&
-        base->type->info.struct_info->non_virtual_size > 0) {
+        base->type->info.struct_info != NULL) {
       base_size = base->type->info.struct_info->non_virtual_size;
     }
     if (!str->is_union) {

@@ -33,6 +33,9 @@
 #define EBADF           16      /* Bad file number */
 #define ENOEXEC         17      /* Exec format error */
 #define EUNKNOWN        18      /* Unknown OS specific error */
+#define EPERM           19      /* Operation not permitted */
+#define ESRCH           20      /* No such process */
+#define EDEADLK         21      /* Resource deadlock would occur */
 
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6

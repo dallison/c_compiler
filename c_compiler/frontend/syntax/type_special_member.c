@@ -1842,6 +1842,12 @@ static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
         StructMemberIsNestedType(member)) {
       continue;
     }
+    // A default constructor that evaluates a default member initializer is
+    // non-trivial even when the member's own type is trivial.
+    if (kind == kCXXSpecialMemberDefaultConstructor &&
+        member->default_initializer != NULL) {
+      return false;
+    }
     if (!CXXTypeSpecialMemberIsTrivial(member->symbol->type, kind)) {
       return false;
     }

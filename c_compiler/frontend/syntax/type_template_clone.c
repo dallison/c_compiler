@@ -34,6 +34,7 @@
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data);
 static void InstantiateClonedFunctionTemplateCall(TemplateFunctionBodyClone* clone,
                                                   ASTNode* node);
+static bool ASTNodeWithinPackExpansion(ASTNode* node);
 static bool ASTNodeWithinUnresolvedPackExpansion(TemplateFunctionBodyClone* clone,
                                                  ASTNode* node);
 static ASTNode* ReanalyzeClonedDependentFunctorCall(
@@ -391,9 +392,16 @@ static void RewriteClonedConstructorMemberCall(TemplateFunctionBodyClone* clone,
       return;
     }
   }
-  if (receiver_type->template_origin == NULL ||
-      strcmp(member_name->value.string->value,
-             receiver_type->template_origin->name.value) != 0) {
+  const char* source_name = member_name->value.string->value;
+  const char* origin_name =
+      receiver_type->template_origin != NULL
+          ? receiver_type->template_origin->name.value
+          : NULL;
+  size_t origin_length = origin_name != NULL ? strlen(origin_name) : 0;
+  if (origin_name == NULL || strncmp(source_name, origin_name, origin_length) != 0 ||
+      (source_name[origin_length] != '\0' &&
+       source_name[origin_length] != '<' &&
+       source_name[origin_length] != '#')) {
     return;
   }
   StringSet(member_name->value.string, constructor_name);
@@ -684,6 +692,60 @@ static Symbol* PackExpansionExpressionSymbol(TemplateFunctionBodyClone* clone,
 
 typedef struct {
   TemplateFunctionBodyClone* clone;
+  int pack_index;
+  size_t pack_length;
+  bool multiple_packs;
+} TemplateArgumentPackExpressionSearch;
+
+static void FindTemplateArgumentPackExpression(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  TemplateArgumentPackExpressionSearch* search = data;
+  for (size_t i = 0; id->template_arguments != NULL &&
+                     i < id->template_arguments->length; i++) {
+    int pack_index = -1;
+    size_t pack_length = 0;
+    if (!FindPackExpansionInTemplateArgument(
+            id->template_arguments->value.p[i], search->clone->args,
+            &pack_index, &pack_length)) {
+      continue;
+    }
+    if (search->pack_index >= 0 && search->pack_index != pack_index) {
+      search->multiple_packs = true;
+      continue;
+    }
+    search->pack_index = pack_index;
+    search->pack_length = pack_length;
+  }
+}
+
+static bool PackExpansionTemplateArgumentInfo(
+    TemplateFunctionBodyClone* clone, ASTNode* node, size_t* pack_length,
+    bool* multiple_packs) {
+  TemplateArgumentPackExpressionSearch search = {
+      .clone = clone,
+      .pack_index = -1,
+      .pack_length = 0,
+      .multiple_packs = false,
+  };
+  ASTNodeVisit(node, FindTemplateArgumentPackExpression, 0, &search);
+  if (pack_length != NULL) {
+    *pack_length = search.pack_length;
+  }
+  if (multiple_packs != NULL) {
+    *multiple_packs = search.multiple_packs;
+  }
+  return search.pack_index >= 0;
+}
+
+typedef struct {
+  TemplateFunctionBodyClone* clone;
   bool found;
 } UnresolvedPackSearch;
 
@@ -868,7 +930,7 @@ static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                         int child_id,
                                                         VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL) {
+  if (mode != kVisitPostChildren || node == NULL) {
     return;
   }
   InstantiateClonedFunctionTemplateCall(data, node);
@@ -968,6 +1030,15 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
         id->template_arguments = concrete_args;
       }
     }
+    if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.template_origin != NULL &&
+        node->parent != NULL && node->parent->op == AST_OP(call) &&
+        ((VectorASTNode*)node->parent)->left == node) {
+      id->symbol = id->symbol->type->info.function.template_origin;
+      ASTNodeSetType(node, id->symbol->type);
+      node->flags &= ~kASTAnalyzed;
+      node->parent->flags &= ~kASTAnalyzed;
+    }
     if (id->symbol == replace->from) {
       id->symbol = replace->to;
       ASTNodeSetType(node, TypeIsReference(replace->to->type)
@@ -1037,6 +1108,39 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
   }
 }
 
+typedef struct {
+  Symbol* replacement;
+  Symbol* source_pack;
+} PackReplacementSearch;
+
+static void FindPackSourceForReplacement(MapKeyValue* kv, void* data) {
+  PackReplacementSearch* search = data;
+  Vector* replacements = kv != NULL ? kv->value.p : NULL;
+  for (size_t i = 0;
+       search->source_pack == NULL && replacements != NULL &&
+       i < replacements->length; i++) {
+    Symbol* candidate = replacements->value.p[i];
+    if (candidate == search->replacement ||
+        (candidate != NULL && search->replacement != NULL &&
+         strcmp(candidate->name.value, search->replacement->name.value) == 0)) {
+      search->source_pack = kv->key.p;
+    }
+  }
+}
+
+static Symbol* PackSourceForReplacement(TemplateFunctionBodyClone* clone,
+                                        Symbol* replacement) {
+  if (clone == NULL || replacement == NULL) {
+    return NULL;
+  }
+  PackReplacementSearch search = {
+      .replacement = replacement,
+      .source_pack = NULL,
+  };
+  MapTraverse(&clone->pack_symbol_map, FindPackSourceForReplacement, &search);
+  return search.source_pack;
+}
+
 /* Visitor for the special case of a pack used in a non-expansion context where
  * exactly one element is expected (e.g. a single-element pack): substitute the
  * identifier's template arguments and bind to the concrete instantiation. */
@@ -1067,6 +1171,10 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
       !ASTNodeWithinUnresolvedPackExpansion(clone, node)) {
     int pack_index = -1;
     size_t pack_length = 0;
+    Vector* template_args_for_substitution = id->template_arguments;
+    Vector* rebased_template_args = NULL;
+    int substitution_rebase_base =
+        clone->rebase_template_parameter_base;
     for (size_t i = 0; i < id->template_arguments->length; i++) {
       if (FindPackExpansionInTemplateArgument(
               id->template_arguments->value.p[i], clone->args, &pack_index,
@@ -1074,8 +1182,24 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
         break;
       }
     }
+    VectorASTNode* parent_call =
+        node->parent != NULL && node->parent->op == AST_OP(call)
+            ? (VectorASTNode*)node->parent
+            : NULL;
+    ASTNode* first_actual =
+        parent_call != NULL && parent_call->children != NULL &&
+                parent_call->children->length > 0
+            ? parent_call->children->value.p[0]
+            : NULL;
+    Symbol* actual_replacement =
+        first_actual != NULL && first_actual->op == AST_OP(identifier)
+            ? ((IdentifierASTNode*)first_actual)->symbol
+            : NULL;
+    Symbol* actual_source_pack =
+        PackSourceForReplacement(clone, actual_replacement);
     if (pack_index < 0 && id->template_arguments->length == 1 &&
         id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
+        actual_source_pack != NULL &&
         (id->symbol->flags.is_template ||
          id->symbol->type->info.function.template_origin != NULL)) {
       for (size_t i = 0; i < clone->args->length; i++) {
@@ -1083,6 +1207,24 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
         if (pack != NULL && pack->pack_arguments != NULL &&
             pack->pack_arguments->length == 1) {
           pack_index = (int)i;
+          break;
+        }
+      }
+    }
+    if (pack_index < 0 && clone->rebase_template_parameter_base > 0) {
+      rebased_template_args =
+          TemplateArgumentVectorCopy(id->template_arguments);
+      for (size_t i = 0; i < rebased_template_args->length; i++) {
+        RebaseTemplateArgumentParameterIndices(
+            rebased_template_args->value.p[i],
+            clone->rebase_template_parameter_base);
+      }
+      for (size_t i = 0; i < rebased_template_args->length; i++) {
+        if (FindPackExpansionInTemplateArgument(
+                rebased_template_args->value.p[i], clone->args, &pack_index,
+                &pack_length)) {
+          template_args_for_substitution = rebased_template_args;
+          substitution_rebase_base = 0;
           break;
         }
       }
@@ -1097,6 +1239,7 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
       }
       Vector* concrete_args = NULL;
       bool use_single_pack_element =
+          actual_source_pack != NULL &&
           id->template_arguments->length == 1 && pack != NULL &&
           pack->pack_arguments != NULL && pack->pack_arguments->length == 1 &&
           id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
@@ -1112,10 +1255,12 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
         VectorAppend(concrete_args, TemplateArgumentCopy(element));
       } else {
         Vector* substitution_args =
-            element_args != NULL ? element_args : clone->args;
+            actual_source_pack != NULL && element_args != NULL
+                ? element_args
+                : clone->args;
         concrete_args = SubstituteTemplateArgumentVector(
-            clone->parser, id->template_arguments, substitution_args,
-            clone->rebase_template_parameter_base);
+            clone->parser, template_args_for_substitution, substitution_args,
+            substitution_rebase_base);
       }
       VectorDeleteWithContents(id->template_arguments,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -1137,6 +1282,12 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
             element_args, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
       }
+    }
+    if (rebased_template_args != NULL) {
+      VectorDeleteWithContents(
+          rebased_template_args,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
     }
   }
   Vector* replacements =
@@ -1327,13 +1478,33 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
       bool multiple_packs = false;
       Symbol* pack_symbol =
           PackExpansionExpressionSymbol(clone, actual, &multiple_packs);
+      size_t template_argument_pack_length = 0;
+      bool template_argument_multiple_packs = false;
+      bool has_template_argument_pack = PackExpansionTemplateArgumentInfo(
+          clone, actual, &template_argument_pack_length,
+          &template_argument_multiple_packs);
+      multiple_packs =
+          multiple_packs || template_argument_multiple_packs;
       if (multiple_packs) {
         SyntaxError(clone->parser->syntax,
                     "pack expansion with multiple parameter packs is not supported yet");
       }
       if (pack_symbol == NULL &&
+          !has_template_argument_pack &&
           !ClonePatternReferencesUnresolvedPack(clone, actual)) {
         actual->flags &= ~kASTPackExpansion;
+      }
+      if (pack_symbol == NULL && has_template_argument_pack) {
+        for (size_t j = 0; j < template_argument_pack_length; j++) {
+          ASTNode* expanded_actual =
+              ClonePackExpansionPattern(clone, actual, NULL, NULL, j);
+          expanded_actual->parent = node;
+          expanded_actual->child_id = (int)expanded->length;
+          VectorAppend(expanded, expanded_actual);
+        }
+        ASTNodeDelete(actual);
+        changed = true;
+        continue;
       }
       Vector* replacements =
           pack_symbol != NULL
@@ -1547,13 +1718,71 @@ static void SetClonedCallReturnType(VectorASTNode* call, TypeRecord* func) {
   }
 }
 
+static void RebindClonedLoweredDependentMemberCall(VectorASTNode* call) {
+  if (call == NULL || call->left == NULL ||
+      call->left->op != AST_OP(identifier) || call->children == NULL ||
+      call->children->length == 0) {
+    return;
+  }
+  IdentifierASTNode* callee = (IdentifierASTNode*)call->left;
+  if (callee->symbol == NULL || callee->symbol->type == NULL ||
+      !TypeIsFunction(callee->symbol->type) ||
+      callee->symbol->type->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  ASTNode* receiver = call->children->value.p[0];
+  TypeRecord* receiver_type = receiver != NULL ? receiver->type : NULL;
+  if (receiver_type == NULL) {
+    return;
+  }
+  if (TypeIsReference(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (TypeIsPointer(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (!TypeIsStructOrUnion(receiver_type) ||
+      receiver_type->info.struct_info == NULL) {
+    return;
+  }
+  StructMember* member = FindStructMember(receiver_type->info.struct_info,
+                                          &callee->symbol->name);
+  if (member == NULL || !member->is_member_function || member->is_static ||
+      member->overload_next != NULL || member->symbol == NULL ||
+      !TypeIsFunction(member->symbol->type)) {
+    return;
+  }
+  callee->symbol = member->symbol;
+  ASTNodeSetType(call->left, member->symbol->type);
+  SetClonedCallReturnType(call, member->symbol->type);
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax,
+                                             member->symbol);
+}
+
+static void RebindClonedLoweredDependentMemberCallVisitor(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPostChildren && node != NULL &&
+      node->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)node;
+    if (call->left != NULL && call->left->op == AST_OP(identifier) &&
+        call->left->type != NULL && TypeIsStructOrUnion(call->left->type)) {
+      node->flags &= ~kASTAnalyzed;
+      call->left->flags &= ~kASTAnalyzed;
+    }
+    RebindClonedLoweredDependentMemberCall((VectorASTNode*)node);
+  }
+}
+
 /* In a cloned body, resolve a call whose callee is a function template to the
  * concrete instantiation deduced from the (now concrete) explicit template
  * arguments and actual arguments, updating the callee symbol and result type.
  * Skips calls whose actuals still contain pack expansions. */
 static void InstantiateClonedFunctionTemplateCall(
     TemplateFunctionBodyClone* clone, ASTNode* node) {
-  if (node->op != AST_OP(call)) {
+  if (node->op != AST_OP(call) || ASTNodeWithinPackExpansion(node) ||
+      PackExpansionExpressionSymbol(clone, node, NULL) != NULL) {
     return;
   }
   VectorASTNode* call = (VectorASTNode*)node;
@@ -2470,6 +2699,111 @@ static bool ASTNodeWithinUnresolvedPackExpansion(TemplateFunctionBodyClone* clon
   return false;
 }
 
+static StructMember* FindClonedConcreteMember(Struct* receiver,
+                                               StructMember* source) {
+  if (receiver == NULL || source == NULL || source->symbol == NULL) {
+    return NULL;
+  }
+  TypeRecord* source_type = source->symbol->type;
+  String* lookup_name = &source->symbol->name;
+  if (source_type != NULL && TypeIsFunction(source_type) &&
+      source_type->info.function.is_constructor &&
+      receiver->tag_name != NULL) {
+    lookup_name = receiver->tag_name;
+  }
+  StructMember* head = FindStructMember(receiver, lookup_name);
+  if (head == NULL || source_type == NULL || !TypeIsFunction(source_type)) {
+    return head;
+  }
+
+  StructMember* match = NULL;
+  for (StructMember* candidate = head; candidate != NULL;
+       candidate = candidate->overload_next) {
+    TypeRecord* candidate_type =
+        candidate->symbol != NULL ? candidate->symbol->type : NULL;
+    if (candidate_type == NULL || !TypeIsFunction(candidate_type) ||
+        candidate_type->info.function.prototype.length !=
+            source_type->info.function.prototype.length) {
+      continue;
+    }
+    CXXSpecialMemberKind source_kind =
+        source_type->info.function.cxx_special_member_kind;
+    if (source_kind != kCXXSpecialMemberNone &&
+        candidate_type->info.function.cxx_special_member_kind != source_kind) {
+      continue;
+    }
+    bool parameter_match = true;
+    for (size_t i = 1; i < source_type->info.function.prototype.length; i++) {
+      Symbol* source_parameter =
+          source_type->info.function.prototype.value.p[i];
+      Symbol* candidate_parameter =
+          candidate_type->info.function.prototype.value.p[i];
+      if (source_parameter == NULL || candidate_parameter == NULL) {
+        parameter_match = source_parameter == candidate_parameter;
+      } else if (!TypeContainsTemplateParameter(source_parameter->type) &&
+                 !TypeEqual(source_parameter->type,
+                            candidate_parameter->type)) {
+        parameter_match = false;
+      }
+      if (!parameter_match) {
+        break;
+      }
+    }
+    if (parameter_match) {
+      if (match != NULL) {
+        return NULL;
+      }
+      match = candidate;
+    }
+  }
+  return match;
+}
+
+static void RebindClonedConcreteMemberAccess(ASTNode* node) {
+  if (node == NULL ||
+      (node->op != AST_OP(dot) && node->op != AST_OP(arrow))) {
+    return;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node;
+  if (access->right == NULL ||
+      access->right->op != AST_OP(structmember)) {
+    return;
+  }
+  StructMemberASTNode* member_node =
+      (StructMemberASTNode*)access->right;
+  TypeRecord* receiver_type =
+      access->left != NULL ? access->left->type : NULL;
+  if (receiver_type != NULL && node->op == AST_OP(arrow) &&
+      TypeIsPointer(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+      receiver_type->info.struct_info != NULL &&
+      member_node->member != NULL && member_node->member->symbol != NULL) {
+    StructMember* concrete = FindClonedConcreteMember(
+        receiver_type->info.struct_info, member_node->member);
+    if (concrete != NULL && concrete->symbol != NULL) {
+      StructMemberASTNodeSetMember(member_node, concrete);
+      node->flags &= ~kASTAnalyzed;
+    }
+  }
+  if (member_node->member != NULL && member_node->member->symbol != NULL) {
+    ASTNodeSetType(node, member_node->member->symbol->type);
+    if (!member_node->member->is_member_function) {
+      node->value_category = kValueCategoryLvalue;
+    }
+  }
+}
+
+static void RebindClonedConcreteMemberAccessVisitor(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPostChildren) {
+    RebindClonedConcreteMemberAccess(node);
+  }
+}
+
 /* Match the source spelling of a class-valued member alias without the
  * permissive canonical type equality used by overload resolution.  Distinct
  * aliases of the same primary template (allocator_traits<allocator_type> and
@@ -2692,18 +3026,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
     }
   }
-  if ((node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
-      ((BinaryASTNode*)node)->right != NULL &&
-      ((BinaryASTNode*)node)->right->op == AST_OP(structmember)) {
-    StructMemberASTNode* member_node =
-        (StructMemberASTNode*)((BinaryASTNode*)node)->right;
-    if (member_node->member != NULL && member_node->member->symbol != NULL) {
-      ASTNodeSetType(node, member_node->member->symbol->type);
-      if (!member_node->member->is_member_function) {
-        node->value_category = kValueCategoryLvalue;
-      }
-    }
-  }
+  RebindClonedConcreteMemberAccess(node);
   // A dependent member access `recv.name` / `recv->name` whose member is still an
   // unresolved *string* name (its receiver's type was dependent when the
   // template was defined) must be rebound after substitution.  Clear its
@@ -3435,6 +3758,9 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   }
   ExpandClonedScalarMemberInitPack(clone, node);
   bool expanded_call_actuals = ExpandClonedCallPackActuals(clone, node);
+  if (node->op == AST_OP(call)) {
+    RebindClonedLoweredDependentMemberCall((VectorASTNode*)node);
+  }
   InstantiateClonedFunctionTemplateCall(clone, node);
   if (expanded_call_actuals && node->op == AST_OP(call)) {
     ASTNodeVisit(node, ReplaceSingleElementPackIdentifierVisitor, 0, clone);
@@ -3497,9 +3823,16 @@ static void RewriteDeferredConstructorMemberName(VectorASTNode* call) {
                        member_name->value.string) != NULL) {
     return;
   }
-  if (receiver_type->template_origin == NULL ||
-      strcmp(member_name->value.string->value,
-             receiver_type->template_origin->name.value) != 0) {
+  const char* source_name = member_name->value.string->value;
+  const char* origin_name =
+      receiver_type->template_origin != NULL
+          ? receiver_type->template_origin->name.value
+          : NULL;
+  size_t origin_length = origin_name != NULL ? strlen(origin_name) : 0;
+  if (origin_name == NULL || strncmp(source_name, origin_name, origin_length) != 0 ||
+      (source_name[origin_length] != '\0' &&
+       source_name[origin_length] != '<' &&
+       source_name[origin_length] != '#')) {
     return;
   }
   StringSet(member_name->value.string, constructor_name);
@@ -3953,8 +4286,9 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
       for (size_t j = 0;
            j < pack_length && to_index < to->info.function.prototype.length;
            j++) {
-        VectorAppend(replacements,
-                     to->info.function.prototype.value.p[to_index++]);
+        Symbol* replacement =
+            to->info.function.prototype.value.p[to_index++];
+        VectorAppend(replacements, replacement);
       }
       MapKeyValue kv;
       kv.key.p = from_formal;
@@ -4014,6 +4348,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   }
   ASTNode* body = ASTNodeClone(from->info.function.body,
                                CloneTemplateFunctionBodyNode, &clone, NULL);
+  ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, NULL);
+  ASTNodeVisit(body, RebindClonedLoweredDependentMemberCallVisitor, 0, NULL);
   // Drop discarded `if constexpr` branches (whose condition the clone above has
   // already folded to a constant) before the re-analysis passes can walk them.
   body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
