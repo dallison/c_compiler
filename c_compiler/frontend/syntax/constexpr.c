@@ -1578,7 +1578,8 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     result->object = bound_object;
     return true;
   }
-  if (node->op == AST_OP(subscript)) {
+  if (node->op == AST_OP(subscript) &&
+      ASTNodeGetShape(node) == kASTShapeBinary) {
     BinaryASTNode* subscript = (BinaryASTNode*)node;
     ConstexprValue object_value;
     int64_t index;
@@ -1672,7 +1673,8 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
       return allow_object || !(*slot)->is_object;
     }
   }
-  if (node->op == AST_OP(subscript)) {
+  if (node->op == AST_OP(subscript) &&
+      ASTNodeGetShape(node) == kASTShapeBinary) {
     BinaryASTNode* subscript = (BinaryASTNode*)node;
     ConstexprValue object_value;
     int64_t index;
@@ -1766,7 +1768,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(address)) {
     UnaryASTNode* address = (UnaryASTNode*)node;
-    if (address->sub != NULL && address->sub->op == AST_OP(subscript)) {
+    if (address->sub != NULL &&
+        address->sub->op == AST_OP(subscript) &&
+        ASTNodeGetShape(address->sub) == kASTShapeBinary) {
       BinaryASTNode* subscript = (BinaryASTNode*)address->sub;
       ConstexprValue base;
       int64_t index;

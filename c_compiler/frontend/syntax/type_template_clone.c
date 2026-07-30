@@ -1432,11 +1432,11 @@ static ASTNode* CloneLambdaCapturePackPattern(TemplateFunctionBodyClone* clone,
   return pattern_clone;
 }
 
-/* Expand pack-expansion call arguments (`f(args...)`) in a cloned call node
- * into the concrete sequence of per-element arguments. Handles three forms of
- * pack actuals: a bare pack identifier, an arbitrary pattern containing a pack,
- * and a captured-pack member access. Returns true if the argument list was
- * rewritten. */
+/* Expand pack-expansion arguments (`f(args...)` or `value[args...]`) in a
+ * cloned call-like vector node into the concrete sequence of per-element
+ * arguments. Handles three forms of pack actuals: a bare pack identifier, an
+ * arbitrary pattern containing a pack, and a captured-pack member access.
+ * Returns true if the argument list was rewritten. */
 
 static Struct* CloneLambdaClosureOwner(TemplateFunctionBodyClone* clone) {
   if (clone == NULL || clone->to_func == NULL ||
@@ -1448,7 +1448,9 @@ static Struct* CloneLambdaClosureOwner(TemplateFunctionBodyClone* clone) {
 
 static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
                                         ASTNode* node) {
-  if (node->op != AST_OP(call)) {
+  if (node->op != AST_OP(call) &&
+      !(node->op == AST_OP(subscript) &&
+        ASTNodeGetShape(node) == kASTShapeVector)) {
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)node;

@@ -2421,6 +2421,20 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         }
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
+        if (member->is_member_function &&
+            StringEqual(&member_symbol->name, "operator[]") &&
+            !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+          size_t implicit_object_parameters =
+              FunctionHasImplicitThisParameter(member_symbol->type) ? 1 : 0;
+          size_t explicit_parameters =
+              member_symbol->type->info.function.prototype.length -
+              implicit_object_parameters;
+          if (explicit_parameters != 1) {
+            SyntaxError(parser->syntax,
+                        "operator[] requires exactly one parameter before "
+                        "C++23");
+          }
+        }
         if (is_static_member && member->is_member_function &&
             (StringEqual(&member_symbol->name, "operator()") ||
              StringEqual(&member_symbol->name, "operator[]")) &&

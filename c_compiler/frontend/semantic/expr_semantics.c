@@ -3253,6 +3253,69 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   return (ASTNode*)node;
 }
 
+static ASTNode* AnalyzeMultidimensionalSubscript(VectorASTNode* node) {
+  // Analyze the receiver while detached.  VectorASTNode's legacy child
+  // replacer indexes only the argument vector, so an in-place receiver rewrite
+  // would otherwise replace argument zero.
+  ASTNode* receiver = node->left;
+  node->left = NULL;
+  if (receiver != NULL) {
+    receiver->parent = NULL;
+  }
+  ASTNode* analyzed_receiver = AnalyzeExpression(receiver);
+  if (analyzed_receiver != receiver) {
+    ASTNodeDelete(receiver);
+  }
+  node->left = analyzed_receiver;
+  if (analyzed_receiver != NULL) {
+    analyzed_receiver->parent = &node->base;
+    analyzed_receiver->child_id = 0;
+  }
+
+  TypeRecord* receiver_type =
+      analyzed_receiver != NULL ? analyzed_receiver->type : NULL;
+  bool dependent_receiver =
+      receiver_type == NULL || TypeIsUnknown(receiver_type) ||
+      TypeContainsTemplateParameter(receiver_type);
+  if (dependent_receiver || TypeIsStructOrUnion(receiver_type)) {
+    Vector* actuals = NewVector();
+    for (size_t i = 0; i < node->children->length; i++) {
+      ASTNode* actual = (ASTNode*)VectorGet(node->children, i);
+      VectorSet(node->children, i, NULL);
+      if (actual != NULL) {
+        actual->parent = NULL;
+      }
+      VectorAppend(actuals, actual);
+    }
+    node->left = NULL;
+    if (analyzed_receiver != NULL) {
+      analyzed_receiver->parent = NULL;
+    }
+    ASTNode* call =
+        NewOperatorMemberCall(analyzed_receiver, "operator[]", actuals,
+                              node->base.location);
+    return ReplaceVectorWithCall(node, call);
+  }
+
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* old_index = (ASTNode*)VectorGet(node->children, i);
+    ASTNode* index = AnalyzeExpression(old_index);
+    if (index != old_index) {
+      VectorSet(node->children, i, index);
+      if (index != NULL) {
+        index->parent = &node->base;
+        index->child_id = (int)i;
+      }
+      ASTNodeDelete(old_index);
+    }
+  }
+  SemanticError((ASTNode*)node,
+                "Built-in subscripting requires exactly one index");
+  ASTNodeSetType((ASTNode*)node,
+                 NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  return (ASTNode*)node;
+}
+
 // Inliner data.
 typedef struct {
   Map argument_map;     // Map of callee symbols to caller-local clones.
@@ -9848,7 +9911,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(subscript):  // Array subscript.
-      node = AnalyzeArraySubscript(binary_node);
+      node = ASTNodeGetShape(node) == kASTShapeVector
+                 ? AnalyzeMultidimensionalSubscript(vector_node)
+                 : AnalyzeArraySubscript(binary_node);
       break;
 
     case AST_OP(call):  // Function call.

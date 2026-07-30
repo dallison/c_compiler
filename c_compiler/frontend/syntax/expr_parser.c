@@ -3318,11 +3318,36 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
 
 // Parse an array subscript expression.
 static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
-                                TokenClass followers) {
+                                    TokenClass followers) {
+  if (CompilerIsCXX() &&
+      CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    Vector* indices = NewVector();
+    while (!LexLookingAt(syntax->lex, TOK(rsquare))) {
+      ASTNode* index = SyntaxParseSingleExpression(
+          syntax, followers | TC(exprsep) | TC(closebra));
+      MarkCXXPackExpansionIfPresent(syntax, index);
+      VectorAppend(indices, index);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+    }
+    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+    ASTNode* only_index =
+        indices->length == 1 ? (ASTNode*)VectorGet(indices, 0) : NULL;
+    if (only_index != NULL &&
+        (only_index->flags & kASTPackExpansion) == 0) {
+      ASTNode* index = only_index;
+      VectorDelete(indices);
+      return NewBinaryASTNode(AST_OP(subscript), NULL,
+                              syntax->lex->current_token_location, left, index);
+    }
+    return NewVectorASTNode(AST_OP(subscript), NULL,
+                            syntax->lex->current_token_location, left, indices);
+  }
   ASTNode* index = SyntaxParseExpression(syntax, followers);
   SyntaxNeedBracket(syntax, TOK(rsquare), followers);
   return NewBinaryASTNode(AST_OP(subscript), NULL,
-                   syntax->lex->current_token_location, left, index);
+                          syntax->lex->current_token_location, left, index);
 }
 
 // Parse a function call or varargs builtin.

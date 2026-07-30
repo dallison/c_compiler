@@ -190,6 +190,8 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_explicit_this_parameter", "202110L");
       PreprocessorDefineMacro(p, "__cpp_if_consteval", "202106L");
       PreprocessorDefineMacro(p, "__cpp_static_call_operator", "202207L");
+      PreprocessorDefineMacro(p, "__cpp_multidimensional_subscript",
+                              "202211L");
     }
   }
 
