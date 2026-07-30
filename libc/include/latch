@@ -1,0 +1,63 @@
+//
+//  latch
+//  libc
+//
+//  C++20 latch support for DaveCC.
+//
+
+#ifndef __davecc_latch__
+#define __davecc_latch__
+
+#include <atomic>
+#include <cstddef>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<latch> is unavailable in this single-threaded target profile"
+#endif
+
+#define __cpp_lib_latch 201907L
+
+namespace std {
+
+class latch {
+ public:
+  static constexpr ptrdiff_t max() noexcept {
+    return static_cast<ptrdiff_t>((~size_t(0)) >> 1);
+  }
+
+  constexpr explicit latch(ptrdiff_t expected) : __count_(expected) {}
+  ~latch() = default;
+  latch(const latch&) = delete;
+  latch& operator=(const latch&) = delete;
+
+  void count_down(ptrdiff_t update = 1) {
+    ptrdiff_t previous = __count_.fetch_sub(update, memory_order_release);
+    if (previous == update) {
+      __count_.notify_all();
+    }
+  }
+
+  bool try_wait() const noexcept {
+    return __count_.load(memory_order_acquire) == 0;
+  }
+
+  void wait() const {
+    ptrdiff_t count = __count_.load(memory_order_acquire);
+    while (count != 0) {
+      __count_.wait(count, memory_order_acquire);
+      count = __count_.load(memory_order_acquire);
+    }
+  }
+
+  void arrive_and_wait(ptrdiff_t update = 1) {
+    count_down(update);
+    wait();
+  }
+
+ private:
+  atomic<ptrdiff_t> __count_;
+};
+
+}  // namespace std
+
+#endif /* __davecc_latch__ */

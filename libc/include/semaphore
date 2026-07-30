@@ -1,0 +1,124 @@
+//
+//  semaphore
+//  libc
+//
+//  C++20 counting-semaphore support for DaveCC.
+//
+
+#ifndef __davecc_semaphore__
+#define __davecc_semaphore__
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <threads.h>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<semaphore> is unavailable in this single-threaded target profile"
+#endif
+
+#define __cpp_lib_semaphore 201907L
+
+namespace std {
+
+namespace __semaphore_detail {
+
+template <class Rep, class Period>
+long long __timeout_us(const chrono::duration<Rep, Period>& timeout) {
+  if (timeout <= chrono::duration<Rep, Period>::zero()) {
+    return 0;
+  }
+  long double value =
+      static_cast<long double>(timeout.count()) *
+      static_cast<long double>(Period::num) * 1000000.0L /
+      static_cast<long double>(Period::den);
+  if (value >= 9223372036854775807.0L) {
+    return 0x7fffffffffffffffLL;
+  }
+  if (value < 1.0L) {
+    return 1;
+  }
+  long long rounded = static_cast<long long>(value);
+  return static_cast<long double>(rounded) < value ? rounded + 1 : rounded;
+}
+
+}  // namespace __semaphore_detail
+
+template <ptrdiff_t LeastMaxValue = 1>
+class counting_semaphore {
+ public:
+  static_assert(LeastMaxValue >= 0);
+
+  constexpr explicit counting_semaphore(ptrdiff_t desired)
+      : __count_(desired) {}
+  ~counting_semaphore() = default;
+  counting_semaphore(const counting_semaphore&) = delete;
+  counting_semaphore& operator=(const counting_semaphore&) = delete;
+
+  static constexpr ptrdiff_t max() noexcept { return LeastMaxValue; }
+
+  void release(ptrdiff_t update = 1) {
+    __count_.fetch_add(update, memory_order_release);
+    if (update == 1) {
+      __count_.notify_one();
+    } else {
+      __count_.notify_all();
+    }
+  }
+
+  void acquire() {
+    for (;;) {
+      if (try_acquire()) {
+        return;
+      }
+      __count_.wait(0, memory_order_relaxed);
+    }
+  }
+
+  bool try_acquire() noexcept {
+    ptrdiff_t count = __count_.load(memory_order_relaxed);
+    while (count > 0) {
+      if (__count_.compare_exchange_weak(
+              count, count - 1, memory_order_acquire,
+              memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  template <class Rep, class Period>
+  bool try_acquire_for(const chrono::duration<Rep, Period>& timeout) {
+    return try_acquire_until(chrono::steady_clock::now() + timeout);
+  }
+
+  template <class Clock, class Duration>
+  bool try_acquire_until(
+      const chrono::time_point<Clock, Duration>& timeout) {
+    for (;;) {
+      if (try_acquire()) {
+        return true;
+      }
+      auto now = Clock::now();
+      if (timeout <= now) {
+        return false;
+      }
+      ptrdiff_t unavailable = 0;
+      int result = __davecc_addr_wait(
+          &__count_.__value, &unavailable, sizeof(unavailable),
+          __semaphore_detail::__timeout_us(timeout - now));
+      if (result == thrd_error) {
+        return false;
+      }
+    }
+  }
+
+ private:
+  atomic<ptrdiff_t> __count_;
+};
+
+using binary_semaphore = counting_semaphore<1>;
+
+}  // namespace std
+
+#endif /* __davecc_semaphore__ */

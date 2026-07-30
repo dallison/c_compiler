@@ -1,0 +1,253 @@
+//
+//  condition_variable
+//  libc
+//
+//  C++20 condition-variable support for DaveCC.
+//
+
+#ifndef __davecc_condition_variable__
+#define __davecc_condition_variable__
+
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
+#include <syscall.h>
+#include <threads.h>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<condition_variable> is unavailable in this single-threaded target profile"
+#endif
+
+namespace std {
+
+enum class cv_status {
+  no_timeout,
+  timeout,
+};
+
+namespace __condition_variable_detail {
+
+inline void __check(int result) {
+  if (result != thrd_success) {
+    abort();
+  }
+}
+
+template <class Rep, class Period>
+long long __timeout_us(const chrono::duration<Rep, Period>& timeout) {
+  return __mutex_detail::__timeout_us(timeout);
+}
+
+}  // namespace __condition_variable_detail
+
+class condition_variable {
+ public:
+  using native_handle_type = cnd_t*;
+
+  condition_variable() : __condition_{} {
+    __condition_variable_detail::__check(cnd_init(&__condition_));
+  }
+  ~condition_variable() { cnd_destroy(&__condition_); }
+  condition_variable(const condition_variable&) = delete;
+  condition_variable& operator=(const condition_variable&) = delete;
+
+  void notify_one() noexcept {
+    __condition_variable_detail::__check(cnd_signal(&__condition_));
+  }
+  void notify_all() noexcept {
+    __condition_variable_detail::__check(cnd_broadcast(&__condition_));
+  }
+
+  void wait(unique_lock<mutex>& lock) {
+    if (!lock.owns_lock() || lock.mutex() == nullptr) {
+      abort();
+    }
+    __condition_variable_detail::__check(
+        cnd_wait(&__condition_, lock.mutex()->native_handle()));
+  }
+
+  template <class Predicate>
+  void wait(unique_lock<mutex>& lock, Predicate predicate) {
+    while (!predicate()) {
+      wait(lock);
+    }
+  }
+
+  template <class Rep, class Period>
+  cv_status wait_for(unique_lock<mutex>& lock,
+                     const chrono::duration<Rep, Period>& timeout) {
+    if (!lock.owns_lock() || lock.mutex() == nullptr) {
+      abort();
+    }
+    int result = __davecc_cnd_timedwait_for(
+        &__condition_, lock.mutex()->native_handle(),
+        __condition_variable_detail::__timeout_us(timeout));
+    if (result == thrd_timedout) {
+      return cv_status::timeout;
+    }
+    __condition_variable_detail::__check(result);
+    return cv_status::no_timeout;
+  }
+
+  template <class Rep, class Period, class Predicate>
+  bool wait_for(unique_lock<mutex>& lock,
+                const chrono::duration<Rep, Period>& timeout,
+                Predicate predicate) {
+    return wait_until(lock, chrono::steady_clock::now() + timeout, predicate);
+  }
+
+  template <class Clock, class Duration>
+  cv_status wait_until(unique_lock<mutex>& lock,
+                       const chrono::time_point<Clock, Duration>& timeout) {
+    auto now = Clock::now();
+    if (timeout <= now) {
+      return cv_status::timeout;
+    }
+    cv_status result = wait_for(lock, timeout - now);
+    return result == cv_status::timeout || Clock::now() >= timeout
+               ? cv_status::timeout
+               : cv_status::no_timeout;
+  }
+
+  template <class Clock, class Duration, class Predicate>
+  bool wait_until(unique_lock<mutex>& lock,
+                  const chrono::time_point<Clock, Duration>& timeout,
+                  Predicate predicate) {
+    while (!predicate()) {
+      if (wait_until(lock, timeout) == cv_status::timeout) {
+        return predicate();
+      }
+    }
+    return true;
+  }
+
+  native_handle_type native_handle() noexcept { return &__condition_; }
+
+ private:
+  cnd_t __condition_;
+};
+
+class condition_variable_any {
+ public:
+  condition_variable_any() : __condition_{} {
+    __condition_variable_detail::__check(cnd_init(&__condition_));
+  }
+  ~condition_variable_any() { cnd_destroy(&__condition_); }
+  condition_variable_any(const condition_variable_any&) = delete;
+  condition_variable_any& operator=(const condition_variable_any&) = delete;
+
+  void notify_one() noexcept {
+    __mutex_.lock();
+    int result = cnd_signal(&__condition_);
+    __mutex_.unlock();
+    __condition_variable_detail::__check(result);
+  }
+  void notify_all() noexcept {
+    __mutex_.lock();
+    int result = cnd_broadcast(&__condition_);
+    __mutex_.unlock();
+    __condition_variable_detail::__check(result);
+  }
+
+  template <class Lock>
+  void wait(Lock& lock) {
+    __mutex_.lock();
+#ifdef __cpp_exceptions
+    try {
+      lock.unlock();
+    } catch (...) {
+      __mutex_.unlock();
+      throw;
+    }
+#else
+    lock.unlock();
+#endif
+    int result = cnd_wait(&__condition_, __mutex_.native_handle());
+    __mutex_.unlock();
+    lock.lock();
+    __condition_variable_detail::__check(result);
+  }
+
+  template <class Lock, class Predicate>
+  void wait(Lock& lock, Predicate predicate) {
+    while (!predicate()) {
+      wait(lock);
+    }
+  }
+
+  template <class Lock, class Rep, class Period>
+  cv_status wait_for(Lock& lock,
+                     const chrono::duration<Rep, Period>& timeout) {
+    __mutex_.lock();
+#ifdef __cpp_exceptions
+    try {
+      lock.unlock();
+    } catch (...) {
+      __mutex_.unlock();
+      throw;
+    }
+#else
+    lock.unlock();
+#endif
+    int result = __davecc_cnd_timedwait_for(
+        &__condition_, __mutex_.native_handle(),
+        __condition_variable_detail::__timeout_us(timeout));
+    __mutex_.unlock();
+    lock.lock();
+    if (result == thrd_timedout) {
+      return cv_status::timeout;
+    }
+    __condition_variable_detail::__check(result);
+    return cv_status::no_timeout;
+  }
+
+  template <class Lock, class Rep, class Period, class Predicate>
+  bool wait_for(Lock& lock, const chrono::duration<Rep, Period>& timeout,
+                Predicate predicate) {
+    return wait_until(lock, chrono::steady_clock::now() + timeout, predicate);
+  }
+
+  template <class Lock, class Clock, class Duration>
+  cv_status wait_until(
+      Lock& lock, const chrono::time_point<Clock, Duration>& timeout) {
+    auto now = Clock::now();
+    if (timeout <= now) {
+      return cv_status::timeout;
+    }
+    cv_status result = wait_for(lock, timeout - now);
+    return result == cv_status::timeout || Clock::now() >= timeout
+               ? cv_status::timeout
+               : cv_status::no_timeout;
+  }
+
+  template <class Lock, class Clock, class Duration, class Predicate>
+  bool wait_until(Lock& lock,
+                  const chrono::time_point<Clock, Duration>& timeout,
+                  Predicate predicate) {
+    while (!predicate()) {
+      if (wait_until(lock, timeout) == cv_status::timeout) {
+        return predicate();
+      }
+    }
+    return true;
+  }
+
+ private:
+  mutex __mutex_;
+  cnd_t __condition_;
+};
+
+inline void notify_all_at_thread_exit(condition_variable& condition,
+                                      unique_lock<mutex> lock) {
+  if (!lock.owns_lock() || lock.mutex() == nullptr) {
+    abort();
+  }
+  __condition_variable_detail::__check(
+      __davecc_cnd_notify_all_at_thread_exit(
+          condition.native_handle(), lock.mutex()->native_handle()));
+  (void)lock.release();
+}
+
+}  // namespace std
+
+#endif /* __davecc_condition_variable__ */

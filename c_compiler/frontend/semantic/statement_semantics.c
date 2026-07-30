@@ -659,6 +659,42 @@ static void CollectJumpStatements(ASTNode* node, void* data, int child_id,
   }
 }
 
+static void RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
+                                                  int child_id,
+                                                  VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL ||
+      node->op != AST_OP(compound)) {
+    return;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
+  for (size_t i = compound->statements->length; i > 0; i--) {
+    ASTNode* statement = compound->statements->value.p[i - 1];
+    if ((statement->flags & kASTFallthroughDestructor) == 0) {
+      continue;
+    }
+    VectorDeleteElement(compound->statements, i - 1);
+    ASTNodeDelete(statement);
+  }
+
+  Vector destructors;
+  VectorInit(&destructors);
+  CollectCompoundLocalDestructors(compound, 0, compound->statements->length,
+                                  NULL, &destructors);
+  for (size_t i = 0; i < destructors.length; i++) {
+    ASTNode* destructor = destructors.value.p[i];
+    destructor->flags |= kASTFallthroughDestructor;
+    VectorAppend(compound->statements, destructor);
+  }
+  VectorDestruct(&destructors);
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    ASTNode* statement = compound->statements->value.p[i];
+    statement->parent = node;
+    statement->child_id = (int)i;
+  }
+}
+
 // Inserts scope-exit destructor calls for automatic objects at every
 // return/break/continue in `func`'s body (see the block comment above).
 void CXXInsertScopeExitDestructors(TypeRecord* func) {
@@ -669,6 +705,8 @@ void CXXInsertScopeExitDestructors(TypeRecord* func) {
       TypeContainsTemplateParameter(func)) {
     return;
   }
+  ASTNodeVisit(func->info.function.body,
+               RebuildCompoundFallthroughDestructors, 0, NULL);
   Vector jumps;
   VectorInit(&jumps);
   ASTNodeVisit(func->info.function.body, CollectJumpStatements, 0, &jumps);

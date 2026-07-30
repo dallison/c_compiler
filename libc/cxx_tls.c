@@ -13,6 +13,7 @@
 
 void __davecc_tls_thread_init_impl(void);
 void __davecc_tls_thread_fini_impl(void);
+void __davecc_thread_exit_callbacks(void);
 
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
 typedef void (*DaveCCTlsBlockDtorFn)(void*);
@@ -76,4 +77,7 @@ void __davecc_tls_thread_fini(void) {
   RunBlockDestructors();
 #endif
   __davecc_tls_thread_fini_impl();
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  __davecc_thread_exit_callbacks();
+#endif
 }

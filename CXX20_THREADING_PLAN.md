@@ -43,13 +43,13 @@ and approves the runtime foundation.
 
 ## Step 3: Blocking synchronization
 
-- [ ] Add `condition_variable` and `condition_variable_any`, including
+- [x] Add `condition_variable` and `condition_variable_any`, including
       predicate and timed waits.
-- [ ] Add `counting_semaphore` and `binary_semaphore`.
-- [ ] Add `latch`.
-- [ ] Add reusable `barrier` and completion callbacks.
-- [ ] Add hosted cross-backend tests.
-- [ ] Review Step 3 before proceeding.
+- [x] Add `counting_semaphore` and `binary_semaphore`.
+- [x] Add `latch`.
+- [x] Add reusable `barrier` and completion callbacks.
+- [x] Add hosted cross-backend tests.
+- [x] Review Step 3 before proceeding.
 
 ## Step 4: Stop tokens and `jthread`
 

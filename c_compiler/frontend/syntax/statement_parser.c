@@ -196,6 +196,7 @@ void SyntaxAppendCXXBlockScopeDestructors(Vector* statements) {
           ASTNode* destructor = NewCXXArrayElementDestructorCall(
               decl->symbol, k - 1, decl->base.location);
           if (destructor != NULL) {
+            destructor->flags |= kASTFallthroughDestructor;
             VectorAppend(statements, destructor);
           }
         }
@@ -203,6 +204,7 @@ void SyntaxAppendCXXBlockScopeDestructors(Vector* statements) {
         ASTNode* destructor =
             NewCXXDestructorCall(decl->symbol, decl->base.location);
         if (destructor != NULL) {
+          destructor->flags |= kASTFallthroughDestructor;
           VectorAppend(statements, destructor);
         }
       }

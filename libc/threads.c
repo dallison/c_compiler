@@ -15,6 +15,14 @@
 void __davecc_tls_thread_init(void);
 void __davecc_tls_thread_fini(void);
 
+typedef struct DaveCCConditionAtExit {
+  cnd_t* condition;
+  mtx_t* mutex;
+  struct DaveCCConditionAtExit* next;
+} DaveCCConditionAtExit;
+
+static __thread DaveCCConditionAtExit* condition_at_exit;
+
 int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
   if (thr == NULL || func == NULL) {
     return thrd_error;
@@ -410,6 +418,44 @@ static int ConditionWaitFor(cnd_t* condition, mtx_t* mutex,
 
 int cnd_wait(cnd_t* condition, mtx_t* mutex) {
   return ConditionWaitFor(condition, mutex, -1);
+}
+
+int __davecc_cnd_timedwait_for(cnd_t* condition, mtx_t* mutex,
+                               long long timeout_us) {
+  return ConditionWaitFor(condition, mutex, timeout_us > 0 ? timeout_us : 0);
+}
+
+int __davecc_cnd_notify_all_at_thread_exit(cnd_t* condition, mtx_t* mutex) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  if (condition == NULL || mutex == NULL) {
+    return thrd_error;
+  }
+  DaveCCConditionAtExit* entry = malloc(sizeof(*entry));
+  if (entry == NULL) {
+    return thrd_nomem;
+  }
+  entry->condition = condition;
+  entry->mutex = mutex;
+  entry->next = condition_at_exit;
+  condition_at_exit = entry;
+  return thrd_success;
+#else
+  (void)condition;
+  (void)mutex;
+  return thrd_error;
+#endif
+}
+
+void __davecc_thread_exit_callbacks(void) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  while (condition_at_exit != NULL) {
+    DaveCCConditionAtExit* entry = condition_at_exit;
+    condition_at_exit = entry->next;
+    (void)mtx_unlock(entry->mutex);
+    (void)cnd_broadcast(entry->condition);
+    free(entry);
+  }
+#endif
 }
 
 int cnd_timedwait(cnd_t* condition, mtx_t* mutex,

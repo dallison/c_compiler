@@ -1,0 +1,120 @@
+//
+//  barrier
+//  libc
+//
+//  C++20 reusable barrier support for DaveCC.
+//
+
+#ifndef __davecc_barrier__
+#define __davecc_barrier__
+
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <mutex>
+#include <utility>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<barrier> is unavailable in this single-threaded target profile"
+#endif
+
+#define __cpp_lib_barrier 201907L
+
+namespace std {
+
+namespace __barrier_detail {
+
+struct __empty_completion {
+  void operator()() noexcept {}
+};
+
+}  // namespace __barrier_detail
+
+template <class CompletionFunction = __barrier_detail::__empty_completion>
+class barrier {
+ public:
+  class arrival_token {
+   public:
+    arrival_token(arrival_token&&) noexcept = default;
+    arrival_token& operator=(arrival_token&&) noexcept = default;
+    arrival_token(const arrival_token&) = delete;
+    arrival_token& operator=(const arrival_token&) = delete;
+
+   private:
+    friend class barrier;
+    explicit arrival_token(size_t phase) : __phase_(phase) {}
+    size_t __phase_;
+  };
+
+  static constexpr ptrdiff_t max() noexcept {
+    return static_cast<ptrdiff_t>((~size_t(0)) >> 1);
+  }
+
+  explicit barrier(ptrdiff_t expected,
+                   CompletionFunction completion = CompletionFunction())
+      : __expected_(expected),
+        __remaining_(expected),
+        __phase_(0),
+        __completion_(std::move(completion)) {}
+
+  ~barrier() = default;
+  barrier(const barrier&) = delete;
+  barrier& operator=(const barrier&) = delete;
+
+  arrival_token arrive(ptrdiff_t update = 1) {
+    unique_lock<mutex> lock(__mutex_);
+    arrival_token token(__phase_.load(memory_order_relaxed));
+    __remaining_ -= update;
+    if (__remaining_ == 0) {
+      __finish_phase(lock);
+    } else {
+      lock.unlock();
+    }
+    return token;
+  }
+
+  void wait(arrival_token&& token) const {
+    size_t phase = __phase_.load(memory_order_acquire);
+    while (phase == token.__phase_) {
+      __phase_.wait(phase, memory_order_acquire);
+      phase = __phase_.load(memory_order_acquire);
+    }
+  }
+
+  void arrive_and_wait() {
+    wait(arrive());
+  }
+
+  void arrive_and_drop() {
+    unique_lock<mutex> lock(__mutex_);
+    --__expected_;
+    --__remaining_;
+    if (__remaining_ == 0) {
+      __finish_phase(lock);
+    } else {
+      lock.unlock();
+    }
+  }
+
+ private:
+  void __finish_phase(unique_lock<mutex>& lock) {
+    std::invoke(__completion_);
+    __remaining_ = __expected_;
+    __phase_.fetch_add(1, memory_order_release);
+    lock.unlock();
+    __phase_.notify_all();
+  }
+
+  mutable mutex __mutex_;
+  ptrdiff_t __expected_;
+  ptrdiff_t __remaining_;
+  mutable atomic<size_t> __phase_;
+  CompletionFunction __completion_;
+};
+
+template <class CompletionFunction>
+barrier(ptrdiff_t, CompletionFunction) -> barrier<CompletionFunction>;
+
+}  // namespace std
+
+#endif /* __davecc_barrier__ */
