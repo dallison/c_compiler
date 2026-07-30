@@ -218,6 +218,10 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
 
     link_thread_test thread_join_negative libc/tests/runtime/thread_join_negative.c
     link_thread_test thread_thrd_exit libc/tests/runtime/thread_thrd_exit.c
+    link_thread_test thread_reclamation libc/tests/runtime/thread_reclamation.c
+    link_thread_test thread_sleep libc/tests/runtime/thread_sleep.c
+    link_thread_test thread_condition libc/tests/runtime/thread_condition.c
+    link_thread_test thread_addr_wait libc/tests/runtime/thread_addr_wait.c
 
     link_thread_libc_test thread_heap_stress libc/tests/runtime/thread_heap_stress.c
     link_thread_libc_test thread_errno_isolation libc/tests/runtime/thread_errno_isolation.c

@@ -532,6 +532,14 @@ cc_library(
 )
 
 cc_library(
+    name = "guest_addr_wait",
+    srcs = ["c_compiler/Loader/guest_addr_wait.c"],
+    hdrs = ["c_compiler/Loader/guest_addr_wait.h"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+)
+
+cc_library(
     name = "linker",
     srcs = [
         "Linker/Architecture/linker_arch_6502.c",
@@ -733,6 +741,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":guest_addr_wait",
         ":linker",
         ":loader",
         ":utils",
@@ -760,6 +769,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":guest_addr_wait",
         ":linker",
         ":loader",
         ":utils",
@@ -784,6 +794,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":guest_addr_wait",
         ":linker",
         ":loader",
         ":utils",
@@ -810,6 +821,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":guest_addr_wait",
         ":linker",
         ":loader",
         ":utils",
@@ -2811,6 +2823,7 @@ sh_test(
         ":x86_64",
         "tests/aarch64_coroutine_exchange_test.cc",
         "tests/aarch64_peephole_cases.c",
+        "tests/arm_i64_call_arg_test.c",
         "tests/ir_optimizer_cases.c",
         "tests/ir_optimizer_cases.cc",
         "tests/sccp_alias_execution_cases.c",

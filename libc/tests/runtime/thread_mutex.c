@@ -32,6 +32,12 @@ static int contention_worker(void* mutex_ptr) {
   if (mtx_trylock(mutex) != thrd_busy) return 1;
   if (mtx_unlock(mutex) != thrd_error) return 2;
   if (__davecc_mtx_timedlock_for(mutex, 2000) != thrd_timedout) return 3;
+  long long deadline_us = __davecc_realtime_time_us() + 2000;
+  struct timespec deadline = {
+      (time_t)(deadline_us / 1000000),
+      (long)((deadline_us % 1000000) * 1000),
+  };
+  if (mtx_timedlock(mutex, &deadline) != thrd_timedout) return 4;
   return 0;
 }
 

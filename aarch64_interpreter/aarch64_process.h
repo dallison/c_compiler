@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "guest_addr_wait.h"
 #include "loader.h"
 #include "vector.h"
 #include "aarch64_interpreter.h"
@@ -32,6 +33,8 @@ typedef struct AARCH64GuestThread {
   bool host_thread_valid;
   bool is_main;
   bool joinable;
+  bool detached;
+  bool join_in_progress;
   AARCH64GuestThreadState state;
   int exit_code;
   AARCH64Interpreter cpu;
@@ -62,9 +65,12 @@ typedef struct AARCH64ProcessRuntime {
   Vector threads;
   Vector memory_ranges;
   uint64_t next_tid;
+  int active_joins;
   AARCH64GuestThread* main_thread;
+  GuestAddrWaitTable addr_wait_table;
   bool shutting_down;
   bool initialized;
+  bool addr_wait_table_initialized;
   bool memory_mutex_initialized;
   bool mutex_initialized;
   bool got_resolve_mutex_initialized;
@@ -94,6 +100,15 @@ int64_t AARCH64SyscallThreadCreate(AARCH64GuestThread* caller, uint64_t fn,
                                    uint64_t tls_fini_fn);
 int64_t AARCH64SyscallThreadJoin(AARCH64GuestThread* caller, uint64_t tid,
                                  uint64_t result_ptr);
+int64_t AARCH64SyscallThreadDetach(AARCH64GuestThread* caller, uint64_t tid);
+int64_t AARCH64SyscallAddrWait(AARCH64GuestThread* caller, uint64_t address,
+                               uint64_t expected_ptr, size_t size,
+                               int64_t timeout_us);
+int64_t AARCH64SyscallAddrWake(AARCH64GuestThread* caller, uint64_t address,
+                               bool wake_all);
+int64_t AARCH64SyscallThreadSleep(AARCH64GuestThread* caller,
+                                   uint64_t duration_ptr, uint64_t remaining_ptr);
+int64_t AARCH64SyscallHardwareConcurrency(void);
 int64_t AARCH64SyscallThreadSelf(AARCH64GuestThread* caller);
 int64_t AARCH64SyscallGetTp(AARCH64GuestThread* caller);
 void AARCH64SyscallThreadExit(AARCH64GuestThread* caller, int64_t status);
@@ -102,6 +117,8 @@ int64_t AARCH64SyscallHeapUnlock(AARCH64GuestThread* caller);
 
 void AARCH64ProcessRegisterGuestMemory(AARCH64ProcessRuntime* process,
                                        uint64_t start, size_t size);
+void AARCH64ProcessUnregisterGuestMemory(AARCH64ProcessRuntime* process,
+                                         uint64_t start, size_t size);
 bool AARCH64ProcessGuestMemoryOk(AARCH64ProcessRuntime* process, uint64_t addr,
                                  size_t size);
 

@@ -272,8 +272,46 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       break;
     case RISC_V_ECALL_MONOTONIC_TIME: {
       struct timespec now;
-      int64_t* result = (int64_t*)interpreter->iregs[REG(a1)];
+      int64_t* result = (int64_t*)RISCVGuestAddressToHost(
+          interpreter, (uint64_t)interpreter->iregs[REG(a1)], sizeof(int64_t));
       if (result == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        interpreter->iregs[REG(a0)] = (uint64_t)-1;
+      } else {
+        *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        interpreter->iregs[REG(a0)] = 0;
+      }
+      break;
+    }
+    case RISC_V_ECALL_THREAD_DETACH:
+      interpreter->iregs[REG(a0)] = (uint64_t)RISCVSyscallThreadDetach(
+          interpreter->guest_thread, (uint64_t)interpreter->iregs[REG(a1)]);
+      break;
+    case RISC_V_ECALL_ADDR_WAIT:
+      interpreter->iregs[REG(a0)] = (uint64_t)RISCVSyscallAddrWait(
+          interpreter->guest_thread, (uint64_t)interpreter->iregs[REG(a1)],
+          (uint64_t)interpreter->iregs[REG(a2)],
+          (uint64_t)interpreter->iregs[REG(a3)],
+          (int64_t)interpreter->iregs[REG(a4)]);
+      break;
+    case RISC_V_ECALL_ADDR_WAKE:
+      interpreter->iregs[REG(a0)] = (uint64_t)RISCVSyscallAddrWake(
+          interpreter->guest_thread, (uint64_t)interpreter->iregs[REG(a1)],
+          interpreter->iregs[REG(a2)]);
+      break;
+    case RISC_V_ECALL_THREAD_SLEEP:
+      interpreter->iregs[REG(a0)] = (uint64_t)RISCVSyscallThreadSleep(
+          interpreter->guest_thread, (uint64_t)interpreter->iregs[REG(a1)],
+          (uint64_t)interpreter->iregs[REG(a2)]);
+      break;
+    case RISC_V_ECALL_HARDWARE_CONCURRENCY:
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)RISCVSyscallHardwareConcurrency();
+      break;
+    case RISC_V_ECALL_REALTIME_TIME: {
+      struct timespec now;
+      int64_t* result = (int64_t*)RISCVGuestAddressToHost(
+          interpreter, (uint64_t)interpreter->iregs[REG(a1)], sizeof(int64_t));
+      if (result == NULL || clock_gettime(CLOCK_REALTIME, &now) != 0) {
         interpreter->iregs[REG(a0)] = (uint64_t)-1;
       } else {
         *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;

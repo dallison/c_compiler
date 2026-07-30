@@ -827,6 +827,20 @@ static TargetInstruction* GetLoweredHi(IRNode* node) {
   return (TargetInstruction*)(intptr_t)node->data.lvalue;
 }
 
+// Keep the low and high halves of a wide value in distinct physical registers.
+static void PairWideHalves(TargetInstruction* lo, TargetInstruction* hi) {
+  if (lo == NULL || hi == NULL || lo == hi) {
+    return;
+  }
+  TargetAddUser(lo, hi);
+}
+
+static TargetInstruction* GetDestInstruction(ARMGenerator* g, IRNode* node);
+static void RouteWideResultToDest(ARMGenerator* g, IRNode* node,
+                                  TargetInstruction* lo,
+                                  TargetInstruction* hi);
+static TargetInstruction* WideMov(ARMGenerator* g, TargetInstruction* src);
+
 static TargetInstruction* GetIntConstant(ARMGenerator* g, IRNode* node,
                                          TargetType type, int64_t value) {
   return SetInstructionSize(TargetGetIntConstant(&g->base, node, type, value),
@@ -1666,6 +1680,81 @@ static TargetInstruction* Const32(ARMGenerator* g, int32_t value) {
                        kSize32Bit);
 }
 
+static bool WideMergeTmpHasStackHome(IRNode* tmp) {
+  return tmp != NULL && tmp->opcode == IR_OP(tmp) &&
+         TypeIsWideInt(tmp->type) && tmp->data.ivalue < 0;
+}
+
+static int EnsureWideMergeStackHome(ARMGenerator* g, IRNode* tmp) {
+  assert(tmp->opcode == IR_OP(tmp) && TypeIsWideInt(tmp->type));
+  if (tmp->data.ivalue >= 0) {
+    return 0;
+  }
+  (void)g;
+  return (int)tmp->data.ivalue;
+}
+
+static void AssignWideMergeStackHomes(ARMGenerator* g, Generator* gen) {
+  IRNode* node = GeneratorFirstInstruction(gen);
+  while (node != NULL) {
+    IRNode* dest = node->dest;
+    if (dest != NULL && dest->opcode == IR_OP(tmp) &&
+        TypeIsWideInt(dest->type) && dest->data.ivalue == 0) {
+      dest->data.ivalue = AllocateSavedArgumentHome(g, 8, 8);
+    }
+    node = IRNext(node);
+  }
+}
+
+static void StoreWideToMergeTmp(ARMGenerator* g, IRNode* tmp,
+                                TargetInstruction* lo,
+                                TargetInstruction* hi) {
+  int off = EnsureWideMergeStackHome(g, tmp);
+  if (off == 0) {
+    return;
+  }
+  TargetInstruction* fp = FramePointer(g);
+  TargetInstruction* str_lo = Emit(
+      g, SetInstructionSize(NewInstruction3(ARM_OP(str), lo, fp,
+                                            GetIntConstant(g, NULL,
+                                                           kTargetType32Bit, off)),
+                            kSize32Bit));
+  TargetInstruction* str_hi = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(ARM_OP(str), hi, fp,
+                            GetIntConstant(g, NULL, kTargetType32Bit, off + 4)),
+             kSize32Bit));
+  str_lo->flags |= kARMFrameStorageOffset;
+  str_hi->flags |= kARMFrameStorageOffset;
+}
+
+static void LoadWideFromMergeTmp(ARMGenerator* g, IRNode* tmp,
+                                 TargetInstruction** lo,
+                                 TargetInstruction** hi) {
+  int off = EnsureWideMergeStackHome(g, tmp);
+  if (off == 0) {
+    *lo = GetLoweredNode(tmp);
+    *hi = GetLoweredHi(tmp);
+    return;
+  }
+  TargetInstruction* fp = FramePointer(g);
+  TargetInstruction* lo_base = WideMov(g, fp);
+  *lo = Emit(g, SetInstructionSize(
+                    NewInstruction2(ARM_OP(ldr), lo_base,
+                                    GetIntConstant(g, NULL, kTargetType32Bit,
+                                                   off)),
+                    kSize32Bit));
+  TargetInstruction* hi_base = WideMov(g, fp);
+  *hi = Emit(g, SetInstructionSize(
+                    NewInstruction2(ARM_OP(ldr), hi_base,
+                                    GetIntConstant(g, NULL, kTargetType32Bit,
+                                                   off + 4)),
+                    kSize32Bit));
+  (*lo)->flags |= kARMFrameStorageOffset;
+  (*hi)->flags |= kARMFrameStorageOffset;
+  PairWideHalves(*lo, *hi);
+}
+
 // Produce the low and high 32-bit halves of a wide (64-bit) operand.  Constants
 // are materialized on demand; other wide nodes have already been lowered to a
 // (low, high) pair by LowerWideExpression and friends.
@@ -1675,6 +1764,17 @@ static void MaterializeWide(ARMGenerator* g, IRNode* node,
     uint64_t v = (uint64_t)((IRConstant*)node)->value.ivalue;
     *lo = Const32(g, (int32_t)(uint32_t)v);
     *hi = Const32(g, (int32_t)(uint32_t)(v >> 32));
+    if (*lo != *hi) {
+      PairWideHalves(*lo, *hi);
+    }
+    return;
+  }
+  IRNode* src = node;
+  if (node->opcode == IR_OP(pusharg) && node->inputs.length > 0) {
+    src = node->inputs.value.p[0];
+  }
+  if (WideMergeTmpHasStackHome(src)) {
+    LoadWideFromMergeTmp(g, src, lo, hi);
     return;
   }
   *lo = GetLoweredNode(node);
@@ -1688,6 +1788,9 @@ static void MaterializeWide(ARMGenerator* g, IRNode* node,
   // A non-wide value used in a wide context (e.g. an int promoted implicitly)
   // has no high half; treat it as zero-extended.  This should be rare because
   // the front end inserts explicit extensions, but guard against a NULL.
+  if (*hi != NULL && *lo != NULL && *hi != *lo) {
+    PairWideHalves(*lo, *hi);
+  }
   if (*hi == NULL) {
     *hi = ZeroReg(g);
   }
@@ -1802,12 +1905,16 @@ static TargetInstruction* WideLibCall(ARMGenerator* g, IRNode* node,
   g->not_leaf = true;
   g->base.num_calls++;
 
-  // Result low half is r0 (the call instruction itself); capture the high half
-  // from r1 immediately while it is still live.
+  // Result is in r0:r1.  Capture both halves into fresh registers immediately
+  // while they are still live.
   TargetInstruction* r1 = Emit(g, NewInstruction(ARM_OP(r1)));
   TargetInstruction* hi = Emit(g, NewInstruction1(ARM_OP(mov), r1));
+  TargetInstruction* lo = Emit(g, NewInstruction1(ARM_OP(mov), call));
+  PairWideHalves(lo, hi);
   SetLoweredHi(node, hi);
-  return SetLoweredNode(node, call);
+  TargetInstruction* result = SetLoweredNode(node, lo);
+  RouteWideResultToDest(g, node, lo, hi);
+  return result;
 }
 
 // Lower a 64-bit integer producing IR node into a (low, high) register pair.
@@ -1957,8 +2064,11 @@ static TargetInstruction* LowerWideExpression(ARMGenerator* g, IRNode* node) {
       break;
   }
 
+  PairWideHalves(lo, hi);
   SetLoweredHi(node, hi);
-  return SetLoweredNode(node, lo);
+  TargetInstruction* result = SetLoweredNode(node, lo);
+  RouteWideResultToDest(g, node, lo, hi);
+  return result;
 }
 
 static void ApplyFixups(ARMGenerator* g, IRNode* label_node) {
@@ -2067,12 +2177,15 @@ static TargetInstruction* LowerModulo(ARMGenerator* g, IRNode* node,
 }
 
 
-static TargetInstruction* GetDestInstruction(ARMGenerator* g, IRNode* node);
-
 static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
     return node->data.ptr;
+  }
+
+  if (node->opcode == IR_OP(tmp) && TypeIsWideInt(node->type)) {
+    TargetInstruction* marker = Emit(g, NewInstruction(ARM_OP(tmp)));
+    return SetLoweredNode(node, marker);
   }
 
   // 64-bit integer operations are lowered into register pairs.
@@ -2396,10 +2509,22 @@ static TargetInstruction* GetDestInstruction(ARMGenerator* g, IRNode* node) {
   if (node->dest == NULL) {
     return NULL;
   }
+  if (NodeIsWideInt(node->dest)) {
+    return NULL;
+  }
   if (node->dest->data.ptr == NULL) {
     LowerExpression(g, node->dest);
   }
   return GetLoweredNode(node->dest);
+}
+
+static void RouteWideResultToDest(ARMGenerator* g, IRNode* node,
+                                  TargetInstruction* lo,
+                                  TargetInstruction* hi) {
+  if (node->dest == NULL || !NodeIsWideInt(node->dest)) {
+    return;
+  }
+  StoreWideToMergeTmp(g, node->dest, lo, hi);
 }
 
 static ARMOpcode InvertCondCode(ARMOpcode c) {
@@ -2454,8 +2579,11 @@ static ARMOpcode WideCompareSetFlags(ARMGenerator* g, IRNode* lhs_node,
     } else {
       xlo = blo; xhi = bhi; ylo = alo; yhi = ahi;
     }
-    EmitWide32(g, NewInstruction2(ARM_OP(subs), xlo, ylo));
-    EmitWide32(g, NewInstruction2(ARM_OP(sbcs), xhi, yhi));
+    TargetInstruction* wlo =
+        EmitWide32(g, NewInstruction2(ARM_OP(subs), xlo, ylo));
+    TargetInstruction* whi =
+        EmitWide32(g, NewInstruction2(ARM_OP(sbcs), xhi, yhi));
+    PairWideHalves(wlo, whi);
     if (want_ge) {
       cond = is_unsigned ? ARM_OP(hs) : ARM_OP(ge);
     } else {
@@ -2813,18 +2941,20 @@ static TargetInstruction* LowerWideLoad(ARMGenerator* g, IRNode* node) {
                                     kSize32Bit));
     TargetInstruction* offset_hi =
         GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
+    // Regalloc may assign the low result to hi_addr's register; refresh the
+    // high base so the following load stays `[fp+off+4]`, not `[lo, #4]`.
+    hi_addr = WideMov(g, addr);
     hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), hi_addr, offset_hi),
                                     kSize32Bit));
     uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
     lo->flags |= frame_flag;
     hi->flags |= frame_flag;
+    PairWideHalves(lo, hi);
   }
   SetLoweredHi(node, hi);
-  TargetInstruction* dest = GetDestInstruction(g, node);
-  if (dest != NULL) {
-    lo = SetDestOrMove(g, lo, dest, ARM_OP(mov));
-  }
-  return SetLoweredNode(node, lo);
+  TargetInstruction* result = SetLoweredNode(node, lo);
+  RouteWideResultToDest(g, node, lo, hi);
+  return result;
 }
 
 static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
@@ -3117,6 +3247,7 @@ static TargetInstruction* LowerWideStore(ARMGenerator* g, IRNode* node) {
   IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction *src_lo, *src_hi;
   MaterializeWide(g, src_node, &src_lo, &src_hi);
+  PairWideHalves(src_lo, src_hi);
 
   TargetInstruction* addr;
   TargetInstruction* offset;
@@ -3455,6 +3586,21 @@ static TargetInstruction* LowerZeroExtend(ARMGenerator* g, IRNode* node) {
   // emitting e.g. "and rX, rX, #24" instead of the correct "and rX, rX, #255".)
   IRConstant* diff_node = (IRConstant*)node->inputs.value.p[1];
   int64_t diff = diff_node->value.ivalue;
+  if (NodeIsWideInt(node)) {
+    TargetInstruction* lo = value;
+    if (diff > 0 && diff < 32) {
+      TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
+      TargetInstruction* lsl =
+          Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsl), value, immed), 0));
+      lo = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsr), lsl, immed), 0));
+    }
+    TargetInstruction* hi = ZeroReg(g);
+    PairWideHalves(lo, hi);
+    SetLoweredHi(node, hi);
+    lo = SetLoweredNode(node, lo);
+    RouteWideResultToDest(g, node, lo, hi);
+    return lo;
+  }
   if (diff <= 0 || diff >= 32) {
     return SetLoweredNode(node, value);
   }
@@ -3695,8 +3841,11 @@ static TargetInstruction* FinishSignExtend(ARMGenerator* g, IRNode* node,
     TargetInstruction* hi = EmitWide32(
         g, NewInstruction2(ARM_OP(asr), lo,
                            GetIntConstant(g, NULL, kTargetType32Bit, 31)));
+    PairWideHalves(lo, hi);
     SetLoweredHi(node, hi);
-    return SetLoweredNode(node, lo);
+    lo = SetLoweredNode(node, lo);
+    RouteWideResultToDest(g, node, lo, hi);
+    return lo;
   }
   // Honor a "-> $n" merge destination (see LowerZeroExtend): a sign-extended
   // char/short operand of && / || / ?: must write the merge temp.
@@ -4346,15 +4495,16 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   }
 
   // Phase 4:
-  // Pass through all args, in reverse order, pushing those not passed in
-  // registers and moving the register arguments into their argument
-  // registers.
-  //
-  // TODO: figure out if we can just set the dest to the reg->base.
+  // Materialize stack and scalar register arguments first (reverse pass), then
+  // set up 64-bit register pairs immediately before the call.  Wide movs into
+  // r2:r3 must not run before stack output-pointer addresses are stored.
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
     switch (arg_location->type) {
+      case kArgLocationIntPair:
+        // Materialized in the forward pass below, after stack arguments.
+        break;
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
         // contains the offset from the to of the pushed args to the copied
@@ -4423,39 +4573,6 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         mov->dest = arg_location->location.reg;
         break;
       }
-      case kArgLocationIntPair: {
-        // 64-bit integer: move the low half into the even register and the high
-        // half into the odd register.  Both are kept live to the call via the
-        // regarg list (BuildArgList).  Tag these as argument moves so the
-        // parallel-move resolver schedules them together with the other integer
-        // argument moves; otherwise a following argument materialized into one
-        // of this pair's destination registers (r2/r3) would be clobbered
-        // before its own move reads it.
-        TargetInstruction* lo;
-        TargetInstruction* hi;
-        if (TypeIsMemberPointerAggregate(arg_node->type)) {
-          TargetInstruction* address = Materialize(g, arg_node);
-          lo = Emit(g, SetInstructionSize(
-                           NewInstruction2(
-                               ARM_OP(ldr), address,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-                           kSize32Bit));
-          hi = Emit(g, SetInstructionSize(
-                           NewInstruction2(
-                               ARM_OP(ldr), address,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 4)),
-                           kSize32Bit));
-        } else {
-          MaterializeWide(g, arg_node, &lo, &hi);
-        }
-        TargetInstruction* mlo = Emit(g, NewInstruction1(ARM_OP(mov), lo));
-        mlo->dest = arg_location->location.reg;
-        mlo->flags |= kARMArgMove;
-        TargetInstruction* mhi = Emit(g, NewInstruction1(ARM_OP(mov), hi));
-        mhi->dest = arg_location->reg2;
-        mhi->flags |= kARMArgMove;
-        break;
-      }
       case kArgLocationIntPairSplit: {
         assert(TypeIsMemberPointerAggregate(arg_node->type));
         TargetInstruction* address = Materialize(g, arg_node);
@@ -4513,6 +4630,37 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         break;
       }
     }
+  }
+
+  for (size_t i = 1; i < node->inputs.length; i++) {
+    IRNode* arg_node = node->inputs.value.p[i];
+    ArgLocation* arg_location = arg_locations.value.p[i - 1];
+    if (arg_location->type != kArgLocationIntPair) {
+      continue;
+    }
+    TargetInstruction* lo;
+    TargetInstruction* hi;
+    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+      TargetInstruction* address = Materialize(g, arg_node);
+      lo = Emit(g, SetInstructionSize(
+                       NewInstruction2(
+                           ARM_OP(ldr), address,
+                           GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                       kSize32Bit));
+      hi = Emit(g, SetInstructionSize(
+                       NewInstruction2(
+                           ARM_OP(ldr), address,
+                           GetIntConstant(g, NULL, kTargetType32Bit, 4)),
+                       kSize32Bit));
+    } else {
+      MaterializeWide(g, arg_node, &lo, &hi);
+    }
+    TargetInstruction* mlo = Emit(g, NewInstruction1(ARM_OP(mov), lo));
+    mlo->dest = arg_location->location.reg;
+    mlo->flags |= kARMArgMove;
+    TargetInstruction* mhi = Emit(g, NewInstruction1(ARM_OP(mov), hi));
+    mhi->dest = arg_location->reg2;
+    mhi->flags |= kARMArgMove;
   }
 
   // Finally emit the call instruction containing the address
@@ -4593,6 +4741,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       if (result_used) {
         call = Emit(g, NewInstruction1(ARM_OP(mov), call));
       }
+      PairWideHalves(call, hi);
     } else if (result_used && node->type != NULL &&
                !TypeIsStructOrUnion(node->type)) {
       // Scalar (integer/pointer) result in r0.
@@ -4613,14 +4762,18 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // instead of f()'s result.  bl/blr are not expressions, so SetDestOrMove
   // emits an explicit move rather than redirecting the call's r0 output.
   if (node->dest != NULL) {
-    TargetInstruction* dest = GetDestInstruction(g, node);
-    if (dest != NULL) {
-      // A floating-point result returns in the FP return register and must be
-      // copied with fmov; using the integer mov here corrupts the value.
-      ARMOpcode mov_opcode = TypeIsFloatingPoint(node->type)
-                                 ? ARM_OP(fmov)
-                                 : ARM_OP(mov);
-      call = SetDestOrMove(g, call, dest, mov_opcode);
+    if (NodeIsWideInt(node)) {
+      RouteWideResultToDest(g, node, call, GetLoweredHi(node));
+    } else {
+      TargetInstruction* dest = GetDestInstruction(g, node);
+      if (dest != NULL) {
+        // A floating-point result returns in the FP return register and must be
+        // copied with fmov; using the integer mov here corrupts the value.
+        ARMOpcode mov_opcode = TypeIsFloatingPoint(node->type)
+                                   ? ARM_OP(fmov)
+                                   : ARM_OP(mov);
+        call = SetDestOrMove(g, call, dest, mov_opcode);
+      }
     }
   }
   SetLoweredNode(node, call);
@@ -5216,6 +5369,7 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
         TargetInstruction* lo;
         TargetInstruction* hi;
         MaterializeWide(g, node->inputs.value.p[0], &lo, &hi);
+        PairWideHalves(lo, hi);
         SetLoweredHi(node, hi);
         return SetLoweredNode(node, lo);
       }
@@ -5241,14 +5395,16 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       return LowerMemcpy(g, node);
 
     case IR_OP(cast): {
-      TargetInstruction* inst;
       if (NodeIsWideInt(node)) {
-        TargetInstruction* hi;
-        MaterializeWide(g, node->inputs.value.p[0], &inst, &hi);
+        TargetInstruction *lo, *hi;
+        MaterializeWide(g, node->inputs.value.p[0], &lo, &hi);
+        PairWideHalves(lo, hi);
         SetLoweredHi(node, hi);
-      } else {
-        inst = Materialize(g, node->inputs.value.p[0]);
+        SetLoweredNode(node, lo);
+        RouteWideResultToDest(g, node, lo, hi);
+        return lo;
       }
+      TargetInstruction* inst = Materialize(g, node->inputs.value.p[0]);
       // Honor a "-> $n" merge destination (the temp used to merge the arms of
       // && / || / ?:).  Without this, a cast appearing in one arm (e.g.
       // `cond ? NULL : (char*)s`) never writes the merge temp, so the consumer
@@ -5845,7 +6001,8 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   }
 }
 
-static void AssignRegisterVars(ARMGenerator* g, Vector* vars, Vector* args) {
+static void AssignRegisterVars(ARMGenerator* g, Generator* gen, Vector* vars,
+                               Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -5862,6 +6019,8 @@ static void AssignRegisterVars(ARMGenerator* g, Vector* vars, Vector* args) {
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(g, entry, args, &var_offset);
   }
+
+  AssignWideMergeStackHomes(g, gen);
   
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
@@ -5895,7 +6054,7 @@ static void LowerVariables(ARMGenerator* g, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(g, &local_vars,
+  AssignRegisterVars(g, gen, &local_vars,
                      &compiler->current_function->info.function.prototype);
   VectorDestruct(&local_vars);
 }

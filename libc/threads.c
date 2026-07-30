@@ -6,6 +6,8 @@
 //
 
 #include <threads.h>
+#include <errno.h>
+#include <limits.h>
 #include <syscall.h>
 #include <stdlib.h>
 
@@ -20,10 +22,17 @@ int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
   long tid = syscall(SYS_THREAD_CREATE, func, arg, __davecc_tls_thread_init,
                      __davecc_tls_thread_fini);
   if (tid <= 0) {
-    return thrd_nomem;
+    return tid == -ENOMEM || tid == -EAGAIN ? thrd_nomem : thrd_error;
   }
   *thr = (thrd_t)tid;
   return thrd_success;
+}
+
+int thrd_detach(thrd_t thr) {
+  if (thr == 0) {
+    return thrd_error;
+  }
+  return syscall(SYS_THREAD_DETACH, thr) == 0 ? thrd_success : thrd_error;
 }
 
 int thrd_join(thrd_t thr, int* res) {
@@ -35,6 +44,15 @@ int thrd_join(thrd_t thr, int* res) {
     return thrd_error;
   }
   return thrd_success;
+}
+
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
+  if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
+      duration->tv_nsec >= 1000000000) {
+    return -1;
+  }
+  long result = syscall(SYS_THREAD_SLEEP, duration, remaining);
+  return result == 0 ? 0 : (result == -EINTR ? -2 : -1);
 }
 
 thrd_t thrd_current(void) {
@@ -56,6 +74,11 @@ int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
   return thrd_error;
 }
 
+int thrd_detach(thrd_t thr) {
+  (void)thr;
+  return thrd_error;
+}
+
 int thrd_join(thrd_t thr, int* res) {
   (void)thr;
   (void)res;
@@ -73,7 +96,50 @@ int thrd_equal(thrd_t a, thrd_t b) {
 void thrd_exit(int res) {
   exit(res);
 }
+
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
+  (void)duration;
+  (void)remaining;
+  return -1;
+}
 #endif
+
+int __davecc_addr_wait(const volatile void* address, const void* expected,
+                       size_t size, long long timeout_us) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  long result = syscall(SYS_ADDR_WAIT, address, expected, size, timeout_us);
+  if (result == 0) {
+    return thrd_success;
+  }
+  return result == 1 ? thrd_timedout : thrd_error;
+#else
+  (void)address;
+  (void)expected;
+  (void)size;
+  (void)timeout_us;
+  return thrd_error;
+#endif
+}
+
+int __davecc_addr_wake(const volatile void* address, int wake_all) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  return syscall(SYS_ADDR_WAKE, address, wake_all) >= 0 ? thrd_success
+                                                        : thrd_error;
+#else
+  (void)address;
+  (void)wake_all;
+  return thrd_error;
+#endif
+}
+
+unsigned int __davecc_hardware_concurrency(void) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  long result = syscall(SYS_HARDWARE_CONCURRENCY);
+  return result > 0 ? (unsigned int)result : 0;
+#else
+  return 0;
+#endif
+}
 
 long long __davecc_monotonic_time_us(void) {
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
@@ -88,14 +154,24 @@ long long __davecc_monotonic_time_us(void) {
 #endif
 }
 
+long long __davecc_realtime_time_us(void) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  long long result = 0;
+  if (syscall(SYS_REALTIME_TIME, &result) == 0) {
+    return result;
+  }
+#endif
+  return (long long)time(NULL) * 1000000;
+}
+
 void thrd_yield(void) {
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
   (void)syscall(SYS_THREAD_YIELD);
 #endif
 }
 
-static unsigned int MutexOwnerToken(void) {
-  unsigned int owner = (unsigned int)thrd_current();
+static thrd_t MutexOwnerToken(void) {
+  thrd_t owner = thrd_current();
   return owner == 0 ? 1 : owner;
 }
 
@@ -129,8 +205,20 @@ static int MutexCompareExchange(unsigned int* value, unsigned int* expected,
 #endif
 }
 
-static unsigned int* MutexOwnerSlot(mtx_t* mutex) {
-  return (unsigned int*)&mutex->owner;
+static thrd_t MutexOwnerLoad(const mtx_t* mutex) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  return __atomic_load_n(&mutex->owner, 2);
+#else
+  return mutex->owner;
+#endif
+}
+
+static void MutexOwnerStore(mtx_t* mutex, thrd_t owner) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  __atomic_store_n(&mutex->owner, owner, 3);
+#else
+  mutex->owner = owner;
+#endif
 }
 
 int mtx_init(mtx_t* mutex, int type) {
@@ -157,9 +245,9 @@ int mtx_trylock(mtx_t* mutex) {
   if (mutex == NULL) {
     return thrd_error;
   }
-  unsigned int self = MutexOwnerToken();
+  thrd_t self = MutexOwnerToken();
   if ((mutex->type & mtx_recursive) != 0 && MutexLoad(&mutex->state) != 0 &&
-      MutexLoad(MutexOwnerSlot(mutex)) == self) {
+      MutexOwnerLoad(mutex) == self) {
     ++mutex->recursion;
     return thrd_success;
   }
@@ -167,7 +255,7 @@ int mtx_trylock(mtx_t* mutex) {
   if (!MutexCompareExchange(&mutex->state, &expected, 1)) {
     return thrd_busy;
   }
-  MutexStore(MutexOwnerSlot(mutex), self);
+  MutexOwnerStore(mutex, self);
   mutex->recursion = 1;
   return thrd_success;
 }
@@ -178,7 +266,16 @@ int mtx_lock(mtx_t* mutex) {
     if (result == thrd_success || result == thrd_error) {
       return result;
     }
+    unsigned int locked = 1;
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+    if (__davecc_addr_wait(&mutex->state, &locked, sizeof(locked), -1) ==
+        thrd_error) {
+      return thrd_error;
+    }
+#else
+    (void)locked;
     thrd_yield();
+#endif
   }
 }
 
@@ -204,24 +301,38 @@ int __davecc_mtx_timedlock_for(mtx_t* mutex, long long timeout_us) {
     if (__davecc_monotonic_time_us() >= deadline) {
       return thrd_timedout;
     }
-    thrd_yield();
+    long long remaining = deadline - __davecc_monotonic_time_us();
+    unsigned int locked = 1;
+    int wait_result = __davecc_addr_wait(
+        &mutex->state, &locked, sizeof(locked), remaining > 0 ? remaining : 0);
+    if (wait_result == thrd_error) {
+      return thrd_error;
+    }
   }
 #endif
 }
 
+static long long TimespecToMicroseconds(const struct timespec* time_point) {
+  if ((long long)time_point->tv_sec > LLONG_MAX / 1000000) {
+    return LLONG_MAX;
+  }
+  return (long long)time_point->tv_sec * 1000000 +
+         time_point->tv_nsec / 1000;
+}
+
 int mtx_timedlock(mtx_t* mutex, const struct timespec* time_point) {
-  if (time_point == NULL) {
+  if (time_point == NULL || time_point->tv_sec < 0 ||
+      time_point->tv_nsec < 0 || time_point->tv_nsec >= 1000000000) {
     return thrd_error;
   }
-  long long now = (long long)time(NULL) * 1000000;
-  long long deadline = (long long)time_point->tv_sec * 1000000 +
-                       time_point->tv_nsec / 1000;
+  long long now = __davecc_realtime_time_us();
+  long long deadline = TimespecToMicroseconds(time_point);
   return __davecc_mtx_timedlock_for(mutex, deadline - now);
 }
 
 int mtx_unlock(mtx_t* mutex) {
   if (mutex == NULL || MutexLoad(&mutex->state) == 0 ||
-      MutexLoad(MutexOwnerSlot(mutex)) != MutexOwnerToken()) {
+      MutexOwnerLoad(mutex) != MutexOwnerToken()) {
     return thrd_error;
   }
   if ((mutex->type & mtx_recursive) != 0 && mutex->recursion > 1) {
@@ -229,9 +340,89 @@ int mtx_unlock(mtx_t* mutex) {
     return thrd_success;
   }
   mutex->recursion = 0;
-  MutexStore(MutexOwnerSlot(mutex), 0);
+  MutexOwnerStore(mutex, 0);
   MutexStore(&mutex->state, 0);
+  (void)__davecc_addr_wake(&mutex->state, 0);
   return thrd_success;
+}
+
+static unsigned int ConditionLoad(const cnd_t* condition) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  return __atomic_load_n(&condition->generation, 2);
+#else
+  return condition->generation;
+#endif
+}
+
+static void ConditionAdvance(cnd_t* condition) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  (void)__atomic_fetch_add(&condition->generation, 1, 3);
+#else
+  condition->generation++;
+#endif
+}
+
+int cnd_init(cnd_t* condition) {
+  if (condition == NULL) {
+    return thrd_error;
+  }
+  condition->generation = 0;
+  return thrd_success;
+}
+
+void cnd_destroy(cnd_t* condition) {
+  if (condition != NULL) {
+    condition->generation = 0;
+  }
+}
+
+int cnd_signal(cnd_t* condition) {
+  if (condition == NULL) {
+    return thrd_error;
+  }
+  ConditionAdvance(condition);
+  return __davecc_addr_wake(&condition->generation, 0);
+}
+
+int cnd_broadcast(cnd_t* condition) {
+  if (condition == NULL) {
+    return thrd_error;
+  }
+  ConditionAdvance(condition);
+  return __davecc_addr_wake(&condition->generation, 1);
+}
+
+static int ConditionWaitFor(cnd_t* condition, mtx_t* mutex,
+                            long long timeout_us) {
+  if (condition == NULL || mutex == NULL) {
+    return thrd_error;
+  }
+  unsigned int generation = ConditionLoad(condition);
+  int unlock_result = mtx_unlock(mutex);
+  if (unlock_result != thrd_success) {
+    return unlock_result;
+  }
+  int wait_result = __davecc_addr_wait(
+      &condition->generation, &generation, sizeof(generation), timeout_us);
+  int lock_result = mtx_lock(mutex);
+  return lock_result == thrd_success ? wait_result : lock_result;
+}
+
+int cnd_wait(cnd_t* condition, mtx_t* mutex) {
+  return ConditionWaitFor(condition, mutex, -1);
+}
+
+int cnd_timedwait(cnd_t* condition, mtx_t* mutex,
+                  const struct timespec* time_point) {
+  if (time_point == NULL || time_point->tv_sec < 0 ||
+      time_point->tv_nsec < 0 ||
+      time_point->tv_nsec >= 1000000000) {
+    return thrd_error;
+  }
+  long long deadline = TimespecToMicroseconds(time_point);
+  long long now = __davecc_realtime_time_us();
+  return ConditionWaitFor(condition, mutex,
+                          deadline > now ? deadline - now : 0);
 }
 
 int __davecc_once_begin(dave_once_flag_t* flag) {
@@ -249,19 +440,30 @@ int __davecc_once_begin(dave_once_flag_t* flag) {
         return 1;
       }
     }
+    unsigned int initializing = 1;
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+    if (__davecc_addr_wait(&flag->state, &initializing,
+                           sizeof(initializing), -1) == thrd_error) {
+      return 0;
+    }
+#else
+    (void)initializing;
     thrd_yield();
+#endif
   }
 }
 
 void __davecc_once_complete(dave_once_flag_t* flag) {
   if (flag != NULL) {
     MutexStore(&flag->state, 2);
+    (void)__davecc_addr_wake(&flag->state, 1);
   }
 }
 
 void __davecc_once_abort(dave_once_flag_t* flag) {
   if (flag != NULL) {
     MutexStore(&flag->state, 0);
+    (void)__davecc_addr_wake(&flag->state, 1);
   }
 }
 

@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "guest_addr_wait.h"
 #include "loader.h"
 #include "vector.h"
 #include "x86_64_interpreter.h"
@@ -35,6 +36,8 @@ typedef struct X86_64GuestThread {
   bool host_thread_valid;
   bool is_main;
   bool joinable;
+  bool detached;
+  bool join_in_progress;
   X86_64GuestThreadState state;
   int exit_code;
   X86_64Interpreter cpu;
@@ -60,9 +63,12 @@ typedef struct X86_64ProcessRuntime {
   Vector threads;
   Vector memory_ranges;
   uint64_t next_tid;
+  int active_joins;
   X86_64GuestThread* main_thread;
+  GuestAddrWaitTable addr_wait_table;
   bool shutting_down;
   bool initialized;
+  bool addr_wait_table_initialized;
   bool mutex_initialized;
   bool got_resolve_mutex_initialized;
   bool heap_mutex_initialized;
@@ -90,6 +96,15 @@ int64_t X86_64SyscallThreadCreate(X86_64GuestThread* caller, uint64_t fn,
                                   uint64_t tls_fini_fn);
 int64_t X86_64SyscallThreadJoin(X86_64GuestThread* caller, uint64_t tid,
                                 uint64_t result_ptr);
+int64_t X86_64SyscallThreadDetach(X86_64GuestThread* caller, uint64_t tid);
+int64_t X86_64SyscallAddrWait(X86_64GuestThread* caller, uint64_t address,
+                              uint64_t expected_ptr, size_t size,
+                              int64_t timeout_us);
+int64_t X86_64SyscallAddrWake(X86_64GuestThread* caller, uint64_t address,
+                              bool wake_all);
+int64_t X86_64SyscallThreadSleep(X86_64GuestThread* caller,
+                                 uint64_t duration_ptr, uint64_t remaining_ptr);
+int64_t X86_64SyscallHardwareConcurrency(void);
 int64_t X86_64SyscallThreadSelf(X86_64GuestThread* caller);
 int64_t X86_64SyscallGetTp(X86_64GuestThread* caller);
 void X86_64SyscallThreadExit(X86_64GuestThread* caller, int64_t status);
@@ -109,6 +124,8 @@ int X86_64NativeCallVoidFunction(Loader* loader, uint64_t fn);
 
 void X86_64ProcessRegisterGuestMemory(X86_64ProcessRuntime* process,
                                       uint64_t start, size_t size);
+void X86_64ProcessUnregisterGuestMemory(X86_64ProcessRuntime* process,
+                                        uint64_t start, size_t size);
 bool X86_64ProcessGuestMemoryOk(X86_64ProcessRuntime* process, uint64_t addr,
                                 size_t size);
 

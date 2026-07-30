@@ -389,6 +389,28 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
       *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
       return 0;
     }
+    case X86_64_SYSCALL_THREAD_DETACH:
+      return X86_64SyscallThreadDetach(interpreter->guest_thread, (uint64_t)a0);
+    case X86_64_SYSCALL_ADDR_WAIT:
+      return X86_64SyscallAddrWait(interpreter->guest_thread, (uint64_t)a0,
+                                   (uint64_t)a1, (size_t)a2, a3);
+    case X86_64_SYSCALL_ADDR_WAKE:
+      return X86_64SyscallAddrWake(interpreter->guest_thread, (uint64_t)a0,
+                                   a1 != 0);
+    case X86_64_SYSCALL_THREAD_SLEEP:
+      return X86_64SyscallThreadSleep(interpreter->guest_thread, (uint64_t)a0,
+                                      (uint64_t)a1);
+    case X86_64_SYSCALL_HARDWARE_CONCURRENCY:
+      return X86_64SyscallHardwareConcurrency();
+    case X86_64_SYSCALL_REALTIME_TIME: {
+      struct timespec now;
+      int64_t* result = (int64_t*)(uintptr_t)a0;
+      if (result == NULL || clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return -1;
+      }
+      *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+      return 0;
+    }
     default:
       fprintf(stderr, "Unknown x86_64 syscall %lld\n", (long long)number);
       X86_64InterpreterFail(interpreter, 1);

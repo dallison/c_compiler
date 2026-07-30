@@ -6,14 +6,20 @@
 #include "x86_64_process.h"
 
 #include "elf.h"
+#include "guest_addr_wait.h"
 #include "loader_lifecycle.h"
 #include <errno.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 static pthread_mutex_t g_fallback_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int g_fallback_heap_lock_depth = 0;
+
+static void GuestThreadDestruct(X86_64GuestThread* thread);
 
 static bool GuestLoaderAddressOk(Loader* loader, uint64_t addr, size_t size) {
   for (size_t i = 0; i < loader->regions.length; i++) {
@@ -25,6 +31,80 @@ static bool GuestLoaderAddressOk(Loader* loader, uint64_t addr, size_t size) {
     }
   }
   return false;
+}
+
+static bool GuestMemoryReadable(X86_64ProcessRuntime* process, uint64_t addr,
+                                size_t size) {
+  if (process == NULL) {
+    return false;
+  }
+  if (X86_64ProcessGuestMemoryOk(process, addr, size)) {
+    return true;
+  }
+  return GuestLoaderAddressOk(process->loader, addr, size);
+}
+
+static bool GuestMemoryContainsLocked(X86_64ProcessRuntime* process,
+                                      uint64_t addr, size_t size) {
+  for (size_t i = 0; i < process->memory_ranges.length; i++) {
+    X86_64GuestMemoryRange* range = process->memory_ranges.value.p[i];
+    if (range != NULL && addr >= range->start && addr + size <= range->end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool X86_64GuestAddrRead(void* context, uint64_t guest_address,
+                                void* value, size_t size) {
+  X86_64ProcessRuntime* process = context;
+  if (process == NULL || !process->initialized ||
+      !process->memory_lock_initialized) {
+    return false;
+  }
+  pthread_rwlock_rdlock(&process->memory_lock);
+  bool ok = GuestMemoryContainsLocked(process, guest_address, size);
+  if (!ok) {
+    ok = GuestLoaderAddressOk(process->loader, guest_address, size);
+  }
+  if (ok) {
+    memcpy(value, (void*)(uintptr_t)guest_address, size);
+  }
+  pthread_rwlock_unlock(&process->memory_lock);
+  return ok;
+}
+
+static void ProcessRemoveThread(X86_64ProcessRuntime* process,
+                                X86_64GuestThread* thread) {
+  for (size_t i = 0; i < process->threads.length; i++) {
+    if (process->threads.value.p[i] == thread) {
+      VectorDeleteElement(&process->threads, i);
+      return;
+    }
+  }
+}
+
+static void ReapFinishedDetachedThreads(X86_64ProcessRuntime* process) {
+  for (;;) {
+    X86_64GuestThread* thread = NULL;
+    pthread_mutex_lock(&process->mutex);
+    for (size_t i = 0; i < process->threads.length; i++) {
+      X86_64GuestThread* candidate = process->threads.value.p[i];
+      if (candidate != NULL && candidate->detached &&
+          candidate->state == kGuestThreadFinished &&
+          candidate->host_thread_valid && !candidate->is_main) {
+        thread = candidate;
+        ProcessRemoveThread(process, thread);
+        break;
+      }
+    }
+    pthread_mutex_unlock(&process->mutex);
+    if (thread == NULL) {
+      return;
+    }
+    pthread_join(thread->host_thread, NULL);
+    GuestThreadDestruct(thread);
+  }
 }
 
 void X86_64ProcessRegisterGuestMemory(X86_64ProcessRuntime* process,
@@ -40,6 +120,26 @@ void X86_64ProcessRegisterGuestMemory(X86_64ProcessRuntime* process,
   range->end = start + (uint64_t)size;
   pthread_rwlock_wrlock(&process->memory_lock);
   VectorAppend(&process->memory_ranges, range);
+  pthread_rwlock_unlock(&process->memory_lock);
+}
+
+void X86_64ProcessUnregisterGuestMemory(X86_64ProcessRuntime* process,
+                                      uint64_t start, size_t size) {
+  if (process == NULL || !process->initialized || size == 0 ||
+      !process->memory_lock_initialized) {
+    return;
+  }
+  uint64_t end = start + (uint64_t)size;
+  pthread_rwlock_wrlock(&process->memory_lock);
+  for (size_t i = 0; i < process->memory_ranges.length;) {
+    X86_64GuestMemoryRange* range = process->memory_ranges.value.p[i];
+    if (range != NULL && range->start == start && range->end == end) {
+      free(range);
+      VectorDeleteElement(&process->memory_ranges, i);
+      continue;
+    }
+    i++;
+  }
   pthread_rwlock_unlock(&process->memory_lock);
 }
 
@@ -78,15 +178,23 @@ static void GuestThreadDestruct(X86_64GuestThread* thread) {
   if (thread == NULL) {
     return;
   }
+  X86_64ProcessRuntime* process = thread->process;
+  char* stack = thread->stack;
+  void* tls_block = thread->tls_block;
+  size_t tls_block_size = thread->tls_block_size;
+  if (process != NULL && process->initialized) {
+    if (stack != NULL) {
+      X86_64ProcessUnregisterGuestMemory(process, (uint64_t)(uintptr_t)stack,
+                                         X86_64_STACK_SIZE);
+    }
+    if (tls_block != NULL && tls_block_size > 0) {
+      X86_64ProcessUnregisterGuestMemory(process, (uint64_t)(uintptr_t)tls_block,
+                                         tls_block_size);
+    }
+  }
   X86_64InterpreterDestruct(&thread->cpu);
-  if (thread->stack != NULL) {
-    free(thread->stack);
-    thread->stack = NULL;
-  }
-  if (thread->tls_block != NULL) {
-    free(thread->tls_block);
-    thread->tls_block = NULL;
-  }
+  free(stack);
+  free(tls_block);
   free(thread);
 }
 
@@ -140,6 +248,39 @@ static int RunWorkerGuestCalls(X86_64GuestThread* thread) {
   return result;
 }
 
+static void WaitForActiveJoins(X86_64ProcessRuntime* process) {
+  for (;;) {
+    pthread_mutex_lock(&process->mutex);
+    int pending = process->active_joins;
+    pthread_mutex_unlock(&process->mutex);
+    if (pending == 0) {
+      return;
+    }
+    sched_yield();
+  }
+}
+
+static void WaitForRunningWorkers(X86_64ProcessRuntime* process) {
+  for (;;) {
+    ReapFinishedDetachedThreads(process);
+    bool pending = false;
+    pthread_mutex_lock(&process->mutex);
+    for (size_t i = 0; i < process->threads.length; i++) {
+      X86_64GuestThread* thread = process->threads.value.p[i];
+      if (thread != NULL && !thread->is_main && thread->host_thread_valid &&
+          thread->state != kGuestThreadFinished) {
+        pending = true;
+        break;
+      }
+    }
+    pthread_mutex_unlock(&process->mutex);
+    if (!pending) {
+      return;
+    }
+    sched_yield();
+  }
+}
+
 static void* GuestThreadHostEntry(void* arg) {
   X86_64GuestThread* thread = (X86_64GuestThread*)arg;
   X86_64ProcessSetCurrentThread(thread->process, thread);
@@ -149,6 +290,12 @@ static void* GuestThreadHostEntry(void* arg) {
   pthread_mutex_unlock(&thread->process->mutex);
 
   int exit_code = RunWorkerGuestCalls(thread);
+
+  if (thread->heap_lock_depth > 0 && thread->process != NULL &&
+      thread->process->heap_mutex_initialized) {
+    thread->heap_lock_depth = 0;
+    pthread_mutex_unlock(&thread->process->heap_mutex);
+  }
 
   pthread_mutex_lock(&thread->process->mutex);
   thread->exit_code = exit_code;
@@ -202,6 +349,11 @@ void X86_64ProcessRuntimeInit(X86_64ProcessRuntime* process,
     return;
   }
   process->current_thread_key_initialized = true;
+  if (!GuestAddrWaitTableInit(&process->addr_wait_table)) {
+    DestroyProcessLocks(process);
+    return;
+  }
+  process->addr_wait_table_initialized = true;
   VectorInit(&process->threads);
   VectorInit(&process->memory_ranges);
   process->next_tid = 1;
@@ -223,16 +375,56 @@ void X86_64ProcessRuntimeDestruct(X86_64ProcessRuntime* process) {
   process->shutting_down = true;
   pthread_mutex_unlock(&process->mutex);
 
+  if (process->addr_wait_table_initialized) {
+    GuestAddrWaitTableShutdown(&process->addr_wait_table);
+  }
+
+  ReapFinishedDetachedThreads(process);
+  WaitForRunningWorkers(process);
+  WaitForActiveJoins(process);
+
+  X86_64GuestThread* main_thread = NULL;
+  pthread_mutex_lock(&process->mutex);
   for (size_t i = 0; i < process->threads.length; i++) {
     X86_64GuestThread* thread = process->threads.value.p[i];
+    if (thread != NULL && thread->is_main) {
+      main_thread = thread;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&process->mutex);
+
+  for (;;) {
+    X86_64GuestThread* thread = NULL;
+    pthread_t host = (pthread_t)0;
+    pthread_mutex_lock(&process->mutex);
+    for (size_t i = 0; i < process->threads.length; i++) {
+      X86_64GuestThread* candidate = process->threads.value.p[i];
+      if (candidate != NULL && !candidate->is_main &&
+          candidate->host_thread_valid && !candidate->join_in_progress) {
+        thread = candidate;
+        host = candidate->host_thread;
+        ProcessRemoveThread(process, thread);
+        break;
+      }
+    }
+    pthread_mutex_unlock(&process->mutex);
     if (thread == NULL) {
-      continue;
+      break;
     }
-    if (thread->host_thread_valid && !thread->is_main) {
-      pthread_join(thread->host_thread, NULL);
-      thread->host_thread_valid = false;
-    }
+    pthread_join(host, NULL);
     GuestThreadDestruct(thread);
+  }
+
+  pthread_mutex_lock(&process->mutex);
+  VectorClear(&process->threads);
+  if (main_thread != NULL) {
+    VectorAppend(&process->threads, main_thread);
+  }
+  pthread_mutex_unlock(&process->mutex);
+
+  if (main_thread != NULL) {
+    GuestThreadDestruct(main_thread);
   }
   VectorDestruct(&process->threads);
 
@@ -241,6 +433,11 @@ void X86_64ProcessRuntimeDestruct(X86_64ProcessRuntime* process) {
     free(range);
   }
   VectorDestruct(&process->memory_ranges);
+
+  if (process->addr_wait_table_initialized) {
+    GuestAddrWaitTableDestruct(&process->addr_wait_table);
+    process->addr_wait_table_initialized = false;
+  }
 
   DestroyProcessLocks(process);
   process->initialized = false;
@@ -480,6 +677,7 @@ int64_t X86_64SyscallThreadCreate(X86_64GuestThread* caller, uint64_t fn,
   thread->tid = process->next_tid++;
   thread->cpu.guest_tid = thread->tid;
   VectorAppend(&process->threads, thread);
+  RegisterThreadMemory(process, thread);
 
   int rc = pthread_create(&thread->host_thread, NULL, GuestThreadHostEntry,
                           thread);
@@ -490,9 +688,9 @@ int64_t X86_64SyscallThreadCreate(X86_64GuestThread* caller, uint64_t fn,
     return -ENOMEM;
   }
   thread->host_thread_valid = true;
-  RegisterThreadMemory(process, thread);
   uint64_t tid = thread->tid;
   pthread_mutex_unlock(&process->mutex);
+  ReapFinishedDetachedThreads(process);
   return (int64_t)tid;
 }
 
@@ -521,13 +719,16 @@ int64_t X86_64SyscallThreadJoin(X86_64GuestThread* caller, uint64_t tid,
   }
 
   X86_64ProcessRuntime* process = caller->process;
+  ReapFinishedDetachedThreads(process);
+
   pthread_mutex_lock(&process->mutex);
   X86_64GuestThread* thread = X86_64ProcessFindThread(process, tid);
   if (thread == NULL) {
     pthread_mutex_unlock(&process->mutex);
     return -ESRCH;
   }
-  if (!thread->joinable || thread->state == kGuestThreadJoined) {
+  if (!thread->joinable || thread->detached ||
+      thread->state == kGuestThreadJoined) {
     pthread_mutex_unlock(&process->mutex);
     return -EINVAL;
   }
@@ -540,21 +741,130 @@ int64_t X86_64SyscallThreadJoin(X86_64GuestThread* caller, uint64_t tid,
     return -EINVAL;
   }
   thread->joinable = false;
+  thread->join_in_progress = true;
+  process->active_joins++;
   pthread_t host_thread = thread->host_thread;
   pthread_mutex_unlock(&process->mutex);
 
   pthread_join(host_thread, NULL);
 
-  pthread_mutex_lock(&process->mutex);
-  thread->host_thread_valid = false;
-  thread->state = kGuestThreadJoined;
   int exit_code = thread->exit_code;
-  pthread_mutex_unlock(&process->mutex);
-
   if (result_ptr != 0) {
     *(int*)(uintptr_t)result_ptr = exit_code;
   }
+
+  pthread_mutex_lock(&process->mutex);
+  thread->host_thread_valid = false;
+  thread->join_in_progress = false;
+  process->active_joins--;
+  thread->state = kGuestThreadJoined;
+  ProcessRemoveThread(process, thread);
+  pthread_mutex_unlock(&process->mutex);
+
+  GuestThreadDestruct(thread);
+  ReapFinishedDetachedThreads(process);
   return 0;
+}
+
+int64_t X86_64SyscallThreadDetach(X86_64GuestThread* caller, uint64_t tid) {
+  if (caller == NULL || caller->process == NULL) {
+    return -EINVAL;
+  }
+  if (tid == 0) {
+    return -EINVAL;
+  }
+
+  X86_64ProcessRuntime* process = caller->process;
+  ReapFinishedDetachedThreads(process);
+
+  pthread_mutex_lock(&process->mutex);
+  X86_64GuestThread* thread = X86_64ProcessFindThread(process, tid);
+  if (thread == NULL) {
+    pthread_mutex_unlock(&process->mutex);
+    return -ESRCH;
+  }
+  if (thread->is_main || thread->detached ||
+      thread->state == kGuestThreadJoined) {
+    pthread_mutex_unlock(&process->mutex);
+    return -EINVAL;
+  }
+  if (!thread->joinable) {
+    pthread_mutex_unlock(&process->mutex);
+    return -EINVAL;
+  }
+  thread->joinable = false;
+  thread->detached = true;
+  pthread_mutex_unlock(&process->mutex);
+
+  ReapFinishedDetachedThreads(process);
+  return 0;
+}
+
+int64_t X86_64SyscallAddrWait(X86_64GuestThread* caller, uint64_t address,
+                              uint64_t expected_ptr, size_t size,
+                              int64_t timeout_us) {
+  if (caller == NULL || caller->process == NULL ||
+      !caller->process->addr_wait_table_initialized) {
+    return -EINVAL;
+  }
+  if (expected_ptr == 0 || timeout_us < -1 ||
+      (size != 1 && size != 2 && size != 4 && size != 8)) {
+    return -EINVAL;
+  }
+  X86_64ProcessRuntime* process = caller->process;
+  if (!GuestMemoryReadable(process, expected_ptr, size)) {
+    return -EINVAL;
+  }
+  unsigned char expected[8];
+  memcpy(expected, (void*)(uintptr_t)expected_ptr, size);
+  return GuestAddrWait(&process->addr_wait_table, X86_64GuestAddrRead, process,
+                       address, expected, size, timeout_us);
+}
+
+int64_t X86_64SyscallAddrWake(X86_64GuestThread* caller, uint64_t address,
+                              bool wake_all) {
+  if (caller == NULL || caller->process == NULL ||
+      !caller->process->addr_wait_table_initialized) {
+    return -EINVAL;
+  }
+  return GuestAddrWake(&caller->process->addr_wait_table, address, wake_all);
+}
+
+int64_t X86_64SyscallThreadSleep(X86_64GuestThread* caller,
+                                 uint64_t duration_ptr, uint64_t remaining_ptr) {
+  if (caller == NULL || caller->process == NULL || duration_ptr == 0) {
+    return -EINVAL;
+  }
+  X86_64ProcessRuntime* process = caller->process;
+  if (!GuestMemoryReadable(process, duration_ptr, sizeof(struct timespec))) {
+    return -EINVAL;
+  }
+  struct timespec duration;
+  memcpy(&duration, (void*)(uintptr_t)duration_ptr, sizeof(duration));
+  if (duration.tv_sec < 0 || duration.tv_nsec < 0 ||
+      duration.tv_nsec >= 1000000000L) {
+    return -EINVAL;
+  }
+  struct timespec remaining_storage;
+  struct timespec* remaining = NULL;
+  if (remaining_ptr != 0) {
+    if (!GuestMemoryReadable(process, remaining_ptr, sizeof(struct timespec))) {
+      return -EINVAL;
+    }
+    remaining = &remaining_storage;
+  }
+  if (nanosleep(&duration, remaining) != 0) {
+    if (remaining != NULL && remaining_ptr != 0) {
+      memcpy((void*)(uintptr_t)remaining_ptr, remaining, sizeof(*remaining));
+    }
+    return -errno;
+  }
+  return 0;
+}
+
+int64_t X86_64SyscallHardwareConcurrency(void) {
+  long count = sysconf(_SC_NPROCESSORS_ONLN);
+  return count > 0 ? count : 0;
 }
 
 int64_t X86_64SyscallThreadSelf(X86_64GuestThread* caller) {

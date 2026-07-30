@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "guest_addr_wait.h"
 #include "loader.h"
 #include "risc_v_interpreter.h"
 #include "vector.h"
@@ -17,7 +18,6 @@ typedef enum {
   kRISCVGuestThreadIdle,
   kRISCVGuestThreadRunning,
   kRISCVGuestThreadFinished,
-  kRISCVGuestThreadJoined,
 } RISCVGuestThreadState;
 
 typedef struct RISCVGuestThread {
@@ -27,6 +27,7 @@ typedef struct RISCVGuestThread {
   bool host_thread_valid;
   bool is_main;
   bool joinable;
+  bool join_in_progress;
   RISCVGuestThreadState state;
   int exit_code;
   RISCVInterpreter cpu_storage;
@@ -40,6 +41,7 @@ typedef struct RISCVGuestThread {
   uint64_t tls_fini_fn;
   bool tls_fini_done;
   int heap_lock_depth;
+  bool detached;
 } RISCVGuestThread;
 
 typedef struct RISCVProcessRuntime {
@@ -52,7 +54,9 @@ typedef struct RISCVProcessRuntime {
   pthread_key_t current_thread_key;
   Vector threads;
   uint64_t next_tid;
+  int active_joins;
   RISCVGuestThread* main_thread;
+  GuestAddrWaitTable addr_wait_table;
   bool shutting_down;
   bool initialized;
 } RISCVProcessRuntime;
@@ -69,6 +73,7 @@ int RISCVInterpreterCallWithArg(RISCVInterpreter* interpreter, uint64_t fn,
 void* RISCVGuestAddressToHost(RISCVInterpreter* interpreter, uint64_t addr,
                               size_t size);
 
+// RISCVProcessResolveGuestAddress acquires process->mutex internally.
 bool RISCVProcessRuntimeInit(RISCVProcessRuntime* process, Loader* loader);
 void RISCVProcessRuntimeDestruct(RISCVProcessRuntime* process);
 RISCVGuestThread* RISCVProcessAttachMainThread(RISCVProcessRuntime* process,
@@ -89,5 +94,15 @@ int64_t RISCVSyscallHeapLock(RISCVGuestThread* caller);
 int64_t RISCVSyscallHeapUnlock(RISCVGuestThread* caller);
 int64_t RISCVSyscallTime(void);
 int64_t RISCVSyscallClock(void);
+int64_t RISCVSyscallThreadDetach(RISCVGuestThread* caller, uint64_t tid);
+int64_t RISCVSyscallAddrWait(RISCVGuestThread* caller, uint64_t address,
+                             uint64_t expected_ptr, uint64_t size,
+                             int64_t timeout_us);
+int64_t RISCVSyscallAddrWake(RISCVGuestThread* caller, uint64_t address,
+                             int64_t wake_all);
+int64_t RISCVSyscallThreadSleep(RISCVGuestThread* caller,
+                                uint64_t duration_ptr,
+                                uint64_t remaining_ptr);
+int64_t RISCVSyscallHardwareConcurrency(void);
 
 #endif

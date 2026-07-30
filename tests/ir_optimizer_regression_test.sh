@@ -479,3 +479,22 @@ if grep -Eq '[[:space:]]mov[[:space:]]|[[:space:]]str[[:space:]]+(x31|xzr)' \
   echo "AArch64 leaf reference return retained redundant register copies" >&2
   exit 1
 fi
+
+# Passing a computed 64-bit ?: result (and related wide merge temps) into calls
+# must preserve both halves across argument materialization.
+ARM_I64_CALL_ARG_SOURCE="$ROOT/tests/arm_i64_call_arg_test.c"
+ARM_I64_CALL_ARG_EXE="$WORK/arm_i64_call_arg.exe"
+"$DAVECC" -target arm -O0 -nostdinc -nostdlib -static -Wl,-e -Wl,main \
+  "$ARM_I64_CALL_ARG_SOURCE" -o "$ARM_I64_CALL_ARG_EXE"
+if ! "$INTERP_ARM" -i "$ARM_I64_CALL_ARG_EXE"; then
+  echo "ARM 64-bit call argument regression executable failed at -O0" >&2
+  exit 1
+fi
+
+ARM_I64_CALL_ARG_O2_EXE="$WORK/arm_i64_call_arg_o2.exe"
+"$DAVECC" -target arm -O2 -nostdinc -nostdlib -static -Wl,-e -Wl,main \
+  "$ARM_I64_CALL_ARG_SOURCE" -o "$ARM_I64_CALL_ARG_O2_EXE"
+if ! "$INTERP_ARM" -i "$ARM_I64_CALL_ARG_O2_EXE"; then
+  echo "ARM 64-bit call argument regression executable failed at -O2" >&2
+  exit 1
+fi

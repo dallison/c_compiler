@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "arm_interpreter.h"
+#include "guest_addr_wait.h"
 #include "loader.h"
 #include "vector.h"
 
@@ -13,16 +14,17 @@ typedef enum {
   kARMGuestThreadIdle,
   kARMGuestThreadRunning,
   kARMGuestThreadFinished,
-  kARMGuestThreadJoined,
 } ARMGuestThreadState;
 
 typedef struct ARMGuestThread {
   struct ARMProcessRuntime* process;
   uint32_t tid;
+  uint32_t slot;
   pthread_t host_thread;
   bool host_thread_valid;
   bool is_main;
   bool joinable;
+  bool join_in_progress;
   ARMGuestThreadState state;
   int exit_code;
   ARMInterpreter cpu_storage;
@@ -36,6 +38,7 @@ typedef struct ARMGuestThread {
   uint64_t tls_fini_fn;
   bool tls_fini_done;
   int heap_lock_depth;
+  bool detached;
 } ARMGuestThread;
 
 typedef struct ARMProcessRuntime {
@@ -48,11 +51,14 @@ typedef struct ARMProcessRuntime {
   pthread_key_t current_thread_key;
   Vector threads;
   uint32_t next_tid;
+  int active_joins;
   ARMGuestThread* main_thread;
+  GuestAddrWaitTable addr_wait_table;
   bool shutting_down;
   bool initialized;
 } ARMProcessRuntime;
 
+// ARMProcessResolveGuestAddress acquires process->mutex internally.
 bool ARMProcessRuntimeInit(ARMProcessRuntime* process, Loader* loader);
 void ARMProcessRuntimeDestruct(ARMProcessRuntime* process);
 ARMGuestThread* ARMProcessAttachMainThread(ARMProcessRuntime* process,
@@ -71,5 +77,14 @@ int32_t ARMSyscallGetTp(ARMGuestThread* caller);
 void ARMSyscallThreadExit(ARMGuestThread* caller, int32_t status);
 int32_t ARMSyscallHeapLock(ARMGuestThread* caller);
 int32_t ARMSyscallHeapUnlock(ARMGuestThread* caller);
+int32_t ARMSyscallThreadDetach(ARMGuestThread* caller, uint32_t tid);
+int32_t ARMSyscallAddrWait(ARMGuestThread* caller, uint32_t address,
+                           uint32_t expected_ptr, uint32_t size,
+                           int64_t timeout_us);
+int32_t ARMSyscallAddrWake(ARMGuestThread* caller, uint32_t address,
+                           uint32_t wake_all);
+int32_t ARMSyscallThreadSleep(ARMGuestThread* caller, uint32_t duration_ptr,
+                              uint32_t remaining_ptr);
+int32_t ARMSyscallHardwareConcurrency(void);
 
 #endif

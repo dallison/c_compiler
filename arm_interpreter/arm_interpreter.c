@@ -666,8 +666,6 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
 static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
                              int32_t a0, int32_t a1, int32_t a2, int32_t a3,
                              int32_t a4, int32_t a5, bool* pc_updated) {
-  (void)a4;
-  (void)a5;
   switch (number) {
     case ARM_SYSCALL_HALT:
     case ARM_SYSCALL_EXIT:
@@ -750,6 +748,30 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       int64_t* result =
           (int64_t*)ResolveHostPtr(interpreter, (uint32_t)a1, sizeof(int64_t));
       if (result == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+      }
+      *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+      return 0;
+    }
+    case ARM_SYSCALL_THREAD_DETACH:
+      return ARMSyscallThreadDetach(interpreter->guest_thread, (uint32_t)a1);
+    case ARM_SYSCALL_ADDR_WAIT:
+      return ARMSyscallAddrWait(
+          interpreter->guest_thread, (uint32_t)a1, (uint32_t)a2, (uint32_t)a3,
+          (int64_t)((uint64_t)(uint32_t)a4 | ((uint64_t)(uint32_t)a5 << 32)));
+    case ARM_SYSCALL_ADDR_WAKE:
+      return ARMSyscallAddrWake(interpreter->guest_thread, (uint32_t)a1,
+                                (uint32_t)a2);
+    case ARM_SYSCALL_THREAD_SLEEP:
+      return ARMSyscallThreadSleep(interpreter->guest_thread, (uint32_t)a1,
+                                    (uint32_t)a2);
+    case ARM_SYSCALL_HARDWARE_CONCURRENCY:
+      return ARMSyscallHardwareConcurrency();
+    case ARM_SYSCALL_REALTIME_TIME: {
+      struct timespec now;
+      int64_t* result =
+          (int64_t*)ResolveHostPtr(interpreter, (uint32_t)a1, sizeof(int64_t));
+      if (result == NULL || clock_gettime(CLOCK_REALTIME, &now) != 0) {
         return -1;
       }
       *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
@@ -1890,14 +1912,14 @@ void ARMInterpreterInitForThread(
     interpreter->stack = malloc(ARM_STACK_SIZE);
     interpreter->owns_stack = true;
   }
-  uint32_t tid = guest_thread != NULL ? guest_thread->tid : 1;
+  uint32_t slot = guest_thread != NULL ? guest_thread->slot : 0;
   interpreter->stack_guest_base =
-      ARM_STACK_BASE - (tid > 0 ? (tid - 1) * 0x01000000u : 0);
+      ARM_STACK_BASE - slot * 0x01000000u;
   if (tls_block != NULL) {
     interpreter->tls_block = tls_block;
     interpreter->tls_block_size = tls_block_size;
     interpreter->tls_guest_base =
-        ARM_TLS_BASE + (tid > 0 ? (tid - 1) * 0x00100000u : 0);
+        ARM_TLS_BASE + slot * 0x00100000u;
     interpreter->tp_base = interpreter->tls_guest_base;
   } else if (loader->tls.present && loader->tls.main_thread_block != NULL) {
     interpreter->tls_block = loader->tls.main_thread_block;

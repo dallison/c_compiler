@@ -77,14 +77,16 @@ bool representation_differs(const T& left, const T& right) noexcept {
 
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
 template <class Atomic>
-void wait(const Atomic& object, typename Atomic::value_type old,
-          memory_order order) noexcept {
+void wait(const Atomic& object, const volatile void* address,
+          typename Atomic::value_type old, memory_order order) noexcept {
   for (;;) {
     typename Atomic::value_type current = object.load(order);
     if (representation_differs(current, old)) {
       return;
     }
-    thrd_yield();
+    if (__davecc_addr_wait(address, &old, sizeof(old), -1) != thrd_success) {
+      return;
+    }
   }
 }
 #endif
@@ -222,13 +224,15 @@ struct atomic {
 
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
   void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
-    __atomic_detail::wait(*this, old, order);
+    __atomic_detail::wait(*this, &__value, old, order);
   }
 
   void notify_one() noexcept {
+    (void)__davecc_addr_wake(&__value, 0);
   }
 
   void notify_all() noexcept {
+    (void)__davecc_addr_wake(&__value, 1);
   }
 #endif
 
@@ -400,13 +404,15 @@ struct atomic_ref {
 
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
   void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
-    __atomic_detail::wait(*this, old, order);
+    __atomic_detail::wait(*this, __ptr, old, order);
   }
 
   void notify_one() const noexcept {
+    (void)__davecc_addr_wake(__ptr, 0);
   }
 
   void notify_all() const noexcept {
+    (void)__davecc_addr_wake(__ptr, 1);
   }
 #endif
 

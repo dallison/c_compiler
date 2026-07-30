@@ -189,7 +189,11 @@ uint64_t LoaderLookupSymbol(Loader* loader, const char* name) {
   if (!found) {
     return 0;
   }
-  return lib->load_address + symbol->value;
+  uint64_t runtime = 0;
+  if (!LoaderLinkedAddressToRuntime(loader, lib, symbol->value, &runtime)) {
+    return 0;
+  }
+  return runtime;
 }
 
 void LoaderSetCurrentSymbol(Loader* loader,

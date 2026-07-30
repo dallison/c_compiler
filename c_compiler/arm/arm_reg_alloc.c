@@ -549,7 +549,7 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, spill, inst);
   }
-  
+
   // Retarget all uses of the original instruction to the spill.  If the
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
@@ -1063,6 +1063,26 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
        continue;
      }
      reg->base.owner = NULL;
+  }
+
+  // A value defined before a loop and live across its back edge must not remain
+  // solely in a physical register.  Dominator-order allocation can otherwise
+  // spill it only after an early loop use has already been processed, leaving
+  // that processed use tied to a register which later loop instructions reuse.
+  // Spill such invariants before allocating the first loop instruction so all
+  // loop uses are retargeted to reload from a stable stack slot.
+  if (block->loop_nesting > 0) {
+    for (size_t i = 0; i < block->inputs.length; i++) {
+      TargetInstruction* inst = block->inputs.value.p[i];
+      if (inst->block == block || inst->reg == NULL ||
+          ARMIsFixedRegister(inst) || ARMIsVarRegister(inst) ||
+          (inst->flags & TARGET_INST_SPILLED) != 0 ||
+          !BitSetContains(&block->output_ids, inst->id) ||
+          InstructionHasExternalDefs(allocator, inst)) {
+        continue;
+      }
+      SpillInstruction(allocator, inst);
+    }
   }
     
   // Now allocate the registers to the inputs.
