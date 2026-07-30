@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <new>
+#include <stop_token>
 #include <syscall.h>
 #include <system_error>
 #include <threads.h>
@@ -85,6 +86,39 @@ struct __state {
   void __call() {
     __apply<Function, __argument_pack<Args...>>::__call(
         __function, __arguments);
+  }
+};
+
+template <class Function, class... Args>
+struct __plain_invocation {
+  Function __function;
+  __argument_pack<Args...> __arguments;
+
+  explicit __plain_invocation(Function&& function, Args&&... arguments)
+      : __function(std::move(function)),
+        __arguments(std::move(arguments)...) {}
+
+  void operator()() {
+    __apply<Function, __argument_pack<Args...>>::__call(
+        __function, __arguments);
+  }
+};
+
+template <class Function, class... Args>
+struct __stoppable_invocation {
+  stop_token __token;
+  Function __function;
+  __argument_pack<Args...> __arguments;
+
+  explicit __stoppable_invocation(stop_token&& token, Function&& function,
+                                  Args&&... arguments)
+      : __token(std::move(token)),
+        __function(std::move(function)),
+        __arguments(std::move(arguments)...) {}
+
+  void operator()() {
+    __apply<Function, __argument_pack<Args...>>::__call(
+        __function, __arguments, std::move(__token));
   }
 };
 
@@ -288,6 +322,143 @@ struct hash<thread::id> {
     return hash<thrd_t>{}(value.__value_);
   }
 };
+
+class jthread {
+  template <class Function, class... Args>
+  void __start_pointer(true_type, Function function, Args... arguments) {
+    __thread_ = thread(function, __source_.get_token(),
+                       std::move(arguments)...);
+  }
+
+  template <class Function, class... Args>
+  void __start_pointer(false_type, Function function, Args... arguments) {
+    __thread_ = thread(function, std::move(arguments)...);
+  }
+
+  template <class Function, class... Args>
+  static thread __make_thread_impl(true_type, stop_token token,
+                                   Function function, Args... arguments) {
+    using invocation =
+        __thread_detail::__stoppable_invocation<
+            Function, Args...>;
+    return thread(invocation(
+        std::move(token), std::move(function),
+        std::move(arguments)...));
+  }
+
+  template <class Function, class... Args>
+  static thread __make_thread_impl(false_type, stop_token,
+                                   Function function, Args... arguments) {
+    using invocation =
+        __thread_detail::__plain_invocation<
+            Function, Args...>;
+    return thread(invocation(
+        std::move(function), std::move(arguments)...));
+  }
+
+  template <class Function, class... Args>
+  static thread __make_thread(stop_token token, Function function,
+                              Args... arguments) {
+    using accepts_stop_token =
+        typename is_invocable<Function, stop_token, Args...>::type;
+    return __make_thread_impl(
+        accepts_stop_token(), std::move(token),
+        std::move(function), std::move(arguments)...);
+  }
+
+ public:
+  using id = thread::id;
+  using native_handle_type = thread::native_handle_type;
+
+  jthread() noexcept : __source_(nostopstate), __thread_() {}
+
+  template <class Function, class... Args>
+    requires (
+        is_pointer<Function>::value &&
+        (is_invocable<Function, stop_token, decay_t<Args>...>::value ||
+         is_invocable<Function, decay_t<Args>...>::value))
+  explicit jthread(Function function, Args&&... arguments)
+      : __source_(), __thread_() {
+    using accepts_stop_token =
+        typename is_invocable<Function, stop_token,
+                              decay_t<Args>...>::type;
+    __start_pointer(
+        accepts_stop_token(), function,
+        __thread_detail::__decay_copy(
+            static_cast<Args&&>(arguments))...);
+  }
+
+  template <class Function, class... Args>
+    requires (
+        !is_same_v<remove_cvref_t<Function>, jthread> &&
+        !is_pointer<decay_t<Function>>::value &&
+        (is_invocable<decay_t<Function>, stop_token,
+                      decay_t<Args>...>::value ||
+         is_invocable<decay_t<Function>, decay_t<Args>...>::value))
+  explicit jthread(Function&& function, Args&&... arguments)
+      : __source_(),
+        __thread_(__make_thread(
+            __source_.get_token(),
+            __thread_detail::__decay_copy(
+                static_cast<Function&&>(function)),
+            __thread_detail::__decay_copy(
+                static_cast<Args&&>(arguments))...)) {}
+
+  ~jthread() {
+    if (joinable()) {
+      request_stop();
+      join();
+    }
+  }
+
+  jthread(const jthread&) = delete;
+  jthread& operator=(const jthread&) = delete;
+
+  jthread(jthread&& other) noexcept
+      : __source_(std::move(other.__source_)),
+        __thread_(std::move(other.__thread_)) {}
+
+  jthread& operator=(jthread&& other) noexcept {
+    if (this != &other) {
+      if (joinable()) {
+        request_stop();
+        join();
+      }
+      __source_ = std::move(other.__source_);
+      __thread_ = std::move(other.__thread_);
+    }
+    return *this;
+  }
+
+  void swap(jthread& other) noexcept {
+    __source_.swap(other.__source_);
+    __thread_.swap(other.__thread_);
+  }
+
+  bool joinable() const noexcept { return __thread_.joinable(); }
+  void join() { __thread_.join(); }
+  void detach() { __thread_.detach(); }
+  id get_id() const noexcept { return __thread_.get_id(); }
+  native_handle_type native_handle() { return __thread_.native_handle(); }
+
+  stop_source get_stop_source() noexcept { return __source_; }
+  stop_token get_stop_token() const noexcept {
+    return __source_.get_token();
+  }
+  bool request_stop() noexcept { return __source_.request_stop(); }
+
+  static unsigned int hardware_concurrency() noexcept {
+    return thread::hardware_concurrency();
+  }
+
+ private:
+  stop_source __source_;
+  thread __thread_;
+};
+
+inline void swap(jthread& left, jthread& right) noexcept {
+  left.swap(right);
+}
 
 namespace this_thread {
 

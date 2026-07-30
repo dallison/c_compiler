@@ -53,12 +53,12 @@ and approves the runtime foundation.
 
 ## Step 4: Stop tokens and `jthread`
 
-- [ ] Add `stop_token`, `stop_source`, `stop_callback`, and `nostopstate`.
-- [ ] Make callback registration, execution, and destruction race-safe.
-- [ ] Add `jthread` stop-token injection, request-stop, move, and destructor
+- [x] Add `stop_token`, `stop_source`, `stop_callback`, and `nostopstate`.
+- [x] Make callback registration, execution, and destruction race-safe.
+- [x] Add `jthread` stop-token injection, request-stop, move, and destructor
       semantics.
-- [ ] Add hosted cross-backend tests.
-- [ ] Review Step 4 before proceeding.
+- [x] Add hosted cross-backend tests.
+- [x] Review Step 4 before proceeding.
 
 ## Step 5: Integration and completion
 

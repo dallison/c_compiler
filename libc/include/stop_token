@@ -1,0 +1,406 @@
+//
+//  stop_token
+//  libc
+//
+//  C++20 cooperative cancellation support for DaveCC.
+//
+
+#ifndef __davecc_stop_token__
+#define __davecc_stop_token__
+
+#include <atomic>
+#include <mutex>
+#include <new>
+#include <syscall.h>
+#include <threads.h>
+#include <type_traits>
+#include <utility>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<stop_token> is unavailable in this single-threaded target profile"
+#endif
+
+#define __cpp_lib_jthread 201911L
+
+namespace std {
+
+struct nostopstate_t {
+  explicit constexpr nostopstate_t() = default;
+};
+
+inline constexpr nostopstate_t nostopstate{};
+
+class stop_token;
+class stop_source;
+template <class Callback>
+class stop_callback;
+
+namespace __stop_detail {
+
+struct __callback_base;
+
+struct __state {
+  atomic<unsigned int> __references;
+  atomic<unsigned int> __sources;
+  atomic<bool> __requested;
+  mutex __mutex;
+  __callback_base* __callbacks;
+
+  __state()
+      : __references(1),
+        __sources(1),
+        __requested(false),
+        __callbacks(nullptr) {}
+};
+
+inline void __state_add_ref(__state* state) noexcept {
+  if (state != nullptr) {
+    state->__references.fetch_add(1, memory_order_relaxed);
+  }
+}
+
+inline void __state_release(__state* state) noexcept {
+  if (state != nullptr &&
+      state->__references.fetch_sub(1, memory_order_acq_rel) == 1) {
+    delete state;
+  }
+}
+
+struct __callback_execution {
+  atomic<bool> __running;
+  atomic<bool> __owner_destroyed;
+  atomic<unsigned int> __waiters;
+  thrd_t __thread_id;
+
+  __callback_execution()
+      : __running(true),
+        __owner_destroyed(false),
+        __waiters(0),
+        __thread_id(thrd_current()) {}
+};
+
+struct __callback_base {
+  __callback_base* __next;
+  __callback_execution* __execution;
+  bool __registered;
+
+  __callback_base()
+      : __next(nullptr),
+        __execution(nullptr),
+        __registered(false) {}
+
+  virtual ~__callback_base() = default;
+  virtual void __call() noexcept = 0;
+};
+
+template <class Callback>
+struct __callback_node : __callback_base {
+  Callback __callback;
+
+  template <class Initializer>
+  explicit __callback_node(Initializer&& callback) noexcept(
+      is_nothrow_constructible<Callback, Initializer&&>::value)
+      : __callback_base(),
+        __callback(static_cast<Initializer&&>(callback)) {}
+
+  void __call() noexcept override { __callback(); }
+};
+
+inline bool __state_stop_possible(__state* state) noexcept {
+  return state != nullptr &&
+         (state->__requested.load(memory_order_acquire) ||
+          state->__sources.load(memory_order_acquire) != 0);
+}
+
+inline void __register_callback(__state* state,
+                                __callback_base* callback) noexcept {
+  state->__mutex.lock();
+  if (!state->__requested.load(memory_order_acquire)) {
+    callback->__next = state->__callbacks;
+    callback->__registered = true;
+    state->__callbacks = callback;
+    state->__mutex.unlock();
+    return;
+  }
+  state->__mutex.unlock();
+  callback->__call();
+}
+
+inline void __unregister_callback(__state* state,
+                                  __callback_base* callback) noexcept {
+  state->__mutex.lock();
+  if (callback->__registered) {
+    __callback_base** link = &state->__callbacks;
+    while (*link != nullptr && *link != callback) {
+      link = &(*link)->__next;
+    }
+    if (*link == callback) {
+      *link = callback->__next;
+    }
+    callback->__registered = false;
+    callback->__next = nullptr;
+  }
+  __callback_execution* execution = callback->__execution;
+  bool same_thread =
+      execution != nullptr && execution->__thread_id == thrd_current();
+  if (execution != nullptr && !same_thread) {
+    execution->__waiters.fetch_add(1, memory_order_relaxed);
+  }
+  state->__mutex.unlock();
+
+  if (execution == nullptr) {
+    return;
+  }
+  if (same_thread) {
+    execution->__owner_destroyed.store(true, memory_order_release);
+    return;
+  }
+  while (execution->__running.load(memory_order_acquire)) {
+    execution->__running.wait(true, memory_order_acquire);
+  }
+  if (execution->__waiters.fetch_sub(1, memory_order_acq_rel) == 1) {
+    execution->__waiters.notify_all();
+  }
+}
+
+inline bool __request_stop(__state* state) noexcept {
+  if (state == nullptr ||
+      state->__requested.exchange(true, memory_order_acq_rel)) {
+    return false;
+  }
+
+  // A callback may destroy every stop_source, including the source whose
+  // request_stop call is currently active.  Keep the state alive independently
+  // until callback traversal and mutex use have finished.
+  __state_add_ref(state);
+  state->__mutex.lock();
+  while (state->__callbacks != nullptr) {
+    __callback_base* callback = state->__callbacks;
+    state->__callbacks = callback->__next;
+    callback->__next = nullptr;
+    callback->__registered = false;
+    __callback_execution execution;
+    callback->__execution = &execution;
+    state->__mutex.unlock();
+
+    callback->__call();
+
+    if (!execution.__owner_destroyed.load(memory_order_acquire)) {
+      state->__mutex.lock();
+      callback->__execution = nullptr;
+      state->__mutex.unlock();
+    }
+    execution.__running.store(false, memory_order_release);
+    execution.__running.notify_all();
+    while (execution.__waiters.load(memory_order_acquire) != 0) {
+      unsigned int waiters =
+          execution.__waiters.load(memory_order_relaxed);
+      if (waiters != 0) {
+        execution.__waiters.wait(waiters, memory_order_acquire);
+      }
+    }
+
+    state->__mutex.lock();
+  }
+  state->__mutex.unlock();
+  __state_release(state);
+  return true;
+}
+
+}  // namespace __stop_detail
+
+class stop_token {
+ public:
+  stop_token() noexcept : __state_(nullptr) {}
+
+  stop_token(const stop_token& other) noexcept : __state_(other.__state_) {
+    __stop_detail::__state_add_ref(__state_);
+  }
+
+  stop_token(stop_token&& other) noexcept : __state_(other.__state_) {
+    other.__state_ = nullptr;
+  }
+
+  ~stop_token() { __stop_detail::__state_release(__state_); }
+
+  stop_token& operator=(const stop_token& other) noexcept {
+    if (this != &other) {
+      __stop_detail::__state_add_ref(other.__state_);
+      __stop_detail::__state_release(__state_);
+      __state_ = other.__state_;
+    }
+    return *this;
+  }
+
+  stop_token& operator=(stop_token&& other) noexcept {
+    if (this != &other) {
+      __stop_detail::__state_release(__state_);
+      __state_ = other.__state_;
+      other.__state_ = nullptr;
+    }
+    return *this;
+  }
+
+  void swap(stop_token& other) noexcept {
+    std::swap(__state_, other.__state_);
+  }
+
+  bool stop_requested() const noexcept {
+    return __state_ != nullptr &&
+           __state_->__requested.load(memory_order_acquire);
+  }
+
+  bool stop_possible() const noexcept {
+    return __stop_detail::__state_stop_possible(__state_);
+  }
+
+  friend bool operator==(const stop_token& left,
+                         const stop_token& right) noexcept {
+    return left.__state_ == right.__state_;
+  }
+
+ private:
+  explicit stop_token(__stop_detail::__state* state) noexcept
+      : __state_(state) {
+    __stop_detail::__state_add_ref(__state_);
+  }
+
+  __stop_detail::__state* __state_;
+
+  friend class stop_source;
+  template <class Callback>
+  friend class stop_callback;
+};
+
+inline void swap(stop_token& left, stop_token& right) noexcept {
+  left.swap(right);
+}
+
+class stop_source {
+ public:
+  stop_source() : __state_(new __stop_detail::__state()) {}
+  explicit stop_source(nostopstate_t) noexcept : __state_(nullptr) {}
+
+  stop_source(const stop_source& other) noexcept : __state_(other.__state_) {
+    if (__state_ != nullptr) {
+      __stop_detail::__state_add_ref(__state_);
+      __state_->__sources.fetch_add(1, memory_order_relaxed);
+    }
+  }
+
+  stop_source(stop_source&& other) noexcept : __state_(other.__state_) {
+    other.__state_ = nullptr;
+  }
+
+  ~stop_source() { __release(); }
+
+  stop_source& operator=(const stop_source& other) noexcept {
+    if (this != &other) {
+      __stop_detail::__state* replacement = other.__state_;
+      if (replacement != nullptr) {
+        __stop_detail::__state_add_ref(replacement);
+        replacement->__sources.fetch_add(1, memory_order_relaxed);
+      }
+      __release();
+      __state_ = replacement;
+    }
+    return *this;
+  }
+
+  stop_source& operator=(stop_source&& other) noexcept {
+    if (this != &other) {
+      __release();
+      __state_ = other.__state_;
+      other.__state_ = nullptr;
+    }
+    return *this;
+  }
+
+  void swap(stop_source& other) noexcept {
+    std::swap(__state_, other.__state_);
+  }
+
+  stop_token get_token() const noexcept { return stop_token(__state_); }
+
+  bool stop_possible() const noexcept { return __state_ != nullptr; }
+  bool stop_requested() const noexcept {
+    return __state_ != nullptr &&
+           __state_->__requested.load(memory_order_acquire);
+  }
+  bool request_stop() noexcept {
+    return __stop_detail::__request_stop(__state_);
+  }
+
+  friend bool operator==(const stop_source& left,
+                         const stop_source& right) noexcept {
+    return left.__state_ == right.__state_;
+  }
+
+ private:
+  void __release() noexcept {
+    if (__state_ != nullptr) {
+      __state_->__sources.fetch_sub(1, memory_order_release);
+      __stop_detail::__state_release(__state_);
+      __state_ = nullptr;
+    }
+  }
+
+  __stop_detail::__state* __state_;
+};
+
+inline void swap(stop_source& left, stop_source& right) noexcept {
+  left.swap(right);
+}
+
+template <class Callback>
+class stop_callback {
+ public:
+  using callback_type = Callback;
+
+  template <class Initializer>
+  explicit stop_callback(const stop_token& token,
+                         Initializer&& callback) noexcept(
+      is_nothrow_constructible<Callback, Initializer&&>::value)
+      : __state_(token.__state_),
+        __callback_(static_cast<Initializer&&>(callback)) {
+    __stop_detail::__state_add_ref(__state_);
+    if (__stop_detail::__state_stop_possible(__state_)) {
+      __stop_detail::__register_callback(__state_, &__callback_);
+    }
+  }
+
+  template <class Initializer>
+  explicit stop_callback(stop_token&& token,
+                         Initializer&& callback) noexcept(
+      is_nothrow_constructible<Callback, Initializer&&>::value)
+      : __state_(token.__state_),
+        __callback_(static_cast<Initializer&&>(callback)) {
+    __stop_detail::__state_add_ref(__state_);
+    if (__stop_detail::__state_stop_possible(__state_)) {
+      __stop_detail::__register_callback(__state_, &__callback_);
+    }
+  }
+
+  ~stop_callback() {
+    if (__state_ != nullptr) {
+      __stop_detail::__unregister_callback(__state_, &__callback_);
+      __stop_detail::__state_release(__state_);
+    }
+  }
+
+  stop_callback(const stop_callback&) = delete;
+  stop_callback& operator=(const stop_callback&) = delete;
+  stop_callback(stop_callback&&) = delete;
+  stop_callback& operator=(stop_callback&&) = delete;
+
+ private:
+  __stop_detail::__state* __state_;
+  __stop_detail::__callback_node<Callback> __callback_;
+};
+
+template <class Callback>
+stop_callback(stop_token, Callback) -> stop_callback<decay_t<Callback>>;
+
+}  // namespace std
+
+#endif /* __davecc_stop_token__ */
