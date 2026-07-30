@@ -151,12 +151,15 @@ typedef void* (*SerialAllocFn)(DeserializeContext* ctx, const void* blob,
                                size_t len);
 typedef bool (*SerialReadFn)(DeserializeContext* ctx, WireBuffer* buf,
                              void* obj);
+typedef bool (*SerialCanInternFn)(const void* obj);
 
 typedef struct {
   SerialWriteFn write;
   SerialAllocFn alloc;
   SerialReadFn read;
   const char* name;  // Human-readable kind name (for FIELDMETA / debugging).
+  // Optional validity check for weak/stale graph references.
+  SerialCanInternFn can_intern;
 } SerialKindVtable;
 
 // Registers the vtable for a kind.  Safe to call more than once (idempotent).

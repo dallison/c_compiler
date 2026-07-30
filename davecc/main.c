@@ -8,11 +8,13 @@
 
 // This is a driver for the C compiler, assembler, linker and interpreter.
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "dstring.h"
 #include "vector.h"
@@ -1167,6 +1169,27 @@ static bool EmitModule(const char* input, Vector* options, Vector* target_opts,
   return ok;
 }
 
+static bool EmitModuleInChild(const char* input, Vector* options,
+                              Vector* target_opts, const char* module_path) {
+  pid_t pid = fork();
+  if (pid < 0) {
+    perror("Cannot start module compiler");
+    return false;
+  }
+  if (pid == 0) {
+    _exit(EmitModule(input, options, target_opts, module_path) ? 0 : 1);
+  }
+
+  int status;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      perror("Cannot wait for module compiler");
+      return false;
+    }
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 // Hidden -Xload-module hook: load and verify a module archive, printing a short
 // summary.  Requires a compiler global for the deserialized objects' arenas.
 static bool LoadModule(const char* module_path, Vector* options) {
@@ -1341,12 +1364,13 @@ int main(int argc, char * argv[]) {
     exit(LoadModule(load_module->value, &compiler_options) ? 0 : 1);
   }
 
-  // Public coordinated mode: emit the module artifact and then continue with
-  // normal object generation in the same driver invocation.
+  // Public coordinated mode.  The module and object paths compile the
+  // translation unit independently.  Isolate module emission in a child so its
+  // process-global compiler arenas cannot contaminate object generation.
   String* module_output =
       OptionStringValue(kOptionModuleOutput, &compiler_options);
+  const char* module_input = NULL;
   if (module_output != NULL) {
-    const char* module_input = NULL;
     size_t input_count = 0;
     for (size_t i = 0; i < compiler_options.length; i++) {
       CompilerOptionValue* opt = compiler_options.value.p[i];
@@ -1359,8 +1383,8 @@ int main(int argc, char * argv[]) {
       fprintf(stderr, "-fmodule-output requires exactly one source input\n");
       exit(1);
     }
-    if (!EmitModule(module_input, &compiler_options, target_opts,
-                    module_output->value)) {
+    if (!EmitModuleInChild(module_input, &compiler_options, target_opts,
+                           module_output->value)) {
       exit(1);
     }
   }
@@ -1493,7 +1517,7 @@ int main(int argc, char * argv[]) {
       VectorAppend(&linker_args, object_file->value);
     }
   }
-  
+
   int status = 0;
   if (!compile_only) {
     AddDefaultRuntime(&linker_args, &object_files, &compiler_options,

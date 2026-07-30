@@ -59,7 +59,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
   - Backend and freestanding-profile audit, with hosted support on x86-64,
     AArch64, ARM, and RISC-V; 65(C)02 intentionally diagnoses atomics because
     its embedded profile has no threading support.
-- [ ] Add the standard threading surface where supported.
+- [x] Add the standard threading surface where supported.
   - `<thread>` and `std::thread`.
   - `jthread` and stop tokens.
   - Semaphores, latches, barriers, and condition variables.

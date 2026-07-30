@@ -138,9 +138,7 @@ typedef struct ClassTemplatePartialSpecialization {
   Symbol* tag_symbol;       // Parsed specialization body tag (not owned).
   Vector template_parameters;  // TemplateParameter* entries owned.
   Vector pattern_arguments;    // TemplateArgument* entries owned.
-  // Optional C++20 requires-clause for this partial specialization.  Not
-  // serialized: Struct::partial_specializations is intentionally deferred on
-  // the wire (see @wire - below).
+  // Optional C++20 requires-clause for this partial specialization.
   struct ConstraintExpr* associated_constraint;
   // The same record type is reused for variable-template partial/explicit
   // specializations (stored on VariableTemplate::partial_specializations).  For
@@ -298,10 +296,9 @@ typedef struct StructMember {
 // A struct or union type.  Module-serialization field numbers (see
 // type_serialize.c).  refs is recomputed on load; the derived member maps,
 // vtable/vbtable info, using-declarations, partial specializations and
-// deduction guides carry no wire number (rebuilt or deferred).
 struct Struct {
   int refs;          // @wire - (refcount, recomputed)
-  struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire -
+  struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire 31
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3
@@ -343,8 +340,8 @@ struct Struct {
   // parse state; not serialized.
   int defining_template_scope_count;  // @wire - (recomputed)
   Vector template_parameters;  // TemplateParameter* entries.     // @wire 15
-  Vector partial_specializations;  // @wire - (deferred)
-  Vector deduction_guides;  // @wire - (deferred)
+  Vector partial_specializations;  // @wire 32
+  Vector deduction_guides;  // Symbol* entries owned.             // @wire 33
   struct ConstraintExpr* associated_constraint;  // C++20 requires-clause. // @wire 30
   int template_parameter_count;  // Simple template arity.        // @wire 16
   bool packed;       // packed: no inter-member padding.          // @wire 17

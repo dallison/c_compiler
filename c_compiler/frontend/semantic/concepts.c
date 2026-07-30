@@ -2508,7 +2508,12 @@ static ConstraintExpr* NewConstraintFromExpression(ASTNode* expr,
     }
     return NewDisjunctionConstraint(left, right, location);
   }
-  return NewAtomicConstraint(expr, location);
+  // The parser's expression tree remains attached to transient syntax state
+  // and can be destructed when that state is reset.  Constraints outlive that
+  // tree (notably for deferred template instantiation and module emission), so
+  // retain an independent AST with its own shape-specific storage.
+  return NewAtomicConstraint(
+      ASTNodeClone(expr, IdentityCloneNode, NULL, NULL), location);
 }
 
 // Parse a concept-id named by a nested-name-specifier, such as

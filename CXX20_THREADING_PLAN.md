@@ -62,9 +62,9 @@ and approves the runtime foundation.
 
 ## Step 5: Integration and completion
 
-- [ ] Export completed headers through `libc/modules/std.hpp`.
-- [ ] Add p-code and 65(C)02 diagnostics and update profile documentation.
-- [ ] Run syntax, libc runtime, dedicated threading, and full hosted execution
+- [x] Export completed headers through `libc/modules/std.hpp`.
+- [x] Add p-code and 65(C)02 diagnostics and update profile documentation.
+- [x] Run syntax, libc runtime, dedicated threading, and full hosted execution
       suites.
-- [ ] Check off the threading item in `CXX20_CXX23_REMAINING.md`.
-- [ ] Perform final review before commit.
+- [x] Check off the threading item in `CXX20_CXX23_REMAINING.md`.
+- [x] Perform final review before commit.

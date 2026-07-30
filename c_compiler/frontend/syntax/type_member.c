@@ -982,8 +982,11 @@ void StructRebuildMemberLookupTables(Struct* str) {
   if (str == NULL) {
     return;
   }
-  for (size_t i = 0; i < str->members.length; i++) {
-    StructMember* member = (StructMember*)VectorGet(&str->members, i);
+  // Overloads are appended to the member vector after their chain head, while
+  // lookup tables must keep pointing at that head.  Rebuild in reverse so the
+  // first declaration for each name is installed last.
+  for (size_t i = str->members.length; i > 0; i--) {
+    StructMember* member = (StructMember*)VectorGet(&str->members, i - 1);
     if (member == NULL || member->symbol == NULL) {
       continue;
     }
@@ -1277,6 +1280,13 @@ static void QueueTemplateConstructorInitializers(
   stored->symbol = symbol;
   stored->initializers = initializers;
   VectorAppend(&template_constructor_initializers, stored);
+}
+
+void RegisterTemplateConstructorInitializers(
+    Symbol* symbol, CXXConstructorInitList* initializers) {
+  if (FindTemplateConstructorInitializers(symbol) == NULL) {
+    QueueTemplateConstructorInitializers(symbol, initializers);
+  }
 }
 
 // Associate the deferred constructor member-initializer list already recorded

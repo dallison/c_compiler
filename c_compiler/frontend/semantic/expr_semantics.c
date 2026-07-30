@@ -8775,6 +8775,38 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       FindStructMemberWithAccessAndOffsetByName(
           struct_info, member_name->value, &access, &member_owner,
           &member_offset);
+  if (member == NULL && CompilerIsCXX() && struct_info->tag_name != NULL) {
+    TypeRecord* class_type = receiver_type;
+    if (node->base.op == AST_OP(arrow) && TypeIsPointer(class_type)) {
+      class_type = class_type->next;
+    }
+    const char* origin_name =
+        class_type != NULL && class_type->template_origin != NULL
+            ? class_type->template_origin->name.value
+            : NULL;
+    size_t origin_length = origin_name != NULL ? strlen(origin_name) : 0;
+    const char* source_name = member_name->value;
+    bool names_injected_constructor =
+        origin_name != NULL &&
+        strncmp(source_name, origin_name, origin_length) == 0 &&
+        (source_name[origin_length] == '\0' ||
+         source_name[origin_length] == '<' ||
+         source_name[origin_length] == '#');
+    if (names_injected_constructor &&
+        !StringEqual(member_name, struct_info->tag_name->value)) {
+      member = FindStructMemberWithAccessAndOffsetByName(
+          struct_info, struct_info->tag_name->value, &access, &member_owner,
+          &member_offset);
+      if (member != NULL && member->symbol != NULL &&
+          member->symbol->type != NULL &&
+          TypeIsFunction(member->symbol->type) &&
+          member->symbol->type->info.function.is_constructor) {
+        StringSet(member_name, struct_info->tag_name->value);
+      } else {
+        member = NULL;
+      }
+    }
+  }
   if (member == NULL && CompilerIsCXX() && member_name->length > 1 &&
       member_name->value[0] == '~') {
     String* base_tag = CXXFindBaseTagNameForDestructorSpelling(

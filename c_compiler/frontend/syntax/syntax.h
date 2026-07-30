@@ -74,6 +74,12 @@ typedef struct FullyQualifiedIdentifier {
   String spelling;     // Full spelling for diagnostics.
 } FullyQualifiedIdentifier;
 
+typedef struct CXXDeferredConstructorInitializer {
+  String name;
+  Vector* actuals;
+  SourceLocation location;
+} CXXDeferredConstructorInitializer;
+
 typedef struct CXXConstructorInitList {
   Vector virtual_base_specs;  // CXXVirtualBaseInfo*; not owned.
   Vector virtual_base_statements;  // ASTNode*; transferred into function body.

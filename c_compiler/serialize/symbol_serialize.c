@@ -23,7 +23,9 @@
 #include "serialize_common.h"
 #include "symbol.h"
 #include "symbol_table.h"
+#include "syntax.h"
 #include "type.h"
+#include "type_class_internal.h"
 
 //
 // Symbol field numbers.
@@ -87,6 +89,7 @@ enum {
   kSym_is_explicit_specialization = 54,
   kSym_is_template_template_parameter = 55,
   kSym_template_template_parameters = 56,
+  kSym_template_constructor_initializers = 57,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -148,6 +151,8 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_is_template_template_parameter,
      "is_template_template_parameter"},
     {kSym_template_template_parameters, "template_template_parameters"},
+    {kSym_template_constructor_initializers,
+     "template_constructor_initializers"},
 };
 
 //
@@ -253,6 +258,103 @@ static void ReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
     }
     VectorAppend(out, a);
   }
+}
+
+enum {
+  kCtorInit_name = 1,
+  kCtorInit_actuals = 2,
+  kCtorInit_location = 3,
+};
+
+static void WriteTemplateConstructorInitializers(SerializeContext* ctx,
+                                                 WireBuffer* out, int field,
+                                                 Symbol* symbol) {
+  CXXConstructorInitList* initializers =
+      FindTemplateConstructorInitializers(symbol);
+  if (initializers == NULL || initializers->deferred_initializers.length == 0) {
+    return;
+  }
+  WireBuffer list;
+  WireBufferInitOwned(&list, 32);
+  WireWriteRawVarint(
+      &list, (uint64_t)initializers->deferred_initializers.length);
+  for (size_t i = 0; i < initializers->deferred_initializers.length; i++) {
+    CXXDeferredConstructorInitializer* initializer =
+        (CXXDeferredConstructorInitializer*)VectorGet(
+            &initializers->deferred_initializers, i);
+    WireBuffer item;
+    WireBufferInitOwned(&item, 32);
+    SWriteStringVal(ctx, &item, kCtorInit_name, &initializer->name);
+    if (initializer->actuals != NULL) {
+      SWriteRefVector(ctx, &item, kCtorInit_actuals, kSerialKindAST,
+                      initializer->actuals);
+    }
+    WireWriteUint64(&item, kCtorInit_location,
+                    (uint64_t)initializer->location);
+    WireWriteRawVarint(&list, (uint64_t)WireBufferSize(&item));
+    WireWriteRaw(&list, WireBufferData(&item), WireBufferSize(&item));
+    WireBufferDestruct(&item);
+  }
+  WireWriteBytes(out, field, WireBufferData(&list), WireBufferSize(&list));
+  WireBufferDestruct(&list);
+}
+
+static void ReadTemplateConstructorInitializers(DeserializeContext* ctx,
+                                                WireBuffer* in,
+                                                Symbol* symbol) {
+  const void* data;
+  size_t length;
+  if (!WireReadBytes(in, &data, &length)) {
+    return;
+  }
+  WireBuffer list;
+  WireBufferInitReader(&list, data, length);
+  uint64_t count;
+  if (!WireReadRawVarint(&list, &count)) {
+    return;
+  }
+  CXXConstructorInitList* initializers =
+      (CXXConstructorInitList*)malloc(sizeof(CXXConstructorInitList));
+  SyntaxCXXConstructorInitListInit(initializers);
+  for (uint64_t i = 0; i < count; i++) {
+    const void* item_data;
+    size_t item_length;
+    if (!WireReadBytes(&list, &item_data, &item_length)) {
+      break;
+    }
+    CXXDeferredConstructorInitializer* initializer =
+        (CXXDeferredConstructorInitializer*)calloc(1, sizeof(*initializer));
+    StringInit(&initializer->name, NULL);
+    initializer->actuals = NewVector();
+    WireBuffer item;
+    WireBufferInitReader(&item, item_data, item_length);
+    while (!WireBufferEof(&item) && !WireBufferHasError(&item)) {
+      int item_field;
+      WireType wire_type;
+      if (!WireReadTag(&item, &item_field, &wire_type)) {
+        break;
+      }
+      switch (item_field) {
+        case kCtorInit_name:
+          SReadStringVal(ctx, &item, &initializer->name);
+          break;
+        case kCtorInit_actuals:
+          SReadRefVector(ctx, &item, kSerialKindAST, initializer->actuals);
+          break;
+        case kCtorInit_location: {
+          uint64_t location;
+          WireReadUint64(&item, &location);
+          initializer->location = (SourceLocation)location;
+          break;
+        }
+        default:
+          WireSkip(&item, wire_type);
+          break;
+      }
+    }
+    VectorAppend(&initializers->deferred_initializers, initializer);
+  }
+  RegisterTemplateConstructorInitializers(symbol, initializers);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +576,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SerialWriteConcept(ctx, buf, kSym_concept_definition, s->concept_definition);
   SerialWriteConstraint(ctx, buf, kSym_associated_constraint,
                         s->associated_constraint);
+  WriteTemplateConstructorInitializers(
+      ctx, buf, kSym_template_constructor_initializers, s);
   WireWriteInt32(buf, kSym_cxx_linkage, (int32_t)s->cxx_linkage);
   SWriteStringVal(ctx, buf, kSym_owning_module_name, &s->owning_module_name);
   SWriteStringVal(ctx, buf, kSym_owning_module_partition,
@@ -712,6 +816,9 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_func_defn:
         s->value.func_defn =
             (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kSym_template_constructor_initializers:
+        ReadTemplateConstructorInitializers(ctx, buf, s);
         break;
       default:
         WireSkip(buf, wt);

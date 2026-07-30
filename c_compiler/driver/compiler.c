@@ -1488,7 +1488,12 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
       TypeContainsTemplateParameter(decl->base.type) ||
       FunctionBodyContainsUnexpandedPack(
           decl->base.type->info.function.body);
+  bool uninstantiated_function_template =
+      decl->symbol->flags.is_template &&
+      decl->base.type->info.function.template_origin == NULL &&
+      decl->base.type->info.function.template_parameters.length != 0;
   if (NumErrors() != 0 || dependent_function_body ||
+      uninstantiated_function_template ||
       (decl->base.type->info.function.is_inline &&
        !decl->symbol->flags.is_inline_defn) ||
       !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {

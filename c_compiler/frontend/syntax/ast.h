@@ -525,7 +525,7 @@ ASTNode* NewRequiresExpressionASTNode(struct ConstraintExpr* constraint,
 typedef struct {
   ASTNode base;
   Symbol* symbol;              // @wire 16
-  Vector* template_arguments;  // @wire - (not serialized; re-derived)
+  Vector* template_arguments;  // @wire 17
 } IdentifierASTNode;
 
 ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location);
@@ -536,7 +536,7 @@ typedef struct {
   StructMember* member;        // @wire 16
   CXXAccess access;            // @wire 17
   int byte_offset;             // @wire 18
-  Vector* template_arguments;  // @wire - (not serialized; re-derived)
+  Vector* template_arguments;  // @wire 19
   TypeRecord* owner_type;      // @wire - (keeps instantiated member storage alive)
 } StructMemberASTNode;
 
@@ -555,7 +555,7 @@ typedef struct {
     double fvalue;             // @wire 17 (fnumber)
     String* string;            // @wire 18 (string, string_wide)
   } value;
-  Vector* template_arguments;  // @wire - (not serialized; re-derived)
+  Vector* template_arguments;  // @wire 19
 } ConstantASTNode;
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,

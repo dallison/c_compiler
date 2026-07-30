@@ -8,21 +8,22 @@
 #ifndef __davecc_thread__
 #define __davecc_thread__
 
+#include <syscall.h>
+
+#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#error "<thread> is unavailable in this single-threaded target profile"
+#endif
+
 #include <chrono>
 #include <compare>
 #include <exception>
 #include <functional>
 #include <new>
 #include <stop_token>
-#include <syscall.h>
 #include <system_error>
 #include <threads.h>
 #include <type_traits>
 #include <utility>
-
-#if !defined(__DAVECC_HAS_GUEST_THREADS__)
-#error "<thread> is unavailable in this single-threaded target profile"
-#endif
 
 namespace std {
 

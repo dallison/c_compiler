@@ -241,6 +241,7 @@ static Vector* ReadDesignatorVector(DeserializeContext* ctx, WireBuffer* buf) {
         }
         case kDesig_type:
           d->type = (TypeRecord*)SReadRef(ctx, &er, kSerialKindType);
+          TypeRecordIncRef(d->type);
           break;
         case kDesig_array_index_end:
           WireReadInt32(&er, &d->array_index_end);
@@ -279,7 +280,18 @@ static void WriteASTBase(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
   WireWriteUint64(buf, kAST_flags, n->flags);
   SWriteRef(ctx, buf, kAST_type, kSerialKindType, n->type);
   WireWriteInt32(buf, kAST_value_category, (int32_t)n->value_category);
-  SWriteRef(ctx, buf, kAST_parent, kSerialKindAST, n->parent);
+  // Parent is a weak/back reference.  A valid parent reached from the root is
+  // already interned before its child is drained; do not intern through this
+  // edge because detached template fragments can retain stale former parents.
+  SerialHandle parent_handle = kSerialNullHandle;
+  if (n->parent != NULL) {
+    void* found =
+        MapFindPointerKey(&ctx->handle_maps[kSerialKindAST], n->parent);
+    if (found != NULL) {
+      parent_handle = (SerialHandle)(intptr_t)found;
+    }
+  }
+  WireWriteVarint(buf, kAST_parent, parent_handle);
   WireWriteInt32(buf, kAST_child_id, n->child_id);
   WireWriteUint64(buf, kAST_location, (uint64_t)n->location);
 }
@@ -308,6 +320,10 @@ static bool ReadASTBaseField(DeserializeContext* ctx, WireBuffer* buf,
       return true;
     case kAST_type:
       n->type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+      // AST nodes replace and release their analyzed types while imported
+      // templates are instantiated.  Rebuild this owning reference so a clone
+      // cannot tear down the source node's shared type chain.
+      TypeRecordIncRef(n->type);
       return true;
     case kAST_value_category: {
       int32_t v;
@@ -364,6 +380,10 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
     case kASTShapeIdentifier: {
       IdentifierASTNode* id = (IdentifierASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindSymbol, id->symbol);
+      if (id->template_arguments != NULL) {
+        SerialWriteTemplateArgumentVector(ctx, buf, 17,
+                                          id->template_arguments);
+      }
       break;
     }
     case kASTShapeStructMember: {
@@ -371,6 +391,10 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 16, kSerialKindStructMember, sm->member);
       WireWriteInt32(buf, 17, (int32_t)sm->access);
       WireWriteInt32(buf, 18, sm->byte_offset);
+      if (sm->template_arguments != NULL) {
+        SerialWriteTemplateArgumentVector(ctx, buf, 19,
+                                          sm->template_arguments);
+      }
       break;
     }
     case kASTShapeConstant: {
@@ -381,6 +405,10 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
         WireWriteDouble(buf, 17, c->value.fvalue);
       } else {
         WireWriteInt64(buf, 16, c->value.ivalue);
+      }
+      if (c->template_arguments != NULL) {
+        SerialWriteTemplateArgumentVector(ctx, buf, 19,
+                                          c->template_arguments);
       }
       break;
     }
@@ -611,6 +639,11 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
         id->symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
         return;
       }
+      if (field == 17) {
+        id->template_arguments =
+            SerialReadTemplateArgumentVector(ctx, buf);
+        return;
+      }
       break;
     }
     case kASTShapeStructMember: {
@@ -631,6 +664,11 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
         WireReadInt32(buf, &sm->byte_offset);
         return;
       }
+      if (field == 19) {
+        sm->template_arguments =
+            SerialReadTemplateArgumentVector(ctx, buf);
+        return;
+      }
       break;
     }
     case kASTShapeConstant: {
@@ -647,12 +685,18 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
         c->value.string = SReadStringPtr(ctx, buf);
         return;
       }
+      if (field == 19) {
+        c->template_arguments =
+            SerialReadTemplateArgumentVector(ctx, buf);
+        return;
+      }
       break;
     }
     case kASTShapeCast: {
       CastASTNode* c = (CastASTNode*)n;
       if (field == 16) {
         c->cast_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(c->cast_type);
         return;
       }
       if (field == 17) {
@@ -683,6 +727,7 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 21) {
         s->type_operand = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(s->type_operand);
         return;
       }
       if (field == 22) {
@@ -699,6 +744,7 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         t->operand_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(t->operand_type);
         return;
       }
       break;
@@ -971,6 +1017,7 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       PtrScaleASTNode* p = (PtrScaleASTNode*)n;
       if (field == 16) {
         p->ref_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(p->ref_type);
         return;
       }
       if (field == 17) {
@@ -1043,6 +1090,14 @@ static bool WriteAST(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   return !WireBufferHasError(buf);
 }
 
+static bool CanInternAST(const void* obj) {
+  const ASTNode* n = (const ASTNode*)obj;
+  // ASTNodeDelete releases shape-specific heap storage while leaving the
+  // arena-backed node address intact.  References that outlive that deletion
+  // are stale graph edges and cannot be serialized safely.
+  return (n->flags & kASTDestructed) == 0;
+}
+
 // Scans the record for the opcode (field 1) and shape (field 2) so the correct
 // concrete node can be allocated.
 static void* AllocAST(DeserializeContext* ctx, const void* blob, size_t len) {
@@ -1091,7 +1146,8 @@ static bool ReadAST(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
 }
 
 void SerializeRegisterASTKinds(void) {
-  static const SerialKindVtable ast_vt = {WriteAST, AllocAST, ReadAST, "AST"};
+  static const SerialKindVtable ast_vt = {
+      WriteAST, AllocAST, ReadAST, "AST", CanInternAST};
   SerializeRegisterKind(kSerialKindAST, &ast_vt);
   SerializeRegisterFields(kSerialKindAST, kASTBaseFields,
                           sizeof(kASTBaseFields) / sizeof(kASTBaseFields[0]));

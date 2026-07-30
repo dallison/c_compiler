@@ -124,6 +124,10 @@ SerialHandle SerializeIntern(SerializeContext* ctx, SerialKind kind,
   if (ptr == NULL) {
     return kSerialNullHandle;
   }
+  const SerialKindVtable* vt = SerializeGetKindVtable(kind);
+  if (vt != NULL && vt->can_intern != NULL && !vt->can_intern(ptr)) {
+    return kSerialNullHandle;
+  }
   void* found = MapFindPointerKey(&ctx->handle_maps[kind], ptr);
   if (found != NULL) {
     return (SerialHandle)(intptr_t)found;

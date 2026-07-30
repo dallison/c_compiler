@@ -3137,12 +3137,6 @@ static void SyntaxAppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* fun
   }
 }
 
-typedef struct {
-  String name;
-  Vector* actuals;
-  SourceLocation location;
-} CXXDeferredConstructorInitializer;
-
 static CXXDeferredConstructorInitializer* NewCXXDeferredConstructorInitializer(
     const char* name, Vector* actuals, SourceLocation location) {
   CXXDeferredConstructorInitializer* init =

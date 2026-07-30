@@ -1236,7 +1236,8 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     return templ;
   }
   Symbol* template_definition = templ;
-  if ((template_definition->type == NULL ||
+  if ((completion_type != templ->type ||
+       template_definition->type == NULL ||
        template_definition->type->info.function.body == NULL) &&
       templ->value.func_defn != NULL &&
       templ->value.func_defn->type != NULL &&
@@ -1254,7 +1255,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   bool saved_substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = false;
   TypeRecord* func =
-      InstantiateFunctionTemplateType(parser, templ->type,
+      InstantiateFunctionTemplateType(parser, completion_type,
                                       completed_args);
   bool substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = saved_substitution_failed;
@@ -2986,9 +2987,8 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   // Member templates of an instantiated class carry a current signature with
   // the enclosing arguments substituted and their own parameters rebased.
   // Instantiate that signature; the primary definition remains the body source.
-  TypeRecord* candidate_type = templ->type;
   TypeRecord* func =
-      InstantiateFunctionTemplateType(&parser, candidate_type, completed_args);
+      InstantiateFunctionTemplateType(&parser, func_type, completed_args);
   bool substitution_failed = parser.template_substitution_failed;
   parser.template_substitution_failed = saved_substitution_failed;
   if (substitution_failed || TypeContainsTemplateParameter(func)) {

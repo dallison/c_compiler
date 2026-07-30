@@ -3657,6 +3657,30 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   }
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
+    // A dependent reference cast in an imported template can share its
+    // referent with the function return type.  If that referent was released
+    // before the module graph was archived, the imported cast retains only the
+    // reference head.  A return statement still has an authoritative concrete
+    // target on the instantiated function type, so restore the cast from it
+    // before deciding whether template substitution is needed.
+    bool invalid_return_reference =
+        TypeIsReference(cast->cast_type) && cast->cast_type->next == NULL &&
+        node->parent != NULL && node->parent->op == AST_OP(return) &&
+        clone->to_func != NULL && TypeIsFunction(clone->to_func) &&
+        TypeIsReference(clone->to_func->next) &&
+        clone->to_func->next->next != NULL &&
+        clone->to_func->next->declarator == cast->cast_type->declarator;
+    if (invalid_return_reference) {
+      TypeRecordDelete(cast->cast_type);
+      cast->cast_type = TypeRecordCopy(clone->to_func->next);
+      TypeRecordIncRef(cast->cast_type);
+      ASTNodeSetType(node, cast->cast_type->next);
+      node->value_category =
+          cast->cast_type->declarator == kDeclRValueReference
+              ? kValueCategoryXvalue
+              : kValueCategoryLvalue;
+      node_type_substituted = true;
+    }
     // A cast whose type still names a pack (e.g. `static_cast<Ts&&>(args)...`)
     // must keep the pack-dependent cast type until ExpandClonedCallPackActuals
     // clones the pattern per element.  Substituting the whole pack here would
@@ -3668,7 +3692,9 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         FindPackExpansionInType(cast->cast_type, clone->args, &pack_index,
                                 &pack_length) &&
         ASTNodeWithinPackExpansion(node);
-    if (pack_dependent_cast) {
+    if (invalid_return_reference) {
+      // The concrete function return type above is authoritative.
+    } else if (pack_dependent_cast) {
       // Leave cast_type / node->type pack-dependent for per-element expansion.
       node_type_substituted = true;
     } else if (TypeContainsTemplateParameter(cast->cast_type) ||

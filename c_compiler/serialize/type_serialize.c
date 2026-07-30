@@ -12,6 +12,7 @@
 //  symbol-table maps) are intentionally omitted; they are recomputed on load.
 //
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +20,7 @@
 #include "constraint_serialize.h"
 #include "serialize_common.h"
 #include "type.h"
+#include "type_internal.h"
 
 //
 // TypeRecord field numbers.
@@ -275,6 +277,9 @@ enum {
   kStruct_friend_classes = 28,
   kStruct_friend_functions = 29,
   kStruct_associated_constraint = 30,
+  kStruct_lexical_parent = 31,
+  kStruct_partial_specializations = 32,
+  kStruct_deduction_guides = 33,
 };
 
 static const WireFieldDesc kStructFields[] = {
@@ -308,6 +313,9 @@ static const WireFieldDesc kStructFields[] = {
     {kStruct_friend_classes, "friend_classes"},
     {kStruct_friend_functions, "friend_functions"},
     {kStruct_associated_constraint, "associated_constraint"},
+    {kStruct_lexical_parent, "lexical_parent"},
+    {kStruct_partial_specializations, "partial_specializations"},
+    {kStruct_deduction_guides, "deduction_guides"},
 };
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1056,7 @@ static void ReadBaseVector(DeserializeContext* ctx, WireBuffer* in,
 // ---------------------------------------------------------------------------
 static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   TypeRecord* t = (TypeRecord*)obj;
+  assert(t->declarator != kDeclArray || t->next != NULL);
   WireWriteInt32(buf, kType_id, t->id);
   WireWriteInt32(buf, kType_type, (int32_t)t->type);
   WireWriteInt32(buf, kType_qualifiers, (int32_t)t->qualifiers);
@@ -1152,6 +1161,11 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_next:
         t->next = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        // TypeRecordCopy shares the next spine and later releases that shared
+        // edge while substituting a specialization.  Preserve the imported
+        // owner's reference so the primary template's type is not dismantled
+        // after its first instantiation.
+        TypeRecordIncRef(t->next);
         break;
       case kType_array: {
         const void* data;
@@ -1353,6 +1367,115 @@ static bool ReadMember(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
   return !WireBufferHasError(buf);
 }
 
+enum {
+  kPartial_tag_symbol = 1,
+  kPartial_template_parameters = 2,
+  kPartial_pattern_arguments = 3,
+  kPartial_associated_constraint = 4,
+  kPartial_variable_initializer = 5,
+  kPartial_variable_type = 6,
+};
+
+static void WritePartialSpecializationVector(SerializeContext* ctx,
+                                             WireBuffer* out, int field,
+                                             Vector* specializations) {
+  WireBuffer list;
+  WireBufferInitOwned(&list, 32);
+  WireWriteRawVarint(&list, (uint64_t)specializations->length);
+  for (size_t i = 0; i < specializations->length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        (ClassTemplatePartialSpecialization*)VectorGet(specializations, i);
+    WireBuffer item;
+    WireBufferInitOwned(&item, 64);
+    SWriteRef(ctx, &item, kPartial_tag_symbol, kSerialKindSymbol,
+              partial->tag_symbol);
+    SerialWriteTemplateParameterVector(
+        ctx, &item, kPartial_template_parameters,
+        &partial->template_parameters);
+    WriteTemplateArgumentVector(ctx, &item, kPartial_pattern_arguments,
+                                &partial->pattern_arguments);
+    SerialWriteConstraint(ctx, &item, kPartial_associated_constraint,
+                          partial->associated_constraint);
+    SWriteRef(ctx, &item, kPartial_variable_initializer, kSerialKindAST,
+              partial->variable_initializer);
+    SWriteRef(ctx, &item, kPartial_variable_type, kSerialKindType,
+              partial->variable_type);
+    WireWriteRawVarint(&list, (uint64_t)WireBufferSize(&item));
+    WireWriteRaw(&list, WireBufferData(&item), WireBufferSize(&item));
+    WireBufferDestruct(&item);
+  }
+  WireWriteBytes(out, field, WireBufferData(&list), WireBufferSize(&list));
+  WireBufferDestruct(&list);
+}
+
+static void ReadPartialSpecializationVector(DeserializeContext* ctx,
+                                            WireBuffer* in, Vector* out) {
+  const void* data;
+  size_t length;
+  if (!WireReadBytes(in, &data, &length)) {
+    return;
+  }
+  WireBuffer list;
+  WireBufferInitReader(&list, data, length);
+  uint64_t count;
+  if (!WireReadRawVarint(&list, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* item_data;
+    size_t item_length;
+    if (!WireReadBytes(&list, &item_data, &item_length)) {
+      return;
+    }
+    ClassTemplatePartialSpecialization* partial =
+        NewClassTemplatePartialSpecialization(NULL, NULL, NULL);
+    WireBuffer item;
+    WireBufferInitReader(&item, item_data, item_length);
+    while (!WireBufferEof(&item) && !WireBufferHasError(&item)) {
+      int item_field;
+      WireType wire_type;
+      if (!WireReadTag(&item, &item_field, &wire_type)) {
+        break;
+      }
+      switch (item_field) {
+        case kPartial_tag_symbol:
+          partial->tag_symbol =
+              (Symbol*)SReadRef(ctx, &item, kSerialKindSymbol);
+          break;
+        case kPartial_template_parameters:
+          SerialReadTemplateParameterVector(
+              ctx, &item, &partial->template_parameters);
+          break;
+        case kPartial_pattern_arguments: {
+          Vector* arguments = ReadTemplateArgumentVector(ctx, &item);
+          if (arguments != NULL) {
+            VectorDestruct(&partial->pattern_arguments);
+            partial->pattern_arguments = *arguments;
+            free(arguments);
+          }
+          break;
+        }
+        case kPartial_associated_constraint:
+          partial->associated_constraint =
+              SerialReadConstraint(ctx, &item);
+          break;
+        case kPartial_variable_initializer:
+          partial->variable_initializer =
+              (ASTNode*)SReadRef(ctx, &item, kSerialKindAST);
+          break;
+        case kPartial_variable_type:
+          partial->variable_type =
+              (TypeRecord*)SReadRef(ctx, &item, kSerialKindType);
+          break;
+        default:
+          WireSkip(&item, wire_type);
+          break;
+      }
+    }
+    VectorAppend(out, partial);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Struct.
 // ---------------------------------------------------------------------------
@@ -1400,6 +1523,13 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                   &s->friend_functions);
   SerialWriteConstraint(ctx, buf, kStruct_associated_constraint,
                         s->associated_constraint);
+  SWriteRef(ctx, buf, kStruct_lexical_parent, kSerialKindStruct,
+            s->lexical_parent);
+  WritePartialSpecializationVector(
+      ctx, buf, kStruct_partial_specializations,
+      &s->partial_specializations);
+  SWriteRefVector(ctx, buf, kStruct_deduction_guides, kSerialKindSymbol,
+                  &s->deduction_guides);
   return !WireBufferHasError(buf);
 }
 
@@ -1511,6 +1641,17 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kStruct_associated_constraint:
         s->associated_constraint = SerialReadConstraint(ctx, buf);
+        break;
+      case kStruct_lexical_parent:
+        s->lexical_parent =
+            (Struct*)SReadRef(ctx, buf, kSerialKindStruct);
+        break;
+      case kStruct_partial_specializations:
+        ReadPartialSpecializationVector(
+            ctx, buf, &s->partial_specializations);
+        break;
+      case kStruct_deduction_guides:
+        SReadRefVector(ctx, buf, kSerialKindSymbol, &s->deduction_guides);
         break;
       default:
         WireSkip(buf, wt);

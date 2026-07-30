@@ -701,6 +701,18 @@ void LoadedModuleReleaseGraph(LoadedModule* out) {
   }
 
   DeserializeContext* ctx = &out->ctx;
+  // Imported deduction guides are also entries in the symbol pool.  Structs
+  // normally own and delete their guide symbols, so detach these reference
+  // vectors before pool-owned symbols are destructed individually below.
+  Vector* struct_pool = &ctx->objects[kSerialKindStruct];
+  for (size_t i = 0; i < struct_pool->length; i++) {
+    Struct* str = (Struct*)VectorGet(struct_pool, i);
+    if (str != NULL) {
+      VectorDestruct(&str->deduction_guides);
+      VectorInit(&str->deduction_guides);
+    }
+  }
+
   Vector* ns_pool = &ctx->objects[kSerialKindNamespace];
   for (size_t i = 0; i < ns_pool->length; i++) {
     Namespace* ns = (Namespace*)VectorGet(ns_pool, i);
