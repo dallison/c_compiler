@@ -9,8 +9,9 @@ existing C++20 ranges runtime corruption was fixed and committed as `5c09cab`
 `exec_ranges_riscv` all passed.
 
 The `views::zip`, `views::zip_transform`, `views::enumerate`,
-`views::adjacent`, and `views::adjacent_transform` roadmap slices are
-implemented and runtime-clean on all supported ranges-test targets.
+`views::adjacent`, `views::adjacent_transform`, `views::chunk`, `views::slide`,
+`views::chunk_by`, and `views::stride` roadmap slices are implemented and
+runtime-clean on all supported ranges-test targets.
 
 ## Completed implementation
 
@@ -25,6 +26,8 @@ implemented and runtime-clean on all supported ranges-test targets.
   - Added `views::zip`, `views::zip_transform`, and `views::enumerate`.
   - Added forward-window `adjacent_view` and `adjacent_transform_view`,
     including non-common sentinels, pipe closures, and the `pairwise` aliases.
+  - Added runtime chunk and slide windows, predicate-based chunking, and stride
+    iteration with direct and piped adaptors.
 - `cxx_testsuite/tests/syntax/pass/0307_standard_ranges_zip.cpp`
   - Passes with:
 
@@ -42,6 +45,12 @@ implemented and runtime-clean on all supported ranges-test targets.
 - `cxx_testsuite/tests/exec_ranges/0009_adjacent_views.cpp`
   - Covers pair and triple windows, short ranges, reference mutation,
     transformations, pipes, aliases, and non-common sentinels.
+- `cxx_testsuite/tests/syntax/pass/0309_standard_ranges_windows.cpp`
+  - Covers concepts, direct and piped adaptors, inner subranges, predicates,
+    references, and non-common counted ranges.
+- `cxx_testsuite/tests/exec_ranges/0010_window_views.cpp`
+  - Covers partial chunks, short slides, reference mutation, predicate groups,
+    stride sizing, and all four adaptors over non-common ranges.
 
 ## Resolved compiler issues
 

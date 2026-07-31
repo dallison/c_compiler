@@ -2152,6 +2152,464 @@ class adjacent_transform_view
   }
 };
 
+template <class I, class S>
+constexpr subrange<I, I, subrange_kind::sized> __bounded_subrange(
+    I first, S last, iter_difference_t<I> count) {
+  I bound = first;
+  iter_difference_t<I> remaining =
+      ranges::advance(bound, count, last);
+  return subrange<I, I, subrange_kind::sized>(
+      first, bound, count - remaining);
+}
+
+// [range.chunk]
+template <class V>
+  requires view<V> && forward_range<V>
+class chunk_view : public view_interface<chunk_view<V>> {
+ private:
+  V __base_;
+  range_difference_t<V> __n_ = 1;
+
+ public:
+  class iterator {
+   public:
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+    using iterator_concept = forward_iterator_tag;
+    using iterator_category = forward_iterator_tag;
+    using value_type =
+        subrange<base_iterator, base_iterator, subrange_kind::sized>;
+    using difference_type = range_difference_t<V>;
+    using reference = value_type;
+    using pointer = void;
+
+   private:
+    base_iterator __current_;
+    base_sentinel __end_;
+    difference_type __n_ = 1;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(base_iterator current, base_sentinel end,
+                       difference_type n, bool end_marker = false)
+        : __current_(current),
+          __end_(end),
+          __n_(n),
+          __end_marker_(end_marker) {}
+
+    constexpr reference operator*() const {
+      return __bounded_subrange(__current_, __end_, __n_);
+    }
+
+    constexpr iterator& operator++() {
+      ranges::advance(__current_, __n_, __end_);
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__current_ == right.__end_;
+      }
+      if (right.__end_marker_) {
+        return left.__current_ == left.__end_;
+      }
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  chunk_view()
+    requires default_initializable<V>
+  = default;
+
+  constexpr chunk_view(V base, range_difference_t<V> n)
+      : __base_(static_cast<V&&>(base)), __n_(n) {}
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), __n_);
+  }
+
+  constexpr iterator end() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), __n_, true);
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    size_t count = static_cast<size_t>(ranges::size(__base_));
+    size_t width = static_cast<size_t>(__n_);
+    return count == 0 ? 0 : 1 + (count - 1) / width;
+  }
+};
+
+template <class V>
+inline constexpr bool enable_borrowed_range<chunk_view<V>> =
+    enable_borrowed_range<V>;
+
+// [range.slide]
+template <class V>
+  requires view<V> && forward_range<V>
+class slide_view : public view_interface<slide_view<V>> {
+ private:
+  V __base_;
+  range_difference_t<V> __n_ = 1;
+
+ public:
+  class iterator {
+   public:
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+    using iterator_concept = forward_iterator_tag;
+    using iterator_category = forward_iterator_tag;
+    using value_type =
+        subrange<base_iterator, base_iterator, subrange_kind::sized>;
+    using difference_type = range_difference_t<V>;
+    using reference = value_type;
+    using pointer = void;
+
+   private:
+    base_iterator __current_;
+    base_iterator __window_end_;
+    base_sentinel __end_;
+    difference_type __n_ = 1;
+    bool __exhausted_ = false;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(base_iterator current, base_sentinel end,
+                       difference_type n, bool end_marker = false)
+        : __current_(current),
+          __window_end_(current),
+          __end_(end),
+          __n_(n),
+          __end_marker_(end_marker) {
+      difference_type remaining =
+          ranges::advance(__window_end_, __n_, __end_);
+      __exhausted_ = remaining != 0;
+    }
+
+    constexpr reference operator*() const {
+      return reference(__current_, __window_end_, __n_);
+    }
+
+    constexpr iterator& operator++() {
+      if (__window_end_ == __end_) {
+        __exhausted_ = true;
+      } else {
+        ++__current_;
+        ++__window_end_;
+      }
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__exhausted_;
+      }
+      if (right.__end_marker_) {
+        return left.__exhausted_;
+      }
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  slide_view()
+    requires default_initializable<V>
+  = default;
+
+  constexpr slide_view(V base, range_difference_t<V> n)
+      : __base_(static_cast<V&&>(base)), __n_(n) {}
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), __n_);
+  }
+
+  constexpr iterator end() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), __n_, true);
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    size_t count = static_cast<size_t>(ranges::size(__base_));
+    size_t width = static_cast<size_t>(__n_);
+    return count < width ? 0 : count - width + 1;
+  }
+};
+
+template <class V>
+inline constexpr bool enable_borrowed_range<slide_view<V>> =
+    enable_borrowed_range<V>;
+
+// [range.chunk.by]
+template <class V, class Pred>
+  requires view<V> && forward_range<V> && is_object_v<Pred> &&
+           indirect_binary_predicate<Pred, iterator_t<V>, iterator_t<V>>
+class chunk_by_view : public view_interface<chunk_by_view<V, Pred>> {
+ public:
+  V __base_;
+  __movable_box<Pred> __pred_;
+
+ private:
+  constexpr iterator_t<V> __find_next(iterator_t<V> current) {
+    sentinel_t<V> last = ranges::end(__base_);
+    if (current == last) {
+      return current;
+    }
+    iterator_t<V> next = current;
+    ++next;
+    while (next != last && (*__pred_)(*current, *next)) {
+      current = next;
+      ++next;
+    }
+    return next;
+  }
+
+ public:
+  class iterator {
+   public:
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+    using iterator_concept = forward_iterator_tag;
+    using iterator_category = forward_iterator_tag;
+    using value_type = subrange<
+        base_iterator, base_iterator,
+        __subrange_kind_default<base_iterator, base_iterator>::value>;
+    using difference_type = range_difference_t<V>;
+    using reference = value_type;
+    using pointer = void;
+
+   private:
+    chunk_by_view* __parent_ = nullptr;
+    base_iterator __current_;
+    base_iterator __next_;
+    base_sentinel __end_;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(chunk_by_view* parent, base_iterator current,
+                       base_sentinel end, bool end_marker = false)
+        : __parent_(parent),
+          __current_(current),
+          __next_(current),
+          __end_(end),
+          __end_marker_(end_marker) {
+      if (!__end_marker_) {
+        __next_ = __parent_->__find_next(__current_);
+      }
+    }
+
+    constexpr reference operator*() const {
+      return reference(__current_, __next_);
+    }
+
+    constexpr iterator& operator++() {
+      __current_ = __next_;
+      __next_ = __parent_->__find_next(__current_);
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__current_ == right.__end_;
+      }
+      if (right.__end_marker_) {
+        return left.__current_ == left.__end_;
+      }
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  chunk_by_view()
+    requires default_initializable<V> && default_initializable<Pred>
+  = default;
+
+  constexpr chunk_by_view(V base, Pred pred)
+      : __base_(static_cast<V&&>(base)),
+        __pred_(static_cast<Pred&&>(pred)) {}
+
+  constexpr iterator begin() {
+    return iterator(this, ranges::begin(__base_), ranges::end(__base_));
+  }
+
+  constexpr iterator end() {
+    return iterator(this, ranges::begin(__base_), ranges::end(__base_), true);
+  }
+};
+
+// [range.stride]
+template <class V>
+  requires view<V> && input_range<V>
+class stride_view : public view_interface<stride_view<V>> {
+ private:
+  V __base_;
+  range_difference_t<V> __stride_ = 1;
+
+ public:
+  class iterator {
+   public:
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+    using iterator_concept =
+        conditional_t<forward_range<V>, forward_iterator_tag,
+                      input_iterator_tag>;
+    using iterator_category = iterator_concept;
+    using value_type = range_value_t<V>;
+    using difference_type = range_difference_t<V>;
+    using reference = range_reference_t<V>;
+    using pointer = void;
+
+   public:
+    base_iterator __current_;
+    base_sentinel __end_;
+    difference_type __stride_ = 1;
+
+    iterator() = default;
+    constexpr iterator(base_iterator current, base_sentinel end,
+                       difference_type stride)
+        : __current_(current),
+          __end_(end),
+          __stride_(stride) {}
+
+    constexpr reference operator*() const { return *__current_; }
+
+    constexpr iterator& operator++() {
+      ranges::advance(__current_, __stride_, __end_);
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  class __sentinel {
+   public:
+    sentinel_t<V> __end_;
+
+    __sentinel() = default;
+    constexpr explicit __sentinel(sentinel_t<V> end)
+        : __end_(static_cast<sentinel_t<V>&&>(end)) {}
+
+    friend constexpr bool operator==(const iterator& current,
+                                     const __sentinel& end) {
+      return current.__current_ == end.__end_;
+    }
+
+    friend constexpr bool operator!=(const iterator& current,
+                                     const __sentinel& end) {
+      return !(current == end);
+    }
+  };
+
+  using sentinel =
+      conditional_t<common_range<V>, iterator, __sentinel>;
+  using const_iterator = iterator;
+
+  stride_view()
+    requires default_initializable<V>
+  = default;
+
+  constexpr stride_view(V base, range_difference_t<V> stride)
+      : __base_(static_cast<V&&>(base)), __stride_(stride) {}
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), __stride_);
+  }
+
+  constexpr iterator end()
+    requires common_range<V>
+  {
+    return iterator(ranges::end(__base_), ranges::end(__base_), __stride_);
+  }
+
+  constexpr __sentinel end()
+    requires(!common_range<V>)
+  {
+    return __sentinel(ranges::end(__base_));
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    size_t count = static_cast<size_t>(ranges::size(__base_));
+    size_t stride = static_cast<size_t>(__stride_);
+    return count == 0 ? 0 : 1 + (count - 1) / stride;
+  }
+};
+
+template <class V>
+inline constexpr bool enable_borrowed_range<stride_view<V>> =
+    enable_borrowed_range<V>;
+
 // [range.enumerate]
 template <view V>
   requires input_range<V>
@@ -3102,6 +3560,129 @@ struct __adjacent_transform_fn {
   }
 };
 
+template <class D>
+struct __chunk_closure : __adaptor_closure_base {
+  D __n;
+  constexpr explicit __chunk_closure(D n) : __n(n) {}
+
+  template <viewable_range R>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return chunk_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(__n));
+  }
+};
+
+struct __chunk_fn {
+  template <viewable_range R, class D>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range, D n) const {
+    using V = all_t<R>;
+    return chunk_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(n));
+  }
+
+  template <class D>
+  constexpr auto operator()(D n) const {
+    return __chunk_closure<D>(n);
+  }
+};
+
+template <class D>
+struct __slide_closure : __adaptor_closure_base {
+  D __n;
+  constexpr explicit __slide_closure(D n) : __n(n) {}
+
+  template <viewable_range R>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return slide_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(__n));
+  }
+};
+
+struct __slide_fn {
+  template <viewable_range R, class D>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range, D n) const {
+    using V = all_t<R>;
+    return slide_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(n));
+  }
+
+  template <class D>
+  constexpr auto operator()(D n) const {
+    return __slide_closure<D>(n);
+  }
+};
+
+template <class P>
+struct __chunk_by_closure : __adaptor_closure_base {
+  P __pred;
+  constexpr explicit __chunk_by_closure(P pred)
+      : __pred(static_cast<P&&>(pred)) {}
+
+  template <viewable_range R>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return chunk_by_view<V, P>(
+        views::all(static_cast<R&&>(range)), __pred);
+  }
+};
+
+struct __chunk_by_fn {
+  template <viewable_range R, class P>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range, P&& pred) const {
+    using V = all_t<R>;
+    using Pred = decay_t<P>;
+    return chunk_by_view<V, Pred>(
+        views::all(static_cast<R&&>(range)), static_cast<P&&>(pred));
+  }
+
+  template <class P>
+  constexpr auto operator()(P&& pred) const {
+    using Pred = decay_t<P>;
+    return __chunk_by_closure<Pred>(static_cast<P&&>(pred));
+  }
+};
+
+template <class D>
+struct __stride_closure : __adaptor_closure_base {
+  D __stride;
+  constexpr explicit __stride_closure(D stride) : __stride(stride) {}
+
+  template <viewable_range R>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return stride_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(__stride));
+  }
+};
+
+struct __stride_fn {
+  template <viewable_range R, class D>
+  constexpr auto operator()(R&& range, D stride) const {
+    using V = all_t<R>;
+    return stride_view<V>(
+        views::all(static_cast<R&&>(range)),
+        static_cast<range_difference_t<V>>(stride));
+  }
+
+  template <class D>
+  constexpr auto operator()(D stride) const {
+    return __stride_closure<D>(stride);
+  }
+};
+
 template <viewable_range R, class F>
 constexpr auto __make_transform_adaptor(R&& r, F&& f) {
   using Base = all_t<R>;
@@ -3477,6 +4058,10 @@ inline constexpr __detail::__adjacent_fn<2> pairwise{};
 template <size_t N>
 inline constexpr __detail::__adjacent_transform_fn<N> adjacent_transform{};
 inline constexpr __detail::__adjacent_transform_fn<2> pairwise_transform{};
+inline constexpr __detail::__chunk_fn chunk{};
+inline constexpr __detail::__slide_fn slide{};
+inline constexpr __detail::__chunk_by_fn chunk_by{};
+inline constexpr __detail::__stride_fn stride{};
 inline constexpr __detail::__transform_fn transform{};
 inline constexpr __detail::__filter_fn filter{};
 inline constexpr __detail::__take_fn take{};

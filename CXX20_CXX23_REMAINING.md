@@ -103,7 +103,11 @@ implemented.
       windows, callable transforms, and direct and piped adaptor forms.
     - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
       execution targets pass.
-  - `views::chunk`, `slide`, `chunk_by`, and `stride`.
+  - [x] `views::chunk`, `slide`, `chunk_by`, and `stride`.
+    - Includes partial trailing chunks, overlapping runtime windows, predicate
+      grouping, stepped iteration, and non-common sentinel support.
+    - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
+      execution targets pass.
   - `views::join_with`, `repeat`, and `cartesian_product`.
   - `ranges::to`, range fold algorithms, and the new contains/prefix/suffix
     algorithms.
