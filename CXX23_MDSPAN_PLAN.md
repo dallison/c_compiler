@@ -7,10 +7,10 @@ rather than hidden behind library workarounds.
 
 ## Current handoff
 
-Steps 1 through 3 are complete. The next agent should begin with Step 4 (the
-`mdspan` view) and stop after that step for review.
+Steps 1 through 4 are complete. The next agent should begin with Step 5
+(integration and completion).
 
-Step 3 validation completed successfully with:
+Step 4 validation completed successfully with:
 
 - `bazel test //cxx_testsuite:syntax --test_output=errors`
 - `bazel test //cxx_testsuite:exec_x86_64 --test_output=errors`
@@ -46,10 +46,10 @@ Step 3 validation completed successfully with:
 
 ## Step 4: `mdspan` view
 
-- [ ] Implement the standard aliases, constructors, conversions, and deduction
+- [x] Implement the standard aliases, constructors, conversions, and deduction
       guides.
-- [ ] Implement multidimensional element access and all core observers.
-- [ ] Cover pointer, array, span, mapping, accessor, CTAD, conversion, and
+- [x] Implement multidimensional element access and all core observers.
+- [x] Cover pointer, array, span, mapping, accessor, CTAD, conversion, and
       custom-policy use cases.
 
 ## Step 5: Integration and completion

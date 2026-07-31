@@ -654,6 +654,297 @@ struct default_accessor {
   }
 };
 
+template <class TargetMapping, class OtherExtents,
+          class OtherLayoutPolicy>
+struct __mdspan_mapping_conversion {
+  using other_mapping =
+      typename OtherLayoutPolicy::template mapping<OtherExtents>;
+  static constexpr bool is_constructible =
+      is_constructible_v<TargetMapping, const other_mapping&>;
+  static constexpr bool is_convertible =
+      is_convertible_v<const other_mapping&, TargetMapping>;
+};
+
+template <class ElementType, class Extents,
+          class LayoutPolicy = layout_right,
+          class AccessorPolicy = default_accessor<ElementType>>
+class mdspan {
+  static_assert(__mdspan_is_extents<Extents>::value,
+                "mdspan requires an extents specialization");
+  static_assert(
+      is_same_v<ElementType, typename AccessorPolicy::element_type>,
+      "mdspan element type must match its accessor element type");
+
+ public:
+  using extents_type = Extents;
+  using layout_type = LayoutPolicy;
+  using accessor_type = AccessorPolicy;
+  using mapping_type =
+      typename layout_type::template mapping<extents_type>;
+  using element_type = ElementType;
+  using value_type = remove_cv_t<element_type>;
+  using index_type = typename extents_type::index_type;
+  using size_type = typename extents_type::size_type;
+  using rank_type = typename extents_type::rank_type;
+  using data_handle_type = typename accessor_type::data_handle_type;
+  using reference = typename accessor_type::reference;
+
+ private:
+  accessor_type __accessor;
+  mapping_type __mapping;
+  data_handle_type __data_handle;
+
+ public:
+  static constexpr rank_type rank() noexcept {
+    return extents_type::rank();
+  }
+
+  static constexpr rank_type rank_dynamic() noexcept {
+    return extents_type::rank_dynamic();
+  }
+
+  static constexpr size_t static_extent(rank_type rank_index) noexcept {
+    return extents_type::static_extent(rank_index);
+  }
+
+  constexpr index_type extent(rank_type rank_index) const noexcept {
+    return __mapping.extents().extent(rank_index);
+  }
+
+  constexpr mdspan()
+    requires(
+        rank_dynamic() > 0 &&
+        is_default_constructible_v<data_handle_type> &&
+        is_default_constructible_v<mapping_type> &&
+        is_default_constructible_v<accessor_type>)
+      : __accessor(), __mapping(), __data_handle() {}
+
+  constexpr mdspan(const mdspan&) = default;
+  constexpr mdspan(mdspan&&) = default;
+
+  template <class... OtherIndexTypes>
+    requires(
+        (is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+        (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+        (sizeof...(OtherIndexTypes) == rank() ||
+         sizeof...(OtherIndexTypes) == rank_dynamic()) &&
+        is_constructible_v<mapping_type, extents_type> &&
+        is_default_constructible_v<accessor_type>)
+  constexpr explicit mdspan(data_handle_type pointer,
+                            OtherIndexTypes... extents)
+      : __accessor(),
+        __mapping(extents_type(
+            static_cast<index_type>(
+                static_cast<OtherIndexTypes&&>(extents))...)),
+        __data_handle(std::move(pointer)) {}
+
+  template <class OtherIndexType, size_t N>
+    requires(
+        (N == rank() || N == rank_dynamic()) &&
+        is_convertible_v<const OtherIndexType&, index_type> &&
+        is_nothrow_constructible_v<index_type, const OtherIndexType&> &&
+        is_constructible_v<mapping_type, extents_type> &&
+        is_default_constructible_v<accessor_type>)
+  constexpr explicit(N != rank_dynamic())
+      mdspan(data_handle_type pointer,
+             span<OtherIndexType, N> values)
+      : __accessor(),
+        __mapping(extents_type(values)),
+        __data_handle(std::move(pointer)) {}
+
+  template <class OtherIndexType, size_t N>
+    requires(
+        (N == rank() || N == rank_dynamic()) &&
+        is_convertible_v<const OtherIndexType&, index_type> &&
+        is_nothrow_constructible_v<index_type, const OtherIndexType&> &&
+        is_constructible_v<mapping_type, extents_type> &&
+        is_default_constructible_v<accessor_type>)
+  constexpr explicit(N != rank_dynamic())
+      mdspan(data_handle_type pointer,
+             const array<OtherIndexType, N>& values)
+      : __accessor(),
+        __mapping(extents_type(values)),
+        __data_handle(std::move(pointer)) {}
+
+  constexpr mdspan(data_handle_type pointer,
+                   const extents_type& extents)
+    requires(
+        is_constructible_v<mapping_type, const extents_type&> &&
+        is_default_constructible_v<accessor_type>)
+      : __accessor(),
+        __mapping(extents),
+        __data_handle(std::move(pointer)) {}
+
+  constexpr mdspan(data_handle_type pointer,
+                   const mapping_type& mapping)
+    requires(is_default_constructible_v<accessor_type>)
+      : __accessor(),
+        __mapping(mapping),
+        __data_handle(std::move(pointer)) {}
+
+  constexpr mdspan(data_handle_type pointer,
+                   const mapping_type& mapping,
+                   const accessor_type& accessor)
+      : __accessor(accessor),
+        __mapping(mapping),
+        __data_handle(std::move(pointer)) {}
+
+  template <class OtherElementType, class OtherExtents,
+            class OtherLayoutPolicy, class OtherAccessorPolicy>
+    requires(
+        __mdspan_mapping_conversion<
+            mapping_type, OtherExtents,
+            OtherLayoutPolicy>::is_constructible &&
+        is_constructible_v<accessor_type,
+                           const OtherAccessorPolicy&> &&
+        is_constructible_v<
+            data_handle_type,
+            const typename OtherAccessorPolicy::data_handle_type&> &&
+        is_constructible_v<extents_type, OtherExtents>)
+  constexpr explicit(
+      !__mdspan_mapping_conversion<
+          mapping_type, OtherExtents,
+          OtherLayoutPolicy>::is_convertible ||
+      !is_convertible_v<const OtherAccessorPolicy&, accessor_type>)
+      mdspan(const mdspan<OtherElementType, OtherExtents,
+                          OtherLayoutPolicy,
+                          OtherAccessorPolicy>& other)
+      : __accessor(other.accessor()),
+        __mapping(other.mapping()),
+        __data_handle(other.data_handle()) {}
+
+  constexpr mdspan& operator=(const mdspan&) = default;
+  constexpr mdspan& operator=(mdspan&&) = default;
+
+  template <class... OtherIndexTypes>
+    requires(
+        (is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+        (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+        sizeof...(OtherIndexTypes) == rank())
+  constexpr reference operator[](OtherIndexTypes... indices) const {
+    return __accessor.access(
+        __data_handle,
+        __mapping(static_cast<index_type>(
+            std::move(indices))...));
+  }
+
+  constexpr size_type size() const noexcept {
+    size_type result = 1;
+    for (rank_type r = 0; r < rank(); r++) {
+      result *= static_cast<size_type>(extent(r));
+    }
+    return result;
+  }
+
+  constexpr bool empty() const noexcept {
+    return size() == 0;
+  }
+
+  friend constexpr void swap(mdspan& left, mdspan& right) noexcept {
+    mdspan temporary(std::move(left));
+    left = std::move(right);
+    right = std::move(temporary);
+  }
+
+  constexpr const extents_type& extents() const noexcept {
+    return __mapping.extents();
+  }
+
+  constexpr const data_handle_type& data_handle() const noexcept {
+    return __data_handle;
+  }
+
+  constexpr const mapping_type& mapping() const noexcept {
+    return __mapping;
+  }
+
+  constexpr const accessor_type& accessor() const noexcept {
+    return __accessor;
+  }
+
+  static constexpr bool is_always_unique() {
+    return mapping_type::is_always_unique();
+  }
+
+  static constexpr bool is_always_exhaustive() {
+    return mapping_type::is_always_exhaustive();
+  }
+
+  static constexpr bool is_always_strided() {
+    return mapping_type::is_always_strided();
+  }
+
+  constexpr bool is_unique() const {
+    return __mapping.is_unique();
+  }
+
+  constexpr bool is_exhaustive() const {
+    return __mapping.is_exhaustive();
+  }
+
+  constexpr bool is_strided() const {
+    return __mapping.is_strided();
+  }
+
+  constexpr index_type stride(rank_type rank_index) const {
+    return __mapping.stride(rank_index);
+  }
+};
+
+template <class ElementType, size_t N>
+mdspan(ElementType (&)[N])
+    -> mdspan<ElementType, extents<size_t, N>>;
+
+template <class ElementType>
+mdspan(ElementType*)
+    -> mdspan<ElementType, extents<size_t>>;
+
+template <class ElementType, class... Integrals>
+  requires(
+      sizeof...(Integrals) > 0 &&
+      (is_convertible_v<Integrals, size_t> && ...))
+explicit mdspan(ElementType*, Integrals...)
+    -> mdspan<ElementType,
+              dextents<size_t, sizeof...(Integrals)>>;
+
+template <class ElementType, class OtherIndexType, size_t N>
+mdspan(ElementType*, span<OtherIndexType, N>)
+    -> mdspan<ElementType, dextents<size_t, N>>;
+
+template <class ElementType, class OtherIndexType, size_t N>
+mdspan(ElementType*, const array<OtherIndexType, N>&)
+    -> mdspan<ElementType, dextents<size_t, N>>;
+
+template <class ElementType, class IndexType, size_t... ExtentValues>
+mdspan(ElementType*,
+       const extents<IndexType, ExtentValues...>&)
+    -> mdspan<ElementType,
+              extents<IndexType, ExtentValues...>>;
+
+template <class ElementType, class MappingType>
+  requires requires {
+    typename MappingType::extents_type;
+    typename MappingType::layout_type;
+  }
+mdspan(ElementType*, const MappingType&)
+    -> mdspan<ElementType,
+              typename MappingType::extents_type,
+              typename MappingType::layout_type>;
+
+template <class MappingType, class AccessorType>
+  requires requires {
+    typename MappingType::extents_type;
+    typename MappingType::layout_type;
+    typename AccessorType::element_type;
+    typename AccessorType::data_handle_type;
+  }
+mdspan(typename AccessorType::data_handle_type,
+       const MappingType&, const AccessorType&)
+    -> mdspan<typename AccessorType::element_type,
+              typename MappingType::extents_type,
+              typename MappingType::layout_type,
+              AccessorType>;
+
 }  // namespace std
 
 #endif /* __davecc_mdspan__ */

@@ -4181,6 +4181,19 @@ static ASTNode* ReanalyzeClonedResolvedCall(
     return node;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+  if (clone != NULL && clone->to_owner != NULL && id->symbol != NULL &&
+      StorageIs(id->symbol->storage, STO(typedef)) &&
+      TypeContainsTemplateParameter(id->symbol->type)) {
+    StructMember* concrete_member =
+        FindStructMember(clone->to_owner, &id->symbol->name);
+    if (concrete_member != NULL && concrete_member->symbol != NULL &&
+        StorageIs(concrete_member->symbol->storage, STO(typedef)) &&
+        concrete_member->symbol->type != NULL &&
+        !TypeContainsTemplateParameter(concrete_member->symbol->type)) {
+      id->symbol = concrete_member->symbol;
+      ASTNodeSetType(call->left, concrete_member->symbol->type);
+    }
+  }
   bool is_typedef_class_construction =
       clone != NULL && id->template_arguments == NULL &&
       id->symbol != NULL && id->symbol->type != NULL &&
@@ -4489,6 +4502,38 @@ static bool FunctionTemplateHasOwnParameterPack(TypeRecord* func) {
   return false;
 }
 
+// Defer class-typed member initializers in a member constructor template until
+// the constructor's own arguments are known.  Their constructor overload set
+// can depend on those arguments even when the outer initializer node's cached
+// type no longer appears dependent after the enclosing class was substituted.
+static bool ConstructorHasClassMemberInitializer(
+    Symbol* template_definition, Symbol* symbol) {
+  if (template_definition == NULL || symbol == NULL || symbol->type == NULL ||
+      symbol->type->info.function.cxx_member_owner == NULL) {
+    return false;
+  }
+  CXXConstructorInitList* initializers =
+      FindTemplateConstructorInitializers(template_definition);
+  if (initializers == NULL) {
+    return false;
+  }
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  for (size_t i = 0; i < initializers->deferred_initializers.length; i++) {
+    CXXDeferredConstructorInitializer* initializer =
+        initializers->deferred_initializers.value.p[i];
+    if (initializer == NULL || initializer->actuals == NULL) {
+      continue;
+    }
+    StructMember* member = FindStructMember(owner, &initializer->name);
+    if (member == NULL || member->symbol == NULL ||
+        !TypeIsStructOrUnion(member->symbol->type)) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
                                                     Symbol* template_definition,
                                                     Symbol* symbol,
@@ -4575,14 +4620,15 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     // whose value-init is not viable here.  For those, the preamble is deferred
     // to per-call instantiation (its init-list is re-keyed onto this class-level
     // symbol so the per-call clone can rediscover it).  A non-pack member
-    // template constructor (e.g. `duration`'s converting constructor) is instead
-    // baked here, with the enclosing class arguments substituted, so the
-    // init-list -- which may reference the enclosing class parameters -- is
-    // resolved against concrete enclosing arguments (the per-call clone then
-    // only substitutes the member's own parameters).
+    // template constructor is inserted now, but any still-dependent initializer
+    // is left unanalyzed until the per-call body clone binds its parameters.
+    bool defer_constructor_preamble =
+        symbol->type->info.function.is_constructor &&
+        (FunctionTemplateHasOwnParameterPack(symbol->type) ||
+         ConstructorHasClassMemberInitializer(template_definition, symbol));
     if (symbol->type->info.function.is_constructor &&
         (symbol->type->info.function.template_parameter_count == 0 ||
-         !FunctionTemplateHasOwnParameterPack(symbol->type))) {
+         !defer_constructor_preamble)) {
       SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                     symbol, args);
     } else if (symbol->type->info.function.is_constructor) {
@@ -4794,6 +4840,11 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     }
     ASTNodeVisit(stmt, ClearAnalyzedFlagVisitor, 0, NULL);
     RewriteTemplateBodyIdentifiers(stmt, &clone.symbol_map);
+    stmt = ASTNodeVisitAndTransform(
+        stmt, ReanalyzeClonedDependentFunctorCall, NULL);
+    stmt = ASTNodeVisitAndTransform(
+        stmt, ReanalyzeClonedResolvedCall, &clone);
+    body->value.p[i] = stmt;
     ASTNodeVisit(stmt, AnalyzeFunctionTemplateCallActualsVisitor, 0, NULL);
     ASTNodeVisit(stmt, InstantiateClonedFunctionTemplateCallVisitor, 0, &clone);
     AnalyzeStatement(stmt);

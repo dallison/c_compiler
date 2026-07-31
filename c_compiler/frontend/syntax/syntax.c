@@ -3535,15 +3535,19 @@ static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
       func->info.function.cxx_member_owner == NULL) {
     return;
   }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL) {
+      formal->value.arg_number = (int32_t)i;
+    }
+  }
   Symbol* source = CXXSourceObjectParameter(func);
   if (source == NULL) {
     return;
   }
   bool is_constructor_initializer =
       func->info.function.cxx_special_member_kind ==
-          kCXXSpecialMemberCopyConstructor ||
-      func->info.function.cxx_special_member_kind ==
-          kCXXSpecialMemberMoveConstructor;
+      kCXXSpecialMemberCopyConstructor;
   Struct* owner = func->info.function.cxx_member_owner;
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
@@ -3553,6 +3557,9 @@ static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
       continue;
     }
     TypeRecord* member_type = member->symbol->type;
+    if (is_constructor_initializer && !TypeIsFixedArray(member_type)) {
+      continue;
+    }
     if (TypeIsFixedArray(member_type)) {
       for (size_t index = 0; index < member_type->info.array.size.fixed;
            index++) {
@@ -4374,10 +4381,13 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   Symbol* base_copy_source =
       (ctor_kind == kCXXSpecialMemberCopyConstructor ||
        ctor_kind == kCXXSpecialMemberMoveConstructor) &&
+              !func->info.function.is_user_provided &&
               func->info.function.prototype.length > 0
           ? func->info.function.prototype.value
                 .p[func->info.function.prototype.length - 1]
           : NULL;
+  Symbol* member_copy_source =
+      ctor_kind == kCXXSpecialMemberCopyConstructor ? base_copy_source : NULL;
   Vector* complete_initializers = NewVector();
   AppendCXXVBPtrInitializers(func, complete_initializers, location);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
@@ -4517,6 +4527,26 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
       continue;
     }
     ASTNode* stmt = FindCXXExplicitMemberInitializer(init_list, member);
+    if (stmt == NULL && member_copy_source != NULL &&
+        !TypeIsFixedArray(member->symbol->type)) {
+      ASTNode* source_member =
+          NewCXXSourceMemberAccess(member_copy_source,
+                                   member->symbol->name.value, location);
+      if (TypeIsStructOrUnion(member->symbol->type)) {
+        Vector* actuals = NewVector();
+        VectorAppend(actuals, source_member);
+        stmt = SyntaxNewCXXMemberInitializerStatement(
+            syntax, func, member, actuals, location);
+      } else {
+        ASTNode* target_member =
+            NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+        ASTNode* assign =
+            NewBinaryASTNode(AST_OP(assign), member->symbol->type, location,
+                             target_member, source_member);
+        assign->flags |= kASTCXXMemberInitializer;
+        stmt = NewExpressionStatementASTNode(assign, location);
+      }
+    }
     if (stmt == NULL) {
       stmt = NewCXXDefaultMemberInitializerStatement(syntax, func, member);
     }
