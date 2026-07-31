@@ -1612,6 +1612,213 @@ namespace views {
 inline constexpr __detail::__iota_fn iota{};
 }  // namespace views
 
+template <class T>
+class __repeat_iterator {
+ public:
+  using iterator_concept = random_access_iterator_tag;
+  using iterator_category = random_access_iterator_tag;
+  using value_type = T;
+  using difference_type = ptrdiff_t;
+  using reference = const T&;
+  using pointer = const T*;
+
+  const T* __value_ = nullptr;
+  difference_type __current_ = 0;
+
+  __repeat_iterator() = default;
+  constexpr explicit __repeat_iterator(const T* value,
+                                       difference_type current = 0)
+      : __value_(value), __current_(current) {}
+
+  constexpr reference operator*() const { return *__value_; }
+  constexpr pointer operator->() const { return __value_; }
+
+  constexpr __repeat_iterator& operator++() {
+    ++__current_;
+    return *this;
+  }
+
+  constexpr __repeat_iterator operator++(int) {
+    __repeat_iterator copy = *this;
+    ++*this;
+    return copy;
+  }
+
+  constexpr __repeat_iterator& operator--() {
+    --__current_;
+    return *this;
+  }
+
+  constexpr __repeat_iterator operator--(int) {
+    __repeat_iterator copy = *this;
+    --*this;
+    return copy;
+  }
+
+  constexpr __repeat_iterator& operator+=(difference_type n) {
+    __current_ += n;
+    return *this;
+  }
+
+  constexpr __repeat_iterator& operator-=(difference_type n) {
+    __current_ -= n;
+    return *this;
+  }
+
+  constexpr reference operator[](difference_type) const {
+    return *__value_;
+  }
+
+  friend constexpr __repeat_iterator operator+(__repeat_iterator current,
+                                                difference_type n) {
+    current += n;
+    return current;
+  }
+
+  friend constexpr __repeat_iterator operator+(difference_type n,
+                                                __repeat_iterator current) {
+    current += n;
+    return current;
+  }
+
+  friend constexpr __repeat_iterator operator-(__repeat_iterator current,
+                                                difference_type n) {
+    current -= n;
+    return current;
+  }
+
+  friend constexpr difference_type operator-(
+      const __repeat_iterator& left, const __repeat_iterator& right) {
+    return left.__current_ - right.__current_;
+  }
+
+  friend constexpr bool operator==(const __repeat_iterator& left,
+                                   const __repeat_iterator& right) {
+    return left.__current_ == right.__current_;
+  }
+
+  friend constexpr bool operator!=(const __repeat_iterator& left,
+                                   const __repeat_iterator& right) {
+    return !(left == right);
+  }
+
+  friend constexpr bool operator<(const __repeat_iterator& left,
+                                  const __repeat_iterator& right) {
+    return left.__current_ < right.__current_;
+  }
+
+  friend constexpr bool operator>(const __repeat_iterator& left,
+                                  const __repeat_iterator& right) {
+    return right < left;
+  }
+
+  friend constexpr bool operator<=(const __repeat_iterator& left,
+                                   const __repeat_iterator& right) {
+    return !(right < left);
+  }
+
+  friend constexpr bool operator>=(const __repeat_iterator& left,
+                                   const __repeat_iterator& right) {
+    return !(left < right);
+  }
+};
+
+// [range.repeat]
+template <class T, class Bound = unreachable_sentinel_t>
+  requires move_constructible<T> && is_object_v<T> &&
+           same_as<T, remove_cv_t<T>> && semiregular<Bound> &&
+           (integral<Bound> || same_as<Bound, unreachable_sentinel_t>)
+class repeat_view : public view_interface<repeat_view<T, Bound>> {
+ public:
+  using iterator = __repeat_iterator<T>;
+
+  using sentinel =
+      conditional_t<same_as<Bound, unreachable_sentinel_t>,
+                    unreachable_sentinel_t, iterator>;
+  using const_iterator = iterator;
+
+ private:
+  __movable_box<T> __value_;
+  Bound __bound_ = Bound();
+
+ public:
+  repeat_view()
+    requires default_initializable<T>
+  = default;
+
+  constexpr explicit repeat_view(const T& value, Bound bound = Bound())
+    requires copy_constructible<T>
+      : __value_(value), __bound_(bound) {}
+
+  constexpr explicit repeat_view(T&& value, Bound bound = Bound())
+      : __value_(static_cast<T&&>(value)), __bound_(bound) {}
+
+  constexpr iterator begin() const {
+    return iterator(&*__value_);
+  }
+
+  constexpr iterator end() const
+    requires(!same_as<Bound, unreachable_sentinel_t>)
+  {
+    return iterator(&*__value_, static_cast<ptrdiff_t>(__bound_));
+  }
+
+  constexpr unreachable_sentinel_t end() const
+    requires same_as<Bound, unreachable_sentinel_t>
+  {
+    return unreachable_sentinel;
+  }
+
+  constexpr size_t size() const
+    requires(!same_as<Bound, unreachable_sentinel_t>)
+  {
+    return static_cast<size_t>(__bound_);
+  }
+};
+
+template <class T, class Bound>
+struct __iterator_type<repeat_view<T, Bound>> {
+  using type = __repeat_iterator<T>;
+};
+
+template <class T, class Bound>
+struct __iterator_type<const repeat_view<T, Bound>>
+    : __iterator_type<repeat_view<T, Bound>> {
+};
+
+template <class T, class Bound>
+struct __sentinel_type<repeat_view<T, Bound>> {
+  using type = conditional_t<same_as<Bound, unreachable_sentinel_t>,
+                             unreachable_sentinel_t,
+                             __repeat_iterator<T>>;
+};
+
+template <class T, class Bound>
+struct __sentinel_type<const repeat_view<T, Bound>>
+    : __sentinel_type<repeat_view<T, Bound>> {
+};
+
+namespace __detail {
+struct __repeat_fn {
+  template <class T>
+  constexpr auto operator()(T&& value) const {
+    using Value = decay_t<T>;
+    return repeat_view<Value>(static_cast<T&&>(value));
+  }
+
+  template <class T, class Bound>
+  constexpr auto operator()(T&& value, Bound bound) const {
+    using Value = decay_t<T>;
+    return repeat_view<Value, Bound>(
+        static_cast<T&&>(value), static_cast<Bound&&>(bound));
+  }
+};
+}  // namespace __detail
+
+namespace views {
+inline constexpr __detail::__repeat_fn repeat{};
+}  // namespace views
+
 // [range.zip]
 template <class... Views>
 struct __zip_storage;
@@ -1770,6 +1977,219 @@ class zip_view : public view_interface<zip_view<Views...>> {
 template <class... Views>
 inline constexpr bool enable_borrowed_range<zip_view<Views...>> =
     (enable_borrowed_range<Views> && ...);
+
+template <class... Views>
+struct __cartesian_storage;
+
+template <>
+struct __cartesian_storage<> {
+  constexpr __cartesian_storage() {}
+  constexpr bool __empty() const { return false; }
+  constexpr size_t __size() const { return 1; }
+};
+
+template <class V, class... Rest>
+struct __cartesian_storage<V, Rest...> {
+  V __base_;
+  __cartesian_storage<Rest...> __rest_;
+
+  constexpr __cartesian_storage() {}
+  constexpr explicit __cartesian_storage(V base, Rest... rest)
+      : __base_(static_cast<V&&>(base)),
+        __rest_(static_cast<Rest&&>(rest)...) {}
+
+  constexpr bool __empty() {
+    return ranges::begin(__base_) == ranges::end(__base_) ||
+           __rest_.__empty();
+  }
+
+  constexpr size_t __size()
+    requires sized_range<V> && (sized_range<Rest> && ...)
+  {
+    size_t head = static_cast<size_t>(ranges::size(__base_));
+    return head == 0 ? 0 : head * __rest_.__size();
+  }
+};
+
+template <class... Views>
+struct __cartesian_cursor;
+
+template <>
+struct __cartesian_cursor<> {
+  constexpr __cartesian_cursor() {}
+  constexpr explicit __cartesian_cursor(__cartesian_storage<>&) {}
+  constexpr tuple<> __dereference() const { return tuple<>(); }
+  constexpr void __reset() {}
+  constexpr bool __at_end() const { return false; }
+  constexpr bool __same_position(const __cartesian_cursor&) const {
+    return true;
+  }
+};
+
+template <class V>
+struct __cartesian_cursor<V> {
+  iterator_t<V> __begin_;
+  iterator_t<V> __current_;
+  sentinel_t<V> __end_;
+
+  constexpr __cartesian_cursor() {}
+  constexpr explicit __cartesian_cursor(__cartesian_storage<V>& storage)
+      : __begin_(ranges::begin(storage.__base_)),
+        __current_(__begin_),
+        __end_(ranges::end(storage.__base_)) {}
+
+  constexpr tuple<range_reference_t<V>> __dereference() const {
+    return tuple<range_reference_t<V>>(*__current_);
+  }
+
+  constexpr bool __increment_and_wrap() {
+    ++__current_;
+    return __current_ == __end_;
+  }
+
+  constexpr void __reset() { __current_ = __begin_; }
+  constexpr bool __at_end() const { return __current_ == __end_; }
+
+  constexpr bool __same_position(const __cartesian_cursor& other) const {
+    return __current_ == other.__current_;
+  }
+};
+
+template <class V, class Next, class... Rest>
+struct __cartesian_cursor<V, Next, Rest...> {
+  iterator_t<V> __begin_;
+  iterator_t<V> __current_;
+  sentinel_t<V> __end_;
+  __cartesian_cursor<Next, Rest...> __rest_;
+
+  constexpr __cartesian_cursor() {}
+  constexpr explicit __cartesian_cursor(
+      __cartesian_storage<V, Next, Rest...>& storage)
+      : __begin_(ranges::begin(storage.__base_)),
+        __current_(__begin_),
+        __end_(ranges::end(storage.__base_)),
+        __rest_(storage.__rest_) {}
+
+  constexpr tuple<range_reference_t<V>, range_reference_t<Next>,
+                  range_reference_t<Rest>...>
+  __dereference() const {
+    using Result =
+        tuple<range_reference_t<V>, range_reference_t<Next>,
+              range_reference_t<Rest>...>;
+    return Result(__tuple_prepend, *__current_, __rest_.__dereference());
+  }
+
+  constexpr bool __increment_and_wrap() {
+    if (__rest_.__increment_and_wrap()) {
+      __rest_.__reset();
+      ++__current_;
+    }
+    return __current_ == __end_;
+  }
+
+  constexpr void __reset() {
+    __current_ = __begin_;
+    __rest_.__reset();
+  }
+
+  constexpr bool __at_end() const {
+    return __current_ == __end_ || __rest_.__at_end();
+  }
+
+  constexpr bool __same_position(const __cartesian_cursor& other) const {
+    return __current_ == other.__current_ &&
+           __rest_.__same_position(other.__rest_);
+  }
+};
+
+// [range.cartesian]
+template <class First, class... Vs>
+  requires view<First> && (view<Vs> && ...) && input_range<First> &&
+           (forward_range<Vs> && ...)
+class cartesian_product_view
+    : public view_interface<cartesian_product_view<First, Vs...>> {
+ private:
+  __cartesian_storage<First, Vs...> __bases_;
+
+ public:
+  class iterator {
+   public:
+    using iterator_concept = input_iterator_tag;
+    using iterator_category = input_iterator_tag;
+    using value_type = tuple<range_value_t<First>, range_value_t<Vs>...>;
+    using difference_type = ptrdiff_t;
+    using reference =
+        tuple<range_reference_t<First>, range_reference_t<Vs>...>;
+    using pointer = void;
+
+   private:
+    __cartesian_cursor<First, Vs...> __cursor_;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(__cartesian_storage<First, Vs...>& storage,
+                       bool end_marker = false)
+        : __cursor_(storage), __end_marker_(end_marker) {}
+
+    constexpr reference operator*() const {
+      return __cursor_.__dereference();
+    }
+
+    constexpr iterator& operator++() {
+      __cursor_.__increment_and_wrap();
+      return *this;
+    }
+
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__cursor_.__at_end();
+      }
+      if (right.__end_marker_) {
+        return left.__cursor_.__at_end();
+      }
+      return left.__cursor_.__same_position(right.__cursor_);
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  cartesian_product_view()
+    requires default_initializable<First> &&
+             (default_initializable<Vs> && ...)
+  {}
+
+  template <class... Bases>
+  constexpr explicit cartesian_product_view(Bases... bases)
+      : __bases_(static_cast<Bases&&>(bases)...) {}
+
+  constexpr iterator begin() { return iterator(__bases_); }
+  constexpr iterator end() { return iterator(__bases_, true); }
+
+  constexpr auto size()
+    requires sized_range<First> && (sized_range<Vs> && ...)
+  {
+    return __bases_.__size();
+  }
+};
+
+template <class First, class... Vs>
+inline constexpr bool
+    enable_borrowed_range<cartesian_product_view<First, Vs...>> =
+        enable_borrowed_range<First> &&
+        (enable_borrowed_range<Vs> && ...);
 
 template <class Tuple>
 struct __zip_tuple_invoker;
@@ -3328,6 +3748,157 @@ class join_view : public view_interface<
   }
 };
 
+// [range.join.with]
+template <view V, view Pattern, class OuterI = iterator_t<V>,
+          class OuterS = sentinel_t<V>,
+          class InnerRange = remove_reference_t<iter_reference_t<OuterI>>,
+          class InnerI = iterator_t<InnerRange>,
+          class InnerS = sentinel_t<InnerRange>,
+          class PatternI = iterator_t<Pattern>,
+          class PatternS = sentinel_t<Pattern>>
+  requires input_range<V> && input_range<InnerRange> &&
+           forward_range<Pattern> &&
+           is_reference_v<iter_reference_t<OuterI>>
+class join_with_view
+    : public view_interface<
+          join_with_view<V, Pattern, OuterI, OuterS, InnerRange,
+                         InnerI, InnerS, PatternI, PatternS>> {
+ private:
+  V __base_;
+  Pattern __pattern_;
+
+ public:
+  class iterator {
+   public:
+    using iterator_concept = input_iterator_tag;
+    using iterator_category = input_iterator_tag;
+    using value_type =
+        common_type_t<iter_value_t<InnerI>, iter_value_t<PatternI>>;
+    using difference_type = ptrdiff_t;
+    using reference =
+        common_reference_t<iter_reference_t<InnerI>,
+                           iter_reference_t<PatternI>>;
+    using pointer = void;
+
+   private:
+    join_with_view* __parent_ = nullptr;
+    OuterI __outer_;
+    OuterS __outer_end_;
+    InnerI __inner_;
+    InnerS __inner_end_;
+    PatternI __pattern_;
+    PatternS __pattern_end_;
+    bool __in_pattern_ = false;
+    bool __at_end_ = false;
+
+    constexpr void __set_inner() {
+      auto&& inner_range = *__outer_;
+      __inner_ = ranges::begin(inner_range);
+      __inner_end_ = ranges::end(inner_range);
+      __in_pattern_ = false;
+    }
+
+    constexpr void __set_pattern() {
+      __pattern_ = ranges::begin(__parent_->__pattern_);
+      __pattern_end_ = ranges::end(__parent_->__pattern_);
+      __in_pattern_ = true;
+    }
+
+    constexpr void __satisfy() {
+      while (!__at_end_) {
+        if (__in_pattern_) {
+          if (__pattern_ != __pattern_end_) {
+            return;
+          }
+          __set_inner();
+          continue;
+        }
+        if (__inner_ != __inner_end_) {
+          return;
+        }
+        ++__outer_;
+        if (__outer_ == __outer_end_) {
+          __at_end_ = true;
+          return;
+        }
+        __set_pattern();
+      }
+    }
+
+   public:
+    iterator() = default;
+    constexpr iterator(join_with_view* parent, OuterI outer,
+                       OuterS outer_end, bool end_marker = false)
+        : __parent_(parent),
+          __outer_(static_cast<OuterI&&>(outer)),
+          __outer_end_(static_cast<OuterS&&>(outer_end)),
+          __at_end_(end_marker || __outer_ == __outer_end_) {
+      if (!__at_end_) {
+        __set_inner();
+        __satisfy();
+      }
+    }
+
+    constexpr reference operator*() const {
+      if (__in_pattern_) {
+        return *__pattern_;
+      }
+      return *__inner_;
+    }
+
+    constexpr iterator& operator++() {
+      if (__in_pattern_) {
+        ++__pattern_;
+      } else {
+        ++__inner_;
+      }
+      __satisfy();
+      return *this;
+    }
+
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__at_end_ || right.__at_end_) {
+        return left.__at_end_ == right.__at_end_;
+      }
+      if (left.__outer_ != right.__outer_ ||
+          left.__in_pattern_ != right.__in_pattern_) {
+        return false;
+      }
+      return left.__in_pattern_
+                 ? left.__pattern_ == right.__pattern_
+                 : left.__inner_ == right.__inner_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  join_with_view()
+    requires default_initializable<V> &&
+             default_initializable<Pattern>
+  = default;
+
+  constexpr join_with_view(V base, Pattern pattern)
+      : __base_(static_cast<V&&>(base)),
+        __pattern_(static_cast<Pattern&&>(pattern)) {}
+
+  constexpr iterator begin() {
+    return iterator(this, ranges::begin(__base_), ranges::end(__base_));
+  }
+
+  constexpr iterator end() {
+    return iterator(this, ranges::begin(__base_), ranges::end(__base_), true);
+  }
+};
+
 // [range.split] A forward split view for the standard single-element pattern.
 template <class I, class S, class T>
 class __split_iterator {
@@ -3490,6 +4061,21 @@ struct __zip_fn {
     requires(sizeof...(Ranges) > 0) && (viewable_range<Ranges> && ...)
   constexpr auto operator()(Ranges&&... ranges) const {
     return zip_view<all_t<Ranges>...>(
+        views::all(static_cast<Ranges&&>(ranges))...);
+  }
+};
+
+struct __cartesian_product_fn {
+  constexpr empty_view<tuple<>> operator()() const {
+    return empty_view<tuple<>>();
+  }
+
+  template <class First, class... Ranges>
+    requires viewable_range<First> &&
+             (viewable_range<Ranges> && ...)
+  constexpr auto operator()(First&& first, Ranges&&... ranges) const {
+    return cartesian_product_view<all_t<First>, all_t<Ranges>...>(
+        views::all(static_cast<First&&>(first)),
         views::all(static_cast<Ranges&&>(ranges))...);
   }
 };
@@ -3893,6 +4479,60 @@ struct __join_fn : __adaptor_closure_base {
   }
 };
 
+template <viewable_range R, viewable_range Pattern>
+constexpr auto __make_join_with(R&& range, Pattern&& pattern) {
+  using V = all_t<R>;
+  using P = all_t<Pattern>;
+  return join_with_view<V, P>(
+      views::all(static_cast<R&&>(range)),
+      views::all(static_cast<Pattern&&>(pattern)));
+}
+
+template <viewable_range R, class T>
+  requires(!viewable_range<T>)
+constexpr auto __make_join_with(R&& range, T&& value) {
+  using V = all_t<R>;
+  using Value = decay_t<T>;
+  using P = single_view<Value>;
+  return join_with_view<V, P>(
+      views::all(static_cast<R&&>(range)),
+      P(static_cast<T&&>(value)));
+}
+
+template <class Pattern>
+struct __join_with_closure : __adaptor_closure_base {
+  Pattern __pattern;
+  constexpr explicit __join_with_closure(Pattern pattern)
+      : __pattern(static_cast<Pattern&&>(pattern)) {}
+
+  template <viewable_range R>
+  constexpr auto operator()(R&& range) const {
+    return __make_join_with(static_cast<R&&>(range), __pattern);
+  }
+};
+
+struct __join_with_fn {
+  template <viewable_range R, class Pattern>
+  constexpr auto operator()(R&& range, Pattern&& pattern) const {
+    return __make_join_with(static_cast<R&&>(range),
+                            static_cast<Pattern&&>(pattern));
+  }
+
+  template <viewable_range Pattern>
+  constexpr auto operator()(Pattern&& pattern) const {
+    using P = all_t<Pattern>;
+    return __join_with_closure<P>(
+        views::all(static_cast<Pattern&&>(pattern)));
+  }
+
+  template <class T>
+    requires(!viewable_range<T>)
+  constexpr auto operator()(T&& value) const {
+    using Value = decay_t<T>;
+    return __join_with_closure<Value>(static_cast<T&&>(value));
+  }
+};
+
 template <class Pattern>
 struct __split_closure : __adaptor_closure_base {
   Pattern __pattern;
@@ -4050,6 +4690,7 @@ constexpr auto operator|(R&& range, C&& closure) {
 
 namespace views {
 inline constexpr __detail::__zip_fn zip{};
+inline constexpr __detail::__cartesian_product_fn cartesian_product{};
 inline constexpr __detail::__zip_transform_fn zip_transform{};
 inline constexpr __detail::__enumerate_fn enumerate{};
 template <size_t N>
@@ -4071,6 +4712,7 @@ inline constexpr __detail::__drop_while_fn drop_while{};
 inline constexpr __detail::__reverse_fn reverse{};
 inline constexpr __detail::__common_fn common{};
 inline constexpr __detail::__join_fn join{};
+inline constexpr __detail::__join_with_fn join_with{};
 inline constexpr __detail::__split_fn split{};
 inline constexpr __detail::__split_fn lazy_split{};
 inline constexpr __detail::__counted_fn counted{};

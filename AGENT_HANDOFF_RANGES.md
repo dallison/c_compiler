@@ -10,8 +10,9 @@ existing C++20 ranges runtime corruption was fixed and committed as `5c09cab`
 
 The `views::zip`, `views::zip_transform`, `views::enumerate`,
 `views::adjacent`, `views::adjacent_transform`, `views::chunk`, `views::slide`,
-`views::chunk_by`, and `views::stride` roadmap slices are implemented and
-runtime-clean on all supported ranges-test targets.
+`views::chunk_by`, `views::stride`, `views::join_with`, `views::repeat`, and
+`views::cartesian_product` roadmap slices are implemented and runtime-clean on
+all supported ranges-test targets.
 
 ## Completed implementation
 
@@ -28,6 +29,8 @@ runtime-clean on all supported ranges-test targets.
     including non-common sentinels, pipe closures, and the `pairwise` aliases.
   - Added runtime chunk and slide windows, predicate-based chunking, and stride
     iteration with direct and piped adaptors.
+  - Added scalar/range-delimited joining, bounded and unbounded repetition, and
+    variadic odometer-order cartesian products.
 - `cxx_testsuite/tests/syntax/pass/0307_standard_ranges_zip.cpp`
   - Passes with:
 
@@ -51,6 +54,12 @@ runtime-clean on all supported ranges-test targets.
 - `cxx_testsuite/tests/exec_ranges/0010_window_views.cpp`
   - Covers partial chunks, short slides, reference mutation, predicate groups,
     stride sizing, and all four adaptors over non-common ranges.
+- `cxx_testsuite/tests/syntax/pass/0310_standard_ranges_composition.cpp`
+  - Covers concepts, reference types, bounded and unbounded repeats, variadic
+    products, delimiter forms, pipes, and counted ranges.
+- `cxx_testsuite/tests/exec_ranges/0011_composition_views.cpp`
+  - Covers repeat iteration, cartesian order and empty products, scalar and
+    range delimiters, empty inner ranges, and joined-reference mutation.
 
 ## Resolved compiler issues
 

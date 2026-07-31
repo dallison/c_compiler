@@ -108,7 +108,12 @@ implemented.
       grouping, stepped iteration, and non-common sentinel support.
     - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
       execution targets pass.
-  - `views::join_with`, `repeat`, and `cartesian_product`.
+  - [x] `views::join_with`, `repeat`, and `cartesian_product`.
+    - Includes scalar and range delimiters, bounded and unbounded repetition,
+      variadic odometer-order products, empty products, reference tuples, and
+      non-common counted-range integration.
+    - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
+      execution targets pass.
   - `ranges::to`, range fold algorithms, and the new contains/prefix/suffix
     algorithms.
 - [ ] Expand `import std`.
