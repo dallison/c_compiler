@@ -7425,6 +7425,7 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   }
   ASTNode* constructor_call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  LowerMemberFunctionCall((VectorASTNode*)constructor_call);
   ASTNode* result = NewIdentifierASTNode(temp, location);
   ASTNode* comma =
       NewBinaryASTNode(AST_OP(comma), type, location, constructor_call, result);
