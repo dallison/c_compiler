@@ -847,6 +847,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
   }
   IRNode* result;
   if ((node->base.flags & kASTNeedAddress) != 0 ||
+      TypeIsFunction(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
     // Need the address of the node, not the value.  A whole struct/union is

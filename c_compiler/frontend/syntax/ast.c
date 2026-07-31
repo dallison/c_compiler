@@ -4105,6 +4105,7 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &binary_vtbl) return kASTShapeBinary;
   if (v == &inline_call_vtbl) return kASTShapeInlineCall;
   if (v == &vector_vtbl) return kASTShapeVector;
+  if (v == &requires_expr_vtbl) return kASTShapeRequiresExpr;
   if (v == &identifier_vtbl) return kASTShapeIdentifier;
   if (v == &struct_member_vtbl) return kASTShapeStructMember;
   if (v == &constant_vtbl) return kASTShapeConstant;
@@ -4113,6 +4114,7 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &typeid_vtbl) return kASTShapeTypeid;
   if (v == &macro_vtbl) return kASTShapeMacro;
   if (v == &expr_stmt_vtbl) return kASTShapeExprStmt;
+  if (v == &static_assert_vtbl) return kASTShapeStaticAssert;
   if (v == &if_stmt_vtbl) return kASTShapeIf;
   if (v == &combined_stmt_vtbl) return kASTShapeCombined;
   if (v == &throw_vtbl) return kASTShapeThrow;
@@ -4157,6 +4159,12 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       ASTNodeInit(&n->base, op, NULL, 0, &vector_vtbl);
       return &n->base;
     }
+    case kASTShapeRequiresExpr: {
+      RequiresExpressionASTNode* n =
+          ASTArenaAlloc(sizeof(RequiresExpressionASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &requires_expr_vtbl);
+      return &n->base;
+    }
     case kASTShapeIdentifier: {
       IdentifierASTNode* n = ASTArenaAlloc(sizeof(IdentifierASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &identifier_vtbl);
@@ -4197,6 +4205,12 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       ExpressionStatementASTNode* n =
           ASTArenaAlloc(sizeof(ExpressionStatementASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &expr_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeStaticAssert: {
+      StaticAssertASTNode* n = ASTArenaAlloc(sizeof(StaticAssertASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &static_assert_vtbl);
+      StringInit(&n->message, NULL);
       return &n->base;
     }
     case kASTShapeIf: {

@@ -1016,6 +1016,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record =
                   SubstituteTemplateParameters(parser, symbol->type,
                                                completed_args);
+              type_record = TypeMaterializeClassTemplateSpecialization(
+                  parser->syntax, type_record);
             }
             VectorDeleteWithContents(
                 completed_args, (VectorElementDestructor)TemplateArgumentDelete,
@@ -1121,6 +1123,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 type_record =
                     SubstituteTemplateParameters(parser, symbol->type,
                                                  completed_args);
+                type_record = TypeMaterializeClassTemplateSpecialization(
+                    parser->syntax, type_record);
               }
               VectorDeleteWithContents(
                   completed_args,

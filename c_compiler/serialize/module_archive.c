@@ -517,6 +517,19 @@ static void RepairImportedStructTemplateParameters(Struct* st) {
   }
 }
 
+static void RepairImportedPartialSpecializationParameters(Vector* partials) {
+  if (partials == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < partials->length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        (ClassTemplatePartialSpecialization*)VectorGet(partials, i);
+    if (partial != NULL) {
+      RepairImportedTemplateParameterVector(&partial->template_parameters);
+    }
+  }
+}
+
 static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
   if (ctx == NULL) {
     return;
@@ -529,11 +542,23 @@ static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
       if (st->is_template) {
         RepairImportedStructTemplateParameters(st);
       }
+      RepairImportedPartialSpecializationParameters(
+          &st->partial_specializations);
     }
   }
   Vector* sym_pool = &ctx->objects[kSerialKindSymbol];
   for (size_t i = 0; i < sym_pool->length; i++) {
     Symbol* sym = (Symbol*)VectorGet(sym_pool, i);
+    if (sym != NULL && sym->alias_template != NULL) {
+      RepairImportedTemplateParameterVector(
+          &sym->alias_template->parameters);
+    }
+    if (sym != NULL && sym->variable_template != NULL) {
+      RepairImportedTemplateParameterVector(
+          &sym->variable_template->parameters);
+      RepairImportedPartialSpecializationParameters(
+          &sym->variable_template->partial_specializations);
+    }
     if (sym != NULL && sym->type != NULL && TypeIsFunction(sym->type)) {
       if (sym->type->info.function.symbol == NULL) {
         sym->type->info.function.symbol = sym;

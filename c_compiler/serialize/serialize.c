@@ -7,6 +7,7 @@
 
 #include "serialize.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -154,6 +155,8 @@ bool SerializeContextDrain(SerializeContext* ctx) {
         WireBuffer* buf = (WireBuffer*)malloc(sizeof(WireBuffer));
         WireBufferInitOwned(buf, 32);
         if (vt == NULL || vt->write == NULL || !vt->write(ctx, buf, obj)) {
+          fprintf(stderr, "module serialization failed for kind %d object %zu\n",
+                  k, i + 1);
           ctx->error = true;
         }
         // Keep the buffer even on error so destruct frees it uniformly.

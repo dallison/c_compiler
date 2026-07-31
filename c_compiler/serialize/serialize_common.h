@@ -78,4 +78,12 @@ void SerialWriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
 Vector* SerialReadTemplateArgumentVector(DeserializeContext* ctx,
                                          WireBuffer* in);
 
+// ClassTemplatePartialSpecialization vector (de)serialization, implemented in
+// type_serialize.c and shared with symbol_serialize.c for variable templates.
+void SerialWritePartialSpecializationVector(SerializeContext* ctx,
+                                            WireBuffer* out, int field,
+                                            Vector* specializations);
+void SerialReadPartialSpecializationVector(DeserializeContext* ctx,
+                                           WireBuffer* in, Vector* out);
+
 #endif /* serialize_common_h */

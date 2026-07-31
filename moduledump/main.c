@@ -410,6 +410,10 @@ static void DumpSymbol(Symbol* s, size_t handle, String* scratch) {
       ASTNodePrint(s->variable_template->initializer, 6, stdout);
     }
   }
+  if (s->alias_template != NULL) {
+    printf("        alias template:\n");
+    DumpTemplateParameters(&s->alias_template->parameters, 5);
+  }
   if (s->concept_definition != NULL) {
     Concept* c = s->concept_definition;
     printf("        concept definition: %s\n", c->name.value);

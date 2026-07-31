@@ -47,6 +47,30 @@ It can then be consumed with `import "config.hpp";`. Declarations and macros
 that remain defined at the end of header processing are made available to the
 importer. Macros from ordinary named modules are not exported.
 
+## Standard library module
+
+`import std;` is available in C++23 mode. Bazel builds a target-specific
+`std.dcm` and `std.o`; importers must compile for the same target and link the
+matching object.
+
+The verified profile exports:
+
+- Core utilities: `any`, `array`, `compare`, `concepts`, `exception`,
+  `initializer_list`, `iterator`, `memory`, `new`, `optional`, `ratio`,
+  `source_location`, `span`, `stdexcept`, `string`, `string_view`,
+  `system_error`, `tuple`, `type_traits`, `utility`, and `variant`.
+- Containers and adaptors: `deque`, `list`, `map`, `queue`, `set`, `stack`,
+  `unordered_map`, `unordered_set`, and `vector`.
+- Concurrency and time: `atomic`, `barrier`, `chrono`, `condition_variable`,
+  `coroutine`, `latch`, `mutex`, `semaphore`, `stop_token`, and `thread`.
+- C++23 facilities: `algorithm`, `format`, `functional`, `generator`,
+  `mdspan`, `print`, and `ranges`.
+
+This is the library's currently implemented narrow profile. In particular,
+`format` and `print` do not claim locale, Unicode, wide-character, or formatter
+coverage beyond what the corresponding headers implement. Headers absent from
+this list are intentionally not exported yet.
+
 ## Dependency scanning
 
 DaveCC emits P1689R5 dependency information from the preprocessed token stream:

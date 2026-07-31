@@ -73,7 +73,9 @@ void println(const typename __format_detail::__non_deduced<format_string<A0>>::t
 }
 
 inline void println() {
-  __print_detail::__write_stdout(string("\n", 1));
+  if (::fwrite("\n", 1, 1, stdout) != 1) {
+    __format_detail::__fail("print write failed");
+  }
 }
 
 template <class A0>
@@ -88,7 +90,9 @@ void println(FILE* file,
 }
 
 inline void println(FILE* file) {
-  __print_detail::__write_file(file, string("\n", 1));
+  if (::fwrite("\n", 1, 1, file) != 1) {
+    __format_detail::__fail("print write failed");
+  }
 }
 
 }  // namespace std

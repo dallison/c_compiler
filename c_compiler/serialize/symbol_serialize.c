@@ -364,6 +364,7 @@ enum {
   kVt_initializer = 1,  // ASTNode ref (unanalyzed initializer expression).
   kVt_parameters = 2,   // TemplateParameter vector.
   kVt_associated_constraint = 3,
+  kVt_partial_specializations = 4,
 };
 
 static void WriteVariableTemplate(SerializeContext* ctx, WireBuffer* buf,
@@ -375,6 +376,9 @@ static void WriteVariableTemplate(SerializeContext* ctx, WireBuffer* buf,
                                      &vt->parameters);
   SerialWriteConstraint(ctx, &sub, kVt_associated_constraint,
                         vt->associated_constraint);
+  SerialWritePartialSpecializationVector(
+      ctx, &sub, kVt_partial_specializations,
+      &vt->partial_specializations);
   WireWriteBytes(buf, field, WireBufferData(&sub), WireBufferSize(&sub));
   WireBufferDestruct(&sub);
 }
@@ -410,6 +414,10 @@ static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
         break;
       case kVt_associated_constraint:
         vt->associated_constraint = SerialReadConstraint(ctx, &sub);
+        break;
+      case kVt_partial_specializations:
+        SerialReadPartialSpecializationVector(
+            ctx, &sub, &vt->partial_specializations);
         break;
       default:
         WireSkip(&sub, wt);

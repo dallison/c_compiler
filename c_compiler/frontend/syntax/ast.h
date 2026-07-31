@@ -425,6 +425,8 @@ typedef enum {
   kASTShapeBracedInit,
   kASTShapeDesignatedInit,
   kASTShapeCompoundLiteral,
+  kASTShapeStaticAssert,
+  kASTShapeRequiresExpr,
 } ASTNodeShape;
 
 // Returns the concrete shape of a node by inspecting its virtual table.

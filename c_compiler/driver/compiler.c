@@ -1559,10 +1559,15 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
           decl->base.type->info.function.body);
   bool uninstantiated_function_template =
       decl->symbol->flags.is_template &&
-      decl->base.type->info.function.template_origin == NULL &&
-      decl->base.type->info.function.template_parameters.length != 0;
+      decl->base.type->info.function.template_origin == NULL;
+  bool unnamed_cxx_function =
+      CompilerIsCXX() && decl->symbol->asm_name.length == 0 &&
+      !decl->symbol->flags.invented && !decl->symbol->flags.is_c_linkage &&
+      strcmp(decl->symbol->name.value, "main") != 0 &&
+      strncmp(decl->symbol->name.value, "__", 2) != 0;
   if (NumErrors() != 0 || dependent_function_body ||
       uninstantiated_function_template ||
+      unnamed_cxx_function ||
       (decl->base.type->info.function.is_inline &&
        !decl->symbol->flags.is_inline_defn) ||
       !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {

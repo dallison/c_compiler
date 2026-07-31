@@ -121,13 +121,16 @@ implemented.
       projections, and empty-range behavior.
     - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
       execution targets pass.
-- [ ] Expand `import std`.
-  - Export each supported standard header, including ranges, generator, span,
-    format, and print.
-  - Fix imported class-template members, deduction guides, partial
-    specializations, and overload sets before exposing affected headers.
-  - Add useful container, string, span, format, and ranges execution coverage;
-    the current smoke test covers `std::array`, stop tokens, and `std::mdspan`.
+- [x] Expand `import std`.
+  - The C++23 `std` header unit now exports the supported containers, utilities,
+    algorithms, ranges, generator, format, and print surfaces listed in
+    `docs/cxx20_modules.md`.
+  - Module round-tripping covers member templates, deduction guides, class and
+    variable partial specializations, overload chains, alias templates,
+    `static_assert`, and requires-expression ASTs.
+  - Module consumers exercise containers, strings, span, tuple, variant, ratio,
+    source locations, algorithms, ranges folds/conversion, generator, format,
+    and print on x86-64, AArch64, ARM, and RISC-V.
 - [ ] Complete `<format>` and `<print>` beyond the initial narrow implementation.
   - Locale-aware formatting.
   - Unicode printing and `vprint_unicode`.
@@ -147,8 +150,8 @@ implemented.
       coroutine/constexpr audit.
 - [x] 3. Add `counted_iterator` and `common_iterator`.
 - [x] 4. Implement `<mdspan>` now that `<span>` exists.
-- [ ] 5. Build the C++23 ranges expansion on the completed iterator foundation.
-- [ ] 6. Expand `import std` incrementally as module serialization becomes safe
+- [x] 5. Build the C++23 ranges expansion on the completed iterator foundation.
+- [x] 6. Expand `import std` incrementally as module serialization becomes safe
       for each header.
 - [ ] 7. Complete format/print, threading, atomics, memory ownership, chrono,
       filesystem, and the independent C++23 library headers.
@@ -161,5 +164,5 @@ implemented.
       positive and negative tests.
 - [ ] Unsupported embedded-target features have explicit documented profiles
       and useful diagnostics.
-- [ ] `import std` exposes the supported standard-library profile without
+- [x] `import std` exposes the supported standard-library profile without
       importer crashes, incorrect template instantiation, or runtime corruption.

@@ -148,6 +148,45 @@ run "$DAVECC" -target "$TARGET" -static \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute standard library module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  "$FIXTURES/use_std_containers.cpp" \
+  -o "$work/use_std_containers.o" ||
+  fail "compile standard container module importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std_containers.o" "$STD_OBJECT" "$LIBC" \
+  -o "$work/std_containers.bin" ||
+  fail "link standard container module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/std_containers.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute standard container module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  "$FIXTURES/use_std_utilities.cpp" \
+  -o "$work/use_std_utilities.o" ||
+  fail "compile standard utility module importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std_utilities.o" "$STD_OBJECT" "$LIBC" \
+  -o "$work/std_utilities.bin" ||
+  fail "link standard utility module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/std_utilities.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute standard utility module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  "$FIXTURES/use_std_heavy.cpp" \
+  -o "$work/use_std_heavy.o" ||
+  fail "compile template-heavy standard module importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std_heavy.o" "$STD_OBJECT" "$LIBC" \
+  -o "$work/std_heavy.bin" ||
+  fail "link template-heavy standard module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/std_heavy.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute template-heavy standard module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fmodule-output "$work/template_template.dcm" \
   "$FIXTURES/template_template.cppm" -o "$work/template_template.o" ||
@@ -239,6 +278,26 @@ run "$DAVECC" -target "$TARGET" -static \
 "$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} "$work/surface.bin" \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute surface module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/template_surface.dcm" \
+  "$FIXTURES/template_surface.cppm" ||
+  fail "emit template surface module"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/template_surface.cppm" -o "$work/template_surface.o" ||
+  fail "compile template surface module object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_template_surface.cpp" \
+  -o "$work/use_template_surface.o" ||
+  fail "compile template surface importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_template_surface.o" "$work/template_surface.o" "$LIBC" \
+  -o "$work/template_surface.bin" ||
+  fail "link template surface executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/template_surface.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute template surface module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++20 \
   -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||

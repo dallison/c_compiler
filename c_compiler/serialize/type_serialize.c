@@ -1462,9 +1462,9 @@ enum {
   kPartial_variable_type = 6,
 };
 
-static void WritePartialSpecializationVector(SerializeContext* ctx,
-                                             WireBuffer* out, int field,
-                                             Vector* specializations) {
+void SerialWritePartialSpecializationVector(SerializeContext* ctx,
+                                            WireBuffer* out, int field,
+                                            Vector* specializations) {
   WireBuffer list;
   WireBufferInitOwned(&list, 32);
   WireWriteRawVarint(&list, (uint64_t)specializations->length);
@@ -1494,8 +1494,8 @@ static void WritePartialSpecializationVector(SerializeContext* ctx,
   WireBufferDestruct(&list);
 }
 
-static void ReadPartialSpecializationVector(DeserializeContext* ctx,
-                                            WireBuffer* in, Vector* out) {
+void SerialReadPartialSpecializationVector(DeserializeContext* ctx,
+                                           WireBuffer* in, Vector* out) {
   const void* data;
   size_t length;
   if (!WireReadBytes(in, &data, &length)) {
@@ -1611,7 +1611,7 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                         s->associated_constraint);
   SWriteRef(ctx, buf, kStruct_lexical_parent, kSerialKindStruct,
             s->lexical_parent);
-  WritePartialSpecializationVector(
+  SerialWritePartialSpecializationVector(
       ctx, buf, kStruct_partial_specializations,
       &s->partial_specializations);
   SWriteRefVector(ctx, buf, kStruct_deduction_guides, kSerialKindSymbol,
@@ -1733,7 +1733,7 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
             (Struct*)SReadRef(ctx, buf, kSerialKindStruct);
         break;
       case kStruct_partial_specializations:
-        ReadPartialSpecializationVector(
+        SerialReadPartialSpecializationVector(
             ctx, buf, &s->partial_specializations);
         break;
       case kStruct_deduction_guides:

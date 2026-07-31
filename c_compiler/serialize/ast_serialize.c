@@ -20,6 +20,7 @@
 #include <stdlib.h>
 
 #include "ast.h"
+#include "constraint_serialize.h"
 #include "serialize_common.h"
 #include "symbol.h"
 #include "type.h"
@@ -377,6 +378,11 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       WriteASTVectorPtr(ctx, buf, 17, v->children);
       break;
     }
+    case kASTShapeRequiresExpr: {
+      RequiresExpressionASTNode* r = (RequiresExpressionASTNode*)n;
+      SerialWriteConstraint(ctx, buf, 16, r->constraint);
+      break;
+    }
     case kASTShapeIdentifier: {
       IdentifierASTNode* id = (IdentifierASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindSymbol, id->symbol);
@@ -442,6 +448,12 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
     case kASTShapeExprStmt: {
       ExpressionStatementASTNode* e = (ExpressionStatementASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, e->expr);
+      break;
+    }
+    case kASTShapeStaticAssert: {
+      StaticAssertASTNode* a = (StaticAssertASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, a->expr);
+      SWriteStringVal(ctx, buf, 17, &a->message);
       break;
     }
     case kASTShapeIf: {
@@ -633,6 +645,14 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       break;
     }
+    case kASTShapeRequiresExpr: {
+      RequiresExpressionASTNode* r = (RequiresExpressionASTNode*)n;
+      if (field == 16) {
+        r->constraint = SerialReadConstraint(ctx, buf);
+        return;
+      }
+      break;
+    }
     case kASTShapeIdentifier: {
       IdentifierASTNode* id = (IdentifierASTNode*)n;
       if (field == 16) {
@@ -761,6 +781,18 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       ExpressionStatementASTNode* e = (ExpressionStatementASTNode*)n;
       if (field == 16) {
         e->expr = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      break;
+    }
+    case kASTShapeStaticAssert: {
+      StaticAssertASTNode* a = (StaticAssertASTNode*)n;
+      if (field == 16) {
+        a->expr = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        SReadStringVal(ctx, buf, &a->message);
         return;
       }
       break;
