@@ -1890,6 +1890,268 @@ class zip_transform_view
   }
 };
 
+template <class T, size_t>
+struct __adjacent_indexed_type {
+  using type = T;
+};
+
+template <class T, class Sequence>
+struct __repeated_tuple;
+
+template <class T, size_t... Indices>
+struct __repeated_tuple<T, index_sequence<Indices...>> {
+  using type =
+      tuple<typename __adjacent_indexed_type<T, Indices>::type...>;
+};
+
+template <class V, size_t N>
+using __adjacent_reference_t =
+    typename __repeated_tuple<
+        range_reference_t<V>, make_index_sequence<N>>::type;
+
+template <class V, size_t N>
+using __adjacent_value_t =
+    typename __repeated_tuple<
+        range_value_t<V>, make_index_sequence<N>>::type;
+
+template <class V, size_t N>
+struct __adjacent_cursor;
+
+template <class V>
+struct __adjacent_cursor<V, 0> {
+  constexpr __adjacent_cursor() {}
+  constexpr __adjacent_cursor(iterator_t<V>, sentinel_t<V>) {}
+  constexpr tuple<> __dereference() const { return tuple<>(); }
+  constexpr void __increment() {}
+  constexpr bool __at_end() const { return false; }
+  constexpr bool __same_position(const __adjacent_cursor&) const {
+    return true;
+  }
+};
+
+template <class V, size_t N>
+struct __adjacent_cursor {
+  iterator_t<V> __current_;
+  sentinel_t<V> __end_;
+  __adjacent_cursor<V, N - 1> __rest_;
+
+  static constexpr iterator_t<V> __next(iterator_t<V> current,
+                                         const sentinel_t<V>& end) {
+    if (current != end) {
+      ++current;
+    }
+    return current;
+  }
+
+  constexpr __adjacent_cursor() {}
+  constexpr __adjacent_cursor(iterator_t<V> current, sentinel_t<V> end)
+      : __current_(current),
+        __end_(end),
+        __rest_(__next(current, end), end) {}
+
+  constexpr __adjacent_reference_t<V, N> __dereference() const {
+    using Result = __adjacent_reference_t<V, N>;
+    return Result(__tuple_prepend, *__current_, __rest_.__dereference());
+  }
+
+  constexpr void __increment() {
+    ++__current_;
+    __rest_.__increment();
+  }
+
+  constexpr bool __at_end() const {
+    return __current_ == __end_ || __rest_.__at_end();
+  }
+
+  constexpr bool __same_position(const __adjacent_cursor& other) const {
+    return __current_ == other.__current_ &&
+           __rest_.__same_position(other.__rest_);
+  }
+};
+
+// [range.adjacent]
+template <class V, size_t N>
+  requires view<V> && forward_range<V> && (N > 0)
+class adjacent_view : public view_interface<adjacent_view<V, N>> {
+ private:
+  V __base_;
+
+ public:
+  class iterator {
+   public:
+    using iterator_concept = forward_iterator_tag;
+    using iterator_category = forward_iterator_tag;
+    using value_type = __adjacent_value_t<V, N>;
+    using difference_type = range_difference_t<V>;
+    using reference = __adjacent_reference_t<V, N>;
+    using pointer = void;
+
+   private:
+    __adjacent_cursor<V, N> __cursor_;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(iterator_t<V> current, sentinel_t<V> end,
+                       bool end_marker = false)
+        : __cursor_(current, end), __end_marker_(end_marker) {}
+
+    constexpr reference operator*() const {
+      return __cursor_.__dereference();
+    }
+
+    constexpr iterator& operator++() {
+      __cursor_.__increment();
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__cursor_.__at_end();
+      }
+      if (right.__end_marker_) {
+        return left.__cursor_.__at_end();
+      }
+      return left.__cursor_.__same_position(right.__cursor_);
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  adjacent_view()
+    requires default_initializable<V>
+  = default;
+
+  constexpr explicit adjacent_view(V base)
+      : __base_(static_cast<V&&>(base)) {}
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_));
+  }
+
+  constexpr iterator end() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), true);
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    size_t count = static_cast<size_t>(ranges::size(__base_));
+    size_t overlap = N - 1;
+    return count < overlap ? 0 : count - overlap;
+  }
+};
+
+template <class V, size_t N>
+inline constexpr bool enable_borrowed_range<adjacent_view<V, N>> =
+    enable_borrowed_range<V>;
+
+// [range.adjacent.transform]
+template <class V, class F, size_t N>
+  requires view<V> && forward_range<V> && (N > 0) &&
+           move_constructible<F> && is_object_v<F> &&
+           __zip_invocable<F&, __adjacent_reference_t<V, N>>::value &&
+           __can_reference<typename __zip_invoke_result<
+               F&, __adjacent_reference_t<V, N>>::type>
+class adjacent_transform_view
+    : public view_interface<adjacent_transform_view<V, F, N>> {
+ private:
+  adjacent_view<V, N> __inner_;
+  __movable_box<F> __fun_;
+
+ public:
+  class iterator {
+   public:
+    using inner_iterator = typename adjacent_view<V, N>::iterator;
+    using iterator_concept = forward_iterator_tag;
+    using iterator_category = forward_iterator_tag;
+    using reference = typename __zip_invoke_result<
+        F&, __adjacent_reference_t<V, N>>::type;
+    using value_type = remove_cvref_t<reference>;
+    using difference_type = range_difference_t<V>;
+    using pointer = void;
+
+   private:
+    adjacent_transform_view* __parent_ = nullptr;
+    inner_iterator __current_;
+
+   public:
+    iterator() = default;
+    constexpr iterator(adjacent_transform_view* parent,
+                       inner_iterator current)
+        : __parent_(parent),
+          __current_(static_cast<inner_iterator&&>(current)) {}
+
+    constexpr decltype(auto) operator*() const {
+      auto values = *__current_;
+      return __zip_tuple_invoker<__adjacent_reference_t<V, N>>::__call(
+          *__parent_->__fun_, values);
+    }
+
+    constexpr iterator& operator++() {
+      ++__current_;
+      return *this;
+    }
+
+    constexpr iterator operator++(int) {
+      iterator copy = *this;
+      ++*this;
+      return copy;
+    }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  adjacent_transform_view()
+    requires default_initializable<V> && default_initializable<F>
+  = default;
+
+  constexpr adjacent_transform_view(V base, F fun)
+      : __inner_(static_cast<V&&>(base)),
+        __fun_(static_cast<F&&>(fun)) {}
+
+  constexpr iterator begin() {
+    return iterator(this, __inner_.begin());
+  }
+
+  constexpr iterator end() {
+    return iterator(this, __inner_.end());
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    return __inner_.size();
+  }
+};
+
 // [range.enumerate]
 template <view V>
   requires input_range<V>
@@ -2796,6 +3058,50 @@ struct __enumerate_fn : __adaptor_closure_base {
   }
 };
 
+template <size_t N>
+struct __adjacent_fn : __adaptor_closure_base {
+  template <viewable_range R>
+    requires forward_range<all_t<R>> && (N > 0)
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return adjacent_view<V, N>(views::all(static_cast<R&&>(range)));
+  }
+};
+
+template <size_t N, class F>
+struct __adjacent_transform_closure : __adaptor_closure_base {
+  F __fun;
+
+  constexpr explicit __adjacent_transform_closure(F fun)
+      : __fun(static_cast<F&&>(fun)) {}
+
+  template <viewable_range R>
+    requires forward_range<all_t<R>>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return adjacent_transform_view<V, F, N>(
+        views::all(static_cast<R&&>(range)), __fun);
+  }
+};
+
+template <size_t N>
+struct __adjacent_transform_fn {
+  template <viewable_range R, class F>
+    requires forward_range<all_t<R>> && (N > 0)
+  constexpr auto operator()(R&& range, F&& fun) const {
+    using V = all_t<R>;
+    using Fun = decay_t<F>;
+    return adjacent_transform_view<V, Fun, N>(
+        views::all(static_cast<R&&>(range)), static_cast<F&&>(fun));
+  }
+
+  template <class F>
+  constexpr auto operator()(F&& fun) const {
+    using Fun = decay_t<F>;
+    return __adjacent_transform_closure<N, Fun>(static_cast<F&&>(fun));
+  }
+};
+
 template <viewable_range R, class F>
 constexpr auto __make_transform_adaptor(R&& r, F&& f) {
   using Base = all_t<R>;
@@ -3165,6 +3471,12 @@ namespace views {
 inline constexpr __detail::__zip_fn zip{};
 inline constexpr __detail::__zip_transform_fn zip_transform{};
 inline constexpr __detail::__enumerate_fn enumerate{};
+template <size_t N>
+inline constexpr __detail::__adjacent_fn<N> adjacent{};
+inline constexpr __detail::__adjacent_fn<2> pairwise{};
+template <size_t N>
+inline constexpr __detail::__adjacent_transform_fn<N> adjacent_transform{};
+inline constexpr __detail::__adjacent_transform_fn<2> pairwise_transform{};
 inline constexpr __detail::__transform_fn transform{};
 inline constexpr __detail::__filter_fn filter{};
 inline constexpr __detail::__take_fn take{};

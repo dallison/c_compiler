@@ -98,7 +98,11 @@ implemented.
       structured bindings, and recursive tuple access.
     - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
       execution targets pass.
-  - `views::adjacent` and `adjacent_transform`.
+  - [x] `views::adjacent` and `adjacent_transform`.
+    - Includes `pairwise` aliases, non-common sentinel support, reference
+      windows, callable transforms, and direct and piped adaptor forms.
+    - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
+      execution targets pass.
   - `views::chunk`, `slide`, `chunk_by`, and `stride`.
   - `views::join_with`, `repeat`, and `cartesian_product`.
   - `ranges::to`, range fold algorithms, and the new contains/prefix/suffix

@@ -8,8 +8,9 @@ existing C++20 ranges runtime corruption was fixed and committed as `5c09cab`
 `exec_ranges_x86_64`, `exec_ranges_aarch64`, `exec_ranges_arm`, and
 `exec_ranges_riscv` all passed.
 
-The `views::zip`, `views::zip_transform`, and `views::enumerate` roadmap slice
-is implemented and runtime-clean on all supported ranges-test targets.
+The `views::zip`, `views::zip_transform`, `views::enumerate`,
+`views::adjacent`, and `views::adjacent_transform` roadmap slices are
+implemented and runtime-clean on all supported ranges-test targets.
 
 ## Completed implementation
 
@@ -22,6 +23,8 @@ is implemented and runtime-clean on all supported ranges-test targets.
   - Added `zip_transform_view` and recursive tuple invocation.
   - Added `enumerate_view`.
   - Added `views::zip`, `views::zip_transform`, and `views::enumerate`.
+  - Added forward-window `adjacent_view` and `adjacent_transform_view`,
+    including non-common sentinels, pipe closures, and the `pairwise` aliases.
 - `cxx_testsuite/tests/syntax/pass/0307_standard_ranges_zip.cpp`
   - Passes with:
 
@@ -33,6 +36,12 @@ is implemented and runtime-clean on all supported ranges-test targets.
 - `cxx_testsuite/tests/exec_ranges/0008_zip_enumerate_views.cpp`
   - Covers shortest-range termination, reference mutation, four-way zip,
     zip-transform, direct enumerate, and piped enumerate.
+- `cxx_testsuite/tests/syntax/pass/0308_standard_ranges_adjacent.cpp`
+  - Covers view/range concepts, repeated tuple-reference types, transforms,
+    pipes, aliases, and a non-common counted range.
+- `cxx_testsuite/tests/exec_ranges/0009_adjacent_views.cpp`
+  - Covers pair and triple windows, short ranges, reference mutation,
+    transformations, pipes, aliases, and non-common sentinels.
 
 ## Resolved compiler issues
 
