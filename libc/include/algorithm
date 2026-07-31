@@ -27,6 +27,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <functional>
+#include <optional>
 #include <ranges>
 #include <stddef.h>
 #include <type_traits>
@@ -1745,6 +1746,11 @@ struct next_permutation_result {
 };
 template <class I>
 using prev_permutation_result = next_permutation_result<I>;
+template <class I, class T>
+struct in_value_result {
+  I in;
+  T value;
+};
 
 template <class I, class O>
 using copy_result = in_out_result<I, O>;
@@ -1794,6 +1800,10 @@ template <class I, class O>
 using unique_copy_result = in_out_result<I, O>;
 template <class I, class O>
 using partial_sort_copy_result = in_out_result<I, O>;
+template <class I, class T>
+using fold_left_with_iter_result = in_value_result<I, T>;
+template <class I, class T>
+using fold_left_first_with_iter_result = in_value_result<I, T>;
 
 template <class I, class S, class Pred, class Proj = identity>
 constexpr bool all_of(I first, S last, Pred pred, Proj proj = {}) {
@@ -3269,6 +3279,251 @@ constexpr prev_permutation_result<borrowed_iterator_t<R>> prev_permutation(
     R&& r, Comp comp = {}, Proj proj = {}) {
   return ranges::prev_permutation(ranges::begin(r), ranges::end(r),
                                   comp, proj);
+}
+
+// [alg.contains]
+template <class I, class S, class T, class Proj = identity>
+constexpr bool contains(I first, S last, const T& value, Proj proj = {}) {
+  return ranges::find(first, last, value, proj) != last;
+}
+
+template <range R, class T, class Proj = identity>
+constexpr bool contains(R&& range, const T& value, Proj proj = {}) {
+  return ranges::contains(ranges::begin(range), ranges::end(range),
+                          value, proj);
+}
+
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity,
+          class P2 = identity>
+constexpr bool contains_subrange(I1 first1, S1 last1, I2 first2, S2 last2,
+                                 Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  if (first2 == last2) {
+    return true;
+  }
+  return !ranges::search(first1, last1, first2, last2,
+                         pred, p1, p2).empty();
+}
+
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr bool contains_subrange(R1&& range, R2&& needle,
+                                 Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::contains_subrange(
+      ranges::begin(range), ranges::end(range),
+      ranges::begin(needle), ranges::end(needle), pred, p1, p2);
+}
+
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity,
+          class P2 = identity>
+constexpr bool starts_with(I1 first1, S1 last1, I2 first2, S2 last2,
+                           Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  while (first1 != last1 && first2 != last2) {
+    if (!pred(__project(p1, *first1), __project(p2, *first2))) {
+      return false;
+    }
+    ++first1;
+    ++first2;
+  }
+  return first2 == last2;
+}
+
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr bool starts_with(R1&& range, R2&& prefix,
+                           Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::starts_with(
+      ranges::begin(range), ranges::end(range),
+      ranges::begin(prefix), ranges::end(prefix), pred, p1, p2);
+}
+
+template <class I1, class S1, class I2, class S2,
+          class Pred = equal_to, class P1 = identity,
+          class P2 = identity>
+constexpr bool ends_with(I1 first1, S1 last1, I2 first2, S2 last2,
+                         Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  if (first2 == last2) {
+    return true;
+  }
+  I1 end = first1;
+  while (end != last1) {
+    ++end;
+  }
+  auto found =
+      ranges::find_end(first1, last1, first2, last2, pred, p1, p2);
+  return !found.empty() && found.end() == end;
+}
+
+template <range R1, range R2, class Pred = equal_to,
+          class P1 = identity, class P2 = identity>
+constexpr bool ends_with(R1&& range, R2&& suffix,
+                         Pred pred = {}, P1 p1 = {}, P2 p2 = {}) {
+  return ranges::ends_with(
+      ranges::begin(range), ranges::end(range),
+      ranges::begin(suffix), ranges::end(suffix), pred, p1, p2);
+}
+
+// [alg.fold]
+template <class F, class T, class I>
+using __fold_left_value_t =
+    decay_t<invoke_result_t<F&, T, iter_reference_t<I>>>;
+
+template <class F, class I>
+using __fold_first_value_t =
+    decay_t<invoke_result_t<F&, iter_value_t<I>,
+                            iter_reference_t<I>>>;
+
+template <class I, class S, class T, class F>
+constexpr in_value_result<I, __fold_left_value_t<F, T, I>>
+fold_left_with_iter(I first, S last, T init, F f) {
+  using U = __fold_left_value_t<F, T, I>;
+  if (first == last) {
+    return {static_cast<I&&>(first), U(static_cast<T&&>(init))};
+  }
+  U accum = std::invoke(f, static_cast<T&&>(init), *first);
+  ++first;
+  while (first != last) {
+    accum = std::invoke(f, static_cast<U&&>(accum), *first);
+    ++first;
+  }
+  return {static_cast<I&&>(first), static_cast<U&&>(accum)};
+}
+
+template <range R, class T, class F>
+constexpr in_value_result<
+    borrowed_iterator_t<R>,
+    __fold_left_value_t<F, T, iterator_t<R>>>
+fold_left_with_iter(R&& range, T init, F f) {
+  using U = __fold_left_value_t<F, T, iterator_t<R>>;
+  using BI = borrowed_iterator_t<R>;
+  auto result = ranges::fold_left_with_iter(
+      ranges::begin(range), ranges::end(range),
+      static_cast<T&&>(init), static_cast<F&&>(f));
+  if constexpr (borrowed_range<R>) {
+    return {static_cast<BI&&>(result.in),
+            static_cast<U&&>(result.value)};
+  } else {
+    return {dangling(), static_cast<U&&>(result.value)};
+  }
+}
+
+template <class I, class S, class T, class F>
+constexpr auto fold_left(I first, S last, T init, F f) {
+  return ranges::fold_left_with_iter(
+             static_cast<I&&>(first), static_cast<S&&>(last),
+             static_cast<T&&>(init), static_cast<F&&>(f))
+      .value;
+}
+
+template <range R, class T, class F>
+constexpr auto fold_left(R&& range, T init, F f) {
+  return ranges::fold_left(
+      ranges::begin(range), ranges::end(range),
+      static_cast<T&&>(init), static_cast<F&&>(f));
+}
+
+template <class I, class S, class F>
+constexpr in_value_result<I, optional<__fold_first_value_t<F, I>>>
+fold_left_first_with_iter(I first, S last, F f) {
+  using V = iter_value_t<I>;
+  using U = __fold_first_value_t<F, I>;
+  if (first == last) {
+    return {static_cast<I&&>(first), optional<U>()};
+  }
+  optional<U> accum(in_place, V(*first));
+  ++first;
+  while (first != last) {
+    *accum = std::invoke(f, static_cast<U&&>(*accum), *first);
+    ++first;
+  }
+  return {static_cast<I&&>(first),
+          static_cast<optional<U>&&>(accum)};
+}
+
+template <range R, class F>
+constexpr in_value_result<
+    borrowed_iterator_t<R>,
+    optional<__fold_first_value_t<F, iterator_t<R>>>>
+fold_left_first_with_iter(R&& range, F f) {
+  using U = __fold_first_value_t<F, iterator_t<R>>;
+  using O = optional<U>;
+  using BI = borrowed_iterator_t<R>;
+  auto result = ranges::fold_left_first_with_iter(
+      ranges::begin(range), ranges::end(range), static_cast<F&&>(f));
+  if constexpr (borrowed_range<R>) {
+    return {static_cast<BI&&>(result.in),
+            static_cast<O&&>(result.value)};
+  } else {
+    return {dangling(), static_cast<O&&>(result.value)};
+  }
+}
+
+template <class I, class S, class F>
+constexpr auto fold_left_first(I first, S last, F f) {
+  return ranges::fold_left_first_with_iter(
+             static_cast<I&&>(first), static_cast<S&&>(last),
+             static_cast<F&&>(f))
+      .value;
+}
+
+template <range R, class F>
+constexpr auto fold_left_first(R&& range, F f) {
+  return ranges::fold_left_first(
+      ranges::begin(range), ranges::end(range), static_cast<F&&>(f));
+}
+
+template <class I, class S, class T, class F>
+constexpr auto fold_right(I first, S last, T init, F f) {
+  using U =
+      decay_t<invoke_result_t<F&, iter_reference_t<I>, T>>;
+  I tail = first;
+  while (tail != last) {
+    ++tail;
+  }
+  if (first == tail) {
+    return U(static_cast<T&&>(init));
+  }
+  --tail;
+  U accum = std::invoke(f, *tail, static_cast<T&&>(init));
+  while (first != tail) {
+    --tail;
+    accum = std::invoke(f, *tail, static_cast<U&&>(accum));
+  }
+  return accum;
+}
+
+template <range R, class T, class F>
+constexpr auto fold_right(R&& range, T init, F f) {
+  return ranges::fold_right(
+      ranges::begin(range), ranges::end(range),
+      static_cast<T&&>(init), static_cast<F&&>(f));
+}
+
+template <class I, class S, class F>
+constexpr auto fold_right_last(I first, S last, F f) {
+  using V = iter_value_t<I>;
+  using U =
+      decay_t<invoke_result_t<F&, iter_reference_t<I>, V>>;
+  I tail = first;
+  while (tail != last) {
+    ++tail;
+  }
+  if (first == tail) {
+    return optional<U>();
+  }
+  --tail;
+  V initial = *tail;
+  return optional<U>(
+      in_place,
+      ranges::fold_right(first, tail, static_cast<V&&>(initial),
+                         static_cast<F&&>(f)));
+}
+
+template <range R, class F>
+constexpr auto fold_right_last(R&& range, F f) {
+  return ranges::fold_right_last(
+      ranges::begin(range), ranges::end(range), static_cast<F&&>(f));
 }
 
 }  // namespace ranges

@@ -12,7 +12,8 @@ The `views::zip`, `views::zip_transform`, `views::enumerate`,
 `views::adjacent`, `views::adjacent_transform`, `views::chunk`, `views::slide`,
 `views::chunk_by`, `views::stride`, `views::join_with`, `views::repeat`, and
 `views::cartesian_product` roadmap slices are implemented and runtime-clean on
-all supported ranges-test targets.
+all supported ranges-test targets. The C++23 `ranges::to`, fold, contains,
+subrange, prefix, and suffix algorithm slice is also complete.
 
 ## Completed implementation
 
@@ -31,6 +32,14 @@ all supported ranges-test targets.
     iteration with direct and piped adaptors.
   - Added scalar/range-delimited joining, bounded and unbounded repetition, and
     variadic odometer-order cartesian products.
+- `libc/include/algorithm`
+  - Added `fold_left`, `fold_left_first`, `fold_right`, `fold_right_last`, and
+    both left-fold-with-iterator result forms.
+  - Added `contains`, `contains_subrange`, `starts_with`, and `ends_with`,
+    including predicates and projections.
+- `libc/include/ranges`
+  - Added explicit and deduced `ranges::to` conversion, explicit-target pipe
+    closures, nested conversion, and non-common input handling.
 - `cxx_testsuite/tests/syntax/pass/0307_standard_ranges_zip.cpp`
   - Passes with:
 
@@ -60,6 +69,12 @@ all supported ranges-test targets.
 - `cxx_testsuite/tests/exec_ranges/0011_composition_views.cpp`
   - Covers repeat iteration, cartesian order and empty products, scalar and
     range delimiters, empty inner ranges, and joined-reference mutation.
+- `cxx_testsuite/tests/syntax/pass/0311_standard_ranges_algorithms.cpp`
+  - Covers fold result types, counted inputs, projected searches, direct and
+    piped conversion, allocator construction, deduction, and nested containers.
+- `cxx_testsuite/tests/exec_ranges/0012_cxx23_range_algorithms.cpp`
+  - Covers fold direction and empty inputs, iterator results, contains/prefix/
+    suffix edge cases, projections, filtered conversion, and nested conversion.
 
 ## Resolved compiler issues
 

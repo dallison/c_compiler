@@ -4659,6 +4659,63 @@ auto __apply_adaptor(__all_fn&, R&& r) {
   return views::all(static_cast<R&&>(r));
 }
 
+template <class C, input_range R, class... Args>
+constexpr C __to_container(R&& range, Args&&... args) {
+  C result = C(static_cast<Args&&>(args)...);
+  auto first = ranges::begin(range);
+  auto last = ranges::end(range);
+  while (first != last) {
+    if constexpr (requires(C& container, range_reference_t<R> value) {
+                    container.emplace_back(value);
+                  }) {
+      result.emplace_back(*first);
+    } else if constexpr (
+        requires(C& container, range_reference_t<R> value) {
+          container.push_back(value);
+        }) {
+      result.push_back(*first);
+    } else if constexpr (
+        input_range<remove_reference_t<range_reference_t<R>>>) {
+      using Inner = typename C::value_type;
+      result.emplace_back(
+          __to_container<Inner>(*first));
+    } else if constexpr (
+        requires(C& container, range_reference_t<R> value) {
+          container.insert(container.end(), value);
+        }) {
+      result.insert(result.end(), *first);
+    } else {
+      result.insert(*first);
+    }
+    ++first;
+  }
+  return result;
+}
+
+template <class C, class... Args>
+struct __to_closure;
+
+template <class C>
+struct __to_closure<C> : __adaptor_closure_base {
+  template <input_range R>
+  constexpr C operator()(R&& range) const {
+    return __to_container<C>(static_cast<R&&>(range));
+  }
+};
+
+template <class C, class Arg>
+struct __to_closure<C, Arg> : __adaptor_closure_base {
+  Arg __arg;
+
+  constexpr explicit __to_closure(Arg arg)
+      : __arg(static_cast<Arg&&>(arg)) {}
+
+  template <input_range R>
+  constexpr C operator()(R&& range) const {
+    return __to_container<C>(static_cast<R&&>(range), __arg);
+  }
+};
+
 template <class R, class F>
   requires(!is_lvalue_reference_v<R>) && (!__is_closure<R>)
 constexpr transform_view<all_t<R>, F> operator|(
@@ -4687,6 +4744,33 @@ constexpr auto operator|(R&& range, C&& closure) {
   return static_cast<C&&>(closure)(static_cast<R&&>(range));
 }
 }  // namespace __detail
+
+template <class C, input_range R, class... Args>
+  requires(!view<C>)
+constexpr C to(R&& range, Args&&... args) {
+  return __detail::__to_container<C>(
+      static_cast<R&&>(range), static_cast<Args&&>(args)...);
+}
+
+template <class C>
+  requires(!view<C>)
+constexpr __detail::__to_closure<C> to() {
+  return __detail::__to_closure<C>();
+}
+
+template <class C, class Arg>
+  requires(!view<C>) &&
+          (!input_range<remove_reference_t<Arg>>)
+constexpr auto to(Arg&& arg) {
+  return __detail::__to_closure<C, decay_t<Arg>>(
+      static_cast<Arg&&>(arg));
+}
+
+template <template <class...> class C, input_range R>
+constexpr auto to(R&& range) {
+  using Container = C<range_value_t<R>>;
+  return __detail::__to_container<Container>(static_cast<R&&>(range));
+}
 
 namespace views {
 inline constexpr __detail::__zip_fn zip{};

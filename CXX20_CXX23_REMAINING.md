@@ -92,7 +92,7 @@ implemented.
   - `default_accessor` and `mdspan`.
   - Construction from arrays and spans.
   - Compile-time mapping tests and execution tests on all backends.
-- [ ] Implement the C++23 ranges expansion.
+- [x] Implement the C++23 ranges expansion.
   - [x] `views::zip`, `zip_transform`, and `enumerate`.
     - Includes variadic tuple support, standard callable constraints, range-for
       structured bindings, and recursive tuple access.
@@ -114,8 +114,13 @@ implemented.
       non-common counted-range integration.
     - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
       execution targets pass.
-  - `ranges::to`, range fold algorithms, and the new contains/prefix/suffix
-    algorithms.
+  - [x] `ranges::to`, range fold algorithms, and the new
+    contains/prefix/suffix algorithms.
+    - Includes explicit and deduced container conversion, pipe closures,
+      nested conversion, non-common input views, all six C++23 fold forms,
+      projections, and empty-range behavior.
+    - Syntax, the full x86-64 C++ execution suite, and all four dedicated ranges
+      execution targets pass.
 - [ ] Expand `import std`.
   - Export each supported standard header, including ranges, generator, span,
     format, and print.
