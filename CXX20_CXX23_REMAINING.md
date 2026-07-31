@@ -93,7 +93,11 @@ implemented.
   - Construction from arrays and spans.
   - Compile-time mapping tests and execution tests on all backends.
 - [ ] Implement the C++23 ranges expansion.
-  - `views::zip`, `zip_transform`, and `enumerate`.
+  - [ ] `views::zip`, `zip_transform`, and `enumerate`.
+    - Variadic tuple support and initial view implementations are checkpointed.
+    - Syntax coverage passes; execution coverage is blocked on range-for
+      structured-binding parsing and recursive `tuple::get` validation.
+    - See `AGENT_HANDOFF_RANGES.md` for exact commands and resume order.
   - `views::adjacent` and `adjacent_transform`.
   - `views::chunk`, `slide`, `chunk_by`, and `stride`.
   - `views::join_with`, `repeat`, and `cartesian_product`.

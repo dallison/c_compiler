@@ -1612,6 +1612,373 @@ namespace views {
 inline constexpr __detail::__iota_fn iota{};
 }  // namespace views
 
+// [range.zip]
+template <class... Views>
+struct __zip_storage;
+
+template <>
+struct __zip_storage<> {
+  constexpr __zip_storage() {}
+  constexpr size_t __size() const { return static_cast<size_t>(-1); }
+};
+
+template <class V, class... Rest>
+struct __zip_storage<V, Rest...> {
+  V __base_;
+  __zip_storage<Rest...> __rest_;
+
+  constexpr __zip_storage() {}
+  constexpr explicit __zip_storage(V base, Rest... rest)
+      : __base_(static_cast<V&&>(base)),
+        __rest_(static_cast<Rest&&>(rest)...) {}
+
+  constexpr size_t __size()
+    requires sized_range<V> && (sized_range<Rest> && ...)
+  {
+    size_t head = static_cast<size_t>(ranges::size(__base_));
+    size_t tail = __rest_.__size();
+    return head < tail ? head : tail;
+  }
+};
+
+template <class... Views>
+struct __zip_cursor;
+
+template <>
+struct __zip_cursor<> {
+  constexpr __zip_cursor() {}
+  constexpr explicit __zip_cursor(__zip_storage<>&) {}
+  constexpr tuple<> __dereference() const { return tuple<>(); }
+  constexpr void __increment() {}
+  constexpr bool __at_end() const { return false; }
+  constexpr bool __same_position(const __zip_cursor&) const { return true; }
+};
+
+template <class V, class... Rest>
+struct __zip_cursor<V, Rest...> {
+  iterator_t<V> __current_;
+  sentinel_t<V> __end_;
+  __zip_cursor<Rest...> __rest_;
+
+  constexpr __zip_cursor() {}
+  constexpr explicit __zip_cursor(__zip_storage<V, Rest...>& storage)
+      : __current_(ranges::begin(storage.__base_)),
+        __end_(ranges::end(storage.__base_)),
+        __rest_(storage.__rest_) {}
+
+  constexpr tuple<range_reference_t<V>, range_reference_t<Rest>...>
+  __dereference() const {
+    using Result =
+        tuple<range_reference_t<V>, range_reference_t<Rest>...>;
+    return Result(__tuple_prepend, *__current_, __rest_.__dereference());
+  }
+
+  constexpr void __increment() {
+    ++__current_;
+    __rest_.__increment();
+  }
+
+  constexpr bool __at_end() const {
+    return __current_ == __end_ || __rest_.__at_end();
+  }
+
+  constexpr bool __same_position(const __zip_cursor& other) const {
+    return __current_ == other.__current_ &&
+           __rest_.__same_position(other.__rest_);
+  }
+};
+
+template <class... Views>
+  requires(sizeof...(Views) > 0) && (view<Views> && ...) &&
+          (input_range<Views> && ...)
+class zip_view : public view_interface<zip_view<Views...>> {
+ private:
+  __zip_storage<Views...> __bases_;
+
+ public:
+  class iterator {
+   public:
+    using iterator_concept = input_iterator_tag;
+    using iterator_category = input_iterator_tag;
+    using value_type = tuple<range_value_t<Views>...>;
+    using difference_type = ptrdiff_t;
+    using reference = tuple<range_reference_t<Views>...>;
+    using pointer = void;
+
+   private:
+    __zip_cursor<Views...> __cursor_;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(__zip_storage<Views...>& storage,
+                       bool end_marker = false)
+        : __cursor_(storage),
+          __end_marker_(end_marker) {}
+
+    constexpr reference operator*() const {
+      return __cursor_.__dereference();
+    }
+
+    constexpr iterator& operator++() {
+      __cursor_.__increment();
+      return *this;
+    }
+
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__cursor_.__at_end();
+      }
+      if (right.__end_marker_) {
+        return left.__cursor_.__at_end();
+      }
+      return left.__cursor_.__same_position(right.__cursor_);
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  zip_view()
+    requires(default_initializable<Views> && ...)
+  {}
+
+  constexpr explicit zip_view(Views... bases)
+      : __bases_(static_cast<Views&&>(bases)...) {}
+
+  constexpr iterator begin() { return iterator(__bases_); }
+  constexpr iterator end() { return iterator(__bases_, true); }
+
+  constexpr auto size()
+    requires(sized_range<Views> && ...)
+  {
+    return __bases_.__size();
+  }
+};
+
+template <class... Views>
+inline constexpr bool enable_borrowed_range<zip_view<Views...>> =
+    (enable_borrowed_range<Views> && ...);
+
+template <class Tuple>
+struct __zip_tuple_invoker;
+
+template <class F, class Tuple>
+struct __zip_invocable;
+
+template <class F, class... Args>
+struct __zip_invocable<F, tuple<Args...>> : is_invocable<F, Args...> {
+};
+
+template <class F, class Tuple>
+struct __zip_invoke_result;
+
+template <class F, class... Args>
+struct __zip_invoke_result<F, tuple<Args...>> : invoke_result<F, Args...> {
+};
+
+template <>
+struct __zip_tuple_invoker<tuple<>> {
+  template <class F, class... Args>
+  static constexpr decltype(auto) __call(F& fun, tuple<>&,
+                                         Args&&... args) {
+    return std::invoke(fun, static_cast<Args&&>(args)...);
+  }
+};
+
+template <class T, class... Rest>
+struct __zip_tuple_invoker<tuple<T, Rest...>> {
+  template <class F, class... Args>
+  static constexpr decltype(auto) __call(F& fun,
+                                         tuple<T, Rest...>& values,
+                                         Args&&... args) {
+    return __zip_tuple_invoker<tuple<Rest...>>::__call(
+        fun, values.__rest_, static_cast<Args&&>(args)..., values.__0);
+  }
+};
+
+// [range.zip.transform]
+template <class F, class... Views>
+  requires(sizeof...(Views) > 0) && (view<Views> && ...) &&
+          (input_range<Views> && ...) && move_constructible<F> &&
+          is_object_v<F>
+class zip_transform_view
+    : public view_interface<zip_transform_view<F, Views...>> {
+ private:
+  zip_view<Views...> __zip_;
+  __movable_box<F> __fun_;
+
+ public:
+  class iterator {
+   public:
+    using zip_iterator = typename zip_view<Views...>::iterator;
+    using iterator_concept = input_iterator_tag;
+    using iterator_category = input_iterator_tag;
+    using reference =
+        typename __zip_invoke_result<
+            F&, tuple<range_reference_t<Views>...>>::type;
+    using value_type = remove_cvref_t<reference>;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+
+   private:
+    zip_transform_view* __parent_ = nullptr;
+    zip_iterator __current_;
+
+   public:
+    iterator() = default;
+    constexpr iterator(zip_transform_view* parent, zip_iterator current)
+        : __parent_(parent), __current_(static_cast<zip_iterator&&>(current)) {}
+
+    constexpr decltype(auto) operator*() const {
+      auto values = *__current_;
+      return __zip_tuple_invoker<
+          tuple<range_reference_t<Views>...>>::__call(
+          *__parent_->__fun_, values);
+    }
+
+    constexpr iterator& operator++() {
+      ++__current_;
+      return *this;
+    }
+
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  zip_transform_view()
+    requires default_initializable<F> &&
+             (default_initializable<Views> && ...)
+  {}
+
+  constexpr zip_transform_view(F fun, Views... bases)
+      : __zip_(static_cast<Views&&>(bases)...),
+        __fun_(static_cast<F&&>(fun)) {}
+
+  constexpr iterator begin() { return iterator(this, __zip_.begin()); }
+  constexpr iterator end() { return iterator(this, __zip_.end()); }
+
+  constexpr auto size()
+    requires(sized_range<Views> && ...)
+  {
+    return __zip_.size();
+  }
+};
+
+// [range.enumerate]
+template <view V>
+  requires input_range<V>
+class enumerate_view : public view_interface<enumerate_view<V>> {
+ private:
+  V __base_;
+
+ public:
+  class iterator {
+   public:
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+    using iterator_concept = input_iterator_tag;
+    using iterator_category = input_iterator_tag;
+    using difference_type = range_difference_t<V>;
+    using value_type = tuple<difference_type, range_value_t<V>>;
+    using reference = tuple<difference_type, range_reference_t<V>>;
+    using pointer = void;
+
+   private:
+    base_iterator __current_;
+    base_sentinel __end_;
+    difference_type __index_ = 0;
+    bool __end_marker_ = false;
+
+   public:
+    iterator() = default;
+    constexpr iterator(base_iterator current, base_sentinel end,
+                       difference_type index = 0, bool end_marker = false)
+        : __current_(static_cast<base_iterator&&>(current)),
+          __end_(static_cast<base_sentinel&&>(end)),
+          __index_(index),
+          __end_marker_(end_marker) {}
+
+    constexpr reference operator*() const {
+      return reference(__index_, *__current_);
+    }
+
+    constexpr iterator& operator++() {
+      ++__current_;
+      ++__index_;
+      return *this;
+    }
+
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const iterator& left,
+                                     const iterator& right) {
+      if (left.__end_marker_ && right.__end_marker_) {
+        return true;
+      }
+      if (left.__end_marker_) {
+        return right.__current_ == right.__end_;
+      }
+      if (right.__end_marker_) {
+        return left.__current_ == left.__end_;
+      }
+      return left.__current_ == right.__current_;
+    }
+
+    friend constexpr bool operator!=(const iterator& left,
+                                     const iterator& right) {
+      return !(left == right);
+    }
+  };
+
+  using sentinel = iterator;
+  using const_iterator = iterator;
+
+  enumerate_view()
+    requires default_initializable<V>
+  = default;
+
+  constexpr explicit enumerate_view(V base)
+      : __base_(static_cast<V&&>(base)) {}
+
+  constexpr iterator begin() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_));
+  }
+
+  constexpr iterator end() {
+    return iterator(ranges::begin(__base_), ranges::end(__base_), 0, true);
+  }
+
+  constexpr auto size()
+    requires sized_range<V>
+  {
+    return ranges::size(__base_);
+  }
+};
+
 // [range.transform]
 template <class I, class S, class IteratorCallable>
 class __transform_iterator {
@@ -2396,6 +2763,35 @@ using __direct_iterator_t = decltype(declval<V&>().begin());
 template <class V>
 using __direct_sentinel_t = decltype(declval<V&>().end());
 
+struct __zip_fn {
+  template <class... Ranges>
+    requires(sizeof...(Ranges) > 0) && (viewable_range<Ranges> && ...)
+  constexpr auto operator()(Ranges&&... ranges) const {
+    return zip_view<all_t<Ranges>...>(
+        views::all(static_cast<Ranges&&>(ranges))...);
+  }
+};
+
+struct __zip_transform_fn {
+  template <class F, class... Ranges>
+    requires(sizeof...(Ranges) > 0) &&
+            (viewable_range<Ranges> && ...)
+  constexpr auto operator()(F&& fun, Ranges&&... ranges) const {
+    using Fun = decay_t<F>;
+    return zip_transform_view<Fun, all_t<Ranges>...>(
+        static_cast<F&&>(fun),
+        views::all(static_cast<Ranges&&>(ranges))...);
+  }
+};
+
+struct __enumerate_fn : __adaptor_closure_base {
+  template <viewable_range R>
+  constexpr auto operator()(R&& range) const {
+    using V = all_t<R>;
+    return enumerate_view<V>(views::all(static_cast<R&&>(range)));
+  }
+};
+
 template <viewable_range R, class F>
 constexpr auto __make_transform_adaptor(R&& r, F&& f) {
   using Base = all_t<R>;
@@ -2762,6 +3158,9 @@ constexpr auto operator|(R&& range, C&& closure) {
 }  // namespace __detail
 
 namespace views {
+inline constexpr __detail::__zip_fn zip{};
+inline constexpr __detail::__zip_transform_fn zip_transform{};
+inline constexpr __detail::__enumerate_fn enumerate{};
 inline constexpr __detail::__transform_fn transform{};
 inline constexpr __detail::__filter_fn filter{};
 inline constexpr __detail::__take_fn take{};
