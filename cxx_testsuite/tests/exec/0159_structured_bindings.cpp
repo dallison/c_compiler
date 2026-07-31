@@ -69,6 +69,20 @@ int standard_array_get(void) {
   return value[0] + value[1] + value[2];
 }
 
+int range_for_structured_binding(void) {
+  std::pair<int, int> values[2] = {{1, 2}, {3, 4}};
+  int result = 0;
+  for (auto [left, right] : values) {
+    result += left + right;
+  }
+  for (auto& [left, right] : values) {
+    left += 10;
+    right += 20;
+  }
+  return result + values[0].first + values[0].second +
+         values[1].first + values[1].second;
+}
+
 int main(void) {
   if (aggregate_const_binding() != 6) {
     return 1;
@@ -93,6 +107,9 @@ int main(void) {
   }
   if (standard_array_get() != 65) {
     return 8;
+  }
+  if (range_for_structured_binding() != 80) {
+    return 9;
   }
   return 0;
 }

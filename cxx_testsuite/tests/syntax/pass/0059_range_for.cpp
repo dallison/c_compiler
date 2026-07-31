@@ -60,14 +60,14 @@ int sum_values(void) {
   pairs[0].y = 2;
   pairs[1].x = 3;
   pairs[1].y = 4;
-  for ([x, y] : pairs) {
+  for (auto&& [x, y] : pairs) {
     sum += x + y;
   }
 
   PairRange pair_range;
   pair_range.first = pairs;
   pair_range.last = pairs + 2;
-  for ([x, y] : pair_range) {
+  for (auto&& [x, y] : pair_range) {
     sum += x * y;
   }
   return sum + values[0] + values[1] + values[2];

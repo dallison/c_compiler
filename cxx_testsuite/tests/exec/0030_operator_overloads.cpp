@@ -271,7 +271,7 @@ int main(void) {
   range.first = items;
   range.last = items + 2;
   int sum = 0;
-  for ([x, y] : range) {
+  for (auto&& [x, y] : range) {
     sum += x * 10 + y;
   }
   if (sum != 46) {

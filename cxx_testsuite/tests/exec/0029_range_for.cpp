@@ -81,7 +81,7 @@ int main(void) {
   pairs[1].x = 3;
   pairs[1].y = 4;
   int pair_sum = 0;
-  for ([x, y] : pairs) {
+  for (auto&& [x, y] : pairs) {
     pair_sum += x * 10 + y;
   }
   if (pair_sum != 46) {
@@ -92,7 +92,7 @@ int main(void) {
   pair_range.first = pairs;
   pair_range.last = pairs + 2;
   int range_pair_sum = 0;
-  for ([x, y] : pair_range) {
+  for (auto&& [x, y] : pair_range) {
     range_pair_sum += x + y;
   }
   if (range_pair_sum != 10) {

@@ -89,17 +89,20 @@ static Symbol* NewRangeForRangeSymbol(Syntax* syntax,
 
 typedef struct {
   Symbol* loop_var;
+  TypeRecord* structured_binding_type;
   Vector names;  // String* entries for [x, y] bindings.
   Vector symbols;  // Symbol* entries corresponding to names.
 } RangeForBinding;
 
 static void RangeForBindingInit(RangeForBinding* binding) {
   binding->loop_var = NULL;
+  binding->structured_binding_type = NULL;
   VectorInit(&binding->names);
   VectorInit(&binding->symbols);
 }
 
 static void RangeForBindingDestruct(RangeForBinding* binding) {
+  TypeRecordDelete(binding->structured_binding_type);
   VectorDestructWithContents(&binding->names,
                              (VectorElementDestructor)StringDelete,
                              /*free_element=*/false);
@@ -915,11 +918,10 @@ static void AppendRangeForBindingDeclarations(Syntax* syntax,
     return;
   }
 
-  // `for ([a, b] : r)` decomposes each element exactly as `auto&& [a, b] = *it;`
-  // does, so emit a real structured-binding declaration and let the ordinary
-  // lowering apply the [dcl.struct.bind] rules: array elements, the tuple-like
-  // `get<I>` protocol (std::pair and std::tuple, hence map iteration), or
-  // otherwise the class's non-static data members in declaration order.
+  // Emit a real structured-binding declaration and let the ordinary lowering
+  // apply the [dcl.struct.bind] rules: array elements, the tuple-like `get<I>`
+  // protocol (std::pair and std::tuple, hence map iteration), or otherwise the
+  // class's non-static data members in declaration order.
   Vector* names = NewVector();
   for (size_t i = 0; i < binding->names.length; i++) {
     String* name = binding->names.value.p[i];
@@ -930,7 +932,7 @@ static void AppendRangeForBindingDeclarations(Syntax* syntax,
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewStructuredBindingASTNode(
-                   NewRangeForAutoReferenceType(/*rvalue=*/true), names,
+                   TypeRecordCopy(binding->structured_binding_type), names,
                    symbols,
                    NewExpressionInitializerASTNode(current, location),
                    location));
@@ -1143,9 +1145,6 @@ static bool TryParseRangeForStructuredBinding(Syntax* syntax,
 
 static bool TryParseRangeForBinding(Syntax* syntax,
                                     RangeForBinding* binding) {
-  if (TryParseRangeForStructuredBinding(syntax, binding)) {
-    return true;
-  }
   if (!SyntaxLookingAtType(syntax)) {
     return false;
   }
@@ -1153,7 +1152,37 @@ static bool TryParseRangeForBinding(Syntax* syntax,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
   TypeRecord* type = TypeParserParseType(&parser, true);
+  if (type == NULL) {
+    TypeParserDestruct(&parser);
+    return false;
+  }
   TypeRecordIncRef(type);
+
+  LexCheckpoint structured_checkpoint;
+  LexCheckpointSave(syntax->lex, &structured_checkpoint);
+  TypeRecord* declared_type = TypeRecordCopy(type);
+  if (LexLookingAt(syntax->lex, TOK(amp)) ||
+      LexLookingAt(syntax->lex, TOK(ampamp))) {
+    bool rvalue = LexMatch(syntax->lex, TOK(ampamp));
+    if (!rvalue) {
+      LexMatch(syntax->lex, TOK(amp));
+    }
+    TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecordChain(reference, declared_type);
+    TypeRecordCalculateSize(reference);
+    declared_type = reference;
+  }
+  if (TryParseRangeForStructuredBinding(syntax, binding)) {
+    binding->structured_binding_type = declared_type;
+    LexCheckpointDestruct(&structured_checkpoint);
+    TypeRecordDelete(type);
+    TypeParserDestruct(&parser);
+    return true;
+  }
+  TypeRecordDelete(declared_type);
+  LexCheckpointRestore(syntax->lex, &structured_checkpoint);
+  LexCheckpointDestruct(&structured_checkpoint);
+
   binding->loop_var = TypeParserParseDeclarator(&parser, type);
   TypeRecordDelete(type);
   TypeParserDestruct(&parser);
