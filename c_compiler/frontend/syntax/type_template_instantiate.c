@@ -613,6 +613,14 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       func->info.function.is_explicit = explicit_value != 0;
       func->info.function.is_explicit_conversion =
           from->info.function.is_explicit_conversion && explicit_value != 0;
+    } else {
+      ASTNode* condition = CloneDependentExpressionWithArgs(
+          parser, from->info.function.explicit_condition, args);
+      if (DependentExpressionContainsTemplateParameter(condition)) {
+        func->info.function.explicit_condition = condition;
+      } else {
+        ASTNodeDelete(condition);
+      }
     }
   }
   func->info.function.is_final = from->info.function.is_final;
@@ -757,9 +765,10 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     bool saved_trap = DiagnosticErrorTrapBegin();
     compiler->speculative_template_instantiation_depth++;
     func->info.function.associated_constraint =
-        ConceptsSubstituteConstraint(
+        ConceptsSubstituteMemberConstraint(
             parser->syntax, from->info.function.associated_constraint,
-            subst_args, member_template_base);
+            subst_args, member_template_base,
+            from->info.function.cxx_member_owner, owner);
     compiler->speculative_template_instantiation_depth--;
     DiagnosticErrorTrapEnd(saved_trap);
   }
@@ -904,6 +913,14 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       func->info.function.is_explicit = explicit_value != 0;
       func->info.function.is_explicit_conversion =
           from->info.function.is_explicit_conversion && explicit_value != 0;
+    } else {
+      ASTNode* condition = CloneDependentExpressionWithArgs(
+          parser, from->info.function.explicit_condition, args);
+      if (DependentExpressionContainsTemplateParameter(condition)) {
+        func->info.function.explicit_condition = condition;
+      } else {
+        ASTNodeDelete(condition);
+      }
     }
   }
   func->info.function.is_virtual = from->info.function.is_virtual;
@@ -1987,6 +2004,57 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
     // absorbed actual is deduced as one element of the enclosing function
     // template's pack parameter.
     int pack_index = -1;
+    TemplateArgument* pack_pattern = formal_arg;
+    if (formal_arg->pack_arguments != NULL &&
+        formal_arg->pack_arguments->length == 1) {
+      TemplateArgument* bundled_pattern =
+          formal_arg->pack_arguments->value.p[0];
+      if (bundled_pattern != NULL && bundled_pattern->is_pack_expansion) {
+        pack_pattern = bundled_pattern;
+      }
+    }
+    if (pack_pattern->is_pack_expansion &&
+        pack_pattern->kind == kTemplateParameterNonType &&
+        pack_pattern->template_parameter_index >= 0) {
+      pack_index = pack_pattern->template_parameter_index;
+      size_t trailing_formals = formal_args->length - i - 1;
+      if ((size_t)pack_index >= args->length ||
+          actual_args->length < actual_index + trailing_formals) {
+        ok = false;
+        break;
+      }
+      size_t pack_end = actual_args->length - trailing_formals;
+      TemplateArgument* deduced_pack =
+          NewEmptyPackTemplateArgument(kTemplateParameterNonType);
+      for (; actual_index < pack_end; actual_index++) {
+        TemplateArgument* actual_arg = actual_args->value.p[actual_index];
+        if (actual_arg == NULL ||
+            actual_arg->kind != kTemplateParameterNonType) {
+          ok = false;
+          break;
+        }
+        VectorAppend(deduced_pack->pack_arguments,
+                     TemplateArgumentCopy(actual_arg));
+      }
+      if (ok) {
+        TemplateArgument* existing = args->value.p[pack_index];
+        if (existing == NULL ||
+            (existing->kind == kTemplateParameterNonType &&
+             existing->pack_arguments != NULL &&
+             existing->pack_arguments->length == 0)) {
+          TemplateArgumentDelete(existing);
+          args->value.p[pack_index] = deduced_pack;
+          deduced_pack = NULL;
+        } else if (!TemplateArgumentEqual(existing, deduced_pack)) {
+          ok = false;
+        }
+      }
+      TemplateArgumentDelete(deduced_pack);
+      if (!ok) {
+        break;
+      }
+      continue;
+    }
     if (formal_arg->is_pack_expansion &&
         formal_arg->kind == kTemplateParameterType &&
         formal_arg->type != NULL &&
@@ -3459,6 +3527,33 @@ static bool SetDeducedClassTemplateTypePackArgument(Vector* bindings, int index,
   return equal;
 }
 
+static bool SetDeducedClassTemplateValuePackArgument(
+    Vector* bindings, int index, TemplateParameterKind kind, Vector* actuals,
+    size_t first_actual, size_t last_actual) {
+  if (index < 0 || bindings == NULL || (size_t)index >= bindings->length ||
+      actuals == NULL || first_actual > last_actual ||
+      last_actual > actuals->length) {
+    return false;
+  }
+  TemplateArgument* pack = NewEmptyPackTemplateArgument(kind);
+  for (size_t i = first_actual; i < last_actual; i++) {
+    TemplateArgument* actual = actuals->value.p[i];
+    if (actual == NULL || actual->kind != kind) {
+      TemplateArgumentDelete(pack);
+      return false;
+    }
+    VectorAppend(pack->pack_arguments, TemplateArgumentCopy(actual));
+  }
+  TemplateArgument* existing = bindings->value.p[index];
+  if (existing == NULL) {
+    bindings->value.p[index] = pack;
+    return true;
+  }
+  bool equal = TemplateArgumentEqual(existing, pack);
+  TemplateArgumentDelete(pack);
+  return equal;
+}
+
 static bool SetDeducedClassTemplateFunctionTypePackArgument(
     Vector* bindings, int index, Vector* actual_formals, size_t first_actual,
     size_t last_actual) {
@@ -3500,6 +3595,26 @@ static bool TemplateArgumentIsTypeParameterPackPattern(TemplateArgument* arg,
   return arg->is_pack_expansion;
 }
 
+static bool TemplateArgumentIsParameterPackPattern(TemplateArgument* arg,
+                                                   int* index) {
+  if (TemplateArgumentIsTypeParameterPackPattern(arg, index)) {
+    return true;
+  }
+  if (index != NULL) {
+    *index = -1;
+  }
+  if (arg == NULL || !arg->is_pack_expansion ||
+      (arg->kind != kTemplateParameterNonType &&
+       arg->kind != kTemplateParameterTemplate) ||
+      arg->template_parameter_index < 0) {
+    return false;
+  }
+  if (index != NULL) {
+    *index = arg->template_parameter_index;
+  }
+  return true;
+}
+
 static bool ClassTemplateArgumentPackPatternMatches(Vector* bindings,
                                                     Vector* pattern_args,
                                                     Vector* actual_args) {
@@ -3510,9 +3625,15 @@ static bool ClassTemplateArgumentPackPatternMatches(Vector* bindings,
   for (size_t i = 0; i < pattern_args->length; i++) {
     TemplateArgument* pattern = pattern_args->value.p[i];
     int pack_index = -1;
-    if (TemplateArgumentIsTypeParameterPackPattern(pattern, &pack_index)) {
-      return SetDeducedClassTemplateTypePackArgument(
-          bindings, pack_index, actual_args, actual_index, actual_args->length);
+    if (TemplateArgumentIsParameterPackPattern(pattern, &pack_index)) {
+      if (pattern->kind == kTemplateParameterType) {
+        return SetDeducedClassTemplateTypePackArgument(
+            bindings, pack_index, actual_args, actual_index,
+            actual_args->length);
+      }
+      return SetDeducedClassTemplateValuePackArgument(
+          bindings, pack_index, pattern->kind, actual_args, actual_index,
+          actual_args->length);
     }
     if (actual_index >= actual_args->length ||
         !ClassTemplateArgumentPatternMatches(
@@ -3575,6 +3696,16 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
       return SetDeducedTemplateNonTypeArgument(
           bindings, 0, pattern->template_parameter_index, actual);
     }
+    // Both arguments have already been accepted for the primary template's
+    // non-type parameter, so compare integral values after that parameter's
+    // implicit conversion. The expression spelling the partial pattern may
+    // retain its original literal type (for example, int for `0`) while the
+    // actual argument has the parameter type (for example, size_t).
+    if (pattern->dependent_expr == NULL && actual->dependent_expr == NULL &&
+        pattern->type != NULL && actual->type != NULL &&
+        TypeIsIntegral(pattern->type) && TypeIsIntegral(actual->type)) {
+      return pattern->int_value == actual->int_value;
+    }
     return TemplateArgumentEqual(pattern, actual);
   }
   if (pattern->kind == kTemplateParameterTemplate) {
@@ -3596,8 +3727,8 @@ static bool ClassTemplateArgumentVectorPatternMatchesExpanded(
   int pack_pattern_pos = -1;
   for (size_t i = 0; i < pattern_args->length; i++) {
     int idx = -1;
-    if (TemplateArgumentIsTypeParameterPackPattern(pattern_args->value.p[i],
-                                                   &idx)) {
+    if (TemplateArgumentIsParameterPackPattern(pattern_args->value.p[i],
+                                               &idx)) {
       pack_pattern_pos = (int)i;
       break;
     }
@@ -3633,10 +3764,16 @@ static bool ClassTemplateArgumentVectorPatternMatchesExpanded(
     }
   }
   int pack_index = -1;
-  TemplateArgumentIsTypeParameterPackPattern(
-      pattern_args->value.p[pack_pattern_pos], &pack_index);
-  return SetDeducedClassTemplateTypePackArgument(
-      bindings, pack_index, actual_args, leading,
+  TemplateArgument* pack_pattern =
+      pattern_args->value.p[pack_pattern_pos];
+  TemplateArgumentIsParameterPackPattern(pack_pattern, &pack_index);
+  if (pack_pattern->kind == kTemplateParameterType) {
+    return SetDeducedClassTemplateTypePackArgument(
+        bindings, pack_index, actual_args, leading,
+        actual_args->length - trailing);
+  }
+  return SetDeducedClassTemplateValuePackArgument(
+      bindings, pack_index, pack_pattern->kind, actual_args, leading,
       actual_args->length - trailing);
 }
 
@@ -3650,6 +3787,29 @@ static bool ClassTemplateArgumentVectorPatternMatches(Vector* bindings,
                                                       Vector* actual_args) {
   if (pattern_args == NULL || actual_args == NULL) {
     return pattern_args == actual_args;
+  }
+  // Parser-produced pack expansions are represented as a bundle in both the
+  // pattern and the specialization. Preserve those corresponding bundles so
+  // the nested pack matcher can bind type, non-type, or template packs. The
+  // flattened path below is for patterns whose expansion remains a direct
+  // argument entry.
+  bool corresponding_storage =
+      pattern_args->length == actual_args->length;
+  for (size_t i = 0; corresponding_storage && i < pattern_args->length; i++) {
+    TemplateArgument* pattern = pattern_args->value.p[i];
+    TemplateArgument* actual = actual_args->value.p[i];
+    corresponding_storage =
+        (pattern->pack_arguments != NULL) ==
+        (actual->pack_arguments != NULL);
+  }
+  if (corresponding_storage) {
+    for (size_t i = 0; i < pattern_args->length; i++) {
+      if (!ClassTemplateArgumentPatternMatches(
+              bindings, pattern_args->value.p[i], actual_args->value.p[i])) {
+        return false;
+      }
+    }
+    return true;
   }
   Vector expanded_actuals;
   VectorInit(&expanded_actuals);
@@ -3688,6 +3848,31 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
     deduced->qualifiers &= ~pattern->qualifiers;
     bool ok = SetDeducedClassTemplateTypeArgument(bindings, index, deduced);
     TypeRecordDelete(deduced);
+    return ok;
+  }
+  if (pattern->template_origin != NULL &&
+      CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(
+          pattern->template_origin) &&
+      pattern->template_arguments != NULL) {
+    Vector* alias_args = CompleteAliasTemplateArguments(
+        pattern->template_origin, pattern->template_arguments);
+    if (alias_args == NULL) {
+      return false;
+    }
+    TypeParser parser;
+    TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                   STO(implicit), compiler->syntax.context);
+    TypeRecord* expanded = SubstituteTemplateParameters(
+        &parser, pattern->template_origin->type, alias_args);
+    bool substitution_failed = parser.template_substitution_failed;
+    TypeParserDestruct(&parser);
+    VectorDeleteWithContents(alias_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    bool ok =
+        !substitution_failed &&
+        ClassTemplateTypePatternMatches(bindings, expanded, actual);
+    TypeRecordDelete(expanded);
     return ok;
   }
   if (pattern->template_origin != NULL &&
@@ -3833,16 +4018,21 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
         return false;
       }
       if (TypeIsStructOrUnion(pattern)) {
-        if (pattern->template_origin != actual->template_origin) {
+        if (pattern->info.struct_info == actual->info.struct_info) {
+          return true;
+        }
+        bool origin_matches = ClassTemplateOriginMatches(
+            ClassTemplateOriginOf(pattern), ClassTemplateOriginOf(actual));
+        if (!origin_matches) {
           return false;
         }
-        if (!ClassTemplateArgumentVectorPatternMatches(
-                bindings, pattern->template_arguments,
-                actual->template_arguments)) {
+        bool args_match = ClassTemplateArgumentVectorPatternMatches(
+            bindings, SpecializationTemplateArguments(pattern),
+            SpecializationTemplateArguments(actual));
+        if (!args_match) {
           return false;
         }
-        return pattern->info.struct_info == actual->info.struct_info ||
-               pattern->template_origin != NULL;
+        return ClassTemplateOriginOf(pattern) != NULL;
       }
       if (TypeIsEnum(pattern)) {
         return pattern->info.enum_info == actual->info.enum_info;
@@ -4069,15 +4259,20 @@ static int TemplateArgumentVectorPatternSpecificity(Vector* args) {
 static bool MatchClassTemplatePartialSpecialization(
     ClassTemplatePartialSpecialization* partial, Vector* actual_args,
     Vector** bindings_out, int* score_out) {
-  if (partial == NULL || actual_args == NULL ||
-      partial->pattern_arguments.length != actual_args->length) {
+  if (partial == NULL || actual_args == NULL) {
     return false;
   }
   Vector* bindings = NewPartialSpecializationBindings(partial);
   bool ok = true;
-  for (size_t i = 0; ok && i < partial->pattern_arguments.length; i++) {
-    ok = ClassTemplateArgumentPatternMatches(
-        bindings, partial->pattern_arguments.value.p[i], actual_args->value.p[i]);
+  if (partial->pattern_arguments.length == actual_args->length) {
+    for (size_t i = 0; ok && i < partial->pattern_arguments.length; i++) {
+      ok = ClassTemplateArgumentPatternMatches(
+          bindings, partial->pattern_arguments.value.p[i],
+          actual_args->value.p[i]);
+    }
+  } else {
+    ok = ClassTemplateArgumentVectorPatternMatches(
+        bindings, &partial->pattern_arguments, actual_args);
   }
   ok = ok && PartialSpecializationBindingsComplete(partial, bindings);
   if (!ok) {
@@ -4462,21 +4657,31 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
                                     Vector* actuals,
                                     int* score) {
   if (parser == NULL || guide_type == NULL || !TypeIsFunction(guide_type) ||
-      actuals == NULL || score == NULL ||
-      guide_type->info.function.prototype.length != actuals->length) {
+      actuals == NULL || score == NULL) {
+    return false;
+  }
+  TypeRecord* concrete_guide =
+      template_args != NULL
+          ? InstantiateFunctionTemplateType(parser, guide_type, template_args)
+          : guide_type;
+  if (concrete_guide == NULL || !TypeIsFunction(concrete_guide) ||
+      concrete_guide->info.function.prototype.length != actuals->length) {
+    if (template_args != NULL) {
+      TypeRecordDelete(concrete_guide);
+    }
     return false;
   }
   int total = 0;
   for (size_t i = 0; i < actuals->length; i++) {
-    Symbol* formal = guide_type->info.function.prototype.value.p[i];
+    Symbol* formal = concrete_guide->info.function.prototype.value.p[i];
     ASTNode* actual = actuals->value.p[i];
     if (formal == NULL || formal->type == NULL || actual == NULL) {
+      if (template_args != NULL) {
+        TypeRecordDelete(concrete_guide);
+      }
       return false;
     }
-    TypeRecord* formal_type =
-        template_args != NULL
-            ? SubstituteTemplateParameters(parser, formal->type, template_args)
-            : formal->type;
+    TypeRecord* formal_type = formal->type;
     int rank = actual->op == AST_OP(braced_init)
         ? (CXXArrayBracedInitIsViableForDeduction(actual, formal_type) ||
                    CXXInitializerListBracedInitIsViableForDeduction(actual,
@@ -4484,13 +4689,16 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
                ? 0
                : -1)
         : DeductionGuideConversionRank(formal_type, actual->type);
-    if (template_args != NULL) {
-      TypeRecordDelete(formal_type);
-    }
     if (rank < 0) {
+      if (template_args != NULL) {
+        TypeRecordDelete(concrete_guide);
+      }
       return false;
     }
     total += rank;
+  }
+  if (template_args != NULL) {
+    TypeRecordDelete(concrete_guide);
   }
   *score = total;
   return true;
@@ -4740,6 +4948,12 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
       member->symbol->type->info.function.body != NULL) {
     template_definition = member->symbol;
   }
+  // Keep the source definition reachable while this class specialization is
+  // still being assembled. A later data member can use an earlier constexpr
+  // member in a dependent template argument (for example
+  // `array<T, rank_dynamic()>`); constexpr evaluation must be able to
+  // instantiate that body before the normal pending-body pass runs.
+  symbol->value.func_defn = template_definition;
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   PendingMemberBody* pmb = malloc(sizeof(PendingMemberBody));
@@ -4817,6 +5031,14 @@ static bool TemplateNonTypeArgumentMatchesParameter(
       param->kind != kTemplateParameterNonType ||
       arg->kind != kTemplateParameterNonType) {
     return false;
+  }
+  // A nested template-id can be completed while its non-type argument still
+  // depends on an enclosing class template, for example
+  // `array<index_type, rank_dynamic()>` inside `extents<...>`.  Its concrete
+  // value and type are checked after substitution; rejecting the unresolved
+  // expression here prevents the enclosing specialization from ever forming.
+  if (arg->dependent_expr != NULL) {
+    return true;
   }
   if (param->type == NULL || (param->type->type & kTypeAuto) != 0 ||
       TypeContainsTemplateParameter(param->type)) {
@@ -4988,7 +5210,17 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     TemplateParameter* param = template_parameters->value.p[i];
     if (param != NULL && param->is_parameter_pack) {
       TemplateArgument* pack = NewEmptyPackTemplateArgument(param->kind);
-      for (size_t j = i; j < args->length; j++) {
+      // Deduction produces a normalized vector with one bundled argument per
+      // declared parameter. Preserve that one-to-one shape for a non-trailing
+      // pack instead of greedily absorbing the arguments belonging to later
+      // parameters. Raw explicit argument lists still use the trailing-pack
+      // gathering path.
+      bool normalized_pack =
+          args->length == template_parameters->length && i < args->length &&
+          args->value.p[i] != NULL &&
+          ((TemplateArgument*)args->value.p[i])->pack_arguments != NULL;
+      size_t pack_end = normalized_pack ? i + 1 : args->length;
+      for (size_t j = i; j < pack_end; j++) {
         TemplateArgument* arg = args->value.p[j];
         bool incompatible_template =
             arg != NULL && arg->kind == kTemplateParameterTemplate &&

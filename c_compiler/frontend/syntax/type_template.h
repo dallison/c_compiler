@@ -17,6 +17,10 @@ struct ASTNode* TypeSubstituteTemplateExpression(struct Syntax* syntax,
 struct ASTNode* TypeSubstituteTemplateExpressionAndRebase(
     struct Syntax* syntax, struct ASTNode* expr, Vector* args, int rebase_base,
     SourceLocation location);
+struct ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
+    struct Syntax* syntax, struct ASTNode* expr, Vector* args, int rebase_base,
+    SourceLocation location, struct Struct* from_owner,
+    struct Struct* to_owner);
 TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
                                        TypeRecord* type,
                                        Vector* args);

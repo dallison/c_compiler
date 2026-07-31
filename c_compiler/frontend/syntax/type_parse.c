@@ -2260,9 +2260,28 @@ static void ParseArrayDecl(TypeParser* parser) {
       // There was a * before the expression, this means contents.
       size_expr = NewUnaryASTNode(AST_OP(contents), NULL, location, size_expr);
     }
+    int sizeof_pack_index = -1;
+    if (CompilerIsCXX() && ASTNodeGetShape(size_expr) == kASTShapeSizeof &&
+        ((SizeofASTNode*)size_expr)->is_pack_size) {
+      ASTNode* pack_expr = ((SizeofASTNode*)size_expr)->expr;
+      if (pack_expr != NULL && pack_expr->op == AST_OP(identifier)) {
+        Symbol* pack_symbol = ((IdentifierASTNode*)pack_expr)->symbol;
+        if (pack_symbol != NULL && pack_symbol->flags.is_parameter_pack) {
+          sizeof_pack_index = pack_symbol->template_parameter_index;
+        }
+      }
+    }
     size_expr = AnalyzeExpression(size_expr);
     bool delete_expr = true;
     int64_t size;
+    if (sizeof_pack_index >= 0) {
+      p->info.array.template_parameter_index = sizeof_pack_index;
+      // Keep one placeholder slot so the unexpanded pack initializer is
+      // accepted while parsing the template definition. Substitution replaces
+      // this with the concrete pack length before layout/code generation.
+      p->info.array.size.fixed = 1;
+      goto parsed_bound;
+    }
     bool ok = EvaluateIntegerExpression(size_expr, &size);
     if (!ok) {
       if (parser->syntax->parsing_template_declaration &&

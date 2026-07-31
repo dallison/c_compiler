@@ -107,6 +107,20 @@ static ConstexprBinding* FindConstexprBinding(ConstEvalContext* ctx,
       return binding;
     }
   }
+  // A function-template body can retain the primary template's formal symbols
+  // while the instantiated function type owns cloned formals.  They denote the
+  // same argument slot even though their Symbol pointers differ.  Resolve that
+  // slot in the innermost active call frame by argument number and name.
+  if (symbol->flags.is_argument) {
+    for (size_t i = ctx->bindings.length; i > 0; i--) {
+      ConstexprBinding* binding = ctx->bindings.value.p[i - 1];
+      if (binding->symbol != NULL && binding->symbol->flags.is_argument &&
+          binding->symbol->value.arg_number == symbol->value.arg_number &&
+          StringEqual(&binding->symbol->name, symbol->name.value)) {
+        return binding;
+      }
+    }
+  }
   return NULL;
 }
 
@@ -854,20 +868,29 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
   ConstexprBinding* binding = NULL;
   ConstexprValue* slot = NULL;
   bool is_assignment = node->base.op == AST_OP(assign);
+  TypeRecord* left_type = node->left->type;
+  if (TypeIsReference(left_type)) {
+    left_type = left_type->next;
+  }
+  if (node->left->op == AST_OP(subscript) && left_type != NULL &&
+      left_type->declarator == kDeclArray) {
+    left_type =
+        left_type->next != NULL ? left_type->next : node->right->type;
+  }
   if (!EvaluateConstexprLValue(ctx, node->left, &binding) &&
       !EvaluateConstexprObjectLValue(ctx, node->left, &slot, is_assignment)) {
-      return false;
-    }
+    return false;
+  }
 
   ConstexprValue right;
-  if (!EvaluateConstexprValue(ctx, node->right, node->left->type, &right)) {
+  if (!EvaluateConstexprValue(ctx, node->right, left_type, &right)) {
     return false;
   }
 
   if (node->base.op == AST_OP(assign)) {
     bool stored = binding != NULL
-        ? StoreConstexprBinding(ctx, binding, node->left->type, right)
-        : StoreConstexprSlot(ctx, slot, node->left->type, right);
+        ? StoreConstexprBinding(ctx, binding, left_type, right)
+        : StoreConstexprSlot(ctx, slot, left_type, right);
     if (!stored) {
       return false;
     }
@@ -884,7 +907,7 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
       : *slot;
 
   ConstexprValue next = current;
-  if (node->left->type != NULL && TypeIsFloatingPoint(node->left->type)) {
+  if (left_type != NULL && TypeIsFloatingPoint(left_type)) {
     double left;
     double right_value;
     ConstexprValueAsFloating(current, &left);
@@ -964,8 +987,8 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
   }
 
   bool stored = binding != NULL
-      ? StoreConstexprBinding(ctx, binding, node->left->type, next)
-      : StoreConstexprSlot(ctx, slot, node->left->type, next);
+      ? StoreConstexprBinding(ctx, binding, left_type, next)
+      : StoreConstexprSlot(ctx, slot, left_type, next);
   if (!stored) {
     return false;
   }
@@ -1637,6 +1660,18 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     if (slot == NULL) {
       return false;
     }
+    TypeRecord* member_type =
+        member_node->member->symbol != NULL
+            ? member_node->member->symbol->type : NULL;
+    if (member_type != NULL &&
+        (TypeIsFixedArray(member_type) ||
+         TypeIsStructOrUnion(member_type)) &&
+        (!slot->is_object || slot->object == NULL)) {
+      slot->is_object = true;
+      slot->is_address = false;
+      slot->object = NewConstexprObject(
+          ctx, member_type, ConstexprObjectSlotCount(member_type));
+    }
     *result = *slot;
     return true;
   }
@@ -1735,6 +1770,18 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
     *slot = ConstexprObjectSlot(
         object_value.object,
         ConstexprMemberSlotIndex(object_value.object, member_node->member));
+    TypeRecord* member_type =
+        member_node->member->symbol != NULL
+            ? member_node->member->symbol->type : NULL;
+    if (*slot != NULL && member_type != NULL &&
+        (TypeIsFixedArray(member_type) ||
+         TypeIsStructOrUnion(member_type)) &&
+        (!(*slot)->is_object || (*slot)->object == NULL)) {
+      (*slot)->is_object = true;
+      (*slot)->is_address = false;
+      (*slot)->object = NewConstexprObject(
+          ctx, member_type, ConstexprObjectSlotCount(member_type));
+    }
     return *slot != NULL && (allow_object || !(*slot)->is_object);
   }
   return false;
@@ -2092,6 +2139,10 @@ Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
     return NULL;
   }
+  if (symbol->type->info.function.body == NULL &&
+      symbol->type->info.function.cxx_member_owner != NULL) {
+    TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, symbol);
+  }
   Symbol* definition = NULL;
   if (symbol->type->info.function.body != NULL) {
     definition = symbol;
@@ -2362,6 +2413,30 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
   return true;
 }
 
+static bool ConstexprConstructorCandidateMatches(Symbol* candidate,
+                                                 VectorASTNode* call) {
+  if (candidate == NULL || candidate->type == NULL ||
+      !TypeIsFunction(candidate->type) ||
+      !candidate->type->info.function.is_constructor ||
+      candidate->type->info.function.prototype.length !=
+          call->children->length + 1) {
+    return false;
+  }
+  for (size_t a = 0; a < call->children->length; a++) {
+    ASTNode* actual = call->children->value.p[a];
+    Symbol* formal =
+        candidate->type->info.function.prototype.value.p[a + 1];
+    TypeRecord* formal_type =
+        formal != NULL && TypeIsReference(formal->type)
+            ? formal->type->next : formal != NULL ? formal->type : NULL;
+    if (actual == NULL || actual->type == NULL || formal_type == NULL ||
+        !TypeAssignmentCompatible(actual->type, formal_type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node,
                                                  ASTNode** receiver) {
   if (node == NULL || node->op != AST_OP(call)) {
@@ -2395,6 +2470,60 @@ static Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node,
                               member_name->value.string);
   }
   while (member != NULL) {
+    if (member->symbol != NULL && member->symbol->type != NULL &&
+        TypeIsFunction(member->symbol->type)) {
+      Symbol* constructor_template =
+          member->symbol->flags.is_template ? member->symbol : NULL;
+      if (constructor_template == NULL &&
+          member->symbol->value.func_defn != NULL &&
+          member->symbol->value.func_defn->type != NULL &&
+          TypeIsFunction(member->symbol->value.func_defn->type) &&
+          member->symbol->value.func_defn->type
+                  ->info.function.template_parameters.length > 0) {
+        constructor_template = member->symbol->value.func_defn;
+      }
+      if (constructor_template != NULL) {
+        DiagnosticSuppressBegin();
+        Symbol* candidate = TypeCreateFunctionTemplateCandidate(
+            &compiler->syntax, constructor_template, NULL, call->children,
+            /*first_formal_arg=*/1);
+        Symbol* instantiated =
+            candidate != NULL && candidate->type != NULL &&
+                    candidate->type->template_arguments != NULL
+                ? TypeInstantiateFunctionTemplate(
+                      &compiler->syntax, constructor_template,
+                      candidate->type->template_arguments)
+                : NULL;
+        DiagnosticSuppressEnd();
+        if (candidate != NULL) {
+          SymbolDelete(candidate);
+        }
+        if (instantiated != NULL && instantiated->type != NULL &&
+            TypeIsFunction(instantiated->type) &&
+            instantiated->type->info.function.is_constructor &&
+            instantiated->type->info.function.prototype.length ==
+                call->children->length + 1) {
+          *receiver = member_access->left;
+          return instantiated;
+        }
+      }
+      for (Symbol* candidate = member->symbol->overload_next;
+           candidate != NULL; candidate = candidate->overload_next) {
+        if (ConstexprConstructorCandidateMatches(candidate, call)) {
+          *receiver = member_access->left;
+          return candidate;
+        }
+      }
+      Vector* instantiations =
+          &member->symbol->type->info.function.template_instantiations;
+      for (size_t i = 0; i < instantiations->length; i++) {
+        Symbol* candidate = instantiations->value.p[i];
+        if (ConstexprConstructorCandidateMatches(candidate, call)) {
+          *receiver = member_access->left;
+          return candidate;
+        }
+      }
+    }
     if (member->is_member_function && member->symbol != NULL &&
         member->symbol->type != NULL && TypeIsFunction(member->symbol->type) &&
         member->symbol->type->info.function.is_constructor &&
@@ -2927,20 +3056,24 @@ static ConstexprStatementResult EvaluateConstexprStatement(
             if (callee->type->info.function.is_constructor &&
                 !EvaluateConstexprConstructorCall(ctx, expr->expr)) {
               return kConstexprStmtInvalid;
-            }
-            if (callee->type->info.function.is_destructor &&
+            } else if (callee->type->info.function.is_destructor &&
                 !EvaluateConstexprDestructorCall(ctx, expr->expr)) {
               return kConstexprStmtInvalid;
+            } else if (!callee->type->info.function.is_constructor &&
+                       !callee->type->info.function.is_destructor) {
+              ConstexprValue ignored = {0};
+              if (!EvaluateConstexprCall(ctx, expr->expr, &ignored)) {
+                return kConstexprStmtInvalid;
+              }
             }
           }
         }
         return kConstexprStmtNormal;
       }
       ConstexprValue ignored;
-      return EvaluateConstexprValue(ctx, expr->expr, expr->expr->type,
-                                    &ignored)
-                 ? kConstexprStmtNormal
-                 : kConstexprStmtInvalid;
+      bool ok =
+          EvaluateConstexprValue(ctx, expr->expr, expr->expr->type, &ignored);
+      return ok ? kConstexprStmtNormal : kConstexprStmtInvalid;
     }
     case AST_OP(compound):
       return EvaluateConstexprCompound(ctx, (CompoundStatementASTNode*)stmt,
@@ -3019,7 +3152,8 @@ static bool EvaluateConstexprFunctionBody(ConstEvalContext* ctx, TypeRecord* fun
   }
   ConstexprStatementResult stmt_result = EvaluateConstexprStatement(
       ctx, func->info.function.body, func->next, result);
-  return stmt_result == kConstexprStmtReturn;
+  return stmt_result == kConstexprStmtReturn ||
+         (TypeIsVoid(func->next) && stmt_result == kConstexprStmtNormal);
 }
 
 // Resolve a non-static member function call of the form `obj.f(args)` or
@@ -3059,7 +3193,8 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   ASTNode* receiver = NULL;
-  Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
+  Symbol* call_symbol = ConstexprCallSymbol(node);
+  Symbol* callee = ConstexprFunctionDefinition(call_symbol);
   if (callee == NULL) {
     callee =
         ConstexprFunctionDefinition(ConstexprMemberCallSymbol(node, &receiver));

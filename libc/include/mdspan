@@ -1,0 +1,230 @@
+//
+//  mdspan
+//  c_compiler
+//
+//  C++23 multidimensional view support for DaveCC.
+//
+
+#ifndef __davecc_mdspan__
+#define __davecc_mdspan__
+
+#include <array>
+#include <cstddef>
+#include <span>
+#include <type_traits>
+#include <utility>
+
+#ifndef __cpp_lib_mdspan
+#define __cpp_lib_mdspan 202207L
+#endif
+
+namespace std {
+
+template <class IndexType, size_t... Extents>
+class extents {
+  static_assert(is_integral_v<IndexType>,
+                "extents index type must be an integral type");
+  static_assert(!is_same_v<remove_cv_t<IndexType>, bool>,
+                "extents index type cannot be bool");
+
+ public:
+  using index_type = IndexType;
+  using size_type = make_unsigned_t<index_type>;
+  using rank_type = size_t;
+
+  static constexpr rank_type rank() noexcept {
+    return sizeof...(Extents);
+  }
+
+  static constexpr rank_type rank_dynamic() noexcept {
+    return ((Extents == dynamic_extent ? 1 : 0) + ... + 0);
+  }
+
+  static constexpr size_t static_extent(rank_type rank_index) noexcept {
+    size_t result = dynamic_extent;
+    rank_type current = 0;
+    ((current++ == rank_index ? result = Extents : result), ...);
+    return result;
+  }
+
+ private:
+  array<index_type, rank_dynamic()> __dynamic_extents{};
+
+  static constexpr rank_type __dynamic_index(rank_type rank_index) noexcept {
+    rank_type result = 0;
+    for (rank_type r = 0; r < rank_index; r++) {
+      if (static_extent(r) == dynamic_extent) {
+        result++;
+      }
+    }
+    return result;
+  }
+
+  template <class Values>
+  constexpr void __assign_extents(const Values& values,
+                                  rank_type value_count) noexcept {
+    rank_type dynamic_index = 0;
+    if (value_count == rank_dynamic()) {
+      for (; dynamic_index < rank_dynamic(); dynamic_index++) {
+        __dynamic_extents[dynamic_index] =
+            static_cast<index_type>(values[dynamic_index]);
+      }
+      return;
+    }
+    for (rank_type r = 0; r < rank(); r++) {
+      if (static_extent(r) == dynamic_extent) {
+        __dynamic_extents[dynamic_index++] =
+            static_cast<index_type>(values[r]);
+      }
+    }
+  }
+
+ public:
+  constexpr extents() noexcept = default;
+
+  template <class OtherIndexType, size_t... OtherExtents>
+    requires(
+        sizeof...(OtherExtents) == rank() &&
+        ((Extents == dynamic_extent ||
+          OtherExtents == dynamic_extent ||
+          Extents == OtherExtents) && ...))
+  constexpr explicit(
+      (((Extents != dynamic_extent) &&
+        (OtherExtents == dynamic_extent)) || ...))
+      extents(const extents<OtherIndexType, OtherExtents...>& other) noexcept {
+    rank_type dynamic_index = 0;
+    for (rank_type r = 0; r < rank(); r++) {
+      if (static_extent(r) == dynamic_extent) {
+        __dynamic_extents[dynamic_index++] =
+            static_cast<index_type>(other.extent(r));
+      }
+    }
+  }
+
+  template <class... OtherIndexTypes>
+    requires(
+        (sizeof...(OtherIndexTypes) == rank_dynamic() ||
+         sizeof...(OtherIndexTypes) == rank()) &&
+        (is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+        (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...))
+  constexpr explicit extents(OtherIndexTypes... values) noexcept {
+    index_type converted[sizeof...(OtherIndexTypes)]{
+        static_cast<index_type>(std::move(values))...};
+    __assign_extents(converted, sizeof...(OtherIndexTypes));
+  }
+
+  template <class OtherIndexType, size_t N>
+    requires(
+        (N == rank_dynamic() || N == rank()) &&
+        is_convertible_v<const OtherIndexType&, index_type> &&
+        is_nothrow_constructible_v<index_type, const OtherIndexType&>)
+  constexpr explicit(N != rank_dynamic())
+      extents(const array<OtherIndexType, N>& values) noexcept {
+    __assign_extents(values, N);
+  }
+
+  template <class OtherIndexType, size_t N>
+    requires(
+        (N == rank_dynamic() || N == rank()) &&
+        is_convertible_v<OtherIndexType, index_type> &&
+        is_nothrow_constructible_v<index_type, OtherIndexType>)
+  constexpr explicit(N != rank_dynamic())
+      extents(span<OtherIndexType, N> values) noexcept {
+    __assign_extents(values, N);
+  }
+
+  constexpr index_type extent(rank_type rank_index) const noexcept {
+    size_t value = static_extent(rank_index);
+    if (value != dynamic_extent) {
+      return static_cast<index_type>(value);
+    }
+    return __dynamic_extents[__dynamic_index(rank_index)];
+  }
+};
+
+template <class LeftIndexType, size_t... LeftExtents,
+          class RightIndexType, size_t... RightExtents>
+  requires(sizeof...(LeftExtents) == sizeof...(RightExtents))
+constexpr bool operator==(
+    const extents<LeftIndexType, LeftExtents...>& left,
+    const extents<RightIndexType, RightExtents...>& right) noexcept {
+  for (size_t r = 0; r < sizeof...(LeftExtents); r++) {
+    if (left.extent(r) != right.extent(r)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class LeftIndexType, size_t... LeftExtents,
+          class RightIndexType, size_t... RightExtents>
+  requires(sizeof...(LeftExtents) == sizeof...(RightExtents))
+constexpr bool operator!=(
+    const extents<LeftIndexType, LeftExtents...>& left,
+    const extents<RightIndexType, RightExtents...>& right) noexcept {
+  return !(left == right);
+}
+
+template <size_t>
+struct __mdspan_dynamic_extent_for_index {
+  static constexpr size_t value = dynamic_extent;
+};
+
+template <class IndexType, class Sequence>
+struct __make_dextents_type;
+
+template <class IndexType, size_t... Indices>
+struct __make_dextents_type<IndexType, index_sequence<Indices...>> {
+  using type =
+      extents<IndexType,
+              __mdspan_dynamic_extent_for_index<Indices>::value...>;
+};
+
+template <class IndexType, size_t Rank>
+struct __dextents_type {
+  using sequence = make_index_sequence<Rank>;
+  using type = typename __make_dextents_type<IndexType, sequence>::type;
+};
+
+template <class IndexType, size_t Rank>
+using dextents = typename __dextents_type<IndexType, Rank>::type;
+
+template <class>
+struct __mdspan_dynamic_extent_for_type {
+  static constexpr size_t value = dynamic_extent;
+};
+
+template <class... Integrals>
+  requires((is_convertible_v<Integrals, size_t> && ...))
+extents(Integrals...)
+    -> extents<size_t,
+               __mdspan_dynamic_extent_for_type<Integrals>::value...>;
+
+template <class ElementType>
+struct default_accessor {
+  using offset_policy = default_accessor;
+  using element_type = ElementType;
+  using reference = element_type&;
+  using data_handle_type = element_type*;
+
+  constexpr default_accessor() noexcept = default;
+
+  template <class OtherElementType>
+    requires(is_convertible_v<OtherElementType (*)[], element_type (*)[]>)
+  constexpr default_accessor(
+      default_accessor<OtherElementType>) noexcept {}
+
+  constexpr reference access(data_handle_type pointer,
+                             size_t index) const noexcept {
+    return pointer[index];
+  }
+
+  constexpr data_handle_type offset(data_handle_type pointer,
+                                    size_t index) const noexcept {
+    return pointer + index;
+  }
+};
+
+}  // namespace std
+
+#endif /* __davecc_mdspan__ */

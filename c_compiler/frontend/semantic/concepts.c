@@ -369,33 +369,36 @@ static RequiresExpr* RequiresExprSubstitute(Syntax* syntax, RequiresExpr* expr,
   return NewRequiresExpr(parameters, requirements, expr->location);
 }
 
-ConstraintExpr* ConceptsSubstituteConstraint(Syntax* syntax,
-                                             ConstraintExpr* constraint,
-                                             Vector* arguments,
-                                             int rebase_base) {
+static ConstraintExpr* ConceptsSubstituteConstraintImpl(
+    Syntax* syntax, ConstraintExpr* constraint, Vector* arguments,
+    int rebase_base, Struct* from_owner, Struct* to_owner) {
   if (constraint == NULL) {
     return NULL;
   }
   switch (constraint->kind) {
     case kConstraintAtomic:
       return NewAtomicConstraint(
-          TypeSubstituteTemplateExpressionAndRebase(
+          TypeSubstituteMemberTemplateExpressionAndRebase(
               syntax, constraint->as.atomic.expr, arguments, rebase_base,
-              constraint->location),
+              constraint->location, from_owner, to_owner),
           constraint->location);
     case kConstraintConjunction:
       return NewConjunctionConstraint(
-          ConceptsSubstituteConstraint(syntax, constraint->as.binary.left,
-                                       arguments, rebase_base),
-          ConceptsSubstituteConstraint(syntax, constraint->as.binary.right,
-                                       arguments, rebase_base),
+          ConceptsSubstituteConstraintImpl(
+              syntax, constraint->as.binary.left, arguments, rebase_base,
+              from_owner, to_owner),
+          ConceptsSubstituteConstraintImpl(
+              syntax, constraint->as.binary.right, arguments, rebase_base,
+              from_owner, to_owner),
           constraint->location);
     case kConstraintDisjunction:
       return NewDisjunctionConstraint(
-          ConceptsSubstituteConstraint(syntax, constraint->as.binary.left,
-                                       arguments, rebase_base),
-          ConceptsSubstituteConstraint(syntax, constraint->as.binary.right,
-                                       arguments, rebase_base),
+          ConceptsSubstituteConstraintImpl(
+              syntax, constraint->as.binary.left, arguments, rebase_base,
+              from_owner, to_owner),
+          ConceptsSubstituteConstraintImpl(
+              syntax, constraint->as.binary.right, arguments, rebase_base,
+              from_owner, to_owner),
           constraint->location);
     case kConstraintConceptId:
       return NewConceptIdConstraint(
@@ -412,6 +415,21 @@ ConstraintExpr* ConceptsSubstituteConstraint(Syntax* syntax,
           constraint->location);
   }
   return NULL;
+}
+
+ConstraintExpr* ConceptsSubstituteConstraint(Syntax* syntax,
+                                             ConstraintExpr* constraint,
+                                             Vector* arguments,
+                                             int rebase_base) {
+  return ConceptsSubstituteConstraintImpl(
+      syntax, constraint, arguments, rebase_base, NULL, NULL);
+}
+
+ConstraintExpr* ConceptsSubstituteMemberConstraint(
+    Syntax* syntax, ConstraintExpr* constraint, Vector* arguments,
+    int rebase_base, Struct* from_owner, Struct* to_owner) {
+  return ConceptsSubstituteConstraintImpl(
+      syntax, constraint, arguments, rebase_base, from_owner, to_owner);
 }
 
 static Requirement* RequirementSubstitute(Syntax* syntax,
@@ -2493,7 +2511,8 @@ static ConstraintExpr* NewConstraintFromExpression(ASTNode* expr,
       return NewConceptIdConstraint(id->symbol, args, expr->location);
     }
   }
-  if (expr->op == AST_OP(logand) || expr->op == AST_OP(logor)) {
+  if ((expr->flags & kASTFoldExpression) == 0 &&
+      (expr->op == AST_OP(logand) || expr->op == AST_OP(logor))) {
     BinaryASTNode* binary = (BinaryASTNode*)expr;
     ConstraintExpr* left =
         NewConstraintFromExpression(binary->left, binary->left != NULL

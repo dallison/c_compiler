@@ -97,6 +97,18 @@ struct integer_sequence {
 template <size_t... Ints>
 using index_sequence = integer_sequence<size_t, Ints...>;
 
+template <size_t N, size_t... Ints>
+struct __make_index_sequence
+    : __make_index_sequence<N - 1, N - 1, Ints...> {};
+
+template <size_t... Ints>
+struct __make_index_sequence<0, Ints...> {
+  using type = index_sequence<Ints...>;
+};
+
+template <size_t N>
+using make_index_sequence = typename __make_index_sequence<N>::type;
+
 template <class T1, class T2>
 struct pair {
   T1 first;

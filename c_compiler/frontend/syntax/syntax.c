@@ -7144,6 +7144,17 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
       TypeContainsTemplateParameter(id->symbol->type) ||
       TemplateArgumentVectorIsDependent(id->template_arguments)) {
     *(bool*)data = true;
+    return;
+  }
+  if (TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.cxx_member_owner != NULL &&
+      StructContainsTemplateParameter(
+          id->symbol->type->info.function.cxx_member_owner)) {
+    // An unqualified call to a member of the current class-template
+    // instantiation can depend on the class arguments even when its function
+    // signature does not. For example, rank_dynamic() has a fixed size_t
+    // signature but computes its value from the class's extent pack.
+    *(bool*)data = true;
   }
 }
 

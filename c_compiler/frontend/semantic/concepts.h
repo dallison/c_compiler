@@ -27,6 +27,7 @@ struct ASTNode;
 struct TypeRecord;
 struct Symbol;
 struct Syntax;
+struct Struct;
 struct TemplateArgument;
 struct RequiresExpr;
 
@@ -145,6 +146,9 @@ ConstraintExpr* ConceptsCloneConstraint(ConstraintExpr* constraint);
 ConstraintExpr* ConceptsSubstituteConstraint(
     struct Syntax* syntax, ConstraintExpr* constraint, Vector* arguments,
     int rebase_base);
+ConstraintExpr* ConceptsSubstituteMemberConstraint(
+    struct Syntax* syntax, ConstraintExpr* constraint, Vector* arguments,
+    int rebase_base, struct Struct* from_owner, struct Struct* to_owner);
 bool ConceptsConstraintContainsTemplateParameter(ConstraintExpr* constraint);
 
 // True if evaluating `node` could throw: some potentially-evaluated call in the

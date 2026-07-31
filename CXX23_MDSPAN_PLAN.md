@@ -5,6 +5,16 @@ this checklist, and stop for review before beginning the next step. Compiler
 defects exposed by the library implementation must be fixed at their source
 rather than hidden behind library workarounds.
 
+## Current handoff
+
+Steps 1 and 2 are complete. The next agent should begin with Step 3 (`layout_right`,
+`layout_left`, and `layout_stride`) and stop after that step for review.
+
+Step 2 validation completed successfully with:
+
+- `bazel test //cxx_testsuite:syntax --test_output=errors`
+- `bazel test //cxx_testsuite:exec_x86_64 --test_output=errors`
+
 ## Step 1: Multidimensional subscript language support
 
 - [x] Parse C++23 `object[i, j, ...]` as an argument list while preserving a
@@ -19,12 +29,12 @@ rather than hidden behind library workarounds.
 
 ## Step 2: Extents and access policy
 
-- [ ] Add `<mdspan>` and define `__cpp_lib_mdspan` as `202207L`.
-- [ ] Implement shared `dynamic_extent` handling.
-- [ ] Implement `extents` and `dextents`, including static/dynamic observers,
+- [x] Add `<mdspan>` and define `__cpp_lib_mdspan` as `202207L`.
+- [x] Implement shared `dynamic_extent` handling.
+- [x] Implement `extents` and `dextents`, including static/dynamic observers,
       converting construction, equality, and array/span construction.
-- [ ] Implement `default_accessor`.
-- [ ] Add focused compile-time and execution tests.
+- [x] Implement `default_accessor`.
+- [x] Add focused compile-time and execution tests.
 
 ## Step 3: Layout mappings
 

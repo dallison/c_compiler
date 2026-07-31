@@ -454,20 +454,31 @@ static bool CXXTemplateArgumentReferencesParameterPack(
 static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
+  if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
-  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
-    ((CXXPackExpressionSearch*)data)->found = true;
+  Vector* template_arguments = NULL;
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeIdentifier) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    template_arguments = id->template_arguments;
+  } else if (shape == kASTShapeStructMember) {
+    template_arguments =
+        ((StructMemberASTNode*)node)->template_arguments;
+  } else if (shape == kASTShapeConstant) {
+    template_arguments = ((ConstantASTNode*)node)->template_arguments;
+  } else {
     return;
   }
   CXXPackExpressionSearch* search = data;
-  for (size_t i = 0; id->template_arguments != NULL &&
-                     i < id->template_arguments->length; i++) {
+  for (size_t i = 0;
+       template_arguments != NULL && i < template_arguments->length; i++) {
     if (CXXTemplateArgumentReferencesParameterPack(
-            search, id->template_arguments->value.p[i])) {
+            search, template_arguments->value.p[i])) {
       search->found = true;
       return;
     }
@@ -562,32 +573,17 @@ static bool MemberPointerOperatorPrecedesFoldEllipsis(Syntax* syntax) {
   return result;
 }
 
-typedef struct {
-  bool found;
-} FoldPackSearch;
-
-static void FindFoldPackIdentifier(ASTNode* node, void* data, int child_id,
-                                   VisitorMode mode) {
-  (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
-    return;
-  }
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
-  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
-    ((FoldPackSearch*)data)->found = true;
-  }
-}
-
-static bool FoldExpressionContainsPack(ASTNode* node) {
-  FoldPackSearch search = {0};
-  ASTNodeVisit(node, FindFoldPackIdentifier, 0, &search);
-  return search.found;
+static bool FoldExpressionContainsPack(Syntax* syntax, ASTNode* node) {
+  // A fold pattern can name its pack through a template argument rather than
+  // through an ordinary identifier child, as in
+  // `(is_convertible_v<Ts, U> && ...)`.  Use the complete expression-pack
+  // search so those template arguments participate in fold parsing too.
+  return CXXExpressionContainsParameterPack(syntax, node);
 }
 
 static ASTNode* ParseFoldPackExpression(Syntax* syntax, TokenClass followers) {
   ASTNode* expr = ParseCastExpression(syntax, followers);
-  if (!FoldExpressionContainsPack(expr)) {
+  if (!FoldExpressionContainsPack(syntax, expr)) {
     ASTNodeDelete(expr);
     return NULL;
   }
@@ -770,43 +766,51 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
     }
 
     seed = ParseCastExpression(syntax, followers | TC(closebra));
-    bool seed_contains_pack = FoldExpressionContainsPack(seed);
+    bool seed_contains_pack = FoldExpressionContainsPack(syntax, seed);
     if (!seed_contains_pack && seed != NULL &&
         ParseFoldOperator(syntax, &op) &&
         LexMatch(syntax->lex, TOK(ellipsis))) {
-      if (!ParseFoldOperator(syntax, &second_op)) {
+      // A variable-template specialization can carry the pack only in its
+      // explicit template arguments, while the parsed expression has already
+      // folded to a constant node.  In `(Trait<Ts, U> && ...)`, the immediate
+      // ')' unambiguously identifies a unary right fold even if that constant
+      // node no longer exposes the pack to the AST visitor.
+      if (LexMatch(syntax->lex, TOK(rparen))) {
+        pack = seed;
+        seed = NULL;
+        pack_on_left = true;
+      } else if (!ParseFoldOperator(syntax, &second_op)) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression requires a second operator",
                                      location, followers);
         LexCheckpointDestruct(&checkpoint);
         return invalid;
-      }
-      if (second_op != op) {
+      } else if (second_op != op) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression operators must match",
                                      location, followers);
         LexCheckpointDestruct(&checkpoint);
         return invalid;
-      }
-      if ((pack = ParseFoldPackExpression(syntax, followers | TC(closebra))) == NULL) {
+      } else if ((pack = ParseFoldPackExpression(
+                      syntax, followers | TC(closebra))) == NULL) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression requires a parameter pack",
                                      location, followers);
         LexCheckpointDestruct(&checkpoint);
         return invalid;
-      }
-      if (!LexMatch(syntax->lex, TOK(rparen))) {
+      } else if (!LexMatch(syntax->lex, TOK(rparen))) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression syntax error",
                                      location, followers);
         LexCheckpointDestruct(&checkpoint);
         return invalid;
+      } else {
+        pack_on_left = false;
       }
-      pack_on_left = false;
     } else {
       if (!seed_contains_pack) {
         ASTNode* invalid =
@@ -855,7 +859,7 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
           return invalid;
         }
         seed = ParseCastExpression(syntax, followers | TC(closebra));
-        if (seed == NULL || FoldExpressionContainsPack(seed)) {
+        if (seed == NULL || FoldExpressionContainsPack(syntax, seed)) {
           ASTNode* invalid =
               NewInvalidFoldExpression(syntax, &checkpoint,
                                        "fold expression requires a non-pack initializer",

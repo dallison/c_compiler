@@ -107,6 +107,68 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
   return found;
 }
 
+typedef struct {
+  Vector* args;
+  int* pack_index;
+  size_t* pack_length;
+  bool found;
+} PackExpansionExpressionSearch;
+
+static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
+                                              int child_id,
+                                              VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  PackExpansionExpressionSearch* search = data;
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_parameter_pack &&
+        RecordPackExpansionIndex(id->symbol->template_parameter_index,
+                                 search->args, search->pack_index,
+                                 search->pack_length)) {
+      search->found = true;
+    }
+    if (id->symbol != NULL && id->symbol->type != NULL &&
+        FindPackExpansionInType(id->symbol->type, search->args,
+                                search->pack_index,
+                                search->pack_length)) {
+      search->found = true;
+    }
+  }
+  Vector* template_arguments = NULL;
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeIdentifier) {
+    template_arguments = ((IdentifierASTNode*)node)->template_arguments;
+  } else if (shape == kASTShapeStructMember) {
+    template_arguments = ((StructMemberASTNode*)node)->template_arguments;
+  } else if (shape == kASTShapeConstant) {
+    template_arguments = ((ConstantASTNode*)node)->template_arguments;
+  }
+  for (size_t i = 0;
+       template_arguments != NULL && i < template_arguments->length; i++) {
+    if (FindPackExpansionInTemplateArgument(
+            template_arguments->value.p[i], search->args, search->pack_index,
+            search->pack_length)) {
+      search->found = true;
+    }
+  }
+}
+
+static bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
+                                          int* pack_index,
+                                          size_t* pack_length) {
+  PackExpansionExpressionSearch search = {
+      .args = args,
+      .pack_index = pack_index,
+      .pack_length = pack_length,
+      .found = false,
+  };
+  ASTNodeVisit(expr, FindPackExpansionInExpressionNode, 0, &search);
+  return search.found;
+}
+
 bool FindPackExpansionInTemplateArgument(TemplateArgument* arg,
                                                 Vector* args,
                                                 int* pack_index,
@@ -135,7 +197,14 @@ bool FindPackExpansionInTemplateArgument(TemplateArgument* arg,
     }
     return found;
   }
-  return FindPackExpansionInType(arg->type, args, pack_index, pack_length);
+  bool found =
+      FindPackExpansionInType(arg->type, args, pack_index, pack_length);
+  if (arg->dependent_expr != NULL &&
+      FindPackExpansionInExpression(arg->dependent_expr, args, pack_index,
+                                    pack_length)) {
+    found = true;
+  }
+  return found;
 }
 
 /* Copy an argument vector but replace the pack at `pack_index` with a single
@@ -460,6 +529,16 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       VectorAppend(out, TemplateArgumentCopy(arg));
       return;
     }
+    if (pack == NULL && arg->template_parameter_index >= 0 &&
+        (args == NULL ||
+         (size_t)arg->template_parameter_index >= args->length)) {
+      // This pack belongs to a nested member template rather than the
+      // enclosing class template currently being substituted.  Preserve it
+      // for the later member-template instantiation instead of diagnosing the
+      // still-valid expansion as pack-free.
+      VectorAppend(out, TemplateArgumentCopy(arg));
+      return;
+    }
     if (pack != NULL && pack->pack_arguments != NULL) {
       for (size_t i = 0; i < pack->pack_arguments->length; i++) {
         if (arg->kind == kTemplateParameterType && index >= 0 &&
@@ -485,9 +564,8 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
     }
     int pattern_pack_index = -1;
     size_t pattern_pack_length = 0;
-    if (arg->kind == kTemplateParameterType &&
-        FindPackExpansionInType(arg->type, args, &pattern_pack_index,
-                                &pattern_pack_length) &&
+    if (FindPackExpansionInTemplateArgument(
+            arg, args, &pattern_pack_index, &pattern_pack_length) &&
         pattern_pack_index >= 0 && (size_t)pattern_pack_index < args->length) {
       TemplateArgument* pattern_pack = args->value.p[pattern_pack_index];
       if (pattern_pack != NULL && pattern_pack->pack_arguments != NULL) {
@@ -1103,10 +1181,16 @@ static void SubstituteArrayTemplateBound(TypeRecord* copy,
     return;
   }
   TemplateArgument* arg = args->value.p[index];
-  if (arg == NULL || arg->kind != kTemplateParameterNonType) {
+  if (arg == NULL) {
     return;
   }
-  if (arg->template_parameter_index >= 0) {
+  if (arg->pack_arguments != NULL) {
+    copy->info.array.size.fixed = (int)arg->pack_arguments->length;
+    copy->info.array.template_parameter_index = -1;
+    copy->size = 0;
+  } else if (arg->kind != kTemplateParameterNonType) {
+    return;
+  } else if (arg->template_parameter_index >= 0) {
     copy->info.array.template_parameter_index = arg->template_parameter_index;
   } else {
     copy->info.array.size.fixed = (int)arg->int_value;
@@ -1902,6 +1986,15 @@ bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
   if (cloned == NULL) {
     return false;
   }
+  // Substituting an enclosing class template can leave references to a member
+  // function template's own parameters unresolved.  Such an expression is
+  // still dependent and must be carried forward, not sent through semantic
+  // analysis as though it were concrete.
+  if ((cloned->flags & kASTFoldExpression) != 0 &&
+      DependentExpressionContainsTemplateParameter(cloned)) {
+    ASTNodeDelete(cloned);
+    return false;
+  }
   // A dependent qualified name that survived cloning (its scope is still
   // dependent) must not be diagnosed here: this is a speculative fold, and an
   // unresolved name simply means the value stays dependent for now.
@@ -1921,9 +2014,9 @@ bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
  * name sibling members fold, e.g. `using type = ratio<num, den>;` where `num`
  * and `den` are themselves computed from the template parameters.  Returns a
  * fresh constant node on success, or NULL to leave the reference unchanged. */
-ASTNode* TypeSubstituteTemplateExpressionAndRebase(
+ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
     Syntax* syntax, ASTNode* expr, Vector* args, int rebase_base,
-    SourceLocation location) {
+    SourceLocation location, Struct* from_owner, Struct* to_owner) {
   if (syntax == NULL || expr == NULL) {
     return NULL;
   }
@@ -1941,8 +2034,8 @@ ASTNode* TypeSubstituteTemplateExpressionAndRebase(
   clone.args = args;
   clone.to_func = NULL;
   clone.rebase_template_parameter_base = rebase_base;
-  clone.from_owner = NULL;
-  clone.to_owner = NULL;
+  clone.from_owner = from_owner;
+  clone.to_owner = to_owner;
   ASTNode* cloned = ASTNodeClone(expr, CloneTemplateFunctionBodyNode,
                                  &clone, NULL);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
@@ -1952,6 +2045,13 @@ ASTNode* TypeSubstituteTemplateExpressionAndRebase(
     cloned->location = location;
   }
   return cloned;
+}
+
+ASTNode* TypeSubstituteTemplateExpressionAndRebase(
+    Syntax* syntax, ASTNode* expr, Vector* args, int rebase_base,
+    SourceLocation location) {
+  return TypeSubstituteMemberTemplateExpressionAndRebase(
+      syntax, expr, args, rebase_base, location, NULL, NULL);
 }
 
 ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
