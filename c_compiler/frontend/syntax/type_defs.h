@@ -406,7 +406,7 @@ typedef struct TypeRecord {
   // `dependent_member_name` stores the `::`-joined components after the root;
   // this vector, when present, has one entry per component.  Each entry is
   // either NULL or a Vector<TemplateArgument*> for that component's template-id.
-  Vector* dependent_member_template_arguments;
+  Vector* dependent_member_template_arguments;                     // @wire 17
   // Unevaluated operand of a type-dependent decltype expression.  The AST is
   // arena-owned and re-cloned with concrete template arguments during
   // substitution.

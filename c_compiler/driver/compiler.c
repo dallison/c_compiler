@@ -1278,13 +1278,30 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
       !TypeIsFunction(symbol->type)) {
     return;
   }
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, symbol);
   // Do not assign an asm name here.  Compiler-invented runtime declarations
   // deliberately have an empty asm_name so they retain their ABI spelling
   // (for example __davecc_throw rather than a C++-mangled name).
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
                              : symbol->name.value;
-  if (!AsmNameInVector(&compiler->referenced_function_asm_names, asm_name)) {
+  bool first_reference =
+      !AsmNameInVector(&compiler->referenced_function_asm_names, asm_name);
+  if (first_reference && symbol->is_imported_module_symbol &&
+      StorageIs(symbol->storage, STO(static)) &&
+      symbol->type->info.function.template_origin != NULL &&
+      symbol->type->info.function.body != NULL) {
+    // An internal-linkage template specialization imported with a module is
+    // local to the importing translation unit.  Its serialized body cannot be
+    // satisfied by the module object's private definition, so emit a local
+    // copy when this importer first references it.
+    Vector* declarations = NewVector();
+    VectorAppend(declarations,
+                 NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
+    VectorAppend(&compiler->pending_template_instantiations,
+                 NewDeclarationListASTNode(declarations, symbol->location));
+  }
+  if (first_reference) {
     VectorAppend(&compiler->referenced_function_asm_names,
                  NewString(asm_name));
   }
@@ -1479,6 +1496,57 @@ static void MarkFunctionsReferencedByBody(TypeRecord* function) {
   }
 }
 
+static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
+
+static bool TemplateArgumentContainsUninstantiatedClassTemplate(
+    TemplateArgument* argument) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (TypeContainsUninstantiatedClassTemplate(argument->type)) {
+    return true;
+  }
+  for (size_t i = 0; argument->pack_arguments != NULL &&
+                     i < argument->pack_arguments->length; i++) {
+    if (TemplateArgumentContainsUninstantiatedClassTemplate(
+            argument->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsStructOrUnion(current) && current->info.struct_info != NULL &&
+        current->info.struct_info->is_template &&
+        current->template_arguments == NULL &&
+        (current->info.struct_info->tag_symbol == NULL ||
+         current->info.struct_info->tag_symbol->type == NULL ||
+         current->info.struct_info->tag_symbol->type->template_arguments ==
+             NULL)) {
+      return true;
+    }
+    for (size_t i = 0; current->template_arguments != NULL &&
+                       i < current->template_arguments->length; i++) {
+      if (TemplateArgumentContainsUninstantiatedClassTemplate(
+              current->template_arguments->value.p[i])) {
+        return true;
+      }
+    }
+    if (TypeIsFunction(current)) {
+      for (size_t i = 0; i < current->info.function.prototype.length; i++) {
+        Symbol* formal = current->info.function.prototype.value.p[i];
+        if (formal != NULL &&
+            TypeContainsUninstantiatedClassTemplate(formal->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 static bool GenerateFunctionDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* decl) {
   if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
@@ -1486,6 +1554,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   }
   bool dependent_function_body =
       TypeContainsTemplateParameter(decl->base.type) ||
+      TypeContainsUninstantiatedClassTemplate(decl->base.type) ||
       FunctionBodyContainsUnexpandedPack(
           decl->base.type->info.function.body);
   bool uninstantiated_function_template =
@@ -1772,6 +1841,11 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
                  previous_function_reference_count ||
              compiler->referenced_variable_asm_names.length !=
                  previous_variable_reference_count);
+
+    CompilePendingTemplateInstantiations(syntax);
+    if (NumErrors() != 0) {
+      return;
+    }
 
     emitted = false;
     size_t num_roots = compiler->declaration_asts.length;

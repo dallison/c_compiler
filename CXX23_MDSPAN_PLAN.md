@@ -7,13 +7,14 @@ rather than hidden behind library workarounds.
 
 ## Current handoff
 
-Steps 1 through 4 are complete. The next agent should begin with Step 5
-(integration and completion).
+All five steps are complete. Continue with the next item in
+`CXX20_CXX23_REMAINING.md`: the C++23 ranges expansion.
 
-Step 4 validation completed successfully with:
+Final integration validation completed successfully with:
 
 - `bazel test //cxx_testsuite:syntax --test_output=errors`
-- `bazel test //cxx_testsuite:exec_x86_64 --test_output=errors`
+- `bazel test //cxx_testsuite:exec_{x86_64,aarch64,arm,riscv} --test_output=errors`
+- `bazel test //cxx_testsuite:modules_{x86_64,aarch64,arm,riscv} --test_output=errors`
 
 ## Step 1: Multidimensional subscript language support
 
@@ -54,12 +55,12 @@ Step 4 validation completed successfully with:
 
 ## Step 5: Integration and completion
 
-- [ ] Add permanent C++23 execution coverage on x86-64, AArch64, ARM, and
+- [x] Add permanent C++23 execution coverage on x86-64, AArch64, ARM, and
       RISC-V.
-- [ ] Export `<mdspan>` through `libc/modules/std.hpp` and run all module suites.
-- [ ] Fix any importer, template, constexpr, serialization, or backend defects
+- [x] Export `<mdspan>` through `libc/modules/std.hpp` and run all module suites.
+- [x] Fix any importer, template, constexpr, serialization, or backend defects
       uncovered by integration.
-- [ ] Run the complete syntax and hosted execution matrices.
-- [ ] Mark multidimensional subscripts and `<mdspan>` complete in
+- [x] Run the complete syntax and hosted execution matrices.
+- [x] Mark multidimensional subscripts and `<mdspan>` complete in
       `CXX20_CXX23_REMAINING.md` and synchronize its recommended-order list.
-- [ ] Perform a final full-diff review before commit.
+- [x] Perform a final full-diff review before commit.

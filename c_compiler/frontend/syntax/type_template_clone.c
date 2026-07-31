@@ -39,6 +39,8 @@ static bool ASTNodeWithinUnresolvedPackExpansion(TemplateFunctionBodyClone* clon
                                                  ASTNode* node);
 static ASTNode* ReanalyzeClonedDependentFunctorCall(
     ASTNode* node, void* data, ASTNodeTransformAction* action);
+static ASTNode* ReanalyzeClonedConcreteMemberCall(
+    ASTNode* node, void* data, ASTNodeTransformAction* action);
 static void RestoreSymbolOverloadLinks(Vector* snapshots);
 static bool RebindClonedConstructorCall(VectorASTNode* call, Vector* snapshots);
 static StructMember* FindStructMemberOverloadHead(Struct* owner, String* name);
@@ -3745,6 +3747,28 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       node->flags |= kASTDependentCast;
       TypeRecord* cast_type =
           SubstituteTemplateBodyType(clone, cast->cast_type);
+      // A member-function template can clone its saved constructor
+      // initializer after the enclosing class has already been specialized.
+      // Any surviving dependent-member type at that point is indexed against
+      // the class template, not the member function's own argument vector.
+      // Resolve it from the concrete owner's template arguments before
+      // rebasing the member-template parameters.
+      if (cast_type != NULL && cast_type->declarator == kDeclPrimitive &&
+          cast_type->template_parameter_index >= 0 &&
+          cast_type->dependent_member_name != NULL &&
+          clone->to_owner != NULL && clone->to_owner->tag_symbol != NULL &&
+          clone->to_owner->tag_symbol->type != NULL &&
+          clone->to_owner->tag_symbol->type->template_arguments != NULL &&
+          (size_t)cast_type->template_parameter_index <
+              clone->to_owner->tag_symbol->type->template_arguments->length) {
+        TypeRecord* owner_resolved = SubstituteTemplateParameters(
+            clone->parser, cast_type,
+            clone->to_owner->tag_symbol->type->template_arguments);
+        if (owner_resolved != NULL) {
+          TypeRecordDelete(cast_type);
+          cast_type = owner_resolved;
+        }
+      }
       RebaseTemplateParameterIndices(cast_type,
                                      clone->rebase_template_parameter_base);
       TypeRecordCalculateSize(cast_type);
@@ -3978,6 +4002,55 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
     parent->flags |= kASTDependentFunctorCall;
     parent->flags &= ~kASTAnalyzed;
   }
+  return analyzed;
+}
+
+// Constructor preambles can acquire a fresh concrete member-call subtree while
+// a formerly dependent functional construction is being re-analyzed.  Such a
+// call was not present when the surrounding statement was first analyzed, so
+// resolve and lower it explicitly before handing the statement to codegen.
+static ASTNode* ReanalyzeClonedConcreteMemberCall(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL || node->op != AST_OP(call)) {
+    return node;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL ||
+      (call->left->op != AST_OP(dot) &&
+       call->left->op != AST_OP(arrow))) {
+    return node;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)call->left;
+  if (access->right == NULL || access->right->op != AST_OP(structmember) ||
+      access->left == NULL || access->left->type == NULL ||
+      TypeContainsTemplateParameter(access->left->type) ||
+      ASTNodeSubtreeContainsPackExpansion(node)) {
+    return node;
+  }
+  StructMember* member = ((StructMemberASTNode*)access->right)->member;
+  if (member == NULL || !member->is_member_function ||
+      member->symbol == NULL || member->symbol->type == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
+      !member->symbol->type->info.function.is_constructor) {
+    return node;
+  }
+
+  ASTNode* parent = node->parent;
+  int child_id = node->child_id;
+  Vector overload_snapshots;
+  VectorInit(&overload_snapshots);
+  RebindClonedConstructorCall(call, &overload_snapshots);
+  ASTNodeVisit(node, ClearAnalyzedFlagVisitor, 0, NULL);
+  node->flags &= ~kASTDependentFunctorCall;
+  node->parent = NULL;
+  ASTNode* analyzed = AnalyzeExpression(node);
+  RestoreSymbolOverloadLinks(&overload_snapshots);
+  if (analyzed != NULL) {
+    analyzed->parent = parent;
+    analyzed->child_id = child_id;
+  }
+  *action = kASTTransformSkipChildren;
   return analyzed;
 }
 
@@ -4671,9 +4744,20 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
 void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL ||
       !TypeIsFunction(symbol->type) ||
-      symbol->flags.is_template ||
-      symbol->type->info.function.cxx_member_owner == NULL ||
       symbol->type->info.function.body != NULL) {
+    return;
+  }
+  if (!symbol->flags.is_template &&
+      symbol->type->info.function.cxx_member_owner == NULL &&
+      symbol->type->info.function.template_origin != NULL &&
+      symbol->type->template_arguments != NULL) {
+    TypeInstantiateFunctionTemplate(
+        syntax, symbol->type->info.function.template_origin,
+        symbol->type->template_arguments);
+    return;
+  }
+  if (symbol->flags.is_template ||
+      symbol->type->info.function.cxx_member_owner == NULL) {
     return;
   }
   if (symbol->type->info.function.is_implicitly_declared &&
@@ -4848,6 +4932,9 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     ASTNodeVisit(stmt, AnalyzeFunctionTemplateCallActualsVisitor, 0, NULL);
     ASTNodeVisit(stmt, InstantiateClonedFunctionTemplateCallVisitor, 0, &clone);
     AnalyzeStatement(stmt);
+    stmt = ASTNodeVisitAndTransform(
+        stmt, ReanalyzeClonedConcreteMemberCall, NULL);
+    body->value.p[i] = stmt;
   }
   compiler->current_function = saved_function;
   parser->template_substitution_source = saved_substitution_source;

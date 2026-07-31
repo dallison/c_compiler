@@ -7261,6 +7261,17 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   TypeRecordCalculateSize(type);
   SourceLocation location = node->base.location;
   String* constructor_name = type->info.struct_info->tag_name;
+  StructMember* constructor =
+      FindCXXMemberOverloadHead(type->info.struct_info, constructor_name);
+  bool has_user_declared_constructor = false;
+  for (StructMember* candidate = constructor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->is_member_function && candidate->symbol != NULL &&
+        !candidate->symbol->flags.invented) {
+      has_user_declared_constructor = true;
+      break;
+    }
+  }
   if (type->info.struct_info->lexical_parent == NULL &&
       compiler->current_function != NULL &&
       TypeIsFunction(compiler->current_function) &&
@@ -7293,7 +7304,14 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     }
     return AnalyzeExpression(cast);
   }
-  if (type->info.struct_info->is_aggregate) {
+  // A class template's primary struct can retain a stale aggregate flag even
+  // after user-declared constructors have been parsed.  Do not route a
+  // concrete functional construction through aggregate initialization solely
+  // on that flag; verify the constructor set just as the declaration parser
+  // does for parenthesized initialization.
+  if (type->info.struct_info->is_aggregate &&
+      !type->info.struct_info->is_template &&
+      !has_user_declared_constructor) {
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
     temp->location = location;
     ASTNode* temp_id = NewIdentifierASTNode(temp, location);
@@ -7317,8 +7335,6 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     analyzed->value_category = kValueCategoryPrvalue;
     return analyzed;
   }
-  StructMember* constructor =
-      FindCXXMemberOverloadHead(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||
       !constructor->symbol->type->info.function.is_constructor) {
     // The target class has no constructor (e.g. it is an aggregate).  Per

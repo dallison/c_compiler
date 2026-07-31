@@ -6,7 +6,8 @@ The original C++20 correctness gates are now green on x86-64: the main
 execution suite passes 261/261 and the ranges suite passes 4/4. C++23 mode,
 template-template parameters, static call/subscript operators, `if consteval`,
 explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
-`import std`, and `<span>` have been implemented.
+`import std`, `<span>`, multidimensional subscripts, and `<mdspan>` have been
+implemented.
 
 ## Immediate validation gates
 
@@ -75,7 +76,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 
 ## Remaining C++23 language work
 
-- [ ] Implement multidimensional subscript expressions and overloads
+- [x] Implement multidimensional subscript expressions and overloads
       (`object[i, j]`), distinct from the completed static `operator[]` work.
 - [ ] Implement `auto(x)` and `auto{x}` decay-copy syntax.
 - [ ] Implement the `#warning` preprocessing directive.
@@ -85,7 +86,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 
 ## Remaining C++23 library work
 
-- [ ] Implement `<mdspan>`.
+- [x] Implement `<mdspan>`.
   - `extents`, `dextents`, and `dynamic_extent` integration.
   - `layout_left`, `layout_right`, and `layout_stride`.
   - `default_accessor` and `mdspan`.
@@ -104,7 +105,7 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
   - Fix imported class-template members, deduction guides, partial
     specializations, and overload sets before exposing affected headers.
   - Add useful container, string, span, format, and ranges execution coverage;
-    the current smoke test primarily proves `std::array`.
+    the current smoke test covers `std::array`, stop tokens, and `std::mdspan`.
 - [ ] Complete `<format>` and `<print>` beyond the initial narrow implementation.
   - Locale-aware formatting.
   - Unicode printing and `vprint_unicode`.
@@ -122,8 +123,8 @@ explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 - [x] 1. Close the AArch64 and RISC-V validation gaps.
 - [x] 2. Finish the C++20 language tail: multi-pack folds and the
       coroutine/constexpr audit.
-- [ ] 3. Add `counted_iterator` and `common_iterator`.
-- [ ] 4. Implement `<mdspan>` now that `<span>` exists.
+- [x] 3. Add `counted_iterator` and `common_iterator`.
+- [x] 4. Implement `<mdspan>` now that `<span>` exists.
 - [ ] 5. Build the C++23 ranges expansion on the completed iterator foundation.
 - [ ] 6. Expand `import std` incrementally as module serialization becomes safe
       for each header.

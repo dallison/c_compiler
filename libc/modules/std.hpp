@@ -14,6 +14,7 @@
 #include <iterator>
 #include <latch>
 #include <memory>
+#include <mdspan>
 #include <mutex>
 #include <new>
 #include <optional>

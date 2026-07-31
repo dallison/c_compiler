@@ -42,6 +42,7 @@ enum {
   kType_enum_info = 14,
   kType_dependent_decltype_expr = 15,
   kType_template_parameter_name = 16,
+  kType_dependent_member_template_arguments = 17,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -61,6 +62,8 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_enum_info, "enum_info"},
     {kType_dependent_decltype_expr, "dependent_decltype_expr"},
     {kType_template_parameter_name, "template_parameter_name"},
+    {kType_dependent_member_template_arguments,
+     "dependent_member_template_arguments"},
 };
 
 //
@@ -644,6 +647,74 @@ static Vector* ReadTemplateArgumentVector(DeserializeContext* ctx,
   return out;
 }
 
+static void WriteTemplateArgumentVectorVector(SerializeContext* ctx,
+                                              WireBuffer* out, int field,
+                                              Vector* vectors) {
+  WireBuffer payload;
+  WireBufferInitOwned(&payload, 16);
+  size_t count = vectors != NULL ? vectors->length : 0;
+  WireWriteRawVarint(&payload, count);
+  for (size_t i = 0; i < count; i++) {
+    Vector* arguments = vectors->value.p[i];
+    WireWriteRawVarint(&payload, arguments != NULL ? 1 : 0);
+    if (arguments == NULL) {
+      continue;
+    }
+    WireBuffer element;
+    WireBufferInitOwned(&element, 16);
+    WriteTemplateArgumentVector(ctx, &element, 1, arguments);
+    WireWriteRawVarint(&payload, WireBufferSize(&element));
+    WireWriteRaw(&payload, WireBufferData(&element),
+                 WireBufferSize(&element));
+    WireBufferDestruct(&element);
+  }
+  WireWriteBytes(out, field, WireBufferData(&payload),
+                 WireBufferSize(&payload));
+  WireBufferDestruct(&payload);
+}
+
+static Vector* ReadTemplateArgumentVectorVector(DeserializeContext* ctx,
+                                                WireBuffer* in) {
+  const void* data;
+  size_t length;
+  if (!WireReadBytes(in, &data, &length)) {
+    return NULL;
+  }
+  WireBuffer payload;
+  WireBufferInitReader(&payload, data, length);
+  uint64_t count;
+  if (!WireReadRawVarint(&payload, &count)) {
+    return NULL;
+  }
+  Vector* vectors = NewVector();
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t present;
+    if (!WireReadRawVarint(&payload, &present)) {
+      break;
+    }
+    if (present == 0) {
+      VectorAppend(vectors, NULL);
+      continue;
+    }
+    const void* element;
+    size_t element_length;
+    if (!WireReadBytes(&payload, &element, &element_length)) {
+      break;
+    }
+    WireBuffer reader;
+    WireBufferInitReader(&reader, element, element_length);
+    int element_field;
+    WireType wire_type;
+    if (!WireReadTag(&reader, &element_field, &wire_type) ||
+        element_field != 1 || wire_type != kWireLengthDelimited) {
+      VectorAppend(vectors, NULL);
+      continue;
+    }
+    VectorAppend(vectors, ReadTemplateArgumentVector(ctx, &reader));
+  }
+  return vectors;
+}
+
 // Public wrappers so constraint_serialize.c can (de)serialize the
 // TemplateArgument* vectors held by concept-id constraints.
 void SerialWriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
@@ -1074,6 +1145,11 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     WriteTemplateArgumentVector(ctx, buf, kType_template_arguments,
                                 t->template_arguments);
   }
+  if (t->dependent_member_template_arguments != NULL) {
+    WriteTemplateArgumentVectorVector(
+        ctx, buf, kType_dependent_member_template_arguments,
+        t->dependent_member_template_arguments);
+  }
   SWriteRef(ctx, buf, kType_dependent_decltype_expr, kSerialKindAST,
             t->dependent_decltype_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
@@ -1154,6 +1230,10 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_template_arguments:
         t->template_arguments = ReadTemplateArgumentVector(ctx, buf);
+        break;
+      case kType_dependent_member_template_arguments:
+        t->dependent_member_template_arguments =
+            ReadTemplateArgumentVectorVector(ctx, buf);
         break;
       case kType_dependent_decltype_expr:
         t->dependent_decltype_expr =

@@ -19,6 +19,7 @@ static_assert(std::is_pointer<decltype(&set_threaded_value)>::value);
 static_assert(std::is_same_v<int, int>);
 static_assert(
     std::is_invocable<decltype(&set_threaded_value), int*>::value);
+static_assert(std::mdspan<int, std::extents<std::size_t, 2, 3>>::rank() == 2);
 
 int main() {
   std::array<int, 3> values{2, 3, 5};
@@ -51,6 +52,13 @@ int main() {
   std::stop_source source;
   if (!source.request_stop() || !source.get_token().stop_requested()) {
     return 3;
+  }
+
+  int matrix_data[6] = {1, 2, 3, 4, 5, 6};
+  std::mdspan matrix(matrix_data, 2, 3);
+  if (matrix.extent(0) != 2 || matrix.extent(1) != 3 ||
+      matrix[1, 2] != 6) {
+    return 4;
   }
   return 0;
 }
