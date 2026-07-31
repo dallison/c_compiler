@@ -3121,6 +3121,9 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     ASTNode* node = SyntaxParseExpression(syntax, followers | TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
     syntax->parsing_template_argument = saved_parsing_template_argument;
+    if (node != NULL) {
+      node->flags |= kASTParenthesized;
+    }
     return node;
   }
 

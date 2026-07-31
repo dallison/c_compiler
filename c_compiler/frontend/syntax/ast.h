@@ -371,6 +371,7 @@ struct ConstraintExpr;
 #define kASTForcedTypeAdjustment (1ULL << 32)  // Compiler-synthesized pointer adjustment carrying a forced (already-analyzed) type that must survive template-instantiation re-analysis; re-analysis of `this + byteoffset` would otherwise recompute the type as the receiver's own (element-scaled) pointer type and bind subobject members (e.g. __vbptr) to the wrong offset.
 #define kASTCXXBracedTemporary (1ULL << 33)  // Compound literal synthesized for a C++ braced-init-list expression (prvalue).
 #define kASTFallthroughDestructor (1ULL << 34)  // Normal-path local destructor; rebuilt after template instantiation and semantic analysis.
+#define kASTParenthesized (1ULL << 35)  // Expression was explicitly parenthesized; significant for decltype(auto) deduction.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

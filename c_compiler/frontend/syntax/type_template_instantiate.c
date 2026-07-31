@@ -643,6 +643,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_noexcept = from->info.function.is_noexcept;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
+  func->info.function.is_decltype_auto_return_deduced =
+      from->info.function.is_decltype_auto_return_deduced;
   func->info.function.is_coroutine = from->info.function.is_coroutine;
   func->info.function.coroutine_promise_type =
       from->info.function.coroutine_promise_type != NULL
@@ -967,6 +969,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_noexcept = from->info.function.is_noexcept;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
+  func->info.function.is_decltype_auto_return_deduced =
+      from->info.function.is_decltype_auto_return_deduced;
   func->info.function.is_deduction_guide =
       from->info.function.is_deduction_guide;
   func->info.function.is_coroutine = from->info.function.is_coroutine;
