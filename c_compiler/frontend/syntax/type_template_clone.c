@@ -3873,6 +3873,12 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       node->flags |= kASTDependentFunctorCall;
       return node;
     }
+    // This callback runs before ASTNodeClone installs the cloned parent.
+    // ASTNodeBaseCopy therefore still leaves `node->parent` pointing into the
+    // source template. AnalyzeExpression may replace the call in its parent;
+    // detach it first so expanding one specialization cannot mutate the
+    // template body used by later specializations.
+    node->parent = NULL;
     return AnalyzeExpression(node);
   }
   ExpandClonedBracedInitializerPackElements(clone, node);

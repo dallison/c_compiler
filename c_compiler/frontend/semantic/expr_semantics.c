@@ -4753,6 +4753,15 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (CXXSameAccessClass(current_owner, owner)) {
     return true;
   }
+  // A nested class is a member of each enclosing class and has the same access
+  // rights as any other member, including access to private members of those
+  // enclosing classes ([class.access.nest]).
+  for (Struct* enclosing = current_owner->lexical_parent; enclosing != NULL;
+       enclosing = enclosing->lexical_parent) {
+    if (CXXSameAccessClass(enclosing, owner)) {
+      return true;
+    }
+  }
   // Nested lambda closures: while instantiating an outer generic lambda, an
   // inner lambda's body may still be re-analyzed with the outer operator() as
   // current_function.  Capture fields are private to the inner closure; allow

@@ -712,6 +712,10 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclArray:
       TypeRecordToTemplateKeyString(type->next, result);
       StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      if (type->qualifiers != 0) {
+        StringAppendChar(result, '$');
+        QualifiersToString(type->qualifiers, result);
+      }
       break;
 
     case kDeclFunction:

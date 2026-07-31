@@ -42,6 +42,27 @@ int tuple_binding(void) {
   return a + static_cast<int>(b) + c;
 }
 
+int four_element_tuple_binding(void) {
+  std::tuple<int, long, int, long> value(1, 2L, 3, 4L);
+  auto [a, b, c, d] = value;
+  return std::get<0>(value) + static_cast<int>(std::get<1>(value)) +
+         std::get<2>(value) + static_cast<int>(std::get<3>(value)) +
+         a + static_cast<int>(b) + c + static_cast<int>(d);
+}
+
+int four_element_reference_tuple(void) {
+  int a = 1;
+  int b = 2;
+  int c = 3;
+  int d = 4;
+  std::tuple<int&, int&, int&, int&> value(a, b, c, d);
+  std::get<0>(value) += 10;
+  std::get<1>(value) += 20;
+  std::get<2>(value) += 30;
+  std::get<3>(value) += 40;
+  return a + b + c + d;
+}
+
 int pair_binding(void) {
   std::pair<int, long> value(11, 12L);
   auto [a, b] = value;
@@ -110,6 +131,12 @@ int main(void) {
   }
   if (range_for_structured_binding() != 80) {
     return 9;
+  }
+  if (four_element_tuple_binding() != 20) {
+    return 10;
+  }
+  if (four_element_reference_tuple() != 110) {
+    return 11;
   }
   return 0;
 }

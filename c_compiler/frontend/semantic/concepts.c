@@ -1209,16 +1209,16 @@ static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
     return false;
   }
 
-  // Fill in trailing default template arguments (a concept's default arguments
-  // may be computed from the earlier ones, e.g. the standard
-  // `__comparison_common_type_with_impl<T, U, C = common_type_t<T, U>>`), so
-  // the constraint sees a fully-formed argument list.
-  Vector* completed = NULL;
-  if (arguments != NULL && definition->template_parameters != NULL &&
-      arguments->length < definition->template_parameters->length) {
-    completed = TypeCompleteConceptArguments(
-        &compiler->syntax, definition->template_parameters, arguments);
-  }
+  // Normalize the argument list to one entry per declared parameter. Besides
+  // filling defaults, this gathers a flat trailing argument sequence into a
+  // parameter pack. The latter is required even when the supplied argument
+  // count exceeds the number of parameters, e.g. regular_invocable<F, A, B>
+  // must evaluate its definition with Args bound to [A, B], not just A.
+  Vector* completed =
+      arguments != NULL && definition->template_parameters != NULL
+          ? TypeCompleteConceptArguments(
+                &compiler->syntax, definition->template_parameters, arguments)
+          : NULL;
   Vector* eval_arguments = completed != NULL ? completed : arguments;
   bool cacheable =
       eval_arguments != NULL &&

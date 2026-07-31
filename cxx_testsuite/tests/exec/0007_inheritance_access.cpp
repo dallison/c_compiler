@@ -27,6 +27,22 @@ int PrivateDerived::set_private_base(void) {
   return public_value + protected_value;
 }
 
+template <class T>
+class NestedAccess {
+ private:
+  T value_;
+
+ public:
+  explicit NestedAccess(T value) : value_(value) {}
+
+  class Reader {
+   public:
+    T read(const NestedAccess& object) const {
+      return object.value_;
+    }
+  };
+};
+
 int main(void) {
   Derived derived;
   if (derived.set_values() != 42) {
@@ -39,6 +55,11 @@ int main(void) {
   PrivateDerived private_derived;
   if (private_derived.set_private_base() != 20) {
     return 3;
+  }
+  NestedAccess<int> nested(42);
+  NestedAccess<int>::Reader reader;
+  if (reader.read(nested) != 42) {
+    return 4;
   }
   return 0;
 }

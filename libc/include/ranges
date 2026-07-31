@@ -1804,7 +1804,7 @@ struct __zip_tuple_invoker<tuple<T, Rest...>> {
                                          tuple<T, Rest...>& values,
                                          Args&&... args) {
     return __zip_tuple_invoker<tuple<Rest...>>::__call(
-        fun, values.__rest_, static_cast<Args&&>(args)..., values.__0);
+        fun, values.__rest, static_cast<Args&&>(args)..., values.__0);
   }
 };
 
@@ -1812,7 +1812,9 @@ struct __zip_tuple_invoker<tuple<T, Rest...>> {
 template <class F, class... Views>
   requires(sizeof...(Views) > 0) && (view<Views> && ...) &&
           (input_range<Views> && ...) && move_constructible<F> &&
-          is_object_v<F>
+          is_object_v<F> &&
+          regular_invocable<F&, range_reference_t<Views>...> &&
+          __can_reference<invoke_result_t<F&, range_reference_t<Views>...>>
 class zip_transform_view
     : public view_interface<zip_transform_view<F, Views...>> {
  private:
@@ -2775,7 +2777,9 @@ struct __zip_fn {
 struct __zip_transform_fn {
   template <class F, class... Ranges>
     requires(sizeof...(Ranges) > 0) &&
-            (viewable_range<Ranges> && ...)
+            (viewable_range<Ranges> && ...) &&
+            regular_invocable<decay_t<F>&,
+                              range_reference_t<all_t<Ranges>>...>
   constexpr auto operator()(F&& fun, Ranges&&... ranges) const {
     using Fun = decay_t<F>;
     return zip_transform_view<Fun, all_t<Ranges>...>(

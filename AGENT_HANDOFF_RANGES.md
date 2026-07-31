@@ -1,4 +1,4 @@
-# C++23 ranges handoff — 2026-07-30
+# C++23 ranges handoff — 2026-07-31
 
 ## Repository state
 
@@ -8,11 +8,10 @@ existing C++20 ranges runtime corruption was fixed and committed as `5c09cab`
 `exec_ranges_x86_64`, `exec_ranges_aarch64`, `exec_ranges_arm`, and
 `exec_ranges_riscv` all passed.
 
-The next roadmap slice, `views::zip`, `views::zip_transform`, and
-`views::enumerate`, is implemented but **not yet runtime-clean**.  This handoff
-commit intentionally preserves that in-progress state for the computer upgrade.
+The `views::zip`, `views::zip_transform`, and `views::enumerate` roadmap slice
+is implemented and runtime-clean on all supported ranges-test targets.
 
-## In-progress implementation
+## Completed implementation
 
 - `libc/include/tuple`
   - Reworked `tuple` into variadic recursive storage.
@@ -35,58 +34,33 @@ commit intentionally preserves that in-progress state for the computer upgrade.
   - Covers shortest-range termination, reference mutation, four-way zip,
     zip-transform, direct enumerate, and piped enumerate.
 
-## Exact current blocker
+## Resolved compiler issues
 
-The new execution test does not compile yet:
+- Range-for declarations now parse and lower structured bindings without a
+  special-case library workaround.
+- Recursive tuple access handles four-way zip references.
+- Concept argument normalization gathers flat trailing arguments into a
+  declared parameter pack, so `regular_invocable<F&, A, B>` evaluates with both
+  argument types.
+- Template-instantiation keys include array-node cv-qualifiers. This prevents
+  const and non-const array-reference specializations from colliding during
+  `declval`/`views::all` substitution.
+- The standard `zip_transform_view` and adaptor callable constraints are
+  restored.
+
+## Validation
+
+The following all pass:
 
 ```bash
-bazel-bin/davecc -target x86_64 -static -std=c++23 -isystem libc/include \
-  -Wl,-e -Wl,main \
-  cxx_testsuite/tests/exec_ranges/0008_zip_enumerate_views.cpp \
-  bazel-bin/libc/libcx86_64.a -o /tmp/ranges_zip.bin
+bazel test //cxx_testsuite:syntax \
+  //cxx_testsuite:exec_ranges_x86_64 \
+  //cxx_testsuite:exec_ranges_aarch64 \
+  //cxx_testsuite:exec_ranges_arm \
+  //cxx_testsuite:exec_ranges_riscv --test_output=errors
+
+bazel test //cxx_testsuite:exec_x86_64 --test_output=errors
 ```
-
-Current diagnostics:
-
-```text
-0008_zip_enumerate_views.cpp:49: No such symbol "index"
-0008_zip_enumerate_views.cpp:49: Missing ]
-0008_zip_enumerate_views.cpp:49: Structured binding declaration requires an initializer
-libc/include/tuple:47: tuple index out of range
-libc/include/tuple:48: __get is not a member of tuple<>
-```
-
-The first group is the parser rejecting a structured binding directly in a
-range-for declaration:
-
-```cpp
-for (auto [index, value] : std::views::enumerate(right))
-```
-
-Do not hide this by weakening the permanent test; either fix range-for
-structured-binding parsing or first isolate it into a focused language probe.
-The tuple errors likely come from `std::get<3>` on the four-way recursive tuple
-or error recovery after the structured-binding parse failure.  Remove/isolate
-the structured-binding block temporarily to determine which.
-
-`zip_transform_view` currently omits its final callable constraint because the
-compiler evaluated
-`regular_invocable<F&, range_reference_t<Views>...>` incorrectly while
-substituting the view pack, even though an explicit
-`is_invocable_v<F&, int&, long&>` assertion passes.  Restore the standard
-constraint after fixing or characterizing that substitution path.
-
-## Recommended resume order
-
-1. Isolate the range-for structured-binding parser failure.
-2. Compile the execution test without that block to isolate four-way
-   `tuple::get<3>`.
-3. Run `0008` on x86-64 until it returns 0.
-4. Run the syntax suite and all four `exec_ranges_*` targets.
-5. Run tuple/variant/structured-binding regressions because `<tuple>` changed
-   representation.
-6. Restore the standard zip-transform invocability constraint.
-7. Update `CXX20_CXX23_REMAINING.md` only when the trio is runtime-green.
 
 ## Historical C++20 ranges handoff
 

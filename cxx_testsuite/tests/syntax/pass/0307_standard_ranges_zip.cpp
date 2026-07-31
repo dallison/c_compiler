@@ -14,11 +14,16 @@ void check_zip_views() {
   static_assert(std::ranges::sized_range<decltype(zipped)>);
   static_assert(std::tuple_size_v<
                     std::ranges::range_reference_t<decltype(zipped)>> == 2);
+  static_assert(std::same_as<
+                std::tuple_element_t<
+                    1, std::ranges::range_reference_t<decltype(zipped)>>,
+                long&>);
 
   auto combine = [](int value, long weight) -> long {
     return value + weight;
   };
   static_assert(std::is_invocable_v<decltype(combine)&, int&, long&>);
+  static_assert(std::regular_invocable<decltype(combine)&, int&, long&>);
   auto transformed = std::views::zip_transform(combine, values, weights);
   static_assert(std::ranges::view<decltype(transformed)>);
   static_assert(std::same_as<
