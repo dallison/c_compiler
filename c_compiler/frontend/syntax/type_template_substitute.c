@@ -389,7 +389,12 @@ void SubstituteStaticMemberInitializerValue(TypeParser* parser,
     DiagnosticSuppressBegin();
     cloned = AnalyzeExpression(cloned);
     if (cloned != NULL && cloned->type != NULL) {
-      TypeRecord* deduced = TypeDeduceAuto(symbol->type, cloned->type);
+      bool decltype_auto =
+          symbol->type->declarator == kDeclPrimitive &&
+          (symbol->type->type & kTypeDecltypeAuto) != 0;
+      TypeRecord* deduced =
+          decltype_auto ? TypeDeduceDecltypeAuto(cloned)
+                        : TypeDeduceAuto(symbol->type, cloned->type);
       if (deduced != NULL) {
         SymbolSetType(symbol, deduced);
       }

@@ -1487,10 +1487,15 @@ static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
 
 static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   TypeRecord* old_return = compiler->current_function->next;
+  bool decltype_auto =
+      old_return != NULL && old_return->declarator == kDeclPrimitive &&
+      (old_return->type & kTypeDecltypeAuto) != 0;
   deduced->qualifiers &= ~(kQualConst | kQualVolatile);
   TypeRecordIncRef(deduced);
   compiler->current_function->next = deduced;
   compiler->current_function->info.function.is_auto_return_deduced = true;
+  compiler->current_function->info.function.is_decltype_auto_return_deduced =
+      decltype_auto;
   TypeRecordDelete(old_return);
   if (compiler->current_function->info.function.symbol != NULL) {
     compiler->current_function->info.function.symbol->type =
@@ -1498,27 +1503,16 @@ static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   }
 }
 
-// Declared in type_internal.h; forward-declared here to avoid pulling the whole
-// type-parser internal header into the semantic layer.
-TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue);
-
 static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
                                             ASTNode* diagnostic_node) {
   TypeRecord* pattern = compiler->current_function->next;
-  // `decltype(auto)` return: the deduced type is decltype(return-expression),
-  // which preserves the expression's value category (lvalue -> T&,
-  // xvalue -> T&&, prvalue -> T) rather than decaying like plain `auto`.
   if (pattern != NULL && (pattern->type & kTypeDecltypeAuto) != 0 &&
       pattern->declarator == kDeclPrimitive) {
-    TypeRecord* deduced;
-    if (return_value == NULL) {
-      deduced = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
-    } else if (return_value->value_category == kValueCategoryLvalue) {
-      deduced = NewDecltypeReference(return_value->type, false);
-    } else if (return_value->value_category == kValueCategoryXvalue) {
-      deduced = NewDecltypeReference(return_value->type, true);
-    } else {
-      deduced = TypeRecordCopy(return_value->type);
+    TypeRecord* deduced = TypeDeduceDecltypeAuto(return_value);
+    if (deduced == NULL) {
+      SemanticError(diagnostic_node,
+                    "Cannot deduce decltype(auto) function return type");
+      return false;
     }
     SetCurrentFunctionReturnType(deduced);
     return true;
@@ -1661,11 +1655,21 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
       return;
     }
   } else if (return_value != NULL &&
-             compiler->current_function->info.function.is_auto_return_deduced &&
-             !TypeEqualIgnoringTopLevelQualifiers(
-                 return_value->type, compiler->current_function->next)) {
-    SemanticError(return_value, "Inconsistent auto function return type");
-    return;
+             compiler->current_function->info.function.is_auto_return_deduced) {
+    TypeRecord* candidate =
+        compiler->current_function->info.function
+                .is_decltype_auto_return_deduced
+            ? TypeDeduceDecltypeAuto(return_value)
+            : TypeRecordCopy(return_value->type);
+    bool consistent =
+        candidate != NULL &&
+        TypeEqualIgnoringTopLevelQualifiers(
+            candidate, compiler->current_function->next);
+    TypeRecordDelete(candidate);
+    if (!consistent) {
+      SemanticError(return_value, "Inconsistent auto function return type");
+      return;
+    }
   }
 
   if (IsEligibleCXXImplicitMoveReturnValue(return_value)) {

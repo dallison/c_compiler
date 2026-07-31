@@ -239,9 +239,13 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     return false;
   }
 
+  bool decltype_auto =
+      sym->type->declarator == kDeclPrimitive &&
+      (sym->type->type & kTypeDecltypeAuto) != 0;
   TypeRecord* initializer_type = initializer->type;
   TypeRecord* deduced =
-      DeduceCXXInitializerListAuto(initializer, diagnostic_node);
+      decltype_auto ? NULL
+                    : DeduceCXXInitializerListAuto(initializer, diagnostic_node);
   if (deduced != NULL) {
     SymbolSetType(sym, deduced);
     return true;
@@ -253,8 +257,18 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     initializer_expr = expr_init->expr;
     initializer_type = expr_init->expr->type;
   }
+  if (decltype_auto) {
+    if (initializer_expr == NULL ||
+        initializer_expr->op == AST_OP(braced_init)) {
+      SemanticError(diagnostic_node,
+                    "Cannot deduce decltype(auto) from braced initializer");
+      return false;
+    }
+    deduced = TypeDeduceDecltypeAuto(initializer_expr);
+  } else {
+    deduced = TypeDeduceAuto(sym->type, initializer_type);
+  }
   bool forwarding_reference = AutoTypeIsForwardingReference(sym->type);
-  deduced = TypeDeduceAuto(sym->type, initializer_type);
   if (deduced == NULL) {
     SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
                   sym->name.value);

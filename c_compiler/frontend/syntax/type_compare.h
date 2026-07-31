@@ -8,6 +8,8 @@
 
 #include "type_defs.h"
 
+struct ASTNode;
+
 bool TypeContainsTemplateParameter(TypeRecord* type);
 bool SymbolIsInStdNamespace(Symbol* symbol);
 inline bool TypeIsPointer(TypeRecord* type) {
@@ -284,6 +286,7 @@ bool TypeIsAbstractClass(TypeRecord* type);
 bool TypeContainsAuto(TypeRecord* type);
 bool TypeFunctionReturnContainsAuto(TypeRecord* type);
 TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type);
+TypeRecord* TypeDeduceDecltypeAuto(struct ASTNode* expr);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);
 void TypeErrorDetails(SourceLocation location,
                       TypeRecord* t1, TypeRecord* t2);

@@ -171,6 +171,7 @@ enum {
   kFn_explicit_condition = 48,
   kFn_is_volatile_member = 49,
   kFn_has_explicit_object_parameter = 50,
+  kFn_is_decltype_auto_return_deduced = 51,
 };
 
 //
@@ -839,6 +840,8 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kFn_is_noexcept_eligible, f->is_noexcept_eligible);
   WireWriteBool(out, kFn_is_noexcept, f->is_noexcept);
   WireWriteBool(out, kFn_is_auto_return_deduced, f->is_auto_return_deduced);
+  WireWriteBool(out, kFn_is_decltype_auto_return_deduced,
+                f->is_decltype_auto_return_deduced);
   WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
   WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
   SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
@@ -991,6 +994,9 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_is_auto_return_deduced:
         WireReadBool(in, &f->is_auto_return_deduced);
+        break;
+      case kFn_is_decltype_auto_return_deduced:
+        WireReadBool(in, &f->is_decltype_auto_return_deduced);
         break;
       case kFn_is_deduction_guide:
         WireReadBool(in, &f->is_deduction_guide);

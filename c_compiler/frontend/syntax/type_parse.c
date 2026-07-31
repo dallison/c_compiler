@@ -133,6 +133,47 @@ TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
   return ref;
 }
 
+static TypeRecord* UnparenthesizedDecltypeEntityType(ASTNode* expr) {
+  if (expr == NULL || (expr->flags & kASTParenthesized) != 0) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+    return symbol != NULL ? symbol->type : NULL;
+  }
+  if (expr->op == AST_OP(dot) || expr->op == AST_OP(arrow)) {
+    ASTNode* right = ((BinaryASTNode*)expr)->right;
+    if (right != NULL && right->op == AST_OP(structmember)) {
+      StructMember* member = ((StructMemberASTNode*)right)->member;
+      if (member != NULL && member->symbol != NULL &&
+          !member->is_member_function) {
+        return member->symbol->type;
+      }
+    }
+  }
+  return NULL;
+}
+
+TypeRecord* TypeDeduceDecltypeAuto(ASTNode* expr) {
+  if (expr == NULL) {
+    return NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  }
+  TypeRecord* entity_type = UnparenthesizedDecltypeEntityType(expr);
+  if (entity_type != NULL) {
+    return TypeRecordCopy(entity_type);
+  }
+  if (expr->type == NULL) {
+    return NULL;
+  }
+  if (expr->value_category == kValueCategoryLvalue) {
+    return NewDecltypeReference(expr->type, false);
+  }
+  if (expr->value_category == kValueCategoryXvalue) {
+    return NewDecltypeReference(expr->type, true);
+  }
+  return TypeRecordCopy(expr->type);
+}
+
 static bool TypeVectorContainsTemplateParameter(Vector* types) {
   if (types == NULL) {
     return false;

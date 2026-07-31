@@ -217,6 +217,7 @@ typedef struct {
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
   bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49
   bool has_explicit_object_parameter;  // C++23 `this T self`.       // @wire 50
+  bool is_decltype_auto_return_deduced;  // Return used decltype(auto). // @wire 51
 } FunctionInfo;
 
 typedef enum {

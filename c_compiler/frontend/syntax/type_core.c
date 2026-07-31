@@ -1045,6 +1045,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_noexcept_eligible = true;
   t->info.function.is_noexcept = false;
   t->info.function.is_auto_return_deduced = false;
+  t->info.function.is_decltype_auto_return_deduced = false;
   t->info.function.is_deduction_guide = false;
   t->info.function.is_coroutine = false;
   t->info.function.coroutine_promise_type = NULL;
