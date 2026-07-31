@@ -846,7 +846,38 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         if (symbol != NULL && StorageIs(symbol->storage, STO(typedef)) &&
             !base_is_dependent_alias) {
           symbol->flags.used = true;
-          type_record = TypeRecordCopy(symbol->type);
+          Vector* args = NULL;
+          if (symbol->flags.is_template &&
+              typename_name.template_arguments.length > 0) {
+            Vector* parsed_args =
+                typename_name.template_arguments.value.p[
+                    typename_name.template_arguments.length - 1];
+            args = TemplateArgumentVectorCopy(parsed_args);
+          }
+          if (symbol->flags.is_template && args != NULL &&
+              !parser->syntax->parsing_template_declaration &&
+              !TemplateArgumentVectorContainsTemplateParameter(args) &&
+              TypeIsStructOrUnion(symbol->type)) {
+            type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
+          } else {
+            type_record = TypeRecordCopy(symbol->type);
+            if (symbol->flags.is_template && args != NULL) {
+              if (type_record->template_arguments != NULL) {
+                VectorDeleteWithContents(
+                    type_record->template_arguments,
+                    (VectorElementDestructor)TemplateArgumentDelete,
+                    /*free_element=*/false);
+              }
+              type_record->template_origin = symbol;
+              type_record->template_arguments = args;
+              args = NULL;
+            }
+          }
+          if (args != NULL) {
+            VectorDeleteWithContents(
+                args, (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+          }
           type |= type_record->type;
         } else if (typename_name.components.length == 2) {
           String* base_name = typename_name.components.value.p[0];

@@ -749,6 +749,8 @@ static bool TypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
       TypeIsFunction(from) || TypeIsFunction(to)) {
     return false;
   }
+  bool from_pointer = TypeIsPointer(from);
+  bool to_pointer = TypeIsPointer(to);
   TypeRecord* from_copy = TypeRecordCopy(from);
   TypeRecord* to_copy = TypeRecordCopy(to);
   while (from_copy != NULL && TypeIsPointer(from_copy)) {
@@ -757,8 +759,8 @@ static bool TypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
   while (to_copy != NULL && TypeIsPointer(to_copy)) {
     to_copy = to_copy->next;
   }
-  if (from_copy != from && to_copy != to && from_copy != NULL &&
-      to_copy != NULL && TypeIsStructOrUnion(from_copy) &&
+  if (from_pointer && to_pointer && from_copy != NULL && to_copy != NULL &&
+      TypeIsStructOrUnion(from_copy) &&
       TypeIsStructOrUnion(to_copy) && from_copy->info.struct_info != NULL &&
       to_copy->info.struct_info != NULL &&
       !TypeEqualIgnoringQualifiers(from_copy, to_copy)) {

@@ -7723,6 +7723,8 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
         break;
       }
     }
+    bool already_class_template =
+        syntax->last_parsed_tag->flags.is_template;
     syntax->last_parsed_tag->flags.is_template = true;
     syntax->last_parsed_tag->type->info.struct_info->is_template = true;
     syntax->last_parsed_tag->type->info.struct_info->template_parameter_count =
@@ -7736,15 +7738,29 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
                                    syntax->current_template_requires_clause);
       syntax->current_template_requires_clause = NULL;
     }
-    Symbol* alias = NewSymbol(syntax->last_parsed_tag->name.value,
-                              syntax->last_parsed_tag->type, STO(typedef));
-    alias->namespace_ = syntax->last_parsed_tag->namespace_;
-    alias->flags.is_template = true;
-    if (!SyntaxAddSymbol(syntax, alias)) {
-      SymbolDelete(alias);
+    if (class_template->lexical_parent == NULL ||
+        !already_class_template) {
+      Symbol* alias = NewSymbol(syntax->last_parsed_tag->name.value,
+                                syntax->last_parsed_tag->type, STO(typedef));
+      alias->namespace_ = syntax->last_parsed_tag->namespace_;
+      alias->flags.is_template = true;
+      if (!SyntaxAddSymbol(syntax, alias)) {
+        SymbolDelete(alias);
+        Symbol* existing_alias =
+            SyntaxFindSymbol(syntax, &syntax->last_parsed_tag->name);
+        if (existing_alias != NULL &&
+            StorageIs(existing_alias->storage, STO(typedef))) {
+          existing_alias->flags.is_template = true;
+        }
+      }
+    } else {
       Symbol* existing_alias =
-          SyntaxFindSymbol(syntax, &syntax->last_parsed_tag->name);
-      if (existing_alias != NULL && StorageIs(existing_alias->storage, STO(typedef))) {
+          SyntaxFindTopScopeSymbol(syntax, &syntax->last_parsed_tag->name);
+      if (existing_alias != NULL &&
+          StorageIs(existing_alias->storage, STO(typedef)) &&
+          existing_alias->type != NULL &&
+          TypeIsStructOrUnion(existing_alias->type) &&
+          existing_alias->type->info.struct_info == class_template) {
         existing_alias->flags.is_template = true;
       }
     }

@@ -672,6 +672,37 @@ static bool CXXStructTagNameEqual(Struct* left, Struct* right) {
 }
 
 static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
+                                                       Struct* right);
+
+static bool CXXTemplateOriginsSameFamily(Symbol* left, Symbol* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL ||
+      !StringEqualString(&left->name, &right->name)) {
+    return false;
+  }
+  Struct* left_struct =
+      left->type != NULL && TypeIsStructOrUnion(left->type)
+          ? left->type->info.struct_info
+          : NULL;
+  Struct* right_struct =
+      right->type != NULL && TypeIsStructOrUnion(right->type)
+          ? right->type->info.struct_info
+          : NULL;
+  Struct* left_parent =
+      left_struct != NULL ? left_struct->lexical_parent : NULL;
+  Struct* right_parent =
+      right_struct != NULL ? right_struct->lexical_parent : NULL;
+  if (left_parent != NULL || right_parent != NULL) {
+    return left_parent != NULL && right_parent != NULL &&
+           CXXStructSameTemplateFamilyForTypeEquality(left_parent,
+                                                      right_parent);
+  }
+  return left->namespace_ == right->namespace_;
+}
+
+static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
                                                        Struct* right) {
   if (left == right) {
     return true;
@@ -686,8 +717,7 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
           : NULL;
   if (left_origin != NULL || right_origin != NULL) {
     if (left_origin != NULL && right_origin != NULL) {
-      if (left_origin != right_origin &&
-          !StringEqualString(&left_origin->name, &right_origin->name)) {
+      if (!CXXTemplateOriginsSameFamily(left_origin, right_origin)) {
         return false;
       }
       TypeRecord* left_tag_type =
@@ -887,10 +917,8 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
           if (t1->template_origin != NULL && t2->template_origin != NULL &&
               t1->template_arguments != NULL &&
               t2->template_arguments != NULL) {
-            bool same_family =
-                t1->template_origin == t2->template_origin ||
-                StringEqualString(&t1->template_origin->name,
-                                  &t2->template_origin->name);
+            bool same_family = CXXTemplateOriginsSameFamily(
+                t1->template_origin, t2->template_origin);
             return same_family && same_dependent_member &&
                    TemplateArgumentVectorEqual(t1->template_arguments,
                                                t2->template_arguments);

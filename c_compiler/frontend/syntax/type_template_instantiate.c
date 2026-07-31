@@ -443,7 +443,16 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
 
 void AppendTemplateInstantiationName(String* name, Symbol* templ,
                                             Vector* args) {
-  StringSet(name, templ->name.value);
+  Struct* template_struct =
+      templ->type != NULL && TypeIsStructOrUnion(templ->type)
+          ? templ->type->info.struct_info
+          : NULL;
+  if (template_struct != NULL && template_struct->lexical_parent != NULL) {
+    StringPrintf(name, "$nested%d$", templ->id);
+    StringAppendString(name, &templ->name);
+  } else {
+    StringSet(name, templ->name.value);
+  }
   StringAppendChar(name, '<');
   for (size_t i = 0; i < args->length; i++) {
     if (i != 0) {
@@ -602,27 +611,6 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
   func->info.function.explicit_condition = NULL;
-  // A value-dependent `explicit(cond)` was deferred at parse time; substitute
-  // the concrete template arguments and constant-fold it now so this
-  // instantiation gets the correct explicit-ness (C++20 [dcl.fct.spec]).
-  if (from->info.function.explicit_condition != NULL) {
-    int64_t explicit_value = 0;
-    if (TryFoldDependentTemplateArgument(
-            parser, from->info.function.explicit_condition, args,
-            &explicit_value)) {
-      func->info.function.is_explicit = explicit_value != 0;
-      func->info.function.is_explicit_conversion =
-          from->info.function.is_explicit_conversion && explicit_value != 0;
-    } else {
-      ASTNode* condition = CloneDependentExpressionWithArgs(
-          parser, from->info.function.explicit_condition, args);
-      if (DependentExpressionContainsTemplateParameter(condition)) {
-        func->info.function.explicit_condition = condition;
-      } else {
-        ASTNodeDelete(condition);
-      }
-    }
-  }
   func->info.function.is_final = from->info.function.is_final;
   // Virtualness must survive instantiation so the instantiated member is
   // registered into a vtable slot (RegisterCXXVirtualMember, run via
@@ -690,6 +678,35 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       VectorAppend(&enclosing_only_args, args->value.p[i]);
     }
     subst_args = &enclosing_only_args;
+  }
+  // A member function template's explicit condition may depend on both its
+  // enclosing class and its own template parameters.  Substitute only the
+  // enclosing arguments here, then rebase the surviving member parameters to
+  // the standalone function template's zero-based numbering.  Using `args`
+  // directly would consume member parameters that happen to share an index
+  // with an enclosing parameter and incorrectly make explicit constructors
+  // implicit.
+  if (from->info.function.explicit_condition != NULL) {
+    ASTNode* condition = TypeSubstituteMemberTemplateExpressionAndRebase(
+        parser->syntax, from->info.function.explicit_condition, subst_args,
+        member_template_base, from->info.function.explicit_condition->location,
+        parser->template_substitution_source,
+        parser->template_substitution_target);
+    if (ExpressionIsTemplateDependent(condition)) {
+      func->info.function.explicit_condition = condition;
+    } else {
+      int64_t explicit_value = 0;
+      DiagnosticSuppressBegin();
+      condition = AnalyzeExpression(condition);
+      bool folded = EvaluateIntegerExpression(condition, &explicit_value);
+      DiagnosticSuppressEnd();
+      if (folded) {
+        func->info.function.is_explicit = explicit_value != 0;
+        func->info.function.is_explicit_conversion =
+            from->info.function.is_explicit_conversion && explicit_value != 0;
+      }
+      ASTNodeDelete(condition);
+    }
   }
   // Copy the member's own template parameters, substituting enclosing arguments
   // into each parameter's default (e.g. a `= D` default that names the enclosing
@@ -5833,6 +5850,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
 
   Struct* str = NewStruct(source_struct->is_union);
   str->is_class = source_struct->is_class;
+  str->lexical_parent = source_struct->lexical_parent;
   str->packed = source_struct->packed;
   str->explicit_alignment = source_struct->explicit_alignment;
   str->pack = source_struct->pack;

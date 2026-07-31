@@ -468,7 +468,8 @@ static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
 
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
-                               Vector* attributes, Vector* bases) {
+                               Vector* attributes, Vector* bases,
+                               Symbol* qualified_definition_tag) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -476,7 +477,9 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   if (empty_tag_name) {
     SyntaxFakeTagName(parser->syntax, tag_name);
   }
-  Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  Symbol* tag = qualified_definition_tag != NULL
+                    ? qualified_definition_tag
+                    : SyntaxFindTopScopeTag(parser->syntax, tag_name);
   if (tag != NULL) {
     if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of struct/union %s",
@@ -623,7 +626,9 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
 
   CheckFlexibleArrays(parser, str, is_union);
-  AddInjectedClassName(parser, tag);
+  if (qualified_definition_tag == NULL) {
+    AddInjectedClassName(parser, tag);
+  }
   // Record concrete (non-template) C++ classes so unused private data members
   // can be diagnosed at end of translation unit (-Wunused-private-field).
   // Templates (defining_template_scope_count > 0) are skipped because member
@@ -784,12 +789,28 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
   parser->cxx_member_owner = saved_base_member_owner;
   parser->syntax->cxx_class_head = saved_base_class_head;
   if (LexMatch(parser->lex, TOK(lbrace))) {
+    Symbol* qualified_definition_tag = NULL;
     if (has_qualified_tag) {
-      SyntaxError(parser->syntax, "Cannot define qualified struct tag %s",
-                  qualified_tag.spelling.value);
+      Symbol* resolved =
+          SyntaxFindQualifiedSymbol(parser->syntax, &qualified_tag);
+      if (resolved == NULL) {
+        resolved = SyntaxFindQualifiedTag(parser->syntax, &qualified_tag);
+      }
+      if (resolved != NULL && resolved->type != NULL &&
+          TypeIsStructOrUnion(resolved->type) &&
+          resolved->type->info.struct_info != NULL) {
+        qualified_definition_tag =
+            resolved->type->info.struct_info->tag_symbol;
+      }
+      if (qualified_definition_tag == NULL) {
+        SyntaxError(parser->syntax, "Unknown qualified struct tag %s",
+                    qualified_tag.spelling.value);
+      } else {
+        StringSetString(&tag_name, &qualified_definition_tag->name);
+      }
     }
     tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes,
-                          &bases);
+                          &bases, qualified_definition_tag);
     if (is_final && tag != NULL && tag->type != NULL &&
         tag->type->info.struct_info != NULL) {
       tag->type->info.struct_info->is_final = true;
@@ -823,6 +844,9 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // New tag.
       Struct* str = NewStruct(is_union);
       str->is_class = is_class;
+      if (CompilerIsCXX() && parser->cxx_member_owner != NULL) {
+        str->lexical_parent = parser->cxx_member_owner;
+      }
       TypeRecord* type =
           NewTypeRecord(is_union ? kTypeUnion : kTypeStruct, kQualPlain);
       type->info.struct_info = str;

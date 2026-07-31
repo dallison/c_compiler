@@ -7,10 +7,10 @@ rather than hidden behind library workarounds.
 
 ## Current handoff
 
-Steps 1 and 2 are complete. The next agent should begin with Step 3 (`layout_right`,
-`layout_left`, and `layout_stride`) and stop after that step for review.
+Steps 1 through 3 are complete. The next agent should begin with Step 4 (the
+`mdspan` view) and stop after that step for review.
 
-Step 2 validation completed successfully with:
+Step 3 validation completed successfully with:
 
 - `bazel test //cxx_testsuite:syntax --test_output=errors`
 - `bazel test //cxx_testsuite:exec_x86_64 --test_output=errors`
@@ -38,10 +38,10 @@ Step 2 validation completed successfully with:
 
 ## Step 3: Layout mappings
 
-- [ ] Implement `layout_right::mapping`.
-- [ ] Implement `layout_left::mapping`.
-- [ ] Implement `layout_stride::mapping`.
-- [ ] Cover zero rank, zero extents, mixed static/dynamic extents, strides,
+- [x] Implement `layout_right::mapping`.
+- [x] Implement `layout_left::mapping`.
+- [x] Implement `layout_stride::mapping`.
+- [x] Cover zero rank, zero extents, mixed static/dynamic extents, strides,
       conversions, and mapping properties.
 
 ## Step 4: `mdspan` view
