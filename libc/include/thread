@@ -17,6 +17,7 @@
 #include <chrono>
 #include <compare>
 #include <exception>
+#include <format>
 #include <functional>
 #include <new>
 #include <stop_token>
@@ -321,6 +322,33 @@ template <>
 struct hash<thread::id> {
   size_t operator()(thread::id value) const noexcept {
     return hash<thrd_t>{}(value.__value_);
+  }
+};
+
+template <>
+struct formatter<thread::id, char> {
+  const char* __specification_data = nullptr;
+  size_t __specification_size = 0;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    auto begin = context.begin();
+    auto end = context.end();
+    __specification_data = begin;
+    __specification_size = static_cast<size_t>(end - begin);
+    return context.end();
+  }
+
+  format_context::iterator format(thread::id value,
+                                  format_context& context) const {
+    __format_detail::__spec specification =
+        __format_detail::__parse_spec(
+            string_view(__specification_data, __specification_size),
+            &context.__arguments());
+    __format_detail::__format_builtin(
+        hash<thread::id>{}(value), specification,
+        context.__buffer(), &context.__arguments());
+    return context.out();
   }
 };
 

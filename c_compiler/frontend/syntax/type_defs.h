@@ -381,6 +381,7 @@ typedef struct {
   bool is_static:1;             // Actual/formal must match.     // @wire 2
   bool is_vla:1;                // Variable length array.        // @wire 3
   bool is_placeholder_vla:1;    // [*] in function prototype.    // @wire 4
+  bool is_dependent_bound:1;    // Unevaluated template bound.    // @wire 8
   int template_parameter_index;  // >=0 if bound is non-type param. // @wire 5
 } ArrayInfo;
 

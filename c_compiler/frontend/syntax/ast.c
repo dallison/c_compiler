@@ -1812,6 +1812,16 @@ static ASTNode* PtrScaleASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
+static void PtrScaleASTNodeVisit(ASTNode* node,
+                                 void (*func)(ASTNode*, void*, int,
+                                              VisitorMode),
+                                 int child_id, void* data) {
+  PtrScaleASTNode* n = (PtrScaleASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static bool PtrScaleASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   return ASTNodeUsesValue(node->parent, node);
 }
@@ -1823,7 +1833,8 @@ static void PtrScaleASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
 }
 
 static ASTNodeVirtuals ptr_scale_vtbl = {PtrScaleASTNodeDelete, PtrScaleASTNodePrint,
-                                    PtrScaleASTNodeReplaceChild, PtrScaleASTNodeClone, NULL,
+                                    PtrScaleASTNodeReplaceChild, PtrScaleASTNodeClone,
+  PtrScaleASTNodeVisit,
   PtrScaleASTNodeUsesValue, PtrScaleASTNodeTransform,
 };
 

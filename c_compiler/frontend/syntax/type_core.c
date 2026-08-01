@@ -359,7 +359,8 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
     return NULL;
   }
   TypeRecordCalculateSize(record->next);
-  if (record->declarator == kDeclArray && !record->info.array.is_vla) {
+  if (record->declarator == kDeclArray && !record->info.array.is_vla &&
+      !record->info.array.is_dependent_bound) {
     record->size = record->info.array.size.fixed * record->next->size;
     return record;
   }
@@ -373,7 +374,8 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:
-        if (!record->info.array.is_vla) {
+        if (!record->info.array.is_vla &&
+            !record->info.array.is_dependent_bound) {
           record->size = record->info.array.size.fixed * record->next->size;
         }
         break;
@@ -999,6 +1001,7 @@ TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static) {
   t->info.array.size.vla.codegen_info = NULL;
   t->info.array.is_vla = false;
   t->info.array.is_placeholder_vla = false;
+  t->info.array.is_dependent_bound = false;
   t->info.array.template_parameter_index = -1;
   t->size = 0;  // Don't know yet.
   return t;

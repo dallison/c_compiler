@@ -2371,6 +2371,13 @@ static void ParseArrayDecl(TypeParser* parser) {
           goto parsed_bound;
         }
       }
+      if (parser->syntax->parsing_template_declaration &&
+          DependentExpressionContainsTemplateParameter(size_expr)) {
+        p->info.array.size.vla.size = size_expr;
+        p->info.array.is_dependent_bound = true;
+        delete_expr = false;
+        goto parsed_bound;
+      }
       // VLA.
       if (!TypeIsIntegral(size_expr->type)) {
         SyntaxError(parser->syntax, "Variable length array size must be integral");

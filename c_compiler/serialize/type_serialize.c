@@ -115,6 +115,7 @@ enum {
   kArr_template_parameter_index = 5,
   kArr_fixed = 6,
   kArr_vla_size = 7,
+  kArr_is_dependent_bound = 8,
 };
 
 //
@@ -737,9 +738,10 @@ static void WriteArrayInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kArr_is_static, a->is_static);
   WireWriteBool(out, kArr_is_vla, a->is_vla);
   WireWriteBool(out, kArr_is_placeholder_vla, a->is_placeholder_vla);
+  WireWriteBool(out, kArr_is_dependent_bound, a->is_dependent_bound);
   WireWriteInt32(out, kArr_template_parameter_index,
                  a->template_parameter_index);
-  if (a->is_vla) {
+  if (a->is_vla || a->is_dependent_bound) {
     SWriteRef(ctx, out, kArr_vla_size, kSerialKindAST, a->size.vla.size);
   } else {
     WireWriteInt32(out, kArr_fixed, a->size.fixed);
@@ -771,6 +773,10 @@ static void ReadArrayInfo(DeserializeContext* ctx, WireBuffer* in,
       case kArr_is_placeholder_vla:
         WireReadBool(in, &b);
         a->is_placeholder_vla = b;
+        break;
+      case kArr_is_dependent_bound:
+        WireReadBool(in, &b);
+        a->is_dependent_bound = b;
         break;
       case kArr_template_parameter_index:
         WireReadInt32(in, &a->template_parameter_index);

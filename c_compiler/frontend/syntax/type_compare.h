@@ -103,7 +103,7 @@ inline bool TypeIsArray(TypeRecord* type) {
 }
 inline bool TypeIsFixedArray(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclArray &&
-      !type->info.array.is_vla;
+      !type->info.array.is_vla && !type->info.array.is_dependent_bound;
 }
 
 // A VLA passed to a function is converted to a pointer but its array info

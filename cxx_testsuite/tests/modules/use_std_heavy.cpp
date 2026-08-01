@@ -72,6 +72,15 @@ int main() {
   if (std::format("{} + {} = {}", 2, 3, 5) != "2 + 3 = 5") {
     return 9;
   }
+  if (std::format("{}{}{}{}{}{}", 1, 2, 3, 4, 5, 6) != "123456") {
+    return 10;
+  }
+  if (std::format("{:%Q %q}", std::chrono::seconds(42)) != "42 s") {
+    return 11;
+  }
+  if (std::format("{}", std::thread::id()) != "0") {
+    return 12;
+  }
   std::println("import std heavy surface: {}", generated);
   std::println();
   return 0;

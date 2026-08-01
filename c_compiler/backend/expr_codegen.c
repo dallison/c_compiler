@@ -477,12 +477,18 @@ static IRNode* StashCallResult(Generator* gen, IRNode* node,
   return tmp;
 }
 
-static IRNode* StashValueAcrossCall(Generator* gen, IRNode* value) {
+static IRNode* StashValueAcrossCall(Generator* gen, IRNode* value,
+                                    bool rebuild_address_at_reload) {
   IRNode* address = GeneratorSpillValueToTemp(gen, value, value->type);
   IRNode* marker =
       IRSetType(GeneratorEmit(gen, NewIR(IR_OP(tmp))), value->type);
   marker->flags |= kIRDeferredArgReload;
-  marker->aux = address;
+  if (rebuild_address_at_reload) {
+    marker->flags |= kIRDeferredArgRebuildAddress;
+    marker->aux = address->inputs.value.p[0];
+  } else {
+    marker->aux = address;
+  }
   return marker;
 }
 
@@ -1978,16 +1984,41 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         !TypeIsArray(arg_value->type);
     bool call_result_reference_actual =
         reference_returning_call && arg_value->opcode == IR_OP(calla);
-    if (!compiler->call_return_fixed_reg && must_survive_later_call &&
+    bool aggregate_reference_actual =
+        !compiler->call_return_fixed_reg && CompilerIsCXX() &&
+        reference_formal && aggregate_actual;
+    bool stash_value_across_call = false;
+    // Reference binding can turn a scalar lvalue into an address expression.
+    // Defer C++ spills until after that conversion, but keep call-result
+    // stashing immediate for aggregate/reference cases whose representation
+    // must not change.
+    bool preserve_noncall_argument =
+        (!compiler->call_return_fixed_reg &&
+         (!aggregate_actual || stashable_reference_actual)) ||
+        (compiler->call_return_fixed_reg && CompilerIsCXX() &&
+         reference_formal && !aggregate_actual);
+    if (preserve_noncall_argument &&
+        must_survive_later_call &&
         !argument_contains_call &&
-        !TypeIsFunction(arg_value->type) &&
-        (!aggregate_actual || stashable_reference_actual)) {
-      arg_value = StashValueAcrossCall(gen, arg_value);
+        !TypeIsFunction(arg_value->type)) {
+      if (CompilerIsCXX()) {
+        stash_value_across_call = true;
+      } else {
+        arg_value = StashValueAcrossCall(
+            gen, arg_value, /*rebuild_address_at_reload=*/false);
+      }
     } else if (must_survive_later_call && argument_contains_call &&
                (!aggregate_actual || stashable_reference_actual ||
-                call_result_reference_actual)) {
-      arg_value = StashCallResult(gen, arg_value,
-                                  /*route_conversion_to_dest=*/true);
+                call_result_reference_actual || aggregate_reference_actual)) {
+      if (CompilerIsCXX() &&
+          ((!reference_formal && !aggregate_actual) ||
+           (!compiler->call_return_fixed_reg &&
+            (stashable_reference_actual || aggregate_reference_actual)))) {
+        stash_value_across_call = true;
+      } else {
+        arg_value = StashCallResult(gen, arg_value,
+                                    /*route_conversion_to_dest=*/true);
+      }
     }
 
     if (reference_formal &&
@@ -2014,6 +2045,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
       }
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+    }
+
+    if (stash_value_across_call &&
+        (!compiler->call_return_fixed_reg ||
+         (!IRIsVariable(arg_value) &&
+          arg_value->opcode != IR_OP(addressof)))) {
+      arg_value = StashValueAcrossCall(
+          gen, arg_value, /*rebuild_address_at_reload=*/true);
     }
 
     if (reference_formal && reference_returning_call) {
@@ -2119,8 +2158,16 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       if (PushArgNumber(push) == argnum - 1) {
         IRNode* value = push->inputs.value.p[0];
         if ((value->flags & kIRDeferredArgReload) != 0) {
+          IRNode* reload_address = value->aux;
+          if ((value->flags & kIRDeferredArgRebuildAddress) != 0) {
+            // The original addressof node may have been consumed by earlier
+            // lowering. Rebuild it from the durable spill variable.
+            reload_address = IRSetType(
+                GeneratorEmit(gen, NewIR1(IR_OP(addressof), reload_address)),
+                NewPointerTo(kQualPlain, value->type));
+          }
           IRNode* reload = GeneratorReloadSpilledValue(
-              gen, value->aux, value->type);
+              gen, reload_address, value->type);
           IRReplaceInput(push, 0, reload);
           IRSetType(push, reload->type);
           value = reload;

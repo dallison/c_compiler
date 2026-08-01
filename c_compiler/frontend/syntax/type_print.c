@@ -120,7 +120,9 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
     fprintf(fp, "%s", str.value);
 
     if (record->declarator == kDeclArray) {
-      if (record->info.array.is_vla) {
+      if (record->info.array.is_dependent_bound) {
+        fprintf(fp, " template-dependent array ");
+      } else if (record->info.array.is_vla) {
         fprintf(fp, " variable length array ");
       } else {
         fprintf(fp, " array of size %d ", record->info.array.size.fixed);
@@ -310,7 +312,11 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
 
     case kDeclArray:
       TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
-      StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      if (type->info.array.is_dependent_bound) {
+        StringAppend(result, "[$dependent]");
+      } else {
+        StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      }
       break;
 
     case kDeclFunction: {
@@ -564,6 +570,21 @@ static void AppendDependentMemberTemplateArgsToKey(TypeRecord* type,
   }
 }
 
+static bool AppendNamedLexicalStructPath(Struct* str, String* result) {
+  if (str == NULL || str->tag_name == NULL ||
+      str->tag_name->value[0] == '<' ||
+      (str->tag_symbol != NULL && str->tag_symbol->flags.invented)) {
+    return false;
+  }
+  if (str->lexical_parent != NULL &&
+      !AppendNamedLexicalStructPath(str->lexical_parent, result)) {
+    return false;
+  }
+  StringAppendString(result, str->tag_name);
+  StringAppend(result, "::");
+  return true;
+}
+
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
   if (type == NULL) {
     StringAppend(result, "<invalid-type>");
@@ -624,18 +645,17 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
                                &str->tag_symbol->namespace_->qualified_name);
             StringAppend(result, "::");
           }
+          bool has_stable_lexical_path =
+              AppendNamedLexicalStructPath(str->lexical_parent, result);
           if (str->tag_name->value[0] != '<') {
             StringAppendString(result, str->tag_name);
           }
           // The per-struct pointer suffix disambiguates types whose tag *name*
-          // is not by itself a unique identifier: lambda closure types and
-          // unnamed/anonymous structs, plus plain (non-template) classes -- in
-          // particular a nested class such as `iterator`, which recurs under
-          // many unrelated enclosing classes (`set<K>::iterator`,
-          // `list<T>::iterator`, ...) and shares its simple name with those
-          // siblings.  Without the suffix, `pair<iterator,bool>` would key
-          // identically regardless of *which* iterator it holds and collapse
-          // those distinct instantiations into whichever was built first.
+          // is not by itself a unique identifier: lambda closure types,
+          // unnamed/anonymous structs, and local plain classes. Named nested
+          // classes use the lexical path emitted above (for example,
+          // `set<K>::iterator`), which both disambiguates siblings and remains
+          // stable when a module is deserialized.
           //
           // A class template *specialization*, by contrast, carries its
           // template arguments in the tag name (e.g. `char_traits<char>`),
@@ -655,7 +675,8 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
                (str->tag_symbol->type->template_origin != NULL ||
                 str->tag_symbol->type->template_arguments != NULL)) ||
               strchr(str->tag_name->value, '<') != NULL;
-          if (is_invented || is_anonymous || !is_template_specialization) {
+          if (is_invented || is_anonymous ||
+              (!is_template_specialization && !has_stable_lexical_path)) {
             StringPrintf(result, "$S%p", (void*)str);
           }
         }
@@ -711,7 +732,11 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
 
     case kDeclArray:
       TypeRecordToTemplateKeyString(type->next, result);
-      StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      if (type->info.array.is_dependent_bound) {
+        StringAppend(result, "[$dependent]");
+      } else {
+        StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      }
       if (type->qualifiers != 0) {
         StringAppendChar(result, '$');
         QualifiersToString(type->qualifiers, result);

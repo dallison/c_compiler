@@ -1174,11 +1174,35 @@ static TypeRecord* SubstituteBareTemplateParameter(TypeParser* parser,
 }
 
 /* Substitute a non-type template parameter used as an array bound. */
-static void SubstituteArrayTemplateBound(TypeRecord* copy,
+static void SubstituteArrayTemplateBound(TypeParser* parser,
+                                         TypeRecord* copy,
                                          TypeRecord* original,
                                          Vector* args) {
-  if (copy->declarator != kDeclArray ||
-      original->info.array.template_parameter_index < 0) {
+  if (copy->declarator != kDeclArray) {
+    return;
+  }
+  if (original->info.array.is_dependent_bound) {
+    int64_t folded = 0;
+    if (TryFoldDependentTemplateArgument(
+            parser, original->info.array.size.vla.size, args, &folded)) {
+      if (folded < 0) {
+        SyntaxError(parser->syntax, "Array with negative size");
+        folded = 1;
+      }
+      copy->info.array.size.fixed = (int)folded;
+      copy->info.array.is_dependent_bound = false;
+      copy->size = 0;
+    } else {
+      ASTNode* partial = CloneDependentExpressionWithArgs(
+          parser, original->info.array.size.vla.size, args);
+      if (partial != NULL) {
+        copy->info.array.size.vla.size = partial;
+      }
+      copy->size = 0;
+    }
+    return;
+  }
+  if (original->info.array.template_parameter_index < 0) {
     return;
   }
   int index = original->info.array.template_parameter_index;
@@ -1316,7 +1340,7 @@ TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
                                               Vector* args) {
   TypeRecord* copy = TypeRecordCopy(type);
   SubstituteMemberPointerClass(copy, args);
-  SubstituteArrayTemplateBound(copy, type, args);
+  SubstituteArrayTemplateBound(parser, copy, type, args);
   SubstituteTypeSpineNext(parser, copy, type, args);
   SubstituteFunctionPrototype(parser, copy, type, args);
   return TypeRecordCalculateSize(copy);

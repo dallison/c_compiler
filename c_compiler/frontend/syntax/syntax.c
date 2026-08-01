@@ -406,6 +406,14 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
   }
   switch (left->declarator) {
     case kDeclArray:
+      if (left->info.array.is_dependent_bound ||
+          right->info.array.is_dependent_bound) {
+        return left->info.array.is_dependent_bound ==
+                   right->info.array.is_dependent_bound &&
+               left->info.array.size.vla.size ==
+                   right->info.array.size.vla.size &&
+               OverloadTypesEqual(left->next, right->next);
+      }
       return left->info.array.size.fixed == right->info.array.size.fixed &&
              OverloadTypesEqual(left->next, right->next);
     case kDeclPointer:
@@ -1259,6 +1267,9 @@ static bool TypeContainsTemplateParameterReference(TypeRecord* type) {
       return true;
     }
     if (TypeIsArray(t) && t->info.array.template_parameter_index >= 0) {
+      return true;
+    }
+    if (TypeIsArray(t) && t->info.array.is_dependent_bound) {
       return true;
     }
     if (TemplateArgumentVectorIsDependent(t->template_arguments)) {

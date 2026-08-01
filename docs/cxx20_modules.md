@@ -66,10 +66,12 @@ The verified profile exports:
 - C++23 facilities: `algorithm`, `format`, `functional`, `generator`,
   `mdspan`, `print`, and `ranges`.
 
-This is the library's currently implemented narrow profile. In particular,
-`format` and `print` do not claim locale, Unicode, wide-character, or formatter
-coverage beyond what the corresponding headers implement. Headers absent from
-this list are intentionally not exported yet.
+This is the library's currently implemented narrow profile. The exported
+`format` and `print` surfaces include variadic formatting/printing, the
+implemented chrono duration and system-time-point formatters, and
+`formatter<thread::id, char>`. They do not claim locale, Unicode,
+wide-character, filesystem, or full calendar/time-zone formatting. Headers
+absent from this list are intentionally not exported yet.
 
 ## Dependency scanning
 

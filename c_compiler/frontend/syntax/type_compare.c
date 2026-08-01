@@ -351,11 +351,16 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
   }
   switch (left->declarator) {
     case kDeclArray:
+      if (left->info.array.is_dependent_bound !=
+          right->info.array.is_dependent_bound) {
+        return false;
+      }
       if (left->info.array.template_parameter_index !=
           right->info.array.template_parameter_index) {
         return false;
       }
       if (left->info.array.template_parameter_index < 0 &&
+          !left->info.array.is_dependent_bound &&
           left->info.array.size.fixed != right->info.array.size.fixed) {
         return false;
       }
@@ -859,6 +864,13 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
+      if (t1->info.array.is_dependent_bound ||
+          t2->info.array.is_dependent_bound) {
+        return t1->info.array.is_dependent_bound ==
+                   t2->info.array.is_dependent_bound &&
+               t1->info.array.size.vla.size ==
+                   t2->info.array.size.vla.size;
+      }
       return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:
     case kDeclReference:
@@ -1178,9 +1190,9 @@ static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {
       result = NewReferenceTypeRecord(pattern->qualifiers, true);
       break;
     case kDeclArray:
-      result = NewBasicArrayTypeRecord(pattern->qualifiers,
-                                       pattern->info.array.size.fixed,
-                                       pattern->info.array.is_vla);
+      result = TypeRecordCopy(pattern);
+      TypeRecordDecRef(result->next);
+      result->next = NULL;
       break;
     default:
       result = TypeRecordCopy(pattern);
@@ -1269,6 +1281,13 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
     case kDeclArray:
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
+      }
+      if (t1->info.array.is_dependent_bound ||
+          t2->info.array.is_dependent_bound) {
+        return t1->info.array.is_dependent_bound ==
+                   t2->info.array.is_dependent_bound &&
+               t1->info.array.size.vla.size ==
+                   t2->info.array.size.vla.size;
       }
       return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:

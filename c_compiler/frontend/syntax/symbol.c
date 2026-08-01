@@ -732,7 +732,8 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       // the other.
       StringAppendChar(out, 'A');
       if (!type->info.array.is_flexible && !type->info.array.is_vla &&
-          !type->info.array.is_placeholder_vla) {
+          !type->info.array.is_placeholder_vla &&
+          !type->info.array.is_dependent_bound) {
         char bound[32];
         snprintf(bound, sizeof(bound), "%d", type->info.array.size.fixed);
         StringAppend(out, bound);

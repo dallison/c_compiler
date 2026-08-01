@@ -72,7 +72,8 @@ implemented.
 - [ ] Complete `<chrono>`.
   - Calendar and civil-time types.
   - Time-zone support where the target profile permits it.
-  - Chrono formatting integration.
+  - Extend the completed narrow duration/system-time-point formatting to the
+    full calendar and time-zone surface.
 
 ## Remaining C++23 language work
 
@@ -131,10 +132,16 @@ implemented.
   - Module consumers exercise containers, strings, span, tuple, variant, ratio,
     source locations, algorithms, ranges folds/conversion, generator, format,
     and print on x86-64, AArch64, ARM, and RISC-V.
-- [ ] Complete `<format>` and `<print>` beyond the initial narrow implementation.
+- [x] Complete the narrow `<format>` and `<print>` layer.
+  - Variadic `format`, `format_to`, `format_to_n`, `formatted_size`, `print`,
+    and `println` use standard parameter-pack interfaces.
+  - Non-template print operations have out-of-line runtime definitions.
+  - Narrow formatters cover the implemented chrono duration/system-time-point
+    surface and `thread::id`.
+- [ ] Complete `<format>` and `<print>` beyond the narrow implementation.
   - Locale-aware formatting.
   - Unicode printing and `vprint_unicode`.
-  - Standard formatters for chrono, filesystem paths, and other library types.
+  - Filesystem, full calendar/time-zone, and other deferred standard formatters.
   - Wide-character and UTF-8 contexts if those are in the supported profile.
 - [ ] Implement `<expected>`.
 - [ ] Implement `<flat_map>` and `<flat_set>`.

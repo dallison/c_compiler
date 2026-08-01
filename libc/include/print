@@ -12,88 +12,74 @@ namespace std {
 
 namespace __print_detail {
 
-inline void __write_stdout(const string& value) {
-  size_t position = 0;
-  while (position < value.size()) {
-    int written = ::write(1, value.data() + position, value.size() - position);
-    if (written <= 0) {
-      __format_detail::__fail("failed to write formatted output");
-    }
-    position += static_cast<size_t>(written);
-  }
-}
-
-inline void __write_file(FILE* file, const string& value) {
-  if (file == nullptr ||
-      ::fwrite(value.data(), 1, value.size(), file) != value.size()) {
-    __format_detail::__fail("failed to write formatted output");
-  }
-}
+void __write_stdout(const string& value);
+void __write_file(FILE* file, const string& value);
 
 }  // namespace __print_detail
 
-inline void vprint_nonunicode(string_view text, format_args args) {
-  __print_detail::__write_stdout(vformat(text, args));
-}
+void vprint_nonunicode(string_view text, format_args args);
+void vprint_nonunicode(FILE* file, string_view text, format_args args);
 
-inline void vprint_nonunicode(FILE* file, string_view text, format_args args) {
-  __print_detail::__write_file(file, vformat(text, args));
-}
+void print(
+    const typename __format_detail::__non_deduced<format_string<>>::type& text);
+void print(
+    FILE* file,
+    const typename __format_detail::__non_deduced<format_string<>>::type& text);
 
-void print(const typename __format_detail::__non_deduced<format_string<>>::type& text) {
+template <class... Args>
+void print(
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
   __print_detail::__write_stdout(
-      __format_detail::__format_invoke(text.data(), text.size()));
+      __format_detail::__format_invoke(
+          text.data(), text.size(), static_cast<Args&&>(args)...));
 }
 
-template <class A0>
-void print(const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-           A0&& a0) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  __print_detail::__write_stdout(
-      __format_detail::__format_invoke(text.data(), text.size(), arg0));
+template <class... Args>
+void print(
+    FILE* file,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  __print_detail::__write_file(
+      file, __format_detail::__format_invoke(
+                text.data(), text.size(), static_cast<Args&&>(args)...));
 }
 
-template <class A0>
-void print(FILE* file,
-           const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-           A0&& a0) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  __print_detail::__write_file(file,
-      __format_detail::__format_invoke(text.data(), text.size(), arg0));
-}
+void println(
+    const typename __format_detail::__non_deduced<format_string<>>::type& text);
 
-template <class A0>
-void println(const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-             A0&& a0) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  string output =
-      __format_detail::__format_invoke(text.data(), text.size(), arg0);
+template <class... Args>
+void println(
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  string output = __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
   output.push_back('\n');
   __print_detail::__write_stdout(output);
 }
 
-inline void println() {
-  if (::fwrite("\n", 1, 1, stdout) != 1) {
-    __format_detail::__fail("print write failed");
-  }
-}
+void println();
 
-template <class A0>
-void println(FILE* file,
-             const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-             A0&& a0) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  string output =
-      __format_detail::__format_invoke(text.data(), text.size(), arg0);
+void println(
+    FILE* file,
+    const typename __format_detail::__non_deduced<format_string<>>::type& text);
+
+template <class... Args>
+void println(
+    FILE* file,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  string output = __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
   output.push_back('\n');
   __print_detail::__write_file(file, output);
 }
 
-inline void println(FILE* file) {
-  if (::fwrite("\n", 1, 1, file) != 1) {
-    __format_detail::__fail("print write failed");
-  }
-}
+void println(FILE* file);
 
 }  // namespace std
 

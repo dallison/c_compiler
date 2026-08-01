@@ -4364,7 +4364,10 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
           concrete_owner = canonical->symbol->type->info.struct_info;
         }
       }
+      bool selected_member_template_specialization =
+          member->symbol->type->info.function.template_origin != NULL;
       if (same_constructor_owner && concrete_owner != NULL &&
+          !selected_member_template_specialization &&
           concrete_owner->tag_name != NULL) {
         StructMember* concrete_head =
             FindCXXMemberOverloadHead(concrete_owner, concrete_owner->tag_name);

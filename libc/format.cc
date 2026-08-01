@@ -422,7 +422,8 @@ void __vformat_to(const char* text_data, size_t text_size,
       args.next_dynamic = next_argument;
       __spec parsed_specification;
       size_t spec_position = specification_start;
-      size_t spec_end = specification_start + specification_size;
+      size_t spec_end =
+          specification_start + (value->is_builtin ? specification_size : 0);
       if (spec_position + 1 < spec_end &&
           (text_data[spec_position + 1] == '<' ||
            text_data[spec_position + 1] == '>' ||
@@ -541,18 +542,233 @@ void __vformat_to(const char* text_data, size_t text_size,
   }
 }
 
-__format_args __make_runtime_args(const __format_arg_store& store) {
-  __format_args args;
-  args.values = store.__data();
-  args.count = store.__size();
-  args.next_dynamic = 0;
-  return args;
+static void AppendDecimal(string* output, long long value, int width) {
+  bool negative = value < 0;
+  unsigned long long magnitude =
+      negative ? static_cast<unsigned long long>(-(value + 1)) + 1
+               : static_cast<unsigned long long>(value);
+  string digits;
+  __unsigned_integer_to(magnitude, 'd', false, &digits);
+  if (negative) {
+    output->push_back('-');
+  }
+  for (int i = static_cast<int>(digits.size()); i < width; ++i) {
+    output->push_back('0');
+  }
+  output->append(digits);
+}
+
+static void AppendDurationUnit(string* output, intmax_t num, intmax_t den) {
+  if (num == 1 && den == 1000000000) {
+    output->append("ns");
+  } else if (num == 1 && den == 1000000) {
+    output->append("us");
+  } else if (num == 1 && den == 1000) {
+    output->append("ms");
+  } else if (num == 1 && den == 1) {
+    output->push_back('s');
+  } else if (num == 60 && den == 1) {
+    output->append("min");
+  } else if (num == 3600 && den == 1) {
+    output->push_back('h');
+  } else if (num == 86400 && den == 1) {
+    output->push_back('d');
+  } else {
+    output->push_back('[');
+    AppendDecimal(output, num, 0);
+    if (den != 1) {
+      output->push_back('/');
+      AppendDecimal(output, den, 0);
+    }
+    output->append("]s");
+  }
+}
+
+void __format_chrono_duration(string_view count, long double total_seconds,
+                              intmax_t period_num, intmax_t period_den,
+                              const char* specification_data,
+                              size_t specification_size, string* output) {
+  string_view specification(specification_data, specification_size);
+  if (specification.empty()) {
+    output->append(count.data(), count.size());
+    AppendDurationUnit(output, period_num, period_den);
+    return;
+  }
+
+  long long whole_seconds = static_cast<long long>(total_seconds);
+  long long magnitude = whole_seconds < 0 ? -whole_seconds : whole_seconds;
+  for (size_t i = 0; i < specification.size(); ++i) {
+    char current = specification[i];
+    if (current != '%') {
+      output->push_back(current);
+      continue;
+    }
+    if (++i >= specification.size()) {
+      __fail("incomplete chrono format specifier");
+    }
+    switch (specification[i]) {
+      case '%':
+        output->push_back('%');
+        break;
+      case 'n':
+        output->push_back('\n');
+        break;
+      case 't':
+        output->push_back('\t');
+        break;
+      case 'Q':
+        output->append(count.data(), count.size());
+        break;
+      case 'q':
+        AppendDurationUnit(output, period_num, period_den);
+        break;
+      case 'H':
+        AppendDecimal(output, (magnitude / 3600) % 24, 2);
+        break;
+      case 'M':
+        AppendDecimal(output, (magnitude / 60) % 60, 2);
+        break;
+      case 'S':
+        AppendDecimal(output, magnitude % 60, 2);
+        break;
+      case 'R':
+        AppendDecimal(output, (magnitude / 3600) % 24, 2);
+        output->push_back(':');
+        AppendDecimal(output, (magnitude / 60) % 60, 2);
+        break;
+      case 'T':
+        AppendDecimal(output, (magnitude / 3600) % 24, 2);
+        output->push_back(':');
+        AppendDecimal(output, (magnitude / 60) % 60, 2);
+        output->push_back(':');
+        AppendDecimal(output, magnitude % 60, 2);
+        break;
+      case 'j':
+        AppendDecimal(output, magnitude / 86400, 0);
+        break;
+      default:
+        __fail("unsupported chrono duration format specifier");
+    }
+  }
+}
+
+static long long FloorDiv(long long value, long long divisor) {
+  long long quotient = value / divisor;
+  long long remainder = value % divisor;
+  return remainder < 0 ? quotient - 1 : quotient;
+}
+
+struct CivilTime {
+  long long year;
+  unsigned month;
+  unsigned day;
+  unsigned hour;
+  unsigned minute;
+  unsigned second;
+};
+
+static CivilTime CivilTimeFromEpoch(long long seconds_since_epoch) {
+  long long days = FloorDiv(seconds_since_epoch, 86400);
+  long long day_seconds = seconds_since_epoch - days * 86400;
+  long long z = days + 719468;
+  long long era = FloorDiv(z, 146097);
+  unsigned day_of_era = static_cast<unsigned>(z - era * 146097);
+  unsigned year_of_era =
+      (day_of_era - day_of_era / 1460 + day_of_era / 36524 -
+       day_of_era / 146096) /
+      365;
+  long long year = static_cast<long long>(year_of_era) + era * 400;
+  unsigned day_of_year =
+      day_of_era -
+      (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  unsigned month_prime = (5 * day_of_year + 2) / 153;
+  unsigned day =
+      day_of_year - (153 * month_prime + 2) / 5 + 1;
+  unsigned month = month_prime < 10 ? month_prime + 3 : month_prime - 9;
+  year += month <= 2;
+  CivilTime result;
+  result.year = year;
+  result.month = month;
+  result.day = day;
+  result.hour = static_cast<unsigned>(day_seconds / 3600);
+  result.minute = static_cast<unsigned>((day_seconds / 60) % 60);
+  result.second = static_cast<unsigned>(day_seconds % 60);
+  return result;
+}
+
+void __format_chrono_time_point(long long seconds_since_epoch,
+                                const char* specification_data,
+                                size_t specification_size, string* output) {
+  string_view specification(specification_data, specification_size);
+  CivilTime value = CivilTimeFromEpoch(seconds_since_epoch);
+  const char* active_data =
+      specification.empty() ? "%F %T" : specification.data();
+  size_t active_size = specification.empty() ? 5 : specification.size();
+  for (size_t i = 0; i < active_size; ++i) {
+    char current = active_data[i];
+    if (current != '%') {
+      output->push_back(current);
+      continue;
+    }
+    if (++i >= active_size) {
+      __fail("incomplete chrono format specifier");
+    }
+    switch (active_data[i]) {
+      case '%':
+        output->push_back('%');
+        break;
+      case 'n':
+        output->push_back('\n');
+        break;
+      case 't':
+        output->push_back('\t');
+        break;
+      case 'Y':
+        AppendDecimal(output, value.year, 4);
+        break;
+      case 'm':
+        AppendDecimal(output, value.month, 2);
+        break;
+      case 'd':
+        AppendDecimal(output, value.day, 2);
+        break;
+      case 'H':
+        AppendDecimal(output, value.hour, 2);
+        break;
+      case 'M':
+        AppendDecimal(output, value.minute, 2);
+        break;
+      case 'S':
+        AppendDecimal(output, value.second, 2);
+        break;
+      case 'F':
+        AppendDecimal(output, value.year, 4);
+        output->push_back('-');
+        AppendDecimal(output, value.month, 2);
+        output->push_back('-');
+        AppendDecimal(output, value.day, 2);
+        break;
+      case 'R':
+        AppendDecimal(output, value.hour, 2);
+        output->push_back(':');
+        AppendDecimal(output, value.minute, 2);
+        break;
+      case 'T':
+        AppendDecimal(output, value.hour, 2);
+        output->push_back(':');
+        AppendDecimal(output, value.minute, 2);
+        output->push_back(':');
+        AppendDecimal(output, value.second, 2);
+        break;
+      default:
+        __fail("unsupported chrono time-point format specifier");
+    }
+  }
 }
 
 string __format_invoke(const char* text_data, size_t text_size) {
-  __format_arg_store store;
   string output;
-  __format_args runtime_args = __make_runtime_args(store);
+  __format_args runtime_args(nullptr, 0);
   __vformat_to(text_data, text_size, &runtime_args, &output);
   return output;
 }
@@ -570,10 +786,6 @@ string vformat(string_view text, format_args args) {
 string format(
     const typename __format_detail::__non_deduced<format_string<>>::type& text) {
   return __format_detail::__format_invoke(text.data(), text.size());
-}
-
-__format_detail::__format_arg_store make_format_args() {
-  return __format_detail::__format_arg_store();
 }
 
 }  // namespace std

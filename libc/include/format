@@ -3,6 +3,7 @@
 
 #include <__exception_support>
 #include <__itoa.h>
+#include <chrono>
 #include <cstddef>
 #include <iterator>
 #include <stdexcept>
@@ -99,11 +100,13 @@ struct __format_arg {
   void (*format_value)(const void*, const __format_specification*, string&,
                        const __format_args*);
   bool (*integer_value)(const void*, long long*);
+  bool is_builtin;
 
   __format_arg()
       : value(nullptr),
         format_value(nullptr),
-        integer_value(nullptr) {}
+        integer_value(nullptr),
+        is_builtin(false) {}
 };
 
 struct __format_args {
@@ -165,6 +168,13 @@ void __signed_integer_to(long long value, const __spec& spec, string* output);
 void __unsigned_integer_with_sign_to(unsigned long long value,
                                      const __spec& spec, string* output);
 void __floating_to(double value, const __spec& spec, string* output);
+void __format_chrono_duration(string_view count, long double total_seconds,
+                              intmax_t period_num, intmax_t period_den,
+                              const char* specification_data,
+                              size_t specification_size, string* output);
+void __format_chrono_time_point(long long seconds_since_epoch,
+                                const char* specification_data,
+                                size_t specification_size, string* output);
 
 string __unsigned_integer(unsigned long long value, char type, bool alternate);
 string __signed_integer(long long value, const __spec& spec);
@@ -443,54 +453,37 @@ constexpr bool __format_specification_valid(bool syntax_valid,
   }
 }
 
-struct __no_format_type {};
+template <unsigned Position, class CharT, class... Args>
+struct __format_type_checker;
 
-template <unsigned Position, class CharT, class T0 = __no_format_type,
-          class T1 = __no_format_type, class T2 = __no_format_type,
-          class T3 = __no_format_type, class T4 = __no_format_type>
-struct __format_type_checker {
+template <unsigned Position, class CharT>
+struct __format_type_checker<Position, CharT> {
+  static constexpr bool specification(unsigned, bool, char) {
+    return false;
+  }
+
+  static constexpr bool dynamic_integer(unsigned) {
+    return false;
+  }
+};
+
+template <unsigned Position, class CharT, class Head, class... Tail>
+struct __format_type_checker<Position, CharT, Head, Tail...> {
   static constexpr bool specification(unsigned index, bool syntax_valid,
                                       char presentation) {
-    if (index == Position &&
-        !is_same<T0, __no_format_type>::value) {
-      return __format_specification_valid<T0>(syntax_valid, presentation);
+    if (index == Position) {
+      return __format_specification_valid<Head>(syntax_valid, presentation);
     }
-    if (index == Position + 1 &&
-        !is_same<T1, __no_format_type>::value) {
-      return __format_specification_valid<T1>(syntax_valid, presentation);
-    }
-    if (index == Position + 2 &&
-        !is_same<T2, __no_format_type>::value) {
-      return __format_specification_valid<T2>(syntax_valid, presentation);
-    }
-    if (index == Position + 3 &&
-        !is_same<T3, __no_format_type>::value) {
-      return __format_specification_valid<T3>(syntax_valid, presentation);
-    }
-    if (index == Position + 4 &&
-        !is_same<T4, __no_format_type>::value) {
-      return __format_specification_valid<T4>(syntax_valid, presentation);
-    }
-    return false;
+    return __format_type_checker<Position + 1, CharT, Tail...>::specification(
+        index, syntax_valid, presentation);
   }
 
   static constexpr bool dynamic_integer(unsigned index) {
     if (index == Position) {
-      return is_integral<remove_cv_t<remove_reference_t<T0>>>::value;
+      return is_integral<remove_cv_t<remove_reference_t<Head>>>::value;
     }
-    if (index == Position + 1) {
-      return is_integral<remove_cv_t<remove_reference_t<T1>>>::value;
-    }
-    if (index == Position + 2) {
-      return is_integral<remove_cv_t<remove_reference_t<T2>>>::value;
-    }
-    if (index == Position + 3) {
-      return is_integral<remove_cv_t<remove_reference_t<T3>>>::value;
-    }
-    if (index == Position + 4) {
-      return is_integral<remove_cv_t<remove_reference_t<T4>>>::value;
-    }
-    return false;
+    return __format_type_checker<Position + 1, CharT, Tail...>::
+        dynamic_integer(index);
   }
 };
 
@@ -531,8 +524,9 @@ struct __custom_format_callback {
   }
 };
 
+template <size_t Capacity>
 class __format_arg_store {
-  __format_arg __values[32];
+  __format_arg __values[Capacity == 0 ? 1 : Capacity];
   size_t __count;
 
  public:
@@ -540,7 +534,7 @@ class __format_arg_store {
 
   template <class T>
   void __push(T&& value) {
-    if (__count >= 32) {
+    if (__count >= Capacity) {
       __fail("too many format arguments");
     }
     __format_arg* slot = __values + __count;
@@ -552,11 +546,17 @@ class __format_arg_store {
     }
     if constexpr (__is_builtin_format_type<U>::value) {
       slot->format_value = __format_builtin_callback<U>;
+      slot->is_builtin = true;
     } else {
       slot->format_value = __custom_format_callback<U>::call;
+      slot->is_builtin = false;
     }
     slot->integer_value = __integer_argument<U>;
     ++__count;
+  }
+  template <class... Args>
+  void __push_all(Args&&... args) {
+    (__push(static_cast<Args&&>(args)), ...);
   }
   const __format_arg* __data() const { return __values; }
   size_t __size() const { return __count; }
@@ -565,115 +565,25 @@ class __format_arg_store {
 void __vformat_to(const char* text_data, size_t text_size,
                   const __format_args* arguments, string* output);
 
-__format_args __make_runtime_args(const __format_arg_store& store);
 string __format_invoke(const char* text_data, size_t text_size);
 
-template <class A0>
+template <class... Args>
 inline string __format_invoke(const char* text_data, size_t text_size,
-                              A0&& a0) {
-  __format_arg_store store;
-  store.__push(static_cast<A0&&>(a0));
+                              Args&&... args) {
+  __format_arg_store<sizeof...(Args)> store;
+  store.__push_all(static_cast<Args&&>(args)...);
   string output;
-  __format_args runtime_args = __make_runtime_args(store);
-  __vformat_to(text_data, text_size, &runtime_args, &output);
-  return output;
-}
-
-template <class A0, class A1>
-inline string __format_invoke(const char* text_data, size_t text_size,
-                              A0&& a0, A1&& a1) {
-  __format_arg_store store;
-  store.__push(static_cast<A0&&>(a0));
-  store.__push(static_cast<A1&&>(a1));
-  string output;
-  __format_args runtime_args = __make_runtime_args(store);
-  __vformat_to(text_data, text_size, &runtime_args, &output);
-  return output;
-}
-
-template <class A0, class A1, class A2>
-inline string __format_invoke(const char* text_data, size_t text_size,
-                              A0&& a0, A1&& a1, A2&& a2) {
-  __format_arg_store store;
-  store.__push(static_cast<A0&&>(a0));
-  store.__push(static_cast<A1&&>(a1));
-  store.__push(static_cast<A2&&>(a2));
-  string output;
-  __format_args runtime_args = __make_runtime_args(store);
-  __vformat_to(text_data, text_size, &runtime_args, &output);
-  return output;
-}
-
-template <class A0, class A1, class A2, class A3>
-inline string __format_invoke(const char* text_data, size_t text_size,
-                              A0&& a0, A1&& a1, A2&& a2, A3&& a3) {
-  __format_arg_store store;
-  store.__push(static_cast<A0&&>(a0));
-  store.__push(static_cast<A1&&>(a1));
-  store.__push(static_cast<A2&&>(a2));
-  store.__push(static_cast<A3&&>(a3));
-  string output;
-  __format_args runtime_args = __make_runtime_args(store);
-  __vformat_to(text_data, text_size, &runtime_args, &output);
-  return output;
-}
-
-template <class A0, class A1, class A2, class A3, class A4>
-inline string __format_invoke(const char* text_data, size_t text_size,
-                              A0&& a0, A1&& a1, A2&& a2, A3&& a3, A4&& a4) {
-  __format_arg_store store;
-  store.__push(static_cast<A0&&>(a0));
-  store.__push(static_cast<A1&&>(a1));
-  store.__push(static_cast<A2&&>(a2));
-  store.__push(static_cast<A3&&>(a3));
-  store.__push(static_cast<A4&&>(a4));
-  string output;
-  __format_args runtime_args = __make_runtime_args(store);
+  __format_args runtime_args(store.__data(), store.__size());
   __vformat_to(text_data, text_size, &runtime_args, &output);
   return output;
 }
 
 }  // namespace __format_detail
 
-__format_detail::__format_arg_store make_format_args();
-template <class A0>
-auto make_format_args(A0& a0) {
-  __format_detail::__format_arg_store store;
-  store.__push(a0);
-  return store;
-}
-template <class A0, class A1>
-auto make_format_args(A0& a0, A1& a1) {
-  __format_detail::__format_arg_store store;
-  store.__push(a0);
-  store.__push(a1);
-  return store;
-}
-template <class A0, class A1, class A2>
-auto make_format_args(A0& a0, A1& a1, A2& a2) {
-  __format_detail::__format_arg_store store;
-  store.__push(a0);
-  store.__push(a1);
-  store.__push(a2);
-  return store;
-}
-template <class A0, class A1, class A2, class A3>
-auto make_format_args(A0& a0, A1& a1, A2& a2, A3& a3) {
-  __format_detail::__format_arg_store store;
-  store.__push(a0);
-  store.__push(a1);
-  store.__push(a2);
-  store.__push(a3);
-  return store;
-}
-template <class A0, class A1, class A2, class A3, class A4>
-auto make_format_args(A0& a0, A1& a1, A2& a2, A3& a3, A4& a4) {
-  __format_detail::__format_arg_store store;
-  store.__push(a0);
-  store.__push(a1);
-  store.__push(a2);
-  store.__push(a3);
-  store.__push(a4);
+template <class... Args>
+auto make_format_args(Args&... args) {
+  __format_detail::__format_arg_store<sizeof...(Args)> store;
+  store.__push_all(args...);
   return store;
 }
 
@@ -894,105 +804,22 @@ OutputIt vformat_to(OutputIt out, string_view text, format_args args) {
 string format(
     const typename __format_detail::__non_deduced<format_string<>>::type& text);
 
-template <class A0>
-inline string format(
-    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-    A0&& a0) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  const char* data = text.data();
-  size_t size = text.size();
-  return __format_detail::__format_invoke(data, size, arg0);
-}
-
-template <class A0, class A1>
-inline string format(
-    const typename __format_detail::__non_deduced<format_string<A0, A1>>::type& text,
-    A0&& a0, A1&& a1) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
-  const char* data = text.data();
-  size_t size = text.size();
-  return __format_detail::__format_invoke(data, size, arg0, arg1);
-}
-
-template <class A0, class A1, class A2>
+template <class... Args>
 inline string format(
     const typename __format_detail::__non_deduced<
-        format_string<A0, A1, A2>>::type& text,
-    A0&& a0, A1&& a1, A2&& a2) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
-  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
-  const char* data = text.data();
-  size_t size = text.size();
-  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2);
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
 }
 
-template <class A0, class A1, class A2, class A3>
-inline string format(
-    const typename __format_detail::__non_deduced<
-        format_string<A0, A1, A2, A3>>::type& text,
-    A0&& a0, A1&& a1, A2&& a2, A3&& a3) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
-  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
-  typename decay<A3>::type arg3 = static_cast<A3&&>(a3);
-  const char* data = text.data();
-  size_t size = text.size();
-  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2, arg3);
-}
-
-template <class A0, class A1, class A2, class A3, class A4>
-inline string format(
-    const typename __format_detail::__non_deduced<
-        format_string<A0, A1, A2, A3, A4>>::type& text,
-    A0&& a0, A1&& a1, A2&& a2, A3&& a3, A4&& a4) {
-  typename decay<A0>::type arg0 = static_cast<A0&&>(a0);
-  typename decay<A1>::type arg1 = static_cast<A1&&>(a1);
-  typename decay<A2>::type arg2 = static_cast<A2&&>(a2);
-  typename decay<A3>::type arg3 = static_cast<A3&&>(a3);
-  typename decay<A4>::type arg4 = static_cast<A4&&>(a4);
-  const char* data = text.data();
-  size_t size = text.size();
-  return __format_detail::__format_invoke(data, size, arg0, arg1, arg2, arg3,
-                                          arg4);
-}
-
-template <class OutputIt>
+template <class OutputIt, class... Args>
 OutputIt format_to(OutputIt out,
                    const typename __format_detail::__non_deduced<
-                       format_string<>>::type& text) {
-  string result =
-      __format_detail::__format_invoke(
-          text.data(), text.size());
-  for (size_t i = 0; i < result.size(); ++i) {
-    *out++ = result[i];
-  }
-  return out;
-}
-
-template <class OutputIt, class A0>
-OutputIt format_to(OutputIt out,
-                   const typename __format_detail::__non_deduced<
-                       format_string<A0>>::type& text,
-                   A0&& a0) {
+                       format_string<Args...>>::type& text,
+                   Args&&... args) {
   string result = __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0));
-  for (size_t i = 0; i < result.size(); ++i) {
-    *out++ = result[i];
-  }
-  return out;
-}
-
-template <class OutputIt, class A0, class A1>
-OutputIt format_to(OutputIt out,
-                   const typename __format_detail::__non_deduced<
-                       format_string<A0, A1>>::type& text,
-                   A0&& a0, A1&& a1) {
-  string result = __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0), static_cast<A1&&>(a1));
+      text.data(), text.size(), static_cast<Args&&>(args)...);
   for (size_t i = 0; i < result.size(); ++i) {
     *out++ = result[i];
   }
@@ -1005,14 +832,14 @@ struct format_to_n_result {
   size_t size;
 };
 
-template <class OutputIt, class A0>
+template <class OutputIt, class... Args>
 format_to_n_result<OutputIt> format_to_n(
     OutputIt out, size_t n,
-    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-    A0&& a0) {
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
   string result = __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0));
+      text.data(), text.size(), static_cast<Args&&>(args)...);
   size_t count = result.size() < n ? result.size() : n;
   for (size_t i = 0; i < count; ++i) {
     *out++ = result[i];
@@ -1020,42 +847,100 @@ format_to_n_result<OutputIt> format_to_n(
   return {out, result.size()};
 }
 
-template <class OutputIt, class A0, class A1>
-format_to_n_result<OutputIt> format_to_n(
-    OutputIt out, size_t n,
+template <class... Args>
+size_t formatted_size(
     const typename __format_detail::__non_deduced<
-        format_string<A0, A1>>::type& text,
-    A0&& a0, A1&& a1) {
-  string result = __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0), static_cast<A1&&>(a1));
-  size_t count = result.size() < n ? result.size() : n;
-  for (size_t i = 0; i < count; ++i) {
-    *out++ = result[i];
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...)
+      .size();
+}
+
+template <class Rep, class Period>
+struct formatter<chrono::duration<Rep, Period>, char> {
+  const char* __specification_data = nullptr;
+  size_t __specification_size = 0;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    auto begin = context.begin();
+    auto end = context.end();
+    __specification_data = begin;
+    __specification_size = static_cast<size_t>(end - begin);
+    return context.end();
   }
-  return {out, result.size()};
-}
 
-template <class A0>
-size_t formatted_size(
-    const typename __format_detail::__non_deduced<format_string<A0>>::type& text,
-    A0&& a0) {
-  return __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0))
-      .size();
-}
+  format_context::iterator format(
+      const chrono::duration<Rep, Period>& value,
+      format_context& context) const {
+    string count;
+    __format_detail::__spec count_specification;
+    __format_detail::__format_builtin(
+        value.count(), count_specification, count, &context.__arguments());
+    string result;
+    long double total_seconds =
+        static_cast<long double>(value.count()) *
+        static_cast<long double>(Period::num) /
+        static_cast<long double>(Period::den);
+    __format_detail::__format_chrono_duration(
+        count, total_seconds, Period::num, Period::den,
+        __specification_data, __specification_size, &result);
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
 
-template <class A0, class A1>
-size_t formatted_size(
-    const typename __format_detail::__non_deduced<
-        format_string<A0, A1>>::type& text,
-    A0&& a0, A1&& a1) {
-  return __format_detail::__format_invoke(
-      text.data(), text.size(),
-      static_cast<A0&&>(a0), static_cast<A1&&>(a1))
-      .size();
-}
+template <class Clock, class Duration>
+struct formatter<chrono::time_point<Clock, Duration>, char>
+    : formatter<Duration, char> {
+  format_context::iterator format(
+      const chrono::time_point<Clock, Duration>& value,
+      format_context& context) const {
+    return formatter<Duration, char>::format(
+        value.time_since_epoch(), context);
+  }
+};
+
+template <class Duration>
+struct formatter<chrono::time_point<chrono::system_clock, Duration>, char> {
+  const char* __specification_data = nullptr;
+  size_t __specification_size = 0;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    auto begin = context.begin();
+    auto end = context.end();
+    __specification_data = begin;
+    __specification_size = static_cast<size_t>(end - begin);
+    return context.end();
+  }
+
+  format_context::iterator format(
+      const chrono::time_point<chrono::system_clock, Duration>& value,
+      format_context& context) const {
+    Duration since_epoch = value.time_since_epoch();
+    using period = typename Duration::period;
+    long long scaled_ticks =
+        static_cast<long long>(since_epoch.count()) * period::num;
+    long long seconds_since_epoch = scaled_ticks / period::den;
+    if (scaled_ticks < 0 && scaled_ticks % period::den != 0) {
+      --seconds_since_epoch;
+    }
+    string result;
+    __format_detail::__format_chrono_time_point(
+        seconds_since_epoch, __specification_data, __specification_size,
+        &result);
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
 
 template <class Visitor, class Context>
 decltype(auto) visit_format_arg(Visitor&& visitor,

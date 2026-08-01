@@ -1746,6 +1746,7 @@ static bool DeduceFunctionTemplateArrayInitializerArgument(
   }
   if (formal->info.array.template_parameter_index < 0 &&
       !formal->info.array.is_flexible && !formal->info.array.is_vla &&
+      !formal->info.array.is_dependent_bound &&
       formal->info.array.size.fixed < (int)braced->initializers->length) {
     return false;
   }
@@ -2293,6 +2294,7 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
       formal->info.array.template_parameter_index >= 0) {
     int index = formal->info.array.template_parameter_index;
     if (actual->declarator != kDeclArray || actual->info.array.is_vla ||
+        actual->info.array.is_dependent_bound ||
         actual->info.array.template_parameter_index >= 0 ||
         !SetDeducedFunctionTemplateNonTypeArgument(
             args, explicit_arg_count, index, actual->info.array.size.fixed)) {
@@ -3949,6 +3951,7 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
     case kDeclArray:
       if (pattern->info.array.template_parameter_index >= 0) {
         if (actual->info.array.is_vla ||
+            actual->info.array.is_dependent_bound ||
             !SetDeducedFunctionTemplateNonTypeArgument(
                 bindings, 0, pattern->info.array.template_parameter_index,
                 actual->info.array.size.fixed)) {
@@ -4641,6 +4644,7 @@ static bool CXXArrayBracedInitIsViableForDeduction(ASTNode* actual,
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
   if (!target->info.array.is_flexible && !target->info.array.is_vla &&
+      !target->info.array.is_dependent_bound &&
       target->info.array.template_parameter_index < 0 &&
       target->info.array.size.fixed < (int)braced->initializers->length) {
     return false;
