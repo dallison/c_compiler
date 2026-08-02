@@ -2842,6 +2842,16 @@ static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture,
                        : NewIdentifierASTNode(capture->captured, location);
   if (capture->by_reference) {
     value = NewUnaryASTNode(AST_OP(address), NULL, location, value);
+  } else if (capture->field != NULL &&
+             TypeIsStructOrUnion(capture->field->type) &&
+             (!capture->is_init_capture ||
+              value->value_category != kValueCategoryPrvalue)) {
+    // A by-value class capture is copy-initialized.  Preserve that semantic
+    // operation in the aggregate-like closure initializer instead of letting
+    // initializer flattening lower it to a byte copy.  The cast analyzer
+    // selects the copy/move constructor, and designated-init code generation
+    // constructs its result directly in the capture field.
+    value = NewCastASTNode(capture->field->type, location, value);
   }
   if (capture->is_pack_expansion) {
     value->flags |= kASTPackExpansion;

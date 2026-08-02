@@ -161,6 +161,8 @@ static const WireFieldDesc kSymbolFields[] = {
 enum {
   kAttr_name = 1,
   kAttr_args = 2,
+  kAttr_dependent_alignas_type = 3,
+  kAttr_dependent_alignas_expr = 4,
 };
 
 //
@@ -208,6 +210,10 @@ static void WriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
     WireBufferInitOwned(&elem, 16);
     SWriteStringVal(ctx, &elem, kAttr_name, &a->name);
     SWriteStringVector(ctx, &elem, kAttr_args, &a->args);
+    SWriteRef(ctx, &elem, kAttr_dependent_alignas_type,
+              kSerialKindType, a->dependent_alignas_type);
+    SWriteRef(ctx, &elem, kAttr_dependent_alignas_expr,
+              kSerialKindAST, a->dependent_alignas_expr);
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -250,6 +256,14 @@ static void ReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
           break;
         case kAttr_args:
           SReadStringVector(ctx, &er, &a->args);
+          break;
+        case kAttr_dependent_alignas_type:
+          a->dependent_alignas_type =
+              (TypeRecord*)SReadRef(ctx, &er, kSerialKindType);
+          break;
+        case kAttr_dependent_alignas_expr:
+          a->dependent_alignas_expr =
+              (ASTNode*)SReadRef(ctx, &er, kSerialKindAST);
           break;
         default:
           WireSkip(&er, wt);

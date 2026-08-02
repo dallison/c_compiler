@@ -540,6 +540,8 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   str->pack = compiler->pack_alignment;
   // Apply layout attributes (packed, aligned) before laying out members so the
   // member offsets reflect them in a single pass.
+  AttributeListDestruct(&tag->attributes);
+  AttributeListClone(&tag->attributes, attributes);
   StructApplyLayoutAttributes(str, attributes);
   for (size_t i = 0; i < bases->length; i++) {
     VectorAppend(&str->bases, bases->value.p[i]);

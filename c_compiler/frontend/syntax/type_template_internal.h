@@ -63,6 +63,8 @@ bool FindPackExpansionInTemplateArgument(TemplateArgument* arg, Vector* args,
 Vector* TemplateArgumentVectorCopyWithPackElement(Vector* args, int pack_index,
                                                   TemplateArgument* element);
 void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args);
+void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
+                                        Vector* args);
 void SubstituteStaticMemberInitializerValue(TypeParser* parser, Symbol* symbol,
                                             struct ASTNode* initializer,
                                             Vector* args);

@@ -20,6 +20,7 @@
 #include "member_pointer.h"
 #include "module_identity.h"
 #include "symbol_table.h"
+#include "type_template_internal.h"
 
 bool StorageIs(Storage storage, Storage value) {
   return (storage & value) != 0;
@@ -43,6 +44,8 @@ Attribute* NewAttribute(const char* name) {
   StringInit(&attr->name, name);
   NormalizeAttributeName(&attr->name);
   VectorInit(&attr->args);
+  attr->dependent_alignas_type = NULL;
+  attr->dependent_alignas_expr = NULL;
   return attr;
 }
 
@@ -50,6 +53,8 @@ void AttributeDestruct(Attribute* attr) {
   StringDestruct(&attr->name);
   VectorDestructWithContents(&attr->args, (VectorElementDestructor)StringDestruct,
                              /*free_element=*/true);
+  TypeRecordDelete(attr->dependent_alignas_type);
+  ASTNodeDelete(attr->dependent_alignas_expr);
 }
 
 void AttributeDelete(Attribute* attr) {
@@ -69,6 +74,13 @@ Attribute* AttributeClone(Attribute* attr) {
     String* a = attr->args.value.p[i];
     VectorAppend(&copy->args, NewString(a->value));
   }
+  copy->dependent_alignas_type =
+      attr->dependent_alignas_type != NULL
+          ? TypeRecordCopy(attr->dependent_alignas_type)
+          : NULL;
+  copy->dependent_alignas_expr =
+      ASTNodeClone(attr->dependent_alignas_expr, IdentityCloneNode,
+                   NULL, NULL);
   return copy;
 }
 

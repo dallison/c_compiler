@@ -2916,6 +2916,33 @@ static ASTNode* RewriteClonedDependentMemberAddress(ASTNode* node) {
   return result;
 }
 
+static void QueueODRUsedStaticDataMember(StructMember* member) {
+  if (member == NULL || member->symbol == NULL || !member->is_static ||
+      member->is_member_function || member->default_initializer == NULL) {
+    return;
+  }
+  Symbol* symbol = member->symbol;
+  if (symbol->asm_name.length == 0) {
+    SymbolSetCXXMangledAsmName(symbol);
+  }
+  if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+    return;
+  }
+
+  symbol->flags.address_taken = true;
+  symbol->flags.is_defined = true;
+  symbol->flags.is_template = false;
+  symbol->flags.is_weak = true;
+  Vector* declarations = NewVector();
+  VectorAppend(
+      declarations,
+      NewVariableDeclarationASTNode(
+          symbol, CloneCXXDefaultMemberInitializer(member->default_initializer),
+          symbol->location));
+  VectorAppend(&compiler->pending_template_instantiations,
+               NewDeclarationListASTNode(declarations, symbol->location));
+}
+
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
   if (node->op == AST_OP(ptr_scale)) {
@@ -3451,14 +3478,21 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
             (member->is_static ||
              StorageIs(member->symbol->storage, STO(typedef)) ||
              member->symbol->flags.value_set)) {
-          if (member->symbol->flags.value_set &&
+          bool address_operand =
+              (node->flags & kASTNeedAddress) != 0 ||
+              (node->parent != NULL &&
+               node->parent->op == AST_OP(address));
+          if (address_operand && member->is_static) {
+            QueueODRUsedStaticDataMember(member);
+          }
+          if (member->symbol->flags.value_set && !address_operand &&
               TypeIsIntegral(member->symbol->type)) {
             TypeRecord* value_type = TypeRecordCopy(member->symbol->type);
             TypeRecordDelete(concrete);
             return NewIntConstantASTNode(member->symbol->value.ivalue,
                                          value_type, node->location);
           }
-          if (member->symbol->flags.value_set &&
+          if (member->symbol->flags.value_set && !address_operand &&
               TypeIsFloatingPoint(member->symbol->type)) {
             TypeRecord* value_type = TypeRecordCopy(member->symbol->type);
             double value = member->symbol->value.fvalue;
@@ -4250,6 +4284,41 @@ static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
   return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
 }
 
+static TypeRecord* ResolveClonedDependentTypedef(
+    TemplateFunctionBodyClone* clone, TypeRecord* type) {
+  if (clone == NULL || type == NULL || type->dependent_member_name == NULL) {
+    return NULL;
+  }
+  TypeRecord* scope = TypeRecordCopy(type);
+  StringDelete(scope->dependent_member_name);
+  scope->dependent_member_name = NULL;
+  TypeRecord* owner =
+      SubstituteTemplateParameters(clone->parser, scope, clone->args);
+  RebaseTemplateParameterIndices(owner,
+                                 clone->rebase_template_parameter_base);
+  owner = TypeMaterializeClassTemplateSpecialization(
+      clone->parser->syntax, owner);
+  TypeRecordDelete(scope);
+
+  TypeRecord* result = NULL;
+  if (owner != NULL && TypeIsStructOrUnion(owner) &&
+      owner->info.struct_info != NULL) {
+    StructMember* member =
+        FindStructMember(owner->info.struct_info,
+                         type->dependent_member_name);
+    if (member != NULL && member->symbol != NULL &&
+        member->symbol->type != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      result = TypeRecordCopy(member->symbol->type);
+      result->qualifiers |= type->qualifiers;
+      result = TypeMaterializeClassTemplateSpecialization(
+          clone->parser->syntax, result);
+    }
+  }
+  TypeRecordDelete(owner);
+  return result;
+}
+
 /* Post-clone pass: re-resolve already-typed construction calls in the cloned
  * body. Constructor calls may still reference the generic template's overload
  * set, and typedef class functional casts (e.g. `alias(args)`) may still carry
@@ -4300,6 +4369,17 @@ static ASTNode* ReanalyzeClonedResolvedCall(
                                        clone->args);
       RebaseTemplateParameterIndices(concrete_type,
                                      clone->rebase_template_parameter_base);
+      concrete_type = TypeMaterializeClassTemplateSpecialization(
+          clone->parser->syntax, concrete_type);
+    }
+    if (concrete_type != NULL &&
+        TypeContainsTemplateParameter(concrete_type)) {
+      TypeRecord* resolved =
+          ResolveClonedDependentTypedef(clone, id->symbol->type);
+      if (resolved != NULL) {
+        TypeRecordDelete(concrete_type);
+        concrete_type = resolved;
+      }
     }
     if (!TypeIsStructOrUnion(concrete_type) &&
         !TypeContainsTemplateParameter(concrete_type) &&
@@ -4345,6 +4425,17 @@ static ASTNode* ReanalyzeClonedResolvedCall(
         node->child_id = child_id;
       }
       return analyzed;
+    }
+    if (TypeContainsTemplateParameter(concrete_type)) {
+      Symbol* partial = NewSymbol(id->symbol->name.value, concrete_type,
+                                  id->symbol->storage);
+      partial->flags = id->symbol->flags;
+      partial->location = id->symbol->location;
+      partial->alignment = id->symbol->alignment;
+      partial->namespace_ = id->symbol->namespace_;
+      id->symbol = partial;
+      ASTNodeSetType(call->left, partial->type);
+      return node;
     }
     TypeRecordDelete(concrete_type);
   }
