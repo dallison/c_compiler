@@ -7,7 +7,9 @@ execution suite passes 261/261 and the ranges suite passes 4/4. C++23 mode,
 template-template parameters, static call/subscript operators, `if consteval`,
 explicit object parameters, `std::generator`, `<format>`, `<print>`, initial
 `import std`, `<span>`, multidimensional subscripts, and `<mdspan>` have been
-implemented.
+implemented.  The low-coupling C++23 audit additionally completed static
+lambdas, `size_t` literal suffixes, trailing labels, alias init-statements, and
+simplified implicit move.
 
 ## Immediate validation gates
 
@@ -81,9 +83,19 @@ implemented.
       (`object[i, j]`), distinct from the completed static `operator[]` work.
 - [x] Implement `auto(x)` and `auto{x}` decay-copy syntax.
 - [x] Implement the `#warning` preprocessing directive.
-- [ ] Audit the remaining low-coupling C++23 language proposals and add explicit
+- [x] Audit the remaining low-coupling C++23 language proposals and add explicit
       feature tests or unsupported diagnostics rather than silently accepting
       partial behavior.
+  - Complete static lambdas and parameter-list omission, matching the advertised
+    `__cpp_static_call_operator` feature level.
+  - Implement P0330 `z`/`uz` literals, P2324 trailing labels, P2360 alias
+    init-statements, and P2266 simplified implicit move.
+  - Check every advertised C++23 language macro in the central C++23 mode test
+    and verify that it is absent in C++20 mode.
+  - Keep range-for temporary lifetime extension, named/delimited escapes,
+    inherited-constructor CTAD, the C++23 `consteval` propagation update, source
+    encoding changes, and the expanded `constexpr` rules explicitly deferred;
+    their newer feature-macro levels are not advertised.
 
 ## Remaining C++23 library work
 

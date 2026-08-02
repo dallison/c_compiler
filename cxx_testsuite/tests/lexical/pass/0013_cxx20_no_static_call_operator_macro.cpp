@@ -16,6 +16,18 @@
 #error "__cpp_auto_cast must not be defined before C++23"
 #endif
 
+#ifdef __cpp_multidimensional_subscript
+#error "__cpp_multidimensional_subscript must not be defined before C++23"
+#endif
+
+#ifdef __cpp_size_t_suffix
+#error "__cpp_size_t_suffix must not be defined before C++23"
+#endif
+
+#ifdef __cpp_implicit_move
+#error "__cpp_implicit_move must not be defined before C++23"
+#endif
+
 int main(void) {
   return 0;
 }

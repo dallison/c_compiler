@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <assert.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include "concepts.h"
@@ -1403,8 +1404,20 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
                        spelling[1] == 'b' || spelling[1] == 'B' ||
                        (spelling[1] >= '0' && spelling[1] <= '7'));
   bool has_u = StringContainsChar(&lex->suffix, 'U');
+  bool has_z = StringContainsChar(&lex->suffix, 'Z');
   bool has_ll = StringContainsString(&lex->suffix, "LL");
   bool has_l = !has_ll && StringContainsChar(&lex->suffix, 'L');
+  if (has_z) {
+    TypeRecord* type = NewSizeTypeRecord();
+    if (!has_u) {
+      // The plain z suffix denotes the signed integer type corresponding to
+      // size_t; adding u selects size_t itself.
+      type->type &= ~kTypeUnsigned;
+    }
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    return NewIntConstantASTNode(value, type, location);
+  }
   LexNextToken(lex);
 
   uint64_t uval = (uint64_t)value;
@@ -1446,6 +1459,19 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
   TypeRecord* type = NewTypeRecordWithSize(type_specifier, kQualPlain);
   return NewIntConstantASTNode(value, type,
                                syntax->lex->current_token_location);
+}
+
+static bool IsCXXSizeLiteralSuffix(String* suffix) {
+  if (suffix == NULL || (suffix->length != 1 && suffix->length != 2)) {
+    return false;
+  }
+  char first = toupper((unsigned char)suffix->value[0]);
+  if (suffix->length == 1) {
+    return first == 'Z';
+  }
+  char second = toupper((unsigned char)suffix->value[1]);
+  return (first == 'U' && second == 'Z') ||
+         (first == 'Z' && second == 'U');
 }
 
 static void CXXUserDefinedLiteralOperatorName(String* name, String* suffix) {
@@ -2387,11 +2413,13 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
 }
 
 // Parse the optional `(params)` of a lambda into `func`'s prototype.  An
-// omitted parameter list is allowed and leaves the prototype empty.
-static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
+// omitted parameter list is allowed and leaves the prototype empty.  Return
+// whether the parameter list was present so C++23's expanded parameter-list
+// omission can be diagnosed in older modes.
+static bool ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
                                      TokenClass followers) {
   if (!LexMatch(syntax->lex, TOK(lparen))) {
-    return;
+    return false;
   }
   int arg_number = 0;
   while (!LexLookingAt(syntax->lex, TOK(rparen)) && !LexEof(syntax->lex)) {
@@ -2440,6 +2468,7 @@ static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
     }
   }
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  return true;
 }
 
 static void ParseLambdaTrailingRequiresClause(Syntax* syntax,
@@ -2490,12 +2519,14 @@ static bool SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
 static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
                                                       TypeRecord* func,
                                                       bool* is_mutable,
+                                                      bool* is_static,
                                                       bool* is_constexpr,
                                                       bool* is_consteval,
                                                       bool* is_noexcept,
                                                       TypeRecord* default_type,
                                                       TokenClass followers) {
   *is_mutable = false;
+  *is_static = false;
   *is_constexpr = false;
   *is_consteval = false;
   *is_noexcept = false;
@@ -2503,6 +2534,11 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
   while (keep_parsing) {
     if (LexMatch(syntax->lex, TOK(mutable))) {
       *is_mutable = true;
+    } else if (LexMatch(syntax->lex, TOK(static))) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        SyntaxError(syntax, "static lambda requires C++23");
+      }
+      *is_static = true;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
       *is_constexpr = true;
     } else if (LexMatch(syntax->lex, TOK(consteval))) {
@@ -2513,6 +2549,13 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
     } else {
       keep_parsing = false;
     }
+  }
+  if (*is_static && *is_mutable) {
+    SyntaxError(syntax, "static lambda cannot be mutable");
+  }
+  if (*is_static && func->info.function.has_explicit_object_parameter) {
+    SyntaxError(syntax,
+                "static lambda cannot have an explicit object parameter");
   }
 
   TypeRecord* return_type = default_type;
@@ -2576,7 +2619,8 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
 static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
                                      TypeRecord* return_type, bool is_mutable,
                                      Vector* explicit_template_params,
-                                     SourceLocation location) {
+                                     SourceLocation location,
+                                     bool* out_is_static) {
   Struct* closure = closure_type->info.struct_info;
   TypeRecord* func = NewFunctionTypeRecord();
   // A C++20 explicit template-parameter-list (`[]<class T>(...)`) precedes the
@@ -2588,16 +2632,24 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
                    explicit_template_params->value.p[i]);
     }
   }
-  ParseLambdaParameterList(syntax, func, TC(closebra));
+  bool has_parameter_list =
+      ParseLambdaParameterList(syntax, func, TC(closebra));
+  if (!has_parameter_list &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+      !LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax,
+                "lambda specifiers without a parameter list require C++23");
+  }
+  bool is_static = false;
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_noexcept = false;
-  return_type = ParseLambdaSpecifiersAndReturnType(syntax, func, &is_mutable,
-                                                   &is_constexpr, &is_consteval,
-                                                   &is_noexcept, return_type,
-                                                   TC(closebra));
+  return_type = ParseLambdaSpecifiersAndReturnType(
+      syntax, func, &is_mutable, &is_static, &is_constexpr, &is_consteval,
+      &is_noexcept, return_type, TC(closebra));
   func->info.function.is_const_member =
-      !func->info.function.has_explicit_object_parameter && !is_mutable;
+      !func->info.function.has_explicit_object_parameter && !is_mutable &&
+      !is_static;
   // A closure's call operator is a constexpr function whenever it satisfies the
   // constexpr requirements, whether or not `constexpr` was written
   // ([expr.prim.lambda.closure]/4).  Bodies that do not satisfy them are only
@@ -2614,8 +2666,10 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
       SyntaxError(syntax,
                   "lambda with an explicit object parameter cannot be mutable");
     }
-  } else {
+  } else if (!is_static) {
     TypeRecordAddCXXThisParameter(func, closure, location);
+  } else {
+    func->info.function.cxx_member_owner = closure;
   }
 
   Symbol* op = NewSymbol("operator()", func, STO(implicit));
@@ -2639,8 +2693,10 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
 
   StructMember* member = NewStructMember(op);
   member->is_member_function = true;
+  member->is_static = is_static;
   member->access = kAccessPublic;
   StructAddSyntheticMember(closure, member);
+  *out_is_static = is_static;
   return op;
 }
 
@@ -2991,11 +3047,17 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   // body ([expr.prim.lambda.closure]/4), exactly like an `auto`-returning
   // function, so hand operator() an `auto` placeholder and let the ordinary
   // return-statement deduction fill it in.
+  bool is_static = false;
   Symbol* call_operator =
       NewLambdaCallOperator(syntax, closure_type,
                             NewTypeRecord(kTypeAuto, kQualPlain),
                             /*is_mutable=*/false, explicit_template_params,
-                            location);
+                            location, &is_static);
+  if (is_static &&
+      (captures.length > 0 ||
+       capture_default != kLambdaCaptureDefaultNone)) {
+    SyntaxError(syntax, "static lambda cannot have captures");
+  }
   ParseLambdaBody(syntax, call_operator, &captures, followers);
   if (opened_template_scope) {
     // The TemplateParameter objects were transferred into the operator()'s
@@ -3003,7 +3065,7 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
     VectorDelete(explicit_template_params);
     SyntaxCloseScope(syntax);
   }
-  if (capture_default != kLambdaCaptureDefaultNone) {
+  if (!is_static && capture_default != kLambdaCaptureDefaultNone) {
     Vector body_locals;
     VectorInit(&body_locals);
     ASTNodeVisit(call_operator->type->info.function.body,
@@ -3018,10 +3080,12 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   AddImplicitLambdaClosureSpecialMembers(
       syntax, closure_type->info.struct_info, closure_type->info.struct_info->tag_symbol,
       captures.length > 0, explicit_template_params != NULL);
-  LambdaRewrite rewrite = {
-      &captures, call_operator->type->info.function.prototype.value.p[0]};
-  ASTNodeVisit(call_operator->type->info.function.body,
-               RewriteLambdaCaptureUses, 0, &rewrite);
+  if (!is_static && captures.length > 0) {
+    LambdaRewrite rewrite = {
+        &captures, call_operator->type->info.function.prototype.value.p[0]};
+    ASTNodeVisit(call_operator->type->info.function.body,
+                 RewriteLambdaCaptureUses, 0, &rewrite);
+  }
 
   // Queue operator() for analysis/codegen unless the closure captures a
   // non-pack value whose type still names an enclosing template parameter.
@@ -3293,6 +3357,20 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   // Check for integer constant.
   if (LexLookingAt(lex, TOK(number))) {
     if (lex->ud_suffix.length != 0) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+          IsCXXSizeLiteralSuffix(&lex->ud_suffix)) {
+        SyntaxError(syntax, "size_t literal suffix requires C++23");
+      } else if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        char first =
+            toupper((unsigned char)lex->ud_suffix.value[0]);
+        char second =
+            lex->ud_suffix.length > 1
+                ? toupper((unsigned char)lex->ud_suffix.value[1])
+                : '\0';
+        if (first == 'Z' || (first == 'U' && second == 'Z')) {
+          SyntaxError(syntax, "invalid size_t literal suffix");
+        }
+      }
       return ParseCXXUserDefinedIntegerLiteral(syntax);
     }
     return ParseIntegerConstant(syntax, followers);

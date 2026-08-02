@@ -1331,7 +1331,7 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // Check the case labels for duplicates. Since they are sorted we only need
   // to check for two adjacent values being the same.  This is faster than doing
   // an n^2 search for each value;
-  for (size_t i = 0; i < num_cases - 1; i++) {
+  for (size_t i = 0; i + 1 < num_cases; i++) {
     int64_t case_value1 = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
     int64_t case_value2 =
         ((CaseLabelASTNode*)(node->cases.value.p[i + 1]))->value;
@@ -1625,18 +1625,51 @@ static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
          !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
 }
 
-static bool IsEligibleCXXImplicitMoveReturnValue(ASTNode* return_value) {
-  if (!CompilerIsCXX() || return_value == NULL ||
-      return_value->op != AST_OP(identifier) ||
-      compiler->current_function == NULL ||
-      TypeIsReference(compiler->current_function->next) ||
-      !TypeIsStructOrUnion(compiler->current_function->next) ||
-      !TypeEqual(return_value->type, compiler->current_function->next)) {
+static bool IsCXXMoveEligibleIdentifier(ASTNode* expression) {
+  if (!CompilerIsCXX() || expression == NULL ||
+      expression->op != AST_OP(identifier)) {
     return false;
   }
-  Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
-  return sym != NULL && (sym->flags.is_local || sym->flags.is_argument) &&
-         !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
+  Symbol* sym = ((IdentifierASTNode*)expression)->symbol;
+  if (sym == NULL || (!sym->flags.is_local && !sym->flags.is_argument) ||
+      sym->flags.is_temp || StorageIs(sym->storage, STO(static))) {
+    return false;
+  }
+  TypeRecord* object_type = sym->type;
+  if (object_type == NULL) {
+    return false;
+  }
+  if (TypeIsReference(object_type)) {
+    if (object_type->declarator != kDeclRValueReference) {
+      return false;
+    }
+    object_type = object_type->next;
+  }
+  // DaveCC expression nodes do not retain top-level cv-qualification from an
+  // identifier.  Keep const operands as lvalues so overload resolution cannot
+  // incorrectly select a non-const move constructor.
+  return object_type != NULL && !TypeIsConst(object_type) &&
+         !TypeIsVolatile(object_type);
+}
+
+static bool IsEligibleCXXImplicitMoveReturnValue(ASTNode* return_value) {
+  if (!IsCXXMoveEligibleIdentifier(return_value) ||
+      compiler->current_function == NULL) {
+    return false;
+  }
+  TypeRecord* return_type = compiler->current_function->next;
+  TypeRecord* target_type = return_type;
+  if (TypeIsReference(return_type)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23) ||
+        return_type->declarator != kDeclRValueReference) {
+      return false;
+    }
+    target_type = return_type->next;
+  } else if (!TypeIsStructOrUnion(return_type)) {
+    return false;
+  }
+  return target_type != NULL &&
+         TypeEqualIgnoringTopLevelQualifiers(return_value->type, target_type);
 }
 
 static bool IsCXXFunctionArgumentReturnValue(ASTNode* return_value) {
@@ -1751,7 +1784,8 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   if (IsEligibleCXXImplicitMoveReturnValue(return_value)) {
     ASTValueCategory original_category = return_value->value_category;
     return_value->value_category = kValueCategoryXvalue;
-    if (IsCXXFunctionArgumentReturnValue(return_value)) {
+    if (IsCXXFunctionArgumentReturnValue(return_value) &&
+        !TypeIsReference(compiler->current_function->next)) {
       ASTNode* materialized = MaterializeCXXReturnByMove(return_value);
       if (materialized != return_value) {
         ASTNodeReplaceChild((ASTNode*)node, 0, materialized, false);
@@ -1763,6 +1797,25 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   }
 
   bool cxx_return_elision = IsEligibleCXXReturnElisionValue(return_value);
+  Symbol* named_return_symbol =
+      return_value != NULL && return_value->op == AST_OP(identifier)
+          ? ((IdentifierASTNode*)return_value)->symbol
+          : NULL;
+  TypeRecord* named_return_object_type =
+      named_return_symbol != NULL ? named_return_symbol->type : NULL;
+  if (named_return_object_type != NULL &&
+      TypeIsReference(named_return_object_type)) {
+    named_return_object_type = named_return_object_type->next;
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+      named_return_object_type != NULL &&
+      TypeIsConst(named_return_object_type) &&
+      TypeIsStructOrUnion(compiler->current_function->next) &&
+      TypeEqualIgnoringTopLevelQualifiers(
+          return_value->type, compiler->current_function->next)) {
+    CXXValidateReturnInitialization(compiler->current_function->next,
+                                    return_value);
+  }
   if (!cxx_return_elision && return_value != NULL &&
       TypeIsStructOrUnion(compiler->current_function->next) &&
       TypeEqual(return_value->type, compiler->current_function->next) &&

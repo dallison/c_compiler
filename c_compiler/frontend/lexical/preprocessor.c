@@ -193,6 +193,8 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_static_call_operator", "202207L");
       PreprocessorDefineMacro(p, "__cpp_multidimensional_subscript",
                               "202211L");
+      PreprocessorDefineMacro(p, "__cpp_size_t_suffix", "202011L");
+      PreprocessorDefineMacro(p, "__cpp_implicit_move", "202207L");
     }
   }
 

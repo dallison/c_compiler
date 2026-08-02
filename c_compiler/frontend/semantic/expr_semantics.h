@@ -53,6 +53,10 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
 StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
                                                     bool allow_explicit);
 
+// Validate class copy-initialization of a named return operand, including the
+// constructor that must remain viable when NRVO later elides the call.
+void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from);
+
 // Lower a bare braced-init-list used as an expression (function argument,
 // return value or assignment right-hand side) into a temporary of `target`
 // type initialized by the braces.  Returns the analyzed compound-literal

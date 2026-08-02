@@ -64,6 +64,22 @@
 #error "__cpp_auto_cast has the wrong value"
 #endif
 
+#if __cpp_multidimensional_subscript != 202211L
+#error "__cpp_multidimensional_subscript has the wrong value"
+#endif
+
+#if __cpp_size_t_suffix != 202011L
+#error "__cpp_size_t_suffix has the wrong value"
+#endif
+
+#if __cpp_implicit_move != 202207L
+#error "__cpp_implicit_move has the wrong value"
+#endif
+
+#if 1uz != 1
+#error "size_t literals must work in preprocessing expressions"
+#endif
+
 int main(void) {
   return 0;
 }

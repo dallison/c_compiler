@@ -5421,6 +5421,16 @@ StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* fro
       to, from, allow_explicit, /*allow_same_class=*/false);
 }
 
+void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from) {
+  StructMember* constructor = FindConvertingConstructorCandidate(
+      to, from, /*allow_explicit=*/false, /*allow_same_class=*/true);
+  if (constructor == NULL || constructor->symbol == NULL) {
+    SemanticError(from, "No viable constructor for return value");
+    return;
+  }
+  CheckDeletedFunctionUse(constructor->symbol, from);
+}
+
 // Converts `from` to the class type `to` by constructing a temporary through a
 // viable converting constructor (`to(from)`), splicing the resulting
 // prvalue temporary in place of `from`.  Returns true if such a conversion was
@@ -9600,6 +9610,30 @@ static void EnsureThrowCopyConstructor(ThrowASTNode* node) {
   TypeParserDestruct(&parser);
 }
 
+static bool IsCXX23MoveEligibleThrowOperand(ASTNode* expression) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX23) || expression == NULL ||
+      expression->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* sym = ((IdentifierASTNode*)expression)->symbol;
+  if (sym == NULL || (!sym->flags.is_local && !sym->flags.is_argument) ||
+      sym->flags.is_temp || StorageIs(sym->storage, STO(static))) {
+    return false;
+  }
+  TypeRecord* object_type = sym->type;
+  if (object_type == NULL) {
+    return false;
+  }
+  if (TypeIsReference(object_type)) {
+    if (object_type->declarator != kDeclRValueReference) {
+      return false;
+    }
+    object_type = object_type->next;
+  }
+  return object_type != NULL && !TypeIsConst(object_type) &&
+         !TypeIsVolatile(object_type);
+}
+
 static void AnalyzeThrowExpression(ThrowASTNode* node) {
   if (!CompilerExceptionsEnabled()) {
     SemanticError((ASTNode*)node,
@@ -9613,6 +9647,9 @@ static void AnalyzeThrowExpression(ThrowASTNode* node) {
     }
   } else {
     node->expr = AnalyzeExpression(node->expr);
+    if (IsCXX23MoveEligibleThrowOperand(node->expr)) {
+      node->expr->value_category = kValueCategoryXvalue;
+    }
     if (TypeIsVoid(node->expr->type) || TypeIsFunction(node->expr->type)) {
       SemanticError(node->expr, "Cannot throw expression of this type");
     }

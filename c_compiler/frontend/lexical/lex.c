@@ -511,6 +511,34 @@ static int AppendUTF8CodePoint(String* output, uint32_t cp) {
 // If LLU or LU then it is reversed to ULL or UL.
 static void CollectIntegerSuffix(Lex* lex) {
   StringClear(&lex->suffix);
+  // C++23 adds the size suffix `z`/`Z`, optionally combined with `u`/`U`
+  // in either order.  Recognize the complete suffix before the C++ user-
+  // defined-literal path sees it, but only when it ends the preprocessing
+  // number: `1z_value` remains one user-defined literal suffix.
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    size_t start = lex->pos;
+    size_t length = 0;
+    char first = toupper((unsigned char)lex->line.value[start]);
+    char second =
+        start + 1 < lex->line.length
+            ? toupper((unsigned char)lex->line.value[start + 1])
+            : '\0';
+    if (first == 'Z') {
+      length = second == 'U' ? 2 : 1;
+    } else if (first == 'U' && second == 'Z') {
+      length = 2;
+    }
+    if (length != 0 &&
+        LexIdentifierCharByteCount(lex->line.value, start + length,
+                                   lex->line.length, false) == 0) {
+      for (size_t i = 0; i < length; i++) {
+        StringAppendChar(
+            &lex->suffix,
+            toupper((unsigned char)lex->line.value[lex->pos++]));
+      }
+      return;
+    }
+  }
   if (CompilerCXXAtLeast(kLanguageStandardCXX11)) {
     size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
                                               lex->line.length, true);

@@ -509,6 +509,23 @@ static bool SelectionHasInitStatement(Syntax* syntax) {
   return found;
 }
 
+static bool LookingAtUsingAliasDeclaration(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(using))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool is_alias = LexLookingAt(syntax->lex, TOK(identifier));
+  if (is_alias) {
+    LexNextToken(syntax->lex);
+    is_alias = LexLookingAt(syntax->lex, TOK(equal));
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return is_alias;
+}
+
 static ASTNode* ParseSelectionCondition(Syntax* syntax, TokenClass followers,
                                         ASTNode** out_cond_decl,
                                         ASTNode** out_init,
@@ -529,6 +546,11 @@ static ASTNode* ParseSelectionCondition(Syntax* syntax, TokenClass followers,
       LexMatch(syntax->lex, TOK(semicolon));
       *out_init = NewCompoundStatementASTNode(NewVector(), location);
     } else if (SyntaxLookingAtDeclaration(syntax)) {
+      if (LookingAtUsingAliasDeclaration(syntax) &&
+          !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        SyntaxError(syntax,
+                    "alias declaration in init-statement requires C++23");
+      }
       // A simple-declaration init-statement consumes its own ';'.
       *out_init = SyntaxParseLocalDeclaration(syntax);
     } else {
@@ -1308,7 +1330,14 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
     return range_for;
   }
   if (!LexLookingAt(lex, TOK(semicolon))) {
-    if (SyntaxLookingAtType(syntax)) {
+    bool alias_init = LookingAtUsingAliasDeclaration(syntax);
+    if (alias_init) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        SyntaxError(syntax,
+                    "alias declaration in init-statement requires C++23");
+      }
+      c1 = SyntaxParseLocalDeclaration(syntax);
+    } else if (SyntaxLookingAtType(syntax)) {
       c1 = SyntaxParseLocalDeclaration(syntax);
     } else {
       c1 = SyntaxParseExpression(syntax, followers);
@@ -1316,6 +1345,12 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
     }
   } else {
     SyntaxNeedSemicolon(syntax, followers | TC(expr));
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    range_for = TryParseCXXRangeForStatement(syntax, followers, location);
+    if (range_for != NULL) {
+      return FinishInitScope(syntax, c1, true, range_for, location);
+    }
   }
   if (!LexLookingAt(lex, TOK(semicolon))) {
     c2 = SyntaxParseExpression(syntax, followers);
@@ -1368,8 +1403,12 @@ static ASTNode* ParseCaseStatement(Syntax* syntax, TokenClass followers,
   //
   ASTNode* stmt = NULL;
   if (!LexLookingAt(syntax->lex, TOK(case)) &&
-      !LexLookingAt(syntax->lex, TOK(default))) {
+      !LexLookingAt(syntax->lex, TOK(default)) &&
+      !LexLookingAt(syntax->lex, TOK(rbrace))) {
     stmt = SyntaxParseStatement(syntax, followers);
+  } else if (LexLookingAt(syntax->lex, TOK(rbrace)) &&
+             !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    SyntaxError(syntax, "label at end of compound statement requires C++23");
   }
   return NewCaseLabelASTNode(expr, stmt, location);
 }
@@ -1382,7 +1421,14 @@ static ASTNode* ParseDefaultStatement(Syntax* syntax, TokenClass followers,
   if (!LexMatch(syntax->lex, TOK(colon))) {
     SyntaxError(syntax, "Missing colon after default");
   }
-  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  ASTNode* stmt = NULL;
+  if (LexLookingAt(syntax->lex, TOK(rbrace))) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax, "label at end of compound statement requires C++23");
+    }
+  } else {
+    stmt = SyntaxParseStatement(syntax, followers);
+  }
   return NewCaseLabelASTNode(NULL, stmt, location);
 }
 
@@ -1561,7 +1607,14 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
         StringInit(&label_name, lex->spelling.value);
         LexNextToken(lex);  // Consume label name.
         LexNextToken(lex);  // Consume colon.
-        ASTNode* label_stmt = SyntaxParseStatement(syntax, followers);
+        ASTNode* label_stmt = NULL;
+        if (LexLookingAt(lex, TOK(rbrace))) {
+          if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+            SyntaxError(syntax, "label at end of compound statement requires C++23");
+          }
+        } else {
+          label_stmt = SyntaxParseStatement(syntax, followers);
+        }
         stmt = NewLabelASTNode(label_name.value, label_stmt, false,
                                syntax->lex->current_token_location);
         need_semicolon = false;
