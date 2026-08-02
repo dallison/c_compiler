@@ -6285,6 +6285,49 @@ bool TypeIsCXXInitializerList(TypeRecord* type) {
   return CXXSymbolIsStdInitializerListTemplate(type->template_origin);
 }
 
+/* Public: is `info` an *initializer-list constructor* ([dcl.init.list]/2)?
+ * That is a constructor whose first user parameter is `std::initializer_list<E>`
+ * (or a reference to one) and whose remaining parameters all have default
+ * arguments.  A constructor that merely mentions an initializer_list somewhere
+ * later in its parameter list -- `expected(unexpect_t, initializer_list<U>,
+ * Args&&...)`, say -- is not one, and must not make `T x{...}` pass the whole
+ * braced-init-list as a single argument. */
+bool CXXConstructorIsInitializerListConstructor(FunctionInfo* info) {
+  if (info == NULL || !info->is_constructor) {
+    return false;
+  }
+  size_t first = 0;
+  while (first < info->prototype.length) {
+    Symbol* formal = info->prototype.value.p[first];
+    if (formal == NULL || (!StringEqual(&formal->name, "this") &&
+                           !StringEqual(&formal->name, "__complete_object"))) {
+      break;
+    }
+    first++;
+  }
+  if (first >= info->prototype.length) {
+    return false;
+  }
+  Symbol* formal = info->prototype.value.p[first];
+  if (formal == NULL) {
+    return false;
+  }
+  TypeRecord* formal_type = formal->type;
+  if (TypeIsReference(formal_type)) {
+    formal_type = formal_type->next;
+  }
+  if (!TypeIsCXXInitializerList(formal_type)) {
+    return false;
+  }
+  for (size_t i = first + 1; i < info->prototype.length; i++) {
+    Symbol* rest = info->prototype.value.p[i];
+    if (rest != NULL && rest->default_argument == NULL) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Public: the element type T of a `std::initializer_list<T>` type, or NULL. */
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type) {
   if (!TypeIsCXXInitializerList(type) || type->template_arguments == NULL ||

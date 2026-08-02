@@ -49,8 +49,14 @@ static Symbol* CommonTypePlaceholderOrigin(void) {
 }
 
 bool TypeRecordIsInvokeResultPlaceholder(TypeRecord* type) {
-  return type != NULL && type->template_origin == InvokeResultPlaceholderOrigin() &&
-         type->template_arguments != NULL;
+  if (type == NULL || type->template_origin == NULL ||
+      type->template_arguments == NULL) {
+    return false;
+  }
+  Symbol* origin = type->template_origin;
+  return origin == InvokeResultPlaceholderOrigin() ||
+         (origin->flags.invented && origin->name.value != NULL &&
+          strcmp(origin->name.value, "__davecc_invoke_result_t") == 0);
 }
 
 static Vector* TypeVectorFromTemplateArguments(Vector* template_args) {
@@ -156,8 +162,14 @@ TypeRecord* TypeRecordNewInvokeResultPlaceholder(Vector* type_args) {
 }
 
 bool TypeRecordIsCommonTypePlaceholder(TypeRecord* type) {
-  return type != NULL && type->template_origin == CommonTypePlaceholderOrigin() &&
-         type->template_arguments != NULL;
+  if (type == NULL || type->template_origin == NULL ||
+      type->template_arguments == NULL) {
+    return false;
+  }
+  Symbol* origin = type->template_origin;
+  return origin == CommonTypePlaceholderOrigin() ||
+         (origin->flags.invented && origin->name.value != NULL &&
+          strcmp(origin->name.value, "__davecc_common_type_t") == 0);
 }
 
 TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(TypeParser* parser,
@@ -360,32 +372,48 @@ static ASTNode* NewSyntheticLvalue(Syntax* syntax, TypeRecord* type) {
   return id;
 }
 
+// Builds the expression a trait's type operand stands for: `declval<T>()`,
+// which is an lvalue for `T&` and an xvalue otherwise -- including for a
+// non-reference `T`, since `declval<T>()` is declared to return `T&&`
+// ([declval]).  Modelling a non-reference operand as a prvalue instead would
+// stop it binding to an rvalue-reference parameter.
 static ASTNode* TypeTraitSyntheticExpressionFromType(Syntax* syntax,
                                                      TypeRecord* type) {
   type = MaterializeTraitType(syntax, type);
   if (type == NULL) {
     return NULL;
   }
+  TypeRecord* object_type = NULL;
+  bool is_lvalue = false;
   if (TypeIsReference(type)) {
-    TypeRecord* object_type = TypeTraitCopyOwnedSpine(type->next);
+    object_type = TypeTraitCopyOwnedSpine(type->next);
     if (object_type == NULL) {
       return NULL;
     }
     object_type->qualifiers |=
         (type->qualifiers & (kQualConst | kQualVolatile));
-    ASTNode* expr = NULL;
-    if (type->declarator == kDeclRValueReference) {
-      expr = NewSyntheticValue(syntax, object_type);
-      if (expr != NULL) {
-        expr->value_category = kValueCategoryXvalue;
-      }
-    } else {
-      expr = NewSyntheticLvalue(syntax, object_type);
-    }
-    TypeRecordDelete(object_type);
-    return expr;
+    is_lvalue = type->declarator != kDeclRValueReference;
+  } else {
+    object_type = TypeRecordCopy(type);
   }
-  return NewSyntheticValue(syntax, type);
+  ASTNode* expr = NULL;
+  if (is_lvalue) {
+    expr = NewSyntheticLvalue(syntax, object_type);
+  } else {
+    expr = NewSyntheticValue(syntax, object_type);
+    if (expr != NULL) {
+      expr->value_category = kValueCategoryXvalue;
+    }
+  }
+  // The node already carries the type and value category `declval` would give
+  // it.  Analyzing it again would recategorize the underlying temporary as a
+  // plain lvalue, so an rvalue operand would stop binding to an
+  // rvalue-reference parameter.
+  if (expr != NULL) {
+    expr->flags |= kASTAnalyzed;
+  }
+  TypeRecordDelete(object_type);
+  return expr;
 }
 
 static ASTNode* NewSyntheticTypeCallee(Syntax* syntax, TypeRecord* type) {
@@ -1200,8 +1228,8 @@ static bool TypeTraitIsInvocable(Syntax* syntax, Vector* type_args,
             : NewSyntheticValue(syntax, callable);
     Vector* actuals = NewVector();
     for (size_t i = 1; i < type_args->length; i++) {
-      ASTNode* arg =
-          NewSyntheticValue(syntax, (TypeRecord*)type_args->value.p[i]);
+      ASTNode* arg = TypeTraitSyntheticExpressionFromType(
+          syntax, (TypeRecord*)type_args->value.p[i]);
       if (arg == NULL) {
         ASTNodeDelete(callee);
         VectorDelete(actuals);
@@ -1687,8 +1715,12 @@ static TypeRecord* CXXTypeTraitInvokeResultTypeImpl(Syntax* syntax,
             : NewSyntheticValue(syntax, callable);
     Vector* actuals = NewVector();
     for (size_t i = 1; i < type_args->length; i++) {
-      ASTNode* arg =
-          NewSyntheticValue(syntax, (TypeRecord*)type_args->value.p[i]);
+      // An argument type `Ai` stands for an expression `declval<Ai>()`, whose
+      // value category follows from the reference kind ([meta.trans.other]).
+      // Modelling `Ai&&` as a prvalue instead would make it fail to bind to an
+      // rvalue-reference parameter, and disagree with is_invocable.
+      ASTNode* arg = TypeTraitSyntheticExpressionFromType(
+          syntax, (TypeRecord*)type_args->value.p[i]);
       if (arg == NULL) {
         ASTNodeDelete(callee);
         VectorDelete(actuals);

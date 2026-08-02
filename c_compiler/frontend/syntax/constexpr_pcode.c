@@ -2861,7 +2861,19 @@ static bool BuildPCodeStructObject(TypeRecord* type, ASTNode* initializer,
       continue;
     }
     if (init_index >= braced->initializers->length) {
-      break;
+      if (str->is_union) {
+        break;
+      }
+      // A member the braced list does not reach is initialized from its default
+      // member initializer, or value-initialized when it has none
+      // ([dcl.init.aggr]/5); the zeroed slot already models the latter.
+      if (member->default_initializer != NULL &&
+          !PCodeStoreInitializer(
+              member->symbol->type, member->default_initializer,
+              PCodeConstexprObjectSlot(object, member->index))) {
+        return false;
+      }
+      continue;
     }
     size_t slot_index = str->is_union ? 0 : member->index;
     if (!PCodeStoreInitializer(member->symbol->type,

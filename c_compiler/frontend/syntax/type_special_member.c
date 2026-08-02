@@ -456,6 +456,13 @@ void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
     return;
   }
   Struct* owner = func->info.function.cxx_member_owner;
+  if (owner->is_union) {
+    // Only one variant member of a union is ever alive, and which one is not
+    // known statically, so a union destructor never destroys its members; the
+    // owner of the union is responsible for destroying the active member
+    // before the union itself dies.
+    return;
+  }
   for (size_t i = owner->members.length; i > 0; i--) {
     StructMember* member = owner->members.value.p[i - 1];
     AppendCXXSingleMemberDestructorCalls(func, member, body, location);
@@ -833,15 +840,16 @@ void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
   member_symbol->value.func_defn = member_symbol;
   member_symbol->type->info.function.is_inline = true;
   member_symbol->type->info.function.definition = true;
+  // An explicitly defaulted function is implicitly constexpr whenever the
+  // corresponding implicit declaration would be ([dcl.fct.def.default]/3,
+  // [class.compare.default]).  Implicitly declared special members are marked
+  // constexpr where they are synthesized, so mark the explicitly defaulted ones
+  // here to match.  A body that turns out not to be constant simply fails the
+  // fold in the evaluator rather than being diagnosed up front.
+  member_symbol->type->info.function.is_constexpr = true;
 
   if (CXXFunctionIsThreeWayComparison(member_symbol->type) ||
       CXXFunctionIsEqualityComparison(member_symbol->type)) {
-    // A defaulted comparison operator is implicitly constexpr when it satisfies
-    // the requirements for a constexpr function ([class.compare.default]).  Mark
-    // it so its synthesized body can participate in constant evaluation; if a
-    // member subobject's comparison turns out not to be constant, the evaluator
-    // simply fails the fold.
-    member_symbol->type->info.function.is_constexpr = true;
     Vector* comparison_body = NewVector();
     if (CXXFunctionIsThreeWayComparison(member_symbol->type)) {
       AppendCXXThreeWayComparisons(parser, member_symbol, comparison_body,

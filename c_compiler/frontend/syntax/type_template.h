@@ -150,6 +150,7 @@ Symbol* TypeClassTemplatePlaceholderOrigin(TypeRecord* type);
 bool TypeClassTemplatePlaceholderAcceptsDeduced(TypeRecord* placeholder,
                                                 TypeRecord* deduced);
 bool TypeIsCXXInitializerList(TypeRecord* type);
+bool CXXConstructorIsInitializerListConstructor(FunctionInfo* info);
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
 TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,
                                               TypeRecord* element_type);

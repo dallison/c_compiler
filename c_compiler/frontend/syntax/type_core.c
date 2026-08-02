@@ -867,6 +867,11 @@ TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member) {
   if (member == NULL || member->symbol == NULL || member->symbol->type == NULL) {
     return NULL;
   }
+  // A pointer-to-member freezes the member's type, so a member function with a
+  // placeholder return type has to be deduced before it is copied.  Closures
+  // reach this through `&C::operator()` in deduction guides such as
+  // std::function's.
+  SemanticEnsureAutoReturnTypeDeduced(member->symbol->type);
   TypeRecord* type = TypeRecordCopy(member->symbol->type);
   if (!member->is_member_function || !TypeIsFunction(type)) {
     return type;

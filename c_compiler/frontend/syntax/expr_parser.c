@@ -2598,7 +2598,13 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
                                                    TC(closebra));
   func->info.function.is_const_member =
       !func->info.function.has_explicit_object_parameter && !is_mutable;
-  func->info.function.is_constexpr = is_constexpr;
+  // A closure's call operator is a constexpr function whenever it satisfies the
+  // constexpr requirements, whether or not `constexpr` was written
+  // ([expr.prim.lambda.closure]/4).  Bodies that do not satisfy them are only
+  // diagnosed where a constant expression is actually required, so marking
+  // every call operator constexpr costs nothing and lets closures be invoked
+  // during constant evaluation.
+  func->info.function.is_constexpr = true;
   func->info.function.is_consteval = is_consteval;
   func->info.function.is_noexcept = is_noexcept;
   TypeRecordChain(func, return_type);
@@ -2981,9 +2987,13 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
         syntax, syntax->current_template_parameter_count);
   }
 
+  // Without a trailing return type a lambda's return type is deduced from its
+  // body ([expr.prim.lambda.closure]/4), exactly like an `auto`-returning
+  // function, so hand operator() an `auto` placeholder and let the ordinary
+  // return-statement deduction fill it in.
   Symbol* call_operator =
       NewLambdaCallOperator(syntax, closure_type,
-                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            NewTypeRecord(kTypeAuto, kQualPlain),
                             /*is_mutable=*/false, explicit_template_params,
                             location);
   ParseLambdaBody(syntax, call_operator, &captures, followers);

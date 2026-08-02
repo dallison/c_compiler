@@ -1275,6 +1275,37 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
   return false;
 }
 
+// Applies the default member initializers of the members a braced aggregate
+// initializer left out ([dcl.init.aggr]/5).  A member with no default member
+// initializer keeps the zeroed slot the object was created with, which is what
+// value initialization yields for the scalars this evaluator models.
+static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
+                                                    TypeRecord* type,
+                                                    ConstexprObject* object,
+                                                    const bool* initialized,
+                                                    size_t slot_count) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->is_union || initialized == NULL) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length && i < slot_count; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        member->default_initializer == NULL || initialized[i]) {
+      continue;
+    }
+    ConstexprValue* slot = ConstexprObjectSlot(object, i);
+    if (slot == NULL ||
+        !EvaluateConstexprInitializer(ctx, member->symbol->type,
+                                      member->default_initializer, slot)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                          TypeRecord* type,
                                          ASTNode* initializer,
@@ -1348,8 +1379,10 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     return false;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  bool ok = slot_count == 0 || initialized != NULL;
   size_t next_index = 0;
-  for (size_t i = 0; i < braced->initializers->length; i++) {
+  for (size_t i = 0; ok && i < braced->initializers->length; i++) {
     ASTNode* entry = braced->initializers->value.p[i];
     size_t slot_index = next_index;
     ASTNode* entry_init = entry;
@@ -1360,17 +1393,23 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
           (DesignatedInitializerASTNode*)entry;
       if (designated->designators == NULL ||
           designated->designators->length == 0) {
-        return false;
+        ok = false;
+        break;
       }
       if (!ConstexprDesignatorSlotIndex(
               type, designated->designators->value.p[0], &slot_index)) {
-        return false;
+        ok = false;
+        break;
       }
       if (designated->designators->length > 1) {
         if (!EvaluateConstexprDesignatedInitializer(
                 ctx, type, object, designated->designators, 0,
                 designated->init)) {
-          return false;
+          ok = false;
+          break;
+        }
+        if (slot_index < slot_count) {
+          initialized[slot_index] = true;
         }
         next_index = slot_index + 1;
         continue;
@@ -1379,18 +1418,21 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     }
     ConstexprValue* slot = ConstexprObjectSlot(object, slot_index);
     if (slot == NULL) {
-      return false;
+      ok = false;
+      break;
     }
     TypeRecord* slot_type = ConstexprObjectSlotType(type, slot_index);
     if (!is_designated_entry &&
         TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
         type->info.struct_info->is_union) {
       if (i > 0 || type->info.struct_info->members.length == 0) {
-        return false;
+        ok = false;
+        break;
       }
       StructMember* member = type->info.struct_info->members.value.p[0];
       if (member == NULL || member->symbol == NULL) {
-        return false;
+        ok = false;
+        break;
       }
       slot_type = member->symbol->type;
       ConstexprActivateUnionMember(object, member);
@@ -1409,11 +1451,20 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
       }
     }
     if (!EvaluateConstexprInitializer(ctx, slot_type, entry_init, slot)) {
-      return false;
+      ok = false;
+      break;
+    }
+    if (slot_index < slot_count) {
+      initialized[slot_index] = true;
     }
     next_index = slot_index + 1;
   }
-  return true;
+  if (ok) {
+    ok = ApplyConstexprDefaultMemberInitializers(ctx, type, object, initialized,
+                                                 slot_count);
+  }
+  free(initialized);
+  return ok;
 }
 
 ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,

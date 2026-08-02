@@ -1503,6 +1503,17 @@ static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   }
 }
 
+/* A placeholder return type deduced from a type-dependent operand -- a lambda
+ * inside a template whose body is analyzed against the still-symbolic enclosing
+ * parameters -- would freeze a template parameter into the signature and make
+ * the enclosing closure permanently dependent.  Deduction for such a body
+ * belongs to the instantiation, where the operand is concrete, so leave the
+ * placeholder in place. */
+static bool DeducedReturnTypeIsStillDependent(TypeRecord* deduced) {
+  return deduced != NULL &&
+         (TypeIsUnknown(deduced) || TypeContainsTemplateParameter(deduced));
+}
+
 static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
                                             ASTNode* diagnostic_node) {
   TypeRecord* pattern = compiler->current_function->next;
@@ -1513,6 +1524,10 @@ static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
       SemanticError(diagnostic_node,
                     "Cannot deduce decltype(auto) function return type");
       return false;
+    }
+    if (DeducedReturnTypeIsStillDependent(deduced)) {
+      TypeRecordDelete(deduced);
+      return true;
     }
     SetCurrentFunctionReturnType(deduced);
     return true;
@@ -1528,8 +1543,69 @@ static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
     SemanticError(diagnostic_node, "Cannot deduce auto function return type");
     return false;
   }
+  if (DeducedReturnTypeIsStillDependent(deduced)) {
+    TypeRecordDelete(deduced);
+    return true;
+  }
   SetCurrentFunctionReturnType(deduced);
   return true;
+}
+
+static void CollectValueReturns(ASTNode* node, void* data, int child_id,
+                                VisitorMode mode) {
+  (void)child_id;
+  (void)mode;
+  if (node != NULL && node->op == AST_OP(return) &&
+      ((CombinedStatementASTNode*)node)->cond != NULL) {
+    VectorAppend((Vector*)data, node);
+  }
+}
+
+void StatementFinishAutoReturnDeduction(TypeRecord* func,
+                                        ASTNode* diagnostic_node) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      !TypeFunctionReturnContainsAuto(func)) {
+    return;
+  }
+  Vector returns;
+  VectorInit(&returns);
+  ASTNodeVisit(func->info.function.body, CollectValueReturns, 0, &returns);
+  TypeRecord* saved_function = compiler->current_function;
+  compiler->current_function = func;
+  if (returns.length == 0) {
+    // No `return` with an operand: deduce as if from `return;` at the closing
+    // brace ([dcl.spec.auto]/8), which yields `void` for a plain `auto` or
+    // `decltype(auto)` placeholder and is an error for anything else (`auto*`).
+    DeduceCurrentFunctionAutoReturn(/*return_value=*/NULL, diagnostic_node);
+  }
+  // Otherwise the placeholder survived analysis of the returns themselves: the
+  // body was cloned from an already-analyzed template pattern (so re-analysis
+  // is a no-op) or every operand was still type-dependent at the time.  Retry
+  // against the operands as they stand now; if they are still dependent the
+  // deduction stays deferred to a later, more concrete instantiation.
+  for (size_t i = 0;
+       i < returns.length && TypeFunctionReturnContainsAuto(func); i++) {
+    CombinedStatementASTNode* statement = returns.value.p[i];
+    if (statement->cond == NULL) {
+      continue;
+    }
+    // Instantiation rebuilds parts of a cloned body (a fold expansion, say)
+    // without clearing the enclosing statement's analyzed flag, so the walk
+    // above may not have reached the operand.  Type it here rather than leave
+    // the signature unresolved for the call that asked.
+    if ((statement->cond->flags & kASTAnalyzed) == 0) {
+      ASTNode* analyzed = AnalyzeExpression(statement->cond);
+      if (analyzed != statement->cond) {
+        ASTNodeReplaceChild((ASTNode*)statement, 0, analyzed, false);
+      }
+      statement->cond = analyzed;
+    }
+    if (statement->cond != NULL && statement->cond->type != NULL) {
+      DeduceCurrentFunctionAutoReturn(statement->cond, diagnostic_node);
+    }
+  }
+  compiler->current_function = saved_function;
+  VectorDestruct(&returns);
 }
 
 static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {

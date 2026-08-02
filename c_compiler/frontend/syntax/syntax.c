@@ -4530,11 +4530,40 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   AppendCXXVBPtrInitializers(func, complete_restores, location);
   InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
                                            complete_restores, location);
+  // A union holds at most one active variant member, so a constructor may not
+  // initialize every member the way a struct constructor does.  The
+  // mem-initializer list names the member to activate; failing that the first
+  // variant member carrying a default member initializer is activated.  Every
+  // other variant member stays uninitialized -- running its default
+  // constructor would both clobber the active member's storage and leave a
+  // constructed object the destructor never tears down.
+  StructMember* union_variant_member = NULL;
+  if (owner->is_union && member_copy_source == NULL) {
+    for (size_t i = 0; i < owner->members.length; i++) {
+      StructMember* member = owner->members.value.p[i];
+      if (member == NULL || member->symbol == NULL || member->is_static ||
+          member->is_member_function ||
+          StorageIs(member->symbol->storage, STO(typedef))) {
+        continue;
+      }
+      if (VectorContainsPointer(&init_list->member_specs, member)) {
+        union_variant_member = member;
+        break;
+      }
+      if (union_variant_member == NULL && member->default_initializer != NULL) {
+        union_variant_member = member;
+      }
+    }
+  }
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
         member->is_member_function || StorageIs(member->symbol->storage,
                                                 STO(typedef))) {
+      continue;
+    }
+    if (owner->is_union && member_copy_source == NULL &&
+        member != union_variant_member) {
       continue;
     }
     ASTNode* stmt = FindCXXExplicitMemberInitializer(init_list, member);
@@ -8287,15 +8316,8 @@ static bool CXXConstructorSetHasInitializerList(StructMember* ctor) {
     if (!info->is_constructor) {
       continue;
     }
-    for (size_t i = 0; i < info->prototype.length; i++) {
-      Symbol* formal = info->prototype.value.p[i];
-      TypeRecord* formal_type = formal->type;
-      if (TypeIsReference(formal_type)) {
-        formal_type = formal_type->next;
-      }
-      if (TypeIsCXXInitializerList(formal_type)) {
-        return true;
-      }
+    if (CXXConstructorIsInitializerListConstructor(info)) {
+      return true;
     }
   }
   return false;

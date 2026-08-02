@@ -15,6 +15,11 @@
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
 bool IsConstantExpression(ASTNode* node);
 
+// Analyzes `func`'s body so that a placeholder (`auto` / `decltype(auto)`)
+// return type is replaced by the deduced one.  A no-op for anything else.
+// Call before a use that bakes the function's signature into another type.
+void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func);
+
 // Resolve a call whose callee names an overloaded function template, once its
 // arguments are concrete (used when instantiating a cloned template body).
 // Returns the best concrete instantiation, or NULL if none is viable.

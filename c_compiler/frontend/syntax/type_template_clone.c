@@ -1845,6 +1845,16 @@ static void InstantiateClonedFunctionTemplateCall(
       if (actual->type != NULL && TypeContainsAuto(actual->type)) {
         return;
       }
+      // The call is still type-dependent: this clone only substituted the
+      // enclosing template's arguments, so a member function template's own
+      // parameters (and any type built from them) survive here.  Deduction
+      // against such an argument would bind the callee to the placeholder type
+      // itself, producing a specialization whose parameters are unusable -- and
+      // that bogus specialization is cached, so the later, concrete
+      // instantiation never gets a chance to replace it.
+      if (actual->type != NULL && TypeContainsTemplateParameter(actual->type)) {
+        return;
+      }
       if ((actual->flags & kASTLambdaExpression) != 0) {
         return;
       }

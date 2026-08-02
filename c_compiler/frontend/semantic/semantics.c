@@ -434,9 +434,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
 
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
-  if (TypeFunctionReturnContainsAuto(node->type)) {
-    SemanticError(node, "Cannot deduce auto function return type");
-  }
+  StatementFinishAutoReturnDeduction(node->type, node);
   CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);

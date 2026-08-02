@@ -11,6 +11,7 @@
 #include <coroutine>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <format>
 #include <functional>
 #include <generator>

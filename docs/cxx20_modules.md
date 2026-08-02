@@ -63,8 +63,8 @@ The verified profile exports:
   `unordered_map`, `unordered_set`, and `vector`.
 - Concurrency and time: `atomic`, `barrier`, `chrono`, `condition_variable`,
   `coroutine`, `latch`, `mutex`, `semaphore`, `stop_token`, and `thread`.
-- C++23 facilities: `algorithm`, `format`, `functional`, `generator`,
-  `mdspan`, `print`, and `ranges`.
+- C++23 facilities: `algorithm`, `expected`, `format`, `functional`,
+  `generator`, `mdspan`, `print`, and `ranges`.
 
 This is the library's currently implemented narrow profile. The exported
 `format` and `print` surfaces include variadic formatting/printing, the

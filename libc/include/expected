@@ -1,0 +1,1291 @@
+//
+//  expected
+//  c_compiler
+//
+//  C++23 std::expected support for DaveCC.
+//
+
+#ifndef expected_h
+#define expected_h
+
+#include <__exception_support>
+#include <exception>
+#include <functional>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+#define __cpp_lib_expected 202211L
+
+namespace std {
+
+template <class T, class E>
+class expected;
+
+template <class E>
+class unexpected;
+
+struct unexpect_t {
+  explicit unexpect_t() = default;
+};
+
+inline constexpr unexpect_t unexpect{};
+
+namespace __expected_detail {
+
+template <class T>
+struct __is_expected : false_type {
+};
+
+template <class T, class E>
+struct __is_expected<expected<T, E>> : true_type {
+};
+
+template <class T>
+struct __is_unexpected : false_type {
+};
+
+template <class T>
+struct __is_unexpected<unexpected<T>> : true_type {
+};
+
+template <class T, class E>
+union __storage {
+  char __dummy_;
+  T __value_;
+  E __error_;
+
+  constexpr __storage() : __dummy_(0) {}
+  constexpr explicit __storage(in_place_t) : __value_() {}
+
+  template <class U>
+  constexpr explicit __storage(in_place_t, U&& value)
+      : __value_(static_cast<U&&>(value)) {}
+
+  template <class G>
+  constexpr explicit __storage(unexpect_t, G&& error)
+      : __error_(static_cast<G&&>(error)) {}
+
+  constexpr ~__storage() {}
+};
+
+template <class E>
+union __void_storage {
+  char __dummy_;
+  E __error_;
+
+  constexpr __void_storage() : __dummy_(0) {}
+
+  template <class G>
+  constexpr explicit __void_storage(unexpect_t, G&& error)
+      : __error_(static_cast<G&&>(error)) {}
+
+  constexpr ~__void_storage() {}
+};
+
+}  // namespace __expected_detail
+
+template <class E>
+class unexpected {
+  static_assert(is_object<E>::value,
+                "unexpected<E> requires an object error type");
+  static_assert(!is_array<E>::value,
+                "unexpected<E> cannot contain an array");
+  static_assert(!is_const<E>::value && !is_volatile<E>::value,
+                "unexpected<E> requires an unqualified error type");
+
+  E __error_;
+
+ public:
+  using error_type = E;
+
+  unexpected(const unexpected&) = default;
+  unexpected(unexpected&&) = default;
+  unexpected& operator=(const unexpected&) = default;
+  unexpected& operator=(unexpected&&) = default;
+
+  template <class Err>
+    requires (!is_same<remove_cvref_t<Err>, unexpected>::value &&
+              is_constructible<E, Err>::value)
+  constexpr explicit unexpected(Err&& error)
+      : __error_(static_cast<Err&&>(error)) {}
+
+  template <class... Args>
+    requires is_constructible<E, Args...>::value
+  constexpr explicit unexpected(in_place_t, Args&&... args)
+      : unexpected(E(static_cast<Args&&>(args)...)) {}
+
+  template <class U, class... Args>
+    requires is_constructible<E, initializer_list<U>&, Args...>::value
+  constexpr explicit unexpected(in_place_t, initializer_list<U> init,
+                                Args&&... args)
+      : unexpected(E(init, static_cast<Args&&>(args)...)) {}
+
+  constexpr const E& error() const& noexcept { return __error_; }
+  constexpr E& error() & noexcept { return __error_; }
+  constexpr const E&& error() const&& noexcept {
+    return static_cast<const E&&>(__error_);
+  }
+  constexpr E&& error() && noexcept { return static_cast<E&&>(__error_); }
+
+  constexpr void swap(unexpected& other) {
+    std::swap(__error_, other.__error_);
+  }
+
+};
+
+template <class E>
+unexpected(E) -> unexpected<E>;
+
+template <class E>
+constexpr void swap(unexpected<E>& left, unexpected<E>& right) {
+  left.swap(right);
+}
+
+template <class E1, class E2>
+constexpr bool operator==(const unexpected<E1>& left,
+                          const unexpected<E2>& right) {
+  return left.error() == right.error();
+}
+
+template <class E = void>
+class bad_expected_access;
+
+template <>
+class bad_expected_access<void> : public exception {
+ public:
+  const char* what() const noexcept override {
+    return "bad expected access";
+  }
+};
+
+using __bad_expected_access_base = bad_expected_access<void>;
+
+template <class E>
+class bad_expected_access : public __bad_expected_access_base {
+  E __error_;
+
+ public:
+  explicit bad_expected_access(E error)
+      : __error_(static_cast<E&&>(error)) {}
+
+  const E& error() const& noexcept { return __error_; }
+  E& error() & noexcept { return __error_; }
+  const E&& error() const&& noexcept {
+    return static_cast<const E&&>(__error_);
+  }
+  E&& error() && noexcept { return static_cast<E&&>(__error_); }
+};
+
+template <class T, class E>
+class expected {
+  static_assert(is_object<T>::value,
+                "expected<T, E> requires an object value type");
+  static_assert(!is_array<T>::value,
+                "expected<T, E> cannot contain an array value");
+  static_assert(!is_same<remove_cv_t<T>, in_place_t>::value &&
+                    !is_same<remove_cv_t<T>, unexpect_t>::value,
+                "expected<T, E> cannot contain a tag type");
+  static_assert(!__expected_detail::__is_unexpected<remove_cv_t<T>>::value,
+                "expected<T, E> cannot contain unexpected");
+  static_assert(is_object<E>::value,
+                "expected<T, E> requires an object error type");
+  static_assert(!is_array<E>::value,
+                "expected<T, E> cannot contain an array error");
+  static_assert(!is_const<E>::value && !is_volatile<E>::value,
+                "expected<T, E> requires an unqualified error type");
+
+  __expected_detail::__storage<T, E> __storage_;
+  bool __has_value_;
+
+  constexpr T* __value_ptr() noexcept { return &__storage_.__value_; }
+  constexpr const T* __value_ptr() const noexcept {
+    return &__storage_.__value_;
+  }
+  constexpr E* __error_ptr() noexcept { return &__storage_.__error_; }
+  constexpr const E* __error_ptr() const noexcept {
+    return &__storage_.__error_;
+  }
+
+  template <class... Args>
+  constexpr void __construct_value(Args&&... args) {
+    new (__value_ptr()) T(static_cast<Args&&>(args)...);
+    __has_value_ = true;
+  }
+
+  template <class U, class... Args>
+  constexpr void __construct_value_list(initializer_list<U> init,
+                                        Args&&... args) {
+    new (__value_ptr()) T(init, static_cast<Args&&>(args)...);
+    __has_value_ = true;
+  }
+
+  template <class... Args>
+  constexpr void __construct_error(Args&&... args) {
+    new (__error_ptr()) E(static_cast<Args&&>(args)...);
+    __has_value_ = false;
+  }
+
+  template <class U, class... Args>
+  constexpr void __construct_error_list(initializer_list<U> init,
+                                        Args&&... args) {
+    new (__error_ptr()) E(init, static_cast<Args&&>(args)...);
+    __has_value_ = false;
+  }
+
+  constexpr void __destroy() noexcept {
+    if (__has_value_) {
+      __value_ptr()->~T();
+    } else {
+      __error_ptr()->~E();
+    }
+  }
+
+  template <class... Args>
+  constexpr void __replace_error_with_value(Args&&... args) {
+    if constexpr (is_nothrow_constructible<T, Args...>::value) {
+      __error_ptr()->~E();
+      __construct_value(static_cast<Args&&>(args)...);
+    } else {
+      T replacement = T(static_cast<Args&&>(args)...);
+      if constexpr (is_nothrow_move_constructible<T>::value) {
+        __error_ptr()->~E();
+        __construct_value(static_cast<T&&>(replacement));
+      } else {
+        static_assert(is_nothrow_move_constructible<E>::value,
+                      "state transition requires a nothrow movable alternative");
+        E old_error = static_cast<E&&>(*__error_ptr());
+        __error_ptr()->~E();
+        try {
+          __construct_value(static_cast<T&&>(replacement));
+        } catch (...) {
+          __construct_error(static_cast<E&&>(old_error));
+          throw;
+        }
+      }
+    }
+  }
+
+  template <class... Args>
+  constexpr void __replace_value_with_error(Args&&... args) {
+    if constexpr (is_nothrow_constructible<E, Args...>::value) {
+      __value_ptr()->~T();
+      __construct_error(static_cast<Args&&>(args)...);
+    } else {
+      E replacement = E(static_cast<Args&&>(args)...);
+      if constexpr (is_nothrow_move_constructible<E>::value) {
+        __value_ptr()->~T();
+        __construct_error(static_cast<E&&>(replacement));
+      } else {
+        static_assert(is_nothrow_move_constructible<T>::value,
+                      "state transition requires a nothrow movable alternative");
+        T old_value = static_cast<T&&>(*__value_ptr());
+        __value_ptr()->~T();
+        try {
+          __construct_error(static_cast<E&&>(replacement));
+        } catch (...) {
+          __construct_value(static_cast<T&&>(old_value));
+          throw;
+        }
+      }
+    }
+  }
+
+ public:
+  using value_type = T;
+  using error_type = E;
+  using unexpected_type = unexpected<E>;
+
+  template <class U>
+  using rebind = expected<U, error_type>;
+
+  constexpr expected()
+    requires is_default_constructible<T>::value
+      : __storage_(in_place), __has_value_(true) {}
+
+  constexpr expected(const expected& other)
+    requires (is_copy_constructible<T>::value &&
+              is_copy_constructible<E>::value)
+      : __storage_(), __has_value_(false) {
+    if (other.__has_value_) {
+      __construct_value(*other.__value_ptr());
+    } else {
+      __construct_error(*other.__error_ptr());
+    }
+  }
+
+  constexpr expected(expected&& other)
+    requires (is_move_constructible<T>::value &&
+              is_move_constructible<E>::value)
+      : __storage_(), __has_value_(false) {
+    if (other.__has_value_) {
+      __construct_value(static_cast<T&&>(*other.__value_ptr()));
+    } else {
+      __construct_error(static_cast<E&&>(*other.__error_ptr()));
+    }
+  }
+
+  template <class U, class G>
+    requires (is_constructible<T, const U&>::value &&
+              is_constructible<E, const G&>::value)
+  constexpr explicit expected(const expected<U, G>& other)
+      : __storage_(), __has_value_(false) {
+    if (other.has_value()) {
+      __construct_value(*other);
+    } else {
+      __construct_error(other.error());
+    }
+  }
+
+  template <class U, class G>
+    requires (is_constructible<T, U>::value &&
+              is_constructible<E, G>::value)
+  constexpr explicit expected(expected<U, G>&& other)
+      : __storage_(), __has_value_(false) {
+    if (other.has_value()) {
+      __construct_value(static_cast<U&&>(*other));
+    } else {
+      __construct_error(static_cast<G&&>(other.error()));
+    }
+  }
+
+  template <class U = T>
+    requires (!is_same<remove_cvref_t<U>, expected>::value &&
+              !__expected_detail::__is_unexpected<remove_cvref_t<U>>::value &&
+              !is_same<remove_cvref_t<U>, in_place_t>::value &&
+              !is_same<remove_cvref_t<U>, unexpect_t>::value &&
+              is_constructible<T, U>::value)
+  constexpr expected(U&& value)
+      : __storage_(in_place, static_cast<U&&>(value)),
+        __has_value_(true) {}
+
+  template <class G>
+    requires is_constructible<E, const G&>::value
+  constexpr expected(const unexpected<G>& error)
+      : __storage_(unexpect, error.error()), __has_value_(false) {}
+
+  template <class G>
+    requires is_constructible<E, G>::value
+  constexpr expected(unexpected<G>&& error)
+      : __storage_(unexpect, static_cast<G&&>(error.error())),
+        __has_value_(false) {}
+
+  template <class... Args>
+    requires is_constructible<T, Args...>::value
+  constexpr explicit expected(in_place_t, Args&&... args)
+      : __storage_(), __has_value_(false) {
+    __construct_value(static_cast<Args&&>(args)...);
+  }
+
+  template <class U, class... Args>
+    requires is_constructible<T, initializer_list<U>&, Args...>::value
+  constexpr explicit expected(in_place_t, initializer_list<U> init,
+                              Args&&... args)
+      : __storage_(), __has_value_(false) {
+    __construct_value_list(init, static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+    requires is_constructible<E, Args...>::value
+  constexpr explicit expected(unexpect_t, Args&&... args)
+      : __storage_(), __has_value_(true) {
+    __construct_error(static_cast<Args&&>(args)...);
+  }
+
+  template <class U, class... Args>
+    requires is_constructible<E, initializer_list<U>&, Args...>::value
+  constexpr explicit expected(unexpect_t, initializer_list<U> init,
+                              Args&&... args)
+      : __storage_(), __has_value_(true) {
+    __construct_error_list(init, static_cast<Args&&>(args)...);
+  }
+
+  constexpr ~expected() { __destroy(); }
+
+  constexpr expected& operator=(const expected& other)
+    requires (is_copy_constructible<T>::value &&
+              is_copy_assignable<T>::value &&
+              is_copy_constructible<E>::value &&
+              is_copy_assignable<E>::value &&
+              (is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value)) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__has_value_ && other.__has_value_) {
+      **this = *other;
+    } else if (!__has_value_ && !other.__has_value_) {
+      error() = other.error();
+    } else if (other.__has_value_) {
+      __replace_error_with_value(*other);
+    } else {
+      __replace_value_with_error(other.error());
+    }
+    return *this;
+  }
+
+  constexpr expected& operator=(expected&& other)
+    requires (is_move_constructible<T>::value &&
+              is_move_assignable<T>::value &&
+              is_move_constructible<E>::value &&
+              is_move_assignable<E>::value &&
+              (is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value)) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__has_value_ && other.__has_value_) {
+      **this = static_cast<T&&>(*other);
+    } else if (!__has_value_ && !other.__has_value_) {
+      error() = static_cast<E&&>(other.error());
+    } else if (other.__has_value_) {
+      __replace_error_with_value(static_cast<T&&>(*other));
+    } else {
+      __replace_value_with_error(static_cast<E&&>(other.error()));
+    }
+    return *this;
+  }
+
+  template <class U = T>
+    requires (!__expected_detail::__is_expected<remove_cvref_t<U>>::value &&
+              !__expected_detail::__is_unexpected<remove_cvref_t<U>>::value &&
+              is_constructible<T, U>::value &&
+              is_assignable<T&, U>::value &&
+              (is_nothrow_constructible<T, U>::value ||
+               is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value))
+  constexpr expected& operator=(U&& value) {
+    if (__has_value_) {
+      **this = static_cast<U&&>(value);
+    } else {
+      __replace_error_with_value(static_cast<U&&>(value));
+    }
+    return *this;
+  }
+
+  template <class G>
+    requires (is_constructible<E, const G&>::value &&
+              is_assignable<E&, const G&>::value &&
+              (is_nothrow_constructible<E, const G&>::value ||
+               is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value))
+  constexpr expected& operator=(const unexpected<G>& other) {
+    if (__has_value_) {
+      __replace_value_with_error(other.error());
+    } else {
+      error() = other.error();
+    }
+    return *this;
+  }
+
+  template <class G>
+    requires (is_constructible<E, G>::value &&
+              is_assignable<E&, G>::value &&
+              (is_nothrow_constructible<E, G>::value ||
+               is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value))
+  constexpr expected& operator=(unexpected<G>&& other) {
+    if (__has_value_) {
+      __replace_value_with_error(static_cast<G&&>(other.error()));
+    } else {
+      error() = static_cast<G&&>(other.error());
+    }
+    return *this;
+  }
+
+  constexpr const T* operator->() const noexcept { return __value_ptr(); }
+  constexpr T* operator->() noexcept { return __value_ptr(); }
+  constexpr const T& operator*() const& noexcept { return *__value_ptr(); }
+  constexpr T& operator*() & noexcept { return *__value_ptr(); }
+  constexpr const T&& operator*() const&& noexcept {
+    return static_cast<const T&&>(*__value_ptr());
+  }
+  constexpr T&& operator*() && noexcept {
+    return static_cast<T&&>(*__value_ptr());
+  }
+
+  constexpr explicit operator bool() const noexcept { return __has_value_; }
+  constexpr bool has_value() const noexcept { return __has_value_; }
+
+  constexpr T& value() & {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(error()));
+    }
+    return **this;
+  }
+
+  constexpr const T& value() const& {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(error()));
+    }
+    return **this;
+  }
+
+  constexpr T&& value() && {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(
+          static_cast<E&&>(error())));
+    }
+    return static_cast<T&&>(**this);
+  }
+
+  constexpr const T&& value() const&& {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(
+          static_cast<const E&&>(error())));
+    }
+    return static_cast<const T&&>(**this);
+  }
+
+  constexpr const E& error() const& noexcept { return *__error_ptr(); }
+  constexpr E& error() & noexcept { return *__error_ptr(); }
+  constexpr const E&& error() const&& noexcept {
+    return static_cast<const E&&>(*__error_ptr());
+  }
+  constexpr E&& error() && noexcept {
+    return static_cast<E&&>(*__error_ptr());
+  }
+
+  template <class U>
+  constexpr T value_or(U&& default_value) const& {
+    return __has_value_ ? **this
+                        : static_cast<T>(static_cast<U&&>(default_value));
+  }
+
+  template <class U>
+  constexpr T value_or(U&& default_value) && {
+    return __has_value_ ? static_cast<T&&>(**this)
+                        : static_cast<T>(static_cast<U&&>(default_value));
+  }
+
+  template <class G>
+  constexpr E error_or(G&& default_error) const& {
+    return __has_value_ ? static_cast<E>(static_cast<G&&>(default_error))
+                        : error();
+  }
+
+  template <class G>
+  constexpr E error_or(G&& default_error) && {
+    return __has_value_ ? static_cast<E>(static_cast<G&&>(default_error))
+                        : static_cast<E&&>(error());
+  }
+
+  template <class... Args>
+    requires is_nothrow_constructible<T, Args...>::value
+  constexpr T& emplace(Args&&... args) {
+    if (__has_value_) {
+      __value_ptr()->~T();
+    } else {
+      __error_ptr()->~E();
+    }
+    __construct_value(static_cast<Args&&>(args)...);
+    return **this;
+  }
+
+  template <class U, class... Args>
+    requires is_nothrow_constructible<T, initializer_list<U>&, Args...>::value
+  constexpr T& emplace(initializer_list<U> init, Args&&... args) {
+    if (__has_value_) {
+      __value_ptr()->~T();
+    } else {
+      __error_ptr()->~E();
+    }
+    __construct_value_list(init, static_cast<Args&&>(args)...);
+    return **this;
+  }
+
+  constexpr void swap(expected& other)
+    requires (is_swappable<T>::value && is_swappable<E>::value &&
+              is_move_constructible<T>::value &&
+              is_move_constructible<E>::value &&
+              (is_nothrow_move_constructible<T>::value ||
+               is_nothrow_move_constructible<E>::value)) {
+    if (__has_value_ && other.__has_value_) {
+      std::swap(**this, *other);
+    } else if (!__has_value_ && !other.__has_value_) {
+      std::swap(error(), other.error());
+    } else if (__has_value_) {
+      if constexpr (is_nothrow_move_constructible<E>::value) {
+        E error_temp = static_cast<E&&>(other.error());
+        other.__error_ptr()->~E();
+        try {
+          other.__construct_value(static_cast<T&&>(**this));
+        } catch (...) {
+          other.__construct_error(static_cast<E&&>(error_temp));
+          throw;
+        }
+        __value_ptr()->~T();
+        __construct_error(static_cast<E&&>(error_temp));
+      } else {
+        T value_temp = static_cast<T&&>(**this);
+        __value_ptr()->~T();
+        try {
+          __construct_error(static_cast<E&&>(other.error()));
+        } catch (...) {
+          __construct_value(static_cast<T&&>(value_temp));
+          throw;
+        }
+        other.__error_ptr()->~E();
+        other.__construct_value(static_cast<T&&>(value_temp));
+      }
+    } else {
+      other.swap(*this);
+    }
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, T&>>
+  and_then(F&& function) & {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function), **this);
+    }
+    return unexpected<E>(error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const T&>>
+  and_then(F&& function) const& {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function), **this);
+    }
+    return unexpected<E>(error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, T&&>>
+  and_then(F&& function) && {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function), static_cast<T&&>(**this));
+    }
+    return unexpected<E>(static_cast<E&&>(error()));
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const T&&>>
+  and_then(F&& function) const&& {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function), static_cast<const T&&>(**this));
+    }
+    return unexpected<E>(static_cast<const E&&>(error()));
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F, T&>>, E>
+  transform(F&& function) & {
+    using U = remove_cv_t<invoke_result_t<F, T&>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function), **this);
+        return {};
+      }
+      return unexpected<E>(error());
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function), **this);
+      }
+      return unexpected<E>(error());
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F, const T&>>, E>
+  transform(F&& function) const& {
+    using U = remove_cv_t<invoke_result_t<F, const T&>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function), **this);
+        return {};
+      }
+      return unexpected<E>(error());
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function), **this);
+      }
+      return unexpected<E>(error());
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F, T&&>>, E>
+  transform(F&& function) && {
+    using U = remove_cv_t<invoke_result_t<F, T&&>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function), static_cast<T&&>(**this));
+        return {};
+      }
+      return unexpected<E>(static_cast<E&&>(error()));
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function), static_cast<T&&>(**this));
+      }
+      return unexpected<E>(static_cast<E&&>(error()));
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F, const T&&>>, E>
+  transform(F&& function) const&& {
+    using U = remove_cv_t<invoke_result_t<F, const T&&>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function), static_cast<const T&&>(**this));
+        return {};
+      }
+      return unexpected<E>(static_cast<const E&&>(error()));
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function), static_cast<const T&&>(**this));
+      }
+      return unexpected<E>(static_cast<const E&&>(error()));
+    }
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, E&>>
+  or_else(F&& function) & {
+    if (__has_value_) {
+      return **this;
+    }
+    return std::invoke(std::forward<F>(function), error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const E&>>
+  or_else(F&& function) const& {
+    if (__has_value_) {
+      return **this;
+    }
+    return std::invoke(std::forward<F>(function), error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, E&&>>
+  or_else(F&& function) && {
+    if (__has_value_) {
+      return static_cast<T&&>(**this);
+    }
+    return std::invoke(std::forward<F>(function), static_cast<E&&>(error()));
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const E&&>>
+  or_else(F&& function) const&& {
+    if (__has_value_) {
+      return static_cast<const T&&>(**this);
+    }
+    return std::invoke(std::forward<F>(function), static_cast<const E&&>(error()));
+  }
+
+  template <class F>
+  constexpr expected<T, remove_cv_t<invoke_result_t<F, E&>>>
+  transform_error(F&& function) & {
+    if (__has_value_) {
+      return **this;
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, E&>>>(
+        std::invoke(std::forward<F>(function), error()));
+  }
+
+  template <class F>
+  constexpr expected<T, remove_cv_t<invoke_result_t<F, const E&>>>
+  transform_error(F&& function) const& {
+    if (__has_value_) {
+      return **this;
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, const E&>>>(
+        std::invoke(std::forward<F>(function), error()));
+  }
+
+  template <class F>
+  constexpr expected<T, remove_cv_t<invoke_result_t<F, E&&>>>
+  transform_error(F&& function) && {
+    if (__has_value_) {
+      return static_cast<T&&>(**this);
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, E&&>>>(
+        std::invoke(std::forward<F>(function), static_cast<E&&>(error())));
+  }
+
+  template <class F>
+  constexpr expected<T, remove_cv_t<invoke_result_t<F, const E&&>>>
+  transform_error(F&& function) const&& {
+    if (__has_value_) {
+      return static_cast<const T&&>(**this);
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, const E&&>>>(
+        std::invoke(std::forward<F>(function), static_cast<const E&&>(error())));
+  }
+};
+
+template <class E>
+class expected<void, E> {
+  static_assert(is_object<E>::value,
+                "expected<void, E> requires an object error type");
+  static_assert(!is_array<E>::value,
+                "expected<void, E> cannot contain an array error");
+  static_assert(!is_const<E>::value && !is_volatile<E>::value,
+                "expected<void, E> requires an unqualified error type");
+
+  __expected_detail::__void_storage<E> __storage_;
+  bool __has_value_;
+
+  constexpr E* __error_ptr() noexcept { return &__storage_.__error_; }
+  constexpr const E* __error_ptr() const noexcept {
+    return &__storage_.__error_;
+  }
+
+  template <class... Args>
+  constexpr void __construct_error(Args&&... args) {
+    new (__error_ptr()) E(static_cast<Args&&>(args)...);
+    __has_value_ = false;
+  }
+
+  template <class U, class... Args>
+  constexpr void __construct_error_list(initializer_list<U> init,
+                                        Args&&... args) {
+    new (__error_ptr()) E(init, static_cast<Args&&>(args)...);
+    __has_value_ = false;
+  }
+
+ public:
+  using value_type = void;
+  using error_type = E;
+  using unexpected_type = unexpected<E>;
+
+  template <class U>
+  using rebind = expected<U, error_type>;
+
+  constexpr expected() noexcept : __storage_(), __has_value_(true) {}
+
+  constexpr expected(const expected& other)
+    requires is_copy_constructible<E>::value
+      : __storage_(), __has_value_(true) {
+    if (!other.__has_value_) {
+      __construct_error(other.error());
+    }
+  }
+
+  constexpr expected(expected&& other)
+    requires is_move_constructible<E>::value
+      : __storage_(), __has_value_(true) {
+    if (!other.__has_value_) {
+      __construct_error(static_cast<E&&>(other.error()));
+    }
+  }
+
+  template <class G>
+    requires is_constructible<E, const G&>::value
+  constexpr explicit expected(const expected<void, G>& other)
+      : __storage_(), __has_value_(true) {
+    if (!other.has_value()) {
+      __construct_error(other.error());
+    }
+  }
+
+  template <class G>
+    requires is_constructible<E, G>::value
+  constexpr explicit expected(expected<void, G>&& other)
+      : __storage_(), __has_value_(true) {
+    if (!other.has_value()) {
+      __construct_error(static_cast<G&&>(other.error()));
+    }
+  }
+
+  template <class G>
+    requires is_constructible<E, const G&>::value
+  constexpr expected(const unexpected<G>& error)
+      : __storage_(unexpect, error.error()), __has_value_(false) {}
+
+  template <class G>
+    requires is_constructible<E, G>::value
+  constexpr expected(unexpected<G>&& error)
+      : __storage_(unexpect, static_cast<G&&>(error.error())),
+        __has_value_(false) {}
+
+  constexpr explicit expected(in_place_t) noexcept
+      : __storage_(), __has_value_(true) {}
+
+  template <class... Args>
+    requires is_constructible<E, Args...>::value
+  constexpr explicit expected(unexpect_t, Args&&... args)
+      : __storage_(), __has_value_(true) {
+    __construct_error(static_cast<Args&&>(args)...);
+  }
+
+  template <class U, class... Args>
+    requires is_constructible<E, initializer_list<U>&, Args...>::value
+  constexpr explicit expected(unexpect_t, initializer_list<U> init,
+                              Args&&... args)
+      : __storage_(), __has_value_(true) {
+    __construct_error_list(init, static_cast<Args&&>(args)...);
+  }
+
+  constexpr ~expected() {
+    if (!__has_value_) {
+      __error_ptr()->~E();
+    }
+  }
+
+  constexpr expected& operator=(const expected& other)
+    requires (is_copy_constructible<E>::value &&
+              is_copy_assignable<E>::value) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__has_value_ && !other.__has_value_) {
+      __construct_error(other.error());
+    } else if (!__has_value_ && other.__has_value_) {
+      __error_ptr()->~E();
+      __has_value_ = true;
+    } else if (!__has_value_) {
+      error() = other.error();
+    }
+    return *this;
+  }
+
+  constexpr expected& operator=(expected&& other)
+    requires (is_move_constructible<E>::value &&
+              is_move_assignable<E>::value) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__has_value_ && !other.__has_value_) {
+      __construct_error(static_cast<E&&>(other.error()));
+    } else if (!__has_value_ && other.__has_value_) {
+      __error_ptr()->~E();
+      __has_value_ = true;
+    } else if (!__has_value_) {
+      error() = static_cast<E&&>(other.error());
+    }
+    return *this;
+  }
+
+  template <class G>
+    requires (is_constructible<E, const G&>::value &&
+              is_assignable<E&, const G&>::value)
+  constexpr expected& operator=(const unexpected<G>& other) {
+    if (__has_value_) {
+      __construct_error(other.error());
+    } else {
+      error() = other.error();
+    }
+    return *this;
+  }
+
+  template <class G>
+    requires (is_constructible<E, G>::value &&
+              is_assignable<E&, G>::value)
+  constexpr expected& operator=(unexpected<G>&& other) {
+    if (__has_value_) {
+      __construct_error(static_cast<G&&>(other.error()));
+    } else {
+      error() = static_cast<G&&>(other.error());
+    }
+    return *this;
+  }
+
+  constexpr explicit operator bool() const noexcept { return __has_value_; }
+  constexpr bool has_value() const noexcept { return __has_value_; }
+
+  constexpr void operator*() const noexcept {}
+
+  constexpr void value() const& {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(error()));
+    }
+  }
+
+  constexpr void value() && {
+    if (!__has_value_) {
+      __DAVECC_THROW(bad_expected_access<E>(
+          static_cast<E&&>(error())));
+    }
+  }
+
+  constexpr const E& error() const& noexcept { return *__error_ptr(); }
+  constexpr E& error() & noexcept { return *__error_ptr(); }
+  constexpr const E&& error() const&& noexcept {
+    return static_cast<const E&&>(*__error_ptr());
+  }
+  constexpr E&& error() && noexcept {
+    return static_cast<E&&>(*__error_ptr());
+  }
+
+  template <class G>
+  constexpr E error_or(G&& default_error) const& {
+    return __has_value_ ? static_cast<E>(static_cast<G&&>(default_error))
+                        : error();
+  }
+
+  template <class G>
+  constexpr E error_or(G&& default_error) && {
+    return __has_value_ ? static_cast<E>(static_cast<G&&>(default_error))
+                        : static_cast<E&&>(error());
+  }
+
+  constexpr void emplace() noexcept {
+    if (!__has_value_) {
+      __error_ptr()->~E();
+      __has_value_ = true;
+    }
+  }
+
+  constexpr void swap(expected& other)
+    requires (is_swappable<E>::value && is_move_constructible<E>::value) {
+    if (__has_value_ && other.__has_value_) {
+      return;
+    }
+    if (!__has_value_ && !other.__has_value_) {
+      std::swap(error(), other.error());
+      return;
+    }
+    if (__has_value_) {
+      __construct_error(static_cast<E&&>(other.error()));
+      other.__error_ptr()->~E();
+      other.__has_value_ = true;
+    } else {
+      other.swap(*this);
+    }
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>>
+  and_then(F&& function) & {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function));
+    }
+    return unexpected<E>(error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>>
+  and_then(F&& function) const& {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function));
+    }
+    return unexpected<E>(error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>>
+  and_then(F&& function) && {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function));
+    }
+    return unexpected<E>(static_cast<E&&>(error()));
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>>
+  and_then(F&& function) const&& {
+    if (__has_value_) {
+      return std::invoke(std::forward<F>(function));
+    }
+    return unexpected<E>(static_cast<const E&&>(error()));
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F>>, E>
+  transform(F&& function) & {
+    using U = remove_cv_t<invoke_result_t<F>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function));
+        return {};
+      }
+      return unexpected<E>(error());
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function));
+      }
+      return unexpected<E>(error());
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F>>, E>
+  transform(F&& function) const& {
+    using U = remove_cv_t<invoke_result_t<F>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function));
+        return {};
+      }
+      return unexpected<E>(error());
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function));
+      }
+      return unexpected<E>(error());
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F>>, E>
+  transform(F&& function) && {
+    using U = remove_cv_t<invoke_result_t<F>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function));
+        return {};
+      }
+      return unexpected<E>(static_cast<E&&>(error()));
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function));
+      }
+      return unexpected<E>(static_cast<E&&>(error()));
+    }
+  }
+
+  template <class F>
+  constexpr expected<remove_cv_t<invoke_result_t<F>>, E>
+  transform(F&& function) const&& {
+    using U = remove_cv_t<invoke_result_t<F>>;
+    if constexpr (is_void<U>::value) {
+      if (__has_value_) {
+        std::invoke(std::forward<F>(function));
+        return {};
+      }
+      return unexpected<E>(static_cast<const E&&>(error()));
+    } else {
+      if (__has_value_) {
+        return std::invoke(std::forward<F>(function));
+      }
+      return unexpected<E>(static_cast<const E&&>(error()));
+    }
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, E&>>
+  or_else(F&& function) & {
+    if (__has_value_) {
+      return {};
+    }
+    return std::invoke(std::forward<F>(function), error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const E&>>
+  or_else(F&& function) const& {
+    if (__has_value_) {
+      return {};
+    }
+    return std::invoke(std::forward<F>(function), error());
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, E&&>>
+  or_else(F&& function) && {
+    if (__has_value_) {
+      return {};
+    }
+    return std::invoke(std::forward<F>(function), static_cast<E&&>(error()));
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const E&&>>
+  or_else(F&& function) const&& {
+    if (__has_value_) {
+      return {};
+    }
+    return std::invoke(std::forward<F>(function), static_cast<const E&&>(error()));
+  }
+
+  template <class F>
+  constexpr expected<void, remove_cv_t<invoke_result_t<F, E&>>>
+  transform_error(F&& function) & {
+    if (__has_value_) {
+      return expected<void, remove_cv_t<invoke_result_t<F, E&>>>();
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, E&>>>(
+        std::invoke(std::forward<F>(function), error()));
+  }
+
+  template <class F>
+  constexpr expected<void, remove_cv_t<invoke_result_t<F, const E&>>>
+  transform_error(F&& function) const& {
+    if (__has_value_) {
+      return expected<void, remove_cv_t<invoke_result_t<F, const E&>>>();
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, const E&>>>(
+        std::invoke(std::forward<F>(function), error()));
+  }
+
+  template <class F>
+  constexpr expected<void, remove_cv_t<invoke_result_t<F, E&&>>>
+  transform_error(F&& function) && {
+    if (__has_value_) {
+      return expected<void, remove_cv_t<invoke_result_t<F, E&&>>>();
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, E&&>>>(
+        std::invoke(std::forward<F>(function), static_cast<E&&>(error())));
+  }
+
+  template <class F>
+  constexpr expected<void, remove_cv_t<invoke_result_t<F, const E&&>>>
+  transform_error(F&& function) const&& {
+    if (__has_value_) {
+      return expected<void, remove_cv_t<invoke_result_t<F, const E&&>>>();
+    }
+    return unexpected<remove_cv_t<invoke_result_t<F, const E&&>>>(
+        std::invoke(std::forward<F>(function), static_cast<const E&&>(error())));
+  }
+};
+
+template <class T, class E>
+constexpr void swap(expected<T, E>& left, expected<T, E>& right) {
+  left.swap(right);
+}
+
+template <class T1, class E1, class T2, class E2>
+  requires (!is_void<T1>::value && !is_void<T2>::value)
+constexpr bool operator==(const expected<T1, E1>& left,
+                          const expected<T2, E2>& right) {
+  if (left.has_value() != right.has_value()) {
+    return false;
+  }
+  return left.has_value() ? *left == *right
+                          : left.error() == right.error();
+}
+
+template <class E1, class E2>
+constexpr bool operator==(const expected<void, E1>& left,
+                          const expected<void, E2>& right) {
+  if (left.has_value() != right.has_value()) {
+    return false;
+  }
+  return left.has_value() || left.error() == right.error();
+}
+
+template <class T, class E, class U>
+  requires (!__expected_detail::__is_expected<remove_cvref_t<U>>::value &&
+            !__expected_detail::__is_unexpected<remove_cvref_t<U>>::value)
+constexpr bool operator==(const expected<T, E>& left, const U& right) {
+  return left.has_value() && *left == right;
+}
+
+template <class T, class E, class U>
+  requires (!__expected_detail::__is_expected<remove_cvref_t<U>>::value &&
+            !__expected_detail::__is_unexpected<remove_cvref_t<U>>::value)
+constexpr bool operator==(const U& left, const expected<T, E>& right) {
+  return right == left;
+}
+
+template <class T, class E, class G>
+constexpr bool operator==(const expected<T, E>& left,
+                          const unexpected<G>& right) {
+  return !left.has_value() && left.error() == right.error();
+}
+
+template <class T, class E, class G>
+constexpr bool operator==(const unexpected<G>& left,
+                          const expected<T, E>& right) {
+  return right == left;
+}
+
+}  // namespace std
+
+#endif /* expected_h */

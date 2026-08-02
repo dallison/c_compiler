@@ -5,6 +5,7 @@ static_assert(std::is_same_v<
               std::ratio<5, 6>>);
 static_assert(std::tuple_size_v<std::tuple<int, long>> == 2);
 static_assert(std::variant_size_v<std::variant<int, long>> == 2);
+static_assert(std::is_same_v<std::expected<int, long>::error_type, long>);
 
 int main() {
   int values[] = {1, 2, 3, 4};
@@ -33,6 +34,14 @@ int main() {
   std::runtime_error error("module error");
   if (error.what()[0] != 'm') {
     return 5;
+  }
+
+  std::expected<int, long> outcome(6);
+  std::expected<int, long> failure(std::unexpect, 7L);
+  auto doubled = outcome.transform([](int item) { return item * 2; });
+  if (!outcome || *outcome != 6 || failure || failure.error() != 7L ||
+      !doubled || *doubled != 12) {
+    return 6;
   }
 
   return 0;

@@ -98,7 +98,7 @@ static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
                                     Vector* remaining_actuals,
                                     SourceLocation location);
 
-static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
+void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func) ||
       !TypeFunctionReturnContainsAuto(func)) {
     return;
@@ -118,9 +118,18 @@ static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
     compiler->current_class_access_context =
         func->info.function.cxx_member_owner;
   }
+  // Deduction happens once and its result is permanent, so the body analysis is
+  // a real instantiation even when the caller is a signature-only probe such as
+  // a type trait.  Templates the body needs must therefore be queued for
+  // emission; leaving the speculative flag set would drop them for good.
+  int saved_speculative_depth =
+      compiler->speculative_template_instantiation_depth;
+  compiler->speculative_template_instantiation_depth = 0;
   AnalyzeStatement(func->info.function.body);
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_class_access_context;
+  StatementFinishAutoReturnDeduction(func, /*diagnostic_node=*/NULL);
+  compiler->speculative_template_instantiation_depth = saved_speculative_depth;
 }
 
 static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
@@ -2552,16 +2561,9 @@ static bool CXXConstructorSetTakesInitializerList(StructMember* ctor) {
         !candidate->symbol->type->info.function.is_constructor) {
       continue;
     }
-    FunctionInfo* info = &candidate->symbol->type->info.function;
-    for (size_t i = 0; i < info->prototype.length; i++) {
-      Symbol* formal = info->prototype.value.p[i];
-      TypeRecord* formal_type = formal->type;
-      if (TypeIsReference(formal_type)) {
-        formal_type = formal_type->next;
-      }
-      if (TypeIsCXXInitializerList(formal_type)) {
-        return true;
-      }
+    if (CXXConstructorIsInitializerListConstructor(
+            &candidate->symbol->type->info.function)) {
+      return true;
     }
   }
   return false;
@@ -2587,11 +2589,6 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       TypeIsCXXInitializerList(target)) {
     return NULL;
   }
-  // `T{}` value-initializes, which the aggregate path already lowers to a
-  // zero-initialized temporary plus (where needed) a default constructor call.
-  if (braced->initializers == NULL || braced->initializers->length == 0) {
-    return NULL;
-  }
   StructMember* constructor = FindCXXMemberOverloadHead(
       target->info.struct_info, target->info.struct_info->tag_name);
   if (constructor == NULL || !constructor->is_member_function ||
@@ -2599,6 +2596,41 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       !TypeIsFunction(constructor->symbol->type) ||
       !constructor->symbol->type->info.function.is_constructor) {
     return NULL;
+  }
+  // `T{}` value-initializes ([dcl.init]/8).  A user-provided default
+  // constructor must be run and must *not* be preceded by zero-initialization,
+  // so call it here.  Anything else -- a defaulted or implicit default
+  // constructor -- is left to the caller's zero-initializing aggregate path,
+  // which recurses into the members that still need construction.
+  if (braced->initializers == NULL || braced->initializers->length == 0) {
+    size_t first_user_formal =
+        StructHasVirtualBases(target->info.struct_info) ? 2 : 1;
+    bool user_provided_default = false;
+    for (StructMember* candidate = constructor;
+         candidate != NULL && !user_provided_default;
+         candidate = candidate->overload_next) {
+      if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+          !TypeIsFunction(candidate->symbol->type)) {
+        continue;
+      }
+      FunctionInfo* info = &candidate->symbol->type->info.function;
+      if (!info->is_constructor || info->is_deleted ||
+          !info->is_user_provided ||
+          info->prototype.length < first_user_formal) {
+        continue;
+      }
+      user_provided_default = true;
+      for (size_t i = first_user_formal; i < info->prototype.length; i++) {
+        Symbol* formal = info->prototype.value.p[i];
+        if (formal == NULL || formal->default_argument == NULL) {
+          user_provided_default = false;
+          break;
+        }
+      }
+    }
+    if (!user_provided_default) {
+      return NULL;
+    }
   }
 
   Vector* actuals = NewVector();
@@ -8241,7 +8273,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (TypeIsPointer(node->left->type)) {
     subtype = subtype->next;
   }
-  EnsureAutoReturnTypeDeduced(subtype);
+  SemanticEnsureAutoReturnTypeDeduced(subtype);
 
   TypeRecord* return_type = subtype->next;
   if (TypeIsReference(return_type)) {
@@ -8990,6 +9022,12 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
 static void AnalyzeAddressOperator(UnaryASTNode* node) {
   node->sub = AnalyzeExpression(node->sub);
   node->base.value_category = kValueCategoryPrvalue;
+  // Forming a pointer to a function bakes its signature into the result type,
+  // so a placeholder return type has to be resolved first.  This is how a
+  // closure's `&C::operator()` reaches deduction guides such as std::function's.
+  if (node->sub != NULL) {
+    SemanticEnsureAutoReturnTypeDeduced(node->sub->type);
+  }
   TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");

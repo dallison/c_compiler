@@ -1066,36 +1066,60 @@ constexpr const T* get_if(const variant<Types...>* value) noexcept {
 template <class R, class Visitor, class... Types>
 R visit(Visitor&& vis, variant<Types...>& var) {
   if constexpr (is_void<R>::value) {
-    var.__visit_impl(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> void {
+      vis(static_cast<decltype(value)&&>(value));
+    };
+    var.__visit_impl(invoke);
   } else {
-    return var.__visit_impl(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> R {
+      return vis(static_cast<decltype(value)&&>(value));
+    };
+    return var.__visit_impl(invoke);
   }
 }
 
 template <class R, class Visitor, class... Types>
 R visit(Visitor&& vis, const variant<Types...>& var) {
   if constexpr (is_void<R>::value) {
-    var.__visit_impl(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> void {
+      vis(static_cast<decltype(value)&&>(value));
+    };
+    var.__visit_impl(invoke);
   } else {
-    return var.__visit_impl(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> R {
+      return vis(static_cast<decltype(value)&&>(value));
+    };
+    return var.__visit_impl(invoke);
   }
 }
 
 template <class R, class Visitor, class... Types>
 R visit(Visitor&& vis, variant<Types...>&& var) {
   if constexpr (is_void<R>::value) {
-    var.__visit_impl_move(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> void {
+      vis(static_cast<decltype(value)&&>(value));
+    };
+    var.__visit_impl_move(invoke);
   } else {
-    return var.__visit_impl_move(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> R {
+      return vis(static_cast<decltype(value)&&>(value));
+    };
+    return var.__visit_impl_move(invoke);
   }
 }
 
 template <class R, class Visitor, class... Types>
 R visit(Visitor&& vis, const variant<Types...>&& var) {
   if constexpr (is_void<R>::value) {
-    var.__visit_impl_const_move(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> void {
+      vis(static_cast<decltype(value)&&>(value));
+    };
+    var.__visit_impl_const_move(invoke);
   } else {
-    return var.__visit_impl_const_move(std::forward<Visitor>(vis));
+    auto invoke = [&](auto&& value) -> R {
+      return vis(static_cast<decltype(value)&&>(value));
+    };
+    return var.__visit_impl_const_move(invoke);
   }
 }
 
@@ -1150,13 +1174,13 @@ auto __visit_three(Visitor vis, Variant0&& var0, Variant1&& var1,
 template <class R, class Visitor, class Variant0, class Variant1>
 R visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
   if constexpr (is_void<R>::value) {
-    auto invoke = [&, vis](auto&& value0, auto&& value1) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1) -> void {
       vis(value0, value1);
     };
     __variant_detail::__visit_two(invoke, std::forward<Variant0>(var0),
                                   std::forward<Variant1>(var1));
   } else {
-    auto invoke = [&, vis](auto&& value0, auto&& value1) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1) -> R {
       return vis(value0, value1);
     };
     return __variant_detail::__visit_two(invoke, std::forward<Variant0>(var0),
@@ -1168,14 +1192,16 @@ template <class R, class Visitor, class Variant0, class Variant1,
           class Variant2>
 R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
   if constexpr (is_void<R>::value) {
-    auto invoke = [&, vis](auto&& value0, auto&& value1, auto&& value2) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1,
+                           auto&& value2) -> void {
       vis(value0, value1, value2);
     };
     __variant_detail::__visit_three(invoke, std::forward<Variant0>(var0),
                                     std::forward<Variant1>(var1),
                                     std::forward<Variant2>(var2));
   } else {
-    auto invoke = [&, vis](auto&& value0, auto&& value1, auto&& value2) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1,
+                           auto&& value2) -> R {
       return vis(value0, value1, value2);
     };
     return __variant_detail::__visit_three(
@@ -1189,9 +1215,9 @@ template <class R, class Visitor, class Variant0, class Variant1,
 R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
         Variant3&& var3) {
   if constexpr (is_void<R>::value) {
-    auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) -> void {
       auto visit_last_two = [&, vis, value0, value1](auto value2,
-                                                     auto value3) {
+                                                     auto value3) -> void {
         vis(value0, value1, std::move(value2), std::move(value3));
       };
       __variant_detail::__visit_two(visit_last_two,
@@ -1202,9 +1228,9 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
                                   std::forward<Variant0>(var0),
                                   std::forward<Variant1>(var1));
   } else {
-    auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) -> R {
       auto visit_last_two = [&, vis, value0, value1](auto value2,
-                                                     auto value3) {
+                                                     auto value3) -> R {
         return vis(value0, value1, std::move(value2), std::move(value3));
       };
       return __variant_detail::__visit_two(visit_last_two,
@@ -1222,9 +1248,10 @@ template <class R, class Visitor, class Variant0, class Variant1,
 R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
         Variant3&& var3, Variant4&& var4) {
   if constexpr (is_void<R>::value) {
-    auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) -> void {
       auto visit_last_three = [&, vis, value0, value1](
-                                  auto value2, auto value3, auto value4) {
+                                  auto value2, auto value3,
+                                  auto value4) -> void {
         vis(value0, value1, std::move(value2), std::move(value3),
             std::move(value4));
       };
@@ -1237,9 +1264,10 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
                                   std::forward<Variant0>(var0),
                                   std::forward<Variant1>(var1));
   } else {
-    auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) -> R {
       auto visit_last_three = [&, vis, value0, value1](
-                                  auto value2, auto value3, auto value4) {
+                                  auto value2, auto value3,
+                                  auto value4) -> R {
         return vis(value0, value1, std::move(value2), std::move(value3),
                    std::move(value4));
       };

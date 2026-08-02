@@ -234,15 +234,15 @@ struct __is_member_pointer_argument
 template <class F>
 struct __invoke_helper {
   template <class... Args>
-  static typename __invoke_result<F, Args...>::type call(F& function,
-                                                       Args&&... args) {
+  static constexpr typename __invoke_result<F, Args...>::type call(
+      F& function, Args&&... args) {
     return (function)(static_cast<Args&&>(args)...);
   }
 };
 
 template <class R, class A>
 struct __invoke_helper<R(A)> {
-  static R call(R (*function)(A), A&& arg) {
+  static constexpr R call(R (*function)(A), A&& arg) {
     return function(static_cast<A&&>(arg));
   }
 };
@@ -256,7 +256,7 @@ template <class Function, class Object, bool IsReferenceWrapper,
 struct __invoke_dispatch<Function, Object, false, false, IsReferenceWrapper,
                          IsPointer> {
   template <class Argument, class... Args>
-  static __davecc_invoke_result_t(Function, Argument, Args...)
+  static constexpr __davecc_invoke_result_t(Function, Argument, Args...)
   call(Function& function, Argument&& object, Args&&... args) {
     return function(static_cast<Argument&&>(object),
                     static_cast<Args&&>(args)...);
@@ -268,7 +268,7 @@ struct __invoke_dispatch<Function, Object, true, false, true, false> {
   using Value = remove_reference_t<Object>;
 
   template <class... Args>
-  static __davecc_invoke_result_t(Function, Object, Args...)
+  static constexpr __davecc_invoke_result_t(Function, Object, Args...)
   call(Function& function, Value& object, Args&&... args) {
     return (object.get().*function)(static_cast<Args&&>(args)...);
   }
@@ -277,7 +277,7 @@ struct __invoke_dispatch<Function, Object, true, false, true, false> {
 template <class Function, class Object>
 struct __invoke_dispatch<Function, Object, true, false, false, true> {
   template <class... Args>
-  static __davecc_invoke_result_t(Function, Object, Args...)
+  static constexpr __davecc_invoke_result_t(Function, Object, Args...)
   call(Function& function, Object object, Args&&... args) {
     return ((*object).*function)(static_cast<Args&&>(args)...);
   }
@@ -286,7 +286,7 @@ struct __invoke_dispatch<Function, Object, true, false, false, true> {
 template <class Function, class Object>
 struct __invoke_dispatch<Function, Object, true, false, false, false> {
   template <class Argument, class... Args>
-  static __davecc_invoke_result_t(Function, Argument, Args...)
+  static constexpr __davecc_invoke_result_t(Function, Argument, Args...)
   call(Function& function, Argument&& object, Args&&... args) {
     return (static_cast<Argument&&>(object).*function)(
         static_cast<Args&&>(args)...);
@@ -297,7 +297,7 @@ template <class Function, class Object>
 struct __invoke_dispatch<Function, Object, false, true, true, false> {
   using Value = remove_reference_t<Object>;
 
-  static __davecc_invoke_result_t(Function, Object)
+  static constexpr __davecc_invoke_result_t(Function, Object)
   call(Function& function, Value& object) {
     return object.get().*function;
   }
@@ -305,7 +305,7 @@ struct __invoke_dispatch<Function, Object, false, true, true, false> {
 
 template <class Function, class Object>
 struct __invoke_dispatch<Function, Object, false, true, false, true> {
-  static __davecc_invoke_result_t(Function, Object)
+  static constexpr __davecc_invoke_result_t(Function, Object)
   call(Function& function, Object object) {
     return (*object).*function;
   }
@@ -314,20 +314,20 @@ struct __invoke_dispatch<Function, Object, false, true, false, true> {
 template <class Function, class Object>
 struct __invoke_dispatch<Function, Object, false, true, false, false> {
   template <class Argument>
-  static __davecc_invoke_result_t(Function, Argument)
+  static constexpr __davecc_invoke_result_t(Function, Argument)
   call(Function& function, Argument&& object) {
     return object.*function;
   }
 };
 
 template <class F>
-__davecc_invoke_result_t(F) invoke(F&& function) {
+constexpr __davecc_invoke_result_t(F) invoke(F&& function) {
   return function();
 }
 
 template <class F, class T, class... Args>
   requires (__is_member_pointer_argument<F>::value)
-__davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
+constexpr __davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
 invoke(F&& function, reference_wrapper<T>&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
   using Object = reference_wrapper<T>;
@@ -339,7 +339,7 @@ invoke(F&& function, reference_wrapper<T>&& object, Args&&... args) {
 
 template <class F, class T, class... Args>
   requires (__is_member_pointer_argument<F>::value)
-__davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
+constexpr __davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
 invoke(F&& function, reference_wrapper<T>& object, Args&&... args) {
   using Function = remove_reference_t<F>;
   using Object = reference_wrapper<T>;
@@ -352,7 +352,7 @@ invoke(F&& function, reference_wrapper<T>& object, Args&&... args) {
 template <class F, class T, class... Args>
   requires (__is_member_pointer_argument<F>::value &&
             __davecc_is_member_pointer_direct_object(F, T) != 0)
-__davecc_invoke_result_t(F, T, Args...)
+constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
   using Object = remove_reference_t<T>;
@@ -365,7 +365,7 @@ invoke(F&& function, T&& object, Args&&... args) {
 template <class F, class T, class... Args>
   requires (__is_member_pointer_argument<F>::value &&
             __davecc_is_member_pointer_direct_object(F, T) == 0)
-__davecc_invoke_result_t(F, T, Args...)
+constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
   using Object = remove_reference_t<T>;
@@ -377,7 +377,7 @@ invoke(F&& function, T&& object, Args&&... args) {
 
 template <class F, class T, class... Args>
   requires (!__is_member_pointer_argument<F>::value)
-__davecc_invoke_result_t(F, T, Args...)
+constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
   using Object = remove_reference_t<T>;
