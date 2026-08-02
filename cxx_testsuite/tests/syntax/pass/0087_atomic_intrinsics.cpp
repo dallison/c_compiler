@@ -1,5 +1,4 @@
 // RUN: -std=c++20
-#define __ATOMIC_SEQ_CST 5
 
 int atomic_intrinsic_values(void) {
   int value = 3;

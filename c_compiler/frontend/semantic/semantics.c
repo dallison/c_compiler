@@ -179,6 +179,10 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
     case AST_OP(builtin_atomic_compare_exchange_val):
     case AST_OP(builtin_atomic_compare_exchange_n):
     case AST_OP(builtin_atomic_fence):
+    case AST_OP(builtin_expect):
+    case AST_OP(builtin_prefetch):
+    case AST_OP(builtin_trap):
+    case AST_OP(builtin_unreachable):
       return true;
     case AST_OP(label): {
       LabelASTNode* label = (LabelASTNode*)node;

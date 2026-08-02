@@ -9872,6 +9872,56 @@ static void AnalyzeSourceIntegerBuiltin(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain));
 }
 
+static void AnalyzeBuiltinExpect(VectorASTNode* node) {
+  TypeRecord* result_type = NewTypeRecordWithSize(kTypeLong, kQualPlain);
+  if (node->children->length != 2) {
+    ASTNodeSetType(&node->base, result_type);
+    return;
+  }
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* child = node->children->value.p[i];
+    child = AnalyzeExpression(child);
+    node->children->value.p[i] = child;
+    NormalConversion(child, NewTypeRecordWithSize(kTypeLong, kQualPlain));
+  }
+  ASTNodeSetType(&node->base, result_type);
+}
+
+static void AnalyzeBuiltinPrefetch(VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    node->children->value.p[i] =
+        AnalyzeExpression(node->children->value.p[i]);
+  }
+  if (node->children->length >= 1) {
+    ASTNode* address = node->children->value.p[0];
+    if (!TypeIsPointerOrArray(address->type)) {
+      SemanticError(address, "__builtin_prefetch address must be a pointer");
+    }
+  }
+  for (size_t i = 1; i < node->children->length; i++) {
+    ASTNode* option = node->children->value.p[i];
+    int64_t value = -1;
+    if (!TypeIsIntegral(option->type) ||
+        !EvaluateIntegerExpression(option, &value)) {
+      SemanticError(option,
+                    "__builtin_prefetch optional arguments must be constant integers");
+      continue;
+    }
+    if ((i == 1 && (value < 0 || value > 1)) ||
+        (i == 2 && (value < 0 || value > 3))) {
+      SemanticError(option,
+                    "__builtin_prefetch argument is outside its valid range");
+    }
+  }
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
+static void AnalyzeBuiltinTerminator(VectorASTNode* node) {
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
   SourceLocation location = node->base.location;
   if (node->children == NULL || node->children->length == 0) {
@@ -10210,6 +10260,19 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_source_line):
     case AST_OP(builtin_source_column):
       AnalyzeSourceIntegerBuiltin(vector_node);
+      break;
+
+    case AST_OP(builtin_expect):
+      AnalyzeBuiltinExpect(vector_node);
+      break;
+
+    case AST_OP(builtin_prefetch):
+      AnalyzeBuiltinPrefetch(vector_node);
+      break;
+
+    case AST_OP(builtin_trap):
+    case AST_OP(builtin_unreachable):
+      AnalyzeBuiltinTerminator(vector_node);
       break;
 
     case AST_OP(builtin_type_trait):

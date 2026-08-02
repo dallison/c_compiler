@@ -2374,6 +2374,27 @@ static bool IsKnownAttribute(const char* name) {
   return false;
 }
 
+bool SyntaxAttributeIsSupported(const char* name) {
+  static const char* supported[] = {
+      "packed",          "aligned",          "format",
+      "deprecated",      "unused",           "warn_unused_result",
+      "noreturn",        "noinline",         "always_inline",
+      "constructor",     "destructor",
+  };
+  for (size_t i = 0; i < sizeof(supported) / sizeof(supported[0]); i++) {
+    if (strcmp(supported[i], name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool IsUnsupportedTypeAttribute(const char* name) {
+  return strcmp(name, "vector_size") == 0 ||
+         strcmp(name, "ext_vector_type") == 0 ||
+         strcmp(name, "mode") == 0;
+}
+
 // Parse an __attribute__((...)) clause list, appending parsed Attribute* to
 // attrs.  Assumes TOK(attribute) was just consumed.
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
@@ -2383,7 +2404,10 @@ void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
   ParseAttributeText(&attribute_list, attrs);
   for (size_t i = start; i < attrs->length; i++) {
     Attribute* attr = attrs->value.p[i];
-    if (!IsKnownAttribute(attr->name.value)) {
+    if (IsUnsupportedTypeAttribute(attr->name.value)) {
+      SyntaxError(syntax, "'%s' type attribute is not supported",
+                  attr->name.value);
+    } else if (!IsKnownAttribute(attr->name.value)) {
       SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
                     attr->name.value);
     }
@@ -2539,7 +2563,10 @@ static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
       SyntaxError(syntax, "aligned attribute argument must be an integer");
     }
   }
-  if (!IsKnownAttribute(attr->name.value)) {
+  if (IsUnsupportedTypeAttribute(attr->name.value)) {
+    SyntaxError(syntax, "'%s' type attribute is not supported",
+                attr->name.value);
+  } else if (!IsKnownAttribute(attr->name.value)) {
     SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
                   attr->name.value);
   }
