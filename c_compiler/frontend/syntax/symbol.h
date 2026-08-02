@@ -72,6 +72,11 @@ typedef struct AliasTemplate {
 typedef struct Attribute {
   String name;   // Normalized attribute name.               // @wire 1
   Vector args;   // Vector of String* argument tokens.       // @wire 2
+  // Unevaluated operands for a dependent C++ alignas specifier. Exactly one
+  // is non-NULL; template instantiation substitutes it and writes the
+  // resulting concrete alignment to the owning Symbol.
+  struct TypeRecord* dependent_alignas_type;                  // @wire 3
+  struct ASTNode* dependent_alignas_expr;                     // @wire 4
 } Attribute;
 
 Attribute* NewAttribute(const char* name);

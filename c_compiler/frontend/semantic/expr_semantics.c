@@ -300,6 +300,10 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     if ((node->base.flags & kASTIsDeclaration) != 0) {
       return &node->base;
     }
+    if (node->base.parent != NULL &&
+        node->base.parent->op == AST_OP(address)) {
+      return &node->base;
+    }
     if (!node->symbol->flags.value_set) {
       return &node->base;
     }
@@ -4263,6 +4267,11 @@ static TypeRecord* CopyFunctionTypeForVirtualCall(TypeRecord* function_type) {
 
 static ASTNode* NewAnalyzedBuiltinAddressOf(ASTNode* sub,
                                             SourceLocation location) {
+  if (sub != NULL && sub->op == AST_OP(contents)) {
+    ASTNode* pointer = ASTNodeMove(((UnaryASTNode*)sub)->sub);
+    ASTNodeDelete(sub);
+    return pointer;
+  }
   TypeRecord* pointer_type = NewPointerTo(kQualPlain, sub->type);
   ASTNode* address =
       NewUnaryASTNode(AST_OP(address), pointer_type, location, sub);
@@ -5409,7 +5418,21 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
       best_rank = rank;
       ambiguous = false;
     } else if (rank == best_rank) {
-      ambiguous = true;
+      bool best_is_template =
+          best->symbol != NULL && best->symbol->flags.is_template;
+      bool candidate_is_template = c->symbol->flags.is_template;
+      if (best_is_template != candidate_is_template) {
+        // [over.match.best.general]: for otherwise indistinguishable
+        // candidates, a non-template function is better than a function
+        // template specialization.  This is common for a class that has both
+        // `T(const T&)` and `template<class U> T(const T<U>&)`.
+        if (best_is_template) {
+          best = c;
+        }
+        ambiguous = false;
+      } else {
+        ambiguous = true;
+      }
     }
   }
   return ambiguous ? NULL : best;
@@ -8770,6 +8793,15 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   Struct* struct_info = NULL;
 
   node->left = AnalyzeExpression(node->left);
+  if (CompilerIsCXX() && node->base.op == AST_OP(dot) &&
+      node->left != NULL && node->left->type != NULL &&
+      TypeIsStructOrUnion(node->left->type) &&
+      node->left->value_category == kValueCategoryPrvalue &&
+      !HasAddress(node->left)) {
+    node->left = MaterializeTemporary(node->left, node->left->type);
+    node->left->parent = (ASTNode*)node;
+    node->left->child_id = 0;
+  }
   if (node->base.op == AST_OP(arrow) &&
       !TypeIsStructOrUnionPointer(node->left->type)) {
     ASTNode* overloaded_arrow =

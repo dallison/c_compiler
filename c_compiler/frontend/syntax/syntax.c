@@ -1075,7 +1075,6 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
       }
     }
   }
-
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
   bool has_template_qualified_prefix = false;
@@ -2605,6 +2604,7 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
 
   SyntaxNeedBracket(syntax, TOK(lparen), TC(decl) | TC(closebra));
   int64_t value = 0;
+  Attribute* dependent = NULL;
   if (SyntaxLookingAtType(syntax)) {
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
@@ -2614,7 +2614,8 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
     if (sym == NULL || sym->type == NULL) {
       SyntaxError(syntax, "alignas type-id is invalid");
     } else if (TypeContainsTemplateParameter(sym->type)) {
-      SyntaxError(syntax, "dependent alignas type-id is not supported");
+      dependent = NewAttribute("aligned");
+      dependent->dependent_alignas_type = TypeRecordCopy(sym->type);
     } else {
       TypeRecordCalculateSize(sym->type);
       value = TypeRecordAlignment(sym->type);
@@ -2623,15 +2624,26 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
     TypeParserDestruct(&parser);
   } else {
     ASTNode* expr = SyntaxParseExpression(syntax, TC(closebra));
-    expr = AnalyzeExpression(expr);
-    bool ok = EvaluateIntegerExpression(expr, &value);
-    if (!ok) {
-      SyntaxError(syntax, "alignas specifier must be a constant expression");
+    if (syntax->parsing_template_declaration &&
+        ExpressionIsTemplateDependent(expr)) {
+      dependent = NewAttribute("aligned");
+      dependent->dependent_alignas_expr = expr;
+      expr = NULL;
+    } else {
+      expr = AnalyzeExpression(expr);
+      bool ok = EvaluateIntegerExpression(expr, &value);
+      if (!ok) {
+        SyntaxError(syntax, "alignas specifier must be a constant expression");
+      }
     }
     ASTNodeDelete(expr);
   }
   SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
 
+  if (dependent != NULL) {
+    VectorAppend(attrs, dependent);
+    return true;
+  }
   if (value < 0 || value > 2147483647 ||
       !IsPowerOf2OrZero((int32_t)value)) {
     SyntaxError(syntax, "alignas specifier must name a power-of-two alignment");
@@ -5164,22 +5176,29 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     }
   }
 
-  if (syntax->parsing_template_declaration && enclosing_class_is_template) {
-    SyntaxDeferTemplateFriendFunction(syntax, befriending, sym);
-    SyntaxCloseScope(syntax);
-    TypeParserDestruct(&parser);
-    TypeRecordDelete(type);
-    AttributeListDestruct(&attributes);
-    syntax->local_tag_stack = saved_tag_stack;
-    return;
+  // A friend function template's parameter indices start after the enclosing
+  // class template's parameters. An ordinary dependent friend sees only the
+  // enclosing parameters and remains a non-template function per
+  // specialization.
+  bool friend_has_own_template_head = false;
+  if (syntax->parsing_template_declaration && TypeIsFunction(sym->type) &&
+      syntax->current_template_parameters != NULL) {
+    Vector* params = syntax->current_template_parameters;
+    for (size_t i = 0; i < params->length; i++) {
+      TemplateParameter* param = params->value.p[i];
+      if (param != NULL &&
+          param->index >= befriending->defining_template_scope_count) {
+        friend_has_own_template_head = true;
+        break;
+      }
+    }
   }
 
   // Case (b): give the friend its own template-parameter list and mark it a
   // function template so overload resolution / ADL treat it accordingly.  The
   // parameters currently live in `current_template_parameters`; copy them onto
   // the function type (the caller frees its own copy).
-  if (syntax->parsing_template_declaration && TypeIsFunction(sym->type) &&
-      syntax->current_template_parameters != NULL &&
+  if (friend_has_own_template_head &&
       sym->type->info.function.template_parameters.length == 0) {
     Vector* params = syntax->current_template_parameters;
     for (size_t i = 0; i < params->length; i++) {
@@ -5188,7 +5207,10 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     }
     sym->flags.is_template = true;
     sym->type->info.function.template_parameter_count = (int)params->length;
-    sym->type->info.function.template_parameter_base = 0;
+    TemplateParameter* first =
+        params->length > 0 ? params->value.p[0] : NULL;
+    sym->type->info.function.template_parameter_base =
+        first != NULL ? first->index : 0;
     // Fold any concept-constrained parameters (e.g. `template <integral I>`) and
     // an explicit trailing requires-clause into the function's constraint.
     MoveTemplateParameterConstraints(
@@ -5199,6 +5221,16 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
                                       syntax->current_template_requires_clause);
       syntax->current_template_requires_clause = NULL;
     }
+  }
+
+  if (syntax->parsing_template_declaration && enclosing_class_is_template) {
+    SyntaxDeferTemplateFriendFunction(syntax, befriending, sym);
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
   }
 
   Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
@@ -10282,8 +10314,12 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
   LexCheckpointSave(syntax->lex, &checkpoint);
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
-  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
-                                                     TC(openbra) | TC(stmt));
+  if (SyntaxCurrentTokenStartsQualifiedName(syntax)) {
+    SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+        syntax, &name, TC(openbra) | TC(stmt));
+  } else {
+    SyntaxParseFullyQualifiedIdentifier(syntax, &name);
+  }
   bool followed_by_assignment = LexLookingAt(syntax->lex, TOK(equal));
   bool decided = false;
   bool is_type = false;
@@ -10507,6 +10543,110 @@ bool SyntaxLookingAtType(Syntax* syntax) {
   }
 }
 
+// A functional-style temporary followed by member access is necessarily an
+// expression statement, even when its leading name is also a type.  Without
+// this lookahead, `T(value).member()` is sent to the declaration parser as the
+// parenthesized declarator `T(value)`.
+static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
+  if (!CompilerIsCXX() ||
+      (!LexLookingAt(syntax->lex, TOK(identifier)) &&
+       !LexLookingAt(syntax->lex, TOK(coloncolon)))) {
+    return false;
+  }
+  Symbol* initial_symbol =
+      LexLookingAt(syntax->lex, TOK(identifier))
+          ? SyntaxFindSymbol(syntax, &syntax->lex->spelling)
+          : NULL;
+  bool template_name =
+      initial_symbol != NULL && initial_symbol->flags.is_template;
+  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+    LexCheckpoint qualification;
+    LexCheckpointSave(syntax->lex, &qualification);
+    LexNextToken(syntax->lex);
+    bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+    LexCheckpointRestore(syntax->lex, &qualification);
+    LexCheckpointDestruct(&qualification);
+    bool qualified_type_name =
+        qualified && SyntaxQualifiedNameLooksLikeType(syntax);
+    bool type_name =
+        initial_symbol != NULL &&
+        (initial_symbol->flags.is_template ||
+         StorageIs(initial_symbol->storage, STO(typedef)) ||
+         (initial_symbol->type != NULL &&
+          TypeIsStructOrUnion(initial_symbol->type)));
+    if (!type_name &&
+        SyntaxFindTag(syntax, &syntax->lex->spelling) == NULL &&
+        !qualified_type_name) {
+      return false;
+    }
+    template_name |= qualified_type_name;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool is_member_access = false;
+
+  // Keep this lookahead lexical. Running TypeParserParseType here is not
+  // speculative: declarations and template instantiations it encounters can
+  // mutate symbol tables even after the lexer checkpoint is restored.
+  if (LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    LexNextToken(syntax->lex);
+  }
+  bool have_type_name = LexLookingAt(syntax->lex, TOK(identifier));
+  while (have_type_name) {
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(less))) {
+      if (!template_name) {
+        have_type_name = false;
+        break;
+      }
+      int angle_depth = 0;
+      do {
+        Token token = syntax->lex->current_token;
+        if (token == TOK(semicolon)) {
+          break;
+        }
+        if (token == TOK(less)) {
+          angle_depth++;
+        } else {
+          angle_depth -= LexClosingAngleCount(token);
+        }
+        LexNextToken(syntax->lex);
+      } while (!LexEof(syntax->lex) && angle_depth > 0);
+      if (angle_depth != 0) {
+        have_type_name = false;
+        break;
+      }
+    }
+    if (!LexLookingAt(syntax->lex, TOK(coloncolon))) {
+      break;
+    }
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(template))) {
+      LexNextToken(syntax->lex);
+    }
+    have_type_name = LexLookingAt(syntax->lex, TOK(identifier));
+  }
+
+  if (have_type_name && LexLookingAt(syntax->lex, TOK(lparen))) {
+    int depth = 0;
+    do {
+      if (LexLookingAt(syntax->lex, TOK(lparen))) {
+        depth++;
+      } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+        depth--;
+      }
+      LexNextToken(syntax->lex);
+    } while (!LexEof(syntax->lex) && depth > 0);
+    is_member_access =
+        depth == 0 &&
+        (LexLookingAt(syntax->lex, TOK(dot)) ||
+         LexLookingAt(syntax->lex, TOK(arrow)));
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return is_member_access && SyntaxLookingAtType(syntax);
+}
+
 static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
   // Recognize any qualified-name start: a leading `::`, a name that a
   // namespace/template prefix makes look qualified, or a plain `ident::`
@@ -10548,6 +10688,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return result;
   }
   if (CXXQualifiedNameLooksLikeCallExpression(syntax)) {
+    return false;
+  }
+  if (CXXTypeStartsTemporaryMemberAccess(syntax)) {
     return false;
   }
   switch (syntax->lex->current_token) {

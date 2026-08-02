@@ -2366,10 +2366,9 @@ static void ParseArrayDecl(TypeParser* parser) {
       p->info.array.size.fixed = 1;
       goto parsed_bound;
     }
-    bool ok = EvaluateIntegerExpression(size_expr, &size);
-    if (!ok) {
-      if (parser->syntax->parsing_template_declaration &&
-          size_expr->op == AST_OP(identifier)) {
+    if (parser->syntax->parsing_template_declaration &&
+        ExpressionIsTemplateDependent(size_expr)) {
+      if (size_expr->op == AST_OP(identifier)) {
         IdentifierASTNode* id = (IdentifierASTNode*)size_expr;
         if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
             !id->symbol->flags.is_template_type_parameter) {
@@ -2379,13 +2378,17 @@ static void ParseArrayDecl(TypeParser* parser) {
           goto parsed_bound;
         }
       }
-      if (parser->syntax->parsing_template_declaration &&
-          DependentExpressionContainsTemplateParameter(size_expr)) {
-        p->info.array.size.vla.size = size_expr;
-        p->info.array.is_dependent_bound = true;
-        delete_expr = false;
-        goto parsed_bound;
-      }
+      // A dependent expression can carry a placeholder constant value after
+      // semantic analysis (for example, sizeof(T) uses the template
+      // parameter's provisional size).  Preserve the expression before
+      // constant evaluation so instantiation can compute the real bound.
+      p->info.array.size.vla.size = size_expr;
+      p->info.array.is_dependent_bound = true;
+      delete_expr = false;
+      goto parsed_bound;
+    }
+    bool ok = EvaluateIntegerExpression(size_expr, &size);
+    if (!ok) {
       // VLA.
       if (!TypeIsIntegral(size_expr->type)) {
         SyntaxError(parser->syntax, "Variable length array size must be integral");

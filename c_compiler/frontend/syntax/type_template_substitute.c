@@ -368,6 +368,65 @@ void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args) {
   symbol->dependent_value_template_parameter_index = -1;
 }
 
+void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
+                                        Vector* args) {
+  if (parser == NULL || symbol == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < symbol->attributes.length; i++) {
+    Attribute* attr = symbol->attributes.value.p[i];
+    if (attr == NULL ||
+        (attr->dependent_alignas_type == NULL &&
+         attr->dependent_alignas_expr == NULL)) {
+      continue;
+    }
+
+    int64_t alignment = 0;
+    bool resolved = false;
+    if (attr->dependent_alignas_type != NULL) {
+      TypeRecord* concrete = SubstituteTemplateParameters(
+          parser, attr->dependent_alignas_type, args);
+      if (concrete != NULL && !TypeContainsTemplateParameter(concrete)) {
+        TypeRecordCalculateSize(concrete);
+        alignment = TypeRecordAlignment(concrete);
+        resolved = true;
+      } else if (concrete != NULL) {
+        TypeRecordDelete(attr->dependent_alignas_type);
+        attr->dependent_alignas_type = concrete;
+        concrete = NULL;
+      }
+      TypeRecordDelete(concrete);
+    } else {
+      ASTNode* concrete = CloneDependentExpressionWithArgs(
+          parser, attr->dependent_alignas_expr, args);
+      if (concrete != NULL && ExpressionIsTemplateDependent(concrete)) {
+        ASTNodeDelete(attr->dependent_alignas_expr);
+        attr->dependent_alignas_expr = concrete;
+        concrete = NULL;
+      } else if (concrete != NULL) {
+        concrete = AnalyzeExpression(concrete);
+        resolved = EvaluateIntegerExpression(concrete, &alignment);
+      }
+      ASTNodeDelete(concrete);
+    }
+
+    if (!resolved) {
+      continue;
+    }
+    if (alignment < 0 || alignment > 2147483647 ||
+        (alignment != 0 && (alignment & (alignment - 1)) != 0)) {
+      SyntaxError(parser->syntax,
+                  "alignas specifier must name a power-of-two alignment");
+    } else if (alignment > symbol->alignment) {
+      symbol->alignment = (int)alignment;
+    }
+    TypeRecordDelete(attr->dependent_alignas_type);
+    attr->dependent_alignas_type = NULL;
+    ASTNodeDelete(attr->dependent_alignas_expr);
+    attr->dependent_alignas_expr = NULL;
+  }
+}
+
 void SubstituteStaticMemberInitializerValue(TypeParser* parser,
                                                    Symbol* symbol,
                                                    ASTNode* initializer,

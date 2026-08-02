@@ -534,6 +534,9 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
           kCXXSpecialMemberCopyConstructor ||
       func->info.function.cxx_special_member_kind ==
           kCXXSpecialMemberMoveConstructor;
+  bool copy_constructor =
+      func->info.function.cxx_special_member_kind ==
+      kCXXSpecialMemberCopyConstructor;
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -542,6 +545,11 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
       continue;
     }
     TypeRecord* member_type = member->symbol->type;
+    // The constructor preamble already copy-initializes non-array members.
+    // Fixed arrays are intentionally left for the element-wise path below.
+    if (copy_constructor && !TypeIsFixedArray(member_type)) {
+      continue;
+    }
     if (TypeIsFixedArray(member_type)) {
       size_t ndims = 0;
       for (TypeRecord* t = member_type; TypeIsFixedArray(t); t = t->next) {

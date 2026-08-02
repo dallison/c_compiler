@@ -1098,6 +1098,10 @@ static bool CXXDesignatedInitFunctionalCastConstructor(ASTNode* init,
     return CXXDesignatedInitFunctionalCastConstructor(
         ((ExpressionInitializerASTNode*)init)->expr, ctor_call);
   }
+  if (init->op == AST_OP(cast)) {
+    return CXXDesignatedInitFunctionalCastConstructor(
+        ((CastASTNode*)init)->expr, ctor_call);
+  }
   if (init->op == AST_OP(call)) {
     TypeRecord* callee_type = ((VectorASTNode*)init)->left != NULL
                                   ? ((VectorASTNode*)init)->left->type
@@ -2713,6 +2717,13 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   IRNode* expr = GenerateExpression(gen, node->sub);
   bool sub_returns_reference = ExpressionReturnsReference(node->sub);
   if (node->sub->op == AST_OP(compound_literal)) {
+    IRSetType(expr, node->base.type);
+    return expr;
+  }
+  if (node->sub->op == AST_OP(dot) ||
+      node->sub->op == AST_OP(arrow) ||
+      node->sub->op == AST_OP(subscript) ||
+      node->sub->op == AST_OP(contents)) {
     IRSetType(expr, node->base.type);
     return expr;
   }

@@ -179,6 +179,8 @@ static bool CXXCompoundLiteralWrapsConstructedTemporary(
          CXXSameClassIgnoringQualifiers(literal_sym->type, source->type);
 }
 
+static bool CXXInitializerConstructsInPlace(ASTNode* init);
+
 static bool CXXTemporaryIsElidedByDirectInitialization(ASTNode* node,
                                                        Symbol* sym) {
   for (ASTNode* parent = node != NULL ? node->parent : NULL; parent != NULL;
@@ -190,15 +192,9 @@ static bool CXXTemporaryIsElidedByDirectInitialization(ASTNode* node,
       if (expr != NULL && expr->op == AST_OP(expr_init)) {
         expr = ((ExpressionInitializerASTNode*)expr)->expr;
       }
-      Designator* first_designator =
-          designated->designators != NULL &&
-                  designated->designators->length != 0
-              ? designated->designators->value.p[0]
-              : NULL;
-      if (first_designator != NULL &&
-          first_designator->designator_type == kDesignatorArray &&
-          CXXTemporaryConstructionResultSymbol(expr) == sym &&
-          CXXSameClassIgnoringQualifiers(parent->type, sym->type)) {
+      if (CXXTemporaryConstructionResultSymbol(expr) == sym &&
+          CXXSameClassIgnoringQualifiers(parent->type, sym->type) &&
+          CXXInitializerConstructsInPlace(designated->init)) {
         return true;
       }
     }
@@ -219,6 +215,9 @@ static bool CXXInitializerConstructsInPlace(ASTNode* init) {
   if (init->op == AST_OP(expr_init)) {
     return CXXInitializerConstructsInPlace(
         ((ExpressionInitializerASTNode*)init)->expr);
+  }
+  if (init->op == AST_OP(cast)) {
+    return CXXInitializerConstructsInPlace(((CastASTNode*)init)->expr);
   }
   if (init->op == AST_OP(call)) {
     ASTNode* callee = ((VectorASTNode*)init)->left;
@@ -357,6 +356,47 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   VectorDestruct(&collection.temps);
   VectorDestruct(&collection.elided);
   return expr;
+}
+
+static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
+    ASTNode* expr) {
+  if (!CompilerIsCXX() || expr == NULL ||
+      (compiler->current_function != NULL &&
+       (compiler->current_function->info.function.is_coroutine ||
+        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+    return expr;
+  }
+  CXXTemporaryCollection collection;
+  VectorInit(&collection.temps);
+  VectorInit(&collection.elided);
+  ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  if (collection.temps.length == 0) {
+    VectorDestruct(&collection.temps);
+    VectorDestruct(&collection.elided);
+    return expr;
+  }
+
+  Symbol* saved = SyntaxNewTemporary(&compiler->syntax, expr->type);
+  ASTNode* assignment = NewBinaryASTNode(
+      AST_OP(assign), NULL, expr->location,
+      NewIdentifierASTNode(saved, expr->location), expr);
+  ASTNode* sequence = AnalyzeExpression(assignment);
+  for (size_t i = collection.temps.length; i > 0; i--) {
+    Symbol* sym = collection.temps.value.p[i - 1];
+    ASTNode* destructor =
+        NewCXXTemporaryDestructorCall(sym, expr->location);
+    if (destructor != NULL) {
+      sequence = AnalyzeExpression(NewBinaryASTNode(
+          AST_OP(comma), NULL, expr->location, sequence, destructor));
+    }
+  }
+  ASTNode* result =
+      AnalyzeExpression(NewIdentifierASTNode(saved, expr->location));
+  sequence = AnalyzeExpression(NewBinaryASTNode(
+      AST_OP(comma), NULL, expr->location, sequence, result));
+  VectorDestruct(&collection.temps);
+  VectorDestruct(&collection.elided);
+  return sequence;
 }
 
 // ---- C++ scope-exit destructor insertion ---------------------------------
@@ -1020,6 +1060,8 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
     SemanticCheckScalarType(node->cond);
     return;
   }
+  node->cond =
+      AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->cond);
   AnalyzeStatement(node->if_part);
   AnalyzeStatement(node->else_part);
   SemanticCheckScalarType(node->cond);
@@ -1030,6 +1072,8 @@ static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
+  node->cond =
+      AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
 }
@@ -1039,6 +1083,8 @@ static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
+  node->cond =
+      AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
 }
@@ -1253,6 +1299,8 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+  node->expr =
+      AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->expr);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->expr);
 
@@ -1376,6 +1424,8 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
       }
     } else {
       node->c1 = AnalyzeExpression(node->c1);
+      node->c1 =
+          AppendCXXFullExpressionTemporaryDestructors(node->c1);
     }
   }
 
@@ -1384,10 +1434,13 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
     SemanticConvertType(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                         kConvertContextualBool);
     SemanticCheckScalarType(node->c2);
+    node->c2 =
+        AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->c2);
   }
 
   // Optional expression 3.
   node->c3 = AnalyzeExpression(node->c3);
+  node->c3 = AppendCXXFullExpressionTemporaryDestructors(node->c3);
 
   // Finally the statment.
   AnalyzeStatement(node->stmt);

@@ -246,7 +246,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           member_symbol->value = member->symbol->value;
           member_symbol->dependent_value_template_parameter_index =
               member->symbol->dependent_value_template_parameter_index;
+          VectorDestruct(&member_symbol->attributes);
+          AttributeListClone(&member_symbol->attributes,
+                             &member->symbol->attributes);
           SubstituteDependentSymbolValue(member_symbol, args);
+          SubstituteDependentSymbolAlignment(parser, member_symbol, args);
           SubstituteStaticMemberInitializerValue(
               parser, member_symbol, member->default_initializer, args);
 
@@ -260,7 +264,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           instantiated->bit_size = member->bit_size;
           instantiated->bit_offset = member->bit_offset;
           instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
-          AlignNextOffset(str, member_type);
+          AlignNextOffsetForSymbol(str, member_symbol);
           instantiated->byte_offset = str->next_offset;
           instantiated->index = str->members.length;
           AddStructMember(parser, str, instantiated);
@@ -304,7 +308,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     member_symbol->value = member->symbol->value;
     member_symbol->dependent_value_template_parameter_index =
         member->symbol->dependent_value_template_parameter_index;
+    VectorDestruct(&member_symbol->attributes);
+    AttributeListClone(&member_symbol->attributes,
+                       &member->symbol->attributes);
     SubstituteDependentSymbolValue(member_symbol, args);
+    SubstituteDependentSymbolAlignment(parser, member_symbol, args);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer, args);
 
@@ -337,7 +345,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     if (!instantiated->is_static && !instantiated->is_member_function &&
         !instantiated->is_using_declaration &&
         !StructMemberIsNestedType(instantiated)) {
-      AlignNextOffset(str, member_type);
+      AlignNextOffsetForSymbol(str, member_symbol);
       instantiated->byte_offset = str->next_offset;
       instantiated->index = str->members.length;
       AddStructMember(parser, str, instantiated);
@@ -3950,14 +3958,17 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
           TypeMemberPointerPointeeType(actual));
     case kDeclArray:
       if (pattern->info.array.template_parameter_index >= 0) {
-        if (actual->info.array.is_vla ||
+        if (actual->info.array.is_flexible ||
+            actual->info.array.is_vla ||
             actual->info.array.is_dependent_bound ||
             !SetDeducedFunctionTemplateNonTypeArgument(
                 bindings, 0, pattern->info.array.template_parameter_index,
                 actual->info.array.size.fixed)) {
           return false;
         }
-      } else if (pattern->info.array.size.fixed !=
+      } else if (pattern->info.array.is_flexible !=
+                     actual->info.array.is_flexible ||
+                 pattern->info.array.size.fixed !=
                  actual->info.array.size.fixed) {
         return false;
       }
@@ -5877,6 +5888,15 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   type->template_arguments = TemplateArgumentVectorCopy(completed_args);
   Symbol* tag = NewSymbol(instantiated_name.value, type, STO(implicit));
   tag->flags.is_defined = true;
+  if (source_struct->tag_symbol != NULL) {
+    VectorDestruct(&tag->attributes);
+    AttributeListClone(&tag->attributes,
+                       &source_struct->tag_symbol->attributes);
+    SubstituteDependentSymbolAlignment(parser, tag, source_args);
+    if (tag->alignment > str->explicit_alignment) {
+      str->explicit_alignment = tag->alignment;
+    }
+  }
   str->tag_name = &tag->name;
   str->tag_symbol = tag;
   if (!AddTemplateInstantiationTag(parser, templ, tag)) {
@@ -6031,25 +6051,33 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     member_symbol->value = member->symbol->value;
     member_symbol->dependent_value_template_parameter_index =
         member->symbol->dependent_value_template_parameter_index;
+    VectorDestruct(&member_symbol->attributes);
+    AttributeListClone(&member_symbol->attributes,
+                       &member->symbol->attributes);
     SubstituteDependentSymbolValue(member_symbol, source_args);
+    SubstituteDependentSymbolAlignment(parser, member_symbol, source_args);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer,
                                            source_args);
     StructMember* instantiated = NewStructMember(member_symbol);
-    // Substitute template parameters in a non-static default member initializer
-    // (e.g. `W value = W();`).  A plain clone would leave the parameter-typed
-    // value-initialization `W()` referencing the template parameter, which then
-    // lowers to an undefined symbol; substitution rewrites it to e.g. `int()`.
-    if (member->default_initializer != NULL && !member->is_static) {
+    // Substitute template parameters in every member initializer. For a static
+    // member the instantiated initializer is retained until an odr-use queues
+    // its storage; for a non-static member it is used by constructor lowering.
+    ASTNode* member_initializer = member->default_initializer;
+    if (member->is_static && member->symbol->variable_template != NULL &&
+        member->symbol->variable_template->initializer != NULL) {
+      member_initializer = member->symbol->variable_template->initializer;
+    }
+    if (member_initializer != NULL) {
       ASTNode* substituted = CloneDependentExpressionWithArgs(
-          parser, member->default_initializer, source_args);
+          parser, member_initializer, source_args);
       instantiated->default_initializer =
           substituted != NULL
               ? substituted
-              : CloneCXXDefaultMemberInitializer(member->default_initializer);
+              : CloneCXXDefaultMemberInitializer(member_initializer);
     } else {
       instantiated->default_initializer =
-          CloneCXXDefaultMemberInitializer(member->default_initializer);
+          CloneCXXDefaultMemberInitializer(member_initializer);
     }
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
@@ -6062,7 +6090,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
     if (!instantiated->is_static && !instantiated->is_using_declaration &&
         !StructMemberIsNestedType(instantiated)) {
-      AlignNextOffset(str, member_type);
+      AlignNextOffsetForSymbol(str, member_symbol);
       instantiated->byte_offset = str->next_offset;
     } else {
       instantiated->byte_offset = member->byte_offset;

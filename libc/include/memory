@@ -8,6 +8,11 @@
 #ifndef memory_h
 #define memory_h
 
+#if !defined(__6502__) && !defined(__W65C02__)
+#include <atomic>
+#endif
+#include <__exception_support>
+#include <exception>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -486,6 +491,759 @@ static inline unique_ptr<T> make_unique(Args&&... args) {
 template <class T, class Deleter>
 static inline void swap(unique_ptr<T, Deleter>& left,
                         unique_ptr<T, Deleter>& right) noexcept {
+  left.swap(right);
+}
+
+class bad_weak_ptr : public exception {
+ public:
+  bad_weak_ptr() noexcept {
+  }
+
+  const char* what() const noexcept override {
+    return "std::bad_weak_ptr";
+  }
+};
+
+template <class T>
+class shared_ptr;
+
+template <class T>
+class weak_ptr;
+
+template <class T>
+class enable_shared_from_this;
+
+template <class T, class... Args>
+shared_ptr<T> make_shared(Args&&... args);
+
+namespace __shared_ptr_detail {
+
+#if defined(__6502__) || defined(__W65C02__)
+
+struct __count {
+  unsigned int __value;
+
+  explicit __count(unsigned int value) noexcept : __value(value) {
+  }
+
+  void __add() noexcept {
+    ++__value;
+  }
+
+  bool __release() noexcept {
+    return --__value == 0;
+  }
+
+  unsigned int __load() const noexcept {
+    return __value;
+  }
+
+  bool __try_add() noexcept {
+    if (__value == 0) {
+      return false;
+    }
+    ++__value;
+    return true;
+  }
+};
+
+#else
+
+struct __count {
+  atomic<unsigned int> __value;
+
+  explicit __count(unsigned int value) noexcept : __value(value) {
+  }
+
+  void __add() noexcept {
+    __value.fetch_add(1, memory_order_relaxed);
+  }
+
+  bool __release() noexcept {
+    return __value.fetch_sub(1, memory_order_acq_rel) == 1;
+  }
+
+  unsigned int __load() const noexcept {
+    return __value.load(memory_order_acquire);
+  }
+
+  bool __try_add() noexcept {
+    unsigned int value = __value.load(memory_order_acquire);
+    while (value != 0) {
+      if (__value.compare_exchange_weak(value, value + 1,
+                                        memory_order_acquire,
+                                        memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+#endif
+
+template <class T>
+struct __type_token {
+  static const char __value;
+};
+
+template <class T>
+const char __type_token<T>::__value = 0;
+
+struct __control_block {
+  __count __shared_owners;
+  __count __weak_owners;
+
+  __control_block() noexcept : __shared_owners(1), __weak_owners(1) {
+  }
+
+  virtual ~__control_block() {
+  }
+
+  virtual void __destroy_object() noexcept = 0;
+
+  virtual void* __get_deleter(const void*) noexcept {
+    return 0;
+  }
+
+  void __add_shared() noexcept {
+    __shared_owners.__add();
+  }
+
+  bool __try_add_shared() noexcept {
+    return __shared_owners.__try_add();
+  }
+
+  void __release_shared() noexcept {
+    if (__shared_owners.__release()) {
+      __destroy_object();
+      __release_weak();
+    }
+  }
+
+  void __add_weak() noexcept {
+    __weak_owners.__add();
+  }
+
+  void __release_weak() noexcept {
+    if (__weak_owners.__release()) {
+      delete this;
+    }
+  }
+
+  long __use_count() const noexcept {
+    return static_cast<long>(__shared_owners.__load());
+  }
+};
+
+template <class Pointer, class Deleter>
+struct __pointer_control_block : __control_block {
+  Pointer __pointer;
+  Deleter __deleter;
+
+  __pointer_control_block(Pointer pointer, Deleter deleter)
+      : __pointer(pointer), __deleter(std::move(deleter)) {
+  }
+
+  void __destroy_object() noexcept override {
+    __deleter(__pointer);
+  }
+
+  void* __get_deleter(const void* token) noexcept override {
+    if (token == &__type_token<Deleter>::__value) {
+      return &__deleter;
+    }
+    return 0;
+  }
+};
+
+template <class T>
+struct __inplace_control_block : __control_block {
+  alignas(T) unsigned char __storage[sizeof(T)];
+
+  template <class... Args>
+  explicit __inplace_control_block(Args&&... args) {
+    new (static_cast<void*>(__storage)) T(std::forward<Args>(args)...);
+  }
+
+  T* __get() noexcept {
+    return reinterpret_cast<T*>(__storage);
+  }
+
+  void __destroy_object() noexcept override {
+    __get()->~T();
+  }
+};
+
+struct __adopt_shared_t {
+};
+
+}  // namespace __shared_ptr_detail
+
+template <class T, class U, bool = is_array<T>::value>
+struct __shared_default_deleter {
+  using type = default_delete<U>;
+};
+
+template <class T, class U>
+struct __shared_default_deleter<T, U, true> {
+  using type = default_delete<T>;
+};
+
+template <class T>
+class shared_ptr {
+ public:
+  using element_type = remove_extent_t<T>;
+  using weak_type = weak_ptr<T>;
+
+ private:
+  element_type* __pointer;
+  __shared_ptr_detail::__control_block* __control;
+
+  template <class U>
+  friend class shared_ptr;
+  template <class U>
+  friend class weak_ptr;
+  template <class U>
+  friend class enable_shared_from_this;
+  template <class U, class... Args>
+  friend shared_ptr<U> make_shared(Args&&... args);
+
+  shared_ptr(element_type* pointer,
+             __shared_ptr_detail::__control_block* control,
+             __shared_ptr_detail::__adopt_shared_t) noexcept
+      : __pointer(pointer), __control(control) {
+  }
+
+  template <class U, class Deleter>
+  void __construct(U* pointer, Deleter deleter) {
+    using __block =
+        __shared_ptr_detail::__pointer_control_block<U*, Deleter>;
+    __DAVECC_TRY {
+      __control = new __block(pointer, std::move(deleter));
+    }
+    __DAVECC_CATCH_ALL {
+      deleter(pointer);
+      __DAVECC_RETHROW;
+    }
+    __pointer = pointer;
+    __enable_weak_this(pointer, pointer);
+  }
+
+  template <class U, class Original,
+            enable_if_t<is_convertible<Original*, const U*>::value, int> = 0>
+  void __enable_weak_this(const enable_shared_from_this<U>* base,
+                          Original* pointer) noexcept {
+    if (base != 0 && base->__weak_this.expired()) {
+      base->__weak_this =
+          shared_ptr<U>(*this,
+                        const_cast<U*>(static_cast<const U*>(pointer)));
+    }
+  }
+
+  void __enable_weak_this(...) noexcept {
+  }
+
+ public:
+  constexpr shared_ptr() noexcept : __pointer(0), __control(0) {
+  }
+
+  constexpr shared_ptr(decltype(nullptr)) noexcept
+      : __pointer(0), __control(0) {
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<U*, element_type*>::value, int> = 0>
+  explicit shared_ptr(U* pointer) : __pointer(0), __control(0) {
+    using __deleter = typename __shared_default_deleter<T, U>::type;
+    __construct(pointer, __deleter());
+  }
+
+  template <class U, class Deleter,
+            enable_if_t<is_convertible<U*, element_type*>::value, int> = 0>
+  shared_ptr(U* pointer, Deleter deleter) : __pointer(0), __control(0) {
+    __construct(pointer, std::move(deleter));
+  }
+
+  template <class Deleter>
+  shared_ptr(decltype(nullptr), Deleter deleter)
+      : __pointer(0), __control(0) {
+    __construct(static_cast<element_type*>(0), std::move(deleter));
+  }
+
+  shared_ptr(const shared_ptr& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_shared();
+    }
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename shared_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  shared_ptr(const shared_ptr<U>& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_shared();
+    }
+  }
+
+  shared_ptr(shared_ptr&& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    other.__pointer = 0;
+    other.__control = 0;
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename shared_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  shared_ptr(shared_ptr<U>&& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    other.__pointer = 0;
+    other.__control = 0;
+  }
+
+  template <class U>
+  shared_ptr(const shared_ptr<U>& other, element_type* pointer) noexcept
+      : __pointer(pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_shared();
+    }
+  }
+
+  template <class U>
+  shared_ptr(shared_ptr<U>&& other, element_type* pointer) noexcept
+      : __pointer(pointer), __control(other.__control) {
+    other.__pointer = 0;
+    other.__control = 0;
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename weak_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  explicit shared_ptr(const weak_ptr<U>& other)
+      : __pointer(0), __control(0) {
+    if (other.__control == 0 || !other.__control->__try_add_shared()) {
+      __DAVECC_THROW(bad_weak_ptr());
+    }
+    __pointer = other.__pointer;
+    __control = other.__control;
+  }
+
+  template <class U, class Deleter,
+            enable_if_t<is_convertible<U*, element_type*>::value, int> = 0>
+  shared_ptr(unique_ptr<U, Deleter>&& other)
+      : __pointer(0), __control(0) {
+    if (other.get() != 0) {
+      using __block =
+          __shared_ptr_detail::__pointer_control_block<U*, Deleter>;
+      __control =
+          new __block(other.get(), std::move(other.get_deleter()));
+      __pointer = other.release();
+      __enable_weak_this(__pointer, __pointer);
+    }
+  }
+
+  ~shared_ptr() {
+    if (__control != 0) {
+      __control->__release_shared();
+    }
+  }
+
+  shared_ptr& operator=(const shared_ptr& other) noexcept {
+    shared_ptr(other).swap(*this);
+    return *this;
+  }
+
+  template <class U>
+  shared_ptr& operator=(const shared_ptr<U>& other) noexcept {
+    shared_ptr(other).swap(*this);
+    return *this;
+  }
+
+  shared_ptr& operator=(shared_ptr&& other) noexcept {
+    shared_ptr(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  template <class U>
+  shared_ptr& operator=(shared_ptr<U>&& other) noexcept {
+    shared_ptr(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  template <class U, class Deleter>
+  shared_ptr& operator=(unique_ptr<U, Deleter>&& other) {
+    shared_ptr(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  shared_ptr& operator=(decltype(nullptr)) noexcept {
+    reset();
+    return *this;
+  }
+
+  void reset() noexcept {
+    shared_ptr().swap(*this);
+  }
+
+  template <class U>
+  void reset(U* pointer) {
+    shared_ptr(pointer).swap(*this);
+  }
+
+  template <class U, class Deleter>
+  void reset(U* pointer, Deleter deleter) {
+    shared_ptr(pointer, std::move(deleter)).swap(*this);
+  }
+
+  void swap(shared_ptr& other) noexcept {
+    std::swap(__pointer, other.__pointer);
+    std::swap(__control, other.__control);
+  }
+
+  element_type* get() const noexcept {
+    return __pointer;
+  }
+
+  template <class U = T>
+  enable_if_t<!is_array<U>::value && !is_void<element_type>::value,
+              add_lvalue_reference_t<element_type>>
+  operator*() const noexcept {
+    return *__pointer;
+  }
+
+  template <class U = T>
+  enable_if_t<!is_array<U>::value, element_type*>
+  operator->() const noexcept {
+    return __pointer;
+  }
+
+  template <class U = T>
+  enable_if_t<is_array<U>::value, element_type&>
+  operator[](size_t index) const {
+    return __pointer[index];
+  }
+
+  long use_count() const noexcept {
+    return __control == 0 ? 0 : __control->__use_count();
+  }
+
+  bool unique() const noexcept {
+    return use_count() == 1;
+  }
+
+  explicit operator bool() const noexcept {
+    return __pointer != 0;
+  }
+
+  template <class U>
+  bool owner_before(const shared_ptr<U>& other) const noexcept {
+    return __control < other.__control;
+  }
+
+  template <class U>
+  bool owner_before(const weak_ptr<U>& other) const noexcept {
+    return __control < other.__control;
+  }
+
+  template <class Deleter>
+  Deleter* __get_deleter() const noexcept {
+    if (__control == 0) {
+      return 0;
+    }
+    return static_cast<Deleter*>(
+        __control->__get_deleter(
+            &__shared_ptr_detail::__type_token<Deleter>::__value));
+  }
+};
+
+template <class T>
+class weak_ptr {
+ public:
+  using element_type = remove_extent_t<T>;
+
+ private:
+  element_type* __pointer;
+  __shared_ptr_detail::__control_block* __control;
+
+  template <class U>
+  friend class shared_ptr;
+  template <class U>
+  friend class weak_ptr;
+
+ public:
+  constexpr weak_ptr() noexcept : __pointer(0), __control(0) {
+  }
+
+  weak_ptr(const weak_ptr& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_weak();
+    }
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename weak_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  weak_ptr(const weak_ptr<U>& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_weak();
+    }
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename shared_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  weak_ptr(const shared_ptr<U>& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    if (__control != 0) {
+      __control->__add_weak();
+    }
+  }
+
+  weak_ptr(weak_ptr&& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    other.__pointer = 0;
+    other.__control = 0;
+  }
+
+  template <class U,
+            enable_if_t<is_convertible<typename weak_ptr<U>::element_type*,
+                                       element_type*>::value,
+                        int> = 0>
+  weak_ptr(weak_ptr<U>&& other) noexcept
+      : __pointer(other.__pointer), __control(other.__control) {
+    other.__pointer = 0;
+    other.__control = 0;
+  }
+
+  ~weak_ptr() {
+    if (__control != 0) {
+      __control->__release_weak();
+    }
+  }
+
+  weak_ptr& operator=(const weak_ptr& other) noexcept {
+    weak_ptr(other).swap(*this);
+    return *this;
+  }
+
+  template <class U>
+  weak_ptr& operator=(const weak_ptr<U>& other) noexcept {
+    weak_ptr(other).swap(*this);
+    return *this;
+  }
+
+  template <class U>
+  weak_ptr& operator=(const shared_ptr<U>& other) noexcept {
+    weak_ptr(other).swap(*this);
+    return *this;
+  }
+
+  weak_ptr& operator=(weak_ptr&& other) noexcept {
+    weak_ptr(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  template <class U>
+  weak_ptr& operator=(weak_ptr<U>&& other) noexcept {
+    weak_ptr(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  void reset() noexcept {
+    weak_ptr().swap(*this);
+  }
+
+  void swap(weak_ptr& other) noexcept {
+    std::swap(__pointer, other.__pointer);
+    std::swap(__control, other.__control);
+  }
+
+  long use_count() const noexcept {
+    return __control == 0 ? 0 : __control->__use_count();
+  }
+
+  bool expired() const noexcept {
+    return use_count() == 0;
+  }
+
+  shared_ptr<T> lock() const noexcept {
+    if (__control != 0 && __control->__try_add_shared()) {
+      return shared_ptr<T>(
+          __pointer, __control,
+          __shared_ptr_detail::__adopt_shared_t());
+    }
+    return shared_ptr<T>();
+  }
+
+  template <class U>
+  bool owner_before(const shared_ptr<U>& other) const noexcept {
+    return __control < other.__control;
+  }
+
+  template <class U>
+  bool owner_before(const weak_ptr<U>& other) const noexcept {
+    return __control < other.__control;
+  }
+};
+
+template <class T>
+class enable_shared_from_this {
+ protected:
+  constexpr enable_shared_from_this() noexcept {
+  }
+
+  enable_shared_from_this(const enable_shared_from_this&) noexcept {
+  }
+
+  enable_shared_from_this& operator=(
+      const enable_shared_from_this&) noexcept {
+    return *this;
+  }
+
+  ~enable_shared_from_this() {
+  }
+
+ public:
+  shared_ptr<T> shared_from_this() {
+    return shared_ptr<T>(__weak_this);
+  }
+
+  shared_ptr<const T> shared_from_this() const {
+    return shared_ptr<const T>(__weak_this);
+  }
+
+  weak_ptr<T> weak_from_this() noexcept {
+    return __weak_this;
+  }
+
+  weak_ptr<const T> weak_from_this() const noexcept {
+    return __weak_this;
+  }
+
+ private:
+  template <class U>
+  friend class shared_ptr;
+
+  mutable weak_ptr<T> __weak_this;
+};
+
+template <class T, class... Args>
+shared_ptr<T> make_shared(Args&&... args) {
+  static_assert(!is_array<T>::value,
+                "make_shared array overloads are not implemented");
+  using __block = __shared_ptr_detail::__inplace_control_block<T>;
+  __block* control = new __block(std::forward<Args>(args)...);
+  shared_ptr<T> result(control->__get(), control,
+                       __shared_ptr_detail::__adopt_shared_t());
+  result.__enable_weak_this(control->__get(), control->__get());
+  return result;
+}
+
+template <class Deleter, class T>
+Deleter* get_deleter(const shared_ptr<T>& pointer) noexcept {
+  return pointer.template __get_deleter<Deleter>();
+}
+
+template <class T, class U>
+shared_ptr<T> static_pointer_cast(const shared_ptr<U>& pointer) noexcept {
+  return shared_ptr<T>(pointer, static_cast<T*>(pointer.get()));
+}
+
+template <class T, class U>
+shared_ptr<T> static_pointer_cast(shared_ptr<U>&& pointer) noexcept {
+  T* cast_pointer = static_cast<T*>(pointer.get());
+  return shared_ptr<T>(std::move(pointer), cast_pointer);
+}
+
+template <class T, class U>
+shared_ptr<T> dynamic_pointer_cast(const shared_ptr<U>& pointer) noexcept {
+  T* cast_pointer = dynamic_cast<T*>(pointer.get());
+  if (cast_pointer == 0) {
+    return shared_ptr<T>();
+  }
+  return shared_ptr<T>(pointer, cast_pointer);
+}
+
+template <class T, class U>
+shared_ptr<T> dynamic_pointer_cast(shared_ptr<U>&& pointer) noexcept {
+  T* cast_pointer = dynamic_cast<T*>(pointer.get());
+  if (cast_pointer == 0) {
+    return shared_ptr<T>();
+  }
+  return shared_ptr<T>(std::move(pointer), cast_pointer);
+}
+
+template <class T, class U>
+shared_ptr<T> const_pointer_cast(const shared_ptr<U>& pointer) noexcept {
+  return shared_ptr<T>(pointer, const_cast<T*>(pointer.get()));
+}
+
+template <class T, class U>
+shared_ptr<T> const_pointer_cast(shared_ptr<U>&& pointer) noexcept {
+  T* cast_pointer = const_cast<T*>(pointer.get());
+  return shared_ptr<T>(std::move(pointer), cast_pointer);
+}
+
+template <class T, class U>
+shared_ptr<T> reinterpret_pointer_cast(
+    const shared_ptr<U>& pointer) noexcept {
+  return shared_ptr<T>(pointer, reinterpret_cast<T*>(pointer.get()));
+}
+
+template <class T, class U>
+shared_ptr<T> reinterpret_pointer_cast(shared_ptr<U>&& pointer) noexcept {
+  T* cast_pointer = reinterpret_cast<T*>(pointer.get());
+  return shared_ptr<T>(std::move(pointer), cast_pointer);
+}
+
+template <class T, class U>
+bool operator==(const shared_ptr<T>& left,
+                const shared_ptr<U>& right) noexcept {
+  return left.get() == right.get();
+}
+
+template <class T>
+bool operator==(const shared_ptr<T>& pointer, decltype(nullptr)) noexcept {
+  return pointer.get() == 0;
+}
+
+template <class T>
+bool operator==(decltype(nullptr), const shared_ptr<T>& pointer) noexcept {
+  return pointer.get() == 0;
+}
+
+template <class T, class U>
+bool operator!=(const shared_ptr<T>& left,
+                const shared_ptr<U>& right) noexcept {
+  return !(left == right);
+}
+
+template <class T>
+bool operator!=(const shared_ptr<T>& pointer, decltype(nullptr)) noexcept {
+  return pointer.get() != 0;
+}
+
+template <class T>
+bool operator!=(decltype(nullptr), const shared_ptr<T>& pointer) noexcept {
+  return pointer.get() != 0;
+}
+
+template <class T>
+void swap(shared_ptr<T>& left, shared_ptr<T>& right) noexcept {
+  left.swap(right);
+}
+
+template <class T>
+void swap(weak_ptr<T>& left, weak_ptr<T>& right) noexcept {
   left.swap(right);
 }
 
