@@ -85,6 +85,14 @@ void test_trailing_switch_labels(int value) {
   }
 }
 
+int test_classic_for_after_expression_init() {
+  int index = 0;
+  int count = 3;
+  for (++index; index < count; ++index) {
+  }
+  return index;
+}
+
 int main() {
   return test_alias_init_statements() + test_trailing_label(true);
 }

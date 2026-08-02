@@ -1309,8 +1309,64 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   }
   VectorAppend(statements, loop);
   ASTNode* result = NewCompoundStatementASTNode(statements, location);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23) && !reuse_named_range) {
+    result->flags |= kASTCXX23RangeForLifetime;
+  }
   RangeForBindingDestruct(&binding);
   return result;
+}
+
+// After a range-for init-statement has consumed its semicolon, distinguish the
+// required range-declaration (`decl : range`) from an ordinary for condition
+// without invoking the declaration parser speculatively.  That parser can emit
+// diagnostics before its lexer checkpoint is restored; in particular,
+// `index < count` was mistaken for an unterminated template-id.
+static bool LookingAtCXXRangeForAfterInit(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  int paren_depth = 0;
+  int square_depth = 0;
+  int brace_depth = 0;
+  int conditional_depth = 0;
+  bool found_colon = false;
+  while (!LexEof(lex)) {
+    Token token = lex->current_token;
+    bool top_level =
+        paren_depth == 0 && square_depth == 0 && brace_depth == 0;
+    if (top_level && (token == TOK(semicolon) || token == TOK(rparen))) {
+      break;
+    }
+    if (token == TOK(lparen)) {
+      paren_depth++;
+    } else if (token == TOK(rparen)) {
+      if (paren_depth == 0) {
+        break;
+      }
+      paren_depth--;
+    } else if (token == TOK(lsquare)) {
+      square_depth++;
+    } else if (token == TOK(rsquare) && square_depth > 0) {
+      square_depth--;
+    } else if (token == TOK(lbrace)) {
+      brace_depth++;
+    } else if (token == TOK(rbrace) && brace_depth > 0) {
+      brace_depth--;
+    } else if (top_level && token == TOK(question)) {
+      conditional_depth++;
+    } else if (top_level && token == TOK(colon)) {
+      if (conditional_depth > 0) {
+        conditional_depth--;
+      } else {
+        found_colon = true;
+        break;
+      }
+    }
+    LexNextToken(lex);
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return found_colon;
 }
 
 // For statement.
@@ -1346,7 +1402,8 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
   } else {
     SyntaxNeedSemicolon(syntax, followers | TC(expr));
   }
-  if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      LookingAtCXXRangeForAfterInit(syntax)) {
     range_for = TryParseCXXRangeForStatement(syntax, followers, location);
     if (range_for != NULL) {
       return FinishInitScope(syntax, c1, true, range_for, location);

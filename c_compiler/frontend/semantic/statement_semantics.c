@@ -435,6 +435,19 @@ static void AppendLocalDestructorStatements(Symbol* sym, Vector* out) {
                         location));
 }
 
+static void AppendRangeForTemporaryDestructorStatements(ASTNode* initializer,
+                                                        Vector* out) {
+  CXXTemporaryCollection collection;
+  VectorInit(&collection.temps);
+  VectorInit(&collection.elided);
+  ASTNodeVisit(initializer, CollectCXXTemporarySymbols, 0, &collection);
+  for (size_t i = collection.temps.length; i > 0; i--) {
+    AppendLocalDestructorStatements(collection.temps.value.p[i - 1], out);
+  }
+  VectorDestruct(&collection.temps);
+  VectorDestruct(&collection.elided);
+}
+
 static size_t IndexOfChildInCompound(CompoundStatementASTNode* compound,
                                      ASTNode* child) {
   for (size_t i = 0; i < compound->statements->length; i++) {
@@ -456,6 +469,10 @@ static void CollectCompoundLocalDestructors(CompoundStatementASTNode* compound,
   }
   for (size_t i = hi; i > lo; i--) {
     ASTNode* stmt = compound->statements->value.p[i - 1];
+    if ((compound->base.flags & kASTCXX23RangeForLifetime) != 0 &&
+        i == 1) {
+      AppendRangeForTemporaryDestructorStatements(stmt, out);
+    }
     if (stmt->op != AST_OP(decl_list)) {
       continue;
     }

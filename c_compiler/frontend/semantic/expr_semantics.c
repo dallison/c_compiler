@@ -8770,6 +8770,15 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   Struct* struct_info = NULL;
 
   node->left = AnalyzeExpression(node->left);
+  if (CompilerIsCXX() && node->base.op == AST_OP(dot) &&
+      node->left != NULL && node->left->type != NULL &&
+      TypeIsStructOrUnion(node->left->type) &&
+      node->left->value_category == kValueCategoryPrvalue &&
+      !HasAddress(node->left)) {
+    node->left = MaterializeTemporary(node->left, node->left->type);
+    node->left->parent = (ASTNode*)node;
+    node->left->child_id = 0;
+  }
   if (node->base.op == AST_OP(arrow) &&
       !TypeIsStructOrUnionPointer(node->left->type)) {
     ASTNode* overloaded_arrow =
