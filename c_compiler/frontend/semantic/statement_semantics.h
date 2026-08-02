@@ -28,4 +28,9 @@ void StatementFinishAutoReturnDeduction(TypeRecord* func,
 // run with compiler->current_function (and access context) set to `func`.
 void CXXInsertScopeExitDestructors(TypeRecord* func);
 
+// Appends the temporary symbols whose lifetimes are extended by a synthesized
+// range-for initializer, in destruction order.
+void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
+                                              Vector* out);
+
 #endif /* statement_semantics_h */

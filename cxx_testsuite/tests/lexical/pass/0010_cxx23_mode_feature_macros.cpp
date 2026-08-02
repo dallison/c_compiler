@@ -76,6 +76,10 @@
 #error "__cpp_implicit_move has the wrong value"
 #endif
 
+#if __cpp_range_based_for != 202211L
+#error "__cpp_range_based_for has the wrong value"
+#endif
+
 #if 1uz != 1
 #error "size_t literals must work in preprocessing expressions"
 #endif

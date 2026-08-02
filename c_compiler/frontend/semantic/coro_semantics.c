@@ -13,6 +13,7 @@
 #include "compiler.h"
 #include "expr_semantics.h"
 #include "semantics.h"
+#include "statement_semantics.h"
 
 /* Result of walking a function body to decide whether it is a coroutine
  * (contains co_await/co_yield/co_return) and to count its suspension points. */
@@ -3569,6 +3570,24 @@ static void AppendPersistedCoroutineLocalDestructor(
   }
 }
 
+static void AppendPersistedCoroutineRangeForTemporaryDestructors(
+    Vector* statements, CoroutineFrame* frame, Vector* persisted_locals,
+    CompoundStatementASTNode* compound, SourceLocation location) {
+  for (size_t i = persisted_locals->length; i > 0; i--) {
+    CoroutinePersistedLocal* local = persisted_locals->value.p[i - 1];
+    if (local == NULL || local->symbol == NULL ||
+        !local->symbol->flags.is_temp ||
+        local->store_compound != compound || local->member == NULL) {
+      continue;
+    }
+    ASTNode* destructor = NewCoroutineFrameMemberGuardedDestructor(
+        frame, local->member, local->constructed_member, location);
+    if (destructor != NULL) {
+      VectorAppend(statements, destructor);
+    }
+  }
+}
+
 /* Destroy frame-backed locals when the coroutine body exits normally.  Walk
  * from the co_return out through its enclosing scopes so active locals are
  * destroyed in exact reverse declaration/nesting order.  Frame copies of
@@ -3608,6 +3627,11 @@ static void AppendPersistedCoroutineLocalDestructors(
               statements, frame, persisted_locals,
               ((VariableDeclarationASTNode*)declaration)->symbol, location);
         }
+      }
+      if ((compound->base.flags & kASTRangeForInitializer) != 0 &&
+          limit > 0) {
+        AppendPersistedCoroutineRangeForTemporaryDestructors(
+            statements, frame, persisted_locals, compound, location);
       }
     } else if (parent->op == AST_OP(catch)) {
       AppendPersistedCoroutineLocalDestructor(
@@ -5400,6 +5424,96 @@ static void CollectPersistedCoroutineCatchParametersForPoint(
       CollectPersistedCoroutineCatchParameterFromAncestor, &search);
 }
 
+typedef struct {
+  SuspensionPoints* points;
+  Vector* persisted_locals;
+  bool* ok;
+} PersistedRangeForTemporaryCollection;
+
+static bool CoroutineNodeIsWithin(ASTNode* node, ASTNode* ancestor) {
+  for (ASTNode* current = node; current != NULL; current = current->parent) {
+    if (current == ancestor) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CoroutineRangeForContainsSuspension(
+    CompoundStatementASTNode* compound, SuspensionPoints* points) {
+  for (int i = 0; points != NULL && i < points->count; i++) {
+    ASTNode* suspension =
+        points->points[i].kind == kSuspensionCoAwait
+            ? points->points[i].co_await
+            : points->points[i].co_yield;
+    if (CoroutineNodeIsWithin(suspension, (ASTNode*)compound)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void AnalyzeCoroutineRangeForDeclarations(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(compound) ||
+      (node->flags & kASTRangeForInitializer) == 0) {
+    return;
+  }
+  CompoundStatementASTNode* range = (CompoundStatementASTNode*)node;
+  if (range->statements == NULL || range->statements->length < 2) {
+    return;
+  }
+  AnalyzeStatement(range->statements->value.p[0]);
+  ASTNode* iteration = range->statements->value.p[1];
+  if (iteration == NULL || iteration->op != AST_OP(compound)) {
+    return;
+  }
+  CompoundStatementASTNode* declarations =
+      (CompoundStatementASTNode*)iteration;
+  for (size_t i = 0; i < declarations->statements->length; i++) {
+    ASTNode* statement = declarations->statements->value.p[i];
+    if (statement == NULL || statement->op != AST_OP(decl_list)) {
+      break;
+    }
+    AnalyzeStatement(statement);
+  }
+}
+
+static void CollectPersistedCoroutineRangeForTemporaries(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(compound) ||
+      (node->flags & kASTRangeForInitializer) == 0) {
+    return;
+  }
+  PersistedRangeForTemporaryCollection* collection = data;
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
+  if (!CoroutineRangeForContainsSuspension(compound, collection->points) ||
+      compound->statements == NULL || compound->statements->length == 0) {
+    return;
+  }
+  Vector temporaries;
+  VectorInit(&temporaries);
+  CXXCollectRangeForInitializerTemporaries(
+      compound->statements->value.p[0], &temporaries);
+  for (size_t i = temporaries.length; i > 0; i--) {
+    Symbol* symbol = temporaries.value.p[i - 1];
+    if (!CoroutineLocalCanBePersisted(symbol)) {
+      SemanticError(node,
+                    "coroutine range-for temporary has unsupported type");
+      *collection->ok = false;
+      continue;
+    }
+    AddPersistedCoroutineLocal(collection->persisted_locals, symbol, false,
+                               false, false, compound);
+  }
+  VectorDestruct(&temporaries);
+}
+
 /* Build the full set of locals and catch-parameters that live across any
  * suspension point and so must be promoted into the frame. Returns false if any
  * such object cannot be represented there (catch parameters still require a
@@ -5413,6 +5527,14 @@ static bool CollectPersistedCoroutineLocals(
     return true;
   }
   bool ok = true;
+  PersistedRangeForTemporaryCollection range_collection = {
+      .points = points,
+      .persisted_locals = persisted_locals,
+      .ok = &ok,
+  };
+  ASTNodeVisit((ASTNode*)body,
+               CollectPersistedCoroutineRangeForTemporaries, 0,
+               &range_collection);
   for (int i = 0; i < points->count; i++) {
     CollectPersistedCoroutineLocalsForPoint(body, &points->points[i],
                                             persisted_locals, &ok);
@@ -5816,6 +5938,40 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
       persisted_locals->length == 0) {
     return;
   }
+  Vector range_temporaries;
+  VectorInit(&range_temporaries);
+  if ((compound->base.flags & kASTRangeForInitializer) != 0 &&
+      compound->statements != NULL && compound->statements->length != 0) {
+    ASTNode* range_decl = compound->statements->value.p[0];
+    CXXCollectRangeForInitializerTemporaries(range_decl, &range_temporaries);
+    size_t inserted = 0;
+    for (size_t i = range_temporaries.length; i > 0; i--) {
+      Symbol* symbol = range_temporaries.value.p[i - 1];
+      CoroutinePersistedLocal* local =
+          FindPersistedCoroutineLocal(persisted_locals, symbol);
+      if (local == NULL || local->member == NULL) {
+        continue;
+      }
+      PersistedLocalInitializerRewrite rewrite = {
+          .symbol = symbol,
+          .frame = frame,
+          .member = local->member,
+      };
+      range_decl = ASTNodeVisitAndTransform(
+          range_decl, RewritePersistedLocalInitializerTransform, &rewrite);
+      compound->statements->value.p[0] = range_decl;
+      if (local->constructed_member != NULL) {
+        size_t insert_index = 1 + inserted;
+        CompoundASTNodeInsertStatement(
+            compound,
+            NewFrameIntAssignment(frame, local->constructed_member, 1,
+                                  range_decl->location),
+            insert_index);
+        AdjustSuspensionPointIndicesAfterInsert(points, compound, insert_index);
+        inserted++;
+      }
+    }
+  }
   for (size_t i = 0; i < compound->statements->length; i++) {
     ASTNode* stmt = compound->statements->value.p[i];
     CoroutinePersistedLocal* destroyed =
@@ -5865,6 +6021,23 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
     }
     i += inserted;
   }
+  for (size_t i = 0; i < range_temporaries.length; i++) {
+    CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
+        persisted_locals, range_temporaries.value.p[i]);
+    if (local == NULL || local->member == NULL ||
+        local->constructed_member == NULL) {
+      continue;
+    }
+    ASTNode* destructor = NewCoroutineFrameMemberGuardedDestructor(
+        frame, local->member, local->constructed_member,
+        compound->base.location);
+    if (destructor != NULL) {
+      VectorAppend(compound->statements, destructor);
+      destructor->parent = (ASTNode*)compound;
+      destructor->child_id = (int)compound->statements->length - 1;
+    }
+  }
+  VectorDestruct(&range_temporaries);
 }
 
 /* Entry point: redirect persisted-local initialization into the frame. */
@@ -6340,6 +6513,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   return_object->location = node->location;
   points.capacity = scan.suspend_count;
   if (needs_frame && points.capacity > 0) {
+    ASTNodeVisit((ASTNode*)body, AnalyzeCoroutineRangeForDeclarations, 0,
+                 NULL);
     points.points = calloc((size_t)points.capacity, sizeof(SuspensionPoint));
     if (points.points == NULL) {
       SemanticError(node, "failed to allocate coroutine suspension points");

@@ -171,6 +171,13 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_exceptions", "199711L");
       PreprocessorDefineMacro(p, "__EXCEPTIONS", "1");
     }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      PreprocessorDefineMacro(p, "__cpp_range_based_for", "202211L");
+    } else if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+      PreprocessorDefineMacro(p, "__cpp_range_based_for", "201603L");
+    } else if (CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+      PreprocessorDefineMacro(p, "__cpp_range_based_for", "200907L");
+    }
 
     // C++20 feature-test macros for language features implemented by DaveCC.
     if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {

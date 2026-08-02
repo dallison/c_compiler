@@ -926,6 +926,35 @@ typedef struct {
   Symbol* symbol;
 } OpenCleanup;
 
+static bool OpenCleanupContainsSymbol(Vector* open, Symbol* symbol) {
+  for (size_t i = 0; open != NULL && i < open->length; i++) {
+    OpenCleanup* cleanup = open->value.p[i];
+    if (cleanup != NULL && cleanup->symbol == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void OpenRangeForTemporaryCleanups(
+    Generator* gen, CompoundStatementASTNode* node, size_t trailing_start,
+    IRNode** start_label, Vector* open) {
+  for (size_t i = trailing_start; i < node->statements->length; i++) {
+    Symbol* symbol = CleanupReceiverSymbol(node->statements->value.p[i]);
+    if (symbol == NULL || !symbol->flags.is_temp ||
+        OpenCleanupContainsSymbol(open, symbol)) {
+      continue;
+    }
+    if (*start_label == NULL) {
+      *start_label = GeneratorEmit(gen, NewIR(IR_OP(label)));
+    }
+    OpenCleanup* cleanup = malloc(sizeof(OpenCleanup));
+    cleanup->start_label = *start_label;
+    cleanup->symbol = symbol;
+    VectorAppend(open, cleanup);
+  }
+}
+
 static bool GenerateCompoundExceptionCleanup(Generator* gen) {
   return CompilerIsCXX() && CompilerExceptionsEnabled() &&
          !gen->for_constant_evaluation;
@@ -1057,6 +1086,10 @@ static void GenerateCompoundStatement(Generator* gen,
         oc->start_label = start_label;
         oc->symbol = sym;
         VectorAppend(&open, oc);
+      }
+      if ((node->base.flags & kASTRangeForInitializer) != 0 && i == 0) {
+        OpenRangeForTemporaryCleanups(gen, node, trailing_start, &start_label,
+                                      &open);
       }
     }
   }

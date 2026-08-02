@@ -1483,6 +1483,58 @@ static void InlineCallASTNodeReplaceChild(ASTNode* parent, int child_id,
   }
 }
 
+typedef struct {
+  InlineCallASTNode* owner;
+  GotoStatementASTNode* jump;
+} InlineCallGotoReconnect;
+
+static bool InlineCallNodeBelongsTo(ASTNode* node,
+                                    InlineCallASTNode* owner) {
+  for (ASTNode* parent = node != NULL ? node->parent : NULL;
+       parent != NULL; parent = parent->parent) {
+    if (parent->op == AST_OP(inline_call)) {
+      return parent == (ASTNode*)owner;
+    }
+  }
+  return false;
+}
+
+static void FindInlineCallGotoLabel(ASTNode* node, void* data, int child_id,
+                                    VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(label)) {
+    return;
+  }
+  InlineCallGotoReconnect* reconnect = data;
+  LabelASTNode* label = (LabelASTNode*)node;
+  if (InlineCallNodeBelongsTo(node, reconnect->owner) &&
+      StringEqualString(reconnect->jump->label_name, &label->name)) {
+    reconnect->jump->label = node;
+  }
+}
+
+static void ReconnectInlineCallGoto(ASTNode* node, void* data, int child_id,
+                                    VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(goto)) {
+    return;
+  }
+  InlineCallASTNode* owner = data;
+  if (!InlineCallNodeBelongsTo(node, owner)) {
+    return;
+  }
+  GotoStatementASTNode* jump = (GotoStatementASTNode*)node;
+  jump->label = NULL;
+  jump->lca = owner->inlined;
+  InlineCallGotoReconnect reconnect = {
+      .owner = owner,
+      .jump = jump,
+  };
+  ASTNodeVisit(owner->inlined, FindInlineCallGotoLabel, 0, &reconnect);
+}
+
 static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
                                        ASTNode* (*func)(ASTNode* node, void*),
                                        void* data) {
@@ -1491,6 +1543,7 @@ static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->inlined = ASTNodeClone(from->inlined, func, data, &to->base);
   to->ret_value = ASTNodeClone(from->ret_value, func, data, &to->base);
+  ASTNodeVisit(to->inlined, ReconnectInlineCallGoto, 0, to);
   return func(&to->base, data);
 }
 

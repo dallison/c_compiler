@@ -1309,8 +1309,8 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   }
   VectorAppend(statements, loop);
   ASTNode* result = NewCompoundStatementASTNode(statements, location);
-  if (CompilerCXXAtLeast(kLanguageStandardCXX23) && !reuse_named_range) {
-    result->flags |= kASTCXX23RangeForLifetime;
+  if (!reuse_named_range) {
+    result->flags |= kASTRangeForInitializer;
   }
   RangeForBindingDestruct(&binding);
   return result;

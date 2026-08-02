@@ -7576,6 +7576,7 @@ static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
                        result);
   ASTNode* analyzed = AnalyzeExpression(comma);
   analyzed->value_category = kValueCategoryPrvalue;
+  analyzed->flags |= kASTFunctionParameterTemporary;
   return analyzed;
 }
 
@@ -8429,6 +8430,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
             ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
             actual = materialized;
           }
+        }
+        if (TypeIsStructOrUnion(formal->type) &&
+            TypeIsStructOrUnion(actual->type)) {
+          actual->flags |= kASTFunctionParameterTemporary;
         }
         if (!polymorphic_special_this) {
           NormalConversion(actual, formal->type);

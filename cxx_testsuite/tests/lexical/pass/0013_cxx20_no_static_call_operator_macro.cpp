@@ -28,6 +28,10 @@
 #error "__cpp_implicit_move must not be defined before C++23"
 #endif
 
+#if __cpp_range_based_for != 201603L
+#error "__cpp_range_based_for must retain its C++17 value in C++20"
+#endif
+
 int main(void) {
   return 0;
 }

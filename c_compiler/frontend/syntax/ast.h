@@ -376,7 +376,9 @@ struct ConstraintExpr;
 #define kASTCXXBracedTemporary (1ULL << 33)  // Compound literal synthesized for a C++ braced-init-list expression (prvalue).
 #define kASTFallthroughDestructor (1ULL << 34)  // Normal-path local destructor; rebuilt after template instantiation and semantic analysis.
 #define kASTParenthesized (1ULL << 35)  // Expression was explicitly parenthesized; significant for decltype(auto) deduction.
-#define kASTCXX23RangeForLifetime (1ULL << 36)  // Range-for compound whose initializer temporaries live through the loop.
+#define kASTRangeForInitializer (1ULL << 36)  // Synthetic range-for compound with a hidden range initializer.
+#define kASTFunctionParameterTemporary (1ULL << 37)  // Materialization of a by-value function parameter object.
+#define kASTTemporaryCleanupCall (1ULL << 38)  // Compiler-generated end-of-lifetime destructor call.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
