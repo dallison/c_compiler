@@ -2020,6 +2020,16 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
     case AST_OP(builtin_atomic_fence):
       ValidationReject(state, "atomic builtins are not constexpr eligible");
       return;
+    case AST_OP(builtin_prefetch):
+      ValidationReject(state, "__builtin_prefetch is not constexpr eligible");
+      return;
+    case AST_OP(builtin_trap):
+      ValidationReject(state, "__builtin_trap is not constexpr eligible");
+      return;
+    case AST_OP(builtin_unreachable):
+      ValidationReject(state,
+                       "__builtin_unreachable is not constexpr eligible");
+      return;
     case AST_OP(call): {
       if (PCodeConstexprCallSymbol(node) == NULL) {
         ValidationReject(state, "indirect calls are not pcode-constexpr eligible");

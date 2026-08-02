@@ -130,6 +130,10 @@ typedef enum {
   AST_OP(builtin_source_function),
   AST_OP(builtin_source_pretty_function),
   AST_OP(builtin_type_trait),
+  AST_OP(builtin_expect),
+  AST_OP(builtin_prefetch),
+  AST_OP(builtin_trap),
+  AST_OP(builtin_unreachable),
 
   AST_OP(cast),   // Cast AST node token.
   AST_OP(label),  // Label AST node.

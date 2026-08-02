@@ -1,5 +1,3 @@
-#define __ATOMIC_SEQ_CST 5
-
 int main(void) {
   int value = 4;
   if (__atomic_load_n(&value, __ATOMIC_SEQ_CST) != 4) {

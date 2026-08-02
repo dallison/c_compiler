@@ -2264,6 +2264,27 @@ static Symbol* GetDaveCCThrowFunction(const char* function_name,
   return symbol;
 }
 
+static Symbol* GetBuiltinAbortFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "abort");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("abort", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
 static Symbol* GetDaveCCDynamicCastFunction(bool is_reference,
                                             SourceLocation location) {
   const char* func_name =
@@ -3141,6 +3162,26 @@ static IRNode* GenerateBuiltinAtomicCompareExchange(Generator* gen,
   return IRSetType(result, node->base.type);
 }
 
+static IRNode* GenerateBuiltinExpect(Generator* gen, VectorASTNode* node) {
+  IRNode* value = GenerateExpression(gen, node->children->value.p[0]);
+  GenerateExpression(gen, node->children->value.p[1]);
+  return IRSetType(value, node->base.type);
+}
+
+static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    GenerateExpression(gen, node->children->value.p[i]);
+  }
+  return IRSetType(GeneratorEmit(gen, NewIR(IR_OP(nop))), node->base.type);
+}
+
+static IRNode* GenerateBuiltinTerminator(Generator* gen, VectorASTNode* node) {
+  Symbol* abort_function = GetBuiltinAbortFunction(node->base.location);
+  IRNode* function = GeneratorGetVariable(gen, abort_function);
+  IRNode* call = NewIR1(IR_OP(calla), function);
+  return IRSetType(GeneratorEmit(gen, call), node->base.type);
+}
+
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) {
   int diff = node->type->size - input->type->size;  // Difference in bytes.
    if (diff == 0) {
@@ -3829,6 +3870,19 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(builtin_atomic_fence):
       result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_fence));
+      break;
+
+    case AST_OP(builtin_expect):
+      result = GenerateBuiltinExpect(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_prefetch):
+      result = GenerateBuiltinPrefetch(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_trap):
+    case AST_OP(builtin_unreachable):
+      result = GenerateBuiltinTerminator(gen, vector_node);
       break;
 
     case AST_OP(builtin_source_file):

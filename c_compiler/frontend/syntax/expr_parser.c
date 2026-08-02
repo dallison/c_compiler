@@ -42,6 +42,10 @@ static struct Intrinsic {
     {"__builtin_FUNCTION", AST_OP(builtin_source_function), 0},
     {"__builtin_LINE", AST_OP(builtin_source_line), 0},
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
+    {"__builtin_expect", AST_OP(builtin_expect), 2},
+    {"__builtin_prefetch", AST_OP(builtin_prefetch), 3},
+    {"__builtin_trap", AST_OP(builtin_trap), 0},
+    {"__builtin_unreachable", AST_OP(builtin_unreachable), 0},
     {"__builtin_va_arg", AST_OP(builtin_va_arg), 2},
     {"__builtin_va_copy", AST_OP(builtin_va_copy), 2},
     {"__builtin_va_end", AST_OP(builtin_va_end), 1},
@@ -90,8 +94,35 @@ static const struct Intrinsic* GetIntrinsic(const char* name) {
                  sizeof(intrinsics[0]), CompareIntrinsicName);
 }
 
+static bool IntrinsicAvailableOnCurrentTarget(
+    const struct Intrinsic* intrinsic) {
+  if (intrinsic == NULL) {
+    return false;
+  }
+  bool atomic = false;
+  switch (intrinsic->opcode) {
+    case AST_OP(builtin_atomic_load):
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n):
+    case AST_OP(builtin_atomic_fence):
+      atomic = true;
+      break;
+    default:
+      break;
+  }
+  return !atomic ||
+         (!StringEqual(compiler->target_name, "6502") &&
+          !StringEqual(compiler->target_name, "65c02"));
+}
+
 static bool IsBuiltinCallName(const char* name) {
-  if (GetIntrinsic(name) != NULL || strcmp(name, "__builtin_expect") == 0) {
+  if (GetIntrinsic(name) != NULL) {
     return true;
   }
   return strncmp(name, "__davecc_is_", 12) == 0;
@@ -3458,11 +3489,22 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
       }
     }
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
-    if (actuals->length != (size_t)intrinsic->num_args) {
+    bool valid_arity =
+        intrinsic->opcode == AST_OP(builtin_prefetch)
+            ? actuals->length >= 1 && actuals->length <= 3
+            : actuals->length == (size_t)intrinsic->num_args;
+    if (!valid_arity) {
+      if (intrinsic->opcode == AST_OP(builtin_prefetch)) {
+        SyntaxError(
+            syntax,
+            "Wrong number of args for builtin; expected between 1 and 3, got %zd",
+            actuals->length);
+      } else {
       SyntaxError(
           syntax,
           "Wrong number of args for builtin; expected %d, got %zd",
           intrinsic->num_args, actuals->length);
+      }
     }
     return NewVectorASTNode(intrinsic->opcode, NULL,
                             syntax->lex->current_token_location, left, actuals);
@@ -3507,32 +3549,6 @@ static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
 // Parse a function call or varargs builtin.
 static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
                                   TokenClass followers) {
-  // __builtin_expect(expr, hint) is a branch-prediction hint that evaluates to
-  // its first argument; the hint is ignored.
-  if (left->op == AST_OP(identifier) &&
-      StringEqual(&((IdentifierASTNode*)left)->symbol->name,
-                  "__builtin_expect")) {
-    ASTNode* value = NULL;
-    while (!LexLookingAt(syntax->lex, TOK(rparen))) {
-      ASTNode* arg = SyntaxParseSingleExpression(syntax, followers);
-      if (value == NULL) {
-        value = arg;
-      } else {
-        ASTNodeDelete(arg);
-      }
-      if (!LexMatch(syntax->lex, TOK(comma))) {
-        break;
-      }
-    }
-    SyntaxNeedBracket(syntax, TOK(rparen), followers);
-    if (value == NULL) {
-      value = (ASTNode*)NewIntConstantASTNode(
-          0, NewTypeRecordWithSize(kTypeLong, kQualPlain),
-          syntax->lex->current_token_location);
-    }
-    return value;
-  }
-
   // Check for varargs intrinsic functions.
   ASTNode* varargs = VarargsIntrinsic(syntax, left, followers);
   if (varargs != NULL) {
@@ -3904,38 +3920,160 @@ static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
 }
 
 
+static bool PreprocessorFeatureIsSupported(const char* name) {
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+  if (strcmp(name, "cxx_exceptions") == 0) {
+    return CompilerExceptionsEnabled();
+  }
+  if (strcmp(name, "cxx_rtti") == 0) {
+    return true;
+  }
+  if (strcmp(name, "cxx_constexpr") == 0 ||
+      strcmp(name, "cxx_lambdas") == 0 ||
+      strcmp(name, "cxx_rvalue_references") == 0 ||
+      strcmp(name, "cxx_variadic_templates") == 0) {
+    return CompilerCXXAtLeast(kLanguageStandardCXX11);
+  }
+  if (strcmp(name, "cxx_concepts") == 0 ||
+      strcmp(name, "cxx_coroutines") == 0 ||
+      strcmp(name, "cxx_modules") == 0) {
+    return CompilerCXXAtLeast(kLanguageStandardCXX20);
+  }
+  return false;
+}
+
+static int64_t CXXAttributeProbeValue(const char* attribute_namespace,
+                                      const char* name) {
+  if (attribute_namespace != NULL &&
+      strcmp(attribute_namespace, "gnu") != 0) {
+    return 0;
+  }
+  const char* canonical = name;
+  if (strcmp(name, "nodiscard") == 0) {
+    canonical = "warn_unused_result";
+  } else if (strcmp(name, "maybe_unused") == 0) {
+    canonical = "unused";
+  }
+  if (attribute_namespace != NULL) {
+    return SyntaxAttributeIsSupported(canonical) ? 1 : 0;
+  }
+  if (strcmp(name, "noreturn") == 0) {
+    return 200809L;
+  }
+  if (strcmp(name, "deprecated") == 0) {
+    return 201309L;
+  }
+  if (strcmp(name, "fallthrough") == 0 ||
+      strcmp(name, "maybe_unused") == 0) {
+    return 201603L;
+  }
+  if (strcmp(name, "likely") == 0 || strcmp(name, "unlikely") == 0) {
+    return 201803L;
+  }
+  if (strcmp(name, "nodiscard") == 0) {
+    return 201907L;
+  }
+  return 0;
+}
+
+static bool ParsePreprocessorProbeName(Syntax* syntax, String* name_space,
+                                       String* name) {
+  StringInit(name_space, NULL);
+  StringInit(name, NULL);
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  String first;
+  StringInit(&first, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  if (LexMatch(syntax->lex, TOK(coloncolon))) {
+    StringSetString(name_space, &first);
+    if (LexLookingAt(syntax->lex, TOK(identifier))) {
+      StringSetString(name, &syntax->lex->spelling);
+      LexNextToken(syntax->lex);
+    }
+  } else {
+    StringSetString(name, &first);
+  }
+  StringDestruct(&first);
+  return name->length != 0;
+}
+
 static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
                                                   TokenClass followers) {
   
   if (StringEqual(&syntax->lex->spelling, "defined")) {
     LexNextToken(syntax->lex);
     String macro_name;
+    StringInit(&macro_name, NULL);
     if (LexMatch(syntax->lex, TOK(lparen))) {
       if (LexLookingAt(syntax->lex, TOK(identifier))) {
-        StringInit(&macro_name, syntax->lex->spelling.value);
+        StringSetString(&macro_name, &syntax->lex->spelling);
         LexNextToken(syntax->lex);
-      } else {
-        StringInit(&macro_name, NULL);
       }
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
     } else if (LexLookingAt(syntax->lex, TOK(identifier))) {
-      StringInit(&macro_name, syntax->lex->spelling.value);
+      StringSetString(&macro_name, &syntax->lex->spelling);
       LexNextToken(syntax->lex);
     }
-    Macro* macro =
-    PreprocessorFindMacro(syntax->lex->preprocessor, &macro_name);
     TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
-    return NewIntConstantASTNode(macro == NULL ? 0 : 1, int_type,
+    bool defined = PreprocessorMacroNameIsDefined(
+        syntax->lex->preprocessor, &macro_name);
+    StringDestruct(&macro_name);
+    return NewIntConstantASTNode(defined ? 1 : 0, int_type,
                                  syntax->lex->current_token_location);
   } else if (StringEqual(&syntax->lex->spelling, "__has_feature")) {
     LexNextToken(syntax->lex);
     if (LexMatch(syntax->lex, TOK(lparen))) {
+      bool value = false;
       if (LexLookingAt(syntax->lex, TOK(identifier))) {
-        // TODO: handle __has_feature?
+        value = PreprocessorFeatureIsSupported(
+            syntax->lex->spelling.value);
         LexNextToken(syntax->lex);
       }
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
-      return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+      return NewIntConstantASTNode(value,
+                                   NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                   syntax->lex->current_token_location);
+    }
+  } else if (StringEqual(&syntax->lex->spelling, "__has_builtin")) {
+    LexNextToken(syntax->lex);
+    if (LexMatch(syntax->lex, TOK(lparen))) {
+      bool value = false;
+      if (LexLookingAt(syntax->lex, TOK(identifier))) {
+        value = IntrinsicAvailableOnCurrentTarget(
+            GetIntrinsic(syntax->lex->spelling.value));
+        LexNextToken(syntax->lex);
+      }
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return NewIntConstantASTNode(value,
+                                   NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                   syntax->lex->current_token_location);
+    }
+  } else if (StringEqual(&syntax->lex->spelling, "__has_attribute") ||
+             StringEqual(&syntax->lex->spelling, "__has_cpp_attribute")) {
+    bool cxx_attribute =
+        StringEqual(&syntax->lex->spelling, "__has_cpp_attribute");
+    LexNextToken(syntax->lex);
+    if (LexMatch(syntax->lex, TOK(lparen))) {
+      String name_space;
+      String name;
+      int64_t value = 0;
+      if (ParsePreprocessorProbeName(syntax, &name_space, &name)) {
+        if (cxx_attribute) {
+          value = CXXAttributeProbeValue(
+              name_space.length == 0 ? NULL : name_space.value, name.value);
+        } else if (name_space.length == 0) {
+          value = SyntaxAttributeIsSupported(name.value);
+        }
+      }
+      StringDestruct(&name_space);
+      StringDestruct(&name);
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return NewIntConstantASTNode(value,
+                                   NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                    syntax->lex->current_token_location);
     }
   } else if (StringEqual(&syntax->lex->spelling, "__has_include") ||

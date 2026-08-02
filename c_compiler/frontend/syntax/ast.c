@@ -309,6 +309,14 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_source_function";
     case AST_OP(builtin_source_pretty_function):
       return "builtin_source_pretty_function";
+    case AST_OP(builtin_expect):
+      return "builtin_expect";
+    case AST_OP(builtin_prefetch):
+      return "builtin_prefetch";
+    case AST_OP(builtin_trap):
+      return "builtin_trap";
+    case AST_OP(builtin_unreachable):
+      return "builtin_unreachable";
 
     case AST_OP(cast):
       return "cast";

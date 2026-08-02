@@ -198,6 +198,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
   IdentifierASTNode* id_node = (IdentifierASTNode*)node;
   BinaryASTNode* binary_node = (BinaryASTNode*)node;
   UnaryASTNode* unary_node = (UnaryASTNode*)node;
+  VectorASTNode* vector_node = (VectorASTNode*)node;
 
   int64_t left;
   int64_t right;
@@ -225,6 +226,16 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       *result = colno + 1;
       return true;
     }
+    case AST_OP(builtin_expect):
+      if (vector_node->children->length == 2 &&
+          EvaluateIntegerExpressionInContext(
+              ctx, vector_node->children->value.p[0], &left) &&
+          EvaluateIntegerExpressionInContext(
+              ctx, vector_node->children->value.p[1], &right)) {
+        *result = left;
+        return true;
+      }
+      return false;
 
     case AST_OP(assign):
     case AST_OP(pluseq):

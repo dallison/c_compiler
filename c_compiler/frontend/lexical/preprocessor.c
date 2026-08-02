@@ -227,12 +227,23 @@ static void PredefineMacros(Preprocessor* p) {
   // Define additional practical macros provided by some compilers and
   // need for include files in the OS.
   PreprocessorDefineMacro(p, "__GNUC__", "4");
+  PreprocessorDefineMacro(p, "__GNUC_MINOR__", "2");
+  PreprocessorDefineMacro(p, "__GNUC_PATCHLEVEL__", "1");
 
   // Pretend to be llvm to get compatibility with code in standard header files.
   PreprocessorDefineMacro(p, "__llvm__", "1");
 
   // Pretend to be on linux.
   PreprocessorDefineMacro(p, "__linux__", "1");
+
+  // GCC's atomic memory-order constants.  The frontend accepts these values
+  // directly for __atomic_* operations on targets that provide atomics.
+  PreprocessorDefineMacro(p, "__ATOMIC_RELAXED", "0");
+  PreprocessorDefineMacro(p, "__ATOMIC_CONSUME", "1");
+  PreprocessorDefineMacro(p, "__ATOMIC_ACQUIRE", "2");
+  PreprocessorDefineMacro(p, "__ATOMIC_RELEASE", "3");
+  PreprocessorDefineMacro(p, "__ATOMIC_ACQ_REL", "4");
+  PreprocessorDefineMacro(p, "__ATOMIC_SEQ_CST", "5");
 
   // These are defined by GCC and clang and are used in header files.  We need
   // to define them too.
@@ -2279,9 +2290,13 @@ static void Endif(Preprocessor* p, String* line, size_t pos) {
   UpdateState(p);
 }
 
-static bool MacroNameIsDefined(Preprocessor* p, String* name) {
+bool PreprocessorMacroNameIsDefined(Preprocessor* p, String* name) {
   if (StringEqual(name, "__has_include") ||
-      StringEqual(name, "__has_cpp_attribute")) {
+      StringEqual(name, "__has_include_next") ||
+      StringEqual(name, "__has_builtin") ||
+      StringEqual(name, "__has_attribute") ||
+      StringEqual(name, "__has_cpp_attribute") ||
+      StringEqual(name, "__has_feature")) {
     return true;
   }
   Macro* macro = HashTableSearch(&p->macros, name->value);
@@ -2298,7 +2313,7 @@ static void Ifndef(Preprocessor* p, String* line, size_t pos) {
     // An empty macro name will always be missing.
   }
  
-  VectorPush(&p->if_stack, MacroNameIsDefined(p, &macro_name)
+  VectorPush(&p->if_stack, PreprocessorMacroNameIsDefined(p, &macro_name)
                                 ? NULL : &macro_not_defined);
   StringDestruct(&macro_name);
 
@@ -2320,7 +2335,9 @@ static void Ifdef(Preprocessor* p, String* line, size_t pos) {
     // of macros so it won't be found.
   }
   VectorPush(&p->if_stack,
-             MacroNameIsDefined(p, &macro_name) ? &macro_defined : NULL);
+             PreprocessorMacroNameIsDefined(p, &macro_name)
+                 ? &macro_defined
+                 : NULL);
   StringDestruct(&macro_name);
 
   pos = SkipSpacesAndComments(p, pos, line, NULL);
@@ -2404,7 +2421,7 @@ static void ElifMacroTest(Preprocessor* p, String* line, size_t pos,
   if (macro_name.length == 0) {
     PreprocessorError(p, "Expected macro name after #%s", directive);
   }
-  bool is_defined = MacroNameIsDefined(p, &macro_name);
+  bool is_defined = PreprocessorMacroNameIsDefined(p, &macro_name);
   p->if_stack.value.p[p->if_stack.length - 1] =
       require_defined ? (is_defined ? &condition_true : NULL)
                       : (is_defined ? NULL : &condition_true);

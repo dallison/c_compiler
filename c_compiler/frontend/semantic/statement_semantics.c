@@ -72,7 +72,19 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
     case AST_OP(builtin_atomic_compare_exchange_val):
     case AST_OP(builtin_atomic_compare_exchange_n):
     case AST_OP(builtin_atomic_fence):
+    case AST_OP(builtin_prefetch):
+    case AST_OP(builtin_trap):
+    case AST_OP(builtin_unreachable):
       return true;
+    case AST_OP(builtin_expect): {
+      VectorASTNode* builtin = (VectorASTNode*)node;
+      for (size_t i = 0; i < builtin->children->length; i++) {
+        if (ExpressionHasSideEffects(builtin->children->value.p[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
     case AST_OP(comma): {
       BinaryASTNode* n = (BinaryASTNode*)node;
       return ExpressionHasSideEffects(n->left) || ExpressionHasSideEffects(n->right);
