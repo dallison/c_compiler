@@ -80,7 +80,7 @@ implemented.
 - [x] Implement multidimensional subscript expressions and overloads
       (`object[i, j]`), distinct from the completed static `operator[]` work.
 - [x] Implement `auto(x)` and `auto{x}` decay-copy syntax.
-- [ ] Implement the `#warning` preprocessing directive.
+- [x] Implement the `#warning` preprocessing directive.
 - [ ] Audit the remaining low-coupling C++23 language proposals and add explicit
       feature tests or unsupported diagnostics rather than silently accepting
       partial behavior.

@@ -2505,17 +2505,20 @@ static void Error(Preprocessor* p, String* line, size_t pos) {
   }
   String error = {0};
   StringAppend(&error, &line->value[pos]);  // Rest of line
-  PreprocessorError(p, error.value);
+  PreprocessorError(p, "%s", error.value);
   StringDestruct(&error);
 }
 
+// C++23 [cpp.error].  DaveCC also accepts #warning as an extension in earlier
+// language modes, matching its historical behavior and mainstream compilers.
+// The pp-token sequence is intentionally not macro-expanded.
 static void Warning(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
   String warning = {0};
   StringAppend(&warning, &line->value[pos]);  // Rest of line
-  PreprocessorWarning(p, "preprocessor", warning.value);
+  PreprocessorWarning(p, "preprocessor", "%s", warning.value);
   StringDestruct(&warning);
 }
 
