@@ -285,6 +285,7 @@ bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
 bool TypeIsAbstractClass(TypeRecord* type);
 bool TypeContainsAuto(TypeRecord* type);
 bool TypeFunctionReturnContainsAuto(TypeRecord* type);
+TypeRecord* TypeDecayForByValueDeduction(TypeRecord* type);
 TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type);
 TypeRecord* TypeDeduceDecltypeAuto(struct ASTNode* expr);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);

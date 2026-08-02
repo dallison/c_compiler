@@ -289,9 +289,17 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   // `decltype(auto)` is a placeholder type: its deduction follows decltype
   // (value-category preserving) rules rather than template-argument deduction.
   if (LexLookingAt(parser->lex, TOK(auto))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(parser->lex, &checkpoint);
     LexNextToken(parser->lex);
-    SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
-    return NewTypeRecord(kTypeDecltypeAuto | kTypeAuto, kQualPlain);
+    if (LexLookingAt(parser->lex, TOK(rparen))) {
+      SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+      return NewTypeRecord(kTypeDecltypeAuto | kTypeAuto, kQualPlain);
+    }
+    // In C++23, `decltype(auto(expr))` names the type of an auto cast rather
+    // than the `decltype(auto)` placeholder.  Restore the `auto` token and
+    // parse the complete operand as an expression below.
+    LexCheckpointRestore(parser->lex, &checkpoint);
   }
 
   bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));

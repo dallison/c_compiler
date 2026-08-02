@@ -12,6 +12,10 @@
 #error "__cpp_explicit_this_parameter must not be defined before C++23"
 #endif
 
+#ifdef __cpp_auto_cast
+#error "__cpp_auto_cast must not be defined before C++23"
+#endif
+
 int main(void) {
   return 0;
 }

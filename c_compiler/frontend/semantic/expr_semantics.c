@@ -9432,11 +9432,35 @@ static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
   return AnalyzeExpression(deref);
 }
 
-static void AnalyzeCastExpression(CastASTNode* node) {
+static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+  bool auto_paren = node->kind == kCastAutoParen;
+  bool auto_brace = node->kind == kCastAutoBrace;
+  if (auto_paren || auto_brace) {
+    TypeRecord* deduced =
+        TypeDecayForByValueDeduction(node->expr != NULL ? node->expr->type
+                                                        : NULL);
+    if (deduced == NULL) {
+      SemanticError((ASTNode*)node,
+                    "Cannot deduce the target type of an auto cast");
+      deduced = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+    }
+    TypeRecordDelete(node->cast_type);
+    node->cast_type = deduced;
+    TypeRecordIncRef(node->cast_type);
+    // Direct-list-initialization from a prvalue of the deduced type uses that
+    // prvalue as the result object; it must not synthesize an extra move.
+    if (auto_brace && !TypeIsVoid(node->cast_type) && node->expr != NULL &&
+        node->expr->value_category == kValueCategoryPrvalue &&
+        TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type)) {
+      node->kind = kCastAutoParen;
+      auto_paren = true;
+      auto_brace = false;
+    }
+  }
   if (node->kind == kCastDynamic) {
     AnalyzeDynamicCast(node);
-    return;
+    return (ASTNode*)node;
   }
   if (node->kind == kCastConst) {
     ValidateCXXConstCast(node);
@@ -9465,7 +9489,29 @@ static void AnalyzeCastExpression(CastASTNode* node) {
       ASTNodeSetType((ASTNode*)node, node->cast_type);
       node->base.value_category = kValueCategoryPrvalue;
     }
-    return;
+    return (ASTNode*)node;
+  }
+  if (auto_brace && TypeIsVoid(node->cast_type)) {
+    SemanticError((ASTNode*)node,
+                  "a braced auto cast cannot initialize void");
+    ASTNodeSetType((ASTNode*)node, node->cast_type);
+    node->base.value_category = kValueCategoryPrvalue;
+    return (ASTNode*)node;
+  }
+  if (auto_brace) {
+    Vector* elements = NewVector();
+    VectorAppend(elements, ASTNodeMove(node->expr));
+    ASTNode* braced =
+        NewBracedInitializerASTNode(elements, NULL, node->base.location);
+    ASTNode* lowered =
+        LowerCXXBracedInitToTarget(braced, node->cast_type);
+    ASTNode* parent = node->base.parent;
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, node->base.child_id, lowered, true);
+    } else {
+      ASTNodeDelete((ASTNode*)node);
+    }
+    return lowered;
   }
   if (TypeIsReference(node->cast_type)) {
     if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
@@ -9479,18 +9525,30 @@ static void AnalyzeCastExpression(CastASTNode* node) {
             ? kValueCategoryXvalue
             : kValueCategoryLvalue;
   } else {
-    bool materialized_same_class =
+    bool same_class =
         CompilerIsCXX() && TypeIsStructOrUnion(node->cast_type) &&
-        TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type) &&
-        TryConvertWithConvertingConstructorImpl(
-            node->expr, node->cast_type, kConvertCast,
-            /*allow_same_class=*/true);
+        TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type);
+    bool identity_same_class_prvalue =
+        auto_paren && same_class &&
+        node->expr->value_category == kValueCategoryPrvalue;
+    bool materialized_same_class =
+        identity_same_class_prvalue ||
+        (same_class &&
+         TryConvertWithConvertingConstructorImpl(
+             node->expr, node->cast_type, kConvertCast,
+             /*allow_same_class=*/true));
+    if (auto_paren && same_class && !materialized_same_class) {
+      SemanticError((ASTNode*)node,
+                    "auto cast cannot construct its result from the operand");
+    }
     if (!materialized_same_class) {
       SemanticConvertType(node->expr, node->cast_type, kConvertCast);
     }
     // Result is the requested type.
     ASTNodeSetType((ASTNode*)node, node->cast_type);
+    node->base.value_category = kValueCategoryPrvalue;
   }
+  return (ASTNode*)node;
 }
 
 static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
@@ -9953,7 +10011,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       return AnalyzeTypeidExpression((TypeidASTNode*)node);
 
     case AST_OP(cast):
-      AnalyzeCastExpression((CastASTNode*)node);
+      node = AnalyzeCastExpression((CastASTNode*)node);
       break;
 
     case AST_OP(compound_literal):

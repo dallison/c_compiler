@@ -3191,6 +3191,55 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     return NewCastASTNode(type, location, argument);
   }
 
+  // C++23 placeholder conversion: `auto(expr)` / `auto{expr}`.  Unlike a
+  // fundamental functional cast, placeholder deduction requires exactly one
+  // assignment-expression and its target type is determined during semantic
+  // analysis after the operand has a type.
+  if (CompilerIsCXX() && LexLookingAt(lex, TOK(auto))) {
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    bool brace_init = LexLookingAt(lex, TOK(lbrace));
+    if (!brace_init && !LexLookingAt(lex, TOK(lparen))) {
+      SyntaxError(syntax,
+                  "expected '(' or '{' after auto in functional-style cast");
+      SyntaxRecover(syntax, followers);
+      return NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+    }
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax, "auto(x) and auto{x} require C++23");
+    }
+    Token close = brace_init ? TOK(rbrace) : TOK(rparen);
+    LexNextToken(lex);
+    ASTNode* argument = NULL;
+    if (!LexLookingAt(lex, close)) {
+      argument = SyntaxParseSingleExpression(syntax, followers | TC(exprsep) |
+                                                         TC(closebra));
+      if (LexLookingAt(lex, TOK(comma))) {
+        SyntaxError(syntax,
+                    "a functional-style cast to auto requires exactly one "
+                    "argument");
+        while (LexMatch(lex, TOK(comma))) {
+          ASTNodeDelete(SyntaxParseSingleExpression(
+              syntax, followers | TC(exprsep) | TC(closebra)));
+        }
+      }
+    }
+    SyntaxNeedBracket(syntax, close, followers);
+    if (argument == NULL) {
+      SyntaxError(syntax,
+                  "a functional-style cast to auto requires exactly one "
+                  "argument");
+      argument = NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+    }
+    ASTNode* result =
+        NewCastASTNode(NewTypeRecord(kTypeAuto, kQualPlain), location, argument);
+    ((CastASTNode*)result)->kind =
+        brace_init ? kCastAutoBrace : kCastAutoParen;
+    return result;
+  }
+
   // Check for identifier.  In C++ an unqualified operator-function-id (e.g.
   // `operator+`) is also a valid primary expression naming a free operator
   // function, so route a leading `operator` keyword through the same identifier

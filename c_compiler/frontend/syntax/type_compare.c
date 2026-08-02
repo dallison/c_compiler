@@ -1201,6 +1201,30 @@ static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {
   return result;
 }
 
+// Apply the [temp.deduct.call] adjustments used when deducing a bare
+// by-value template parameter.  C++23 `auto(expr)` uses exactly these rules:
+// arrays and functions decay to pointers, references are removed, and
+// top-level cv-qualification does not participate in deduction.
+TypeRecord* TypeDecayForByValueDeduction(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  while (TypeIsReference(type) && type->next != NULL) {
+    type = type->next;
+  }
+  TypeRecord* result = NULL;
+  if (TypeIsArray(type) && type->next != NULL) {
+    result = NewPointerTo(kQualPlain, TypeRecordCopy(type->next));
+  } else if (TypeIsFunction(type)) {
+    result = NewPointerTo(kQualPlain, TypeRecordCopy(type));
+  } else {
+    result = TypeRecordCopy(type);
+    result->qualifiers = kQualPlain;
+  }
+  TypeRecordCalculateSize(result);
+  return result;
+}
+
 TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
   if (pattern == NULL || initializer_type == NULL) {
     return NULL;

@@ -582,6 +582,10 @@ typedef enum {
   kCastReinterpret,
   kCastConst,
   kCastDynamic,
+  // C++23 placeholder conversions retain their spelling through template
+  // cloning so semantic analysis can re-deduce the decayed target type.
+  kCastAutoParen,
+  kCastAutoBrace,
 } CastKind;
 
 typedef struct {
