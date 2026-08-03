@@ -75,6 +75,8 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
     {"-std", kCompilerOptionString, kOptionStandard, false,
      "Select language standard: c89, c99, c11, c17, c++11, c++17, c++20, c++23"},
+    {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
+     "Select constexpr evaluator: auto, pcode, ast, or audit"},
     {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
     {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
     {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false, "Print fron end dump"},
@@ -2405,6 +2407,23 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
   ParseStandardOption(compiler, options);
+  compiler->constexpr_eval_mode = kConstexprEvalAuto;
+  String* constexpr_eval = OptionStringValue(kOptionConstexprEval, options);
+  if (constexpr_eval != NULL) {
+    if (StringEqual(constexpr_eval, "auto")) {
+      compiler->constexpr_eval_mode = kConstexprEvalAuto;
+    } else if (StringEqual(constexpr_eval, "pcode")) {
+      compiler->constexpr_eval_mode = kConstexprEvalPCode;
+    } else if (StringEqual(constexpr_eval, "ast")) {
+      compiler->constexpr_eval_mode = kConstexprEvalAST;
+    } else if (StringEqual(constexpr_eval, "audit")) {
+      compiler->constexpr_eval_mode = kConstexprEvalAudit;
+    } else {
+      fprintf(stderr, "Invalid constexpr evaluator: %s\n",
+              constexpr_eval->value);
+      exit(1);
+    }
+  }
   ParseOptimizationOption(compiler, options, target->default_opt_level);
   compiler->pic = OptionBoolValue(kOptionPic, options, false);
   if (target->static_linkage_only && compiler->pic) {

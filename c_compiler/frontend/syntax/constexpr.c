@@ -8,6 +8,7 @@
 
 #include "constexpr.h"
 #include <stdlib.h>
+#include <string.h>
 #include "compiler.h"
 #include "constexpr_pcode.h"
 #include "errors.h"
@@ -18,6 +19,15 @@
 #include "type_template.h"
 
 typedef struct ConstexprBinding ConstexprBinding;
+
+static void ReportConstexprPCodeFailure(ASTNode* node, bool always) {
+  if (always ||
+      (compiler->current_function == NULL &&
+       compiler->constant_evaluation_required_depth > 0)) {
+    SemanticError(node, "constexpr pcode evaluation failed: %s",
+                  ConstexprPCodeFailureReason());
+  }
+}
 
 struct ConstexprValue {
   bool is_object;
@@ -122,6 +132,10 @@ static ConstexprBinding* FindConstexprBinding(ConstEvalContext* ctx,
     }
   }
   return NULL;
+}
+
+bool ConstexprHasBinding(ConstEvalContext* ctx, Symbol* symbol) {
+  return ctx != NULL && FindConstexprBinding(ctx, symbol) != NULL;
 }
 
 static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
@@ -603,16 +617,12 @@ static TypeRecord* ConstexprObjectSlotType(TypeRecord* type,
   return NULL;
 }
 
-bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
-                                              ASTNode* initializer) {
+static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
+                                                        ASTNode* initializer) {
   if (symbol == NULL || symbol->type == NULL || initializer == NULL ||
       (!TypeIsFixedArray(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
     return false;
   }
-  if (ConstexprPCodeEvaluateObjectConstantForSymbol(symbol, initializer)) {
-    return true;
-  }
-
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
   ConstexprValue object_value = {0};
@@ -642,6 +652,44 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   }
   ConstEvalContextDestruct(&ctx);
   return ok;
+}
+
+bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
+                                              ASTNode* initializer) {
+  if (symbol == NULL || initializer == NULL) {
+    return false;
+  }
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  bool pcode_attempted = mode != kConstexprEvalAST;
+  bool pcode_ok =
+      pcode_attempted &&
+      ConstexprPCodeEvaluateObjectConstantForSymbol(symbol, initializer);
+  if (mode == kConstexprEvalPCode) {
+    if (!pcode_ok) {
+      ReportConstexprPCodeFailure(initializer, false);
+    }
+    return pcode_ok;
+  }
+  if ((mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) &&
+      pcode_ok) {
+    return true;
+  }
+  ConstexprObject* pcode_object =
+      pcode_ok ? (ConstexprObject*)symbol->value.other : NULL;
+  if (pcode_ok) {
+    symbol->flags.value_set = false;
+    symbol->value.other = NULL;
+  }
+  if (mode == kConstexprEvalAudit) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+  }
+  bool ast_ok =
+      ConstexprEvaluateObjectConstantForSymbolAST(symbol, initializer);
+  compiler->constexpr_eval_mode = mode;
+  if (pcode_object != NULL) {
+    ConstexprPCodeDeleteObject(pcode_object);
+  }
+  return ast_ok;
 }
 
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
@@ -2488,8 +2536,7 @@ static bool ConstexprConstructorCandidateMatches(Symbol* candidate,
   return true;
 }
 
-static Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node,
-                                                 ASTNode** receiver) {
+Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
   if (node == NULL || node->op != AST_OP(call)) {
     return NULL;
   }
@@ -2588,8 +2635,8 @@ static Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node,
   return NULL;
 }
 
-static Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
-                                                 size_t actual_count) {
+Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
+                                          size_t actual_count) {
   if (type == NULL || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL) {
     return NULL;
@@ -2743,6 +2790,12 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   if (decl == NULL || decl->symbol == NULL ||
       TypeIsFunction(decl->symbol->type)) {
     return false;
+  }
+  if (StorageIs(decl->symbol->storage, STO(static) | STO(thread))) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23) ||
+        !decl->symbol->flags.is_constexpr) {
+      return false;
+    }
   }
   if (PushConstexprSymbolValue(ctx, decl->symbol)) {
     return true;
@@ -3170,6 +3223,15 @@ static ConstexprStatementResult EvaluateConstexprStatement(
       CaseLabelASTNode* label = (CaseLabelASTNode*)stmt;
       return EvaluateConstexprStatement(ctx, label->stmt, return_type, result);
     }
+    case AST_OP(label):
+      return CompilerCXXAtLeast(kLanguageStandardCXX23)
+                 ? EvaluateConstexprStatement(
+                       ctx, ((LabelASTNode*)stmt)->stmt, return_type, result)
+                 : kConstexprStmtInvalid;
+    case AST_OP(goto):
+      // P2242 permits a goto in a constexpr function definition, but a
+      // constant-evaluated path still may not execute it.
+      return kConstexprStmtInvalid;
     case AST_OP(return): {
       CombinedStatementASTNode* ret = (CombinedStatementASTNode*)stmt;
       ConstexprValue return_value = {0};
@@ -3291,33 +3353,165 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                     int64_t* result) {
   (void)ConstexprFunctionDefinition(ConstexprCallSymbol(node));
-  if (ConstexprPCodeEvaluateCallAsInteger(ctx, node, result)) {
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  bool use_overlay_result = false;
+  int64_t overlay_result = 0;
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+      ConstexprPCodeRequiresASTOverlay(node)) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+    ConstexprValue overlay_value;
+    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value) &&
+                      ConstexprValueAsInteger(overlay_value, &overlay_result);
+    compiler->constexpr_eval_mode = mode;
+    if (!overlay_ok) {
+      return false;
+    }
+    use_overlay_result = true;
+  }
+  int64_t pcode_result = 0;
+  bool pcode_ok =
+      mode != kConstexprEvalAST &&
+      ConstexprPCodeEvaluateCallAsInteger(ctx, node, &pcode_result);
+  if (mode == kConstexprEvalPCode) {
+    if (!pcode_ok) {
+      ReportConstexprPCodeFailure(node, false);
+      return false;
+    }
+    *result = use_overlay_result ? overlay_result : pcode_result;
     return true;
   }
+  if (mode == kConstexprEvalAuto && pcode_ok) {
+    *result = use_overlay_result ? overlay_result : pcode_result;
+    return true;
+  }
+  if (mode == kConstexprEvalAudit) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+  }
   ConstexprValue value;
-  return EvaluateConstexprCall(ctx, node, &value) &&
-         ConstexprValueAsInteger(value, result);
+  bool ast_ok = EvaluateConstexprCall(ctx, node, &value) &&
+                ConstexprValueAsInteger(value, result);
+  compiler->constexpr_eval_mode = mode;
+  if (mode == kConstexprEvalAudit &&
+      (pcode_ok != ast_ok || (pcode_ok && pcode_result != *result))) {
+    if (pcode_ok && ast_ok) {
+      SemanticError(node,
+                    "constexpr evaluator mismatch: pcode=%lld, ast=%lld",
+                    (long long)pcode_result, (long long)*result);
+    } else {
+      SemanticError(node,
+                    pcode_ok
+                        ? "constexpr evaluator mismatch"
+                        : "constexpr evaluator mismatch: pcode failed: %s",
+                    ConstexprPCodeFailureReason());
+    }
+    return false;
+  }
+  if (pcode_ok) {
+    *result = pcode_result;
+    return true;
+  }
+  return ast_ok;
 }
 
 bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                      double* result) {
   (void)ConstexprFunctionDefinition(ConstexprCallSymbol(node));
-  if (ConstexprPCodeEvaluateCallAsFloating(ctx, node, result)) {
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  bool use_overlay_result = false;
+  double overlay_result = 0;
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+      ConstexprPCodeRequiresASTOverlay(node)) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+    ConstexprValue overlay_value;
+    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value) &&
+                      ConstexprValueAsFloating(overlay_value, &overlay_result);
+    compiler->constexpr_eval_mode = mode;
+    if (!overlay_ok) {
+      return false;
+    }
+    use_overlay_result = true;
+  }
+  double pcode_result = 0;
+  bool pcode_ok =
+      mode != kConstexprEvalAST &&
+      ConstexprPCodeEvaluateCallAsFloating(ctx, node, &pcode_result);
+  if (mode == kConstexprEvalPCode) {
+    if (!pcode_ok) {
+      ReportConstexprPCodeFailure(node, false);
+      return false;
+    }
+    *result = use_overlay_result ? overlay_result : pcode_result;
     return true;
   }
+  if (mode == kConstexprEvalAuto && pcode_ok) {
+    *result = use_overlay_result ? overlay_result : pcode_result;
+    return true;
+  }
+  if (mode == kConstexprEvalAudit) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+  }
   ConstexprValue value;
-  return EvaluateConstexprCall(ctx, node, &value) &&
-         ConstexprValueAsFloating(value, result);
+  bool ast_ok = EvaluateConstexprCall(ctx, node, &value) &&
+                ConstexprValueAsFloating(value, result);
+  compiler->constexpr_eval_mode = mode;
+  if (mode == kConstexprEvalAudit &&
+      (pcode_ok != ast_ok ||
+       (pcode_ok &&
+        memcmp(&pcode_result, result, sizeof(pcode_result)) != 0))) {
+    SemanticError(node, "constexpr evaluator mismatch%s",
+                  pcode_ok ? "" : ": pcode evaluation failed");
+    return false;
+  }
+  if (pcode_ok) {
+    *result = pcode_result;
+    return true;
+  }
+  return ast_ok;
 }
 
 bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   (void)ConstexprFunctionDefinition(ConstexprCallSymbol(node));
-  if (ConstexprPCodeEvaluateCallAsObject(ctx, node)) {
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+      ConstexprPCodeRequiresASTOverlay(node)) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+    ConstexprValue overlay_value;
+    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value) &&
+                      overlay_value.is_object &&
+                      overlay_value.object != NULL;
+    compiler->constexpr_eval_mode = mode;
+    if (!overlay_ok) {
+      return false;
+    }
+  }
+  bool pcode_ok =
+      mode != kConstexprEvalAST &&
+      ConstexprPCodeEvaluateCallAsObject(ctx, node);
+  if (mode == kConstexprEvalPCode) {
+    if (!pcode_ok) {
+      ReportConstexprPCodeFailure(node, false);
+    }
+    return pcode_ok;
+  }
+  if (mode == kConstexprEvalAuto && pcode_ok) {
     return true;
   }
+  if (mode == kConstexprEvalAudit) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+  }
   ConstexprValue value;
-  return EvaluateConstexprCall(ctx, node, &value) && value.is_object &&
-         value.object != NULL;
+  bool ast_ok = EvaluateConstexprCall(ctx, node, &value) && value.is_object &&
+                value.object != NULL;
+  compiler->constexpr_eval_mode = mode;
+  if (mode == kConstexprEvalAudit && pcode_ok != ast_ok) {
+    SemanticError(node,
+                  pcode_ok
+                      ? "constexpr evaluator mismatch"
+                      : "constexpr evaluator mismatch: pcode failed: %s",
+                  ConstexprPCodeFailureReason());
+    return false;
+  }
+  return pcode_ok || ast_ok;
 }
 
 bool ConstexprEvaluateConstructorCallForSymbol(ConstEvalContext* ctx,
@@ -3358,8 +3552,33 @@ bool ConstexprEvaluateConstructorCallForSymbol(ConstEvalContext* ctx,
 }
 
 bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+      ConstexprPCodeRequiresASTOverlay(node)) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+    ConstexprValue overlay_value = {0};
+    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value);
+    compiler->constexpr_eval_mode = mode;
+    if (!overlay_ok) {
+      return false;
+    }
+  }
+  bool pcode_ok =
+      (mode == kConstexprEvalPCode || mode == kConstexprEvalAudit) &&
+      ConstexprPCodeEvaluateCall(ctx, node);
+  if (mode == kConstexprEvalPCode) {
+    if (!pcode_ok) {
+      ReportConstexprPCodeFailure(node, false);
+    }
+    return pcode_ok;
+  }
+  if (mode == kConstexprEvalAudit) {
+    compiler->constexpr_eval_mode = kConstexprEvalAST;
+  }
+  bool ast_ok = false;
   if (EvaluateConstexprConstructorCall(ctx, node)) {
-    return true;
+    ast_ok = true;
+    goto done;
   }
   ASTNode* receiver = NULL;
   Symbol* constructor = ConstexprRawConstructorCallSymbol(node, &receiver);
@@ -3386,13 +3605,26 @@ bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
         (ConstexprValue){.is_object = true, .object = object});
     bool ok = EvaluateConstexprConstructorCall(ctx, node);
     PopConstexprBindings(ctx, mark);
-    return ok;
+    ast_ok = ok;
+    goto done;
   }
   if (EvaluateConstexprDestructorCall(ctx, node)) {
-    return true;
+    ast_ok = true;
+    goto done;
   }
   ConstexprValue value = {0};
-  return EvaluateConstexprCall(ctx, node, &value);
+  ast_ok = EvaluateConstexprCall(ctx, node, &value);
+done:
+  compiler->constexpr_eval_mode = mode;
+  if (mode == kConstexprEvalAudit && pcode_ok != ast_ok) {
+    SemanticError(node,
+                  pcode_ok
+                      ? "constexpr evaluator mismatch"
+                      : "constexpr evaluator mismatch: pcode failed: %s",
+                  ConstexprPCodeFailureReason());
+    return false;
+  }
+  return ast_ok;
 }
 
 static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,

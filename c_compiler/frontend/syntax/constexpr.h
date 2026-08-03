@@ -36,6 +36,7 @@ bool ConstexprBindingAsInteger(ConstEvalContext* ctx, Symbol* symbol,
                                int64_t* result);
 bool ConstexprBindingAsFloating(ConstEvalContext* ctx, Symbol* symbol,
                                 double* result);
+bool ConstexprHasBinding(ConstEvalContext* ctx, Symbol* symbol);
 bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                     int64_t* result);
 bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
@@ -67,6 +68,9 @@ bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
 Symbol* ConstexprFunctionDefinition(Symbol* symbol);
+Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver);
+Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
+                                          size_t actual_count);
 bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
                                        TypeRecord* object_type,
                                        ConstexprObject** object);

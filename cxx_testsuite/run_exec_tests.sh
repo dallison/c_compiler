@@ -137,6 +137,9 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   out="$work/test.out"
   compile_cmd=("$DAVECC" -target "$TARGET" -static "$TEST_STANDARD"
                -isystem "$INCLUDE_DIR")
+  if [ -n "${DAVECC_CONSTEXPR_EVAL:-}" ]; then
+    compile_cmd+=("-fconstexpr-eval=${DAVECC_CONSTEXPR_EVAL}")
+  fi
   compile_cmd+=("${COMPILE_ARGS[@]}" "$src" "$LIBC" -o "$bin")
   if ! "${compile_cmd[@]}" >"$work/compile.log" 2>&1; then
     echo "FAIL $base (compile)"

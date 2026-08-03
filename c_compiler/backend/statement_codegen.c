@@ -389,7 +389,8 @@ static ASTNode* CXXElidableStructReturnInitializer(ASTNode* initializer,
     return NULL;
   }
   if ((expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
-       expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma)) &&
+       expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma) ||
+       expr->op == AST_OP(spaceship)) &&
       TypeEqual(expr->type, target)) {
     return expr;
   }
@@ -2009,6 +2010,26 @@ static void GenerateCaseLabel(Generator* gen, CaseLabelASTNode* node) {
 // assigned we generate a branch to it, otherwise we create one for it.
 static void GenerateGotoStatement(Generator* gen,
                                   GotoStatementASTNode* node) {
+  if (gen->for_constant_evaluation) {
+    String name;
+    StringInit(&name, "abort");
+    Symbol* abort_function = FindGlobalSymbol(&name);
+    StringDestruct(&name);
+    if (abort_function == NULL) {
+      TypeRecord* func_type = NewFunctionTypeRecord();
+      TypeRecordChain(func_type,
+                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+      abort_function = NewSymbol("abort", func_type, STO(extern));
+      abort_function->flags.invented = true;
+      abort_function->flags.is_forward_declared = true;
+      abort_function->flags.noreturn = true;
+      abort_function->location = node->base.location;
+      SyntaxAddSymbol(&compiler->syntax, abort_function);
+    }
+    GeneratorEmit(
+        gen, NewIR1(IR_OP(calla), GeneratorGetVariable(gen, abort_function)));
+    return;
+  }
   LabelASTNode* label_node = (LabelASTNode*)node->label;
   if (label_node->label == NULL) {
     label_node->label = NewIR(IR_OP(label));

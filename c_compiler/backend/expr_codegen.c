@@ -620,24 +620,38 @@ static IROpcode ThreeWayIROpcode(TypeRecord* type) {
 // struct-by-value results are materialized.
 static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
   IRNode* left = GenerateExpression(gen, node->left);
+  if (ContainsCall(node->left)) {
+    left = StashCallResult(gen, left, /*route_conversion_to_dest=*/false);
+  }
   IRNode* right = GenerateExpression(gen, node->right);
+  if (ContainsCall(node->right)) {
+    right = StashCallResult(gen, right, /*route_conversion_to_dest=*/false);
+  }
   TypeRecord* operand_type = node->right->type;
   IROpcode opcode = ThreeWayIROpcode(operand_type);
   IRNode* cmp = GeneratorEmit(gen, NewIR2(opcode, left, right));
   TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   IRSetType(cmp, int_type);
 
-  Symbol* tmp = SyntaxNewTemporary(gen->syntax, node->base.type);
-  IRNode* var = GeneratorGetVariable(gen, tmp);
-  IRNode* addr = GeneratorEmit(gen, NewIR1(IR_OP(addressof), var));
-  IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
+  IRNode* result;
+  IRNode* addr;
+  if (gen->current_struct_address != NULL) {
+    addr = gen->current_struct_address;
+    result = addr;
+  } else {
+    Symbol* tmp = SyntaxNewTemporary(gen->syntax, node->base.type);
+    IRNode* var = GeneratorGetVariable(gen, tmp);
+    addr = GeneratorEmit(gen, NewIR1(IR_OP(addressof), var));
+    IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
+    result = var;
+  }
   // Store into the category's `int _v` member (offset 0).  The store width must
   // match the target's int size (e.g. 16-bit on the 6502).
   IROpcode store_op = int_type->size >= 4   ? IR_OP(store32)
                       : int_type->size == 2 ? IR_OP(store16)
                                             : IR_OP(store8);
   GeneratorEmit(gen, NewIR2(store_op, addr, cmp));
-  return var;
+  return result;
 }
 
 static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
@@ -3924,7 +3938,9 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(asm):
       // This can happen if a function containing a return asm(...)
       // is inlinec.
-      result = GenerateAsm(gen, (AsmASTNode*)node);
+      result = gen->for_constant_evaluation
+                   ? GenerateBuiltinTerminator(gen, (VectorASTNode*)node)
+                   : GenerateAsm(gen, (AsmASTNode*)node);
       break;
       
     default:

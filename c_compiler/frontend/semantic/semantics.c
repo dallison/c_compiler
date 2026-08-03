@@ -424,9 +424,15 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   TypeRecord* saved_current_function = compiler->current_function;
   Struct* saved_class_access_context =
       compiler->current_class_access_context;
+  int saved_immediate_context_depth =
+      compiler->immediate_function_context_depth;
+  int saved_constant_evaluation_depth =
+      compiler->constant_evaluation_required_depth;
   compiler->current_function = node->type;
   compiler->current_class_access_context =
       node->type->info.function.cxx_member_owner;
+  compiler->immediate_function_context_depth = 0;
+  compiler->constant_evaluation_required_depth = 0;
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
   SemanticAnalyzeCoroutineFunction(node);
@@ -457,6 +463,9 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
       break;
     }
   }
+  compiler->immediate_function_context_depth = saved_immediate_context_depth;
+  compiler->constant_evaluation_required_depth =
+      saved_constant_evaluation_depth;
   compiler->current_function = saved_current_function;
   compiler->current_class_access_context = saved_class_access_context;
 }

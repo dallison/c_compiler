@@ -9,11 +9,14 @@
 #include "constexpr.h"
 
 bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason);
+bool ConstexprPCodeRequiresASTOverlay(ASTNode* node);
+const char* ConstexprPCodeFailureReason(void);
 bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                          int64_t* result);
 bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                           double* result);
 bool ConstexprPCodeEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node);
+bool ConstexprPCodeEvaluateCall(ConstEvalContext* ctx, ASTNode* node);
 bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
                                             ASTNode* node,
                                             ConstexprObject** result);

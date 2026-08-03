@@ -1945,7 +1945,13 @@ static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
     return NULL;
   }
   ASTNodeVisit(cloned, ClearStaticAssertExprAnalysis, 0, NULL);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    compiler->constant_evaluation_required_depth++;
+  }
   cloned = AnalyzeExpression(cloned);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    compiler->constant_evaluation_required_depth--;
+  }
   if (cloned == NULL) {
     ASTNodeDelete(cloned);
     return NULL;

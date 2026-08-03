@@ -8,7 +8,7 @@
 #error "__cpp_concepts has the wrong value"
 #endif
 
-#if __cpp_consteval != 201811L
+#if __cpp_consteval != 202211L
 #error "__cpp_consteval has the wrong value"
 #endif
 
@@ -40,7 +40,7 @@
 #error "__cpp_conditional_explicit has the wrong value"
 #endif
 
-#if __cpp_constexpr != 202002L
+#if __cpp_constexpr != 202211L
 #error "__cpp_constexpr has the wrong value"
 #endif
 

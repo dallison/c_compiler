@@ -49,6 +49,13 @@ typedef enum {
 } LanguageStandard;
 
 typedef enum {
+  kConstexprEvalAuto,
+  kConstexprEvalPCode,
+  kConstexprEvalAST,
+  kConstexprEvalAudit,
+} ConstexprEvalMode;
+
+typedef enum {
   kInitTypeByte,    // 8-bit constant.
   kInitTypeHalf,    // 16-bit constant.
   kInitTypeWord,    // 32-bit constant.
@@ -423,6 +430,7 @@ typedef struct {
   bool keep_asm_file;
   bool save_ir;
   bool save_ast;
+  ConstexprEvalMode constexpr_eval_mode;
   FILE* ir_output_file;
   FILE* ast_output_file;
   int opt_level;

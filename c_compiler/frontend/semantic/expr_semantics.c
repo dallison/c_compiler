@@ -134,6 +134,112 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
 
 static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
 
+static bool CXXInImmediateFunctionContext(void) {
+  return compiler->immediate_function_context_depth > 0 ||
+         (CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+          compiler->constant_evaluation_required_depth > 0) ||
+         (compiler->current_function != NULL &&
+          TypeIsFunction(compiler->current_function) &&
+          compiler->current_function->info.function.is_consteval);
+}
+
+static bool CXXCurrentFunctionCanEscalate(bool* deferred_template_pattern) {
+  *deferred_template_pattern = false;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX23) ||
+      compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function) ||
+      compiler->current_function->info.function.is_consteval) {
+    return false;
+  }
+  FunctionInfo* function = &compiler->current_function->info.function;
+  Symbol* symbol = function->symbol;
+  if (function->is_constexpr &&
+      TypeContainsTemplateParameter(compiler->current_function)) {
+    *deferred_template_pattern = function->is_constexpr;
+    return *deferred_template_pattern;
+  }
+  bool lambda_call_operator =
+      function->cxx_member_owner != NULL &&
+      function->cxx_member_owner->tag_symbol != NULL &&
+      function->cxx_member_owner->tag_symbol->flags.invented &&
+      symbol != NULL && StringEqual(&symbol->name, "operator()");
+  bool instantiated_constexpr = function->is_constexpr &&
+      (function->template_origin != NULL ||
+       (function->cxx_member_owner != NULL &&
+        function->cxx_member_owner->tag_symbol != NULL &&
+        function->cxx_member_owner->tag_symbol->type != NULL &&
+        function->cxx_member_owner->tag_symbol->type->template_origin != NULL));
+  return lambda_call_operator || function->is_defaulted ||
+         instantiated_constexpr;
+}
+
+static bool CXXEscalateCurrentFunction(void) {
+  bool deferred_template_pattern;
+  if (!CXXCurrentFunctionCanEscalate(&deferred_template_pattern)) {
+    return false;
+  }
+  if (deferred_template_pattern) {
+    return true;
+  }
+  FunctionInfo* function = &compiler->current_function->info.function;
+  function->is_consteval = true;
+  function->is_constexpr = true;
+  function->is_inline = true;
+  return true;
+}
+
+// P2564 makes immediacy a property of each concrete specialization.  A call
+// site must know that property before the normal pending-instantiation pass, so
+// analyze a newly selected constexpr specialization just far enough to type its
+// body and discover an immediate-escalating expression.
+static void CXXAnalyzeImmediateEscalationCandidate(Symbol* symbol) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX23) || symbol == NULL ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      !symbol->type->info.function.is_constexpr ||
+      symbol->type->info.function.is_consteval ||
+      symbol->type->info.function.body == NULL ||
+      (symbol->type->info.function.body->flags & kASTAnalyzed) != 0) {
+    return;
+  }
+  FunctionInfo* function = &symbol->type->info.function;
+  bool instantiated_entity =
+      function->template_origin != NULL ||
+      (function->cxx_member_owner != NULL &&
+       function->cxx_member_owner->tag_symbol != NULL &&
+       function->cxx_member_owner->tag_symbol->type != NULL &&
+       function->cxx_member_owner->tag_symbol->type->template_origin != NULL);
+  if (!instantiated_entity) {
+    return;
+  }
+  for (size_t i = 0; i < compiler->functions_being_analyzed.length; i++) {
+    if (compiler->functions_being_analyzed.value.p[i] == symbol->type) {
+      return;
+    }
+  }
+  TypeRecord* saved_function = compiler->current_function;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  int saved_immediate_depth = compiler->immediate_function_context_depth;
+  int saved_constant_depth = compiler->constant_evaluation_required_depth;
+  compiler->current_function = symbol->type;
+  compiler->current_class_access_context =
+      symbol->type->info.function.cxx_member_owner;
+  compiler->immediate_function_context_depth = 0;
+  compiler->constant_evaluation_required_depth = 0;
+  VectorAppend(&compiler->functions_being_analyzed, symbol->type);
+  AnalyzeStatement(symbol->type->info.function.body);
+  StatementFinishAutoReturnDeduction(symbol->type, NULL);
+  for (size_t i = compiler->functions_being_analyzed.length; i-- > 0;) {
+    if (compiler->functions_being_analyzed.value.p[i] == symbol->type) {
+      VectorDeleteElement(&compiler->functions_being_analyzed, i);
+      break;
+    }
+  }
+  compiler->immediate_function_context_depth = saved_immediate_depth;
+  compiler->constant_evaluation_required_depth = saved_constant_depth;
+  compiler->current_function = saved_function;
+  compiler->current_class_access_context = saved_access_context;
+}
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // A dependent qualified value name (`T::member`) that still carries its flag
   // here was never resolved during template instantiation, meaning the named
@@ -216,6 +322,7 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
         &compiler->syntax, node->symbol, node->template_arguments);
     if (instantiated != NULL) {
       node->symbol = instantiated;
+      CXXAnalyzeImmediateEscalationCandidate(instantiated);
     }
   }
 
@@ -392,6 +499,34 @@ static bool ExpressionMayObserveConstantEvaluation(ASTNode* node) {
   return query.found;
 }
 
+typedef struct {
+  bool found;
+} UnboundAutomaticFinder;
+
+static void FindUnboundAutomatic(ASTNode* node, void* data, int child_id,
+                                 VisitorMode mode) {
+  (void)child_id;
+  UnboundAutomaticFinder* finder = data;
+  if (mode != kVisitPreChildren || finder->found ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol != NULL &&
+      (symbol->flags.is_argument ||
+       (symbol->flags.is_local &&
+        !StorageIs(symbol->storage, STO(static) | STO(thread)) &&
+        !symbol->flags.is_constexpr))) {
+    finder->found = true;
+  }
+}
+
+static bool ExpressionHasUnboundAutomatic(ASTNode* node) {
+  UnboundAutomaticFinder finder = {false};
+  ASTNodeVisit(node, FindUnboundAutomatic, 0, &finder);
+  return finder.found;
+}
+
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
 static ASTNode* FoldConstantExpression(ASTNode* node) {
@@ -399,6 +534,20 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   // arguments are known. Folding it now would freeze placeholder properties
   // such as the provisional size of a dependent type into the template body.
   if (CompilerIsCXX() && ExpressionIsTemplateDependent(node)) {
+    return NULL;
+  }
+  if (compiler->current_function != NULL &&
+      compiler->current_function->info.function.prototype.length != 0) {
+    // A function body is analyzed before any invocation binds its formals.
+    // Even a subtree that does not retain a reliable parent link to an
+    // argument identifier must not be frozen from placeholder argument data.
+    return NULL;
+  }
+  // Function parameters and ordinary automatic variables have no value until
+  // the function executes. Speculatively interpreting such a subtree during
+  // semantic analysis would freeze a placeholder value into the function
+  // body, making every later invocation observe that value.
+  if (ExpressionHasUnboundAutomatic(node)) {
     return NULL;
   }
   // Speculative runtime folding is not a manifestly constant-evaluated
@@ -5520,10 +5669,7 @@ static bool TryConvertWithConvertingConstructorImpl(
       TypeIsFunction(ctor->symbol->type) &&
       ctor->symbol->type->info.function.is_consteval &&
       compiler->num_errors == errors_before_analysis &&
-      compiler->immediate_function_context_depth == 0 &&
-      (compiler->current_function == NULL ||
-       !TypeIsFunction(compiler->current_function) ||
-       !compiler->current_function->info.function.is_consteval) &&
+      !CXXInImmediateFunctionContext() &&
       analyzed != NULL && analyzed->op == AST_OP(comma)) {
     ASTNode* converted_call = ((BinaryASTNode*)analyzed)->left;
     if (converted_call != NULL && converted_call->op == AST_OP(call)) {
@@ -5554,8 +5700,10 @@ static bool TryConvertWithConvertingConstructorImpl(
     temp->value.other = NULL;
     ConstEvalContextDestruct(&context);
     if (!constant) {
-      SemanticError(converted_call != NULL ? converted_call : analyzed,
-                    "consteval function call is not a constant expression");
+      if (!CXXEscalateCurrentFunction()) {
+        SemanticError(converted_call != NULL ? converted_call : analyzed,
+                      "consteval function call is not a constant expression");
+      }
     } else if (initializer != NULL) {
       ASTNode* simplified =
           AnalyzeInitializer(temp->type, initializer, true);
@@ -6298,6 +6446,7 @@ static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
   Symbol* instantiated = TypeInstantiateFunctionTemplate(
       &compiler->syntax, selected->type->info.function.template_origin,
       selected->type->template_arguments);
+  CXXAnalyzeImmediateEscalationCandidate(instantiated);
   return instantiated != NULL ? instantiated : selected;
 }
 
@@ -6862,6 +7011,7 @@ static StructMember* InstantiateSelectedMemberTemplateCandidate(
   if (instantiated == NULL) {
     return selected;
   }
+  CXXAnalyzeImmediateEscalationCandidate(instantiated);
   StructMember* member = NewStructMember(instantiated);
   member->is_member_function = true;
   member->is_static = selected->is_static;
@@ -7083,6 +7233,9 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     return best;
   }
   StructMember* resolved = InstantiateSelectedMemberTemplateCandidate(best);
+  if (resolved != NULL) {
+    CXXAnalyzeImmediateEscalationCandidate(resolved->symbol);
+  }
   DeleteTemporaryMemberTemplateCandidates(
       &temporary_members, resolved == best ? best : NULL);
   return resolved;
@@ -8285,6 +8438,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (CompilerIsCXX() && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, id->symbol);
+    CXXAnalyzeImmediateEscalationCandidate(id->symbol);
   } else if (CompilerIsCXX() &&
              (node->left->op == AST_OP(dot) ||
               node->left->op == AST_OP(arrow))) {
@@ -8296,6 +8450,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (member->member != NULL && member->member->symbol != NULL) {
         TypeEnsureTemplateMemberFunctionDefinition(
             &compiler->syntax, member->member->symbol);
+        CXXAnalyzeImmediateEscalationCandidate(member->member->symbol);
       }
     }
   }
@@ -8476,13 +8631,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       immediate_function_type = resolved->type;
     }
   }
-  bool in_immediate_function_context =
-      compiler->immediate_function_context_depth > 0 ||
-      (compiler->current_function != NULL &&
-       TypeIsFunction(compiler->current_function) &&
-       compiler->current_function->info.function.is_consteval);
   if (call_ok && immediate_function_type->info.function.is_consteval &&
-      !in_immediate_function_context) {
+      !CXXInImmediateFunctionContext()) {
     bool ok = false;
     if (TypeIsFloatingPoint(return_type)) {
       double value;
@@ -8502,8 +8652,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       ConstEvalContextDestruct(&ctx);
     }
     if (!ok) {
-      SemanticError((ASTNode*)node,
-                    "consteval function call is not a constant expression");
+      if (!CXXEscalateCurrentFunction()) {
+        SemanticError((ASTNode*)node,
+                      "consteval function call is not a constant expression");
+      }
     }
   }
 
@@ -9094,6 +9246,18 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
       TypeIsFunction(node->sub->type)) {
     TypeEnsureTemplateMemberFunctionDefinition(
         &compiler->syntax, ((IdentifierASTNode*)node->sub)->symbol);
+    IdentifierASTNode* identifier = (IdentifierASTNode*)node->sub;
+    if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+        identifier->symbol != NULL && identifier->symbol->type != NULL &&
+        TypeIsFunction(identifier->symbol->type) &&
+        identifier->symbol->type->info.function.is_consteval &&
+        !CXXInImmediateFunctionContext() &&
+        (!CompilerCXXAtLeast(kLanguageStandardCXX23) ||
+         !CXXEscalateCurrentFunction())) {
+      SemanticError(node->sub,
+                    "immediate function may only be named in an immediate "
+                    "function context");
+    }
   }
 }
 

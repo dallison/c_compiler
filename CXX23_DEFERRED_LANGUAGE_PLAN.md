@@ -5,7 +5,7 @@
 - [x] Implement P2718 range-initializer temporary lifetime semantics.
 - [x] Implement source/literal encoding and P2290 delimited escapes.
 - [x] Vendor pinned Unicode data and implement P2071 named escapes.
-- [ ] Implement P2564 and complete the deferred `constexpr` rules.
+- [x] Implement P2564 and complete the deferred `constexpr` rules.
 - [ ] Implement P2582 inherited-constructor CTAD.
 - [ ] Validate feature macros, run conformance suites, and close the roadmap.
 

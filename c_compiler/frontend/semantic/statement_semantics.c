@@ -944,7 +944,9 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
     return;
   }
   ASTNodeVisit(expr, ClearStaticAssertAnalysis, 0, NULL);
+  compiler->constant_evaluation_required_depth++;
   expr = AnalyzeExpression(expr);
+  compiler->constant_evaluation_required_depth--;
   if (expr == NULL) {
     ASTNodeDelete(expr);
     SemanticError((ASTNode*)node,
@@ -1183,7 +1185,13 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
     }
     return;
   }
+  if (node->is_constexpr) {
+    compiler->constant_evaluation_required_depth++;
+  }
   node->cond = AnalyzeExpression(node->cond);
+  if (node->is_constexpr) {
+    compiler->constant_evaluation_required_depth--;
+  }
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);

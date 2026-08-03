@@ -99,6 +99,9 @@ run_compile() {
   read_run_args "$src"
   local args=(-target pcode -S "$DEFAULT_STD" -isystem "$INCLUDE_DIR")
   args+=("${RUN_ARGS[@]}")
+  if [ -n "${DAVECC_CONSTEXPR_EVAL:-}" ]; then
+    args+=("-fconstexpr-eval=${DAVECC_CONSTEXPR_EVAL}")
+  fi
   "$DAVECC" "${args[@]}" "$src" -o "$out" >"$log" 2>&1
   return $?
 }

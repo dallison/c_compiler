@@ -32,6 +32,14 @@
 #error "__cpp_named_character_escapes must not be defined before C++23"
 #endif
 
+#if __cpp_consteval != 201811L
+#error "__cpp_consteval must retain its C++20 value in C++20"
+#endif
+
+#if __cpp_constexpr != 202002L
+#error "__cpp_constexpr must retain its C++20 value in C++20"
+#endif
+
 #if __cpp_range_based_for != 201603L
 #error "__cpp_range_based_for must retain its C++17 value in C++20"
 #endif

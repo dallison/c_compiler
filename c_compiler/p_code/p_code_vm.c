@@ -1090,6 +1090,8 @@ const char* PCodeVMStatusName(PCodeVMStatus status) {
       return "invalid free";
     case kPCodeVMStatusAllocationFailure:
       return "allocation failure";
+    case kPCodeVMStatusInvalidConstantOperation:
+      return "invalid constant operation";
   }
   return "unknown";
 }
