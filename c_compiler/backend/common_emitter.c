@@ -212,11 +212,14 @@ void EmitLiteral(Literal* literal, FILE* fp) {
       for (size_t i = 0; i < slit->value.length; i++) {
         fprintf(fp, "\t.byte 0x%02x\n", slit->value.value[i] & 0xff);
       }
+      for (int i = 0; i < slit->element_size; i++) {
+        fprintf(fp, "\t.byte 0x00\n");
+      }
       // The literal is an object and the size includes the zero
       // at the end.
       fprintf(fp, "\t.type .str.%d, @object\n", literal->id);
       fprintf(fp, "\t.size .str.%d, %zd\n", literal->id,
-              slit->value.length + compiler->int_size);
+              slit->value.length + slit->element_size);
       fprintf(fp, "\n");
       break;
     }
@@ -229,14 +232,11 @@ void EmitLiteral(Literal* literal, FILE* fp) {
       // can set the address.
       fprintf(fp, ".str.%d:\n", literal->id);
 
-      // Print the literal in escaped form. Any non-printable
-      // characters are encoded in hex or as their usual
-      // ANSI C escape characters.
       StringLiteral* slit = (StringLiteral*)literal;
-      String escaped = {0};
-      StringEscape(&slit->value, &escaped);
-      fprintf(fp, "\t.asciz \"%s\"\n", escaped.value);
-      StringDestruct(&escaped);
+      for (size_t i = 0; i < slit->value.length; i++) {
+        fprintf(fp, "\t.byte 0x%02x\n", slit->value.value[i] & 0xff);
+      }
+      fprintf(fp, "\t.byte 0x00\n");
 
       // The literal is an object and the size includes the zero
       // at the end.

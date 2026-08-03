@@ -128,63 +128,52 @@ static bool IsBuiltinCallName(const char* name) {
   return strncmp(name, "__davecc_is_", 12) == 0;
 }
 
+typedef struct {
+  const char* name;
+  CXXTypeTraitKind kind;
+} TypeTraitName;
+
+static const TypeTraitName kTypeTraitNames[] = {
+    {"__davecc_is_assignable", kCXXTypeTraitIsAssignable},
+    {"__davecc_is_base_of", kCXXTypeTraitIsBaseOf},
+    {"__davecc_is_class", kCXXTypeTraitIsClass},
+    {"__davecc_is_constructible", kCXXTypeTraitIsConstructible},
+    {"__davecc_is_convertible", kCXXTypeTraitIsConvertible},
+    {"__davecc_is_destructible", kCXXTypeTraitIsDestructible},
+    {"__davecc_is_enum", kCXXTypeTraitIsEnum},
+    {"__davecc_is_invocable", kCXXTypeTraitIsInvocable},
+    {"__davecc_is_member_function_pointer",
+     kCXXTypeTraitIsMemberFunctionPointer},
+    {"__davecc_is_member_object_pointer", kCXXTypeTraitIsMemberObjectPointer},
+    {"__davecc_is_member_pointer", kCXXTypeTraitIsMemberPointer},
+    {"__davecc_is_member_pointer_direct_object",
+     kCXXTypeTraitMemberPointerDirectObject},
+    {"__davecc_is_nothrow_assignable", kCXXTypeTraitIsNothrowAssignable},
+    {"__davecc_is_nothrow_constructible",
+     kCXXTypeTraitIsNothrowConstructible},
+    {"__davecc_is_nothrow_destructible", kCXXTypeTraitIsNothrowDestructible},
+    {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
+    {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
+    {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
+    {"__davecc_is_union", kCXXTypeTraitIsUnion},
+};
+
 static CXXTypeTraitKind TypeTraitKindFromName(const char* name) {
-  if (strcmp(name, "__davecc_is_constructible") == 0) {
-    return kCXXTypeTraitIsConstructible;
+  if (name == NULL || name[0] != '_' || name[1] != '_') {
+    return (CXXTypeTraitKind)-1;
   }
-  if (strcmp(name, "__davecc_is_nothrow_constructible") == 0) {
-    return kCXXTypeTraitIsNothrowConstructible;
-  }
-  if (strcmp(name, "__davecc_is_convertible") == 0) {
-    return kCXXTypeTraitIsConvertible;
-  }
-  if (strcmp(name, "__davecc_is_assignable") == 0) {
-    return kCXXTypeTraitIsAssignable;
-  }
-  if (strcmp(name, "__davecc_is_nothrow_assignable") == 0) {
-    return kCXXTypeTraitIsNothrowAssignable;
-  }
-  if (strcmp(name, "__davecc_is_destructible") == 0) {
-    return kCXXTypeTraitIsDestructible;
-  }
-  if (strcmp(name, "__davecc_is_nothrow_destructible") == 0) {
-    return kCXXTypeTraitIsNothrowDestructible;
-  }
-  if (strcmp(name, "__davecc_is_base_of") == 0) {
-    return kCXXTypeTraitIsBaseOf;
-  }
-  if (strcmp(name, "__davecc_is_swappable") == 0) {
-    return kCXXTypeTraitIsSwappable;
-  }
-  if (strcmp(name, "__davecc_is_swappable_with") == 0) {
-    return kCXXTypeTraitIsSwappableWith;
-  }
-  if (strcmp(name, "__davecc_is_invocable") == 0) {
-    return kCXXTypeTraitIsInvocable;
-  }
-  if (strcmp(name, "__davecc_is_nothrow_invocable") == 0) {
-    return kCXXTypeTraitIsNothrowInvocable;
-  }
-  if (strcmp(name, "__davecc_is_class") == 0) {
-    return kCXXTypeTraitIsClass;
-  }
-  if (strcmp(name, "__davecc_is_union") == 0) {
-    return kCXXTypeTraitIsUnion;
-  }
-  if (strcmp(name, "__davecc_is_enum") == 0) {
-    return kCXXTypeTraitIsEnum;
-  }
-  if (strcmp(name, "__davecc_is_member_pointer") == 0) {
-    return kCXXTypeTraitIsMemberPointer;
-  }
-  if (strcmp(name, "__davecc_is_member_object_pointer") == 0) {
-    return kCXXTypeTraitIsMemberObjectPointer;
-  }
-  if (strcmp(name, "__davecc_is_member_function_pointer") == 0) {
-    return kCXXTypeTraitIsMemberFunctionPointer;
-  }
-  if (strcmp(name, "__davecc_is_member_pointer_direct_object") == 0) {
-    return kCXXTypeTraitMemberPointerDirectObject;
+  size_t low = 0;
+  size_t high = sizeof(kTypeTraitNames) / sizeof(kTypeTraitNames[0]);
+  while (low < high) {
+    size_t middle = low + (high - low) / 2;
+    int comparison = strcmp(name, kTypeTraitNames[middle].name);
+    if (comparison < 0) {
+      high = middle;
+    } else if (comparison > 0) {
+      low = middle + 1;
+    } else {
+      return kTypeTraitNames[middle].kind;
+    }
   }
   return (CXXTypeTraitKind)-1;
 }
@@ -1529,19 +1518,30 @@ static ASTNode* NewCXXLiteralOperatorIdentifier(Syntax* syntax, String* name,
 static ASTNode* NewStringLiteralArgument(String* contents,
                                          SourceLocation location,
                                          LiteralEncoding encoding) {
-  bool wide = encoding == kLiteralEncodingWide;
-  bool utf8 = encoding == kLiteralEncodingUTF8 &&
-              CompilerCXXAtLeast(kLanguageStandardCXX20);
-  int terminator_size = wide ? compiler->wchar_size : 1;
+  int element_size = 1;
+  Type element_type = kTypeChar;
+  if (encoding == kLiteralEncodingWide) {
+    element_size = compiler->wchar_size;
+    element_type = kTypeInt;
+  } else if (encoding == kLiteralEncodingUTF16) {
+    element_size = 2;
+    element_type = kTypeChar16;
+  } else if (encoding == kLiteralEncodingUTF32) {
+    element_size = 4;
+    element_type = kTypeChar32;
+  } else if (encoding == kLiteralEncodingUTF8 &&
+             CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    element_type = kTypeChar8;
+  }
   TypeRecord* array = NewBasicArrayTypeRecord(
-      kQualPlain, (int)contents->length + terminator_size, false);
-  Type element_type = wide ? kTypeInt : (utf8 ? kTypeChar8 : kTypeChar);
+      kQualPlain, (int)(contents->length / element_size) + 1, false);
   TypeRecord* element = NewTypeRecordWithSize(
-      element_type, wide ? kQualPlain : kQualConst);
+      element_type, CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, element);
   TypeRecordCalculateSize(array);
-  return wide ? NewWideStringConstantASTNode(contents, array, location)
-              : NewStringConstantASTNode(contents, array, location);
+  return element_size > 1
+             ? NewWideStringConstantASTNode(contents, array, location)
+             : NewStringConstantASTNode(contents, array, location);
 }
 
 static ASTNode* NewCXXUserDefinedLiteralCallForSymbol(
@@ -1773,7 +1773,8 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   if (user_defined) {
     StringSetString(&suffix, &lex->ud_suffix);
   }
-  String* contents = NewString(lex->spelling.value);
+  String* contents =
+      NewStringWithLength(lex->spelling.value, lex->spelling.length);
   LexNextToken(lex);
   
   // Adjacent string literals are joined together.
@@ -1792,7 +1793,7 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
         encoding = next_encoding;
       }
     }
-    StringAppend(contents, lex->spelling.value);
+    StringAppendSegment(contents, lex->spelling.value, lex->spelling.length);
     if (lex->ud_suffix.length != 0) {
       user_defined = true;
       StringSetString(&suffix, &lex->ud_suffix);
@@ -1801,7 +1802,11 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   }
   if (user_defined) {
     Vector* actuals = NewVector();
-    size_t length = contents->length;
+    int element_size =
+        encoding == kLiteralEncodingUTF16
+            ? 2
+            : encoding == kLiteralEncodingUTF32 ? 4 : 1;
+    size_t length = contents->length / element_size;
     VectorAppend(actuals,
                  NewStringLiteralArgument(contents, location, encoding));
     VectorAppend(actuals,
@@ -1814,22 +1819,31 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   }
   StringDestruct(&suffix);
   
-  TypeRecord* array =
-    NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
+  int element_size =
+      encoding == kLiteralEncodingUTF16
+          ? 2
+          : encoding == kLiteralEncodingUTF32 ? 4 : 1;
+  TypeRecord* array = NewBasicArrayTypeRecord(
+      kQualPlain, (int)(contents->length / element_size) + 1, false);
   // In C++ a narrow string literal has type `const char[N]`; in C it is a
   // non-const `char[N]` (modifying it is undefined behavior, but the type is
   // not const-qualified).
   Type element_type =
-      encoding == kLiteralEncodingUTF8 &&
-              CompilerCXXAtLeast(kLanguageStandardCXX20)
-          ? kTypeChar8
-          : kTypeChar;
+      encoding == kLiteralEncodingUTF16
+          ? kTypeChar16
+          : encoding == kLiteralEncodingUTF32
+                ? kTypeChar32
+                : encoding == kLiteralEncodingUTF8 &&
+                          CompilerCXXAtLeast(kLanguageStandardCXX20)
+                      ? kTypeChar8
+                      : kTypeChar;
   TypeRecord* type = NewTypeRecordWithSize(
       element_type, CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, type);
   TypeRecordCalculateSize(array);
-  return NewStringConstantASTNode(contents, array,
-                                  location);
+  return element_size > 1
+             ? NewWideStringConstantASTNode(contents, array, location)
+             : NewStringConstantASTNode(contents, array, location);
   
 }
 
@@ -1843,13 +1857,13 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   if (user_defined) {
     StringSetString(&suffix, &lex->ud_suffix);
   }
-  String* contents = NewStringWithLength(lex->spelling.value,
-                                         lex->spelling.length + 4);
+  String* contents =
+      NewStringWithLength(lex->spelling.value, lex->spelling.length);
   LexNextToken(lex);
   
   // Adjacent wide string literals are joined together.
   while (LexLookingAt(lex, TOK(string_wide))) {
-    StringAppend(contents, lex->spelling.value);
+    StringAppendSegment(contents, lex->spelling.value, lex->spelling.length);
     if (lex->ud_suffix.length != 0) {
       user_defined = true;
       StringSetString(&suffix, &lex->ud_suffix);
@@ -1858,10 +1872,7 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   }
   if (user_defined) {
     Vector* actuals = NewVector();
-    size_t length = contents->length > (size_t)compiler->wchar_size
-                        ? (contents->length - compiler->wchar_size) /
-                              compiler->wchar_size
-                        : 0;
+    size_t length = contents->length / compiler->wchar_size;
     VectorAppend(actuals, NewStringLiteralArgument(
                               contents, location, kLiteralEncodingWide));
     VectorAppend(actuals,
@@ -1874,10 +1885,12 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   }
   StringDestruct(&suffix);
   
-  TypeRecord* array =
-  NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
-  TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  TypeRecord* array = NewBasicArrayTypeRecord(
+      kQualPlain, (int)(contents->length / compiler->wchar_size) + 1, false);
+  TypeRecord* type = NewTypeRecordWithSize(
+      kTypeInt, CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, type);
+  TypeRecordCalculateSize(array);
   return NewWideStringConstantASTNode(contents, array,
                                  syntax->lex->current_token_location);
 }
@@ -1889,10 +1902,14 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
   SourceLocation location = lex->current_token_location;
   LiteralEncoding encoding = lex->literal_encoding;
   Type literal_type =
-      encoding == kLiteralEncodingUTF8 &&
-              CompilerCXXAtLeast(kLanguageStandardCXX20)
-          ? kTypeChar8
-          : kTypeChar;
+      encoding == kLiteralEncodingUTF16
+          ? kTypeChar16
+          : encoding == kLiteralEncodingUTF32
+                ? kTypeChar32
+                : encoding == kLiteralEncodingUTF8 &&
+                          CompilerCXXAtLeast(kLanguageStandardCXX20)
+                      ? kTypeChar8
+                      : kTypeChar;
   if (lex->ud_suffix.length != 0) {
     String suffix;
     StringInit(&suffix, NULL);
@@ -1976,6 +1993,12 @@ static TypeRecord* GenericControllingType(TypeRecord* ctype) {
 // Character types (char/signed char/unsigned char/char8_t) stay distinct, as
 // does signedness for the other integer types.
 static int CanonicalPrimitive(int t) {
+  if (t & kTypeChar32) {
+    return kTypeChar32;
+  }
+  if (t & kTypeChar16) {
+    return kTypeChar16;
+  }
   if (t & kTypeChar8) {
     return kTypeChar8;
   }
@@ -3188,6 +3211,8 @@ static bool TokenStartsFundamentalTypeSpecifier(Token token) {
   switch (token) {
     case TOK(char):
     case TOK(char8_t):
+    case TOK(char16_t):
+    case TOK(char32_t):
     case TOK(short):
     case TOK(int):
     case TOK(long):

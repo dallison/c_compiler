@@ -84,6 +84,7 @@ typedef struct Source {
   uint32_t file_index;  // Index of file.
   struct Source* prev;  // Previous Source in stack.
   SourceDevice device;  // Where the input comes from.
+  bool at_start;        // No source bytes have been consumed yet.
   union {
     FILE* file;  // File to read, if from file.
     struct {

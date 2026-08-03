@@ -328,6 +328,16 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
                        Vector* initializers);
 static ASTNode* InitCompoundLiteral(ASTNode* node);
 
+static int StringLiteralElementSize(ASTNode* expr) {
+  if (expr != NULL && TypeIsArray(expr->type) && expr->type->next != NULL) {
+    TypeRecordCalculateSize(expr->type->next);
+    return expr->type->next->size;
+  }
+  return expr != NULL && expr->op == AST_OP(string_wide)
+             ? compiler->wchar_size
+             : 1;
+}
+
 static void InitPointer(ASTNode* expr,
                         ASTNode* subinit,
                         Initializer* init_out,
@@ -336,7 +346,8 @@ static void InitPointer(ASTNode* expr,
   if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
     // String literal.
     ConstantASTNode* string_node = (ConstantASTNode*)expr;
-    int literal_id = CompilerAddStringLiteral(string_node->value.string, expr->op == AST_OP(string_wide));
+    int literal_id = CompilerAddStringLiteral(
+        string_node->value.string, StringLiteralElementSize(expr));
     init_out->type = kInitTypeString;
     init_out->value.literal_id = literal_id;
     init_out->offset = offset;
@@ -409,7 +420,8 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
     } else if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
       // String literal.
       ConstantASTNode* string_node = (ConstantASTNode*)expr;
-      int literal_id = CompilerAddStringLiteral(string_node->value.string, expr->op == AST_OP(string_wide));
+      int literal_id = CompilerAddStringLiteral(
+          string_node->value.string, StringLiteralElementSize(expr));
       init_out->type = kInitTypeString;
       init_out->value.literal_id = literal_id;
       init_out->offset = offset;
@@ -633,10 +645,12 @@ static void LiteralInit(Literal* lit, LiteralType type) {
   lit->disabled = false;
 }
 
-int CompilerAddStringLiteral(String* value, bool is_wide) {
+int CompilerAddStringLiteral(String* value, int element_size) {
   StringLiteral* literal = malloc(sizeof(StringLiteral));
-  LiteralInit(&literal->base, is_wide ? kLiteralWideString : kLiteralString);
+  LiteralInit(&literal->base,
+              element_size > 1 ? kLiteralWideString : kLiteralString);
   StringInitFromSegment(&literal->value, value->value, value->length);
+  literal->element_size = element_size;
   VectorAppend(&compiler->literals, literal);
   return literal->base.id;
 }

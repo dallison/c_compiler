@@ -141,6 +141,7 @@ typedef struct {
 typedef struct {
   Literal base;
   String value;
+  int element_size;
 } StringLiteral;
 
 void LiteralDelete(Literal* literal);
@@ -505,7 +506,7 @@ void CompilerSetImportState(void* state, TranslationUnitImportReleaseFn release)
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                          Vector* options);
-int CompilerAddStringLiteral(String* value, bool is_wide);
+int CompilerAddStringLiteral(String* value, int element_size);
 int CompilerAddBufferLiteral(const void* data, size_t length);
 StringLiteral* CompilerFindStringLiteral(int literal_id);
 BufferLiteral* CompilerFindBufferLiteral(int literal_id);

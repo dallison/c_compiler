@@ -3,8 +3,7 @@
 ## To-do
 - [x] Stabilize and revalidate the range-for parser lookahead fix.
 - [x] Implement P2718 range-initializer temporary lifetime semantics.
-- [ ] Implement source/literal encoding and P2290 delimited escapes.
-      (in progress)
+- [x] Implement source/literal encoding and P2290 delimited escapes.
 - [ ] Vendor pinned Unicode data and implement P2071 named escapes.
 - [ ] Implement P2564 and complete the deferred `constexpr` rules.
 - [ ] Implement P2582 inherited-constructor CTAD.

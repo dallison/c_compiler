@@ -2061,7 +2061,7 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
 
 // Assembly language IR node.  This refers to a string literal.
 static void GenerateAsm(Generator* gen, AsmASTNode* node) {
-  int literal_id = CompilerAddStringLiteral(node->text, false);
+  int literal_id = CompilerAddStringLiteral(node->text, 1);
   IRNode* literal = GeneratorGetIntConstant(gen, NULL, literal_id);
   Vector inputs;
   VectorInit(&inputs);

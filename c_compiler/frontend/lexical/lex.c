@@ -372,6 +372,34 @@ static size_t DecodeUtf8(const char* text, size_t pos, size_t length,
   return needed;
 }
 
+static void ValidateUTF8SourceLine(Lex* lex) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    return;
+  }
+  for (size_t i = 0; i < lex->line.length;) {
+    unsigned char ch = (unsigned char)lex->line.value[i];
+    if (ch < 0x80) {
+      i++;
+      continue;
+    }
+    uint32_t codepoint;
+    size_t bytes =
+        DecodeUtf8(lex->line.value, i, lex->line.length, &codepoint);
+    if (bytes == 0) {
+      lex->pos = i;
+      LexError(lex, "Invalid UTF-8 source character");
+      lex->pos = 0;
+      return;
+    }
+    i += bytes;
+  }
+}
+
+static void ReadUTF8SourceLine(Lex* lex) {
+  SourceReadLine(lex->source, &lex->line);
+  ValidateUTF8SourceLine(lex);
+}
+
 size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
                                   bool start) {
   if (pos >= length) {
@@ -398,10 +426,85 @@ size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
 
 // Perform escape processing on a char.  This handles
 // backslashes inside a string literal or character constant.
-static int EscapeChar(Lex* lex, int* size, bool* universal) {
+static int LiteralEncodingSize(LiteralEncoding encoding) {
+  switch (encoding) {
+    case kLiteralEncodingUTF16:
+      return 2;
+    case kLiteralEncodingUTF32:
+      return 4;
+    case kLiteralEncodingWide:
+      return compiler->wchar_size;
+    default:
+      return 1;
+  }
+}
+
+static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
+                      bool* universal) {
   *size = 1;
   *universal = false;
   char ch = lex->line.value[lex->pos];
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+      (ch == 'o' || ch == 'x' || ch == 'u') &&
+      lex->pos + 1 < lex->line.length &&
+      lex->line.value[lex->pos + 1] == '{') {
+    int base = ch == 'o' ? 8 : 16;
+    bool is_universal = ch == 'u';
+    lex->pos += 2;
+    uint64_t value = 0;
+    size_t digits = 0;
+    bool overflow = false;
+    while (lex->pos < lex->line.length) {
+      unsigned char digit = (unsigned char)lex->line.value[lex->pos];
+      int numeric = -1;
+      if (digit >= '0' && digit <= '9') {
+        numeric = digit - '0';
+      } else if (base == 16 && digit >= 'a' && digit <= 'f') {
+        numeric = digit - 'a' + 10;
+      } else if (base == 16 && digit >= 'A' && digit <= 'F') {
+        numeric = digit - 'A' + 10;
+      }
+      if (numeric < 0 || numeric >= base) {
+        break;
+      }
+      if (value > (UINT64_MAX - (uint64_t)numeric) / (uint64_t)base) {
+        overflow = true;
+      } else {
+        value = value * (uint64_t)base + (uint64_t)numeric;
+      }
+      digits++;
+      lex->pos++;
+    }
+    if (digits == 0) {
+      LexError(lex, "Empty delimited escape sequence");
+    }
+    if (lex->pos >= lex->line.length ||
+        lex->line.value[lex->pos] != '}') {
+      LexError(lex, "Missing } in delimited escape sequence");
+    } else {
+      lex->pos++;
+    }
+    if (is_universal) {
+      if (overflow || value > 0x10ffff ||
+          (value >= 0xd800 && value <= 0xdfff)) {
+        LexError(lex, "Invalid universal-character value");
+        value = 0xfffd;
+      }
+      *universal = true;
+    } else {
+      int bytes = LiteralEncodingSize(encoding);
+      uint64_t maximum =
+          bytes == 4 ? UINT32_MAX : ((UINT64_C(1) << (bytes * 8)) - 1);
+      if (overflow || value > maximum) {
+        LexError(lex,
+                 "Delimited escape value is not representable in literal "
+                 "encoding");
+        value = 0;
+      }
+      *size = bytes;
+    }
+    return (int)value;
+  }
   if (ch == 'x' || ch == 'X') {
     lex->pos++;
     int n = 0;
@@ -504,6 +607,55 @@ static int AppendUTF8CodePoint(String* output, uint32_t cp) {
   StringAppendChar(output, (char)(0x80 | ((cp >> 6) & 0x3f)));
   StringAppendChar(output, (char)(0x80 | (cp & 0x3f)));
   return 4;
+}
+
+static int AppendUniversalCodePoint(String* output, LiteralEncoding encoding,
+                                    uint32_t cp) {
+  if (encoding == kLiteralEncodingUTF16 ||
+      (encoding == kLiteralEncodingWide && compiler->wchar_size == 2)) {
+    if (cp <= 0xffff) {
+      StringAppendChar(output, cp & 0xff);
+      StringAppendChar(output, (cp >> 8) & 0xff);
+      return 1;
+    }
+    cp -= 0x10000;
+    uint16_t high = 0xd800 | (uint16_t)(cp >> 10);
+    uint16_t low = 0xdc00 | (uint16_t)(cp & 0x3ff);
+    StringAppendChar(output, high & 0xff);
+    StringAppendChar(output, (high >> 8) & 0xff);
+    StringAppendChar(output, low & 0xff);
+    StringAppendChar(output, (low >> 8) & 0xff);
+    return 2;
+  }
+  if (encoding == kLiteralEncodingUTF32 ||
+      encoding == kLiteralEncodingWide) {
+    int size = LiteralEncodingSize(encoding);
+    for (int i = 0; i < size; i++) {
+      StringAppendChar(output, (cp >> (i * 8)) & 0xff);
+    }
+    return 1;
+  }
+  return AppendUTF8CodePoint(output, cp);
+}
+
+static void AppendEncodedSourceCharacter(Lex* lex, LiteralEncoding encoding,
+                                         size_t start) {
+  uint32_t codepoint;
+  size_t bytes =
+      DecodeUtf8(lex->line.value, start, lex->line.length, &codepoint);
+  if (bytes == 0) {
+    LexError(lex, "Invalid UTF-8 source character");
+    lex->pos = start + 1;
+    return;
+  }
+  if (encoding == kLiteralEncodingUTF16 ||
+      encoding == kLiteralEncodingUTF32 ||
+      encoding == kLiteralEncodingWide) {
+    AppendUniversalCodePoint(&lex->spelling, encoding, codepoint);
+  } else {
+    StringAppendSegment(&lex->spelling, &lex->line.value[start], bytes);
+  }
+  lex->pos = start + bytes;
 }
 
 // Collect an integer suffix.
@@ -631,10 +783,10 @@ static bool CharAt(Lex* lex, size_t offset, char ch) {
 }
 
 static void AppendRawLiteralChar(Lex* lex, LiteralEncoding encoding, char ch) {
-  if (encoding == kLiteralEncodingWide) {
-    for (int i = 0; i < compiler->wchar_size; i++) {
-      StringAppendChar(&lex->spelling, ((unsigned char)ch >> i*8) & 0xff);
-    }
+  if (encoding == kLiteralEncodingUTF16 ||
+      encoding == kLiteralEncodingUTF32 ||
+      encoding == kLiteralEncodingWide) {
+    AppendUniversalCodePoint(&lex->spelling, encoding, (unsigned char)ch);
     return;
   }
   StringAppendChar(&lex->spelling, ch);
@@ -651,7 +803,7 @@ static bool ReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
   }
   AppendRawLiteralChar(lex, encoding, '\n');
   StringClear(&lex->line);
-  SourceReadLine(lex->source, &lex->line);
+  ReadUTF8SourceLine(lex);
   lex->pos = 0;
   return lex->line.length != 0 || !SourceEof(lex->source);
 }
@@ -699,8 +851,12 @@ static void CollectRawStringLiteral(Lex* lex, LiteralEncoding encoding) {
       closed = true;
       break;
     }
-    AppendRawLiteralChar(lex, encoding, ch);
-    lex->pos++;
+    if ((unsigned char)ch >= 0x80) {
+      AppendEncodedSourceCharacter(lex, encoding, lex->pos);
+    } else {
+      AppendRawLiteralChar(lex, encoding, ch);
+      lex->pos++;
+    }
   }
   if (!closed) {
     LexError(lex, "Unterminated raw string literal");
@@ -726,9 +882,9 @@ static void CollectStringLiteral(Lex* lex, LiteralEncoding encoding) {
     if (ch == '\\') {
       int size;
       bool universal;
-      int v = EscapeChar(lex, &size, &universal);
+      int v = EscapeChar(lex, encoding, &size, &universal);
       if (universal) {
-        AppendUTF8CodePoint(&lex->spelling, (uint32_t)v);
+        AppendUniversalCodePoint(&lex->spelling, encoding, (uint32_t)v);
       } else {
         if (encoding == kLiteralEncodingUTF8 && size == 1 && v > 0xff) {
           LexError(lex, "Escape value is not representable in char8_t");
@@ -740,7 +896,7 @@ static void CollectStringLiteral(Lex* lex, LiteralEncoding encoding) {
     } else if (ch == '"') {
       break;
     } else {
-      StringAppendChar(&lex->spelling, ch);
+      AppendEncodedSourceCharacter(lex, encoding, lex->pos - 1);
     }
   }
   if (newline) {
@@ -764,42 +920,19 @@ static void CollectWideStringLiteral(Lex* lex) {
     if (ch == '\\') {
       int size;
       bool universal;
-      int v = EscapeChar(lex, &size, &universal);
-      // Size is ignored.
-      for (int i = 0; i < compiler->wchar_size; i++) {
-        StringAppendChar(&lex->spelling, (v >> i*8) & 0xff);
+      int v = EscapeChar(lex, kLiteralEncodingWide, &size, &universal);
+      if (universal) {
+        AppendUniversalCodePoint(&lex->spelling, kLiteralEncodingWide,
+                                 (uint32_t)v);
+      } else {
+        for (int i = 0; i < compiler->wchar_size; i++) {
+          StringAppendChar(&lex->spelling, (v >> i * 8) & 0xff);
+        }
       }
     } else if (ch == '"') {
       break;
     } else {
-      // Decode a UTF-8 source sequence into a single Unicode code point and
-      // store it as one wchar_t.  Each wide character holds a code point, not
-      // an individual UTF-8 byte.
-      unsigned int cp = (unsigned char)ch;
-      int extra = 0;
-      if ((cp & 0x80) != 0) {
-        if ((cp & 0xe0) == 0xc0) {
-          cp &= 0x1f;
-          extra = 1;
-        } else if ((cp & 0xf0) == 0xe0) {
-          cp &= 0x0f;
-          extra = 2;
-        } else if ((cp & 0xf8) == 0xf0) {
-          cp &= 0x07;
-          extra = 3;
-        }
-        for (int k = 0; k < extra && lex->pos < lex->line.length; k++) {
-          unsigned char cont = (unsigned char)lex->line.value[lex->pos];
-          if ((cont & 0xc0) != 0x80) {
-            break;   // Not a continuation byte; stop decoding.
-          }
-          cp = (cp << 6) | (cont & 0x3f);
-          lex->pos++;
-        }
-      }
-      for (int i = 0; i < compiler->wchar_size; i++) {
-        StringAppendChar(&lex->spelling, (cp >> i*8) & 0xff);
-      }
+      AppendEncodedSourceCharacter(lex, kLiteralEncodingWide, lex->pos - 1);
     }
   }
   if (newline) {
@@ -807,6 +940,13 @@ static void CollectWideStringLiteral(Lex* lex) {
   }
   CollectUserDefinedLiteralSuffix(lex);
 }
+
+static bool LiteralRequiresSingleUTF8CodeUnit(LiteralEncoding encoding) {
+  return encoding == kLiteralEncodingUTF8 ||
+         (encoding == kLiteralEncodingNone &&
+          CompilerCXXAtLeast(kLanguageStandardCXX23));
+}
+
 // Collect a character constant.  The current pos is the open single quote.
 // Returns the binary value of the character constant.
 static int CollectCharConst(Lex* lex, LiteralEncoding encoding) {
@@ -826,14 +966,29 @@ static int CollectCharConst(Lex* lex, LiteralEncoding encoding) {
     if (ch == '\\') {
       int size;
       bool universal;
-      int v = EscapeChar(lex, &size, &universal);
+      int v = EscapeChar(lex, encoding, &size, &universal);
       if (universal) {
+        if (encoding == kLiteralEncodingUTF16 ||
+            encoding == kLiteralEncodingUTF32) {
+          if (encoding == kLiteralEncodingUTF16 && (uint32_t)v > 0xffff) {
+            LexError(lex,
+                     "UTF-16 character literal must contain exactly one "
+                     "code unit");
+            utf8_width_error = true;
+          }
+          value = v;
+          nchars++;
+          continue;
+        }
         String encoded;
         StringInit(&encoded, NULL);
         int units = AppendUTF8CodePoint(&encoded, (uint32_t)v);
-        if (encoding == kLiteralEncodingUTF8 && units != 1) {
-          LexError(lex,
-                   "UTF-8 character literal must contain exactly one code unit");
+        if (LiteralRequiresSingleUTF8CodeUnit(encoding) && units != 1) {
+          LexError(
+              lex, encoding == kLiteralEncodingUTF8
+                       ? "UTF-8 character literal must contain exactly one "
+                         "code unit"
+                       : "Character literal must contain exactly one code unit");
           utf8_width_error = true;
         }
         for (int i = 0; i < units; i++) {
@@ -846,21 +1001,63 @@ static int CollectCharConst(Lex* lex, LiteralEncoding encoding) {
           LexError(lex, "Escape value is not representable in char8_t");
           utf8_width_error = true;
         }
+        if (encoding == kLiteralEncodingUTF16 ||
+            encoding == kLiteralEncodingUTF32) {
+          value = v;
+          nchars++;
+          continue;
+        }
         for (int i = 0; i < size; i++) {
-          value = (value << 8) | ((v >> i*8) & 0xff);
+          value = (value << 8) | ((v >> i * 8) & 0xff);
         }
         nchars += size;
       }
     } else if (ch == '\'') {
       break;
     } else {
-      value = (value << 8) | ch;
-      nchars++;
-      if (encoding == kLiteralEncodingUTF8 && (unsigned char)ch >= 0x80 &&
-          !utf8_width_error) {
-        LexError(lex,
-                 "UTF-8 character literal must contain exactly one code unit");
-        utf8_width_error = true;
+      size_t start = lex->pos - 1;
+      if ((unsigned char)ch >= 0x80 &&
+          (encoding == kLiteralEncodingUTF16 ||
+           encoding == kLiteralEncodingUTF32 ||
+           LiteralRequiresSingleUTF8CodeUnit(encoding))) {
+        uint32_t codepoint;
+        size_t bytes =
+            DecodeUtf8(lex->line.value, start, lex->line.length, &codepoint);
+        if (bytes == 0) {
+          LexError(lex, "Invalid UTF-8 source character");
+          bytes = 1;
+          codepoint = 0xfffd;
+        }
+        if (encoding == kLiteralEncodingUTF16 ||
+            encoding == kLiteralEncodingUTF32) {
+          if (encoding == kLiteralEncodingUTF16 && codepoint > 0xffff) {
+            LexError(lex,
+                     "UTF-16 character literal must contain exactly one "
+                     "code unit");
+            utf8_width_error = true;
+          }
+          value = (int)codepoint;
+          nchars++;
+        } else {
+          if (!utf8_width_error) {
+            LexError(
+                lex, encoding == kLiteralEncodingUTF8
+                         ? "UTF-8 character literal must contain exactly one "
+                           "code unit"
+                         : "Character literal must contain exactly one "
+                           "code unit");
+            utf8_width_error = true;
+          }
+          for (size_t i = 0; i < bytes; i++) {
+            value = (value << 8) |
+                    (unsigned char)lex->line.value[start + i];
+          }
+          nchars += (int)bytes;
+        }
+        lex->pos = start + bytes;
+      } else {
+        value = (value << 8) | (unsigned char)ch;
+        nchars++;
       }
     }
   }
@@ -893,14 +1090,31 @@ static int CollectWideCharConst(Lex* lex) {
     if (ch == '\\') {
       int size;
       bool universal;
-      int v = EscapeChar(lex, &size, &universal);
-      // Size is ignored.
+      int v = EscapeChar(lex, kLiteralEncodingWide, &size, &universal);
+      if (compiler->wchar_size == 2 && (uint32_t)v > 0xffff) {
+        LexError(lex,
+                 "Wide character literal must contain exactly one code unit");
+      }
       value = v;
       nchars ++;
     } else if (ch == '\'') {
       break;
     } else {
-      value =  ch;
+      size_t start = lex->pos - 1;
+      uint32_t codepoint;
+      size_t bytes =
+          DecodeUtf8(lex->line.value, start, lex->line.length, &codepoint);
+      if (bytes == 0) {
+        LexError(lex, "Invalid UTF-8 source character");
+        bytes = 1;
+        codepoint = 0xfffd;
+      }
+      if (compiler->wchar_size == 2 && codepoint > 0xffff) {
+        LexError(lex,
+                 "Wide character literal must contain exactly one code unit");
+      }
+      value = (int)codepoint;
+      lex->pos = start + bytes;
       nchars++;
     }
   }
@@ -1788,7 +2002,7 @@ void LexReadLine(Lex* lex) {
   // appeared.  There is no include nesting to unwind in a replay source.
   if (lex->suppress_preprocessing) {
     if (!SourceEof(lex->source)) {
-      SourceReadLine(lex->source, &lex->line);
+      ReadUTF8SourceLine(lex);
     }
     return;
   }
@@ -1801,7 +2015,7 @@ void LexReadLine(Lex* lex) {
       // Read a line into the 'line' string.  This terminates
       // at an unescaped newline character or the end of file.  It also replaces
       // trigraphs.
-      SourceReadLine(lex->source, &lex->line);
+      ReadUTF8SourceLine(lex);
 
       // Check for preprocessing directive.
       bool directive =

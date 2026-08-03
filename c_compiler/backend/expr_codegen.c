@@ -137,10 +137,20 @@ static bool IsCommutative(ASTOpcode op) {
 }
 
 // Table to translate a type into a size.
+static int Char16Size(void) {
+  return 2;
+}
+
+static int Char32Size(void) {
+  return 4;
+}
+
 static struct {
   bool (*type_func)(TypeRecord*);
   int (*size_func)(void);
 } int_type_sizes[] = {
+  {TypeIsChar32, Char32Size},
+  {TypeIsChar16, Char16Size},
   {TypeIsShort, ShortSize},
   {TypeIsLong, LongSize},
   {TypeIsLongLong, LongLongSize},
@@ -318,7 +328,13 @@ IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
 // unique id allocated by the compiler.  The IR instruction
 // contains this ID.
 static IRNode* GenerateLiteral(Generator* gen, ConstantASTNode* node) {
-  int literal_id = CompilerAddStringLiteral(node->value.string, node->base.op == AST_OP(string_wide));
+  int element_size = 1;
+  if (TypeIsArray(node->base.type) && node->base.type->next != NULL) {
+    TypeRecordCalculateSize(node->base.type->next);
+    element_size = node->base.type->next->size;
+  }
+  int literal_id =
+      CompilerAddStringLiteral(node->value.string, element_size);
 
   return IRSetType(GeneratorEmit(
       gen, NewIR1(IR_OP(literalref),
@@ -338,7 +354,7 @@ static IRNode* GenerateBuiltinSourceString(Generator* gen, VectorASTNode* node,
                                            const char* value) {
   String string;
   StringInit(&string, value);
-  int literal_id = CompilerAddStringLiteral(&string, false);
+  int literal_id = CompilerAddStringLiteral(&string, 1);
   StringDestruct(&string);
   return IRSetType(GeneratorEmit(
       gen, NewIR1(IR_OP(literalref),
@@ -3380,7 +3396,7 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
 
 // Assembly language IR node.  This refers to a string literal.
 static IRNode* GenerateAsm(Generator* gen, AsmASTNode* node) {
-  int literal_id = CompilerAddStringLiteral(node->text, false);
+  int literal_id = CompilerAddStringLiteral(node->text, 1);
 
   IRNode* asm_ir = NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id));
   asm_ir->aux = node;

@@ -117,7 +117,7 @@ inline bool TypeIsVLA(TypeRecord* type) {
 inline bool TypeIsIntegral(TypeRecord* type) {
   return TypeIsPrimitive(type) &&
          (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeChar8 |
-                        kTypeLong |
+                        kTypeChar16 | kTypeChar32 | kTypeLong |
                         kTypeLongLong | kTypeBool | kTypeEnum | kTypeUnsigned |
                         kTypeSigned)) != 0;
 }
@@ -172,8 +172,17 @@ inline bool TypeIsChar8(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeChar8) != 0;
 }
 
+inline bool TypeIsChar16(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeChar16) != 0;
+}
+
+inline bool TypeIsChar32(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeChar32) != 0;
+}
+
 inline bool TypeIsCharFamily(TypeRecord* type) {
-  return TypeIsChar(type) || TypeIsChar8(type);
+  return TypeIsChar(type) || TypeIsChar8(type) || TypeIsChar16(type) ||
+         TypeIsChar32(type);
 }
 
 inline bool TypeIsShort(TypeRecord* type) {
@@ -224,10 +233,15 @@ inline bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL) {
     return false;
   }
-  bool left_char8 = TypeIsChar8(left) && !TypeIsEnum(left);
-  bool right_char8 = TypeIsChar8(right) && !TypeIsEnum(right);
-  if (left_char8 || right_char8) {
-    return left_char8 != right_char8;
+  Type unicode_mask = kTypeChar8 | kTypeChar16 | kTypeChar32;
+  Type left_unicode = TypeIsPrimitive(left) && !TypeIsEnum(left)
+                          ? left->type & unicode_mask
+                          : kTypeImplicit;
+  Type right_unicode = TypeIsPrimitive(right) && !TypeIsEnum(right)
+                           ? right->type & unicode_mask
+                           : kTypeImplicit;
+  if (left_unicode != kTypeImplicit || right_unicode != kTypeImplicit) {
+    return left_unicode != right_unicode;
   }
   if (left->next != NULL && right->next != NULL &&
       (TypeIsPointerOrArray(left) || TypeIsReference(left)) &&

@@ -185,6 +185,16 @@ static BaseTypeDIE base_types[] = {
      "char8_t",
      DW_ATE(UTF),
      1},
+    {{13, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsChar16,
+     "char16_t",
+     DW_ATE(UTF),
+     2},
+    {{14, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsChar32,
+     "char32_t",
+     DW_ATE(UTF),
+     4},
 };
 
 #define NUM_BASE_TYPES (sizeof(base_types) / sizeof(BaseTypeDIE))

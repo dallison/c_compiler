@@ -546,6 +546,8 @@ void AppendFunctionTemplateInstantiation(Symbol* templ,
 bool TypeIsInt(TypeRecord* type);
 bool TypeIsChar(TypeRecord* type);
 bool TypeIsChar8(TypeRecord* type);
+bool TypeIsChar16(TypeRecord* type);
+bool TypeIsChar32(TypeRecord* type);
 bool TypeIsCharFamily(TypeRecord* type);
 bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right);
 bool TypeIsShort(TypeRecord* type);
@@ -585,7 +587,7 @@ bool TypeIsVolatile(TypeRecord* type);
 bool TypeIsEnum(TypeRecord* type);
 
 bool TypeIsUnsigned(TypeRecord* type) {
-  if (TypeIsChar8(type)) {
+  if (TypeIsChar8(type) || TypeIsChar16(type) || TypeIsChar32(type)) {
     return true;
   }
   if (!compiler->plain_char_is_signed && type->type == kTypeChar) {

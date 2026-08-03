@@ -772,6 +772,10 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, 'b');
   } else if (TypeIsChar8(type)) {
     StringAppend(out, "Du");
+  } else if (TypeIsChar16(type)) {
+    StringAppend(out, "Ds");
+  } else if (TypeIsChar32(type)) {
+    StringAppend(out, "Di");
   } else if (TypeIsChar(type)) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 'h' : 'c');
   } else if (TypeIsShort(type)) {

@@ -155,6 +155,14 @@ int SizeofInt(void) {
   return compiler->int_size;
 }
 
+static int SizeofChar16(void) {
+  return 2;
+}
+
+static int SizeofChar32(void) {
+  return 4;
+}
+
 int SizeofLong(void) {
   return compiler->long_size;
 }
@@ -176,6 +184,8 @@ static struct {
   Type type;
   int (*func)(void);
 } type_sizes[] = {
+  {kTypeChar32, SizeofChar32},
+  {kTypeChar16, SizeofChar16},
   {kTypeChar8, SizeofChar},
   {kTypeChar, SizeofChar},
   {kTypeBool, SizeofBool},

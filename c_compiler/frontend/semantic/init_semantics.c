@@ -349,60 +349,33 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
 }
 
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
-  if (expr->op == AST_OP(string)) {
-    // Array initialized by string?
-    if (TypeIsCharFamily(inode->type->next)) {
-      ConstantASTNode* c = (ConstantASTNode*)expr;
-      TypeRecord* literal_element =
-          TypeIsArray(expr->type) ? expr->type->next : NULL;
-      if (literal_element == NULL ||
-          TypeIsChar8(inode->type->next) != TypeIsChar8(literal_element)) {
-        SemanticError(expr,
-                      "String literal encoding does not match character array "
-                      "element type");
-      }
+  if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
+    TypeRecord* literal_element =
+        TypeIsArray(expr->type) ? expr->type->next : NULL;
+    bool character_array = TypeIsCharFamily(inode->type->next) ||
+                           TypeIsInt(inode->type->next);
+    if (literal_element == NULL || !character_array ||
+        inode->type->next->type != literal_element->type) {
+      SemanticError(expr,
+                    "String literal encoding does not match character array "
+                    "element type");
+    } else {
+      ConstantASTNode* literal = (ConstantASTNode*)expr;
+      TypeRecordCalculateSize(literal_element);
+      size_t element_size = (size_t)literal_element->size;
+      size_t string_length = literal->value.string->length / element_size + 1;
       if (!inode->type->info.array.is_flexible) {
-        // Length with terminating zero.
-        size_t string_length = c->value.string->length + 1;
         if (string_length > inode->type->info.array.size.fixed + 1) {
-          SemanticError(expr,
-                        "Too many initializers for character array");
+          SemanticError(expr, "Too many initializers for character array");
         }
       } else {
         inode->type->info.array.is_flexible = false;
-        inode->type->info.array.size.fixed = (int)c->value.string->length + 1;
+        inode->type->info.array.size.fixed = (int)string_length;
         TypeRecordCalculateSize(inode->type);
       }
       inode->expr = ASTNodeMove(expr);
       expr->type->size = inode->type->size;
       return AdvanceCurrent(inode->parent);
-    } else if (TypeIsInt(inode->type->next)) {
-      SemanticError(expr,
-                     "Initializing a wide-char array with a non-wide string literal");
-    }
-  }
-  if (expr->op == AST_OP(string_wide)) {
-    // Array initialized by wide string?
-    if (TypeIsInt(inode->type->next)) {
-      ConstantASTNode* c = (ConstantASTNode*)expr;
-      if (!inode->type->info.array.is_flexible) {
-        // Length with terminating zero.
-        size_t string_length = c->value.string->length / sizeof(int);
-        if (string_length > inode->type->info.array.size.fixed + 1) {
-           SemanticError(expr,
-                        "Too many initializers for wide character array");
-         }
-       } else {
-         inode->type->info.array.is_flexible = false;
-         inode->type->info.array.size.fixed = (int)(c->value.string->length / sizeof(int)) + 1;
-         TypeRecordCalculateSize(inode->type);
-       }
-      inode->expr = ASTNodeMove(expr);
-      expr->type->size = inode->type->size;
-      return AdvanceCurrent(inode->parent);
-    } else if (TypeIsCharFamily(inode->type->next)) {
-      SemanticError(expr,
-                      "Initializing a char array with a wide string literal");
     }
   }
   // Lazy init of half of remaining array members.

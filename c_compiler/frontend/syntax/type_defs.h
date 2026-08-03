@@ -46,12 +46,16 @@ typedef enum {
   // alias for char or unsigned char, even though it has the same representation
   // and conversion rank as unsigned char.
   kTypeChar8 = 1 << 19,
+  // Unicode code-unit types.  These are distinct fundamental types with the
+  // representations of uint_least16_t and uint_least32_t respectively.
+  kTypeChar16 = 1 << 20,
+  kTypeChar32 = 1 << 21,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 19
+#define TYPE_LAST_BIT 21
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {

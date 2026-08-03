@@ -163,6 +163,7 @@ Source* NewSourceFromFile(const char* filename, FILE* in) {
   src->lineno = 0;
   src->from.file = in;
   src->device = kSourceFromFile;
+  src->at_start = true;
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
@@ -178,6 +179,7 @@ Source* NewSourceFromString(const char* filename, String* str) {
   src->from.string.string = str;
   src->from.string.index = 0;
   src->device = kSourceFromString;
+  src->at_start = true;
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
@@ -228,6 +230,7 @@ void SourceRewind(Source* src) {
       break;
   }
   src->lineno = 0;
+  src->at_start = true;
   src->file_index = -1;
 }
 
@@ -286,8 +289,17 @@ void SourceReadLine(Source* src, String* line) {
     }
     src->lineno++;
 
+    size_t start = 0;
+    if (src->at_start && newline.length >= 3 &&
+        (unsigned char)newline.value[0] == 0xef &&
+        (unsigned char)newline.value[1] == 0xbb &&
+        (unsigned char)newline.value[2] == 0xbf) {
+      start = 3;
+    }
+    src->at_start = false;
+
     // Replace trigraphs in newline, generating line.
-    for (size_t i = 0; i < newline.length; i++) {
+    for (size_t i = start; i < newline.length; i++) {
       char c = newline.value[i];
 
       if (c == '?' && i < newline.length - 2 && newline.value[i + 1] == '?') {
