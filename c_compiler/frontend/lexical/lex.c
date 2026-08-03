@@ -50,6 +50,7 @@
 #include <limits.h>
 
 #include "errors.h"
+#include "unicode_name.h"
 #include "vector.h"
 
 // A reserved word, mapping a spelling to a token.
@@ -424,6 +425,106 @@ size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
              : 0;
 }
 
+static int AppendUTF8CodePoint(String* output, uint32_t cp);
+
+static bool DecodeIdentifierUniversalCharacter(const char* text, size_t pos,
+                                               size_t length, bool start,
+                                               uint32_t* codepoint,
+                                               size_t* bytes) {
+  if (pos + 2 > length || text[pos] != '\\') {
+    return false;
+  }
+  size_t cursor = pos + 1;
+  char kind = text[cursor++];
+  uint32_t value = 0;
+  if (kind == 'N' && CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+      cursor < length && text[cursor] == '{') {
+    size_t name_start = ++cursor;
+    while (cursor < length && text[cursor] != '}') {
+      unsigned char ch = (unsigned char)text[cursor];
+      if (!(ch == ' ' || ch == '-' || isupper(ch) || isdigit(ch))) {
+        return false;
+      }
+      cursor++;
+    }
+    if (cursor == name_start || cursor >= length ||
+        !UnicodeCodePointFromName(&text[name_start], cursor - name_start,
+                                  &value)) {
+      return false;
+    }
+    cursor++;
+  } else if (kind == 'u' &&
+             CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+             cursor < length && text[cursor] == '{') {
+    size_t digit_start = ++cursor;
+    while (cursor < length && isxdigit((unsigned char)text[cursor])) {
+      unsigned char digit = (unsigned char)text[cursor++];
+      uint32_t numeric = isdigit(digit) ? digit - '0'
+                                        : tolower(digit) - 'a' + 10;
+      if (value > (UINT32_MAX - numeric) / 16) {
+        return false;
+      }
+      value = value * 16 + numeric;
+    }
+    if (cursor == digit_start || cursor >= length || text[cursor] != '}') {
+      return false;
+    }
+    cursor++;
+  } else if (kind == 'u' || kind == 'U') {
+    size_t digit_count = kind == 'U' ? 8 : 4;
+    if (cursor + digit_count > length) {
+      return false;
+    }
+    for (size_t i = 0; i < digit_count; i++) {
+      unsigned char digit = (unsigned char)text[cursor++];
+      if (!isxdigit(digit)) {
+        return false;
+      }
+      value = value * 16 +
+              (isdigit(digit) ? digit - '0' : tolower(digit) - 'a' + 10);
+    }
+  } else {
+    return false;
+  }
+  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
+      !(start ? CodepointAllowedAtIdentifierStart(value)
+              : CodepointAllowedInIdentifier(value))) {
+    return false;
+  }
+  *codepoint = value;
+  *bytes = cursor - pos;
+  return true;
+}
+
+size_t LexIdentifierSourceCharByteCount(const char* text, size_t pos,
+                                        size_t length, bool start) {
+  size_t bytes = LexIdentifierCharByteCount(text, pos, length, start);
+  if (bytes != 0) {
+    return bytes;
+  }
+  uint32_t codepoint;
+  return DecodeIdentifierUniversalCharacter(text, pos, length, start,
+                                            &codepoint, &bytes)
+             ? bytes
+             : 0;
+}
+
+size_t LexAppendIdentifierSourceChar(String* output, const char* text,
+                                     size_t pos, size_t length, bool start) {
+  size_t bytes = LexIdentifierCharByteCount(text, pos, length, start);
+  if (bytes != 0) {
+    StringAppendSegment(output, &text[pos], bytes);
+    return bytes;
+  }
+  uint32_t codepoint;
+  if (!DecodeIdentifierUniversalCharacter(text, pos, length, start,
+                                          &codepoint, &bytes)) {
+    return 0;
+  }
+  AppendUTF8CodePoint(output, codepoint);
+  return bytes;
+}
+
 // Perform escape processing on a char.  This handles
 // backslashes inside a string literal or character constant.
 static int LiteralEncodingSize(LiteralEncoding encoding) {
@@ -503,6 +604,45 @@ static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
       }
       *size = bytes;
     }
+    return (int)value;
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23) && ch == 'N' &&
+      lex->pos + 1 < lex->line.length &&
+      lex->line.value[lex->pos + 1] == '{') {
+    lex->pos += 2;
+    size_t name_start = lex->pos;
+    bool valid_characters = true;
+    while (lex->pos < lex->line.length &&
+           lex->line.value[lex->pos] != '}') {
+      unsigned char name_char = (unsigned char)lex->line.value[lex->pos];
+      if (!(name_char == ' ' || name_char == '-' || isupper(name_char) ||
+            isdigit(name_char))) {
+        valid_characters = false;
+      }
+      lex->pos++;
+    }
+    size_t name_length = lex->pos - name_start;
+    if (name_length == 0) {
+      LexError(lex, "Empty named universal character escape");
+    }
+    if (!valid_characters) {
+      LexError(lex, "Invalid character in named universal character escape");
+    }
+    bool terminated =
+        lex->pos < lex->line.length && lex->line.value[lex->pos] == '}';
+    if (!terminated) {
+      LexError(lex, "Missing } in named universal character escape");
+    } else {
+      lex->pos++;
+    }
+    uint32_t value = 0xfffd;
+    if (name_length != 0 && valid_characters &&
+        !UnicodeCodePointFromName(&lex->line.value[name_start], name_length,
+                                  &value)) {
+      LexError(lex, "Unknown Unicode character name");
+      value = 0xfffd;
+    }
+    *universal = true;
     return (int)value;
   }
   if (ch == 'x' || ch == 'X') {
@@ -761,19 +901,20 @@ static void CollectUserDefinedLiteralSuffix(Lex* lex) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
     return;
   }
-  size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
-                                            lex->line.length, true);
+  size_t bytes = LexIdentifierSourceCharByteCount(
+      lex->line.value, lex->pos, lex->line.length, true);
   if (bytes == 0) {
     return;
   }
+  bool start = true;
   while (lex->pos < lex->line.length) {
-    bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
-                                       lex->line.length, false);
+    bytes = LexAppendIdentifierSourceChar(
+        &lex->ud_suffix, lex->line.value, lex->pos, lex->line.length, start);
     if (bytes == 0) {
       break;
     }
-    StringAppendSegment(&lex->ud_suffix, &lex->line.value[lex->pos], bytes);
     lex->pos += bytes;
+    start = false;
   }
 }
 
@@ -1233,18 +1374,21 @@ static void CollectIdentifierOrWide(Lex* lex) {
 
   // Identifier, collect into spelling.
   StringClear(&lex->spelling);
+  bool identifier_start = true;
   while (lex->pos < lex->line.length) {
     char ch = lex->line.value[lex->pos];
-    size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
-                                              lex->line.length, false);
+    size_t bytes = LexAppendIdentifierSourceChar(
+        &lex->spelling, lex->line.value, lex->pos, lex->line.length,
+        identifier_start);
     if (bytes == 0 && lex->assembler_mode && (ch == '.' || ch == '@')) {
       bytes = 1;
+      StringAppendChar(&lex->spelling, ch);
     }
     if (bytes == 0) {
       break;
     }
-    StringAppendSegment(&lex->spelling, &lex->line.value[lex->pos], bytes);
     lex->pos += bytes;
+    identifier_start = false;
   }
 
   // In preprocessor and assembler modes we have no reserved words.
@@ -1871,8 +2015,8 @@ void LexNextToken(Lex* lex) {
   // Check for identifier, reserved word or wide string.
   // Wide strings (and character constants) begin with upper
   // case L followed by a quote.
-  if (LexIdentifierCharByteCount(lex->line.value, lex->pos,
-                                 lex->line.length, true) != 0 ||
+  if (LexIdentifierSourceCharByteCount(lex->line.value, lex->pos,
+                                       lex->line.length, true) != 0 ||
       (lex->assembler_mode && (ch == '.' || ch == '@'))) {
     CollectIdentifierOrWide(lex);
     goto record_token_location;
@@ -1900,6 +2044,18 @@ void LexNextToken(Lex* lex) {
   if (ch == '\'') {
     lex->number = CollectCharConst(lex, kLiteralEncodingNone);
     lex->current_token = TOK(charconst);
+    goto record_token_location;
+  }
+
+  if (ch == '\\' && lex->pos + 1 < lex->line.length &&
+      (lex->line.value[lex->pos + 1] == 'u' ||
+       lex->line.value[lex->pos + 1] == 'U' ||
+       lex->line.value[lex->pos + 1] == 'N')) {
+    LexError(
+        lex,
+        "Universal character name cannot name a basic character or an invalid "
+        "identifier character");
+    lex->pos++;
     goto record_token_location;
   }
 

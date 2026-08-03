@@ -642,6 +642,8 @@ cc_library(
         "c_compiler/frontend/semantic/rtti.c",
         "c_compiler/backend/ir.c",
         "c_compiler/frontend/lexical/lex.c",
+        "c_compiler/frontend/lexical/unicode_name.c",
+        "c_compiler/frontend/lexical/generated/unicode_name_data.c",
         "c_compiler/optimization/optimizer.c",
         "c_compiler/optimization/sccp.c",
         "c_compiler/driver/options.c",

@@ -202,6 +202,7 @@ static void PredefineMacros(Preprocessor* p) {
                               "202211L");
       PreprocessorDefineMacro(p, "__cpp_size_t_suffix", "202011L");
       PreprocessorDefineMacro(p, "__cpp_implicit_move", "202207L");
+      PreprocessorDefineMacro(p, "__cpp_named_character_escapes", "202207L");
     }
   }
 
@@ -948,12 +949,14 @@ static size_t SkipUserDefinedLiteralSuffix(String* line, size_t pos) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
     return pos;
   }
-  size_t bytes = LexIdentifierCharByteCount(line->value, pos, line->length, true);
+  size_t bytes =
+      LexIdentifierSourceCharByteCount(line->value, pos, line->length, true);
   if (bytes == 0) {
     return pos;
   }
   while (pos < line->length) {
-    bytes = LexIdentifierCharByteCount(line->value, pos, line->length, false);
+    bytes =
+        LexIdentifierSourceCharByteCount(line->value, pos, line->length, false);
     if (bytes == 0) {
       break;
     }
@@ -972,13 +975,15 @@ static size_t SkipNumber(String* line, size_t pos) {
       pos++;
       continue;
     }
-    if (LexIdentifierCharByteCount(line->value, pos, line->length, false) != 0) {
+    size_t identifier_bytes = LexIdentifierSourceCharByteCount(
+        line->value, pos, line->length, false);
+    if (identifier_bytes != 0) {
       exponent_marker = ch == 'e' || ch == 'E' || ch == 'p' || ch == 'P';
       do {
-        pos++;
-      } while (pos < line->length &&
-               LexIdentifierCharByteCount(line->value, pos, line->length,
-                                          false) != 0);
+        pos += identifier_bytes;
+        identifier_bytes = LexIdentifierSourceCharByteCount(
+            line->value, pos, line->length, false);
+      } while (identifier_bytes != 0);
       continue;
     }
     if ((ch == '+' || ch == '-') && exponent_marker) {
@@ -986,13 +991,17 @@ static size_t SkipNumber(String* line, size_t pos) {
       pos++;
       continue;
     }
+    size_t separator_bytes =
+        pos + 1 < line->length
+            ? LexIdentifierSourceCharByteCount(line->value, pos + 1,
+                                               line->length, false)
+            : 0;
     if (CompilerCXXAtLeast(kLanguageStandardCXX14) && ch == '\'' &&
         pos + 1 < line->length &&
         (isdigit((unsigned char)line->value[pos + 1]) ||
-         LexIdentifierCharByteCount(line->value, pos + 1, line->length,
-                                    false) != 0)) {
+         separator_bytes != 0)) {
       exponent_marker = false;
-      pos += 2;
+      pos += 1 + (separator_bytes != 0 ? separator_bytes : 1);
       continue;
     }
     break;
@@ -1088,7 +1097,8 @@ static size_t AppendRawStringLiteral(String* input, String* output, size_t start
 static bool CanStartToken(String* input, size_t pos) {
   char ch = input->value[pos];
   if (isspace((unsigned char)ch) ||
-      LexIdentifierCharByteCount(input->value, pos, input->length, true) != 0 ||
+      LexIdentifierSourceCharByteCount(input->value, pos, input->length,
+                                       true) != 0 ||
       ch == '"' || ch == '\'' || ch == '#' || ch == '(' || ch == ')') {
     return true;
   }
@@ -1248,36 +1258,39 @@ static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* out
 // defined (name) - spaces optional
 static size_t AppendDefined(String* input, String* output, size_t pos) {
   pos = SkipSpacesAndCommentsInLine(input, pos);
-  size_t start = pos;
-  size_t length = 0;
+  String spelling;
+  StringInit(&spelling, NULL);
   if (input->value[pos] == '(') {
     pos++;
     pos = SkipSpacesAndCommentsInLine(input, pos);
-    start = pos;
+    bool start = true;
     while (pos < input->length) {
-      size_t bytes =
-          LexIdentifierCharByteCount(input->value, pos, input->length, false);
+      size_t bytes = LexAppendIdentifierSourceChar(
+          &spelling, input->value, pos, input->length, start);
       if (bytes == 0) {
         break;
       }
       pos += bytes;
+      start = false;
     }
-    length = pos - start;
-    pos++;
+    if (pos < input->length && input->value[pos] == ')') {
+      pos++;
+    }
   } else {
+    bool start = true;
     while (pos < input->length) {
-      size_t bytes =
-          LexIdentifierCharByteCount(input->value, pos, input->length, false);
+      size_t bytes = LexAppendIdentifierSourceChar(
+          &spelling, input->value, pos, input->length, start);
       if (bytes == 0) {
         break;
       }
       pos += bytes;
+      start = false;
     }
-    length = pos - start;
   }
-  EncodeLength(output, length);
-  StringAppendSegment(output, &input->value[start], length);
-  
+  EncodeLength(output, spelling.length);
+  StringAppendString(output, &spelling);
+  StringDestruct(&spelling);
   return pos;
 }
 
@@ -1292,7 +1305,8 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       break;
     }
     char ch = input->value[i];
-    if (LexIdentifierCharByteCount(input->value, i, input->length, true) != 0 ||
+    if (LexIdentifierSourceCharByteCount(input->value, i, input->length,
+                                         true) != 0 ||
         (assembler_mode && (ch == '.' || ch == '@'))) {
       if (CompilerIsCXX() && ch == 'R' && i + 1 < input->length &&
           input->value[i + 1] == '"') {
@@ -1335,29 +1349,29 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
         StringAppendChar(output, PPTOK(wide_char_literal));
         i = AppendCharLiteral(input, output, i, i + 2);
       } else {
-        size_t start = i;
         String spelling = {0};
         StringInit(&spelling, NULL);
+        bool identifier_start = true;
         while (i < input->length) {
-          size_t bytes =
-              LexIdentifierCharByteCount(input->value, i, input->length, false);
+          size_t bytes = LexAppendIdentifierSourceChar(
+              &spelling, input->value, i, input->length, identifier_start);
           if (bytes == 0 && assembler_mode &&
               (input->value[i] == '.' || input->value[i] == '@')) {
             bytes = 1;
+            StringAppendChar(&spelling, input->value[i]);
           }
           if (bytes == 0) {
             break;
           }
-          StringAppendSegment(&spelling, &input->value[i], bytes);
           i += bytes;
+          identifier_start = false;
         }
         if (StringEqual(&spelling, "defined")) {
           StringAppendChar(output, PPTOK(defined));
           i = AppendDefined(input, output, i);
         } else {
           StringAppendChar(output, PPTOK(identifier));
-          size_t length = i - start;
-          EncodeLength(output, length);
+          EncodeLength(output, spelling.length);
           StringAppendString(output, &spelling);
         }
         StringDestruct(&spelling);
@@ -1723,15 +1737,17 @@ static size_t SkipSpacesAndComments(Preprocessor* p, size_t pos, String* line,
 // result.
 static size_t ReadIdentifier(String* line, size_t pos, String* result) {
   StringInit(result, NULL);
-  if (LexIdentifierCharByteCount(line->value, pos, line->length, true) != 0) {
+  if (LexIdentifierSourceCharByteCount(line->value, pos, line->length,
+                                       true) != 0) {
+    bool start = true;
     while (pos < line->length) {
-      size_t bytes =
-          LexIdentifierCharByteCount(line->value, pos, line->length, false);
+      size_t bytes = LexAppendIdentifierSourceChar(
+          result, line->value, pos, line->length, start);
       if (bytes == 0) {
         break;
       }
-      StringAppendSegment(result, &line->value[pos], bytes);
       pos += bytes;
+      start = false;
     }
   }
   return pos;

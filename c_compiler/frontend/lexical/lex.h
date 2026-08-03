@@ -173,6 +173,13 @@ bool LexConsumeClosingAngle(Lex* lex);
 // or zero if the byte sequence is not valid at that identifier position.
 size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
                                   bool start);
+// As above, but also accepts a universal-character-name and returns the number
+// of source bytes occupied by it.
+size_t LexIdentifierSourceCharByteCount(const char* text, size_t pos,
+                                        size_t length, bool start);
+// Appends one decoded identifier character and returns its source byte length.
+size_t LexAppendIdentifierSourceChar(String* output, const char* text,
+                                     size_t pos, size_t length, bool start);
 
 void LexError(Lex* lex, const char* error, ...);
 void VLexError(Lex* lex, const char* error, va_list ap);

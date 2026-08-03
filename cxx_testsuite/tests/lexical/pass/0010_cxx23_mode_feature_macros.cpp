@@ -80,6 +80,10 @@
 #error "__cpp_range_based_for has the wrong value"
 #endif
 
+#if __cpp_named_character_escapes != 202207L
+#error "__cpp_named_character_escapes has the wrong value"
+#endif
+
 #if 1uz != 1
 #error "size_t literals must work in preprocessing expressions"
 #endif
