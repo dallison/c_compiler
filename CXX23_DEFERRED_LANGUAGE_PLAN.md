@@ -6,8 +6,8 @@
 - [x] Implement source/literal encoding and P2290 delimited escapes.
 - [x] Vendor pinned Unicode data and implement P2071 named escapes.
 - [x] Implement P2564 and complete the deferred `constexpr` rules.
-- [ ] Implement P2582 inherited-constructor CTAD.
-- [ ] Validate feature macros, run conformance suites, and close the roadmap.
+- [x] Implement P2582 inherited-constructor CTAD.
+- [x] Validate feature macros, run conformance suites, and close the roadmap.
 
 ## 1. Stabilize the range-for parser baseline
 - Retain the diagnostic-free top-level-colon probe in

@@ -26,6 +26,18 @@ template <class T>
 Box(T) -> Box<T>;
 
 template <class T>
+struct InheritedBase {
+  T value;
+
+  InheritedBase(T initial) : value(initial) {}
+};
+
+template <class T>
+struct InheritedDerived : InheritedBase<T> {
+  using InheritedBase<T>::InheritedBase;
+};
+
+template <class T>
 struct Category {
   static constexpr int value = 0;
 };

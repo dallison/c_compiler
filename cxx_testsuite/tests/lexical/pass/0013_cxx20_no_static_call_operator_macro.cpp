@@ -44,6 +44,10 @@
 #error "__cpp_range_based_for must retain its C++17 value in C++20"
 #endif
 
+#if __cpp_deduction_guides != 201703L
+#error "__cpp_deduction_guides must retain its C++17 value in C++20"
+#endif
+
 int main(void) {
   return 0;
 }

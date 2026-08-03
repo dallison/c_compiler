@@ -92,10 +92,10 @@ simplified implicit move.
     init-statements, and P2266 simplified implicit move.
   - Check every advertised C++23 language macro in the central C++23 mode test
     and verify that it is absent in C++20 mode.
-  - Keep range-for temporary lifetime extension, named/delimited escapes,
+  - Complete range-for temporary lifetime extension, named/delimited escapes,
     inherited-constructor CTAD, the C++23 `consteval` propagation update, source
-    encoding changes, and the expanded `constexpr` rules explicitly deferred;
-    their newer feature-macro levels are not advertised.
+    encoding changes, and the expanded `constexpr` rules, with their C++23
+    feature-macro levels covered in the central mode tests.
 
 ## Remaining C++23 library work
 

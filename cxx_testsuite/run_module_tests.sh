@@ -279,14 +279,14 @@ run "$DAVECC" -target "$TARGET" -static \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute surface module program"
 
-run "$DAVECC" -target "$TARGET" -std=c++20 \
+run "$DAVECC" -target "$TARGET" -std=c++23 \
   -Xemit-module "$work/template_surface.dcm" \
   "$FIXTURES/template_surface.cppm" ||
   fail "emit template surface module"
-run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
   "$FIXTURES/template_surface.cppm" -o "$work/template_surface.o" ||
   fail "compile template surface module object"
-run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_template_surface.cpp" \
   -o "$work/use_template_surface.o" ||
   fail "compile template surface importer"

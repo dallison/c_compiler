@@ -553,6 +553,18 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
     return;
   }
   Struct* base_struct = lookup_base->info.struct_info;
+  const char* lookup_member_name = member_name;
+  bool inherits_constructor = false;
+  if (base_struct->tag_name != NULL) {
+    if (strcmp(member_name, base_struct->tag_name->value) == 0) {
+      inherits_constructor = true;
+    } else if (lookup_base->template_origin != NULL &&
+               strcmp(member_name,
+                      lookup_base->template_origin->name.value) == 0) {
+      lookup_member_name = base_struct->tag_name->value;
+      inherits_constructor = true;
+    }
+  }
   int base_offset = 0;
   if (!StructHasBaseStruct(owner, base_struct, &base_offset) &&
       !StructHasBaseType(parser->syntax, owner, lookup_base, &base_offset)) {
@@ -567,7 +579,7 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   Struct* ignored_owner = NULL;
   int member_offset = 0;
   StructMember* first = FindStructMemberWithAccessAndOffsetByName(
-      base_struct, member_name, &ignored_access, &ignored_owner,
+      base_struct, lookup_member_name, &ignored_access, &ignored_owner,
       &member_offset);
   if (first == NULL) {
     SyntaxError(parser->syntax, "No such base class member %s", member_name);
@@ -597,6 +609,16 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
         CloneCXXMemberUsingMember(member, access, byte_offset);
     if (clone != NULL) {
       clone->symbol->location = location;
+      // An inherited constructor is found under the base class's name, but it
+      // participates in overload resolution as a constructor of the derived
+      // class.  Keep the cloned function type (and therefore its base-subobject
+      // `this` adjustment), while publishing it under the derived class name.
+      if (clone->is_member_function && clone->symbol->type != NULL &&
+          TypeIsFunction(clone->symbol->type) &&
+          clone->symbol->type->info.function.is_constructor &&
+          inherits_constructor && owner->tag_name != NULL) {
+        StringSetString(&clone->symbol->name, owner->tag_name);
+      }
       AddCXXMemberUsingFunction(parser, owner, clone);
       imported = true;
     }

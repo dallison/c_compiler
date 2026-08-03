@@ -84,6 +84,10 @@
 #error "__cpp_named_character_escapes has the wrong value"
 #endif
 
+#if __cpp_deduction_guides != 202207L
+#error "__cpp_deduction_guides has the wrong value"
+#endif
+
 #if 1uz != 1
 #error "size_t literals must work in preprocessing expressions"
 #endif

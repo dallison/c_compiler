@@ -24,5 +24,9 @@ int main() {
   if (!template_probe::has_addition<int>()) {
     return 6;
   }
+  template_probe::InheritedDerived inherited(9);
+  if (inherited.value != 9) {
+    return 7;
+  }
   return 0;
 }

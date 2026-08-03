@@ -187,6 +187,17 @@ enum {
 };
 
 //
+// CXXMemberUsingDeclaration (inline sub-message) field numbers.
+//
+enum {
+  kMemberUsing_base_type = 1,
+  kMemberUsing_member_name = 2,
+  kMemberUsing_access = 3,
+  kMemberUsing_location = 4,
+  kMemberUsing_is_pack_expansion = 5,
+};
+
+//
 // Enum field numbers.
 //
 enum {
@@ -285,6 +296,7 @@ enum {
   kStruct_lexical_parent = 31,
   kStruct_partial_specializations = 32,
   kStruct_deduction_guides = 33,
+  kStruct_member_using_declarations = 34,
 };
 
 static const WireFieldDesc kStructFields[] = {
@@ -321,6 +333,7 @@ static const WireFieldDesc kStructFields[] = {
     {kStruct_lexical_parent, "lexical_parent"},
     {kStruct_partial_specializations, "partial_specializations"},
     {kStruct_deduction_guides, "deduction_guides"},
+    {kStruct_member_using_declarations, "member_using_declarations"},
 };
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1148,98 @@ static void ReadBaseVector(DeserializeContext* ctx, WireBuffer* in,
 }
 
 // ---------------------------------------------------------------------------
+// CXXMemberUsingDeclaration vector (inline).
+// ---------------------------------------------------------------------------
+static void WriteMemberUsingVector(SerializeContext* ctx, WireBuffer* buf,
+                                   int field, Vector* v) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 16);
+  size_t length = v == NULL ? 0 : v->length;
+  WireWriteRawVarint(&tmp, (uint64_t)length);
+  for (size_t i = 0; i < length; i++) {
+    CXXMemberUsingDeclaration* decl =
+        (CXXMemberUsingDeclaration*)VectorGet(v, i);
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 16);
+    SWriteRef(ctx, &elem, kMemberUsing_base_type, kSerialKindType,
+              decl->base_type);
+    SWriteStringVal(ctx, &elem, kMemberUsing_member_name, &decl->member_name);
+    WireWriteInt32(&elem, kMemberUsing_access, (int32_t)decl->access);
+    WireWriteUint64(&elem, kMemberUsing_location,
+                    (uint64_t)decl->location);
+    WireWriteBool(&elem, kMemberUsing_is_pack_expansion,
+                  decl->is_pack_expansion);
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(buf, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+static void ReadMemberUsingVector(DeserializeContext* ctx, WireBuffer* in,
+                                  Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      return;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    CXXMemberUsingDeclaration* decl =
+        (CXXMemberUsingDeclaration*)calloc(1, sizeof(*decl));
+    StringInit(&decl->member_name, NULL);
+    while (!WireBufferEof(&er) && !WireBufferHasError(&er)) {
+      int field;
+      WireType wt;
+      if (!WireReadTag(&er, &field, &wt)) {
+        break;
+      }
+      switch (field) {
+        case kMemberUsing_base_type:
+          decl->base_type =
+              (TypeRecord*)SReadRef(ctx, &er, kSerialKindType);
+          break;
+        case kMemberUsing_member_name:
+          SReadStringVal(ctx, &er, &decl->member_name);
+          break;
+        case kMemberUsing_access: {
+          int32_t value;
+          WireReadInt32(&er, &value);
+          decl->access = (CXXAccess)value;
+          break;
+        }
+        case kMemberUsing_location: {
+          uint64_t value;
+          WireReadUint64(&er, &value);
+          decl->location = (SourceLocation)value;
+          break;
+        }
+        case kMemberUsing_is_pack_expansion:
+          WireReadBool(&er, &decl->is_pack_expansion);
+          break;
+        default:
+          WireSkip(&er, wt);
+          break;
+      }
+    }
+    VectorAppend(out, decl);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // TypeRecord.
 // ---------------------------------------------------------------------------
 static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
@@ -1622,6 +1727,8 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
       &s->partial_specializations);
   SWriteRefVector(ctx, buf, kStruct_deduction_guides, kSerialKindSymbol,
                   &s->deduction_guides);
+  WriteMemberUsingVector(ctx, buf, kStruct_member_using_declarations,
+                         &s->member_using_declarations);
   return !WireBufferHasError(buf);
 }
 
@@ -1744,6 +1851,9 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kStruct_deduction_guides:
         SReadRefVector(ctx, buf, kSerialKindSymbol, &s->deduction_guides);
+        break;
+      case kStruct_member_using_declarations:
+        ReadMemberUsingVector(ctx, buf, &s->member_using_declarations);
         break;
       default:
         WireSkip(buf, wt);

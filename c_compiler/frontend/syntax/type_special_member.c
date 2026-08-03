@@ -1027,12 +1027,51 @@ static bool CXXStructHasNonPublicDataMember(Struct* str) {
   return false;
 }
 
+static bool CXXStructHasInheritedConstructor(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    TypeRecord* func = member != NULL && member->symbol != NULL
+                           ? member->symbol->type
+                           : NULL;
+    if (member != NULL && member->is_using_declaration &&
+        member->is_member_function && func != NULL && TypeIsFunction(func) &&
+        func->info.function.is_constructor) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->member_using_declarations.length; i++) {
+    CXXMemberUsingDeclaration* decl =
+        str->member_using_declarations.value.p[i];
+    if (decl == NULL || decl->base_type == NULL ||
+        decl->member_name.value == NULL) {
+      continue;
+    }
+    Symbol* origin = decl->base_type->template_origin;
+    if (origin != NULL &&
+        strcmp(decl->member_name.value, origin->name.value) == 0) {
+      return true;
+    }
+    Struct* base = TypeIsStructOrUnion(decl->base_type)
+                       ? decl->base_type->info.struct_info
+                       : NULL;
+    if (base != NULL && base->tag_name != NULL &&
+        strcmp(decl->member_name.value, base->tag_name->value) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void ComputeCXXAggregateStatus(Struct* str) {
   if (!CompilerIsCXX() || str == NULL) {
     return;
   }
   bool aggregate = !str->is_union &&
                    !CXXStructHasUserDeclaredConstructor(str) &&
+                   !CXXStructHasInheritedConstructor(str) &&
                    !CXXStructHasVirtualMemberFunction(str) &&
                    // A class that inherits virtual functions still "has virtual
                    // functions" and so is not an aggregate; virtual_members

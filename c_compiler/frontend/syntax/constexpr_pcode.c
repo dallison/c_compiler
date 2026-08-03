@@ -2989,6 +2989,26 @@ bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
     return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
            ConstexprValueAsFloating(value, result);
   }
+  TypeRecord* return_type =
+      callee != NULL && callee->type != NULL ? callee->type->next : NULL;
+  if (TypeIsIntegral(return_type)) {
+    int64_t integer = 0;
+    bool ok = RunRealPCodeCall(ctx, node, callee->type, &integer, NULL, NULL,
+                               NULL, &reason);
+    if (!ok) {
+      ok = RunConstexprExpressionThunk(ctx, node, &integer, NULL, NULL, NULL,
+                                       &reason);
+    }
+    if (ok) {
+      *result = TypeIsUnsigned(return_type) ? (double)(uint64_t)integer
+                                            : (double)integer;
+    }
+    return SetConstexprPCodeResult(ok, reason);
+  }
+  if (return_type == NULL) {
+    return SetConstexprPCodeResult(
+        false, "constexpr pcode call has no function definition");
+  }
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, result, NULL, NULL,
                              &reason);
   if (!ok) {

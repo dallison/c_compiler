@@ -4748,9 +4748,57 @@ static bool CXXDeductionCandidateEqual(TypeRecord* left, TypeRecord* right) {
   return TypeEqual(left, right);
 }
 
+static Symbol* CXXInheritedConstructorBaseTemplate(
+    CXXMemberUsingDeclaration* decl) {
+  if (decl == NULL || decl->base_type == NULL ||
+      decl->member_name.value == NULL) {
+    return NULL;
+  }
+  Symbol* base_template = ClassTemplateOriginOf(decl->base_type);
+  if (base_template == NULL || !base_template->flags.is_template ||
+      strcmp(decl->member_name.value, base_template->name.value) != 0) {
+    return NULL;
+  }
+  return base_template;
+}
+
+static TypeRecord* CXXMapInheritedDeductionToDerived(
+    Syntax* syntax, Symbol* class_template, TypeRecord* base_pattern,
+    TypeRecord* base_deduced) {
+  if (syntax == NULL || class_template == NULL ||
+      class_template->type == NULL || base_pattern == NULL ||
+      base_deduced == NULL ||
+      !TypeIsStructOrUnion(class_template->type) ||
+      class_template->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = class_template->type->info.struct_info;
+  Vector bindings;
+  VectorInit(&bindings);
+  for (size_t i = 0; i < str->template_parameters.length; i++) {
+    VectorAppend(&bindings, NULL);
+  }
+  bool matched =
+      ClassTemplateTypePatternMatches(&bindings, base_pattern, base_deduced);
+  for (size_t i = 0; matched && i < bindings.length; i++) {
+    matched = bindings.value.p[i] != NULL;
+  }
+  TypeRecord* result = NULL;
+  if (matched &&
+      ConceptsConstraintSatisfied(str->associated_constraint, &bindings)) {
+    result =
+        TypeInstantiateClassTemplateQuiet(syntax, class_template, &bindings);
+  }
+  VectorDestructWithContents(&bindings,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  return result;
+}
+
 static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
     Syntax* syntax, Symbol* class_template, TypeRecord* placeholder,
-    Vector* actuals, bool allow_explicit, bool* alias_rejected) {
+    Vector* actuals, bool allow_explicit, bool* alias_rejected,
+    int* selected_score, bool* selected_explicit) {
   if (syntax == NULL || class_template == NULL || class_template->type == NULL ||
       !class_template->flags.is_template || actuals == NULL ||
       !TypeIsStructOrUnion(class_template->type) ||
@@ -4764,6 +4812,7 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
   int best_score = -1;
   bool ambiguous = false;
   bool best_is_explicit = false;
+  bool best_is_inherited = false;
   for (size_t i = 0; i < str->deduction_guides.length; i++) {
     Symbol* guide = str->deduction_guides.value.p[i];
     if (guide == NULL || guide->type == NULL || !TypeIsFunction(guide->type)) {
@@ -4846,6 +4895,7 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
       result = candidate;
       best_score = guide_score;
       best_is_explicit = guide->type->info.function.is_explicit;
+      best_is_inherited = false;
       ambiguous = false;
     } else if (guide_score == best_score &&
                !CXXDeductionCandidateEqual(result, candidate)) {
@@ -4853,6 +4903,57 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
       TypeRecordDelete(candidate);
     } else {
       TypeRecordDelete(candidate);
+    }
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    for (size_t i = 0; i < str->member_using_declarations.length; i++) {
+      CXXMemberUsingDeclaration* decl =
+          str->member_using_declarations.value.p[i];
+      Symbol* base_template = CXXInheritedConstructorBaseTemplate(decl);
+      if (base_template == NULL) {
+        continue;
+      }
+      int inherited_score = -1;
+      bool inherited_explicit = false;
+      DiagnosticSuppressBegin();
+      TypeRecord* base_deduced = TypeDeduceClassTemplateFromGuideFiltered(
+          syntax, base_template, NULL, actuals, allow_explicit, NULL,
+          &inherited_score, &inherited_explicit);
+      DiagnosticSuppressEnd();
+      if (base_deduced == NULL) {
+        continue;
+      }
+      TypeRecord* candidate = CXXMapInheritedDeductionToDerived(
+          syntax, class_template, decl->base_type, base_deduced);
+      TypeRecordDelete(base_deduced);
+      if (candidate == NULL) {
+        continue;
+      }
+      if (placeholder != NULL &&
+          !TypeClassTemplatePlaceholderAcceptsDeduced(placeholder, candidate)) {
+        if (alias_rejected != NULL) {
+          *alias_rejected = true;
+        }
+        TypeRecordDelete(candidate);
+        continue;
+      }
+      if (result == NULL || inherited_score < best_score) {
+        if (result != NULL) {
+          TypeRecordDelete(result);
+        }
+        result = candidate;
+        best_score = inherited_score;
+        best_is_explicit = inherited_explicit;
+        best_is_inherited = true;
+        ambiguous = false;
+      } else if (inherited_score == best_score && best_is_inherited &&
+                 !CXXDeductionCandidateEqual(result, candidate)) {
+        ambiguous = true;
+        TypeRecordDelete(candidate);
+      } else {
+        // A non-inherited candidate is preferred when otherwise tied.
+        TypeRecordDelete(candidate);
+      }
     }
   }
   TypeParserDestruct(&parser);
@@ -4870,6 +4971,14 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
     TypeRecordDelete(result);
     return NULL;
   }
+  if (result != NULL) {
+    if (selected_score != NULL) {
+      *selected_score = best_score;
+    }
+    if (selected_explicit != NULL) {
+      *selected_explicit = best_is_explicit;
+    }
+  }
   return result;
 }
 
@@ -4878,7 +4987,7 @@ TypeRecord* TypeDeduceClassTemplateFromGuide(Syntax* syntax,
                                              Vector* actuals,
                                              bool allow_explicit) {
   return TypeDeduceClassTemplateFromGuideFiltered(
-      syntax, class_template, NULL, actuals, allow_explicit, NULL);
+      syntax, class_template, NULL, actuals, allow_explicit, NULL, NULL, NULL);
 }
 
 TypeRecord* TypeDeduceClassTemplateFromPlaceholder(Syntax* syntax,
@@ -4898,7 +5007,8 @@ TypeRecord* TypeDeduceClassTemplateFromPlaceholder(Syntax* syntax,
                            ? placeholder
                            : NULL;
   return TypeDeduceClassTemplateFromGuideFiltered(
-      syntax, class_template, filter, actuals, allow_explicit, alias_rejected);
+      syntax, class_template, filter, actuals, allow_explicit, alias_rejected,
+      NULL, NULL);
 }
 
 /* Set up the source->target struct substitution and clone/queue the body of an

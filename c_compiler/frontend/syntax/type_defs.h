@@ -309,7 +309,7 @@ struct Struct {
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3
   Vector friend_classes;    // Struct* granted friendship.        // @wire 28
   Vector friend_functions;  // Symbol* granted friendship.        // @wire 29
-  Vector member_using_declarations;  // @wire - (not serialized)
+  Vector member_using_declarations;  // CXXMemberUsingDeclaration*.        // @wire 34
   Vector virtual_bases;  // @wire - (recomputed on layout)
   Vector members;    // StructMember* (owns members).             // @wire 4
   Vector virtual_members;  // StructMember* by slot (not owned).  // @wire 27

@@ -178,6 +178,11 @@ static void PredefineMacros(Preprocessor* p) {
     } else if (CompilerCXXAtLeast(kLanguageStandardCXX11)) {
       PreprocessorDefineMacro(p, "__cpp_range_based_for", "200907L");
     }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+      PreprocessorDefineMacro(
+          p, "__cpp_deduction_guides",
+          CompilerCXXAtLeast(kLanguageStandardCXX23) ? "202207L" : "201703L");
+    }
 
     // C++20 feature-test macros for language features implemented by DaveCC.
     if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
