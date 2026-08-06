@@ -1918,6 +1918,57 @@ void X86_64InterpreterDumpRegisters(X86_64Interpreter* interpreter) {
   printf("rip 0x%016" PRIx64 "\n", interpreter->rip);
 }
 
+static uint64_t SetupGuestMainArgs(X86_64Interpreter* interpreter, int argc,
+                                   char** argv, uint64_t entry_address,
+                                   bool is_static_link) {
+  uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
+  uint64_t stack_top = (stack_base + X86_64_STACK_SIZE) & ~0xFULL;
+  WriteReg(interpreter, X86_REG_RDI, (uint64_t)argc);
+  if (!is_static_link) {
+    WriteReg(interpreter, X86_REG_RSI, entry_address);
+    return stack_top;
+  }
+  if (argc <= 0 || argv == NULL) {
+    WriteReg(interpreter, X86_REG_RSI, 0);
+    return stack_top;
+  }
+
+  size_t string_bytes = 0;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    if (len > X86_64_STACK_SIZE - string_bytes) {
+      goto invalid_args;
+    }
+    string_bytes += len;
+  }
+  if ((size_t)argc >= X86_64_STACK_SIZE / sizeof(uint64_t)) {
+    goto invalid_args;
+  }
+  size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
+  if (string_bytes + vector_bytes + 15 > X86_64_STACK_SIZE) {
+    goto invalid_args;
+  }
+
+  uint64_t string_address = stack_top - string_bytes;
+  uint64_t guest_argv = (string_address - vector_bytes) & ~0xFULL;
+  char* string_out = (char*)(uintptr_t)string_address;
+  uint64_t* pointer_out = (uint64_t*)(uintptr_t)guest_argv;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy(string_out, argv[i], len);
+    pointer_out[i] = (uint64_t)(uintptr_t)string_out;
+    string_out += len;
+  }
+  pointer_out[argc] = 0;
+  WriteReg(interpreter, X86_REG_RSI, guest_argv);
+  return guest_argv;
+
+invalid_args:
+  WriteReg(interpreter, X86_REG_RDI, 0);
+  WriteReg(interpreter, X86_REG_RSI, 0);
+  return stack_top;
+}
+
 void X86_64InterpreterInitForThread(
     X86_64Interpreter* interpreter, X86_64ProcessRuntime* process,
     X86_64GuestThread* guest_thread, Loader* loader, uint64_t entry_address,
@@ -1939,9 +1990,6 @@ void X86_64InterpreterInitForThread(
     interpreter->stack = malloc(X86_64_STACK_SIZE);
     interpreter->owns_stack = true;
   }
-  interpreter->rsp =
-      (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
-  interpreter->rsp &= ~0xFULL;
   if (fs_base != 0) {
     interpreter->fs_base = fs_base;
     interpreter->tls_block_size = tls_block_size;
@@ -1949,35 +1997,26 @@ void X86_64InterpreterInitForThread(
     interpreter->fs_base = loader->tls.fs_base;
     interpreter->tls_block_size = loader->tls.block_size;
   }
+  uint64_t argument_bottom =
+      SetupGuestMainArgs(interpreter, argc, argv, entry_address,
+                         loader->is_static);
+  interpreter->rsp = argument_bottom & ~0xFULL;
   Push64(interpreter, 0);
   interpreter->rip = entry_address;
   interpreter->running = true;
-
-  WriteReg(interpreter, X86_REG_RDI, (uint64_t)argc);
-  if (!loader->is_static) {
-    WriteReg(interpreter, X86_REG_RSI, entry_address);
-  } else {
-    WriteReg(interpreter, X86_REG_RSI, (uint64_t)(uintptr_t)argv);
-  }
 }
 
 void X86_64InterpreterPrepareMain(X86_64Interpreter* interpreter,
                                   uint64_t entry_address, int argc,
                                   char** argv, bool is_static_link) {
-  interpreter->rsp =
-      (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
-  interpreter->rsp &= ~0xFULL;
+  uint64_t argument_bottom =
+      SetupGuestMainArgs(interpreter, argc, argv, entry_address,
+                         is_static_link);
+  interpreter->rsp = argument_bottom & ~0xFULL;
   Push64(interpreter, 0);
   interpreter->rip = entry_address;
   interpreter->running = true;
   interpreter->rip_updated = false;
-
-  WriteReg(interpreter, X86_REG_RDI, (uint64_t)argc);
-  if (!is_static_link) {
-    WriteReg(interpreter, X86_REG_RSI, entry_address);
-  } else {
-    WriteReg(interpreter, X86_REG_RSI, (uint64_t)(uintptr_t)argv);
-  }
 }
 
 void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,

@@ -17,8 +17,9 @@ extern bool print_libraries_only;
 int main(int argc, char *argv[]) {
   String filename = {0};
   bool trace_instructions = false;
+  int program_index = -1;
   for (int i = 1; i < argc; i++) {
-    if (argv[i][0] == '-') {
+    if (program_index < 0 && argv[i][0] == '-') {
       switch (argv[i][1]) {
         case 'd':
           trace_instructions = true;
@@ -28,18 +29,19 @@ int main(int argc, char *argv[]) {
           exit(2);
       }
     } else {
-      if (filename.length != 0) {
-        fprintf(stderr, "Only one file to interpret please\n");
-        exit(1);
+      if (program_index < 0) {
+        program_index = i;
+        StringSet(&filename, argv[i]);
       }
-      StringSet(&filename, argv[i]);
     }
   }
 
-  if (filename.length == 0) {
-    fprintf(stderr, "usage: %s [-d] <program>\n", argv[0]);
+  if (program_index < 0) {
+    fprintf(stderr, "usage: %s [-d] program [args...]\n", argv[0]);
     exit(2);
   }
+  int program_argc = argc - program_index;
+  char** program_argv = &argv[program_index];
 
   PCodeInterpreter interpreter;
   Loader loader;
@@ -99,7 +101,7 @@ int main(int argc, char *argv[]) {
   }
 
   int result = PCodeInterpreterRun(&interpreter, &loader, loader.main_address,
-                                   argc, argv);
+                                   program_argc, program_argv);
   if (!PCodeGuestRunProgramShutdown(&loader, &interpreter)) {
     result = 1;
   }

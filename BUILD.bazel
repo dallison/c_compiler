@@ -2619,6 +2619,38 @@ sh_test(
 )
 
 sh_test(
+    name = "multiarch_argv_test",
+    srcs = ["tests/multiarch_argv_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :arm)",
+        "$(rootpath :riscv)",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :libc_aarch64)",
+        "$(rootpath :libc_arm)",
+        "$(rootpath :libc_riscv)",
+        "$(rootpath :libc_pcode)",
+    ],
+    data = [
+        ":aarch64",
+        ":arm",
+        ":davecc",
+        ":libc_aarch64",
+        ":libc_arm",
+        ":libc_headers",
+        ":libc_pcode",
+        ":libc_riscv",
+        ":libc_x86_64",
+        ":pcode",
+        ":riscv",
+        ":x86_64",
+    ],
+)
+
+sh_test(
     name = "cxx_lexical_mode_test",
     srcs = ["tests/cxx_lexical_mode_test.sh"],
     args = [

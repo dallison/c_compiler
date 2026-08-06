@@ -21,8 +21,9 @@ int main(int argc, char * argv[]) {
   bool trace_regs = false;
   bool trace_instructions = false;
   bool enter_debugger = false;
+  int program_index = -1;
   for (int i = 1; i < argc; i++) {
-    if (argv[i][0] == '-') {
+    if (program_index < 0 && argv[i][0] == '-') {
       switch (argv[i][1]) {
         case 'd':
           trace_instructions = true;
@@ -38,13 +39,18 @@ int main(int argc, char * argv[]) {
           exit(2);
       }
     } else {
-      if (filename.length != 0) {
-        fprintf(stderr, "Only one file to interpret please\n");
-        exit(1);
+      if (program_index < 0) {
+        program_index = i;
+        StringSet(&filename, argv[i]);
       }
-      StringSet(&filename, argv[i]);
     }
   }
+  if (program_index < 0) {
+    fprintf(stderr, "usage: %s [-d] [-g] [-r] program [args...]\n", argv[0]);
+    exit(2);
+  }
+  int program_argc = argc - program_index;
+  char** program_argv = &argv[program_index];
   
   RISCVInterpreter interpreter;
   Loader loader;
@@ -88,7 +94,7 @@ int main(int argc, char * argv[]) {
     exit(0);
   }
   RISCVInterpreterInit(&interpreter, &loader,
-                       loader.main_address, argc, argv,
+                       loader.main_address, program_argc, program_argv,
                        trace_regs, trace_instructions);
   RISCVProcessRuntime process;
   if (!RISCVProcessRuntimeInit(&process, &loader)) {
@@ -108,6 +114,8 @@ int main(int argc, char * argv[]) {
     LoaderDestruct(&loader);
     exit(1);
   }
+  RISCVInterpreterPrepareMain(&interpreter, loader.main_address, program_argc,
+                              program_argv);
   int result;
   if (enter_debugger) {
     RISCVDebugger debugger;

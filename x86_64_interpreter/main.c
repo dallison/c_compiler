@@ -28,14 +28,13 @@ int main(int argc, char** argv) {
   int program_arg_offset = 0;
 
   for (int i = 1; i < argc; i++) {
-    if (argv[i][0] != '-') {
-      if (program != NULL) {
-        program_arg_offset = i;
-        break;
-      }
+    if (program == NULL && argv[i][0] != '-') {
       program = argv[i];
-      program_arg_offset = i + 1;
+      program_arg_offset = i;
       continue;
+    }
+    if (program != NULL) {
+      break;
     }
     if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interpret") == 0) {
       mode = kX86_64ModeInterpret;

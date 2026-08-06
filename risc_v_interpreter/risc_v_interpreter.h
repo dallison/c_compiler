@@ -130,6 +130,9 @@ void RISCVInterpreterInitForThread(
     uint64_t entry_address, int argc, char** argv, char* stack,
     void* tls_block, size_t tls_block_size, bool trace_regs,
     bool trace_instructions);
+void RISCVInterpreterPrepareMain(RISCVInterpreter* interpreter,
+                                 uint64_t entry_address, int argc,
+                                 char** argv);
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter);
 int RISCVInterpreterRun(RISCVInterpreter* interpreter);
 void RISCVInterpreterCall(RISCVInterpreter* interpreter, uint64_t fn);
