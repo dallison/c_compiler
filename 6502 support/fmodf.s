@@ -151,7 +151,7 @@ modf_copy_mantissa:
   JSR __fnormalize
 
   LDX #mt1
-  JMP __fassemble     // Asssmeble into mt1 as temp
+  JSR __fassemble     // Assemble into mt1 as temp.
 
   LDY #3
 modf_return_fract:
