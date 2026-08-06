@@ -16,9 +16,9 @@ _start:
 
 
   // Push argv and argc onto the stack.
-  // argv is in the reserved page immediately below the program image.
+  // argv is in the reserved pages below the program image.
   LDX #0
-  LDY #0x4
+  LDY #0x5
   JSR __pushxy
 
   // argc is in i0

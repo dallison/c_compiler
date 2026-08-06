@@ -29,7 +29,7 @@
 #define W65C02_instruction_def(x) static void Interpret_##x(W65C02Interpreter* interpreter)
 #define W65C02_instruction(x) Interpret_##x
 
-#define W65C02_GUEST_ARGV_START 0x400
+#define W65C02_GUEST_ARGV_START 0x500
 #define W65C02_GUEST_ARGV_END 0x800
 
 typedef struct {
@@ -1270,14 +1270,7 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
       }
     }
   }
-  // Page 4 through the start of the linked program is reserved for argv.
-  // Populate it after loading sections so argv cannot be overwritten, and
-  // include the executable path as argv[0] plus the required null sentinel.
   int num_args = 0;
-  if (!W65C02CopyGuestArgv(interpreter, argc, argv, first_arg, &num_args)) {
-    fprintf(stderr, "Program arguments exceed 6502 guest argv space\n");
-    return 1;
-  }
   // Need some space for the stack.
   if (memtop > 0xbe00) {
     printf("Program is too big\n");
@@ -1289,6 +1282,14 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
   if (!W65C02GuestRunInitArrays(loader, interpreter)) {
     fprintf(stderr, "Error running guest init arrays\n");
     exit(1);
+  }
+
+  // Page 5 through the start of the linked program is reserved for argv.
+  // Populate it after loading sections and running constructors so neither
+  // can overwrite it. Include argv[0] and the required null sentinel.
+  if (!W65C02CopyGuestArgv(interpreter, argc, argv, first_arg, &num_args)) {
+    fprintf(stderr, "Program arguments exceed 6502 guest argv space\n");
+    return 1;
   }
 
   // Guest constructors use the normal zero-page calling convention and may

@@ -169,6 +169,7 @@ sh_binary(
         ":libc_x86_64",
         ":pcode",
         ":riscv",
+        ":run",
         ":riscvdasm",
         ":rvasm",
         ":support_rom_65c02",
@@ -1020,6 +1021,25 @@ cc_binary(
 )
 
 cc_binary(
+    name = "run",
+    srcs = ["run/main.c"],
+    copts = COMMON_COPTS,
+    data = [
+        ":6502",
+        ":aarch64",
+        ":arm",
+        ":pcode",
+        ":riscv",
+        ":support_rom_65c02",
+        ":x86_64",
+    ],
+    deps = [
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
     name = "moduledump",
     srcs = ["moduledump/main.c"],
     copts = COMMON_COPTS,
@@ -1189,6 +1209,7 @@ runtime_srcs=(
   "6502 support/store_indirect.s"
   "6502 support/store_indirect8.s"
   "6502 support/push.s"
+  "6502 support/pull_drop.s"
   "6502 support/frame_push.s"
   "6502 support/inline_mem_params.s"
   "6502 support/pushmem.s"
@@ -2658,6 +2679,39 @@ sh_test(
 )
 
 sh_test(
+    name = "run_dispatch_test",
+    srcs = ["tests/run_dispatch_test.sh"],
+    args = [
+        "$(rootpath :run)",
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_65c02)",
+        "$(rootpath :libc_aarch64)",
+        "$(rootpath :libc_arm)",
+        "$(rootpath :libc_pcode)",
+        "$(rootpath :libc_riscv)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":6502",
+        ":aarch64",
+        ":arm",
+        ":davecc",
+        ":libc_65c02",
+        ":libc_aarch64",
+        ":libc_arm",
+        ":libc_headers",
+        ":libc_pcode",
+        ":libc_riscv",
+        ":libc_x86_64",
+        ":pcode",
+        ":riscv",
+        ":run",
+        ":support_rom_65c02",
+        ":x86_64",
+    ],
+)
+
+sh_test(
     name = "cxx_lexical_mode_test",
     srcs = ["tests/cxx_lexical_mode_test.sh"],
     args = [
@@ -2805,6 +2859,16 @@ sh_test(
         ":davecc",
         ":elfdump",
         "tests/6502_constant_materialization_cases.cpp",
+    ],
+)
+
+sh_test(
+    name = "6502_single_byte_copy_test",
+    srcs = ["tests/6502_single_byte_copy_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
+        "tests/6502_single_byte_copy_cases.c",
     ],
 )
 

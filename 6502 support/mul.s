@@ -194,6 +194,7 @@ umul2_l2:
 // b = a * 8 + a * 2
 __umul2_10:
   PHA
+  LDY #0
 umul2_10b:
   LDA 0,X
   STA __t0
@@ -223,14 +224,28 @@ umul2_10c:
   LDA __t1
   ADC __t3
   STA 1,X
+  TYA
+  BEQ mul2_10_done
+
+  // Restore the sign for a negative signed multiplicand.
+  SEC
+  LDA #0
+  SBC 0,X
+  STA 0,X
+  LDA #0
+  SBC 1,X
+  STA 1,X
+mul2_10_done:
   RTS
 
 // Signed multiply int by 10
 __smul2_10:
   PHA
+  LDY #0
   LDA 1,X
   BPL umul2_10b     // Positive multiplicand, just unsigned multiply
 
+  INY
   // Negate multiplicand.
   SEC
   LDA #0
@@ -241,17 +256,5 @@ __smul2_10:
   SBC 1,X
   STA __t1
   STA __t3
-
-  // Do unsigned multiply (leaves X = result offet)
-  JSR umul2_10c
-
-  // Negate result.
-  SEC
-  LDA #0
-  SBC 0,X
-  STA 0,X
-  LDA #0
-  SBC 1,X
-  STA 1,X
-  RTS
+  BRA umul2_10c
 

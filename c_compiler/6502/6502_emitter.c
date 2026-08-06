@@ -179,6 +179,11 @@ typedef struct {
 typedef struct {
   PullRegisterMatch pulled;
   TargetInstruction* increment;
+} PullAndDropMatch;
+
+typedef struct {
+  PullRegisterMatch pulled;
+  TargetInstruction* increment;
   TargetInstruction* address;
   TargetInstruction* push_result;
   TargetInstruction* push_address;
@@ -286,6 +291,36 @@ static bool FindPullRegisterMatch(W65C02Emitter* emitter,
   TargetInstruction* candidate = inst;
   for (int i = 0; candidate != NULL && i < 3; i++) {
     if (MatchPullRegister(emitter, candidate, match)) {
+      return true;
+    }
+    candidate = PreviousPrintable(candidate);
+  }
+  return false;
+}
+
+static bool MatchPullAndDrop(W65C02Emitter* emitter, TargetInstruction* pull,
+                             PullAndDropMatch* match) {
+  if (compiler->optimize_for_size) {
+    return false;
+  }
+  PullRegisterMatch pulled;
+  if (!MatchPullRegister(emitter, pull, &pulled)) {
+    return false;
+  }
+  TargetInstruction* increment = NextPrintable(pulled.store_high);
+  if (StackIncrementSize(emitter, increment) != 2) {
+    return false;
+  }
+  *match = (PullAndDropMatch){pulled, increment};
+  return true;
+}
+
+static bool FindPullAndDropMatch(W65C02Emitter* emitter,
+                                 TargetInstruction* inst,
+                                 PullAndDropMatch* match) {
+  TargetInstruction* candidate = inst;
+  for (int i = 0; candidate != NULL && i < 4; i++) {
+    if (MatchPullAndDrop(emitter, candidate, match)) {
       return true;
     }
     candidate = PreviousPrintable(candidate);
@@ -691,6 +726,9 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
   W65C02Opcode opcode = (W65C02Opcode)inst->opcode;
   PullRegisterMatch pulled;
   bool has_pulled = FindPullRegisterMatch(emitter, inst, &pulled);
+  PullAndDropMatch pull_and_drop;
+  bool has_pull_and_drop =
+      FindPullAndDropMatch(emitter, inst, &pull_and_drop);
   ReplaceTopMatch replace_top;
   bool has_replace_top = FindReplaceTopMatch(emitter, inst, &replace_top);
   if (has_pulled &&
@@ -702,6 +740,10 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
        inst == replace_top.push_address)) {
     return;
   }
+  if (!has_replace_top && has_pull_and_drop &&
+      inst == pull_and_drop.increment) {
+    return;
+  }
   if (has_pulled && inst == pulled.pull) {
     const char* reg_name = W65C02RegisterAsString(
         (W65C02Register*)pulled.result->reg, 0, buf, sizeof(buf));
@@ -709,6 +751,10 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%-12s #%d\n", "lda", replace_top.drop_size);
       fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
       fprintf(fp, "\tjsr         __replace_top_reg2\n");
+    } else if (has_pull_and_drop &&
+               pull_and_drop.pulled.pull == inst) {
+      fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
+      fprintf(fp, "\tjsr         __pullreg2_drop2\n");
     } else {
       fprintf(fp, "\t%-12s #%s\n", "ldx", reg_name);
       fprintf(fp, "\tjsr         __pullreg2\n");

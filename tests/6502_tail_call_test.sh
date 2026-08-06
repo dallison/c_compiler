@@ -273,10 +273,17 @@ for target in 6502 65c02; do
   assembly="$WORK/${target}_stack_replace.s"
   "$DAVECC" -target "$target" -S -std=c++20 \
     "$STACK_REPLACE_SOURCE" -o "$assembly"
-  if ! grep -Eq 'jsr[[:space:]]+__pullreg2' "$assembly" ||
+  if ! grep -Eq 'jsr[[:space:]]+__pullreg2_drop2' "$assembly" ||
      ! grep -Eq 'jsr[[:space:]]+__replace_top_reg2' "$assembly" ||
      ! grep -Eq 'jsr[[:space:]]+__var_addr_push_i[0-9]+' "$assembly"; then
     echo "$target: struct-result stack operations were not combined" >&2
+    exit 1
+  fi
+  if awk 'previous ~ /jsr[[:space:]]+__pullreg2$/ &&
+          /jsr[[:space:]]+__incsp2$/ {found=1}
+          NF {previous=$0}
+          END {exit found ? 0 : 1}' "$assembly"; then
+    echo "$target: pull-result and argument-drop calls were not fused" >&2
     exit 1
   fi
   stack_main=$(function_body main "$assembly")

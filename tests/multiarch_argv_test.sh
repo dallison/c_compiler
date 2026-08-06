@@ -31,11 +31,11 @@ int main(int argc, char** argv) {
   if (argv[0] == 0 || argv[0][0] == '\0') {
     return 11;
   }
-  if (strcmp(argv[1], "50") != 0 || strcmp(argv[2], "-d") != 0 ||
+  if (strcmp(argv[1], "10") != 0 || strcmp(argv[2], "-d") != 0 ||
       strcmp(argv[3], "beta") != 0) {
     return 12;
   }
-  if (atoi(argv[1]) != 50) {
+  if (atoi(argv[1]) != 10) {
     return 14;
   }
   argv[3][0] = 'B';
@@ -59,9 +59,9 @@ run_case() {
     -isystem "$ROOT/libc/include" \
     "$WORK/argv.c" "$libc" -o "$exe"
   if [[ "$interpret" == yes ]]; then
-    "$runner" -i "$exe" 50 -d beta
+    "$runner" -i "$exe" 10 -d beta
   else
-    "$runner" "$exe" 50 -d beta
+    "$runner" "$exe" 10 -d beta
   fi
 }
 
@@ -71,7 +71,7 @@ run_6502_case() {
 
   "$DAVECC" -target "$target" -O0 -static -isystem "$ROOT/libc/include" \
     "$WORK/argv.c" "$LIBC_65" -o "$exe"
-  "$INTERP_65" -rom "$ROM_65" "$exe" 50 -d beta
+  "$INTERP_65" -rom "$ROM_65" "$exe" 10 -d beta
 }
 
 cat > "$WORK/embedded_cpp.cpp" <<'SRC'

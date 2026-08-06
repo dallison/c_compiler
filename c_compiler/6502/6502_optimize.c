@@ -8,6 +8,7 @@
 
 #include "6502_optimize.h"
 #include "6502_codegen.h"
+#include "compiler.h"
 #include "target_basic_block.h"
 #include <assert.h>
 
@@ -1285,6 +1286,135 @@ static void RemoveZeroPageStoreReloads(W65C02Generator* g) {
   }
 }
 
+static bool SamePhysicalPointerRegister(TargetInstruction* lhs,
+                                        TargetInstruction* rhs) {
+  return lhs != NULL && rhs != NULL && lhs->reg != NULL && rhs->reg != NULL &&
+         RegisterByteAddress(lhs, 0) == RegisterByteAddress(rhs, 0) &&
+         RegisterByteAddress(lhs, 1) == RegisterByteAddress(rhs, 1);
+}
+
+// Repeating a one-byte copy is idempotent even when its pointers alias.
+// Repeating a small zero operation is always idempotent. Register allocation
+// can expose these patterns by assigning distinct address temporaries to the
+// same physical pointer registers.
+static void RemoveRepeatedSmallMemoryOperations(W65C02Generator* g) {
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* next =
+          inst == block->end_code ? NULL : TargetNext(inst);
+      TargetInstruction* prev = PreviousPostAllocationInstruction(inst);
+      bool repeated_copy =
+          TargetOpcodeEq(inst->opcode, W65C02_OP(copymem1)) &&
+          TargetIntValue(inst->operand[2]) == 1 && prev != NULL &&
+          prev->block == block &&
+          TargetOpcodeEq(prev->opcode, W65C02_OP(copymem1)) &&
+          TargetIntValue(prev->operand[2]) == 1 &&
+          SamePhysicalPointerRegister(prev->operand[0], inst->operand[0]) &&
+          SamePhysicalPointerRegister(prev->operand[1], inst->operand[1]);
+      bool repeated_zero =
+          TargetOpcodeEq(inst->opcode, W65C02_OP(zeromem1)) &&
+          TargetIntValue(inst->operand[1]) <= 2 && prev != NULL &&
+          prev->block == block &&
+          TargetOpcodeEq(prev->opcode, W65C02_OP(zeromem1)) &&
+          TargetIntValue(prev->operand[1]) ==
+              TargetIntValue(inst->operand[1]) &&
+          SamePhysicalPointerRegister(prev->operand[0], inst->operand[0]);
+      if (repeated_copy || repeated_zero) {
+        TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+      }
+      inst = next;
+    }
+  }
+}
+
+static TargetInstruction* SmallMemoryConstant(W65C02Generator* g,
+                                               int value) {
+  TargetInstruction* constant =
+      TargetGetIntConstant(&g->base, NULL, kTargetType8Bit, value);
+  SetAddrMode(constant, kAddrModeImmediate);
+  return constant;
+}
+
+static void InsertSmallMemoryInstruction(W65C02Generator* g,
+                                         TargetBasicBlock* block,
+                                         TargetInstruction* before,
+                                         W65C02Opcode opcode,
+                                         TargetInstruction* operand,
+                                         TargetInstruction* offset,
+                                         AddressingMode mode) {
+  TargetInstruction* inserted =
+      operand == NULL
+          ? TargetNewInstruction((TargetOpcode)opcode)
+          : offset == NULL
+                ? TargetNewInstruction1((TargetOpcode)opcode, operand)
+                : TargetNewInstruction2((TargetOpcode)opcode, operand, offset);
+  SetAddrMode(inserted, mode);
+  TargetBasicBlockEmitBefore(&g->base, block, inserted, before);
+}
+
+// Inline one-byte operations when they are both smaller and faster than the
+// descriptor helpers. At -O1 and above, also inline two-byte operations unless
+// -Os requested the smaller shared helper. 65C02 can use (zp) for byte zero;
+// NMOS 6502 uses the equivalent (zp),Y form.
+static void InlineSmallMemoryOperations(W65C02Generator* g) {
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;) {
+      TargetInstruction* next =
+          inst == block->end_code ? NULL : TargetNext(inst);
+      bool is_copy = TargetOpcodeEq(inst->opcode, W65C02_OP(copymem1));
+      bool is_zero = TargetOpcodeEq(inst->opcode, W65C02_OP(zeromem1));
+      int size = is_copy ? (int)TargetIntValue(inst->operand[2])
+                         : is_zero ? (int)TargetIntValue(inst->operand[1]) : 0;
+      bool inline_one =
+          size == 1 &&
+          (!is_zero || Is65c02() || !compiler->optimize_for_size);
+      bool inline_two =
+          size == 2 && OptLevel1() && !compiler->optimize_for_size;
+      if ((is_copy || is_zero) && (inline_one || inline_two)) {
+        TargetInstruction* zero = SmallMemoryConstant(g, 0);
+        TargetInstruction* one =
+            size == 2 ? SmallMemoryConstant(g, 1) : NULL;
+        TargetInstruction* dest = inst->operand[0];
+        TargetInstruction* src = is_copy ? inst->operand[1] : NULL;
+        AddressingMode first_mode =
+            Is65c02() ? kAddrModeIndirect : kAddrModeIndirectIndexed;
+
+        if (is_zero) {
+          InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(lda), zero,
+                                       NULL, kAddrModeImmediate);
+        }
+        if (!Is65c02()) {
+          InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(ldy), zero,
+                                       NULL, kAddrModeImmediate);
+        }
+        if (is_copy) {
+          InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(lda), src,
+                                       zero, first_mode);
+        }
+        InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(sta), dest,
+                                     zero, first_mode);
+
+        if (size == 2) {
+          InsertSmallMemoryInstruction(
+              g, block, inst, Is65c02() ? W65C02_OP(ldy) : W65C02_OP(iny),
+              Is65c02() ? one : NULL, NULL,
+              Is65c02() ? kAddrModeImmediate : kAddrModeImplied);
+          if (is_copy) {
+            InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(lda), src,
+                                         one, kAddrModeIndirectIndexed);
+          }
+          InsertSmallMemoryInstruction(g, block, inst, W65C02_OP(sta), dest,
+                                       one, kAddrModeIndirectIndexed);
+        }
+        TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+      }
+      inst = next;
+    }
+  }
+}
+
 static bool IsImmediateY(TargetInstruction* inst, int value) {
   return inst != NULL && TargetOpcodeEq(inst->opcode, W65C02_OP(ldy)) &&
          GetAddrMode(inst) == kAddrModeImmediate &&
@@ -1542,6 +1672,8 @@ void W65C02CombineIndirectCopies(W65C02Generator* g) {
     inst->uses = (int)inst->users.length;
   }
 
+  RemoveRepeatedSmallMemoryOperations(g);
+  InlineSmallMemoryOperations(g);
   RemoveRepeatedZeroPageStores(g);
   RemoveZeroPageStoreReloads(g);
 
