@@ -14,7 +14,7 @@ struct __jmp_buf {
   long regs[32];
 };
 #elif defined(__pcode__)
-#elif defined(__W65C02__)
+#elif defined(__6502__)
 struct __jmp_buf {
   char b[6];
   int i[12];

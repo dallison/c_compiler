@@ -3966,15 +3966,11 @@ static void CompareSignedInteger(W65C02Generator* g,
 // Branches to target if lhs <= rhs (signed).
 static void CompareSignedLessOrEqual(W65C02Generator* g, IRNode* lhs_node,
                                      IRNode* rhs_node, IRNode* target_node) {
-  TargetInstruction* value1 = GetAddress(g, lhs_node, true);
-  TargetInstruction* value2 = GetAddress(g, rhs_node, true);
-  AddReloadPoint(g, value1);
-  AddReloadPoint(g, value2);
-  CompareSignedSubtract(g, value1, value2, Sizeof(lhs_node->type));
-  TargetInstruction* bra = EmitBranch(g, W65C02_OP(bmi), target_node);
-  bra->flags |= k6502InstIsCondBranch;
-  bra = EmitBranch(g, W65C02_OP(beq), target_node);
-  bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
+  // lhs <= rhs is equivalent to rhs >= lhs.  Reversing the operands lets the
+  // signed subtraction's N/V result decide the whole relation.  Testing Z
+  // after a multi-byte subtraction is incorrect because it only describes
+  // the most-significant byte.
+  CompareSignedInteger(g, rhs_node, lhs_node, target_node, false);
 }
 
 // If the branch comes from a comparison node we combine the comparison
@@ -7177,37 +7173,7 @@ static void CompareSignedLessOrEqualExpression(W65C02Generator* g, IRNode* lhs,
                                                IRNode* rhs,
                                                TargetInstruction* dest,
                                                int size) {
-  TargetInstruction* value1 = GetAddress(g, lhs, true);
-  TargetInstruction* value2 = GetAddress(g, rhs, true);
-  AddReloadPoint(g, value1);
-  AddReloadPoint(g, value2);
-  TargetInstruction* false_label =
-      NewInstruction(W65C02_OP(label), kAddrModeImplied);
-  TargetInstruction* true_label =
-      NewInstruction(W65C02_OP(label), kAddrModeImplied);
-  TargetInstruction* end_label =
-      NewInstruction(W65C02_OP(label), kAddrModeImplied);
-  ldxi(g, 0);
-  CompareSignedSubtract(g, value1, value2, size);
-  EmitResolvedBranch(g, W65C02_OP(bmi), true_label);
-  EmitResolvedBranch(g, W65C02_OP(beq), true_label);
-  Emit(g, false_label);
-  if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    txa(g);
-    sta(g, dest, 0);
-  } else {
-    stx(g, dest, 0);
-  }
-  EmitResolvedBranch(g, W65C02_OP(bra), end_label);
-  Emit(g, true_label);
-  inx(g);
-  if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    txa(g);
-    sta(g, dest, 0);
-  } else {
-    stx(g, dest, 0);
-  }
-  Emit(g, end_label);
+  CompareSignedIntegerExpression(g, rhs, lhs, dest, size, false);
 }
 
 

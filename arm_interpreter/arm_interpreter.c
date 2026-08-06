@@ -1854,14 +1854,35 @@ static uint64_t ARMInterpreterInitialSp(ARMInterpreter* interpreter) {
 static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
                                int argc, char** argv, uint64_t entry_address,
                                bool is_static_link) {
+  (void)loader;
+  (void)entry_address;
+  (void)is_static_link;
   WriteReg(interpreter, 0, (uint64_t)(uint32_t)argc);
-  if (!is_static_link) {
-    WriteReg(interpreter, 1, entry_address);
-  } else if (argc > 0 && argv != NULL) {
+  if (argc > 0 && argv != NULL) {
+    const size_t argument_space = 4096;
+    if ((size_t)argc >= argument_space / sizeof(uint32_t)) {
+      goto invalid_args;
+    }
+    size_t string_bytes = 0;
+    for (int i = 0; i < argc; ++i) {
+      size_t len = strlen(argv[i]) + 1;
+      if (len > argument_space - string_bytes) {
+        goto invalid_args;
+      }
+      string_bytes += len;
+    }
+    size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint32_t);
+    if (string_bytes + vector_bytes + 15 > argument_space) {
+      goto invalid_args;
+    }
+
     uint64_t guest_top =
         ((uint64_t)interpreter->stack_guest_base + ARM_STACK_SIZE) & ~0x7ull;
     uint64_t p = guest_top;
     uint32_t* guest_ptrs = malloc((size_t)(argc + 1) * sizeof(uint32_t));
+    if (guest_ptrs == NULL) {
+      goto invalid_args;
+    }
     for (int i = 0; i < argc; i++) {
       size_t len = strlen(argv[i]) + 1;
       p -= len;
@@ -1883,6 +1904,11 @@ static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
   } else {
     WriteReg(interpreter, 1, 0);
   }
+  return;
+
+invalid_args:
+  WriteReg(interpreter, 0, 0);
+  WriteReg(interpreter, 1, 0);
 }
 
 void ARMInterpreterInitForThread(

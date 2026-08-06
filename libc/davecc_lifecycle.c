@@ -20,7 +20,7 @@ extern DaveCCInitFiniFn __init_array_end[];
 extern DaveCCInitFiniFn __fini_array_start[];
 extern DaveCCInitFiniFn __fini_array_end[];
 
-#if !defined(__W65C02__)
+#if !defined(__6502__)
 void __davecc_tls_thread_fini(void) __attribute__((weak));
 #endif
 void __cxa_finalize(void* dso);
@@ -95,7 +95,7 @@ void __davecc_run_fini(void) {
     return;
   }
   __davecc_fini_done = 1;
-#if !defined(__W65C02__)
+#if !defined(__6502__)
   if (__davecc_tls_thread_fini != NULL) {
     __davecc_tls_thread_fini();
   }

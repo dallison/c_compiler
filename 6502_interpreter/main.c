@@ -166,6 +166,12 @@ int main(int argc, char *argv[]) {
   bool trace = false;
   const char* rom_filename = NULL;
   for (int i = 1; i < argc; i++) {
+    // Once the executable is known, every remaining token belongs to the
+    // guest, including arguments such as "-d" that resemble interpreter
+    // options.
+    if (file != NULL) {
+      continue;
+    }
     if (argv[i][0] == '-') {
       if (strcmp(argv[i], "-debug") == 0) {
         debug = true;

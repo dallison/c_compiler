@@ -45,7 +45,7 @@
 #define NULL ((void*)0)
 
 #ifndef __FPOS_T
-#if defined(__W65C02__)
+#if defined(__6502__)
 typedef int fpos_t;
 #else
 typedef long fpos_t;
@@ -54,7 +54,7 @@ typedef long fpos_t;
 #endif
 
 #ifndef __SIZE_T
-#if defined(__W65C02__)
+#if defined(__6502__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -63,7 +63,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__W65C02__)
+#if defined(__6502__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;
@@ -94,7 +94,7 @@ typedef struct FILE {
 #define _IONBF 3        // No buffering.
 
 // Default buffer size.
-#if defined(__W65C02__)
+#if defined(__6502__)
 #define BUFSIZE 64
 #else
 #define BUFSIZE 4096
@@ -102,7 +102,7 @@ typedef struct FILE {
 #define BUFSIZ BUFSIZE
 
 #define FOPEN_MAX 0
-#if defined(__W65C02__)
+#if defined(__6502__)
 #define FILENAME_MAX 16
 #else
 #define FILENAME_MAX 256
@@ -122,7 +122,7 @@ extern FILE* stderr;
 extern FILE* __all_files;
 extern FILE* __last_file;
 
-#if defined(__W65C02__)
+#if defined(__6502__)
 typedef char mode_t;
 typedef char char_t;
 #else

@@ -141,7 +141,7 @@
 #define SYS_HARDWARE_CONCURRENCY 29
 #define SYS_REALTIME_TIME 30
 
-#elif defined(__W65C02__)
+#elif defined(__6502__)
 #define SYS_EXIT 1
 #define SYS_EXIT_CLEAN 22
 #define SYS_OPEN 2
@@ -180,7 +180,7 @@ extern long syscall(int n, ...);
 extern long syscall(int n, ...);
 #elif defined(__arm__)
 extern long syscall(int n, ...);
-#elif defined(__W65C02__)
+#elif defined(__6502__)
 extern long syscall(int n, ...);
 #else
 #error "Unknown architecture"

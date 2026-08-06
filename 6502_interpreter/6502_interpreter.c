@@ -29,6 +29,9 @@
 #define W65C02_instruction_def(x) static void Interpret_##x(W65C02Interpreter* interpreter)
 #define W65C02_instruction(x) Interpret_##x
 
+#define W65C02_GUEST_ARGV_START 0x400
+#define W65C02_GUEST_ARGV_END 0x800
+
 typedef struct {
   void (*func)(W65C02Interpreter*);
   int bytes;
@@ -1177,6 +1180,48 @@ void W65C02Reset(W65C02Interpreter* interpreter) {
 
 #define VECTOR_RAM 0xfd00
 
+static bool W65C02CopyGuestArgv(W65C02Interpreter* interpreter, int argc,
+                                char** argv, int first_arg,
+                                int* guest_argc_out) {
+  if (argv == NULL || first_arg <= 0 || first_arg > argc) {
+    return false;
+  }
+
+  int guest_argc = argc - first_arg + 1;
+  size_t pointer_bytes = (size_t)(guest_argc + 1) * 2;
+  size_t argv_capacity = W65C02_GUEST_ARGV_END - W65C02_GUEST_ARGV_START;
+  if (pointer_bytes > argv_capacity) {
+    return false;
+  }
+  size_t string_bytes = 0;
+  for (int i = first_arg - 1; i < argc; ++i) {
+    size_t len = strlen(argv[i]) + 1;
+    if (len > argv_capacity - pointer_bytes - string_bytes) {
+      return false;
+    }
+    string_bytes += len;
+  }
+
+  uint16_t string_address =
+      (uint16_t)(W65C02_GUEST_ARGV_START + pointer_bytes);
+  for (int i = 0; i < guest_argc; ++i) {
+    int host_index = first_arg - 1 + i;
+    size_t len = strlen(argv[host_index]) + 1;
+    uint16_t pointer_address =
+        (uint16_t)(W65C02_GUEST_ARGV_START + i * 2);
+    interpreter->memory[pointer_address] = string_address & 0xff;
+    interpreter->memory[pointer_address + 1] = string_address >> 8;
+    memcpy(interpreter->memory + string_address, argv[host_index], len);
+    string_address = (uint16_t)(string_address + len);
+  }
+  uint16_t terminator =
+      (uint16_t)(W65C02_GUEST_ARGV_START + guest_argc * 2);
+  interpreter->memory[terminator] = 0;
+  interpreter->memory[terminator + 1] = 0;
+  *guest_argc_out = guest_argc;
+  return true;
+}
+
 int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
                          uint64_t entry_address, int argc, char** argv,
                          int first_arg) {
@@ -1210,22 +1255,6 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
   interpreter->enter_func = LoaderLookupSymbol(loader, "__enter");
   interpreter->enter_leaf_func = LoaderLookupSymbol(loader, "__enter_leaf");
 
-  // Copy args into 0x200.
-  // 0x200..0x200+num_args: pointers to the argument string
-  // 0x200+num_args...: copies of the command args.
-  int num_args = argc - first_arg + 1;
-  int16_t* argcp = (int16_t*)&interpreter->memory[0x200];    // First arg pointer.
-  char* argp = (char*)(&interpreter->memory[0x200] + 2 * num_args);  // First arg value.
-  
-  // Copy in argv[0].
-  *argcp++ = (int16_t)(strcpy(argp, argv[0]) - (char*)interpreter->memory);
-  argp += strlen(argv[0]) + 1;
-  
-  // Rest of args.
-  for (int i = first_arg; i < argc; i++) {
-    *argcp++ = (int16_t)(strcpy(argp, argv[i]) - (char*)interpreter->memory);
-    argp += strlen(argv[i]) + 1;
-  }
   // Copy the memory mapped in from the file into the interpreter's
   // memory.
   int memtop = 0;
@@ -1240,6 +1269,14 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
         memtop = top;
       }
     }
+  }
+  // Page 4 through the start of the linked program is reserved for argv.
+  // Populate it after loading sections so argv cannot be overwritten, and
+  // include the executable path as argv[0] plus the required null sentinel.
+  int num_args = 0;
+  if (!W65C02CopyGuestArgv(interpreter, argc, argv, first_arg, &num_args)) {
+    fprintf(stderr, "Program arguments exceed 6502 guest argv space\n");
+    return 1;
   }
   // Need some space for the stack.
   if (memtop > 0xbe00) {

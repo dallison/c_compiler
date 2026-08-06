@@ -1394,11 +1394,9 @@ static uint64_t SetupGuestMainArgs(AARCH64Interpreter* interpreter, int argc,
                                    bool is_static_link) {
   uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
   uint64_t stack_top = (stack_base + AARCH64_STACK_SIZE) & ~0xFULL;
+  (void)entry_address;
+  (void)is_static_link;
   WriteX(interpreter, 0, (uint64_t)argc);
-  if (!is_static_link) {
-    WriteX(interpreter, 1, entry_address);
-    return stack_top;
-  }
   if (argc <= 0 || argv == NULL) {
     WriteX(interpreter, 1, 0);
     return stack_top;

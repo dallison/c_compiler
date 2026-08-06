@@ -18,7 +18,7 @@ typedef int wchar_t;
 #define WHAR_MAX INT_MAX
 
 #ifndef __SIZE_T
-#if defined(__W65C02__)
+#if defined(__6502__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
