@@ -21,6 +21,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <mdspan>
 #include <mutex>
 #include <new>

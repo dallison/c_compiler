@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <memory_resource>
 #include <cstddef>
 #include <utility>
 
@@ -1151,6 +1152,13 @@ typename set<Key, Compare, Allocator>::size_type erase_if(
   }
   return old_size - c.size();
 }
+
+namespace pmr {
+
+template <class Key, class Compare = less<Key>>
+using set = std::set<Key, Compare, polymorphic_allocator<Key>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

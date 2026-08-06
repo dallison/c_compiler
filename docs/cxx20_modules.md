@@ -56,9 +56,10 @@ matching object.
 The verified profile exports:
 
 - Core utilities: `any`, `array`, `compare`, `concepts`, `exception`,
-  `initializer_list`, `iterator`, `memory`, `new`, `optional`, `ratio`,
-  `source_location`, `span`, `stdexcept`, `string`, `string_view`,
-  `system_error`, `tuple`, `type_traits`, `utility`, and `variant`.
+  `initializer_list`, `iterator`, `memory`, `memory_resource`, `new`,
+  `optional`, `ratio`, `source_location`, `span`, `stdexcept`, `string`,
+  `string_view`, `system_error`, `tuple`, `type_traits`, `utility`, and
+  `variant`.
 - Containers and adaptors: `deque`, `list`, `map`, `queue`, `set`, `stack`,
   `unordered_map`, `unordered_set`, and `vector`.
 - Concurrency and time: `atomic`, `barrier`, `chrono`, `condition_variable`,

@@ -57,6 +57,7 @@ filegroup(
         "libc/include/list",
         "libc/include/map",
         "libc/include/memory",
+        "libc/include/memory_resource",
         "libc/include/mdspan",
         "libc/include/mutex",
         "libc/include/new",

@@ -44,5 +44,16 @@ int main() {
     return 6;
   }
 
+  std::pmr::vector<int> polymorphic_values;
+  polymorphic_values.push_back(9);
+  if (polymorphic_values[0] != 9) {
+    return 7;
+  }
+  std::pmr::string polymorphic_text(
+      "module-visible polymorphic string storage");
+  if (polymorphic_text[0] != 'm') {
+    return 8;
+  }
+
   return 0;
 }

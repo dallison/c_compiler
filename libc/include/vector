@@ -18,6 +18,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <stddef.h>
 #ifdef __cpp_exceptions
@@ -498,7 +499,7 @@ class vector {
   }
 
  public:
-  vector() noexcept { __reset_empty(); }
+  vector() noexcept : __alloc_(Allocator()) { __reset_empty(); }
 
   explicit vector(const Allocator& alloc) noexcept : __alloc_(alloc) {
     __reset_empty();
@@ -935,6 +936,13 @@ template <class T, class Allocator>
 void swap(vector<T, Allocator>& a, vector<T, Allocator>& b) noexcept {
   a.swap(b);
 }
+
+namespace pmr {
+
+template <class T>
+using vector = std::vector<T, polymorphic_allocator<T>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

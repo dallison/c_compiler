@@ -67,10 +67,11 @@ simplified implicit move.
   - `jthread` and stop tokens.
   - Semaphores, latches, barriers, and condition variables.
   - Document intentionally unsupported embedded-target profiles.
-- [ ] Add shared ownership and polymorphic allocation.
+- [x] Add shared ownership and polymorphic allocation.
   - `shared_ptr`, `weak_ptr`, and `enable_shared_from_this`.
   - `memory_resource` and the core PMR aliases.
-- [ ] Implement `<system_error>` and `<filesystem>`.
+- [x] Implement `<system_error>`.
+- [ ] Implement `<filesystem>`.
 - [ ] Complete `<chrono>`.
   - Calendar and civil-time types.
   - Time-zone support where the target profile permits it.
@@ -155,7 +156,7 @@ simplified implicit move.
   - Unicode printing and `vprint_unicode`.
   - Filesystem, full calendar/time-zone, and other deferred standard formatters.
   - Wide-character and UTF-8 contexts if those are in the supported profile.
-- [ ] Implement `<expected>`.
+- [x] Implement `<expected>`.
 - [ ] Implement `<flat_map>` and `<flat_set>`.
 - [ ] Implement `move_only_function`, `bind_back`, and remaining C++23
       functional utilities.

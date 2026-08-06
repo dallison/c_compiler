@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <stddef.h>
 #ifdef __cpp_exceptions
@@ -977,6 +978,13 @@ template <class T, class Allocator>
 void swap(deque<T, Allocator>& a, deque<T, Allocator>& b) noexcept {
   a.swap(b);
 }
+
+namespace pmr {
+
+template <class T>
+using deque = std::deque<T, polymorphic_allocator<T>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

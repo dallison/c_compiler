@@ -1,0 +1,242 @@
+//
+//  memory_resource
+//  c_compiler
+//
+//  C++17 polymorphic memory-resource support.
+//
+
+#ifndef __davecc_memory_resource__
+#define __davecc_memory_resource__
+
+#include <__exception_support>
+#include <cstddef>
+#include <memory>
+#include <new>
+#include <stdint.h>
+#include <type_traits>
+#include <utility>
+
+#define __cpp_lib_memory_resource 201603L
+
+namespace std {
+namespace pmr {
+
+class memory_resource {
+ public:
+  virtual ~memory_resource() = default;
+
+  void* allocate(size_t bytes,
+                 size_t alignment = alignof(long double)) {
+    return do_allocate(bytes, alignment);
+  }
+
+  void deallocate(void* ptr, size_t bytes,
+                  size_t alignment = alignof(long double)) {
+    do_deallocate(ptr, bytes, alignment);
+  }
+
+  bool is_equal(const memory_resource& other) const noexcept {
+    return do_is_equal(other);
+  }
+
+ protected:
+  virtual void* do_allocate(size_t bytes, size_t alignment) = 0;
+  virtual void do_deallocate(void* ptr, size_t bytes,
+                             size_t alignment) = 0;
+  virtual bool do_is_equal(const memory_resource& other) const noexcept = 0;
+};
+
+inline bool operator==(const memory_resource& left,
+                       const memory_resource& right) noexcept {
+  return &left == &right || left.is_equal(right);
+}
+
+inline bool operator!=(const memory_resource& left,
+                       const memory_resource& right) noexcept {
+  return !(left == right);
+}
+
+namespace __memory_resource_detail {
+
+void* aligned_allocate(size_t bytes, size_t alignment);
+void aligned_deallocate(void* ptr) noexcept;
+
+class new_delete_resource_impl final : public memory_resource {
+ protected:
+  void* do_allocate(size_t bytes, size_t alignment) override {
+    if (alignment <= alignof(long double)) {
+      return ::operator new(bytes);
+    }
+    return aligned_allocate(bytes, alignment);
+  }
+
+  void do_deallocate(void* ptr, size_t, size_t alignment) override {
+    if (ptr != nullptr) {
+      if (alignment <= alignof(long double)) {
+        ::operator delete(ptr);
+      } else {
+        aligned_deallocate(ptr);
+      }
+    }
+  }
+
+  bool do_is_equal(const memory_resource& other) const noexcept override {
+    return this == &other;
+  }
+};
+
+class null_resource_impl final : public memory_resource {
+ protected:
+  void* do_allocate(size_t, size_t) override {
+    __DAVECC_THROW(bad_alloc());
+    return nullptr;
+  }
+
+  void do_deallocate(void*, size_t, size_t) override {
+  }
+
+  bool do_is_equal(const memory_resource& other) const noexcept override {
+    return this == &other;
+  }
+};
+
+}  // namespace __memory_resource_detail
+
+memory_resource* new_delete_resource() noexcept;
+memory_resource* null_memory_resource() noexcept;
+memory_resource* set_default_resource(memory_resource* resource) noexcept;
+memory_resource* get_default_resource() noexcept;
+
+template <class T = byte>
+class polymorphic_allocator {
+ public:
+  using value_type = T;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using propagate_on_container_copy_assignment = false_type;
+  using propagate_on_container_move_assignment = false_type;
+  using propagate_on_container_swap = false_type;
+  using is_always_equal = false_type;
+
+  template <class U>
+  struct rebind {
+    using other = polymorphic_allocator<U>;
+  };
+
+  polymorphic_allocator() noexcept : resource_(get_default_resource()) {
+  }
+
+  polymorphic_allocator(memory_resource* resource) noexcept
+      : resource_(resource != nullptr ? resource : get_default_resource()) {
+  }
+
+  polymorphic_allocator(const polymorphic_allocator& other) noexcept
+      : resource_(other.resource_) {
+  }
+
+  template <class U>
+  polymorphic_allocator(const polymorphic_allocator<U>& other) noexcept
+      : resource_(other.resource()) {
+  }
+
+  polymorphic_allocator& operator=(const polymorphic_allocator&) = delete;
+
+  T* allocate(size_t count) {
+    return static_cast<T*>(
+        resource_->allocate(count * sizeof(T), alignof(T)));
+  }
+
+  void deallocate(T* ptr, size_t count) noexcept {
+    resource_->deallocate(ptr, count * sizeof(T), alignof(T));
+  }
+
+  void* allocate_bytes(size_t bytes,
+                       size_t alignment = alignof(long double)) {
+    return resource_->allocate(bytes, alignment);
+  }
+
+  void deallocate_bytes(void* ptr, size_t bytes,
+                        size_t alignment = alignof(long double)) {
+    resource_->deallocate(ptr, bytes, alignment);
+  }
+
+  template <class U>
+  U* allocate_object(size_t count = 1) {
+    return static_cast<U*>(
+        allocate_bytes(count * sizeof(U), alignof(U)));
+  }
+
+  template <class U>
+  void deallocate_object(U* ptr, size_t count = 1) {
+    deallocate_bytes(ptr, count * sizeof(U), alignof(U));
+  }
+
+  template <class U, class... Args>
+  void construct(U* ptr, Args&&... args) {
+    new (ptr) U(std::forward<Args>(args)...);
+  }
+
+  template <class U>
+  void destroy(U* ptr) {
+    ptr->~U();
+  }
+
+  template <class U, class... Args>
+  U* new_object(Args&&... args) {
+    U* ptr = this->template allocate_object<U>();
+#ifdef __cpp_exceptions
+    try {
+      construct(ptr, std::forward<Args>(args)...);
+    } catch (...) {
+      this->template deallocate_object<U>(ptr);
+      throw;
+    }
+#else
+    construct(ptr, std::forward<Args>(args)...);
+#endif
+    return ptr;
+  }
+
+  template <class U>
+  void delete_object(U* ptr) {
+    destroy(ptr);
+    this->template deallocate_object<U>(ptr);
+  }
+
+  size_t max_size() const noexcept {
+    return static_cast<size_t>(-1) / sizeof(T);
+  }
+
+  polymorphic_allocator select_on_container_copy_construction() const {
+    return polymorphic_allocator();
+  }
+
+  memory_resource* resource() const noexcept {
+    return resource_;
+  }
+
+ private:
+  template <class>
+  friend class polymorphic_allocator;
+
+  memory_resource* resource_;
+};
+
+template <class T, class U>
+inline bool operator==(const polymorphic_allocator<T>& left,
+                       const polymorphic_allocator<U>& right) noexcept {
+  return *left.resource() == *right.resource();
+}
+
+template <class T, class U>
+inline bool operator!=(const polymorphic_allocator<T>& left,
+                       const polymorphic_allocator<U>& right) noexcept {
+  return !(left == right);
+}
+
+}  // namespace pmr
+}  // namespace std
+
+#endif

@@ -19,6 +19,7 @@
 #include <compare>
 #include <cstddef>
 #include <memory>
+#include <memory_resource>
 #include <stdlib.h>
 #include <string.h>
 
@@ -103,26 +104,27 @@ class basic_string {
   }
 
  public:
-  basic_string() noexcept { __set_empty(); }
+  basic_string() noexcept : __alloc(Allocator()) { __set_empty(); }
 
-  basic_string(const CharT* s) {
+  basic_string(const CharT* s) : __alloc(Allocator()) {
     __set_empty();
     __assign_raw(s, traits_type::length(s));
   }
 
-  basic_string(const CharT* s, size_type n) {
+  basic_string(const CharT* s, size_type n) : __alloc(Allocator()) {
     __set_empty();
     __assign_raw(s, n);
   }
 
   // Construct from anything that views characters (notably basic_string_view).
   // Requires the complete view type at the point of instantiation.
-  explicit basic_string(basic_string_view<CharT, traits_type> sv) {
+  explicit basic_string(basic_string_view<CharT, traits_type> sv)
+      : __alloc(Allocator()) {
     __set_empty();
     __assign_raw(sv.data(), sv.size());
   }
 
-  basic_string(size_type n, CharT c) {
+  basic_string(size_type n, CharT c) : __alloc(Allocator()) {
     __set_empty();
     __reserve_for(n);
     if (n != 0) {
@@ -137,7 +139,8 @@ class basic_string {
     __assign_raw(other.__data, other.__size);
   }
 
-  basic_string(const basic_string& other, size_type pos, size_type n = npos) {
+  basic_string(const basic_string& other, size_type pos, size_type n = npos)
+      : __alloc(Allocator()) {
     __set_empty();
     if (pos > other.__size) {
       pos = other.__size;
@@ -440,6 +443,13 @@ class basic_string {
 };
 
 using string = basic_string<char>;
+
+namespace pmr {
+
+using string =
+    basic_string<char, char_traits<char>, polymorphic_allocator<char>>;
+
+}  // namespace pmr
 
 string to_string(int value);
 string to_string(unsigned int value);

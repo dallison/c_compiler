@@ -2132,6 +2132,9 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
       "\n");
   if (CompilerIsCXX()) {
     StringAppend(code,
+                 "extern \"C\" int __cxa_guard_acquire(unsigned long long*);\n"
+                 "extern \"C\" void __cxa_guard_release(unsigned long long*);\n"
+                 "extern \"C\" void __cxa_guard_abort(unsigned long long*);\n"
                  "extern \"C\" int __davecc_cxa_atexit(void*, void*, unsigned long, "
                  "unsigned long, int);\n"
                  "extern \"C\" void __davecc_tls_thread_init(void);\n"

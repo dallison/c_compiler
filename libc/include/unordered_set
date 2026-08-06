@@ -16,6 +16,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <memory_resource>
 #include <type_traits>
 #include <utility>
 
@@ -214,6 +215,15 @@ typename unordered_set<Key, Hash, KeyEqual, Allocator>::size_type erase_if(
   }
   return old_size - c.size();
 }
+
+namespace pmr {
+
+template <class Key, class Hash = hash<Key>,
+          class KeyEqual = equal_to<Key>>
+using unordered_set =
+    std::unordered_set<Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

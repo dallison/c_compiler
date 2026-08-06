@@ -18,6 +18,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <memory_resource>
 #include <utility>
 
 namespace std {
@@ -752,6 +753,13 @@ template <class T, class Allocator>
 void swap(list<T, Allocator>& left, list<T, Allocator>& right) noexcept {
   left.swap(right);
 }
+
+namespace pmr {
+
+template <class T>
+using list = std::list<T, polymorphic_allocator<T>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

@@ -87,6 +87,29 @@ struct __alloc_void {
 template <class T>
 using __void_t = typename __alloc_void<T>::type;
 
+struct allocator_arg_t {
+};
+
+inline constexpr allocator_arg_t allocator_arg = {};
+
+template <class T, class Allocator, class = void>
+struct uses_allocator : false_type {
+  using type = false_type;
+};
+
+template <class T, class Allocator>
+struct uses_allocator<T, Allocator,
+                      __void_t<typename T::allocator_type>>
+    : is_convertible<Allocator, typename T::allocator_type> {
+  using type =
+      typename is_convertible<Allocator, typename T::allocator_type>::type;
+};
+
+#if __cplusplus >= 201703L
+template <class T, class Allocator>
+constexpr bool uses_allocator_v = uses_allocator<T, Allocator>::value;
+#endif
+
 template <class T>
 static bool __alloc_traits_bool(T* value) {
   return false;

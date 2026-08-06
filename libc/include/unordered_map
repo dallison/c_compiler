@@ -16,6 +16,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <memory_resource>
 #ifdef __cpp_exceptions
 #include <stdexcept>
 #endif
@@ -284,6 +285,16 @@ typename unordered_map<Key, T, Hash, KeyEqual, Allocator>::size_type erase_if(
   }
   return old_size - c.size();
 }
+
+namespace pmr {
+
+template <class Key, class T, class Hash = hash<Key>,
+          class KeyEqual = equal_to<Key>>
+using unordered_map =
+    std::unordered_map<Key, T, Hash, KeyEqual,
+                       polymorphic_allocator<pair<const Key, T>>>;
+
+}  // namespace pmr
 
 }  // namespace std
 

@@ -120,6 +120,7 @@ run_coroutine_target() {
   done
 }
 
+run_coroutine_target 6502 "$INTERP_65" plain "$ROM_65"
 run_coroutine_target 65c02 "$INTERP_65" plain "$ROM_65"
 run_coroutine_target riscv "$INTERP_RV" plain ""
 run_coroutine_target aarch64 "$INTERP_A64" integrated ""

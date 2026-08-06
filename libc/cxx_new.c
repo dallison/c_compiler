@@ -8,8 +8,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-void* __davecc_operator_new(size_t size) asm("_Znwm");
-void* __davecc_operator_new_array(size_t size) asm("_Znam");
+void* __davecc_operator_new(unsigned long size) asm("_Znwm");
+void* __davecc_operator_new_array(unsigned long size) asm("_Znam");
 void* __davecc_operator_new32(unsigned int size) asm("_Znwj");
 void* __davecc_operator_new_array32(unsigned int size) asm("_Znaj");
 void __davecc_operator_delete(void* ptr) asm("_ZdlPv");
@@ -19,12 +19,19 @@ static void* CXXAllocate(size_t size) {
   return malloc(size == 0 ? 1 : size);
 }
 
-void* __davecc_operator_new(size_t size) {
-  return CXXAllocate(size);
+static void* CXXAllocateLong(unsigned long size) {
+  if (size > (unsigned long)(size_t)-1) {
+    return NULL;
+  }
+  return CXXAllocate((size_t)size);
 }
 
-void* __davecc_operator_new_array(size_t size) {
-  return CXXAllocate(size);
+void* __davecc_operator_new(unsigned long size) {
+  return CXXAllocateLong(size);
+}
+
+void* __davecc_operator_new_array(unsigned long size) {
+  return CXXAllocateLong(size);
 }
 
 void* __davecc_operator_new32(unsigned int size) {
