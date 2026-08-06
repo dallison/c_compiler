@@ -694,13 +694,53 @@ void PCodeInterpreterCall(PCodeInterpreter* interpreter, uint64_t fn) {
   PCodeInterpreterRestoreState(interpreter, &saved);
 }
 
+static bool CopyGuestArgv(PCodeInterpreter* interpreter, int argc, char** argv,
+                          uint64_t* guest_argv, uint64_t* argument_bottom) {
+  uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
+  uint64_t stack_top = (stack_base + P_CODE_STACK_SIZE) & ~0x7ULL;
+  *guest_argv = 0;
+  *argument_bottom = stack_top;
+  if (argc <= 0 || argv == NULL) {
+    return true;
+  }
+
+  size_t string_bytes = 0;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    if (len > P_CODE_STACK_SIZE - string_bytes) {
+      return false;
+    }
+    string_bytes += len;
+  }
+  if ((size_t)argc >= P_CODE_STACK_SIZE / sizeof(uint64_t)) {
+    return false;
+  }
+  size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
+  if (string_bytes + vector_bytes + 7 > P_CODE_STACK_SIZE) {
+    return false;
+  }
+
+  uint64_t string_address = stack_top - string_bytes;
+  uint64_t vector_address = (string_address - vector_bytes) & ~0x7ULL;
+  char* string_out = (char*)(uintptr_t)string_address;
+  uint64_t* pointer_out = (uint64_t*)(uintptr_t)vector_address;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy(string_out, argv[i], len);
+    pointer_out[i] = (uint64_t)(uintptr_t)string_out;
+    string_out += len;
+  }
+  pointer_out[argc] = 0;
+  *guest_argv = vector_address;
+  *argument_bottom = vector_address;
+  return true;
+}
+
 int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader,
                         uint64_t entry_address, int argc, char** argv) {
   if (interpreter->stack == NULL) {
     interpreter->stack = malloc(P_CODE_STACK_SIZE);
   }
-  interpreter->iregs[PCODE_SP_REG] =
-      (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
   interpreter->escape = EscapeHandler;
   interpreter->loader = loader;
   interpreter->running = true;
@@ -716,8 +756,18 @@ int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader,
   startup[2] = (uint32_t)(pcrel >> 32);
   startup[3] = PCODE_OP(esc) << 24 | P_CODE_ESC_PROGRAM_RETURN;
 
+  uint64_t guest_argv;
+  uint64_t argument_bottom;
+  if (!CopyGuestArgv(interpreter, argc, argv, &guest_argv, &argument_bottom)) {
+    argc = 0;
+    guest_argv = 0;
+    argument_bottom =
+        ((uint64_t)(uintptr_t)(interpreter->stack + P_CODE_STACK_SIZE)) &
+        ~0x7ULL;
+  }
+  iregs[PCODE_SP_REG] = (int64_t)argument_bottom;
   iregs[PCODE_SP_REG] -= 8;
-  WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)argv);
+  WriteU64((void*)iregs[PCODE_SP_REG], guest_argv);
   iregs[PCODE_SP_REG] -= 4;
   WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)argc);
 

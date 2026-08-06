@@ -347,6 +347,52 @@ static void DumpRegChanges(RISCVInterpreter* interpreter) {
   }
 }
 
+static uint64_t SetupGuestMainArgs(RISCVInterpreter* interpreter, int argc,
+                                   char** argv) {
+  uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
+  uint64_t stack_top = (stack_base + RISC_V_STACK_SIZE) & ~0xFULL;
+  interpreter->iregs[RISC_V_REG_a0] = argc;
+  if (argc <= 0 || argv == NULL) {
+    interpreter->iregs[RISC_V_REG_a1] = 0;
+    return stack_top;
+  }
+
+  size_t string_bytes = 0;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    if (len > RISC_V_STACK_SIZE - string_bytes) {
+      goto invalid_args;
+    }
+    string_bytes += len;
+  }
+  if ((size_t)argc >= RISC_V_STACK_SIZE / sizeof(uint64_t)) {
+    goto invalid_args;
+  }
+  size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
+  if (string_bytes + vector_bytes + 15 > RISC_V_STACK_SIZE) {
+    goto invalid_args;
+  }
+
+  uint64_t string_address = stack_top - string_bytes;
+  uint64_t guest_argv = (string_address - vector_bytes) & ~0xFULL;
+  char* string_out = (char*)(uintptr_t)string_address;
+  uint64_t* pointer_out = (uint64_t*)(uintptr_t)guest_argv;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy(string_out, argv[i], len);
+    pointer_out[i] = (uint64_t)(uintptr_t)string_out;
+    string_out += len;
+  }
+  pointer_out[argc] = 0;
+  interpreter->iregs[RISC_V_REG_a1] = (int64_t)guest_argv;
+  return guest_argv;
+
+invalid_args:
+  interpreter->iregs[RISC_V_REG_a0] = 0;
+  interpreter->iregs[RISC_V_REG_a1] = 0;
+  return stack_top;
+}
+
 void RISCVInterpreterInitForThread(
     RISCVInterpreter* interpreter, RISCVProcessRuntime* process,
     RISCVGuestThread* guest_thread, Loader* loader, uint64_t entry_address,
@@ -388,8 +434,6 @@ void RISCVInterpreterInitForThread(
   }
   interpreter->stack_guest_base =
       (uint64_t)(uintptr_t)interpreter->stack;
-  interpreter->iregs[RV_SP_REG] =
-      (int64_t)(interpreter->stack + RISC_V_STACK_SIZE);
   if (tls_block != NULL) {
     interpreter->tls_block = tls_block;
     interpreter->tls_block_size = tls_block_size;
@@ -421,10 +465,8 @@ void RISCVInterpreterInitForThread(
   interpreter->pc = (int64_t)startup;
   interpreter->running = true;
   interpreter->exit_code = 0;
-
-  // Move argc and argv into regs a0 and a1.
-  iregs[RV_INT_ARG_START] = argc;
-  iregs[RV_INT_ARG_START + 1] = (int64_t)argv;
+  uint64_t argument_bottom = SetupGuestMainArgs(interpreter, argc, argv);
+  iregs[RV_SP_REG] = (int64_t)(argument_bottom & ~0xFULL);
 
   if (kShowRegChanges) {
     interpreter->trace_regs = true;
@@ -438,6 +480,17 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
   RISCVInterpreterInitForThread(interpreter, NULL, NULL, loader,
                                 entry_address, argc, argv, NULL, NULL, 0,
                                 trace_regs, trace_instructions);
+}
+
+void RISCVInterpreterPrepareMain(RISCVInterpreter* interpreter,
+                                 uint64_t entry_address, int argc,
+                                 char** argv) {
+  interpreter->iregs[RISC_V_REG_ra] = (int64_t)entry_address;
+  interpreter->pc = (int64_t)interpreter->startup_code;
+  interpreter->running = true;
+  interpreter->exit_code = 0;
+  uint64_t argument_bottom = SetupGuestMainArgs(interpreter, argc, argv);
+  interpreter->iregs[RV_SP_REG] = (int64_t)(argument_bottom & ~0xFULL);
 }
 
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {

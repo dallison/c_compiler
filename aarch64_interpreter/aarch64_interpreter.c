@@ -1389,6 +1389,57 @@ void AARCH64InterpreterWriteX(AARCH64Interpreter* interpreter, int reg,
   WriteX(interpreter, reg, value);
 }
 
+static uint64_t SetupGuestMainArgs(AARCH64Interpreter* interpreter, int argc,
+                                   char** argv, uint64_t entry_address,
+                                   bool is_static_link) {
+  uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
+  uint64_t stack_top = (stack_base + AARCH64_STACK_SIZE) & ~0xFULL;
+  WriteX(interpreter, 0, (uint64_t)argc);
+  if (!is_static_link) {
+    WriteX(interpreter, 1, entry_address);
+    return stack_top;
+  }
+  if (argc <= 0 || argv == NULL) {
+    WriteX(interpreter, 1, 0);
+    return stack_top;
+  }
+
+  size_t string_bytes = 0;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    if (len > AARCH64_STACK_SIZE - string_bytes) {
+      goto invalid_args;
+    }
+    string_bytes += len;
+  }
+  if ((size_t)argc >= AARCH64_STACK_SIZE / sizeof(uint64_t)) {
+    goto invalid_args;
+  }
+  size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
+  if (string_bytes + vector_bytes + 15 > AARCH64_STACK_SIZE) {
+    goto invalid_args;
+  }
+
+  uint64_t string_address = stack_top - string_bytes;
+  uint64_t guest_argv = (string_address - vector_bytes) & ~0xFULL;
+  char* string_out = (char*)(uintptr_t)string_address;
+  uint64_t* pointer_out = (uint64_t*)(uintptr_t)guest_argv;
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy(string_out, argv[i], len);
+    pointer_out[i] = (uint64_t)(uintptr_t)string_out;
+    string_out += len;
+  }
+  pointer_out[argc] = 0;
+  WriteX(interpreter, 1, guest_argv);
+  return guest_argv;
+
+invalid_args:
+  WriteX(interpreter, 0, 0);
+  WriteX(interpreter, 1, 0);
+  return stack_top;
+}
+
 void AARCH64InterpreterInitForThread(
     AARCH64Interpreter* interpreter, AARCH64ProcessRuntime* process,
     AARCH64GuestThread* guest_thread, Loader* loader, uint64_t entry_address,
@@ -1410,9 +1461,6 @@ void AARCH64InterpreterInitForThread(
     interpreter->stack = malloc(AARCH64_STACK_SIZE);
     interpreter->owns_stack = true;
   }
-  interpreter->sp =
-      (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
-  interpreter->sp &= ~0xFULL;
   if (tp_base != 0) {
     interpreter->tp_base = tp_base;
     interpreter->tls_block_size = tls_block_size;
@@ -1420,14 +1468,12 @@ void AARCH64InterpreterInitForThread(
     interpreter->tp_base = loader->tls.tp_base;
     interpreter->tls_block_size = loader->tls.block_size;
   }
+  uint64_t argument_bottom =
+      SetupGuestMainArgs(interpreter, argc, argv, entry_address,
+                         loader->is_static);
+  interpreter->sp = argument_bottom & ~0xFULL;
   interpreter->pc = entry_address;
   interpreter->running = entry_address != 0;
-  WriteX(interpreter, 0, (uint64_t)argc);
-  if (!loader->is_static) {
-    WriteX(interpreter, 1, entry_address);
-  } else {
-    WriteX(interpreter, 1, (uint64_t)(uintptr_t)argv);
-  }
   WriteX(interpreter, AARCH64_LR_REG, 0);
 }
 
@@ -1443,17 +1489,12 @@ void AARCH64InterpreterInit(AARCH64Interpreter* interpreter, Loader* loader,
 void AARCH64InterpreterPrepareMain(AARCH64Interpreter* interpreter,
                                    uint64_t entry_address, int argc,
                                    char** argv, bool is_static_link) {
-  interpreter->sp =
-      (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
-  interpreter->sp &= ~0xFULL;
+  uint64_t argument_bottom =
+      SetupGuestMainArgs(interpreter, argc, argv, entry_address,
+                         is_static_link);
+  interpreter->sp = argument_bottom & ~0xFULL;
   interpreter->pc = entry_address;
   interpreter->running = true;
-  WriteX(interpreter, 0, (uint64_t)argc);
-  if (!is_static_link) {
-    WriteX(interpreter, 1, entry_address);
-  } else {
-    WriteX(interpreter, 1, (uint64_t)(uintptr_t)argv);
-  }
   WriteX(interpreter, AARCH64_LR_REG, 0);
 }
 

@@ -12,8 +12,6 @@
 
 .global _start
 _start:
-  li a0, 1
-  li a1, 0
   call main
   li t6, 1
   ecall
