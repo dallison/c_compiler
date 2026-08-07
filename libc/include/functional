@@ -12,10 +12,18 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <exception>
+#include <initializer_list>
 #include <new>
+#include <tuple>
 #include <typeinfo>
 #include <type_traits>
 #include <utility>
+
+#if __cplusplus >= 202302L
+#define __cpp_lib_move_only_function 202110L
+#define __cpp_lib_invoke_r 202106L
+#define __cpp_lib_bind_back 202202L
+#endif
 
 namespace std {
 
@@ -322,7 +330,7 @@ struct __invoke_dispatch<Function, Object, false, true, false, false> {
 
 template <class F>
 constexpr __davecc_invoke_result_t(F) invoke(F&& function) {
-  return function();
+  return static_cast<F&&>(function)();
 }
 
 template <class F, class T, class... Args>
@@ -379,10 +387,8 @@ template <class F, class T, class... Args>
   requires (!__is_member_pointer_argument<F>::value)
 constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
-  using Function = remove_reference_t<F>;
-  using Object = remove_reference_t<T>;
-  return __invoke_dispatch<Function, Object, false, false, false, false>::call(
-      function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
+  return static_cast<F&&>(function)(static_cast<T&&>(object),
+                                    static_cast<Args&&>(args)...);
 }
 
 template <class F, class... Args>
@@ -396,7 +402,7 @@ struct __is_invocable_impl<reference_wrapper<T>, Args...>
 };
 
 template <class F, class... Args>
-struct __is_invocable : __is_invocable_impl<remove_reference_t<F>, Args...> {
+struct __is_invocable : __is_invocable_impl<F, Args...> {
 };
 
 template <class F, class... Args>
@@ -411,7 +417,7 @@ struct __is_nothrow_invocable_impl<reference_wrapper<T>, Args...>
 
 template <class F, class... Args>
 struct __is_nothrow_invocable
-    : __is_nothrow_invocable_impl<remove_reference_t<F>, Args...> {
+    : __is_nothrow_invocable_impl<F, Args...> {
 };
 
 }  // namespace __invoke_detail
@@ -458,7 +464,140 @@ struct is_nothrow_invocable_r
                         R, is_void<R>::value, F, Args...>::value> {
 };
 
+template <class R, class F, class... Args>
+inline constexpr bool is_invocable_r_v =
+    is_invocable_r<R, F, Args...>::value;
+
+template <class F, class... Args>
+inline constexpr bool is_nothrow_invocable_v =
+    is_nothrow_invocable<F, Args...>::value;
+
+template <class R, class F, class... Args>
+inline constexpr bool is_nothrow_invocable_r_v =
+    is_nothrow_invocable_r<R, F, Args...>::value;
+
 using __invoke_detail::invoke;
+
+#if __cplusplus >= 202302L
+
+template <class R, class F, class... Args>
+  requires is_invocable_r<R, F, Args...>::value
+constexpr R invoke_r(F&& function, Args&&... args)
+    noexcept(is_nothrow_invocable_r<R, F, Args...>::value) {
+  if constexpr (is_void<R>::value) {
+    std::invoke(static_cast<F&&>(function), static_cast<Args&&>(args)...);
+    return;
+  } else {
+    return static_cast<R>(
+        std::invoke(static_cast<F&&>(function),
+                    static_cast<Args&&>(args)...));
+  }
+}
+
+namespace __bind_back_detail {
+
+template <class Sequence>
+struct __binder_caller;
+
+template <size_t... Indices>
+struct __binder_caller<index_sequence<Indices...>> {
+  template <class Function, class Tuple, class... Args>
+  static constexpr invoke_result_t<
+      Function&&, Args&&...,
+      decltype(std::get<Indices>(declval<Tuple>()))...>
+  __call(Function&& function, Tuple&& bound, Args&&... args)
+      noexcept(is_nothrow_invocable<
+               Function&&, Args&&...,
+               decltype(std::get<Indices>(declval<Tuple>()))...>::value) {
+    return std::invoke(
+        static_cast<Function&&>(function),
+        static_cast<Args&&>(args)...,
+        std::get<Indices>(static_cast<Tuple&&>(bound))...);
+  }
+};
+
+template <class... Args>
+struct __all_constructible;
+
+template <>
+struct __all_constructible<> : true_type {};
+
+template <class Arg, class... Rest>
+struct __all_constructible<Arg, Rest...>
+    : bool_constant<is_constructible<decay_t<Arg>, Arg>::value &&
+                    __all_constructible<Rest...>::value> {};
+
+template <class Function, class... Bound>
+class __binder {
+ private:
+  using __indices = make_index_sequence<sizeof...(Bound)>;
+
+ public:
+  template <class F, class... Args>
+  constexpr explicit __binder(F&& function, Args&&... args)
+      : __function(static_cast<F&&>(function)),
+        __bound(static_cast<Args&&>(args)...) {}
+
+  template <class... Args>
+  constexpr decltype(auto) operator()(Args&&... args) &
+      noexcept(noexcept(__call(
+          *this, static_cast<Args&&>(args)...))) {
+    return __call(*this, static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr decltype(auto) operator()(Args&&... args) const&
+      noexcept(noexcept(__call(
+          *this, static_cast<Args&&>(args)...))) {
+    return __call(*this, static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr decltype(auto) operator()(Args&&... args) &&
+      noexcept(noexcept(__call(
+          static_cast<__binder&&>(*this),
+          static_cast<Args&&>(args)...))) {
+    return __call(static_cast<__binder&&>(*this),
+                  static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr decltype(auto) operator()(Args&&... args) const&&
+      noexcept(noexcept(__call(
+          static_cast<const __binder&&>(*this),
+          static_cast<Args&&>(args)...))) {
+    return __call(static_cast<const __binder&&>(*this),
+                  static_cast<Args&&>(args)...);
+  }
+
+ private:
+  template <class Self, class... Args>
+  static constexpr decltype(auto) __call(Self&& self, Args&&... args)
+      noexcept(noexcept(__binder_caller<__indices>::__call(
+          static_cast<Self&&>(self).__function,
+          static_cast<Self&&>(self).__bound,
+          static_cast<Args&&>(args)...))) {
+    return __binder_caller<__indices>::__call(
+        static_cast<Self&&>(self).__function,
+        static_cast<Self&&>(self).__bound,
+        static_cast<Args&&>(args)...);
+  }
+
+  Function __function;
+  tuple<Bound...> __bound;
+};
+
+}  // namespace __bind_back_detail
+
+template <class F, class... Args>
+  requires (is_constructible<decay_t<F>, F>::value &&
+            __bind_back_detail::__all_constructible<Args...>::value)
+constexpr auto bind_back(F&& function, Args&&... args) {
+  return __bind_back_detail::__binder<decay_t<F>, decay_t<Args>...>(
+      static_cast<F&&>(function), static_cast<Args&&>(args)...);
+}
+
+#endif
 
 class bad_function_call : public exception {
  public:
@@ -825,6 +964,368 @@ void swap(function<R(Args...)>& left,
           function<R(Args...)>& right) noexcept {
   left.swap(right);
 }
+
+#if __cplusplus >= 202302L
+
+template <class Signature>
+class move_only_function;
+
+namespace __move_only_function_detail {
+
+using __storage_type = __function_detail::__storage_type;
+
+struct __operations {
+  void* invoke;
+  void (*move)(__storage_type*, __storage_type*);
+  void (*destroy)(__storage_type*);
+};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __invocable;
+
+template <class R, class F, class... Args>
+struct __invocable<false, R, F, Args...> : is_invocable_r<R, F, Args...> {};
+
+template <class R, class F, class... Args>
+struct __invocable<true, R, F, Args...>
+    : is_nothrow_invocable_r<R, F, Args...> {};
+
+template <int Mode, bool Noexcept, class R, class F, class... Args>
+struct __callable;
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<0, Noexcept, R, F, Args...>
+    : bool_constant<
+          __invocable<Noexcept, R, F, Args...>::value &&
+          __invocable<Noexcept, R, F&, Args...>::value> {};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<1, Noexcept, R, F, Args...>
+    : __invocable<Noexcept, R, F&, Args...> {};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<2, Noexcept, R, F, Args...>
+    : __invocable<Noexcept, R, F&&, Args...> {};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<3, Noexcept, R, F, Args...>
+    : bool_constant<
+          __invocable<Noexcept, R, const F, Args...>::value &&
+          __invocable<Noexcept, R, const F&, Args...>::value> {};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<4, Noexcept, R, F, Args...>
+    : __invocable<Noexcept, R, const F&, Args...> {};
+
+template <bool Noexcept, class R, class F, class... Args>
+struct __callable<5, Noexcept, R, F, Args...>
+    : __invocable<Noexcept, R, const F&&, Args...> {};
+
+template <bool IsSelf, int Mode, bool Noexcept, class R, class Target,
+          class Source, class Self, class... Args>
+struct __valid_target;
+
+template <int Mode, bool Noexcept, class R, class Target, class Source,
+          class Self, class... Args>
+struct __valid_target<true, Mode, Noexcept, R, Target, Source, Self, Args...>
+    : false_type {};
+
+template <int Mode, bool Noexcept, class R, class Target, class Source,
+          class Self, class... Args>
+struct __valid_target<false, Mode, Noexcept, R, Target, Source, Self, Args...>
+    : bool_constant<is_constructible<Target, Source>::value &&
+                    __callable<Mode, Noexcept, R, Target, Args...>::value> {};
+
+template <class F>
+struct __is_local
+    : bool_constant<sizeof(F) <= sizeof(__storage_type) &&
+                    alignof(F) <= alignof(__storage_type) &&
+                    is_nothrow_move_constructible<F>::value> {};
+
+template <int Mode, bool Noexcept, class R, class F, class... Args>
+struct __manager {
+  static F*& heap_pointer(__storage_type& storage) {
+    return *reinterpret_cast<F**>(storage.data);
+  }
+
+  static F* get(__storage_type& storage) {
+    if constexpr (__is_local<F>::value) {
+      return reinterpret_cast<F*>(storage.data);
+    } else {
+      return heap_pointer(storage);
+    }
+  }
+
+  static R invoke_target(__storage_type* storage, Args... args)
+      noexcept(Noexcept) {
+    F* target = get(*storage);
+    if constexpr (Mode == 2) {
+      return std::invoke(static_cast<F&&>(*target),
+                         static_cast<Args&&>(args)...);
+    } else if constexpr (Mode == 3 || Mode == 4) {
+      return std::invoke(static_cast<const F&>(*target),
+                         static_cast<Args&&>(args)...);
+    } else if constexpr (Mode == 5) {
+      return std::invoke(static_cast<const F&&>(*target),
+                         static_cast<Args&&>(args)...);
+    } else {
+      return std::invoke(*target, static_cast<Args&&>(args)...);
+    }
+  }
+
+  static void move(__storage_type* destination, __storage_type* source) {
+    if constexpr (__is_local<F>::value) {
+      F* source_target = get(*source);
+      ::new (static_cast<void*>(destination->data))
+          F(static_cast<F&&>(*source_target));
+      source_target->~F();
+    } else {
+      heap_pointer(*destination) = heap_pointer(*source);
+      heap_pointer(*source) = nullptr;
+    }
+  }
+
+  static void destroy(__storage_type* storage) {
+    if constexpr (__is_local<F>::value) {
+      get(*storage)->~F();
+    } else {
+      delete heap_pointer(*storage);
+      heap_pointer(*storage) = nullptr;
+    }
+  }
+
+  static const __operations* table() {
+    static const __operations value = {
+        reinterpret_cast<void*>(&invoke_target), &move, &destroy};
+    return &value;
+  }
+};
+
+template <class Signature, int Mode, bool Noexcept>
+class __base;
+
+template <class R, class... Args, int Mode, bool Noexcept>
+class __base<R(Args...), Mode, Noexcept> {
+ private:
+  using __invoke_type = R (*)(__storage_type*, Args...) noexcept(Noexcept);
+
+  template <class T, class... ConstructorArgs>
+  void __initialize(ConstructorArgs&&... args) {
+    using Manager = __manager<Mode, Noexcept, R, T, Args...>;
+    if constexpr (__is_local<T>::value) {
+      ::new (static_cast<void*>(__storage.data))
+          T(static_cast<ConstructorArgs&&>(args)...);
+    } else {
+      Manager::heap_pointer(__storage) =
+          new T(static_cast<ConstructorArgs&&>(args)...);
+    }
+    __ops = Manager::table();
+    __invoke = reinterpret_cast<__invoke_type>(__ops->invoke);
+  }
+
+ protected:
+  __base() noexcept : __storage{}, __ops(nullptr), __invoke(nullptr) {}
+
+  template <class T, class... ConstructorArgs>
+  explicit __base(in_place_type_t<T>, ConstructorArgs&&... args)
+      : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    this->template __initialize<T>(
+        static_cast<ConstructorArgs&&>(args)...);
+  }
+
+  template <class T, class U, class... ConstructorArgs>
+  explicit __base(in_place_type_t<T>, initializer_list<U> values,
+                  ConstructorArgs&&... args)
+      : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    this->template __initialize<T>(
+        values, static_cast<ConstructorArgs&&>(args)...);
+  }
+
+  __base(__base&& other) noexcept
+      : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    if (other.__ops != nullptr) {
+      other.__ops->move(&__storage, &other.__storage);
+      __ops = other.__ops;
+      __invoke = other.__invoke;
+      other.__ops = nullptr;
+      other.__invoke = nullptr;
+    }
+  }
+
+  __base& operator=(__base&& other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    __reset();
+    if (other.__ops != nullptr) {
+      other.__ops->move(&__storage, &other.__storage);
+      __ops = other.__ops;
+      __invoke = other.__invoke;
+      other.__ops = nullptr;
+      other.__invoke = nullptr;
+    }
+    return *this;
+  }
+
+  ~__base() {
+    __reset();
+  }
+
+  void __reset() noexcept {
+    if (__ops != nullptr) {
+      __ops->destroy(&__storage);
+      __ops = nullptr;
+      __invoke = nullptr;
+    }
+  }
+
+  void __swap(__base& other) noexcept {
+    if (this == &other) {
+      return;
+    }
+    __base temporary(static_cast<__base&&>(other));
+    other = static_cast<__base&&>(*this);
+    *this = static_cast<__base&&>(temporary);
+  }
+
+  bool __has_value() const noexcept {
+    return __ops != nullptr;
+  }
+
+  R __call(Args... args) const noexcept(Noexcept) {
+    return __invoke(const_cast<__storage_type*>(&__storage),
+                    static_cast<Args&&>(args)...);
+  }
+
+ private:
+  __base(const __base&) = delete;
+  __base& operator=(const __base&) = delete;
+
+  __storage_type __storage;
+  const __operations* __ops;
+  __invoke_type __invoke;
+};
+
+}  // namespace __move_only_function_detail
+
+#define __DAVECC_MOVE_ONLY_FUNCTION(QUALIFIERS, MODE, NOEXCEPT_TOKEN,         \
+                                    NOEXCEPT_VALUE)                           \
+  template <class R, class... Args>                                          \
+  class move_only_function<R(Args...) QUALIFIERS NOEXCEPT_TOKEN>             \
+      : public __move_only_function_detail::__base<                          \
+            R(Args...), MODE, NOEXCEPT_VALUE> {                              \
+   private:                                                                  \
+    using __base = __move_only_function_detail::__base<                      \
+        R(Args...), MODE, NOEXCEPT_VALUE>;                                   \
+    using __self = move_only_function<                                       \
+        R(Args...) QUALIFIERS NOEXCEPT_TOKEN>;                               \
+                                                                             \
+   public:                                                                   \
+    using result_type = R;                                                   \
+                                                                             \
+    move_only_function() noexcept : __base() {}                              \
+    move_only_function(nullptr_t) noexcept : __base() {}                     \
+    move_only_function(move_only_function&& other) noexcept                  \
+        : __base(static_cast<__base&&>(other)) {}                            \
+    move_only_function(const move_only_function&) = delete;                  \
+                                                                             \
+    template <class F>                                                       \
+      requires (is_constructible<decay_t<F>, F&&>::value &&                  \
+                __move_only_function_detail::__callable<                     \
+                    MODE, NOEXCEPT_VALUE, R, decay_t<F>, Args...>::value)     \
+    move_only_function(F&& value)                                            \
+        : __base(in_place_type<decay_t<F>>, static_cast<F&&>(value)) {        \
+      using Target = decay_t<F>;                                             \
+      if constexpr (is_pointer<Target>::value ||                             \
+                    is_member_pointer<Target>::value) {                      \
+        if (static_cast<Target>(value) == nullptr) {                         \
+          this->__reset();                                                   \
+        }                                                                    \
+      }                                                                      \
+    }                                                                        \
+                                                                             \
+    template <class T, class... ConstructorArgs>                             \
+      requires (is_constructible<T, ConstructorArgs&&...>::value &&          \
+                __move_only_function_detail::__callable<                     \
+                    MODE, NOEXCEPT_VALUE, R, T, Args...>::value)              \
+    explicit move_only_function(in_place_type_t<T>,                          \
+                                ConstructorArgs&&... args)                    \
+        : __base(in_place_type<T>,                                           \
+                 static_cast<ConstructorArgs&&>(args)...) {}                 \
+                                                                             \
+    template <class T, class U, class... ConstructorArgs>                    \
+      requires (is_constructible<T, initializer_list<U>&,                    \
+                                 ConstructorArgs&&...>::value &&             \
+                __move_only_function_detail::__callable<                     \
+                    MODE, NOEXCEPT_VALUE, R, T, Args...>::value)              \
+    explicit move_only_function(in_place_type_t<T>,                          \
+                                initializer_list<U> values,                   \
+                                ConstructorArgs&&... args)                    \
+        : __base(in_place_type<T>, values,                                   \
+                 static_cast<ConstructorArgs&&>(args)...) {}                 \
+                                                                             \
+    ~move_only_function() = default;                                         \
+                                                                             \
+    move_only_function& operator=(move_only_function&& other) noexcept {     \
+      __base::operator=(static_cast<__base&&>(other));                       \
+      return *this;                                                          \
+    }                                                                        \
+    move_only_function& operator=(const move_only_function&) = delete;       \
+                                                                             \
+    move_only_function& operator=(nullptr_t) noexcept {                      \
+      this->__reset();                                                       \
+      return *this;                                                          \
+    }                                                                        \
+                                                                             \
+    template <class F>                                                       \
+      requires (is_constructible<decay_t<F>, F&&>::value &&                  \
+                __move_only_function_detail::__callable<                     \
+                    MODE, NOEXCEPT_VALUE, R, decay_t<F>, Args...>::value)     \
+    move_only_function& operator=(F&& value) {                               \
+      move_only_function temporary(static_cast<F&&>(value));                 \
+      this->swap(temporary);                                                 \
+      return *this;                                                          \
+    }                                                                        \
+                                                                             \
+    explicit operator bool() const noexcept {                                \
+      return this->__has_value();                                            \
+    }                                                                        \
+                                                                             \
+    R operator()(Args... args) QUALIFIERS NOEXCEPT_TOKEN {                   \
+      return this->__call(static_cast<Args&&>(args)...);                     \
+    }                                                                        \
+                                                                             \
+    void swap(move_only_function& other) noexcept {                          \
+      this->__swap(other);                                                   \
+    }                                                                        \
+                                                                             \
+    friend void swap(move_only_function& left,                               \
+                     move_only_function& right) noexcept {                   \
+      left.swap(right);                                                      \
+    }                                                                        \
+                                                                             \
+    friend bool operator==(const move_only_function& value,                  \
+                           nullptr_t) noexcept {                              \
+      return !value;                                                         \
+    }                                                                        \
+  };
+
+__DAVECC_MOVE_ONLY_FUNCTION(, 0, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(, 0, noexcept, true)
+__DAVECC_MOVE_ONLY_FUNCTION(&, 1, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(&, 1, noexcept, true)
+__DAVECC_MOVE_ONLY_FUNCTION(&&, 2, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(&&, 2, noexcept, true)
+__DAVECC_MOVE_ONLY_FUNCTION(const, 3, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(const, 3, noexcept, true)
+__DAVECC_MOVE_ONLY_FUNCTION(const &, 4, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(const &, 4, noexcept, true)
+__DAVECC_MOVE_ONLY_FUNCTION(const &&, 5, , false)
+__DAVECC_MOVE_ONLY_FUNCTION(const &&, 5, noexcept, true)
+
+#undef __DAVECC_MOVE_ONLY_FUNCTION
+
+#endif
 
 }  // namespace std
 

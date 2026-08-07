@@ -1,0 +1,85 @@
+//
+//  __flat_container
+//  c_compiler
+//
+//  Shared implementation support for the C++23 flat associative containers.
+//
+
+#ifndef __davecc_flat_container__
+#define __davecc_flat_container__
+
+#include <stddef.h>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+struct sorted_unique_t {
+  explicit sorted_unique_t() = default;
+};
+
+inline constexpr sorted_unique_t sorted_unique{};
+
+struct sorted_equivalent_t {
+  explicit sorted_equivalent_t() = default;
+};
+
+inline constexpr sorted_equivalent_t sorted_equivalent{};
+
+namespace __flat_detail {
+
+template <class Compare, class = void>
+struct __is_transparent : false_type {
+};
+
+template <class Compare>
+struct __is_transparent<Compare, void_t<typename Compare::is_transparent>>
+    : true_type {
+};
+
+template <class Compare, class Left, class Right>
+constexpr bool __equivalent(const Compare& compare, const Left& left,
+                            const Right& right) {
+  return !compare(left, right) && !compare(right, left);
+}
+
+template <class Container, class Key, class Compare>
+constexpr size_t __lower_bound_index(const Container& values, const Key& key,
+                                     const Compare& compare) {
+  size_t first = 0;
+  size_t count = values.size();
+  while (count != 0) {
+    size_t step = count / 2;
+    size_t middle = first + step;
+    if (compare(values[middle], key)) {
+      first = middle + 1;
+      count -= step + 1;
+    } else {
+      count = step;
+    }
+  }
+  return first;
+}
+
+template <class Container, class Key, class Compare>
+constexpr size_t __upper_bound_index(const Container& values, const Key& key,
+                                     const Compare& compare) {
+  size_t first = 0;
+  size_t count = values.size();
+  while (count != 0) {
+    size_t step = count / 2;
+    size_t middle = first + step;
+    if (!compare(key, values[middle])) {
+      first = middle + 1;
+      count -= step + 1;
+    } else {
+      count = step;
+    }
+  }
+  return first;
+}
+
+}  // namespace __flat_detail
+}  // namespace std
+
+#endif /* __davecc_flat_container__ */

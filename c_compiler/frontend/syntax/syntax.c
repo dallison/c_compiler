@@ -2179,16 +2179,57 @@ typedef struct {
   bool found;
 } CXXPackExpressionSearch;
 
+static bool CXXTemplateArgumentReferencesParameterPack(
+    TemplateArgument* argument) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (argument->references_parameter_pack) {
+    return true;
+  }
+  for (size_t i = 0;
+       argument->pack_arguments != NULL &&
+       i < argument->pack_arguments->length; i++) {
+    if (CXXTemplateArgumentReferencesParameterPack(
+            argument->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
+  if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
-  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+  if ((node->flags & kASTReferencesParameterPack) != 0) {
     ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
+  Vector* template_arguments = NULL;
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeIdentifier) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    template_arguments = id->template_arguments;
+  } else if (shape == kASTShapeStructMember) {
+    template_arguments =
+        ((StructMemberASTNode*)node)->template_arguments;
+  } else if (shape == kASTShapeConstant) {
+    template_arguments = ((ConstantASTNode*)node)->template_arguments;
+  }
+  for (size_t i = 0;
+       template_arguments != NULL && i < template_arguments->length; i++) {
+    if (CXXTemplateArgumentReferencesParameterPack(
+            template_arguments->value.p[i])) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
   }
 }
 
@@ -2196,6 +2237,53 @@ static bool CXXExpressionContainsParameterPack(ASTNode* node) {
   CXXPackExpressionSearch search = {0};
   ASTNodeVisit(node, FindCXXParameterPackExpression, 0, &search);
   return search.found;
+}
+
+static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL;
+       current = current->next) {
+    int parameter_index = -1;
+    TypeIsTemplateParameterPlaceholder(current, &parameter_index);
+    for (size_t i = 0;
+         parameter_index >= 0 &&
+         syntax->current_template_parameters != NULL &&
+         i < syntax->current_template_parameters->length; i++) {
+      TemplateParameter* parameter =
+          syntax->current_template_parameters->value.p[i];
+      if (parameter != NULL && parameter->index == parameter_index &&
+          parameter->is_parameter_pack) {
+        return true;
+      }
+    }
+    Vector* function_parameters =
+        compiler->current_function != NULL &&
+                TypeIsFunction(compiler->current_function)
+            ? &compiler->current_function->info.function.template_parameters
+            : NULL;
+    for (size_t i = 0;
+         parameter_index >= 0 && function_parameters != NULL &&
+         i < function_parameters->length; i++) {
+      TemplateParameter* parameter = function_parameters->value.p[i];
+      if (parameter != NULL && parameter->index == parameter_index &&
+          parameter->is_parameter_pack) {
+        return true;
+      }
+    }
+    if (current->dependent_decltype_expr != NULL &&
+        CXXExpressionContainsParameterPack(
+            current->dependent_decltype_expr)) {
+      return true;
+    }
+    for (size_t i = 0;
+         current->template_arguments != NULL &&
+         i < current->template_arguments->length; i++) {
+      if (CXXTemplateArgumentReferencesParameterPack(
+              current->template_arguments->value.p[i])) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* expr) {
@@ -2917,9 +3005,16 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
     StringInit(&member_name, base->type->info.struct_info->tag_name->value);
   }
   ASTNode* receiver = NewIdentifierASTNode(this_symbol, location);
-  if (base->byte_offset != 0) {
-    TypeRecord* base_pointer =
-        NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
+  TypeRecord* base_pointer =
+      NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
+  if (base->byte_offset == 0 && !base->is_virtual) {
+    // Member lookup must start from the base subobject even when no address
+    // adjustment is required. Virtual-base special-member calls retain the
+    // complete-object receiver used by their hidden construction/destruction
+    // protocol.
+    receiver->flags |= kASTAnalyzed;
+    ASTNodeSetType(receiver, base_pointer);
+  } else if (base->byte_offset != 0) {
     ASTNode* offset =
         NewIntConstantASTNode(base->byte_offset,
                               NewTypeRecordWithSize(kTypeInt, kQualPlain),
@@ -3244,6 +3339,7 @@ void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
   VectorInit(&init_list->base_statements);
   VectorInit(&init_list->member_specs);
   VectorInit(&init_list->member_statements);
+  init_list->delegating_statement = NULL;
   VectorInit(&init_list->raw_initializers);
   VectorInit(&init_list->deferred_initializers);
   init_list->last_initializer_order = -1;
@@ -3256,6 +3352,7 @@ void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
   VectorDestruct(&init_list->base_statements);
   VectorDestruct(&init_list->member_specs);
   VectorDestruct(&init_list->member_statements);
+  ASTNodeDelete(init_list->delegating_statement);
   VectorDestructWithContents(
       &init_list->raw_initializers,
       (VectorElementDestructor)CXXDeferredConstructorInitializerDelete,
@@ -3473,11 +3570,20 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
   if (owner == NULL || name == NULL) {
     return NULL;
   }
+  StructMember* alias_member = FindStructMemberByName(owner, name);
+  TypeRecord* alias_type =
+      alias_member != NULL && alias_member->symbol != NULL &&
+              StorageIs(alias_member->symbol->storage, STO(typedef))
+          ? alias_member->symbol->type
+          : NULL;
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
         base->type->info.struct_info == NULL) {
       continue;
+    }
+    if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, name)) {
@@ -3496,11 +3602,20 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
   if (owner == NULL || name == NULL) {
     return NULL;
   }
+  StructMember* alias_member = FindStructMemberByName(owner, name);
+  TypeRecord* alias_type =
+      alias_member != NULL && alias_member->symbol != NULL &&
+              StorageIs(alias_member->symbol->storage, STO(typedef))
+          ? alias_member->symbol->type
+          : NULL;
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
         base->type->info.struct_info == NULL) {
       continue;
+    }
+    if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, name)) {
@@ -3512,6 +3627,65 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
     }
   }
   return NULL;
+}
+
+static bool CXXConstructorInitializerNamesOwner(Struct* owner,
+                                                const char* name) {
+  if (owner == NULL || name == NULL) {
+    return false;
+  }
+  if (owner->tag_name != NULL && StringEqual(owner->tag_name, name)) {
+    return true;
+  }
+  if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL) {
+    String* template_name = CXXPrimaryTemplateName(owner->tag_symbol->type);
+    if (template_name != NULL && StringEqual(template_name, name)) {
+      return true;
+    }
+  }
+  StructMember* alias = FindStructMemberByName(owner, name);
+  return alias != NULL && alias->symbol != NULL &&
+         StorageIs(alias->symbol->storage, STO(typedef)) &&
+         alias->symbol->type != NULL && owner->tag_symbol != NULL &&
+         owner->tag_symbol->type != NULL &&
+         TypeEqual(alias->symbol->type, owner->tag_symbol->type);
+}
+
+static ASTNode* NewCXXDelegatingConstructorCall(
+    Syntax* syntax, TypeRecord* func, Vector* actuals,
+    SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL) {
+    VectorDelete(actuals);
+    return NULL;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  Symbol* this_symbol = FindThisSymbol(syntax);
+  if (this_symbol == NULL && func->info.function.prototype.length > 0) {
+    this_symbol = func->info.function.prototype.value.p[0];
+  }
+  if (this_symbol == NULL || owner->tag_name == NULL) {
+    VectorDelete(actuals);
+    return NULL;
+  }
+  if (StructHasVirtualBases(owner) &&
+      func->info.function.prototype.length > 1) {
+    Symbol* complete_object = func->info.function.prototype.value.p[1];
+    ASTNode* argument = NewIdentifierASTNode(complete_object, location);
+    if (actuals->length == 0) {
+      VectorAppend(actuals, argument);
+    } else {
+      VectorInsertBefore(actuals, 0, argument);
+    }
+  }
+  ASTNode* member = NewStringConstantASTNode(
+      NewString(owner->tag_name->value), NULL, location);
+  ASTNode* access = NewBinaryASTNode(
+      AST_OP(arrow), NULL, location,
+      NewIdentifierASTNode(this_symbol, location), member);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, access, actuals);
+  return NewExpressionStatementASTNode(call, location);
 }
 
 static StructMember* FindCXXDirectDataMemberByName(Struct* owner,
@@ -4233,6 +4407,34 @@ void SyntaxParseCXXConstructorInitializerList(
                  NewCXXDeferredConstructorInitializer(
                      init_name, CloneCXXConstructorInitializerActuals(actuals),
                      location));
+    if (CXXConstructorInitializerNamesOwner(owner, init_name)) {
+      if (init_list->delegating_statement != NULL ||
+          init_list->base_specs.length != 0 ||
+          init_list->virtual_base_specs.length != 0 ||
+          init_list->member_specs.length != 0) {
+        SyntaxError(syntax,
+                    "delegating constructor initializer must appear alone");
+        VectorDelete(actuals);
+      } else {
+        init_list->delegating_statement =
+            NewCXXDelegatingConstructorCall(syntax, func, actuals, location);
+      }
+      FullyQualifiedIdentifierDestruct(&name);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
+    }
+    if (init_list->delegating_statement != NULL) {
+      SyntaxError(syntax,
+                  "delegating constructor initializer must appear alone");
+      VectorDelete(actuals);
+      FullyQualifiedIdentifierDestruct(&name);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
+    }
     CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
     CXXVirtualBaseInfo* virtual_base = NULL;
     if (base != NULL && base->is_virtual) {
@@ -4327,6 +4529,26 @@ void SyntaxResolveCXXConstructorInitializerList(
     Vector* actuals = deferred->actuals;
     deferred->actuals = NULL;
     SourceLocation location = deferred->location;
+    if (CXXConstructorInitializerNamesOwner(owner, init_name)) {
+      if (init_list->delegating_statement != NULL ||
+          init_list->base_specs.length != 0 ||
+          init_list->virtual_base_specs.length != 0 ||
+          init_list->member_specs.length != 0) {
+        SyntaxError(syntax,
+                    "delegating constructor initializer must appear alone");
+        VectorDelete(actuals);
+      } else {
+        init_list->delegating_statement =
+            NewCXXDelegatingConstructorCall(syntax, func, actuals, location);
+      }
+      continue;
+    }
+    if (init_list->delegating_statement != NULL) {
+      SyntaxError(syntax,
+                  "delegating constructor initializer must appear alone");
+      VectorDelete(actuals);
+      continue;
+    }
     CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
     CXXVirtualBaseInfo* virtual_base = NULL;
     if (base != NULL && base->is_virtual) {
@@ -4425,6 +4647,11 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   }
   Struct* owner = func->info.function.cxx_member_owner;
   SyntaxResolveCXXConstructorInitializerList(syntax, func, init_list);
+  if (init_list->delegating_statement != NULL) {
+    VectorInsertOrAppend(body, 0, init_list->delegating_statement);
+    init_list->delegating_statement = NULL;
+    return;
+  }
   size_t insert_at = 0;
   // A defaulted copy/move constructor must copy/move-construct each base
   // subobject (virtual or not) from the corresponding subobject of the source,
@@ -7513,6 +7740,8 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           arg->is_pack_expansion = true;
         }
       }
+      arg->references_parameter_pack =
+          CXXTypeContainsParameterPack(syntax, arg->type);
       NormalizeTemplateNameArgument(arg, bare_template);
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;
@@ -7521,10 +7750,26 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
                                                   TC(closebra) | TC(exprsep));
       syntax->parsing_template_argument = old_parsing_template_argument;
       arg->kind = kTemplateParameterNonType;
+      arg->references_parameter_pack =
+          CXXExpressionContainsParameterPack(expr);
       int direct_template_parameter_index = -1;
       bool is_direct_nttp =
           ExpressionIsNonTypeTemplateParameter(expr,
                                                &direct_template_parameter_index);
+      if (is_direct_nttp) {
+        for (size_t i = 0;
+             syntax->current_template_parameters != NULL &&
+             i < syntax->current_template_parameters->length; i++) {
+          TemplateParameter* parameter =
+              syntax->current_template_parameters->value.p[i];
+          if (parameter != NULL &&
+              parameter->index == direct_template_parameter_index &&
+              parameter->is_parameter_pack) {
+            arg->references_parameter_pack = true;
+            break;
+          }
+        }
+      }
       // A template argument can only be value-dependent when template parameters
       // are in scope, i.e. while parsing a template declaration.  Outside one it
       // must be a concrete constant expression, so it has to be folded now.  The
@@ -8253,9 +8498,9 @@ static const char* CXXConstructorNameForType(TypeRecord* type) {
   return type->info.struct_info->tag_name->value;
 }
 
-static ASTNode* NewCXXConstructorCall(Syntax* syntax, Symbol* sym,
-                                      Vector* actuals,
-                                      SourceLocation location) {
+ASTNode* SyntaxNewCXXConstructorCall(Syntax* syntax, Symbol* sym,
+                                     Vector* actuals,
+                                     SourceLocation location) {
   (void)syntax;
   const char* constructor_name = CXXConstructorNameForType(sym->type);
   if (constructor_name == NULL) {
@@ -8408,7 +8653,8 @@ static ASTNode* NewCXXCopyListConstructorInitializer(Syntax* syntax,
   Vector* actuals = NewVector();
   if (CXXConstructorSetHasInitializerList(constructor)) {
     VectorAppend(actuals, initializer);
-    return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+    return SyntaxNewCXXConstructorCall(syntax, sym, actuals,
+                                       initializer->location);
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
   for (size_t i = 0; i < braced->initializers->length; i++) {
@@ -8420,7 +8666,8 @@ static ASTNode* NewCXXCopyListConstructorInitializer(Syntax* syntax,
     }
   }
   braced->initializers->length = 0;
-  return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+  return SyntaxNewCXXConstructorCall(syntax, sym, actuals,
+                                     initializer->location);
 }
 
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
@@ -8559,8 +8806,22 @@ static ASTNode* NewCXXBracedInitializerFromActuals(Vector* actuals,
 
 static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
                                           bool wrap_aggregate_braces) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type)) {
+  if (!CompilerIsCXX() || sym == NULL) {
     return NULL;
+  }
+  if (!TypeIsStructOrUnion(sym->type)) {
+    if (!LexMatch(syntax->lex, TOK(lparen))) {
+      return NULL;
+    }
+    SourceLocation location = syntax->lex->current_token_location;
+    Vector* actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
+    if (actuals->length == 1) {
+      ASTNode* initializer = actuals->value.p[0];
+      actuals->length = 0;
+      VectorDelete(actuals);
+      return initializer;
+    }
+    return NewCXXBracedInitializerFromActuals(actuals, location);
   }
   if (!TypeIsClassTemplatePlaceholder(sym->type) &&
       sym->type->info.struct_info->is_aggregate &&
@@ -8635,7 +8896,7 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
     }
     return braced_initializer;
   }
-  return NewCXXConstructorCall(syntax, sym, actuals, location);
+  return SyntaxNewCXXConstructorCall(syntax, sym, actuals, location);
 }
 
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
@@ -8709,7 +8970,7 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
        ctor->symbol->type->info.function.is_trivial_special_member)) {
     return NULL;
   }
-  return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
+  return SyntaxNewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
 }
 
 static ASTNode* NewCXXDestructorCallOnReceiver(ASTNode* receiver,
@@ -9807,7 +10068,8 @@ static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym
   expr_init->expr = NULL;
   Vector* actuals = NewVector();
   VectorAppend(actuals, expr);
-  return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+  return SyntaxNewCXXConstructorCall(syntax, sym, actuals,
+                                     initializer->location);
 }
 
 ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,

@@ -237,6 +237,11 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       return false;
 
+    case AST_OP(noexcept_expr):
+      *result =
+          !ExpressionPotentiallyThrows(((UnaryASTNode*)node)->sub);
+      return true;
+
     case AST_OP(builtin_clz):
     case AST_OP(builtin_ctz):
     case AST_OP(builtin_popcount):

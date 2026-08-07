@@ -62,6 +62,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
   parser->deferred_inline_bodies = NULL;
+  parser->deferred_noexcept_specifiers = NULL;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -2134,6 +2135,31 @@ void ParseCXXExceptionSpecifier(TypeParser* parser, TypeRecord* func) {
   if (LexMatch(parser->lex, TOK(noexcept))) {
     bool is_noexcept = true;
     if (LexMatch(parser->lex, TOK(lparen))) {
+      if (parser->deferred_noexcept_specifiers != NULL) {
+        DeferredNoexceptSpecifier* deferred =
+            malloc(sizeof(DeferredNoexceptSpecifier));
+        deferred->member_symbol = parser->symbol;
+        deferred->function_type = func;
+        LexCheckpointSave(parser->lex, &deferred->expression_checkpoint);
+        VectorAppend(parser->deferred_noexcept_specifiers, deferred);
+        int depth = 0;
+        while (!LexEof(parser->lex)) {
+          if (LexLookingAt(parser->lex, TOK(rparen)) && depth == 0) {
+            break;
+          }
+          if (LexLookingAt(parser->lex, TOK(lparen))) {
+            depth++;
+          } else if (LexLookingAt(parser->lex, TOK(rparen))) {
+            depth--;
+          }
+          LexNextToken(parser->lex);
+        }
+        SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+        if (func != NULL) {
+          func->info.function.is_noexcept = false;
+        }
+        return;
+      }
       ASTNode* expr =
           SyntaxParseSingleExpression(parser->syntax, TC(exprsep));
       expr = AnalyzeExpression(expr);
@@ -2428,8 +2454,25 @@ parsed_bound:
 
 static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   if (!CompilerIsCXX() || parser->symbol == NULL ||
-      parser->stack.length != 0 || !TypeIsStructOrUnion(parser->base_type) ||
+      parser->stack.length != 0 ||
       !LexLookingAt(parser->lex, TOK(lparen))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool starts_with_expression =
+      !LexLookingAt(parser->lex, TOK(rparen)) &&
+      !LexLookingAt(parser->lex, TOK(ellipsis)) &&
+      !LexLookingAt(parser->lex, TOK(this)) &&
+      !LexLookingAt(parser->lex, TOK(thread_local)) &&
+      !SyntaxLookingAtType(parser->syntax);
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  if (starts_with_expression) {
+    return true;
+  }
+  if (!TypeIsStructOrUnion(parser->base_type)) {
     return false;
   }
   if (parser->context == kParsingBlockScope) {
@@ -2438,14 +2481,14 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   if (parser->context != kParsingFileScope) {
     return false;
   }
-  LexCheckpoint checkpoint;
-  LexCheckpointSave(parser->lex, &checkpoint);
+  LexCheckpoint file_checkpoint;
+  LexCheckpointSave(parser->lex, &file_checkpoint);
   LexNextToken(parser->lex);
   bool direct_initializer =
       !LexLookingAt(parser->lex, TOK(rparen)) &&
       !SyntaxLookingAtType(parser->syntax);
-  LexCheckpointRestore(parser->lex, &checkpoint);
-  LexCheckpointDestruct(&checkpoint);
+  LexCheckpointRestore(parser->lex, &file_checkpoint);
+  LexCheckpointDestruct(&file_checkpoint);
   return direct_initializer;
 }
 

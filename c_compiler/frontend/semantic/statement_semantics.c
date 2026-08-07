@@ -355,11 +355,13 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
   } else {
     return;
   }
-  if (CXXTemporaryNeedsDestructor(sym) &&
-      !VectorContainsPointer(&collection->temps, sym)) {
-    VectorAppend(&collection->temps, sym);
+  if (CXXTemporaryNeedsDestructor(sym)) {
     if (CXXTemporaryIsFunctionParameterObject(node, sym)) {
-      VectorAppend(&collection->parameter_temps, sym);
+      if (!VectorContainsPointer(&collection->parameter_temps, sym)) {
+        VectorAppend(&collection->parameter_temps, sym);
+      }
+    } else if (!VectorContainsPointer(&collection->temps, sym)) {
+      VectorAppend(&collection->temps, sym);
     }
   }
 }
@@ -596,6 +598,21 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
     if (CXXRangeForTemporaryIsExtended(&collection, symbol, direct)) {
       continue;
     }
+    ASTNode* destructor =
+        NewCXXTemporaryDestructorCall(symbol, initializer->location);
+    if (destructor != NULL) {
+      initializer = NewBinaryASTNode(AST_OP(comma), destructor->type,
+                                     initializer->location, initializer,
+                                     destructor);
+      initializer->flags |= kASTAnalyzed;
+    }
+  }
+  // Function-parameter temporaries are never lifetime-extended by a range-for
+  // initializer.  They are tracked separately from ordinary temporaries so
+  // they are not also destroyed by the generic full-expression cleanup path;
+  // destroy them explicitly at the end of this initializer.
+  for (size_t i = collection.parameter_temps.length; i > 0; i--) {
+    Symbol* symbol = collection.parameter_temps.value.p[i - 1];
     ASTNode* destructor =
         NewCXXTemporaryDestructorCall(symbol, initializer->location);
     if (destructor != NULL) {
@@ -1789,6 +1806,20 @@ static void CollectValueReturns(ASTNode* node, void* data, int child_id,
   }
 }
 
+static void ResetStaleDependentReturnExpression(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->type == NULL || TypeIsUnknown(node->type) ||
+      (node->flags & kASTDependentFunctorCall) != 0) {
+    node->flags &= ~(kASTAnalyzed | kASTDependentFunctorCall);
+  }
+}
+
 void StatementFinishAutoReturnDeduction(TypeRecord* func,
                                         ASTNode* diagnostic_node) {
   if (func == NULL || !TypeIsFunction(func) ||
@@ -1821,7 +1852,12 @@ void StatementFinishAutoReturnDeduction(TypeRecord* func,
     // without clearing the enclosing statement's analyzed flag, so the walk
     // above may not have reached the operand.  Type it here rather than leave
     // the signature unresolved for the call that asked.
-    if ((statement->cond->flags & kASTAnalyzed) == 0) {
+    if ((statement->cond->flags & kASTAnalyzed) == 0 ||
+        statement->cond->type == NULL ||
+        TypeIsUnknown(statement->cond->type) ||
+        (statement->cond->flags & kASTDependentFunctorCall) != 0) {
+      ASTNodeVisit(statement->cond, ResetStaleDependentReturnExpression, 0,
+                   NULL);
       ASTNode* analyzed = AnalyzeExpression(statement->cond);
       if (analyzed != statement->cond) {
         ASTNodeReplaceChild((ASTNode*)statement, 0, analyzed, false);

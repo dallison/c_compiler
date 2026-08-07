@@ -472,6 +472,9 @@ static bool CXXTemplateArgumentReferencesParameterPack(
   if (argument == NULL) {
     return false;
   }
+  if (argument->references_parameter_pack) {
+    return true;
+  }
   if (argument->template_parameter_index >= 0 &&
       CXXTemplateParameterIndexIsPack(
           search->syntax, argument->template_parameter_index)) {
@@ -496,6 +499,10 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if ((node->flags & kASTReferencesParameterPack) != 0) {
+    ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
   Vector* template_arguments = NULL;
@@ -1409,6 +1416,14 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         // constant-folded during semantic analysis.
         template_arguments = args;
         args = NULL;
+      } else if (symbol->flags.is_template &&
+                 StorageIs(symbol->storage, STO(typedef))) {
+        // Alias template-id used as an expression, e.g.
+        // `make_index_sequence<N>()`.  Preserve its written arguments so a
+        // dependent N can be substituted before functional construction
+        // instantiates the alias.
+        template_arguments = args;
+        args = NULL;
       }
       if (args != NULL) {
         VectorDestructWithContents(args,
@@ -1424,6 +1439,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     node->flags |= kASTQualifiedName;
   }
   ((IdentifierASTNode*)node)->template_arguments = template_arguments;
+  CXXPackExpressionSearch pack_search = {.syntax = syntax, .found = false};
+  for (size_t i = 0;
+       template_arguments != NULL && i < template_arguments->length; i++) {
+    if (CXXTemplateArgumentReferencesParameterPack(
+            &pack_search, template_arguments->value.p[i])) {
+      node->flags |= kASTReferencesParameterPack;
+      break;
+    }
+  }
   return node;
 }
 
@@ -5444,6 +5468,18 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(alignof))) {
     return ParseAlignof(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(noexcept))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    if (!LexMatch(syntax->lex, TOK(lparen))) {
+      SyntaxError(syntax, "Expected ( after noexcept");
+      return NewUnaryASTNode(AST_OP(noexcept_expr), NULL, location, NULL);
+    }
+    ASTNode* expression =
+        SyntaxParseSingleExpression(syntax, TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    return NewUnaryASTNode(AST_OP(noexcept_expr), NULL, location, expression);
   }
 
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(typeid))) {

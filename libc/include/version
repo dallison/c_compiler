@@ -37,9 +37,14 @@
 #endif
 
 #if __cplusplus >= 202302L
+#define __cpp_lib_bind_back 202202L
 #define __cpp_lib_expected 202211L
+#define __cpp_lib_flat_map 202207L
+#define __cpp_lib_flat_set 202207L
 #define __cpp_lib_generator 202207L
+#define __cpp_lib_invoke_r 202106L
 #define __cpp_lib_mdspan 202207L
+#define __cpp_lib_move_only_function 202110L
 #define __cpp_lib_print 202207L
 #endif
 

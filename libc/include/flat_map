@@ -1,0 +1,912 @@
+//
+//  flat_map
+//  c_compiler
+//
+//  C++23 flat_map and flat_multimap.
+//
+
+#ifndef __davecc_flat_map__
+#define __davecc_flat_map__
+
+#include <__exception_support>
+#include <__flat_container>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <ranges>
+#ifdef __cpp_exceptions
+#include <stdexcept>
+#endif
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+namespace __flat_detail {
+
+[[noreturn]] inline void __flat_map_out_of_range() {
+#ifdef __cpp_exceptions
+  throw out_of_range("flat_map::at");
+#else
+  __builtin_trap();
+#endif
+}
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, bool Multi>
+class __flat_map_base;
+
+template <class Owner, bool Constant>
+class __flat_map_iterator {
+  using __owner_type = conditional_t<Constant, const Owner, Owner>;
+
+ public:
+  using iterator_category = random_access_iterator_tag;
+  using iterator_concept = random_access_iterator_tag;
+  using value_type = typename Owner::value_type;
+  using difference_type = typename Owner::difference_type;
+  using size_type = typename Owner::size_type;
+  using reference =
+      conditional_t<Constant, typename Owner::const_reference,
+                    typename Owner::reference>;
+
+  struct pointer {
+    reference __value;
+    constexpr const reference* operator->() const { return &__value; }
+  };
+
+  constexpr __flat_map_iterator() : __owner(nullptr), __index(0) {}
+
+  constexpr __flat_map_iterator(__owner_type* owner, size_type index)
+      : __owner(owner), __index(index) {}
+
+  template <bool Other>
+    requires(Constant && !Other)
+  constexpr __flat_map_iterator(
+      const __flat_map_iterator<Owner, Other>& other)
+      : __owner(other.__owner), __index(other.__index) {}
+
+  constexpr reference operator*() const {
+    return reference(__owner->__iterator_key(__index),
+                     __owner->__iterator_value(__index));
+  }
+
+  constexpr pointer operator->() const { return pointer{operator*()}; }
+  constexpr reference operator[](difference_type offset) const {
+    return *(*this + offset);
+  }
+  constexpr __flat_map_iterator& operator++() {
+    ++__index;
+    return *this;
+  }
+  constexpr __flat_map_iterator operator++(int) {
+    __flat_map_iterator copy = *this;
+    ++*this;
+    return copy;
+  }
+  constexpr __flat_map_iterator& operator--() {
+    --__index;
+    return *this;
+  }
+  constexpr __flat_map_iterator operator--(int) {
+    __flat_map_iterator copy = *this;
+    --*this;
+    return copy;
+  }
+  constexpr __flat_map_iterator& operator+=(difference_type offset) {
+    __index = static_cast<size_type>(
+        static_cast<difference_type>(__index) + offset);
+    return *this;
+  }
+  constexpr __flat_map_iterator& operator-=(difference_type offset) {
+    return *this += -offset;
+  }
+  friend constexpr __flat_map_iterator operator+(
+      __flat_map_iterator iterator, difference_type offset) {
+    iterator += offset;
+    return iterator;
+  }
+  friend constexpr __flat_map_iterator operator+(
+      difference_type offset, __flat_map_iterator iterator) {
+    iterator += offset;
+    return iterator;
+  }
+  friend constexpr __flat_map_iterator operator-(
+      __flat_map_iterator iterator, difference_type offset) {
+    iterator -= offset;
+    return iterator;
+  }
+  friend constexpr difference_type operator-(
+      const __flat_map_iterator& left,
+      const __flat_map_iterator& right) {
+    return static_cast<difference_type>(left.__index) -
+           static_cast<difference_type>(right.__index);
+  }
+  friend constexpr bool operator==(const __flat_map_iterator& left,
+                                   const __flat_map_iterator& right) {
+    return left.__owner == right.__owner && left.__index == right.__index;
+  }
+  friend constexpr auto operator<=>(const __flat_map_iterator& left,
+                                    const __flat_map_iterator& right) {
+    return left.__index <=> right.__index;
+  }
+
+  constexpr size_type __position() const { return __index; }
+
+ private:
+  template <class, bool>
+  friend class __flat_map_iterator;
+
+  __owner_type* __owner;
+  size_type __index;
+};
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, bool Multi>
+class __flat_map_base {
+ public:
+  using key_type = Key;
+  using mapped_type = T;
+  using value_type = pair<key_type, mapped_type>;
+  using key_compare = Compare;
+  using key_container_type = KeyContainer;
+  using mapped_container_type = MappedContainer;
+  using size_type = typename key_container_type::size_type;
+  using difference_type = typename key_container_type::difference_type;
+  using reference = pair<const key_type&, mapped_type&>;
+  using const_reference = pair<const key_type&, const mapped_type&>;
+
+  class value_compare {
+   public:
+    constexpr bool operator()(const_reference left,
+                              const_reference right) const {
+      return __compare(left.first, right.first);
+    }
+
+   protected:
+    constexpr explicit value_compare(key_compare compare)
+        : __compare(compare) {}
+
+   private:
+    friend class __flat_map_base;
+    key_compare __compare;
+  };
+
+  struct containers {
+    key_container_type keys;
+    mapped_container_type values;
+  };
+
+ public:
+  using iterator = __flat_map_iterator<__flat_map_base, false>;
+  using const_iterator = __flat_map_iterator<__flat_map_base, true>;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+  constexpr __flat_map_base()
+      : __keys(), __values(), __compare() {}
+
+  constexpr explicit __flat_map_base(const key_compare& compare)
+      : __keys(), __values(), __compare(compare) {}
+
+  constexpr __flat_map_base(
+      key_container_type keys, mapped_container_type values,
+      const key_compare& compare = key_compare())
+      : __keys(std::move(keys)),
+        __values(std::move(values)),
+        __compare(compare) {
+    __normalize();
+  }
+
+  constexpr __flat_map_base(
+      sorted_unique_t, key_container_type keys, mapped_container_type values,
+      const key_compare& compare = key_compare())
+      : __keys(std::move(keys)),
+        __values(std::move(values)),
+        __compare(compare) {}
+
+  constexpr __flat_map_base(
+      sorted_equivalent_t, key_container_type keys,
+      mapped_container_type values,
+      const key_compare& compare = key_compare())
+      : __keys(std::move(keys)),
+        __values(std::move(values)),
+        __compare(compare) {}
+
+  template <class InputIterator>
+  constexpr __flat_map_base(InputIterator first, InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(), __values(), __compare(compare) {
+    insert(first, last);
+  }
+
+  template <class InputIterator>
+  constexpr __flat_map_base(sorted_unique_t, InputIterator first,
+                            InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(), __values(), __compare(compare) {
+    insert(sorted_unique, first, last);
+  }
+
+  template <class InputIterator>
+  constexpr __flat_map_base(sorted_equivalent_t, InputIterator first,
+                            InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(), __values(), __compare(compare) {
+    insert(sorted_equivalent, first, last);
+  }
+
+  template <ranges::input_range Range>
+  constexpr __flat_map_base(from_range_t, Range&& range,
+                            const key_compare& compare = key_compare())
+      : __keys(), __values(), __compare(compare) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  constexpr __flat_map_base(initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __flat_map_base(values.begin(), values.end(), compare) {}
+
+  constexpr __flat_map_base(sorted_unique_t,
+                            initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __flat_map_base(sorted_unique, values.begin(), values.end(),
+                        compare) {}
+
+  constexpr __flat_map_base(sorted_equivalent_t,
+                            initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __flat_map_base(sorted_equivalent, values.begin(), values.end(),
+                        compare) {}
+
+  template <class Allocator>
+  constexpr explicit __flat_map_base(const Allocator& allocator)
+      : __keys(allocator), __values(allocator), __compare() {}
+
+  template <class Allocator>
+  constexpr __flat_map_base(const key_compare& compare,
+                            const Allocator& allocator)
+      : __keys(allocator), __values(allocator), __compare(compare) {}
+
+  constexpr __flat_map_base& operator=(initializer_list<value_type> values) {
+    clear();
+    insert(values);
+    return *this;
+  }
+
+  constexpr iterator begin() noexcept { return iterator(this, 0); }
+  constexpr const_iterator begin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr iterator end() noexcept { return iterator(this, size()); }
+  constexpr const_iterator end() const noexcept {
+    return const_iterator(this, size());
+  }
+  constexpr const_iterator cbegin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr const_iterator cend() const noexcept {
+    return const_iterator(this, size());
+  }
+  constexpr reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  constexpr reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  constexpr bool empty() const noexcept { return __keys.empty(); }
+  constexpr size_type size() const noexcept { return __keys.size(); }
+  constexpr size_type max_size() const noexcept {
+    size_type key_max = __keys.max_size();
+    size_type value_max = __values.max_size();
+    return key_max < value_max ? key_max : value_max;
+  }
+
+  constexpr mapped_type& operator[](const key_type& key) {
+    return try_emplace(key).first->second;
+  }
+
+  constexpr mapped_type& operator[](key_type&& key) {
+    return try_emplace(std::move(key)).first->second;
+  }
+
+  template <class K>
+    requires __is_transparent<key_compare>::value
+  constexpr mapped_type& operator[](K&& key) {
+    return try_emplace(static_cast<K&&>(key)).first->second;
+  }
+
+  template <class K>
+  constexpr mapped_type& at(const K& key) {
+    iterator found = find(key);
+    if (found == end()) {
+      __flat_map_out_of_range();
+    }
+    return found->second;
+  }
+
+  template <class K>
+  constexpr const mapped_type& at(const K& key) const {
+    const_iterator found = find(key);
+    if (found == end()) {
+      __flat_map_out_of_range();
+    }
+    return found->second;
+  }
+
+  template <class... Args>
+  constexpr auto emplace(Args&&... args) {
+    value_type value(static_cast<Args&&>(args)...);
+    return insert(std::move(value));
+  }
+
+  template <class... Args>
+  constexpr iterator emplace_hint(const_iterator,
+                                  Args&&... args) {
+    if constexpr (Multi) {
+      return emplace(static_cast<Args&&>(args)...);
+    } else {
+      return emplace(static_cast<Args&&>(args)...).first;
+    }
+  }
+
+  constexpr auto insert(const value_type& value) {
+    return __insert_pair(value.first, value.second);
+  }
+
+  constexpr auto insert(value_type&& value) {
+    return __insert_pair(std::move(value.first),
+                         std::move(value.second));
+  }
+
+  template <class First, class Second>
+  constexpr auto insert(const pair<First, Second>& value) {
+    return __insert_pair(value.first, value.second);
+  }
+
+  template <class First, class Second>
+  constexpr auto insert(pair<First, Second>&& value) {
+    return __insert_pair(static_cast<First&&>(value.first),
+                         static_cast<Second&&>(value.second));
+  }
+
+  template <class Pair>
+  constexpr iterator insert(const_iterator, Pair&& value) {
+    if constexpr (Multi) {
+      return insert(static_cast<Pair&&>(value));
+    } else {
+      return insert(static_cast<Pair&&>(value)).first;
+    }
+  }
+
+  template <class InputIterator>
+  constexpr void insert(InputIterator first, InputIterator last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+
+  template <class InputIterator>
+  constexpr void insert(sorted_unique_t, InputIterator first,
+                        InputIterator last) {
+    insert(first, last);
+  }
+
+  template <class InputIterator>
+  constexpr void insert(sorted_equivalent_t, InputIterator first,
+                        InputIterator last) {
+    insert(first, last);
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(Range&& range) {
+    insert(ranges::begin(range), ranges::end(range));
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(sorted_unique_t, Range&& range) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(sorted_equivalent_t, Range&& range) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  constexpr void insert(initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr void insert(sorted_unique_t,
+                        initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr void insert(sorted_equivalent_t,
+                        initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr containers extract() && {
+    return containers{std::move(__keys), std::move(__values)};
+  }
+
+  constexpr void replace(key_container_type&& keys,
+                         mapped_container_type&& values) {
+    __keys = std::move(keys);
+    __values = std::move(values);
+  }
+
+  template <class K, class... Args>
+  constexpr auto try_emplace(K&& key, Args&&... args) {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    if constexpr (!Multi) {
+      if (__has_equivalent(index, key)) {
+        return pair<iterator, bool>(iterator(this, index), false);
+      }
+    } else {
+      index = __upper_bound_index(__keys, key, __compare);
+    }
+    mapped_type mapped(static_cast<Args&&>(args)...);
+    iterator inserted =
+        __insert_at(index, static_cast<K&&>(key), std::move(mapped));
+    if constexpr (Multi) {
+      return inserted;
+    } else {
+      return pair<iterator, bool>(inserted, true);
+    }
+  }
+
+  template <class K, class... Args>
+  constexpr iterator try_emplace(const_iterator, K&& key,
+                                 Args&&... args) {
+    if constexpr (Multi) {
+      return try_emplace(static_cast<K&&>(key),
+                         static_cast<Args&&>(args)...);
+    } else {
+      return try_emplace(static_cast<K&&>(key),
+                         static_cast<Args&&>(args)...).first;
+    }
+  }
+
+  template <class K, class M>
+  constexpr auto insert_or_assign(K&& key, M&& mapped) {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    if (__has_equivalent(index, key)) {
+      __values[index] = static_cast<M&&>(mapped);
+      return pair<iterator, bool>(iterator(this, index), false);
+    }
+    iterator inserted =
+        __insert_at(index, static_cast<K&&>(key),
+                    static_cast<M&&>(mapped));
+    return pair<iterator, bool>(inserted, true);
+  }
+
+  template <class K, class M>
+  constexpr iterator insert_or_assign(const_iterator, K&& key, M&& mapped) {
+    return insert_or_assign(static_cast<K&&>(key),
+                            static_cast<M&&>(mapped)).first;
+  }
+
+  constexpr iterator erase(const_iterator position) {
+    size_type index = position.__position();
+    __keys.erase(__keys.begin() + static_cast<difference_type>(index));
+    __values.erase(__values.begin() + static_cast<difference_type>(index));
+    return iterator(this, index);
+  }
+
+  constexpr iterator erase(iterator position) {
+    return erase(const_iterator(position));
+  }
+
+  constexpr iterator erase(const_iterator first, const_iterator last) {
+    size_type first_index = first.__position();
+    size_type last_index = last.__position();
+    __keys.erase(__keys.begin() + static_cast<difference_type>(first_index),
+                 __keys.begin() + static_cast<difference_type>(last_index));
+    __values.erase(
+        __values.begin() + static_cast<difference_type>(first_index),
+        __values.begin() + static_cast<difference_type>(last_index));
+    return iterator(this, first_index);
+  }
+
+  template <class K>
+  constexpr size_type erase(const K& key) {
+    auto range = this->equal_range(key);
+    size_type removed =
+        static_cast<size_type>(range.second - range.first);
+    erase(range.first, range.second);
+    return removed;
+  }
+
+  constexpr void swap(__flat_map_base& other)
+      noexcept(noexcept(std::swap(__keys, other.__keys)) &&
+               noexcept(std::swap(__values, other.__values)) &&
+               noexcept(std::swap(__compare, other.__compare))) {
+    std::swap(__keys, other.__keys);
+    std::swap(__values, other.__values);
+    std::swap(__compare, other.__compare);
+  }
+
+  constexpr void clear() noexcept {
+    __keys.clear();
+    __values.clear();
+  }
+
+  constexpr key_compare key_comp() const { return __compare; }
+  constexpr value_compare value_comp() const {
+    return value_compare(__compare);
+  }
+
+  constexpr const key_container_type& keys() const noexcept {
+    return __keys;
+  }
+
+  constexpr const mapped_container_type& values() const noexcept {
+    return __values;
+  }
+
+  constexpr const key_type& __iterator_key(size_type index) const {
+    return __keys[index];
+  }
+
+  constexpr mapped_type& __iterator_value(size_type index) {
+    return __values[index];
+  }
+
+  constexpr const mapped_type& __iterator_value(size_type index) const {
+    return __values[index];
+  }
+
+  template <class K>
+  constexpr iterator find(const K& key) {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    return __has_equivalent(index, key) ? iterator(this, index) : end();
+  }
+
+  template <class K>
+  constexpr const_iterator find(const K& key) const {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    return __has_equivalent(index, key) ? const_iterator(this, index) : end();
+  }
+
+  template <class K>
+  constexpr size_type count(const K& key) const {
+    if constexpr (Multi) {
+      auto range = this->equal_range(key);
+      return static_cast<size_type>(range.second - range.first);
+    } else {
+      return find(key) == end() ? 0 : 1;
+    }
+  }
+
+  template <class K>
+  constexpr bool contains(const K& key) const {
+    return find(key) != end();
+  }
+
+  template <class K>
+  constexpr iterator lower_bound(const K& key) {
+    return iterator(this, __lower_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr const_iterator lower_bound(const K& key) const {
+    return const_iterator(this,
+                          __lower_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr iterator upper_bound(const K& key) {
+    return iterator(this, __upper_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr const_iterator upper_bound(const K& key) const {
+    return const_iterator(this,
+                          __upper_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr pair<iterator, iterator> equal_range(const K& key) {
+    return {lower_bound(key), upper_bound(key)};
+  }
+
+  template <class K>
+  constexpr pair<const_iterator, const_iterator> equal_range(
+      const K& key) const {
+    return {lower_bound(key), upper_bound(key)};
+  }
+
+  friend constexpr bool operator==(const __flat_map_base& left,
+                                   const __flat_map_base& right) {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    for (size_type i = 0; i < left.size(); ++i) {
+      if (!(left.__keys[i] == right.__keys[i]) ||
+          !(left.__values[i] == right.__values[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+ protected:
+  key_container_type __keys;
+  mapped_container_type __values;
+  key_compare __compare;
+
+ private:
+  template <class K>
+  constexpr bool __has_equivalent(size_type index, const K& key) const {
+    return index != size() &&
+           __equivalent(__compare, __keys[index], key);
+  }
+
+  constexpr void __normalize() {
+    for (size_type i = 1; i < size(); ++i) {
+      size_type current = i;
+      while (current != 0 &&
+             __compare(__keys[current], __keys[current - 1])) {
+        std::swap(__keys[current], __keys[current - 1]);
+        std::swap(__values[current], __values[current - 1]);
+        --current;
+      }
+    }
+    if constexpr (!Multi) {
+      size_type output = 0;
+      for (size_type input = 0; input < size(); ++input) {
+        if (output == 0 ||
+            !__equivalent(__compare, __keys[output - 1], __keys[input])) {
+          if (output != input) {
+            __keys[output] = std::move(__keys[input]);
+            __values[output] = std::move(__values[input]);
+          }
+          ++output;
+        }
+      }
+      __keys.erase(__keys.begin() + static_cast<difference_type>(output),
+                   __keys.end());
+      __values.erase(
+          __values.begin() + static_cast<difference_type>(output),
+          __values.end());
+    }
+  }
+
+  template <class K, class M>
+  constexpr iterator __insert_at(size_type index, K&& key, M&& mapped) {
+    auto mapped_position =
+        __values.insert(
+            __values.begin() + static_cast<difference_type>(index),
+            static_cast<M&&>(mapped));
+    __DAVECC_TRY {
+      __keys.insert(__keys.begin() + static_cast<difference_type>(index),
+                    static_cast<K&&>(key));
+    } __DAVECC_CATCH_ALL {
+      __values.erase(mapped_position);
+      __DAVECC_RETHROW;
+    }
+    return iterator(this, index);
+  }
+
+  template <class K, class M>
+  constexpr auto __insert_pair(K&& key, M&& mapped) {
+    size_type index =
+        Multi ? __upper_bound_index(__keys, key, __compare)
+              : __lower_bound_index(__keys, key, __compare);
+    if constexpr (!Multi) {
+      if (__has_equivalent(index, key)) {
+        return pair<iterator, bool>(iterator(this, index), false);
+      }
+      return pair<iterator, bool>(
+          __insert_at(index, static_cast<K&&>(key),
+                      static_cast<M&&>(mapped)),
+          true);
+    } else {
+      return __insert_at(index, static_cast<K&&>(key),
+                         static_cast<M&&>(mapped));
+    }
+  }
+};
+
+}  // namespace __flat_detail
+
+template <class Key, class T, class Compare = less<Key>,
+          class KeyContainer = vector<Key>,
+          class MappedContainer = vector<T>>
+class flat_map
+    : public __flat_detail::__flat_map_base<
+          Key, T, Compare, KeyContainer, MappedContainer, false> {
+  using __base = __flat_detail::__flat_map_base<
+      Key, T, Compare, KeyContainer, MappedContainer, false>;
+
+ public:
+  constexpr flat_map() = default;
+  constexpr explicit flat_map(const Compare& compare) : __base(compare) {}
+  constexpr flat_map(KeyContainer keys, MappedContainer values,
+                     const Compare& compare = Compare())
+      : __base(std::move(keys), std::move(values), compare) {}
+  constexpr flat_map(sorted_unique_t tag, KeyContainer keys,
+                     MappedContainer values,
+                     const Compare& compare = Compare())
+      : __base(tag, std::move(keys), std::move(values), compare) {}
+  template <class InputIterator>
+  constexpr flat_map(InputIterator first, InputIterator last,
+                     const Compare& compare = Compare())
+      : __base(first, last, compare) {}
+  template <class InputIterator>
+  constexpr flat_map(sorted_unique_t tag, InputIterator first,
+                     InputIterator last,
+                     const Compare& compare = Compare())
+      : __base(tag, first, last, compare) {}
+  template <ranges::input_range Range>
+  constexpr flat_map(from_range_t tag, Range&& range,
+                     const Compare& compare = Compare())
+      : __base(tag, static_cast<Range&&>(range), compare) {}
+  constexpr flat_map(initializer_list<pair<Key, T>> values,
+                     const Compare& compare = Compare())
+      : __base(values, compare) {}
+  constexpr flat_map(sorted_unique_t tag,
+                     initializer_list<pair<Key, T>> values,
+                     const Compare& compare = Compare())
+      : __base(tag, values, compare) {}
+  constexpr flat_map& operator=(initializer_list<pair<Key, T>> values) {
+    __base::operator=(values);
+    return *this;
+  }
+};
+
+template <class Key, class T, class Compare = less<Key>,
+          class KeyContainer = vector<Key>,
+          class MappedContainer = vector<T>>
+class flat_multimap
+    : public __flat_detail::__flat_map_base<
+          Key, T, Compare, KeyContainer, MappedContainer, true> {
+  using __base = __flat_detail::__flat_map_base<
+      Key, T, Compare, KeyContainer, MappedContainer, true>;
+
+ public:
+  constexpr flat_multimap() = default;
+  constexpr explicit flat_multimap(const Compare& compare)
+      : __base(compare) {}
+  constexpr flat_multimap(KeyContainer keys, MappedContainer values,
+                          const Compare& compare = Compare())
+      : __base(std::move(keys), std::move(values), compare) {}
+  constexpr flat_multimap(sorted_equivalent_t tag, KeyContainer keys,
+                          MappedContainer values,
+                          const Compare& compare = Compare())
+      : __base(tag, std::move(keys), std::move(values), compare) {}
+  template <class InputIterator>
+  constexpr flat_multimap(InputIterator first, InputIterator last,
+                          const Compare& compare = Compare())
+      : __base(first, last, compare) {}
+  template <class InputIterator>
+  constexpr flat_multimap(sorted_equivalent_t tag, InputIterator first,
+                          InputIterator last,
+                          const Compare& compare = Compare())
+      : __base(tag, first, last, compare) {}
+  template <ranges::input_range Range>
+  constexpr flat_multimap(from_range_t tag, Range&& range,
+                          const Compare& compare = Compare())
+      : __base(tag, static_cast<Range&&>(range), compare) {}
+  constexpr flat_multimap(initializer_list<pair<Key, T>> values,
+                          const Compare& compare = Compare())
+      : __base(values, compare) {}
+  constexpr flat_multimap(sorted_equivalent_t tag,
+                          initializer_list<pair<Key, T>> values,
+                          const Compare& compare = Compare())
+      : __base(tag, values, compare) {}
+  constexpr flat_multimap& operator=(
+      initializer_list<pair<Key, T>> values) {
+    __base::operator=(values);
+    return *this;
+  }
+};
+
+template <class KeyContainer, class MappedContainer,
+          class Compare = less<typename KeyContainer::value_type>>
+  requires requires {
+    typename KeyContainer::value_type;
+    typename MappedContainer::value_type;
+  }
+flat_map(KeyContainer, MappedContainer, Compare = Compare())
+    -> flat_map<typename KeyContainer::value_type,
+                typename MappedContainer::value_type, Compare,
+                KeyContainer, MappedContainer>;
+
+template <class KeyContainer, class MappedContainer,
+          class Compare = less<typename KeyContainer::value_type>>
+flat_map(sorted_unique_t, KeyContainer, MappedContainer,
+         Compare = Compare())
+    -> flat_map<typename KeyContainer::value_type,
+                typename MappedContainer::value_type, Compare,
+                KeyContainer, MappedContainer>;
+
+template <class KeyContainer, class MappedContainer,
+          class Compare = less<typename KeyContainer::value_type>>
+  requires requires {
+    typename KeyContainer::value_type;
+    typename MappedContainer::value_type;
+  }
+flat_multimap(KeyContainer, MappedContainer, Compare = Compare())
+    -> flat_multimap<typename KeyContainer::value_type,
+                     typename MappedContainer::value_type, Compare,
+                     KeyContainer, MappedContainer>;
+
+template <class KeyContainer, class MappedContainer,
+          class Compare = less<typename KeyContainer::value_type>>
+flat_multimap(sorted_equivalent_t, KeyContainer, MappedContainer,
+              Compare = Compare())
+    -> flat_multimap<typename KeyContainer::value_type,
+                     typename MappedContainer::value_type, Compare,
+                     KeyContainer, MappedContainer>;
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, class Allocator>
+struct uses_allocator<
+    flat_map<Key, T, Compare, KeyContainer, MappedContainer>, Allocator>
+    : bool_constant<uses_allocator_v<KeyContainer, Allocator> &&
+                    uses_allocator_v<MappedContainer, Allocator>> {};
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, class Allocator>
+struct uses_allocator<
+    flat_multimap<Key, T, Compare, KeyContainer, MappedContainer>,
+    Allocator>
+    : bool_constant<uses_allocator_v<KeyContainer, Allocator> &&
+                    uses_allocator_v<MappedContainer, Allocator>> {};
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, class Predicate>
+constexpr typename flat_map<Key, T, Compare, KeyContainer,
+                            MappedContainer>::size_type
+erase_if(flat_map<Key, T, Compare, KeyContainer, MappedContainer>& container,
+         Predicate predicate) {
+  auto old_size = container.size();
+  for (auto iterator = container.begin(); iterator != container.end();) {
+    if (predicate(*iterator)) {
+      iterator = container.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  return old_size - container.size();
+}
+
+template <class Key, class T, class Compare, class KeyContainer,
+          class MappedContainer, class Predicate>
+constexpr typename flat_multimap<Key, T, Compare, KeyContainer,
+                                 MappedContainer>::size_type
+erase_if(
+    flat_multimap<Key, T, Compare, KeyContainer, MappedContainer>& container,
+    Predicate predicate) {
+  auto old_size = container.size();
+  for (auto iterator = container.begin(); iterator != container.end();) {
+    if (predicate(*iterator)) {
+      iterator = container.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  return old_size - container.size();
+}
+
+}  // namespace std
+
+#endif /* __davecc_flat_map__ */

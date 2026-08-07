@@ -22,6 +22,12 @@
 
 namespace std {
 
+struct from_range_t {
+  explicit from_range_t() = default;
+};
+
+inline constexpr from_range_t from_range{};
+
 // A prvalue copy of an expression's decayed type, used in the range-access CPO
 // constraints to check the *decayed* return type of member/ADL calls.
 template <class T>

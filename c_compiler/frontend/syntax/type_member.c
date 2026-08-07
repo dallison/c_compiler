@@ -102,12 +102,14 @@ static bool template_constructor_initializers_initialized = false;
 
 static CXXMemberUsingDeclaration* NewCXXMemberUsingDeclaration(
     TypeRecord* base_type, const char* member_name, CXXAccess access,
-    SourceLocation location, bool is_pack_expansion);
+    SourceLocation location, bool is_pack_expansion,
+    bool qualifier_names_constructor);
 static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                                             TypeRecord* base_type,
                                             const char* member_name,
                                             CXXAccess access,
-                                            SourceLocation location);
+                                            SourceLocation location,
+                                            bool qualifier_names_constructor);
 static bool CanOverloadStructMember(StructMember* existing,
                                     StructMember* member);
 
@@ -429,14 +431,18 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
 
   bool is_dependent = is_template_parameter_base ||
                       TypeContainsTemplateParameter(base_type);
+  bool qualifier_names_constructor =
+      StringEqual(base_name, member_name->value);
   if (is_dependent || parser->syntax->parsing_template_declaration) {
     VectorAppend(&owner->member_using_declarations,
                  NewCXXMemberUsingDeclaration(base_type, member_name->value,
                                               access, location,
-                                              is_pack_expansion));
+                                              is_pack_expansion,
+                                              qualifier_names_constructor));
   } else {
     ImportCXXMemberUsingDeclaration(parser, owner, base_type,
-                                    member_name->value, access, location);
+                                    member_name->value, access, location,
+                                    qualifier_names_constructor);
   }
   TypeRecordDelete(base_type);
   FullyQualifiedIdentifierDestruct(&name);
@@ -468,13 +474,15 @@ static void ParseCXXMemberTypedef(TypeParser* parser, Struct* owner,
 
 static CXXMemberUsingDeclaration* NewCXXMemberUsingDeclaration(
     TypeRecord* base_type, const char* member_name, CXXAccess access,
-    SourceLocation location, bool is_pack_expansion) {
+    SourceLocation location, bool is_pack_expansion,
+    bool qualifier_names_constructor) {
   CXXMemberUsingDeclaration* decl = malloc(sizeof(CXXMemberUsingDeclaration));
   decl->base_type = TypeRecordCopy(base_type);
   StringInit(&decl->member_name, member_name);
   decl->access = access;
   decl->location = location;
   decl->is_pack_expansion = is_pack_expansion;
+  decl->qualifier_names_constructor = qualifier_names_constructor;
   return decl;
 }
 
@@ -537,7 +545,8 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                                             TypeRecord* base_type,
                                             const char* member_name,
                                             CXXAccess access,
-                                            SourceLocation location) {
+                                            SourceLocation location,
+                                            bool qualifier_names_constructor) {
   if (owner == NULL || base_type == NULL || member_name == NULL) {
     return;
   }
@@ -554,9 +563,11 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   }
   Struct* base_struct = lookup_base->info.struct_info;
   const char* lookup_member_name = member_name;
-  bool inherits_constructor = false;
+  bool inherits_constructor = qualifier_names_constructor;
   if (base_struct->tag_name != NULL) {
-    if (strcmp(member_name, base_struct->tag_name->value) == 0) {
+    if (qualifier_names_constructor) {
+      lookup_member_name = base_struct->tag_name->value;
+    } else if (strcmp(member_name, base_struct->tag_name->value) == 0) {
       inherits_constructor = true;
     } else if (lookup_base->template_origin != NULL &&
                strcmp(member_name,
@@ -653,7 +664,8 @@ static void ApplyCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
         }
         ImportCXXMemberUsingDeclaration(parser, owner, element->type,
                                         decl->member_name.value, decl->access,
-                                        decl->location);
+                                        decl->location,
+                                        decl->qualifier_names_constructor);
       }
       return;
     }
@@ -663,7 +675,8 @@ static void ApplyCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                    : TypeRecordCopy(decl->base_type);
   ImportCXXMemberUsingDeclaration(parser, owner, base_type,
                                   decl->member_name.value, decl->access,
-                                  decl->location);
+                                  decl->location,
+                                  decl->qualifier_names_constructor);
   TypeRecordDelete(base_type);
 }
 
@@ -1218,6 +1231,38 @@ static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
   return true;
 }
 
+static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
+                                                     TypeRecord* func) {
+  Vector* template_parameters = &func->info.function.template_parameters;
+  for (size_t i = 0; i < template_parameters->length; i++) {
+    TemplateParameter* parameter = template_parameters->value.p[i];
+    if (parameter == NULL || parameter->name.length == 0) {
+      continue;
+    }
+    TypeRecord* parameter_type = NULL;
+    if (parameter->kind == kTemplateParameterType) {
+      parameter_type =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      parameter_type->template_parameter_index = parameter->index;
+      parameter_type->template_parameter_name =
+          NewString(parameter->name.value);
+    } else if (parameter->type != NULL) {
+      parameter_type = TypeRecordCopy(parameter->type);
+    } else {
+      continue;
+    }
+    Symbol* symbol =
+        NewSymbol(parameter->name.value, parameter_type, STO(typedef));
+    symbol->flags.invented = true;
+    symbol->flags.is_template_parameter = true;
+    symbol->flags.is_template_type_parameter =
+        parameter->kind == kTemplateParameterType;
+    symbol->flags.is_parameter_pack = parameter->is_parameter_pack;
+    symbol->template_parameter_index = parameter->index;
+    SyntaxAddSymbol(syntax, symbol);
+  }
+}
+
 static void AddInlineFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   Vector* formals = &func->info.function.prototype;
   for (size_t i = 0; i < formals->length; i++) {
@@ -1605,6 +1650,59 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     lex->source = NULL;  // Real source is reinstated by end_checkpoint below.
     SourceDelete(replay);
     StringDestruct(&entry->body_text);
+    free(entry);
+  }
+  LexCheckpointRestore(lex, &end_checkpoint);
+  LexCheckpointDestruct(&end_checkpoint);
+  VectorClear(deferred);
+}
+
+static void FlushDeferredNoexceptSpecifiers(TypeParser* parser,
+                                            Vector* deferred) {
+  if (deferred == NULL || deferred->length == 0) {
+    return;
+  }
+  Syntax* syntax = parser->syntax;
+  Lex* lex = parser->lex;
+  LexCheckpoint end_checkpoint;
+  LexCheckpointSave(lex, &end_checkpoint);
+  for (size_t i = 0; i < deferred->length; ++i) {
+    DeferredNoexceptSpecifier* entry = deferred->value.p[i];
+    LexCheckpointRestore(lex, &entry->expression_checkpoint);
+    TypeRecord* old_current_function = compiler->current_function;
+    Struct* old_access_context = compiler->current_class_access_context;
+    compiler->current_function = entry->function_type;
+    compiler->current_class_access_context =
+        entry->function_type->info.function.cxx_member_owner;
+    Vector* old_template_parameters = syntax->current_template_parameters;
+    int old_template_parameter_count =
+        syntax->current_template_parameter_count;
+    bool old_parsing_template = syntax->parsing_template_declaration;
+    syntax->current_template_parameters =
+        &entry->function_type->info.function.template_parameters;
+    syntax->current_template_parameter_count =
+        entry->function_type->info.function.template_parameter_count;
+    syntax->parsing_template_declaration =
+        syntax->current_template_parameters->length != 0;
+    SyntaxOpenScope(syntax);
+    AddFunctionTemplateParameterScopeSymbols(syntax, entry->function_type);
+    AddInlineFunctionScopeSymbols(syntax, entry->function_type);
+    ASTNode* expression = SyntaxParseSingleExpression(syntax, TC(exprsep));
+    expression = AnalyzeExpression(expression);
+    int64_t value = 1;
+    if (!EvaluateIntegerExpression(expression, &value)) {
+      value = 0;
+    }
+    entry->function_type->info.function.is_noexcept = value != 0;
+    ASTNodeDelete(expression);
+    SyntaxCloseScope(syntax);
+    syntax->current_template_parameters = old_template_parameters;
+    syntax->current_template_parameter_count =
+        old_template_parameter_count;
+    syntax->parsing_template_declaration = old_parsing_template;
+    compiler->current_function = old_current_function;
+    compiler->current_class_access_context = old_access_context;
+    LexCheckpointDestruct(&entry->expression_checkpoint);
     free(entry);
   }
   LexCheckpointRestore(lex, &end_checkpoint);
@@ -2067,6 +2165,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   VectorInit(&deferred_inline_bodies);
   Vector* saved_deferred_inline_bodies = parser->deferred_inline_bodies;
   parser->deferred_inline_bodies = &deferred_inline_bodies;
+  Vector deferred_noexcept_specifiers;
+  VectorInit(&deferred_noexcept_specifiers);
+  Vector* saved_deferred_noexcept_specifiers =
+      parser->deferred_noexcept_specifiers;
+  parser->deferred_noexcept_specifiers = &deferred_noexcept_specifiers;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
     if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
@@ -2767,7 +2870,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
 
   // Every member is now declared; re-parse the deferred inline bodies in
   // complete-class context, then restore this frame's collection pointer.
+  FlushDeferredNoexceptSpecifiers(parser, &deferred_noexcept_specifiers);
   FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
   parser->deferred_inline_bodies = saved_deferred_inline_bodies;
+  parser->deferred_noexcept_specifiers =
+      saved_deferred_noexcept_specifiers;
   VectorDestruct(&deferred_inline_bodies);
+  VectorDestruct(&deferred_noexcept_specifiers);
 }

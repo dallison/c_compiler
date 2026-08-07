@@ -606,24 +606,27 @@ TargetInstruction* TargetEmitSymbol(TargetGenerator* target,
 
 TargetInstruction* TargetFramePointer(TargetGenerator* target) {
   if (target->frame_pointer == NULL) {
-    target->frame_pointer =
-        TargetEmit(target, TargetNewInstruction(TARGET_OP(fp)));
+    target->frame_pointer = TargetEmitBefore(
+        target, TargetNewInstruction(TARGET_OP(fp)),
+        TargetFirstInstruction(target));
   }
   return target->frame_pointer;
 }
 
 TargetInstruction* TargetStackPointer(TargetGenerator* target) {
   if (target->stack_pointer == NULL) {
-    target->stack_pointer =
-        TargetEmit(target, TargetNewInstruction(TARGET_OP(sp)));
+    target->stack_pointer = TargetEmitBefore(
+        target, TargetNewInstruction(TARGET_OP(sp)),
+        TargetFirstInstruction(target));
   }
   return target->stack_pointer;
 }
 
 TargetInstruction* TargetThreadPointer(TargetGenerator* target) {
   if (target->thread_pointer == NULL) {
-    target->thread_pointer =
-    TargetEmit(target, TargetNewInstruction(TARGET_OP(tp)));
+    target->thread_pointer = TargetEmitBefore(
+        target, TargetNewInstruction(TARGET_OP(tp)),
+        TargetFirstInstruction(target));
   }
   return target->thread_pointer;
 }

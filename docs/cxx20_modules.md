@@ -60,8 +60,8 @@ The verified profile exports:
   `numbers`, `optional`, `ratio`, `source_location`, `span`, `stdexcept`,
   `string`, `string_view`, `system_error`, `tuple`, `type_traits`, `utility`,
   `variant`, and `version`.
-- Containers and adaptors: `deque`, `list`, `map`, `queue`, `set`, `stack`,
-  `unordered_map`, `unordered_set`, and `vector`.
+- Containers and adaptors: `deque`, `flat_map`, `flat_set`, `list`, `map`,
+  `queue`, `set`, `stack`, `unordered_map`, `unordered_set`, and `vector`.
 - Concurrency and time: `atomic`, `barrier`, `chrono`, `condition_variable`,
   `coroutine`, `latch`, `mutex`, `semaphore`, `stop_token`, `syncstream`, and
   `thread`.
@@ -74,6 +74,9 @@ implemented chrono duration and system-time-point formatters, and
 `formatter<thread::id, char>`. They do not claim locale, Unicode,
 wide-character, filesystem, or full calendar/time-zone formatting. Headers
 absent from this list are intentionally not exported yet.
+
+The C++23 `functional` surface includes `invoke_r`, `bind_back`, and the
+cv/ref/noexcept-qualified `move_only_function` specializations.
 
 ## Dependency scanning
 

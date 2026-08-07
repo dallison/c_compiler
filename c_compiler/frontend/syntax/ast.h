@@ -130,6 +130,7 @@ typedef enum {
   AST_OP(builtin_source_function),
   AST_OP(builtin_source_pretty_function),
   AST_OP(builtin_type_trait),
+  AST_OP(noexcept_expr),
   AST_OP(builtin_clz),
   AST_OP(builtin_ctz),
   AST_OP(builtin_popcount),
@@ -384,6 +385,7 @@ struct ConstraintExpr;
 #define kASTRangeForInitializer (1ULL << 36)  // Synthetic range-for compound with a hidden range initializer.
 #define kASTFunctionParameterTemporary (1ULL << 37)  // Materialization of a by-value function parameter object.
 #define kASTTemporaryCleanupCall (1ULL << 38)  // Compiler-generated end-of-lifetime destructor call.
+#define kASTReferencesParameterPack (1ULL << 39)  // Parsed expression names a pack, even if semantic analysis consumes its template arguments.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

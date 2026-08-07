@@ -725,6 +725,13 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
                                       : node->sub->type);
 }
 
+static void AnalyzeNoexceptExpression(UnaryASTNode* node) {
+  if (node->sub != NULL) {
+    node->sub = AnalyzeExpression(node->sub);
+  }
+  ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+}
+
 static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
   node->sub = AnalyzeExpression(node->sub);
   if (compiler->current_function == NULL ||
@@ -1580,7 +1587,9 @@ static ASTNode* BuildMemberOperatorCall(BinaryASTNode* node,
 
 static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   const char* op_name = BinaryOperatorFunctionName(node->base.op);
-  if (!CompilerIsCXX() || op_name == NULL) {
+  if (!CompilerIsCXX() || op_name == NULL ||
+      node->left == NULL || node->right == NULL ||
+      node->left->type == NULL || node->right->type == NULL) {
     return NULL;
   }
   // A constructor member-initializer that targets a reference data member binds
@@ -1678,6 +1687,9 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
 static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
     BinaryASTNode* node) {
   if (BinaryOperatorFunctionName(node->base.op) == NULL) {
+    return NULL;
+  }
+  if (node->left == NULL || node->right == NULL) {
     return NULL;
   }
   // A braced-init-list operand (e.g. the right-hand side of `x = {...}`) is not
@@ -6208,7 +6220,7 @@ static void EmitFreeCandidateNotes(Vector* candidates, VectorASTNode* call,
   }
 }
 
-static int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);
+int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);
 
 static void DeleteTemporaryFunctionTemplateCandidates(Vector* candidates,
                                                       Symbol* keep) {
@@ -6436,7 +6448,7 @@ Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
       /*diagnose_no_match=*/false, /*diagnose_ambiguous=*/false,
       diagnostic_node);
   VectorDestruct(&candidates);
-  return InstantiateSelectedFunctionTemplateCandidate(best);
+  return best;
 }
 
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
@@ -6469,10 +6481,22 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
       return NULL;
     }
   }
+  FunctionTemplateCandidateStatus candidate_status =
+      TypeClassifyFunctionTemplateCandidate(
+          &compiler->syntax, candidate, explicit_args, node->children, 0);
+  if (candidate_status != kFunctionTemplateCandidateViable) {
+    return NULL;
+  }
+  bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
   Symbol* instantiated = TypeCreateFunctionTemplateCandidate(
       &compiler->syntax, candidate, explicit_args, node->children, 0);
+  bool substitution_failed = DiagnosticErrorTrapped();
   DiagnosticSuppressEnd();
+  DiagnosticErrorTrapEnd(saved_trap);
+  if (substitution_failed) {
+    instantiated = NULL;
+  }
   if (instantiated != NULL && temporary_candidates != NULL) {
     VectorAppend(temporary_candidates, instantiated);
   }
@@ -6728,7 +6752,7 @@ static int FunctionTemplatePatternSpecificity(Symbol* instantiated) {
   return score;
 }
 
-static int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right) {
+int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right) {
   bool left_is_template = left != NULL && left->type != NULL &&
                           TypeIsFunction(left->type) &&
                           left->type->info.function.template_origin != NULL;
@@ -7382,11 +7406,16 @@ static void InstantiateResolvedFunctionTemplateCall(VectorASTNode* node) {
   IdentifierASTNode* id = (IdentifierASTNode*)node->left;
   if (id->symbol == NULL || id->symbol->type == NULL ||
       !TypeIsFunction(id->symbol->type) ||
-      id->symbol->type->info.function.template_origin == NULL ||
-      id->symbol->type->template_arguments == NULL) {
+      id->symbol->type->info.function.template_origin == NULL) {
     return;
   }
-  Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
+  Symbol* instantiated =
+      id->symbol->type->template_arguments != NULL
+          ? InstantiateSelectedFunctionTemplateCandidate(id->symbol)
+          : TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+                &compiler->syntax,
+                id->symbol->type->info.function.template_origin,
+                /*explicit_args=*/NULL, node->children);
   if (instantiated != NULL) {
     id->symbol = instantiated;
     ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
@@ -7420,6 +7449,20 @@ static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name) {
 static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL) {
     return NULL;
+  }
+  if (node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL && id->symbol->flags.is_template &&
+        StorageIs(id->symbol->storage, STO(typedef)) &&
+        id->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments)) {
+      TypeRecord* alias_type = TypeInstantiateClassTemplate(
+          &compiler->syntax, id->symbol, id->template_arguments);
+      if (alias_type != NULL) {
+        ASTNodeSetType(node->left, alias_type);
+      }
+    }
   }
   if (!TypeIsStructOrUnion(node->left->type)) {
     if (node->left->op != AST_OP(identifier)) {
@@ -7460,16 +7503,20 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template &&
-        id->symbol->type != NULL && TypeIsStructOrUnion(id->symbol->type) &&
-        id->symbol->type->template_arguments == NULL &&
-        id->symbol->type->info.struct_info != NULL &&
-        id->symbol->type->info.struct_info->is_template &&
+        id->symbol->type != NULL &&
         id->template_arguments != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
             id->template_arguments)) {
-      explicit_type = TypeInstantiateClassTemplate(&compiler->syntax,
-                                                   id->symbol,
-                                                   id->template_arguments);
+      bool class_template =
+          TypeIsStructOrUnion(id->symbol->type) &&
+          id->symbol->type->template_arguments == NULL &&
+          id->symbol->type->info.struct_info != NULL &&
+          id->symbol->type->info.struct_info->is_template;
+      bool alias_template = StorageIs(id->symbol->storage, STO(typedef));
+      if (class_template || alias_template) {
+        explicit_type = TypeInstantiateClassTemplate(
+            &compiler->syntax, id->symbol, id->template_arguments);
+      }
     }
   }
 
@@ -8262,6 +8309,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   ASTNode* analyzed_callee = AnalyzeExpression(old_callee);
   if (analyzed_callee != old_callee) {
+    if (old_callee != NULL && analyzed_callee != NULL) {
+      analyzed_callee->flags |=
+          old_callee->flags & kASTReferencesParameterPack;
+    }
     ASTNodeDelete(old_callee);
   }
   node->left = analyzed_callee;
@@ -8342,6 +8393,20 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
                        NewTypeRecordWithSize(kTypeInt, kQualPlain));
         return (ASTNode*)node;
       }
+    }
+  }
+  if (node->left != NULL && node->left->op == AST_OP(identifier) &&
+      CallActualsContainTemplateParameter(node)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL &&
+        (id->symbol->flags.is_overloaded ||
+         id->symbol->flags.is_template ||
+         id->symbol->overload_next != NULL)) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                           kQualPlain));
+      return (ASTNode*)node;
     }
   }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
@@ -8985,6 +9050,16 @@ static bool ShouldCountMemberReferenceUse(BinaryASTNode* node) {
          !MemberReferenceIsInitializerTarget(node);
 }
 
+static ASTValueCategory DataMemberAccessValueCategory(BinaryASTNode* node,
+                                                       StructMember* member) {
+  if (node == NULL || member == NULL || member->is_static ||
+      node->base.op == AST_OP(arrow) || node->left == NULL ||
+      node->left->value_category == kValueCategoryLvalue) {
+    return kValueCategoryLvalue;
+  }
+  return kValueCategoryXvalue;
+}
+
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // Already analyzed.
@@ -9002,15 +9077,18 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     node->left->parent = (ASTNode*)node;
     node->left->child_id = 0;
   }
-  if (node->base.op == AST_OP(arrow) &&
-      !TypeIsStructOrUnionPointer(node->left->type)) {
+  int overloaded_arrow_depth = 0;
+  while (node->base.op == AST_OP(arrow) && node->left != NULL &&
+         !TypeIsStructOrUnionPointer(node->left->type) &&
+         overloaded_arrow_depth++ < 64) {
     ASTNode* overloaded_arrow =
         TryAnalyzeOverloadedArrowOperator(node->left, node->base.location);
-    if (overloaded_arrow != NULL) {
-      node->left = overloaded_arrow;
-      node->left->parent = (ASTNode*)node;
-      node->left->child_id = 0;
+    if (overloaded_arrow == NULL) {
+      break;
     }
+    node->left = overloaded_arrow;
+    node->left->parent = (ASTNode*)node;
+    node->left->child_id = 0;
   }
   // A class-template primary still carrying concrete template arguments (e.g.
   // `variant` + `<int,long>` on a lambda capture field) must be materialized
@@ -9107,7 +9185,8 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         }
         ASTNodeSetType((ASTNode*)node, member_type);
         if (!member->is_member_function) {
-          node->base.value_category = kValueCategoryLvalue;
+          node->base.value_category =
+              DataMemberAccessValueCategory(node, member);
         }
         return;
       }
@@ -9147,7 +9226,8 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       }
       ASTNodeSetType((ASTNode*)node, member_type);
       if (!member->is_member_function) {
-        node->base.value_category = kValueCategoryLvalue;
+        node->base.value_category =
+            DataMemberAccessValueCategory(node, member);
       }
       return;
     }
@@ -9344,7 +9424,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   }
   ASTNodeSetType((ASTNode*)node, member_type);
   if (!member->is_member_function) {
-    node->base.value_category = kValueCategoryLvalue;
+    node->base.value_category = DataMemberAccessValueCategory(node, member);
   }
 }
 
@@ -10451,6 +10531,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(sizeof):
     case AST_OP(alignof):
       AnalyzeSizeofExpression((SizeofASTNode*)node);
+      break;
+
+    case AST_OP(noexcept_expr):
+      AnalyzeNoexceptExpression(unary_node);
       break;
 
     case AST_OP(typeid):

@@ -114,6 +114,7 @@ typedef struct TemplateParameter {
 typedef struct TemplateArgument {
   TemplateParameterKind kind;    // @wire 1
   bool is_pack_expansion;        // @wire 2
+  bool references_parameter_pack;  // Pattern names a pack.       // @wire 15
   struct TypeRecord* type;  // Non-NULL for type arguments.        // @wire 3
   long long int_value;      // Valid for simple non-type int args. // @wire 4
   int template_parameter_index;  // >=0 when non-type arg is a param. // @wire 5
@@ -246,6 +247,7 @@ typedef struct CXXMemberUsingDeclaration {
   CXXAccess access;
   SourceLocation location;
   bool is_pack_expansion;
+  bool qualifier_names_constructor;
 } CXXMemberUsingDeclaration;
 
 typedef struct CXXVirtualBaseInfo {

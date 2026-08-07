@@ -63,5 +63,21 @@ int main() {
     return 9;
   }
 
+  std::move_only_function<int(int)> increment(
+      [](int value) { return value + 1; });
+  if (increment(4) != 5) {
+    return 10;
+  }
+
+  auto add_three =
+      std::bind_back([](int left, int right) { return left + right; }, 3);
+  if (add_three(4) != 7) {
+    return 11;
+  }
+
+  if (std::invoke_r<long>([](int value) { return value; }, 12) != 12L) {
+    return 12;
+  }
+
   return 0;
 }

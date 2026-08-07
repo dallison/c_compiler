@@ -162,9 +162,11 @@ simplified implicit move.
   - Filesystem, full calendar/time-zone, and other deferred standard formatters.
   - Wide-character and UTF-8 contexts if those are in the supported profile.
 - [x] Implement `<expected>`.
-- [ ] Implement `<flat_map>` and `<flat_set>`.
-- [ ] Implement `move_only_function`, `bind_back`, and remaining C++23
+- [x] Implement `<flat_map>` and `<flat_set>`.
+- [x] Implement `move_only_function`, `bind_back`, and remaining C++23
       functional utilities.
+  - `<functional>` provides `invoke_r`, `bind_back`, and all cv/ref/noexcept
+    specializations of `move_only_function`.
 - [ ] Decide target support for `<stacktrace>` and `<stdfloat>`, then implement
       or document them as profile exclusions.
 

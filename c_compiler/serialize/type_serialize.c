@@ -84,6 +84,7 @@ enum {
   kTArg_value_adjustment = 12,
   kTArg_member_function = 13,
   kTArg_template_symbol = 14,
+  kTArg_references_parameter_pack = 15,
 };
 
 //
@@ -195,6 +196,7 @@ enum {
   kMemberUsing_access = 3,
   kMemberUsing_location = 4,
   kMemberUsing_is_pack_expansion = 5,
+  kMemberUsing_qualifier_names_constructor = 6,
 };
 
 //
@@ -518,6 +520,8 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
                                   TemplateArgument* a) {
   WireWriteInt32(out, kTArg_kind, (int32_t)a->kind);
   WireWriteBool(out, kTArg_is_pack_expansion, a->is_pack_expansion);
+  WireWriteBool(out, kTArg_references_parameter_pack,
+                a->references_parameter_pack);
   SWriteRef(ctx, out, kTArg_type, kSerialKindType, a->type);
   WireWriteInt64(out, kTArg_int_value, a->int_value);
   WireWriteInt32(out, kTArg_template_parameter_index,
@@ -558,6 +562,9 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
       }
       case kTArg_is_pack_expansion:
         WireReadBool(in, &a->is_pack_expansion);
+        break;
+      case kTArg_references_parameter_pack:
+        WireReadBool(in, &a->references_parameter_pack);
         break;
       case kTArg_type:
         a->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
@@ -1169,6 +1176,8 @@ static void WriteMemberUsingVector(SerializeContext* ctx, WireBuffer* buf,
                     (uint64_t)decl->location);
     WireWriteBool(&elem, kMemberUsing_is_pack_expansion,
                   decl->is_pack_expansion);
+    WireWriteBool(&elem, kMemberUsing_qualifier_names_constructor,
+                  decl->qualifier_names_constructor);
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -1229,6 +1238,9 @@ static void ReadMemberUsingVector(DeserializeContext* ctx, WireBuffer* in,
         }
         case kMemberUsing_is_pack_expansion:
           WireReadBool(&er, &decl->is_pack_expansion);
+          break;
+        case kMemberUsing_qualifier_names_constructor:
+          WireReadBool(&er, &decl->qualifier_names_constructor);
           break;
         default:
           WireSkip(&er, wt);

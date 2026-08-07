@@ -14,6 +14,12 @@
 // files.
 struct Syntax;
 
+typedef struct {
+  Symbol* member_symbol;
+  TypeRecord* function_type;
+  LexCheckpoint expression_checkpoint;
+} DeferredNoexceptSpecifier;
+
 // State for parsing types.
 typedef struct {
   Lex* lex;               // Lexical Analyzer.
@@ -60,6 +66,10 @@ typedef struct {
   // the body see every member (complete-class context, [class.mem]).  NULL
   // outside a class body.
   Vector* deferred_inline_bodies;
+  // Conditional noexcept-specifiers share the same complete-class lookup
+  // context as inline member bodies. Entries are replayed after all members
+  // have been declared so names of later members resolve correctly.
+  Vector* deferred_noexcept_specifiers;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.

@@ -3994,6 +3994,14 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       }
       break;
 
+    case AST_OP(noexcept_expr): {
+      int64_t value = 0;
+      bool evaluated = EvaluateIntegerExpression(node, &value);
+      assert(evaluated);
+      result = GeneratorGetIntConstant(gen, node->type, value);
+      break;
+    }
+
     case AST_OP(logand):
     case AST_OP(logor):
       result = GenerateLogicalOperation(gen, binary_node);

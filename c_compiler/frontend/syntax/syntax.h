@@ -87,6 +87,7 @@ typedef struct CXXConstructorInitList {
   Vector base_statements;    // ASTNode*; transferred into function body.
   Vector member_specs;       // StructMember*; not owned.
   Vector member_statements;  // ASTNode*; transferred into function body.
+  ASTNode* delegating_statement;  // Delegating constructor call, if any.
   Vector raw_initializers;  // CXXDeferredConstructorInitializer*; owned.
   Vector deferred_initializers;  // CXXDeferredConstructorInitializer*; owned.
   int last_initializer_order;
@@ -217,6 +218,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
+ASTNode* SyntaxNewCXXConstructorCall(Syntax* syntax, Symbol* sym,
+                                     Vector* actuals,
+                                     SourceLocation location);
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym);
 ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,

@@ -715,8 +715,8 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
   ASTNode* callee = NewSyntheticTypeCallee(syntax, target);
   Vector* actuals = NewVector();
   for (size_t i = 0; i < arg_types.length; i++) {
-    ASTNode* arg =
-        NewSyntheticValue(syntax, (TypeRecord*)arg_types.value.p[i]);
+    ASTNode* arg = TypeTraitSyntheticExpressionFromType(
+        syntax, (TypeRecord*)arg_types.value.p[i]);
     if (arg == NULL) {
       VectorDestruct(&arg_types);
       VectorDelete(actuals);
@@ -1048,65 +1048,6 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
                                          bool check_nothrow,
                                          TypeRecord** result_out);
 
-static TypeRecord* TypeTraitCalleeFunctionType(ASTNode* left) {
-  if (left == NULL) {
-    return NULL;
-  }
-  if (left->op == AST_OP(dot) || left->op == AST_OP(arrow)) {
-    BinaryASTNode* access = (BinaryASTNode*)left;
-    if (access->right != NULL && access->right->op == AST_OP(structmember)) {
-      StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
-      if (member_node->member != NULL && member_node->member->symbol != NULL) {
-        TypeRecord* fn_type = member_node->member->symbol->type;
-        while (fn_type != NULL && !TypeIsFunction(fn_type)) {
-          fn_type = fn_type->next;
-        }
-        return fn_type;
-      }
-    }
-  }
-  TypeRecord* type = left->type;
-  if (type != NULL && TypeIsPointer(type) && TypeIsFunction(type->next)) {
-    return type->next;
-  }
-  while (type != NULL && !TypeIsFunction(type)) {
-    type = type->next;
-  }
-  return type;
-}
-
-static bool TypeTraitCallArityMatches(VectorASTNode* call_node) {
-  if (call_node == NULL || call_node->children == NULL) {
-    return false;
-  }
-  size_t actual_count = call_node->children->length;
-  TypeRecord* callee_type = TypeTraitCalleeFunctionType(call_node->left);
-  if (callee_type == NULL) {
-    return false;
-  }
-  size_t formal_count = callee_type->info.function.prototype.length;
-  bool implicit_object_param = false;
-  if (call_node->left != NULL &&
-      (call_node->left->op == AST_OP(dot) ||
-       call_node->left->op == AST_OP(arrow))) {
-    BinaryASTNode* access = (BinaryASTNode*)call_node->left;
-    if (access->right != NULL && access->right->op == AST_OP(structmember)) {
-      StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
-      if (member_node->member != NULL && member_node->member->is_member_function &&
-          !member_node->member->is_static) {
-        implicit_object_param = true;
-      }
-    }
-  } else if (callee_type->info.function.cxx_member_owner != NULL &&
-             formal_count > 0) {
-    implicit_object_param = true;
-  }
-  if (implicit_object_param && formal_count > 0) {
-    formal_count -= 1;
-  }
-  return actual_count == formal_count;
-}
-
 static size_t TypeTraitCallableFormalArgCount(Syntax* syntax,
                                               TypeRecord* callable) {
   callable = MaterializeTraitType(syntax, callable);
@@ -1216,16 +1157,8 @@ static bool TypeTraitIsInvocable(Syntax* syntax, Vector* type_args,
   }
   ASTNode* call = NULL;
   {
-    TypeRecord* callable_object = callable;
-    while (callable_object != NULL &&
-           (TypeIsReference(callable_object) ||
-            TypeIsPointer(callable_object))) {
-      callable_object = callable_object->next;
-    }
     ASTNode* callee =
-        (callable_object != NULL && TypeIsStructOrUnion(callable_object))
-            ? NewSyntheticLvalue(syntax, callable)
-            : NewSyntheticValue(syntax, callable);
+        TypeTraitSyntheticExpressionFromType(syntax, callable);
     Vector* actuals = NewVector();
     for (size_t i = 1; i < type_args->length; i++) {
       ASTNode* arg = TypeTraitSyntheticExpressionFromType(
@@ -1275,45 +1208,18 @@ static bool TypeTraitIsInvocable(Syntax* syntax, Vector* type_args,
 }
 
 static bool TypeTraitIsEnum(TypeRecord* type) {
-  type = TypeRecordCopy(type);
-  while (type != NULL && (type->qualifiers & kQualConst) != 0) {
-    type->qualifiers &= ~kQualConst;
-  }
-  while (type != NULL && (type->qualifiers & kQualVolatile) != 0) {
-    type->qualifiers &= ~kQualVolatile;
-  }
-  bool result = type != NULL && TypeIsPrimitive(type) && (type->type & kTypeEnum) != 0;
-  TypeRecordDelete(type);
-  return result;
+  return type != NULL && TypeIsPrimitive(type) &&
+         (type->type & kTypeEnum) != 0;
 }
 
 static bool TypeTraitIsUnion(TypeRecord* type) {
-  type = TypeRecordCopy(type);
-  while (type != NULL && (type->qualifiers & kQualConst) != 0) {
-    type->qualifiers &= ~kQualConst;
-  }
-  while (type != NULL && (type->qualifiers & kQualVolatile) != 0) {
-    type->qualifiers &= ~kQualVolatile;
-  }
-  bool result = type != NULL && TypeIsStructOrUnion(type) &&
-                (type->type & kTypeUnion) != 0;
-  TypeRecordDelete(type);
-  return result;
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         (type->type & kTypeUnion) != 0;
 }
 
 static bool TypeTraitIsClass(TypeRecord* type) {
-  type = TypeRecordCopy(type);
-  while (type != NULL && (type->qualifiers & kQualConst) != 0) {
-    type->qualifiers &= ~kQualConst;
-  }
-  while (type != NULL && (type->qualifiers & kQualVolatile) != 0) {
-    type->qualifiers &= ~kQualVolatile;
-  }
-  bool result = type != NULL && TypeIsStructOrUnion(type) &&
-                (type->type & kTypeUnion) == 0 &&
-                type->info.struct_info != NULL;
-  TypeRecordDelete(type);
-  return result;
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         (type->type & kTypeUnion) == 0 && type->info.struct_info != NULL;
 }
 
 static TypeRecord* TypeTraitStripQualifiers(TypeRecord* type) {
@@ -1708,16 +1614,8 @@ static TypeRecord* CXXTypeTraitInvokeResultTypeImpl(Syntax* syntax,
   }
   ASTNode* call = NULL;
   {
-    TypeRecord* callable_object = callable;
-    while (callable_object != NULL &&
-           (TypeIsReference(callable_object) ||
-            TypeIsPointer(callable_object))) {
-      callable_object = callable_object->next;
-    }
     ASTNode* callee =
-        (callable_object != NULL && TypeIsStructOrUnion(callable_object))
-            ? NewSyntheticLvalue(syntax, callable)
-            : NewSyntheticValue(syntax, callable);
+        TypeTraitSyntheticExpressionFromType(syntax, callable);
     Vector* actuals = NewVector();
     for (size_t i = 1; i < type_args->length; i++) {
       // An argument type `Ai` stands for an expression `declval<Ai>()`, whose

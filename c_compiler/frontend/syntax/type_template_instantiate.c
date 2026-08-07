@@ -1707,6 +1707,23 @@ static bool DeduceFunctionTemplatePackCallArgument(
     TypeRecordDelete(lvalue_ref);
     return ok;
   }
+  if (formal->declarator == kDeclRValueReference &&
+      TypeIsTemplateParameterPlaceholder(formal->next, &placeholder_index) &&
+      actual->value_category != kValueCategoryLvalue &&
+      placeholder_index == pack_index) {
+    TemplateArgument* pack = args->value.p[pack_index];
+    if (pack == NULL) {
+      pack = NewEmptyPackTemplateArgument(kTemplateParameterType);
+      args->value.p[pack_index] = pack;
+    }
+    if (pack->kind != kTemplateParameterType ||
+        pack->pack_arguments == NULL) {
+      return false;
+    }
+    VectorAppend(pack->pack_arguments,
+                 NewDeducedTypeTemplateArgument(actual->type));
+    return true;
+  }
   TypeRecord* decayed = DecayCallArgumentTypeForDeduction(formal, actual->type);
   if (decayed != NULL) {
     bool ok = AppendDeducedFunctionTemplatePackElement(
@@ -2581,6 +2598,17 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                  formal->next, lvalue_ref);
     TypeRecordDelete(lvalue_ref);
     return ok || non_deduced_member;
+  }
+  if (formal->declarator == kDeclRValueReference &&
+      TypeIsTemplateParameterPlaceholder(formal->next, &placeholder_index) &&
+      actual->value_category != kValueCategoryLvalue) {
+    // A forwarding reference binding an rvalue deduces the referred-to type
+    // exactly, including top-level cv-qualification.  Stripping const here
+    // turns `const T&&` actuals into `T&&` specializations and later rejects
+    // the call for discarding qualifiers.
+    return SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
+               args, explicit_arg_count, placeholder_index, actual->type) ||
+           non_deduced_member;
   }
   TypeRecord* decayed = DecayCallArgumentTypeForDeduction(formal, actual->type);
   if (decayed != NULL) {
@@ -4868,6 +4896,7 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
   bool ambiguous = false;
   bool best_is_explicit = false;
   bool best_is_inherited = false;
+  Symbol* best_guide = NULL;
   for (size_t i = 0; i < str->deduction_guides.length; i++) {
     Symbol* guide = str->deduction_guides.value.p[i];
     if (guide == NULL || guide->type == NULL || !TypeIsFunction(guide->type)) {
@@ -4951,11 +4980,25 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
       best_score = guide_score;
       best_is_explicit = guide->type->info.function.is_explicit;
       best_is_inherited = false;
+      best_guide = guide;
       ambiguous = false;
     } else if (guide_score == best_score &&
                !CXXDeductionCandidateEqual(result, candidate)) {
-      ambiguous = true;
-      TypeRecordDelete(candidate);
+      int specificity =
+          best_guide != NULL
+              ? CompareFunctionTemplateSpecificity(guide, best_guide)
+              : 0;
+      if (specificity > 0) {
+        TypeRecordDelete(result);
+        result = candidate;
+        best_is_explicit = guide->type->info.function.is_explicit;
+        best_is_inherited = false;
+        best_guide = guide;
+        ambiguous = false;
+      } else {
+        ambiguous = specificity == 0;
+        TypeRecordDelete(candidate);
+      }
     } else {
       TypeRecordDelete(candidate);
     }
@@ -5000,6 +5043,7 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
         best_score = inherited_score;
         best_is_explicit = inherited_explicit;
         best_is_inherited = true;
+        best_guide = NULL;
         ambiguous = false;
       } else if (inherited_score == best_score && best_is_inherited &&
                  !CXXDeductionCandidateEqual(result, candidate)) {
@@ -6156,8 +6200,10 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
       // the real class specialization so later qualified accesses through this
       // alias (e.g. `To::period::num`) resolve to the specialization's members
       // and fold, instead of emitting an unresolved bare `num`/`den` symbol.
-      nested_type =
-          TypeMaterializeClassTemplateSpecialization(parser->syntax, nested_type);
+      if (!TypeContainsTemplateParameter(nested_type)) {
+        nested_type = TypeMaterializeClassTemplateSpecialization(
+            parser->syntax, nested_type);
+      }
       if (TypeIsStructOrUnion(nested_type) &&
           nested_type->info.struct_info != NULL &&
           member->symbol->type != NULL &&

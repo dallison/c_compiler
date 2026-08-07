@@ -271,6 +271,7 @@ static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
       return false;
     }
     case AST_OP(not):
+    case AST_OP(noexcept_expr):
     case AST_OP(onescomp):
     case AST_OP(uminus):
     case AST_OP(uplus):

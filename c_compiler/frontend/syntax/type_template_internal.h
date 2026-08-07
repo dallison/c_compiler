@@ -30,6 +30,7 @@ typedef struct {
   Map pack_symbol_map;
   TypeParser* parser;
   Vector* args;
+  TypeRecord* from_func;
   TypeRecord* to_func;
   int rebase_template_parameter_base;
   struct Struct* from_owner;

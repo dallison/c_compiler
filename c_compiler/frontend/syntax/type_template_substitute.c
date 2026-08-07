@@ -42,6 +42,9 @@ static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
                                                          Vector* actuals);
 static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
                                                               Vector* actuals);
+static bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
+                                          int* pack_index,
+                                          size_t* pack_length);
 
 static bool RecordPackExpansionIndex(int candidate, Vector* args,
                                      int* pack_index, size_t* pack_length) {
@@ -92,6 +95,11 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
           found = true;
         }
       }
+    }
+    if (t->dependent_decltype_expr != NULL &&
+        FindPackExpansionInExpression(t->dependent_decltype_expr, args,
+                                      pack_index, pack_length)) {
+      found = true;
     }
     if (TypeIsFunction(t)) {
       for (size_t i = 0; i < t->info.function.prototype.length; i++) {
@@ -645,6 +653,22 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
         }
         return;
       }
+    }
+    int unbound_index = FirstTemplateParameterIndexInType(arg->type);
+    if (unbound_index >= 0 &&
+        (args == NULL || (size_t)unbound_index >= args->length)) {
+      // A qualified pattern such as `Args&&...` or
+      // `decltype(f<Indices>())...` can name a pack owned by a nested member
+      // template.  The enclosing class substitution has no binding for that
+      // index yet, so retain the expansion for the member-template pass.
+      VectorAppend(out, TemplateArgumentCopy(arg));
+      return;
+    }
+    if (arg->references_parameter_pack) {
+      // The pattern's syntax records a pack that is not bound by this
+      // substitution pass (typically a nested member-template pack).
+      VectorAppend(out, TemplateArgumentCopy(arg));
+      return;
     }
     ReportPackExpansionRequiresPack(parser, arg);
     return;
@@ -1911,6 +1935,20 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
   }
 }
 
+static TypeRecord* CopyTypeSpineForRebase(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(type);
+  if (copy->next != NULL) {
+    TypeRecord* shared_next = copy->next;
+    copy->next = NULL;
+    TypeRecordDelete(shared_next);
+    TypeRecordChain(copy, CopyTypeSpineForRebase(type->next));
+  }
+  return copy;
+}
+
 /* Rebase (see RebaseTemplateParameterIndices) the parameter indices inside a
  * template argument and its referenced type. */
 void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
@@ -1921,6 +1959,9 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (arg->template_parameter_index >= base) {
     arg->template_parameter_index -= base;
   }
+  TypeRecord* independent_type = CopyTypeSpineForRebase(arg->type);
+  TypeRecordDelete(arg->type);
+  arg->type = independent_type;
   RebaseTemplateParameterIndices(arg->type, base);
   arg->dependent_expr =
       CloneAndRebaseDependentExpression(arg->dependent_expr, base);
@@ -2054,6 +2095,7 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
   MapInitForPointerKeys(&clone.pack_symbol_map);
   clone.parser = parser;
   clone.args = args;
+  clone.from_func = NULL;
   clone.to_func = NULL;
   clone.rebase_template_parameter_base = 0;
   clone.from_owner = NULL;
@@ -2120,6 +2162,7 @@ ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
   MapInitForPointerKeys(&clone.pack_symbol_map);
   clone.parser = &parser;
   clone.args = args;
+  clone.from_func = NULL;
   clone.to_func = NULL;
   clone.rebase_template_parameter_base = rebase_base;
   clone.from_owner = from_owner;

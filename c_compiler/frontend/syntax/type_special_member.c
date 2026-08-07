@@ -1368,6 +1368,9 @@ static bool CXXStructHasDeletedBaseSpecialMemberKind(
       continue;
     }
     Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == str) {
+      continue;
+    }
     if (CXXStructHasDeletedSpecialMemberKind(base_struct, kind) ||
         CXXStructHasDeletedBaseSpecialMemberKind(base_struct, kind)) {
       return true;
@@ -1381,6 +1384,9 @@ static bool CXXStructHasDeletedBaseSpecialMemberKind(
       continue;
     }
     Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == str) {
+      continue;
+    }
     if (CXXStructHasDeletedSpecialMemberKind(base_struct, kind) ||
         CXXStructHasDeletedBaseSpecialMemberKind(base_struct, kind)) {
       return true;

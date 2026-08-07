@@ -14,6 +14,7 @@
 
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
 bool IsConstantExpression(ASTNode* node);
+int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);
 
 // Analyzes `func`'s body so that a placeholder (`auto` / `decltype(auto)`)
 // return type is replaced by the deduced one.  A no-op for anything else.

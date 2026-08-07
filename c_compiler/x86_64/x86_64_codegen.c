@@ -2602,7 +2602,12 @@ static struct BranchInfo {
 
 static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
                                                  IRNode* node) {
-  assert(node->inputs.length == 2);
+  // CFG cleanup can detach the target from a branch in an unreachable block
+  // while leaving the dead instruction in the linear IR list.  It has no
+  // executable effect and must not be lowered as a live branch.
+  if (node->inputs.length < 2) {
+    return Emit(rv, NewInstruction(X86_64_OP(nop)));
+  }
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];
   bool btrue = node->opcode == IR_OP(btrue);
@@ -2610,6 +2615,35 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
   // The x86-64 has 3 operand integer compare and branch instructions.
   // For these we can remove the comparison instructions and combine
   // them with the branch.
+
+  // A comparison that also materializes its boolean into a shared
+  // short-circuit/conditional destination may overwrite one of the original
+  // comparison operands before this branch executes.  Equality comparisons
+  // are lowered through a subtraction followed by sete/setne; branch on that
+  // subtraction result so it stays live across the destination write.
+  if (expr->dest != NULL &&
+      (expr->opcode == IR_OP(cmpeqi) || expr->opcode == IR_OP(cmpnei) ||
+       expr->opcode == IR_OP(cmpeqa) || expr->opcode == IR_OP(cmpnea))) {
+    TargetInstruction* comparison = GetLoweredNode(expr);
+    if (comparison != NULL && comparison->operand[0] != NULL &&
+        ((X86_64Opcode)comparison->opcode == X86_64_OP(sete) ||
+         (X86_64Opcode)comparison->opcode == X86_64_OP(setne))) {
+      bool true_when_zero =
+          (X86_64Opcode)comparison->opcode == X86_64_OP(sete);
+      X86_64Opcode branch =
+          btrue == true_when_zero ? X86_64_OP(jz) : X86_64_OP(jnz);
+      TargetInstruction* inst =
+          Emit(rv, NewInstruction1(branch, comparison->operand[0]));
+      TargetInstruction* target = target_node->data.ptr;
+      if (target == NULL) {
+        VectorAppend(&rv->base.fixups,
+                     NewBranchFixup(inst, target_node, 1));
+      } else {
+        inst->operand[1] = target;
+      }
+      return inst;
+    }
+  }
 
   struct BranchInfo* branch_info = NULL;
   for (size_t i = 0; i < NUM_BRANCH_COMPARES; i++) {

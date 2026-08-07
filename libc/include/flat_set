@@ -1,0 +1,572 @@
+//
+//  flat_set
+//  c_compiler
+//
+//  C++23 flat_set and flat_multiset.
+//
+
+#ifndef __davecc_flat_set__
+#define __davecc_flat_set__
+
+#include <__flat_container>
+#include <algorithm>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <ranges>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+namespace __flat_detail {
+
+template <class Key, class Compare, class KeyContainer, bool Multi>
+class __flat_set_base {
+ public:
+  using key_type = Key;
+  using value_type = Key;
+  using key_compare = Compare;
+  using value_compare = Compare;
+  using key_container_type = KeyContainer;
+  using size_type = typename key_container_type::size_type;
+  using difference_type = typename key_container_type::difference_type;
+  using reference = const value_type&;
+  using const_reference = const value_type&;
+  using iterator = typename key_container_type::const_iterator;
+  using const_iterator = typename key_container_type::const_iterator;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+  constexpr __flat_set_base() : __keys(), __compare() {}
+
+  constexpr explicit __flat_set_base(const key_compare& compare)
+      : __keys(), __compare(compare) {}
+
+  constexpr __flat_set_base(key_container_type keys,
+                            const key_compare& compare = key_compare())
+      : __keys(std::move(keys)), __compare(compare) {
+    __normalize();
+  }
+
+  constexpr __flat_set_base(sorted_unique_t, key_container_type keys,
+                            const key_compare& compare = key_compare())
+      : __keys(std::move(keys)), __compare(compare) {}
+
+  constexpr __flat_set_base(sorted_equivalent_t, key_container_type keys,
+                            const key_compare& compare = key_compare())
+      : __keys(std::move(keys)), __compare(compare) {}
+
+  template <class InputIterator>
+  constexpr __flat_set_base(InputIterator first, InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(), __compare(compare) {
+    insert(first, last);
+  }
+
+  template <class InputIterator>
+  constexpr __flat_set_base(sorted_unique_t, InputIterator first,
+                            InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(first, last), __compare(compare) {}
+
+  template <class InputIterator>
+  constexpr __flat_set_base(sorted_equivalent_t, InputIterator first,
+                            InputIterator last,
+                            const key_compare& compare = key_compare())
+      : __keys(first, last), __compare(compare) {}
+
+  template <ranges::input_range Range>
+  constexpr __flat_set_base(from_range_t, Range&& range,
+                            const key_compare& compare = key_compare())
+      : __keys(), __compare(compare) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  constexpr __flat_set_base(initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __flat_set_base(values.begin(), values.end(), compare) {}
+
+  constexpr __flat_set_base(sorted_unique_t,
+                            initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __keys(values), __compare(compare) {}
+
+  constexpr __flat_set_base(sorted_equivalent_t,
+                            initializer_list<value_type> values,
+                            const key_compare& compare = key_compare())
+      : __keys(values), __compare(compare) {}
+
+  template <class Allocator>
+  constexpr explicit __flat_set_base(const Allocator& allocator)
+      : __keys(allocator), __compare() {}
+
+  template <class Allocator>
+  constexpr __flat_set_base(const key_compare& compare,
+                            const Allocator& allocator)
+      : __keys(allocator), __compare(compare) {}
+
+  constexpr __flat_set_base& operator=(initializer_list<value_type> values) {
+    clear();
+    insert(values);
+    return *this;
+  }
+
+  constexpr iterator begin() noexcept { return __keys.cbegin(); }
+  constexpr const_iterator begin() const noexcept { return __keys.cbegin(); }
+  constexpr iterator end() noexcept { return __keys.cend(); }
+  constexpr const_iterator end() const noexcept { return __keys.cend(); }
+  constexpr const_iterator cbegin() const noexcept { return __keys.cbegin(); }
+  constexpr const_iterator cend() const noexcept { return __keys.cend(); }
+  constexpr reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  constexpr reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  constexpr bool empty() const noexcept { return __keys.empty(); }
+  constexpr size_type size() const noexcept { return __keys.size(); }
+  constexpr size_type max_size() const noexcept { return __keys.max_size(); }
+
+  template <class... Args>
+  constexpr auto emplace(Args&&... args) {
+    value_type value(static_cast<Args&&>(args)...);
+    return insert(std::move(value));
+  }
+
+  template <class... Args>
+  constexpr iterator emplace_hint(const_iterator,
+                                  Args&&... args) {
+    if constexpr (Multi) {
+      return emplace(static_cast<Args&&>(args)...);
+    } else {
+      return emplace(static_cast<Args&&>(args)...).first;
+    }
+  }
+
+  constexpr auto insert(const value_type& value) {
+    return __insert_value(value);
+  }
+
+  constexpr auto insert(value_type&& value) {
+    return __insert_value(std::move(value));
+  }
+
+  constexpr iterator insert(const_iterator, const value_type& value) {
+    if constexpr (Multi) {
+      return insert(value);
+    } else {
+      return insert(value).first;
+    }
+  }
+
+  constexpr iterator insert(const_iterator, value_type&& value) {
+    if constexpr (Multi) {
+      return insert(std::move(value));
+    } else {
+      return insert(std::move(value)).first;
+    }
+  }
+
+  template <class InputIterator>
+  constexpr void insert(InputIterator first, InputIterator last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+
+  template <class InputIterator>
+  constexpr void insert(sorted_unique_t, InputIterator first,
+                        InputIterator last) {
+    insert(first, last);
+  }
+
+  template <class InputIterator>
+  constexpr void insert(sorted_equivalent_t, InputIterator first,
+                        InputIterator last) {
+    insert(first, last);
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(Range&& range) {
+    insert(ranges::begin(range), ranges::end(range));
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(sorted_unique_t, Range&& range) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  template <ranges::input_range Range>
+  constexpr void insert_range(sorted_equivalent_t, Range&& range) {
+    insert_range(static_cast<Range&&>(range));
+  }
+
+  constexpr void insert(initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr void insert(sorted_unique_t,
+                        initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr void insert(sorted_equivalent_t,
+                        initializer_list<value_type> values) {
+    insert(values.begin(), values.end());
+  }
+
+  constexpr key_container_type extract() && {
+    return std::move(__keys);
+  }
+
+  constexpr void replace(key_container_type&& keys) {
+    __keys = std::move(keys);
+  }
+
+  constexpr iterator erase(const_iterator position) {
+    return __keys.erase(position);
+  }
+
+  constexpr iterator erase(const_iterator first, const_iterator last) {
+    return __keys.erase(first, last);
+  }
+
+  constexpr size_type erase(const key_type& key) {
+    auto range = this->equal_range(key);
+    size_type removed = static_cast<size_type>(range.second - range.first);
+    erase(range.first, range.second);
+    return removed;
+  }
+
+  template <class K>
+    requires __is_transparent<key_compare>::value
+  constexpr size_type erase(K&& key) {
+    auto range = this->equal_range(key);
+    size_type removed = static_cast<size_type>(range.second - range.first);
+    erase(range.first, range.second);
+    return removed;
+  }
+
+  constexpr void swap(__flat_set_base& other)
+      noexcept(noexcept(std::swap(__keys, other.__keys)) &&
+               noexcept(std::swap(__compare, other.__compare))) {
+    std::swap(__keys, other.__keys);
+    std::swap(__compare, other.__compare);
+  }
+
+  constexpr void clear() noexcept { __keys.clear(); }
+
+  constexpr key_compare key_comp() const { return __compare; }
+  constexpr value_compare value_comp() const { return __compare; }
+
+  constexpr const key_container_type& keys() const noexcept {
+    return __keys;
+  }
+
+  template <class K>
+  constexpr iterator find(const K& key) {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    if (index == size() ||
+        !__equivalent(__compare, __keys[index], key)) {
+      return end();
+    }
+    return begin() + static_cast<difference_type>(index);
+  }
+
+  template <class K>
+  constexpr const_iterator find(const K& key) const {
+    size_type index = __lower_bound_index(__keys, key, __compare);
+    if (index == size() ||
+        !__equivalent(__compare, __keys[index], key)) {
+      return end();
+    }
+    return begin() + static_cast<difference_type>(index);
+  }
+
+  template <class K>
+  constexpr size_type count(const K& key) const {
+    if constexpr (Multi) {
+      auto range = this->equal_range(key);
+      return static_cast<size_type>(range.second - range.first);
+    } else {
+      return find(key) == end() ? 0 : 1;
+    }
+  }
+
+  template <class K>
+  constexpr bool contains(const K& key) const {
+    return find(key) != end();
+  }
+
+  template <class K>
+  constexpr iterator lower_bound(const K& key) {
+    return begin() + static_cast<difference_type>(
+                         __lower_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr const_iterator lower_bound(const K& key) const {
+    return begin() + static_cast<difference_type>(
+                         __lower_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr iterator upper_bound(const K& key) {
+    return begin() + static_cast<difference_type>(
+                         __upper_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr const_iterator upper_bound(const K& key) const {
+    return begin() + static_cast<difference_type>(
+                         __upper_bound_index(__keys, key, __compare));
+  }
+
+  template <class K>
+  constexpr pair<iterator, iterator> equal_range(const K& key) {
+    return {lower_bound(key), upper_bound(key)};
+  }
+
+  template <class K>
+  constexpr pair<const_iterator, const_iterator> equal_range(
+      const K& key) const {
+    return {lower_bound(key), upper_bound(key)};
+  }
+
+  friend constexpr bool operator==(const __flat_set_base& left,
+                                   const __flat_set_base& right) {
+    return left.__keys == right.__keys;
+  }
+
+  friend constexpr auto operator<=>(const __flat_set_base& left,
+                                    const __flat_set_base& right) {
+    return left.__keys <=> right.__keys;
+  }
+
+ protected:
+  key_container_type __keys;
+  key_compare __compare;
+
+ private:
+  constexpr void __normalize() {
+    std::sort(__keys.begin(), __keys.end(), __compare);
+    if constexpr (!Multi) {
+      size_type output = 0;
+      for (size_type input = 0; input < __keys.size(); ++input) {
+        if (output == 0 ||
+            !__equivalent(__compare, __keys[output - 1], __keys[input])) {
+          if (output != input) {
+            __keys[output] = std::move(__keys[input]);
+          }
+          ++output;
+        }
+      }
+      __keys.erase(__keys.begin() + static_cast<difference_type>(output),
+                   __keys.end());
+    }
+  }
+
+  template <class Value>
+  constexpr auto __insert_value(Value&& value) {
+    size_type index =
+        Multi ? __upper_bound_index(__keys, value, __compare)
+              : __lower_bound_index(__keys, value, __compare);
+    if constexpr (!Multi) {
+      if (index != size() &&
+          __equivalent(__compare, __keys[index], value)) {
+        return pair<iterator, bool>(
+            begin() + static_cast<difference_type>(index), false);
+      }
+      auto position = __keys.insert(
+          __keys.begin() + static_cast<difference_type>(index),
+          static_cast<Value&&>(value));
+      return pair<iterator, bool>(position, true);
+    } else {
+      __keys.insert(__keys.begin() + static_cast<difference_type>(index),
+                    static_cast<Value&&>(value));
+      return begin() + static_cast<difference_type>(index);
+    }
+  }
+};
+
+}  // namespace __flat_detail
+
+template <class Key, class Compare = less<Key>,
+          class KeyContainer = vector<Key>>
+class flat_set
+    : public __flat_detail::__flat_set_base<Key, Compare, KeyContainer, false> {
+  using __base =
+      __flat_detail::__flat_set_base<Key, Compare, KeyContainer, false>;
+
+ public:
+  constexpr flat_set() = default;
+  constexpr explicit flat_set(const Compare& compare) : __base(compare) {}
+  constexpr flat_set(KeyContainer keys,
+                     const Compare& compare = Compare())
+      : __base(std::move(keys), compare) {}
+  constexpr flat_set(sorted_unique_t tag, KeyContainer keys,
+                     const Compare& compare = Compare())
+      : __flat_detail::__flat_set_base<Key, Compare, KeyContainer, false>(
+            tag, std::move(keys), compare) {}
+  template <class InputIterator>
+  constexpr flat_set(InputIterator first, InputIterator last,
+                     const Compare& compare = Compare())
+      : __base(first, last, compare) {}
+  template <class InputIterator>
+  constexpr flat_set(sorted_unique_t tag, InputIterator first,
+                     InputIterator last,
+                     const Compare& compare = Compare())
+      : __base(tag, first, last, compare) {}
+  template <ranges::input_range Range>
+  constexpr flat_set(from_range_t tag, Range&& range,
+                     const Compare& compare = Compare())
+      : __base(tag, static_cast<Range&&>(range), compare) {}
+  constexpr flat_set(initializer_list<Key> values,
+                     const Compare& compare = Compare())
+      : __base(values, compare) {}
+  constexpr flat_set(sorted_unique_t tag, initializer_list<Key> values,
+                     const Compare& compare = Compare())
+      : __base(tag, values, compare) {}
+  constexpr flat_set& operator=(initializer_list<Key> values) {
+    __base::operator=(values);
+    return *this;
+  }
+};
+
+template <class Key, class Compare = less<Key>,
+          class KeyContainer = vector<Key>>
+class flat_multiset
+    : public __flat_detail::__flat_set_base<Key, Compare, KeyContainer, true> {
+  using __base =
+      __flat_detail::__flat_set_base<Key, Compare, KeyContainer, true>;
+
+ public:
+  constexpr flat_multiset() = default;
+  constexpr explicit flat_multiset(const Compare& compare)
+      : __base(compare) {}
+  constexpr flat_multiset(KeyContainer keys,
+                          const Compare& compare = Compare())
+      : __base(std::move(keys), compare) {}
+  constexpr flat_multiset(sorted_equivalent_t tag, KeyContainer keys,
+                          const Compare& compare = Compare())
+      : __base(tag, std::move(keys), compare) {}
+  template <class InputIterator>
+  constexpr flat_multiset(InputIterator first, InputIterator last,
+                          const Compare& compare = Compare())
+      : __base(first, last, compare) {}
+  template <class InputIterator>
+  constexpr flat_multiset(sorted_equivalent_t tag, InputIterator first,
+                          InputIterator last,
+                          const Compare& compare = Compare())
+      : __base(tag, first, last, compare) {}
+  template <ranges::input_range Range>
+  constexpr flat_multiset(from_range_t tag, Range&& range,
+                          const Compare& compare = Compare())
+      : __base(tag, static_cast<Range&&>(range), compare) {}
+  constexpr flat_multiset(initializer_list<Key> values,
+                          const Compare& compare = Compare())
+      : __base(values, compare) {}
+  constexpr flat_multiset(sorted_equivalent_t tag,
+                          initializer_list<Key> values,
+                          const Compare& compare = Compare())
+      : __base(tag, values, compare) {}
+  constexpr flat_multiset& operator=(initializer_list<Key> values) {
+    __base::operator=(values);
+    return *this;
+  }
+};
+
+template <class KeyContainer>
+flat_set(KeyContainer)
+    -> flat_set<typename KeyContainer::value_type,
+                less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <class KeyContainer, class Compare>
+  requires(!same_as<remove_cv_t<KeyContainer>, sorted_unique_t>)
+flat_set(KeyContainer, Compare)
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <class KeyContainer>
+flat_set(sorted_unique_t, KeyContainer)
+    -> flat_set<typename KeyContainer::value_type,
+                less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <class KeyContainer, class Compare>
+flat_set(sorted_unique_t, KeyContainer, Compare)
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <class KeyContainer>
+flat_multiset(KeyContainer)
+    -> flat_multiset<typename KeyContainer::value_type,
+                     less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <class KeyContainer, class Compare>
+  requires(!same_as<remove_cv_t<KeyContainer>, sorted_equivalent_t>)
+flat_multiset(KeyContainer, Compare)
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <class KeyContainer>
+flat_multiset(sorted_equivalent_t, KeyContainer)
+    -> flat_multiset<typename KeyContainer::value_type,
+                     less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <class KeyContainer, class Compare>
+flat_multiset(sorted_equivalent_t, KeyContainer, Compare)
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <class Key, class Compare, class KeyContainer, class Allocator>
+struct uses_allocator<flat_set<Key, Compare, KeyContainer>, Allocator>
+    : uses_allocator<KeyContainer, Allocator> {};
+
+template <class Key, class Compare, class KeyContainer, class Allocator>
+struct uses_allocator<flat_multiset<Key, Compare, KeyContainer>, Allocator>
+    : uses_allocator<KeyContainer, Allocator> {};
+
+template <class Key, class Compare, class KeyContainer, class Predicate>
+constexpr typename flat_set<Key, Compare, KeyContainer>::size_type erase_if(
+    flat_set<Key, Compare, KeyContainer>& container, Predicate predicate) {
+  auto old_size = container.size();
+  for (auto iterator = container.begin(); iterator != container.end();) {
+    if (predicate(*iterator)) {
+      iterator = container.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  return old_size - container.size();
+}
+
+template <class Key, class Compare, class KeyContainer, class Predicate>
+constexpr typename flat_multiset<Key, Compare, KeyContainer>::size_type erase_if(
+    flat_multiset<Key, Compare, KeyContainer>& container,
+    Predicate predicate) {
+  auto old_size = container.size();
+  for (auto iterator = container.begin(); iterator != container.end();) {
+    if (predicate(*iterator)) {
+      iterator = container.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  return old_size - container.size();
+}
+
+}  // namespace std
+
+#endif /* __davecc_flat_set__ */
