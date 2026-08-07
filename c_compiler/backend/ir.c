@@ -108,6 +108,11 @@ static struct {
     {IR_OP(lsri), "lsri"},
     {IR_OP(asri), "asri"},
     {IR_OP(lsli), "lsli"},
+    {IR_OP(rotli), "rotli"},
+    {IR_OP(rotri), "rotri"},
+    {IR_OP(clzi), "clzi"},
+    {IR_OP(ctzi), "ctzi"},
+    {IR_OP(popcounti), "popcounti"},
 
     // Bitwise.
     {IR_OP(ori), "ori"},
@@ -850,6 +855,11 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(lsri):
     case IR_OP(asri):
     case IR_OP(lsli):
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+    case IR_OP(popcounti):
 
     // Bitwise.
     case IR_OP(ori):

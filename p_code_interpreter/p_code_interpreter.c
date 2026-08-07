@@ -301,7 +301,9 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           if (iregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
-            iregs[DEST(inst)] = iregs[SRC1(inst)] / iregs[SRC2(inst)];
+            iregs[DEST(inst)] =
+                (uint64_t)((int64_t)iregs[SRC1(inst)] /
+                           (int64_t)iregs[SRC2(inst)]);
           }
           break;
         case PCODE_OP(divu):
@@ -326,7 +328,9 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           }
           break;
         case PCODE_OP(mod):
-          iregs[DEST(inst)] = iregs[SRC1(inst)] % iregs[SRC2(inst)];
+          iregs[DEST(inst)] =
+              (uint64_t)((int64_t)iregs[SRC1(inst)] %
+                         (int64_t)iregs[SRC2(inst)]);
           break;
         case PCODE_OP(modu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] % (uint64_t)iregs[SRC2(inst)];

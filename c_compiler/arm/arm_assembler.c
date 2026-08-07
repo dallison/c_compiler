@@ -659,6 +659,24 @@ static void Assemble_lsr(ARMAssembler* assembler) { AssembleShift(assembler, 1);
 static void Assemble_asr(ARMAssembler* assembler) { AssembleShift(assembler, 2); }
 static void Assemble_ror(ARMAssembler* assembler) { AssembleShift(assembler, 3); }
 
+static void AssembleBitUnary(ARMAssembler* assembler, uint32_t encoding) {
+  ARMReg rd, rm;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rm)) {
+    return;
+  }
+  EmitInst(assembler, ARM_COND(ARM_COND_AL) | encoding | (rd.num << 12) |
+                          rm.num);
+}
+
+static void Assemble_clz(ARMAssembler* assembler) {
+  AssembleBitUnary(assembler, 0x016f0f10);
+}
+
+static void Assemble_rbit(ARMAssembler* assembler) {
+  AssembleBitUnary(assembler, 0x06ff0f30);
+}
+
 static void AssembleLoadStore(ARMAssembler* assembler, bool load, bool byte,
                               bool half, bool sign) {
   ARMReg rd;
@@ -1384,6 +1402,8 @@ DECLARE_INST_FUNC(lsl);
 DECLARE_INST_FUNC(lsr);
 DECLARE_INST_FUNC(asr);
 DECLARE_INST_FUNC(ror);
+DECLARE_INST_FUNC(clz);
+DECLARE_INST_FUNC(rbit);
 DECLARE_INST_FUNC(bx);
 DECLARE_INST_FUNC(blx);
 DECLARE_INST_FUNC(push);
@@ -1512,6 +1532,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(lsr);
   INST(asr);
   INST(ror);
+  INST(clz);
+  INST(rbit);
   INST(bx);
   INST(blx);
   INST(push);

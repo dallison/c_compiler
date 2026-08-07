@@ -2877,6 +2877,16 @@ sh_test(
 )
 
 sh_test(
+    name = "bit_intrinsics_codegen_test",
+    srcs = ["tests/bit_intrinsics_codegen_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
+        "tests/bit_intrinsics_codegen.cpp",
+    ],
+)
+
+sh_test(
     name = "6502_frame_push_helpers_test",
     srcs = ["tests/6502_frame_push_helpers_test.sh"],
     args = ["$(rootpath :davecc)"],

@@ -237,6 +237,82 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       return false;
 
+    case AST_OP(builtin_clz):
+    case AST_OP(builtin_ctz):
+    case AST_OP(builtin_popcount):
+    case AST_OP(builtin_rotl):
+    case AST_OP(builtin_rotr): {
+      if (vector_node->children->length == 0 ||
+          !EvaluateIntegerExpressionInContext(
+              ctx, vector_node->children->value.p[0], &left)) {
+        return false;
+      }
+      ASTNode* value_node = vector_node->children->value.p[0];
+      if (value_node->type == NULL || TypeIsUnknown(value_node->type) ||
+          TypeContainsTemplateParameter(value_node->type)) {
+        return false;
+      }
+      int width = value_node->type != NULL ? value_node->type->size * 8 : 64;
+      if (node->op != AST_OP(builtin_rotl) &&
+          node->op != AST_OP(builtin_rotr) &&
+          vector_node->children->length == 2) {
+        if (!EvaluateIntegerExpressionInContext(
+                ctx, vector_node->children->value.p[1], &right) ||
+            right <= 0 || right > 64) {
+          return false;
+        }
+        width = (int)right;
+      }
+      uint64_t mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+      uint64_t value = (uint64_t)left & mask;
+      if (node->op == AST_OP(builtin_popcount)) {
+        int count = 0;
+        for (; value != 0; value &= value - 1) {
+          count++;
+        }
+        *result = count;
+        return true;
+      }
+      if (node->op == AST_OP(builtin_clz)) {
+        int count = 0;
+        for (int bit = width - 1; bit >= 0 &&
+                                  (value & (UINT64_C(1) << bit)) == 0;
+             bit--) {
+          count++;
+        }
+        *result = count;
+        return true;
+      }
+      if (node->op == AST_OP(builtin_ctz)) {
+        int count = 0;
+        while (count < width && (value & (UINT64_C(1) << count)) == 0) {
+          count++;
+        }
+        *result = count;
+        return true;
+      }
+      if (vector_node->children->length != 2 ||
+          !EvaluateIntegerExpressionInContext(
+              ctx, vector_node->children->value.p[1], &right)) {
+        return false;
+      }
+      int amount = (int)(right % width);
+      if (amount < 0) {
+        amount += width;
+      }
+      if (node->op == AST_OP(builtin_rotl)) {
+        value = amount == 0
+                    ? value
+                    : ((value << amount) | (value >> (width - amount))) & mask;
+      } else {
+        value = amount == 0
+                    ? value
+                    : ((value >> amount) | (value << (width - amount))) & mask;
+      }
+      *result = (int64_t)value;
+      return true;
+    }
+
     case AST_OP(assign):
     case AST_OP(pluseq):
     case AST_OP(minuseq):

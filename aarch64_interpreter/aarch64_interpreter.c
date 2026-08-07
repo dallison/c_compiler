@@ -669,6 +669,34 @@ static bool ExecuteDataProc2(AARCH64Interpreter* interpreter, uint32_t insn) {
   return true;
 }
 
+static bool ExecuteDataProc1(AARCH64Interpreter* interpreter, uint32_t insn) {
+  bool sf = (insn >> 31) & 1;
+  int op = (insn >> 10) & 0x3f;
+  int rn = (insn >> 5) & 0x1f;
+  int rd = insn & 0x1f;
+  int width = sf ? 64 : 32;
+  uint64_t value = ReadX(interpreter, rn);
+  if (!sf) {
+    value = (uint32_t)value;
+  }
+  uint64_t result;
+  if (op == 0) {  // RBIT
+    result = 0;
+    for (int i = 0; i < width; i++) {
+      result = (result << 1) | ((value >> i) & 1);
+    }
+  } else if (op == 4) {  // CLZ
+    result = value == 0
+                 ? (uint64_t)width
+                 : (sf ? (uint64_t)__builtin_clzll(value)
+                       : (uint64_t)__builtin_clz((uint32_t)value));
+  } else {
+    return false;
+  }
+  WriteX(interpreter, rd, result);
+  return true;
+}
+
 // Data-processing (3 source): MADD/MSUB (and thus MUL/MNEG).
 static bool ExecuteDataProc3(AARCH64Interpreter* interpreter, uint32_t insn) {
   if (((insn >> 21) & 7) != 0) {
@@ -1313,6 +1341,9 @@ static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
   }
   if ((insn & 0x1FE00000) == 0x1A800000) {
     return ExecuteCondSelect(interpreter, insn);
+  }
+  if ((insn & 0x7FFF0000) == 0x5AC00000) {
+    return ExecuteDataProc1(interpreter, insn);
   }
   if ((insn & 0x7FE00000) == 0x1AC00000) {
     return ExecuteDataProc2(interpreter, insn);

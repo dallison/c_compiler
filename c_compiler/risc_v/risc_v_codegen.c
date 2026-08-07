@@ -4124,6 +4124,14 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     return node->data.ptr;
   }
   switch (node->opcode) {
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+    case IR_OP(popcounti):
+      assert(false && "bit operation must be software-expanded before RISC-V lowering");
+      return NULL;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):

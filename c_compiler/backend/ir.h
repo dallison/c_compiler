@@ -107,6 +107,11 @@ typedef enum {
   IR_OP(lsri),  // op0 >> op1 (logical shift)
   IR_OP(asri),  // op0 >> op1 (arithmetic shift)
   IR_OP(lsli),  // op0 <<op1
+  IR_OP(rotli), // rotate op0 left by op1
+  IR_OP(rotri), // rotate op0 right by op1
+  IR_OP(clzi),  // leading zero count
+  IR_OP(ctzi),  // trailing zero count
+  IR_OP(popcounti), // population count
 
   // Bitwise.
   IR_OP(ori),   // op0 | op1
@@ -307,6 +312,7 @@ typedef struct IRNode {
 #define kIRStructReturnCall (1 << 10)  // Call has a hidden aggregate-result arg.
 #define kIRDeferredArgReload (1 << 11)  // Reload after nested argument calls.
 #define kIRDeferredArgRebuildAddress (1 << 12)  // Rebuild spill address late.
+#define kIRBitWidth64 (1 << 14)  // Bit intrinsic operates on 64-bit values.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);

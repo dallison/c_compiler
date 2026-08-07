@@ -2514,9 +2514,38 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       break;
     }
 
+    case X86_64_OP(bsf):
+    case X86_64_OP(bsr):
+    case X86_64_OP(bsfl):
+    case X86_64_OP(bsrl): {
+      bool is32 = (X86_64Opcode)inst->opcode == X86_64_OP(bsfl) ||
+                  (X86_64Opcode)inst->opcode == X86_64_OP(bsrl);
+      bool leading = (X86_64Opcode)inst->opcode == X86_64_OP(bsr) ||
+                     (X86_64Opcode)inst->opcode == X86_64_OP(bsrl);
+      fprintf(fp, "\tmovq ");
+      PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+      fprintf(fp, ", %%r11\n\t%s %s, %s\n",
+              leading ? (is32 ? "bsrl" : "bsrq")
+                      : (is32 ? "bsfl" : "bsfq"),
+              is32 ? "%r11d" : "%r11", is32 ? "%r11d" : "%r11");
+      if (leading) {
+        fprintf(fp, "\t%s ", is32 ? "xorl" : "xorq");
+        PrintAsmImmediate(fp, is32 ? 31 : 63);
+        fprintf(fp, ", %s\n", is32 ? "%r11d" : "%r11");
+      }
+      fprintf(fp, "\tmovq %%r11, ");
+      PrintResultRegFromInst(fp, inst, buf2, sizeof(buf2));
+      fprintf(fp, "\n");
+      break;
+    }
+
     case X86_64_OP(shl):
     case X86_64_OP(shr):
     case X86_64_OP(sar):
+    case X86_64_OP(rol):
+    case X86_64_OP(ror):
+    case X86_64_OP(roll):
+    case X86_64_OP(rorl):
     case X86_64_OP(shll):
     case X86_64_OP(shrl):
     case X86_64_OP(sarl): {
@@ -2527,6 +2556,18 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           break;
         case X86_64_OP(sar):
           op = "sarq";
+          break;
+        case X86_64_OP(rol):
+          op = "rolq";
+          break;
+        case X86_64_OP(ror):
+          op = "rorq";
+          break;
+        case X86_64_OP(roll):
+          op = "roll";
+          break;
+        case X86_64_OP(rorl):
+          op = "rorl";
           break;
         case X86_64_OP(shll):
           op = "shll";
@@ -2553,7 +2594,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, ", %%rcx\n");
         bool shift32 = (X86_64Opcode)inst->opcode == X86_64_OP(shll) ||
                        (X86_64Opcode)inst->opcode == X86_64_OP(shrl) ||
-                       (X86_64Opcode)inst->opcode == X86_64_OP(sarl);
+                       (X86_64Opcode)inst->opcode == X86_64_OP(sarl) ||
+                       (X86_64Opcode)inst->opcode == X86_64_OP(roll) ||
+                       (X86_64Opcode)inst->opcode == X86_64_OP(rorl);
         fprintf(fp, "\t%s %%cl, %s\n\tpopq %%rcx\n\tmovq %%r11, ", op,
                 shift32 ? "%r11d" : "%r11");
         if (inst->dest != NULL && inst->dest->reg != NULL) {
@@ -2563,6 +2606,17 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         } else {
           PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
         }
+        fprintf(fp, "\n");
+        break;
+      }
+      if ((X86_64Opcode)inst->opcode == X86_64_OP(roll) ||
+          (X86_64Opcode)inst->opcode == X86_64_OP(rorl)) {
+        fprintf(fp, "\tmovq ");
+        PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", %%r11\n\t%s ", op);
+        PrintAsmImmediate(fp, TargetIntValue(inst->operand[1]));
+        fprintf(fp, ", %%r11d\n\tmovq %%r11, ");
+        PrintResultRegFromInst(fp, inst, buf2, sizeof(buf2));
         fprintf(fp, "\n");
         break;
       }

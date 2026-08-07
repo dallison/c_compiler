@@ -59,6 +59,25 @@ inline constexpr bool __is_unsigned_integer_v =
 template <class T>
 inline constexpr int __digits = static_cast<int>(sizeof(T) * 8);
 
+#define __DAVECC_BIT_COUNT_OVERLOAD(type, width)                            \
+  constexpr int __countl_zero(type value) noexcept {                        \
+    return __davecc_clz(value, width);                                       \
+  }                                                                          \
+  constexpr int __countr_zero(type value) noexcept {                         \
+    return __davecc_ctz(value, width);                                       \
+  }                                                                          \
+  constexpr int __popcount(type value) noexcept {                            \
+    return __davecc_popcount(value, width);                                  \
+  }
+
+__DAVECC_BIT_COUNT_OVERLOAD(unsigned char, 8)
+__DAVECC_BIT_COUNT_OVERLOAD(unsigned short, 16)
+__DAVECC_BIT_COUNT_OVERLOAD(unsigned int, sizeof(unsigned int) * 8)
+__DAVECC_BIT_COUNT_OVERLOAD(unsigned long, sizeof(unsigned long) * 8)
+__DAVECC_BIT_COUNT_OVERLOAD(unsigned long long, sizeof(unsigned long long) * 8)
+
+#undef __DAVECC_BIT_COUNT_OVERLOAD
+
 }  // namespace __bit_detail
 
 template <class To, class From>
@@ -73,34 +92,19 @@ constexpr To bit_cast(const From& from) noexcept {
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr T rotl(T x, int s) noexcept {
-  constexpr int n = __bit_detail::__digits<T>;
-  const int r = s % n;
-  if (r == 0) {
-    return x;
-  }
-  if (r > 0) {
-    return static_cast<T>((x << r) | (x >> (n - r)));
-  }
-  return static_cast<T>((x >> -r) | (x << (n + r)));
+  return __davecc_rotl(x, s);
 }
 
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr T rotr(T x, int s) noexcept {
-  return rotl(x, -s);
+  return __davecc_rotr(x, s);
 }
 
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr int countl_zero(T x) noexcept {
-  int count = 0;
-  for (int bit = __bit_detail::__digits<T> - 1; bit >= 0; --bit) {
-    if ((x & (static_cast<T>(1) << bit)) != 0) {
-      break;
-    }
-    ++count;
-  }
-  return count;
+  return __bit_detail::__countl_zero(x);
 }
 
 template <class T>
@@ -112,15 +116,7 @@ constexpr int countl_one(T x) noexcept {
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr int countr_zero(T x) noexcept {
-  if (x == 0) {
-    return __bit_detail::__digits<T>;
-  }
-  int count = 0;
-  while ((x & static_cast<T>(1)) == 0) {
-    x >>= 1;
-    ++count;
-  }
-  return count;
+  return __bit_detail::__countr_zero(x);
 }
 
 template <class T>
@@ -132,12 +128,7 @@ constexpr int countr_one(T x) noexcept {
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr int popcount(T x) noexcept {
-  int count = 0;
-  while (x != 0) {
-    x &= static_cast<T>(x - 1);
-    ++count;
-  }
-  return count;
+  return __bit_detail::__popcount(x);
 }
 
 template <class T>

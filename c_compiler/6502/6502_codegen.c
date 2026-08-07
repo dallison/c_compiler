@@ -7516,6 +7516,14 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
     return;
   }
   switch (node->opcode) {
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+    case IR_OP(popcounti):
+      assert(false && "bit operation must be software-expanded before 6502 lowering");
+      return;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):

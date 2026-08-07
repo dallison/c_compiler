@@ -272,7 +272,10 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
                inst->opcode == IR_OP(onescomp) ||
                inst->opcode == IR_OP(noti) ||
                inst->opcode == IR_OP(movi) ||
-               inst->opcode == IR_OP(mova);
+               inst->opcode == IR_OP(mova) ||
+               inst->opcode == IR_OP(clzi) ||
+               inst->opcode == IR_OP(ctzi) ||
+               inst->opcode == IR_OP(popcounti);
   if (lhs.state == kSCCPOverdefined ||
       (!unary && rhs.state == kSCCPOverdefined)) {
     return OverdefinedValue();
@@ -358,6 +361,52 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
       }
       return TypedConstantValue(inst,
                                 (uint64_t)(lhs.value >> rhs.value));
+    case IR_OP(rotli):
+    case IR_OP(rotri): {
+      int amount = (int)(rhs.value % width);
+      if (amount < 0) amount += width;
+      uint64_t mask =
+          width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+      uint64_t value = ulhs & mask;
+      if (amount == 0) return TypedConstantValue(inst, value);
+      uint64_t rotated =
+          inst->opcode == IR_OP(rotli)
+              ? (value << amount) | (value >> (width - amount))
+              : (value >> amount) | (value << (width - amount));
+      return TypedConstantValue(inst, rotated & mask);
+    }
+    case IR_OP(clzi): {
+      uint64_t mask =
+          width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+      uint64_t value = ulhs & mask;
+      int count = 0;
+      for (int bit = width - 1;
+           bit >= 0 && (value & (UINT64_C(1) << bit)) == 0; --bit) {
+        count++;
+      }
+      return TypedConstantValue(inst, count);
+    }
+    case IR_OP(ctzi): {
+      uint64_t mask =
+          width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+      uint64_t value = ulhs & mask;
+      int count = 0;
+      while (count < width && (value & (UINT64_C(1) << count)) == 0) {
+        count++;
+      }
+      return TypedConstantValue(inst, count);
+    }
+    case IR_OP(popcounti): {
+      uint64_t mask =
+          width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+      uint64_t value = ulhs & mask;
+      int count = 0;
+      while (value != 0) {
+        value &= value - 1;
+        count++;
+      }
+      return TypedConstantValue(inst, count);
+    }
     case IR_OP(signextendi):
       if (lhs_node->type != NULL && inst->type != NULL &&
           lhs_node->type->size != inst->type->size) {
@@ -433,6 +482,11 @@ static bool IsSupportedIntegerExpression(IRNode* inst) {
     case IR_OP(lsli):
     case IR_OP(lsri):
     case IR_OP(asri):
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+    case IR_OP(popcounti):
     case IR_OP(zeroextendi):
     case IR_OP(signextendi):
     case IR_OP(cmpeqi):

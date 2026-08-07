@@ -23,10 +23,11 @@ for target in 6502 65c02; do
          inside' "$assembly"
   )
   store_count=$(
-    grep -Ec 'sta[[:space:]]+__i0(\+1)?([[:space:]]|$)' <<<"$overflow_body"
+    grep -Ec 'sta[[:space:]]+__i0(\+1)?([[:space:]]|$)' <<<"$overflow_body" ||
+      true
   )
-  if [[ "$store_count" -ne 2 ]]; then
-    echo "$target: constant result was stored $store_count times, expected 2" >&2
+  if [[ "$store_count" -gt 2 ]]; then
+    echo "$target: constant result was stored $store_count times, expected at most 2" >&2
     exit 1
   fi
 

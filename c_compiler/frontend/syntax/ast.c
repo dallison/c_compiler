@@ -313,6 +313,16 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_expect";
     case AST_OP(builtin_prefetch):
       return "builtin_prefetch";
+    case AST_OP(builtin_clz):
+      return "builtin_clz";
+    case AST_OP(builtin_ctz):
+      return "builtin_ctz";
+    case AST_OP(builtin_popcount):
+      return "builtin_popcount";
+    case AST_OP(builtin_rotl):
+      return "builtin_rotl";
+    case AST_OP(builtin_rotr):
+      return "builtin_rotr";
     case AST_OP(builtin_trap):
       return "builtin_trap";
     case AST_OP(builtin_unreachable):

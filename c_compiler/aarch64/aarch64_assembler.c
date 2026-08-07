@@ -89,6 +89,7 @@ DECLARE_INST_FUNC(lsl);
 DECLARE_INST_FUNC(lslv);
 DECLARE_INST_FUNC(lsr);
 DECLARE_INST_FUNC(lsrv);
+DECLARE_INST_FUNC(rorv);
 DECLARE_INST_FUNC(mov);
 DECLARE_INST_FUNC(movk);
 DECLARE_INST_FUNC(movn);
@@ -323,6 +324,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(orn);
   INST(orr);
   INST(ror);
+  INST(rorv);
   INST(tst);
   INST(eor);
 
@@ -1358,6 +1360,10 @@ static void Assemble_lsrv(AARCH64Assembler* assembler) {
 
 static void Assemble_asrv(AARCH64Assembler* assembler) {
   AssembleShiftVariable(assembler, 10);
+}
+
+static void Assemble_rorv(AARCH64Assembler* assembler) {
+  AssembleShiftVariable(assembler, 11);
 }
 
 static void Assemble_sdiv(AARCH64Assembler* assembler) {

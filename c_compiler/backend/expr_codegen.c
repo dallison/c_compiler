@@ -9,6 +9,7 @@
 #include "expr_codegen.h"
 #include <assert.h>
 #include "compiler.h"
+#include "expr_evaluator.h"
 #include "symbol_table.h"
 #include "rtti.h"
 #include "member_pointer.h"
@@ -3198,6 +3199,206 @@ static IRNode* GenerateBuiltinExpect(Generator* gen, VectorASTNode* node) {
   return IRSetType(value, node->base.type);
 }
 
+static IRNode* EmitBitIR1(Generator* gen, IROpcode op, IRNode* input,
+                          TypeRecord* type) {
+  return IRSetType(GeneratorEmit(gen, NewIR1(op, input)), type);
+}
+
+static IRNode* EmitBitIR2(Generator* gen, IROpcode op, IRNode* left,
+                          IRNode* right, TypeRecord* type) {
+  return IRSetType(GeneratorEmit(gen, NewIR2(op, left, right)), type);
+}
+
+static IRNode* BitConstant(Generator* gen, TypeRecord* type, uint64_t value) {
+  if (type->size < 8) {
+    value &= (UINT64_C(1) << (type->size * 8)) - 1;
+  }
+  return GeneratorGetIntConstant(gen, type, (int64_t)value);
+}
+
+static IRNode* GenerateSoftwarePopcount(Generator* gen, IRNode* value,
+                                        TypeRecord* value_type,
+                                        TypeRecord* result_type) {
+  int width = value_type->size * 8;
+  IRNode* shifted = EmitBitIR2(gen, IR_OP(lsri), value,
+                               BitConstant(gen, value_type, 1), value_type);
+  IRNode* masked = EmitBitIR2(gen, IR_OP(andi), shifted,
+                              BitConstant(gen, value_type,
+                                          UINT64_C(0x5555555555555555)),
+                              value_type);
+  value = EmitBitIR2(gen, IR_OP(subi), value, masked, value_type);
+  IRNode* low = EmitBitIR2(gen, IR_OP(andi), value,
+                           BitConstant(gen, value_type,
+                                       UINT64_C(0x3333333333333333)),
+                           value_type);
+  shifted = EmitBitIR2(gen, IR_OP(lsri), value,
+                       BitConstant(gen, value_type, 2), value_type);
+  shifted = EmitBitIR2(gen, IR_OP(andi), shifted,
+                        BitConstant(gen, value_type,
+                                    UINT64_C(0x3333333333333333)),
+                        value_type);
+  value = EmitBitIR2(gen, IR_OP(addi), low, shifted, value_type);
+  shifted = EmitBitIR2(gen, IR_OP(lsri), value,
+                       BitConstant(gen, value_type, 4), value_type);
+  value = EmitBitIR2(gen, IR_OP(addi), value, shifted, value_type);
+  value = EmitBitIR2(gen, IR_OP(andi), value,
+                      BitConstant(gen, value_type,
+                                  UINT64_C(0x0f0f0f0f0f0f0f0f)),
+                      value_type);
+  for (int shift = 8; shift < width; shift *= 2) {
+    shifted = EmitBitIR2(gen, IR_OP(lsri), value,
+                         BitConstant(gen, value_type, shift), value_type);
+    value = EmitBitIR2(gen, IR_OP(addi), value, shifted, value_type);
+  }
+  return EmitBitIR2(gen, IR_OP(andi), value,
+                    BitConstant(gen, value_type, 0x7f), result_type);
+}
+
+static bool TargetHasNativeBitOperation(ASTOpcode op, int size) {
+  if (StringEqual(compiler->target_name, "aarch64")) {
+    return size == 4 || size == 8;
+  }
+  if (StringEqual(compiler->target_name, "arm") ||
+      StringEqual(compiler->target_name, "armv7") ||
+      StringEqual(compiler->target_name, "armv7-a") ||
+      StringEqual(compiler->target_name, "arm32")) {
+    return size == 4;
+  }
+  if (StringEqual(compiler->target_name, "x86_64")) {
+    return size == 4 || size == 8;
+  }
+  return false;
+}
+
+static IRNode* GenerateBuiltinBitOperation(Generator* gen,
+                                           VectorASTNode* node) {
+  IRNode* value = GenerateExpression(gen, node->children->value.p[0]);
+  TypeRecord* value_type = value->type;
+  int width = value_type->size * 8;
+  ASTOpcode op = node->base.op;
+  if (op != AST_OP(builtin_rotl) && op != AST_OP(builtin_rotr) &&
+      node->children->length == 2) {
+    int64_t explicit_width = 0;
+    bool have_width = EvaluateIntegerExpression(
+        node->children->value.p[1], &explicit_width);
+    if (!have_width) {
+      IRNode* width_ir =
+          GenerateExpression(gen, node->children->value.p[1]);
+      if (IRIsConst(width_ir)) {
+        explicit_width = ((IRConstant*)width_ir)->value.ivalue;
+        have_width = true;
+      }
+    }
+    if (have_width &&
+        (explicit_width == 8 || explicit_width == 16 ||
+         explicit_width == 32 || explicit_width == 64)) {
+      width = (int)explicit_width;
+      if (width > value_type->size * 8) {
+        value_type = NewTypeRecordWithSize(
+            width == 64 ? kTypeLongLong | kTypeUnsigned
+                        : kTypeInt | kTypeUnsigned,
+            kQualPlain);
+      }
+    }
+  }
+  bool native = !gen->for_constant_evaluation &&
+                TargetHasNativeBitOperation(op, value_type->size);
+  if (native) {
+    IROpcode ir_op = IR_OP(popcounti);
+    if (op == AST_OP(builtin_rotl)) ir_op = IR_OP(rotli);
+    if (op == AST_OP(builtin_rotr)) ir_op = IR_OP(rotri);
+    if (op == AST_OP(builtin_clz)) ir_op = IR_OP(clzi);
+    if (op == AST_OP(builtin_ctz)) ir_op = IR_OP(ctzi);
+    if (op == AST_OP(builtin_popcount)) {
+      native = false;
+    } else if (op == AST_OP(builtin_rotl) ||
+               op == AST_OP(builtin_rotr)) {
+      IRNode* count = GenerateExpression(gen, node->children->value.p[1]);
+      IRNode* result =
+          EmitBitIR2(gen, ir_op, value, count, node->base.type);
+      if (width > 32) result->flags |= kIRBitWidth64;
+      return result;
+    } else {
+      if (StringEqual(compiler->target_name, "x86_64")) {
+        uint64_t guard =
+            op == AST_OP(builtin_clz) ? UINT64_C(1)
+                                     : UINT64_C(1) << (value_type->size * 8 - 1);
+        IRNode* guarded =
+            EmitBitIR2(gen, IR_OP(ori), value,
+                       BitConstant(gen, value_type, guard), value_type);
+        IRNode* count = EmitBitIR1(gen, ir_op, guarded, value_type);
+        if (width > 32) count->flags |= kIRBitWidth64;
+        IRNode* is_zero =
+            EmitBitIR1(gen, IR_OP(noti), value, node->base.type);
+        return EmitBitIR2(gen, IR_OP(addi), count, is_zero, node->base.type);
+      }
+      IRNode* result = EmitBitIR1(gen, ir_op, value, value_type);
+      if (width > 32) result->flags |= kIRBitWidth64;
+      return result;
+    }
+  }
+  if (op == AST_OP(builtin_popcount)) {
+    return GenerateSoftwarePopcount(gen, value, value_type, node->base.type);
+  }
+  if (op == AST_OP(builtin_clz)) {
+    for (int shift = 1; shift < width; shift *= 2) {
+      IRNode* part = EmitBitIR2(gen, IR_OP(lsri), value,
+                                BitConstant(gen, value_type, shift), value_type);
+      value = EmitBitIR2(gen, IR_OP(ori), value, part, value_type);
+    }
+    IRNode* count =
+        GenerateSoftwarePopcount(gen, value, value_type, node->base.type);
+    return EmitBitIR2(gen, IR_OP(subi),
+                      BitConstant(gen, node->base.type, width), count,
+                      node->base.type);
+  }
+  if (op == AST_OP(builtin_ctz)) {
+    IRNode* negative = EmitBitIR1(gen, IR_OP(negi), value, value_type);
+    IRNode* lowest =
+        EmitBitIR2(gen, IR_OP(andi), value, negative, value_type);
+    IRNode* below = EmitBitIR2(gen, IR_OP(subi), lowest,
+                               BitConstant(gen, value_type, 1), value_type);
+    if (value_type->size < 8) {
+      below = EmitBitIR2(
+          gen, IR_OP(andi), below,
+          BitConstant(gen, value_type,
+                      (UINT64_C(1) << (value_type->size * 8)) - 1),
+          value_type);
+    }
+    return GenerateSoftwarePopcount(gen, below, value_type, node->base.type);
+  }
+  if (width < 64) {
+    value = EmitBitIR2(
+        gen, IR_OP(andi), value,
+        BitConstant(gen, value_type, (UINT64_C(1) << width) - 1),
+        value_type);
+  }
+  IRNode* count = GenerateExpression(gen, node->children->value.p[1]);
+  if (op == AST_OP(builtin_rotr)) {
+    count = EmitBitIR1(gen, IR_OP(negi), count, count->type);
+  }
+  IRNode* count_mask = BitConstant(gen, count->type, width - 1);
+  IRNode* normalized =
+      EmitBitIR2(gen, IR_OP(andi), count, count_mask, count->type);
+  IRNode* opposite =
+      EmitBitIR1(gen, IR_OP(negi), normalized, count->type);
+  opposite =
+      EmitBitIR2(gen, IR_OP(andi), opposite, count_mask, count->type);
+  IRNode* left;
+  IRNode* right;
+  left = EmitBitIR2(gen, IR_OP(lsli), value, normalized, value_type);
+  right = EmitBitIR2(gen, IR_OP(lsri), value, opposite, value_type);
+  IRNode* result =
+      EmitBitIR2(gen, IR_OP(ori), left, right, node->base.type);
+  if (width < 64) {
+    result = EmitBitIR2(
+        gen, IR_OP(andi), result,
+        BitConstant(gen, value_type, (UINT64_C(1) << width) - 1),
+        node->base.type);
+  }
+  return result;
+}
+
 static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     GenerateExpression(gen, node->children->value.p[i]);
@@ -3904,6 +4105,14 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(builtin_expect):
       result = GenerateBuiltinExpect(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_clz):
+    case AST_OP(builtin_ctz):
+    case AST_OP(builtin_popcount):
+    case AST_OP(builtin_rotl):
+    case AST_OP(builtin_rotr):
+      result = GenerateBuiltinBitOperation(gen, vector_node);
       break;
 
     case AST_OP(builtin_prefetch):

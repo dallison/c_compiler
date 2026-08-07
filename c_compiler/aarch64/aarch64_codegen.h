@@ -195,6 +195,7 @@ typedef enum {
   AARCH64_OP(orn),
   AARCH64_OP(orr),
   AARCH64_OP(ror),
+  AARCH64_OP(rorv),
   AARCH64_OP(tst),
   AARCH64_OP(eor),
 

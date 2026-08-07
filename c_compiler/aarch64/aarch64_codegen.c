@@ -159,6 +159,7 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(orn): return "orn";
   case AARCH64_OP(orr): return "orr";
   case AARCH64_OP(ror): return "ror";
+  case AARCH64_OP(rorv): return "rorv";
   case AARCH64_OP(tst): return "tst";
 
   case AARCH64_OP(b): return "b";
@@ -1434,6 +1435,12 @@ static AARCH64Opcode IR2RV(IROpcode op, bool is_unsigned) {
       return AARCH64_OP(asr);
     case IR_OP(lsli):
       return AARCH64_OP(lsl);
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+      return AARCH64_OP(ror);
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+      return AARCH64_OP(clz);
 
     case IR_OP(ori):
       return AARCH64_OP(orr);
@@ -1918,6 +1925,39 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
                         Condition(g, AARCH64_OP(eq), result_size)),
         result_size);
     result->flags |= kAARCH64ComparisonGenerated;
+    Emit(g, result);
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+    }
+    return SetLoweredNode(node, result);
+  }
+
+  if (node->opcode == IR_OP(rotli) || node->opcode == IR_OP(rotri) ||
+      node->opcode == IR_OP(clzi) || node->opcode == IR_OP(ctzi)) {
+    IRNode* input = node->inputs.value.p[0];
+    int size = ((node->flags & kIRBitWidth64) != 0 ||
+                (node->type != NULL && node->type->size > 4))
+                   ? kSize64Bit
+                   : kSize32Bit;
+    TargetInstruction* source = Materialize(g, input);
+    TargetInstruction* result;
+    if (node->opcode == IR_OP(clzi)) {
+      result = SetInstructionSize(NewInstruction1(AARCH64_OP(clz), source), size);
+    } else if (node->opcode == IR_OP(ctzi)) {
+      TargetInstruction* reversed = Emit(
+          g, SetInstructionSize(NewInstruction1(AARCH64_OP(rbit), source), size));
+      result =
+          SetInstructionSize(NewInstruction1(AARCH64_OP(clz), reversed), size);
+    } else {
+      TargetInstruction* amount = Materialize(g, node->inputs.value.p[1]);
+      if (node->opcode == IR_OP(rotli)) {
+        amount = Emit(g, SetInstructionSize(
+                             NewInstruction1(AARCH64_OP(neg), amount), size));
+      }
+      result = SetInstructionSize(
+          NewInstruction2(AARCH64_OP(rorv), source, amount), size);
+    }
     Emit(g, result);
     TargetInstruction* dest = GetDestInstruction(g, node);
     if (dest != NULL) {
@@ -4432,6 +4472,10 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     return node->data.ptr;
   }
   switch (node->opcode) {
+    case IR_OP(popcounti):
+      assert(false && "popcount must be software-expanded before AArch64 lowering");
+      return NULL;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):
@@ -4589,6 +4633,10 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(lsri):
     case IR_OP(asri):
     case IR_OP(lsli):
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
 
     case IR_OP(ori):
     case IR_OP(andi):

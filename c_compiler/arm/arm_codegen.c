@@ -1374,6 +1374,12 @@ static ARMOpcode IR2RV(IROpcode op, bool is_unsigned) {
       return ARM_OP(asr);
     case IR_OP(lsli):
       return ARM_OP(lsl);
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+      return ARM_OP(ror);
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
+      return ARM_OP(clz);
 
     case IR_OP(ori):
       return ARM_OP(orr);
@@ -2227,6 +2233,36 @@ static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
         NewInstruction1(ARM_OP(cset), Condition(g, ARM_OP(eq), result_size)),
         result_size);
     result->flags |= kARMComparisonGenerated;
+    Emit(g, result);
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+    }
+    return SetLoweredNode(node, result);
+  }
+
+  if (node->opcode == IR_OP(rotli) || node->opcode == IR_OP(rotri) ||
+      node->opcode == IR_OP(clzi) || node->opcode == IR_OP(ctzi)) {
+    TargetInstruction* source = Materialize(g, node->inputs.value.p[0]);
+    TargetInstruction* result;
+    if (node->opcode == IR_OP(clzi)) {
+      result = SetInstructionSize(NewInstruction1(ARM_OP(clz), source),
+                                  kSize32Bit);
+    } else if (node->opcode == IR_OP(ctzi)) {
+      TargetInstruction* reversed =
+          Emit(g, SetInstructionSize(NewInstruction1(ARM_OP(rbit), source),
+                                     kSize32Bit));
+      result = SetInstructionSize(NewInstruction1(ARM_OP(clz), reversed),
+                                  kSize32Bit);
+    } else {
+      TargetInstruction* amount = Materialize(g, node->inputs.value.p[1]);
+      if (node->opcode == IR_OP(rotli)) {
+        amount = Emit(g, SetInstructionSize(
+                             NewInstruction1(ARM_OP(neg), amount), kSize32Bit));
+      }
+      result = SetInstructionSize(
+          NewInstruction2(ARM_OP(ror), source, amount), kSize32Bit);
+    }
     Emit(g, result);
     TargetInstruction* dest = GetDestInstruction(g, node);
     if (dest != NULL) {
@@ -5133,6 +5169,10 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     return node->data.ptr;
   }
   switch (node->opcode) {
+    case IR_OP(popcounti):
+      assert(false && "popcount must be software-expanded before ARM lowering");
+      return NULL;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):
@@ -5283,6 +5323,10 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(lsri):
     case IR_OP(asri):
     case IR_OP(lsli):
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
 
     case IR_OP(ori):
     case IR_OP(andi):

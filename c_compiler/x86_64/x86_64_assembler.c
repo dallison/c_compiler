@@ -1232,6 +1232,36 @@ static void EmitShift(X86_64Assembler* assembler, int op_ext, X86Size size) {
   EncodeFinish(&enc);
 }
 
+static void EmitBitScan(X86_64Assembler* assembler, uint8_t opcode,
+                        X86Size size) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (dst.kind != kX86OpReg) {
+    AssemblerError(&ASM, "Bit scan destination must be a register");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  } else if (size == kX86Size16) {
+    EncodeLegacyPrefix(&enc, 0x66);
+  }
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, opcode);
+  if (src.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, dst.reg.num, &src.reg);
+  } else if (src.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+  } else {
+    AssemblerError(&ASM, "Invalid bit scan source");
+  }
+  EncodeFinish(&enc);
+}
+
 static void EmitUnary(X86_64Assembler* assembler, int op_ext, X86Size size) {
   X86Op dst;
   if (!ParseOperand(assembler, &dst)) {
@@ -1613,6 +1643,7 @@ static void Assemble_movabs(X86_64Assembler* assembler) { EmitMovabs(assembler);
 static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
 static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
 static void Assemble_xorq(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
+static void Assemble_xorl(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
 static void Assemble_addl(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
 static void Assemble_subl(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
 static void Assemble_cmpb(X86_64Assembler* assembler) { EmitCmp(assembler); }
@@ -1643,6 +1674,14 @@ static void Assemble_sarl(X86_64Assembler* assembler) { EmitShift(assembler, 7, 
 static void Assemble_shl(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
 static void Assemble_shr(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
 static void Assemble_sar(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
+static void Assemble_rolq(X86_64Assembler* assembler) { EmitShift(assembler, 0, kX86Size64); }
+static void Assemble_rorq(X86_64Assembler* assembler) { EmitShift(assembler, 1, kX86Size64); }
+static void Assemble_roll(X86_64Assembler* assembler) { EmitShift(assembler, 0, kX86Size32); }
+static void Assemble_rorl(X86_64Assembler* assembler) { EmitShift(assembler, 1, kX86Size32); }
+static void Assemble_bsfq(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size64); }
+static void Assemble_bsrq(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size64); }
+static void Assemble_bsfl(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size32); }
+static void Assemble_bsrl(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size32); }
 static void Assemble_sete(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x94); }
 static void Assemble_setne(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x95); }
 static void Assemble_setl(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9c); }
@@ -1963,6 +2002,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(orq);
   INST(xor);
   INST(xorq);
+  INST(xorl);
   INST(imul);
   INST(imulq);
   INST(imull);
@@ -1985,6 +2025,14 @@ static void InitializeInstructions(Map* instructions) {
   INST(shll);
   INST(shrl);
   INST(sarl);
+  INST(rolq);
+  INST(rorq);
+  INST(roll);
+  INST(rorl);
+  INST(bsfq);
+  INST(bsrq);
+  INST(bsfl);
+  INST(bsrl);
   INST(cmp);
   INST(cmpq);
   INST(cmpb);

@@ -481,10 +481,18 @@ static bool DecodeRegShift(ARMInterpreter* interpreter, uint32_t insn,
   uint32_t value = ReadReg(interpreter, (int)rm);
   int shift_type = (int)((insn >> 5) & 3u);
   int shift_amount;
-  if ((insn & 0x10u) != 0) {
+  bool register_shift = (insn & 0x10u) != 0;
+  if (register_shift) {
     shift_amount = (int)(ReadReg(interpreter, (int)((insn >> 8) & 0xfu)) & 0xffu);
   } else {
     shift_amount = (int)((insn >> 7) & 0x1fu);
+  }
+  if (register_shift && shift_type == 3) {
+    shift_amount &= 31;
+    if (shift_amount == 0) {
+      *operand = value;
+      return true;
+    }
   }
   bool carry = (interpreter->cpsr & CPSR_C) != 0;
   return ShiftOperand(interpreter, value, shift_type, shift_amount, carry,
@@ -1712,6 +1720,27 @@ static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
   // are 01, shared with the load/store encodings, so dispatch this first.
   if ((insn & 0x0f9000f0u) == 0x07100010u) {
     return ExecuteDivide(interpreter, insn);
+  }
+
+  if ((insn & 0x0fff0ff0u) == 0x016f0f10u) {  // CLZ
+    int rd = (insn >> 12) & 0xf;
+    int rm = insn & 0xf;
+    uint32_t value = (uint32_t)ReadReg(interpreter, rm);
+    WriteReg(interpreter, rd,
+             value == 0 ? 32u : (uint32_t)__builtin_clz(value));
+    return true;
+  }
+
+  if ((insn & 0x0fff0ff0u) == 0x06ff0f30u) {  // RBIT
+    int rd = (insn >> 12) & 0xf;
+    int rm = insn & 0xf;
+    uint32_t value = (uint32_t)ReadReg(interpreter, rm);
+    uint32_t result = 0;
+    for (int i = 0; i < 32; i++) {
+      result = (result << 1) | ((value >> i) & 1u);
+    }
+    WriteReg(interpreter, rd, result);
+    return true;
   }
 
   // Multiply and subtract (mls): cond 0000 0110 Rd Ra Rm 1001 Rn.

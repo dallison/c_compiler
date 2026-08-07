@@ -1147,6 +1147,14 @@ static X86_64Opcode IR2X86_64(IROpcode op) {
       return X86_64_OP(sar);
     case IR_OP(lsli):
       return X86_64_OP(shl);
+    case IR_OP(rotli):
+      return X86_64_OP(rol);
+    case IR_OP(rotri):
+      return X86_64_OP(ror);
+    case IR_OP(clzi):
+      return X86_64_OP(bsr);
+    case IR_OP(ctzi):
+      return X86_64_OP(bsf);
 
     case IR_OP(ori):
       return X86_64_OP(or);
@@ -1548,6 +1556,13 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
     return node->data.ptr;
   }
   X86_64Opcode opcode = IR2X86_64(node->opcode);
+  if (node->inputs.length > 0 &&
+      ((IRNode*)node->inputs.value.p[0])->type->size <= 4) {
+    if (opcode == X86_64_OP(rol)) opcode = X86_64_OP(roll);
+    if (opcode == X86_64_OP(ror)) opcode = X86_64_OP(rorl);
+    if (opcode == X86_64_OP(bsf)) opcode = X86_64_OP(bsfl);
+    if (opcode == X86_64_OP(bsr)) opcode = X86_64_OP(bsrl);
+  }
   if (node->opcode == IR_OP(divi) && TypeIsUnsigned(node->type)) {
     opcode = X86_64_OP(div);
   }
@@ -1608,7 +1623,11 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
       break;
     case X86_64_OP(shl):
     case X86_64_OP(shr):
-    case X86_64_OP(sar): {
+    case X86_64_OP(sar):
+    case X86_64_OP(rol):
+    case X86_64_OP(ror):
+    case X86_64_OP(roll):
+    case X86_64_OP(rorl): {
       // There are constant shift operations.
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
@@ -2292,7 +2311,7 @@ static TargetInstruction* LowerLoad(X86_64Generator* rv, Generator* gen,
       opcode = X86_64_OP(loadw);
       break;
     case IR_OP(loadu32):
-      opcode = X86_64_OP(loadl);
+      opcode = X86_64_OP(loadl_z);
       break;
     case IR_OP(loadu8):
       opcode = X86_64_OP(loadb_z);
@@ -4125,6 +4144,10 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     return node->data.ptr;
   }
   switch (node->opcode) {
+    case IR_OP(popcounti):
+      assert(false && "popcount must be software-expanded before x86-64 lowering");
+      return NULL;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):
@@ -4275,6 +4298,10 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(lsri):
     case IR_OP(asri):
     case IR_OP(lsli):
+    case IR_OP(rotli):
+    case IR_OP(rotri):
+    case IR_OP(clzi):
+    case IR_OP(ctzi):
 
     case IR_OP(ori):
     case IR_OP(andi):

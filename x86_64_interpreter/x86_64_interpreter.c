@@ -1490,6 +1490,37 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       *insn_len = pos;
       return true;
     }
+    if (b1 == 0xBC || b1 == 0xBD) {  // BSF / BSR
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      uint64_t source;
+      if (modrm.mod == 3) {
+        source = ReadReg(interpreter, modrm.rm);
+      } else {
+        uint64_t address = EffectiveAddress(interpreter, &modrm, pos);
+        source =
+            rex.w ? Load64(interpreter, address) : Load32(interpreter, address);
+      }
+      if (!rex.w) {
+        source = (uint32_t)source;
+      }
+      interpreter->zf = source == 0;
+      if (source != 0) {
+        uint64_t result;
+        if (b1 == 0xBC) {
+          result = rex.w ? (uint64_t)__builtin_ctzll(source)
+                         : (uint64_t)__builtin_ctz((uint32_t)source);
+        } else {
+          result = rex.w ? (uint64_t)(63 - __builtin_clzll(source))
+                         : (uint64_t)(31 - __builtin_clz((uint32_t)source));
+        }
+        WriteReg(interpreter, modrm.reg, result);
+      }
+      *insn_len = pos;
+      return true;
+    }
     if (b1 == 0xB6 || b1 == 0xB7 || b1 == 0xBE || b1 == 0xBF) {
       // movzx / movsx: B6/BE byte source, B7/BF word source; BE/BF sign-extend.
       ModRM modrm;

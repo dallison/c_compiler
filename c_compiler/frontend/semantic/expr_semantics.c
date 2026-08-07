@@ -10220,6 +10220,32 @@ static void AnalyzeBuiltinExpect(VectorASTNode* node) {
   ASTNodeSetType(&node->base, result_type);
 }
 
+static void AnalyzeBuiltinBitOperation(VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    node->children->value.p[i] =
+        AnalyzeExpression(node->children->value.p[i]);
+  }
+  if (node->children->length == 0) {
+    ASTNodeSetType(&node->base,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  ASTNode* value = node->children->value.p[0];
+  if (!TypeIsIntegral(value->type) || !TypeIsUnsigned(value->type)) {
+    SemanticError(value, "bit builtin requires an unsigned integer operand");
+  }
+  bool rotate = node->base.op == AST_OP(builtin_rotl) ||
+                node->base.op == AST_OP(builtin_rotr);
+  if (node->children->length == 2 &&
+      !TypeIsIntegral(((ASTNode*)node->children->value.p[1])->type)) {
+    SemanticError(node->children->value.p[1],
+                  "bit builtin count or width must be an integer");
+  }
+  ASTNodeSetType(&node->base,
+                 rotate ? TypeRecordCopy(value->type)
+                        : NewTypeRecordWithSize(kTypeInt, kQualPlain));
+}
+
 static void AnalyzeBuiltinPrefetch(VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     node->children->value.p[i] =
@@ -10597,6 +10623,14 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(builtin_expect):
       AnalyzeBuiltinExpect(vector_node);
+      break;
+
+    case AST_OP(builtin_clz):
+    case AST_OP(builtin_ctz):
+    case AST_OP(builtin_popcount):
+    case AST_OP(builtin_rotl):
+    case AST_OP(builtin_rotr):
+      AnalyzeBuiltinBitOperation(vector_node);
       break;
 
     case AST_OP(builtin_prefetch):
