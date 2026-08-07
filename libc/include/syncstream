@@ -1,0 +1,275 @@
+//
+//  syncstream
+//  c_compiler
+//
+//  C++20 synchronized buffered output streams.
+//
+
+#ifndef syncstream_h
+#define syncstream_h
+
+#include <iosfwd>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <streambuf>
+#include <string>
+#include <utility>
+
+#ifndef __cpp_lib_syncbuf
+#define __cpp_lib_syncbuf 201803L
+#endif
+
+namespace std {
+
+namespace __syncstream_detail {
+
+mutex& __mutex_for(const void* wrapped);
+
+}  // namespace __syncstream_detail
+
+template <class CharT, class Traits, class Allocator>
+class basic_syncbuf : public basic_streambuf<CharT, Traits> {
+ public:
+  using char_type = CharT;
+  using traits_type = Traits;
+  using int_type = typename traits_type::int_type;
+  using pos_type = typename traits_type::pos_type;
+  using off_type = typename traits_type::off_type;
+  using allocator_type = Allocator;
+  using streambuf_type = basic_streambuf<CharT, Traits>;
+
+ private:
+  using __buffer_type = basic_string<CharT, Traits, Allocator>;
+
+ public:
+  basic_syncbuf()
+      : __wrapped_(nullptr),
+        __emit_on_sync_(false),
+        __needs_sync_(false),
+        __buffer_(allocator_type()) {
+  }
+
+  explicit basic_syncbuf(streambuf_type* wrapped)
+      : __wrapped_(wrapped),
+        __emit_on_sync_(false),
+        __needs_sync_(false),
+        __buffer_(allocator_type()) {
+  }
+
+  basic_syncbuf(streambuf_type* wrapped, const allocator_type& allocator)
+      : __wrapped_(wrapped),
+        __emit_on_sync_(false),
+        __needs_sync_(false),
+        __buffer_(allocator) {
+  }
+
+  basic_syncbuf(basic_syncbuf&& other) noexcept
+      : streambuf_type(),
+        __wrapped_(other.__wrapped_),
+        __emit_on_sync_(other.__emit_on_sync_),
+        __needs_sync_(other.__needs_sync_),
+        __buffer_(static_cast<__buffer_type&&>(other.__buffer_)) {
+    other.__wrapped_ = nullptr;
+    other.__emit_on_sync_ = false;
+    other.__needs_sync_ = false;
+  }
+
+  basic_syncbuf& operator=(basic_syncbuf&& other) noexcept {
+    if (this != &other) {
+      (void)emit();
+      if (__buffer_.get_allocator() == other.__buffer_.get_allocator()) {
+        __buffer_ = static_cast<__buffer_type&&>(other.__buffer_);
+      } else {
+        __buffer_ = other.__buffer_;
+        other.__buffer_.clear();
+      }
+      __wrapped_ = other.__wrapped_;
+      __emit_on_sync_ = other.__emit_on_sync_;
+      __needs_sync_ = other.__needs_sync_;
+      other.__wrapped_ = nullptr;
+      other.__emit_on_sync_ = false;
+      other.__needs_sync_ = false;
+    }
+    return *this;
+  }
+
+  basic_syncbuf(const basic_syncbuf&) = delete;
+  basic_syncbuf& operator=(const basic_syncbuf&) = delete;
+
+  ~basic_syncbuf() override {
+#ifdef __cpp_exceptions
+    try {
+      (void)emit();
+    } catch (...) {
+    }
+#else
+    (void)emit();
+#endif
+  }
+
+  void swap(basic_syncbuf& other) noexcept {
+    __buffer_.swap(other.__buffer_);
+    streambuf_type* wrapped = __wrapped_;
+    __wrapped_ = other.__wrapped_;
+    other.__wrapped_ = wrapped;
+    bool emit_on_sync = __emit_on_sync_;
+    __emit_on_sync_ = other.__emit_on_sync_;
+    other.__emit_on_sync_ = emit_on_sync;
+    bool needs_sync = __needs_sync_;
+    __needs_sync_ = other.__needs_sync_;
+    other.__needs_sync_ = needs_sync;
+  }
+
+  bool emit() {
+    if (__wrapped_ == nullptr) {
+      return false;
+    }
+    lock_guard<mutex> guard(
+        __syncstream_detail::__mutex_for(static_cast<const void*>(__wrapped_)));
+    if (!__buffer_.empty()) {
+      streamsize requested = static_cast<streamsize>(__buffer_.size());
+      streamsize written = __wrapped_->sputn(__buffer_.data(), requested);
+      if (written != requested) {
+        if (written < 0) {
+          written = 0;
+        }
+        __buffer_ =
+            __buffer_.substr(static_cast<typename __buffer_type::size_type>(
+                written));
+        return false;
+      }
+      __buffer_.clear();
+    }
+    if (__needs_sync_) {
+      if (__wrapped_->pubsync() == -1) {
+        return false;
+      }
+      __needs_sync_ = false;
+    }
+    return true;
+  }
+
+  streambuf_type* get_wrapped() const noexcept {
+    return __wrapped_;
+  }
+
+  allocator_type get_allocator() const noexcept {
+    return __buffer_.get_allocator();
+  }
+
+  void set_emit_on_sync(bool value) noexcept {
+    __emit_on_sync_ = value;
+  }
+
+ protected:
+  int_type overflow(int_type value = traits_type::eof()) override {
+    if (!traits_type::eq_int_type(value, traits_type::eof())) {
+      __buffer_.push_back(traits_type::to_char_type(value));
+    }
+    return traits_type::not_eof(value);
+  }
+
+  streamsize xsputn(const char_type* characters, streamsize count) override {
+    if (count <= 0) {
+      return 0;
+    }
+    __buffer_.append(
+        characters,
+        static_cast<typename __buffer_type::size_type>(count));
+    return count;
+  }
+
+  int sync() override {
+    __needs_sync_ = true;
+    return !__emit_on_sync_ || emit() ? 0 : -1;
+  }
+
+ private:
+  streambuf_type* __wrapped_;
+  bool __emit_on_sync_;
+  bool __needs_sync_;
+  __buffer_type __buffer_;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_syncbuf<CharT, Traits, Allocator>& left,
+          basic_syncbuf<CharT, Traits, Allocator>& right) noexcept {
+  left.swap(right);
+}
+
+template <class CharT, class Traits, class Allocator>
+class basic_osyncstream : public basic_ostream<CharT, Traits> {
+ public:
+  using char_type = CharT;
+  using traits_type = Traits;
+  using int_type = typename traits_type::int_type;
+  using pos_type = typename traits_type::pos_type;
+  using off_type = typename traits_type::off_type;
+  using allocator_type = Allocator;
+  using streambuf_type = basic_streambuf<CharT, Traits>;
+  using syncbuf_type = basic_syncbuf<CharT, Traits, Allocator>;
+
+  basic_osyncstream(streambuf_type* wrapped, const allocator_type& allocator)
+      : basic_ostream<CharT, Traits>(), __buffer_(wrapped, allocator) {
+    this->init(&__buffer_);
+  }
+
+  explicit basic_osyncstream(streambuf_type* wrapped)
+      : basic_ostream<CharT, Traits>(), __buffer_(wrapped) {
+    this->init(&__buffer_);
+  }
+
+  basic_osyncstream(basic_ostream<CharT, Traits>& stream,
+                    const allocator_type& allocator)
+      : basic_osyncstream(stream.rdbuf(), allocator) {
+  }
+
+  explicit basic_osyncstream(basic_ostream<CharT, Traits>& stream)
+      : basic_osyncstream(stream.rdbuf()) {
+  }
+
+  basic_osyncstream(basic_osyncstream&& other) noexcept
+      : basic_ostream<CharT, Traits>(
+            static_cast<basic_ostream<CharT, Traits>&&>(other)),
+        __buffer_(static_cast<syncbuf_type&&>(other.__buffer_)) {
+    basic_ios<CharT, Traits>::rdbuf(&__buffer_);
+  }
+
+  basic_osyncstream& operator=(basic_osyncstream&& other) noexcept {
+    if (this != &other) {
+      basic_ostream<CharT, Traits>::operator=(
+          static_cast<basic_ostream<CharT, Traits>&&>(other));
+      __buffer_ = static_cast<syncbuf_type&&>(other.__buffer_);
+      basic_ios<CharT, Traits>::rdbuf(&__buffer_);
+    }
+    return *this;
+  }
+
+  basic_osyncstream(const basic_osyncstream&) = delete;
+  basic_osyncstream& operator=(const basic_osyncstream&) = delete;
+
+  ~basic_osyncstream() override {
+  }
+
+  void emit() {
+    if (!__buffer_.emit()) {
+      this->setstate(ios_base::badbit);
+    }
+  }
+
+  streambuf_type* get_wrapped() const noexcept {
+    return __buffer_.get_wrapped();
+  }
+
+  syncbuf_type* rdbuf() const noexcept {
+    return const_cast<syncbuf_type*>(&__buffer_);
+  }
+
+ private:
+  syncbuf_type __buffer_;
+};
+
+}  // namespace std
+
+#endif /* syncstream_h */

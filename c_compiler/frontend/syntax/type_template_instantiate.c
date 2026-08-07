@@ -867,6 +867,61 @@ static bool TypeInstantiateVariableTemplateConstantImpl(
   return ok;
 }
 
+bool TypeInstantiateVariableTemplateFloatingConstant(
+    Syntax* syntax, Symbol* var_template, Vector* args, double* out) {
+  if (var_template == NULL || var_template->variable_template == NULL ||
+      var_template->variable_template->initializer == NULL || out == NULL) {
+    return false;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args = CompleteVariableTemplateArguments(
+      &parser, var_template->variable_template, args, true);
+  if (completed_args == NULL) {
+    TypeParserDestruct(&parser);
+    return false;
+  }
+
+  Vector* partial_args = NULL;
+  ClassTemplatePartialSpecialization* partial =
+      SelectVariableTemplatePartialSpecialization(
+          &parser, var_template, completed_args, &partial_args);
+  ASTNode* initializer = var_template->variable_template->initializer;
+  ConstraintExpr* constraint =
+      var_template->variable_template->associated_constraint;
+  Vector* fold_args = completed_args;
+  if (partial != NULL) {
+    initializer = partial->variable_initializer;
+    constraint = partial->associated_constraint;
+    fold_args = partial_args;
+  }
+
+  bool ok = false;
+  if (ConceptsConstraintSatisfied(constraint, fold_args) &&
+      initializer != NULL) {
+    ASTNode* concrete =
+        CloneDependentExpressionWithArgs(&parser, initializer, fold_args);
+    if (concrete != NULL) {
+      concrete = AnalyzeExpression(concrete);
+      ok = EvaluateFloatingPointExpression(concrete, out);
+      ASTNodeDelete(concrete);
+    }
+  } else if (partial == NULL) {
+    ReportVariableTemplateConstraintFailure(syntax, var_template,
+                                            completed_args);
+  }
+  if (partial_args != NULL) {
+    VectorDeleteWithContents(partial_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             false);
+  }
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           false);
+  TypeParserDestruct(&parser);
+  return ok;
+}
+
 /* Instantiate the *type* of a C++ variable template against concrete template
  * arguments `args`, e.g. `in_place_index<1>` -> `in_place_index_t<1>`.  Used for
  * variable templates whose value is a class-type object (a tag such as

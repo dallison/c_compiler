@@ -8,7 +8,6 @@
 
 #include "type_core.h"
 
-// Special-member synthesis is shared only within the type subsystem.
-// Its implementation interface is declared in type_class_internal.h.
+bool CXXTypeIsTriviallyCopyable(TypeRecord* type);
 
 #endif /* type_special_member_h */

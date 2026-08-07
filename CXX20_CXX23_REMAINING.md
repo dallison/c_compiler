@@ -70,6 +70,11 @@ simplified implicit move.
 - [x] Add shared ownership and polymorphic allocation.
   - `shared_ptr`, `weak_ptr`, and `enable_shared_from_this`.
   - `memory_resource` and the core PMR aliases.
+- [x] Add the remaining C++20 headers.
+  - `<bit>` with constexpr bit operations, `endian`, and `bit_cast`.
+  - `<numbers>` with the complete mathematical constants surface.
+  - `<syncstream>` with synchronized emission and retry-safe partial writes.
+  - `<version>` with accurately gated library feature-test macros.
 - [x] Implement `<system_error>`.
 - [ ] Implement `<filesystem>`.
 - [ ] Complete `<chrono>`.

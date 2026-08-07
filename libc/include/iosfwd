@@ -63,6 +63,13 @@ class basic_ofstream;
 template <class CharT, class Traits = char_traits<CharT>>
 class basic_fstream;
 
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT>>
+class basic_syncbuf;
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT>>
+class basic_osyncstream;
+
 class ios_base;
 
 using streambuf = basic_streambuf<char>;
@@ -78,6 +85,10 @@ using filebuf = basic_filebuf<char>;
 using ifstream = basic_ifstream<char>;
 using ofstream = basic_ofstream<char>;
 using fstream = basic_fstream<char>;
+using syncbuf = basic_syncbuf<char>;
+using osyncstream = basic_osyncstream<char>;
+using wsyncbuf = basic_syncbuf<wchar_t>;
+using wosyncstream = basic_osyncstream<wchar_t>;
 
 }  // namespace std
 

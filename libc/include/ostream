@@ -238,6 +238,13 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
 
  protected:
   basic_ostream() {}
+  basic_ostream(basic_ostream&& other) noexcept {
+    this->move(other);
+  }
+  basic_ostream& operator=(basic_ostream&& other) noexcept {
+    this->move(other);
+    return *this;
+  }
 
  private:
   [[gnu::noinline]] static bool __emit_bytes(

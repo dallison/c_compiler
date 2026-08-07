@@ -212,6 +212,11 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       StringDestruct(&const_name);
 
       if (e->is_scoped) {
+        if (!InsertLocalSymbol(parser->syntax->local_symbol_stack, ec)) {
+          SyntaxError(parser->syntax,
+                      "Enum constant %s is already defined in this enum",
+                      ec->name.value);
+        }
         VectorAppend(&e->constants, ec);
       } else {
         // Insert the constant as a symbol in the current scope.
@@ -296,7 +301,16 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
   // and 'e' will be a pointer to the Enum information.
   e->tag_symbol = tag;
   e->is_scoped = is_scoped;
+  if (is_scoped) {
+    // Enumerators declared earlier in an enum-specifier are visible to later
+    // enumerator initializers, but scoped-enum names must not leak into the
+    // enclosing scope.
+    SyntaxOpenScope(parser->syntax);
+  }
   Type t = ParseEnumConstants(parser, e, tag->type);
+  if (is_scoped) {
+    SyntaxCloseScope(parser->syntax);
+  }
   tag->type->type |= t;
   tag->type->size = SizeofType(t);
   if (e->is_scoped) {

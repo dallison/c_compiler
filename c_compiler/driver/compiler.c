@@ -357,8 +357,34 @@ static void InitPointer(ASTNode* expr,
     return;
   }
   if (expr->op == AST_OP(number)) {
-    // Pointers can be initialized by a number.
-    InitInteger(expr, init_out, offset, initializers);
+    // A null pointer constant is represented by an integer-valued AST node,
+    // including the dedicated std::nullptr_t node.  Encode it using the
+    // destination pointer width rather than the source expression's type.
+    int64_t value = 0;
+    TypeRecordCalculateSize(subinit->type);
+    bool is_nullptr = TypeIsNullPointer(expr->type);
+    bool is_zero_literal =
+        ((ConstantASTNode*)expr)->value.ivalue == 0;
+    if ((!is_nullptr && !is_zero_literal &&
+         !EvaluateIntegerExpression(expr, &value)) ||
+        value != 0) {
+      SemanticError(expr,
+                    "Invalid static pointer initialization; expected null");
+      free(init_out);
+      return;
+    }
+    if (subinit->type->size == 2) {
+      init_out->type = kInitTypeHalf;
+      init_out->value.half = 0;
+    } else if (subinit->type->size == 4) {
+      init_out->type = kInitTypeWord;
+      init_out->value.word = 0;
+    } else {
+      init_out->type = kInitTypeLong;
+      init_out->value._long = 0;
+    }
+    init_out->offset = offset;
+    VectorAppend(initializers, init_out);
     return;
   }
   ASTNode* var_node;

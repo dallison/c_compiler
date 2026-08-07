@@ -19,6 +19,7 @@ typedef enum {
   kCXXTypeTraitIsNothrowAssignable,
   kCXXTypeTraitIsDestructible,
   kCXXTypeTraitIsNothrowDestructible,
+  kCXXTypeTraitIsTriviallyCopyable,
   kCXXTypeTraitIsBaseOf,
   kCXXTypeTraitIsSwappable,
   kCXXTypeTraitIsSwappableWith,

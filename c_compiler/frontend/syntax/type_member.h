@@ -25,6 +25,7 @@ StructMember* FindStructMemberWithAccessAndOffsetByName(
     Struct* str, const char* name, CXXAccess* access, Struct** owner,
     int* byte_offset);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
+int CXXBaseOffsetForMember(Struct* str, StructMember* member);
 void CollectConversionOperators(Struct* str, Vector* out);
 
 void StructRebuildMemberLookupTables(Struct* str);

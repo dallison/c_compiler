@@ -1878,6 +1878,61 @@ static bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
          func->info.function.is_trivial_special_member;
 }
 
+bool CXXTypeIsTriviallyCopyable(TypeRecord* type) {
+  if (type == NULL || TypeIsReference(type) || TypeIsFunction(type) ||
+      TypeIsVoid(type)) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeIsTriviallyCopyable(type->next);
+  }
+  if (TypeIsArray(type)) {
+    return false;
+  }
+  if (!TypeIsStructOrUnion(type)) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  if (str == NULL) {
+    return false;
+  }
+
+  TypeRecord* destructor =
+      CXXFindSpecialMemberFunction(str, kCXXSpecialMemberDestructor);
+  if (destructor == NULL || destructor->info.function.is_deleted ||
+      !destructor->info.function.is_trivial_special_member) {
+    return false;
+  }
+
+  bool has_eligible_copy_or_move = false;
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* function =
+          member->symbol != NULL ? member->symbol->type : NULL;
+      if (function == NULL || !TypeIsFunction(function)) {
+        continue;
+      }
+      CXXSpecialMemberKind kind =
+          function->info.function.cxx_special_member_kind;
+      if (kind != kCXXSpecialMemberCopyConstructor &&
+          kind != kCXXSpecialMemberMoveConstructor &&
+          kind != kCXXSpecialMemberCopyAssignment &&
+          kind != kCXXSpecialMemberMoveAssignment) {
+        continue;
+      }
+      if (function->info.function.is_deleted) {
+        continue;
+      }
+      has_eligible_copy_or_move = true;
+      if (!function->info.function.is_trivial_special_member) {
+        return false;
+      }
+    }
+  }
+  return has_eligible_copy_or_move;
+}
+
 static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
                                               CXXSpecialMemberKind kind) {
   if (str == NULL || str->virtual_bases.length != 0) {

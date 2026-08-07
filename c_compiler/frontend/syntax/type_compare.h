@@ -9,6 +9,7 @@
 #include "type_defs.h"
 
 struct ASTNode;
+struct Syntax;
 
 bool TypeContainsTemplateParameter(TypeRecord* type);
 bool SymbolIsInStdNamespace(Symbol* symbol);
@@ -288,6 +289,10 @@ inline bool TypeIsUnknown(TypeRecord* type) {
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
+// Compare types for C++ virtual override matching after resolving alias and
+// alias-template base spellings to their canonical class specializations.
+bool TypeEqualForCXXOverride(struct Syntax* syntax, TypeRecord* t1,
+                             TypeRecord* t2);
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
 bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only);
 int StructCountPublicDerivationPaths(Struct* from, Struct* to);

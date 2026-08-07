@@ -55,15 +55,16 @@ matching object.
 
 The verified profile exports:
 
-- Core utilities: `any`, `array`, `compare`, `concepts`, `exception`,
+- Core utilities: `any`, `array`, `bit`, `compare`, `concepts`, `exception`,
   `initializer_list`, `iterator`, `memory`, `memory_resource`, `new`,
-  `optional`, `ratio`, `source_location`, `span`, `stdexcept`, `string`,
-  `string_view`, `system_error`, `tuple`, `type_traits`, `utility`, and
-  `variant`.
+  `numbers`, `optional`, `ratio`, `source_location`, `span`, `stdexcept`,
+  `string`, `string_view`, `system_error`, `tuple`, `type_traits`, `utility`,
+  `variant`, and `version`.
 - Containers and adaptors: `deque`, `list`, `map`, `queue`, `set`, `stack`,
   `unordered_map`, `unordered_set`, and `vector`.
 - Concurrency and time: `atomic`, `barrier`, `chrono`, `condition_variable`,
-  `coroutine`, `latch`, `mutex`, `semaphore`, `stop_token`, and `thread`.
+  `coroutine`, `latch`, `mutex`, `semaphore`, `stop_token`, `syncstream`, and
+  `thread`.
 - C++23 facilities: `algorithm`, `expected`, `format`, `functional`,
   `generator`, `mdspan`, `print`, and `ranges`.
 

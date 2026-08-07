@@ -964,6 +964,27 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   }
 }
 
+bool TypeEqualForCXXOverride(struct Syntax* syntax, TypeRecord* t1,
+                             TypeRecord* t2) {
+  if (t1 == t2) {
+    return true;
+  }
+  TypeRecord* left = t1;
+  TypeRecord* right = t2;
+  if (syntax != NULL && CompilerIsCXX()) {
+    left = TypeMaterializeClassTemplateSpecialization(syntax, t1);
+    right = TypeMaterializeClassTemplateSpecialization(syntax, t2);
+  }
+  bool equal = TypeEqual(left, right);
+  if (left != t1) {
+    TypeRecordDelete(left);
+  }
+  if (right != t2) {
+    TypeRecordDelete(right);
+  }
+  return equal;
+}
+
 bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only) {
   if (from == NULL || to == NULL) {
     return false;

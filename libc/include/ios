@@ -141,6 +141,16 @@ class ios_base {
  protected:
   ios_base()
       : __flags_(skipws | dec), __precision_(6), __width_(0) {}
+  ios_base(ios_base&& other) noexcept
+      : __flags_(other.__flags_),
+        __precision_(other.__precision_),
+        __width_(other.__width_) {}
+  ios_base& operator=(ios_base&& other) noexcept {
+    __flags_ = other.__flags_;
+    __precision_ = other.__precision_;
+    __width_ = other.__width_;
+    return *this;
+  }
   ~ios_base() {}
 
  private:
@@ -262,6 +272,16 @@ class basic_ios : public ios_base {
     __state_ = (sb != nullptr) ? goodbit : badbit;
     __exceptions_ = goodbit;
     __fill_ = ' ';
+  }
+
+  void move(basic_ios& other) noexcept {
+    flags(other.flags());
+    precision(other.precision());
+    width(other.width());
+    __tie_ = other.__tie_;
+    __state_ = other.__state_;
+    __exceptions_ = other.__exceptions_;
+    __fill_ = other.__fill_;
   }
 
  private:

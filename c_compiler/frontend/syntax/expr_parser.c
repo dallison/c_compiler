@@ -155,6 +155,7 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
     {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
     {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
+    {"__davecc_is_trivially_copyable", kCXXTypeTraitIsTriviallyCopyable},
     {"__davecc_is_union", kCXXTypeTraitIsUnion},
 };
 
@@ -289,11 +290,22 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
       this_symbol->type->next->info.struct_info == NULL) {
     return NULL;
   }
+  // Inside a template definition, any qualified base member access must stay
+  // dependent until the template is instantiated; binding it while parsing the
+  // primary template (especially once complete bases like basic_ostream are
+  // visible) leaves owner/member metadata tied to the primary and the derived
+  // class's hidden overloads win later.
+  if (syntax->current_template_parameter_count > 0) {
+    return NULL;
+  }
   Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
       syntax, name, name->components.length - 1);
   if (owner == NULL || owner->type == NULL ||
       !TypeIsStructOrUnion(owner->type) ||
       owner->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  if (TypeContainsTemplateParameter(owner->type)) {
     return NULL;
   }
   TypeRecord* receiver_type = this_symbol->type->next;
@@ -311,10 +323,13 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
   }
   ASTNode* left =
       NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
-  ASTNode* right = NewStringConstantASTNode(NewString(member_name.value), NULL,
-                                            syntax->lex->current_token_location);
+  ASTNode* right =
+      NewStructMemberASTNode(member, syntax->lex->current_token_location);
   StringDestruct(&member_name);
   right->flags |= kASTQualifiedName;
+  StructMemberASTNode* member_node = (StructMemberASTNode*)right;
+  member_node->owner_type = owner->type;
+  TypeRecordIncRef(member_node->owner_type);
   return NewBinaryASTNode(AST_OP(arrow), NULL,
                           syntax->lex->current_token_location, left, right);
 }

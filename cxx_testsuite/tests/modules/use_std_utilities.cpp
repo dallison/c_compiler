@@ -6,6 +6,9 @@ static_assert(std::is_same_v<
 static_assert(std::tuple_size_v<std::tuple<int, long>> == 2);
 static_assert(std::variant_size_v<std::variant<int, long>> == 2);
 static_assert(std::is_same_v<std::expected<int, long>::error_type, long>);
+static_assert(std::rotl<unsigned int>(0x80000001u, 1) == 3u);
+static_assert(std::numbers::pi > 3.14159 && std::numbers::pi < 3.14160);
+static_assert(std::is_same_v<std::syncbuf, std::basic_syncbuf<char>>);
 
 int main() {
   int values[] = {1, 2, 3, 4};
@@ -53,6 +56,11 @@ int main() {
       "module-visible polymorphic string storage");
   if (polymorphic_text[0] != 'm') {
     return 8;
+  }
+
+  unsigned int bits = std::bit_cast<unsigned int>(1.0f);
+  if (bits != 0x3f800000u) {
+    return 9;
   }
 
   return 0;

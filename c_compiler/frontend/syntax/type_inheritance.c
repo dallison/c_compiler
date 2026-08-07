@@ -28,7 +28,8 @@
 #include "rtti.h"
 #include "set.h"
 
-static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b);
+static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
+                                             TypeRecord* b);
 
 bool StructHasBaseStruct(Struct* str, Struct* target, int* offset) {
   if (str == NULL || target == NULL) {
@@ -147,6 +148,16 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       is_virtual = true;
     }
     TypeRecord* base_type = TypeParserParseType(parser, true);
+    if (!parser->syntax->parsing_template_declaration &&
+        parser->syntax->current_template_parameter_count == 0 &&
+        !TypeContainsTemplateParameter(base_type)) {
+      TypeRecord* materialized_base =
+          TypeMaterializeClassTemplateSpecialization(parser->syntax, base_type);
+      if (materialized_base != base_type) {
+        TypeRecordDelete(base_type);
+        base_type = materialized_base;
+      }
+    }
     bool is_pack_expansion = CompilerIsCXX() &&
                              LexMatch(parser->lex, TOK(ellipsis));
     int placeholder_index = -1;
@@ -517,7 +528,7 @@ static bool CXXVirtualNamesCompatible(StructMember* candidate,
   return StringEqualString(&candidate->symbol->name, &base_member->symbol->name);
 }
 
-static StructMember* FindCXXOverriderInHierarchy(Struct* str,
+static StructMember* FindCXXOverriderInHierarchy(Syntax* syntax, Struct* str,
                                                  StructMember* base_member) {
   if (str == NULL) {
     return NULL;
@@ -530,7 +541,7 @@ static StructMember* FindCXXOverriderInHierarchy(Struct* str,
         !CXXVirtualNamesCompatible(candidate, base_member)) {
       continue;
     }
-    if (CXXMemberFunctionSignaturesMatch(candidate->symbol->type,
+    if (CXXMemberFunctionSignaturesMatch(syntax, candidate->symbol->type,
                                          base_member->symbol->type)) {
       return candidate;
     }
@@ -542,8 +553,8 @@ static StructMember* FindCXXOverriderInHierarchy(Struct* str,
         base->type->info.struct_info == NULL) {
       continue;
     }
-    StructMember* found =
-        FindCXXOverriderInHierarchy(base->type->info.struct_info, base_member);
+    StructMember* found = FindCXXOverriderInHierarchy(
+        syntax, base->type->info.struct_info, base_member);
     if (found != NULL) {
       return found;
     }
@@ -551,7 +562,7 @@ static StructMember* FindCXXOverriderInHierarchy(Struct* str,
   return NULL;
 }
 
-static StructMember* FindCXXFinalOverrider(Struct* complete,
+static StructMember* FindCXXFinalOverrider(Syntax* syntax, Struct* complete,
                                            StructMember* base_member) {
   if (complete == NULL || base_member == NULL || base_member->symbol == NULL ||
       base_member->symbol->type == NULL) {
@@ -560,7 +571,8 @@ static StructMember* FindCXXFinalOverrider(Struct* complete,
   // Walk the whole complete-object hierarchy, not just its directly declared
   // members: an intermediate base (e.g. `B` in `A <- B <- C`) may carry the
   // final overrider that a grandbase-source subobject vtable must point at.
-  StructMember* overrider = FindCXXOverriderInHierarchy(complete, base_member);
+  StructMember* overrider =
+      FindCXXOverriderInHierarchy(syntax, complete, base_member);
   return overrider != NULL ? overrider : base_member;
 }
 
@@ -723,7 +735,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
 
   for (size_t i = 0; i < source->virtual_members.length; i++) {
     StructMember* member = source->virtual_members.value.p[i];
-    member = FindCXXFinalOverrider(complete, member);
+    member = FindCXXFinalOverrider(parser->syntax, complete, member);
     if (member == NULL || member->symbol == NULL) {
       continue;
     }
@@ -916,9 +928,10 @@ Symbol* StructFindVTableSymbol(Struct* complete, Struct* source,
   return NULL;
 }
 
-static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b) {
+static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
+                                             TypeRecord* b) {
   if (!TypeIsFunction(a) || !TypeIsFunction(b) ||
-      !TypeEqual(a->next, b->next) ||
+      !TypeEqualForCXXOverride(syntax, a->next, b->next) ||
       a->info.function.is_const_member != b->info.function.is_const_member ||
       a->info.function.is_volatile_member !=
           b->info.function.is_volatile_member ||
@@ -934,14 +947,14 @@ static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b) {
   for (size_t i = 0; i < a->info.function.prototype.length - a_first; i++) {
     Symbol* a_arg = a->info.function.prototype.value.p[i + a_first];
     Symbol* b_arg = b->info.function.prototype.value.p[i + b_first];
-    if (!TypeEqual(a_arg->type, b_arg->type)) {
+    if (!TypeEqualForCXXOverride(syntax, a_arg->type, b_arg->type)) {
       return false;
     }
   }
   return true;
 }
 
-static StructMember* FindCXXBaseVirtualOverride(Struct* str,
+static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
                                                 StructMember* member) {
   if (str == NULL || member == NULL || member->symbol == NULL ||
       !member->is_member_function) {
@@ -954,23 +967,21 @@ static StructMember* FindCXXBaseVirtualOverride(Struct* str,
         base->type->info.struct_info == NULL) {
       continue;
     }
+    Struct* base_struct = base->type->info.struct_info;
     String destructor_name = {0};
     StructMember* base_member = NULL;
     if (func->info.function.is_destructor) {
       StringInit(&destructor_name, "~");
-      StringAppendString(&destructor_name,
-                         base->type->info.struct_info->tag_name);
-      base_member = FindStructMember(base->type->info.struct_info,
-                                     &destructor_name);
+      StringAppendString(&destructor_name, base_struct->tag_name);
+      base_member = FindStructMember(base_struct, &destructor_name);
     } else {
-      base_member =
-          FindStructMember(base->type->info.struct_info, &member->symbol->name);
+      base_member = FindStructMember(base_struct, &member->symbol->name);
     }
     for (StructMember* candidate = base_member; candidate != NULL;
          candidate = candidate->overload_next) {
       if (candidate->is_member_function &&
           candidate->symbol->type->info.function.is_virtual &&
-          CXXMemberFunctionSignaturesMatch(member->symbol->type,
+          CXXMemberFunctionSignaturesMatch(syntax, member->symbol->type,
                                            candidate->symbol->type)) {
         if (destructor_name.value != NULL) {
           StringDestruct(&destructor_name);
@@ -1021,7 +1032,7 @@ void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
     return;
   }
   TypeRecord* func = member->symbol->type;
-  StructMember* override = FindCXXBaseVirtualOverride(str, member);
+  StructMember* override = FindCXXBaseVirtualOverride(parser->syntax, str, member);
   if (func->info.function.is_override && override == NULL) {
     String suffix;
     StringInit(&suffix, NULL);

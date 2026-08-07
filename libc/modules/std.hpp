@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <bit>
 #include <chrono>
 #include <compare>
 #include <concepts>
@@ -25,6 +26,7 @@
 #include <mdspan>
 #include <mutex>
 #include <new>
+#include <numbers>
 #include <optional>
 #include <print>
 #include <queue>
@@ -39,6 +41,7 @@
 #include <stack>
 #include <string>
 #include <string_view>
+#include <syncstream>
 #include <system_error>
 #include <thread>
 #include <tuple>
@@ -48,3 +51,4 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <version>

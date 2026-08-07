@@ -128,6 +128,9 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(struct Syntax* syntax,
 bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,
                                              Symbol* var_template, Vector* args,
                                              int64_t* out);
+// Floating-point counterpart of TypeInstantiateVariableTemplateConstant.
+bool TypeInstantiateVariableTemplateFloatingConstant(
+    struct Syntax* syntax, Symbol* var_template, Vector* args, double* out);
 // Instantiate the type of a variable template (e.g. `in_place_index<1>` ->
 // `in_place_index_t<1>`) with concrete template arguments.  Used for variable
 // templates whose value is a class-type tag object.  Returns NULL on failure.

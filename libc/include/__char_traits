@@ -15,11 +15,89 @@
 
 namespace std {
 
-// Minimal char_traits.  Only the char specialization is provided; that is all
-// std::string and std::string_view need and it keeps the surface tied to tested
-// C string routines.
 template <class CharT>
-struct char_traits;
+struct char_traits {
+  using char_type = CharT;
+  using int_type = unsigned long;
+  using pos_type = long;
+  using off_type = long;
+
+  static constexpr void assign(char_type& a, const char_type& b) noexcept {
+    a = b;
+  }
+  static constexpr bool eq(char_type a, char_type b) noexcept {
+    return a == b;
+  }
+  static constexpr bool lt(char_type a, char_type b) noexcept {
+    return a < b;
+  }
+  static size_t length(const char_type* s) {
+    size_t n = 0;
+    while (s[n] != char_type()) {
+      ++n;
+    }
+    return n;
+  }
+  static int compare(const char_type* a, const char_type* b, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+      if (lt(a[i], b[i])) {
+        return -1;
+      }
+      if (lt(b[i], a[i])) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = src[i];
+    }
+    return dst;
+  }
+  static char_type* move(char_type* dst, const char_type* src, size_t n) {
+    if (dst < src) {
+      for (size_t i = 0; i < n; ++i) {
+        dst[i] = src[i];
+      }
+    } else if (dst > src) {
+      for (size_t i = n; i > 0; --i) {
+        dst[i - 1] = src[i - 1];
+      }
+    }
+    return dst;
+  }
+  static char_type* assign(char_type* dst, size_t n, char_type c) {
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = c;
+    }
+    return dst;
+  }
+  static const char_type* find(const char_type* s, size_t n,
+                               const char_type& c) {
+    for (size_t i = 0; i < n; ++i) {
+      if (eq(s[i], c)) {
+        return s + i;
+      }
+    }
+    return nullptr;
+  }
+  static constexpr char_type to_char_type(int_type c) noexcept {
+    return static_cast<char_type>(c);
+  }
+  static constexpr int_type to_int_type(char_type c) noexcept {
+    return static_cast<int_type>(c);
+  }
+  static constexpr bool eq_int_type(int_type a, int_type b) noexcept {
+    return a == b;
+  }
+  static constexpr int_type eof() noexcept {
+    return static_cast<int_type>(-1);
+  }
+  static constexpr int_type not_eof(int_type c) noexcept {
+    return eq_int_type(c, eof()) ? 0 : c;
+  }
+};
 
 template <>
 struct char_traits<char> {

@@ -2943,6 +2943,92 @@ static void QueueODRUsedStaticDataMember(StructMember* member) {
                NewDeclarationListASTNode(declarations, symbol->location));
 }
 
+static Struct* FindOwnerBaseStructMatchingType(TemplateFunctionBodyClone* clone,
+                                               Struct* str,
+                                               TypeRecord* target);
+
+static void MaterializeClonedQualifiedBaseStructMember(
+    TemplateFunctionBodyClone* clone, StructMemberASTNode* member_node,
+    ASTNode* node) {
+  if (clone == NULL || member_node == NULL ||
+      member_node->owner_type == NULL || member_node->member == NULL ||
+      member_node->member->symbol == NULL) {
+    return;
+  }
+  TypeRecord* owner_type = member_node->owner_type;
+  if (!TypeContainsTemplateParameter(owner_type) &&
+      owner_type->template_origin == NULL) {
+    return;
+  }
+  TypeRecord* scope = TypeRecordCopy(owner_type);
+  TypeRecord* concrete =
+      SubstituteTemplateParameters(clone->parser, scope, clone->args);
+  RebaseTemplateParameterIndices(concrete, clone->rebase_template_parameter_base);
+  concrete = TypeMaterializeClassTemplateSpecialization(
+      clone->parser->syntax, concrete);
+  TypeRecordDelete(scope);
+  if (concrete == NULL || !TypeIsStructOrUnion(concrete) ||
+      concrete->info.struct_info == NULL) {
+    TypeRecordDelete(concrete);
+    return;
+  }
+  Struct* lookup_struct = concrete->info.struct_info;
+  if (clone->to_owner != NULL) {
+    Struct* owner_base = FindOwnerBaseStructMatchingType(clone, clone->to_owner,
+                                                         concrete);
+    if (owner_base != NULL) {
+      lookup_struct = owner_base;
+    }
+  }
+  StructMember* resolved =
+      FindStructMemberByName(lookup_struct,
+                             member_node->member->symbol->name.value);
+  if (resolved == NULL || resolved->symbol == NULL) {
+    TypeRecordDelete(concrete);
+    return;
+  }
+  member_node->member = resolved;
+  TypeRecordDelete(member_node->owner_type);
+  member_node->owner_type = concrete;
+  TypeRecordIncRef(member_node->owner_type);
+  ASTNodeSetType(node, resolved->symbol->type);
+}
+
+static Struct* FindOwnerBaseStructMatchingType(TemplateFunctionBodyClone* clone,
+                                               Struct* str,
+                                               TypeRecord* target) {
+  if (clone == NULL || str == NULL || target == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+        clone->parser->syntax, base->type);
+    TypeRecord* compare_type =
+        materialized != NULL ? materialized : base->type;
+    if (TypeEqual(compare_type, target)) {
+      Struct* result = compare_type->info.struct_info;
+      if (materialized != NULL && materialized != base->type) {
+        TypeRecordDelete(materialized);
+      }
+      return result;
+    }
+    if (materialized != NULL && materialized != base->type) {
+      TypeRecordDelete(materialized);
+    }
+    Struct* nested = FindOwnerBaseStructMatchingType(
+        clone, base->type->info.struct_info, target);
+    if (nested != NULL) {
+      return nested;
+    }
+  }
+  return NULL;
+}
+
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
   if (node->op == AST_OP(ptr_scale)) {
@@ -3039,8 +3125,14 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       node->flags &= ~kASTAnalyzed;
     }
   }
+  if (node->op == AST_OP(structmember) &&
+      (node->flags & kASTQualifiedName) != 0) {
+    MaterializeClonedQualifiedBaseStructMember(
+        clone, (StructMemberASTNode*)node, node);
+  }
   if (node->op == AST_OP(structmember) && clone->from_owner != NULL &&
-      clone->to_owner != NULL && clone->from_owner != clone->to_owner) {
+      clone->to_owner != NULL && clone->from_owner != clone->to_owner &&
+      (node->flags & kASTQualifiedName) == 0) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)node;
     if (member_node->member != NULL && member_node->member->symbol != NULL) {
       StructMember* concrete =
@@ -3435,9 +3527,44 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
       if (concrete != NULL && TypeIsStructOrUnion(concrete) &&
           concrete->info.struct_info != NULL) {
+        Struct* lookup_struct = concrete->info.struct_info;
+        if (clone->to_owner != NULL) {
+          Struct* owner_base = FindOwnerBaseStructMatchingType(
+              clone, clone->to_owner, concrete);
+          if (owner_base != NULL) {
+            lookup_struct = owner_base;
+          }
+        }
         StructMember* member =
-            FindStructMemberByName(concrete->info.struct_info,
-                                   effective_member_name);
+            FindStructMemberByName(lookup_struct, effective_member_name);
+        if (member != NULL && member->symbol != NULL && !member->is_static &&
+            clone->to_owner != NULL) {
+          Symbol* this_symbol = NULL;
+          if (clone->to_func != NULL && TypeIsFunction(clone->to_func)) {
+            for (size_t pi = 0;
+                 pi < clone->to_func->info.function.prototype.length; pi++) {
+              Symbol* formal =
+                  clone->to_func->info.function.prototype.value.p[pi];
+              if (formal != NULL && strcmp(formal->name.value, "this") == 0) {
+                this_symbol = formal;
+                break;
+              }
+            }
+          }
+          if (this_symbol != NULL) {
+            ASTNode* left = NewIdentifierASTNode(this_symbol, node->location);
+            ASTNode* right =
+                NewStructMemberASTNode(member, node->location);
+            right->flags |= kASTQualifiedName;
+            StructMemberASTNode* member_node = (StructMemberASTNode*)right;
+            member_node->owner_type = concrete;
+            TypeRecordIncRef(member_node->owner_type);
+            ASTNode* access = NewBinaryASTNode(AST_OP(arrow), NULL,
+                                               node->location, left, right);
+            TypeRecordDelete(concrete);
+            return access;
+          }
+        }
         if (member != NULL && member->symbol != NULL && !member->is_static &&
             member->is_member_function && member->overload_next == NULL &&
             (node->flags & kASTNeedAddress) != 0) {
@@ -3450,29 +3577,6 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
           // Retain kASTDependentQualifiedName until the enclosing address node
           // rewrites `&T::member` to the dedicated pointer-to-member AST.
           return node;
-        }
-        if (member != NULL && member->symbol != NULL && !member->is_static &&
-            clone->to_owner != NULL && clone->to_owner->tag_symbol != NULL &&
-            clone->to_owner->tag_symbol->type != NULL &&
-            (clone->to_owner == concrete->info.struct_info ||
-             TypeIsDerivedFrom(clone->to_owner->tag_symbol->type, concrete))) {
-          Symbol* this_symbol = NULL;
-          if (clone->to_func != NULL && TypeIsFunction(clone->to_func) &&
-              clone->to_func->info.function.prototype.length > 0) {
-            Symbol* first = clone->to_func->info.function.prototype.value.p[0];
-            if (first != NULL && strcmp(first->name.value, "this") == 0) {
-              this_symbol = first;
-            }
-          }
-          if (this_symbol != NULL) {
-            ASTNode* left = NewIdentifierASTNode(this_symbol, node->location);
-            ASTNode* right = NewStringConstantASTNode(
-                NewString(member->symbol->name.value), NULL, node->location);
-            ASTNode* access = NewBinaryASTNode(AST_OP(arrow), NULL,
-                                               node->location, left, right);
-            TypeRecordDelete(concrete);
-            return access;
-          }
         }
         if (member != NULL && member->symbol != NULL &&
             (member->is_static ||
@@ -3578,6 +3682,28 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       id->template_arguments = concrete_args;
+      if (id->symbol != NULL && id->symbol->variable_template != NULL &&
+          !TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
+          (node->flags & kASTNeedAddress) == 0 &&
+          (node->parent == NULL || node->parent->op != AST_OP(address))) {
+        TypeRecord* concrete_type = TypeInstantiateVariableTemplateType(
+            clone->parser->syntax, id->symbol, concrete_args);
+        int64_t value = 0;
+        if (concrete_type != NULL && TypeIsIntegral(concrete_type) &&
+            TypeInstantiateVariableTemplateConstant(
+                clone->parser->syntax, id->symbol, concrete_args, &value)) {
+          return NewIntConstantASTNode(value, concrete_type, node->location);
+        }
+        double floating_value = 0;
+        if (concrete_type != NULL && TypeIsFloatingPoint(concrete_type) &&
+            TypeInstantiateVariableTemplateFloatingConstant(
+                clone->parser->syntax, id->symbol, concrete_args,
+                &floating_value)) {
+          return NewRealConstantASTNode(floating_value, concrete_type,
+                                        node->location);
+        }
+        TypeRecordDelete(concrete_type);
+      }
       if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
           id->symbol->type->info.function.template_origin != NULL) {
         id->symbol = id->symbol->type->info.function.template_origin;

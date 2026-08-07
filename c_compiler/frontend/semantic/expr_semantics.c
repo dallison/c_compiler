@@ -265,12 +265,26 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       (node->base.flags & kASTIsDeclaration) == 0 &&
       !TemplateArgumentVectorContainsTemplateParameter(
           node->template_arguments)) {
+    TypeRecord* concrete = TypeInstantiateVariableTemplateType(
+        &compiler->syntax, node->symbol, node->template_arguments);
     int64_t value = 0;
-    if (TypeInstantiateVariableTemplateConstant(&compiler->syntax, node->symbol,
-                                                node->template_arguments,
-                                                &value)) {
+    if (concrete != NULL && TypeIsIntegral(concrete) &&
+        TypeInstantiateVariableTemplateConstant(
+            &compiler->syntax, node->symbol, node->template_arguments, &value)) {
       ASTNode* const_node =
-          NewIntConstantASTNode(value, node->symbol->type, node->base.location);
+          NewIntConstantASTNode(value, concrete, node->base.location);
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+                          true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
+    }
+    double floating_value = 0;
+    if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
+        TypeInstantiateVariableTemplateFloatingConstant(
+            &compiler->syntax, node->symbol, node->template_arguments,
+            &floating_value)) {
+      ASTNode* const_node = NewRealConstantASTNode(
+          floating_value, concrete, node->base.location);
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
                           true);
       const_node->flags |= kASTAnalyzed;
@@ -281,8 +295,6 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     // folded constant.  Materialize a value-initialized temporary of the
     // concrete type so overload resolution and template argument deduction see
     // the correct `in_place_index_t<1>` type.
-    TypeRecord* concrete = TypeInstantiateVariableTemplateType(
-        &compiler->syntax, node->symbol, node->template_arguments);
     if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
       SourceLocation location = node->base.location;
       Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
@@ -304,6 +316,7 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       analyzed->value_category = kValueCategoryLvalue;
       return analyzed;
     }
+    TypeRecordDelete(concrete);
   }
 
   if (CompilerIsCXX() && node->symbol != NULL &&
@@ -3165,18 +3178,23 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       }
     }
   }
-  if ((symbol->flags.is_constexpr ||
-       symbol->flags.is_constinit) &&
-      !symbol->flags.is_template &&
-      !symbol->flags.value_set) {
-    SemanticError(init,
-                  symbol->flags.is_constinit
-                      ? "constinit variable initializer is not a constant expression"
-                      : "constexpr variable initializer is not a constant expression");
-  }
   ASTNode* simplified_init =
       AnalyzeInitializer(node->type, init, requires_constant_initializer);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
+  if ((symbol->flags.is_constexpr || symbol->flags.is_constinit) &&
+      !symbol->flags.is_template && !symbol->flags.value_set) {
+    // Initializer analysis can finish dependent-template substitutions and
+    // expose a scalar constant that was not foldable during the first pass.
+    EvaluateConstantForSymbol(symbol, simplified_init);
+    if (!symbol->flags.value_set &&
+        !ExpressionIsTemplateDependent(simplified_init)) {
+      SemanticError(
+          simplified_init,
+          symbol->flags.is_constinit
+              ? "constinit variable initializer is not a constant expression"
+              : "constexpr variable initializer is not a constant expression");
+    }
+  }
 
   // If the symbol being initialized is static set a flag to tell the
   // code generator not to generate any code for it.
@@ -3245,7 +3263,10 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
       node->base.op == AST_OP(assign) && node->left != NULL &&
       node->left->type != NULL && TypeIsReference(node->left->type)) {
     TypeRecord* reference_type = node->left->type;
-    if (!TypeEqualIgnoringQualifiers(node->right->type, reference_type->next)) {
+    TypeRecord* initializer_type =
+        TypeIsReference(node->right->type) ? node->right->type->next
+                                           : node->right->type;
+    if (!TypeEqualIgnoringQualifiers(initializer_type, reference_type->next)) {
       NormalConversion(node->right,
                        ReferenceConversionTarget(node->right, reference_type));
     }
@@ -4503,7 +4524,29 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
               TypeIsFunction(member->symbol->type)
           ? member->symbol->type->info.function.cxx_member_owner
           : NULL;
-  if (concrete_receiver != NULL && member->symbol != NULL) {
+  TypeRecord* qualified_owner_type = member_node->owner_type;
+  bool qualified_base_member =
+      member_access->right != NULL &&
+      (member_access->right->flags & kASTQualifiedName) != 0;
+  if (qualified_base_member && qualified_owner_type != NULL &&
+      TypeIsStructOrUnion(qualified_owner_type) &&
+      qualified_owner_type->info.struct_info != NULL &&
+      member->symbol != NULL) {
+    StructMember* base_member = FindStructMemberWithAccessAndOffsetByName(
+        qualified_owner_type->info.struct_info, member->symbol->name.value,
+        NULL, NULL, NULL);
+    if (base_member != NULL && base_member->symbol != NULL) {
+      member = base_member;
+      StructMemberASTNodeSetMember(member_node, base_member);
+      member_owner =
+          base_member->symbol->type != NULL &&
+                  TypeIsFunction(base_member->symbol->type)
+              ? base_member->symbol->type->info.function.cxx_member_owner
+              : member_owner;
+    }
+  }
+  if (!qualified_base_member && concrete_receiver != NULL &&
+      member->symbol != NULL) {
     StructMember* concrete_member =
         FindStructMember(concrete_receiver, &member->symbol->name);
     if (concrete_member != NULL && concrete_member->symbol != NULL &&
@@ -8981,6 +9024,95 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     }
   }
   node->right = AnalyzeExpression(node->right);
+  if (node->right != NULL && node->right->op == AST_OP(structmember)) {
+    StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
+    StructMember* member = member_node->member;
+    TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
+    if (TypeIsReference(receiver_type)) {
+      receiver_type = receiver_type->next;
+    }
+    if (node->base.op == AST_OP(arrow) && TypeIsPointer(receiver_type)) {
+      receiver_type = receiver_type->next;
+    }
+    Struct* receiver_struct =
+        receiver_type != NULL && TypeIsStructOrUnion(receiver_type)
+            ? receiver_type->info.struct_info
+            : NULL;
+    bool qualified_base_lookup =
+        (node->right->flags & kASTQualifiedName) != 0;
+    if (qualified_base_lookup) {
+      Struct* qualified_owner =
+          member_node->owner_type != NULL &&
+                  member_node->owner_type->info.struct_info != NULL
+              ? member_node->owner_type->info.struct_info
+              : NULL;
+      if (qualified_owner == NULL && member != NULL &&
+          member->symbol != NULL && member->symbol->type != NULL &&
+          TypeIsFunction(member->symbol->type) &&
+          member->symbol->type->info.function.cxx_member_owner != NULL) {
+        qualified_owner = member->symbol->type->info.function.cxx_member_owner;
+      }
+      if (member != NULL && member->symbol != NULL && qualified_owner != NULL) {
+        if ((node->right->flags & kASTQualifiedName) == 0) {
+          node->right->flags |= kASTQualifiedName;
+        }
+        CXXAccess access = kAccessPublic;
+        Struct* member_owner = NULL;
+        int member_offset = 0;
+        StructMember* resolved = FindStructMemberWithAccessAndOffsetByName(
+            qualified_owner, member->symbol->name.value, &access, &member_owner,
+            &member_offset);
+        if (resolved != NULL) {
+          member = resolved;
+          StructMemberASTNodeSetMember(member_node, resolved);
+        }
+        if (receiver_struct != NULL) {
+          ApplyVirtualBaseAdjustmentToMemberReference(node, receiver_struct,
+                                                      member_owner,
+                                                      &member_offset);
+        }
+        if (member_offset < 0) {
+          member_offset =
+              CXXBaseOffsetForMember(receiver_struct, member) + member->byte_offset;
+        }
+        member_node->access = access;
+        member_node->byte_offset = member_offset;
+        if (!member->is_member_function &&
+            !CurrentFunctionCanAccessMember(receiver_struct, member_owner,
+                                            member->access, access)) {
+          const char* owner_name =
+              member_owner != NULL && member_owner->tag_name != NULL
+                  ? member_owner->tag_name->value
+                  : "<anonymous>";
+          SemanticError((ASTNode*)node, "%s is a %s member of %s",
+                        member->symbol->name.value, CXXAccessName(access),
+                        owner_name);
+        }
+        if (!member->is_member_function && member->symbol != NULL &&
+            ShouldCountMemberReferenceUse(node)) {
+          member->symbol->flags.used = true;
+        }
+        TypeRecord* member_type = member->symbol->type;
+        if (!member->is_static && !member->is_member_function &&
+            TypeIsReference(member_type) &&
+            !MemberReferenceIsInitializerTarget(node)) {
+          ASTNodeSetType((ASTNode*)node, member_type->next);
+          node->base.value_category = kValueCategoryLvalue;
+          return;
+        }
+        if (!member->is_static && !member->is_member_function &&
+            !member->is_mutable && MemberReceiverIsConst(node)) {
+          member_type = TypeRecordCopy(member_type);
+          member_type->qualifiers |= kQualConst;
+        }
+        ASTNodeSetType((ASTNode*)node, member_type);
+        if (!member->is_member_function) {
+          node->base.value_category = kValueCategoryLvalue;
+        }
+        return;
+      }
+    }
+  }
   if (node->right != NULL && node->right->op == AST_OP(structmember)) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
     StructMember* member = member_node->member;
