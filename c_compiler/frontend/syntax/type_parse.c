@@ -104,6 +104,29 @@ void TypeParserDestruct(TypeParser* parser) {
   VectorDestruct(&parser->stack);
 }
 
+TypeSubstitutionScope TypeParserPushTemplateSubstitution(
+    TypeParser* parser, Struct* source, Struct* target) {
+  TypeSubstitutionScope scope = {
+      parser,
+      parser != NULL ? parser->template_substitution_source : NULL,
+      parser != NULL ? parser->template_substitution_target : NULL,
+  };
+  if (parser != NULL) {
+    parser->template_substitution_source = source;
+    parser->template_substitution_target = target;
+  }
+  return scope;
+}
+
+void TypeParserPopTemplateSubstitution(TypeSubstitutionScope* scope) {
+  if (scope == NULL || scope->parser == NULL) {
+    return;
+  }
+  scope->parser->template_substitution_source = scope->source;
+  scope->parser->template_substitution_target = scope->target;
+  scope->parser = NULL;
+}
+
 // Mapping for token vs type for parsing a type specifier.
 static struct {
   Token token;

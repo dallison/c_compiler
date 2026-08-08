@@ -30,26 +30,22 @@
 #include "set.h"
 #include "type_traits_semantics.h"
 
-static void DependentExpressionContainsParameterVisitor(ASTNode* node,
-                                                       void* data,
-                                                       int child_id,
-                                                       VisitorMode mode) {
-  (void)child_id;
-  (void)mode;
+static bool DependentExpressionNodeContainsParameter(ASTNode* node,
+                                                     void* data) {
+  (void)data;
   if (node == NULL || node->op != AST_OP(identifier)) {
-    return;
+    return false;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL) {
-    return;
+    return false;
   }
-  if ((id->symbol->flags.is_template_parameter &&
-       id->symbol->template_parameter_index >= 0) ||
-      id->symbol->dependent_value_template_parameter_index >= 0 ||
-      TypeContainsTemplateParameter(id->symbol->type) ||
-      TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
-    *(bool*)data = true;
-  }
+  return (id->symbol->flags.is_template_parameter &&
+          id->symbol->template_parameter_index >= 0) ||
+         id->symbol->dependent_value_template_parameter_index >= 0 ||
+         TypeContainsTemplateParameter(id->symbol->type) ||
+         TemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments);
 }
 
 bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right);
@@ -57,9 +53,7 @@ bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
 
 bool DependentExpressionContainsTemplateParameter(ASTNode* expr) {
-  bool found = false;
-  ASTNodeVisit(expr, DependentExpressionContainsParameterVisitor, 0, &found);
-  return found;
+  return ASTNodeAny(expr, DependentExpressionNodeContainsParameter, NULL);
 }
 
 /* True if a template argument is still dependent: it references a template
@@ -133,9 +127,6 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
       }
     }
     if (TypeIsFunction(t)) {
-      if (TypeContainsTemplateParameter(t->next)) {
-        return true;
-      }
       for (size_t i = 0; i < t->info.function.prototype.length; i++) {
         Symbol* formal = t->info.function.prototype.value.p[i];
         if (formal != NULL && TypeContainsTemplateParameter(formal->type)) {
@@ -963,6 +954,29 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
                  CanonicalPrimitiveType(t2->type) &&
              t1->qualifiers == t2->qualifiers;
   }
+}
+
+bool TypeEqualIgnoringTopLevelQualifierMask(TypeRecord* t1, TypeRecord* t2,
+                                             Qualifiers ignored) {
+  if (t1 == NULL || t2 == NULL) {
+    return t1 == t2;
+  }
+  TypeRecord left = *t1;
+  TypeRecord right = *t2;
+  left.qualifiers &= ~ignored;
+  right.qualifiers &= ~ignored;
+  return TypeEqual(&left, &right);
+}
+
+bool TypeEqualIgnoringFunctionNoexcept(TypeRecord* t1, TypeRecord* t2) {
+  if (!TypeIsFunction(t1) || !TypeIsFunction(t2)) {
+    return TypeEqual(t1, t2);
+  }
+  TypeRecord left = *t1;
+  TypeRecord right = *t2;
+  left.info.function.is_noexcept = false;
+  right.info.function.is_noexcept = false;
+  return TypeEqual(&left, &right);
 }
 
 bool TypeEqualForCXXOverride(struct Syntax* syntax, TypeRecord* t1,

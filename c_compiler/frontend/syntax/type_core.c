@@ -856,6 +856,20 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   return r;
 }
 
+TypeRecord* TypeRecordCloneSpine(TypeRecord* record) {
+  if (record == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(record);
+  if (copy->next != NULL) {
+    TypeRecord* shared_next = copy->next;
+    copy->next = NULL;
+    TypeRecordDelete(shared_next);
+    TypeRecordChain(copy, TypeRecordCloneSpine(record->next));
+  }
+  return copy;
+}
+
 //
 // Type creation functions.
 //

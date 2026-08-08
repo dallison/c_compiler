@@ -1887,20 +1887,14 @@ static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
   return false;
 }
 
-static void ExpressionDependencyVisitor(ASTNode* node, void* data,
-                                        int child_id, VisitorMode mode) {
-  (void)child_id;
-  if (node == NULL || mode != kVisitPreChildren || *(bool*)data) {
-    return;
-  }
+static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
+  (void)data;
   if (TypeContainsTemplateParameter(node->type)) {
-    *(bool*)data = true;
-    return;
+    return true;
   }
   if ((node->flags & kASTDependentQualifiedName) != 0 ||
       node->op == AST_OP(requires_expr)) {
-    *(bool*)data = true;
-    return;
+    return true;
   }
   if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
     // `sizeof(T)` / `alignof(T)` on a dependent type is value-dependent even
@@ -1908,8 +1902,7 @@ static void ExpressionDependencyVisitor(ASTNode* node, void* data,
     // when dependent (see SizeofASTNode::type_operand).
     SizeofASTNode* s = (SizeofASTNode*)node;
     if (TypeContainsTemplateParameter(s->type_operand)) {
-      *(bool*)data = true;
-      return;
+      return true;
     }
   }
   if (node->op == AST_OP(identifier)) {
@@ -1919,15 +1912,14 @@ static void ExpressionDependencyVisitor(ASTNode* node, void* data,
          TypeContainsTemplateParameter(id->symbol->type) ||
          StaticAssertTemplateArgumentVectorContainsTemplateParameter(
              id->template_arguments))) {
-      *(bool*)data = true;
+      return true;
     }
   }
+  return false;
 }
 
 bool ExpressionIsTemplateDependent(ASTNode* expr) {
-  bool dependent = false;
-  ASTNodeVisit(expr, ExpressionDependencyVisitor, 0, &dependent);
-  return dependent;
+  return ASTNodeAny(expr, ExpressionNodeIsTemplateDependent, NULL);
 }
 
 static void ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_id,
@@ -5226,7 +5218,7 @@ static void RecordFriendFunction(Syntax* syntax, Struct* befriending,
   if (definition != NULL) {
     // Inline friend definitions belong to the enclosing namespace; queue them
     // alongside the other deferred definitions so codegen emits the body.
-    VectorAppend(&compiler->pending_template_instantiations, definition);
+    CompilerQueuePendingTemplateInstantiation(definition);
   }
 }
 

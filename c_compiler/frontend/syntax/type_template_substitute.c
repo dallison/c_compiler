@@ -1935,20 +1935,6 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
   }
 }
 
-static TypeRecord* CopyTypeSpineForRebase(TypeRecord* type) {
-  if (type == NULL) {
-    return NULL;
-  }
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (copy->next != NULL) {
-    TypeRecord* shared_next = copy->next;
-    copy->next = NULL;
-    TypeRecordDelete(shared_next);
-    TypeRecordChain(copy, CopyTypeSpineForRebase(type->next));
-  }
-  return copy;
-}
-
 /* Rebase (see RebaseTemplateParameterIndices) the parameter indices inside a
  * template argument and its referenced type. */
 void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
@@ -1959,7 +1945,7 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (arg->template_parameter_index >= base) {
     arg->template_parameter_index -= base;
   }
-  TypeRecord* independent_type = CopyTypeSpineForRebase(arg->type);
+  TypeRecord* independent_type = TypeRecordCloneSpine(arg->type);
   TypeRecordDelete(arg->type);
   arg->type = independent_type;
   RebaseTemplateParameterIndices(arg->type, base);

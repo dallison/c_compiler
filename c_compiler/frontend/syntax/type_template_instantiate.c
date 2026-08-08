@@ -1251,8 +1251,8 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  VectorAppend(&compiler->pending_template_instantiations,
-               NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingTemplateInstantiation(
+      NewDeclarationListASTNode(declarations, symbol->location));
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 
@@ -1459,27 +1459,14 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     Vector* declarations = NewVector();
     VectorAppend(declarations,
                  NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-    VectorAppend(&compiler->pending_template_instantiations,
-                 NewDeclarationListASTNode(declarations, symbol->location));
+    CompilerQueuePendingTemplateInstantiation(
+        NewDeclarationListASTNode(declarations, symbol->location));
     VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
   }
   VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
   return symbol;
-}
-
-static TypeRecord* CopyDeducedTypeSpine(TypeRecord* type) {
-  if (type == NULL) {
-    return NULL;
-  }
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (type->next != NULL) {
-    TypeRecordDelete(copy->next);
-    copy->next = CopyDeducedTypeSpine(type->next);
-    TypeRecordIncRef(copy->next);
-  }
-  return TypeRecordCalculateSize(copy);
 }
 
 /* Create a type template argument holding an independent copy of a deduced
@@ -1490,7 +1477,7 @@ static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
   memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
-  arg->type = CopyDeducedTypeSpine(type);
+  arg->type = TypeRecordCalculateSize(TypeRecordCloneSpine(type));
   arg->int_value = 0;
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
@@ -1521,7 +1508,8 @@ static TypeRecord* FunctionTemplateDeductionActualType(TypeRecord* actual) {
   if (actual == NULL) {
     return NULL;
   }
-  TypeRecord* deduced = CopyDeducedTypeSpine(actual);
+  TypeRecord* deduced =
+      TypeRecordCalculateSize(TypeRecordCloneSpine(actual));
   deduced->qualifiers = kQualPlain;
   return deduced;
 }
@@ -1543,7 +1531,8 @@ static bool SetDeducedFunctionTemplateTypeArgumentImpl(Vector* args,
 
   TypeRecord* deduced = strip_top_level_cv
                             ? FunctionTemplateDeductionActualType(actual)
-                            : CopyDeducedTypeSpine(actual);
+                            : TypeRecordCalculateSize(
+                                  TypeRecordCloneSpine(actual));
   TemplateArgument* existing = args->value.p[index];
   if (existing == NULL) {
     args->value.p[index] = NewDeducedTypeTemplateArgument(deduced);
@@ -4639,14 +4628,8 @@ static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
   if (left == NULL || right == NULL) {
     return false;
   }
-  TypeRecord* left_plain = TypeRecordCopy(left);
-  TypeRecord* right_plain = TypeRecordCopy(right);
-  left_plain->qualifiers = kQualPlain;
-  right_plain->qualifiers = kQualPlain;
-  bool equal = TypeEqual(left_plain, right_plain);
-  TypeRecordDelete(left_plain);
-  TypeRecordDelete(right_plain);
-  return equal;
+  return TypeEqualIgnoringTopLevelQualifierMask(
+      left, right, left->qualifiers | right->qualifiers);
 }
 
 static bool TypeCanAddTopLevelQualifiers(TypeRecord* from, TypeRecord* to) {
@@ -5118,8 +5101,6 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
                                                        StructMember* member,
                                                        Vector* args,
                                                        Vector* pending) {
-  Struct* saved_substitution_source = parser->template_substitution_source;
-  Struct* saved_substitution_target = parser->template_substitution_target;
   TypeRecord* source_owner =
       member->symbol != NULL && member->symbol->type != NULL
           ? member->symbol->type
@@ -5135,8 +5116,8 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
       source_owner != NULL && TypeIsStructOrUnion(source_owner)
           ? source_owner->info.struct_info
           : NULL;
-  parser->template_substitution_source = substitution_source;
-  parser->template_substitution_target = owner;
+  TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+      parser, substitution_source, owner);
   TypeRecord* func = InstantiateMemberFunctionType(
       parser, owner, member->is_static, member->symbol->type, args,
       member->symbol->location);
@@ -5199,8 +5180,7 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
   // `array<T, rank_dynamic()>`); constexpr evaluation must be able to
   // instantiate that body before the normal pending-body pass runs.
   symbol->value.func_defn = template_definition;
-  parser->template_substitution_source = saved_substitution_source;
-  parser->template_substitution_target = saved_substitution_target;
+  TypeParserPopTemplateSubstitution(&substitution);
   PendingMemberBody* pmb = malloc(sizeof(PendingMemberBody));
   pmb->symbol = symbol;
   pmb->template_definition = template_definition;
@@ -5892,8 +5872,8 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
       Vector* declarations = NewVector();
       VectorAppend(declarations,
                    NewVariableDeclarationASTNode(sym, NULL, sym->location));
-      VectorAppend(&compiler->pending_template_instantiations,
-                   NewDeclarationListASTNode(declarations, sym->location));
+      CompilerQueuePendingTemplateInstantiation(
+          NewDeclarationListASTNode(declarations, sym->location));
       VectorAppend(&compiler->declaration_asts,
                    sym->type->info.function.body);
     } else if (is_new_symbol && ftpl->type->info.function.body != NULL) {

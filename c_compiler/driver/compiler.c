@@ -1340,8 +1340,8 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
     Vector* declarations = NewVector();
     VectorAppend(declarations,
                  NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-    VectorAppend(&compiler->pending_template_instantiations,
-                 NewDeclarationListASTNode(declarations, symbol->location));
+    CompilerQueuePendingTemplateInstantiation(
+        NewDeclarationListASTNode(declarations, symbol->location));
   }
   if (first_reference) {
     VectorAppend(&compiler->referenced_function_asm_names,
@@ -2203,6 +2203,89 @@ TlsModel ParseTlsModelName(String* tls_model) {
   return TLS(bad);
 }
 
+static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
+  if (symbol == NULL || symbol->type == NULL || asm_name == NULL ||
+      symbol->asm_name.value == NULL ||
+      strcmp(symbol->asm_name.value, asm_name) != 0) {
+    return false;
+  }
+  return !TypeIsFunction(symbol->type) ||
+         (!symbol->flags.is_template &&
+          symbol->type->info.function.body != NULL);
+}
+
+static void IndexPendingTemplateInstantiation(ASTNode* declaration) {
+  if (declaration == NULL || declaration->op != AST_OP(decl_list)) {
+    return;
+  }
+  DeclarationListASTNode* declarations =
+      (DeclarationListASTNode*)declaration;
+  for (size_t i = 0; declarations->declarations != NULL &&
+                     i < declarations->declarations->length; i++) {
+    VariableDeclarationASTNode* decl =
+        declarations->declarations->value.p[i];
+    Symbol* symbol = decl != NULL ? decl->symbol : NULL;
+    const char* asm_name =
+        symbol != NULL ? symbol->asm_name.value : NULL;
+    if (asm_name == NULL || *asm_name == '\0' ||
+        !PendingSymbolIsDefinition(symbol, asm_name)) {
+      continue;
+    }
+    MapKeyType lookup_key;
+    lookup_key.p = (void*)asm_name;
+    if (MapFind(&compiler->pending_template_instantiation_names,
+                lookup_key) != NULL) {
+      continue;
+    }
+    MapKeyValue entry;
+    entry.key.p = strdup(asm_name);
+    entry.value.p = symbol;
+    MapInsert(&compiler->pending_template_instantiation_names, entry);
+  }
+}
+
+void CompilerQueuePendingTemplateInstantiation(ASTNode* declaration) {
+  if (compiler == NULL || declaration == NULL) {
+    return;
+  }
+  VectorAppend(&compiler->pending_template_instantiations, declaration);
+  IndexPendingTemplateInstantiation(declaration);
+}
+
+bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name) {
+  if (compiler == NULL || asm_name == NULL || *asm_name == '\0') {
+    return false;
+  }
+  MapKeyType key;
+  key.p = (void*)asm_name;
+  Symbol* indexed =
+      MapFind(&compiler->pending_template_instantiation_names, key);
+  if (PendingSymbolIsDefinition(indexed, asm_name)) {
+    return true;
+  }
+  // A symbol can receive its final mangled name or definition body after it is
+  // queued. Preserve the old scan's behavior for those uncommon late updates;
+  // stable queued definitions take the indexed fast path above.
+  for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
+    DeclarationListASTNode* declarations =
+        compiler->pending_template_instantiations.value.p[i];
+    if (declarations == NULL ||
+        declarations->base.op != AST_OP(decl_list) ||
+        declarations->declarations == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < declarations->declarations->length; j++) {
+      VariableDeclarationASTNode* decl =
+          declarations->declarations->value.p[j];
+      if (decl != NULL &&
+          PendingSymbolIsDefinition(decl->symbol, asm_name)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static void InitBasic(Compiler* compiler, const char* filename) {
   // The input filename "-" means standard input; use a plain base name for
   // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
@@ -2234,6 +2317,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&cxx_init_array_functions);
   VectorInit(&cxx_fini_array_functions);
   VectorInit(&compiler->pending_template_instantiations);
+  MapInitForCharPointerKeys(
+      &compiler->pending_template_instantiation_names);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
   SetInit(&compiler->error_warnings, CompareWarning);
@@ -2688,6 +2773,10 @@ static void FreeRttiTypeInfoKey(MapKeyValue* kv) {
   StringDelete((String*)kv->key.p);
 }
 
+static void FreePendingTemplateInstantiationKey(MapKeyValue* kv) {
+  free(kv->key.p);
+}
+
 void CompilerDestruct(Compiler* compiler) {
   ConstexprPCodeClearImageCache();
 
@@ -2706,6 +2795,9 @@ void CompilerDestruct(Compiler* compiler) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
   }
   VectorDestruct(&compiler->pending_template_instantiations);
+  MapDestructWithContents(
+      &compiler->pending_template_instantiation_names,
+      FreePendingTemplateInstantiationKey);
 
   // Free function-definition symbols that were superseded by an earlier
   // declaration and so never entered the global symbol table.  Deleting each

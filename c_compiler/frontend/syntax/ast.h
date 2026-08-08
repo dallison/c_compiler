@@ -454,7 +454,10 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op);
 // Deletes an AST node based on its runtime type.  It calls the deleter
 // function pointer in the node.
 void ASTNodeDelete(ASTNode* node);
+// Replaces a node's type with a non-NULL type, retaining the new type and
+// releasing the old one. Use ASTNodeClearType when invalidating semantic state.
 void ASTNodeSetType(ASTNode* node, TypeRecord* type);
+void ASTNodeClearType(ASTNode* node);
 // Like ASTNodeSetType, but keeps a live function-template primary type alive
 // when replacing a call callee that still shares the template declaration type.
 void ASTNodeSetInstantiatedCalleeType(ASTNode* node, TypeRecord* type);
@@ -472,6 +475,9 @@ void ASTNodeVisit(ASTNode* node,
                   void (*func)(ASTNode* node, void*, int, VisitorMode),
                   int child_id,
                   void* data);
+// Returns true as soon as predicate matches a node, without descending into
+// any remaining subtrees.
+bool ASTNodeAny(ASTNode* node, ASTNodeUpwardVisitor predicate, void* data);
 void ASTNodeVisitUpwards(ASTNode* node, ASTNodeUpwardVisitor func,
                          void* data);
 ASTNode* ASTNodeVisitAndTransform(ASTNode* node, ASTNodeTransformer func,

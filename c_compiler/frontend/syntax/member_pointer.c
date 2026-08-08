@@ -144,24 +144,13 @@ static bool MemberPointerPointeeTypesCompatible(TypeRecord* from,
         to->info.function.is_noexcept) {
       return false;
     }
-    TypeRecord* relaxed = TypeRecordCopy(from);
-    relaxed->info.function.is_noexcept = false;
-    bool equal = TypeEqual(relaxed, to);
-    TypeRecordDelete(relaxed);
-    return equal;
+    return TypeEqualIgnoringFunctionNoexcept(from, to);
   }
   Qualifiers cv = kQualConst | kQualVolatile;
   if ((from->qualifiers & cv & ~to->qualifiers) != 0) {
     return false;
   }
-  TypeRecord* unqualified_from = TypeRecordCopy(from);
-  TypeRecord* unqualified_to = TypeRecordCopy(to);
-  unqualified_from->qualifiers &= ~cv;
-  unqualified_to->qualifiers &= ~cv;
-  bool equal = TypeEqual(unqualified_from, unqualified_to);
-  TypeRecordDelete(unqualified_from);
-  TypeRecordDelete(unqualified_to);
-  return equal;
+  return TypeEqualIgnoringTopLevelQualifierMask(from, to, cv);
 }
 
 static bool MemberPointerIsVirtualFunctionEncoding(TypeRecord* type,
@@ -802,13 +791,7 @@ static ASTNode* MemberPointerBuildAdjFieldLoad(ASTNode* member_ptr,
 }
 
 static TypeRecord* MemberPointerCopyFunctionType(TypeRecord* function_type) {
-  TypeRecord* copy = TypeRecordCopy(function_type);
-  VectorInit(&copy->info.function.prototype);
-  for (size_t i = 0; i < function_type->info.function.prototype.length; i++) {
-    Symbol* formal = function_type->info.function.prototype.value.p[i];
-    VectorAppend(&copy->info.function.prototype, SymbolClone(formal));
-  }
-  return copy;
+  return TypeRecordCopy(function_type);
 }
 
 static ASTNode* MemberPointerCloneReceiver(ASTNode* receiver) {

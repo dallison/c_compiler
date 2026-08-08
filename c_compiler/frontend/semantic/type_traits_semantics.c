@@ -235,19 +235,6 @@ static bool TypeVectorHasDependentTemplateParameter(Vector* types) {
   return false;
 }
 
-static TypeRecord* TypeTraitCopyOwnedSpine(TypeRecord* type) {
-  if (type == NULL) {
-    return NULL;
-  }
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (type->next != NULL) {
-    TypeRecordDelete(copy->next);
-    copy->next = TypeTraitCopyOwnedSpine(type->next);
-    TypeRecordIncRef(copy->next);
-  }
-  return TypeRecordCalculateSize(copy);
-}
-
 static void TypeTraitStripAllQualifiers(TypeRecord* type) {
   for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
     cur->qualifiers = kQualPlain;
@@ -255,7 +242,8 @@ static void TypeTraitStripAllQualifiers(TypeRecord* type) {
 }
 
 static TypeRecord* TypeRecordStripCvRefForTraitPlaceholder(TypeRecord* type) {
-  TypeRecord* owned = TypeTraitCopyOwnedSpine(type);
+  TypeRecord* owned =
+      TypeRecordCalculateSize(TypeRecordCloneSpine(type));
   if (owned == NULL) {
     return NULL;
   }
@@ -284,7 +272,8 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
       if (types != NULL && !TypeVectorHasDependentTemplateParameter(types)) {
         TypeRecord* common = CXXTypeTraitCommonType(syntax, types);
         if (common != NULL) {
-          resolved = TypeTraitCopyOwnedSpine(common);
+          resolved =
+              TypeRecordCalculateSize(TypeRecordCloneSpine(common));
           if (resolved != NULL) {
             TypeTraitStripAllQualifiers(resolved);
           }
@@ -323,8 +312,10 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL) {
     return false;
   }
-  TypeRecord* plain_left = TypeTraitCopyOwnedSpine(left);
-  TypeRecord* plain_right = TypeTraitCopyOwnedSpine(right);
+  TypeRecord* plain_left =
+      TypeRecordCalculateSize(TypeRecordCloneSpine(left));
+  TypeRecord* plain_right =
+      TypeRecordCalculateSize(TypeRecordCloneSpine(right));
   if (plain_left == NULL || plain_right == NULL) {
     TypeRecordDelete(plain_left);
     TypeRecordDelete(plain_right);
@@ -386,7 +377,8 @@ static ASTNode* TypeTraitSyntheticExpressionFromType(Syntax* syntax,
   TypeRecord* object_type = NULL;
   bool is_lvalue = false;
   if (TypeIsReference(type)) {
-    object_type = TypeTraitCopyOwnedSpine(type->next);
+    object_type =
+        TypeRecordCalculateSize(TypeRecordCloneSpine(type->next));
     if (object_type == NULL) {
       return NULL;
     }

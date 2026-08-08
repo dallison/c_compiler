@@ -4128,8 +4128,8 @@ static void QueueCoroutineGeneratedFunction(Symbol* symbol) {
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  VectorAppend(&compiler->pending_template_instantiations,
-               NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingTemplateInstantiation(
+      NewDeclarationListASTNode(declarations, symbol->location));
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 

@@ -72,6 +72,12 @@ typedef struct {
   Vector* deferred_noexcept_specifiers;
 } TypeParser;
 
+typedef struct {
+  TypeParser* parser;
+  Struct* source;
+  Struct* target;
+} TypeSubstitutionScope;
+
 // Struct to hold information from a partial type specifier.
 typedef struct  {
   Type type;
@@ -91,6 +97,9 @@ void TypeParserReset(TypeParser* parser);
 // the TypeRecords the stack referenced; those are owned by the parsed type or
 // already consumed.
 void TypeParserDestruct(TypeParser* parser);
+TypeSubstitutionScope TypeParserPushTemplateSubstitution(
+    TypeParser* parser, Struct* source, Struct* target);
+void TypeParserPopTemplateSubstitution(TypeSubstitutionScope* scope);
 
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev);

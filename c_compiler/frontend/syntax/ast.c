@@ -632,7 +632,7 @@ void ASTNodeDelete(ASTNode* node) {
 }
 
 void ASTNodeSetType(ASTNode* node, TypeRecord* type) {
-  if (type == NULL) {
+  if (node == NULL || type == NULL) {
     return;
   }
   if (node->type == type) {
@@ -644,6 +644,14 @@ void ASTNodeSetType(ASTNode* node, TypeRecord* type) {
   }
   node->type = type;
   TypeRecordIncRef(type);
+}
+
+void ASTNodeClearType(ASTNode* node) {
+  if (node == NULL || node->type == NULL) {
+    return;
+  }
+  TypeRecordDelete(node->type);
+  node->type = NULL;
 }
 
 static bool ASTTypeIsFunctionTemplatePrimary(TypeRecord* type) {
@@ -813,11 +821,14 @@ ASTNode* ASTNodeClone(const ASTNode* node,
   return clone;
 }
 
+static bool* ast_visit_early_stop;
+
 void ASTNodeVisit(ASTNode* node,
                   void (*func)(ASTNode* node, void*, int, VisitorMode),
                   int child_id,
                   void* data) {
-  if (node == NULL) {
+  if (node == NULL ||
+      (ast_visit_early_stop != NULL && *ast_visit_early_stop)) {
     return;
   }
   if (node->virtuals->visitor == NULL) {
@@ -826,6 +837,35 @@ void ASTNodeVisit(ASTNode* node,
     return;
   }
   node->virtuals->visitor(node, func, child_id, data);
+}
+
+typedef struct {
+  ASTNodeUpwardVisitor predicate;
+  void* data;
+  bool* found;
+} ASTNodeAnyContext;
+
+static void ASTNodeAnyVisitor(ASTNode* node, void* data, int child_id,
+                              VisitorMode mode) {
+  (void)child_id;
+  ASTNodeAnyContext* context = data;
+  if (mode == kVisitPreChildren && !*context->found &&
+      context->predicate(node, context->data)) {
+    *context->found = true;
+  }
+}
+
+bool ASTNodeAny(ASTNode* node, ASTNodeUpwardVisitor predicate, void* data) {
+  if (node == NULL || predicate == NULL) {
+    return false;
+  }
+  bool found = false;
+  bool* saved_stop = ast_visit_early_stop;
+  ast_visit_early_stop = &found;
+  ASTNodeAnyContext context = {predicate, data, &found};
+  ASTNodeVisit(node, ASTNodeAnyVisitor, 0, &context);
+  ast_visit_early_stop = saved_stop;
+  return found;
 }
 
 void ASTNodeVisitUpwards(ASTNode* node, ASTNodeUpwardVisitor func,

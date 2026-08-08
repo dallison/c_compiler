@@ -289,6 +289,11 @@ inline bool TypeIsUnknown(TypeRecord* type) {
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
+// Non-allocating variants for comparisons that intentionally ignore one
+// top-level property while preserving strict comparison of the remaining type.
+bool TypeEqualIgnoringTopLevelQualifierMask(TypeRecord* t1, TypeRecord* t2,
+                                             Qualifiers ignored);
+bool TypeEqualIgnoringFunctionNoexcept(TypeRecord* t1, TypeRecord* t2);
 // Compare types for C++ virtual override matching after resolving alias and
 // alias-template base spellings to their canonical class specializations.
 bool TypeEqualForCXXOverride(struct Syntax* syntax, TypeRecord* t1,

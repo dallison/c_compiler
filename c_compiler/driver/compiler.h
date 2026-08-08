@@ -407,6 +407,9 @@ typedef struct {
   // Declaration ASTs synthesized while instantiating templates.  Drained by
   // the driver through the normal semantic/codegen path.
   Vector pending_template_instantiations;
+  // Owned asm-name keys for definitions in the queue above. The map avoids
+  // repeatedly scanning every queued declaration when suppressing duplicates.
+  Map pending_template_instantiation_names;
 
   // Function-definition symbols (Symbol*) that are not stored in the global
   // symbol table because the function was previously declared.  Each owns a
@@ -469,6 +472,9 @@ typedef struct {
 
 // Globals to avoid passing these around.
 extern Compiler* compiler;
+
+void CompilerQueuePendingTemplateInstantiation(struct ASTNode* declaration);
+bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name);
 
 bool CompilerInitFromFile(Compiler* compiler, const char* filename,
                           Vector* options, Vector* target_opts);

@@ -109,13 +109,6 @@ static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
   }
 }
 
-static void ClearASTNodeType(ASTNode* node) {
-  if (node != NULL && node->type != NULL) {
-    TypeRecordDelete(node->type);
-    node->type = NULL;
-  }
-}
-
 static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
@@ -197,7 +190,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
       (was_dependent_call ||
        (result->flags & kASTDependentFunctorCall) != 0)) {
     result->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
-    ASTNodeSetType(result, NULL);
+    ASTNodeClearType(result);
     if (result->op == AST_OP(call)) {
       VectorASTNode* call = (VectorASTNode*)result;
       if (call->left != NULL) {
@@ -505,20 +498,6 @@ static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
   return false;
 }
 
-static TypeRecord* DeepCopyTypeSpine(TypeRecord* type) {
-  if (type == NULL) {
-    return NULL;
-  }
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (copy->next != NULL) {
-    TypeRecord* shared_next = copy->next;
-    copy->next = NULL;
-    TypeRecordDelete(shared_next);
-    TypeRecordChain(copy, DeepCopyTypeSpine(type->next));
-  }
-  return copy;
-}
-
 /* Substitute a type in a nested class-template member body.  Besides the
  * nested class itself, such a body can name the injected class name of its
  * enclosing specialization (for example `outer result;` inside
@@ -536,14 +515,11 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
     return SubstituteTemplateParameters(clone->parser, type, clone->args);
   }
 
-  Struct* saved_source = clone->parser->template_substitution_source;
-  Struct* saved_target = clone->parser->template_substitution_target;
-  clone->parser->template_substitution_source = source;
-  clone->parser->template_substitution_target = target;
+  TypeSubstitutionScope substitution =
+      TypeParserPushTemplateSubstitution(clone->parser, source, target);
   TypeRecord* substituted =
       SubstituteTemplateParameters(clone->parser, type, clone->args);
-  clone->parser->template_substitution_source = saved_source;
-  clone->parser->template_substitution_target = saved_target;
+  TypeParserPopTemplateSubstitution(&substitution);
   return substituted;
 }
 
@@ -1754,16 +1730,9 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
   return changed;
 }
 
-static void FindPackExpansionSubtreeVisitor(ASTNode* node, void* data,
-                                            int child_id, VisitorMode mode) {
-  (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL) {
-    return;
-  }
-  bool* found = data;
-  if ((node->flags & kASTPackExpansion) != 0) {
-    *found = true;
-  }
+static bool ASTNodeIsPackExpansion(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL && (node->flags & kASTPackExpansion) != 0;
 }
 
 /* True if any node anywhere in `node`'s subtree is still an unexpanded pack
@@ -1778,9 +1747,7 @@ static void FindPackExpansionSubtreeVisitor(ASTNode* node, void* data,
  * ambiguity).  Such a construction must stay deferred until the member template
  * is instantiated per call, when the pack length is known. */
 static bool ASTNodeSubtreeContainsPackExpansion(ASTNode* node) {
-  bool found = false;
-  ASTNodeVisit(node, FindPackExpansionSubtreeVisitor, 0, &found);
-  return found;
+  return ASTNodeAny(node, ASTNodeIsPackExpansion, NULL);
 }
 
 /* True if any actual argument of `call` is still an unexpanded pack expansion
@@ -3062,8 +3029,8 @@ static void QueueODRUsedStaticDataMember(StructMember* member) {
       NewVariableDeclarationASTNode(
           symbol, CloneCXXDefaultMemberInitializer(member->default_initializer),
           symbol->location));
-  VectorAppend(&compiler->pending_template_instantiations,
-               NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingTemplateInstantiation(
+      NewDeclarationListASTNode(declarations, symbol->location));
 }
 
 static Struct* FindOwnerBaseStructMatchingType(TemplateFunctionBodyClone* clone,
@@ -3336,7 +3303,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       ((BinaryASTNode*)node)->right != NULL &&
       ((BinaryASTNode*)node)->right->op == AST_OP(string)) {
     node->flags &= ~kASTAnalyzed;
-    ClearASTNodeType(node);
+    ASTNodeClearType(node);
   }
   if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
     SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
@@ -4025,7 +3992,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         int cast_index = FirstTemplateParameterIndexInType(cast->cast_type);
         if (formal_index >= 0 && cast_index >= 0 &&
             formal_index != cast_index) {
-          TypeRecord* repaired = DeepCopyTypeSpine(cast->cast_type);
+          TypeRecord* repaired = TypeRecordCloneSpine(cast->cast_type);
           TypeRecordDelete(cast->cast_type);
           cast->cast_type = repaired;
           for (TypeRecord* t = cast->cast_type; t != NULL; t = t->next) {
@@ -4082,11 +4049,11 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                 TypeChainReferencesStruct(cast->cast_type,
                                           clone->from_owner))) {
       node->flags |= kASTDependentCast;
-      TypeRecord* cast_pattern = DeepCopyTypeSpine(cast->cast_type);
+      TypeRecord* cast_pattern = TypeRecordCloneSpine(cast->cast_type);
       TypeRecord* cast_type =
           SubstituteTemplateBodyType(clone, cast_pattern);
       TypeRecordDelete(cast_pattern);
-      TypeRecord* independent_cast_type = DeepCopyTypeSpine(cast_type);
+      TypeRecord* independent_cast_type = TypeRecordCloneSpine(cast_type);
       TypeRecordDelete(cast_type);
       cast_type = independent_cast_type;
       // A member-function template can clone its saved constructor
@@ -4212,7 +4179,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
           node->flags &= ~kASTAnalyzed;
           call->left->flags &= ~kASTAnalyzed;
           access->right->flags &= ~kASTAnalyzed;
-          ASTNodeSetType(node, NULL);
+          ASTNodeClearType(node);
         }
       }
     }
@@ -4222,7 +4189,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   if (expanded_call_actuals && node->op == AST_OP(call)) {
     ASTNodeVisit(node, ReplaceSingleElementPackIdentifierVisitor, 0, clone);
     node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
-    ASTNodeSetType(node, NULL);
+    ASTNodeClearType(node);
     VectorASTNode* call = (VectorASTNode*)node;
     if (call->left != NULL) {
       call->left->flags &= ~kASTAnalyzed;
@@ -4344,14 +4311,14 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
   VectorInit(&overload_snapshots);
   RebindClonedConstructorCall(call, &overload_snapshots);
   node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
-  ASTNodeSetType(node, NULL);
+  ASTNodeClearType(node);
   if (call->left != NULL) {
     call->left->flags &= ~kASTAnalyzed;
     if ((call->left->op == AST_OP(dot) ||
          call->left->op == AST_OP(arrow)) &&
         ((BinaryASTNode*)call->left)->right != NULL &&
         ((BinaryASTNode*)call->left)->right->op == AST_OP(string)) {
-      ClearASTNodeType(call->left);
+      ASTNodeClearType(call->left);
     }
   }
   if (call->children != NULL) {
@@ -4359,7 +4326,7 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
       ASTNode* actual = call->children->value.p[i];
       if (actual != NULL) {
         actual->flags &= ~kASTAnalyzed;
-        ASTNodeSetType(actual, NULL);
+        ASTNodeClearType(actual);
       }
     }
   }
@@ -4795,7 +4762,7 @@ static ASTNode* ReanalyzeClonedResolvedCall(
       id->symbol = concrete;
       ASTNodeSetType(call->left, concrete->type);
       node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
-      ASTNodeSetType(node, NULL);
+      ASTNodeClearType(node);
       call->left->flags &= ~kASTAnalyzed;
       if (call->children != NULL) {
         for (size_t i = 0; i < call->children->length; i++) {
@@ -4842,7 +4809,7 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   VectorInit(&overload_snapshots);
   RebindClonedConstructorCall(call, &overload_snapshots);
   node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
-  ASTNodeSetType(node, NULL);
+  ASTNodeClearType(node);
   if (call->left != NULL) {
     call->left->flags &= ~kASTAnalyzed;
   }
@@ -4964,12 +4931,16 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   // SubstituteTemplateParameters consults; otherwise such types stay generic and
   // member calls (e.g. the move ctor/assignment used by `swap`) target an
   // unemitted, generic-mangled symbol.
-  Struct* saved_substitution_source = parser->template_substitution_source;
-  Struct* saved_substitution_target = parser->template_substitution_target;
   Struct* saved_access_context = compiler->current_class_access_context;
+  TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+      parser,
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.from_owner
+          : parser->template_substitution_source,
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.to_owner
+          : parser->template_substitution_target);
   if (clone.from_owner != NULL && clone.to_owner != NULL) {
-    parser->template_substitution_source = clone.from_owner;
-    parser->template_substitution_target = clone.to_owner;
     compiler->current_class_access_context = clone.to_owner;
   }
   AddOwnerMemberSymbolMappings(&clone);
@@ -5020,8 +4991,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
   ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
-  parser->template_substitution_source = saved_substitution_source;
-  parser->template_substitution_target = saved_substitution_target;
+  TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
   MapDestruct(&clone.symbol_map);
@@ -5031,38 +5001,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
 /* True if a template instantiation with the given mangled asm name is already
  * queued for emission, so it is not instantiated/emitted twice. */
 bool PendingTemplateInstantiationHasAsmName(const char* asm_name) {
-  if (asm_name == NULL || *asm_name == '\0') {
-    return false;
-  }
-  for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
-    DeclarationListASTNode* decls =
-        (DeclarationListASTNode*)compiler->pending_template_instantiations.value.p[i];
-    if (decls == NULL || decls->base.op != AST_OP(decl_list) ||
-        decls->declarations == NULL) {
-      continue;
-    }
-    for (size_t j = 0; j < decls->declarations->length; j++) {
-      VariableDeclarationASTNode* decl =
-          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
-      if (decl == NULL || decl->symbol == NULL) {
-        continue;
-      }
-      const char* queued_name = decl->symbol->asm_name.value;
-      TypeRecord* queued_type = decl->symbol->type;
-      if (queued_name == NULL || strcmp(queued_name, asm_name) != 0) {
-        continue;
-      }
-      if (queued_type != NULL && !TypeIsFunction(queued_type)) {
-        return true;
-      }
-      if (!decl->symbol->flags.is_template && queued_type != NULL &&
-          TypeIsFunction(queued_type) &&
-          queued_type->info.function.body != NULL) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return CompilerPendingTemplateInstantiationHasAsmName(asm_name);
 }
 
 // True if a function template has a template parameter pack among its own
@@ -5250,8 +5189,8 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  VectorAppend(&compiler->pending_template_instantiations,
-               NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingTemplateInstantiation(
+      NewDeclarationListASTNode(declarations, symbol->location));
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 
@@ -5316,8 +5255,6 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Symbol* template_definition = symbol->value.func_defn;
-  Struct* saved_source = parser.template_substitution_source;
-  Struct* saved_target = parser.template_substitution_target;
   TypeRecord* source_owner =
       template_definition->type != NULL &&
               template_definition->type->info.function.cxx_member_owner != NULL &&
@@ -5326,17 +5263,16 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
           ? template_definition->type->info.function.cxx_member_owner
                 ->tag_symbol->type
           : NULL;
-  parser.template_substitution_source =
+  TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+      &parser,
       source_owner != NULL && TypeIsStructOrUnion(source_owner)
           ? source_owner->info.struct_info
-          : NULL;
-  parser.template_substitution_target =
-      symbol->type->info.function.cxx_member_owner;
+          : NULL,
+      symbol->type->info.function.cxx_member_owner);
   QueueTemplateMemberFunctionDefinitionImpl(
       symbol, template_definition, &parser, template_arguments,
       /*allow_lazy=*/false);
-  parser.template_substitution_source = saved_source;
-  parser.template_substitution_target = saved_target;
+  TypeParserPopTemplateSubstitution(&substitution);
   TypeParserDestruct(&parser);
 }
 
@@ -5430,13 +5366,17 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     }
   }
   TypeRecord* saved_function = compiler->current_function;
-  Struct* saved_substitution_source = parser->template_substitution_source;
-  Struct* saved_substitution_target = parser->template_substitution_target;
   Struct* saved_access_context = compiler->current_class_access_context;
   compiler->current_function = func;
+  TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+      parser,
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.from_owner
+          : parser->template_substitution_source,
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.to_owner
+          : parser->template_substitution_target);
   if (clone.from_owner != NULL && clone.to_owner != NULL) {
-    parser->template_substitution_source = clone.from_owner;
-    parser->template_substitution_target = clone.to_owner;
     compiler->current_class_access_context = clone.to_owner;
   }
   AddOwnerMemberSymbolMappings(&clone);
@@ -5467,8 +5407,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     body->value.p[i] = stmt;
   }
   compiler->current_function = saved_function;
-  parser->template_substitution_source = saved_substitution_source;
-  parser->template_substitution_target = saved_substitution_target;
+  TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;
   MapDestruct(&clone.symbol_map);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
@@ -5487,7 +5426,7 @@ static ASTNode* ReanalyzeDeferredDependentAssignNode(
   *action = kASTTransformSkipChildren;
   ASTNodeVisit(node, ClearAnalyzedFlagVisitor, 0, NULL);
   node->flags &= ~(kASTDeferredDependentAssign | kASTAnalyzed);
-  ASTNodeSetType(node, NULL);
+  ASTNodeClearType(node);
   ASTNode* parent = node->parent;
   int child_id = node->child_id;
   node->parent = NULL;
@@ -5532,10 +5471,8 @@ void CloneInstantiatedMemberFunctionBody(TypeParser* parser,
                                                 Symbol* template_definition,
                                                 Struct* substitution_source,
                                                 Vector* args) {
-  Struct* saved_substitution_source = parser->template_substitution_source;
-  Struct* saved_substitution_target = parser->template_substitution_target;
-  parser->template_substitution_source = substitution_source;
-  parser->template_substitution_target = owner;
+  TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+      parser, substitution_source, owner);
   // A virtual member function is referenced from the class's vtable, not (only)
   // from direct call sites, so the lazy "define on first direct call" scheme
   // would leave it undefined and the vtable slot pointing at a missing symbol.
@@ -5548,8 +5485,7 @@ void CloneInstantiatedMemberFunctionBody(TypeParser* parser,
                      symbol->type->info.function.is_pure_virtual);
   QueueTemplateMemberFunctionDefinitionImpl(symbol, template_definition, parser,
                                             args, /*allow_lazy=*/!is_virtual);
-  parser->template_substitution_source = saved_substitution_source;
-  parser->template_substitution_target = saved_substitution_target;
+  TypeParserPopTemplateSubstitution(&substitution);
 }
 
 /* Instantiate a member function of a class template into the concrete `owner`.

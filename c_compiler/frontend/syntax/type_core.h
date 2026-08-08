@@ -27,6 +27,9 @@ void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
+// Copies every node in a type's declarator spine so callers may safely mutate
+// qualifiers, template indices, or next links without touching shared nodes.
+TypeRecord* TypeRecordCloneSpine(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
 Vector* TemplateParameterVectorCopy(Vector* params);
