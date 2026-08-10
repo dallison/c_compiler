@@ -5555,6 +5555,21 @@ static bool IsIntrinsicCall(W65C02Generator* g, IRNode* node) {
   return false;
 }
 
+static TargetInstruction* FinishIntrinsicResult(
+    W65C02Generator* g, IRNode* node, TargetInstruction* result,
+    TargetInstruction* destination) {
+  if (destination != NULL) {
+    int size = Sizeof(node->type);
+    AddReloadPoint(g, result);
+    AddReloadPoint(g, destination);
+    Copy(g, destination, result, 0, 0, size, GetAddrMode(destination),
+         GetAddrMode(result));
+    AddSpillPoint(g, destination);
+    result = destination;
+  }
+  return SetLoweredNode(node, result);
+}
+
 static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
   if (!IsIntrinsicCall(g, node)) {
     return NULL;
@@ -5567,16 +5582,12 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
   Intrinsic* in = MapFind(&g->intrinsics, k);
   assert(in != NULL);
   
-  TargetInstruction* result = NULL;
+  TargetInstruction* destination = NULL;
   if (node->dest != NULL) {
-    LowerIRNode(g, node->dest);
-    result = GetLoweredNode(node->dest);
-  } else {
-    result = TempRegister(g, node->type, Sizeof(node->type));
+    destination = GetDestAddress(g, node, true);
   }
-  if (result != NULL) {
-    result->flags |= k6502ExprIsCallResult;
-  }
+  TargetInstruction* result = TempRegister(g, node->type, Sizeof(node->type));
+  result->flags |= k6502ExprIsCallResult;
 
   switch (in->index) {
     case kIntrinsicIsalnum:
@@ -5601,7 +5612,7 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
       SetIndexReg(g, result, result, 0);
       sta(g, result, 0);
       stz(g, result, 1);
-      return SetLoweredNode(node, result);
+      return FinishIntrinsicResult(g, node, result, destination);
     }
        break;
     case kIntrinsicMemcpy: {
@@ -5673,7 +5684,7 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
         SetIndexReg(g, result, result, 0);
         sta(g, result, 1);
       }
-      return SetLoweredNode(node, result);
+      return FinishIntrinsicResult(g, node, result, destination);
     }
     case kIntrinsicMemset: {
       // Put size in __mem_size.
@@ -5734,7 +5745,7 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
         SetIndexReg(g, result, result, 0);
         sta(g, result, 1);
       }
-      return SetLoweredNode(node, result);
+      return FinishIntrinsicResult(g, node, result, destination);
     }
     case kIntrinsicMemcmp: {
       // Put size in __mem_size.
@@ -5791,7 +5802,7 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
       SetIndexReg(g, result, result, 0);
       stx(g, result, 0);
       sty(g, result, 1);
-      return SetLoweredNode(node, result);
+      return FinishIntrinsicResult(g, node, result, destination);
     }
     default:
       fprintf(stderr, "Unknown intrinsic index %d for %s\n", in->index, in->symbol->name.value);

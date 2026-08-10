@@ -23,6 +23,7 @@
 #define P_CODE_ESC_HALT 4           // Halt interpreter.
 #define P_CODE_ESC_DEBUG 5         // Debug escape.
 #define P_CODE_ESC_RESOLVE 6      // Resolve symbol.
+#define P_CODE_ESC_SYSCALL 7      // Generic guest syscall bridge.
 #define P_CODE_ESC_ABORT 11
 #define P_CODE_ESC_EXIT 12
 #define P_CODE_ESC_EXIT_CLEAN 22

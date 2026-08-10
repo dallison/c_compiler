@@ -13,6 +13,7 @@
 #include <deque>
 #include <exception>
 #include <expected>
+#include <filesystem>
 #include <flat_map>
 #include <flat_set>
 #include <format>

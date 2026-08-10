@@ -10,6 +10,7 @@
 #include "loader.h"
 #include "loader_lifecycle.h"
 #include "elf.h"
+#include "filesystem_host.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -397,6 +398,63 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
       *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
       return 0;
     }
+    case AARCH64_SYSCALL_FS_STATUS:
+      return DaveHostFilesystemGetStatus(
+          (const char*)(uintptr_t)a0, (int)a1,
+          (DaveHostFilesystemStat*)(uintptr_t)a2);
+    case AARCH64_SYSCALL_FS_OPEN_DIRECTORY:
+      return DaveHostFilesystemOpenDirectory((const char*)(uintptr_t)a0);
+    case AARCH64_SYSCALL_FS_READ_DIRECTORY:
+      return DaveHostFilesystemReadDirectory(
+          (int)a0, (DaveHostFilesystemDirectoryEntry*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_CLOSE_DIRECTORY:
+      return DaveHostFilesystemCloseDirectory((int)a0);
+    case AARCH64_SYSCALL_FS_CREATE_DIRECTORY:
+      return DaveHostFilesystemCreateDirectory((const char*)(uintptr_t)a0,
+                                               (uint32_t)a1);
+    case AARCH64_SYSCALL_FS_REMOVE:
+      return DaveHostFilesystemRemove((const char*)(uintptr_t)a0);
+    case AARCH64_SYSCALL_FS_RENAME:
+      return DaveHostFilesystemRename((const char*)(uintptr_t)a0,
+                                      (const char*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_CURRENT_PATH:
+      return DaveHostFilesystemCurrentPath((char*)(uintptr_t)a0, (size_t)a1);
+    case AARCH64_SYSCALL_FS_SET_CURRENT_PATH:
+      return DaveHostFilesystemSetCurrentPath((const char*)(uintptr_t)a0);
+    case AARCH64_SYSCALL_FS_READ_SYMLINK:
+      return DaveHostFilesystemReadSymlink(
+          (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case AARCH64_SYSCALL_FS_CREATE_SYMLINK:
+      return DaveHostFilesystemCreateSymlink((const char*)(uintptr_t)a0,
+                                             (const char*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_CREATE_HARD_LINK:
+      return DaveHostFilesystemCreateHardLink((const char*)(uintptr_t)a0,
+                                              (const char*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_SET_PERMISSIONS:
+      return DaveHostFilesystemSetPermissions(
+          (const char*)(uintptr_t)a0, (uint32_t)a1, (int)a2);
+    case AARCH64_SYSCALL_FS_RESIZE:
+      return a1 == 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostFilesystemResize(
+                       (const char*)(uintptr_t)a0,
+                       *(const uint64_t*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_SET_MODIFICATION_TIME:
+      return a1 == 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostFilesystemSetModificationTime(
+                       (const char*)(uintptr_t)a0,
+                       *(const int64_t*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_SPACE:
+      return DaveHostFilesystemQuerySpace(
+          (const char*)(uintptr_t)a0,
+          (DaveHostFilesystemSpace*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_FS_COPY_FILE:
+      return DaveHostFilesystemCopyFile((const char*)(uintptr_t)a0,
+                                        (const char*)(uintptr_t)a1, (int)a2);
+    case AARCH64_SYSCALL_FS_CANONICAL:
+      return DaveHostFilesystemCanonical(
+          (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
     default:
       fprintf(stderr, "Unknown AArch64 syscall %lld\n", (long long)number);
       AARCH64InterpreterFail(interpreter, 1);

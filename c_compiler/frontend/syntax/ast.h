@@ -386,6 +386,7 @@ struct ConstraintExpr;
 #define kASTFunctionParameterTemporary (1ULL << 37)  // Materialization of a by-value function parameter object.
 #define kASTTemporaryCleanupCall (1ULL << 38)  // Compiler-generated end-of-lifetime destructor call.
 #define kASTReferencesParameterPack (1ULL << 39)  // Parsed expression names a pack, even if semantic analysis consumes its template arguments.
+#define kASTCXXFunctionalConstruction (1ULL << 40)  // Identifier was parsed as a class type followed by a functional-construction argument list.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

@@ -390,8 +390,8 @@ static ASTNode* NewStaticMemberReference(Syntax* syntax,
 // cast.
 static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
                                          FullyQualifiedIdentifier* name) {
-  if (!CompilerIsCXX() || name->is_qualified ||
-      syntax->context != kParsingBlockScope) {
+  (void)syntax;
+  if (!CompilerIsCXX() || name->is_qualified) {
     return NULL;
   }
   Struct* owner = NULL;
@@ -1224,6 +1224,24 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   // Find the symbol by searching all symbol tables.  It must exist.
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
 
+  // An injected class name used in a functional construction expression
+  // denotes the class type, even when ordinary member lookup found the
+  // same-named constructor overload first.  Redirect source-level `T(...)`
+  // through the enclosing class tag before constructing the identifier AST.
+  if (symbol != NULL && symbol->type != NULL &&
+      TypeIsFunction(symbol->type) &&
+      symbol->type->info.function.is_constructor &&
+      symbol->type->info.function.cxx_member_owner != NULL &&
+      LexLookingAt(lex, TOK(lparen))) {
+    Symbol* self_tag = CurrentClassSelfTagSymbol(syntax, &name);
+    if (self_tag != NULL && self_tag->type != NULL &&
+        TypeIsStructOrUnion(self_tag->type) &&
+        self_tag->type->info.struct_info ==
+            symbol->type->info.function.cxx_member_owner) {
+      symbol = self_tag;
+    }
+  }
+
   // Name hiding ([basic.lookup.unqual], [class.member.lookup]): inside a member
   // function, an unqualified name that names a non-static member of the class
   // (or one of its bases) hides any entity of the same name declared in an
@@ -1255,7 +1273,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       StructMember* member = FindStructMember(
           this_symbol->type->next->info.struct_info, &member_name);
       StringDestruct(&member_name);
-      if (member != NULL && !member->is_static) {
+      bool member_is_constructor =
+          member != NULL && member->symbol != NULL &&
+          member->symbol->type != NULL &&
+          TypeIsFunction(member->symbol->type) &&
+          member->symbol->type->info.function.is_constructor;
+      if (member != NULL && !member->is_static && !member_is_constructor) {
         ASTNode* member_access = NewMemberAccessFromThis(
             syntax, &name, /*allow_unresolved_member=*/false);
         if (member_access != NULL) {
@@ -1433,10 +1456,33 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   bool is_qualified_name = name.is_qualified;
+  Struct* functional_constructor_owner =
+      symbol != NULL && symbol->type != NULL &&
+              TypeIsFunction(symbol->type) &&
+              symbol->type->info.function.is_constructor
+          ? symbol->type->info.function.cxx_member_owner
+          : NULL;
+  bool is_functional_class_construction =
+      CompilerIsCXX() && symbol != NULL && symbol->type != NULL &&
+      (TypeIsStructOrUnion(symbol->type) ||
+       functional_constructor_owner != NULL) &&
+      LexLookingAt(lex, TOK(lparen));
   FullyQualifiedIdentifierDestruct(&name);
   ASTNode* node = NewIdentifierASTNode(symbol, lex->current_token_location);
   if (is_qualified_name) {
     node->flags |= kASTQualifiedName;
+  }
+  if (is_functional_class_construction) {
+    node->flags |= kASTCXXFunctionalConstruction;
+    if (functional_constructor_owner != NULL) {
+      TypeRecord* owner_type = NewTypeRecord(
+          functional_constructor_owner->is_union ? kTypeUnion : kTypeStruct,
+          kQualPlain);
+      owner_type->info.struct_info = functional_constructor_owner;
+      TypeRecordCalculateSize(owner_type);
+      ASTNodeSetType(node, owner_type);
+      TypeRecordDelete(owner_type);
+    }
   }
   ((IdentifierASTNode*)node)->template_arguments = template_arguments;
   CXXPackExpressionSearch pack_search = {.syntax = syntax, .found = false};

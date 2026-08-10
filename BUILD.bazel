@@ -47,6 +47,7 @@ filegroup(
         "libc/include/expected",
         "libc/include/flat_map",
         "libc/include/flat_set",
+        "libc/include/filesystem",
         "libc/include/format",
         "libc/include/fstream",
         "libc/include/functional",
@@ -736,10 +737,19 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":filesystem_host",
         ":linker",
         ":loader",
         ":utils",
     ],
+)
+
+cc_library(
+    name = "filesystem_host",
+    srcs = ["c_compiler/Loader/filesystem_host.c"],
+    hdrs = ["c_compiler/Loader/filesystem_host.h"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
 )
 
 cc_library(
@@ -761,6 +771,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
         ":loader",
@@ -789,6 +800,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
         ":loader",
@@ -814,6 +826,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
         ":loader",
@@ -841,6 +854,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
         ":loader",
@@ -853,6 +867,7 @@ cc_library(
     srcs = [
         "p_code_interpreter/p_code_disassembler.c",
         "p_code_interpreter/p_code_interpreter.c",
+        "p_code_interpreter/p_code_syscalls.c",
     ],
     hdrs = glob([
         "p_code_interpreter/*.h",
@@ -865,6 +880,7 @@ cc_library(
     includes = COMMON_INCLUDES + ["p_code_interpreter"],
     deps = [
         ":elf",
+        ":filesystem_host",
         ":linker",
         ":loader",
         ":utils",
@@ -2202,6 +2218,11 @@ sh_test(
     tags = ["manual"],
 )
 
+filegroup(
+    name = "filesystem_syscall_smoke_source",
+    srcs = ["tests/filesystem_syscall_smoke.c"],
+)
+
 sh_test(
     name = "pcode_runtime_smoke_test",
     srcs = ["tests/pcode_runtime_smoke_test.sh"],
@@ -2214,6 +2235,47 @@ sh_test(
         ":davecc",
         ":libc_pcode",
         ":pcode",
+    ],
+)
+
+sh_test(
+    name = "filesystem_syscall_pcode_test",
+    srcs = ["tests/filesystem_syscall_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "pcode",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+        "$(rootpath //:filesystem_syscall_smoke_source)",
+        "-",
+    ],
+    data = [
+        ":davecc",
+        ":filesystem_syscall_smoke_source",
+        ":libc_headers",
+        ":libc_pcode",
+        ":pcode",
+    ],
+)
+
+sh_test(
+    name = "filesystem_syscall_65c02_test",
+    srcs = ["tests/filesystem_syscall_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "65c02",
+        "$(rootpath :6502)",
+        "$(rootpath :libc_65c02)",
+        "$(rootpath //:filesystem_syscall_smoke_source)",
+        "$(rootpath :support_rom_65c02)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":filesystem_syscall_smoke_source",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
     ],
 )
 

@@ -926,7 +926,14 @@ static void SymbolDirective(Assembler* assembler,
     AssemblerSymbol* sym =
     AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
     if (sym != NULL) {
-      sym->binding = binding;
+      // A later reference can emit `.global name` after an inline definition
+      // has already emitted `.weak name`.  ELF weak binding must survive that
+      // redundant global declaration; otherwise two translation units that
+      // use the same inline function become strong duplicate definitions.
+      if (binding != SYM_BIND(global) ||
+          sym->binding != SYM_BIND(weak)) {
+        sym->binding = binding;
+      }
       sym->exported = true;
     } else {
       // No symbol, add it as a global, but undefined.

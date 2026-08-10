@@ -281,7 +281,7 @@
 
 .set stack_bottom 0xc000
 .set sys_exit 1
-.set sys_abort 2
+.set sys_abort 8
 
 // Math scratch space starts at 0xc0 (40 bytes)
 .set mt1 0xc0     // 16 bytes
@@ -335,7 +335,7 @@ start:
   BRK
   .byte sys_exit
 
-.set max_syscall_number 7
+.set max_syscall_number 8
 syscalls:
 .hword __abort      // 0
 .hword __exit       // 1
@@ -343,8 +343,9 @@ syscalls:
 .hword __close      // 3
 .hword __write      // 4
 .hword __read       // 5
-.hword __lseek      // 6
-.hword __abort      // 7
+.hword __abort      // 6
+.hword __lseek      // 7
+.hword __abort      // 8
 
 // Entry with A = syscall number (byte after BRK)
 // uses some scratch space

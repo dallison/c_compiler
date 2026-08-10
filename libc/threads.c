@@ -150,7 +150,7 @@ unsigned int __davecc_hardware_concurrency(void) {
 }
 
 long long __davecc_monotonic_time_us(void) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
   if (syscall(SYS_MONOTONIC_TIME, &result) == 0) {
     return result;
@@ -163,7 +163,7 @@ long long __davecc_monotonic_time_us(void) {
 }
 
 long long __davecc_realtime_time_us(void) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
   if (syscall(SYS_REALTIME_TIME, &result) == 0) {
     return result;

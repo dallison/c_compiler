@@ -915,6 +915,28 @@ void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
   }
 }
 
+void SynthesizeExplicitlyDefaultedMemberFunctionBodies(TypeParser* parser,
+                                                       Struct* str) {
+  if (parser == NULL || str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    for (StructMember* candidate = member; candidate != NULL;
+         candidate = candidate->overload_next) {
+      Symbol* symbol = candidate->symbol;
+      if (!candidate->is_member_function || symbol == NULL ||
+          symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+          !symbol->type->info.function.is_defaulted ||
+          !symbol->type->info.function.is_explicitly_defaulted ||
+          symbol->type->info.function.body != NULL) {
+        continue;
+      }
+      SynthesizeDefaultedMemberFunctionBody(parser, symbol);
+    }
+  }
+}
+
 static Symbol* CXXSourceObjectParameter(TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func) ||
       func->info.function.prototype.length < 2) {

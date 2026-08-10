@@ -7,6 +7,8 @@
 #include "arm_process.h"
 #include "elf.h"
 #include "loader_lifecycle.h"
+#include "filesystem_host.h"
+#include <errno.h>
 #include "loader_arch.h"
 #include "loader_dynamic.h"
 #include <fcntl.h>
@@ -785,6 +787,88 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
       return 0;
     }
+    case ARM_SYSCALL_FS_STATUS:
+      return (int32_t)DaveHostFilesystemGetStatus(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1), a2,
+          (DaveHostFilesystemStat*)ResolveHostPtr(
+              interpreter, (uint32_t)a3, sizeof(DaveHostFilesystemStat)));
+    case ARM_SYSCALL_FS_OPEN_DIRECTORY:
+      return (int32_t)DaveHostFilesystemOpenDirectory(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1));
+    case ARM_SYSCALL_FS_READ_DIRECTORY:
+      return (int32_t)DaveHostFilesystemReadDirectory(
+          a1, (DaveHostFilesystemDirectoryEntry*)ResolveHostPtr(
+                  interpreter, (uint32_t)a2,
+                  sizeof(DaveHostFilesystemDirectoryEntry)));
+    case ARM_SYSCALL_FS_CLOSE_DIRECTORY:
+      return (int32_t)DaveHostFilesystemCloseDirectory(a1);
+    case ARM_SYSCALL_FS_CREATE_DIRECTORY:
+      return (int32_t)DaveHostFilesystemCreateDirectory(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (uint32_t)a2);
+    case ARM_SYSCALL_FS_REMOVE:
+      return (int32_t)DaveHostFilesystemRemove(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1));
+    case ARM_SYSCALL_FS_RENAME:
+      return (int32_t)DaveHostFilesystemRename(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a2, 1));
+    case ARM_SYSCALL_FS_CURRENT_PATH:
+      return (int32_t)DaveHostFilesystemCurrentPath(
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a1, (size_t)a2),
+          (size_t)a2);
+    case ARM_SYSCALL_FS_SET_CURRENT_PATH:
+      return (int32_t)DaveHostFilesystemSetCurrentPath(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1));
+    case ARM_SYSCALL_FS_READ_SYMLINK:
+      return (int32_t)DaveHostFilesystemReadSymlink(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3),
+          (size_t)a3);
+    case ARM_SYSCALL_FS_CREATE_SYMLINK:
+      return (int32_t)DaveHostFilesystemCreateSymlink(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a2, 1));
+    case ARM_SYSCALL_FS_CREATE_HARD_LINK:
+      return (int32_t)DaveHostFilesystemCreateHardLink(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a2, 1));
+    case ARM_SYSCALL_FS_SET_PERMISSIONS:
+      return (int32_t)DaveHostFilesystemSetPermissions(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (uint32_t)a2, a3);
+    case ARM_SYSCALL_FS_RESIZE: {
+      uint64_t* size = (uint64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a2, sizeof(uint64_t));
+      return size == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostFilesystemResize(
+                       (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+                       *size);
+    }
+    case ARM_SYSCALL_FS_SET_MODIFICATION_TIME: {
+      int64_t* nanoseconds = (int64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a2, sizeof(int64_t));
+      return nanoseconds == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostFilesystemSetModificationTime(
+                       (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+                       *nanoseconds);
+    }
+    case ARM_SYSCALL_FS_SPACE:
+      return (int32_t)DaveHostFilesystemQuerySpace(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (DaveHostFilesystemSpace*)ResolveHostPtr(
+              interpreter, (uint32_t)a2, sizeof(DaveHostFilesystemSpace)));
+    case ARM_SYSCALL_FS_COPY_FILE:
+      return (int32_t)DaveHostFilesystemCopyFile(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a2, 1), a3);
+    case ARM_SYSCALL_FS_CANONICAL:
+      return (int32_t)DaveHostFilesystemCanonical(
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3),
+          (size_t)a3);
     case ARM_SYSCALL_RESOLVE:
       ResolveAndFixupSymbol(interpreter, pc_updated);
       return 0;

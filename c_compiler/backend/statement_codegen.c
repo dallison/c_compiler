@@ -390,7 +390,7 @@ static ASTNode* CXXElidableStructReturnInitializer(ASTNode* initializer,
   }
   if ((expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
        expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma) ||
-       expr->op == AST_OP(spaceship)) &&
+       expr->op == AST_OP(question) || expr->op == AST_OP(spaceship)) &&
       TypeEqual(expr->type, target)) {
     return expr;
   }

@@ -35,6 +35,16 @@ char* strerror(int errnum) {
     case EPERM: return "Operation not permitted";
     case ESRCH: return "No such process";
     case EDEADLK: return "Resource deadlock would occur";
+    case ENOTDIR: return "Not a directory";
+    case EISDIR: return "Is a directory";
+    case ENAMETOOLONG: return "File name too long";
+    case ENOTEMPTY: return "Directory not empty";
+    case ELOOP: return "Too many symbolic links";
+    case EROFS: return "Read-only file system";
+    case EXDEV: return "Cross-device link";
+    case ENOTSUP: return "Operation not supported";
+    case EFBIG: return "File too large";
+    case ENFILE: return "Too many open files in system";
     default: {
 #if defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
       static __thread char buf[32];

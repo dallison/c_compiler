@@ -585,6 +585,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   parser->cxx_member_owner = str;
   parser->syntax->cxx_class_head = str;
   ParseStructMembers(parser, str, is_union, tag_name);
+  SynthesizeExplicitlyDefaultedMemberFunctionBodies(parser, str);
   parser->cxx_member_owner = saved_member_owner;
   parser->syntax->cxx_class_head = saved_class_head;
   if (class_symbol_scope != NULL) {

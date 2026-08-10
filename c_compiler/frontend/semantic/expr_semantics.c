@@ -2307,6 +2307,9 @@ typedef enum {
 } ConditionalFunctionArmKind;
 
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+static bool TryConvertWithConvertingConstructorImpl(
+    ASTNode* from, TypeRecord* to, ConversionContext ctx,
+    bool allow_same_class);
 
 static ConditionalFunctionArmKind GetConditionalFunctionArmKind(
     ASTNode* arm, TypeRecord** function_type) {
@@ -2436,6 +2439,22 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
       TypeIsStructOrUnion(colon->left->type) &&
       TypeIsStructOrUnion(colon->right->type) &&
       TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type)) {
+    // [expr.cond]: when same-class operands do not already share a glvalue
+    // category, an lvalue arm opposite a prvalue arm is copy-initialized into
+    // a prvalue.  Merely assigning the common class type here leaves codegen
+    // selecting between object addresses and can return a pointer into the
+    // callee's dead stack frame.
+    if (colon->left->value_category == kValueCategoryPrvalue &&
+        colon->right->value_category != kValueCategoryPrvalue) {
+      TryConvertWithConvertingConstructorImpl(
+          colon->right, colon->left->type, kConvertNormal,
+          /*allow_same_class=*/true);
+    } else if (colon->right->value_category == kValueCategoryPrvalue &&
+               colon->left->value_category != kValueCategoryPrvalue) {
+      TryConvertWithConvertingConstructorImpl(
+          colon->left, colon->right->type, kConvertNormal,
+          /*allow_same_class=*/true);
+    }
     TypeRecord* result_type = TypeRecordCopy(colon->left->type);
     result_type->qualifiers = kQualPlain;
     ASTNodeSetType((ASTNode*)colon, result_type);
@@ -2490,6 +2509,14 @@ static bool HasAddress(ASTNode* node) {
       return true;
     case AST_OP(compound_literal):
       return true;
+    case AST_OP(comma):
+      // In C++, the built-in comma expression has the value category of its
+      // right operand.  Converting-constructor lowering represents an already
+      // materialized class temporary as `(constructor_call, temporary)`;
+      // recognizing the temporary's address here avoids materializing and
+      // moving that same object a second time when it binds to a reference.
+      return CompilerIsCXX() &&
+             HasAddress(((BinaryASTNode*)node)->right);
     default:
       return false;
   }
@@ -7766,8 +7793,7 @@ static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
       !TypeIsStructOrUnion(actual->type) ||
       !TypeEqualIgnoringQualifiers(actual->type, formal_type) ||
       formal_type->info.struct_info == NULL ||
-      formal_type->info.struct_info->tag_name == NULL ||
-      formal_type->info.struct_info->is_aggregate) {
+      formal_type->info.struct_info->tag_name == NULL) {
     return actual;
   }
 
@@ -8307,7 +8333,11 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (old_callee != NULL) {
     old_callee->parent = NULL;
   }
-  ASTNode* analyzed_callee = AnalyzeExpression(old_callee);
+  bool syntactic_class_construction =
+      old_callee != NULL &&
+      (old_callee->flags & kASTCXXFunctionalConstruction) != 0;
+  ASTNode* analyzed_callee =
+      syntactic_class_construction ? old_callee : AnalyzeExpression(old_callee);
   if (analyzed_callee != old_callee) {
     if (old_callee != NULL && analyzed_callee != NULL) {
       analyzed_callee->flags |=
@@ -8350,6 +8380,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
+  }
+  if (syntactic_class_construction) {
+    ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
+    if (construction != NULL) {
+      return construction;
+    }
   }
   // A member-function-template call whose explicit template arguments or actuals
   // are still template-dependent cannot be resolved yet; defer it so it is
@@ -8686,7 +8722,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         }
         actual->flags |= kASTNeedAddress;
       } else {
-        if (actual->value_category == kValueCategoryXvalue) {
+        if (actual->value_category != kValueCategoryPrvalue) {
           ASTNode* materialized =
               MaterializeCXXByValueClassArgument(actual, formal->type);
           if (materialized != actual) {

@@ -2111,9 +2111,25 @@ static TargetInstruction* LowerLocation(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, Emit(pcode, TargetNewLocation(loc)));
 }
 
+static int64_t CalculateTypeArgumentSize(TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  if (TypeIsFloatingPoint(type)) {
+    return PCodeFpIsDoubleWidth(type) ? 8 : 4;
+  }
+  if (TypeIsPointerOrArray(type) || TypeIsReference(type)) {
+    return 8;
+  }
+  if (TypeIsStructOrUnion(type)) {
+    return type->info.struct_info->size;
+  }
+  return type->size < 4 ? 4 : type->size;
+}
+
 // The first input is the address of the 'ap' variable.  The second is the
 // address of the last function argument.  The ap variable is set to the
-// address of the last argument + 8.
+// address immediately after the last argument.
 static TargetInstruction* LowerBuiltinVaStart(PCodeGenerator* pcode,
                                               IRNode* node) {
   TargetInstruction* arg_addr;
@@ -2121,9 +2137,12 @@ static TargetInstruction* LowerBuiltinVaStart(PCodeGenerator* pcode,
   GetAddressAndOffset(pcode, node->inputs.value.p[1], &arg_addr, &arg_offset);
   TargetInstruction* arg =
       Emit(pcode, NewInstruction2(P_OP(addc), arg_addr, arg_offset));
+  int64_t argument_size =
+      CalculateTypeArgumentSize(((IRNode*)node->inputs.value.p[1])->type);
   TargetInstruction* add = Emit(
       pcode, NewInstruction2(P_OP(addc), arg,
-                             GetIntConstant(pcode, NULL, kTargetType32Bit, 8)));
+                             GetIntConstant(pcode, NULL, kTargetType32Bit,
+                                            argument_size)));
 
   TargetInstruction* ap_addr;
   TargetInstruction* ap_offset;
@@ -2556,19 +2575,7 @@ static int64_t CalculateArgumentSize(Symbol* arg) {
   if (arg == NULL || arg->type == NULL) {
     return 0;
   }
-  if (TypeIsFloatingPoint(arg->type)) {
-    if (PCodeFpIsDoubleWidth(arg->type)) {
-      return 8;
-    }
-    return 4;
-  }
-  if (TypeIsPointerOrArray(arg->type) || TypeIsReference(arg->type)) {
-    return 8;
-  }
-  if (TypeIsStructOrUnion(arg->type)) {
-    return arg->type->info.struct_info->size;
-  }
-  return arg->type->size < 4 ? 4 : arg->type->size;
+  return CalculateTypeArgumentSize(arg->type);
 }
 
 void PCodeLower(PCodeGenerator* pcode, Generator* gen) {

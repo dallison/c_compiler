@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include "elf.h"
 #include "loader_lifecycle.h"
+#include "filesystem_host.h"
+#include <errno.h>
 #include "risc_v_disassembler.h"
 #include "risc_v_process.h"
 
@@ -317,6 +319,162 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
         *result = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
         interpreter->iregs[REG(a0)] = 0;
       }
+      break;
+    }
+    case RISC_V_ECALL_FS_STATUS: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      DaveHostFilesystemStat* result =
+          (DaveHostFilesystemStat*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a3)],
+              sizeof(DaveHostFilesystemStat));
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostFilesystemGetStatus(
+          path, (int)interpreter->iregs[REG(a2)], result);
+      break;
+    }
+    case RISC_V_ECALL_FS_OPEN_DIRECTORY: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemOpenDirectory(path);
+      break;
+    }
+    case RISC_V_ECALL_FS_READ_DIRECTORY: {
+      DaveHostFilesystemDirectoryEntry* result =
+          (DaveHostFilesystemDirectoryEntry*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a2)],
+              sizeof(DaveHostFilesystemDirectoryEntry));
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemReadDirectory(
+              (int)interpreter->iregs[REG(a1)], result);
+      break;
+    }
+    case RISC_V_ECALL_FS_CLOSE_DIRECTORY:
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemCloseDirectory(
+              (int)interpreter->iregs[REG(a1)]);
+      break;
+    case RISC_V_ECALL_FS_CREATE_DIRECTORY: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemCreateDirectory(
+              path, (uint32_t)interpreter->iregs[REG(a2)]);
+      break;
+    }
+    case RISC_V_ECALL_FS_REMOVE: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemRemove(path);
+      break;
+    }
+    case RISC_V_ECALL_FS_RENAME: {
+      const char* old_path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      const char* new_path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemRename(old_path, new_path);
+      break;
+    }
+    case RISC_V_ECALL_FS_CURRENT_PATH: {
+      size_t capacity = (size_t)interpreter->iregs[REG(a2)];
+      char* buffer = (char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], capacity);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemCurrentPath(buffer, capacity);
+      break;
+    }
+    case RISC_V_ECALL_FS_SET_CURRENT_PATH: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemSetCurrentPath(path);
+      break;
+    }
+    case RISC_V_ECALL_FS_READ_SYMLINK: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      size_t capacity = (size_t)interpreter->iregs[REG(a3)];
+      char* buffer = (char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], capacity);
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostFilesystemReadSymlink(
+          path, buffer, capacity);
+      break;
+    }
+    case RISC_V_ECALL_FS_CREATE_SYMLINK:
+    case RISC_V_ECALL_FS_CREATE_HARD_LINK: {
+      const char* target = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      const char* link = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], 1);
+      int64_t result =
+          interpreter->iregs[REG(t6)] == RISC_V_ECALL_FS_CREATE_SYMLINK
+              ? DaveHostFilesystemCreateSymlink(target, link)
+              : DaveHostFilesystemCreateHardLink(target, link);
+      interpreter->iregs[REG(a0)] = (uint64_t)result;
+      break;
+    }
+    case RISC_V_ECALL_FS_SET_PERMISSIONS: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemSetPermissions(
+              path, (uint32_t)interpreter->iregs[REG(a2)],
+              (int)interpreter->iregs[REG(a3)]);
+      break;
+    }
+    case RISC_V_ECALL_FS_RESIZE: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      uint64_t* size = (uint64_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], sizeof(uint64_t));
+      interpreter->iregs[REG(a0)] =
+          size == NULL ? (uint64_t)-(int64_t)DAVE_HOST_EINVAL
+                       : (uint64_t)DaveHostFilesystemResize(path, *size);
+      break;
+    }
+    case RISC_V_ECALL_FS_SET_MODIFICATION_TIME: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      int64_t* nanoseconds = (int64_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], sizeof(int64_t));
+      interpreter->iregs[REG(a0)] =
+          nanoseconds == NULL
+              ? (uint64_t)-(int64_t)DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostFilesystemSetModificationTime(
+                    path, *nanoseconds);
+      break;
+    }
+    case RISC_V_ECALL_FS_SPACE: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      DaveHostFilesystemSpace* result =
+          (DaveHostFilesystemSpace*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a2)],
+              sizeof(DaveHostFilesystemSpace));
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemQuerySpace(path, result);
+      break;
+    }
+    case RISC_V_ECALL_FS_COPY_FILE: {
+      const char* source = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      const char* destination = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], 1);
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostFilesystemCopyFile(
+          source, destination, (int)interpreter->iregs[REG(a3)]);
+      break;
+    }
+    case RISC_V_ECALL_FS_CANONICAL: {
+      const char* path = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      size_t capacity = (size_t)interpreter->iregs[REG(a3)];
+      char* buffer = (char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], capacity);
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemCanonical(path, buffer, capacity);
       break;
     }
     default:

@@ -1284,7 +1284,7 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
       !TypeIsVLA(range_type)) {
     loop = NewRangeForArrayLoop(syntax, &binding, range_sym, range_type, stmt,
                                 location);
-  } else if (range_type == NULL ||
+  } else if (range_type != NULL &&
              RangeTypeHasMemberBeginEnd(
                  TypeMaterializeClassTemplateSpecialization(syntax,
                                                             range_type))) {

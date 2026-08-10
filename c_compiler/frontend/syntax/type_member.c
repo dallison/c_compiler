@@ -1903,7 +1903,8 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   StringDestruct(&member_name);
   if (func->info.function.is_defaulted) {
-    SynthesizeDefaultedMemberFunctionBody(parser, member_symbol);
+    // Synthesize after the complete class body has been parsed so memberwise
+    // operations include data members declared later in the class.
   } else if (!func->info.function.is_deleted) {
     ParseInlineMemberFunctionBody(parser, member_symbol);
   }
@@ -2779,7 +2780,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         } else if (member->is_static || member->is_member_function) {
           if (member->is_member_function &&
               member_symbol->type->info.function.is_defaulted) {
-            SynthesizeDefaultedMemberFunctionBody(parser, member_symbol);
+            // Synthesize after the complete class body has been parsed so
+            // memberwise operations see every data member.
           } else if (member->is_member_function &&
                      member_symbol->type->info.function.is_deleted) {
             has_inline_body = false;

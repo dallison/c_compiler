@@ -3115,10 +3115,10 @@ static void CollectActualArguments(Preprocessor* p,
         }
       }
       if (tok == PPTOK(comma)) {
-        MoveToNextToken(ti);
-        SkipSpaceTokens(ti);
         if (num_nested_brackets == 1) {
           // Comma outside of nested brackets, end of actual.
+          MoveToNextToken(ti);
+          SkipSpaceTokens(ti);
           break;
         }
       }

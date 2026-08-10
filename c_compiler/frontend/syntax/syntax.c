@@ -5393,6 +5393,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   }
 
   sym->type->info.function.is_explicit = false;
+  // A friend function defined in a non-local class definition is implicitly
+  // inline even when the `inline` specifier is omitted ([dcl.fct.spec]).
+  if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    sym->type->info.function.is_inline = true;
+  }
 
   // 'friend void A::f();' names an existing member function of another class.
   // It refers to that member rather than introducing a namespace-scope function,

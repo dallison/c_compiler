@@ -388,20 +388,9 @@ static W65C02Opcode ReloadOpFromReg(W65C02Register* reg) {
 }
 
 
-static bool IsAfterSpillPoint(TargetInstruction* inst, void* data) {
-  TargetInstruction* spill_point = data;
-  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
-      inst->addr > spill_point->addr;
-}
-
-// Predicate for evicting a reload: retarget exactly those users that have not
-// yet been processed and that come after the current allocation frontier.
-// Already-processed users (e.g. earlier reloads, which carry no real address)
-// have consumed the register and must keep referencing this reload.
-static bool IsAfterFrontier(TargetInstruction* inst, void* data) {
-  int frontier_addr = *(int*)data;
-  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
-      inst->addr > frontier_addr;
+static bool NotProcessed(TargetInstruction* inst, void* data) {
+  (void)data;
+  return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
 
@@ -417,8 +406,7 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
   if (IsSpillInstruction(victim)) {
     TargetInstruction* slot = victim->operand[0];
     assert(slot != NULL && IsSpillOnly(slot));
-    int frontier_addr = allocator->frontier_addr;
-    TargetRetargetInstructionIf(victim, slot, IsAfterFrontier, &frontier_addr);
+    TargetRetargetInstructionIf(victim, slot, NotProcessed, NULL);
     reg->base.owner = NULL;
     return reg;
   }
@@ -450,7 +438,7 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
   // the users of inst empty and its uses count 0.
-  TargetRetargetInstructionIf(victim, spill, IsAfterSpillPoint, spill_point);
+  TargetRetargetInstructionIf(victim, spill, NotProcessed, NULL);
   spill->operand[0] = victim;
   spill->reg = victim->reg;
   reg->base.owner = NULL;
@@ -595,6 +583,16 @@ static void FreeRegisters(W65C02RegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      bool already_seen = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          already_seen = true;
+          break;
+        }
+      }
+      if (already_seen) {
+        continue;
+      }
       W65C02Register* reg = (W65C02Register*)op->reg;
       if (IsSpillInstruction(op)) {
         continue;
@@ -659,12 +657,16 @@ static void RetargetToReload(TargetBasicBlock* block, void* data) {
     if (inst == rdata->reload) {
       continue;
     }
+    bool replaced = false;
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
-      TargetInstruction* op = inst->operand[i];
-      if (op == rdata->spilled) {
-        assert(op->uses > 0);
-        TargetReplaceOperand(inst, i, rdata->reload);
+      if (inst->operand[i] == rdata->spilled) {
+        inst->operand[i] = rdata->reload;
+        replaced = true;
       }
+    }
+    if (replaced) {
+      TargetRemoveUser(rdata->spilled, inst);
+      TargetAddUser(rdata->reload, inst);
     }
   }
   // Add the reload instruction to the inputs of the block if the block has
@@ -821,6 +823,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
 
   if (inst->opcode == (TargetOpcode)W65C02_OP(reloadpoint)) {
     FreeRegisters(allocator, inst);
+    inst->flags |= TARGET_INST_PROCESSED;
     return;
   }
 
@@ -836,6 +839,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
      reg = (W65C02Register*)inst->dest->reg;
      inst->reg = inst->dest->reg;
      FreeRegisters(allocator, inst);
+     inst->flags |= TARGET_INST_PROCESSED;
      return;
    }
   
@@ -843,6 +847,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
   FreeRegisters(allocator, inst);
 
   if (!NeedsRegister(inst)) {
+    inst->flags |= TARGET_INST_PROCESSED;
     return;
   }
 
@@ -856,6 +861,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
     case W65C02_OP(symbol):
      case W65C02_OP(localvar):
     case W65C02_OP(argument):
+      inst->flags |= TARGET_INST_PROCESSED;
       return;
 
     case W65C02_OP(fp):
@@ -893,6 +899,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
   inst->uses = (int)inst->users.length;
   inst->reg = &reg->base;
   reg->base.owner = inst;
+  inst->flags |= TARGET_INST_PROCESSED;
 
   // If nobody is using this register free it up immediately.
   if (inst->uses == 0 && !reg->locked) {

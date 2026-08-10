@@ -8,6 +8,7 @@
 
 #include "6502_interpreter.h"
 #include "elf.h"
+#include "filesystem_host.h"
 #include "loader_lifecycle.h"
 #include <stdio.h>
 #include <ctype.h>
@@ -696,12 +697,32 @@ static char irq_handler[] = {
 #define W65C02_REG_SP REG_SP
 #define W65C02_INT_OPEN 2
 #define W65C02_INT_CLOSE 3
-#define W65C02_INT_LSEEK 4
-#define W65C02_INT_WRITE 5
-#define W65C02_INT_READ 6
-#define W65C02_INT_POLL 7
-#define W65C02_INT_IOCTL 8
-#define W65C02_INT_ABORT 9
+#define W65C02_INT_WRITE 4
+#define W65C02_INT_READ 5
+#define W65C02_INT_LSEEK 7
+#define W65C02_INT_ABORT 8
+#define W65C02_INT_TIME 13
+#define W65C02_INT_CLOCK 14
+#define W65C02_INT_MONOTONIC_TIME 24
+#define W65C02_INT_REALTIME_TIME 30
+#define W65C02_INT_FS_STATUS 31
+#define W65C02_INT_FS_OPEN_DIRECTORY 32
+#define W65C02_INT_FS_READ_DIRECTORY 33
+#define W65C02_INT_FS_CLOSE_DIRECTORY 34
+#define W65C02_INT_FS_CREATE_DIRECTORY 35
+#define W65C02_INT_FS_REMOVE 36
+#define W65C02_INT_FS_RENAME 37
+#define W65C02_INT_FS_CURRENT_PATH 38
+#define W65C02_INT_FS_SET_CURRENT_PATH 39
+#define W65C02_INT_FS_READ_SYMLINK 40
+#define W65C02_INT_FS_CREATE_SYMLINK 41
+#define W65C02_INT_FS_CREATE_HARD_LINK 42
+#define W65C02_INT_FS_SET_PERMISSIONS 43
+#define W65C02_INT_FS_RESIZE 44
+#define W65C02_INT_FS_SET_MODIFICATION_TIME 45
+#define W65C02_INT_FS_SPACE 46
+#define W65C02_INT_FS_COPY_FILE 47
+#define W65C02_INT_FS_CANONICAL 48
 
 static int Open(W65C02Interpreter* interpreter, const char* filename, int flags, int mode) {
   int index = 0;
@@ -1016,96 +1037,316 @@ bool W65C02GuestRunFiniArrays(Loader* loader,
   return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleFini);
 }
 
-// This is entered from a BRK instruction
-// sp+0: result address
-// sp+2... args from system call.
-// Sets X,Y to the result of the syscall
+static uint16_t GuestRead16(const void* pointer) {
+  uint16_t value;
+  memcpy(&value, pointer, sizeof(value));
+  return value;
+}
+
+static int32_t GuestRead32(const void* pointer) {
+  int32_t value;
+  memcpy(&value, pointer, sizeof(value));
+  return value;
+}
+
+static void* GuestPointer(W65C02Interpreter* interpreter, uint16_t address,
+                          size_t size) {
+  if (size > 0x10000u || (size_t)address + size > 0x10000u) {
+    return NULL;
+  }
+  return interpreter->memory + address;
+}
+
+static const char* GuestString(W65C02Interpreter* interpreter,
+                               uint16_t address) {
+  const char* value = GuestPointer(interpreter, address, 1);
+  if (value == NULL ||
+      memchr(value, '\0', 0x10000u - (size_t)address) == NULL) {
+    return NULL;
+  }
+  return value;
+}
+
+static void SetSyscallResult(W65C02Interpreter* interpreter,
+                             uint16_t result_address, int64_t result) {
+  int32_t narrowed = (int32_t)result;
+  void* destination =
+      GuestPointer(interpreter, result_address, sizeof(narrowed));
+  if (destination != NULL) {
+    memcpy(destination, &narrowed, sizeof(narrowed));
+  }
+  interpreter->x = narrowed & 0xff;
+  interpreter->y = (narrowed >> 8) & 0xff;
+}
+
+static int64_t GuestClockMicroseconds(W65C02Interpreter* interpreter,
+                                     uint16_t result_address,
+                                     clockid_t clock_id) {
+  int64_t* destination =
+      GuestPointer(interpreter, result_address, sizeof(int64_t));
+  struct timespec now;
+  if (destination == NULL || clock_gettime(clock_id, &now) != 0) {
+    return -DAVE_HOST_EINVAL;
+  }
+  int64_t value = (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+  memcpy(destination, &value, sizeof(value));
+  return 0;
+}
+
+// This is entered from the interpreter's custom software-break instruction.
+// sp+0 is the address of the four-byte long result and sp+2 starts the packed
+// 65C02 arguments (all pointers and int/size_t arguments are two bytes).
 static void BrkHandler(W65C02Interpreter* interpreter, int8_t code) {
-  uint16_t W65C02sp = *(uint16_t*)&interpreter->memory[REG_SP];     // SP as 6502 address.
-  uint8_t* sp = (uint8_t*)(interpreter->memory + W65C02sp);  // SP in native.
-  
+  uint16_t guest_sp = GuestRead16(&interpreter->memory[REG_SP]);
+  uint8_t* sp = GuestPointer(interpreter, guest_sp, 2);
+  if (sp == NULL) {
+    interpreter->exit_code = 1;
+    interpreter->running = false;
+    return;
+  }
+  uint16_t result_address = GuestRead16(sp);
+  int64_t result = 0;
+
+#define ARG16(offset) GuestRead16(sp + 2 + (offset))
+#define ARG_PTR(offset, size) \
+  GuestPointer(interpreter, ARG16(offset), (size))
+#define ARG_STRING(offset) GuestString(interpreter, ARG16(offset))
+
   switch (code) {
     case W65C02_INT_EXIT:
-      exit(*((uint16_t*)(sp+2)));
-      break;
+      exit((int16_t)ARG16(0));
     case W65C02_INT_EXIT_CLEAN:
-      interpreter->exit_code = *((uint16_t*)(sp + 2));
+      interpreter->exit_code = (int16_t)ARG16(0);
       LoaderLifecycleMarkExecutableFiniComplete(interpreter->loader,
                                                 interpreter->loader->lifecycle);
       interpreter->running = false;
-      break;
+      return;
     case W65C02_INT_ABORT:
       abort();
-      break;
     case W65C02_INT_OPEN: {
-      const char* filename = (const char*)&interpreter->memory[*((uint16_t*)(sp+2))];
-      int flags = ConvertOpenFlags(*((uint16_t*)(sp+4)));
-      int mode = *((uint16_t*)(sp+6));
-      int fd_index = Open(interpreter, filename, flags, mode);
-      if (fd_index == -1) {
-        SetErrno(interpreter);
+      const char* filename = ARG_STRING(0);
+      if (filename == NULL) {
+        result = -1;
+        errno = EINVAL;
+      } else {
+        result = Open(interpreter, filename, ConvertOpenFlags(ARG16(2)),
+                      ARG16(4));
       }
-      interpreter->x = fd_index & 0xff;
-      interpreter->y = (fd_index >> 8) & 0xff;
       break;
     }
-    // For all file operations, X,Y contain the index into the open_files.
-    case W65C02_INT_CLOSE: {
-      int fd_index = interpreter->x + (interpreter->y << 8);
-      int e = Close(interpreter, fd_index);
-      if (e == -1) {
-        SetErrno(interpreter);
-      }
-      interpreter->x = e & 0xff;
-      interpreter->y = (e >> 8) & 0xff;
+    case W65C02_INT_CLOSE:
+      result = Close(interpreter, (int16_t)ARG16(0));
       break;
-    }
-    case W65C02_INT_LSEEK: {
-      int fd_index = interpreter->x + (interpreter->y << 8);
-      off_t offset = (off_t)*((uint16_t*)(sp+4));
-      int whence = (int)*((uint16_t*)(sp+6));
-      off_t e = Lseek(interpreter, fd_index, offset, whence);
-      if (e == -1) {
-        SetErrno(interpreter);
-      }
-      interpreter->x = e & 0xff;
-      interpreter->y = (e >> 8) & 0xff;
+    case W65C02_INT_LSEEK:
+      result = Lseek(interpreter, (int16_t)ARG16(0),
+                     (off_t)GuestRead32(sp + 4), (int16_t)ARG16(6));
       break;
-    }
     case W65C02_INT_WRITE: {
-      int fd_index = interpreter->x + (interpreter->y << 8);
-      const char* buffer = (const char*)&interpreter->memory[*((uint16_t*)(sp+4))];
-      size_t length = (off_t)*((uint16_t*)(sp+6));
-      ssize_t e = Write(interpreter, fd_index, buffer, length);
-      if (e == -1) {
-        SetErrno(interpreter);
-      }
-      interpreter->x = e & 0xff;
-      interpreter->y = (e >> 8) & 0xff;
+      size_t length = ARG16(4);
+      const char* buffer = ARG_PTR(2, length);
+      result = buffer == NULL
+                   ? -1
+                   : Write(interpreter, (int16_t)ARG16(0), buffer, length);
+      if (buffer == NULL) errno = EINVAL;
       break;
     }
     case W65C02_INT_READ: {
-      int fd_index = interpreter->x + (interpreter->y << 8);
-      char* buffer = (char*)&interpreter->memory[*((uint16_t*)(sp+4))];
-      size_t length = (off_t)*((uint16_t*)(sp+6));
-      ssize_t e = Read(interpreter, fd_index, buffer, length);
-      if (e == -1) {
-        SetErrno(interpreter);
+      size_t length = ARG16(4);
+      char* buffer = ARG_PTR(2, length);
+      result = buffer == NULL
+                   ? -1
+                   : Read(interpreter, (int16_t)ARG16(0), buffer, length);
+      if (buffer == NULL) errno = EINVAL;
+      break;
+    }
+    case W65C02_INT_TIME:
+      result = (int64_t)time(NULL);
+      break;
+    case W65C02_INT_CLOCK: {
+      struct timespec now;
+      result = clock_gettime(CLOCK_MONOTONIC, &now) == 0
+                   ? (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000
+                   : -1;
+      break;
+    }
+    case W65C02_INT_MONOTONIC_TIME:
+      result = GuestClockMicroseconds(interpreter, ARG16(0),
+                                      CLOCK_MONOTONIC);
+      break;
+    case W65C02_INT_REALTIME_TIME:
+      result =
+          GuestClockMicroseconds(interpreter, ARG16(0), CLOCK_REALTIME);
+      break;
+    case W65C02_INT_FS_STATUS: {
+      DaveHostFilesystemStat host_result;
+      DaveHostFilesystemStat* guest_result = ARG_PTR(4, sizeof(host_result));
+      const char* path = ARG_STRING(0);
+      if (path == NULL || guest_result == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        result =
+            DaveHostFilesystemGetStatus(path, ARG16(2), &host_result);
+        if (result == 0) {
+          memcpy(guest_result, &host_result, sizeof(host_result));
+        }
       }
-      interpreter->x = e & 0xff;
-      interpreter->y = (e >> 8) & 0xff;
       break;
     }
-    case W65C02_INT_POLL: {
+    case W65C02_INT_FS_OPEN_DIRECTORY: {
+      const char* path = ARG_STRING(0);
+      result = path == NULL ? -DAVE_HOST_EINVAL
+                            : DaveHostFilesystemOpenDirectory(path);
       break;
     }
-    case W65C02_INT_IOCTL: {
+    case W65C02_INT_FS_READ_DIRECTORY: {
+      DaveHostFilesystemDirectoryEntry host_result;
+      DaveHostFilesystemDirectoryEntry* guest_result =
+          ARG_PTR(2, sizeof(host_result));
+      if (guest_result == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        result = DaveHostFilesystemReadDirectory((int16_t)ARG16(0),
+                                                 &host_result);
+        if (result > 0) {
+          memcpy(guest_result, &host_result, sizeof(host_result));
+        }
+      }
+      break;
+    }
+    case W65C02_INT_FS_CLOSE_DIRECTORY:
+      result = DaveHostFilesystemCloseDirectory((int16_t)ARG16(0));
+      break;
+    case W65C02_INT_FS_CREATE_DIRECTORY: {
+      const char* path = ARG_STRING(0);
+      result = path == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostFilesystemCreateDirectory(path, ARG16(2));
+      break;
+    }
+    case W65C02_INT_FS_REMOVE: {
+      const char* path = ARG_STRING(0);
+      result = path == NULL ? -DAVE_HOST_EINVAL
+                            : DaveHostFilesystemRemove(path);
+      break;
+    }
+    case W65C02_INT_FS_RENAME: {
+      const char* old_path = ARG_STRING(0);
+      const char* new_path = ARG_STRING(2);
+      result = old_path == NULL || new_path == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostFilesystemRename(old_path, new_path);
+      break;
+    }
+    case W65C02_INT_FS_CURRENT_PATH: {
+      size_t capacity = ARG16(2);
+      char* buffer = ARG_PTR(0, capacity);
+      result = buffer == NULL ? -DAVE_HOST_EINVAL
+                              : DaveHostFilesystemCurrentPath(buffer,
+                                                              capacity);
+      break;
+    }
+    case W65C02_INT_FS_SET_CURRENT_PATH: {
+      const char* path = ARG_STRING(0);
+      result = path == NULL ? -DAVE_HOST_EINVAL
+                            : DaveHostFilesystemSetCurrentPath(path);
+      break;
+    }
+    case W65C02_INT_FS_READ_SYMLINK:
+    case W65C02_INT_FS_CANONICAL: {
+      const char* path = ARG_STRING(0);
+      size_t capacity = ARG16(4);
+      char* buffer = ARG_PTR(2, capacity);
+      if (path == NULL || buffer == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else if (code == W65C02_INT_FS_READ_SYMLINK) {
+        result = DaveHostFilesystemReadSymlink(path, buffer, capacity);
+      } else {
+        result = DaveHostFilesystemCanonical(path, buffer, capacity);
+      }
+      break;
+    }
+    case W65C02_INT_FS_CREATE_SYMLINK:
+    case W65C02_INT_FS_CREATE_HARD_LINK: {
+      const char* target = ARG_STRING(0);
+      const char* link = ARG_STRING(2);
+      if (target == NULL || link == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else if (code == W65C02_INT_FS_CREATE_SYMLINK) {
+        result = DaveHostFilesystemCreateSymlink(target, link);
+      } else {
+        result = DaveHostFilesystemCreateHardLink(target, link);
+      }
+      break;
+    }
+    case W65C02_INT_FS_SET_PERMISSIONS: {
+      const char* path = ARG_STRING(0);
+      result = path == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostFilesystemSetPermissions(path, ARG16(2),
+                                                      ARG16(4));
+      break;
+    }
+    case W65C02_INT_FS_RESIZE: {
+      const char* path = ARG_STRING(0);
+      const uint64_t* size = ARG_PTR(2, sizeof(uint64_t));
+      uint64_t value;
+      if (path == NULL || size == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        memcpy(&value, size, sizeof(value));
+        result = DaveHostFilesystemResize(path, value);
+      }
+      break;
+    }
+    case W65C02_INT_FS_SET_MODIFICATION_TIME: {
+      const char* path = ARG_STRING(0);
+      const int64_t* nanoseconds = ARG_PTR(2, sizeof(int64_t));
+      int64_t value;
+      if (path == NULL || nanoseconds == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        memcpy(&value, nanoseconds, sizeof(value));
+        result = DaveHostFilesystemSetModificationTime(path, value);
+      }
+      break;
+    }
+    case W65C02_INT_FS_SPACE: {
+      DaveHostFilesystemSpace host_result;
+      DaveHostFilesystemSpace* guest_result =
+          ARG_PTR(2, sizeof(host_result));
+      const char* path = ARG_STRING(0);
+      if (path == NULL || guest_result == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        result = DaveHostFilesystemQuerySpace(path, &host_result);
+        if (result == 0) {
+          memcpy(guest_result, &host_result, sizeof(host_result));
+        }
+      }
+      break;
+    }
+    case W65C02_INT_FS_COPY_FILE: {
+      const char* source = ARG_STRING(0);
+      const char* destination = ARG_STRING(2);
+      result = source == NULL || destination == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostFilesystemCopyFile(source, destination,
+                                                ARG16(4));
       break;
     }
     default:
-      printf("Undefined sbrk\n");
-      exit(1);
+      result = -DAVE_HOST_ENOSYS;
+      break;
   }
+
+  if (result == -1) {
+    SetErrno(interpreter);
+  }
+  SetSyscallResult(interpreter, result_address, result);
+
+#undef ARG16
+#undef ARG_PTR
+#undef ARG_STRING
 }
 
 

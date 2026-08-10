@@ -26,12 +26,12 @@
 .set int_exit 1
 .set int_open 2
 .set int_close 3
-.set int_lseek 4
-.set int_write 5
-.set int_read 6
-.set int_poll 7
-.set int_ioctl 8
-.set int_abort 9
+.set int_write 4
+.set int_read 5
+.set int_lseek 7
+.set int_abort 8
+.set int_poll 9
+.set int_ioctl 10
 .set int_exit_clean 22
 
 // File descriptors are at 0x300 and each consists of:
@@ -521,7 +521,7 @@ poll:
   JSR get_device_func
   JMP func_call
 
-.set max_syscall_number 7
+.set max_syscall_number 8
 syscalls:
 .hword __abort      // 0
 .hword __exit       // 1
@@ -529,8 +529,9 @@ syscalls:
 .hword __close      // 3
 .hword __write      // 4
 .hword __read       // 5
-.hword __lseek      // 6
-.hword __abort      // 7
+.hword __abort      // 6
+.hword __lseek      // 7
+.hword __abort      // 8
 
 // Entry with A = syscall number (byte after BRK)
 // uses some scratch space

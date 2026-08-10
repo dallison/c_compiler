@@ -1244,9 +1244,10 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
   symbol->flags.is_defined = true;
   if (symbol->type->info.function.is_inline) {
     symbol->flags.is_inline_defn = true;
-    if (!StorageIs(symbol->storage, STO(static))) {
-      symbol->flags.is_weak = true;
-    }
+  }
+  if (!StorageIs(symbol->storage, STO(static)) &&
+      !symbol->flags.is_explicit_specialization) {
+    symbol->flags.is_weak = true;
   }
   Vector* declarations = NewVector();
   VectorAppend(declarations,
@@ -1452,9 +1453,10 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     symbol->flags.is_defined = true;
     if (symbol->type->info.function.is_inline) {
       symbol->flags.is_inline_defn = true;
-      if (!StorageIs(symbol->storage, STO(static))) {
-        symbol->flags.is_weak = true;
-      }
+    }
+    if (!StorageIs(symbol->storage, STO(static)) &&
+        !symbol->flags.is_explicit_specialization) {
+      symbol->flags.is_weak = true;
     }
     Vector* declarations = NewVector();
     VectorAppend(declarations,
@@ -5865,9 +5867,10 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
       sym->flags.is_defined = true;
       if (sym->type->info.function.is_inline) {
         sym->flags.is_inline_defn = true;
-        if (!StorageIs(sym->storage, STO(static))) {
-          sym->flags.is_weak = true;
-        }
+      }
+      if (!StorageIs(sym->storage, STO(static)) &&
+          !sym->flags.is_explicit_specialization) {
+        sym->flags.is_weak = true;
       }
       Vector* declarations = NewVector();
       VectorAppend(declarations,

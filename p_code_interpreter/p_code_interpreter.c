@@ -15,6 +15,7 @@
 #include "elf.h"
 #include "loader_lifecycle.h"
 #include "p_code_disassembler.h"
+#include "p_code_syscalls.h"
 
 #define DEST(inst) ((inst >> 16) & 0xff)
 #define SRC1(inst) ((inst >> 8) & 0xff)
@@ -178,6 +179,12 @@ static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code){
 
     case P_CODE_ESC_RESOLVE:
       ResolveAndFixupSymbol(interpreter);
+      break;
+
+    case P_CODE_ESC_SYSCALL:
+      interpreter->iregs[0] = PCodeHandlePackedSyscall(
+          interpreter, interpreter->iregs[0],
+          (const void*)(uintptr_t)interpreter->iregs[1]);
       break;
       
     default:

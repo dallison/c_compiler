@@ -23,12 +23,32 @@ const error_category& generic_category() noexcept;
 const error_category& system_category() noexcept;
 
 enum class errc {
+  bad_file_descriptor = EBADF,
+  cross_device_link = EXDEV,
+  directory_not_empty = ENOTEMPTY,
+  file_exists = EEXIST,
+  file_too_large = EFBIG,
+  filename_too_long = ENAMETOOLONG,
+  function_not_supported = ENOSYS,
+  interrupted = EINTR,
+  io_error = EIO,
+  is_a_directory = EISDIR,
+  no_space_on_device = ENOSPC,
+  no_such_device = ENODEV,
+  no_such_file_or_directory = ENOENT,
   operation_not_permitted = EPERM,
+  operation_not_supported = ENOTSUP,
+  permission_denied = EACCES,
+  read_only_file_system = EROFS,
   no_such_process = ESRCH,
   not_enough_memory = ENOMEM,
+  not_a_directory = ENOTDIR,
   resource_unavailable_try_again = EAGAIN,
   invalid_argument = EINVAL,
   resource_deadlock_would_occur = EDEADLK,
+  too_many_files_open = EMFILE,
+  too_many_files_open_in_system = ENFILE,
+  too_many_symbolic_link_levels = ELOOP,
 };
 
 class error_code {

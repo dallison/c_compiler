@@ -80,6 +80,8 @@
 #define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
+#define SYS_MONOTONIC_TIME 24
+#define SYS_REALTIME_TIME 30
 
 #elif defined(__aarch64__)
 #define SYS_OPEN 2
@@ -152,9 +154,30 @@
 #define SYS_ABORT 8
 #define SYS_TIME 13
 #define SYS_CLOCK 14
+#define SYS_MONOTONIC_TIME 24
+#define SYS_REALTIME_TIME 30
 #else
 #error "Unknown architecture for syscall"
 #endif
+
+#define SYS_FS_STATUS 31
+#define SYS_FS_OPEN_DIRECTORY 32
+#define SYS_FS_READ_DIRECTORY 33
+#define SYS_FS_CLOSE_DIRECTORY 34
+#define SYS_FS_CREATE_DIRECTORY 35
+#define SYS_FS_REMOVE 36
+#define SYS_FS_RENAME 37
+#define SYS_FS_CURRENT_PATH 38
+#define SYS_FS_SET_CURRENT_PATH 39
+#define SYS_FS_READ_SYMLINK 40
+#define SYS_FS_CREATE_SYMLINK 41
+#define SYS_FS_CREATE_HARD_LINK 42
+#define SYS_FS_SET_PERMISSIONS 43
+#define SYS_FS_RESIZE 44
+#define SYS_FS_SET_MODIFICATION_TIME 45
+#define SYS_FS_SPACE 46
+#define SYS_FS_COPY_FILE 47
+#define SYS_FS_CANONICAL 48
 
 #if defined(SYS_THREAD_CREATE) && defined(SYS_HEAP_LOCK) && \
     !defined(__p_code__)
@@ -165,23 +188,53 @@
 #define __DAVECC_HAS_TLS_THREAD_ERRNO__ 1
 #endif
 
+#if defined(SYS_MONOTONIC_TIME) && defined(SYS_REALTIME_TIME)
+#define __DAVECC_HAS_HOST_CLOCK__ 1
+#endif
+
 #if defined(__risc_v__)
 #define SYSCALL \
    return asm( \
               "mv t6, a0\n" \
               "ecall" \
               )
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern long syscall(int n, ...);
+#ifdef __cplusplus
+}
+#endif
 #elif defined(__x86_64__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
 extern long syscall(int n, ...);
+#endif
 #elif defined(__p_code__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
 extern long syscall(int n, ...);
+#endif
 #elif defined(__aarch64__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
 extern long syscall(int n, ...);
+#endif
 #elif defined(__arm__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
 extern long syscall(int n, ...);
+#endif
 #elif defined(__6502__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
 extern long syscall(int n, ...);
+#endif
 #else
 #error "Unknown architecture"
 #endif

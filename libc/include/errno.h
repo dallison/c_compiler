@@ -36,6 +36,17 @@
 #define EPERM           19      /* Operation not permitted */
 #define ESRCH           20      /* No such process */
 #define EDEADLK         21      /* Resource deadlock would occur */
+#define ENOTDIR         22      /* Not a directory */
+#define EISDIR          23      /* Is a directory */
+#define ENAMETOOLONG    24      /* File name too long */
+#define ENOTEMPTY       25      /* Directory not empty */
+#define ELOOP           26      /* Too many symbolic links */
+#define EROFS           27      /* Read-only file system */
+#define EXDEV           28      /* Cross-device link */
+#define ENOTSUP         29      /* Operation not supported */
+#define EOPNOTSUPP      ENOTSUP
+#define EFBIG           30      /* File too large */
+#define ENFILE          31      /* Too many open files in system */
 
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6

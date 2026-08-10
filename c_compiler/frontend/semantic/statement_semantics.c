@@ -2082,7 +2082,8 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   }
   if (!cxx_return_elision && return_value != NULL &&
       TypeIsStructOrUnion(compiler->current_function->next) &&
-      TypeEqual(return_value->type, compiler->current_function->next) &&
+      TypeEqualIgnoringTopLevelQualifiers(
+          return_value->type, compiler->current_function->next) &&
       return_value->value_category != kValueCategoryPrvalue) {
     ASTNode* materialized = MaterializeCXXReturnByMove(return_value);
     if (materialized != return_value) {

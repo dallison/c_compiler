@@ -22,6 +22,7 @@
 #include <memory_resource>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 
 namespace std {
 
@@ -114,6 +115,15 @@ class basic_string {
   basic_string(const CharT* s, size_type n) : __alloc(Allocator()) {
     __set_empty();
     __assign_raw(s, n);
+  }
+
+  template <class InputIt,
+            enable_if_t<!is_integral_v<InputIt>, int> = 0>
+  basic_string(InputIt first, InputIt last) : __alloc(Allocator()) {
+    __set_empty();
+    for (; first != last; ++first) {
+      push_back(static_cast<CharT>(*first));
+    }
   }
 
   // Construct from anything that views characters (notably basic_string_view).
@@ -443,6 +453,12 @@ class basic_string {
 };
 
 using string = basic_string<char>;
+using wstring = basic_string<wchar_t>;
+#if __cplusplus >= 202002L
+using u8string = basic_string<char8_t>;
+#endif
+using u16string = basic_string<char16_t>;
+using u32string = basic_string<char32_t>;
 
 namespace pmr {
 
