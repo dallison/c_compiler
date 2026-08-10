@@ -60,10 +60,11 @@ for target in 6502 65c02; do
          /^\.func_end__Z17widen_call_resultv:$/{inside=0} \
          inside' "$assembly"
   )
-  if grep -Eq 'lda[[:space:]]+__b2([[:space:]]|$)' <<<"$call_widen_body" ||
-     ! awk '/sta[[:space:]]+__b2([[:space:]]|$)/ {
+  if grep -Eq 'lda[[:space:]]+__b[0-9]+([[:space:]]|$)' \
+       <<<"$call_widen_body" ||
+     ! awk '/(jsr[[:space:]]+__var_value1_b[0-9]+|sta[[:space:]]+__b[0-9]+)([[:space:]]|$)/ {
               getline
-              found = $0 ~ /sta[[:space:]]+__i0([[:space:]]|$)/
+              if ($0 ~ /sta[[:space:]]+__i0([[:space:]]|$)/) found = 1
             }
             END { exit !found }' <<<"$call_widen_body"; then
     echo "$target: retained a reload immediately after a zero-page store" >&2

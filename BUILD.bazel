@@ -2223,6 +2223,11 @@ filegroup(
     srcs = ["tests/filesystem_syscall_smoke.c"],
 )
 
+filegroup(
+    name = "filesystem_cpp_backend_smoke_source",
+    srcs = ["tests/filesystem_cpp_backend_smoke.cpp"],
+)
+
 sh_test(
     name = "pcode_runtime_smoke_test",
     srcs = ["tests/pcode_runtime_smoke_test.sh"],
@@ -2252,6 +2257,26 @@ sh_test(
     data = [
         ":davecc",
         ":filesystem_syscall_smoke_source",
+        ":libc_headers",
+        ":libc_pcode",
+        ":pcode",
+    ],
+)
+
+sh_test(
+    name = "filesystem_cpp_pcode_test",
+    srcs = ["tests/filesystem_syscall_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "pcode",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+        "$(rootpath //:filesystem_cpp_backend_smoke_source)",
+        "-",
+    ],
+    data = [
+        ":davecc",
+        ":filesystem_cpp_backend_smoke_source",
         ":libc_headers",
         ":libc_pcode",
         ":pcode",

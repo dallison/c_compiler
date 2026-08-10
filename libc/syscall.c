@@ -37,9 +37,11 @@ long syscall(int n, ...) {
 long syscall(int n, ...) {
   (void)n;
   return asm(
+      "pushx r1\n"
       "ldw r0, [ap, #16]\n"
       "addc r1, ap, #20\n"
-      "esc #7");
+      "esc #7\n"
+      "popx r1");
 }
 #elif defined(__x86_64__)
 // Implemented in x86_64 support/syscall.s

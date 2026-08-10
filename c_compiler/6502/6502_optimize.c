@@ -561,6 +561,21 @@ static bool IsTrackingMetadata(TargetInstruction* inst) {
          W65C02IsExpression(inst) || (inst->flags & k6502DontEmit) != 0;
 }
 
+static bool ByteValueLoadLeavesA(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(var_value1):
+    case W65C02_OP(var_value1b):
+    case W65C02_OP(arg_value1):
+    case W65C02_OP(arg_value1b):
+      return true;
+    default:
+      return false;
+  }
+}
+
 static TargetInstruction* NextEffectiveInstruction(TargetInstruction* inst) {
   TargetInstruction* next = TargetNext(inst);
   while (next != NULL && IsTrackingMetadata(next)) {
@@ -763,6 +778,19 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
     }
      switch ((W65C02Opcode)inst->opcode) {
       case W65C02_OP(lda): {
+        TargetInstruction* previous = TargetPrev(inst);
+        while (previous != NULL && IsTrackingMetadata(previous)) {
+          previous = TargetPrev(previous);
+        }
+        if (ByteValueLoadLeavesA(previous) &&
+            previous->operand[0] == inst->operand[0]) {
+          // The byte-load helpers store the loaded value in their destination
+          // and return with that same value still in A. Avoid loading it back
+          // from zero page when the next operation consumes the byte.
+          TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+          opt_data->modified = true;
+          break;
+        }
         TargetInstruction* prev_user = PreviousUserOfA(inst);
         TargetInstruction* prev_modifier = PreviousModifierOfA(inst);
         if (prev_modifier != NULL && prev_modifier->opcode == (TargetOpcode)W65C02_OP(lda)) {
