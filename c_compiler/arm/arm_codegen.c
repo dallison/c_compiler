@@ -1185,8 +1185,17 @@ static TargetInstruction* OffsetFrom(ARMGenerator* g, TargetInstruction* src,
   return AddImmediate(g, page_inst, page_offset);
 }
 
+static bool HasEightBitMemoryOffset(ARMOpcode opcode) {
+  return opcode == ARM_OP(ldrh) || opcode == ARM_OP(ldrsh) ||
+         opcode == ARM_OP(ldrsb) || opcode == ARM_OP(strh);
+}
+
 static TargetInstruction* LoadImmediate(ARMGenerator* g, ARMOpcode opcode,
                                           TargetInstruction* base, int32_t offset) {
+  if (HasEightBitMemoryOffset(opcode) && (offset < -255 || offset > 255)) {
+    base = OffsetFrom(g, base, offset);
+    offset = 0;
+  }
   if (ARMIsPossibleImmediate(offset)) {
     return Emit(g, NewInstruction2(opcode, base,
                                     GetIntConstant(g, NULL, kTargetType32Bit, offset)));
@@ -1200,6 +1209,10 @@ static TargetInstruction* LoadImmediate(ARMGenerator* g, ARMOpcode opcode,
 
 static TargetInstruction* StoreImmediate(ARMGenerator* g, ARMOpcode opcode,
                                          TargetInstruction* value, TargetInstruction* base, int32_t offset) {
+  if (HasEightBitMemoryOffset(opcode) && (offset < -255 || offset > 255)) {
+    base = OffsetFrom(g, base, offset);
+    offset = 0;
+  }
   if (ARMIsPossibleImmediate(offset)) {
     return Emit(g, NewInstruction3(opcode, value, base,
                                     GetIntConstant(g, NULL, kTargetType32Bit, offset)));
@@ -1458,7 +1471,10 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
   if (var->base.outputs.length == 0) {
     return false;
   }
-  return true;
+  if (TypeIsFloatingPoint(var_node->type)) {
+    return g->num_fp_reg_vars < 8;
+  }
+  return g->num_int_reg_vars < 4;
 }
 
 // Static variables have an address calculated by the linker.  Load the
@@ -1891,13 +1907,13 @@ static TargetInstruction* WideLibCall(ARMGenerator* g, IRNode* node,
   MaterializeWide(g, b, &blo, &bhi);
 
   TargetInstruction* arg0 =
-      SetDestOrMove(g, alo, IntArgumentRegister(g, 0), ARM_OP(mov));
+      SetDestOrMoveToArgReg(g, a, alo, IntArgumentRegister(g, 0), ARM_OP(mov));
   TargetInstruction* arg1 =
-      SetDestOrMove(g, ahi, IntArgumentRegister(g, 1), ARM_OP(mov));
+      SetDestOrMoveToArgReg(g, a, ahi, IntArgumentRegister(g, 1), ARM_OP(mov));
   TargetInstruction* arg2 =
-      SetDestOrMove(g, blo, IntArgumentRegister(g, 2), ARM_OP(mov));
+      SetDestOrMoveToArgReg(g, b, blo, IntArgumentRegister(g, 2), ARM_OP(mov));
   TargetInstruction* arg3 =
-      SetDestOrMove(g, bhi, IntArgumentRegister(g, 3), ARM_OP(mov));
+      SetDestOrMoveToArgReg(g, b, bhi, IntArgumentRegister(g, 3), ARM_OP(mov));
 
   // Keep all four argument registers live up to the call.
   TargetInstruction* regarg =
@@ -2924,6 +2940,13 @@ static TargetInstruction* Load(ARMGenerator* g, IRNode* addr_node, ARMOpcode opc
   if (!on_stack) {
     return addr;
   }
+  if (HasEightBitMemoryOffset(opcode)) {
+    int64_t value = TargetIntValue(offset);
+    if (value < -255 || value > 255) {
+      addr = OffsetFrom(g, addr, (int32_t)value);
+      offset = ZeroImm(g);
+    }
+  }
 
   TargetInstruction* result = Emit(g, SetInstructionSize(NewInstruction2(opcode, addr, offset), size));
   result->flags |= FrameOffsetFlagForNode(addr_node);
@@ -3070,6 +3093,13 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
     ARMOpcode opcode = TypeIsFloatingPoint(addr_node->type) ? ARM_OP(fmov) : ARM_OP(mov);
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
+  }
+  if (HasEightBitMemoryOffset(opcode)) {
+    int64_t value = TargetIntValue(offset);
+    if (value < -255 || value > 255) {
+      addr = OffsetFrom(g, addr, (int32_t)value);
+      offset = ZeroImm(g);
+    }
   }
 
   TargetInstruction* result =
@@ -3613,7 +3643,14 @@ static TargetInstruction* LowerAddressOf(ARMGenerator* g, IRNode* node) {
 }
 
 static TargetInstruction* LowerZeroExtend(ARMGenerator* g, IRNode* node) {
-  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
+  IRNode* input = node->inputs.value.p[0];
+  TargetInstruction* value;
+  if (NodeIsWideInt(input)) {
+    TargetInstruction* unused_hi;
+    MaterializeWide(g, input, &value, &unused_hi);
+  } else {
+    value = Materialize(g, input);
+  }
   // The second IR operand is the bit-difference between the destination and
   // source widths (e.g. 24 for a char->int extension, 16 for a short->int
   // extension), NOT a usable AND mask.  Zero-extend by shifting the value left
@@ -3893,7 +3930,14 @@ static TargetInstruction* FinishSignExtend(ARMGenerator* g, IRNode* node,
 }
 
 static TargetInstruction* LowerSignExtend(ARMGenerator* g, IRNode* node) {
-  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
+  IRNode* input = node->inputs.value.p[0];
+  TargetInstruction* value;
+  if (NodeIsWideInt(input)) {
+    TargetInstruction* unused_hi;
+    MaterializeWide(g, input, &value, &unused_hi);
+  } else {
+    value = Materialize(g, input);
+  }
   if (ARMIsSignedLoad(value)) {
     return FinishSignExtend(g, node, value);
   }
@@ -4300,6 +4344,13 @@ static size_t ArgStackSlot(TypeRecord* type, size_t* offset) {
   return slot;
 }
 
+static bool IsStructReturnArgument(IRNode* node) {
+  if (node->opcode == IR_OP(pusharg) && node->inputs.length > 0) {
+    node = node->inputs.value.p[0];
+  }
+  return node->opcode == IR_OP(structreturn);
+}
+
 static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -4321,14 +4372,18 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (TypeIsStructOrUnion(arg_node->type)) {
-      if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
-        // RVO (Return Value Optimization), passing structreturn as arg->base.
-        TargetInstruction* arg_reg =
-             IntArgumentRegister(g, next_int_arg_reg++);
-         VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
-        continue;
+    if (IsStructReturnArgument(arg_node)) {
+      // AAPCS passes the hidden aggregate-result pointer in r0.  It is wrapped
+      // in pusharg at ordinary call sites, so inspect the wrapped operand
+      // rather than relying on the pusharg node's aggregate type.
+      VectorAppend(&arg_locations,
+                   NewArgLocationRegister(IntArgumentRegister(g, 0)));
+      if (next_int_arg_reg == 0) {
+        next_int_arg_reg = 1;
       }
+      continue;
+    }
+    if (TypeIsStructOrUnion(arg_node->type)) {
       bool variadic = callee_varargs && arg_ordinal >= named_count;
       // Named struct/union arguments are passed *by value* in the stacked
       // argument area, laid out consecutively (see ArgStackSlot).  The callee
@@ -5196,7 +5251,9 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
 
     case IR_OP(structreturn): {
       // Always allocate a saved register for the struct return value.
-      // g->struct_return_reg = g->num_int_reg_vars++;
+      if (g->struct_return_reg < 0) {
+        g->struct_return_reg = g->num_int_reg_vars++;
+      }
       TargetInstruction* result =
           SetLoweredNode(node, EmitSymbol(g, NewInstruction(ARM_OP(structreturn))));
       TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(mov),

@@ -1408,6 +1408,12 @@ static void InlineCopyToIndirectIndexed(W65C02Generator* g, TargetInstruction* t
   SetAddrMode(to, old_to);
 }
 
+static bool IsAbsoluteSymbolAddressingMode(AddressingMode mode) {
+  return mode == kAddrModeAbsoluteSymbol ||
+         mode == kAddrModeAbsoluteSymbolIndexedX ||
+         mode == kAddrModeAbsoluteSymbolIndexedY;
+}
+
 // Loop to copy from:
 // 1. (addr),Y (or addr,Y) to zp,X.
 // 2. addr,X to (addr),Y or addr,Y
@@ -1430,8 +1436,8 @@ static void CopyWithLoopXY(W65C02Generator* g, TargetInstruction* to,
     ldxi(g, to_index);
   }
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
-  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  lda(g, from, IsAbsoluteSymbolAddressingMode(from_mode) ? 0 : -1);
+  sta(g, to, IsAbsoluteSymbolAddressingMode(to_mode) ? 0 : -1);
   dey(g);
   if (to_index == 0) {
     dex(g);
@@ -1470,8 +1476,8 @@ static void CopyWithLoopYX(W65C02Generator* g, TargetInstruction* to,
   ldxi(g, size + from_index - 1);
 
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
-  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  lda(g, from, IsAbsoluteSymbolAddressingMode(from_mode) ? 0 : -1);
+  sta(g, to, IsAbsoluteSymbolAddressingMode(to_mode) ? 0 : -1);
   dey(g);
   dex(g);
   if (from_index != 0) {
@@ -1998,7 +2004,7 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
 
         } else if (TargetOpcodeEq(inst->opcode, W65C02_OP(localvar)) &&
             ((inst->flags & k6502NeedAddress) != 0 ||
-             TypeIsPointerOrArray(node->type) || TypeIsStructOrUnion(node->type))) {
+             TypeIsArray(node->type) || TypeIsStructOrUnion(node->type))) {
           W65C02Opcode var_addr_op = offset >= 256 ? W65C02_OP(var_addrb) : W65C02_OP(var_addr);
         
           Emit(g,
@@ -2058,8 +2064,15 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
             (inst->flags & k6502NeedAddress) != 0) {
           mode = kAddrModeSymbolAddr;
         }
-        result = TempRegister(g, node->type, Sizeof(node->type));
-        Copy(g, result, inst, 0, 0, Sizeof(node->type), GetAddrMode(result), mode);
+        bool materializing_address = mode == kAddrModeSymbolAddr;
+        int result_size =
+            materializing_address ? 2 : Sizeof(node->type);
+        TypeRecord* result_type =
+            materializing_address
+                ? NewPointerTo(kQualPlain, node->type)
+                : node->type;
+        result = TempRegister(g, result_type, result_size);
+        Copy(g, result, inst, 0, 0, result_size, GetAddrMode(result), mode);
         AddSpillPoint(g, result);
         break;
       }
@@ -3149,12 +3162,11 @@ static void GetOpInstructions(W65C02Generator* g, IRNode* node,
       case IR_OP(movf):
       case IR_OP(movd):
       case IR_OP(mova):
-        if (node->dest != NULL && node->outputs.length == 0) {
-          // Just an assignment to another node, no copy needed.
-          ops[i] = GetLoweredNode(input);
-        } else {
-          ops[i] = Materialize(g, input, Sizeof(input->type), true);
-        }
+        // A move still needs a byte-addressable source even when its result is
+        // routed directly into another node's destination. Stack locals and
+        // arguments lower to frame descriptors (implied-mode pseudo
+        // instructions), which Copy cannot read directly.
+        ops[i] = Materialize(g, input, Sizeof(input->type), true);
         break;
       default:
         abort();
@@ -4618,6 +4630,7 @@ static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, I
     // ldy #var addr hi (omitted for hi == 0)
     // jsr func
     if (!is_zero) {
+      AddReloadPoint(g, src);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), src, kAddrModeImplied));
     }
     ldxi(g, offset & 0xff);
@@ -5520,17 +5533,9 @@ static TargetInstruction* PushStructArg(W65C02Generator* g, IRNode* node,
                                         size_t* args_size) {
   size_t struct_size = Sizeof(node->type);
   *args_size += struct_size;
-  bool from_call = (node->flags & kIRFromCall) != 0;
   bool large = struct_size >= 256;
   TargetInstruction* size =
       GetIntConstant(g, node, kTargetType16Bit, (int64_t)struct_size);
-  if (from_call) {
-    return Emit(g, NewInstruction1(
-                       large ? W65C02_OP(pushmem_xy2)
-                             : W65C02_OP(pushmem_xy1),
-                       size, kAddrModeImplied));
-  }
-
   TargetInstruction* src = GetAddress(g, node, true);
   AddReloadPoint(g, src);
   return Emit(g, NewInstruction2(

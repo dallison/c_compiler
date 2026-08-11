@@ -8,6 +8,8 @@
 
 #include "expr_codegen.h"
 #include <assert.h>
+#include <stdio.h>
+#include <string.h>
 #include "compiler.h"
 #include "expr_evaluator.h"
 #include "symbol_table.h"
@@ -321,8 +323,13 @@ IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
 
 IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
                                     TypeRecord* type) {
-  return IRSetType(GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), addr)),
-                   type);
+  assert(addr->opcode == IR_OP(addressof));
+  IRNode* reload_addr =
+      IRSetType(GeneratorEmit(
+                    gen, NewIR1(IR_OP(addressof), addr->inputs.value.p[0])),
+                addr->type);
+  return IRSetType(
+      GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), reload_addr)), type);
 }
 
 // String literals are global to the compiler.  Each one has a
@@ -515,7 +522,7 @@ typedef struct {
 
 static void FindCall(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   CallFinder* finder = data;
-  if (node->op == AST_OP(call)) {
+  if (node->op == AST_OP(call) || node->op == AST_OP(inline_call)) {
     finder->found_call = true;
   }
 }
@@ -534,12 +541,9 @@ static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node,
                                   IRNode* input);
 
 static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
-  // If the left and right nodes contains a call then we need to move their
-  // results into a temp node. Calls always return in the same register.
-  bool stash_call_results = compiler->call_return_fixed_reg &&
-      ContainsCall(node->left) &&
-      ContainsCall(node->right);
-  
+  // Preserve the left result while evaluating a call on the right. Targets
+  // with selectable return registers can still use a globally shared
+  // temporary register bank that callees clobber (notably the 65C02).
   ASTNode* lhs = node->left;
   ASTNode* rhs = node->right;
   bool is_commutative = IsCommutative(node->base.op);
@@ -566,13 +570,17 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
       rhs = tmp;
     }
   }
+  bool stash_call_results = ContainsCall(rhs);
   IRNode* left = GenerateExpression(gen, lhs);
+  IRNode* left_spill = NULL;
+  TypeRecord* left_spill_type = NULL;
   if (stash_call_results) {
-    left = StashCallResult(gen, left, /*route_conversion_to_dest=*/false);
+    left_spill_type = left->type;
+    left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
   }
   IRNode* right = GenerateExpression(gen, rhs);
-  if (stash_call_results) {
-    right = StashCallResult(gen, right, /*route_conversion_to_dest=*/false);
+  if (left_spill != NULL) {
+    left = GeneratorReloadSpilledValue(gen, left_spill, left_spill_type);
   }
   if (pm_compare_type != NULL) {
     node->left = lhs;
@@ -620,13 +628,17 @@ static IROpcode ThreeWayIROpcode(TypeRecord* type) {
 // member (offset 0) of a fresh comparison-category temporary, mirroring the way
 // struct-by-value results are materialized.
 static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
+  bool stash_left = ContainsCall(node->right);
   IRNode* left = GenerateExpression(gen, node->left);
-  if (ContainsCall(node->left)) {
-    left = StashCallResult(gen, left, /*route_conversion_to_dest=*/false);
+  IRNode* left_spill = NULL;
+  TypeRecord* left_spill_type = NULL;
+  if (stash_left) {
+    left_spill_type = left->type;
+    left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
   }
   IRNode* right = GenerateExpression(gen, node->right);
-  if (ContainsCall(node->right)) {
-    right = StashCallResult(gen, right, /*route_conversion_to_dest=*/false);
+  if (left_spill != NULL) {
+    left = GeneratorReloadSpilledValue(gen, left_spill, left_spill_type);
   }
   TypeRecord* operand_type = node->right->type;
   IROpcode opcode = ThreeWayIROpcode(operand_type);
@@ -1162,10 +1174,30 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
   for (size_t i = 0; i < init->initializers->length; i++) {
     IRNode* destaddr = dest;
     ASTNode* subinit = (ASTNode*)init->initializers->value.p[i];
-    assert(subinit->op == AST_OP(designated_init));
-
-    DesignatedInitializerASTNode* designated_init =
-        (DesignatedInitializerASTNode*)subinit;
+    DesignatedInitializerASTNode sequential_init;
+    DesignatedInitializerASTNode* designated_init = NULL;
+    if (subinit->op == AST_OP(designated_init)) {
+      designated_init = (DesignatedInitializerASTNode*)subinit;
+    } else {
+      // Template instantiation can expose an unflattened array initializer
+      // after substituting the dependent element type. Treat its entries as
+      // ordinary sequential array elements.
+      TypeRecord* aggregate_type =
+          init->base.type != NULL ? init->base.type : node->type;
+      assert(aggregate_type != NULL && TypeIsArray(aggregate_type));
+      memset(&sequential_init, 0, sizeof(sequential_init));
+      sequential_init.base.op = AST_OP(designated_init);
+      sequential_init.base.type = aggregate_type->next;
+      sequential_init.init = subinit;
+      designated_init = &sequential_init;
+      int offset = (int)i * sequential_init.base.type->size;
+      if (offset != 0) {
+        destaddr = GeneratorEmit(
+            gen, NewIR2(IR_OP(adda), dest,
+                        GeneratorGetIntConstant(gen, NULL, offset)));
+      }
+      subinit = (ASTNode*)designated_init;
+    }
     if (designated_init->designators != NULL) {
       if (designated_init->designators->length > 0) {
         // We have designators.  Need to build up an address from the
@@ -1905,7 +1937,7 @@ static bool ExpressionReturnsReference(ASTNode* node) {
     InlineCallASTNode* call = (InlineCallASTNode*)node;
     return call->ret_value != NULL &&
            TypeIsPointer(call->ret_value->type) &&
-           TypeEqual(call->ret_value->type->next, node->type);
+           node->value_category != kValueCategoryPrvalue;
   }
   if (node->op == AST_OP(cast)) {
     return TypeIsReference(((CastASTNode*)node)->cast_type);
@@ -2086,14 +2118,6 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
-    if (stash_value_across_call &&
-        (!compiler->call_return_fixed_reg ||
-         (!IRIsVariable(arg_value) &&
-          arg_value->opcode != IR_OP(addressof)))) {
-      arg_value = StashValueAcrossCall(
-          gen, arg_value, /*rebuild_address_at_reload=*/true);
-    }
-
     if (reference_formal && reference_returning_call) {
       if (TypeIsStructOrUnion(arg_value->type) ||
           TypeIsArray(arg_value->type)) {
@@ -2107,6 +2131,19 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       CheckForVarDef(arg_value, arg);
     } else if (reference_formal) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+    }
+
+    // Preserve the final argument representation. In particular, aggregate
+    // reference binding above turns the materialized class temporary into an
+    // address. Stashing the aggregate first leaves the deferred-reload marker
+    // hidden below a later addressof node, so the argument emission pass never
+    // reloads it after evaluating subsequent arguments.
+    if (stash_value_across_call &&
+        (!compiler->call_return_fixed_reg ||
+         (!IRIsVariable(arg_value) &&
+          arg_value->opcode != IR_OP(addressof)))) {
+      arg_value = StashValueAcrossCall(
+          gen, arg_value, /*rebuild_address_at_reload=*/true);
     }
 
     bool aggregate_value_formal =
@@ -2927,19 +2964,6 @@ static IRNode* GenerateBooleanValue(Generator* gen, IRNode* value) {
   return IRSetType(GeneratorEmit(gen, NewIR2(opcode, value, zero)), bool_type);
 }
 
-static IRNode* AssignBooleanToTmp(Generator* gen, IRNode* value, IRNode* tmp) {
-  if (value == tmp) {
-    return value;
-  }
-  if (value->opcode == IR_OP(tmp) || !IRIsExpression(value) ||
-      IRIsConstant(value) || IRIsVariable(value)) {
-    value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(movi), value)),
-                      NewTypeRecordWithSize(kTypeBool, kQualPlain));
-  }
-  value->dest = tmp;
-  return value;
-}
-
 static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // If the left node is constant we can omit the comparison and branches.
  if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
@@ -2975,17 +2999,16 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
        ASTNodeUsesValue(node->base.parent, &node->base);
  // Non-constant logical operation, generate comparison and branches.
  IRNode* label = NewIR(IR_OP(label));
- IRNode* tmp = NULL;
- if (value_is_used) {
-   tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
- }
+ IRNode* tmp_addr = NULL;
+ TypeRecord* bool_type =
+     NewTypeRecordWithSize(kTypeBool, kQualPlain);
 
  // Evaluate left node.
  IRNode* left = GenerateExpression(gen, node->left);
  
  if (value_is_used) {
    IRNode* left_bool = GenerateBooleanValue(gen, left);
-   AssignBooleanToTmp(gen, left_bool, tmp);
+   tmp_addr = GeneratorSpillValueToTemp(gen, left_bool, bool_type);
  }
 
 
@@ -2998,12 +3021,19 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  IRNode* right = GenerateExpression(gen, node->right);
  if (value_is_used) {
    right = GenerateBooleanValue(gen, right);
-   AssignBooleanToTmp(gen, right, tmp);
+   IRNode* right_addr =
+       IRSetType(GeneratorEmit(
+                     gen, NewIR1(IR_OP(addressof),
+                                 tmp_addr->inputs.value.p[0])),
+                 tmp_addr->type);
+   GeneratorEmit(gen,
+                 NewIR2(GetStoreOpcodeForType(bool_type), right_addr, right));
  }
 
  GeneratorEmit(gen, label);
- if (tmp != NULL) {
-   IRSetType(tmp, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+ IRNode* tmp = NULL;
+ if (tmp_addr != NULL) {
+   tmp = GeneratorReloadSpilledValue(gen, tmp_addr, bool_type);
    if (!TypeIsBool(node->base.type)) {
      return GenerateZeroExtend(gen, (ASTNode*)node, tmp);
    }
@@ -3037,7 +3067,7 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
 
   IRNode* tmp = NULL;
   if (value_is_used && !direct_struct_destination) {
-    tmp = GeneratorEmitVariable(gen, NewIR(IR_OP(tmp)));
+    tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
     IRSetType(tmp, need_address ? NewPointerTo(kQualPlain, node->base.type)
                                  : node->base.type);
   }
@@ -3056,12 +3086,13 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   if (value_is_used && !direct_struct_destination &&
       colon->left->op != AST_OP(throw)) {
     if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left) ||
-        left->opcode == IR_OP(addressof)) {
+        left->opcode == IR_OP(addressof) ||
+        left->opcode == IR_OP(literalref)) {
       IROpcode move_opcode = need_address ? IR_OP(mova) :
           MoveToTmpOpcode(colon->left->type);
       left = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, left)),
                        need_address ? tmp->type : colon->left->type);
-   }
+    }
     left->dest = tmp;
     // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left)), colon->left->type);
   }
@@ -3082,12 +3113,13 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   if (value_is_used && !direct_struct_destination &&
       colon->right->op != AST_OP(throw)) {
     if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right) ||
-        right->opcode == IR_OP(addressof)) {
+        right->opcode == IR_OP(addressof) ||
+        right->opcode == IR_OP(literalref)) {
       IROpcode move_opcode = need_address ? IR_OP(mova) :
           MoveToTmpOpcode(colon->left->type);
       right = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, right)),
                         need_address ? tmp->type : colon->left->type);
-   }
+    }
     right->dest = tmp;
     // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right)), colon->right->type);
   }

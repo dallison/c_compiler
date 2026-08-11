@@ -32,6 +32,14 @@ void vprint_nonunicode(FILE* file, string_view text, format_args args) {
   __print_detail::__write_file(file, vformat(text, args));
 }
 
+void vprint_unicode(string_view text, format_args args) {
+  __print_detail::__write_stdout(vformat(text, args));
+}
+
+void vprint_unicode(FILE* file, string_view text, format_args args) {
+  __print_detail::__write_file(file, vformat(text, args));
+}
+
 void print(
     const typename __format_detail::__non_deduced<format_string<>>::type& text) {
   __print_detail::__write_stdout(
@@ -54,9 +62,7 @@ void println(
 }
 
 void println() {
-  if (::fwrite("\n", 1, 1, stdout) != 1) {
-    __format_detail::__fail("print write failed");
-  }
+  __print_detail::__write_stdout(string("\n"));
 }
 
 void println(

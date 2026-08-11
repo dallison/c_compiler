@@ -222,6 +222,15 @@ static bool IsAddWithImmediate(TargetInstruction* inst) {
          ARMIsIntConst(inst->operand[1]);
 }
 
+static bool MemoryOffsetPossible(TargetInstruction* inst, int offset) {
+  ARMOpcode opcode = (ARMOpcode)inst->opcode;
+  if (opcode == ARM_OP(ldrh) || opcode == ARM_OP(ldrsh) ||
+      opcode == ARM_OP(ldrsb) || opcode == ARM_OP(strh)) {
+    return offset >= -255 && offset <= 255;
+  }
+  return ARMIsPossibleImmediate(offset);
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   ARMGenerator* rv = opt_data->rv;
@@ -242,7 +251,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       if (IsAddWithImmediate(base) && base->dest == NULL) {
         int offset = ARMIntValue(inst->operand[1]);
         int immed = ARMIntValue(base->operand[1]);
-        if (ARMIsPossibleImmediate(offset + immed)) {
+        if (MemoryOffsetPossible(inst, offset + immed)) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));
@@ -261,7 +270,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       if (IsAddWithImmediate(base) && base->dest == NULL) {
         int offset = ARMIntValue(inst->operand[2]);
         int immed = ARMIntValue(base->operand[1]);
-        if (ARMIsPossibleImmediate(offset + immed)) {
+        if (MemoryOffsetPossible(inst, offset + immed)) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));

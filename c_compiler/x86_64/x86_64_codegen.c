@@ -1556,8 +1556,10 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
     return node->data.ptr;
   }
   X86_64Opcode opcode = IR2X86_64(node->opcode);
-  if (node->inputs.length > 0 &&
-      ((IRNode*)node->inputs.value.p[0])->type->size <= 4) {
+  if (node->type != NULL && node->type->size <= 4) {
+    if (node->opcode == IR_OP(addi)) opcode = X86_64_OP(addl);
+    if (node->opcode == IR_OP(subi)) opcode = X86_64_OP(subl);
+    if (node->opcode == IR_OP(muli)) opcode = X86_64_OP(imull);
     if (opcode == X86_64_OP(rol)) opcode = X86_64_OP(roll);
     if (opcode == X86_64_OP(ror)) opcode = X86_64_OP(rorl);
     if (opcode == X86_64_OP(bsf)) opcode = X86_64_OP(bsfl);

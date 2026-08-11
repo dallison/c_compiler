@@ -3896,6 +3896,40 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
   }
 
+  // Capture register arguments before assigning any physical argument
+  // registers. Argument expressions can themselves still reside in x0..x7
+  // (especially forwarding calls such as gt(a, b) -> lt(b, a)); moving one
+  // argument directly would otherwise destroy a later argument in a register
+  // cycle.
+  Vector staged_register_args;
+  VectorInit(&staged_register_args);
+  for (size_t i = 1; i < node->inputs.length; i++) {
+    VectorAppend(&staged_register_args, NULL);
+  }
+  for (size_t i = 1; i < node->inputs.length; i++) {
+    ArgLocation* arg_location = arg_locations.value.p[i - 1];
+    if (arg_location->type != kArgLocationRegister) {
+      continue;
+    }
+    IRNode* arg_node = node->inputs.value.p[i];
+    TargetInstruction* arg = Materialize(g, arg_node);
+    if (TypeIsStructOrUnion(arg_node->type) && arg_node->type->size <= 8) {
+      arg = Emit(g, CopyInstructionSize(
+                        NewInstruction2(
+                            AARCH64_OP(ldr), arg,
+                            GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                        0));
+    }
+    AARCH64Opcode move_opcode = TypeIsFloatingPoint(arg_node->type)
+                                    ? AARCH64_OP(fmov)
+                                    : AARCH64_OP(mov);
+    TargetInstruction* staged = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+    TargetInstruction* move =
+        Emit(g, CopyInstructionSize(NewInstruction1(move_opcode, arg), 0));
+    move->dest = staged;
+    VectorSet(&staged_register_args, i - 1, staged);
+  }
+
   // Phase 4:
   // Pass through all args, in reverse order, pushing those not passed in
   // registers and moving the register arguments into their argument
@@ -3984,18 +4018,9 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       }
       case kArgLocationRegister: {
         // Argument is in a register.
-        TargetInstruction* arg = Materialize(g, arg_node);
-        if (TypeIsStructOrUnion(arg_node->type)) {
-          size_t size = arg_node->type->size;
-          if (size <= 8) {
-            // A struct less than 8 bytes is passed in a register.  The
-            // Materialize call will result in the address of the struct.  We
-            // need to load it.
-            arg = Emit(g, CopyInstructionSize(NewInstruction2(
-                               AARCH64_OP(ldr), arg,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)), 0));
-          }
-        }
+        TargetInstruction* arg =
+            VectorGet(&staged_register_args, i - 1);
+        assert(arg != NULL);
         AARCH64Opcode mov_opcode = AARCH64_OP(mov);
         if (TypeIsFloatingPoint(arg_node->type)) {
           mov_opcode = AARCH64_OP(fmov);
@@ -4097,6 +4122,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, call);
 
+  VectorDestruct(&staged_register_args);
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
   return call;
 }

@@ -726,10 +726,16 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       parser->syntax->parsing_template_declaration &&
       specialization_args != NULL;
   if (is_full_specialization || is_partial_specialization) {
-    specialization_template =
-        has_qualified_tag ? SyntaxFindQualifiedSymbol(parser->syntax,
-                                                      &qualified_tag)
-                          : SyntaxFindSymbol(parser->syntax, &tag_name);
+    if (has_qualified_tag) {
+      specialization_template =
+          SyntaxFindQualifiedSymbol(parser->syntax, &qualified_tag);
+    } else {
+      specialization_template = SyntaxFindTag(parser->syntax, &tag_name);
+      if (specialization_template == NULL ||
+          !specialization_template->flags.is_template) {
+        specialization_template = SyntaxFindSymbol(parser->syntax, &tag_name);
+      }
+    }
     if (specialization_template == NULL ||
         !specialization_template->flags.is_template ||
         specialization_template->type == NULL ||

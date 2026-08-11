@@ -107,6 +107,10 @@ static inline void __parse_spec_range(const string_view& text, size_t start,
       __fail("missing precision");
     }
   }
+  if (position < end && text[position] == 'L') {
+    result->localized = true;
+    ++position;
+  }
   if (position < end) {
     result->type = text[position++];
   }
@@ -135,14 +139,171 @@ size_t __prefix_length(const string& value) {
   return result;
 }
 
+static bool __utf8_decode(string_view value, size_t position,
+                          unsigned long* code_point, size_t* length) {
+  if (position >= value.size()) {
+    return false;
+  }
+  unsigned long first =
+      static_cast<unsigned long>(value[position]) & 0xFFUL;
+  if (first < 0x80) {
+    *code_point = first;
+    *length = 1;
+    return true;
+  }
+  size_t count = 0;
+  if (first >= 0xF0 && first <= 0xF4) {
+    count = 4;
+  } else if (first >= 0xE0 && first <= 0xEF) {
+    count = 3;
+  } else if (first >= 0xC2 && first <= 0xDF) {
+    count = 2;
+  }
+  if (count == 0 || position + count > value.size()) {
+    *code_point = 0xFFFD;
+    *length = 1;
+    return false;
+  }
+  unsigned long result = first & (0x7FUL >> count);
+  for (size_t i = 1; i < count; ++i) {
+    unsigned long next =
+        static_cast<unsigned long>(value[position + i]) & 0xFFUL;
+    if ((next & 0xC0) != 0x80) {
+      *code_point = 0xFFFD;
+      *length = 1;
+      return false;
+    }
+    result = (result << 6) | (next & 0x3F);
+  }
+  if ((count == 2 && result < 0x80) ||
+      (count == 3 && result < 0x800) ||
+      (count == 4 && (result < 0x10000 || result > 0x10FFFF)) ||
+      (result >= 0xD800 && result <= 0xDFFF)) {
+    *code_point = 0xFFFD;
+    *length = 1;
+    return false;
+  }
+  *code_point = result;
+  *length = count;
+  return true;
+}
+
+static bool __unicode_combining(unsigned long value) {
+  return (value >= 0x0300 && value <= 0x036F) ||
+         (value >= 0x1AB0 && value <= 0x1AFF) ||
+         (value >= 0x1DC0 && value <= 0x1DFF) ||
+         (value >= 0x20D0 && value <= 0x20FF) ||
+         (value >= 0xFE20 && value <= 0xFE2F) ||
+         value == 0x200D || (value >= 0xFE00 && value <= 0xFE0F);
+}
+
+static size_t __unicode_width(unsigned long value) {
+  if (value == 0 || value < 0x20 || (value >= 0x7F && value < 0xA0) ||
+      __unicode_combining(value)) {
+    return 0;
+  }
+  if ((value >= 0x1100 && value <= 0x115F) ||
+      (value >= 0x2329 && value <= 0x232A) ||
+      (value >= 0x2E80 && value <= 0xA4CF) ||
+      (value >= 0xAC00 && value <= 0xD7A3) ||
+      (value >= 0xF900 && value <= 0xFAFF) ||
+      (value >= 0xFE10 && value <= 0xFE19) ||
+      (value >= 0xFE30 && value <= 0xFE6F) ||
+      (value >= 0xFF00 && value <= 0xFF60) ||
+      (value >= 0xFFE0 && value <= 0xFFE6) ||
+      (value >= 0x1F300 && value <= 0x1FAFF) ||
+      (value >= 0x20000 && value <= 0x3FFFD)) {
+    return 2;
+  }
+  return 1;
+}
+
+size_t __utf8_display_width(string_view value) {
+  size_t width = 0;
+  for (size_t position = 0; position < value.size();) {
+    unsigned long code_point = 0;
+    size_t length = 1;
+    __utf8_decode(value, position, &code_point, &length);
+    width += __unicode_width(code_point);
+    position += length;
+  }
+  return width;
+}
+
+size_t __utf8_prefix_for_width(string_view value, size_t maximum_width) {
+  size_t position = 0;
+  size_t accepted = 0;
+  size_t width = 0;
+  while (position < value.size()) {
+    unsigned long code_point = 0;
+    size_t length = 1;
+    __utf8_decode(value, position, &code_point, &length);
+    size_t code_width = __unicode_width(code_point);
+    if (code_width != 0 && width + code_width > maximum_width) {
+      break;
+    }
+    width += code_width;
+    position += length;
+    accepted = position;
+  }
+  return accepted;
+}
+
+static void __append_hex_escape(unsigned char value, string* output) {
+  static const char digits[] = "0123456789abcdef";
+  output->append("\\x", 2);
+  output->push_back(digits[value >> 4]);
+  output->push_back(digits[value & 15]);
+}
+
+void __append_debug_string(string_view value, bool character, string* output) {
+  const char quote = character ? '\'' : '"';
+  output->push_back(quote);
+  for (size_t position = 0; position < value.size();) {
+    unsigned char byte = static_cast<unsigned char>(value[position]);
+    if (byte == static_cast<unsigned char>(quote) || byte == '\\') {
+      output->push_back('\\');
+      output->push_back(static_cast<char>(byte));
+      ++position;
+    } else if (byte == '\n' || byte == '\r' || byte == '\t') {
+      output->push_back('\\');
+      output->push_back(byte == '\n' ? 'n' : byte == '\r' ? 'r' : 't');
+      ++position;
+    } else if (byte < 0x20 || byte == 0x7F) {
+      __append_hex_escape(byte, output);
+      ++position;
+    } else if (byte < 0x80) {
+      output->push_back(static_cast<char>(byte));
+      ++position;
+    } else {
+      unsigned long code_point = 0;
+      size_t length = 1;
+      bool valid = __utf8_decode(value, position, &code_point, &length);
+      (void)code_point;
+      if (!valid) {
+        __append_hex_escape(byte, output);
+        ++position;
+      } else {
+        output->append(value.data() + position, length);
+        position += length;
+      }
+    }
+  }
+  output->push_back(quote);
+}
+
 void __append_padded(string* output, const string* value,
-                     const __spec* spec, bool numeric) {
+                     const __spec* spec, bool numeric, bool unicode_text) {
   size_t width = spec->width > 0 ? static_cast<size_t>(spec->width) : 0;
-  if (width <= value->size()) {
+  size_t value_width =
+      unicode_text
+          ? __utf8_display_width(string_view(value->data(), value->size()))
+          : value->size();
+  if (width <= value_width) {
     output->append(*value);
     return;
   }
-  size_t padding = width - value->size();
+  size_t padding = width - value_width;
   char align = spec->align;
   if (align == 0) {
     align = numeric ? '>' : '<';
@@ -516,6 +677,10 @@ void __vformat_to(const char* text_data, size_t text_size,
         } else {
           __fail("missing precision");
         }
+      }
+      if (spec_position < spec_end && text_data[spec_position] == 'L') {
+        parsed_specification.localized = true;
+        ++spec_position;
       }
       if (spec_position < spec_end) {
         parsed_specification.type = text_data[spec_position++];

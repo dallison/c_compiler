@@ -22,6 +22,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <latch>
+#include <locale>
 #include <list>
 #include <map>
 #include <memory>
@@ -39,6 +40,7 @@
 #include <set>
 #include <source_location>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <stop_token>
 #include <stack>

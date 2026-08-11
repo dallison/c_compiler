@@ -1112,6 +1112,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       String typedef_name;
       StringInit(&typedef_name, lex->spelling.value);
       Symbol* symbol = SyntaxFindSymbol(parser->syntax, &typedef_name);
+      if (symbol != NULL && !symbol->flags.is_template &&
+          LexLookingAt(lex, TOK(less))) {
+        Symbol* tag_symbol = SyntaxFindTag(parser->syntax, &typedef_name);
+        if (tag_symbol != NULL && tag_symbol->flags.is_template &&
+            tag_symbol->type != NULL && TypeIsStructOrUnion(tag_symbol->type)) {
+          symbol = tag_symbol;
+        }
+      }
       if (symbol == NULL) {
         Symbol* tag_symbol = SyntaxFindTag(parser->syntax, &typedef_name);
         if (tag_symbol != NULL && tag_symbol->flags.is_template &&
@@ -1201,6 +1209,31 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                     (VectorElementDestructor)TemplateArgumentDelete,
                     /*free_element=*/false);
               }
+              type_record->template_arguments = args;
+              args = NULL;
+            }
+          }
+          type |= type_record->type;
+          if (args != NULL) {
+            VectorDestructWithContents(args,
+                                       (VectorElementDestructor)TemplateArgumentDelete,
+                                       /*free_element=*/false);
+          }
+        } else if (symbol->flags.is_template && symbol->type != NULL &&
+                   TypeIsStructOrUnion(symbol->type)) {
+          symbol->flags.used = true;
+          LexNextToken(lex);
+          Vector* args = NULL;
+          if (LexLookingAt(lex, TOK(less))) {
+            args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+          }
+          if (args != NULL && !parser->syntax->parsing_template_declaration &&
+              !TemplateArgumentVectorContainsTemplateParameter(args)) {
+            type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
+          } else {
+            type_record = TypeRecordCopy(symbol->type);
+            type_record->template_origin = symbol;
+            if (args != NULL) {
               type_record->template_arguments = args;
               args = NULL;
             }

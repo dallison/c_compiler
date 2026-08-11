@@ -499,6 +499,26 @@ static bool UsesA(TargetInstruction* inst) {
   return false;
 }
 
+static bool WritesSameOperand(TargetInstruction* inst,
+                              TargetInstruction* reference) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(sta):
+    case W65C02_OP(stz):
+    case W65C02_OP(inc):
+    case W65C02_OP(dec):
+    case W65C02_OP(asl):
+    case W65C02_OP(lsr):
+    case W65C02_OP(rol):
+    case W65C02_OP(ror):
+      return GetAddrMode(inst) != kAddrModeAccumulator &&
+             inst->operand[0] == reference->operand[0] &&
+             inst->operand[1] == reference->operand[1] &&
+             GetAddrMode(inst) == GetAddrMode(reference);
+    default:
+      return false;
+  }
+}
+
 static TargetInstruction* PreviousModifierOfA(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
@@ -783,7 +803,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           previous = TargetPrev(previous);
         }
         if (ByteValueLoadLeavesA(previous) &&
-            previous->operand[0] == inst->operand[0]) {
+            previous->operand[0] == inst->operand[0] &&
+            GetAddrMode(inst) == kAddrModeZeroPage) {
           // The byte-load helpers store the loaded value in their destination
           // and return with that same value still in A. Avoid loading it back
           // from zero page when the next operation consumes the byte.
@@ -822,7 +843,17 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           // But we need to check that if the addressing mode is indirect (Y or X), the index
           // hasn't been modified.  We can't really know that, so prevent removal for indirect
           // addressing modes.
-          if (prev_user->operand[0] == inst->operand[0] && prev_user->operand[1] == inst->operand[1] &&
+          bool value_modified = false;
+          for (TargetInstruction* between = TargetNext(prev_user);
+               between != NULL && between != inst;
+               between = TargetNext(between)) {
+            if (WritesSameOperand(between, inst)) {
+              value_modified = true;
+              break;
+            }
+          }
+          if (!value_modified &&
+              prev_user->operand[0] == inst->operand[0] && prev_user->operand[1] == inst->operand[1] &&
               GetAddrMode(prev_user) == GetAddrMode(inst) &&
               GetAddrMode(inst) != kAddrModeIndirectIndexed && GetAddrMode(inst) != kAddrModeIndirect) {
             TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);

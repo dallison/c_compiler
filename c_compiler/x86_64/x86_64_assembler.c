@@ -995,11 +995,20 @@ static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
   EncodeFinish(&enc);
 }
 
-static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext) {
+static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext,
+                    int force_bits) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
     return;
+  }
+  if (force_bits == 32) {
+    if (src.kind == kX86OpReg && !src.reg.is_xmm) {
+      src.reg.size = kX86Size32;
+    }
+    if (dst.kind == kX86OpReg && !dst.reg.is_xmm) {
+      dst.reg.size = kX86Size32;
+    }
   }
 
   if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
@@ -1640,12 +1649,12 @@ static void EmitFnegSd(X86_64Assembler* assembler) {
 
 static void Assemble_movw(X86_64Assembler* assembler) { EmitMovSized(assembler, 16); }
 static void Assemble_movabs(X86_64Assembler* assembler) { EmitMovabs(assembler); }
-static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
-static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
-static void Assemble_xorq(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
-static void Assemble_xorl(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
-static void Assemble_addl(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
-static void Assemble_subl(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
+static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
+static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
+static void Assemble_xorq(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
+static void Assemble_xorl(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 32); }
+static void Assemble_addl(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 32); }
+static void Assemble_subl(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 32); }
 static void Assemble_cmpb(X86_64Assembler* assembler) { EmitCmp(assembler); }
 static void Assemble_cmpl(X86_64Assembler* assembler) { EmitCmp(assembler); }
 static void Assemble_cmpw(X86_64Assembler* assembler) { EmitCmp(assembler); }
@@ -1888,13 +1897,13 @@ static void Assemble_pop(X86_64Assembler* assembler) {
 static void Assemble_popq(X86_64Assembler* assembler) {
   EmitPushPop(assembler, false);
 }
-static void Assemble_add(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
-static void Assemble_addq(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
-static void Assemble_sub(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
-static void Assemble_subq(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
-static void Assemble_and(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
-static void Assemble_or(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
-static void Assemble_xor(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
+static void Assemble_add(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
+static void Assemble_addq(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
+static void Assemble_sub(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
+static void Assemble_subq(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
+static void Assemble_and(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
+static void Assemble_or(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
+static void Assemble_xor(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
 static void Assemble_cmp(X86_64Assembler* assembler) { EmitCmp(assembler); }
 static void Assemble_cmpq(X86_64Assembler* assembler) { EmitCmp(assembler); }
 static void Assemble_lea(X86_64Assembler* assembler) { EmitLea(assembler); }

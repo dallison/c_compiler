@@ -1463,9 +1463,17 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   }
   if (TypeIsConst(node->symbol->type) || node->symbol->flags.is_constexpr ||
       node->symbol->flags.is_constinit) {
-    EvaluateScalarConstantForSymbol(node->symbol, node->initializer) ||
-        ConstexprEvaluateObjectConstantForSymbol(node->symbol,
-                                                node->initializer);
+    bool scalar =
+        EvaluateScalarConstantForSymbol(node->symbol, node->initializer);
+    bool ordinary_automatic_const =
+        node->symbol->flags.is_local &&
+        !StorageIs(node->symbol->storage, STO(static) | STO(thread)) &&
+        !node->symbol->flags.is_constexpr &&
+        !node->symbol->flags.is_constinit;
+    if (!scalar && !ordinary_automatic_const) {
+      ConstexprEvaluateObjectConstantForSymbol(node->symbol,
+                                               node->initializer);
+    }
   }
   if (TypeIsMemberPointer(node->symbol->type)) {
     MemberPointerValue value;

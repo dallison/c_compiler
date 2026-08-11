@@ -319,7 +319,15 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
       }
       assert(IsSpillInstruction(owner) ||
              (owner->flags & TARGET_INST_SPILLED) == 0);
-      
+      if (!IsSpillInstruction(owner)) {
+        MapKeyType key = {.w = owner->id};
+        TargetInstruction* point =
+            MapFind(&allocator->spill_points, key);
+        if (point == NULL ||
+            (point->flags & TARGET_INST_PROCESSED) == 0) {
+          continue;
+        }
+      }
       int cost = SpillCost(owner);
       if (cost < min_cost) {
         min_cost = cost;
@@ -431,9 +439,6 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
 
   // printf("Spilled @%d (reg %d) as @%d\n", victim->id, reg->base.num, spill->id);
  
-  // Emit spill instruction just after spill point.
-  TargetBasicBlockEmitAfter(&allocator->g->base, victim->block, spill, spill_point);
-  
   // Retarget all uses of the original instruction to the spill.  If the
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
@@ -441,6 +446,10 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
   TargetRetargetInstructionIf(victim, spill, NotProcessed, NULL);
   spill->operand[0] = victim;
   spill->reg = victim->reg;
+  // Emit spill instruction just after spill point.
+  TargetBasicBlockEmitAfter(&allocator->g->base, spill_point->block, spill,
+                            spill_point);
+
   reg->base.owner = NULL;
   victim->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -574,6 +583,25 @@ static W65C02RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
   }
 }
 
+static bool IsDeferredMergeExpression(TargetInstruction* inst) {
+  if (inst->opcode != (TargetOpcode)W65C02_OP(expr1)) {
+    return false;
+  }
+  int stores = 0;
+  int loads = 0;
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    if (user->opcode == (TargetOpcode)W65C02_OP(sta)) {
+      stores++;
+    } else if (user->opcode == (TargetOpcode)W65C02_OP(lda)) {
+      loads++;
+    } else if (user->opcode != (TargetOpcode)W65C02_OP(reloadpoint)) {
+      return false;
+    }
+  }
+  return stores == 2 && loads == 1;
+}
+
 static void FreeRegisters(W65C02RegisterAllocator* allocator,
                           TargetInstruction* inst) {
   if (IsSpillOnly(inst)) {
@@ -644,17 +672,41 @@ static W65C02Register* AllocateRegisterWithType(
   return reg;
 }
 
+static void AllocateDeferredOperands(W65C02RegisterAllocator* allocator,
+                                     TargetInstruction* inst) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op == NULL || op->reg != NULL || !IsDeferredMergeExpression(op)) {
+      continue;
+    }
+    assert((op->flags & TARGET_INST_PROCESSED) != 0);
+    W65C02Register* reg = AllocateRegisterWithType(
+        allocator, k6502RegTypeB, CanUseTemp(allocator, op));
+    op->reg = &reg->base;
+    reg->base.owner = op;
+  }
+}
+
 struct ReloadData {
   TargetInstruction* spilled;
   TargetInstruction* reload;
 };
+
+static TargetInstruction* OriginalSpilledValue(TargetInstruction* inst) {
+  while (inst != NULL && IsSpillInstruction(inst) &&
+         inst->operand[0] != NULL) {
+    inst = inst->operand[0];
+  }
+  return inst;
+}
 
 static void RetargetToReload(TargetBasicBlock* block, void* data) {
   struct ReloadData* rdata = data;
   for (TargetInstruction* inst = block->code;
        inst != NULL && TargetPrev(inst) != block->end_code;
        inst = TargetNext(inst)) {
-    if (inst == rdata->reload) {
+    if (inst == rdata->reload || IsSpillInstruction(inst) ||
+        inst->opcode == (TargetOpcode)W65C02_OP(reloadpoint)) {
       continue;
     }
     bool replaced = false;
@@ -669,29 +721,17 @@ static void RetargetToReload(TargetBasicBlock* block, void* data) {
       TargetAddUser(rdata->reload, inst);
     }
   }
-  // Add the reload instruction to the inputs of the block if the block has
-  // the spilled instruction as an input.
-  if (BitSetContains(&block->input_ids, rdata->spilled->operand[0]->id)) {
-    if (!BitSetContains(&block->input_ids, rdata->reload->id)) {
-      VectorAppend(&block->inputs, rdata->reload);
-      BitSetInsert(&block->input_ids, rdata->reload->id);
-    }
-  }
-  // Same for outputs.
-  if (BitSetContains(&block->output_ids, rdata->spilled->operand[0]->id)) {
-    if (!BitSetContains(&block->output_ids, rdata->reload->id)) {
-      VectorAppend(&block->outputs, rdata->reload);
-      BitSetInsert(&block->output_ids, rdata->reload->id);
-    }
-  }
 }
 
 static TargetInstruction* FindReloadPoint(TargetInstruction* inst, TargetInstruction* spill) {
   void* block = inst->block;
   TargetInstruction* p = TargetPrev(inst);
   while (p != NULL && p->block == block) {
-    if (p->opcode == (TargetOpcode)W65C02_OP(reloadpoint) && p->operand[0] == spill) {
-      return p;
+    if (p->opcode == (TargetOpcode)W65C02_OP(reloadpoint)) {
+      if (OriginalSpilledValue(p->operand[0]) ==
+          OriginalSpilledValue(spill)) {
+        return p;
+      }
     }
     p = TargetPrev(p);
   }
@@ -716,14 +756,12 @@ static void ReloadSpills(W65C02RegisterAllocator* allocator,
       assert(reg != NULL);
       AssignRegister(reg, reload);
       
-      // In any blocks dominated by this one, we now need to retarget
-      // all references to the spilled instruction to the reload instruction.
+      // Keep a reload local to this basic block. Calls terminate 65C02 blocks,
+      // so propagating a reload into dominated successors can incorrectly keep
+      // it in a caller-clobbered register across the call. A successor that
+      // still needs the spilled value will create its own reload.
       struct ReloadData rdata = {.spilled = op, .reload = reload};
-      TargetBasicBlockTraverseDominatorTree(&allocator->g->base,
-                                            inst->block,
-                                            RetargetToReload,
-                                            kTraversePreOrder,
-                                            &rdata);
+      RetargetToReload(inst->block, &rdata);
       
     }
   }
@@ -827,6 +865,13 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
     return;
   }
 
+  if (IsDeferredMergeExpression(inst)) {
+    inst->uses = (int)inst->users.length;
+    inst->flags |= TARGET_INST_PROCESSED;
+    return;
+  }
+
+  AllocateDeferredOperands(allocator, inst);
   ReloadSpills(allocator, inst);
  
   W65C02Register* reg;
@@ -881,9 +926,27 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
       break;
       
     case W65C02_OP(structreturn): {
-      W65C02RegisterType reg_type = RegisterTypeFromInstruction(inst);
-      reg = AllocateRegisterWithType(allocator, reg_type, CanUseTemp(allocator, inst));
-      reg->base.reserved = true;
+      // Inlining can leave more than one structreturn pseudo-instruction in a
+      // function. They all denote the same hidden return-buffer argument and
+      // must share its permanently reserved register; reserving a fresh
+      // register for every copy eventually exhausts the preserved register
+      // bank.
+      reg = NULL;
+      for (int i = 0; i < W65C02_NUM_I_REGS; i++) {
+        // Structreturn is the only pseudo-instruction that reserves a normal
+        // I register. Its owner may already have reached zero uses, but the
+        // reservation still identifies the shared hidden-argument register.
+        if (allocator->i_regs[i].base.reserved) {
+          reg = &allocator->i_regs[i];
+          break;
+        }
+      }
+      if (reg == NULL) {
+        W65C02RegisterType reg_type = RegisterTypeFromInstruction(inst);
+        reg = AllocateRegisterWithType(
+            allocator, reg_type, CanUseTemp(allocator, inst));
+        reg->base.reserved = true;
+      }
       break;
     }
       

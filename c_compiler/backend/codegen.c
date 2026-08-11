@@ -932,7 +932,10 @@ static void StraightenGraph(Generator* gen) {
     if (block->in_edges.length == 1) {
       // Found a possible movable block.
       BasicBlock* input = VectorGet(&gen->basic_blocks, block->in_edges.value.w[0]);
-      if (input->out_edges.length == 1) {
+      // A single-block loop is its own sole predecessor and successor. It is
+      // not a coalescing candidate: moving a block's instructions into itself
+      // continually reinserts each instruction before its own terminator.
+      if (input != block && input->out_edges.length == 1) {
         assert(block == VectorGet(&gen->basic_blocks, input->out_edges.value.w[0]));
         IRNode* terminator = input->end_code;
         // Unconditional branch, not in a jump table.
@@ -1324,8 +1327,26 @@ static void GenerateVLASizeExpressions(Generator* gen, Vector* prototype) {
   }
 }
 
+static void ResetASTIRLabel(ASTNode* node, void* data, int child_id,
+                            VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  if (node->op == AST_OP(label)) {
+    ((LabelASTNode*)node)->label = NULL;
+  } else if (node->op == AST_OP(case)) {
+    ((CaseLabelASTNode*)node)->label = NULL;
+  }
+}
+
 void* GenerateFunction(Generator* gen) {
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)gen->func->info.function.body;
+  // Template and inline ASTs can be emitted more than once. IR label nodes are
+  // owned by one Generator and are destroyed with its IR, so never reuse the
+  // cached pointer left by an earlier emission of the same AST.
+  ASTNodeVisit(&body->base, ResetASTIRLabel, 0, NULL);
   if (body->statements->length == 0) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));

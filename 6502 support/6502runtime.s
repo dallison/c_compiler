@@ -2297,6 +2297,11 @@ umul4_l2:
             RTS
 
 __smul8:
+  // The low 64 bits of two's-complement signed and unsigned products are
+  // identical. Reuse the unsigned implementation; the old sign-adjusting
+  // path called into a stack-consuming helper with JSR and corrupted its
+  // saved result address.
+  JMP __umul8
   PHA
   LDA 0,X
   STA multiplicand

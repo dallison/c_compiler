@@ -1156,6 +1156,55 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
   return inst;
 }
 
+static bool IntegerArithmeticNeedsNormalization(IROpcode opcode) {
+  switch (opcode) {
+    case IR_OP(addi):
+    case IR_OP(subi):
+    case IR_OP(muli):
+    case IR_OP(divi):
+    case IR_OP(modi):
+    case IR_OP(lsri):
+    case IR_OP(asri):
+    case IR_OP(lsli):
+    case IR_OP(ori):
+    case IR_OP(andi):
+    case IR_OP(xori):
+    case IR_OP(noti):
+    case IR_OP(onescomp):
+    case IR_OP(negi):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static TargetInstruction* NormalizeIntegerArithmeticResult(
+    PCodeGenerator* pcode, IRNode* node, TargetInstruction* value) {
+  int size = node->type == NULL ? 8 : node->type->size;
+  if (size <= 0 || size >= 8) {
+    return value;
+  }
+
+  int shift = 64 - size * 8;
+  if (TypeIsUnsigned(node->type)) {
+    uint64_t mask = (UINT64_C(1) << (size * 8)) - 1;
+    TargetInstruction* mask_value = Emit(
+        pcode, NewInstruction1(
+                   P_OP(movxc),
+                   GetIntConstant(pcode, NULL, kTargetType64Bit, mask)));
+    return Emit(pcode, NewInstruction2(P_OP(and), value, mask_value));
+  }
+
+  TargetInstruction* shift_value =
+      Emit(pcode,
+           NewInstruction1(P_OP(movc),
+                           GetIntConstant(pcode, NULL, kTargetType32Bit,
+                                          shift)));
+  TargetInstruction* shifted =
+      Emit(pcode, NewInstruction2(P_OP(lsl), value, shift_value));
+  return Emit(pcode, NewInstruction2(P_OP(asr), shifted, shift_value));
+}
+
 static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
@@ -1182,9 +1231,13 @@ static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
     }
   }
   TargetUpdateOperandUsers(inst);
-  ApplyDestInstruction(pcode, node, inst);
-  SetLoweredNode(node, inst);
-  return Emit(pcode, inst);
+  TargetInstruction* result = Emit(pcode, inst);
+  if (IntegerArithmeticNeedsNormalization(node->opcode)) {
+    result = NormalizeIntegerArithmeticResult(pcode, node, result);
+  }
+  ApplyDestInstruction(pcode, node, result);
+  SetLoweredNode(node, result);
+  return result;
 }
 
 static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,

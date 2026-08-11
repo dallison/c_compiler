@@ -107,7 +107,7 @@ STA 7,X
 RTS
 
 __sdiv8:
-  PHA
+  STA __t0
   LDA 0,X
   STA dividend
   LDA 1,X
@@ -133,7 +133,7 @@ LDA 0,Y
   STA divisor+1
   LDA 2,Y
   STA divisor+2
-  LDA 2,Y
+  LDA 3,Y
   STA divisor+3
 LDA 4,Y
 STA divisor+4
@@ -144,27 +144,44 @@ STA divisor+6
 LDA 7,Y
 STA divisor+7
   EOR dividend+7
-  BPL udiv8_1
+  AND #0x80
+  STA __t1
 
-  // One of divisor or dividend is negative.  Result will be negative.
-  LDA divisor+7
-  BPL sdiv8_l1
-
-  // Divisor is negative, negate it.
-  JSR negate_divisor
-  BRA sdiv8_l2
-
-sdiv8_l1:
-  // Dividend is negative, negate it.
+  // Divide magnitudes, then apply the quotient sign. Keep the destination in
+  // scratch rather than on the hardware stack: udiv8 is called with JSR and
+  // therefore cannot pop a caller byte from that stack.
+  LDA dividend+7
+  BPL sdiv8_dividend_positive
   JSR negate_dividend
-
-sdiv8_l2:
-  // Perform unsigned divide
-  PLA
+sdiv8_dividend_positive:
+  LDA divisor+7
+  BPL sdiv8_divisor_positive
+  JSR negate_divisor
+sdiv8_divisor_positive:
   JSR udiv8
 
-  // Negate result.
+  LDX __t0
+  LDA quotient
+  STA 0,X
+  LDA quotient+1
+  STA 1,X
+  LDA quotient+2
+  STA 2,X
+  LDA quotient+3
+  STA 3,X
+  LDA quotient+4
+  STA 4,X
+  LDA quotient+5
+  STA 5,X
+  LDA quotient+6
+  STA 6,X
+  LDA quotient+7
+  STA 7,X
+  LDA __t1
+  BPL sdiv8_done
   JMP negate_result
+sdiv8_done:
+  RTS
 
 __udiv8:
   PHA
@@ -253,6 +270,7 @@ ROL dividend+6
 ROL remainder+3
 ROL remainder+4
 ROL remainder+5
+ROL remainder+6
 ROL remainder+7
         LDA remainder
         SEC         // Trial subtraction

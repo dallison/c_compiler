@@ -179,6 +179,22 @@
 #define SYS_FS_COPY_FILE 47
 #define SYS_FS_CANONICAL 48
 
+#define SYS_TZDB_VERSION 49
+#define SYS_TZDB_GENERATION 50
+#define SYS_TZDB_RELOAD 51
+#define SYS_TZDB_CURRENT_ZONE 52
+#define SYS_TZDB_ZONE_COUNT 53
+#define SYS_TZDB_ZONE_NAME 54
+#define SYS_TZDB_LOCATE_ZONE 55
+#define SYS_TZDB_SYS_INFO 56
+#define SYS_TZDB_LOCAL_INFO 57
+#define SYS_TZDB_LEAP_COUNT 58
+#define SYS_TZDB_LEAP_INFO 59
+
+#if defined(SYS_TZDB_VERSION)
+#define __DAVECC_HAS_HOST_TZDB__ 1
+#endif
+
 #if defined(SYS_THREAD_CREATE) && defined(SYS_HEAP_LOCK) && \
     !defined(__p_code__)
 #define __DAVECC_HAS_GUEST_THREADS__ 1

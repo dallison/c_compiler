@@ -59,6 +59,9 @@ filegroup(
         "libc/include/istream",
         "libc/include/iterator",
         "libc/include/latch",
+        "libc/include/__locale_core",
+        "libc/include/__basic_ios_locale",
+        "libc/include/locale",
         "libc/include/list",
         "libc/include/map",
         "libc/include/memory",
@@ -737,6 +740,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":linker",
         ":loader",
@@ -750,6 +754,15 @@ cc_library(
     hdrs = ["c_compiler/Loader/filesystem_host.h"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
+)
+
+cc_library(
+    name = "chrono_host",
+    srcs = ["c_compiler/Loader/chrono_host.c"],
+    hdrs = ["c_compiler/Loader/chrono_host.h"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":filesystem_host"],
 )
 
 cc_library(
@@ -771,6 +784,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
@@ -800,6 +814,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
@@ -826,6 +841,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
@@ -854,6 +870,7 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":guest_addr_wait",
         ":linker",
@@ -880,6 +897,7 @@ cc_library(
     includes = COMMON_INCLUDES + ["p_code_interpreter"],
     deps = [
         ":elf",
+        ":chrono_host",
         ":filesystem_host",
         ":linker",
         ":loader",
@@ -2298,6 +2316,88 @@ sh_test(
         ":6502",
         ":davecc",
         ":filesystem_syscall_smoke_source",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
+    ],
+)
+
+filegroup(
+    name = "chrono_syscall_smoke_source",
+    srcs = ["tests/chrono_syscall_smoke.c"],
+)
+
+filegroup(
+    name = "chrono_host_test_source",
+    srcs = ["tests/chrono_host_test.c"],
+)
+
+filegroup(
+    name = "chrono_tzif_fixtures",
+    srcs = [
+        "tests/generate_tzif_fixtures.py",
+    ],
+)
+
+cc_binary(
+    name = "chrono_host_test_bin",
+    srcs = [":chrono_host_test_source"],
+    copts = COMMON_COPTS,
+    deps = [":chrono_host"],
+)
+
+sh_test(
+    name = "chrono_host_test",
+    srcs = ["tests/run_chrono_host_test.sh"],
+    args = ["$(rootpath :chrono_host_test_bin)"],
+    data = [
+        ":chrono_host_test_bin",
+        ":chrono_tzif_fixtures",
+    ],
+)
+
+sh_test(
+    name = "chrono_syscall_pcode_test",
+    srcs = ["tests/chrono_syscall_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "pcode",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+        "$(rootpath //:chrono_syscall_smoke_source)",
+        "-",
+    ],
+    data = [
+        ":chrono_syscall_smoke_source",
+        ":chrono_tzif_fixtures",
+        ":davecc",
+        ":libc_headers",
+        ":libc_pcode",
+        ":pcode",
+    ],
+)
+
+filegroup(
+    name = "chrono_syscall_smoke_6502_source",
+    srcs = ["tests/chrono_syscall_smoke_6502.c"],
+)
+
+sh_test(
+    name = "chrono_syscall_65c02_test",
+    srcs = ["tests/chrono_syscall_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "65c02",
+        "$(rootpath :6502)",
+        "$(rootpath :libc_65c02)",
+        "$(rootpath //:chrono_syscall_smoke_6502_source)",
+        "$(rootpath :support_rom_65c02)",
+    ],
+    data = [
+        ":6502",
+        ":chrono_syscall_smoke_6502_source",
+        ":chrono_tzif_fixtures",
+        ":davecc",
         ":libc_65c02",
         ":libc_headers",
         ":support_rom_65c02",

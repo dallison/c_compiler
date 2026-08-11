@@ -2115,7 +2115,9 @@ bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
   // dependent) must not be diagnosed here: this is a speculative fold, and an
   // unresolved name simply means the value stays dependent for now.
   DiagnosticSuppressBegin();
+  compiler->constant_evaluation_required_depth++;
   cloned = AnalyzeExpression(cloned);
+  compiler->constant_evaluation_required_depth--;
   bool ok = EvaluateIntegerExpression(cloned, out);
   DiagnosticSuppressEnd();
   ASTNodeDelete(cloned);

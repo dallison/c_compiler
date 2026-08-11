@@ -19,6 +19,8 @@ void __write_file(FILE* file, const string& value);
 
 void vprint_nonunicode(string_view text, format_args args);
 void vprint_nonunicode(FILE* file, string_view text, format_args args);
+void vprint_unicode(string_view text, format_args args);
+void vprint_unicode(FILE* file, string_view text, format_args args);
 
 void print(
     const typename __format_detail::__non_deduced<format_string<>>::type& text);

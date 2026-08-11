@@ -41,6 +41,13 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
     ASTNode* node, void* data, ASTNodeTransformAction* action);
 static ASTNode* ReanalyzeClonedConcreteMemberCall(
     ASTNode* node, void* data, ASTNodeTransformAction* action);
+static ASTNode* ReanalyzeClonedUntypedExpression(
+    ASTNode* node, void* data, ASTNodeTransformAction* action);
+static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
+                                         int child_id, VisitorMode mode);
+static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode);
 static void RestoreSymbolOverloadLinks(Vector* snapshots);
 static bool RebindClonedConstructorCall(VectorASTNode* call, Vector* snapshots);
 static StructMember* FindStructMemberOverloadHead(Struct* owner, String* name);
@@ -558,6 +565,10 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
         node->flags &= ~kASTAnalyzed;
       }
     }
+    if (TypeContainsAuto(existing->type) && decl->initializer != NULL) {
+      ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+      node->flags &= ~kASTAnalyzed;
+    }
     return;
   }
 
@@ -599,6 +610,13 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
       decl->initializer->child_id = 0;
       node->flags &= ~kASTAnalyzed;
     }
+  }
+  if (TypeContainsAuto(replacement->type) && decl->initializer != NULL) {
+    // The primary template could not deduce this local while its initializer
+    // was dependent. Re-analyze the concrete cloned initializer so ordinary
+    // auto deduction runs for the instantiated function body.
+    ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+    node->flags &= ~kASTAnalyzed;
   }
 }
 
@@ -922,6 +940,9 @@ typedef struct {
   size_t element_index;
 } ReplacePackIdentifierData;
 
+static Symbol* PackSourceForReplacement(TemplateFunctionBodyClone* clone,
+                                        Symbol* replacement);
+
 static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                         void* data,
                                                         int child_id,
@@ -950,7 +971,54 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
   ReplacePackIdentifierData* replace = data;
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
-    if (replace->clone != NULL && id->template_arguments != NULL) {
+    bool repaired_direct_pack_template_argument = false;
+    if (replace->clone != NULL && id->template_arguments != NULL &&
+        id->template_arguments->length == 1 && node->parent != NULL &&
+        node->parent->op == AST_OP(call) &&
+        ((VectorASTNode*)node->parent)->left == node) {
+      VectorASTNode* parent_call = (VectorASTNode*)node->parent;
+      ASTNode* first_actual =
+          parent_call->children != NULL && parent_call->children->length > 0
+              ? parent_call->children->value.p[0]
+              : NULL;
+      Symbol* actual_pack =
+          first_actual != NULL && first_actual->op == AST_OP(identifier)
+              ? ((IdentifierASTNode*)first_actual)->symbol
+              : NULL;
+      Symbol* actual_pack_source =
+          PackSourceForReplacement(replace->clone, actual_pack);
+      int pack_index =
+          replace->from != NULL
+              ? FirstTemplateParameterIndexInType(replace->from->type)
+              : -1;
+      if (pack_index >= (int)replace->clone->args->length &&
+          replace->clone->rebase_template_parameter_base > 0) {
+        pack_index -= replace->clone->rebase_template_parameter_base;
+      }
+      TemplateArgument* pack =
+          (actual_pack == replace->from ||
+           actual_pack_source == replace->from) &&
+                  pack_index >= 0 &&
+                  (size_t)pack_index < replace->clone->args->length
+              ? replace->clone->args->value.p[pack_index]
+              : NULL;
+      TemplateArgument* element =
+          pack != NULL && pack->pack_arguments != NULL &&
+                  replace->element_index < pack->pack_arguments->length
+              ? pack->pack_arguments->value.p[replace->element_index]
+              : NULL;
+      if (element != NULL) {
+        VectorDeleteWithContents(
+            id->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        id->template_arguments = NewVector();
+        VectorAppend(id->template_arguments, TemplateArgumentCopy(element));
+        repaired_direct_pack_template_argument = true;
+      }
+    }
+    if (replace->clone != NULL && id->template_arguments != NULL &&
+        !repaired_direct_pack_template_argument) {
       bool substituted_template_args = false;
       int pack_index = -1;
       size_t pack_length = 0;
@@ -1858,6 +1926,24 @@ static void RebindClonedLoweredDependentMemberCallVisitor(
   }
 }
 
+static void RestoreClonedInlineReferenceActualTypes(VectorASTNode* call) {
+  for (size_t i = 0; call != NULL && call->children != NULL &&
+                     i < call->children->length;
+       i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual == NULL || actual->op != AST_OP(inline_call) ||
+        actual->value_category == kValueCategoryPrvalue) {
+      continue;
+    }
+    InlineCallASTNode* inline_call = (InlineCallASTNode*)actual;
+    TypeRecord* stored_result =
+        inline_call->ret_value != NULL ? inline_call->ret_value->type : NULL;
+    if (TypeIsPointer(stored_result)) {
+      ASTNodeSetType(actual, stored_result->next);
+    }
+  }
+}
+
 /* In a cloned body, resolve a call whose callee is a function template to the
  * concrete instantiation deduced from the (now concrete) explicit template
  * arguments and actual arguments, updating the callee symbol and result type.
@@ -1956,6 +2042,7 @@ static void InstantiateClonedFunctionTemplateCall(
       }
     }
   }
+  RestoreClonedInlineReferenceActualTypes(call);
   Symbol* instantiated = NULL;
   if (id->symbol->overload_next != NULL) {
     instantiated = CXXResolveOverloadedFunctionTemplateCall(
@@ -4325,6 +4412,10 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
     for (size_t i = 0; i < call->children->length; i++) {
       ASTNode* actual = call->children->value.p[i];
       if (actual != NULL) {
+        if (actual->op == AST_OP(inline_call) &&
+            actual->value_category != kValueCategoryPrvalue) {
+          continue;
+        }
         actual->flags &= ~kASTAnalyzed;
         ASTNodeClearType(actual);
       }
@@ -4828,6 +4919,146 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   return analyzed;
 }
 
+static bool IsReanalyzableClonedExpressionOpcode(ASTOpcode op) {
+  switch (op) {
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+    case AST_OP(contents):
+    case AST_OP(address):
+    case AST_OP(not):
+    case AST_OP(onescomp):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshift):
+    case AST_OP(rshiftl):
+    case AST_OP(rshifta):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(spaceship):
+    case AST_OP(question):
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(comma):
+    case AST_OP(logand):
+    case AST_OP(logor):
+    case AST_OP(dotstar):
+    case AST_OP(arrowstar):
+      return true;
+    default:
+      return false;
+  }
+}
+
+/* A class-template body may contain a non-dependent expression nested in an
+ * otherwise dependent statement.  The template parse deliberately leaves that
+ * expression untyped, but after cloning both operands can be concrete.  Analyze
+ * the expression itself at that point so code generation never has to infer a
+ * missing semantic type. */
+static ASTNode* ReanalyzeClonedUntypedExpression(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL ||
+      (node->type != NULL && !TypeContainsAuto(node->type)) ||
+      !IsReanalyzableClonedExpressionOpcode(node->op)) {
+    return node;
+  }
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeUnary) {
+    ASTNode* sub = ((UnaryASTNode*)node)->sub;
+    if (sub == NULL || sub->type == NULL ||
+        TypeContainsTemplateParameter(sub->type)) {
+      return node;
+    }
+  } else if (shape == kASTShapeBinary) {
+    BinaryASTNode* binary = (BinaryASTNode*)node;
+    if (binary->left == NULL || binary->right == NULL ||
+        binary->left->type == NULL || binary->right->type == NULL ||
+        TypeContainsTemplateParameter(binary->left->type) ||
+        TypeContainsTemplateParameter(binary->right->type)) {
+      return node;
+    }
+  } else {
+    return node;
+  }
+  *action = kASTTransformSkipChildren;
+  node->flags &= ~kASTAnalyzed;
+  ASTNode* parent = node->parent;
+  int child_id = node->child_id;
+  node->parent = NULL;
+  ASTNode* analyzed = AnalyzeExpression(node);
+  if (analyzed != NULL) {
+    analyzed->parent = parent;
+    analyzed->child_id = child_id;
+  }
+  return analyzed;
+}
+
+static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
+                                         int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(vardecl)) {
+    return;
+  }
+  VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+  if (decl->symbol == NULL || !TypeContainsAuto(decl->symbol->type) ||
+      decl->initializer == NULL) {
+    return;
+  }
+  ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+  decl->initializer = AnalyzeExpression(decl->initializer);
+  if (decl->initializer != NULL) {
+    decl->initializer->parent = node;
+    decl->initializer->child_id = 0;
+  }
+  ASTNodeSetType(node, decl->symbol->type);
+}
+
+static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol != NULL && symbol->type != NULL &&
+      !TypeContainsAuto(symbol->type) &&
+      (node->type == NULL || TypeContainsAuto(node->type))) {
+    ASTNodeSetType(node, symbol->type);
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 /* Clone the body of function template `from` into the concrete instantiation
  * `to`, substituting template arguments `args`. First builds the original->
  * clone symbol map (mapping each generic formal to its instantiated formal, and
@@ -4991,6 +5222,12 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
   ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
+  TypeRecord* saved_function = compiler->current_function;
+  compiler->current_function = to;
+  ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
+  body = ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
+  compiler->current_function = saved_function;
   TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);

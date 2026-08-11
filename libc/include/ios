@@ -19,6 +19,8 @@
 
 namespace std {
 
+class locale;
+
 // A minimal fpos: it carries a stream offset.  The State template parameter of
 // the standard (multibyte conversion state) is irrelevant to the single-byte
 // char specialization used throughout this library, so it is ignored.
@@ -83,6 +85,14 @@ class ios_base {
   static const seekdir beg = 0;
   static const seekdir cur = 1;
   static const seekdir end = 2;
+
+  enum event { erase_event, imbue_event, copyfmt_event };
+  typedef void (*event_callback)(event, ios_base&, int);
+
+  locale imbue(const locale& loc);
+  locale getloc() const;
+
+  static void register_callback(event_callback fn, int index);
 
   // A stream-error exception.  Exception-enabled targets use the normal
   // runtime_error hierarchy.  Embedded targets compile with exceptions
@@ -161,6 +171,11 @@ class ios_base {
   fmtflags __flags_;
   streamsize __precision_;
   streamsize __width_;
+
+  static const int __max_callbacks_ = 8;
+  static event_callback __callbacks_[__max_callbacks_];
+  static int __callback_indices_[__max_callbacks_];
+  static int __callback_count_;
 };
 
 // Manipulator functions that operate on ios_base format state.
@@ -259,6 +274,8 @@ class basic_ios : public ios_base {
     __fill_ = c;
     return old;
   }
+
+  locale imbue(const locale& loc);
 
  protected:
   basic_ios() : __rdbuf_(nullptr), __tie_(nullptr), __state_(badbit),

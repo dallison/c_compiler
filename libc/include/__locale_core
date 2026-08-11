@@ -1,0 +1,39 @@
+//
+//  __locale_core
+//  c_compiler
+//
+//  Internal locale helpers kept out of the public facet declarations.
+//
+
+#ifndef __davecc_locale_core__
+#define __davecc_locale_core__
+
+#include <__exception_support>
+#include <cstring>
+
+namespace std {
+
+class bad_cast;
+class runtime_error;
+
+namespace __locale_detail {
+
+[[noreturn]] void __throw_runtime(const char* message);
+[[noreturn]] void __throw_bad_cast();
+
+size_t __next_facet_index();
+
+inline bool __is_classic_name(const char* name) {
+  return name == nullptr || name[0] == '\0' || strcmp(name, "C") == 0 ||
+         strcmp(name, "POSIX") == 0;
+}
+
+inline bool __same_category(int requested, int facet_cat) {
+  return (requested & facet_cat) != 0;
+}
+
+}  // namespace __locale_detail
+
+}  // namespace std
+
+#endif /* __davecc_locale_core__ */

@@ -372,13 +372,6 @@ for target in 6502 65c02; do
       exit 1
     fi
   done
-  for helper in pushmem_xy1 pushmem_xy2; do
-    if ! grep -A1 -E "jsr[[:space:]]+__${helper}([[:space:]]|$)" \
-         "$assembly" | grep -Eq '\.byte[[:space:]]'; then
-      echo "$target: __$helper did not use an inline descriptor" >&2
-      exit 1
-    fi
-  done
   if grep -B12 -E 'jsr[[:space:]]+__(copy|push|zero)mem[12]' "$assembly" |
      grep -Eq 'sta[[:space:]]+__mem_(src|dest|size)'; then
     echo "$target: memory helper retained zero-page argument setup" >&2

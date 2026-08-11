@@ -338,7 +338,8 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner) {
 }
 
 static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
-                                   X86_64RegisterType type) {
+                                           X86_64RegisterType type,
+                                           bool can_use_temp) {
   X86_64Register* regs =
       type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
@@ -350,6 +351,9 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
   // unsafe victim if no safe register is available.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
+      if (!can_use_temp && register_ranges[i].temp) {
+        continue;
+      }
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
@@ -644,7 +648,8 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
   X86_64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim = FindSpillVictim(allocator, type);
+    TargetInstruction* victim =
+        FindSpillVictim(allocator, type, can_use_temp);
     reg = SpillInstruction(allocator, victim);
   }
   assert(reg != NULL);
@@ -1300,16 +1305,60 @@ static void ProcessBasicBlock(X86_64RegisterAllocator* allocator,
 }
 
 
-// Build the preserved_instructions set, instructions that need their
-// register to be preserved across calls.  If the block contains a call
-// all outputs need to be preserved.
+static bool IsCallInstruction(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)X86_64_OP(call) ||
+         inst->opcode == (TargetOpcode)X86_64_OP(rcall) ||
+         inst->opcode == (TargetOpcode)X86_64_OP(callf) ||
+         inst->opcode == (TargetOpcode)X86_64_OP(rcallf);
+}
+
+static bool IsUser(TargetInstruction* inst, TargetInstruction* candidate) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (candidate->operand[i] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Build the preserved_instructions set, instructions that need a callee-saved
+// register. Block outputs must survive every call in the block. Values used
+// later in the same block must also be preserved when a call lies between
+// their definition and use.
 static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   X86_64RegisterAllocator* allocator = data;
-  if (!block->contains_call) {
-    return;
+  bool contains_call =
+      block->end_code != NULL && IsCallInstruction(block->end_code);
+  for (TargetInstruction* inst = block->code;
+       inst != NULL; inst = TargetNext(inst)) {
+    if (IsCallInstruction(inst)) {
+      contains_call = true;
+      break;
+    }
+    if (inst == block->end_code) {
+      break;
+    }
   }
-  // Preserve all outputs.
-  BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
+  if (contains_call) {
+    BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
+  }
+
+  for (TargetInstruction* inst = block->code;
+       inst != NULL && inst != block->end_code; inst = TargetNext(inst)) {
+    bool crossed_call = false;
+    for (TargetInstruction* next = TargetNext(inst);
+         next != NULL; next = TargetNext(next)) {
+      if (IsCallInstruction(next)) {
+        crossed_call = true;
+      } else if (crossed_call && IsUser(inst, next)) {
+        BitSetInsert(&allocator->preserved_instructions, inst->id);
+        break;
+      }
+      if (next == block->end_code) {
+        break;
+      }
+    }
+  }
 }
 
 // Register variables are pinned to a fixed physical register by index and are

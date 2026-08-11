@@ -187,6 +187,19 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/std_heavy.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute template-heavy standard module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  "$FIXTURES/use_std_locale.cpp" \
+  -o "$work/use_std_locale.o" ||
+  fail "compile standard locale module importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std_locale.o" "$STD_OBJECT" "$LIBC" \
+  -o "$work/std_locale.bin" ||
+  fail "link standard locale module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/std_locale.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute standard locale module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -fmodule-output "$work/template_template.dcm" \
   "$FIXTURES/template_template.cppm" -o "$work/template_template.o" ||

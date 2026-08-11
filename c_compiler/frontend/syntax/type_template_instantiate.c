@@ -220,6 +220,13 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     if (member == NULL || member->symbol == NULL) {
       continue;
     }
+    // Hidden vptr/vbptr fields describe the template definition's provisional
+    // layout.  Concrete bases can change which class owns those fields, so they
+    // must be recomputed after substitution instead of cloned as ordinary data
+    // members.
+    if (member == from->vptr_member || member == from->vbptr_member) {
+      continue;
+    }
     if (member->symbol->flags.is_parameter_pack && !member->is_static &&
         !member->is_member_function && !member->is_using_declaration &&
         !StructMemberIsNestedType(member)) {
@@ -6173,6 +6180,13 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   VectorInit(&pending_nested_friend_targets);
   for (size_t i = 0; i < source_struct->members.length; i++) {
     StructMember* member = source_struct->members.value.p[i];
+    // Layout-only fields from the primary template are not source-level
+    // members.  Recreate them for the specialization after its concrete base
+    // graph and virtual-base set are known.
+    if (member == source_struct->vptr_member ||
+        member == source_struct->vbptr_member) {
+      continue;
+    }
     if (StructMemberIsNestedType(member)) {
       TypeRecord* nested_type =
           SubstituteTemplateParameters(parser, member->symbol->type,

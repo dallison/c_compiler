@@ -5051,6 +5051,20 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       old_sym->value.func_defn = sym;
       old_sym->type->info.function.is_defaulted = true;
     }
+    bool defaulted_comparison =
+        sym->type->info.function.cxx_member_owner != NULL &&
+        (StringEqual(&sym->name, "operator==") ||
+         StringEqual(&sym->name, "operator<=>"));
+    if (defaulted_comparison) {
+      TypeParser parser;
+      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                     kParsingFileScope);
+      SynthesizeDefaultedMemberFunctionBody(&parser, sym);
+      TypeParserDestruct(&parser);
+      SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+      SyntaxNeedSemicolon(syntax, TC(decl));
+      return NewVariableDeclarationASTNode(sym, NULL, sym->location);
+    }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;
     SyntaxOpenScope(syntax);
@@ -5524,10 +5538,23 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
   Vector* friend_decls = NewVector();
   Struct* saved_access_context = compiler->current_class_access_context;
+  Struct* saved_comparison_owner =
+      sym->type->info.function.cxx_member_owner;
+  if (sym->type->info.function.is_defaulted &&
+      saved_comparison_owner == NULL &&
+      (StringEqual(&sym->name, "operator==") ||
+       StringEqual(&sym->name, "operator<=>"))) {
+    // A defaulted hidden-friend comparison is a namespace-scope function, but
+    // its generated memberwise body needs the befriending class as the object
+    // layout.  Supply that owner only while synthesizing the body; restoring it
+    // preserves free-function lookup and mangling.
+    sym->type->info.function.cxx_member_owner = befriending;
+  }
   compiler->current_class_access_context = befriending;
   ASTNode* definition =
       DeclareOrDefineFunction(syntax, friend_decls, sym, old_sym);
   compiler->current_class_access_context = saved_access_context;
+  sym->type->info.function.cxx_member_owner = saved_comparison_owner;
   RecordFriendFunction(syntax, befriending, sym, in_scope_symbol, definition);
   if (definition == NULL) {
     // Declaration only: DeclareOrDefineFunction did not adopt the vector.
@@ -6996,7 +7023,9 @@ static TemplateArgument* ParseTemplateNonTypeDefault(Syntax* syntax) {
     arg->dependent_expr = expr;
     return arg;
   }
+  compiler->constant_evaluation_required_depth++;
   expr = AnalyzeExpression(expr);
+  compiler->constant_evaluation_required_depth--;
   bool ok = TemplateArgumentSetFromExpression(arg, expr);
   if (!ok && is_direct_parameter) {
     arg->template_parameter_index = direct_parameter_index;
@@ -7785,7 +7814,9 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
         if (direct_template_parameter_index >= 0) {
           arg->template_parameter_index = direct_template_parameter_index;
         }
+        compiler->constant_evaluation_required_depth++;
         expr = AnalyzeExpression(expr);
+        compiler->constant_evaluation_required_depth--;
         bool value_ok = false;
         if (arg->template_parameter_index >= 0) {
           arg->type = expr != NULL && expr->type != NULL

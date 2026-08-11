@@ -6,13 +6,21 @@
 #include <chrono>
 #include <cstddef>
 #include <iterator>
+#include <locale>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
+#if __cplusplus >= 202302L
+#define __cpp_lib_format 202207L
+#define __cpp_lib_format_ranges 202207L
+#else
 #define __cpp_lib_format 201907L
+#endif
 
 extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
 extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
@@ -67,19 +75,42 @@ class basic_format_parse_context {
   const_iterator __begin;
   const_iterator __end;
   size_t __next;
+  size_t __argument_count;
+  unsigned char __indexing;
 
  public:
   constexpr explicit basic_format_parse_context(
       basic_string_view<CharT> text, size_t argument_count = 0) noexcept
-      : __begin(text.data()), __end(text.data() + text.size()), __next(0) {
-    (void)argument_count;
-  }
+      : __begin(text.data()),
+        __end(text.data() + text.size()),
+        __next(0),
+        __argument_count(argument_count),
+        __indexing(0) {}
 
   constexpr const_iterator begin() const noexcept { return __begin; }
   constexpr const_iterator end() const noexcept { return __end; }
   constexpr void advance_to(const_iterator it) { __begin = it; }
-  constexpr size_t next_arg_id() { return __next++; }
-  constexpr void check_arg_id(size_t id) { (void)id; }
+  constexpr size_t next_arg_id() {
+    if (__indexing == 2) {
+      __DAVECC_THROW(
+          format_error("cannot mix automatic and manual argument indices"));
+    }
+    __indexing = 1;
+    if (__next >= __argument_count) {
+      __DAVECC_THROW(format_error("format argument index out of range"));
+    }
+    return __next++;
+  }
+  constexpr void check_arg_id(size_t id) {
+    if (__indexing == 1) {
+      __DAVECC_THROW(
+          format_error("cannot mix automatic and manual argument indices"));
+    }
+    __indexing = 2;
+    if (id >= __argument_count) {
+      __DAVECC_THROW(format_error("format argument index out of range"));
+    }
+  }
 };
 
 using format_parse_context = basic_format_parse_context<char>;
@@ -95,18 +126,46 @@ struct __format_args;
 struct __spec;
 struct __format_specification;
 
+enum class __format_arg_kind : unsigned char {
+  empty,
+  boolean,
+  character,
+  signed_integer,
+  unsigned_integer,
+  floating,
+  string,
+  pointer,
+  custom
+};
+
 struct __format_arg {
   const void* value;
   void (*format_value)(const void*, const __format_specification*, string&,
                        const __format_args*);
   bool (*integer_value)(const void*, long long*);
   bool is_builtin;
+  __format_arg_kind kind;
+  bool bool_value;
+  char char_value;
+  long long signed_value;
+  unsigned long long unsigned_value;
+  double floating_value;
+  const char* string_data;
+  size_t string_size;
 
   __format_arg()
       : value(nullptr),
         format_value(nullptr),
         integer_value(nullptr),
-        is_builtin(false) {}
+        is_builtin(false),
+        kind(__format_arg_kind::empty),
+        bool_value(false),
+        char_value(0),
+        signed_value(0),
+        unsigned_value(0),
+        floating_value(0),
+        string_data(nullptr),
+        string_size(0) {}
 };
 
 struct __format_args {
@@ -137,6 +196,7 @@ struct __spec {
   char type;
   bool alternate;
   bool zero;
+  bool localized;
   int width;
   int precision;
 
@@ -147,6 +207,7 @@ struct __spec {
         type(0),
         alternate(false),
         zero(false),
+        localized(false),
         width(-1),
         precision(-1) {}
 };
@@ -161,7 +222,10 @@ int __dynamic_integer(const __format_args* args, size_t index);
 __spec __parse_spec(string_view text, const __format_args* args);
 size_t __prefix_length(const string& value);
 void __append_padded(string* output, const string* value, const __spec* spec,
-                     bool numeric);
+                     bool numeric, bool unicode_text = false);
+size_t __utf8_display_width(string_view value);
+size_t __utf8_prefix_for_width(string_view value, size_t width);
+void __append_debug_string(string_view value, bool character, string* output);
 void __unsigned_integer_to(unsigned long long value, char type, bool alternate,
                            string* output);
 void __signed_integer_to(long long value, const __spec& spec, string* output);
@@ -201,6 +265,7 @@ inline void __format_builtin(const T& value, const __spec& spec,
   (void)args;
   string converted;
   bool numeric = false;
+  bool unicode_text = false;
   if constexpr (is_same<U, bool>::value) {
     if (spec.type == 0 || spec.type == 's') {
       converted = value ? "true" : "false";
@@ -211,8 +276,13 @@ inline void __format_builtin(const T& value, const __spec& spec,
   } else if constexpr (is_same<U, char>::value ||
                        is_same<U, signed char>::value ||
                        is_same<U, unsigned char>::value) {
-    if (spec.type == 0 || spec.type == 'c') {
+    if (spec.type == '?') {
+      char text[1] = {static_cast<char>(value)};
+      __append_debug_string(string_view(text, 1), true, &converted);
+      unicode_text = true;
+    } else if (spec.type == 0 || spec.type == 'c') {
       converted = string(1, static_cast<char>(value));
+      unicode_text = true;
     } else if constexpr (is_signed<U>::value) {
       __signed_integer_to(static_cast<long long>(value), spec, &converted);
       numeric = true;
@@ -232,33 +302,49 @@ inline void __format_builtin(const T& value, const __spec& spec,
     __floating_to(static_cast<double>(value), spec, &converted);
     numeric = true;
   } else if constexpr (is_same<U, string>::value) {
-    if (spec.type != 0 && spec.type != 's') {
+    if (spec.type != 0 && spec.type != 's' && spec.type != '?') {
       __fail("invalid string presentation type");
     }
     size_t length = value.size();
-    if (spec.precision >= 0 &&
-        static_cast<size_t>(spec.precision) < length) {
-      length = static_cast<size_t>(spec.precision);
+    if (spec.precision >= 0) {
+      length = __utf8_prefix_for_width(
+          string_view(value.data(), value.size()),
+          static_cast<size_t>(spec.precision));
     }
-    converted = string(value.data(), length);
+    if (spec.type == '?') {
+      __append_debug_string(string_view(value.data(), length), false, &converted);
+    } else {
+      converted = string(value.data(), length);
+    }
+    unicode_text = true;
   } else if constexpr (is_same<U, string_view>::value) {
-    if (spec.type != 0 && spec.type != 's') {
+    if (spec.type != 0 && spec.type != 's' && spec.type != '?') {
       __fail("invalid string presentation type");
     }
     size_t length = value.size();
-    if (spec.precision >= 0 &&
-        static_cast<size_t>(spec.precision) < length) {
-      length = static_cast<size_t>(spec.precision);
+    if (spec.precision >= 0) {
+      length = __utf8_prefix_for_width(value,
+                                       static_cast<size_t>(spec.precision));
     }
-    converted = string(value.data(), length);
+    if (spec.type == '?') {
+      __append_debug_string(string_view(value.data(), length), false, &converted);
+    } else {
+      converted = string(value.data(), length);
+    }
+    unicode_text = true;
   } else if constexpr (is_array<U>::value) {
     const char* text = value;
     size_t length = char_traits<char>::length(text);
-    if (spec.precision >= 0 &&
-        static_cast<size_t>(spec.precision) < length) {
-      length = static_cast<size_t>(spec.precision);
+    if (spec.precision >= 0) {
+      length = __utf8_prefix_for_width(string_view(text, length),
+                                       static_cast<size_t>(spec.precision));
     }
-    converted = string(text, length);
+    if (spec.type == '?') {
+      __append_debug_string(string_view(text, length), false, &converted);
+    } else {
+      converted = string(text, length);
+    }
+    unicode_text = true;
   } else if constexpr (is_pointer<U>::value &&
                        is_same<remove_cv_t<remove_pointer_t<U>>, char>::value) {
     const char* text = value;
@@ -266,11 +352,16 @@ inline void __format_builtin(const T& value, const __spec& spec,
       __fail("null string pointer");
     }
     size_t length = char_traits<char>::length(text);
-    if (spec.precision >= 0 &&
-        static_cast<size_t>(spec.precision) < length) {
-      length = static_cast<size_t>(spec.precision);
+    if (spec.precision >= 0) {
+      length = __utf8_prefix_for_width(string_view(text, length),
+                                       static_cast<size_t>(spec.precision));
     }
-    converted = string(text, length);
+    if (spec.type == '?') {
+      __append_debug_string(string_view(text, length), false, &converted);
+    } else {
+      converted = string(text, length);
+    }
+    unicode_text = true;
   } else if constexpr (is_same<U, nullptr_t>::value) {
     if (spec.type != 0 && spec.type != 'p') {
       __fail("invalid pointer presentation type");
@@ -288,10 +379,15 @@ inline void __format_builtin(const T& value, const __spec& spec,
   } else {
     __fail("type is not formattable");
   }
-  __append_padded(&output, &converted, &spec, numeric);
+  __append_padded(&output, &converted, &spec, numeric, unicode_text);
 }
 
 }  // namespace __format_detail
+
+namespace __format_detail {
+template <size_t Capacity>
+class __format_arg_store;
+}
 
 template <class Context>
 class basic_format_arg {
@@ -305,6 +401,9 @@ class basic_format_arg {
   explicit operator bool() const noexcept {
     return __value.format_value != nullptr;
   }
+  const __format_detail::__format_arg& __implementation() const noexcept {
+    return __value;
+  }
 };
 
 template <class Context>
@@ -317,8 +416,9 @@ class basic_format_args {
       const __format_detail::__format_args& implementation) noexcept
       : __values(implementation) {}
 
-  template <class Store>
-  basic_format_args(const Store& store) noexcept
+  template <size_t Capacity>
+  basic_format_args(
+      const __format_detail::__format_arg_store<Capacity>& store) noexcept
       : __values(store.__data(), store.__size()) {}
 
   basic_format_arg<Context> get(size_t index) const noexcept {
@@ -399,12 +499,14 @@ struct __is_builtin_format_type {
   using U = remove_cv_t<T>;
   static constexpr bool value =
       is_integral<U>::value || is_floating_point<U>::value ||
-      is_pointer<U>::value || is_array<U>::value ||
+      is_pointer<U>::value ||
+      (is_array<U>::value &&
+       is_same<remove_cv_t<remove_extent_t<U>>, char>::value) ||
       is_same<U, nullptr_t>::value || is_same<U, string>::value ||
       is_same<U, string_view>::value;
 };
 
-template <class T>
+template <class T, class CharT = char>
 constexpr bool __builtin_presentation_valid(char presentation) {
   using U = remove_cv_t<remove_reference_t<T>>;
   if constexpr (is_same<U, bool>::value) {
@@ -415,7 +517,8 @@ constexpr bool __builtin_presentation_valid(char presentation) {
   } else if constexpr (is_same<U, char>::value ||
                        is_same<U, signed char>::value ||
                        is_same<U, unsigned char>::value) {
-    return presentation == 0 || presentation == 'c' || presentation == 'd' ||
+    return presentation == 0 || presentation == 'c' || presentation == '?' ||
+           presentation == 'd' ||
            presentation == 'x' || presentation == 'X' ||
            presentation == 'o' || presentation == 'b' ||
            presentation == 'B';
@@ -430,10 +533,13 @@ constexpr bool __builtin_presentation_valid(char presentation) {
            presentation == 'g' || presentation == 'G';
   } else if constexpr (is_same<U, string>::value ||
                        is_same<U, string_view>::value ||
-                       is_array<U>::value ||
+                       (is_array<U>::value &&
+                        is_same<remove_cv_t<remove_extent_t<U>>,
+                                CharT>::value) ||
                        (is_pointer<U>::value &&
-                        is_same<remove_cv_t<remove_pointer_t<U>>, char>::value)) {
-    return presentation == 0 || presentation == 's';
+                        is_same<remove_cv_t<remove_pointer_t<U>>,
+                                CharT>::value)) {
+    return presentation == 0 || presentation == 's' || presentation == '?';
   } else if constexpr (is_pointer<U>::value ||
                        is_same<U, nullptr_t>::value) {
     return presentation == 0 || presentation == 'p';
@@ -442,12 +548,13 @@ constexpr bool __builtin_presentation_valid(char presentation) {
   }
 }
 
-template <class T>
+template <class T, class CharT = char>
 constexpr bool __format_specification_valid(bool syntax_valid,
                                             char presentation) {
   using U = remove_cv_t<remove_reference_t<T>>;
   if constexpr (__is_builtin_format_type<U>::value) {
-    return syntax_valid && __builtin_presentation_valid<U>(presentation);
+    return syntax_valid &&
+           __builtin_presentation_valid<U, CharT>(presentation);
   } else {
     return true;
   }
@@ -472,7 +579,8 @@ struct __format_type_checker<Position, CharT, Head, Tail...> {
   static constexpr bool specification(unsigned index, bool syntax_valid,
                                       char presentation) {
     if (index == Position) {
-      return __format_specification_valid<Head>(syntax_valid, presentation);
+      return __format_specification_valid<Head, CharT>(syntax_valid,
+                                                       presentation);
     }
     return __format_type_checker<Position + 1, CharT, Tail...>::specification(
         index, syntax_valid, presentation);
@@ -503,7 +611,8 @@ void __format_with_formatter(const void* pointer,
                              string& output, const __format_args* arguments) {
   string_view text(specification->data, specification->size);
   formatter<T, char> value_formatter;
-  format_parse_context parse_context(text);
+  format_parse_context parse_context(
+      text, arguments != nullptr ? arguments->count : 0);
   auto parsed = value_formatter.parse(parse_context);
   if (parsed != parse_context.end()) {
     __fail("format specifier was not fully consumed");
@@ -551,6 +660,47 @@ class __format_arg_store {
       slot->format_value = __custom_format_callback<U>::call;
       slot->is_builtin = false;
     }
+    if constexpr (is_same<U, bool>::value) {
+      slot->kind = __format_arg_kind::boolean;
+      slot->bool_value = value;
+    } else if constexpr (is_same<U, char>::value ||
+                         is_same<U, signed char>::value ||
+                         is_same<U, unsigned char>::value) {
+      slot->kind = __format_arg_kind::character;
+      slot->char_value = static_cast<char>(value);
+    } else if constexpr (is_integral<U>::value && is_signed<U>::value) {
+      slot->kind = __format_arg_kind::signed_integer;
+      slot->signed_value = static_cast<long long>(value);
+    } else if constexpr (is_integral<U>::value) {
+      slot->kind = __format_arg_kind::unsigned_integer;
+      slot->unsigned_value = static_cast<unsigned long long>(value);
+    } else if constexpr (is_floating_point<U>::value) {
+      slot->kind = __format_arg_kind::floating;
+      slot->floating_value = static_cast<double>(value);
+    } else if constexpr (is_same<U, string>::value ||
+                         is_same<U, string_view>::value) {
+      slot->kind = __format_arg_kind::string;
+      slot->string_data = value.data();
+      slot->string_size = value.size();
+    } else if constexpr (is_array<U>::value &&
+                         is_same<remove_cv_t<remove_extent_t<U>>,
+                                 char>::value) {
+      slot->kind = __format_arg_kind::string;
+      slot->string_data = value;
+      slot->string_size = char_traits<char>::length(value);
+    } else if constexpr (is_pointer<U>::value &&
+                         is_same<remove_cv_t<remove_pointer_t<U>>,
+                                 char>::value) {
+      slot->kind = __format_arg_kind::string;
+      slot->string_data = value;
+      slot->string_size =
+          value == nullptr ? 0 : char_traits<char>::length(value);
+    } else if constexpr (is_pointer<U>::value ||
+                         is_same<U, nullptr_t>::value) {
+      slot->kind = __format_arg_kind::pointer;
+    } else {
+      slot->kind = __format_arg_kind::custom;
+    }
     slot->integer_value = __integer_argument<U>;
     ++__count;
   }
@@ -587,6 +737,11 @@ auto make_format_args(Args&... args) {
   return store;
 }
 
+template <class... Args>
+auto make_wformat_args(Args&... args) {
+  return make_format_args(args...);
+}
+
 namespace __format_detail {
 }  // namespace __format_detail
 
@@ -611,7 +766,7 @@ class basic_format_string {
           ++i;
           continue;
         }
-        throw format_error("unmatched '}' in format string");
+        __DAVECC_THROW(format_error("unmatched '}' in format string"));
       }
       if (text[i] != '{') {
         continue;
@@ -634,19 +789,19 @@ class basic_format_string {
       if (explicit_argument) {
         manual = true;
         if (automatic) {
-          throw format_error(
-              "cannot mix automatic and manual argument indices");
+          __DAVECC_THROW(format_error(
+              "cannot mix automatic and manual argument indices"));
         }
       } else {
         automatic = true;
         if (manual) {
-          throw format_error(
-              "cannot mix automatic and manual argument indices");
+          __DAVECC_THROW(format_error(
+              "cannot mix automatic and manual argument indices"));
         }
         argument = next_automatic++;
       }
       if (argument >= sizeof...(Args)) {
-        throw format_error("format argument index out of range");
+        __DAVECC_THROW(format_error("format argument index out of range"));
       }
 
       size_t specification_start = position;
@@ -668,26 +823,28 @@ class basic_format_string {
               ++position;
             }
             if (position >= __size || text[position] != '}') {
-              throw format_error("invalid dynamic format specification");
+              __DAVECC_THROW(
+                  format_error("invalid dynamic format specification"));
             }
             if (explicit_dynamic) {
               manual = true;
               if (automatic) {
-                throw format_error(
-                    "cannot mix automatic and manual argument indices");
+                __DAVECC_THROW(format_error(
+                    "cannot mix automatic and manual argument indices"));
               }
             } else {
               automatic = true;
               if (manual) {
-                throw format_error(
-                    "cannot mix automatic and manual argument indices");
+                __DAVECC_THROW(format_error(
+                    "cannot mix automatic and manual argument indices"));
               }
               dynamic_argument = next_automatic++;
             }
             if (dynamic_argument >= sizeof...(Args) ||
                 !__format_detail::__format_type_checker<
                     0, CharT, Args...>::dynamic_integer(dynamic_argument)) {
-              throw format_error("invalid dynamic format argument");
+              __DAVECC_THROW(
+                  format_error("invalid dynamic format argument"));
             }
             ++position;
           } else {
@@ -697,7 +854,7 @@ class basic_format_string {
         specification_size = position - specification_start;
       }
       if (position >= __size || text[position] != '}') {
-        throw format_error("unmatched '{' in format string");
+        __DAVECC_THROW(format_error("unmatched '{' in format string"));
       }
       bool builtin_syntax_valid = true;
       char presentation = 0;
@@ -762,6 +919,9 @@ class basic_format_string {
           }
         }
       }
+      if (spec_position < spec_end && text[spec_position] == 'L') {
+        ++spec_position;
+      }
       if (spec_position < spec_end) {
         presentation = static_cast<char>(text[spec_position++]);
       }
@@ -771,8 +931,8 @@ class basic_format_string {
       if (!__format_detail::__format_type_checker<
               0, CharT, Args...>::specification(
               argument, builtin_syntax_valid, presentation)) {
-        throw format_error(
-            "format presentation is incompatible with argument type");
+        __DAVECC_THROW(format_error(
+            "format presentation is incompatible with argument type"));
       }
       i = position;
     }
@@ -788,9 +948,156 @@ class basic_format_string {
 };
 
 template <class... Args>
+class basic_format_string<wchar_t, Args...> {
+  const wchar_t* __data;
+  size_t __size;
+
+ public:
+  template <size_t N>
+  constexpr basic_format_string(const wchar_t (&text)[N])
+      : __data(text), __size(N - 1) {}
+
+  constexpr const wchar_t* data() const noexcept { return __data; }
+  constexpr size_t size() const noexcept { return __size; }
+  constexpr basic_string_view<wchar_t> get() const noexcept {
+    return basic_string_view<wchar_t>(__data, __size);
+  }
+};
+
+template <class... Args>
 using format_string = basic_format_string<char, Args...>;
 
+template <class... Args>
+using wformat_string = basic_format_string<wchar_t, Args...>;
+
+namespace __format_detail {
+
+inline void __append_utf8_code_point(unsigned long value, string* output) {
+  if (value <= 0x7F) {
+    output->push_back(static_cast<char>(value));
+  } else if (value <= 0x7FF) {
+    output->push_back(static_cast<char>(0xC0 | (value >> 6)));
+    output->push_back(static_cast<char>(0x80 | (value & 0x3F)));
+  } else if (value <= 0xFFFF) {
+    output->push_back(static_cast<char>(0xE0 | (value >> 12)));
+    output->push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | (value & 0x3F)));
+  } else {
+    output->push_back(static_cast<char>(0xF0 | (value >> 18)));
+    output->push_back(static_cast<char>(0x80 | ((value >> 12) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | (value & 0x3F)));
+  }
+}
+
+inline string __wide_to_utf8(wstring_view value) {
+  string result;
+  for (size_t i = 0; i < value.size(); ++i) {
+    unsigned long code_point = static_cast<unsigned long>(value[i]);
+    if (code_point >= 0xD800 && code_point <= 0xDBFF &&
+        i + 1 < value.size()) {
+      unsigned long low = static_cast<unsigned long>(value[i + 1]);
+      if (low >= 0xDC00 && low <= 0xDFFF) {
+        code_point =
+            0x10000 + ((code_point - 0xD800) << 10) + (low - 0xDC00);
+        ++i;
+      }
+    }
+    if (code_point > 0x10FFFF ||
+        (code_point >= 0xD800 && code_point <= 0xDFFF)) {
+      code_point = 0xFFFD;
+    }
+    __append_utf8_code_point(code_point, &result);
+  }
+  return result;
+}
+
+inline wstring __utf8_to_wide(string_view value) {
+  wstring result;
+  for (size_t position = 0; position < value.size();) {
+    unsigned char first = static_cast<unsigned char>(value[position]);
+    unsigned long code_point = first;
+    size_t length = 1;
+    if (first >= 0xC2 && first < 0xE0 && position + 1 < value.size()) {
+      code_point = ((first & 0x1F) << 6) |
+                   (static_cast<unsigned char>(value[position + 1]) & 0x3F);
+      length = 2;
+    } else if (first >= 0xE0 && first < 0xF0 &&
+               position + 2 < value.size()) {
+      code_point = ((first & 0x0F) << 12) |
+                   ((static_cast<unsigned char>(value[position + 1]) & 0x3F)
+                    << 6) |
+                   (static_cast<unsigned char>(value[position + 2]) & 0x3F);
+      length = 3;
+    } else if (first >= 0xF0 && first < 0xF5 &&
+               position + 3 < value.size()) {
+      code_point = ((first & 0x07) << 18) |
+                   ((static_cast<unsigned char>(value[position + 1]) & 0x3F)
+                    << 12) |
+                   ((static_cast<unsigned char>(value[position + 2]) & 0x3F)
+                    << 6) |
+                   (static_cast<unsigned char>(value[position + 3]) & 0x3F);
+      length = 4;
+    }
+    result.push_back(static_cast<wchar_t>(code_point));
+    position += length;
+  }
+  return result;
+}
+
+template <class T>
+inline T&& __narrow_wide_argument(T&& value) {
+  return static_cast<T&&>(value);
+}
+
+inline string __narrow_wide_argument(const wstring& value) {
+  return __wide_to_utf8(wstring_view(value.data(), value.size()));
+}
+
+inline string __narrow_wide_argument(wstring_view value) {
+  return __wide_to_utf8(value);
+}
+
+inline string __narrow_wide_argument(const wchar_t* value) {
+  return value == nullptr
+             ? string()
+             : __wide_to_utf8(
+                   wstring_view(value, char_traits<wchar_t>::length(value)));
+}
+
+template <size_t N>
+inline string __narrow_wide_argument(const wchar_t (&value)[N]) {
+  return __wide_to_utf8(wstring_view(value, N == 0 ? 0 : N - 1));
+}
+
+template <class... Args>
+inline wstring __wformat_invoke(const wchar_t* text_data, size_t text_size,
+                                Args&&... args) {
+  string narrow_text =
+      __wide_to_utf8(wstring_view(text_data, text_size));
+  string narrow_result = __format_invoke(
+      narrow_text.data(), narrow_text.size(),
+      __narrow_wide_argument(static_cast<Args&&>(args))...);
+  return __utf8_to_wide(
+      string_view(narrow_result.data(), narrow_result.size()));
+}
+
+}  // namespace __format_detail
+
 string vformat(string_view text, format_args args);
+
+using wformat_context =
+    basic_format_context<back_insert_iterator<wstring>, wchar_t>;
+using wformat_args = basic_format_args<wformat_context>;
+
+inline wstring vformat(wstring_view text, wformat_args args) {
+  string narrow = __format_detail::__wide_to_utf8(text);
+  format_args narrow_args(args.__implementation());
+  string result =
+      vformat(string_view(narrow.data(), narrow.size()), narrow_args);
+  return __format_detail::__utf8_to_wide(
+      string_view(result.data(), result.size()));
+}
 
 template <class OutputIt>
 OutputIt vformat_to(OutputIt out, string_view text, format_args args) {
@@ -804,12 +1111,55 @@ OutputIt vformat_to(OutputIt out, string_view text, format_args args) {
 string format(
     const typename __format_detail::__non_deduced<format_string<>>::type& text);
 
+inline wstring format(
+    const typename __format_detail::__non_deduced<wformat_string<>>::type&
+        text) {
+  return __format_detail::__wformat_invoke(text.data(), text.size());
+}
+
 template <class... Args>
 inline string format(
     const typename __format_detail::__non_deduced<
         format_string<Args...>>::type& text,
     Args&&... args) {
   return __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
+}
+
+inline string vformat(const locale&, string_view text, format_args args) {
+  return vformat(text, args);
+}
+
+inline wstring vformat(const locale&, wstring_view text, wformat_args args) {
+  return vformat(text, args);
+}
+
+template <class... Args>
+inline string format(
+    const locale&,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__format_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
+}
+
+template <class... Args>
+inline wstring format(
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__wformat_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
+}
+
+template <class... Args>
+inline wstring format(
+    const locale&,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__wformat_invoke(
       text.data(), text.size(), static_cast<Args&&>(args)...);
 }
 
@@ -824,6 +1174,38 @@ OutputIt format_to(OutputIt out,
     *out++ = result[i];
   }
   return out;
+}
+
+template <class OutputIt, class... Args>
+OutputIt format_to(
+    OutputIt out,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  wstring result = __format_detail::__wformat_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class OutputIt, class... Args>
+OutputIt format_to(
+    OutputIt out, const locale&,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return format_to(out, text, static_cast<Args&&>(args)...);
+}
+
+template <class OutputIt, class... Args>
+OutputIt format_to(
+    OutputIt out, const locale&,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return format_to(out, text, static_cast<Args&&>(args)...);
 }
 
 template <class OutputIt>
@@ -856,6 +1238,457 @@ size_t formatted_size(
       text.data(), text.size(), static_cast<Args&&>(args)...)
       .size();
 }
+
+template <class... Args>
+size_t formatted_size(
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return __format_detail::__wformat_invoke(
+             text.data(), text.size(), static_cast<Args&&>(args)...)
+      .size();
+}
+
+enum class range_format {
+  disabled,
+  map,
+  set,
+  sequence,
+  string,
+  debug_string
+};
+
+namespace __format_detail {
+
+template <class T, class = void>
+struct __range_kind {
+  static constexpr range_format value = range_format::sequence;
+};
+
+template <class T>
+struct __range_kind<T, void_t<typename T::mapped_type>> {
+  static constexpr range_format value = range_format::map;
+};
+
+template <class T>
+concept __member_range =
+    requires(T& value) {
+      value.begin();
+      value.end();
+    } &&
+    !is_same<remove_cv_t<T>, string>::value &&
+    !is_same<remove_cv_t<T>, string_view>::value;
+
+inline void __append_range_piece(string* result, string_view piece) {
+  result->append(piece.data(), piece.size());
+}
+
+}  // namespace __format_detail
+
+template <class R>
+inline constexpr range_format format_kind =
+    __format_detail::__member_range<R>
+        ? __format_detail::__range_kind<remove_cv_t<R>>::value
+        : range_format::disabled;
+
+template <class First, class Second>
+struct formatter<pair<First, Second>, char> {
+  bool __brackets = true;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    if (context.begin() != context.end() && *context.begin() == 'n') {
+      __brackets = false;
+      return context.begin() + 1;
+    }
+    return context.begin();
+  }
+
+  format_context::iterator format(const pair<First, Second>& value,
+                                  format_context& context) const {
+    string result;
+    if (__brackets) {
+      result.push_back('(');
+    }
+    result.append(__format_detail::__format_invoke("{}", 2, value.first));
+    result.append(", ");
+    result.append(__format_detail::__format_invoke("{}", 2, value.second));
+    if (__brackets) {
+      result.push_back(')');
+    }
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
+
+template <class R>
+  requires __format_detail::__member_range<R>
+struct formatter<R, char> {
+  bool __brackets = true;
+  bool __map = format_kind<R> == range_format::map;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    auto current = context.begin();
+    if (current != context.end() && *current == 'n') {
+      __brackets = false;
+      ++current;
+    } else if (current != context.end() && *current == 'm') {
+      __map = true;
+      ++current;
+    }
+    return current;
+  }
+
+  format_context::iterator format(const R& value,
+                                  format_context& context) const {
+    string result;
+    if (__brackets) {
+      result.push_back(__map ? '{' : '[');
+    }
+    bool first = true;
+    for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
+      if (!first) {
+        result.append(", ");
+      }
+      first = false;
+      result.append(__format_detail::__format_invoke("{}", 2, *iterator));
+    }
+    if (__brackets) {
+      result.push_back(__map ? '}' : ']');
+    }
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
+
+namespace __format_detail {
+
+inline void __append_fixed_unsigned(unsigned value, unsigned width,
+                                    string* output) {
+  char buffer[12];
+  unsigned position = width;
+  for (unsigned i = 0; i < width; ++i) {
+    buffer[--position] = static_cast<char>('0' + value % 10);
+    value /= 10;
+  }
+  output->append(buffer, width);
+}
+
+inline void __append_calendar_year(int value, string* output) {
+  if (value < 0) {
+    output->push_back('-');
+    value = -value;
+  }
+  __append_fixed_unsigned(static_cast<unsigned>(value), 4, output);
+}
+
+inline const char* __month_short_name(unsigned value) {
+  static const char* names[] = {"???", "Jan", "Feb", "Mar", "Apr", "May",
+                                "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                                "Dec"};
+  return value <= 12 ? names[value] : names[0];
+}
+
+inline const char* __month_long_name(unsigned value) {
+  static const char* names[] = {
+      "???",      "January", "February", "March",    "April",
+      "May",      "June",    "July",     "August",   "September",
+      "October",  "November", "December"};
+  return value <= 12 ? names[value] : names[0];
+}
+
+inline const char* __weekday_short_name(unsigned value) {
+  static const char* names[] = {"Sun", "Mon", "Tue", "Wed",
+                                "Thu", "Fri", "Sat"};
+  return names[value % 7];
+}
+
+inline const char* __weekday_long_name(unsigned value) {
+  static const char* names[] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
+                                "Thursday", "Friday", "Saturday"};
+  return names[value % 7];
+}
+
+inline void __format_year_month_day(const chrono::year_month_day& value,
+                                    const char* specification,
+                                    size_t specification_size,
+                                    string* output) {
+  int year_value = static_cast<int>(value.year());
+  unsigned month_value = static_cast<unsigned>(value.month());
+  unsigned day_value = static_cast<unsigned>(value.day());
+  if (specification_size == 0) {
+    __append_calendar_year(year_value, output);
+    output->push_back('-');
+    __append_fixed_unsigned(month_value, 2, output);
+    output->push_back('-');
+    __append_fixed_unsigned(day_value, 2, output);
+    return;
+  }
+  chrono::sys_days day_point = chrono::operator/(value);
+  long long weekday_count = day_point.time_since_epoch().count() + 4;
+  int weekday_index = static_cast<int>(weekday_count % 7);
+  if (weekday_index < 0) {
+    weekday_index += 7;
+  }
+  chrono::weekday weekday_value(static_cast<unsigned>(weekday_index));
+  for (size_t i = 0; i < specification_size; ++i) {
+    char current = specification[i];
+    if (current != '%' || i + 1 >= specification_size) {
+      output->push_back(current);
+      continue;
+    }
+    char conversion = specification[++i];
+    switch (conversion) {
+      case '%':
+        output->push_back('%');
+        break;
+      case 'Y':
+        __append_calendar_year(year_value, output);
+        break;
+      case 'y':
+        __append_fixed_unsigned(static_cast<unsigned>(year_value % 100), 2,
+                                output);
+        break;
+      case 'm':
+        __append_fixed_unsigned(month_value, 2, output);
+        break;
+      case 'd':
+        __append_fixed_unsigned(day_value, 2, output);
+        break;
+      case 'e':
+        if (day_value < 10) {
+          output->push_back(' ');
+        }
+        __append_fixed_unsigned(day_value, day_value < 10 ? 1 : 2, output);
+        break;
+      case 'F':
+        __append_calendar_year(year_value, output);
+        output->push_back('-');
+        __append_fixed_unsigned(month_value, 2, output);
+        output->push_back('-');
+        __append_fixed_unsigned(day_value, 2, output);
+        break;
+      case 'b':
+      case 'h':
+        output->append(__month_short_name(month_value));
+        break;
+      case 'B':
+        output->append(__month_long_name(month_value));
+        break;
+      case 'a':
+        output->append(
+            __weekday_short_name(static_cast<unsigned>(weekday_value)));
+        break;
+      case 'A':
+        output->append(
+            __weekday_long_name(static_cast<unsigned>(weekday_value)));
+        break;
+      case 'n':
+        output->push_back('\n');
+        break;
+      case 't':
+        output->push_back('\t');
+        break;
+      default:
+        __fail("unsupported chrono calendar conversion");
+    }
+  }
+}
+
+}  // namespace __format_detail
+
+template <>
+struct formatter<chrono::year_month_day, char> {
+  const char* __specification_data = nullptr;
+  size_t __specification_size = 0;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    __specification_data = context.begin();
+    __specification_size =
+        static_cast<size_t>(context.end() - context.begin());
+    return context.end();
+  }
+
+  format_context::iterator format(const chrono::year_month_day& value,
+                                  format_context& context) const {
+    string result;
+    __format_detail::__format_year_month_day(
+        value, __specification_data, __specification_size, &result);
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
+
+template <>
+struct formatter<chrono::year, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.end();
+  }
+  format_context::iterator format(chrono::year value,
+                                  format_context& context) const {
+    string result;
+    __format_detail::__append_calendar_year(static_cast<int>(value), &result);
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
+
+template <>
+struct formatter<chrono::month, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.end();
+  }
+  format_context::iterator format(chrono::month value,
+                                  format_context& context) const {
+    string result;
+    __format_detail::__append_fixed_unsigned(
+        static_cast<unsigned>(value), 2, &result);
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
+
+template <>
+struct formatter<chrono::day, char> : formatter<chrono::month, char> {
+  format_context::iterator format(chrono::day value,
+                                  format_context& context) const {
+    return formatter<chrono::month, char>::format(
+        chrono::month(static_cast<unsigned>(value)), context);
+  }
+};
+
+template <>
+struct formatter<chrono::weekday, char> {
+  bool __long_name = false;
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    if (context.end() - context.begin() == 2 && context.begin()[0] == '%' &&
+        context.begin()[1] == 'A') {
+      __long_name = true;
+    }
+    return context.end();
+  }
+  format_context::iterator format(chrono::weekday value,
+                                  format_context& context) const {
+    const char* name =
+        __long_name
+            ? __format_detail::__weekday_long_name(
+                  static_cast<unsigned>(value))
+            : __format_detail::__weekday_short_name(
+                  static_cast<unsigned>(value));
+    auto out = context.out();
+    while (*name != '\0') {
+      *out++ = *name++;
+    }
+    return out;
+  }
+};
+
+template <class Duration, class TimeZonePtr>
+struct formatter<chrono::zoned_time<Duration, TimeZonePtr>, char> {
+  const char* __specification_data = nullptr;
+  size_t __specification_size = 0;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    __specification_data = context.begin();
+    __specification_size =
+        static_cast<size_t>(context.end() - context.begin());
+    return context.end();
+  }
+
+  format_context::iterator format(
+      const chrono::zoned_time<Duration, TimeZonePtr>& value,
+      format_context& context) const {
+    long long total_seconds =
+        value.get_local_time().time_since_epoch().count();
+    long long day_count = total_seconds / 86400;
+    long long second_of_day = total_seconds % 86400;
+    if (second_of_day < 0) {
+      second_of_day += 86400;
+      --day_count;
+    }
+    chrono::year_month_day date = chrono::operator/(
+        chrono::sys_days(chrono::days(day_count)));
+    chrono::sys_info information =
+        value.get_time_zone()->get_info(value.get_sys_time());
+    const char* specification =
+        __specification_size == 0 ? "%F %T %Z" : __specification_data;
+    size_t specification_size =
+        __specification_size == 0 ? 8 : __specification_size;
+    string result;
+    for (size_t i = 0; i < specification_size; ++i) {
+      char current = specification[i];
+      if (current != '%' || i + 1 >= specification_size) {
+        result.push_back(current);
+        continue;
+      }
+      char conversion = specification[++i];
+      if (conversion == 'T' || conversion == 'R' ||
+          conversion == 'H' || conversion == 'M' || conversion == 'S') {
+        unsigned hour = static_cast<unsigned>(second_of_day / 3600);
+        unsigned minute =
+            static_cast<unsigned>((second_of_day / 60) % 60);
+        unsigned second = static_cast<unsigned>(second_of_day % 60);
+        if (conversion == 'T' || conversion == 'R' || conversion == 'H') {
+          __format_detail::__append_fixed_unsigned(hour, 2, &result);
+        }
+        if (conversion == 'T' || conversion == 'R') {
+          result.push_back(':');
+        }
+        if (conversion == 'T' || conversion == 'R' || conversion == 'M') {
+          __format_detail::__append_fixed_unsigned(minute, 2, &result);
+        }
+        if (conversion == 'T') {
+          result.push_back(':');
+        }
+        if (conversion == 'T' || conversion == 'S') {
+          __format_detail::__append_fixed_unsigned(second, 2, &result);
+        }
+      } else if (conversion == 'Z') {
+        result.append(information.abbrev);
+      } else if (conversion == 'z') {
+        long long offset = information.offset.count();
+        result.push_back(offset < 0 ? '-' : '+');
+        if (offset < 0) {
+          offset = -offset;
+        }
+        __format_detail::__append_fixed_unsigned(
+            static_cast<unsigned>(offset / 3600), 2, &result);
+        __format_detail::__append_fixed_unsigned(
+            static_cast<unsigned>((offset / 60) % 60), 2, &result);
+      } else {
+        char date_specification[2] = {'%', conversion};
+        __format_detail::__format_year_month_day(
+            date, date_specification, 2, &result);
+      }
+    }
+    auto out = context.out();
+    for (size_t i = 0; i < result.size(); ++i) {
+      *out++ = result[i];
+    }
+    return out;
+  }
+};
 
 template <class Rep, class Period>
 struct formatter<chrono::duration<Rep, Period>, char> {
@@ -945,7 +1778,28 @@ struct formatter<chrono::time_point<chrono::system_clock, Duration>, char> {
 template <class Visitor, class Context>
 decltype(auto) visit_format_arg(Visitor&& visitor,
                                 basic_format_arg<Context> argument) {
-  return static_cast<Visitor&&>(visitor)(argument);
+  const __format_detail::__format_arg& value = argument.__implementation();
+  switch (value.kind) {
+    case __format_detail::__format_arg_kind::boolean:
+      return static_cast<Visitor&&>(visitor)(value.bool_value);
+    case __format_detail::__format_arg_kind::character:
+      return static_cast<Visitor&&>(visitor)(value.char_value);
+    case __format_detail::__format_arg_kind::signed_integer:
+      return static_cast<Visitor&&>(visitor)(value.signed_value);
+    case __format_detail::__format_arg_kind::unsigned_integer:
+      return static_cast<Visitor&&>(visitor)(value.unsigned_value);
+    case __format_detail::__format_arg_kind::floating:
+      return static_cast<Visitor&&>(visitor)(value.floating_value);
+    case __format_detail::__format_arg_kind::string:
+      return static_cast<Visitor&&>(visitor)(
+          string_view(value.string_data, value.string_size));
+    case __format_detail::__format_arg_kind::pointer:
+      return static_cast<Visitor&&>(visitor)(value.value);
+    case __format_detail::__format_arg_kind::custom:
+      return static_cast<Visitor&&>(visitor)(argument);
+    default:
+      return static_cast<Visitor&&>(visitor)(monostate());
+  }
 }
 
 }  // namespace std

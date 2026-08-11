@@ -1740,6 +1740,21 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     return node->data.ptr;
   }
   RVOpcode opcode = IR2RV(node->opcode);
+  if (node->type != NULL && node->type->size <= 4 &&
+      TypeIsIntegral(node->type)) {
+    if (node->opcode == IR_OP(addi)) opcode = RV_OP(addw);
+    if (node->opcode == IR_OP(subi)) opcode = RV_OP(subw);
+    if (node->opcode == IR_OP(muli)) opcode = RV_OP(mulw);
+    if (node->opcode == IR_OP(divi)) {
+      opcode = TypeIsUnsigned(node->type) ? RV_OP(divuw) : RV_OP(divw);
+    }
+    if (node->opcode == IR_OP(modi)) {
+      opcode = TypeIsUnsigned(node->type) ? RV_OP(remuw) : RV_OP(remw);
+    }
+    if (node->opcode == IR_OP(lsli)) opcode = RV_OP(sllw);
+    if (node->opcode == IR_OP(lsri)) opcode = RV_OP(srlw);
+    if (node->opcode == IR_OP(asri)) opcode = RV_OP(sraw);
+  }
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =

@@ -10,6 +10,7 @@
 #include "loader.h"
 #include "loader_lifecycle.h"
 #include "elf.h"
+#include "chrono_host.h"
 #include "filesystem_host.h"
 #include "x86_64_machine.h"
 #include <errno.h>
@@ -469,6 +470,50 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_FS_CANONICAL:
       return DaveHostFilesystemCanonical(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case X86_64_SYSCALL_TZDB_VERSION:
+      return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
+    case X86_64_SYSCALL_TZDB_GENERATION:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoGeneration((uint64_t*)(uintptr_t)a0);
+    case X86_64_SYSCALL_TZDB_RELOAD:
+      return DaveHostChronoReload((uint64_t*)(uintptr_t)a0);
+    case X86_64_SYSCALL_TZDB_CURRENT_ZONE:
+      return DaveHostChronoCurrentZone((char*)(uintptr_t)a0, (size_t)a1);
+    case X86_64_SYSCALL_TZDB_ZONE_COUNT:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoZoneCount((uint32_t*)(uintptr_t)a0);
+    case X86_64_SYSCALL_TZDB_ZONE_NAME:
+      return DaveHostChronoZoneName((uint32_t)a0, (char*)(uintptr_t)a1,
+                                    (size_t)a2);
+    case X86_64_SYSCALL_TZDB_LOCATE_ZONE:
+      return a2 == 0 || a3 == 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoLocateZone(
+                       (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1,
+                       (size_t)a2, (uint32_t*)(uintptr_t)a3);
+    case X86_64_SYSCALL_TZDB_SYS_INFO: {
+      const DaveHostChronoSysInfoRequestWire* request =
+          (const DaveHostChronoSysInfoRequestWire*)(uintptr_t)a1;
+      return a0 == 0 || request == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoSysInfoRequest((const char*)(uintptr_t)a0,
+                                                  request);
+    }
+    case X86_64_SYSCALL_TZDB_LOCAL_INFO: {
+      const DaveHostChronoLocalInfoRequestWire* request =
+          (const DaveHostChronoLocalInfoRequestWire*)(uintptr_t)a1;
+      return a0 == 0 || request == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoLocalInfoRequest((const char*)(uintptr_t)a0,
+                                                    request);
+    }
+    case X86_64_SYSCALL_TZDB_LEAP_COUNT:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoLeapCount((uint32_t*)(uintptr_t)a0);
+    case X86_64_SYSCALL_TZDB_LEAP_INFO:
+      return a1 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoLeapInfo((uint32_t)a0,
+                                              (DaveHostChronoLeapSecond*)(uintptr_t)a1);
     default:
       fprintf(stderr, "Unknown x86_64 syscall %lld\n", (long long)number);
       X86_64InterpreterFail(interpreter, 1);

@@ -617,8 +617,19 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
 }
 
 static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
-  return EvaluateScalarConstantForSymbol(symbol, initializer) ||
-         ConstexprEvaluateObjectConstantForSymbol(symbol, initializer);
+  if (EvaluateScalarConstantForSymbol(symbol, initializer)) {
+    return true;
+  }
+  // Speculatively caching an ordinary automatic const class object is optional.
+  // Its initializer may refer to other automatic objects whose runtime values
+  // are not bound in the P-code constexpr thunk.  Treating that partial result
+  // as a constant freezes zero-filled members into later expressions.
+  if (symbol->flags.is_local &&
+      !StorageIs(symbol->storage, STO(static) | STO(thread)) &&
+      !symbol->flags.is_constexpr && !symbol->flags.is_constinit) {
+    return false;
+  }
+  return ConstexprEvaluateObjectConstantForSymbol(symbol, initializer);
 }
 
 static StructMember* MemberPointerMemberFromExpression(ASTNode* node);
@@ -1337,6 +1348,13 @@ static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
   }
 
   node->sub = AnalyzeExpression(node->sub);
+  if (node->sub->type != NULL) {
+    TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+        &compiler->syntax, node->sub->type);
+    if (materialized != node->sub->type) {
+      ASTNodeSetType(node->sub, materialized);
+    }
+  }
   if (!TypeIsStructOrUnion(node->sub->type)) {
     return NULL;
   }
@@ -1398,6 +1416,13 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
   }
 
   node->sub = AnalyzeExpression(node->sub);
+  if (node->sub->type != NULL) {
+    TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+        &compiler->syntax, node->sub->type);
+    if (materialized != node->sub->type) {
+      ASTNodeSetType(node->sub, materialized);
+    }
+  }
   if (!TypeIsStructOrUnion(node->sub->type)) {
     return NULL;
   }
@@ -3596,6 +3621,12 @@ static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id,
   if (node->op == AST_OP(vardecl)) {
     AddInlineLocalSymbol(
         inliner, ((VariableDeclarationASTNode*)node)->symbol);
+  } else if (node->op == AST_OP(identifier)) {
+    // Lowered expressions can contain compiler-generated locals without a
+    // VariableDeclarationASTNode (for example the temporary that carries a
+    // placement-new result). They still need a caller-local clone when the
+    // containing function is inlined.
+    AddInlineLocalSymbol(inliner, ((IdentifierASTNode*)node)->symbol);
   } else if (node->op == AST_OP(catch)) {
     AddInlineLocalSymbol(inliner, ((CatchASTNode*)node)->symbol);
   }
@@ -3841,7 +3872,8 @@ typedef struct {
 static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   GotoFinder* finder = data;
   finder->node_count++;
-  if (node->op == AST_OP(goto)) {
+  if (node->op == AST_OP(goto) || node->op == AST_OP(inline_call) ||
+      node->op == AST_OP(stmt_expr)) {
     finder->found_goto = true;
   }
 }
@@ -3885,6 +3917,15 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
       ((BinaryASTNode*)node)->right->op != AST_OP(braced_init)) {
     finder->found_unresolved = true;
   }
+  if (node->op == AST_OP(call)) {
+    ASTNode* callee = ((VectorASTNode*)node)->left;
+    if (callee != NULL && callee->op == AST_OP(identifier)) {
+      Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
+      if (symbol != NULL && symbol->flags.is_template_type_parameter) {
+        finder->found_unresolved = true;
+      }
+    }
+  }
 }
 
 // We can only inline a function if:
@@ -3913,8 +3954,34 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
     // Only at -O2 and above.
     return false;
   }
+  // Required constant expressions are interpreted from their semantic AST.
+  // Replacing a constexpr call with the normal runtime inline_call lowering
+  // before that interpretation loses the call boundary and makes the constant
+  // evaluator reject an otherwise valid expression.
+  if (compiler->constant_evaluation_required_depth > 0) {
+    return false;
+  }
   // __attribute__((noinline)) blocks inlining outright.
   if (func->symbol != NULL && func->symbol->flags.noinline) {
+    return false;
+  }
+  // A lazily instantiated function can temporarily share the primary
+  // template's body until its concrete body is cloned.  Inlining that shared
+  // body copies still-dependent expressions into the caller (for example
+  // `T(value)` inside a braced initializer) even though the call's signature is
+  // already concrete.
+  if (func->template_origin != NULL &&
+      func->template_origin->type != NULL &&
+      TypeIsFunction(func->template_origin->type) &&
+      func->body == func->template_origin->type->info.function.body) {
+    return false;
+  }
+  // The inline-call argument copier binds `this` as the static member-owner
+  // pointer.  It does not reproduce the runtime adjustment needed to reach a
+  // virtual base, so inlining such a member can turn uses of that base into
+  // invalid object accesses.
+  if (func->cxx_member_owner != NULL &&
+      func->cxx_member_owner->virtual_bases.length != 0) {
     return false;
   }
   // Constructors are not inlined because they have no return value; replacing
@@ -5299,6 +5366,14 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     }
     if (CompilerIsCXX() && TypeIsVoidPointer(actual) &&
         TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
+      return -1;
+    }
+    if (CompilerIsCXX() && actual->next != NULL && target->next != NULL &&
+        !TypeIsVoid(actual->next) && !TypeIsVoid(target->next) &&
+        !TypeEqualIgnoringQualifiers(actual->next, target->next) &&
+        !(TypeIsStructOrUnion(actual->next) &&
+          TypeIsStructOrUnion(target->next) &&
+          TypeIsDerivedFrom(actual->next, target->next))) {
       return -1;
     }
     if (TypeAssignmentCompatible(actual, target)) {
@@ -8817,7 +8892,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // a function (not a function pointer) and it was tagged as inline.
   if (call_ok && TypeIsFunction(node->left->type)) {
     FunctionInfo* func = &node->left->type->info.function;
-    if (FunctionCanBeInlined(func)) {
+    if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.
       ASTNode* inline_call = InlineFunctionCall(func, node);

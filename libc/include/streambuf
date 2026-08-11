@@ -14,10 +14,13 @@
 
 #include <iosfwd>
 #include <ios>
+#include <iterator>
 #include <__char_traits>
 #include <cstddef>
 
 namespace std {
+
+class locale;
 
 template <class CharT, class Traits>
 class basic_streambuf {
@@ -30,7 +33,8 @@ class basic_streambuf {
 
   virtual ~basic_streambuf() {}
 
-  // Locale support is not provided; getloc/pubimbue are intentionally omitted.
+  locale pubimbue(const locale& loc);
+  locale getloc() const;
 
   // Buffer / positioning.
   basic_streambuf* pubsetbuf(char_type* s, streamsize n) {
@@ -185,7 +189,9 @@ class basic_streambuf {
   }
   virtual int_type overflow(int_type = Traits::eof()) { return Traits::eof(); }
 
- private:
+  virtual locale imbue(const locale& loc);
+
+ protected:
   char_type* __eback_;
   char_type* __gptr_;
   char_type* __egptr_;
@@ -193,6 +199,254 @@ class basic_streambuf {
   char_type* __pptr_;
   char_type* __epptr_;
 };
+
+class ostreambuf_iterator {
+ public:
+  typedef output_iterator_tag iterator_category;
+  typedef char char_type;
+  typedef char_traits<char> traits_type;
+  typedef ptrdiff_t difference_type;
+  typedef char& reference;
+  typedef char* pointer;
+
+  ostreambuf_iterator() noexcept : __streambuf_(nullptr) {}
+  explicit ostreambuf_iterator(basic_streambuf<char, char_traits<char>>* s) noexcept
+      : __streambuf_(s) {}
+  ostreambuf_iterator& operator=(char c) {
+    if (__streambuf_ != nullptr &&
+        traits_type::eq_int_type(__streambuf_->sputc(c), traits_type::eof())) {
+      __streambuf_ = nullptr;
+    }
+    return *this;
+  }
+  ostreambuf_iterator& operator*() { return *this; }
+  ostreambuf_iterator& operator++() { return *this; }
+  ostreambuf_iterator operator++(int) { return *this; }
+  bool failed() const noexcept { return __streambuf_ == nullptr; }
+
+ private:
+  basic_streambuf<char, char_traits<char>>* __streambuf_;
+};
+
+class wostreambuf_iterator {
+ public:
+  typedef output_iterator_tag iterator_category;
+  typedef wchar_t char_type;
+  typedef char_traits<wchar_t> traits_type;
+  typedef ptrdiff_t difference_type;
+  typedef wchar_t& reference;
+  typedef wchar_t* pointer;
+
+  wostreambuf_iterator() noexcept : __streambuf_(nullptr) {}
+  explicit wostreambuf_iterator(basic_streambuf<wchar_t, char_traits<wchar_t>>* s) noexcept
+      : __streambuf_(s) {}
+  wostreambuf_iterator& operator=(wchar_t c) {
+    if (__streambuf_ != nullptr &&
+        traits_type::eq_int_type(__streambuf_->sputc(c), traits_type::eof())) {
+      __streambuf_ = nullptr;
+    }
+    return *this;
+  }
+  wostreambuf_iterator& operator*() { return *this; }
+  wostreambuf_iterator& operator++() { return *this; }
+  wostreambuf_iterator operator++(int) { return *this; }
+  bool failed() const noexcept { return __streambuf_ == nullptr; }
+
+ private:
+  basic_streambuf<wchar_t, char_traits<wchar_t>>* __streambuf_;
+};
+
+class istreambuf_iterator {
+ public:
+  typedef input_iterator_tag iterator_category;
+  typedef char char_type;
+  typedef char_traits<char> traits_type;
+  typedef ptrdiff_t difference_type;
+  typedef const char& reference;
+  typedef const char* pointer;
+
+  istreambuf_iterator() noexcept : __streambuf_(nullptr), __cached_(false) {}
+  explicit istreambuf_iterator(basic_streambuf<char, char_traits<char>>* s) noexcept
+      : __streambuf_(s), __cached_(false) {}
+  istreambuf_iterator(basic_streambuf<char, char_traits<char>>* s, int) noexcept
+      : __streambuf_(s), __cached_(false) {}
+
+  const char& operator*() const {
+    if (!__cached_) {
+      __value_ = __read();
+      __cached_ = true;
+    }
+    return __value_;
+  }
+  istreambuf_iterator& operator++() {
+    if (__streambuf_ != nullptr) {
+      __streambuf_->sbumpc();
+    }
+    __cached_ = false;
+    return *this;
+  }
+  istreambuf_iterator operator++(int) {
+    istreambuf_iterator tmp = *this;
+    ++*this;
+    return tmp;
+  }
+  bool equal(const istreambuf_iterator& other) const {
+    if (__streambuf_ == nullptr && other.__streambuf_ == nullptr) {
+      return true;
+    }
+    if (__streambuf_ == nullptr || other.__streambuf_ == nullptr) {
+      return false;
+    }
+    if (__cached_) {
+      if (other.__cached_) {
+        return traits_type::eq(__value_, other.__value_);
+      }
+      traits_type::int_type c =
+          other.__streambuf_ != nullptr ? other.__streambuf_->sgetc()
+                                        : traits_type::eof();
+      if (traits_type::eq_int_type(c, traits_type::eof())) {
+        return false;
+      }
+      return traits_type::eq(__value_, traits_type::to_char_type(c));
+    }
+    if (other.__cached_) {
+      traits_type::int_type c =
+          __streambuf_ != nullptr ? __streambuf_->sgetc() : traits_type::eof();
+      if (traits_type::eq_int_type(c, traits_type::eof())) {
+        return false;
+      }
+      return traits_type::eq(traits_type::to_char_type(c), other.__value_);
+    }
+    return traits_type::eq_int_type(__streambuf_->sgetc(),
+                                    other.__streambuf_->sgetc());
+  }
+
+ private:
+  mutable basic_streambuf<char, char_traits<char>>* __streambuf_;
+  mutable bool __cached_;
+  mutable char __value_;
+
+  char __read() const {
+    traits_type::int_type c =
+        __streambuf_ != nullptr ? __streambuf_->sgetc() : traits_type::eof();
+    if (traits_type::eq_int_type(c, traits_type::eof())) {
+      __streambuf_ = nullptr;
+      return char();
+    }
+    return traits_type::to_char_type(c);
+  }
+};
+
+class wistreambuf_iterator {
+ public:
+  typedef input_iterator_tag iterator_category;
+  typedef wchar_t char_type;
+  typedef char_traits<wchar_t> traits_type;
+  typedef ptrdiff_t difference_type;
+  typedef const wchar_t& reference;
+  typedef const wchar_t* pointer;
+
+  wistreambuf_iterator() noexcept : __streambuf_(nullptr), __cached_(false) {}
+  explicit wistreambuf_iterator(basic_streambuf<wchar_t, char_traits<wchar_t>>* s) noexcept
+      : __streambuf_(s), __cached_(false) {}
+  wistreambuf_iterator(basic_streambuf<wchar_t, char_traits<wchar_t>>* s, int) noexcept
+      : __streambuf_(s), __cached_(false) {}
+
+  const wchar_t& operator*() const {
+    if (!__cached_) {
+      __value_ = __read();
+      __cached_ = true;
+    }
+    return __value_;
+  }
+  wistreambuf_iterator& operator++() {
+    if (__streambuf_ != nullptr) {
+      __streambuf_->sbumpc();
+    }
+    __cached_ = false;
+    return *this;
+  }
+  wistreambuf_iterator operator++(int) {
+    wistreambuf_iterator tmp = *this;
+    ++*this;
+    return tmp;
+  }
+  bool equal(const wistreambuf_iterator& other) const {
+    if (__streambuf_ == nullptr && other.__streambuf_ == nullptr) {
+      return true;
+    }
+    if (__streambuf_ == nullptr || other.__streambuf_ == nullptr) {
+      return false;
+    }
+    if (__cached_) {
+      if (other.__cached_) {
+        return traits_type::eq(__value_, other.__value_);
+      }
+      traits_type::int_type c =
+          other.__streambuf_ != nullptr ? other.__streambuf_->sgetc()
+                                        : traits_type::eof();
+      if (traits_type::eq_int_type(c, traits_type::eof())) {
+        return false;
+      }
+      return traits_type::eq(__value_, traits_type::to_char_type(c));
+    }
+    if (other.__cached_) {
+      traits_type::int_type c =
+          __streambuf_ != nullptr ? __streambuf_->sgetc() : traits_type::eof();
+      if (traits_type::eq_int_type(c, traits_type::eof())) {
+        return false;
+      }
+      return traits_type::eq(traits_type::to_char_type(c), other.__value_);
+    }
+    return traits_type::eq_int_type(__streambuf_->sgetc(),
+                                    other.__streambuf_->sgetc());
+  }
+
+ private:
+  mutable basic_streambuf<wchar_t, char_traits<wchar_t>>* __streambuf_;
+  mutable bool __cached_;
+  mutable wchar_t __value_;
+
+  wchar_t __read() const {
+    traits_type::int_type c =
+        __streambuf_ != nullptr ? __streambuf_->sgetc() : traits_type::eof();
+    if (traits_type::eq_int_type(c, traits_type::eof())) {
+      __streambuf_ = nullptr;
+      return wchar_t();
+    }
+    return traits_type::to_char_type(c);
+  }
+};
+
+inline bool operator==(const istreambuf_iterator& lhs,
+                       const istreambuf_iterator& rhs) {
+  return lhs.equal(rhs);
+}
+
+inline bool operator!=(const istreambuf_iterator& lhs,
+                       const istreambuf_iterator& rhs) {
+  return !lhs.equal(rhs);
+}
+
+inline bool operator==(const wistreambuf_iterator& lhs,
+                       const wistreambuf_iterator& rhs) {
+  return lhs.equal(rhs);
+}
+
+inline bool operator!=(const wistreambuf_iterator& lhs,
+                       const wistreambuf_iterator& rhs) {
+  return !lhs.equal(rhs);
+}
+
+template <class CharT, class Traits>
+locale basic_ios<CharT, Traits>::imbue(const locale& loc) {
+  locale old = static_cast<const ios_base&>(*this).getloc();
+  static_cast<ios_base&>(*this).imbue(loc);
+  if (this->rdbuf() != nullptr) {
+    this->rdbuf()->pubimbue(loc);
+  }
+  return old;
+}
 
 }  // namespace std
 

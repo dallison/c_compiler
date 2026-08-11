@@ -1445,28 +1445,26 @@ static void GenerateWhileStatement(Generator* gen,
       break;
     }
     case kCodeForSpeed: {
-      // If we have a constant condition at this point it is non-zero
-      // so this is a forever loop.
+      IRNode* loop_label = NewIR(IR_OP(label));
+      // Use one condition block for both loop entry and the back edge. Besides
+      // making `continue` target the condition (rather than the body), this
+      // avoids generating a call-bearing condition twice with distinct spill
+      // temporaries that SSA can incorrectly coalesce.
       if (const_cond == NULL) {
-        IRNode* cond = GenerateExpression(gen, node->cond);
-
-        // bfalse cond, break_label
-        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+        GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
       }
-     
+
+      GeneratorEmit(gen, loop_label);
+      GenerateStatement(gen, node->stmt);
+
       // continue_label:
       GeneratorEmit(gen, gen->continue_label);
 
-      // stmt
-      GenerateStatement(gen, node->stmt);
-
       if (const_cond == NULL) {
-        // if (cond) goto continue_label.
         IRNode* cond = GenerateExpression(gen, node->cond);
-        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->continue_label));
+        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
       } else {
-        // bra continue_label
-        GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
+        GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
       }
       break;
     }
@@ -1831,12 +1829,15 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
       GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
       break;
       
-    case kCodeForSpeed:
-      // if (!cond) goto break_label
+    case kCodeForSpeed: {
+      // Use a single condition block for entry and the back edge. Generating
+      // the same call-bearing AST twice creates different spill temporaries;
+      // after SSA loop rotation, the header can otherwise retain the first
+      // iteration's spilled operand forever.
+      IRNode* condition_label = NULL;
       if (node->c2 != NULL && !constant_condition) {
-        IRNode* cond = GenerateExpression(gen, node->c2);
-        // bfalse cond, break_label
-        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+        condition_label = NewIR(IR_OP(label));
+        GeneratorEmit(gen, NewIR1(IR_OP(bra), condition_label));
       }
       
       // loop_label:
@@ -1854,6 +1855,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
       }
 
       if (node->c2 != NULL && !constant_condition) {
+        GeneratorEmit(gen, condition_label);
         IRNode* cond = GenerateExpression(gen, node->c2);
         // btrue cond, loop_label
         GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
@@ -1862,7 +1864,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
         GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
       }
       break;
-    
+    }
   }
   
   // break_label:

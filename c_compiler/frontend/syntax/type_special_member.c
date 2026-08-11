@@ -376,7 +376,9 @@ static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
   ASTNode* member_name =
       NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
                                location);
-  return NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node,
+  ASTOpcode access_op =
+      TypeIsPointerOrArray(this_symbol->type) ? AST_OP(arrow) : AST_OP(dot);
+  return NewBinaryASTNode(access_op, NULL, location, this_node,
                           member_name);
 }
 

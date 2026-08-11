@@ -70,7 +70,7 @@ class bad_variant_access : public exception {
   }
 };
 
-constexpr size_t variant_npos = static_cast<size_t>(-1);
+inline constexpr size_t variant_npos = static_cast<size_t>(-1);
 
 template <class T>
 struct variant_size;

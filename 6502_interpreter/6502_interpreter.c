@@ -8,6 +8,7 @@
 
 #include "6502_interpreter.h"
 #include "elf.h"
+#include "chrono_host.h"
 #include "filesystem_host.h"
 #include "loader_lifecycle.h"
 #include <stdio.h>
@@ -723,6 +724,17 @@ static char irq_handler[] = {
 #define W65C02_INT_FS_SPACE 46
 #define W65C02_INT_FS_COPY_FILE 47
 #define W65C02_INT_FS_CANONICAL 48
+#define W65C02_INT_TZDB_VERSION 49
+#define W65C02_INT_TZDB_GENERATION 50
+#define W65C02_INT_TZDB_RELOAD 51
+#define W65C02_INT_TZDB_CURRENT_ZONE 52
+#define W65C02_INT_TZDB_ZONE_COUNT 53
+#define W65C02_INT_TZDB_ZONE_NAME 54
+#define W65C02_INT_TZDB_LOCATE_ZONE 55
+#define W65C02_INT_TZDB_SYS_INFO 56
+#define W65C02_INT_TZDB_LOCAL_INFO 57
+#define W65C02_INT_TZDB_LEAP_COUNT 58
+#define W65C02_INT_TZDB_LEAP_INFO 59
 
 static int Open(W65C02Interpreter* interpreter, const char* filename, int flags, int mode) {
   int index = 0;
@@ -1122,6 +1134,13 @@ static void BrkHandler(W65C02Interpreter* interpreter, int8_t code) {
       interpreter->running = false;
       return;
     case W65C02_INT_ABORT:
+      fprintf(stderr, "guest abort at pc=0x%04x sp=0x%04x s=0x%02x stack:",
+              interpreter->pc, guest_sp, interpreter->s);
+      for (int i = 1; i <= 16; ++i) {
+        fprintf(stderr, " %02x",
+                interpreter->memory[0x100 + (uint8_t)(interpreter->s + i)]);
+      }
+      fprintf(stderr, "\n");
       abort();
     case W65C02_INT_OPEN: {
       const char* filename = ARG_STRING(0);
@@ -1332,6 +1351,103 @@ static void BrkHandler(W65C02Interpreter* interpreter, int8_t code) {
                    ? -DAVE_HOST_EINVAL
                    : DaveHostFilesystemCopyFile(source, destination,
                                                 ARG16(4));
+      break;
+    }
+    case W65C02_INT_TZDB_VERSION: {
+      size_t capacity = ARG16(2);
+      char* buffer = ARG_PTR(0, capacity);
+      result = buffer == NULL ? -DAVE_HOST_EINVAL
+                              : DaveHostChronoTzdbVersion(buffer, capacity);
+      break;
+    }
+    case W65C02_INT_TZDB_GENERATION: {
+      uint64_t* generation = ARG_PTR(0, sizeof(uint64_t));
+      result = generation == NULL ? -DAVE_HOST_EINVAL
+                                  : DaveHostChronoGeneration(generation);
+      break;
+    }
+    case W65C02_INT_TZDB_RELOAD: {
+      uint64_t* generation = ARG_PTR(0, sizeof(uint64_t));
+      result = DaveHostChronoReload(generation);
+      break;
+    }
+    case W65C02_INT_TZDB_CURRENT_ZONE: {
+      size_t capacity = ARG16(2);
+      char* buffer = ARG_PTR(0, capacity);
+      result = buffer == NULL ? -DAVE_HOST_EINVAL
+                              : DaveHostChronoCurrentZone(buffer, capacity);
+      break;
+    }
+    case W65C02_INT_TZDB_ZONE_COUNT: {
+      uint32_t* count = ARG_PTR(0, sizeof(uint32_t));
+      result = count == NULL ? -DAVE_HOST_EINVAL
+                             : DaveHostChronoZoneCount(count);
+      break;
+    }
+    case W65C02_INT_TZDB_ZONE_NAME: {
+      size_t capacity = ARG16(4);
+      char* buffer = ARG_PTR(2, capacity);
+      result = buffer == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostChronoZoneName((uint32_t)ARG16(0), buffer, capacity);
+      break;
+    }
+    case W65C02_INT_TZDB_LOCATE_ZONE: {
+      const char* name = ARG_STRING(0);
+      size_t capacity = ARG16(4);
+      char* buffer = ARG_PTR(2, capacity);
+      uint32_t* index = ARG_PTR(6, sizeof(uint32_t));
+      result = name == NULL || buffer == NULL || index == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostChronoLocateZone(name, buffer, capacity, index);
+      break;
+    }
+    case W65C02_INT_TZDB_SYS_INFO: {
+      const char* zone = ARG_STRING(0);
+      int64_t* seconds = (int64_t*)ARG_PTR(2, 8);
+      DaveHostChronoSysInfoWire* info =
+          (DaveHostChronoSysInfoWire*)ARG_PTR(4, sizeof(DaveHostChronoSysInfoWire));
+      size_t capacity = ARG16(8);
+      char* abbrev = ARG_PTR(6, capacity);
+      if (zone == NULL || seconds == NULL || info == NULL || abbrev == NULL) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        int64_t value = 0;
+        memcpy(&value, seconds, sizeof(value));
+        result = DaveHostChronoSysInfo(zone, value, info, abbrev, capacity);
+      }
+      break;
+    }
+    case W65C02_INT_TZDB_LOCAL_INFO: {
+      const char* zone = ARG_STRING(0);
+      int64_t* seconds = (int64_t*)ARG_PTR(2, 8);
+      DaveHostChronoLocalInfoWire* info =
+          (DaveHostChronoLocalInfoWire*)ARG_PTR(4, sizeof(DaveHostChronoLocalInfoWire));
+      size_t capacity = ARG16(8);
+      char* abbrev = ARG_PTR(6, capacity * 2);
+      if (zone == NULL || seconds == NULL || info == NULL || abbrev == NULL ||
+          capacity == 0) {
+        result = -DAVE_HOST_EINVAL;
+      } else {
+        int64_t value = 0;
+        memcpy(&value, seconds, sizeof(value));
+        result = DaveHostChronoLocalInfo(zone, value, info, abbrev, capacity,
+                                         abbrev + capacity, capacity);
+      }
+      break;
+    }
+    case W65C02_INT_TZDB_LEAP_COUNT: {
+      uint32_t* count = ARG_PTR(0, sizeof(uint32_t));
+      result = count == NULL ? -DAVE_HOST_EINVAL
+                             : DaveHostChronoLeapCount(count);
+      break;
+    }
+    case W65C02_INT_TZDB_LEAP_INFO: {
+      DaveHostChronoLeapSecond* leap =
+          ARG_PTR(2, sizeof(DaveHostChronoLeapSecond));
+      result = leap == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostChronoLeapInfo((uint32_t)ARG16(0), leap);
       break;
     }
     default:

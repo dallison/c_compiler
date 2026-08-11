@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "chrono_host.h"
 #include "filesystem_host.h"
 #include "loader_lifecycle.h"
 #include "p_code_interpreter.h"
@@ -65,8 +66,6 @@ static int64_t Terminate(PCodeInterpreter* interpreter, int64_t status,
 int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
                            int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                            int64_t a4, int64_t a5) {
-  (void)a3;
-  (void)a4;
   (void)a5;
   switch (number) {
     case P_CODE_SYSCALL_OPEN:
@@ -154,6 +153,51 @@ int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
     case P_CODE_SYSCALL_FS_CANONICAL:
       return DaveHostFilesystemCanonical(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case P_CODE_SYSCALL_TZDB_VERSION:
+      return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
+    case P_CODE_SYSCALL_TZDB_GENERATION:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoGeneration((uint64_t*)(uintptr_t)a0);
+    case P_CODE_SYSCALL_TZDB_RELOAD:
+      return DaveHostChronoReload((uint64_t*)(uintptr_t)a0);
+    case P_CODE_SYSCALL_TZDB_CURRENT_ZONE:
+      return DaveHostChronoCurrentZone((char*)(uintptr_t)a0, (size_t)a1);
+    case P_CODE_SYSCALL_TZDB_ZONE_COUNT:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoZoneCount((uint32_t*)(uintptr_t)a0);
+    case P_CODE_SYSCALL_TZDB_ZONE_NAME:
+      return DaveHostChronoZoneName((uint32_t)a0, (char*)(uintptr_t)a1,
+                                    (size_t)a2);
+    case P_CODE_SYSCALL_TZDB_LOCATE_ZONE:
+      return a2 == 0 || a3 == 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoLocateZone(
+                       (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1,
+                       (size_t)a2, (uint32_t*)(uintptr_t)a3);
+    case P_CODE_SYSCALL_TZDB_SYS_INFO: {
+      const DaveHostChronoSysInfoRequestWire* request =
+          (const DaveHostChronoSysInfoRequestWire*)(uintptr_t)a1;
+      return a0 == 0 || request == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoSysInfoRequest((const char*)(uintptr_t)a0,
+                                                  request);
+    }
+    case P_CODE_SYSCALL_TZDB_LOCAL_INFO: {
+      const DaveHostChronoLocalInfoRequestWire* request =
+          (const DaveHostChronoLocalInfoRequestWire*)(uintptr_t)a1;
+      return a0 == 0 || request == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostChronoLocalInfoRequest((const char*)(uintptr_t)a0,
+                                                    request);
+    }
+    case P_CODE_SYSCALL_TZDB_LEAP_COUNT:
+      return a0 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoLeapCount((uint32_t*)(uintptr_t)a0);
+    case P_CODE_SYSCALL_TZDB_LEAP_INFO:
+      return a1 == 0 ? -DAVE_HOST_EINVAL
+                     : DaveHostChronoLeapInfo(
+                           (uint32_t)a0,
+                           (DaveHostChronoLeapSecond*)(uintptr_t)a1);
     default:
       return -DAVE_HOST_ENOSYS;
   }
@@ -179,6 +223,8 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
   int64_t a0 = 0;
   int64_t a1 = 0;
   int64_t a2 = 0;
+  int64_t a3 = 0;
+  int64_t a4 = 0;
   switch (number) {
     case P_CODE_SYSCALL_OPEN:
       a0 = ReadPackedLong(&cursor);
@@ -251,8 +297,39 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
       a1 = ReadPackedLong(&cursor);
       a2 = ReadPackedInt(&cursor);
       break;
+    case P_CODE_SYSCALL_TZDB_VERSION:
+    case P_CODE_SYSCALL_TZDB_CURRENT_ZONE:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_TZDB_GENERATION:
+    case P_CODE_SYSCALL_TZDB_RELOAD:
+    case P_CODE_SYSCALL_TZDB_ZONE_COUNT:
+    case P_CODE_SYSCALL_TZDB_LEAP_COUNT:
+      a0 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_TZDB_ZONE_NAME:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_TZDB_LOCATE_ZONE:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedLong(&cursor);
+      a3 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_TZDB_SYS_INFO:
+    case P_CODE_SYSCALL_TZDB_LOCAL_INFO:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_TZDB_LEAP_INFO:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
     default:
       break;
   }
-  return PCodeHandleSyscall(interpreter, number, a0, a1, a2, 0, 0, 0);
+  return PCodeHandleSyscall(interpreter, number, a0, a1, a2, a3, a4, 0);
 }

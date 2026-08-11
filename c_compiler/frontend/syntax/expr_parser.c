@@ -1464,7 +1464,10 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           : NULL;
   bool is_functional_class_construction =
       CompilerIsCXX() && symbol != NULL && symbol->type != NULL &&
-      (TypeIsStructOrUnion(symbol->type) ||
+      ((TypeIsStructOrUnion(symbol->type) &&
+        (StorageIs(symbol->storage, STO(typedef)) ||
+         (symbol->flags.is_template &&
+          symbol->variable_template == NULL))) ||
        functional_constructor_owner != NULL) &&
       LexLookingAt(lex, TOK(lparen));
   FullyQualifiedIdentifierDestruct(&name);
@@ -4481,6 +4484,22 @@ static Symbol* FindCXXAllocationFunctionByArgCount(Symbol* first,
   return NULL;
 }
 
+static Symbol* FindCXXPlacementAllocationFunction(Symbol* first) {
+  for (Symbol* symbol = first; symbol != NULL; symbol = symbol->overload_next) {
+    if (symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+        symbol->type->info.function.prototype.length != 2) {
+      continue;
+    }
+    Symbol* pointer_formal =
+        symbol->type->info.function.prototype.value.p[1];
+    if (pointer_formal != NULL && TypeIsPointer(pointer_formal->type) &&
+        TypeIsVoid(pointer_formal->type->next)) {
+      return symbol;
+    }
+  }
+  return NULL;
+}
+
 static Symbol* FindGlobalCXXAllocationFunction(const char* name,
                                                size_t arg_count) {
   String symbol_name;
@@ -4505,7 +4524,11 @@ static Symbol* GetImplicitCXXOperatorNewArray(SourceLocation location) {
 }
 
 static Symbol* GetImplicitCXXPlacementOperatorNew(SourceLocation location) {
-  Symbol* existing = FindGlobalCXXAllocationFunction("operator new", 2);
+  String symbol_name;
+  StringInit(&symbol_name, "operator new");
+  Symbol* existing =
+      FindCXXPlacementAllocationFunction(FindGlobalSymbol(&symbol_name));
+  StringDestruct(&symbol_name);
   if (existing != NULL) {
     return existing;
   }
@@ -4589,16 +4612,29 @@ static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
                                         bool is_array,
                                         size_t arg_count,
                                         SourceLocation location,
-                                        bool global_scope) {
+                                        bool global_scope,
+                                        bool standard_placement) {
   // `::new` names only the global allocation function, bypassing any
   // class-scoped operator new.
   Symbol* member = global_scope ? NULL : GetCXXClassAllocationFunction(
       type, is_array ? "operator new[]" : "operator new", arg_count);
+  if (member != NULL && standard_placement) {
+    member = FindCXXPlacementAllocationFunction(member);
+  }
   if (member != NULL) {
     return member;
   }
   const char* name = is_array ? "operator new[]" : "operator new";
-  Symbol* global = FindGlobalCXXAllocationFunction(name, arg_count);
+  Symbol* global = NULL;
+  if (standard_placement) {
+    String symbol_name;
+    StringInit(&symbol_name, name);
+    global =
+        FindCXXPlacementAllocationFunction(FindGlobalSymbol(&symbol_name));
+    StringDestruct(&symbol_name);
+  } else {
+    global = FindGlobalCXXAllocationFunction(name, arg_count);
+  }
   if (global != NULL) {
     return global;
   }
@@ -4606,7 +4642,7 @@ static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
     return is_array ? GetImplicitCXXOperatorNewArray(location)
                     : GetImplicitCXXOperatorNew(location);
   }
-  if (!is_array && arg_count == 2) {
+  if (!is_array && standard_placement && arg_count == 2) {
     return GetImplicitCXXPlacementOperatorNew(location);
   }
   SyntaxError(&compiler->syntax, "No matching allocation function for placement new");
@@ -5142,6 +5178,10 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   }
 
   Vector* actuals = NewVector();
+  bool standard_placement =
+      placement_actuals != NULL && placement_actuals->length == 1 &&
+      ((ASTNode*)placement_actuals->value.p[0])->type != NULL &&
+      TypeIsPointer(((ASTNode*)placement_actuals->value.p[0])->type);
   ASTNode* allocation_size =
       allocated_type_dependent
           ? NewSizeofASTNodeWithType(allocated_type, location)
@@ -5169,7 +5209,8 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       NewCallASTNode(GetCXXOperatorNewForType(allocated_type,
                                               array_size != NULL,
                                               actuals->length,
-                                              location, global_scope),
+                                              location, global_scope,
+                                              standard_placement),
                      location, actuals);
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
@@ -5250,10 +5291,16 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         init->flags |= kASTDependentNewValueInit;
       }
     }
-    result = NewBinaryASTNode(
-        AST_OP(comma), result_type, location, assign,
-        NewBinaryASTNode(AST_OP(comma), result_type, location, init,
-                         NewIdentifierASTNode(temp, location)));
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewVariableDeclarationASTNode(temp, NULL, location));
+    VectorAppend(statements, NewExpressionStatement(assign, location));
+    VectorAppend(statements, NewExpressionStatement(init, location));
+    VectorAppend(statements,
+                 NewExpressionStatement(NewIdentifierASTNode(temp, location),
+                                        location));
+    result = NewUnaryASTNode(AST_OP(stmt_expr), result_type, location,
+                            NewCompoundStatementASTNode(statements, location));
   }
   if (sym != NULL) {
     SymbolDelete(sym);

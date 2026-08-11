@@ -347,7 +347,7 @@ typedef enum {
 } W65C02Opcode;
 
 // Number of variable registers for each type.
-#define kNumIVars 8
+#define kNumIVars 4
 #define kNumBVars 2
 #define kNumLVars 2
 #define kNumXVars 1

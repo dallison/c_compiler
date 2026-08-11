@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "elf.h"
 #include "loader_lifecycle.h"
+#include "chrono_host.h"
 #include "filesystem_host.h"
 #include <errno.h>
 #include "risc_v_disassembler.h"
@@ -475,6 +476,109 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
           interpreter, interpreter->iregs[REG(a2)], capacity);
       interpreter->iregs[REG(a0)] =
           (uint64_t)DaveHostFilesystemCanonical(path, buffer, capacity);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_VERSION:
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostChronoTzdbVersion(
+          (char*)RISCVGuestAddressToHost(interpreter, interpreter->iregs[REG(a1)],
+                                         (size_t)interpreter->iregs[REG(a2)]),
+          (size_t)interpreter->iregs[REG(a2)]);
+      break;
+    case RISC_V_ECALL_TZDB_GENERATION: {
+      uint64_t* generation = (uint64_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], sizeof(uint64_t));
+      interpreter->iregs[REG(a0)] =
+          generation == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostChronoGeneration(generation);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_RELOAD: {
+      uint64_t* generation = (uint64_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], sizeof(uint64_t));
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostChronoReload(generation);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_CURRENT_ZONE:
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostChronoCurrentZone(
+          (char*)RISCVGuestAddressToHost(interpreter, interpreter->iregs[REG(a1)],
+                                         (size_t)interpreter->iregs[REG(a2)]),
+          (size_t)interpreter->iregs[REG(a2)]);
+      break;
+    case RISC_V_ECALL_TZDB_ZONE_COUNT: {
+      uint32_t* count = (uint32_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], sizeof(uint32_t));
+      interpreter->iregs[REG(a0)] =
+          count == NULL ? (uint64_t)-DAVE_HOST_EINVAL
+                        : (uint64_t)DaveHostChronoZoneCount(count);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_ZONE_NAME:
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostChronoZoneName(
+          (uint32_t)interpreter->iregs[REG(a1)],
+          (char*)RISCVGuestAddressToHost(interpreter, interpreter->iregs[REG(a2)],
+                                         (size_t)interpreter->iregs[REG(a3)]),
+          (size_t)interpreter->iregs[REG(a3)]);
+      break;
+    case RISC_V_ECALL_TZDB_LOCATE_ZONE: {
+      uint32_t* index = (uint32_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a4)], sizeof(uint32_t));
+      interpreter->iregs[REG(a0)] =
+          index == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostChronoLocateZone(
+                    (const char*)RISCVGuestAddressToHost(
+                        interpreter, interpreter->iregs[REG(a1)], 1),
+                    (char*)RISCVGuestAddressToHost(
+                        interpreter, interpreter->iregs[REG(a2)],
+                        (size_t)interpreter->iregs[REG(a3)]),
+                    (size_t)interpreter->iregs[REG(a3)], index);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_SYS_INFO: {
+      const char* zone = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      const DaveHostChronoSysInfoRequestWire* request =
+          (const DaveHostChronoSysInfoRequestWire*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a2)],
+              sizeof(DaveHostChronoSysInfoRequestWire));
+      interpreter->iregs[REG(a0)] =
+          zone == NULL || request == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostChronoSysInfoRequest(zone, request);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_LOCAL_INFO: {
+      const char* zone = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      const DaveHostChronoLocalInfoRequestWire* request =
+          (const DaveHostChronoLocalInfoRequestWire*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a2)],
+              sizeof(DaveHostChronoLocalInfoRequestWire));
+      interpreter->iregs[REG(a0)] =
+          zone == NULL || request == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostChronoLocalInfoRequest(zone, request);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_LEAP_COUNT: {
+      uint32_t* count = (uint32_t*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], sizeof(uint32_t));
+      interpreter->iregs[REG(a0)] =
+          count == NULL ? (uint64_t)-DAVE_HOST_EINVAL
+                        : (uint64_t)DaveHostChronoLeapCount(count);
+      break;
+    }
+    case RISC_V_ECALL_TZDB_LEAP_INFO: {
+      DaveHostChronoLeapSecond* leap = (DaveHostChronoLeapSecond*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)],
+          sizeof(DaveHostChronoLeapSecond));
+      interpreter->iregs[REG(a0)] =
+          leap == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostChronoLeapInfo(
+                    (uint32_t)interpreter->iregs[REG(a1)], leap);
       break;
     }
     default:
@@ -1116,6 +1220,42 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
         }
         int funct3 = (inst >> 12) & 0x7;
         int funct7 = (inst >> 25) & 0x7f;
+        if (funct7 == RV_F7(mulw)) {
+          int32_t lhs = (int32_t)iregs[rs1];
+          int32_t rhs = (int32_t)iregs[rs2];
+          uint32_t ulhs = (uint32_t)iregs[rs1];
+          uint32_t urhs = (uint32_t)iregs[rs2];
+          switch (funct3) {
+            case RV_F3(mulw):
+              iregs[rd] = (int32_t)(ulhs * urhs);
+              break;
+            case RV_F3(divw):
+              if (rhs == 0) {
+                iregs[rd] = -1;
+              } else if (lhs == INT32_MIN && rhs == -1) {
+                iregs[rd] = INT32_MIN;
+              } else {
+                iregs[rd] = lhs / rhs;
+              }
+              break;
+            case RV_F3(divuw):
+              iregs[rd] = (int32_t)(urhs == 0 ? UINT32_MAX : ulhs / urhs);
+              break;
+            case RV_F3(remw):
+              if (rhs == 0) {
+                iregs[rd] = lhs;
+              } else if (lhs == INT32_MIN && rhs == -1) {
+                iregs[rd] = 0;
+              } else {
+                iregs[rd] = lhs % rhs;
+              }
+              break;
+            case RV_F3(remuw):
+              iregs[rd] = (int32_t)(urhs == 0 ? ulhs : ulhs % urhs);
+              break;
+          }
+          break;
+        }
         switch (funct3) {
           case RV_F3(addw):
             if (funct7 == RV_F7(subw)) {

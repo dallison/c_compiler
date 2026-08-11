@@ -357,6 +357,13 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
             regs[j].base.owner = NULL;
             continue;
           }
+          // Destination routing can reserve a register for an instruction
+          // before that instruction has produced its value.  Spilling such an
+          // owner emits a store of the register's previous contents and later
+          // reloads that garbage as the routed result.
+          if ((owner->flags & TARGET_INST_PROCESSED) == 0) {
+            continue;
+          }
           // A fixed-register holder (an incoming argument register r0..r3, the
           // call-result register, etc.) is pinned to a physical register and is
           // typically defined at function entry, before the prologue establishes
@@ -883,6 +890,20 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     assert(inst->dest->reg != NULL);
     reg = (ARMRegister*)inst->dest->reg;
     inst->reg = inst->dest->reg;
+    // A fixed destination can clobber an ordinary value that the allocator
+    // placed in the same physical register earlier in the block. Preserve that
+    // value when it still has a later use (for example, a chained call result
+    // held in r1 while the next argument setup writes r1).
+    TargetInstruction* displaced = reg->base.owner;
+    if (displaced != NULL && displaced != inst->dest && displaced != inst &&
+        displaced->uses > 0 && !ARMIsFixedRegister(displaced) &&
+        !ARMIsResult(displaced) &&
+        (displaced->flags & TARGET_INST_SPILLED) == 0 &&
+        displaced->opcode != (TargetOpcode)ARM_OP(spill) &&
+        displaced->opcode != (TargetOpcode)ARM_OP(reload) &&
+        (displaced->flags & TARGET_INST_PROCESSED) != 0) {
+      SpillInstruction(allocator, displaced);
+    }
     // Re-establish ownership of the destination register.  Argument registers
     // (and other fixed-register holders) are shared singletons whose `reg`
     // field persists across calls, so when the holder already has a register
@@ -1065,6 +1086,19 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
      reg->base.owner = NULL;
   }
 
+  // Promoted variables own function-wide registers. Reclaim every register
+  // already assigned to one before allocating this block: the approximate
+  // live-in sets can omit a variable in the middle of a switch chain even
+  // though a loop backedge needs it again.
+  for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+    RegisterVariable* var = allocator->g->var_regs.value.p[i];
+    TargetInstruction* inst = var != NULL ? var->inst : NULL;
+    if (inst != NULL && inst->reg != NULL && !inst->reg->reserved) {
+      assert(inst->reg->owner == NULL || inst->reg->owner == inst);
+      inst->reg->owner = inst;
+    }
+  }
+
   // A value defined before a loop and live across its back edge must not remain
   // solely in a physical register.  Dominator-order allocation can otherwise
   // spill it only after an early loop use has already been processed, leaving
@@ -1218,6 +1252,19 @@ static void EmitResolvedMove(ARMRegisterAllocator* allocator,
   TargetBasicBlockEmitBefore(&allocator->g->base, block, mov, pos);
 }
 
+// A scalar constant is first materialized as `mov tmp, #imm` during lowering.
+// If that value then participates in a parallel argument move, coalescing can
+// remove the materialization while leaving its uninitialized allocator register
+// as the apparent source. Preserve the immediate itself when re-sequencing.
+static TargetInstruction* ArgumentMoveSource(TargetInstruction* move) {
+  TargetInstruction* source = move != NULL ? move->operand[0] : NULL;
+  if (source != NULL && (ARMOpcode)source->opcode == ARM_OP(mov) &&
+      source->operand[0] != NULL && ARMIsConst(source->operand[0])) {
+    return source->operand[0];
+  }
+  return source;
+}
+
 // Re-sequence a contiguous run of tagged argument moves (moves[0..count-1])
 // into a valid parallel-move order, breaking register cycles through r9.  The
 // original move instructions are disabled and replaced with the resolved
@@ -1245,13 +1292,14 @@ static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
       return;
     }
     dst[i] = m->dest->reg->num;
-    src_reads_register[i] = !ARMIsConst(m->operand[0]);
-    if (src_reads_register[i] && m->operand[0]->reg == NULL) {
+    TargetInstruction* source = ArgumentMoveSource(m);
+    src_reads_register[i] = !ARMIsConst(source);
+    if (src_reads_register[i] && source->reg == NULL) {
       return;
     }
     src[i] =
-        src_reads_register[i] ? m->operand[0]->reg->num : -1;
-    src_ref[i] = m->operand[0];
+        src_reads_register[i] ? source->reg->num : -1;
+    src_ref[i] = source;
     dst_ref[i] = m->dest;
     // A constant assigned to its destination register still needs an emitted
     // materialization; its allocator register does not contain the value yet.
@@ -1326,25 +1374,44 @@ static bool IsIntegerArgumentMove(TargetInstruction* inst) {
          dest->base.num <= ARM_INT_ARG_END;
 }
 
-// Scan the instruction stream for contiguous runs of integer argument moves
-// and resolve each run containing a tagged move as a parallel move.  Constants
-// can reach a fixed argument destination through ordinary destination lowering
-// rather than SetDestOrMoveToArgReg, so include those adjacent untagged moves.
+static bool ArgumentMoveRunHasDependency(TargetInstruction** moves, int count) {
+  for (int i = 0; i < count; i++) {
+    TargetInstruction* source = ArgumentMoveSource(moves[i]);
+    if (source == NULL || ARMIsConst(source) || source->reg == NULL) {
+      continue;
+    }
+    for (int j = 0; j < count; j++) {
+      if (i == j || moves[j]->dest == NULL ||
+          moves[j]->dest->reg == NULL) {
+        continue;
+      }
+      if (source->reg->num == moves[j]->dest->reg->num) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Scan the instruction stream for contiguous runs of tagged integer argument
+// moves and resolve each run as a parallel move.  Do not absorb adjacent
+// untagged moves: those can be the function-entry copies from r0-r3 into local
+// variable registers and are sequentially ordered before the call setup.
 static void ResolveArgumentMoves(ARMRegisterAllocator* allocator) {
   TargetInstruction* inst = TargetFirstInstruction(&allocator->g->base);
   while (inst != NULL) {
-    if (IsIntegerArgumentMove(inst)) {
+    if (IsIntegerArgumentMove(inst) &&
+        (inst->flags & kARMArgMove) != 0) {
       TargetInstruction* moves[ARM_MAX_ARG_MOVES];
       int count = 0;
-      bool has_tagged_move = false;
       TargetInstruction* run = inst;
       while (IsIntegerArgumentMove(run) &&
+             (run->flags & kARMArgMove) != 0 &&
              count < ARM_MAX_ARG_MOVES) {
         moves[count++] = run;
-        has_tagged_move |= (run->flags & kARMArgMove) != 0;
         run = TargetNext(run);
       }
-      if (has_tagged_move) {
+      if (ArgumentMoveRunHasDependency(moves, count)) {
         ResolveArgMoveRun(allocator, moves, count);
       }
       inst = run;  // Continue after the run (resolved moves were inserted

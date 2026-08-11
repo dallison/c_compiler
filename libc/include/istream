@@ -15,7 +15,9 @@
 #include <streambuf>
 #include <ostream>
 #include <iosfwd>
+#include <locale>
 #include <__char_traits>
+#include <type_traits>
 #include <stdlib.h>
 
 namespace std {
@@ -74,9 +76,15 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
 
   // Formatted input of arithmetic values.
   basic_istream& operator>>(bool& v) {
-    long long tmp = 0;
-    if (__extract_int(tmp, /*is_signed=*/true)) {
-      v = tmp != 0;
+    sentry s(*this);
+    if (!s) {
+      return *this;
+    }
+    ios_base::iostate err = ios_base::goodbit;
+    if (__extract_bool_with_locale(v, err)) {
+      if (err != ios_base::goodbit) {
+        this->setstate(err);
+      }
     }
     return *this;
   }
@@ -412,6 +420,21 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     if (Traits::eq_int_type(c, Traits::eof())) {
       this->setstate(ios_base::eofbit);
     }
+  }
+
+  bool __extract_bool_with_locale(bool& v, ios_base::iostate& err) {
+    if constexpr (is_same_v<CharT, char>) {
+      istreambuf_iterator in(this->rdbuf());
+      istreambuf_iterator end;
+      use_facet<num_get<char, istreambuf_iterator>>(this->getloc())
+          .get(in, end, *this, err, v);
+    } else {
+      wistreambuf_iterator in(this->rdbuf());
+      wistreambuf_iterator end;
+      use_facet<num_get<wchar_t, wistreambuf_iterator>>(this->getloc())
+          .get(in, end, *this, err, v);
+    }
+    return true;
   }
 
   bool __extract_int(long long& out, bool is_signed) {

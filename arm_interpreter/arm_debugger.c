@@ -391,14 +391,19 @@ static void Backtrace(ARMDebugger* debugger, char* tail) {
   uint32_t fp = debugger->interpreter->regs[ARM_FP_REG];
   int frame_id = 1;
   for (int i = 0; i < 64 && fp != 0; i++) {
-    uint32_t ra = *(uint32_t*)(uintptr_t)(fp + 4);
+    const uint32_t* frame = ARMGuestAddressToHost(
+        debugger->interpreter, fp, 2 * sizeof(uint32_t));
+    if (frame == NULL) {
+      break;
+    }
+    uint32_t ra = frame[1];
     if (ra == 0) {
       break;
     }
     found = LoaderFindSymbol(debugger->interpreter->loader, ra, &curr);
     ShowLocation(debugger, ra, found ? &curr : NULL, frame_id);
     frame_id++;
-    fp = *(uint32_t*)(uintptr_t)fp;
+    fp = frame[0];
   }
 }
 

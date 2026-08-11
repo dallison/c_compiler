@@ -1,0 +1,28 @@
+//
+//  __basic_ios_locale
+//  c_compiler
+//
+//  basic_ios locale hooks included after <locale>.
+//
+
+#ifndef __davecc_basic_ios_locale__
+#define __davecc_basic_ios_locale__
+
+#include <ios>
+#include <locale>
+
+namespace std {
+
+template <class CharT, class Traits>
+inline locale basic_ios<CharT, Traits>::imbue(const locale& loc) {
+  locale old = getloc();
+  ios_base::imbue(loc);
+  if (__rdbuf_ != nullptr) {
+    __rdbuf_->pubimbue(loc);
+  }
+  return old;
+}
+
+}  // namespace std
+
+#endif /* __davecc_basic_ios_locale__ */

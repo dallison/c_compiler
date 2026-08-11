@@ -21,6 +21,10 @@
 .set multiplier mt3
 
 __smul8:
+  // Signed and unsigned multiplication have the same low 64 result bits.
+  // Sharing this path also avoids nesting a JSR below the result address
+  // saved on the hardware stack.
+  JMP __umul8
   PHA
   LDA 0,X
   STA multiplicand

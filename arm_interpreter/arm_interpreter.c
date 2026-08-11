@@ -7,6 +7,7 @@
 #include "arm_process.h"
 #include "elf.h"
 #include "loader_lifecycle.h"
+#include "chrono_host.h"
 #include "filesystem_host.h"
 #include <errno.h>
 #include "loader_arch.h"
@@ -253,7 +254,13 @@ static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
 static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
+    fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64
+                    " pc 0x%016" PRIx64 " linked_pc=0x%08" PRIx64
+                    " sp=0x%08x fp=0x%08x\n",
+            addr, interpreter->pc, RuntimeToLinked(interpreter, interpreter->pc),
+            (uint32_t)interpreter->regs[13],
+            (uint32_t)interpreter->regs[11]);
+    ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
   GuestMemoryLock(interpreter);
@@ -869,6 +876,108 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
           (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
           (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3),
           (size_t)a3);
+    case ARM_SYSCALL_TZDB_VERSION:
+      return (int32_t)DaveHostChronoTzdbVersion(
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a1, (size_t)a2),
+          (size_t)a2);
+    case ARM_SYSCALL_TZDB_GENERATION: {
+      uint64_t* generation = (uint64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a1, sizeof(uint64_t));
+      return generation == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostChronoGeneration(generation);
+    }
+    case ARM_SYSCALL_TZDB_RELOAD: {
+      uint64_t* generation = (uint64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a1, sizeof(uint64_t));
+      return (int32_t)DaveHostChronoReload(generation);
+    }
+    case ARM_SYSCALL_TZDB_CURRENT_ZONE:
+      return (int32_t)DaveHostChronoCurrentZone(
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a1, (size_t)a2),
+          (size_t)a2);
+    case ARM_SYSCALL_TZDB_ZONE_COUNT: {
+      uint32_t* count = (uint32_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a1, sizeof(uint32_t));
+      return count == NULL ? -DAVE_HOST_EINVAL
+                           : (int32_t)DaveHostChronoZoneCount(count);
+    }
+    case ARM_SYSCALL_TZDB_ZONE_NAME:
+      return (int32_t)DaveHostChronoZoneName(
+          (uint32_t)a1,
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3),
+          (size_t)a3);
+    case ARM_SYSCALL_TZDB_LOCATE_ZONE: {
+      uint32_t* index = (uint32_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a4, sizeof(uint32_t));
+      return index == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostChronoLocateZone(
+                       (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
+                       (char*)ResolveHostPtr(interpreter, (uint32_t)a2,
+                                              (size_t)a3),
+                       (size_t)a3, index);
+    }
+    case ARM_SYSCALL_TZDB_SYS_INFO: {
+      const DaveHostChronoSysInfoRequestWire* request =
+          (const DaveHostChronoSysInfoRequestWire*)ResolveHostPtr(
+              interpreter, (uint32_t)a2, sizeof(DaveHostChronoSysInfoRequestWire));
+      if (request == NULL || request->abbrev_capacity == 0) {
+        return -DAVE_HOST_EINVAL;
+      }
+      const char* zone =
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1);
+      int64_t* seconds = (int64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)request->seconds_address, sizeof(int64_t));
+      DaveHostChronoSysInfoWire* result =
+          (DaveHostChronoSysInfoWire*)ResolveHostPtr(
+              interpreter, (uint32_t)request->result_address,
+              sizeof(DaveHostChronoSysInfoWire));
+      char* abbrev = (char*)ResolveHostPtr(
+          interpreter, (uint32_t)request->abbrev_address,
+          request->abbrev_capacity);
+      return zone == NULL || seconds == NULL || result == NULL || abbrev == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostChronoSysInfo(
+                       zone, *seconds, result, abbrev,
+                       request->abbrev_capacity);
+    }
+    case ARM_SYSCALL_TZDB_LOCAL_INFO: {
+      const DaveHostChronoLocalInfoRequestWire* request =
+          (const DaveHostChronoLocalInfoRequestWire*)ResolveHostPtr(
+              interpreter, (uint32_t)a2, sizeof(DaveHostChronoLocalInfoRequestWire));
+      if (request == NULL || request->abbrev_capacity == 0 ||
+          request->abbrev_capacity > SIZE_MAX / 2) {
+        return -DAVE_HOST_EINVAL;
+      }
+      const char* zone =
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1);
+      int64_t* seconds = (int64_t*)ResolveHostPtr(
+          interpreter, (uint32_t)request->seconds_address, sizeof(int64_t));
+      DaveHostChronoLocalInfoWire* result =
+          (DaveHostChronoLocalInfoWire*)ResolveHostPtr(
+              interpreter, (uint32_t)request->result_address,
+              sizeof(DaveHostChronoLocalInfoWire));
+      size_t capacity = request->abbrev_capacity;
+      char* abbrev = (char*)ResolveHostPtr(
+          interpreter, (uint32_t)request->abbrev_address, capacity * 2);
+      return zone == NULL || seconds == NULL || result == NULL || abbrev == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostChronoLocalInfo(
+                       zone, *seconds, result, abbrev, capacity,
+                       abbrev + capacity, capacity);
+    }
+    case ARM_SYSCALL_TZDB_LEAP_COUNT: {
+      uint32_t* count = (uint32_t*)ResolveHostPtr(
+          interpreter, (uint32_t)a1, sizeof(uint32_t));
+      return count == NULL ? -DAVE_HOST_EINVAL
+                           : (int32_t)DaveHostChronoLeapCount(count);
+    }
+    case ARM_SYSCALL_TZDB_LEAP_INFO:
+      return (int32_t)DaveHostChronoLeapInfo(
+          (uint32_t)a1,
+          (DaveHostChronoLeapSecond*)ResolveHostPtr(
+              interpreter, (uint32_t)a2, sizeof(DaveHostChronoLeapSecond)));
     case ARM_SYSCALL_RESOLVE:
       ResolveAndFixupSymbol(interpreter, pc_updated);
       return 0;
