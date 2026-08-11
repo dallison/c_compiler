@@ -21,6 +21,7 @@
 #include "loader_lifecycle.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include <errno.h>
 #include "risc_v_disassembler.h"
 #include "risc_v_process.h"
@@ -579,6 +580,19 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
               ? (uint64_t)-DAVE_HOST_EINVAL
               : (uint64_t)DaveHostChronoLeapInfo(
                     (uint32_t)interpreter->iregs[REG(a1)], leap);
+      break;
+    }
+    case RISC_V_ECALL_RANDOM_BYTES: {
+      size_t size = (size_t)interpreter->iregs[REG(a2)];
+      void* buffer =
+          size == 0
+              ? NULL
+              : RISCVGuestAddressToHost(
+                    interpreter, interpreter->iregs[REG(a1)], size);
+      interpreter->iregs[REG(a0)] =
+          size != 0 && buffer == NULL
+              ? (uint64_t)-DAVE_HOST_EINVAL
+              : (uint64_t)DaveHostRandomBytes(buffer, size);
       break;
     }
     default:

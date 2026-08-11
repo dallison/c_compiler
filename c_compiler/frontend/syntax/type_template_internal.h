@@ -35,6 +35,8 @@ typedef struct {
   int rebase_template_parameter_base;
   struct Struct* from_owner;
   struct Struct* to_owner;
+  struct Struct* substitution_source;
+  struct Struct* substitution_target;
 } TemplateFunctionBodyClone;
 
 struct ASTNode* IdentityCloneNode(struct ASTNode* node, void* data);

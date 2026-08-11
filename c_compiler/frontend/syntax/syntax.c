@@ -51,6 +51,7 @@ static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
                                                          Namespace* parent,
                                                          String* name,
                                                          bool* ambiguous);
+static bool CXXConstructorSetHasInitializerList(StructMember* ctor);
 
 bool SyntaxCurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   Lex* lex = syntax->lex;
@@ -4360,6 +4361,63 @@ static ASTNode* FindCXXExplicitVirtualBaseInitializer(
   return NULL;
 }
 
+static TypeRecord* CXXConstructorInitializerTargetType(Struct* owner,
+                                                       const char* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  if (CXXConstructorInitializerNamesOwner(owner, name)) {
+    return owner->tag_symbol != NULL ? owner->tag_symbol->type : NULL;
+  }
+  CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, name);
+  if (base != NULL) {
+    return base->type;
+  }
+  CXXVirtualBaseInfo* virtual_base = FindCXXVirtualBaseByName(owner, name);
+  if (virtual_base != NULL) {
+    return virtual_base->type;
+  }
+  StructMember* member = FindCXXDirectDataMemberByName(owner, name);
+  return member != NULL && member->symbol != NULL ? member->symbol->type : NULL;
+}
+
+static Vector* ResolveCXXBracedConstructorInitializerActuals(
+    TypeRecord* target_type, Vector* actuals) {
+  if (target_type == NULL || actuals == NULL || actuals->length != 1) {
+    return actuals;
+  }
+  ASTNode* root = actuals->value.p[0];
+  if (root == NULL || root->op != AST_OP(braced_init) ||
+      CXXConstructorSetHasInitializerList(FindCXXConstructor(target_type))) {
+    return actuals;
+  }
+
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)root;
+  Vector* expanded = NewVector();
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    ASTNode* expression = initializer;
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)initializer;
+      expression = expr_init->expr;
+      expr_init->expr = NULL;
+    }
+    braced->initializers->value.p[i] = NULL;
+    if (expression != NULL) {
+      expression->parent = NULL;
+      VectorAppend(expanded, expression);
+    }
+    if (initializer != expression) {
+      ASTNodeDelete(initializer);
+    }
+  }
+  actuals->value.p[0] = NULL;
+  ASTNodeDelete(root);
+  VectorDelete(actuals);
+  return expanded;
+}
+
 void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
@@ -4384,17 +4442,30 @@ void SyntaxParseCXXConstructorInitializerList(
       break;
     }
 
+    const char* init_name = FullyQualifiedIdentifierLast(&name);
     Vector* actuals = NULL;
     if (LexMatch(syntax->lex, TOK(lparen))) {
       actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
-    } else if (LexMatch(syntax->lex, TOK(lbrace))) {
-      actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+    } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+      TypeRecord* target_type =
+          CXXConstructorInitializerTargetType(owner, init_name);
+      StructMember* constructor =
+          TypeIsStructOrUnion(target_type)
+              ? FindCXXConstructor(target_type)
+              : NULL;
+      LexNextToken(syntax->lex);
+      if (target_type == NULL ||
+          CXXConstructorSetHasInitializerList(constructor)) {
+        actuals = NewVector();
+        VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
+      } else {
+        actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+      }
     } else {
       SyntaxError(syntax, "Expected constructor initializer argument list");
       actuals = NewVector();
     }
 
-    const char* init_name = FullyQualifiedIdentifierLast(&name);
     VectorAppend(&init_list->raw_initializers,
                  NewCXXDeferredConstructorInitializer(
                      init_name, CloneCXXConstructorInitializerActuals(actuals),
@@ -4521,6 +4592,8 @@ void SyntaxResolveCXXConstructorInitializerList(
     Vector* actuals = deferred->actuals;
     deferred->actuals = NULL;
     SourceLocation location = deferred->location;
+    actuals = ResolveCXXBracedConstructorInitializerActuals(
+        CXXConstructorInitializerTargetType(owner, init_name), actuals);
     if (CXXConstructorInitializerNamesOwner(owner, init_name)) {
       if (init_list->delegating_statement != NULL ||
           init_list->base_specs.length != 0 ||
@@ -8843,7 +8916,8 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
     }
     SourceLocation location = syntax->lex->current_token_location;
     Vector* actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
-    if (actuals->length == 1) {
+    if (actuals->length == 1 &&
+        !TypeContainsTemplateParameter(sym->type)) {
       ASTNode* initializer = actuals->value.p[0];
       actuals->length = 0;
       VectorDelete(actuals);

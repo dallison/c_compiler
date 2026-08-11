@@ -3489,26 +3489,26 @@ static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {
   
   if (IRIsConst(from)) {
     IRConstant* c = (IRConstant*)from;
-    int64_t value = c->value.ivalue;
+    uint64_t value = (uint64_t)c->value.ivalue;
     if (diff < 0) {
-      // Shorten int.  Say we are shorting a short to a char.  diff will
-      // be -1.
-      value <<= (64 - from->type->size * 8);
-      bool negative = value < 0;
-      value <<= -diff * 0;
-      if (negative) {
-        // Negative, upper bits of result are 1
-        value |= (1LL << 63);
+      int bits = to->type->size * 8;
+      uint64_t mask =
+          bits == 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1;
+      value &= mask;
+      if (!TypeIsUnsigned(to->type) &&
+          (value & ((uint64_t)1 << (bits - 1))) != 0) {
+        value |= ~mask;
       }
-      value >>= to->type->size * 8;
     } else {
-      // Getting longer by diff bytes.
-      // Say we are extending a char to a short.  Diff will be 1.
-      // We shift left 8 bits and then shift right 8 bits.
-      value <<= (64 - from->type->size * 8);
-      value >>= (64 - from->type->size * 8);
+      int bits = from->type->size * 8;
+      uint64_t mask =
+          bits == 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1;
+      value &= mask;
+      if ((value & ((uint64_t)1 << (bits - 1))) != 0) {
+        value |= ~mask;
+      }
     }
-    return GeneratorGetIntConstant(gen, to->type, value);
+    return GeneratorGetIntConstant(gen, to->type, (int64_t)value);
   }
   return IRSetType(GeneratorEmit(gen,
                        NewIR2(IR_OP(signextendi), from,

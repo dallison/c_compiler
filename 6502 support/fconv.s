@@ -526,15 +526,17 @@ ftoi2_loop:
   STA mt1+1
   
 ftoi2_pos:
-  PLX
+  PLA
+  TAX
   LDA mt1+0
   STA 0,X
-  LDA mt1+2
+  LDA mt1+1
   STA 1,X
   RTS
 
 ftoi2_zero:
-  PLX
+  PLA
+  TAX
   LDA #0
   STA 0,X
   STA 1,X
@@ -602,13 +604,15 @@ ftoi1_loop:
   STA mt1+0
   
 ftoi1_pos:
-  PLX
+  PLA
+  TAX
   LDA mt1+0
   STA 0,X
   RTS
 
 ftoi1_zero:
-  PLX
+  PLA
+  TAX
   LDA #0
   STA 0,X
   RTS
@@ -691,7 +695,8 @@ ftoi4_loop:
   STA mt1+3
 
 ftoi4_pos:
-  PLX
+  PLA
+  TAX
   LDY #0
 ftoi4_loop2:
   LDA mt1,Y
@@ -703,7 +708,8 @@ ftoi4_loop2:
   RTS
 
 ftoi4_zero:
-  PLX
+  PLA
+  TAX
   LDA #0
   STA 0,X
   STA 1,X
@@ -712,7 +718,8 @@ ftoi4_zero:
   RTS
 
 ftoi8_zero:
-  PLX
+  PLA
+  TAX
   LDA #0
   STA 0,X
   STA 1,X
@@ -817,7 +824,8 @@ ftoi8_loop:
   STA mt1+7
 
 ftoi8_pos:
-  PLX
+  PLA
+  TAX
   LDY #0
 ftoi8_loop2:
   LDA mt1,Y

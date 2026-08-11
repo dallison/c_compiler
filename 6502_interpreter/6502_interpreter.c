@@ -10,6 +10,7 @@
 #include "elf.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include "loader_lifecycle.h"
 #include <stdio.h>
 #include <ctype.h>
@@ -735,6 +736,7 @@ static char irq_handler[] = {
 #define W65C02_INT_TZDB_LOCAL_INFO 57
 #define W65C02_INT_TZDB_LEAP_COUNT 58
 #define W65C02_INT_TZDB_LEAP_INFO 59
+#define W65C02_INT_RANDOM_BYTES 60
 
 static int Open(W65C02Interpreter* interpreter, const char* filename, int flags, int mode) {
   int index = 0;
@@ -1448,6 +1450,14 @@ static void BrkHandler(W65C02Interpreter* interpreter, int8_t code) {
       result = leap == NULL
                    ? -DAVE_HOST_EINVAL
                    : DaveHostChronoLeapInfo((uint32_t)ARG16(0), leap);
+      break;
+    }
+    case W65C02_INT_RANDOM_BYTES: {
+      size_t size = ARG16(2);
+      void* buffer = size == 0 ? NULL : ARG_PTR(0, size);
+      result = size != 0 && buffer == NULL
+                   ? -DAVE_HOST_EINVAL
+                   : DaveHostRandomBytes(buffer, size);
       break;
     }
     default:

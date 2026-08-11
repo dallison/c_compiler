@@ -1631,16 +1631,11 @@ static TypeRecord* DecayCallArgumentTypeForDeduction(TypeRecord* formal,
   if (formal == NULL || actual == NULL) {
     return NULL;
   }
-  // Only a by-value bare template parameter (`T first`) triggers decay: that is
-  // the case whose deduced argument must become a pointer.  When the parameter
-  // is a pointer, array, or reference the existing structural matching already
-  // deduces correctly (e.g. `T*` vs an array recurses element-wise, and an
-  // array parameter `char[N]` in aggregate CTAD must keep matching structurally
-  // to deduce N), so decaying there would wrongly defeat deduction.
-  bool bare_template_parameter = formal->declarator == kDeclPrimitive &&
-                                 TypeIsUnknown(formal) &&
-                                 formal->template_parameter_index >= 0;
-  if (!bare_template_parameter) {
+  // Decay applies to every by-value function parameter, including a bare
+  // placeholder (`T`) and compound patterns such as `T*`. References retain
+  // the array/function type. Keep an explicit array pattern structural because
+  // it is used by aggregate deduction to recover its bound.
+  if (TypeIsReference(formal) || formal->declarator == kDeclArray) {
     return NULL;
   }
   TypeRecord* decayed = NULL;
@@ -5847,6 +5842,11 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     TypeRecord* func = InstantiateMemberFunctionType(
         parser, /*owner=*/NULL, /*is_static_member=*/true, ftpl->type, args,
         ftpl->location);
+    // Signature instantiation may recursively instantiate nested types and
+    // temporarily replace the parser's active substitution. The inline friend
+    // body still needs the enclosing source->specialization mapping.
+    parser->template_substitution_source = subst_source;
+    parser->template_substitution_target = subst_target;
     bool constraints_satisfied =
         func->info.function.associated_constraint == NULL ||
         ConceptsConstraintSatisfied(

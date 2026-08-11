@@ -704,7 +704,14 @@ bool IRIsConst(IRNode* node) {
 }
 
 bool IRIsZero(IRNode* node) {
-  return IRIsConst(node) && ((IRConstant*)node)->value.ivalue == 0;
+  if (!IRIsConst(node)) {
+    return false;
+  }
+  IRConstant* c = (IRConstant*)node;
+  if (node->opcode == IR_OP(constf) || node->opcode == IR_OP(constd)) {
+    return c->value.fvalue == 0.0;
+  }
+  return c->value.ivalue == 0;
 }
 
 bool IRIsIntConst(IRNode* node) {

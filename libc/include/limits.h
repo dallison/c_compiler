@@ -41,7 +41,7 @@
 #  define INT_MAX  32767
 
 /* Maximum value an `unsigned int' can hold.  (Minimum is 0.)  */
-#  define UINT_MAX  65536U
+#  define UINT_MAX  65535U
 
 /* Minimum and maximum values a `signed long int' can hold.  */
 #   define LONG_MAX  2147483647L

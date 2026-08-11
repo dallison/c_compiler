@@ -25,6 +25,12 @@ using ::atan;
 using ::atan2;
 using ::sqrt;
 using ::fabs;
+using ::floor;
+using ::ceil;
+using ::frexp;
+using ::exp;
+using ::log;
+using ::pow;
 using ::modf;
 using ::ldexp;
 

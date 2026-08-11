@@ -333,16 +333,18 @@ __finf:
 
 // X: offset into zero page
 __fisnanA:
-  LDA 0,X
+  LDA 3,X
   AND #0x7f
   CMP #0x7f
   BNE notnaninf
-  LDA 1,X
-  AND 2,X
-  AND 3,X
-checknanhi:
-  CMP #0xff
-  BNE notnaninf
+  LDA 2,X
+  AND #0x80
+  BEQ notnaninf
+  LDA 2,X
+  AND #0x7f
+  ORA 1,X
+  ORA 0,X
+  BEQ notnaninf
   SEC
   RTS
 notnaninf:
@@ -351,28 +353,35 @@ notnaninf:
 
 // Y: offset into zero page
 __fisnanB:
-  LDA 0,Y
+  LDA 3,Y
   AND #0x7f
   CMP #0x7f
   BNE notnaninf
-  LDA 1,Y
-  AND 2,Y
-  AND 3,Y
-  BRA checknanhi
+  LDA 2,Y
+  AND #0x80
+  BEQ notnaninf
+  LDA 2,Y
+  AND #0x7f
+  ORA 1,Y
+  ORA 0,Y
+  BEQ notnaninf
+  SEC
+  RTS
 
 
 // X: offset into zero page
 __fisinfA:
-  LDA 0,X
+  LDA 3,X
   AND #0x7f
   CMP #0x7f
   BNE notnaninf
-  LDA 1,X
-  CMP #0x80
-  BNE notnaninf
   LDA 2,X
-  AND 3,X
-checkinfhi:
+  AND #0x80
+  BEQ notnaninf
+  LDA 2,X
+  AND #0x7f
+  ORA 1,X
+  ORA 0,X
   BNE notnaninf
   SEC
   RTS
@@ -380,16 +389,20 @@ checkinfhi:
 
 // Y: offset into zero page
 __fisinfB:
-  LDA 0,Y
+  LDA 3,Y
   AND #0x7f
   CMP #0x7f
   BNE notnaninf
-  LDA 1,Y
-  CMP #0x80
-  BNE notnaninf
   LDA 2,Y
-  AND 3,Y
-  BRA checkinfhi
+  AND #0x80
+  BEQ notnaninf
+  LDA 2,Y
+  AND #0x7f
+  ORA 1,Y
+  ORA 0,Y
+  BNE notnaninf
+  SEC
+  RTS
 
 // Entry:
 // sp+0: address of IEE754 single precision number

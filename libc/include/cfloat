@@ -1,0 +1,13 @@
+//
+//  cfloat
+//  c_compiler
+//
+//  C++ wrapper for <float.h>.
+//
+
+#ifndef cfloat_h
+#define cfloat_h
+
+#include <float.h>
+
+#endif /* cfloat_h */

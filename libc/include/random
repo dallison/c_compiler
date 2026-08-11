@@ -1,0 +1,2466 @@
+//
+//  random
+//  c_compiler
+//
+//  C++23 pseudo-random number engines and distributions.
+//
+
+#ifndef __davecc_random__
+#define __davecc_random__
+
+#include <cmath>
+#include <concepts>
+#include <cstdint>
+#include <initializer_list>
+#include <istream>
+#include <iterator>
+#include <limits>
+#include <ostream>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+template <class G>
+concept uniform_random_bit_generator =
+    requires(G& g) {
+      { g() } -> unsigned_integral;
+    } &&
+    requires {
+      G::min();
+      G::max();
+    } &&
+    (G::min() < G::max());
+
+namespace __random_detail {
+
+template <class UInt>
+constexpr UInt __mask_bits(size_t bits) {
+  constexpr size_t width = sizeof(UInt) * 8;
+  if (bits >= width) return static_cast<UInt>(~UInt(0));
+  return static_cast<UInt>((UInt(1) << bits) - UInt(1));
+}
+
+template <class UInt>
+constexpr UInt __add_mod(UInt a, UInt b, UInt modulus) {
+  if (modulus == 0) return static_cast<UInt>(a + b);
+  a %= modulus;
+  b %= modulus;
+  return a >= modulus - b ? static_cast<UInt>(a - (modulus - b))
+                          : static_cast<UInt>(a + b);
+}
+
+template <class UInt>
+constexpr UInt __multiply_mod(UInt a, UInt b, UInt modulus) {
+  if (modulus == 0) return static_cast<UInt>(a * b);
+  if constexpr (sizeof(UInt) <= 4) {
+    return static_cast<UInt>(
+        (static_cast<unsigned long long>(a) *
+         static_cast<unsigned long long>(b)) %
+        modulus);
+  } else {
+    UInt result = 0;
+    a %= modulus;
+    while (b != 0) {
+      if ((b & 1) != 0) result = __add_mod(result, a, modulus);
+      b >>= 1;
+      if (b != 0) a = __add_mod(a, a, modulus);
+    }
+    return result;
+  }
+}
+
+template <class UInt>
+constexpr UInt __linear_step(UInt value, UInt multiplier, UInt increment,
+                             UInt modulus) {
+  return __add_mod(__multiply_mod(value, multiplier, modulus), increment,
+                   modulus);
+}
+
+template <class G>
+constexpr unsigned long long __draw_unsigned(G& gen) {
+  return static_cast<unsigned long long>(gen()) -
+         static_cast<unsigned long long>(G::min());
+}
+
+template <class G>
+constexpr unsigned long long __uniform_below(G& gen,
+                                             unsigned long long bound) {
+  if (bound <= 1) return 0;
+  const unsigned long long gmin =
+      static_cast<unsigned long long>(G::min());
+  const unsigned long long gmax =
+      static_cast<unsigned long long>(G::max());
+  const unsigned long long span = gmax - gmin + 1ULL;
+
+  if (span == 0) {
+    const unsigned long long threshold =
+        static_cast<unsigned long long>(-bound) % bound;
+    unsigned long long value;
+    do {
+      value = static_cast<unsigned long long>(gen()) - gmin;
+    } while (value < threshold);
+    return value % bound;
+  }
+
+  if (span >= bound) {
+    const unsigned long long limit = span - span % bound;
+    unsigned long long value;
+    do {
+      value = static_cast<unsigned long long>(gen()) - gmin;
+    } while (value >= limit);
+    return value % bound;
+  }
+
+  size_t bits = 0;
+  unsigned long long top = bound - 1;
+  while (top != 0) {
+    ++bits;
+    top >>= 1;
+  }
+  for (;;) {
+    unsigned long long value = 0;
+    for (size_t bit = 0; bit < bits; ++bit) {
+      value |= __uniform_below(gen, 2) << bit;
+    }
+    if (value < bound) return value;
+  }
+}
+
+constexpr size_t __ceil_div(size_t a, size_t b) {
+  return a / b + (a % b != 0 ? 1 : 0);
+}
+
+}  // namespace __random_detail
+
+class seed_seq {
+ private:
+  vector<uint_least32_t> seeds_;
+
+ public:
+  using result_type = uint_least32_t;
+
+  seed_seq() noexcept = default;
+
+  template <class InputIt>
+  seed_seq(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      seeds_.push_back(static_cast<result_type>(*first));
+    }
+  }
+
+  seed_seq(initializer_list<result_type> values)
+      : seed_seq(values.begin(), values.end()) {}
+
+  seed_seq(const seed_seq&) = delete;
+  seed_seq& operator=(const seed_seq&) = delete;
+
+  template <class RandomIt>
+  void generate(RandomIt first, RandomIt last) {
+    using output_type = typename iterator_traits<RandomIt>::value_type;
+    const size_t n = static_cast<size_t>(last - first);
+    if (n == 0) return;
+    for (size_t i = 0; i < n; ++i) {
+      first[i] = static_cast<output_type>(0x8b8b8b8bU);
+    }
+
+    const size_t s = seeds_.size();
+    const size_t t = n >= 623 ? 11
+                     : n >= 68 ? 7
+                     : n >= 39 ? 5
+                     : n >= 7  ? 3
+                               : (n - 1) / 2;
+    const size_t p = (n - t) / 2;
+    const size_t q = p + t;
+    const size_t m = s + 1 > n ? s + 1 : n;
+
+    result_type r1 =
+        1664525U * static_cast<result_type>(
+                       first[0] ^ first[p % n] ^ first[q % n]);
+    result_type r2 = r1 + static_cast<result_type>(s);
+    first[p % n] = static_cast<output_type>(first[p % n] + r1);
+    first[q % n] = static_cast<output_type>(first[q % n] + r2);
+    first[0] = static_cast<output_type>(r2);
+
+    for (size_t k = 1; k < m; ++k) {
+      const size_t kn = k % n;
+      const size_t kpn = (k + p) % n;
+      const size_t kqn = (k + q) % n;
+      const size_t km1 = (k - 1) % n;
+      r1 = 1664525U * static_cast<result_type>(
+                              first[kn] ^ first[kpn] ^ first[km1]);
+      const result_type seed =
+          k <= s ? seeds_[k - 1] : static_cast<result_type>(0);
+      r2 = r1 + static_cast<result_type>(k) + seed;
+      first[kpn] = static_cast<output_type>(first[kpn] + r1);
+      first[kqn] = static_cast<output_type>(first[kqn] + r2);
+      first[kn] = static_cast<output_type>(r2);
+    }
+
+    for (size_t k = m; k < m + n; ++k) {
+      const size_t kn = k % n;
+      const size_t kpn = (k + p) % n;
+      const size_t kqn = (k + q) % n;
+      const size_t km1 = (k - 1) % n;
+      const result_type value_n = static_cast<result_type>(first[kn]);
+      const result_type value_p = static_cast<result_type>(first[kpn]);
+      const result_type value_previous =
+          static_cast<result_type>(first[km1]);
+      const result_type r3 =
+          1566083941U *
+          static_cast<result_type>(value_n + value_p + value_previous);
+      const result_type r4 = r3 - static_cast<result_type>(kn);
+      first[kpn] = static_cast<output_type>(first[kpn] ^ r3);
+      first[kqn] = static_cast<output_type>(first[kqn] ^ r4);
+      first[kn] = static_cast<output_type>(r4);
+    }
+  }
+
+  size_t size() const noexcept { return seeds_.size(); }
+
+  template <class OutputIt>
+  void param(OutputIt dest) const {
+    for (result_type value : seeds_) {
+      *dest++ = value;
+    }
+  }
+
+};
+
+template <class UIntType, UIntType a, UIntType c, UIntType m>
+class linear_congruential_engine {
+  static_assert(is_unsigned_v<UIntType>);
+  static_assert(m == 0 || (a < m && c < m));
+
+ public:
+  using result_type = UIntType;
+
+  static constexpr result_type multiplier = a;
+  static constexpr result_type increment = c;
+  static constexpr result_type modulus = m;
+  static constexpr result_type default_seed = 1U;
+
+  linear_congruential_engine() : linear_congruential_engine(default_seed) {}
+  explicit linear_congruential_engine(result_type value) { seed(value); }
+
+  template <class SeedSeq>
+  explicit linear_congruential_engine(SeedSeq& seq) {
+    seed(seq);
+  }
+
+  void seed(result_type value = default_seed) {
+    if constexpr (m != 0) value %= m;
+    state_ = c == 0 && value == 0 ? result_type(1) : value;
+  }
+
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    uint_least32_t words[4] = {};
+    seq.generate(words, words + __random_detail::__ceil_div(
+                                      sizeof(result_type) * 8, size_t(32)));
+    result_type value = 0;
+    const size_t count =
+        __random_detail::__ceil_div(sizeof(result_type) * 8, size_t(32));
+    for (size_t i = 0; i < count; ++i) {
+      value = static_cast<result_type>(
+          value | (static_cast<result_type>(words[i])
+                   << static_cast<int>(i * 32)));
+    }
+    seed(value);
+  }
+
+  static constexpr result_type min() {
+    return c == 0 ? result_type(1) : result_type(0);
+  }
+  static constexpr result_type max() {
+    return m == 0 ? numeric_limits<result_type>::max()
+                  : static_cast<result_type>(m - 1);
+  }
+
+  result_type operator()() {
+    state_ =
+        __random_detail::__linear_step<result_type>(state_, a, c, m);
+    return state_;
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const linear_congruential_engine& lhs,
+                         const linear_congruential_engine& rhs) {
+    return lhs.state_ == rhs.state_;
+  }
+
+  friend bool operator!=(const linear_congruential_engine& lhs,
+                         const linear_congruential_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  result_type state_ = default_seed;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const linear_congruential_engine& engine) {
+    return output << engine.state_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      linear_congruential_engine& engine) {
+    result_type state = 0;
+    if (input >> state) engine.state_ = state;
+    return input;
+  }
+};
+
+template <class UIntType, size_t w, size_t n, size_t m, size_t r, UIntType a,
+          size_t u, UIntType d, size_t s, UIntType b, size_t t, UIntType c,
+          size_t l, UIntType f>
+class mersenne_twister_engine {
+  static_assert(is_unsigned_v<UIntType>);
+  static_assert(0 < m && m <= n && 0 < r && r <= w);
+  static_assert(w <= sizeof(UIntType) * 8);
+
+ public:
+  using result_type = UIntType;
+
+  static constexpr size_t word_size = w;
+  static constexpr size_t state_size = n;
+  static constexpr size_t shift_size = m;
+  static constexpr size_t mask_bits = r;
+  static constexpr result_type xor_mask = a;
+  static constexpr size_t tempering_u = u;
+  static constexpr result_type tempering_d = d;
+  static constexpr size_t tempering_s = s;
+  static constexpr result_type tempering_b = b;
+  static constexpr size_t tempering_t = t;
+  static constexpr result_type tempering_c = c;
+  static constexpr size_t tempering_l = l;
+  static constexpr result_type initialization_multiplier = f;
+  static constexpr result_type default_seed = 5489U;
+
+  mersenne_twister_engine() : mersenne_twister_engine(default_seed) {}
+  explicit mersenne_twister_engine(result_type value) { seed(value); }
+
+  template <class SeedSeq>
+  explicit mersenne_twister_engine(SeedSeq& seq) {
+    seed(seq);
+  }
+
+  void seed(result_type value = default_seed) {
+    state_[0] = value & __word_mask();
+    for (size_t i = 1; i < n; ++i) {
+      state_[i] = static_cast<result_type>(
+          f * (state_[i - 1] ^ (state_[i - 1] >> (w - 2))) +
+          static_cast<result_type>(i));
+      state_[i] &= __word_mask();
+    }
+    index_ = n;
+  }
+
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    const size_t chunks = (w + 31) / 32;
+    uint_least32_t values[n * 2];
+    seq.generate(values, values + n * chunks);
+    bool all_zero = true;
+    for (size_t i = 0; i < n; ++i) {
+      result_type value = 0;
+      for (size_t j = 0; j < chunks; ++j) {
+        value = static_cast<result_type>(
+            value | (static_cast<result_type>(values[i * chunks + j])
+                     << static_cast<int>(j * 32)));
+      }
+      state_[i] = value & __word_mask();
+      if ((state_[i] & __upper_mask()) != 0 || i != 0 && state_[i] != 0) {
+        all_zero = false;
+      }
+    }
+    if (all_zero) state_[0] = result_type(1) << (w - 1);
+    index_ = n;
+  }
+
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return __word_mask(); }
+
+  result_type operator()() {
+    if (index_ >= n) __twist();
+    result_type value = state_[index_++];
+    value ^= (value >> u) & d;
+    value ^= (value << s) & b;
+    value ^= (value << t) & c;
+    value ^= value >> l;
+    return value & __word_mask();
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const mersenne_twister_engine& lhs,
+                         const mersenne_twister_engine& rhs) {
+    if (lhs.index_ != rhs.index_) return false;
+    for (size_t i = 0; i < n; ++i) {
+      if (lhs.state_[i] != rhs.state_[i]) return false;
+    }
+    return true;
+  }
+
+  friend bool operator!=(const mersenne_twister_engine& lhs,
+                         const mersenne_twister_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  static constexpr result_type __word_mask() {
+    return __random_detail::__mask_bits<result_type>(w);
+  }
+  static constexpr result_type __lower_mask() {
+    return __random_detail::__mask_bits<result_type>(r);
+  }
+  static constexpr result_type __upper_mask() {
+    return static_cast<result_type>(__word_mask() & ~__lower_mask());
+  }
+
+  void __twist() {
+    for (size_t i = 0; i < n; ++i) {
+      const result_type joined = static_cast<result_type>(
+          (state_[i] & __upper_mask()) |
+          (state_[(i + 1) % n] & __lower_mask()));
+      result_type value =
+          static_cast<result_type>(state_[(i + m) % n] ^ (joined >> 1));
+      if ((joined & 1) != 0) value ^= a;
+      state_[i] = value & __word_mask();
+    }
+    index_ = 0;
+  }
+
+  result_type state_[n];
+  size_t index_ = n;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const mersenne_twister_engine& engine) {
+    for (size_t i = 0; i < n; ++i) {
+      if (i != 0) output << CharT(' ');
+      output << engine.state_[i];
+    }
+    return output << CharT(' ') << engine.index_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      mersenne_twister_engine& engine) {
+    result_type state[n];
+    size_t index = 0;
+    for (size_t i = 0; i < n; ++i) input >> state[i];
+    input >> index;
+    if (input && index <= n) {
+      for (size_t i = 0; i < n; ++i) engine.state_[i] = state[i];
+      engine.index_ = index;
+    }
+    return input;
+  }
+};
+
+template <class UIntType, size_t w, size_t s, size_t r>
+class subtract_with_carry_engine {
+  static_assert(is_unsigned_v<UIntType>);
+  static_assert(0 < s && s < r && w <= sizeof(UIntType) * 8);
+
+ public:
+  using result_type = UIntType;
+
+  static constexpr size_t word_size = w;
+  static constexpr size_t short_lag = s;
+  static constexpr size_t long_lag = r;
+  static constexpr result_type default_seed = 19780503U;
+
+  subtract_with_carry_engine()
+      : subtract_with_carry_engine(default_seed) {}
+  explicit subtract_with_carry_engine(result_type value) { seed(value); }
+
+  template <class SeedSeq>
+  explicit subtract_with_carry_engine(SeedSeq& seq) {
+    seed(seq);
+  }
+
+  void seed(result_type value = default_seed) {
+    linear_congruential_engine<uint_least32_t, 40014U, 0U, 2147483563U>
+        generator(value == 0 ? default_seed : value);
+    for (size_t i = 0; i < r; ++i) {
+      state_[i] = 0;
+      size_t produced = 0;
+      while (produced < w) {
+        state_[i] = static_cast<result_type>(
+            state_[i] |
+            (static_cast<result_type>(generator())
+             << static_cast<int>(produced)));
+        produced += 32;
+      }
+      state_[i] &= __word_mask();
+    }
+    carry_ = state_[r - 1] == 0 ? 1 : 0;
+    index_ = 0;
+  }
+
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    const size_t chunks = (w + 31) / 32;
+    uint_least32_t values[r * 2];
+    seq.generate(values, values + r * chunks);
+    for (size_t i = 0; i < r; ++i) {
+      state_[i] = 0;
+      for (size_t j = 0; j < chunks; ++j) {
+        state_[i] = static_cast<result_type>(
+            state_[i] |
+            (static_cast<result_type>(values[i * chunks + j])
+             << static_cast<int>(j * 32)));
+      }
+      state_[i] &= __word_mask();
+    }
+    carry_ = state_[r - 1] == 0 ? 1 : 0;
+    index_ = 0;
+  }
+
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return __word_mask(); }
+
+  result_type operator()() {
+    const size_t short_index = (index_ + r - s) % r;
+    const result_type left = state_[short_index];
+    const result_type right = state_[index_];
+    const result_type result =
+        static_cast<result_type>((left - right - carry_) & __word_mask());
+    carry_ = left < right || (carry_ != 0 && left == right) ? 1 : 0;
+    state_[index_] = result;
+    index_ = (index_ + 1) % r;
+    return result;
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const subtract_with_carry_engine& lhs,
+                         const subtract_with_carry_engine& rhs) {
+    if (lhs.index_ != rhs.index_ || lhs.carry_ != rhs.carry_) return false;
+    for (size_t i = 0; i < r; ++i) {
+      if (lhs.state_[i] != rhs.state_[i]) return false;
+    }
+    return true;
+  }
+
+  friend bool operator!=(const subtract_with_carry_engine& lhs,
+                         const subtract_with_carry_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  static constexpr result_type __word_mask() {
+    return __random_detail::__mask_bits<result_type>(w);
+  }
+
+  result_type state_[r];
+  result_type carry_ = 0;
+  size_t index_ = 0;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const subtract_with_carry_engine& engine) {
+    for (size_t i = 0; i < r; ++i) {
+      if (i != 0) output << CharT(' ');
+      output << engine.state_[i];
+    }
+    return output << CharT(' ') << engine.carry_ << CharT(' ')
+                  << engine.index_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      subtract_with_carry_engine& engine) {
+    result_type state[r];
+    result_type carry = 0;
+    size_t index = 0;
+    for (size_t i = 0; i < r; ++i) input >> state[i];
+    input >> carry >> index;
+    if (input && carry <= 1 && index < r) {
+      for (size_t i = 0; i < r; ++i) engine.state_[i] = state[i];
+      engine.carry_ = carry;
+      engine.index_ = index;
+    }
+    return input;
+  }
+};
+
+template <class Engine, size_t p, size_t r>
+class discard_block_engine {
+  static_assert(0 < r && r <= p);
+
+ public:
+  using result_type = typename Engine::result_type;
+  static constexpr size_t block_size = p;
+  static constexpr size_t used_block = r;
+
+  discard_block_engine() = default;
+  explicit discard_block_engine(const Engine& engine) : engine_(engine) {}
+  explicit discard_block_engine(Engine&& engine)
+      : engine_(static_cast<Engine&&>(engine)) {}
+  explicit discard_block_engine(result_type value) : engine_(value) {}
+
+  template <class SeedSeq>
+  explicit discard_block_engine(SeedSeq& seq) : engine_(seq) {}
+
+  void seed() {
+    engine_.seed();
+    used_ = 0;
+  }
+  void seed(result_type value) {
+    engine_.seed(value);
+    used_ = 0;
+  }
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    engine_.seed(seq);
+    used_ = 0;
+  }
+
+  const Engine& base() const noexcept { return engine_; }
+  static constexpr result_type min() { return Engine::min(); }
+  static constexpr result_type max() { return Engine::max(); }
+
+  result_type operator()() {
+    if (used_ == r) {
+      engine_.discard(p - r);
+      used_ = 0;
+    }
+    ++used_;
+    return engine_();
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const discard_block_engine& lhs,
+                         const discard_block_engine& rhs) {
+    return lhs.engine_ == rhs.engine_ && lhs.used_ == rhs.used_;
+  }
+
+  friend bool operator!=(const discard_block_engine& lhs,
+                         const discard_block_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  Engine engine_;
+  size_t used_ = 0;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const discard_block_engine& engine) {
+    return output << engine.engine_ << CharT(' ') << engine.used_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input, discard_block_engine& engine) {
+    Engine base;
+    size_t used = 0;
+    input >> base >> used;
+    if (input && used <= r) {
+      engine.engine_ = base;
+      engine.used_ = used;
+    }
+    return input;
+  }
+};
+
+template <class Engine, size_t w, class UIntType>
+class independent_bits_engine {
+  static_assert(is_unsigned_v<UIntType>);
+  static_assert(0 < w && w <= sizeof(UIntType) * 8);
+
+ public:
+  using result_type = UIntType;
+
+  independent_bits_engine() = default;
+  explicit independent_bits_engine(const Engine& engine) : engine_(engine) {}
+  explicit independent_bits_engine(Engine&& engine)
+      : engine_(static_cast<Engine&&>(engine)) {}
+  explicit independent_bits_engine(typename Engine::result_type value)
+      : engine_(value) {}
+
+  template <class SeedSeq>
+  explicit independent_bits_engine(SeedSeq& seq) : engine_(seq) {}
+
+  void seed() { engine_.seed(); }
+  void seed(typename Engine::result_type value) { engine_.seed(value); }
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    engine_.seed(seq);
+  }
+
+  const Engine& base() const noexcept { return engine_; }
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() {
+    return __random_detail::__mask_bits<result_type>(w);
+  }
+
+  result_type operator()() {
+    result_type result = 0;
+    size_t produced = 0;
+    while (produced < w) {
+      const size_t take = w - produced > 16 ? 16 : w - produced;
+      const unsigned long long bound = 1ULL << take;
+      const result_type part = static_cast<result_type>(
+          __random_detail::__uniform_below(engine_, bound));
+      result = static_cast<result_type>(result | (part << produced));
+      produced += take;
+    }
+    return result;
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const independent_bits_engine& lhs,
+                         const independent_bits_engine& rhs) {
+    return lhs.engine_ == rhs.engine_;
+  }
+
+  friend bool operator!=(const independent_bits_engine& lhs,
+                         const independent_bits_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  Engine engine_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const independent_bits_engine& engine) {
+    return output << engine.engine_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input, independent_bits_engine& engine) {
+    return input >> engine.engine_;
+  }
+};
+
+template <class Engine, size_t k>
+class shuffle_order_engine {
+  static_assert(k > 0);
+
+ public:
+  using result_type = typename Engine::result_type;
+  static constexpr size_t table_size = k;
+
+  shuffle_order_engine() { __initialize(); }
+  explicit shuffle_order_engine(const Engine& engine) : engine_(engine) {
+    __initialize();
+  }
+  explicit shuffle_order_engine(Engine&& engine)
+      : engine_(static_cast<Engine&&>(engine)) {
+    __initialize();
+  }
+  explicit shuffle_order_engine(result_type value) : engine_(value) {
+    __initialize();
+  }
+
+  template <class SeedSeq>
+  explicit shuffle_order_engine(SeedSeq& seq) : engine_(seq) {
+    __initialize();
+  }
+
+  void seed() {
+    engine_.seed();
+    __initialize();
+  }
+  void seed(result_type value) {
+    engine_.seed(value);
+    __initialize();
+  }
+  template <class SeedSeq>
+  void seed(SeedSeq& seq) {
+    engine_.seed(seq);
+    __initialize();
+  }
+
+  const Engine& base() const noexcept { return engine_; }
+  static constexpr result_type min() { return Engine::min(); }
+  static constexpr result_type max() { return Engine::max(); }
+
+  result_type operator()() {
+    const unsigned long long range =
+        static_cast<unsigned long long>(Engine::max()) -
+        static_cast<unsigned long long>(Engine::min()) + 1ULL;
+    size_t index;
+    if (range == 0) {
+      index = static_cast<size_t>(
+          (static_cast<unsigned long long>(y_ - Engine::min()) * k) >>
+          (sizeof(result_type) * 8));
+    } else {
+      index = static_cast<size_t>(
+          (static_cast<unsigned long long>(y_ - Engine::min()) * k) / range);
+    }
+    if (index >= k) index = k - 1;
+    y_ = table_[index];
+    table_[index] = engine_();
+    return y_;
+  }
+
+  void discard(unsigned long long count) {
+    while (count-- != 0) {
+      static_cast<void>((*this)());
+    }
+  }
+
+  friend bool operator==(const shuffle_order_engine& lhs,
+                         const shuffle_order_engine& rhs) {
+    if (!(lhs.engine_ == rhs.engine_) || lhs.y_ != rhs.y_) return false;
+    for (size_t i = 0; i < k; ++i) {
+      if (lhs.table_[i] != rhs.table_[i]) return false;
+    }
+    return true;
+  }
+
+  friend bool operator!=(const shuffle_order_engine& lhs,
+                         const shuffle_order_engine& rhs) {
+    return !(lhs == rhs);
+  }
+
+ private:
+  void __initialize() {
+    for (size_t i = 0; i < k; ++i) table_[i] = engine_();
+    y_ = engine_();
+  }
+
+  Engine engine_;
+  result_type table_[k];
+  result_type y_ = 0;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const shuffle_order_engine& engine) {
+    output << engine.engine_;
+    for (size_t i = 0; i < k; ++i)
+      output << CharT(' ') << engine.table_[i];
+    return output << CharT(' ') << engine.y_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input, shuffle_order_engine& engine) {
+    Engine base;
+    result_type table[k];
+    result_type value = 0;
+    input >> base;
+    for (size_t i = 0; i < k; ++i) input >> table[i];
+    input >> value;
+    if (input) {
+      engine.engine_ = base;
+      for (size_t i = 0; i < k; ++i) engine.table_[i] = table[i];
+      engine.y_ = value;
+    }
+    return input;
+  }
+};
+
+using minstd_rand0 =
+    linear_congruential_engine<uint_fast32_t, 16807, 0, 2147483647>;
+using minstd_rand =
+    linear_congruential_engine<uint_fast32_t, 48271, 0, 2147483647>;
+
+using mt19937 =
+    mersenne_twister_engine<uint_fast32_t, 32, 624, 397, 31, 0x9908b0dfU,
+                            11, 0xffffffffU, 7, 0x9d2c5680U, 15,
+                            0xefc60000U, 18, 1812433253U>;
+using mt19937_64 = mersenne_twister_engine<
+    uint_fast64_t, 64, 312, 156, 31, 0xb5026f5aa96619e9ULL, 29,
+    0x5555555555555555ULL, 17, 0x71d67fffeda60000ULL, 37,
+    0xfff7eee000000000ULL, 43, 6364136223846793005ULL>;
+
+using ranlux24_base =
+    subtract_with_carry_engine<uint_fast32_t, 24, 10, 24>;
+using ranlux48_base =
+    subtract_with_carry_engine<uint_fast64_t, 48, 5, 12>;
+using ranlux24 = discard_block_engine<ranlux24_base, 223, 23>;
+using ranlux48 = discard_block_engine<ranlux48_base, 389, 11>;
+using knuth_b = shuffle_order_engine<minstd_rand0, 256>;
+using default_random_engine = minstd_rand;
+
+template <class RealType, size_t bits, class URBG>
+RealType generate_canonical(URBG& gen) {
+  static_assert(is_floating_point_v<RealType>);
+  const size_t requested =
+      bits < static_cast<size_t>(numeric_limits<RealType>::digits)
+          ? bits
+          : static_cast<size_t>(numeric_limits<RealType>::digits);
+  const RealType range =
+      static_cast<RealType>(URBG::max()) -
+      static_cast<RealType>(URBG::min()) + RealType(1);
+  RealType target = 1;
+  for (size_t i = 0; i < requested; ++i) target *= RealType(2);
+  size_t draws = 1;
+  RealType combinations = range;
+  while (combinations < target) {
+    combinations *= range;
+    ++draws;
+  }
+  RealType sum = 0;
+  RealType factor = 1;
+  for (size_t i = 0; i < draws; ++i) {
+    sum += (static_cast<RealType>(gen()) -
+            static_cast<RealType>(URBG::min())) *
+           factor;
+    factor *= range;
+  }
+  RealType result = sum / factor;
+  return result < RealType(1)
+             ? result
+             : RealType(1) - numeric_limits<RealType>::epsilon();
+}
+
+template <class IntType = int>
+class uniform_int_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = uniform_int_distribution;
+    explicit param_type(result_type a = 0,
+                        result_type b = numeric_limits<result_type>::max())
+        : a_(a), b_(b) {}
+    result_type a() const { return a_; }
+    result_type b() const { return b_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.a_ == y.a_ && x.b_ == y.b_;
+    }
+   private:
+    result_type a_;
+    result_type b_;
+  };
+
+  uniform_int_distribution() = default;
+  explicit uniform_int_distribution(result_type a,
+                                    result_type b =
+                                        numeric_limits<result_type>::max())
+      : params_(a, b) {}
+  explicit uniform_int_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type a() const { return params_.a(); }
+  result_type b() const { return params_.b(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return a(); }
+  result_type max() const { return b(); }
+
+  template <class URBG>
+  result_type operator()(URBG& gen) {
+    return (*this)(gen, params_);
+  }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    using unsigned_type = make_unsigned_t<result_type>;
+    const unsigned_type low = static_cast<unsigned_type>(p.a());
+    const unsigned_type width =
+        static_cast<unsigned_type>(p.b()) - low;
+    const unsigned long long span =
+        static_cast<unsigned long long>(width) + 1ULL;
+    if (span == 0) {
+      return static_cast<result_type>(
+          static_cast<unsigned_type>(__random_detail::__draw_unsigned(gen)));
+    }
+    return static_cast<result_type>(static_cast<unsigned_type>(
+        low + static_cast<unsigned_type>(
+                  __random_detail::__uniform_below(gen, span))));
+  }
+
+  friend bool operator==(const uniform_int_distribution& x,
+                         const uniform_int_distribution& y) {
+    return x.params_ == y.params_;
+  }
+  friend bool operator!=(const uniform_int_distribution& x,
+                         const uniform_int_distribution& y) {
+    return !(x == y);
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const uniform_int_distribution& distribution) {
+    return output << distribution.a() << CharT(' ') << distribution.b();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      uniform_int_distribution& distribution) {
+    result_type a = 0;
+    result_type b = numeric_limits<result_type>::max();
+    input >> a >> b;
+    if (input) distribution.params_ = param_type(a, b);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class uniform_real_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = uniform_real_distribution;
+    explicit param_type(result_type a = 0, result_type b = 1) : a_(a), b_(b) {}
+    result_type a() const { return a_; }
+    result_type b() const { return b_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.a_ == y.a_ && x.b_ == y.b_;
+    }
+   private:
+    result_type a_;
+    result_type b_;
+  };
+  uniform_real_distribution() = default;
+  explicit uniform_real_distribution(result_type a, result_type b = 1)
+      : params_(a, b) {}
+  explicit uniform_real_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type a() const { return params_.a(); }
+  result_type b() const { return params_.b(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return a(); }
+  result_type max() const { return b(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    return p.a() + (p.b() - p.a()) *
+                       generate_canonical<result_type,
+                                          numeric_limits<result_type>::digits>(
+                           gen);
+  }
+  friend bool operator==(const uniform_real_distribution& x,
+                         const uniform_real_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const uniform_real_distribution& distribution) {
+    return output << distribution.a() << CharT(' ') << distribution.b();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      uniform_real_distribution& distribution) {
+    result_type a = 0;
+    result_type b = 1;
+    input >> a >> b;
+    if (input) distribution.params_ = param_type(a, b);
+    return input;
+  }
+};
+
+class bernoulli_distribution {
+ public:
+  using result_type = bool;
+  class param_type {
+   public:
+    using distribution_type = bernoulli_distribution;
+    explicit param_type(double p = 0.5) : p_(p) {}
+    double p() const { return p_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.p_ == y.p_;
+    }
+   private:
+    double p_;
+  };
+  bernoulli_distribution() = default;
+  explicit bernoulli_distribution(double p) : params_(p) {}
+  explicit bernoulli_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  double p() const { return params_.p(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return false; }
+  result_type max() const { return true; }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    return generate_canonical<double, numeric_limits<double>::digits>(gen) <
+           p.p();
+  }
+  friend bool operator==(const bernoulli_distribution& x,
+                         const bernoulli_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const bernoulli_distribution& distribution) {
+    return output << distribution.p();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      bernoulli_distribution& distribution) {
+    double p = 0.5;
+    input >> p;
+    if (input) distribution.params_ = param_type(p);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class normal_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = normal_distribution;
+    explicit param_type(result_type mean = 0, result_type stddev = 1)
+        : mean_(mean), stddev_(stddev) {}
+    result_type mean() const { return mean_; }
+    result_type stddev() const { return stddev_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.mean_ == y.mean_ && x.stddev_ == y.stddev_;
+    }
+   private:
+    result_type mean_;
+    result_type stddev_;
+  };
+  normal_distribution() = default;
+  explicit normal_distribution(result_type mean, result_type stddev = 1)
+      : params_(mean, stddev) {}
+  explicit normal_distribution(const param_type& p) : params_(p) {}
+  void reset() { saved_ = false; }
+  result_type mean() const { return params_.mean(); }
+  result_type stddev() const { return params_.stddev(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return -numeric_limits<result_type>::infinity(); }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    if (saved_) {
+      saved_ = false;
+      return p.mean() + p.stddev() * saved_value_;
+    }
+    double x;
+    double y;
+    double radius;
+    do {
+      x = 2.0 * generate_canonical<double,
+                                   numeric_limits<double>::digits>(gen) -
+          1.0;
+      y = 2.0 * generate_canonical<double,
+                                   numeric_limits<double>::digits>(gen) -
+          1.0;
+      radius = x * x + y * y;
+    } while (radius <= 0.0 || radius >= 1.0);
+    const double scale = sqrt(-2.0 * log(radius) / radius);
+    saved_value_ = static_cast<result_type>(y * scale);
+    saved_ = true;
+    return static_cast<result_type>(p.mean() + p.stddev() * x * scale);
+  }
+  friend bool operator==(const normal_distribution& x,
+                         const normal_distribution& y) {
+    return x.params_ == y.params_ && x.saved_ == y.saved_ &&
+           (!x.saved_ || x.saved_value_ == y.saved_value_);
+  }
+ private:
+  param_type params_;
+  bool saved_ = false;
+  result_type saved_value_ = 0;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const normal_distribution& distribution) {
+    return output << distribution.mean() << CharT(' ')
+                  << distribution.stddev() << CharT(' ')
+                  << distribution.saved_ << CharT(' ')
+                  << distribution.saved_value_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      normal_distribution& distribution) {
+    result_type mean = 0;
+    result_type stddev = 1;
+    bool saved = false;
+    result_type saved_value = 0;
+    input >> mean >> stddev >> saved >> saved_value;
+    if (input) {
+      distribution.params_ = param_type(mean, stddev);
+      distribution.saved_ = saved;
+      distribution.saved_value_ = saved_value;
+    }
+    return input;
+  }
+};
+
+template <class IntType = int>
+class geometric_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = geometric_distribution;
+    explicit param_type(double p = 0.5) : p_(p) {}
+    double p() const { return p_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.p_ == y.p_;
+    }
+   private:
+    double p_;
+  };
+  geometric_distribution() = default;
+  explicit geometric_distribution(double p) : params_(p) {}
+  explicit geometric_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  double p() const { return params_.p(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::max(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    if (p.p() >= 1.0) return 0;
+    double u =
+        generate_canonical<double, numeric_limits<double>::digits>(gen);
+    return static_cast<result_type>(log(1.0 - u) / log(1.0 - p.p()));
+  }
+  friend bool operator==(const geometric_distribution& x,
+                         const geometric_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const geometric_distribution& distribution) {
+    return output << distribution.p();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      geometric_distribution& distribution) {
+    double p = 0.5;
+    input >> p;
+    if (input) distribution.params_ = param_type(p);
+    return input;
+  }
+};
+
+template <class IntType = int>
+class binomial_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = binomial_distribution;
+    explicit param_type(result_type t = 1, double p = 0.5) : t_(t), p_(p) {}
+    result_type t() const { return t_; }
+    double p() const { return p_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.t_ == y.t_ && x.p_ == y.p_;
+    }
+   private:
+    result_type t_;
+    double p_;
+  };
+  binomial_distribution() = default;
+  explicit binomial_distribution(result_type t, double p = 0.5)
+      : params_(t, p) {}
+  explicit binomial_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type t() const { return params_.t(); }
+  double p() const { return params_.p(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return t(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    bernoulli_distribution coin(p.p());
+    result_type count = 0;
+    for (result_type i = 0; i < p.t(); ++i) {
+      if (coin(gen)) ++count;
+    }
+    return count;
+  }
+  friend bool operator==(const binomial_distribution& x,
+                         const binomial_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const binomial_distribution& distribution) {
+    return output << distribution.t() << CharT(' ') << distribution.p();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      binomial_distribution& distribution) {
+    result_type t = 1;
+    double p = 0.5;
+    input >> t >> p;
+    if (input) distribution.params_ = param_type(t, p);
+    return input;
+  }
+};
+
+template <class IntType = int>
+class negative_binomial_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = negative_binomial_distribution;
+    explicit param_type(result_type k = 1, double p = 0.5) : k_(k), p_(p) {}
+    result_type k() const { return k_; }
+    double p() const { return p_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.k_ == y.k_ && x.p_ == y.p_;
+    }
+   private:
+    result_type k_;
+    double p_;
+  };
+  negative_binomial_distribution() = default;
+  explicit negative_binomial_distribution(result_type k, double p = 0.5)
+      : params_(k, p) {}
+  explicit negative_binomial_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type k() const { return params_.k(); }
+  double p() const { return params_.p(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::max(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    geometric_distribution<result_type> geometric(p.p());
+    result_type result = 0;
+    for (result_type i = 0; i < p.k(); ++i) result += geometric(gen);
+    return result;
+  }
+  friend bool operator==(const negative_binomial_distribution& x,
+                         const negative_binomial_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const negative_binomial_distribution& distribution) {
+    return output << distribution.k() << CharT(' ') << distribution.p();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      negative_binomial_distribution& distribution) {
+    result_type k = 1;
+    double p = 0.5;
+    input >> k >> p;
+    if (input) distribution.params_ = param_type(k, p);
+    return input;
+  }
+};
+
+template <class IntType = int>
+class poisson_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = poisson_distribution;
+    explicit param_type(double mean = 1.0) : mean_(mean) {}
+    double mean() const { return mean_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.mean_ == y.mean_;
+    }
+   private:
+    double mean_;
+  };
+  poisson_distribution() = default;
+  explicit poisson_distribution(double mean) : params_(mean) {}
+  explicit poisson_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  double mean() const { return params_.mean(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::max(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    if (p.mean() <= 0.0) return 0;
+    if (p.mean() > 64.0) {
+      normal_distribution<double> normal(p.mean(), sqrt(p.mean()));
+      double value;
+      do value = normal(gen); while (value < 0.0);
+      return static_cast<result_type>(floor(value + 0.5));
+    }
+    const double limit = exp(-p.mean());
+    double product = 1.0;
+    result_type count = 0;
+    do {
+      ++count;
+      product *=
+          generate_canonical<double, numeric_limits<double>::digits>(gen);
+    } while (product > limit);
+    return count - 1;
+  }
+  friend bool operator==(const poisson_distribution& x,
+                         const poisson_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const poisson_distribution& distribution) {
+    return output << distribution.mean();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      poisson_distribution& distribution) {
+    double mean = 1.0;
+    input >> mean;
+    if (input) distribution.params_ = param_type(mean);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class exponential_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = exponential_distribution;
+    explicit param_type(result_type lambda = 1) : lambda_(lambda) {}
+    result_type lambda() const { return lambda_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.lambda_ == y.lambda_;
+    }
+   private:
+    result_type lambda_;
+  };
+  exponential_distribution() = default;
+  explicit exponential_distribution(result_type lambda) : params_(lambda) {}
+  explicit exponential_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type lambda() const { return params_.lambda(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    result_type u;
+    do {
+      u = generate_canonical<result_type,
+                             numeric_limits<result_type>::digits>(gen);
+    } while (u == 0);
+    return -log(u) / p.lambda();
+  }
+  friend bool operator==(const exponential_distribution& x,
+                         const exponential_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const exponential_distribution& distribution) {
+    return output << distribution.lambda();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      exponential_distribution& distribution) {
+    result_type lambda = 1;
+    input >> lambda;
+    if (input) distribution.params_ = param_type(lambda);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class gamma_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = gamma_distribution;
+    explicit param_type(result_type alpha = 1, result_type beta = 1)
+        : alpha_(alpha), beta_(beta) {}
+    result_type alpha() const { return alpha_; }
+    result_type beta() const { return beta_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.alpha_ == y.alpha_ && x.beta_ == y.beta_;
+    }
+   private:
+    result_type alpha_;
+    result_type beta_;
+  };
+  gamma_distribution() = default;
+  explicit gamma_distribution(result_type alpha, result_type beta = 1)
+      : params_(alpha, beta) {}
+  explicit gamma_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type alpha() const { return params_.alpha(); }
+  result_type beta() const { return params_.beta(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    result_type alpha = p.alpha();
+    if (alpha < result_type(1)) {
+      result_type u =
+          generate_canonical<result_type,
+                             numeric_limits<result_type>::digits>(gen);
+      param_type shifted(alpha + result_type(1), p.beta());
+      return (*this)(gen, shifted) * pow(u, result_type(1) / alpha);
+    }
+    const result_type d = alpha - result_type(1) / result_type(3);
+    const result_type c = result_type(1) / sqrt(result_type(9) * d);
+    normal_distribution<result_type> normal;
+    for (;;) {
+      const result_type x = normal(gen);
+      result_type v = result_type(1) + c * x;
+      if (v <= 0) continue;
+      v = v * v * v;
+      const result_type u =
+          generate_canonical<result_type,
+                             numeric_limits<result_type>::digits>(gen);
+      if (u < result_type(1) - result_type(0.0331) * x * x * x * x ||
+          log(u) < result_type(0.5) * x * x +
+                       d * (result_type(1) - v + log(v))) {
+        return p.beta() * d * v;
+      }
+    }
+  }
+  friend bool operator==(const gamma_distribution& x,
+                         const gamma_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const gamma_distribution& distribution) {
+    return output << distribution.alpha() << CharT(' ')
+                  << distribution.beta();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      gamma_distribution& distribution) {
+    result_type alpha = 1;
+    result_type beta = 1;
+    input >> alpha >> beta;
+    if (input) distribution.params_ = param_type(alpha, beta);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class lognormal_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = lognormal_distribution;
+    explicit param_type(result_type m = 0, result_type s = 1) : m_(m), s_(s) {}
+    result_type m() const { return m_; }
+    result_type s() const { return s_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.m_ == y.m_ && x.s_ == y.s_;
+    }
+   private:
+    result_type m_;
+    result_type s_;
+  };
+  lognormal_distribution() = default;
+  explicit lognormal_distribution(result_type m, result_type s = 1)
+      : params_(m, s) {}
+  explicit lognormal_distribution(const param_type& p) : params_(p) {}
+  void reset() { normal_.reset(); }
+  result_type m() const { return params_.m(); }
+  result_type s() const { return params_.s(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    using normal_param =
+        typename normal_distribution<result_type>::param_type;
+    normal_param adjusted(p.m(), p.s());
+    return exp(normal_(gen, adjusted));
+  }
+  friend bool operator==(const lognormal_distribution& x,
+                         const lognormal_distribution& y) {
+    return x.params_ == y.params_ && x.normal_ == y.normal_;
+  }
+ private:
+  param_type params_;
+  normal_distribution<result_type> normal_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const lognormal_distribution& distribution) {
+    return output << distribution.m() << CharT(' ') << distribution.s()
+                  << CharT(' ') << distribution.normal_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      lognormal_distribution& distribution) {
+    result_type m = 0;
+    result_type s = 1;
+    normal_distribution<result_type> normal;
+    input >> m >> s >> normal;
+    if (input) {
+      distribution.params_ = param_type(m, s);
+      distribution.normal_ = normal;
+    }
+    return input;
+  }
+};
+
+template <class RealType = double>
+class weibull_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = weibull_distribution;
+    explicit param_type(result_type a = 1, result_type b = 1) : a_(a), b_(b) {}
+    result_type a() const { return a_; }
+    result_type b() const { return b_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.a_ == y.a_ && x.b_ == y.b_;
+    }
+   private:
+    result_type a_;
+    result_type b_;
+  };
+  weibull_distribution() = default;
+  explicit weibull_distribution(result_type a, result_type b = 1)
+      : params_(a, b) {}
+  explicit weibull_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type a() const { return params_.a(); }
+  result_type b() const { return params_.b(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    result_type u =
+        generate_canonical<result_type,
+                           numeric_limits<result_type>::digits>(gen);
+    return p.b() * pow(-log(result_type(1) - u), result_type(1) / p.a());
+  }
+  friend bool operator==(const weibull_distribution& x,
+                         const weibull_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const weibull_distribution& distribution) {
+    return output << distribution.a() << CharT(' ') << distribution.b();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      weibull_distribution& distribution) {
+    result_type a = 1;
+    result_type b = 1;
+    input >> a >> b;
+    if (input) distribution.params_ = param_type(a, b);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class extreme_value_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = extreme_value_distribution;
+    explicit param_type(result_type a = 0, result_type b = 1) : a_(a), b_(b) {}
+    result_type a() const { return a_; }
+    result_type b() const { return b_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.a_ == y.a_ && x.b_ == y.b_;
+    }
+   private:
+    result_type a_;
+    result_type b_;
+  };
+  extreme_value_distribution() = default;
+  explicit extreme_value_distribution(result_type a, result_type b = 1)
+      : params_(a, b) {}
+  explicit extreme_value_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type a() const { return params_.a(); }
+  result_type b() const { return params_.b(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return -numeric_limits<result_type>::infinity(); }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    result_type u;
+    do {
+      u = generate_canonical<result_type,
+                             numeric_limits<result_type>::digits>(gen);
+    } while (u == 0);
+    return p.a() - p.b() * log(-log(u));
+  }
+  friend bool operator==(const extreme_value_distribution& x,
+                         const extreme_value_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const extreme_value_distribution& distribution) {
+    return output << distribution.a() << CharT(' ') << distribution.b();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      extreme_value_distribution& distribution) {
+    result_type a = 0;
+    result_type b = 1;
+    input >> a >> b;
+    if (input) distribution.params_ = param_type(a, b);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class chi_squared_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = chi_squared_distribution;
+    explicit param_type(result_type n = 1) : n_(n) {}
+    result_type n() const { return n_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.n_ == y.n_;
+    }
+   private:
+    result_type n_;
+  };
+  chi_squared_distribution() = default;
+  explicit chi_squared_distribution(result_type n) : params_(n) {}
+  explicit chi_squared_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type n() const { return params_.n(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    gamma_distribution<result_type> gamma(p.n() / result_type(2),
+                                           result_type(2));
+    return gamma(gen);
+  }
+  friend bool operator==(const chi_squared_distribution& x,
+                         const chi_squared_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const chi_squared_distribution& distribution) {
+    return output << distribution.n();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      chi_squared_distribution& distribution) {
+    result_type n = 1;
+    input >> n;
+    if (input) distribution.params_ = param_type(n);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class cauchy_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = cauchy_distribution;
+    explicit param_type(result_type a = 0, result_type b = 1) : a_(a), b_(b) {}
+    result_type a() const { return a_; }
+    result_type b() const { return b_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.a_ == y.a_ && x.b_ == y.b_;
+    }
+   private:
+    result_type a_;
+    result_type b_;
+  };
+  cauchy_distribution() = default;
+  explicit cauchy_distribution(result_type a, result_type b = 1)
+      : params_(a, b) {}
+  explicit cauchy_distribution(const param_type& p) : params_(p) {}
+  void reset() { normal_.reset(); }
+  result_type a() const { return params_.a(); }
+  result_type b() const { return params_.b(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return -numeric_limits<result_type>::infinity(); }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    result_type denominator;
+    do denominator = normal_(gen); while (denominator == 0);
+    return p.a() + p.b() * normal_(gen) / denominator;
+  }
+  friend bool operator==(const cauchy_distribution& x,
+                         const cauchy_distribution& y) {
+    return x.params_ == y.params_ && x.normal_ == y.normal_;
+  }
+ private:
+  param_type params_;
+  normal_distribution<result_type> normal_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const cauchy_distribution& distribution) {
+    return output << distribution.a() << CharT(' ') << distribution.b()
+                  << CharT(' ') << distribution.normal_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      cauchy_distribution& distribution) {
+    result_type a = 0;
+    result_type b = 1;
+    normal_distribution<result_type> normal;
+    input >> a >> b >> normal;
+    if (input) {
+      distribution.params_ = param_type(a, b);
+      distribution.normal_ = normal;
+    }
+    return input;
+  }
+};
+
+template <class RealType = double>
+class fisher_f_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = fisher_f_distribution;
+    explicit param_type(result_type m = 1, result_type n = 1)
+        : m_(m), n_(n) {}
+    result_type m() const { return m_; }
+    result_type n() const { return n_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.m_ == y.m_ && x.n_ == y.n_;
+    }
+   private:
+    result_type m_;
+    result_type n_;
+  };
+  fisher_f_distribution() = default;
+  explicit fisher_f_distribution(result_type m, result_type n = 1)
+      : params_(m, n) {}
+  explicit fisher_f_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  result_type m() const { return params_.m(); }
+  result_type n() const { return params_.n(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    chi_squared_distribution<result_type> left(p.m());
+    chi_squared_distribution<result_type> right(p.n());
+    return (left(gen) / p.m()) / (right(gen) / p.n());
+  }
+  friend bool operator==(const fisher_f_distribution& x,
+                         const fisher_f_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const fisher_f_distribution& distribution) {
+    return output << distribution.m() << CharT(' ') << distribution.n();
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      fisher_f_distribution& distribution) {
+    result_type m = 1;
+    result_type n = 1;
+    input >> m >> n;
+    if (input) distribution.params_ = param_type(m, n);
+    return input;
+  }
+};
+
+template <class RealType = double>
+class student_t_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = student_t_distribution;
+    explicit param_type(result_type n = 1) : n_(n) {}
+    result_type n() const { return n_; }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.n_ == y.n_;
+    }
+   private:
+    result_type n_;
+  };
+  student_t_distribution() = default;
+  explicit student_t_distribution(result_type n) : params_(n) {}
+  explicit student_t_distribution(const param_type& p) : params_(p) {}
+  void reset() { normal_.reset(); }
+  result_type n() const { return params_.n(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return -numeric_limits<result_type>::infinity(); }
+  result_type max() const { return numeric_limits<result_type>::infinity(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    chi_squared_distribution<result_type> chi(p.n());
+    return normal_(gen) / sqrt(chi(gen) / p.n());
+  }
+  friend bool operator==(const student_t_distribution& x,
+                         const student_t_distribution& y) {
+    return x.params_ == y.params_ && x.normal_ == y.normal_;
+  }
+ private:
+  param_type params_;
+  normal_distribution<result_type> normal_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const student_t_distribution& distribution) {
+    return output << distribution.n() << CharT(' ') << distribution.normal_;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      student_t_distribution& distribution) {
+    result_type n = 1;
+    normal_distribution<result_type> normal;
+    input >> n >> normal;
+    if (input) {
+      distribution.params_ = param_type(n);
+      distribution.normal_ = normal;
+    }
+    return input;
+  }
+};
+
+template <class IntType = int>
+class discrete_distribution {
+ public:
+  using result_type = IntType;
+  class param_type {
+   public:
+    using distribution_type = discrete_distribution;
+    param_type() : weights_(1, 1.0) {}
+    template <class InputIt>
+    param_type(InputIt first, InputIt last) {
+      for (; first != last; ++first) weights_.push_back(*first);
+      if (weights_.empty()) weights_.push_back(1.0);
+    }
+    param_type(initializer_list<double> values)
+        : param_type(values.begin(), values.end()) {}
+    template <class UnaryOperation>
+    param_type(size_t count, double xmin, double xmax, UnaryOperation fw) {
+      if (count == 0) {
+        weights_.push_back(1.0);
+      } else {
+        const double delta = (xmax - xmin) / count;
+        for (size_t i = 0; i < count; ++i)
+          weights_.push_back(fw(xmin + (i + 0.5) * delta));
+      }
+    }
+    vector<double> probabilities() const {
+      vector<double> result(weights_);
+      double sum = 0;
+      for (double value : result) sum += value;
+      if (sum == 0) {
+        const double p = 1.0 / result.size();
+        for (double& value : result) value = p;
+      } else {
+        for (double& value : result) value /= sum;
+      }
+      return result;
+    }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.weights_ == y.weights_;
+    }
+   private:
+    vector<double> weights_;
+    friend class discrete_distribution;
+  };
+  discrete_distribution() = default;
+  template <class InputIt>
+  discrete_distribution(InputIt first, InputIt last) : params_(first, last) {}
+  discrete_distribution(initializer_list<double> values) : params_(values) {}
+  template <class UnaryOperation>
+  discrete_distribution(size_t count, double xmin, double xmax,
+                        UnaryOperation fw)
+      : params_(count, xmin, xmax, fw) {}
+  explicit discrete_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  vector<double> probabilities() const { return params_.probabilities(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return 0; }
+  result_type max() const {
+    return static_cast<result_type>(params_.weights_.size() - 1);
+  }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    vector<double> probabilities = p.probabilities();
+    const double value =
+        generate_canonical<double, numeric_limits<double>::digits>(gen);
+    double cumulative = 0;
+    for (size_t i = 0; i + 1 < probabilities.size(); ++i) {
+      cumulative += probabilities[i];
+      if (value < cumulative) return static_cast<result_type>(i);
+    }
+    return static_cast<result_type>(probabilities.size() - 1);
+  }
+  friend bool operator==(const discrete_distribution& x,
+                         const discrete_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const discrete_distribution& distribution) {
+    vector<double> values = distribution.probabilities();
+    output << values.size();
+    for (double value : values) output << CharT(' ') << value;
+    return output;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      discrete_distribution& distribution) {
+    size_t count = 0;
+    input >> count;
+    vector<double> values(count);
+    for (size_t i = 0; i < count; ++i) input >> values[i];
+    if (input) {
+      distribution.params_ = param_type(values.begin(), values.end());
+    }
+    return input;
+  }
+};
+
+template <class RealType = double>
+class piecewise_constant_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = piecewise_constant_distribution;
+    param_type() : intervals_{0.0, 1.0}, weights_{1.0} {}
+    template <class BoundaryIt, class WeightIt>
+    param_type(BoundaryIt first_b, BoundaryIt last_b, WeightIt first_w) {
+      for (; first_b != last_b; ++first_b) intervals_.push_back(*first_b);
+      if (intervals_.size() < 2) intervals_ = vector<double>{0.0, 1.0};
+      for (size_t i = 1; i < intervals_.size(); ++i)
+        weights_.push_back(*first_w++);
+    }
+    template <class UnaryOperation>
+    param_type(initializer_list<double> boundaries, UnaryOperation fw) {
+      for (double value : boundaries) intervals_.push_back(value);
+      if (intervals_.size() < 2) intervals_ = vector<double>{0.0, 1.0};
+      for (size_t i = 0; i + 1 < intervals_.size(); ++i)
+        weights_.push_back(
+            fw((intervals_[i] + intervals_[i + 1]) * 0.5));
+    }
+    template <class UnaryOperation>
+    param_type(size_t count, double xmin, double xmax, UnaryOperation fw) {
+      if (count == 0) {
+        intervals_ = vector<double>{0.0, 1.0};
+        weights_ = vector<double>{1.0};
+      } else {
+        const double width = (xmax - xmin) / count;
+        for (size_t i = 0; i <= count; ++i)
+          intervals_.push_back(xmin + i * width);
+        for (size_t i = 0; i < count; ++i)
+          weights_.push_back(fw(xmin + (i + 0.5) * width));
+      }
+    }
+    vector<double> intervals() const { return intervals_; }
+    vector<double> densities() const {
+      vector<double> result(weights_);
+      double area = 0;
+      for (size_t i = 0; i < result.size(); ++i)
+        area += result[i] * (intervals_[i + 1] - intervals_[i]);
+      for (double& value : result) value /= area;
+      return result;
+    }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.intervals_ == y.intervals_ && x.weights_ == y.weights_;
+    }
+   private:
+    vector<double> intervals_;
+    vector<double> weights_;
+    friend class piecewise_constant_distribution;
+  };
+  piecewise_constant_distribution() = default;
+  template <class BoundaryIt, class WeightIt>
+  piecewise_constant_distribution(BoundaryIt first_b, BoundaryIt last_b,
+                                  WeightIt first_w)
+      : params_(first_b, last_b, first_w) {}
+  template <class UnaryOperation>
+  piecewise_constant_distribution(initializer_list<double> boundaries,
+                                  UnaryOperation fw)
+      : params_(boundaries, fw) {}
+  template <class UnaryOperation>
+  piecewise_constant_distribution(size_t count, double xmin, double xmax,
+                                  UnaryOperation fw)
+      : params_(count, xmin, xmax, fw) {}
+  explicit piecewise_constant_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  vector<double> intervals() const { return params_.intervals(); }
+  vector<double> densities() const { return params_.densities(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return params_.intervals_.front(); }
+  result_type max() const { return params_.intervals_.back(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    vector<double> masses;
+    for (size_t i = 0; i < p.weights_.size(); ++i)
+      masses.push_back(p.weights_[i] *
+                       (p.intervals_[i + 1] - p.intervals_[i]));
+    discrete_distribution<size_t> choose(masses.begin(), masses.end());
+    const size_t i = choose(gen);
+    uniform_real_distribution<result_type> within(
+        static_cast<result_type>(p.intervals_[i]),
+        static_cast<result_type>(p.intervals_[i + 1]));
+    return within(gen);
+  }
+  friend bool operator==(const piecewise_constant_distribution& x,
+                         const piecewise_constant_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const piecewise_constant_distribution& distribution) {
+    vector<double> intervals = distribution.intervals();
+    vector<double> densities = distribution.densities();
+    output << intervals.size();
+    for (double value : intervals) output << CharT(' ') << value;
+    for (double value : densities) output << CharT(' ') << value;
+    return output;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      piecewise_constant_distribution& distribution) {
+    size_t count = 0;
+    input >> count;
+    vector<double> intervals(count);
+    vector<double> densities(count > 0 ? count - 1 : 0);
+    for (size_t i = 0; i < intervals.size(); ++i) input >> intervals[i];
+    for (size_t i = 0; i < densities.size(); ++i) input >> densities[i];
+    if (input && intervals.size() >= 2) {
+      distribution.params_ =
+          param_type(intervals.begin(), intervals.end(), densities.begin());
+    }
+    return input;
+  }
+};
+
+template <class RealType = double>
+class piecewise_linear_distribution {
+ public:
+  using result_type = RealType;
+  class param_type {
+   public:
+    using distribution_type = piecewise_linear_distribution;
+    param_type() : intervals_{0.0, 1.0}, weights_{1.0, 1.0} {}
+    template <class BoundaryIt, class WeightIt>
+    param_type(BoundaryIt first_b, BoundaryIt last_b, WeightIt first_w) {
+      for (; first_b != last_b; ++first_b) intervals_.push_back(*first_b);
+      if (intervals_.size() < 2) intervals_ = vector<double>{0.0, 1.0};
+      for (size_t i = 0; i < intervals_.size(); ++i)
+        weights_.push_back(*first_w++);
+    }
+    template <class UnaryOperation>
+    param_type(initializer_list<double> boundaries, UnaryOperation fw) {
+      for (double value : boundaries) intervals_.push_back(value);
+      if (intervals_.size() < 2) intervals_ = vector<double>{0.0, 1.0};
+      for (size_t i = 0; i < intervals_.size(); ++i)
+        weights_.push_back(fw(intervals_[i]));
+    }
+    template <class UnaryOperation>
+    param_type(size_t count, double xmin, double xmax, UnaryOperation fw) {
+      if (count == 0) {
+        intervals_ = vector<double>{0.0, 1.0};
+        weights_ = vector<double>{1.0, 1.0};
+      } else {
+        const double width = (xmax - xmin) / count;
+        for (size_t i = 0; i <= count; ++i) {
+          const double value = xmin + i * width;
+          intervals_.push_back(value);
+          weights_.push_back(fw(value));
+        }
+      }
+    }
+    vector<double> intervals() const { return intervals_; }
+    vector<double> densities() const {
+      vector<double> result(weights_);
+      double area = 0;
+      for (size_t i = 0; i + 1 < result.size(); ++i)
+        area += 0.5 * (result[i] + result[i + 1]) *
+                (intervals_[i + 1] - intervals_[i]);
+      for (double& value : result) value /= area;
+      return result;
+    }
+    friend bool operator==(const param_type& x, const param_type& y) {
+      return x.intervals_ == y.intervals_ && x.weights_ == y.weights_;
+    }
+   private:
+    vector<double> intervals_;
+    vector<double> weights_;
+    friend class piecewise_linear_distribution;
+  };
+  piecewise_linear_distribution() = default;
+  template <class BoundaryIt, class WeightIt>
+  piecewise_linear_distribution(BoundaryIt first_b, BoundaryIt last_b,
+                                WeightIt first_w)
+      : params_(first_b, last_b, first_w) {}
+  template <class UnaryOperation>
+  piecewise_linear_distribution(initializer_list<double> boundaries,
+                                UnaryOperation fw)
+      : params_(boundaries, fw) {}
+  template <class UnaryOperation>
+  piecewise_linear_distribution(size_t count, double xmin, double xmax,
+                                UnaryOperation fw)
+      : params_(count, xmin, xmax, fw) {}
+  explicit piecewise_linear_distribution(const param_type& p) : params_(p) {}
+  void reset() {}
+  vector<double> intervals() const { return params_.intervals(); }
+  vector<double> densities() const { return params_.densities(); }
+  param_type param() const { return params_; }
+  void param(const param_type& p) { params_ = p; }
+  result_type min() const { return params_.intervals_.front(); }
+  result_type max() const { return params_.intervals_.back(); }
+  template <class URBG>
+  result_type operator()(URBG& gen) { return (*this)(gen, params_); }
+  template <class URBG>
+  result_type operator()(URBG& gen, const param_type& p) {
+    vector<double> masses;
+    for (size_t i = 0; i + 1 < p.weights_.size(); ++i)
+      masses.push_back(0.5 * (p.weights_[i] + p.weights_[i + 1]) *
+                       (p.intervals_[i + 1] - p.intervals_[i]));
+    discrete_distribution<size_t> choose(masses.begin(), masses.end());
+    const size_t i = choose(gen);
+    const double width = p.intervals_[i + 1] - p.intervals_[i];
+    const double left = p.weights_[i];
+    const double slope = p.weights_[i + 1] - left;
+    const double mass = masses[i];
+    const double target =
+        generate_canonical<double, numeric_limits<double>::digits>(gen) * mass;
+    double offset;
+    if (slope == 0.0) {
+      offset = target / left;
+    } else {
+      offset = width * (sqrt(left * left + 2.0 * slope * target / width) -
+                        left) /
+               slope;
+    }
+    return static_cast<result_type>(p.intervals_[i] + offset);
+  }
+  friend bool operator==(const piecewise_linear_distribution& x,
+                         const piecewise_linear_distribution& y) {
+    return x.params_ == y.params_;
+  }
+ private:
+  param_type params_;
+
+  template <class CharT, class Traits>
+  friend basic_ostream<CharT, Traits>& operator<<(
+      basic_ostream<CharT, Traits>& output,
+      const piecewise_linear_distribution& distribution) {
+    vector<double> intervals = distribution.intervals();
+    vector<double> densities = distribution.densities();
+    output << intervals.size();
+    for (double value : intervals) output << CharT(' ') << value;
+    for (double value : densities) output << CharT(' ') << value;
+    return output;
+  }
+  template <class CharT, class Traits>
+  friend basic_istream<CharT, Traits>& operator>>(
+      basic_istream<CharT, Traits>& input,
+      piecewise_linear_distribution& distribution) {
+    size_t count = 0;
+    input >> count;
+    vector<double> intervals(count);
+    vector<double> densities(count);
+    for (size_t i = 0; i < intervals.size(); ++i) input >> intervals[i];
+    for (size_t i = 0; i < densities.size(); ++i) input >> densities[i];
+    if (input && intervals.size() >= 2) {
+      distribution.params_ =
+          param_type(intervals.begin(), intervals.end(), densities.begin());
+    }
+    return input;
+  }
+};
+
+class random_device {
+ public:
+  using result_type = unsigned int;
+
+  random_device();
+  explicit random_device(const string& token);
+  ~random_device();
+
+  random_device(const random_device&) = delete;
+  random_device& operator=(const random_device&) = delete;
+
+  result_type operator()();
+  double entropy() const noexcept;
+
+  static constexpr result_type min() {
+    return numeric_limits<result_type>::min();
+  }
+  static constexpr result_type max() {
+    return numeric_limits<result_type>::max();
+  }
+
+ private:
+  bool available_ = false;
+};
+
+}  // namespace std
+
+#endif /* __davecc_random__ */

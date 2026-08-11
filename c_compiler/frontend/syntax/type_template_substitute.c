@@ -769,7 +769,7 @@ static TypeRecord* SubstituteTemplateSelfReference(TypeRecord* type,
  * where the parsed type still points at the template definition's nested class,
  * but the concrete outer class already owns the substituted nested type. */
 static TypeRecord* SubstituteNestedTypeFromActiveInstantiation(
-    TypeParser* parser, TypeRecord* type) {
+    TypeParser* parser, TypeRecord* type, Vector* args) {
   if (!CompilerIsCXX() || parser == NULL ||
       type->declarator != kDeclPrimitive || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL || type->info.struct_info->tag_name == NULL) {
@@ -795,6 +795,13 @@ static TypeRecord* SubstituteNestedTypeFromActiveInstantiation(
         FindStructMember(target, type->info.struct_info->tag_name);
     if (member != NULL && member->symbol != NULL &&
         member->symbol->type != NULL && TypeIsStructOrUnion(member->symbol->type)) {
+      Struct* nested = member->symbol->type->info.struct_info;
+      if (source != target && nested != NULL &&
+          nested->lexical_parent == source &&
+          StructHasMemberFunction(nested)) {
+        return SubstituteNestedStructTemplateParameters(
+            parser, member->symbol->type, args);
+      }
       TypeRecord* subst = TypeRecordCopy(member->symbol->type);
       subst->qualifiers |= type->qualifiers;
       return TypeRecordCalculateSize(subst);
@@ -1623,8 +1630,11 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     // `nested<Outer>`) must pass through template-id substitution so its
     // arguments are completed and validated.  The active-nested shortcuts
     // below are only valid for an unadorned injected nested type name.
-    if (type->template_arguments == NULL) {
-      subst = SubstituteNestedTypeFromActiveInstantiation(parser, type);
+    bool explicit_nested_template_id =
+        type->template_arguments != NULL && type->info.struct_info != NULL &&
+        type->info.struct_info->is_template;
+    if (!explicit_nested_template_id) {
+      subst = SubstituteNestedTypeFromActiveInstantiation(parser, type, args);
       if (subst != NULL) {
         return subst;
       }
@@ -1651,8 +1661,19 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     return subst;
   }
 
+  bool nested_in_active_instantiation =
+      CompilerIsCXX() && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL &&
+      ((parser->template_substitution_source != NULL &&
+        type->info.struct_info->lexical_parent ==
+            parser->template_substitution_source) ||
+       (parser->enclosing_template_substitution_source != NULL &&
+        type->info.struct_info->lexical_parent ==
+            parser->enclosing_template_substitution_source));
   if (CompilerIsCXX() && TypeIsStructOrUnion(type) &&
-      StructContainsTemplateParameter(type->info.struct_info)) {
+      (StructContainsTemplateParameter(type->info.struct_info) ||
+       (nested_in_active_instantiation &&
+        StructHasMemberFunction(type->info.struct_info)))) {
     if (type->info.struct_info != NULL &&
         type->info.struct_info->is_template &&
         template_id.origin == NULL && template_id.args == NULL) {
@@ -2086,6 +2107,10 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
   clone.rebase_template_parameter_base = 0;
   clone.from_owner = NULL;
   clone.to_owner = NULL;
+  clone.substitution_source =
+      parser != NULL ? parser->template_substitution_source : NULL;
+  clone.substitution_target =
+      parser != NULL ? parser->template_substitution_target : NULL;
   ASTNode* cloned =
       ASTNodeClone(expr, CloneDependentDecltypeNode, &clone, NULL);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
@@ -2155,6 +2180,14 @@ ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
   clone.rebase_template_parameter_base = rebase_base;
   clone.from_owner = from_owner;
   clone.to_owner = to_owner;
+  clone.substitution_source =
+      from_owner != NULL && to_owner != NULL
+          ? from_owner
+          : parser.template_substitution_source;
+  clone.substitution_target =
+      from_owner != NULL && to_owner != NULL
+          ? to_owner
+          : parser.template_substitution_target;
   ASTNode* cloned = ASTNodeClone(expr, CloneTemplateFunctionBodyNode,
                                  &clone, NULL);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);

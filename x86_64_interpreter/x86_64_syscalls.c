@@ -12,6 +12,7 @@
 #include "elf.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include "x86_64_machine.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -514,6 +515,10 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
       return a1 == 0 ? -DAVE_HOST_EINVAL
                      : DaveHostChronoLeapInfo((uint32_t)a0,
                                               (DaveHostChronoLeapSecond*)(uintptr_t)a1);
+    case X86_64_SYSCALL_RANDOM_BYTES:
+      return a0 == 0 && a1 != 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostRandomBytes((void*)(uintptr_t)a0, (size_t)a1);
     default:
       fprintf(stderr, "Unknown x86_64 syscall %lld\n", (long long)number);
       X86_64InterpreterFail(interpreter, 1);

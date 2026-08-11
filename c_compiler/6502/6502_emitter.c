@@ -944,17 +944,12 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       if ((has_replace_top && replace_top.address == inst) ||
           IsAddressPushPair(inst, push)) {
         W65C02Register* reg = (W65C02Register*)result->reg;
-        if (opcode == W65C02_OP(var_addr) &&
-            reg->type == k6502RegTypeI &&
-            reg->base.num < W65C02_NUM_I_REGS) {
-          fprintf(fp, "\tjsr         __var_addr_push_i%d\n", reg->base.num);
-          break;
-        }
         fprintf(fp, "\t%-12s #%s\n", "lda",
                 W65C02RegisterAsString(reg, 0, buf, sizeof(buf)));
-        fprintf(fp, "\t%-12s __%s\n", "jsr",
+        fprintf(fp, "\t%-12s __%s_i%d\n", "jsr",
                 opcode == W65C02_OP(var_addr) ? "var_addr_push"
-                                              : "var_addrb_push");
+                                              : "var_addrb_push",
+                result->reg->num);
         break;
       }
       fprintf(fp, "\t%-12s __%s_i%d\t\t\t// %s\n", "jsr",

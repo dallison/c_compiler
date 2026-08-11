@@ -85,6 +85,7 @@
 #define ARM_SYSCALL_TZDB_LOCAL_INFO 57
 #define ARM_SYSCALL_TZDB_LEAP_COUNT 58
 #define ARM_SYSCALL_TZDB_LEAP_INFO 59
+#define ARM_SYSCALL_RANDOM_BYTES 60
 
 struct ARMProcessRuntime;
 struct ARMGuestThread;

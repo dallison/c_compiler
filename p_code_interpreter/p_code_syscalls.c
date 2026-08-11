@@ -10,6 +10,7 @@
 
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include "loader_lifecycle.h"
 #include "p_code_interpreter.h"
 
@@ -198,6 +199,10 @@ int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
                      : DaveHostChronoLeapInfo(
                            (uint32_t)a0,
                            (DaveHostChronoLeapSecond*)(uintptr_t)a1);
+    case P_CODE_SYSCALL_RANDOM_BYTES:
+      return a0 == 0 && a1 != 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostRandomBytes((void*)(uintptr_t)a0, (size_t)a1);
     default:
       return -DAVE_HOST_ENOSYS;
   }
@@ -326,6 +331,10 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
       break;
     case P_CODE_SYSCALL_TZDB_LEAP_INFO:
       a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
+    case P_CODE_SYSCALL_RANDOM_BYTES:
+      a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       break;
     default:

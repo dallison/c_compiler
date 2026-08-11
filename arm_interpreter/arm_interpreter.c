@@ -9,6 +9,7 @@
 #include "loader_lifecycle.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include <errno.h>
 #include "loader_arch.h"
 #include "loader_dynamic.h"
@@ -978,6 +979,15 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
           (uint32_t)a1,
           (DaveHostChronoLeapSecond*)ResolveHostPtr(
               interpreter, (uint32_t)a2, sizeof(DaveHostChronoLeapSecond)));
+    case ARM_SYSCALL_RANDOM_BYTES: {
+      size_t size = (size_t)(uint32_t)a2;
+      void* buffer = size == 0
+                         ? NULL
+                         : ResolveHostPtr(interpreter, (uint32_t)a1, size);
+      return size != 0 && buffer == NULL
+                 ? -DAVE_HOST_EINVAL
+                 : (int32_t)DaveHostRandomBytes(buffer, size);
+    }
     case ARM_SYSCALL_RESOLVE:
       ResolveAndFixupSymbol(interpreter, pc_updated);
       return 0;

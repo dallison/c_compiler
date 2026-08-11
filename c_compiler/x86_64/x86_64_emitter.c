@@ -1316,11 +1316,23 @@ static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
     }
     fprintf(fp, "\n");
   } else if (inst->operand[0] != NULL) {
-    fprintf(fp, "\ttest ");
-    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
-    fprintf(fp, ", ");
-    PrintAttOperand(fp, inst->operand[0], buf2, sizeof(buf2));
-    fprintf(fp, "\n");
+    TargetInstruction* op = inst->operand[0];
+    if (TargetIsConst(op) || (X86_64Opcode)op->opcode == X86_64_OP(x0)) {
+      fprintf(fp, "\tmovq ");
+      if (TargetIsConst(op)) {
+        PrintAsmImmediate(fp, TargetIntValue(op));
+      } else {
+        fprintf(fp, "$0");
+      }
+      fprintf(fp, ", %%r11\n");
+      fprintf(fp, "\ttest %%r11, %%r11\n");
+    } else {
+      fprintf(fp, "\ttest ");
+      PrintAttOperand(fp, op, buf1, sizeof(buf1));
+      fprintf(fp, ", ");
+      PrintAttOperand(fp, op, buf2, sizeof(buf2));
+      fprintf(fp, "\n");
+    }
   }
   fprintf(fp, "\t%s ", set_mnemonic);
   PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));

@@ -47,6 +47,7 @@ enum {
   P_CODE_SYSCALL_TZDB_LOCAL_INFO = 57,
   P_CODE_SYSCALL_TZDB_LEAP_COUNT = 58,
   P_CODE_SYSCALL_TZDB_LEAP_INFO = 59,
+  P_CODE_SYSCALL_RANDOM_BYTES = 60,
 };
 
 int64_t PCodeHandleSyscall(struct PCodeInterpreter* interpreter,

@@ -3474,6 +3474,14 @@ static ASTNode* AnalyzeIncDec(UnaryASTNode* node) {
 static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
+  if (CompilerIsCXX() && node->left != NULL &&
+      (TypeIsUnknown(node->left->type) ||
+       TypeContainsTemplateParameter(node->left->type))) {
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    node->base.value_category = kValueCategoryLvalue;
+    return (ASTNode*)node;
+  }
   if (CompilerIsCXX() && TypeIsStructOrUnion(node->left->type)) {
     StructMember* member =
         FindStructMemberByName(node->left->type->info.struct_info,
@@ -4593,6 +4601,25 @@ static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
 
 static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
 
+static Symbol* CXXStructTemplateFamilyOrigin(Struct* owner) {
+  if (owner == NULL || owner->tag_symbol == NULL) {
+    return NULL;
+  }
+  TypeRecord* tag_type = owner->tag_symbol->type;
+  return tag_type != NULL && tag_type->template_origin != NULL
+             ? tag_type->template_origin
+             : owner->tag_symbol;
+}
+
+static bool CXXStructsShareTemplateFamily(Struct* left, Struct* right) {
+  if (left == right) {
+    return left != NULL;
+  }
+  Symbol* left_origin = CXXStructTemplateFamilyOrigin(left);
+  Symbol* right_origin = CXXStructTemplateFamilyOrigin(right);
+  return left_origin != NULL && left_origin == right_origin;
+}
+
 static bool LowerMemberPointerFunctionCall(VectorASTNode* node);
 
 static bool LowerMemberFunctionCall(VectorASTNode* node) {
@@ -4683,9 +4710,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
       Struct* selected_owner =
           member->symbol->type->info.function.cxx_member_owner;
       bool same_constructor_owner =
-          concrete_owner != NULL && concrete_owner->tag_name != NULL &&
-          selected_owner != NULL && selected_owner->tag_name != NULL &&
-          StringEqualString(concrete_owner->tag_name, selected_owner->tag_name);
+          CXXStructsShareTemplateFamily(concrete_owner, selected_owner);
       if (same_constructor_owner &&
           (compiler->current_class_access_context != NULL ||
            (compiler->current_function != NULL &&
@@ -4695,12 +4720,21 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
                                     ? compiler->current_class_access_context
                                     : compiler->current_function->info.function
                                           .cxx_member_owner;
-        StructMember* canonical =
-            FindStructMember(current_owner, concrete_owner->tag_name);
-        if (canonical != NULL && canonical->symbol != NULL &&
-            StorageIs(canonical->symbol->storage, STO(typedef)) &&
-            TypeIsStructOrUnion(canonical->symbol->type)) {
-          concrete_owner = canonical->symbol->type->info.struct_info;
+        // Rebind a nested constructor through the current specialization only
+        // when that specialization belongs to the receiver's lexical parent.
+        // Looking up by the injected class name alone can otherwise capture an
+        // unrelated nested class with the same name (for example two different
+        // distributions' `param_type` classes).
+        if (concrete_owner->lexical_parent != NULL &&
+            CXXStructsShareTemplateFamily(concrete_owner->lexical_parent,
+                                          current_owner)) {
+          StructMember* canonical =
+              FindStructMember(current_owner, concrete_owner->tag_name);
+          if (canonical != NULL && canonical->symbol != NULL &&
+              StorageIs(canonical->symbol->storage, STO(typedef)) &&
+              TypeIsStructOrUnion(canonical->symbol->type)) {
+            concrete_owner = canonical->symbol->type->info.struct_info;
+          }
         }
       }
       bool selected_member_template_specialization =

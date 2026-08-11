@@ -190,9 +190,14 @@
 #define SYS_TZDB_LOCAL_INFO 57
 #define SYS_TZDB_LEAP_COUNT 58
 #define SYS_TZDB_LEAP_INFO 59
+#define SYS_RANDOM_BYTES 60
 
 #if defined(SYS_TZDB_VERSION)
 #define __DAVECC_HAS_HOST_TZDB__ 1
+#endif
+
+#if defined(SYS_RANDOM_BYTES)
+#define __DAVECC_HAS_HOST_RANDOM__ 1
 #endif
 
 #if defined(SYS_THREAD_CREATE) && defined(SYS_HEAP_LOCK) && \

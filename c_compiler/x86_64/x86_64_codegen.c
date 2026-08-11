@@ -1565,6 +1565,14 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
     if (opcode == X86_64_OP(bsf)) opcode = X86_64_OP(bsfl);
     if (opcode == X86_64_OP(bsr)) opcode = X86_64_OP(bsrl);
   }
+  if (node->inputs.length >= 1) {
+    IRNode* lhs = node->inputs.value.p[0];
+    if (lhs != NULL && lhs->type != NULL && lhs->type->size <= 4) {
+      if (node->opcode == IR_OP(muli)) opcode = X86_64_OP(imull);
+      if (node->opcode == IR_OP(addi)) opcode = X86_64_OP(addl);
+      if (node->opcode == IR_OP(subi)) opcode = X86_64_OP(subl);
+    }
+  }
   if (node->opcode == IR_OP(divi) && TypeIsUnsigned(node->type)) {
     opcode = X86_64_OP(div);
   }
@@ -1711,28 +1719,22 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
       break;
     }
     case X86_64_OP(idiv): {
-      // If we are dividing by a constant power of 2 we can use a shift.
-      // TODO: other constants can be done too.
+      // If we are dividing by a constant power of 2 we can use a shift for
+      // unsigned values.  Signed division must keep idiv: a plain sar
+      // truncates toward negative infinity, not zero as C requires.
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
-        X86_64Opcode shift_opcode =
-            TypeIsUnsigned(node->type) ? X86_64_OP(shr) : X86_64_OP(sar);
         int64_t c = ((IRConstant*)op2)->value.ivalue;
-        // TODO: can we give an error on division by zero here?
         if (c == 1) {
-          // Division by 1 is a mv.
           inst = NewInstruction(X86_64_OP(mv));
           inst->operand[0] = Materialize(rv, op1);
-        } else {
-          if (IsPowerOf2(c) && c < 64) {
-            c = Log2(c);
-            inst =
-                NewInstruction2(shift_opcode, Materialize(rv, op1),
-                                GetIntConstant(rv, NULL, kTargetType32Bit, c));
-            ref_counts_ok = true;
-          }
+        } else if (TypeIsUnsigned(node->type) && IsPowerOf2(c) && c < 64) {
+          inst = NewInstruction2(
+              X86_64_OP(shr), Materialize(rv, op1),
+              GetIntConstant(rv, NULL, kTargetType32Bit, Log2(c)));
+          ref_counts_ok = true;
         }
       }
 
@@ -2004,18 +2006,44 @@ static TargetInstruction* LowerLogicalNot(X86_64Generator* rv, Generator* gen,
 // the conditional branch.  However we still need to generate the correct
 // result because the result might not be used in a branch.
 //
-// Lower a scalar floating-point comparison into "ucomiSS/SD ; setcc ; movzbq".
-// ucomiSS/SD (emitted by PrintCompareAndSet when the X86_64_FCMP_* flag is set)
-// compares operand[0] against operand[1] and sets CF (operand[0] < operand[1]),
-// ZF (operand[0] == operand[1]).  The chosen setcc reads those flags to produce
-// a clean 0/1 boolean.  NaN operands (PF set) are not handled specially.
-static TargetInstruction* FloatCompareSet(X86_64Generator* rv, IRNode* node,
-                                          X86_64Opcode setcc, IRNode* a,
-                                          IRNode* b, bool is_double) {
+// ucomi sets CF for both less-than and unordered operands. Keep this primitive
+// raw, then combine comparisons in both directions to distinguish NaNs without
+// relying on PF surviving through the target IR.
+static TargetInstruction* FloatCompareRawLess(X86_64Generator* rv, IRNode* a,
+                                              IRNode* b, bool is_double) {
   TargetInstruction* inst =
-      NewInstruction2(setcc, Materialize(rv, a), Materialize(rv, b));
+      NewInstruction2(X86_64_OP(setb), Materialize(rv, a), Materialize(rv, b));
   inst->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
-  return Emit(rv, SetLoweredNode(node, inst));
+  return Emit(rv, inst);
+}
+
+static TargetInstruction* FloatCompareEqual(X86_64Generator* rv, IRNode* node,
+                                            IRNode* a, IRNode* b,
+                                            bool is_double, bool negate) {
+  TargetInstruction* ab = FloatCompareRawLess(rv, a, b, is_double);
+  TargetInstruction* ba = FloatCompareRawLess(rv, b, a, is_double);
+  TargetInstruction* different_or_unordered =
+      Emit(rv, NewInstruction2(X86_64_OP(or), ab, ba));
+  TargetInstruction* result = different_or_unordered;
+  if (!negate) {
+    result = Emit(rv, NewInstruction2(
+                          X86_64_OP(xor), result,
+                          GetIntConstant(rv, NULL, kTargetType32Bit, 1)));
+  }
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* FloatCompareLess(X86_64Generator* rv, IRNode* node,
+                                           IRNode* a, IRNode* b,
+                                           bool is_double) {
+  TargetInstruction* ab = FloatCompareRawLess(rv, a, b, is_double);
+  TargetInstruction* ba = FloatCompareRawLess(rv, b, a, is_double);
+  TargetInstruction* not_ba =
+      Emit(rv, NewInstruction2(
+                   X86_64_OP(xor), ba,
+                   GetIntConstant(rv, NULL, kTargetType32Bit, 1)));
+  return SetLoweredNode(
+      node, Emit(rv, NewInstruction2(X86_64_OP(and), ab, not_ba)));
 }
 
 // a <= b is computed as !(b < a) and a >= b as !(a < b): produce (a < b) with
@@ -2024,10 +2052,7 @@ static TargetInstruction* FloatCompareSet(X86_64Generator* rv, IRNode* node,
 static TargetInstruction* FloatCompareInvert(X86_64Generator* rv, IRNode* node,
                                              IRNode* a, IRNode* b,
                                              bool is_double) {
-  TargetInstruction* lt =
-      NewInstruction2(X86_64_OP(setb), Materialize(rv, a), Materialize(rv, b));
-  lt->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
-  lt = Emit(rv, lt);
+  TargetInstruction* lt = FloatCompareRawLess(rv, a, b, is_double);
   return Emit(rv, SetLoweredNode(
                       node, NewInstruction2(
                                 X86_64_OP(xor), lt,
@@ -2100,15 +2125,13 @@ static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
     }
 
     case IR_OP(cmpeqf):
-      return FloatCompareSet(rv, node, X86_64_OP(sete), op1, op2, false);
+      return FloatCompareEqual(rv, node, op1, op2, false, false);
     case IR_OP(cmpnef):
-      return FloatCompareSet(rv, node, X86_64_OP(setne), op1, op2, false);
+      return FloatCompareEqual(rv, node, op1, op2, false, true);
     case IR_OP(cmpltf):
-      // a < b: ucomi(a,b) sets CF when a < b.
-      return FloatCompareSet(rv, node, X86_64_OP(setb), op1, op2, false);
+      return FloatCompareLess(rv, node, op1, op2, false);
     case IR_OP(cmpgtf):
-      // a > b  ==  b < a: ucomi(b,a) sets CF.
-      return FloatCompareSet(rv, node, X86_64_OP(setb), op2, op1, false);
+      return FloatCompareLess(rv, node, op2, op1, false);
     case IR_OP(cmplef):
       // a <= b  ==  !(b < a): compute (b < a) then invert the 0/1 result.
       return FloatCompareInvert(rv, node, op2, op1, false);
@@ -2117,13 +2140,13 @@ static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
       return FloatCompareInvert(rv, node, op1, op2, false);
 
     case IR_OP(cmpeqd):
-      return FloatCompareSet(rv, node, X86_64_OP(sete), op1, op2, true);
+      return FloatCompareEqual(rv, node, op1, op2, true, false);
     case IR_OP(cmpned):
-      return FloatCompareSet(rv, node, X86_64_OP(setne), op1, op2, true);
+      return FloatCompareEqual(rv, node, op1, op2, true, true);
     case IR_OP(cmpltd):
-      return FloatCompareSet(rv, node, X86_64_OP(setb), op1, op2, true);
+      return FloatCompareLess(rv, node, op1, op2, true);
     case IR_OP(cmpgtd):
-      return FloatCompareSet(rv, node, X86_64_OP(setb), op2, op1, true);
+      return FloatCompareLess(rv, node, op2, op1, true);
     case IR_OP(cmpled):
       return FloatCompareInvert(rv, node, op2, op1, true);
     case IR_OP(cmpged):

@@ -43,6 +43,11 @@ static ASTNode* ReanalyzeClonedConcreteMemberCall(
     ASTNode* node, void* data, ASTNodeTransformAction* action);
 static ASTNode* ReanalyzeClonedUntypedExpression(
     ASTNode* node, void* data, ASTNodeTransformAction* action);
+static ASTNode* RebuildClonedCallResultConversion(
+    ASTNode* node, void* data, ASTNodeTransformAction* action);
+static bool RebindClonedConstructorCall(VectorASTNode* call,
+                                        Vector* overload_snapshots);
+static void RestoreSymbolOverloadLinks(Vector* snapshots);
 static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode);
 static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
@@ -140,9 +145,16 @@ static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
   if (TypeIsReference(target)) {
     target = target->next;
   }
-  if (!TypeIsStructOrUnion(target) || cast->expr == NULL ||
-      TypeIsStructOrUnion(cast->expr->type)) {
+  if (target == NULL || cast->expr == NULL || cast->expr->type == NULL) {
     node->flags &= ~kASTDependentCast;
+    return;
+  }
+  // A dependent cast was initially analyzed without converting its operand.
+  // Once both sides are concrete, every target category (not just class types)
+  // must be re-analyzed so arithmetic conversions such as int-to-double are
+  // materialized in the cloned tree.
+  if (TypeContainsTemplateParameter(target) ||
+      TypeContainsTemplateParameter(cast->expr->type)) {
     return;
   }
   // Cast lowering depends on its now-concrete target type. Clear the cast and
@@ -519,7 +531,13 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
       clone->to_owner != NULL ? clone->to_owner->lexical_parent : NULL;
   if (source == NULL || target == NULL || source == target ||
       !TypeChainReferencesStruct(type, source)) {
-    return SubstituteTemplateParameters(clone->parser, type, clone->args);
+    TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+        clone->parser, clone->substitution_source,
+        clone->substitution_target);
+    TypeRecord* substituted =
+        SubstituteTemplateParameters(clone->parser, type, clone->args);
+    TypeParserPopTemplateSubstitution(&substitution);
+    return substituted;
   }
 
   TypeSubstitutionScope substitution =
@@ -528,6 +546,84 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
       SubstituteTemplateParameters(clone->parser, type, clone->args);
   TypeParserPopTemplateSubstitution(&substitution);
   return substituted;
+}
+
+/* A direct initializer parsed while a local's type was dependent cannot be
+ * classified as scalar initialization or a constructor call. Keep its
+ * parenthesized arguments in a braced-initializer container until substitution,
+ * then rebuild the concrete form before semantic analysis/code generation. */
+static bool RewriteClonedConcreteLocalDirectInitializer(
+    TemplateFunctionBodyClone* clone, VariableDeclarationASTNode* decl,
+    Symbol* original, Symbol* replacement) {
+  if (clone == NULL || decl == NULL || original == NULL ||
+      replacement == NULL || original->type == NULL ||
+      replacement->type == NULL ||
+      !TypeContainsTemplateParameter(original->type) ||
+      decl->initializer == NULL ||
+      decl->initializer->op != AST_OP(braced_init)) {
+    return false;
+  }
+
+  ASTNode* root = decl->initializer;
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)root;
+  if (!TypeIsStructOrUnion(replacement->type)) {
+    if (braced->initializers->length != 1) {
+      return false;
+    }
+    ASTNode* initializer = braced->initializers->value.p[0];
+    ASTNode* expression = initializer;
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)initializer;
+      expression = expr_init->expr;
+      expr_init->expr = NULL;
+    }
+    braced->initializers->value.p[0] = NULL;
+    ASTNode* parent = root->parent;
+    int child_id = root->child_id;
+    if (expression != NULL) {
+      expression->parent = parent;
+      expression->child_id = child_id;
+    }
+    if (initializer != expression) {
+      ASTNodeDelete(initializer);
+    }
+    ASTNodeDelete(root);
+    decl->initializer = expression;
+    return true;
+  }
+
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    ASTNode* actual = initializer;
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)initializer;
+      actual = expr_init->expr;
+      expr_init->expr = NULL;
+    }
+    braced->initializers->value.p[i] = NULL;
+    if (actual != NULL) {
+      actual->parent = NULL;
+      VectorAppend(actuals, actual);
+    }
+    if (initializer != actual) {
+      ASTNodeDelete(initializer);
+    }
+  }
+
+  ASTNode* parent = root->parent;
+  int child_id = root->child_id;
+  SourceLocation location = root->location;
+  ASTNodeDelete(root);
+  decl->initializer = SyntaxNewCXXConstructorCall(
+      clone->parser->syntax, replacement, actuals, location);
+  if (decl->initializer != NULL) {
+    decl->initializer->parent = parent;
+    decl->initializer->child_id = child_id;
+  }
+  return true;
 }
 
 static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone,
@@ -545,6 +641,10 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
     decl->symbol = existing;
     RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
     ExpandClonedLocalDirectInitializerPack(clone, decl, existing);
+    if (RewriteClonedConcreteLocalDirectInitializer(
+            clone, decl, old_symbol, existing)) {
+      node->flags &= ~kASTAnalyzed;
+    }
     ASTNode* rewritten_initializer =
         SyntaxRewriteCXXCopyInitConstructorIfNeeded(
             clone->parser->syntax, existing, decl->initializer);
@@ -591,6 +691,10 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   ASTNodeSetType(node, replacement->type);
   RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
   ExpandClonedLocalDirectInitializerPack(clone, decl, replacement);
+  if (RewriteClonedConcreteLocalDirectInitializer(
+          clone, decl, old_symbol, replacement)) {
+    node->flags &= ~kASTAnalyzed;
+  }
   ASTNode* rewritten_initializer =
       SyntaxRewriteCXXCopyInitConstructorIfNeeded(
           clone->parser->syntax, replacement, decl->initializer);
@@ -648,6 +752,58 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
   kv.value.p = replacement;
   MapInsert(&clone->symbol_map, kv);
   return replacement;
+}
+
+static void RetargetClonedNestedConstructorReceiver(
+    TemplateFunctionBodyClone* clone, VectorASTNode* call,
+    Struct* source_nested_owner) {
+  if (clone == NULL || call == NULL || source_nested_owner == NULL ||
+      source_nested_owner->lexical_parent == NULL ||
+      source_nested_owner->tag_name == NULL ||
+      clone->substitution_source !=
+          source_nested_owner->lexical_parent ||
+      clone->substitution_target == NULL ||
+      call->children == NULL || call->children->length == 0) {
+    return;
+  }
+  StructMember* nested_member = FindStructMember(
+      clone->substitution_target,
+      source_nested_owner->tag_name);
+  if (nested_member == NULL || nested_member->symbol == NULL ||
+      nested_member->symbol->type == NULL ||
+      !TypeIsStructOrUnion(nested_member->symbol->type)) {
+    return;
+  }
+  ASTNode* receiver = call->children->value.p[0];
+  if (receiver == NULL || receiver->op != AST_OP(address)) {
+    return;
+  }
+  ASTNode* object = ((UnaryASTNode*)receiver)->sub;
+  if (object == NULL || object->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)object;
+  if (id->symbol == NULL) {
+    return;
+  }
+
+  Struct* target_nested_owner =
+      nested_member->symbol->type->info.struct_info;
+  if (id->symbol->flags.is_temp) {
+    TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
+        clone->parser, source_nested_owner, target_nested_owner);
+    Symbol* replacement =
+        CloneTemplateDependentTemporarySymbol(clone, id->symbol);
+    TypeParserPopTemplateSubstitution(&substitution);
+    if (replacement != NULL) {
+      id->symbol = replacement;
+    }
+  }
+  ASTNodeSetType(object, nested_member->symbol->type);
+  TypeRecord* pointer =
+      NewPointerTo(kQualPlain, TypeRecordCopy(nested_member->symbol->type));
+  ASTNodeSetType(receiver, pointer);
+  TypeRecordDelete(pointer);
 }
 
 /* Like SubstituteTemplateArgumentVectorForTypes but additionally rebases the
@@ -4188,8 +4344,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     }
   }
   if (node->type != NULL && !node_type_substituted) {
-    TypeRecord* type =
-        SubstituteTemplateParameters(clone->parser, node->type, clone->args);
+    TypeRecord* type = SubstituteTemplateBodyType(clone, node->type);
     RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
     ASTNodeSetType(node, type);
   }
@@ -4244,6 +4399,8 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   }
   ExpandClonedScalarMemberInitPack(clone, node);
   bool expanded_call_actuals = ExpandClonedCallPackActuals(clone, node);
+  Vector nested_constructor_overload_snapshots;
+  bool nested_constructor_rebound = false;
   if (node->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)node;
     if (call->left != NULL &&
@@ -4271,8 +4428,41 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
     }
     RebindClonedLoweredDependentMemberCall(call);
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      IdentifierASTNode* callee = (IdentifierASTNode*)call->left;
+      TypeRecord* callee_type =
+          callee->symbol != NULL ? callee->symbol->type : NULL;
+      Struct* constructor_owner =
+          callee_type != NULL && TypeIsFunction(callee_type) &&
+                  callee_type->info.function.is_constructor
+              ? callee_type->info.function.cxx_member_owner
+              : NULL;
+      if (constructor_owner != NULL &&
+          constructor_owner->lexical_parent != NULL &&
+          constructor_owner->lexical_parent ==
+              clone->substitution_source &&
+          clone->substitution_target != NULL) {
+        // A nested class can be non-dependent in layout while still belonging
+        // to an enclosing class-template specialization. Its parsed
+        // constructor symbol names the primary nested class. The cloned
+        // temporary receiver has already been substituted, so rebind through
+        // that concrete receiver before member-template deduction.
+        RetargetClonedNestedConstructorReceiver(
+            clone, call, constructor_owner);
+        VectorInit(&nested_constructor_overload_snapshots);
+        RebindClonedConstructorCall(
+            call, &nested_constructor_overload_snapshots);
+        nested_constructor_rebound = true;
+        node->flags &= ~kASTAnalyzed;
+        call->left->flags &= ~kASTAnalyzed;
+        ASTNodeClearType(node);
+      }
+    }
   }
   InstantiateClonedFunctionTemplateCall(clone, node);
+  if (nested_constructor_rebound) {
+    RestoreSymbolOverloadLinks(&nested_constructor_overload_snapshots);
+  }
   if (expanded_call_actuals && node->op == AST_OP(call)) {
     ASTNodeVisit(node, ReplaceSingleElementPackIdentifierVisitor, 0, clone);
     node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
@@ -4378,13 +4568,14 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
       ASTNode* actual = call->children->value.p[i];
       if (actual != NULL && actual->op == AST_OP(call) &&
           (actual->flags & kASTDependentFunctorCall) != 0) {
+        int actual_child_id = actual->child_id;
         ASTNodeTransformAction child_action = kASTTransformContinue;
         ASTNode* analyzed_actual = ReanalyzeClonedDependentFunctorCall(
             actual, data, &child_action);
         VectorSet(call->children, i, analyzed_actual);
         if (analyzed_actual != NULL) {
           analyzed_actual->parent = node;
-          analyzed_actual->child_id = actual->child_id;
+          analyzed_actual->child_id = actual_child_id;
         }
       }
     }
@@ -4426,8 +4617,10 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
   *action = kASTTransformSkipChildren;
   node->parent = NULL;
   ASTNode* analyzed = AnalyzeExpression(node);
-  node->parent = parent;
-  node->child_id = child_id;
+  if (analyzed != NULL) {
+    analyzed->parent = parent;
+    analyzed->child_id = child_id;
+  }
   RestoreSymbolOverloadLinks(&overload_snapshots);
   if (parent != NULL && parent->op == AST_OP(call)) {
     parent->flags |= kASTDependentFunctorCall;
@@ -4460,11 +4653,23 @@ static ASTNode* ReanalyzeClonedConcreteMemberCall(
     return node;
   }
   StructMember* member = ((StructMemberASTNode*)access->right)->member;
-  if (member == NULL || !member->is_member_function ||
-      member->symbol == NULL || member->symbol->type == NULL ||
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
       !TypeIsFunction(member->symbol->type) ||
       !member->symbol->type->info.function.is_constructor) {
     return node;
+  }
+  ASTNode* receiver = ASTNodeMove(access->left);
+  ASTNode* old_callee = call->left;
+  call->left = NewIdentifierASTNode(member->symbol, old_callee->location);
+  call->left->parent = (ASTNode*)call;
+  call->left->child_id = 0;
+  ASTNodeDelete(old_callee);
+  VectorInsertBefore(call->children, 0, receiver);
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* child = call->children->value.p[i];
+    child->parent = (ASTNode*)call;
+    child->child_id = i;
   }
 
   ASTNode* parent = node->parent;
@@ -4583,9 +4788,14 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
      * trust that binding rather than the receiver: only a still-generic owner
      * needs rebinding from the receiver. */
     Struct* current_owner = id->symbol->type->info.function.cxx_member_owner;
+    bool current_owner_is_template_pattern =
+        current_owner != NULL &&
+        (StructContainsTemplateParameter(current_owner) ||
+         (current_owner->lexical_parent != NULL &&
+          current_owner->lexical_parent->is_template));
     if (ctor_owner != NULL && current_owner != NULL &&
         current_owner != ctor_owner &&
-        !StructContainsTemplateParameter(current_owner)) {
+        !current_owner_is_template_pattern) {
       ctor_owner = NULL;
       ctor_name = NULL;
     }
@@ -4612,6 +4822,44 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   StructMember* member = FindStructMemberOverloadHead(ctor_owner, ctor_name);
   if (member == NULL || member->symbol == NULL) {
     return false;
+  }
+  size_t original_arity =
+      id->symbol->type->info.function.prototype.length;
+  if (original_arity != call->children->length) {
+    StructMember* arity_fallback = NULL;
+    for (StructMember* candidate = member; candidate != NULL;
+         candidate = candidate->overload_next) {
+      if (candidate->symbol != NULL &&
+          !candidate->symbol->flags.is_template &&
+          candidate->symbol->type != NULL &&
+          TypeIsFunction(candidate->symbol->type) &&
+          candidate->symbol->type->info.function.prototype.length ==
+              call->children->length) {
+        if (arity_fallback == NULL) {
+          arity_fallback = candidate;
+        }
+        bool compatible = true;
+        for (size_t i = 1; i < call->children->length; i++) {
+          ASTNode* actual = call->children->value.p[i];
+          Symbol* formal =
+              candidate->symbol->type->info.function.prototype.value.p[i];
+          if (actual == NULL || actual->type == NULL || formal == NULL ||
+              formal->type == NULL ||
+              !TypeAssignmentCompatible(actual->type, formal->type)) {
+            compatible = false;
+            break;
+          }
+        }
+        if (compatible) {
+          member = candidate;
+          arity_fallback = NULL;
+          break;
+        }
+      }
+    }
+    if (arity_fallback != NULL) {
+      member = arity_fallback;
+    }
   }
   SaveAndLinkStructMemberOverloadSymbols(member, overload_snapshots);
   id->symbol = member->symbol;
@@ -4812,11 +5060,12 @@ static ASTNode* ReanalyzeClonedResolvedCall(
     TypeRecord* concrete_type = TypeRecordCopy(id->symbol->type);
     if (TypeContainsTemplateParameter(concrete_type) ||
         (TypeIsStructOrUnion(concrete_type) &&
-         StructContainsTemplateParameter(concrete_type->info.struct_info))) {
+         (StructContainsTemplateParameter(concrete_type->info.struct_info) ||
+          (clone->substitution_source != NULL &&
+           concrete_type->info.struct_info->lexical_parent ==
+               clone->substitution_source)))) {
       TypeRecordDelete(concrete_type);
-      concrete_type =
-          SubstituteTemplateParameters(clone->parser, id->symbol->type,
-                                       clone->args);
+      concrete_type = SubstituteTemplateBodyType(clone, id->symbol->type);
       RebaseTemplateParameterIndices(concrete_type,
                                      clone->rebase_template_parameter_base);
       concrete_type = TypeMaterializeClassTemplateSpecialization(
@@ -4896,6 +5145,14 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   if (!is_constructor) {
     return node;
   }
+  Struct* constructor_owner =
+      id->symbol->type->info.function.cxx_member_owner;
+  if (constructor_owner != NULL &&
+      constructor_owner->lexical_parent == clone->substitution_source &&
+      clone->substitution_target != NULL) {
+    RetargetClonedNestedConstructorReceiver(
+        clone, call, constructor_owner);
+  }
   Vector overload_snapshots;
   VectorInit(&overload_snapshots);
   RebindClonedConstructorCall(call, &overload_snapshots);
@@ -4917,6 +5174,49 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   }
   RestoreSymbolOverloadLinks(&overload_snapshots);
   return analyzed;
+}
+
+/* A function-template call can initially have an unknown placeholder return
+ * type, causing semantic analysis to wrap it in the wrong scalar conversion
+ * (for example i2d). Once cloning resolves the concrete return type, rebuild
+ * that wrapper from the actual source and target types. */
+static ASTNode* RebuildClonedCallResultConversion(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL || node->op < AST_OP(i2s) ||
+      node->op > AST_OP(b2ld)) {
+    return node;
+  }
+  UnaryASTNode* conversion = (UnaryASTNode*)node;
+  if (conversion->sub == NULL || conversion->sub->op != AST_OP(call) ||
+      conversion->sub->type == NULL || node->type == NULL ||
+      TypeContainsTemplateParameter(conversion->sub->type) ||
+      TypeContainsTemplateParameter(node->type)) {
+    return node;
+  }
+
+  ASTNode* expression = conversion->sub;
+  conversion->sub = NULL;
+  expression->parent = NULL;
+  TypeRecord* target = node->type;
+  TypeRecordIncRef(target);
+  SourceLocation location = node->location;
+  ASTNodeDelete(node);
+
+  ASTNode* holder =
+      NewUnaryASTNode(AST_OP(uplus), NULL, location, expression);
+  SemanticConvertType(expression, target, kConvertNormal);
+  ASTNode* rebuilt = ((UnaryASTNode*)holder)->sub;
+  ((UnaryASTNode*)holder)->sub = NULL;
+  if (rebuilt != NULL) {
+    rebuilt->parent = NULL;
+  }
+  ASTNodeDelete(holder);
+  TypeRecordDelete(target);
+  if (action != NULL) {
+    *action = kASTTransformSkipChildren;
+  }
+  return rebuilt;
 }
 
 static bool IsReanalyzableClonedExpressionOpcode(ASTOpcode op) {
@@ -5084,6 +5384,14 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
       from->info.function.template_parameter_base;
   clone.from_owner = CloneFunctionMemberOwner(from);
   clone.to_owner = CloneFunctionMemberOwner(to);
+  clone.substitution_source =
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.from_owner
+          : parser->template_substitution_source;
+  clone.substitution_target =
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.to_owner
+          : parser->template_substitution_target;
   size_t to_index = 0;
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* from_formal = from->info.function.prototype.value.p[i];
@@ -5164,13 +5472,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   // unemitted, generic-mangled symbol.
   Struct* saved_access_context = compiler->current_class_access_context;
   TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
-      parser,
-      clone.from_owner != NULL && clone.to_owner != NULL
-          ? clone.from_owner
-          : parser->template_substitution_source,
-      clone.from_owner != NULL && clone.to_owner != NULL
-          ? clone.to_owner
-          : parser->template_substitution_target);
+      parser, clone.substitution_source, clone.substitution_target);
   if (clone.from_owner != NULL && clone.to_owner != NULL) {
     compiler->current_class_access_context = clone.to_owner;
   }
@@ -5221,6 +5523,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
+  body = ASTNodeVisitAndTransform(body, RebuildClonedCallResultConversion,
+                                  NULL);
   ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
   TypeRecord* saved_function = compiler->current_function;
   compiler->current_function = to;
@@ -5550,6 +5854,14 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
   clone.from_owner = CloneFunctionMemberOwner(from_func);
   clone.to_owner = TypeIsFunction(func) ? func->info.function.cxx_member_owner
                                         : NULL;
+  clone.substitution_source =
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.from_owner
+          : parser->template_substitution_source;
+  clone.substitution_target =
+      clone.from_owner != NULL && clone.to_owner != NULL
+          ? clone.to_owner
+          : parser->template_substitution_target;
   if (from_func != NULL && TypeIsFunction(from_func) && TypeIsFunction(func)) {
     size_t to_index = 0;
     for (size_t i = 0; i < from_func->info.function.prototype.length; i++) {

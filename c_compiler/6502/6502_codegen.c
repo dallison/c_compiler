@@ -2820,13 +2820,15 @@ static TargetInstruction* ShiftOp(W65C02Generator* g, IRNode* node,
   ldx(g, count, 0);
   TargetInstruction* skip = NewInstruction(W65C02_OP(label), kAddrModeImplied);
   EmitResolvedBranch(g, W65C02_OP(beq), skip);
-  // Shift the first iteration.
   ShiftOnce(g, node, op, second_op, size, dest, op1);
   dex(g);
+  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), done);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   ShiftOnce(g, node, op, second_op, size, dest, dest);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  Emit(g, done);
   Emit(g, skip);
   return dest;
 }
@@ -2961,18 +2963,18 @@ static TargetInstruction* ArithmeticRightShiftOp(W65C02Generator* g,
   EmitResolvedBranch(g, W65C02_OP(beq), skip);
   SetIndexReg(g, src, dest, size-1);
   lda(g, src, size-1);
-  
-  // Firat shift puts src into dest.
-  ShiftOnceArithmeticRight(g, node, size, dest, src);
 
+  ShiftOnceArithmeticRight(g, node, size, dest, src);
   dex(g);
+  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), done);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  // Rest of shifts use dest only.
   SetIndexReg(g, dest, dest, size-1);
   lda(g, dest, size-1);
   ShiftOnceArithmeticRight(g, node, size, dest, dest);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  Emit(g, done);
   Emit(g, skip);
   return dest;
 }
@@ -3885,12 +3887,12 @@ static void CompareFloatingExpression(W65C02Generator* g, IRNode* lhs, IRNode* r
   jsr(g, func);
 }
 
-static COMPILER_UNUSED void CompareFloatingPoint(W65C02Generator* g,
+static void CompareFloatingPoint(W65C02Generator* g,
                                                 IRNode* node,
                                                 TargetInstruction* dest,
                                                 IRNode* lhs,
                                                 IRNode* rhs) {
-  int size = 4;
+  int size = Sizeof(lhs->type);
   switch (node->opcode) {
   case IR_OP(cmpeqf):
     CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqf);
@@ -4034,6 +4036,16 @@ static void LowerConditionalBranch(W65C02Generator* g,
   IRNode* lhs = input->inputs.value.p[0];
   IRNode* rhs = input->inputs.value.p[1];
   bool is_unsigned = TypeIsUnsigned(lhs->type);
+
+  if (TypeIsFloatingPoint(lhs->type)) {
+    TargetInstruction* dest = TempRegister(g, node->type, 1);
+    CompareFloatingPoint(g, expr, dest, lhs, rhs);
+    lda(g, dest, 0);
+    TargetInstruction* bra =
+        EmitBranch(g, reverse ? W65C02_OP(beq) : W65C02_OP(bne), target_node);
+    bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
+    return;
+  }
   
   switch (expr->opcode) {
     case IR_OP(cmpeqi):
@@ -5254,6 +5266,7 @@ static void LowerDec(W65C02Generator* g, IRNode* node) {
         break;
       case 8:
         func = is_reg ? g->rdecd : g->dec8;
+        break;
       default:
         abort();
     }
@@ -6195,6 +6208,18 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
     Copy(g, result, result_buf, 0, 0, result_size,
          GetAddrMode(result), GetAddrMode(result_buf));
     call = TargetLastInstruction(&g->base);
+  }
+  if (node->dest == NULL && !TypeIsVoid(node->type) && !IsLeaf(g) &&
+      TypeIsFloatingPoint(node->type)) {
+    int discard_size = Sizeof(node->type);
+    if (discard_size == 1 || discard_size == 2) {
+      call = Emit(g, NewInstruction1(
+          discard_size == 1 ? W65C02_OP(load_result_value1)
+                            : W65C02_OP(load_result_value2),
+          result, kAddrModeImplied));
+    } else {
+      call = Emit(g, NewInstruction(W65C02_OP(load_result), kAddrModeImplied));
+    }
   }
   call->flags |= k6502InstIsCall | k6502BlockEnd;
   if (result == NULL) {
@@ -7364,7 +7389,9 @@ static void LowerComparison(W65C02Generator* g, IRNode* node) {
 
   IRNode* lhs = node->inputs.value.p[0];
   IRNode* rhs = node->inputs.value.p[1];
-  switch (node->opcode) {
+  if (TypeIsFloatingPoint(op1->type)) {
+    CompareFloatingPoint(g, node, dest, lhs, rhs);
+  } else switch (node->opcode) {
     case IR_OP(cmpeqi):
     case IR_OP(cmpeqa):
     case IR_OP(cmpeqf):

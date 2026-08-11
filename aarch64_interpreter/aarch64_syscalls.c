@@ -12,6 +12,7 @@
 #include "elf.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "random_host.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -501,6 +502,10 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
                      : DaveHostChronoLeapInfo(
                            (uint32_t)a0,
                            (DaveHostChronoLeapSecond*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_RANDOM_BYTES:
+      return a0 == 0 && a1 != 0
+                 ? -DAVE_HOST_EINVAL
+                 : DaveHostRandomBytes((void*)(uintptr_t)a0, (size_t)a1);
     default:
       fprintf(stderr, "Unknown AArch64 syscall %lld\n", (long long)number);
       AARCH64InterpreterFail(interpreter, 1);
