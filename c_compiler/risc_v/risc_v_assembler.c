@@ -1422,9 +1422,23 @@ static void AssembleConditionalBranch(RVAssembler* assembler, int funct3) {
     }
     int64_t addr = AssemblerEvaluateExpression(&ASM);
     int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
-    AssemblerEmitWord(
-        &ASM, ASM.current_section,
-        BTypeInstruction(RV_OPCODE(branch), regs[0], regs[1], funct3, offset));
+    if (offset >= -4096 && offset <= 4094) {
+      AssemblerEmitWord(
+          &ASM, ASM.current_section,
+          BTypeInstruction(RV_OPCODE(branch), regs[0], regs[1], funct3,
+                           offset));
+      AssemblerEmitWord(
+          &ASM, ASM.current_section,
+          ITypeInstruction(RV_OPCODE(op_imm), 0, 0, RV_F3(addi), 0));
+    } else {
+      AssemblerEmitWord(
+          &ASM, ASM.current_section,
+          BTypeInstruction(RV_OPCODE(branch), regs[0], regs[1], funct3 ^ 1,
+                           8));
+      AssemblerEmitWord(
+          &ASM, ASM.current_section,
+          JTypeInstruction(RV_OPCODE(jal), 0, offset - 4));
+    }
   }
 }
 
@@ -2064,9 +2078,21 @@ static void AssembleConditionalBranchZero(RVAssembler* assembler, int funct3) {
   }
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      BTypeInstruction(RV_OPCODE(branch), reg, 0, funct3, offset));
+  if (offset >= -4096 && offset <= 4094) {
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        BTypeInstruction(RV_OPCODE(branch), reg, 0, funct3, offset));
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        ITypeInstruction(RV_OPCODE(op_imm), 0, 0, RV_F3(addi), 0));
+  } else {
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        BTypeInstruction(RV_OPCODE(branch), reg, 0, funct3 ^ 1, 8));
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        JTypeInstruction(RV_OPCODE(jal), 0, offset - 4));
+  }
 }
 
 #define ASSEMBLE_CONDITIONAL_BRANCH_ZERO(inst)             \

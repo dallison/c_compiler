@@ -242,22 +242,46 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     SemanticError(diagnostic_node, "auto variable requires an initializer");
     return false;
   }
+  // A dependent initializer only has a placeholder type while its enclosing
+  // template is parsed. Preserve the declared auto type so deduction runs
+  // against the concrete initializer in each specialization.
+  if (CompilerIsCXX() && ExpressionIsTemplateDependent(initializer)) {
+    return true;
+  }
 
   bool decltype_auto =
       sym->type->declarator == kDeclPrimitive &&
       (sym->type->type & kTypeDecltypeAuto) != 0;
-  TypeRecord* initializer_type = initializer->type;
+  ASTNode* deduction_initializer = initializer;
+  if (initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)initializer;
+    if (braced->initializers != NULL &&
+        braced->initializers->length == 1) {
+      ASTNode* only = braced->initializers->value.p[0];
+      if (only != NULL && only->op == AST_OP(designated_init)) {
+        DesignatedInitializerASTNode* designated =
+            (DesignatedInitializerASTNode*)only;
+        if (designated->designators == NULL ||
+            designated->designators->length == 0) {
+          deduction_initializer = designated->init;
+        }
+      }
+    }
+  }
+  TypeRecord* initializer_type = deduction_initializer->type;
   TypeRecord* deduced =
       decltype_auto ? NULL
-                    : DeduceCXXInitializerListAuto(initializer, diagnostic_node);
+                    : DeduceCXXInitializerListAuto(deduction_initializer,
+                                                   diagnostic_node);
   if (deduced != NULL) {
     SymbolSetType(sym, deduced);
     return true;
   }
-  ASTNode* initializer_expr = initializer;
-  if (initializer->op == AST_OP(expr_init)) {
+  ASTNode* initializer_expr = deduction_initializer;
+  if (deduction_initializer->op == AST_OP(expr_init)) {
     ExpressionInitializerASTNode* expr_init =
-        (ExpressionInitializerASTNode*)initializer;
+        (ExpressionInitializerASTNode*)deduction_initializer;
     initializer_expr = expr_init->expr;
     initializer_type = expr_init->expr->type;
   }

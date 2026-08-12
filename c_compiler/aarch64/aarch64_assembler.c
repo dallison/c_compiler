@@ -217,6 +217,8 @@ DECLARE_INST_FUNC(fcvtsd);     // Single to double
 DECLARE_INST_FUNC(fcvtds);     // Double to single.
 DECLARE_INST_FUNC(fcvtns);
 DECLARE_INST_FUNC(fcvtnu);
+DECLARE_INST_FUNC(fcvtzs);
+DECLARE_INST_FUNC(fcvtzu);
 DECLARE_INST_FUNC(fcvt);     // Copy from int reg (no conversion)
 DECLARE_INST_FUNC(fmov);
 DECLARE_INST_FUNC(fcmp);
@@ -445,6 +447,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(fcvtds);     // Double to single.
   INST(fcvtns);
   INST(fcvtnu);
+  INST(fcvtzs);
+  INST(fcvtzu);
   INST(fcvt);     // Copy from int reg (no conversion)
   INST(fmov);
   INST(fcmp);
@@ -781,7 +785,8 @@ static COMPILER_UNUSED bool AssemblerFunction(AARCH64Assembler* assembler, Strin
 
 static void AssembleAddSubImmediate(AARCH64Assembler* assembler,
                                     Register* rd, Register* rn,
-                                    int immed, int sf, int op, int s) {
+                                    int immed, int sf, int op, int s,
+                                    int shift) {
   // The add/sub immediate field is an unsigned 12-bit value.  A negative
   // immediate (common when computing the address of a stack local at a
   // negative frame-pointer offset, e.g. "add x0, x29, #-384") must be encoded
@@ -799,7 +804,8 @@ static void AssembleAddSubImmediate(AARCH64Assembler* assembler,
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (sf << 31) | (op << 30) | (s << 29) | (0x22 << 23) |
-                    ((immed & 0xfff) << 10 | (rn->num << 5) | (rd->num)));
+          (shift << 22) |
+          ((immed & 0xfff) << 10 | (rn->num << 5) | (rd->num)));
 }
 
 static void AssembleAddSubShiftedRegister(AARCH64Assembler* assembler,
@@ -866,7 +872,8 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
                             (0x22u << 23) | (1u << 22) |
                             ((uint32_t)rn.num << 5) | (uint32_t)rd.num);
     } else {
-      AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode, s);
+      AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode,
+                              s, 0);
     }
     return;
   }
@@ -884,7 +891,22 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
       AssembleAddSubShiftedRegister(assembler, &rd, &rn, &src2, rd.width == kX, opcode, s);
       break;
     case kIntImmediate:
-      AssembleAddSubImmediate(assembler, &rd, &rn, src2.i, rd.width == kX, opcode, s);
+      {
+        int shift = 0;
+        if (LexMatch(&ASM.lex, TOK(comma))) {
+          if (!GetShift(assembler, &src2, 12)) {
+            return;
+          }
+          if (src2.shift.type != kLSL || src2.shift.amount != 12) {
+            AssemblerError(&ASM,
+                           "ADD/SUB immediate shift must be LSL #12");
+            return;
+          }
+          shift = 1;
+        }
+        AssembleAddSubImmediate(assembler, &rd, &rn, src2.i,
+                                rd.width == kX, opcode, s, shift);
+      }
       break;
    case kFloatImmediate:
       AssemblerError(&ASM, "Unexpected floating point immediate");
@@ -1783,7 +1805,8 @@ static void AssembleMove(AARCH64Assembler* assembler) {
       // read zero or discard the result.
       if (rd.is_sp || op.reg.is_sp) {
         AssembleAddSubImmediate(assembler, &rd, &op.reg, 0,
-                                rd.width == kX, /*op=*/0, /*s=*/0);
+                                rd.width == kX, /*op=*/0, /*s=*/0,
+                                /*shift=*/0);
         break;
       }
       // General-register MOV is the ORR alias with the zero register as Rn.
@@ -3063,7 +3086,8 @@ static void Assemble_fcvtds(AARCH64Assembler* assembler) {
   AssembleFPConvertPrecision(assembler, kD, kS);
 }
 
-static void AssembleFPToInt(AARCH64Assembler* assembler, int unsigned_convert) {
+static void AssembleFPToInt(AARCH64Assembler* assembler, uint32_t base,
+                            int unsigned_convert) {
   Register rd = GetRegister(assembler);
   NeedComma(assembler);
   Register rn = GetRegister(assembler);
@@ -3073,16 +3097,24 @@ static void AssembleFPToInt(AARCH64Assembler* assembler, int unsigned_convert) {
   }
   AssemblerEmitWord(
       &ASM, ASM.current_section,
-      0x1e200000 | ((rd.width == kX) << 31) | ((rn.width == kD) << 22) |
+      base | ((rd.width == kX) << 31) | ((rn.width == kD) << 22) |
       (unsigned_convert << 16) | (rn.num << 5) | rd.num);
 }
 
 static void Assemble_fcvtns(AARCH64Assembler* assembler) {
-  AssembleFPToInt(assembler, 0);
+  AssembleFPToInt(assembler, 0x1e200000, 0);
 }
 
 static void Assemble_fcvtnu(AARCH64Assembler* assembler) {
-  AssembleFPToInt(assembler, 1);
+  AssembleFPToInt(assembler, 0x1e200000, 1);
+}
+
+static void Assemble_fcvtzs(AARCH64Assembler* assembler) {
+  AssembleFPToInt(assembler, 0x1e380000, 0);
+}
+
+static void Assemble_fcvtzu(AARCH64Assembler* assembler) {
+  AssembleFPToInt(assembler, 0x1e380000, 1);
 }
 
 static void Assemble_fcvt(AARCH64Assembler* assembler) {

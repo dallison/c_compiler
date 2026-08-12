@@ -1,0 +1,62 @@
+#ifndef __davecc_random_uniform__
+#define __davecc_random_uniform__
+
+#include <stddef.h>
+
+namespace std {
+namespace __random_detail {
+
+template <class G>
+constexpr unsigned long long __draw_unsigned(G& gen) {
+  return static_cast<unsigned long long>(gen()) -
+         static_cast<unsigned long long>(G::min());
+}
+
+template <class G>
+constexpr unsigned long long __uniform_below(G& gen,
+                                             unsigned long long bound) {
+  if (bound <= 1) return 0;
+  const unsigned long long gmin =
+      static_cast<unsigned long long>(G::min());
+  const unsigned long long gmax =
+      static_cast<unsigned long long>(G::max());
+  const unsigned long long span = gmax - gmin + 1ULL;
+
+  if (span == 0) {
+    const unsigned long long threshold =
+        static_cast<unsigned long long>(-bound) % bound;
+    unsigned long long value;
+    do {
+      value = static_cast<unsigned long long>(gen()) - gmin;
+    } while (value < threshold);
+    return value % bound;
+  }
+
+  if (span >= bound) {
+    const unsigned long long limit = span - span % bound;
+    unsigned long long value;
+    do {
+      value = static_cast<unsigned long long>(gen()) - gmin;
+    } while (value >= limit);
+    return value % bound;
+  }
+
+  size_t bits = 0;
+  unsigned long long top = bound - 1;
+  while (top != 0) {
+    ++bits;
+    top >>= 1;
+  }
+  for (;;) {
+    unsigned long long value = 0;
+    for (size_t bit = 0; bit < bits; ++bit) {
+      value |= __uniform_below(gen, 2) << bit;
+    }
+    if (value < bound) return value;
+  }
+}
+
+}  // namespace __random_detail
+}  // namespace std
+
+#endif

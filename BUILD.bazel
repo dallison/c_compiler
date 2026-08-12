@@ -16,6 +16,7 @@ filegroup(
         "libc/include/__hash_table",
         "libc/include/__iostream_input",
         "libc/include/__iostream_output",
+        "libc/include/__random_uniform",
         "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",

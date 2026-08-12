@@ -934,6 +934,24 @@ void SynthesizeExplicitlyDefaultedMemberFunctionBodies(TypeParser* parser,
           symbol->type->info.function.body != NULL) {
         continue;
       }
+      if (symbol->type->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberDefaultConstructor) {
+        bool has_dependent_member = false;
+        for (size_t member_index = 0; member_index < str->members.length;
+             member_index++) {
+          StructMember* data_member = str->members.value.p[member_index];
+          if (data_member != NULL && !data_member->is_member_function &&
+              data_member->symbol != NULL &&
+              !StorageIs(data_member->symbol->storage, STO(static)) &&
+              TypeContainsTemplateParameter(data_member->symbol->type)) {
+            has_dependent_member = true;
+            break;
+          }
+        }
+        if (has_dependent_member) {
+          continue;
+        }
+      }
       SynthesizeDefaultedMemberFunctionBody(parser, symbol);
     }
   }

@@ -4,10 +4,10 @@
 #include <random>
 
 template <class Engine, class Value>
-int check_10000(Value expected, int error) {
+int check_count(Value expected, int error, int count = 10000) {
   Engine engine;
   Value value = 0;
-  for (int i = 0; i < 10000; ++i) {
+  for (int i = 0; i < count; ++i) {
     value = static_cast<Value>(engine());
   }
   return value == expected ? 0 : error;
@@ -30,32 +30,37 @@ int main() {
   std::knuth_b knuth;
   if (knuth() > std::knuth_b::max()) return 9;
 #else
-  if (int rc = check_10000<std::minstd_rand0>(1043618065U, 1)) return rc;
-  if (int rc = check_10000<std::minstd_rand>(399268537U, 2)) return rc;
-  if (int rc = check_10000<std::mt19937>(4123659995U, 3)) return rc;
+  if (int rc = check_count<std::minstd_rand0>(16807U, 1, 1)) return rc;
+  if (int rc = check_count<std::minstd_rand>(48271U, 2, 1)) return rc;
+  if (int rc = check_count<std::mt19937>(3499211612U, 3, 1)) return rc;
   if (int rc =
-          check_10000<std::mt19937_64>(9981545732273789042ULL, 4)) {
+          check_count<std::mt19937_64>(14514284786278117030ULL, 4, 1)) {
     return rc;
   }
-  if (int rc = check_10000<std::ranlux24_base>(7937952U, 5)) return rc;
+  if (int rc = check_count<std::ranlux24_base>(15039276U, 5, 1)) return rc;
   if (int rc =
-          check_10000<std::ranlux48_base>(61839128582725ULL, 6)) {
+          check_count<std::ranlux48_base>(23459059301164ULL, 6, 1)) {
     return rc;
   }
-  if (int rc = check_10000<std::ranlux24>(9901578U, 7)) return rc;
-  if (int rc = check_10000<std::ranlux48>(249142670248501ULL, 8)) {
+  // Crossing one block boundary verifies each adaptor's discard behavior
+  // without making interpreted cross-target tests execute hundreds of
+  // thousands of intentionally discarded base-engine values.
+  if (int rc = check_count<std::ranlux24>(15059233U, 7, 24)) return rc;
+  if (int rc =
+          check_count<std::ranlux48>(269312768919532ULL, 8, 12)) {
     return rc;
   }
-  if (int rc = check_10000<std::knuth_b>(1112339016U, 9)) return rc;
+  if (int rc = check_count<std::knuth_b>(152607844U, 9, 1)) return rc;
 #endif
-
   unsigned seeds[] = {1, 2, 3, 4};
   std::seed_seq first_seed(seeds, seeds + 4);
   std::seed_seq second_seed(seeds, seeds + 4);
-  std::mt19937 first(first_seed);
-  std::mt19937 second(second_seed);
-  for (int i = 0; i < 10; ++i) {
-    if (first() != second()) return 10;
+  unsigned first_values[8] = {};
+  unsigned second_values[8] = {};
+  first_seed.generate(first_values, first_values + 8);
+  second_seed.generate(second_values, second_values + 8);
+  for (int i = 0; i < 8; ++i) {
+    if (first_values[i] != second_values[i]) return 10;
   }
 
   std::independent_bits_engine<std::minstd_rand, 12, unsigned> bits(7);

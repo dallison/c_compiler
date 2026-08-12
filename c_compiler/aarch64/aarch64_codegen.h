@@ -298,6 +298,8 @@ typedef enum {
   AARCH64_OP(fcvtds),     // Double to single.
   AARCH64_OP(fcvtns),
   AARCH64_OP(fcvtnu),
+  AARCH64_OP(fcvtzs),
+  AARCH64_OP(fcvtzu),
   AARCH64_OP(fcvt),     // Copy from int reg (no conversion)
   AARCH64_OP(fmov),
   AARCH64_OP(fcmp),

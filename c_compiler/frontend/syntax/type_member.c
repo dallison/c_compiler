@@ -2078,7 +2078,8 @@ static void AnalyzeCXXStaticDataMemberConstantInitializer(TypeParser* parser,
       symbol, initializer, symbol->location);
   SemanticAnalyzeVariableDefinition(parser->syntax,
                                     (VariableDeclarationASTNode*)decl);
-  if (!symbol->flags.value_set) {
+  if (!symbol->flags.value_set &&
+      !ExpressionIsTemplateDependent(initializer)) {
     SyntaxError(parser->syntax,
                 "Static data member initializer must be a constant expression");
   }

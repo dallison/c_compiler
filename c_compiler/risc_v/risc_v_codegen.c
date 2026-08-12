@@ -3157,7 +3157,6 @@ static TargetInstruction* LowerMemcpy(RVGenerator* rv, IRNode* node) {
       src_offset_value = (int)((TargetConstant*)src_offset)->value.ivalue;
     }
   }
-  src_node->data.ptr = src_addr;
 
   // Destination address.
   IRNode* dest_node = node->inputs.value.p[0];
@@ -3401,6 +3400,14 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   Vector arg_locations;
   VectorInit(&arg_locations);
   IRNode* callee_node = node->inputs.value.p[0];
+  // Do not rely on a static callee node's cached lowering: the same IR symbol
+  // can survive across function generators after its old target instruction
+  // has been destroyed.  Look the symbol up in this generator instead.  An
+  // indirect callee is a value and must be materialized normally.
+  TargetInstruction* addr =
+      IRIsStaticVariable(callee_node)
+          ? GetSymbol(rv, NULL, ((IRVariable*)callee_node)->symbol)
+          : Materialize(rv, callee_node);
   TypeRecord* callee_type = callee_node->type;
   if (callee_type != NULL && TypeIsPointer(callee_type)) {
     callee_type = callee_type->next;
@@ -3572,7 +3579,6 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
                         total_stack_size == 0 &&
                         rv->base.stack_frame_size == 0;
-  TargetInstruction* addr = GetLoweredNode(callee_node);
   TargetInstruction* staged_target = NULL;
   if (!will_tail_call &&
       (int)addr->opcode != (int)RV_OP(symbol)) {

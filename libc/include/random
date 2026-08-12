@@ -8,6 +8,7 @@
 #ifndef __davecc_random__
 #define __davecc_random__
 
+#include <__random_uniform>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -89,56 +90,6 @@ constexpr UInt __linear_step(UInt value, UInt multiplier, UInt increment,
                              UInt modulus) {
   return __add_mod(__multiply_mod(value, multiplier, modulus), increment,
                    modulus);
-}
-
-template <class G>
-constexpr unsigned long long __draw_unsigned(G& gen) {
-  return static_cast<unsigned long long>(gen()) -
-         static_cast<unsigned long long>(G::min());
-}
-
-template <class G>
-constexpr unsigned long long __uniform_below(G& gen,
-                                             unsigned long long bound) {
-  if (bound <= 1) return 0;
-  const unsigned long long gmin =
-      static_cast<unsigned long long>(G::min());
-  const unsigned long long gmax =
-      static_cast<unsigned long long>(G::max());
-  const unsigned long long span = gmax - gmin + 1ULL;
-
-  if (span == 0) {
-    const unsigned long long threshold =
-        static_cast<unsigned long long>(-bound) % bound;
-    unsigned long long value;
-    do {
-      value = static_cast<unsigned long long>(gen()) - gmin;
-    } while (value < threshold);
-    return value % bound;
-  }
-
-  if (span >= bound) {
-    const unsigned long long limit = span - span % bound;
-    unsigned long long value;
-    do {
-      value = static_cast<unsigned long long>(gen()) - gmin;
-    } while (value >= limit);
-    return value % bound;
-  }
-
-  size_t bits = 0;
-  unsigned long long top = bound - 1;
-  while (top != 0) {
-    ++bits;
-    top >>= 1;
-  }
-  for (;;) {
-    unsigned long long value = 0;
-    for (size_t bit = 0; bit < bits; ++bit) {
-      value |= __uniform_below(gen, 2) << bit;
-    }
-    if (value < bound) return value;
-  }
 }
 
 constexpr size_t __ceil_div(size_t a, size_t b) {
@@ -473,14 +424,9 @@ class mersenne_twister_engine {
   friend basic_istream<CharT, Traits>& operator>>(
       basic_istream<CharT, Traits>& input,
       mersenne_twister_engine& engine) {
-    result_type state[n];
-    size_t index = 0;
-    for (size_t i = 0; i < n; ++i) input >> state[i];
-    input >> index;
-    if (input && index <= n) {
-      for (size_t i = 0; i < n; ++i) engine.state_[i] = state[i];
-      engine.index_ = index;
-    }
+    for (size_t i = 0; i < n; ++i) input >> engine.state_[i];
+    input >> engine.index_;
+    if (engine.index_ > n) input.setstate(ios_base::failbit);
     return input;
   }
 };

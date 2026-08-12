@@ -281,6 +281,14 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     }
     return concrete;
   }
+  int placeholder_index = -1;
+  TemplateArgument* placeholder_actual = NULL;
+  if (arg->kind == kTemplateParameterType && arg->type != NULL &&
+      TypeIsTemplateParameterPlaceholder(arg->type, &placeholder_index) &&
+      placeholder_index >= 0 &&
+      (size_t)placeholder_index < args->length) {
+    placeholder_actual = args->value.p[placeholder_index];
+  }
   if (arg->kind == kTemplateParameterTemplate &&
       arg->template_parameter_index >= 0 &&
       (size_t)arg->template_parameter_index < args->length) {
@@ -289,6 +297,17 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       TemplateArgumentDelete(concrete);
       return TemplateArgumentCopy(actual);
     }
+  } else if (placeholder_actual != NULL &&
+             placeholder_actual->kind == kTemplateParameterNonType &&
+             placeholder_actual->type != NULL) {
+    // A type-constraint on an `auto` non-type parameter constrains the type of
+    // the argument, not its value. Substitute the concrete value argument's
+    // type into the concept-id's synthetic type argument.
+    concrete->type = TypeRecordCopy(placeholder_actual->type);
+    concrete->type =
+        TypeMaterializeClassTemplateSpecialization(parser->syntax,
+                                                   concrete->type);
+    concrete->template_parameter_index = -1;
   } else if (arg->kind == kTemplateParameterType && arg->type != NULL) {
     concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
     concrete->type =
@@ -315,20 +334,6 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       }
     } else if (actual != NULL && actual->kind == kTemplateParameterNonType &&
                actual->type != NULL) {
-      concrete->type = TypeRecordCopy(actual->type);
-      concrete->type =
-          TypeMaterializeClassTemplateSpecialization(parser->syntax,
-                                                     concrete->type);
-      concrete->template_parameter_index = -1;
-    }
-  } else if (arg->kind == kTemplateParameterType && arg->type != NULL &&
-             TypeIsTemplateParameterPlaceholder(arg->type, NULL) &&
-             arg->type->template_parameter_index >= 0 &&
-             (size_t)arg->type->template_parameter_index < args->length) {
-    TemplateArgument* actual =
-        args->value.p[arg->type->template_parameter_index];
-    if (actual != NULL && actual->kind == kTemplateParameterNonType &&
-        actual->type != NULL) {
       concrete->type = TypeRecordCopy(actual->type);
       concrete->type =
           TypeMaterializeClassTemplateSpecialization(parser->syntax,

@@ -381,6 +381,15 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
     record->size = record->info.struct_info->size;
     return record;
   }
+  // A substituted template parameter may retain the placeholder's cached
+  // primitive size even after its type changes (for example, `UInt` changing
+  // from a pointer-sized placeholder to `unsigned long`). Primitive scalar
+  // sizes are target properties, so recompute them from the concrete type.
+  if (record->declarator == kDeclPrimitive && !TypeIsStructOrUnion(record) &&
+      !TypeContainsTemplateParameter(record)) {
+    record->size = SizeofType(record->type);
+    return record;
+  }
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:

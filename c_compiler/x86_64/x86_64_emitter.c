@@ -1559,8 +1559,13 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
       }
       if ((X86_64Opcode)opcode == X86_64_OP(movq_xmm) &&
           inst->operand[0] != NULL &&
-          inst->reg != NULL &&
-          ((X86_64Register*)inst->reg)->type == kX86_64RegTypeFloat) {
+          ((inst->dest != NULL && inst->dest->reg != NULL &&
+            ((X86_64Register*)inst->dest->reg)->type ==
+                kX86_64RegTypeFloat) ||
+           ((inst->dest == NULL || inst->dest->reg == NULL) &&
+            inst->reg != NULL &&
+            ((X86_64Register*)inst->reg)->type ==
+                kX86_64RegTypeFloat))) {
         if (TargetIsConst(inst->operand[0])) {
           fprintf(fp, "\tmovq ");
           PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));

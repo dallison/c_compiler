@@ -495,6 +495,14 @@ bool ARMIsFixedRegister(TargetInstruction* inst) {
     case ARM_OP(r6):
     case ARM_OP(r7):
     case ARM_OP(r9):  // Dedicated scratch/temp register (see Tmp()).
+    case ARM_OP(d0):
+    case ARM_OP(d1):
+    case ARM_OP(d2):
+    case ARM_OP(d3):
+    case ARM_OP(d4):
+    case ARM_OP(d5):
+    case ARM_OP(d6):
+    case ARM_OP(d7):
     case ARM_OP(fp):
     case ARM_OP(sp):
     case ARM_OP(lr):
@@ -1782,6 +1790,9 @@ static void LoadWideFromMergeTmp(ARMGenerator* g, IRNode* tmp,
 // (low, high) pair by LowerWideExpression and friends.
 static void MaterializeWide(ARMGenerator* g, IRNode* node,
                             TargetInstruction** lo, TargetInstruction** hi) {
+  if (node->opcode == IR_OP(pusharg) && node->inputs.length > 0) {
+    node = node->inputs.value.p[0];
+  }
   if (IRIsConst(node)) {
     uint64_t v = (uint64_t)((IRConstant*)node)->value.ivalue;
     *lo = Const32(g, (int32_t)(uint32_t)v);
@@ -1792,21 +1803,12 @@ static void MaterializeWide(ARMGenerator* g, IRNode* node,
     return;
   }
   IRNode* src = node;
-  if (node->opcode == IR_OP(pusharg) && node->inputs.length > 0) {
-    src = node->inputs.value.p[0];
-  }
   if (WideMergeTmpHasStackHome(src)) {
     LoadWideFromMergeTmp(g, src, lo, hi);
     return;
   }
   *lo = GetLoweredNode(node);
   *hi = GetLoweredHi(node);
-  if (*hi == NULL && node->opcode == IR_OP(pusharg) &&
-      node->inputs.length > 0) {
-    IRNode* value = node->inputs.value.p[0];
-    *lo = GetLoweredNode(value);
-    *hi = GetLoweredHi(value);
-  }
   // A non-wide value used in a wide context (e.g. an int promoted implicitly)
   // has no high half; treat it as zero-extended.  This should be rare because
   // the front end inserts explicit extensions, but guard against a NULL.
@@ -4270,12 +4272,17 @@ static TargetInstruction* BuildArgList(ARMGenerator* g, Vector* arg_locations) {
 // the prototype).  Returns true and sets *named_count if the callee is a
 // variadic function; arguments at or beyond *named_count are variadic and, on
 // AAPCS, must be passed in core registers / on the stack rather than VFP.
-static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
+static TypeRecord* CalleeFunctionType(IRNode* node) {
   IRNode* target = node->inputs.value.p[0];
   TypeRecord* t = target->type;
   while (t != NULL && t->declarator == kDeclPointer) {
     t = t->next;
   }
+  return t != NULL && t->declarator == kDeclFunction ? t : NULL;
+}
+
+static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
+  TypeRecord* t = CalleeFunctionType(node);
   if (t == NULL || t->declarator != kDeclFunction) {
     return false;
   }
@@ -4284,6 +4291,28 @@ static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
   }
   *named_count = (int)t->info.function.prototype.length;
   return true;
+}
+
+/*
+ * Named arguments are classified by the declared parameter type, not by the
+ * source expression type.  This is observable in AAPCS when a 64-bit parameter
+ * follows one core-register argument: the parameter must skip r1 and occupy
+ * r2:r3.  Normally the frontend inserts the matching conversion, but using the
+ * prototype here also keeps the caller and callee ABI synchronized when a
+ * cloned template expression temporarily retains a placeholder type.
+ */
+static TypeRecord* CalleeArgumentABIType(IRNode* call, int arg_ordinal,
+                                         IRNode* actual) {
+  TypeRecord* function = CalleeFunctionType(call);
+  if (function != NULL && arg_ordinal >= 0 &&
+      (size_t)arg_ordinal < function->info.function.prototype.length) {
+    Symbol* parameter =
+        function->info.function.prototype.value.p[arg_ordinal];
+    if (parameter != NULL && parameter->type != NULL) {
+      return parameter->type;
+    }
+  }
+  return actual->type;
 }
 
 // AAPCS stack-slot layout for arguments passed on the stack.  Scalars of 4
@@ -4363,6 +4392,9 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // Variadic floating-point arguments follow the integer ABI on ARM.
   int named_count = 0;
   bool callee_varargs = CalleeVariadicNamedCount(node, &named_count);
+  TypeRecord* callee_type = CalleeFunctionType(node);
+  bool callee_has_struct_return =
+      callee_type != NULL && TypeIsStructOrUnion(callee_type->next);
   // Argument ordinal among the real (source) arguments, ignoring a leading
   // hidden struct-return pointer.
   int arg_ordinal = 0;
@@ -4372,10 +4404,11 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (IsStructReturnArgument(arg_node)) {
+    if ((i == 1 && callee_has_struct_return) ||
+        IsStructReturnArgument(arg_node)) {
       // AAPCS passes the hidden aggregate-result pointer in r0.  It is wrapped
-      // in pusharg at ordinary call sites, so inspect the wrapped operand
-      // rather than relying on the pusharg node's aggregate type.
+      // in pusharg and may have acquired location/argument wrappers by this
+      // stage, so also identify it from the callee's aggregate return type.
       VectorAppend(&arg_locations,
                    NewArgLocationRegister(IntArgumentRegister(g, 0)));
       if (next_int_arg_reg == 0) {
@@ -4383,24 +4416,30 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       }
       continue;
     }
-    if (TypeIsStructOrUnion(arg_node->type)) {
+    TypeRecord* arg_type =
+        CalleeArgumentABIType(node, arg_ordinal, arg_node);
+    if (TypeIsStructOrUnion(arg_type)) {
       bool variadic = callee_varargs && arg_ordinal >= named_count;
-      // Named struct/union arguments are passed *by value* in the stacked
-      // argument area, laid out consecutively (see ArgStackSlot).  The callee
-      // reads them directly at fp + slot (ArgumentLocation / the argument case
-      // in AssignRegisterOrOffset).  This keeps multi-struct calls and structs
-      // of any size correct without the broken "fits in one register" path.
+      // A one-word named aggregate follows the core-register ABI just like a
+      // scalar word.  Larger named aggregates still use the stacked by-value
+      // path below.
       // Variadic struct arguments are passed *by reference*: a single 4-byte
       // pointer to a caller-made copy, occupying one word in the argument area
       // (a core register, then the stack).  Keeping every variadic struct one
       // word wide lets va_arg(struct) walk the save area uniformly -- it loads
       // the pointer and treats it as the struct's address (see
       // LowerBuiltinVaArg).
-      size_t struct_size = arg_node->type->size;
+      size_t struct_size = arg_type->size;
       if (!variadic) {
-        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
-        VectorAppend(&arg_locations,
-                     NewArgLocationPushed(kArgLocationPushed, slot));
+        if (struct_size <= 4 && next_int_arg_reg < ARM_NUM_INT_ARGS) {
+          TargetInstruction* arg_reg =
+              IntArgumentRegister(g, next_int_arg_reg++);
+          VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
+        } else {
+          size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
+          VectorAppend(&arg_locations,
+                       NewArgLocationPushed(kArgLocationPushed, slot));
+        }
       } else {
         if (next_int_arg_reg < ARM_NUM_INT_ARGS) {
           // Pointer to the copy passed in an argument register.
@@ -4419,7 +4458,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         // 8-byte members (HFA doubles / long double) stay aligned.
         struct_area_size += (struct_size + 7) & ~(size_t)7;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeIsFloatingPoint(arg_type)) {
       bool variadic = callee_varargs && arg_ordinal >= named_count;
       if (variadic) {
         // AAPCS: a variadic double is passed like a 64-bit integer -- in a pair
@@ -4437,7 +4476,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         } else {
           // No room for a register pair: pass the whole double on the stack.
           next_int_arg_reg = ARM_NUM_INT_ARGS;
-          size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+          size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
           VectorAppend(&arg_locations,
                        NewArgLocationPushed(kArgLocationPushed, slot));
         }
@@ -4449,11 +4488,11 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
         // order so for now, we record that the arg location is on the stack.
-        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
         VectorAppend(&arg_locations,
                      NewArgLocationPushed(kArgLocationPushed, slot));
       }
-    } else if (TypeIsMemberPointerAggregate(arg_node->type)) {
+    } else if (TypeIsMemberPointerAggregate(arg_type)) {
       // ARM EABI member-function pointers are two 32-bit words with 4-byte
       // alignment.  They therefore use two consecutive core registers (which
       // need not begin at an even register), or an 8-byte stack slot.
@@ -4472,11 +4511,11 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         next_int_arg_reg = ARM_NUM_INT_ARGS;
       } else {
         next_int_arg_reg = ARM_NUM_INT_ARGS;
-        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
         VectorAppend(&arg_locations,
                      NewArgLocationPushed(kArgLocationPushedWide, slot));
       }
-    } else if (TypeIsWideInt(arg_node->type)) {
+    } else if (TypeIsWideInt(arg_type)) {
       // AAPCS: a 64-bit integer is passed in an even-aligned pair of core
       // registers (r0:r1 or r2:r3) or, once those run out, 8-byte aligned on
       // the stack.
@@ -4490,7 +4529,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         VectorAppend(&arg_locations, NewArgLocationIntPair(lo, hi));
       } else {
         next_int_arg_reg = ARM_NUM_INT_ARGS;
-        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
         VectorAppend(&arg_locations,
                      NewArgLocationPushed(kArgLocationPushedWide, slot));
       }
@@ -4503,7 +4542,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
         // order so for now, we record that the arg location is on the stack.
-        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        size_t slot = ArgStackSlot(arg_type, &next_pushed_arg_offset);
         VectorAppend(&arg_locations,
                      NewArgLocationPushed(kArgLocationPushed, slot));
       }
@@ -5674,12 +5713,15 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
               ~(ArgStackAlignment(arg_type) - 1);
         }
       } else if (TypeIsStructOrUnion(arg_type)) {
-        // Named struct/union: always passed by value in the stacked-argument
-        // area (matching the caller in LowerCall).  fp + offset addresses it.
-        location.type = kArgLocationPushed;
-        location.location.offset =
-            (stack_offset + ArgStackAlignment(arg_type) - 1) &
-            ~(ArgStackAlignment(arg_type) - 1);
+        if (arg_type->size <= 4 && int_reg <= ARM_INT_ARG_END) {
+          location.type = kArgLocationRegister;
+          location.location.offset = int_reg;
+        } else {
+          location.type = kArgLocationPushed;
+          location.location.offset =
+              (stack_offset + ArgStackAlignment(arg_type) - 1) &
+              ~(ArgStackAlignment(arg_type) - 1);
+        }
       } else {
         if (int_reg <= ARM_INT_ARG_END) {
           // Arg is in an integer register.
@@ -5730,9 +5772,11 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         ArgStackSlot(arg_symbol->type, &stack_offset);
       }
     } else if (TypeIsStructOrUnion(arg_symbol->type)) {
-      // Named struct/union: always consumes a stacked-argument slot (it is
-      // never placed in a core register), matching the caller.
-      ArgStackSlot(arg_symbol->type, &stack_offset);
+      if (arg_symbol->type->size <= 4 && int_reg <= ARM_INT_ARG_END) {
+        int_reg++;
+      } else {
+        ArgStackSlot(arg_symbol->type, &stack_offset);
+      }
     } else {
       if (int_reg <= ARM_INT_ARG_END) {
         int_reg++;
@@ -5990,12 +6034,19 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
-      // Named struct/union arguments are passed by value in the stacked
-      // argument area (see LowerCall / ArgumentLocation).  The argument lives
-      // at fp + offset; record that positive offset directly (the argument
-      // addressing path in LowerExpression treats it as fp-relative).
       ArgLocation location = ArgumentLocation(entry, args);
-      entry->pooled->data.ivalue = (int)location.location.offset;
+      if (location.type == kArgLocationRegister) {
+        int offset = AllocateSavedArgumentHome(g, 4, 4);
+        VectorAppend(
+            &g->saved_regs,
+            NewSavedArgumentRegister((int)location.location.offset, ARM_FP_REG,
+                                     offset, false));
+        entry->pooled->data.ivalue = offset;
+      } else {
+        // Incoming-frame offsets are adjusted past the frame record by the
+        // emitter.
+        entry->pooled->data.ivalue = (int)location.location.offset;
+      }
       SetDebugStackLocation(entry, entry->pooled->data.ivalue);
     } else {
       // Not an argument.

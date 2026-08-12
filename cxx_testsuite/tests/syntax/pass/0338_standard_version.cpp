@@ -23,6 +23,9 @@
 #if __cpp_lib_memory_resource != 201603L
 #error "__cpp_lib_memory_resource has the wrong value"
 #endif
+#if __cpp_lib_sample != 201603L
+#error "__cpp_lib_sample has the wrong value"
+#endif
 #if __cpp_lib_source_location != 201907L
 #error "__cpp_lib_source_location has the wrong value"
 #endif

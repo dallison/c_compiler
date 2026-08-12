@@ -11,10 +11,6 @@
 //  classic implementations above.  The ExecutionPolicy overloads are not
 //  included; they require a parallelism runtime.
 //
-//  The classic randomized algorithms (std::shuffle, std::sample) are omitted
-//  because <random> is not yet available; their ranges:: counterparts are
-//  present since the caller supplies the generator.
-//
 //  min/max/minmax and swap-family helpers that the standard also lists in
 //  other headers are kept where the standard primarily places them: swap,
 //  move and forward come from <utility>; iter_swap and the sequence
@@ -24,6 +20,7 @@
 #ifndef __davecc_algorithm__
 #define __davecc_algorithm__
 
+#include <__random_uniform>
 #include <initializer_list>
 #include <iterator>
 #include <functional>
@@ -32,6 +29,10 @@
 #include <stddef.h>
 #include <type_traits>
 #include <utility>
+
+#if __cplusplus >= 201703L
+#define __cpp_lib_sample 201603L
+#endif
 
 namespace std {
 
@@ -53,6 +54,65 @@ struct __equal_to {
     return a == b;
   }
 };
+
+template <class Difference, class Generator>
+constexpr Difference __uniform_index(Generator& generator, Difference bound) {
+  return static_cast<Difference>(__random_detail::__uniform_below(
+      generator, static_cast<unsigned long long>(bound)));
+}
+
+template <class PopulationIt, class SampleIt, class Distance, class Generator>
+SampleIt __sample_impl(PopulationIt first, PopulationIt last, SampleIt output,
+                       Distance count, Generator& generator,
+                       forward_iterator_tag) {
+  if (count <= 0) return output;
+  Distance remaining = std::distance(first, last);
+  if (count > remaining) count = remaining;
+  while (first != last && count > 0) {
+    if (__uniform_index(generator, remaining) < count) {
+      *output = *first;
+      ++output;
+      --count;
+    }
+    ++first;
+    --remaining;
+  }
+  return output;
+}
+
+template <class PopulationIt, class SampleIt, class Distance, class Generator>
+SampleIt __sample_impl(PopulationIt first, PopulationIt last, SampleIt output,
+                       Distance count, Generator& generator,
+                       bidirectional_iterator_tag) {
+  return __sample_impl(first, last, output, count, generator,
+                       forward_iterator_tag());
+}
+
+template <class PopulationIt, class SampleIt, class Distance, class Generator>
+SampleIt __sample_impl(PopulationIt first, PopulationIt last, SampleIt output,
+                       Distance count, Generator& generator,
+                       random_access_iterator_tag) {
+  return __sample_impl(first, last, output, count, generator,
+                       forward_iterator_tag());
+}
+
+template <class PopulationIt, class SampleIt, class Distance, class Generator>
+SampleIt __sample_impl(PopulationIt first, PopulationIt last, SampleIt output,
+                       Distance count, Generator& generator,
+                       input_iterator_tag) {
+  if (count <= 0) return output;
+  Distance selected = 0;
+  while (first != last && selected < count) {
+    output[selected] = *first;
+    ++first;
+    ++selected;
+  }
+  for (Distance seen = selected; first != last; ++first, ++seen) {
+    Distance pick = __uniform_index(generator, seen + 1);
+    if (pick < selected) output[pick] = *first;
+  }
+  return output + selected;
+}
 
 }  // namespace __algorithm_detail
 
@@ -1664,6 +1724,28 @@ constexpr bool is_permutation(It1 first1, It1 last1, It2 first2) {
                              __algorithm_detail::__equal_to());
 }
 
+template <class RandomIt, class Generator>
+void shuffle(RandomIt first, RandomIt last, Generator&& generator) {
+  using difference_type =
+      typename iterator_traits<RandomIt>::difference_type;
+  difference_type count = last - first;
+  while (count > 1) {
+    difference_type pick =
+        __algorithm_detail::__uniform_index(generator, count);
+    --count;
+    std::iter_swap(first + count, first + pick);
+  }
+}
+
+template <class PopulationIt, class SampleIt, class Distance, class Generator>
+SampleIt sample(PopulationIt first, PopulationIt last, SampleIt output,
+                Distance count, Generator&& generator) {
+  using category =
+      typename iterator_traits<PopulationIt>::iterator_category;
+  return __algorithm_detail::__sample_impl(first, last, output, count, generator,
+                                            category());
+}
+
 namespace ranges {
 
 template <class Proj, class T>
@@ -2515,9 +2597,8 @@ constexpr I shuffle(I first, S last, Gen&& gen) {
   I end = ranges::next(first, last);
   iter_difference_t<I> count = ranges::distance(first, end);
   for (iter_difference_t<I> i = count; i > 1; --i) {
-    iter_difference_t<I> pick = static_cast<iter_difference_t<I>>(
-        static_cast<unsigned long long>(gen()) %
-        static_cast<unsigned long long>(i));
+    iter_difference_t<I> pick =
+        __algorithm_detail::__uniform_index(gen, i);
     ranges::iter_swap(ranges::next(first, i - 1), ranges::next(first, pick));
   }
   return end;
@@ -2538,9 +2619,7 @@ O sample(I first, S last, O out, iter_difference_t<I> n, Gen&& gen) {
       *out = *first;
       ++out;
       --n;
-    } else if (static_cast<iter_difference_t<I>>(
-                   static_cast<unsigned long long>(gen()) %
-                   static_cast<unsigned long long>(remaining)) < n) {
+    } else if (__algorithm_detail::__uniform_index(gen, remaining) < n) {
       *out = *first;
       ++out;
       --n;

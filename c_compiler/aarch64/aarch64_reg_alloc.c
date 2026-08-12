@@ -555,6 +555,8 @@ static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) 
 
     case  AARCH64_OP(fcvtns):
     case  AARCH64_OP(fcvtnu):
+    case  AARCH64_OP(fcvtzs):
+    case  AARCH64_OP(fcvtzu):
       return kAARCH64RegTypeInt;
 
     default:

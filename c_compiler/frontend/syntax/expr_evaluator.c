@@ -11,6 +11,7 @@
 #include "assembler.h"
 #include "concepts.h"
 #include "constexpr.h"
+#include "syntax.h"
 #include "type.h"
 
 bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
@@ -740,6 +741,11 @@ case AST_OP(ast_op): \
       if (snode->is_pack_size) {
         return false;
       }
+      if (TypeContainsTemplateParameter(snode->type_operand) ||
+          (snode->expr != NULL &&
+           ExpressionIsTemplateDependent(snode->expr))) {
+        return false;
+      }
       if (snode->expr != NULL && TypeIsVLA(snode->expr->type)) {
         return false;
       }
@@ -783,6 +789,14 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   }
   initializer = ConstexprInitializerExpression(initializer);
   if (initializer == NULL) {
+    return false;
+  }
+  // A non-dependent result type does not make a dependent initializer safe to
+  // cache.  For example, `constexpr size_t n = sizeof(T)` must be evaluated
+  // separately for every specialization rather than retaining the template
+  // pattern's placeholder size.
+  if (ExpressionIsTemplateDependent(initializer)) {
+    symbol->flags.value_set = false;
     return false;
   }
   if (TypeIsIntegral(symbol->type)) {

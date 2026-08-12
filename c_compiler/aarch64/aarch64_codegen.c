@@ -257,6 +257,8 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(fmax): return "fmax";
   case AARCH64_OP(fcvtns): return "fcvtns";
   case AARCH64_OP(fcvtnu): return "fcvtnu";
+  case AARCH64_OP(fcvtzs): return "fcvtzs";
+  case AARCH64_OP(fcvtzu): return "fcvtzu";
     case AARCH64_OP(fcvtsd): return "fcvtsd";
     case AARCH64_OP(fcvtds): return "fcvtds";
   case AARCH64_OP(fmov): return "fmov";
@@ -1471,9 +1473,9 @@ static AARCH64Opcode IR2RV(IROpcode op, bool is_unsigned) {
     case IR_OP(d2f):
       return AARCH64_OP(fcvtds);
     case IR_OP(f2i):
-      return AARCH64_OP(fcvtnu);
+      return is_unsigned ? AARCH64_OP(fcvtzu) : AARCH64_OP(fcvtzs);
     case IR_OP(d2i):
-      return AARCH64_OP(fcvtnu);
+      return is_unsigned ? AARCH64_OP(fcvtzu) : AARCH64_OP(fcvtzs);
 
     case IR_OP(movi):
       return AARCH64_OP(mov);

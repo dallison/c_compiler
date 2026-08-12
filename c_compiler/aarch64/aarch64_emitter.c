@@ -1500,6 +1500,8 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     case AARCH64_OP(ucvtf):
     case AARCH64_OP(fcvtns):
     case AARCH64_OP(fcvtnu):
+    case AARCH64_OP(fcvtzs):
+    case AARCH64_OP(fcvtzu):
     case AARCH64_OP(fcvt): {
       assert(inst->reg != NULL);
       assert(inst->operand[0] != NULL);

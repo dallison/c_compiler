@@ -44,6 +44,8 @@ typedef struct {
   Symbol* awaitable_temp;
   StructMember* frame_member;
   StructMember* frame_constructed_member;
+  StructMember* yielded_value_member;
+  StructMember* yielded_value_constructed_member;
   DeclarationListASTNode* decl_list;
   CompoundStatementASTNode* compound;
   size_t statement_index;
@@ -1154,6 +1156,23 @@ static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
   ref = TypeRecordCalculateSize(ref);
   ASTNode* cast =
       NewCastASTNode(ref, location, NewIdentifierASTNode(symbol, location));
+  ((CastASTNode*)cast)->kind = kCastStatic;
+  cast->value_category = kValueCategoryXvalue;
+  return cast;
+}
+
+/* Turn an expression into an xvalue without moving it out of its storage.
+ * Coroutine yield temporaries use this after being materialized in the frame so
+ * an rvalue-reference yield_value overload binds to the frame-resident object. */
+static ASTNode* NewCoroutineMoveValue(ASTNode* value,
+                                      SourceLocation location) {
+  if (value == NULL || value->type == NULL) {
+    return value;
+  }
+  TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, true);
+  TypeRecordChain(ref, TypeRecordCopy(value->type));
+  ref = TypeRecordCalculateSize(ref);
+  ASTNode* cast = NewCastASTNode(ref, location, value);
   ((CastASTNode*)cast)->kind = kCastStatic;
   cast->value_category = kValueCategoryXvalue;
   return cast;
@@ -3292,14 +3311,34 @@ static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
                                point->frame_constructed_member,
                                false, true);
 
+  ASTNode* operand = ASTNodeMove(((UnaryASTNode*)point->co_yield)->sub);
+  ASTNode* yielded_value_init = NULL;
+  if (point->yielded_value_member != NULL) {
+    CoroutineFrameAddOwnedSymbol(
+        frame, point->yielded_value_member->symbol,
+        point->yielded_value_member,
+        point->yielded_value_constructed_member, false, true);
+    yielded_value_init = NewFrameMemberInitialization(
+        frame, point->yielded_value_member,
+        point->yielded_value_constructed_member, operand, location);
+    operand = NewCoroutineMoveValue(
+        NewFrameMemberAccess(frame, point->yielded_value_member, location),
+        location);
+  }
   Vector* actuals = NewVector();
-  VectorAppend(actuals, ASTNodeMove(((UnaryASTNode*)point->co_yield)->sub));
+  VectorAppend(actuals, operand);
   ASTNode* yield_call = NewCoroutinePromiseMemberCall(
       promise, "yield_value", actuals, location);
   ASTNodeSetType(yield_call, TypeRecordCopy(awaiter->type));
   ASTNode* init = NewFrameMemberInitialization(
       frame, point->frame_member, point->frame_constructed_member,
       yield_call, location);
+  if (yielded_value_init != NULL) {
+    Vector* init_statements = NewVector();
+    VectorAppend(init_statements, yielded_value_init);
+    VectorAppend(init_statements, init);
+    init = NewCompoundStatementASTNode(init_statements, location);
+  }
   bool statement_yield =
       point->statement != NULL && point->statement->op == AST_OP(expr) &&
       ((ExpressionStatementASTNode*)point->statement)->expr == point->co_yield;
@@ -4077,6 +4116,23 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
   }
   for (int i = 0; points != NULL && i < points->count; i++) {
     SuspensionPoint* point = &points->points[i];
+    if (point->kind == kSuspensionCoYield && point->co_yield != NULL) {
+      ASTNode* operand = ((UnaryASTNode*)point->co_yield)->sub;
+      if (operand != NULL && operand->type != NULL &&
+          operand->value_category == kValueCategoryPrvalue) {
+        char value_member_name[32];
+        snprintf(value_member_name, sizeof(value_member_name),
+                 "__yielded_value%d", i);
+        point->yielded_value_member = AddCoroutineFrameTypedMember(
+            str, value_member_name, operand->type);
+        if (TypeIsStructOrUnion(operand->type)) {
+          snprintf(value_member_name, sizeof(value_member_name),
+                   "__yielded_value%d_constructed", i);
+          point->yielded_value_constructed_member =
+              AddCoroutineFrameBoolMember(str, value_member_name);
+        }
+      }
+    }
     TypeRecord* awaiter_type = point->kind == kSuspensionCoYield
                                    ? yield_awaiter_type
                                    : point->awaiter->type;
@@ -4709,24 +4765,41 @@ static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
                                              ASTNode* stmt,
                                              size_t at_index);
 
-/* Insert a guarded destructor for a suspension point's awaiter right after the
- * statement that consumes its await_resume result, so the awaiter is destroyed
- * once it is no longer needed. */
+/* Insert guarded destructors for a suspension point's awaiter and any
+ * frame-materialized co_yield prvalue right after await_resume consumes them.
+ * The awaiter was constructed last, so destroy it before the yielded value. */
 static void InsertCoroutineAwaiterDestructorAfterUse(
     SuspensionPoint* point, CoroutineFrame* frame, size_t statement_index,
     SourceLocation location) {
-  ASTNode* dtor = NewCoroutineFrameMemberGuardedDestructor(
+  ASTNode* awaiter_dtor = NewCoroutineFrameMemberGuardedDestructor(
       frame, point->frame_member, point->frame_constructed_member, location);
-  if (dtor == NULL) {
+  ASTNode* yielded_value_dtor = NewCoroutineFrameMemberGuardedDestructor(
+      frame, point->yielded_value_member,
+      point->yielded_value_constructed_member, location);
+  if (awaiter_dtor == NULL && yielded_value_dtor == NULL) {
     return;
   }
   ASTNode* use_stmt = point->compound->statements->value.p[statement_index];
   if (use_stmt != NULL && use_stmt->op == AST_OP(compound)) {
-    CompoundASTNodeInsertStatement((CompoundStatementASTNode*)use_stmt, dtor,
-                                   1);
+    size_t index = 1;
+    if (awaiter_dtor != NULL) {
+      CompoundASTNodeInsertStatement((CompoundStatementASTNode*)use_stmt,
+                                     awaiter_dtor, index++);
+    }
+    if (yielded_value_dtor != NULL) {
+      CompoundASTNodeInsertStatement((CompoundStatementASTNode*)use_stmt,
+                                     yielded_value_dtor, index);
+    }
     return;
   }
-  CoroutineCompoundInsertStatement(point->compound, dtor, statement_index + 1);
+  size_t index = statement_index + 1;
+  if (awaiter_dtor != NULL) {
+    CoroutineCompoundInsertStatement(point->compound, awaiter_dtor, index++);
+  }
+  if (yielded_value_dtor != NULL) {
+    CoroutineCompoundInsertStatement(point->compound, yielded_value_dtor,
+                                     index);
+  }
 }
 
 /* Build an initializer expression `awaiter.await_resume()` of `result_type` (used

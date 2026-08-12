@@ -77,7 +77,11 @@ fi
 
 FIXTURES="$SUITE_ROOT/tests/modules"
 work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-modules.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+if [ -z "${KEEP_MODULE_WORK:-}" ]; then
+  trap 'rm -rf "$work"' EXIT
+else
+  echo "module test work directory: $work" >&2
+fi
 
 fail() {
   echo "FAIL: $1" >&2
@@ -129,13 +133,15 @@ run "$DAVECC" -target "$TARGET" -static \
   >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute module program"
 
-run "$DAVECC" -target "$TARGET" -std=c++20 -S "$FIXTURES/use_std.cpp" \
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fmodule-file "std=$STD_MODULE" "$FIXTURES/use_std.cpp" \
   -o "$work/use_std_cxx20.s"
 if ! grep -Fq "requires C++23" "$work/command.log"; then
   fail "import std was not rejected before C++23"
 fi
 
-run "$DAVECC" -target "$TARGET" -std=c++23 -c "$FIXTURES/use_std.cpp" \
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" "$FIXTURES/use_std.cpp" \
   -o "$work/use_std.o" ||
   fail "compile standard library module importer"
 
@@ -149,6 +155,7 @@ run "$DAVECC" -target "$TARGET" -static \
 [ "$?" -eq 0 ] || fail "execute standard library module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" \
   "$FIXTURES/use_std_containers.cpp" \
   -o "$work/use_std_containers.o" ||
   fail "compile standard container module importer"
@@ -162,6 +169,7 @@ run "$DAVECC" -target "$TARGET" -static \
 [ "$?" -eq 0 ] || fail "execute standard container module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" \
   "$FIXTURES/use_std_utilities.cpp" \
   -o "$work/use_std_utilities.o" ||
   fail "compile standard utility module importer"
@@ -175,6 +183,7 @@ run "$DAVECC" -target "$TARGET" -static \
 [ "$?" -eq 0 ] || fail "execute standard utility module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" \
   "$FIXTURES/use_std_heavy.cpp" \
   -o "$work/use_std_heavy.o" ||
   fail "compile template-heavy standard module importer"
@@ -188,6 +197,21 @@ run "$DAVECC" -target "$TARGET" -static \
 [ "$?" -eq 0 ] || fail "execute template-heavy standard module program"
 
 run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" \
+  "$FIXTURES/use_std_random.cpp" \
+  -o "$work/use_std_random.o" ||
+  fail "compile standard random module importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_std_random.o" "$STD_OBJECT" "$LIBC" \
+  -o "$work/std_random.bin" ||
+  fail "link standard random module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/std_random.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute standard random module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++23 -c \
+  -fmodule-file "std=$STD_MODULE" \
   "$FIXTURES/use_std_locale.cpp" \
   -o "$work/use_std_locale.o" ||
   fail "compile standard locale module importer"

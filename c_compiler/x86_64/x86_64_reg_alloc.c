@@ -897,9 +897,35 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
           spill->operand[0] != NULL ? spill->operand[0] : op;
       X86_64RegisterType reg_type =
           RegisterTypeFromInstruction(spilled_value);
-      X86_64Register *reg = AllocateRegisterWithType(allocator, reload->block, reload,
-                                     reg_type, CanUseTemp(allocator, reload));
+      X86_64Register* reg = FindFreeRegister(
+          allocator, reg_type, CanUseTemp(allocator, reload));
+      if (reg == NULL && X86_64IsStore(inst) && i == 1 &&
+          reg_type == kX86_64RegTypeInt) {
+        // A store needs its value and address simultaneously.  Under high
+        // pressure, allocating the address reload can otherwise spill the
+        // value reload that operand[0] already references; the address then
+        // reuses that register and the store writes an address byte instead of
+        // the value.  r11 is reserved as the spill-address scratch register,
+        // so it is safe to use for this final address reload immediately before
+        // the store.
+        reg = &allocator->int_regs[X86_64_SPILL_ADDR];
+      }
+      if (reg == NULL) {
+        TargetInstruction* victim = FindSpillVictim(
+            allocator, reg_type, CanUseTemp(allocator, reload));
+        reg = SpillInstruction(allocator, victim);
+      }
       AssignRegister(reg, reload);
+      // ReloadSpills bypasses AllocateRegisterWithType, so record a saved
+      // register here as well. Otherwise the generated function may use (for
+      // example) rbx without preserving the caller's value.
+      if (IsSavedReg(reg)) {
+        if (reg_type == kX86_64RegTypeFloat) {
+          BitSetInsert(&allocator->used_float_regs, reg->base.num);
+        } else {
+          BitSetInsert(&allocator->used_int_regs, reg->base.num);
+        }
+      }
       // This reload is for a single instruction.
       reload->uses = 1;
     }

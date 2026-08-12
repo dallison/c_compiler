@@ -2173,14 +2173,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
           // layout; the argument value's own (complete) type is an equivalent
           // fallback when materialization is unavailable.
           TypeRecord* copy_type = formal_type;
-          if (TypeIsStructOrUnion(copy_type) && copy_type->size == 0) {
+          if (TypeIsStructOrUnion(copy_type)) {
             TypeRecord* materialized =
                 TypeMaterializeClassTemplateSpecialization(gen->syntax,
                                                            copy_type);
             if (materialized != NULL && materialized->size != 0) {
               copy_type = materialized;
-            } else if (arg->type != NULL && TypeIsStructOrUnion(arg->type) &&
-                       arg->type->size != 0) {
+            } else if (copy_type->size == 0 && arg->type != NULL &&
+                       TypeIsStructOrUnion(arg->type) && arg->type->size != 0) {
               copy_type = arg->type;
             }
           }
@@ -2995,8 +2995,12 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
               ? result
               : GenerateZeroExtend(gen, (ASTNode*)node, result);
  }
- bool value_is_used = OptLevel0() ||
-       ASTNodeUsesValue(node->base.parent, &node->base);
+ // Every logical expression must produce a value for its enclosing expression
+ // or branch. Returning the right operand directly is invalid on a
+ // short-circuit path because that operand was never evaluated; nested chains
+ // would then consume an uninitialized value and could execute a skipped
+ // dereference.
+ bool value_is_used = true;
  // Non-constant logical operation, generate comparison and branches.
  IRNode* label = NewIR(IR_OP(label));
  IRNode* tmp_addr = NULL;

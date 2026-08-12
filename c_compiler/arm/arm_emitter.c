@@ -83,10 +83,10 @@ static void MoveImmediate(ARMEmitter* emitter,
 
 #endif
 
-// Generate a sequence of add/sub instruction for an immediate.
-// The add/sub instructions take a 12 bit immediate shifted left
-// by 0 or 12 bits.  If the constant is negative, the add becomes
-// a sub and vice versa.
+// Generate a sequence of add/sub instructions for an immediate.  A32 data
+// processing immediates encode an 8-bit value rotated by an even number of
+// bits; unlike AArch64, they do not accept "#imm, lsl #12".  Split the value
+// into byte-aligned pieces, each of which is directly encodable.
 static void AddSubImmediate(ARMEmitter* emitter,
                             const char* destreg,
                             const char* srcreg,
@@ -104,26 +104,16 @@ static void AddSubImmediate(ARMEmitter* emitter,
     snprintf(commentbuf, sizeof(commentbuf), "\t// %s", comment);
   }
   const char* op = add ? "add" : "sub";
-  const char* tmpreg = "ip";
-  if (value > 0xffffff) {
-    // Too big for an immediate, put it into a register and use that.
-    MoveImmediate(emitter, tmpreg, value, fp);
-    fprintf(fp, "\t%s %s, %s, %s%s\n", op, destreg, srcreg, tmpreg, commentbuf);
-    return;
-  }
   int shift = 0;
   while (value != 0) {
-    int v = value & 0xfff;
+    uint64_t v = ((uint64_t)value & 0xffu) << shift;
     if (v != 0) {
-      if (shift != 0) {
-        fprintf(fp, "\t%s %s, %s, #%d, lsl #%d%s\n", op, destreg, srcreg, v, shift, commentbuf);
-      } else {
-        fprintf(fp, "\t%s %s, %s, #%d%s\n", op, destreg, srcreg, v, commentbuf);
-      }
+      fprintf(fp, "\t%s %s, %s, #%" PRIu64 "%s\n", op, destreg, srcreg, v,
+              commentbuf);
       srcreg = destreg;
     }
-    shift += 12;
-    value >>= 12;
+    shift += 8;
+    value >>= 8;
   }
 }
 
@@ -1525,9 +1515,17 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       if (spill_size == 0) {
         spill_size = kSize32Bit;
       }
-      fprintf(fp, "\t%s %s, [fp, #-%d]\t// Spilled @%d\n", store,
-              ARMRegisterName(reg, spill_size, buf1, sizeof(buf1)), offset,
-              inst->operand[0]->id);
+      const char* register_name =
+          ARMRegisterName(reg, spill_size, buf1, sizeof(buf1));
+      int direct_limit = reg->type == kARMRegTypeInt ? 0xfff : 0x3fc;
+      if (offset <= direct_limit) {
+        fprintf(fp, "\t%s %s, [fp, #-%d]", store, register_name, offset);
+      } else {
+        MoveImmediate(emitter, "ip", offset, fp);
+        fprintf(fp, "\tsub ip, fp, ip\n");
+        fprintf(fp, "\t%s %s, [ip]", store, register_name);
+      }
+      fprintf(fp, "\t// Spilled @%d\n", inst->operand[0]->id);
       return;
     }
       
@@ -1544,11 +1542,17 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       if (reload_size == 0) {
         reload_size = kSize32Bit;
       }
-      fprintf(fp, "\t%s %s, [fp, #-%d]\t// Reloaded spilled @%d\n",
-              load,
-              ARMRegisterName(reg, reload_size, buf1, sizeof(buf1)),
-              offset,
-              spill->operand[0]->id);
+      const char* register_name =
+          ARMRegisterName(reg, reload_size, buf1, sizeof(buf1));
+      int direct_limit = reg->type == kARMRegTypeInt ? 0xfff : 0x3fc;
+      if (offset <= direct_limit) {
+        fprintf(fp, "\t%s %s, [fp, #-%d]", load, register_name, offset);
+      } else {
+        MoveImmediate(emitter, "ip", offset, fp);
+        fprintf(fp, "\tsub ip, fp, ip\n");
+        fprintf(fp, "\t%s %s, [ip]", load, register_name);
+      }
+      fprintf(fp, "\t// Reloaded spilled @%d\n", spill->operand[0]->id);
       return;
     }
 

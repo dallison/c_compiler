@@ -11,6 +11,7 @@
 #if __cplusplus >= 201703L
 #define __cpp_lib_filesystem 201703L
 #define __cpp_lib_memory_resource 201603L
+#define __cpp_lib_sample 201603L
 #endif
 
 #if __cplusplus >= 202002L

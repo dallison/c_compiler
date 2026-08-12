@@ -14,6 +14,7 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "list.h"
+#include "syntax.h"
 
 // The semantic analysis of an initializer converts the tree
 // of initializers into a single braced initializer containing
@@ -467,17 +468,27 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
     CompoundLiteralASTNode* cl = (CompoundLiteralASTNode*)expr;
     return InitializeINode(inode, cl->initializer, constants_only);
   }
-  if (constants_only) {
+  bool dependent_initializer =
+      constants_only && CompilerIsCXX() &&
+      ExpressionIsTemplateDependent(expr);
+  bool required_depth_incremented =
+      constants_only && !dependent_initializer;
+  if (required_depth_incremented) {
     compiler->constant_evaluation_required_depth++;
   }
   expr = AnalyzeExpression(expr);
-  if (constants_only) {
+  if (required_depth_incremented) {
     compiler->constant_evaluation_required_depth--;
+  }
+  dependent_initializer =
+      constants_only && CompilerIsCXX() &&
+      ExpressionIsTemplateDependent(expr);
+  if (constants_only && !dependent_initializer) {
     expr = FoldRequiredScalarConstant(expr);
   }
   switch (inode->kind) {
     case kIScalar:
-      if (constants_only) {
+      if (constants_only && !dependent_initializer) {
         // Complile-time constants are constant expressions of anything
         // that can be done using a single relocation (something that
         // has a static address).
@@ -496,7 +507,7 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
       if (StructInitializationTypesMatch(expr->type, inode->type)) {
         // A struct/union can be initialized by an expression of the same
         // struct/union type (ignoring top-level qualifiers on the source).
-        if (constants_only) {
+        if (constants_only && !dependent_initializer) {
           ASTNode* constant = ConstexprObjectInitializerForExpression(
               inode->type, expr);
           if (constant == NULL) {

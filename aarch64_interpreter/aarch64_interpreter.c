@@ -113,8 +113,12 @@ static void WriteSp(AARCH64Interpreter* interpreter, int reg, uint64_t value) {
 }
 
 static uint32_t Fetch32(AARCH64Interpreter* interpreter) {
-  if (GuestAddressOk(interpreter->loader, interpreter->pc, 4)) {
-    return *(uint32_t*)(uintptr_t)interpreter->pc;
+  if (!GuestAddressOk(interpreter->loader, interpreter->pc, 4)) {
+    fprintf(stderr, "Instruction fetch outside mapped memory at 0x%" PRIx64
+                    "\n",
+            interpreter->pc);
+    AARCH64InterpreterDumpRegisters(interpreter);
+    AARCH64InterpreterFail(interpreter, 1);
   }
   return *(uint32_t*)(uintptr_t)interpreter->pc;
 }
