@@ -312,6 +312,7 @@ typedef struct IRNode {
 #define kIRStructReturnCall (1 << 10)  // Call has a hidden aggregate-result arg.
 #define kIRDeferredArgReload (1 << 11)  // Reload after nested argument calls.
 #define kIRDeferredArgRebuildAddress (1 << 12)  // Rebuild spill address late.
+#define kIRAsmMemoryClobber (1 << 13)  // Inline asm may read or write any memory.
 #define kIRBitWidth64 (1 << 14)  // Bit intrinsic operates on 64-bit values.
 
 void IRInit(IRNode* inst, IROpcode opcode);
@@ -382,6 +383,7 @@ bool IRIsUnconditionalBranch(IRNode* node);
 bool IRIsConditionalBranch(IRNode* node);
 bool IRIsReturn(IRNode* node);
 bool IRIsCall(IRNode* node);
+bool IRAsmClobbersMemory(IRNode* node);
 bool IRIsConst(IRNode* node);
 bool IRIsIntConst(IRNode* node);
 int64_t IRIntConstValue(IRNode* node);

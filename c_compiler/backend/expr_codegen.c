@@ -3666,6 +3666,9 @@ static IRNode* GenerateAsm(Generator* gen, AsmASTNode* node) {
 
   IRNode* asm_ir = NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id));
   asm_ir->aux = node;
+  if (AsmASTNodeClobbersMemory(node)) {
+    asm_ir->flags |= kIRAsmMemoryClobber;
+  }
   return IRSetType(GeneratorEmit(gen, asm_ir), node->base.type);
 }
 

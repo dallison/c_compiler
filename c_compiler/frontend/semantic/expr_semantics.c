@@ -5410,11 +5410,11 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
           TypeIsDerivedFrom(actual->next, target->next))) {
       return -1;
     }
-    if (TypeAssignmentCompatible(actual, target)) {
-      return 1;
-    }
     if (TypeIsVoidPointer(actual) || TypeIsVoidPointer(target)) {
       return 2;
+    }
+    if (TypeAssignmentCompatible(actual, target)) {
+      return 1;
     }
   }
   // Function-to-pointer conversion ([conv.func]): a function lvalue argument

@@ -272,7 +272,13 @@ static void FreeRegisters(X86_64RegisterAllocator* allocator,
       if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
         assert(op->uses >= 0);
-        if (op->uses == 0) {
+        // A value that is live out of this block can be consumed again after a
+        // back edge even when its single static user has just reduced the
+        // global use counter to zero.  Keep its register through the block;
+        // otherwise a destructive two-address instruction may reuse and
+        // overwrite a loop invariant that the next iteration still needs.
+        if (op->uses == 0 &&
+            !TargetBasicBlockOutputs(inst->block, op)) {
           if (reg->owner == op) {
             FreeRegister(allocator, (X86_64Register*)reg);
           }

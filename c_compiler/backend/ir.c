@@ -661,6 +661,11 @@ void IRPrint(IRNode* inst, FILE* fp) {
         "fakeunsigned",
         "fromcall",
         "stashedcallresult",
+        "structreturncall",
+        "deferredargreload",
+        "deferredargrebuildaddress",
+        "asmmemoryclobber",
+        "bitwidth64",
     };
     size_t flag_name_count = sizeof(kFlagNames) / sizeof(kFlagNames[0]);
     for (size_t i = 0; i < 32; i++) {
@@ -698,6 +703,11 @@ bool IRIsConditionalBranch(IRNode* node) {
 bool IRIsReturn(IRNode* node) { return node->opcode == IR_OP(ret); }
 
 bool IRIsCall(IRNode* node) { return node->opcode == IR_OP(calla); }
+
+bool IRAsmClobbersMemory(IRNode* node) {
+  return node != NULL && node->opcode == IR_OP(asm) &&
+         (node->flags & kIRAsmMemoryClobber) != 0;
+}
 
 bool IRIsConst(IRNode* node) {
   return node->opcode >= IR_OP(const8) && node->opcode <= IR_OP(consta);

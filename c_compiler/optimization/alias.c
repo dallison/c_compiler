@@ -251,7 +251,7 @@ static bool UnknownEffectMayClobber(const IRMemoryLocation* location) {
 }
 
 bool IRAliasInstMayClobber(const IRMemoryLocation* location, IRNode* inst) {
-  if (IRIsCall(inst)) {
+  if (IRIsCall(inst) || IRAsmClobbersMemory(inst)) {
     return UnknownEffectMayClobber(location);
   }
   if (IsAtomic(inst)) {

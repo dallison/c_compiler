@@ -2101,6 +2101,9 @@ static void GenerateAsm(Generator* gen, AsmASTNode* node) {
   }
   IRNode* asm_ir = GeneratorEmit(gen, NewIR(IR_OP(asm)));
   asm_ir->aux = node;
+  if (AsmASTNodeClobbersMemory(node)) {
+    asm_ir->flags |= kIRAsmMemoryClobber;
+  }
   VectorAppend(&asm_ir->inputs, literal);
   VectorAppend(&literal->outputs, asm_ir);
   for (size_t i = 0; i < inputs.length; i++) {

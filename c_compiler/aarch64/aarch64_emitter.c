@@ -433,11 +433,8 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
                           space_above_frame_pointer -
                           emitter->spill_region_size;  // First saved register.
 
-  // A leaf procedure doesn't save the return address.
-  if (is_leaf) {
-    saved_reg_offset += 8;
-  }
-
+  // Non-empty leaf frames use the same x29/x30 record as other frames. Keep
+  // their callee-saved slots below the local and spill regions as well.
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame, no need to store frame pointer.
   } else {

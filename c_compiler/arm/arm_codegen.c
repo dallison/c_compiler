@@ -1451,6 +1451,27 @@ static ARMOpcode IR2RV(IROpcode op, bool is_unsigned) {
   }
 }
 
+static bool VariableHasAddressUse(IRNode* var_node) {
+  for (size_t i = 0; i < var_node->outputs.length; i++) {
+    IRNode* output = var_node->outputs.value.p[i];
+    if (output == NULL) {
+      continue;
+    }
+    for (size_t operand = 0; operand < output->inputs.length; operand++) {
+      if (output->inputs.value.p[operand] != var_node) {
+        continue;
+      }
+      // A scalar variable is the first operand of its ordinary loads and
+      // stores. Any other use consumes the variable's address as a value and
+      // therefore requires stable stack storage.
+      if (operand != 0 || (!IRIsLoad(output) && !IRIsStore(output))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
   if (OptLevel0()) {
     // When not optimizing, all variables are on the stack.
@@ -1470,8 +1491,14 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
   if (TypeIsVolatile(var->symbol->type)) {
     return false;
   }
+  bool frame_free_struct_return_candidate =
+      g->struct_return_reg >= 0 && g->base.num_calls == 0 &&
+      !g->not_leaf && !g->base.varargs && !g->uses_dynamic_stack &&
+      !g->has_stack_args && g->exception_ranges.length == 0;
   if (var->symbol->flags.address_taken &&
-      !TypeIsReference(var->symbol->type)) {
+      !TypeIsReference(var->symbol->type) &&
+      (!frame_free_struct_return_candidate ||
+       VariableHasAddressUse(var_node))) {
     return false;
   }
 

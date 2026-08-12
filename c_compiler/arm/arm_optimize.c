@@ -440,6 +440,67 @@ static void PoolConstants(ARMGenerator* rv) {
   MapDestruct(&pooler.pool);
 }
 
+static bool HasOtherDefinition(ARMGenerator* rv, TargetInstruction* variable,
+                               TargetInstruction* except) {
+  for (TargetInstruction* inst = TargetFirstInstruction(&rv->base);
+       inst != NULL; inst = TargetNext(inst)) {
+    if (inst != except && inst->dest == variable) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool HasDefinitionAfter(TargetInstruction* position,
+                               TargetInstruction* variable) {
+  for (TargetInstruction* inst = TargetNext(position);
+       inst != NULL; inst = TargetNext(inst)) {
+    if (inst->dest == variable) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool AllUsersAreInBlock(TargetInstruction* inst,
+                               TargetBasicBlock* block) {
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    if (user == NULL || user->block != block) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void EliminateFrameFreeLeafVariableCopies(ARMGenerator* rv) {
+  if (!OptLevel1() || rv->base.num_calls != 0 || rv->not_leaf ||
+      rv->base.varargs || rv->uses_dynamic_stack || rv->has_stack_args ||
+      rv->exception_ranges.length != 0 || rv->base.stack_frame_size != 0 ||
+      rv->saved_regs.length != 0 || rv->struct_return_reg < 0) {
+    return;
+  }
+
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = TargetFirstInstruction(&rv->base);
+       inst != NULL; inst = next) {
+    next = TargetNext(inst);
+    TargetInstruction* source = inst->operand[0];
+    TargetInstruction* dest = inst->dest;
+    if (inst->opcode != (TargetOpcode)ARM_OP(mov) || source == NULL ||
+        dest == NULL || !ARMIsVarRegister(source) ||
+        !ARMIsVarRegister(dest) || source->users.length != 1 ||
+        source->users.value.p[0] != inst || dest->users.length == 0 ||
+        HasOtherDefinition(rv, dest, inst) ||
+        HasDefinitionAfter(inst, source) ||
+        !AllUsersAreInBlock(dest, inst->block)) {
+      continue;
+    }
+    TargetRetargetInstruction(dest, source);
+    TargetBasicBlockRemoveInstruction(&rv->base, inst->block, inst);
+  }
+}
+
 static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
   ARMGenerator* rv = data;
   TargetInstruction* next;
@@ -494,6 +555,8 @@ static void EliminateMoves(ARMGenerator* rv) {
 }
 
 void ARMOptimize(ARMGenerator* rv) {  
+  EliminateFrameFreeLeafVariableCopies(rv);
+
   // Eliminate moves if we can.
   EliminateMoves(rv);
 

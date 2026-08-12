@@ -29,7 +29,8 @@ static LoopMemoryEffects GetLoopMemoryEffects(Generator* gen,
          !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
          inst = IRNext(inst)) {
       effects.calls |= IRIsCall(inst);
-      effects.writes_memory |= IRIsStore(inst);
+      effects.writes_memory |=
+          IRIsStore(inst) || IRAsmClobbersMemory(inst);
     }
     BitSetIteratorNext(&it);
   }

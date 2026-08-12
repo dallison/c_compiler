@@ -3317,6 +3317,34 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "memory_clobber_optimizer_test",
+    srcs = ["tests/memory_clobber_optimizer_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath tests/memory_clobber_optimizer_cases.c)",
+    ],
+    data = [
+        ":davecc",
+        "tests/memory_clobber_optimizer_cases.c",
+    ],
+)
+
+sh_test(
+    name = "x86_licm_liveout_test",
+    srcs = ["tests/x86_licm_liveout_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath tests/x86_licm_liveout_test.c)",
+    ],
+    data = [
+        ":davecc",
+        ":x86_64",
+        "tests/x86_licm_liveout_test.c",
+    ],
+)
+
 genrule(
     name = "support_rom_65c02",
     srcs = [

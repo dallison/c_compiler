@@ -3772,6 +3772,19 @@ ASTNode* NewAsmASTNode(String* text, bool is_volatile,
   return (ASTNode*)node;
 }
 
+bool AsmASTNodeClobbersMemory(const AsmASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < node->clobbers.length; i++) {
+    String* clobber = node->clobbers.value.p[i];
+    if (clobber != NULL && StringEqual(clobber, "memory")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 AsmOperand* NewAsmOperand(const char* constraint, const char* name,
                           ASTNode* expr, bool is_output) {
   AsmOperand* operand = malloc(sizeof(AsmOperand));

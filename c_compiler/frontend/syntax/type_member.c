@@ -2079,6 +2079,7 @@ static void AnalyzeCXXStaticDataMemberConstantInitializer(TypeParser* parser,
   SemanticAnalyzeVariableDefinition(parser->syntax,
                                     (VariableDeclarationASTNode*)decl);
   if (!symbol->flags.value_set &&
+      !TypeContainsTemplateParameter(symbol->type) &&
       !ExpressionIsTemplateDependent(initializer)) {
     SyntaxError(parser->syntax,
                 "Static data member initializer must be a constant expression");
@@ -2809,6 +2810,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
             if (parser->syntax->parsing_template_declaration &&
                 !is_inline_member && initializer != NULL &&
                 CXXStaticDataMemberAllowsInClassInitializer(member_symbol) &&
+                !TypeContainsTemplateParameter(member_symbol->type) &&
                 !DependentExpressionContainsTemplateParameter(initializer)) {
               AnalyzeCXXStaticDataMemberConstantInitializer(parser, member_symbol,
                                                             initializer);

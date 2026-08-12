@@ -875,6 +875,7 @@ typedef struct {
 } AsmASTNode;
 
 ASTNode* NewAsmASTNode(String* text, bool is_volatile, SourceLocation location);
+bool AsmASTNodeClobbersMemory(const AsmASTNode* node);
 
 // Goto.
 typedef struct {

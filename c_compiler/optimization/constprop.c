@@ -290,6 +290,11 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
        !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
        inst = next) {
     next = IRNext(inst);
+    if (IRAsmClobbersMemory(inst)) {
+      // Values cached for stack variables may be stale after inline assembly
+      // that can access arbitrary memory.
+      MapClear(&p->constants);
+    }
     if (inst->dest != NULL) {
       continue;
     }
