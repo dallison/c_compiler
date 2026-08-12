@@ -1576,9 +1576,11 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
           return;
         }
         if ((int)inst->operand[0]->opcode == (int)X86_64_OP(x0)) {
-          fprintf(fp, "\tmovq_xmm ");
-          PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
-          fprintf(fp, ", ");
+          // x0 is a compiler pseudo-register, not a physical x86 zero
+          // register. Materialize its bits before moving them into XMM;
+          // printing x0 as a register otherwise aliases %rax and returns
+          // whatever integer value the preceding call left there.
+          fprintf(fp, "\tmovq $0, %%r10\n\tmovq_xmm %%r10, ");
           if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,

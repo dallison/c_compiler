@@ -165,7 +165,26 @@ double strtod(const char* str, char** endptr) {
 #endif
 #else
   // Double precision.
-  uint64_t packed = (mantissa >> (64LL - 52LL)) |
+  const int discarded_bits = 64 - 52;
+  uint64_t fraction = mantissa >> discarded_bits;
+  uint64_t discarded = mantissa & ((1ULL << discarded_bits) - 1);
+  bool sticky = false;
+  for (int i = 0; i < FIXED_SIZE_HALF - 1; ++i) {
+    if (fx[i] != 0) {
+      sticky = true;
+      break;
+    }
+  }
+  const uint64_t halfway = 1ULL << (discarded_bits - 1);
+  if (discarded > halfway ||
+      (discarded == halfway && (sticky || (fraction & 1) != 0))) {
+    ++fraction;
+    if (fraction == (1ULL << 52)) {
+      fraction = 0;
+      ++exp;
+    }
+  }
+  uint64_t packed = fraction |
           ((uint64_t)exp << 52LL) |
           (uint64_t)negative << 56LL;
   return *(double*)&packed;

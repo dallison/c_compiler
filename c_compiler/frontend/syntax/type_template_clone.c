@@ -3366,10 +3366,13 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
   if (node->op == AST_OP(ptr_scale)) {
     PtrScaleASTNode* scale = (PtrScaleASTNode*)node;
-    ASTNode* expr = scale->expr;
-    scale->expr = NULL;
-    ASTNodeDelete(node);
-    return expr;
+    TypeRecord* ref_type =
+        SubstituteTemplateBodyType(clone, scale->ref_type);
+    RebaseTemplateParameterIndices(ref_type,
+                                   clone->rebase_template_parameter_base);
+    TypeRecordCalculateSize(ref_type);
+    TypeRecordDelete(scale->ref_type);
+    scale->ref_type = ref_type;
   }
   if (node->op == AST_OP(requires_expr)) {
     RequiresExpressionASTNode* requires_node =
@@ -5037,6 +5040,26 @@ static ASTNode* ReanalyzeClonedResolvedCall(
     return node;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+  if (clone != NULL && clone->to_func != NULL &&
+      TypeIsFunction(clone->to_func) && id->symbol != NULL &&
+      StorageIs(id->symbol->storage, STO(typedef)) &&
+      id->symbol->type != NULL) {
+    int parameter_index =
+        FirstTemplateParameterIndexInType(id->symbol->type);
+    int parameter_base =
+        clone->to_func->info.function.template_parameter_base;
+    int parameter_count =
+        clone->to_func->info.function.template_parameter_count;
+    if (parameter_index >= parameter_base &&
+        parameter_index < parameter_base + parameter_count) {
+      // This functional construction still names one of the cloned function
+      // template's own type parameters. Its index has already been rebased for
+      // the standalone function template, so substituting it again with the
+      // enclosing class's argument vector would bind it to an unrelated class
+      // parameter. Leave it dependent until the per-call instantiation.
+      return node;
+    }
+  }
   if (clone != NULL && clone->to_owner != NULL && id->symbol != NULL &&
       StorageIs(id->symbol->storage, STO(typedef)) &&
       TypeContainsTemplateParameter(id->symbol->type)) {

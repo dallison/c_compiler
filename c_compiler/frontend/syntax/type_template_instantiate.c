@@ -5879,13 +5879,20 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
           !sym->flags.is_explicit_specialization) {
         sym->flags.is_weak = true;
       }
-      Vector* declarations = NewVector();
-      VectorAppend(declarations,
-                   NewVariableDeclarationASTNode(sym, NULL, sym->location));
-      CompilerQueuePendingTemplateInstantiation(
-          NewDeclarationListASTNode(declarations, sym->location));
-      VectorAppend(&compiler->declaration_asts,
-                   sym->type->info.function.body);
+      // A friend function template materialized for a class specialization is
+      // still only a template definition. Keep its class-substituted body as
+      // the pattern for per-call instantiation; analyzing or emitting that
+      // dependent body now can bind its own parameters against unrelated class
+      // arguments (for example CharT against an engine type).
+      if (!sym->flags.is_template) {
+        Vector* declarations = NewVector();
+        VectorAppend(declarations,
+                     NewVariableDeclarationASTNode(sym, NULL, sym->location));
+        CompilerQueuePendingTemplateInstantiation(
+            NewDeclarationListASTNode(declarations, sym->location));
+        VectorAppend(&compiler->declaration_asts,
+                     sym->type->info.function.body);
+      }
     } else if (is_new_symbol && ftpl->type->info.function.body != NULL) {
       sym->value.func_defn = ftpl;
     }

@@ -36,6 +36,18 @@ concept uniform_random_bit_generator =
 
 namespace __random_detail {
 
+template <class Stream>
+class __stream_precision_guard {
+ public:
+  __stream_precision_guard(Stream& stream, streamsize precision)
+      : stream_(stream), precision_(stream.precision(precision)) {}
+  ~__stream_precision_guard() { stream_.precision(precision_); }
+
+ private:
+  Stream& stream_;
+  streamsize precision_;
+};
+
 template <class UInt>
 constexpr UInt __mask_bits(size_t bits) {
   constexpr size_t width = sizeof(UInt) * 8;
@@ -1210,6 +1222,8 @@ class normal_distribution {
   friend basic_ostream<CharT, Traits>& operator<<(
       basic_ostream<CharT, Traits>& output,
       const normal_distribution& distribution) {
+    __random_detail::__stream_precision_guard<basic_ostream<CharT, Traits>>
+        precision(output, numeric_limits<result_type>::max_digits10);
     return output << distribution.mean() << CharT(' ')
                   << distribution.stddev() << CharT(' ')
                   << distribution.saved_ << CharT(' ')

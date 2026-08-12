@@ -261,26 +261,20 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
   } else if ((flags & ios_base::basefield) == ios_base::oct) {
     base = 8;
   }
-  if (in != end && traits::eq(*in, CharT('0'))) {
-    Iter next = in;
-    ++next;
-    if (next != end &&
-        (((flags & ios_base::basefield) == ios_base::hex &&
-          (traits::eq(*next, CharT('x')) || traits::eq(*next, CharT('X')))) ||
-         (base == 8))) {
-      if ((flags & ios_base::basefield) == ios_base::hex) {
-        in = next;
-        ++in;
-        base = 16;
-      } else {
-        ++in;
-        base = 8;
-      }
-    }
-  }
   Iter start = in;
   T result = 0;
   bool any = false;
+  if (in != end && traits::eq(*in, CharT('0')) &&
+      (base == 8 || base == 16)) {
+    ++in;
+    any = true;
+    if (base == 16 && in != end &&
+        (traits::eq(*in, CharT('x')) || traits::eq(*in, CharT('X')))) {
+      ++in;
+      start = in;
+      any = false;
+    }
+  }
   while (in != end) {
     int digit_value = 0;
     if (!__read_digit<CharT, Iter>(static_cast<CharT>(*in), base, digit_value)) {
