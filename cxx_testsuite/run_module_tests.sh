@@ -590,4 +590,27 @@ run "$DAVECC" -target "$TARGET" -std=c++20 -c \
   -o "$work/use_export_conflict.o" ||
   fail "compile export_conflict importer"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/deleted_reason.dcm" "$FIXTURES/deleted_reason.cppm" ||
+  fail "emit deleted function reason module"
+if run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+     -fprebuilt-module-path "$work" "$FIXTURES/use_deleted_reason.cpp" \
+     -o "$work/use_deleted_reason.o"; then
+  fail "imported deleted function call succeeded"
+fi
+grep -Fq "use available() instead" "$work/command.log" ||
+  fail "imported deleted function reason diagnostic"
+
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/static_assert_message.dcm" \
+  "$FIXTURES/static_assert_message.cppm" ||
+  fail "emit generated static_assert message module"
+if run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+     -fprebuilt-module-path "$work" "$FIXTURES/use_static_assert_message.cpp" \
+     -o "$work/use_static_assert_message.o"; then
+  fail "imported failing static_assert succeeded"
+fi
+grep -Fq "module-generated assertion" "$work/command.log" ||
+  fail "imported generated static_assert message diagnostic"
+
 echo "ok module emit/import/link/execute"

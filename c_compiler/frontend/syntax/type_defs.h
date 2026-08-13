@@ -223,6 +223,7 @@ typedef struct {
   bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49
   bool has_explicit_object_parameter;  // C++23 `this T self`.       // @wire 50
   bool is_decltype_auto_return_deduced;  // Return used decltype(auto). // @wire 51
+  String* deleted_reason;  // Optional C++26 `= delete("reason")`.  // @wire 52
 } FunctionInfo;
 
 typedef enum {
@@ -249,6 +250,12 @@ typedef struct CXXMemberUsingDeclaration {
   bool is_pack_expansion;
   bool qualifier_names_constructor;
 } CXXMemberUsingDeclaration;
+
+typedef struct CXXFriendTypeDeclaration {
+  struct TypeRecord* type;  // Owned friend-type-specifier pattern.
+  SourceLocation location;
+  bool is_pack_expansion;
+} CXXFriendTypeDeclaration;
 
 typedef struct CXXVirtualBaseInfo {
   struct TypeRecord* type;  // Virtual base class type.
@@ -312,6 +319,7 @@ struct Struct {
   Vector friend_classes;    // Struct* granted friendship.        // @wire 28
   Vector friend_functions;  // Symbol* granted friendship.        // @wire 29
   Vector member_using_declarations;  // CXXMemberUsingDeclaration*.        // @wire 34
+  Vector friend_type_declarations;  // CXXFriendTypeDeclaration*. // @wire 35
   Vector virtual_bases;  // @wire - (recomputed on layout)
   Vector members;    // StructMember* (owns members).             // @wire 4
   Vector virtual_members;  // StructMember* by slot (not owned).  // @wire 27

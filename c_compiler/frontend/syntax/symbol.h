@@ -167,6 +167,9 @@ typedef struct Symbol {
   struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
   struct Symbol* overload_next; // Next overload, same name.     // @wire 39
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
+  // Portable initializer for serialized constexpr aggregate values. The live
+  // ConstexprObject cache in value.other is process-local and cannot be wired.
+  struct ASTNode* constexpr_initializer;                       // @wire 58
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
   // Owned signature copy for a template-template parameter placeholder.
@@ -190,6 +193,10 @@ typedef struct Symbol {
   // distinguishes "referenced but only written" objects for
   // -Wunused-but-set-variable.  Recomputed during analysis, never serialized.
   bool is_read;                   // @wire - (transient)
+  // Structured-binding dependence marker and, for a pack, known cardinality:
+  // -2 means materialized/not a binding, -1 means still dependent, and a
+  // nonnegative value is the known pack size.
+  int structured_binding_pack_size;  // transient
   // Local object selected for named return-value optimization.  Semantic
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.

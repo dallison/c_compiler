@@ -91,14 +91,18 @@ typedef struct {
   Symbol* loop_var;
   TypeRecord* structured_binding_type;
   Vector names;  // String* entries for [x, y] bindings.
+  Vector attributes;  // Vector* of Attribute* entries corresponding to names.
   Vector symbols;  // Symbol* entries corresponding to names.
+  int pack_index;
 } RangeForBinding;
 
 static void RangeForBindingInit(RangeForBinding* binding) {
   binding->loop_var = NULL;
   binding->structured_binding_type = NULL;
   VectorInit(&binding->names);
+  VectorInit(&binding->attributes);
   VectorInit(&binding->symbols);
+  binding->pack_index = -1;
 }
 
 static void RangeForBindingDestruct(RangeForBinding* binding) {
@@ -106,6 +110,14 @@ static void RangeForBindingDestruct(RangeForBinding* binding) {
   VectorDestructWithContents(&binding->names,
                              (VectorElementDestructor)StringDelete,
                              /*free_element=*/false);
+  for (size_t i = 0; i < binding->attributes.length; i++) {
+    Vector* attributes = binding->attributes.value.p[i];
+    if (attributes != NULL) {
+      AttributeListDestruct(attributes);
+      VectorDelete(attributes);
+    }
+  }
+  VectorDestruct(&binding->attributes);
   VectorDestruct(&binding->symbols);
 }
 
@@ -380,6 +392,21 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax) {
       if (sym != NULL) {
         SymbolDelete(sym);
       }
+    } else if (after_type == TOK(lsquare) &&
+               CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      int depth = 0;
+      do {
+        if (LexLookingAt(syntax->lex, TOK(lsquare))) {
+          depth++;
+        } else if (LexLookingAt(syntax->lex, TOK(rsquare))) {
+          depth--;
+        }
+        LexNextToken(syntax->lex);
+      } while (!LexEof(syntax->lex) && depth > 0);
+      is_declaration =
+          depth == 0 &&
+          (LexLookingAt(syntax->lex, TOK(equal)) ||
+           LexLookingAt(syntax->lex, TOK(lbrace)));
     }
     TypeRecordDelete(type);
   }
@@ -415,6 +442,24 @@ static ASTNode* ParseControllingCondition(Syntax* syntax, TokenClass followers,
     SyntaxOpenScope(syntax);
     ASTNode* decl = SyntaxParseConditionDeclaration(syntax);
     Symbol* sym = ConditionDeclaredSymbol(decl);
+    if (sym == NULL && decl != NULL && decl->op == AST_OP(decl_list)) {
+      DeclarationListASTNode* declarations = (DeclarationListASTNode*)decl;
+      if (declarations->declarations != NULL &&
+          declarations->declarations->length > 0) {
+        ASTNode* first = declarations->declarations->value.p[0];
+        if (first != NULL && first->op == AST_OP(structured_binding)) {
+          StructuredBindingASTNode* binding =
+              (StructuredBindingASTNode*)first;
+          binding->condition_symbol = SyntaxNewTemporary(
+              syntax, TypeRecordCopy(binding->declared_type));
+          binding->condition_symbol->flags.is_local = true;
+          binding->condition_symbol->flags.is_defined = true;
+          binding->condition_symbol->structured_binding_pack_size = -1;
+          binding->condition_symbol->location = first->location;
+          sym = binding->condition_symbol;
+        }
+      }
+    }
     *out_decl = decl;
     if (sym != NULL) {
       return NewIdentifierASTNode(sym, sym->location);
@@ -956,7 +1001,7 @@ static void AppendRangeForBindingDeclarations(Syntax* syntax,
   VectorAppend(declarations,
                NewStructuredBindingASTNode(
                    TypeRecordCopy(binding->structured_binding_type), names,
-                   symbols,
+                   symbols, binding->pack_index,
                    NewExpressionInitializerASTNode(current, location),
                    location));
   VectorAppend(body_statements,
@@ -991,6 +1036,9 @@ static ASTNode* NewRangeForIteratorLoop(Syntax* syntax,
   ASTNode* current =
       NewUnaryASTNode(AST_OP(contents), NULL, location,
                       NewIdentifierASTNode(begin, location));
+  if (iterator_type == NULL) {
+    current->flags |= kASTDeferredRangeContents;
+  }
   AppendRangeForBindingDeclarations(syntax, binding, current, body_statements,
                                     location);
   VectorAppend(body_statements, stmt);
@@ -1152,17 +1200,45 @@ static bool TryParseRangeForStructuredBinding(Syntax* syntax,
     return false;
   }
   while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+    bool is_pack = LexMatch(syntax->lex, TOK(ellipsis));
+    if (is_pack) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax,
+                    "Structured binding packs require C++26");
+      }
+      if (binding->pack_index >= 0) {
+        SyntaxError(syntax,
+                    "Structured binding declaration cannot contain multiple packs");
+      } else {
+        binding->pack_index = (int)binding->names.length;
+      }
+    }
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected structured binding name");
       break;
     }
     VectorAppend(&binding->names, NewString(syntax->lex->spelling.value));
     LexNextToken(syntax->lex);
+    Vector* attributes = NewVector();
+    if (SyntaxLookingAtCXXAttribute(syntax)) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax,
+                    "Attributes on structured bindings require C++26");
+      }
+      SyntaxParseCXXAttributes(syntax, attributes);
+    }
+    VectorAppend(&binding->attributes, attributes);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
   }
   SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+  if (binding->pack_index >= 0 &&
+      syntax->current_template_parameter_count == 0) {
+    SyntaxError(
+        syntax,
+        "Structured binding pack can only appear in a templated context");
+  }
   return true;
 }
 
@@ -1218,6 +1294,14 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
   for (size_t i = 0; i < binding->names.length; i++) {
     String* name = binding->names.value.p[i];
     Symbol* sym = NewRangeForAutoSymbol(syntax, name->value, location);
+    if (i < binding->attributes.length) {
+      Vector* attributes = binding->attributes.value.p[i];
+      AttributeListDestruct(&sym->attributes);
+      AttributeListClone(&sym->attributes, attributes);
+      SyntaxApplyDeclarationAttributes(sym);
+    }
+    sym->flags.is_parameter_pack = binding->pack_index == (int)i;
+    sym->structured_binding_pack_size = -1;
     AddRangeForVariable(syntax, sym);
     VectorAppend(&binding->symbols, sym);
   }

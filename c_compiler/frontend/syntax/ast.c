@@ -2337,6 +2337,7 @@ ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location) {
 static void StaticAssertASTNodeDelete(ASTNode* node) {
   StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
   ASTNodeDelete(assert_node->expr);
+  ASTNodeDelete(assert_node->message_expr);
   StringDestruct(&assert_node->message);
   ASTNodeBaseDelete(node);
 }
@@ -2346,16 +2347,22 @@ static void StaticAssertASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   Indent(indents, fp);
   fprintf(fp, "static_assert: %s\n", assert_node->message.value);
   ASTNodePrint(assert_node->expr, indents + 2, fp);
+  ASTNodePrint(assert_node->message_expr, indents + 2, fp);
   ASTNodeBasePrint(node, indents + 2, fp);
 }
 
 static void StaticAssertASTNodeReplaceChild(ASTNode* parent, int child_id,
                                             ASTNode* child,
                                             bool delete_old_child) {
-  assert(child_id == 0);
   StaticAssertASTNode* assert_node = (StaticAssertASTNode*)parent;
-  ASTNode* old = assert_node->expr;
-  assert_node->expr = child;
+  assert(child_id == 0 || child_id == 1);
+  ASTNode* old =
+      child_id == 0 ? assert_node->expr : assert_node->message_expr;
+  if (child_id == 0) {
+    assert_node->expr = child;
+  } else {
+    assert_node->message_expr = child;
+  }
   SetParent(child, parent, child_id);
   if (delete_old_child) {
     ASTNodeDelete(old);
@@ -2368,6 +2375,11 @@ static ASTNode* StaticAssertASTNodeClone(
   StaticAssertASTNode* to = ASTArenaAlloc(sizeof(StaticAssertASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  to->message_expr =
+      ASTNodeClone(from->message_expr, func, data, &to->base);
+  if (to->message_expr != NULL) {
+    to->message_expr->child_id = 1;
+  }
   StringInit(&to->message, from->message.value);
   to->base.flags &= ~kASTAnalyzed;
   return func(&to->base, data);
@@ -2379,6 +2391,7 @@ static void StaticAssertASTNodeVisit(
   StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
   func(node, data, child_id, kVisitPreChildren);
   ASTNodeVisit(assert_node->expr, func, 0, data);
+  ASTNodeVisit(assert_node->message_expr, func, 1, data);
   func(node, data, child_id, kVisitPostChildren);
 }
 
@@ -2387,6 +2400,7 @@ static void StaticAssertASTNodeTransform(ASTNode* node,
                                          void* data) {
   StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
   ASTNodeTransformChild(node, 0, assert_node->expr, func, data);
+  ASTNodeTransformChild(node, 1, assert_node->message_expr, func, data);
 }
 
 static ASTNodeVirtuals static_assert_vtbl = {
@@ -2395,12 +2409,15 @@ static ASTNodeVirtuals static_assert_vtbl = {
     StaticAssertASTNodeVisit, ValueNotUsed, StaticAssertASTNodeTransform};
 
 ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
+                                ASTNode* message_expr,
                                 SourceLocation location) {
   StaticAssertASTNode* node = ASTArenaAlloc(sizeof(StaticAssertASTNode));
   ASTNodeInit(&node->base, AST_OP(static_assert), NULL, location,
               &static_assert_vtbl);
   node->expr = expr;
   SetParent(expr, (ASTNode*)node, 0);
+  node->message_expr = message_expr;
+  SetParent(message_expr, (ASTNode*)node, 1);
   StringInit(&node->message,
              message != NULL ? message->value : "static assertion failed");
   return (ASTNode*)node;
@@ -3237,7 +3254,8 @@ static void StructuredBindingASTNodePrint(ASTNode* node, int indents, FILE* fp) 
   fprintf(fp, "structured_binding");
   for (size_t i = 0; i < binding->names->length; i++) {
     String* name = binding->names->value.p[i];
-    fprintf(fp, "%s%s", i == 0 ? " [" : ", ",
+    fprintf(fp, "%s%s%s", i == 0 ? " [" : ", ",
+            binding->pack_index == (int)i ? "..." : "",
             name != NULL ? name->value : "<null>");
   }
   fprintf(fp, "]\n");
@@ -3275,6 +3293,8 @@ static ASTNode* StructuredBindingASTNodeClone(
   for (size_t i = 0; i < from->symbols->length; i++) {
     VectorAppend(to->symbols, from->symbols->value.p[i]);
   }
+  to->pack_index = from->pack_index;
+  to->condition_symbol = from->condition_symbol;
   to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
   return func(&to->base, data);
 }
@@ -3304,7 +3324,7 @@ static ASTNodeVirtuals structured_binding_vtbl = {
     StructuredBindingASTNodeTransform};
 
 ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
-                                     Vector* symbols,
+                                     Vector* symbols, int pack_index,
                                      ASTNode* initializer,
                                      SourceLocation location) {
   StructuredBindingASTNode* node =
@@ -3314,6 +3334,8 @@ ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
   node->declared_type = declared_type;
   node->names = names;
   node->symbols = symbols;
+  node->pack_index = pack_index;
+  node->condition_symbol = NULL;
   node->initializer = initializer;
   if (initializer != NULL) {
     initializer->parent = (ASTNode*)node;
@@ -4354,6 +4376,7 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       StaticAssertASTNode* n = ASTArenaAlloc(sizeof(StaticAssertASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &static_assert_vtbl);
       StringInit(&n->message, NULL);
+      n->message_expr = NULL;
       return &n->base;
     }
     case kASTShapeIf: {

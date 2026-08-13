@@ -8,6 +8,7 @@
 
 #include "statement_semantics.h"
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -979,7 +980,13 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   }
   ASTNodeDelete(expr);
   if (value == 0) {
-    SemanticError((ASTNode*)node, "%s", node->message.value);
+    String message;
+    StringInit(&message, node->message.value);
+    if (node->message_expr == NULL ||
+        SyntaxEvaluateStaticAssertMessage(node->message_expr, &message)) {
+      SemanticError((ASTNode*)node, "%s", message.value);
+    }
+    StringDestruct(&message);
   }
 }
 
@@ -1474,6 +1481,9 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+  if (node->expr != NULL && TypeIsStructOrUnion(node->expr->type)) {
+    SemanticConvertCXXSwitchCondition(node->expr);
+  }
   node->expr =
       AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->expr);
   AnalyzeStatement(node->stmt);
@@ -2333,13 +2343,162 @@ static ASTNode* NewStructuredBindingElementAccess(Symbol* hidden,
   return member_access;
 }
 
+static Symbol* CloneStructuredBindingSymbol(Symbol* source, const char* name) {
+  TypeRecord* type =
+      source != NULL && source->type != NULL
+          ? TypeRecordCopy(source->type)
+          : NewTypeRecord(kTypeAuto, kQualPlain);
+  Symbol* replacement =
+      NewSymbol(name, type, source != NULL ? source->storage : STO(implicit));
+  if (source != NULL) {
+    replacement->flags = source->flags;
+    replacement->location = source->location;
+    replacement->alignment = source->alignment;
+    replacement->namespace_ = source->namespace_;
+    replacement->value = source->value;
+    replacement->structured_binding_pack_size =
+        source->structured_binding_pack_size;
+    AttributeListDestruct(&replacement->attributes);
+    AttributeListClone(&replacement->attributes, &source->attributes);
+  }
+  replacement->flags.is_parameter_pack = false;
+  replacement->structured_binding_pack_size = -2;
+  return replacement;
+}
+
+static void AddStructuredBindingSymbolMapping(Map* map, Symbol* source,
+                                              Symbol* replacement) {
+  if (map == NULL || source == NULL || replacement == NULL) {
+    return;
+  }
+  MapKeyValue kv;
+  kv.key.p = source;
+  kv.value.p = replacement;
+  MapInsert(map, kv);
+}
+
+static bool ExpandClonedStructuredBindingSymbols(
+    StructuredBindingASTNode* binding, size_t element_count, Map* symbol_map,
+    Map* pack_symbol_map, ASTNode* diagnostic_node) {
+  if (binding == NULL || symbol_map == NULL) {
+    return true;
+  }
+
+  int pack_index = binding->pack_index;
+  size_t logical_count = binding->symbols->length;
+  if (binding->names->length != logical_count) {
+    SemanticError(diagnostic_node,
+                  "Invalid structured binding name and symbol count");
+    return false;
+  }
+  if (pack_index < 0) {
+    Vector* replacements = NewVector();
+    for (size_t i = 0; i < logical_count; i++) {
+      Symbol* source = binding->symbols->value.p[i];
+      String* source_name =
+          i < binding->names->length ? binding->names->value.p[i] : NULL;
+      Symbol* replacement = CloneStructuredBindingSymbol(
+          source, source_name != NULL ? source_name->value : "__binding");
+      AddStructuredBindingSymbolMapping(symbol_map, source, replacement);
+      VectorAppend(replacements, replacement);
+    }
+    VectorDelete(binding->symbols);
+    binding->symbols = replacements;
+    return true;
+  }
+
+  if ((size_t)pack_index >= logical_count || logical_count == 0) {
+    SemanticError(diagnostic_node,
+                  "Invalid structured binding pack position");
+    return false;
+  }
+  size_t fixed_count = logical_count - 1;
+  if (fixed_count > element_count) {
+    SemanticError(
+        diagnostic_node,
+        "Structured binding declaration has more fixed names than elements");
+    return false;
+  }
+  size_t pack_length = element_count - fixed_count;
+  Vector* expanded_names = NewVector();
+  Vector* expanded_symbols = NewVector();
+  Vector* pack_elements = NewVector();
+
+  for (size_t element = 0; element < element_count; element++) {
+    bool is_pack_element =
+        element >= (size_t)pack_index &&
+        element < (size_t)pack_index + pack_length;
+    size_t logical_index =
+        is_pack_element
+            ? (size_t)pack_index
+            : (element < (size_t)pack_index
+                   ? element
+                   : element - pack_length + 1);
+    Symbol* source = binding->symbols->value.p[logical_index];
+    String* source_name = binding->names->value.p[logical_index];
+    String generated_name = {0};
+    const char* replacement_name = source_name->value;
+    if (is_pack_element) {
+      StringPrintf(&generated_name, "%s$pack%zu", source_name->value,
+                   element - (size_t)pack_index);
+      replacement_name = generated_name.value;
+    }
+    Symbol* replacement =
+        CloneStructuredBindingSymbol(source, replacement_name);
+    VectorAppend(expanded_names, NewString(replacement_name));
+    VectorAppend(expanded_symbols, replacement);
+    StringDestruct(&generated_name);
+    if (is_pack_element) {
+      VectorAppend(pack_elements, replacement);
+    } else {
+      AddStructuredBindingSymbolMapping(symbol_map, source, replacement);
+    }
+  }
+
+  Symbol* source_pack = binding->symbols->value.p[(size_t)pack_index];
+  if (pack_symbol_map != NULL) {
+    MapKeyValue kv;
+    kv.key.p = source_pack;
+    kv.value.p = pack_elements;
+    MapInsert(pack_symbol_map, kv);
+  } else {
+    VectorDelete(pack_elements);
+  }
+  VectorDestructWithContents(binding->names,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+  VectorDelete(binding->names);
+  VectorDelete(binding->symbols);
+  binding->names = expanded_names;
+  binding->symbols = expanded_symbols;
+  binding->pack_index = -1;
+  return true;
+}
+
 static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
-                                              size_t index) {
+                                              size_t index, Map* symbol_map,
+                                              Map* pack_symbol_map) {
   StructuredBindingASTNode* binding =
       (StructuredBindingASTNode*)list->declarations->value.p[index];
   SourceLocation location = binding->base.location;
-  Symbol* hidden =
-      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(binding->declared_type));
+  Symbol* hidden = binding->condition_symbol;
+  TypeRecord* hidden_type = TypeRecordCopy(binding->declared_type);
+  if (hidden != NULL && symbol_map != NULL) {
+    Symbol* source_hidden = hidden;
+    hidden = MapFindPointerKey(symbol_map, source_hidden);
+    if (hidden == NULL) {
+      hidden = CloneStructuredBindingSymbol(
+          source_hidden, source_hidden->name.value);
+      AddStructuredBindingSymbolMapping(symbol_map, source_hidden, hidden);
+    }
+    binding->condition_symbol = hidden;
+  }
+  if (hidden != NULL) {
+    SymbolSetType(hidden, hidden_type);
+    TypeRecordDelete(hidden_type);
+  } else {
+    hidden = SyntaxNewTemporary(&compiler->syntax, hidden_type);
+  }
   hidden->flags.is_local = true;
   hidden->flags.is_defined = true;
   hidden->location = location;
@@ -2352,6 +2511,9 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   list->declarations->value.p[index] = hidden_decl;
 
   AnalyzeStatement(hidden_decl);
+  if (binding->condition_symbol != NULL) {
+    hidden->structured_binding_pack_size = -2;
+  }
 
   TypeRecord* object_type = TypeIsReference(hidden->type) ? hidden->type->next
                                                          : hidden->type;
@@ -2374,6 +2536,13 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
     return false;
   }
 
+  if (!ExpandClonedStructuredBindingSymbols(
+          binding, element_count, symbol_map, pack_symbol_map, hidden_decl)) {
+    VectorDestruct(&elements);
+    ASTNodeDelete((ASTNode*)binding);
+    return false;
+  }
+
   if (element_count != binding->symbols->length) {
     SemanticError(hidden_decl,
                   "Structured binding declaration has wrong number of names");
@@ -2382,6 +2551,12 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
     return false;
   }
 
+  for (size_t i = 0; i < binding->symbols->length; i++) {
+    Symbol* symbol = binding->symbols->value.p[i];
+    if (symbol != NULL) {
+      symbol->structured_binding_pack_size = -2;
+    }
+  }
   for (size_t i = 0; i < binding->symbols->length; i++) {
     Symbol* sym = binding->symbols->value.p[i];
     SymbolSetType(sym, NewAutoReferenceType(false));
@@ -2407,6 +2582,71 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   }
   VectorDestruct(&elements);
   ASTNodeDelete((ASTNode*)binding);
+  return true;
+}
+
+ASTNode* SemanticMaterializeClonedStructuredBinding(
+    ASTNode* node, Map* symbol_map, Map* pack_symbol_map) {
+  if (node == NULL || node->op != AST_OP(structured_binding)) {
+    return node;
+  }
+  Vector* declarations = NewVector();
+  VectorAppend(declarations, node);
+  DeclarationListASTNode* list =
+      (DeclarationListASTNode*)NewDeclarationListASTNode(
+          declarations, node->location);
+  if (LowerStructuredBindingDeclaration(list, 0, symbol_map,
+                                        pack_symbol_map)) {
+    list->base.flags |= kASTAnalyzed;
+  }
+  return (ASTNode*)list;
+}
+
+static bool DetermineKnownStructuredBindingPackSize(
+    StructuredBindingASTNode* binding, size_t* pack_size) {
+  if (binding == NULL || binding->pack_index < 0 ||
+      binding->initializer == NULL || pack_size == NULL) {
+    return false;
+  }
+  ASTNode* value = binding->initializer;
+  if (value->op == AST_OP(expr_init)) {
+    value = ((ExpressionInitializerASTNode*)value)->expr;
+  }
+  TypeRecord* object_type = value != NULL ? value->type : NULL;
+  if (object_type == NULL || TypeIsUnknown(object_type) ||
+      TypeContainsAuto(object_type) ||
+      TypeContainsTemplateParameter(object_type)) {
+    return false;
+  }
+  if (TypeIsReference(object_type)) {
+    object_type = object_type->next;
+  }
+
+  size_t element_count = 0;
+  Vector elements;
+  VectorInit(&elements);
+  if (TypeIsFixedArray(object_type)) {
+    element_count = (size_t)object_type->info.array.size.fixed;
+  } else if (StructuredBindingTupleSize(object_type, &element_count)) {
+    // element_count was filled by the tuple protocol.
+  } else if (StructuredBindingDataMembers(object_type, &elements,
+                                          (ASTNode*)binding)) {
+    element_count = elements.length;
+  } else {
+    VectorDestruct(&elements);
+    return false;
+  }
+  VectorDestruct(&elements);
+
+  size_t fixed_count =
+      binding->symbols->length > 0 ? binding->symbols->length - 1 : 0;
+  if (fixed_count > element_count) {
+    SemanticError(
+        (ASTNode*)binding,
+        "Structured binding declaration has more fixed names than elements");
+    return false;
+  }
+  *pack_size = element_count - fixed_count;
   return true;
 }
 
@@ -2494,7 +2734,38 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
   for (size_t i = 0; i < node->declarations->length; i++) {
     ASTNode* decl = node->declarations->value.p[i];
     if (decl != NULL && decl->op == AST_OP(structured_binding)) {
-      LowerStructuredBindingDeclaration(node, i);
+      StructuredBindingASTNode* binding = (StructuredBindingASTNode*)decl;
+      if (binding->initializer != NULL) {
+        binding->initializer = AnalyzeExpression(binding->initializer);
+        if (binding->initializer != NULL) {
+          binding->initializer->parent = decl;
+          binding->initializer->child_id = 0;
+        }
+      }
+      bool dependent =
+          binding->pack_index >= 0 ||
+          ExpressionIsTemplateDependent(binding->initializer) ||
+          (binding->initializer != NULL &&
+           binding->initializer->type != NULL &&
+           (TypeIsUnknown(binding->initializer->type) ||
+            TypeContainsAuto(binding->initializer->type) ||
+            TypeContainsTemplateParameter(binding->initializer->type)));
+      if (binding->pack_index >= 0 &&
+          (size_t)binding->pack_index < binding->symbols->length) {
+        size_t pack_size = 0;
+        if (DetermineKnownStructuredBindingPackSize(binding, &pack_size)) {
+          Symbol* pack =
+              binding->symbols->value.p[(size_t)binding->pack_index];
+          if (pack != NULL) {
+            pack->structured_binding_pack_size = (int)pack_size;
+          }
+        }
+      }
+      if (dependent) {
+        decl->flags |= kASTAnalyzed;
+        continue;
+      }
+      LowerStructuredBindingDeclaration(node, i, NULL, NULL);
       continue;
     }
     AnalyzeStatement(decl);

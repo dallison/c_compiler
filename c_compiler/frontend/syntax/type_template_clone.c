@@ -682,6 +682,10 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   replacement->alignment = old_symbol->alignment;
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
+  replacement->structured_binding_pack_size =
+      old_symbol->structured_binding_pack_size;
+  AttributeListDestruct(&replacement->attributes);
+  AttributeListClone(&replacement->attributes, &old_symbol->attributes);
 
   MapKeyValue kv;
   kv.key.p = old_symbol;
@@ -746,6 +750,8 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
   replacement->alignment = old_symbol->alignment;
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
+  replacement->structured_binding_pack_size =
+      old_symbol->structured_binding_pack_size;
 
   MapKeyValue kv;
   kv.key.p = old_symbol;
@@ -3522,8 +3528,46 @@ static ASTNode* FoldClonedPackIndex(TemplateFunctionBodyClone* clone,
   return result != NULL ? result : node;
 }
 
+static TypeRecord* StructuredBindingInitializerType(
+    StructuredBindingASTNode* binding) {
+  if (binding == NULL || binding->initializer == NULL) {
+    return NULL;
+  }
+  ASTNode* initializer = binding->initializer;
+  if (initializer->op == AST_OP(expr_init)) {
+    ASTNode* expr = ((ExpressionInitializerASTNode*)initializer)->expr;
+    return expr != NULL ? expr->type : NULL;
+  }
+  return initializer->type;
+}
+
+static bool ClonedStructuredBindingStillDependent(
+    StructuredBindingASTNode* binding) {
+  TypeRecord* type = StructuredBindingInitializerType(binding);
+  return type == NULL || TypeIsUnknown(type) || TypeContainsAuto(type) ||
+         TypeContainsTemplateParameter(type) ||
+         ExpressionIsTemplateDependent(binding->initializer);
+}
+
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
+  if (node->op == AST_OP(structured_binding)) {
+    StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+    TypeRecord* declared =
+        SubstituteTemplateBodyType(clone, binding->declared_type);
+    RebaseTemplateParameterIndices(
+        declared, clone->rebase_template_parameter_base);
+    TypeRecordDelete(binding->declared_type);
+    binding->declared_type = declared;
+    ASTNodeSetType(node, declared);
+    node->flags &= ~kASTAnalyzed;
+    if (ClonedStructuredBindingStillDependent(binding)) {
+      return node;
+    }
+    ASTNodeVisit(binding->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+    return SemanticMaterializeClonedStructuredBinding(
+        node, &clone->symbol_map, &clone->pack_symbol_map);
+  }
   ASTNode* indexed = FoldClonedPackIndex(clone, node);
   if (indexed != node) {
     return indexed;
@@ -5641,6 +5685,7 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
         (node->type == NULL || !TypeIsFloatingPoint(node->type));
   }
   if (node == NULL ||
+      ExpressionIsTemplateDependent(node) ||
       (!stale_floating_arithmetic && node->type != NULL &&
        !TypeContainsAuto(node->type)) ||
       !IsReanalyzableClonedExpressionOpcode(node->op)) {
@@ -5700,6 +5745,115 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
     decl->initializer->child_id = 0;
   }
   ASTNodeSetType(node, decl->symbol->type);
+}
+
+typedef struct {
+  TemplateFunctionBodyClone* clone;
+  bool materialized;
+  Vector condition_symbols;  // Hidden objects for deferred binding conditions.
+} DeferredStructuredBindingContext;
+
+static ASTNode* MaterializeDeferredStructuredBinding(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  if (node == NULL || node->op != AST_OP(structured_binding)) {
+    return node;
+  }
+  DeferredStructuredBindingContext* context = data;
+  TemplateFunctionBodyClone* clone = context->clone;
+  StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+  if (ClonedStructuredBindingStillDependent(binding)) {
+    return node;
+  }
+  ASTNodeVisit(binding->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+  Symbol* source_condition = binding->condition_symbol;
+  context->materialized = true;
+  *action = kASTTransformSkipChildren;
+  ASTNode* result = SemanticMaterializeClonedStructuredBinding(
+      node, &clone->symbol_map, &clone->pack_symbol_map);
+  if (source_condition != NULL) {
+    Symbol* replacement =
+        MapFindPointerKey(&clone->symbol_map, source_condition);
+    if (replacement != NULL) {
+      VectorAppend(&context->condition_symbols, replacement);
+    }
+  }
+  return result;
+}
+
+static ASTNode* ExpandDeferredStructuredBindingPackUse(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)action;
+  if (node == NULL) {
+    return NULL;
+  }
+  DeferredStructuredBindingContext* context = data;
+  TemplateFunctionBodyClone* clone = context->clone;
+  if (node->op == AST_OP(pack_index)) {
+    return FoldClonedPackIndex(clone, node);
+  }
+  if ((node->flags & kASTFoldExpression) != 0) {
+    return ExpandClonedFoldExpression(clone, node);
+  }
+  if (node->op == AST_OP(sizeof)) {
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    if (sizeof_node->is_pack_size && sizeof_node->expr != NULL &&
+        sizeof_node->expr->op == AST_OP(identifier)) {
+      Symbol* pack = ((IdentifierASTNode*)sizeof_node->expr)->symbol;
+      Vector* replacements =
+          MapFindPointerKey(&clone->pack_symbol_map, pack);
+      if (replacements != NULL) {
+        return NewIntConstantASTNode((int64_t)replacements->length,
+                                     NewSizeTypeRecord(), node->location);
+      }
+    }
+  }
+  bool expanded_call = ExpandClonedCallPackActuals(clone, node);
+  ExpandClonedBracedInitializerPackElements(clone, node);
+  if (expanded_call) {
+    ASTNodeVisit(node, ClearAnalyzedFlagVisitor, 0, NULL);
+  }
+  return node;
+}
+
+static bool NodeNamesDeferredBindingCondition(ASTNode* node, void* data) {
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  Vector* condition_symbols = data;
+  for (size_t i = 0; i < condition_symbols->length; i++) {
+    if (condition_symbols->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static ASTNode* ReanalyzeDeferredStructuredBindingCondition(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  DeferredStructuredBindingContext* context = data;
+  ASTNode* condition = NULL;
+  if (node != NULL && node->op == AST_OP(if)) {
+    condition = ((IfStatementASTNode*)node)->cond;
+  } else if (node != NULL && node->op == AST_OP(while)) {
+    condition = ((CombinedStatementASTNode*)node)->cond;
+  } else if (node != NULL && node->op == AST_OP(switch)) {
+    condition = ((SwitchStatementASTNode*)node)->expr;
+  }
+  if (condition == NULL ||
+      !ASTNodeAny(condition, NodeNamesDeferredBindingCondition,
+                  &context->condition_symbols)) {
+    return node;
+  }
+  ASTNodeVisit(node, ClearAnalyzedFlagVisitor, 0, NULL);
+  if (node->op == AST_OP(switch)) {
+    SwitchStatementASTNode* switch_node = (SwitchStatementASTNode*)node;
+    VectorClear(&switch_node->cases);
+    switch_node->default_node = NULL;
+  }
+  *action = kASTTransformSkipChildren;
+  AnalyzeStatement(node);
+  return node;
 }
 
 static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
@@ -5893,6 +6047,23 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
   ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
+  DeferredStructuredBindingContext deferred_binding = {
+      .clone = &clone, .materialized = false};
+  VectorInit(&deferred_binding.condition_symbols);
+  body = ASTNodeVisitAndTransform(
+      body, MaterializeDeferredStructuredBinding, &deferred_binding);
+  if (deferred_binding.materialized) {
+    RewriteTemplateBodyIdentifiers(body, &clone.symbol_map);
+    body = ASTNodeVisitAndTransform(
+        body, ExpandDeferredStructuredBindingPackUse, &deferred_binding);
+    ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+    ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
+    body =
+        ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
+    body = ASTNodeVisitAndTransform(
+        body, ReanalyzeDeferredStructuredBindingCondition, &deferred_binding);
+  }
+  VectorDestruct(&deferred_binding.condition_symbols);
   body = ASTNodeVisitAndTransform(body, RebuildClonedCallResultConversion,
                                   NULL);
   body = ASTNodeVisitAndTransform(

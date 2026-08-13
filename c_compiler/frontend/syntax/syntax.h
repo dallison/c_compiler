@@ -50,6 +50,7 @@ typedef struct Syntax {
   bool parsing_template_declaration;  // Parsing declaration after template<...>.
   bool parsing_template_specialization;  // Parsing declaration after template<>.
   bool parsing_template_argument;  // Parsing expression inside template args.
+  bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.
@@ -143,11 +144,15 @@ bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol);
 // positioned at `operator`.
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
 ASTNode* SyntaxParseStaticAssert(Syntax* syntax);
+bool SyntaxEvaluateStaticAssertMessage(ASTNode* message_expr, String* message);
 // Parses a C++ 'friend' declaration appearing inside the body of class
 // 'befriending'.  Handles friend class declarations ('friend class X;' and
 // 'friend X;') as well as friend function declarations and inline friend
 // function definitions, recording the granted friendships on 'befriending'.
 void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending);
+// Parses the optional C++26 reason following an already-consumed `delete`
+// function-body token.
+void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func);
 // Registers a fully-substituted instantiated friend function in namespace 'ns'
 // (merging overloads), returning the symbol that persists in scope.  Used when
 // instantiating a class template's deferred friend functions.

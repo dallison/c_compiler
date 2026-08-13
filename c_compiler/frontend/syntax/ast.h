@@ -390,6 +390,8 @@ struct ConstraintExpr;
 #define kASTTemporaryCleanupCall (1ULL << 38)  // Compiler-generated end-of-lifetime destructor call.
 #define kASTReferencesParameterPack (1ULL << 39)  // Parsed expression names a pack, even if semantic analysis consumes its template arguments.
 #define kASTCXXFunctionalConstruction (1ULL << 40)  // Identifier was parsed as a class type followed by a functional-construction argument list.
+#define kASTDeferredRangeContents (1ULL << 41)  // `*begin` in a dependent range-for before iterator auto deduction.
+#define kASTDeletedFunctionDiagnosed (1ULL << 42)  // Deleted-use diagnostic already emitted for this expression.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -679,9 +681,11 @@ typedef struct {
   ASTNode base;
   ASTNode* expr;
   String message;
+  ASTNode* message_expr;  // C++26 user-generated message, or NULL.
 } StaticAssertASTNode;
 
 ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
+                                ASTNode* message_expr,
                                 SourceLocation location);
 
 // If statement with condition, if and else parts.  The else part is optional.
@@ -788,11 +792,13 @@ typedef struct {
   TypeRecord* declared_type;  // Type pattern before the [x, y] binding list.
   Vector* names;              // String* binding names.
   Vector* symbols;            // Symbol* binding symbols; owned by symbol table.
+  int pack_index;              // Slot introduced by `...name`, or -1.
+  Symbol* condition_symbol;    // Hidden object when used as a condition.
   ASTNode* initializer;
 } StructuredBindingASTNode;
 
 ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
-                                     Vector* symbols,
+                                     Vector* symbols, int pack_index,
                                      ASTNode* initializer,
                                      SourceLocation location);
 

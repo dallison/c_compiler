@@ -170,6 +170,18 @@ expect_compile cxx26_mode \
 #if __cpp_pack_indexing != 202311L
 #error expected pack indexing feature macro
 #endif
+#if __cpp_structured_bindings != 202411L
+#error expected C++26 structured bindings feature macro
+#endif
+#if __cpp_variadic_friend != 202403L
+#error expected variadic friend feature macro
+#endif
+#if __cpp_deleted_function != 202403L
+#error expected deleted function feature macro
+#endif
+#if __cpp_static_assert != 202306L
+#error expected user-generated static_assert message feature macro
+#endif
 int main(void) { return 0; }' \
   -std=c++26
 expect_compile cxx2c_mode_alias \
@@ -178,6 +190,133 @@ expect_compile cxx2c_mode_alias \
 #endif
 int main(void) { return 0; }' \
   -std=c++2c
+
+expect_compile cxx26_variadic_friend \
+  'struct Audit;
+template<class... Friends>
+struct vault {
+  friend Friends..., Audit;
+};
+template<class Owner, class Tag> struct receiver {};
+template<class... Tags>
+struct dispatcher {
+  friend receiver<dispatcher, Tags>...;
+};
+struct nested_friend { struct type {}; };
+template<class... Owners>
+struct nested_owner {
+  friend typename Owners::type...;
+};
+vault<Audit> v;
+dispatcher<int, char> d;
+nested_owner<nested_friend> n;
+int main(void) { return 0; }' \
+  -std=c++26
+expect_compile cxx26_friend_type_list \
+  'struct Second;
+struct owner {
+  friend class First, Second;
+};
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx23_no_variadic_friend \
+  'template<class... Friends>
+struct owner { friend Friends...; };
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx26_variadic_friend_requires_pack \
+  'template<class Friend>
+struct owner { friend Friend...; };
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_friend_type_own_template_parameter \
+  'struct owner {
+  template<class... Friends>
+  friend Friends...;
+};
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_friend_function_still_requires_typename \
+  'template<class T>
+struct owner { friend T::type function(); };
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx23_no_friend_type_only_context \
+  'template<class T>
+struct owner { friend T::type; };
+int main(void) { return 0; }' \
+  -std=c++23
+expect_compile cxx23_no_variadic_friend_macro \
+  '#ifdef __cpp_variadic_friend
+#error variadic friend macro must not be defined before C++26
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_compile cxx26_deleted_function_reason \
+  'void legacy(int) = delete("use the long overload");
+template<class T>
+void unsupported(T) = delete("this type is unsupported");
+struct move_only {
+  move_only() = default;
+  move_only(const move_only&) = delete("use move construction");
+  void reset(int) = delete("call reset() with no arguments");
+};
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx23_no_deleted_function_reason \
+  'void legacy() = delete("requires C++26");
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx26_deleted_function_reason_requires_string \
+  'void legacy() = delete(42);
+int main(void) { return 0; }' \
+  -std=c++26
+expect_compile cxx23_no_deleted_function_macro \
+  '#ifdef __cpp_deleted_function
+#error deleted function macro must not be defined before C++26
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_compile cxx26_static_assert_generated_message \
+  'struct unused_message {};
+static_assert(true, unused_message{});
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx23_no_static_assert_generated_message \
+  'struct message {};
+static_assert(false, message{});
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx26_static_assert_message_size_constant \
+  'struct message {
+  constexpr const char* data() const { return "bad"; }
+  const char* size() const { return "three"; }
+};
+static_assert(false, message{});
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_static_assert_message_size_nonconstant \
+  'struct message {
+  constexpr const char* data() const { return "bad"; }
+  unsigned size() const { return 3; }
+};
+static_assert(false, message{});
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_static_assert_message_data_pointer \
+  'struct message {
+  constexpr int data() const { return 0; }
+  constexpr unsigned size() const { return 0; }
+};
+static_assert(false, message{});
+int main(void) { return 0; }' \
+  -std=c++26
+expect_compile cxx23_static_assert_macro \
+  '#if __cpp_static_assert != 201411L
+#error expected C++17 static_assert feature macro value
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
 
 expect_compile cxx26_pack_indexing \
   'template<class T> struct type_tag;
@@ -281,6 +420,97 @@ expect_compile cxx23_no_pack_indexing_macro \
 #endif
 int main(void) { return 0; }' \
   -std=c++23
+expect_compile cxx17_structured_bindings_macro \
+  '#if __cpp_structured_bindings != 201606L
+#error expected C++17 structured bindings feature macro
+#endif
+int main(void) { return 0; }' \
+  -std=c++17
+expect_compile cxx23_structured_bindings_macro \
+  '#if __cpp_structured_bindings != 201606L
+#error expected pre-C++26 structured bindings feature macro
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_compile cxx14_no_structured_bindings_macro \
+  '#ifdef __cpp_structured_bindings
+#error structured bindings macro must not be defined before C++17
+#endif
+int main(void) { return 0; }' \
+  -std=c++14
+expect_compile cxx26_structured_binding_attributes \
+  'struct pair { int first, second; };
+int main() {
+  auto [first [[maybe_unused]], second] = pair{1, 2};
+  return second - 2;
+}' \
+  -std=c++26
+expect_fail cxx23_no_structured_binding_attributes \
+  'struct pair { int first, second; };
+int main() {
+  auto [first [[maybe_unused]], second] = pair{1, 2};
+  return second - 2;
+}' \
+  -std=c++23
+expect_fail cxx23_no_structured_binding_pack \
+  'struct triple { int a, b, c; };
+template<class T> int f(T value) {
+  auto [...items] = value;
+  return (items + ...);
+}
+int main() { return f(triple{1, 2, 3}); }' \
+  -std=c++23
+expect_fail cxx26_structured_binding_pack_requires_template \
+  'struct triple { int a, b, c; };
+int main() {
+  auto [...items] = triple{1, 2, 3};
+  return (items + ...);
+}' \
+  -std=c++26
+expect_fail cxx26_structured_binding_multiple_packs \
+  'struct triple { int a, b, c; };
+template<class T> int f(T value) {
+  auto [...left, ...right] = value;
+  return 0;
+}
+int main() { return f(triple{1, 2, 3}); }' \
+  -std=c++26
+expect_fail cxx26_structured_binding_too_many_fixed \
+  'struct pair { int a, b; };
+template<class T> int f(T value) {
+  auto [a, b, c, ...rest] = value;
+  return 0;
+}
+int main() { return f(pair{1, 2}); }' \
+  -std=c++26
+expect_fail cxx26_structured_binding_pack_index_out_of_bounds \
+  'struct pair { int a, b; };
+template<class T> int f(T value) {
+  auto [...items] = value;
+  return items...[2];
+}
+int main() { return f(pair{1, 2}); }' \
+  -std=c++26
+expect_fail cxx26_structured_binding_undecomposable \
+  'template<class T> int f(T value) {
+  auto [...items] = value;
+  return 0;
+}
+int main() { return f(1); }' \
+  -std=c++26
+expect_fail cxx26_structured_binding_inaccessible_member \
+  'class hidden_pair {
+    int a;
+    int b;
+  public:
+    hidden_pair(int x, int y) : a(x), b(y) {}
+  };
+template<class T> int f(T value) {
+  auto [...items] = value;
+  return 0;
+}
+int main() { return f(hidden_pair(1, 2)); }' \
+  -std=c++26
 expect_fail cxx26_type_pack_index_out_of_bounds \
   'template<class... Ts> using third_t = Ts...[2];
 third_t<int, char> value;

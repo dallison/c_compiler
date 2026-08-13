@@ -71,6 +71,9 @@ void StructMemberDelete(StructMember* member);
 // Records a C++ 'friend class X;' relationship: members of friend_class may
 // access the private and protected members of str.  Duplicates are ignored.
 void StructAddFriendClass(Struct* str, Struct* friend_class);
+CXXFriendTypeDeclaration* NewCXXFriendTypeDeclaration(
+    TypeRecord* type, bool is_pack_expansion, SourceLocation location);
+void CXXFriendTypeDeclarationDelete(CXXFriendTypeDeclaration* declaration);
 // Records a C++ 'friend <function>;' relationship: the named function may
 // access the private and protected members of str.  Duplicates are ignored.
 void StructAddFriendFunction(Struct* str, Symbol* friend_function);

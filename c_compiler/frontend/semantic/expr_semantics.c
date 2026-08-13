@@ -4433,19 +4433,47 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
 
 static void CheckDeletedFunctionUse(Symbol* function, ASTNode* use) {
   if (!CompilerIsCXX() || function == NULL || function->type == NULL ||
-      !TypeIsFunction(function->type)) {
+      use == NULL ||
+      !TypeIsFunction(function->type) ||
+      (use->flags & kASTDeletedFunctionDiagnosed) != 0) {
     return;
   }
   TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, function);
-  if (!function->type->info.function.is_deleted) {
+  TypeRecord* deleted_type = function->type;
+  if (!deleted_type->info.function.is_deleted &&
+      function->value.func_defn != NULL &&
+      function->value.func_defn->type != NULL &&
+      TypeIsFunction(function->value.func_defn->type) &&
+      function->value.func_defn->type->info.function.is_deleted) {
+    deleted_type = function->value.func_defn->type;
+  }
+  if (!deleted_type->info.function.is_deleted &&
+      function->type->info.function.template_origin != NULL) {
+    Symbol* origin = function->type->info.function.template_origin;
+    if (origin->type != NULL && TypeIsFunction(origin->type) &&
+        origin->type->info.function.is_deleted) {
+      deleted_type = origin->type;
+    } else if (origin->value.func_defn != NULL &&
+               origin->value.func_defn->type != NULL &&
+               TypeIsFunction(origin->value.func_defn->type) &&
+               origin->value.func_defn->type->info.function.is_deleted) {
+      deleted_type = origin->value.func_defn->type;
+    }
+  }
+  if (!deleted_type->info.function.is_deleted) {
     return;
   }
+  use->flags |= kASTDeletedFunctionDiagnosed;
   String function_name;
   StringInit(&function_name, NULL);
   SymbolFunctionDiagnosticName(function, &function_name);
-  if (function->type->info.function.is_implicitly_deleted) {
+  if (deleted_type->info.function.is_implicitly_deleted) {
     SemanticError(use, "Use of implicitly deleted function %s",
                   function_name.value);
+  } else if (deleted_type->info.function.deleted_reason != NULL) {
+    SemanticError(
+        use, "Use of deleted function %s: %s", function_name.value,
+        deleted_type->info.function.deleted_reason->value);
   } else {
     SemanticError(use, "Use of deleted function %s", function_name.value);
   }
@@ -8640,8 +8668,15 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         } else {
           ASTNodeSetType((ASTNode*)node, return_type);
         }
+        if (result_is_concrete) {
+          CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);
+        }
         TypeRecordDelete(return_type);
         return (ASTNode*)node;
+      }
+      if (id->symbol != NULL && !id->symbol->flags.is_overloaded &&
+          id->symbol->overload_next == NULL) {
+        CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);
       }
     }
     node->base.flags |= kASTDependentFunctorCall;
@@ -9634,6 +9669,8 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   // result dependent rather than diagnosing it here.
   if (CompilerIsCXX() && node->sub->type != NULL &&
       (TypeIsUnknown(node->sub->type) ||
+       ((((ASTNode*)node)->flags & kASTDeferredRangeContents) != 0 &&
+        TypeContainsAuto(node->sub->type)) ||
        TypeContainsTemplateParameter(node->sub->type))) {
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
@@ -9711,6 +9748,12 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
     }
     if (!valid_pack) {
       SemanticError((ASTNode*)node, "sizeof... requires a parameter pack");
+    }
+    if (node->expr != NULL && node->expr->op == AST_OP(identifier)) {
+      Symbol* pack = ((IdentifierASTNode*)node->expr)->symbol;
+      if (pack != NULL && pack->structured_binding_pack_size >= 0) {
+        node->base.value.ivalue = pack->structured_binding_pack_size;
+      }
     }
     ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
     return;

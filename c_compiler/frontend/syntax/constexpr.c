@@ -1657,6 +1657,14 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
     if (binding == NULL && id->symbol != NULL &&
+        !id->symbol->flags.value_set &&
+        id->symbol->constexpr_initializer != NULL &&
+        (TypeIsFixedArray(id->symbol->type) ||
+         TypeIsStructOrUnion(id->symbol->type))) {
+      ConstexprEvaluateObjectConstantForSymbol(
+          id->symbol, id->symbol->constexpr_initializer);
+    }
+    if (binding == NULL && id->symbol != NULL &&
         id->symbol->flags.value_set &&
         (TypeIsFixedArray(id->symbol->type) ||
          TypeIsStructOrUnion(id->symbol->type))) {
@@ -2232,6 +2240,45 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
 bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
                                     ConstexprObject** object) {
   return EvaluateConstexprObjectAddress(ctx, node, object);
+}
+
+bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
+                                        String* result) {
+  if (pointer == NULL || result == NULL) {
+    return false;
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  ConstexprValue address = {0};
+  bool evaluated = EvaluateConstexprAddressValue(&ctx, pointer, &address) &&
+                   address.is_address;
+  ConstexprObject* object = address.address_object;
+  size_t index = address.address_index;
+  if (evaluated && object == NULL && address.address_slot != NULL &&
+      address.address_slot->is_object) {
+    object = address.address_slot->object;
+    index = 0;
+  }
+  bool ok = evaluated && object != NULL && index <= object->slots.length &&
+            count <= object->slots.length - index;
+  if (ok) {
+    StringClear(result);
+    for (size_t i = 0; i < count; i++) {
+      ConstexprValue* value =
+          ConstexprObjectSlot(object, index + i);
+      if (value == NULL || value->is_object || value->is_address ||
+          value->is_floating) {
+        ok = false;
+        break;
+      }
+      StringAppendChar(result, (char)value->ivalue);
+    }
+  }
+  ConstEvalContextDestruct(&ctx);
+  if (!ok) {
+    StringClear(result);
+  }
+  return ok;
 }
 
 Symbol* ConstexprFunctionDefinition(Symbol* symbol) {

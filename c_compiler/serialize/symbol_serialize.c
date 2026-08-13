@@ -20,6 +20,7 @@
 #include "ast.h"
 #include "concepts.h"
 #include "constraint_serialize.h"
+#include "constexpr.h"
 #include "serialize_common.h"
 #include "symbol.h"
 #include "symbol_table.h"
@@ -90,6 +91,7 @@ enum {
   kSym_is_template_template_parameter = 55,
   kSym_template_template_parameters = 56,
   kSym_template_constructor_initializers = 57,
+  kSym_constexpr_initializer = 58,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -153,6 +155,7 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_template_template_parameters, "template_template_parameters"},
     {kSym_template_constructor_initializers,
      "template_constructor_initializers"},
+    {kSym_constexpr_initializer, "constexpr_initializer"},
 };
 
 //
@@ -568,8 +571,16 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kSym_dependent_value_template_parameter_index,
                  s->dependent_value_template_parameter_index);
   WireWriteUint64(buf, kSym_location, (uint64_t)s->location);
+  bool constexpr_object =
+      s->flags.value_set && s->type != NULL &&
+      (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type));
+  if (constexpr_object && s->constexpr_initializer == NULL) {
+    s->constexpr_initializer =
+        ConstexprObjectInitializerForSymbol(s, s->location);
+  }
   if (s->type == NULL || !TypeIsFunction(s->type)) {
-    WireWriteInt64(buf, kSym_value_ivalue, s->value.ivalue);
+    WireWriteInt64(buf, kSym_value_ivalue,
+                   constexpr_object ? 0 : s->value.ivalue);
   }
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);
   SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol, s->alias_target);
@@ -587,6 +598,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   }
   SWriteRef(ctx, buf, kSym_default_argument, kSerialKindAST,
             s->default_argument);
+  SWriteRef(ctx, buf, kSym_constexpr_initializer, kSerialKindAST,
+            s->constexpr_initializer);
   WriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
   if (s->variable_template != NULL) {
     WriteVariableTemplate(ctx, buf, kSym_variable_template,
@@ -797,6 +810,10 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_default_argument:
         s->default_argument = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
+      case kSym_constexpr_initializer:
+        s->constexpr_initializer =
+            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        break;
       case kSym_attributes:
         ReadAttributeVector(ctx, buf, &s->attributes);
         break;
@@ -854,6 +871,11 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
     if (s->type->info.function.body != NULL && s->value.func_defn == NULL) {
       s->value.func_defn = s;
     }
+  }
+  if (s->constexpr_initializer != NULL && s->type != NULL &&
+      (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type))) {
+    s->flags.value_set = false;
+    s->value.other = NULL;
   }
   TypeRecordIncRef(s->type);
   return !WireBufferHasError(buf);

@@ -13,9 +13,11 @@
 #include <stdio.h>
 #include <string.h>
 #include "concepts.h"
+#include "constexpr.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
@@ -1489,6 +1491,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_declaration = false;
   syntax->parsing_template_specialization = false;
   syntax->parsing_template_argument = false;
+  syntax->parsing_friend_type_specifier = false;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
@@ -1908,8 +1911,19 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
+    bool structured_binding_dependent =
+        id->symbol != NULL &&
+        id->symbol->structured_binding_pack_size >= -1;
+    if (structured_binding_dependent &&
+        id->symbol->flags.is_parameter_pack &&
+        id->symbol->structured_binding_pack_size >= 0 &&
+        node->parent != NULL && node->parent->op == AST_OP(sizeof) &&
+        ((SizeofASTNode*)node->parent)->is_pack_size) {
+      structured_binding_dependent = false;
+    }
     if (id->symbol != NULL &&
-        (id->symbol->template_parameter_index >= 0 ||
+        (structured_binding_dependent ||
+         id->symbol->template_parameter_index >= 0 ||
          TypeContainsTemplateParameter(id->symbol->type) ||
          StaticAssertTemplateArgumentVectorContainsTemplateParameter(
              id->template_arguments))) {
@@ -1952,21 +1966,113 @@ static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
   return cloned;
 }
 
+static ASTNode* AnalyzeStaticAssertMessageMemberCall(ASTNode* message_expr,
+                                                     const char* member_name) {
+  ASTNode* receiver =
+      ASTNodeClone(message_expr, IdentityCloneNode, NULL, NULL);
+  if (receiver == NULL) {
+    return NULL;
+  }
+  ASTNodeVisit(receiver, ClearStaticAssertExprAnalysis, 0, NULL);
+  ASTNode* member = NewStringConstantASTNode(
+      NewString(member_name), NULL, message_expr->location);
+  ASTNode* access =
+      NewBinaryASTNode(AST_OP(dot), NULL, message_expr->location, receiver,
+                       member);
+  ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, message_expr->location,
+                                   access, NewVector());
+  compiler->constant_evaluation_required_depth++;
+  call = AnalyzeExpression(call);
+  compiler->constant_evaluation_required_depth--;
+  return call;
+}
+
+static ASTNode* ConvertStaticAssertMessageResult(ASTNode* expression,
+                                                 TypeRecord* target) {
+  if (expression == NULL || target == NULL) {
+    ASTNodeDelete(expression);
+    TypeRecordDelete(target);
+    return NULL;
+  }
+  ASTNode* wrapper =
+      NewExpressionStatementASTNode(expression, expression->location);
+  NormalConversion(expression, target);
+  expression = ((ExpressionStatementASTNode*)wrapper)->expr;
+  bool converted =
+      expression != NULL && expression->type != NULL &&
+      TypeEqual(expression->type, target);
+  expression = expression != NULL ? ASTNodeMove(expression) : NULL;
+  ASTNodeDelete(wrapper);
+  TypeRecordDelete(target);
+  if (!converted) {
+    ASTNodeDelete(expression);
+    return NULL;
+  }
+  return expression;
+}
+
+bool SyntaxEvaluateStaticAssertMessage(ASTNode* message_expr, String* message) {
+  if (message_expr == NULL || message == NULL) {
+    return false;
+  }
+  ASTNode* size_call =
+      AnalyzeStaticAssertMessageMemberCall(message_expr, "size");
+  size_call =
+      ConvertStaticAssertMessageResult(size_call, NewSizeTypeRecord());
+  int64_t size = -1;
+  bool size_ok = size_call != NULL &&
+                 EvaluateIntegerExpression(size_call, &size) && size >= 0;
+  ASTNodeDelete(size_call);
+  if (!size_ok) {
+    SemanticError(
+        message_expr,
+        "static_assert message size() must be an integral constant expression");
+    return false;
+  }
+
+  ASTNode* data_call =
+      AnalyzeStaticAssertMessageMemberCall(message_expr, "data");
+  TypeRecord* char_type =
+      NewTypeRecordWithSize(kTypeChar, kQualConst);
+  data_call = ConvertStaticAssertMessageResult(
+      data_call, NewPointerTo(kQualPlain, char_type));
+  bool data_type_ok = data_call != NULL;
+  if (!data_type_ok) {
+    ASTNodeDelete(data_call);
+    SemanticError(message_expr,
+                  "static_assert message data() must be convertible to "
+                  "'const char*'");
+    return false;
+  }
+  bool data_ok =
+      ConstexprEvaluateCharacterSequence(data_call, (size_t)size, message);
+  ASTNodeDelete(data_call);
+  if (!data_ok) {
+    SemanticError(
+        message_expr,
+        "static_assert message data() must be a constant expression");
+    return false;
+  }
+  return true;
+}
+
 ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // static_assert
   SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
 
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
-  bool dependent = syntax->current_template_parameter_count > 0 &&
-                   ExpressionIsTemplateDependent(expr);
 
   String message = {0};
   StringInit(&message, "static assertion failed");
+  ASTNode* message_expr = NULL;
   if (LexMatch(syntax->lex, TOK(comma))) {
     if (LexLookingAt(syntax->lex, TOK(string))) {
       StringSetString(&message, &syntax->lex->spelling);
       LexNextToken(syntax->lex);
+    } else if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      message_expr =
+          SyntaxParseSingleExpression(syntax, TC(closebra));
     } else {
       SyntaxError(syntax, "static_assert message must be a string literal");
     }
@@ -1974,8 +2080,14 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
 
+  bool dependent =
+      syntax->current_template_parameter_count > 0 &&
+      (ExpressionIsTemplateDependent(expr) ||
+       (message_expr != NULL &&
+        ExpressionIsTemplateDependent(message_expr)));
   if (dependent) {
-    ASTNode* node = NewStaticAssertASTNode(expr, &message, location);
+    ASTNode* node =
+        NewStaticAssertASTNode(expr, &message, message_expr, location);
     StringDestruct(&message);
     return node;
   }
@@ -1983,6 +2095,7 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   ASTNode* evaluated = EvaluateStaticAssertExpression(expr);
   ASTNodeDelete(expr);
   if (evaluated == NULL) {
+    ASTNodeDelete(message_expr);
     StringDestruct(&message);
     SyntaxError(syntax, "static_assert expression is not an integer constant expression");
     return NULL;
@@ -1991,19 +2104,25 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   int64_t value = 0;
   if (!EvaluateIntegerExpression(evaluated, &value)) {
     if (ExpressionIsTemplateDependent(evaluated)) {
-      ASTNode* node = NewStaticAssertASTNode(evaluated, &message, location);
+      ASTNode* node =
+          NewStaticAssertASTNode(evaluated, &message, message_expr, location);
       StringDestruct(&message);
       return node;
     }
     ASTNodeDelete(evaluated);
+    ASTNodeDelete(message_expr);
     StringDestruct(&message);
     SyntaxError(syntax, "static_assert expression is not an integer constant expression");
     return NULL;
   }
 
   if (value == 0) {
-    SyntaxError(syntax, "%s", message.value);
+    if (message_expr == NULL ||
+        SyntaxEvaluateStaticAssertMessage(message_expr, &message)) {
+      SyntaxError(syntax, "%s", message.value);
+    }
   }
+  ASTNodeDelete(message_expr);
   StringDestruct(&message);
   ASTNodeDelete(evaluated);
   return NULL;
@@ -2237,6 +2356,9 @@ static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
        current = current->next) {
     int parameter_index = -1;
     TypeIsTemplateParameterPlaceholder(current, &parameter_index);
+    if (parameter_index < 0 && current->dependent_member_name != NULL) {
+      parameter_index = current->template_parameter_index;
+    }
     for (size_t i = 0;
          parameter_index >= 0 &&
          syntax->current_template_parameters != NULL &&
@@ -5041,6 +5163,34 @@ void SyntaxFlushPendingVPtrInitializers(Struct* owner) {
   pending_vptr_inits.length = out;
 }
 
+void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func) {
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    return;
+  }
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SyntaxError(syntax, "deleted function reasons require C++26");
+  }
+  if (!LexLookingAt(syntax->lex, TOK(string)) ||
+      syntax->lex->literal_encoding != kLiteralEncodingNone ||
+      syntax->lex->ud_suffix.length != 0) {
+    SyntaxError(syntax,
+                "deleted function reason must be an ordinary string literal");
+    if (!LexLookingAt(syntax->lex, TOK(rparen)) &&
+        !LexLookingAt(syntax->lex, TOK(semicolon))) {
+      LexNextToken(syntax->lex);
+    }
+  } else {
+    if (func->info.function.deleted_reason != NULL) {
+      StringDelete(func->info.function.deleted_reason);
+    }
+    func->info.function.deleted_reason =
+        NewStringWithLength(syntax->lex->spelling.value,
+                            syntax->lex->spelling.length);
+    LexNextToken(syntax->lex);
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
+}
+
 static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
                                                    TypeRecord* func) {
   if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
@@ -5057,6 +5207,7 @@ static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
   if (LexMatch(syntax->lex, TOK(delete))) {
     func->info.function.is_deleted = true;
     func->info.function.is_explicitly_deleted = true;
+    SyntaxParseCXXDeletedFunctionReason(syntax, func);
     return;
   }
   SyntaxError(syntax, "function specifier must be '= default' or '= delete'");
@@ -5398,6 +5549,80 @@ static void AddFunctionAssociatedConstraint(TypeRecord* func,
 static void MoveTemplateParameterConstraints(Vector* parameters,
                                              ConstraintExpr** target);
 
+static bool FriendTypeReferencesTemplateParameterAtOrAfter(
+    TypeRecord* type, int parameter_base) {
+  for (TypeRecord* current = type; current != NULL;
+       current = current->next) {
+    if (current->template_parameter_index >= parameter_base) {
+      return true;
+    }
+    for (size_t i = 0;
+         current->template_arguments != NULL &&
+         i < current->template_arguments->length; i++) {
+      TemplateArgument* argument =
+          current->template_arguments->value.p[i];
+      if (argument == NULL) {
+        continue;
+      }
+      if (argument->template_parameter_index >= parameter_base ||
+          FriendTypeReferencesTemplateParameterAtOrAfter(
+              argument->type, parameter_base)) {
+        return true;
+      }
+      for (size_t j = 0;
+           argument->pack_arguments != NULL &&
+           j < argument->pack_arguments->length; j++) {
+        TemplateArgument* element = argument->pack_arguments->value.p[j];
+        if (element != NULL &&
+            (element->template_parameter_index >= parameter_base ||
+             FriendTypeReferencesTemplateParameterAtOrAfter(
+                 element->type, parameter_base))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static void RecordFriendTypeSpecifier(Syntax* syntax, Struct* befriending,
+                                      TypeRecord* type,
+                                      bool is_pack_expansion,
+                                      SourceLocation location) {
+  if (syntax->parsing_template_declaration &&
+      FriendTypeReferencesTemplateParameterAtOrAfter(
+          type, befriending->defining_template_scope_count)) {
+    SyntaxError(
+        syntax,
+        "friend type declaration cannot use its own template parameters");
+    return;
+  }
+  bool dependent =
+      type != NULL &&
+      (TypeContainsTemplateParameter(type) || TypeIsUnknown(type));
+  if (is_pack_expansion && !CXXTypeContainsParameterPack(syntax, type)) {
+    SyntaxError(syntax,
+                "friend type pack expansion requires a template parameter pack");
+    return;
+  }
+  if (dependent || is_pack_expansion) {
+    VectorAppend(&befriending->friend_type_declarations,
+                 NewCXXFriendTypeDeclaration(type, is_pack_expansion,
+                                             location));
+    return;
+  }
+  if (type != NULL && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL) {
+    Struct* friend_class =
+        ResolveFriendClassFromEnclosingClasses(befriending, type);
+    StructAddFriendClass(
+        befriending,
+        friend_class != NULL ? friend_class : type->info.struct_info);
+  }
+  // [class.friend]: a friend-type-specifier that does not designate a class
+  // type is ignored.
+}
+
 void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   LexMatch(syntax->lex, TOK(friend));
 
@@ -5418,29 +5643,77 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   bool is_constinit = false;
   bool is_explicit = false;
   TypeRecord* type = NULL;
+  bool saved_friend_type_context = syntax->parsing_friend_type_specifier;
+  bool used_friend_type_only_context =
+      CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      LexLookingAt(syntax->lex, TOK(identifier)) &&
+      SyntaxCurrentIdentifierFollowedByScopeOperator(syntax);
+  syntax->parsing_friend_type_specifier =
+      CompilerCXXAtLeast(kLanguageStandardCXX26);
   ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
                             &is_consteval, &is_constinit, &is_explicit, &type,
                             &attributes, kParsingFileScope);
+  syntax->parsing_friend_type_specifier = saved_friend_type_context;
 
   TypeRecordIncRef(type);
 
-  // 'friend class X;' / 'friend struct X;' / 'friend X;' — a type-specifier
-  // with no declarator names a class to befriend.
-  if (LexLookingAt(syntax->lex, TOK(semicolon))) {
-    if (type != NULL && TypeIsStructOrUnion(type) &&
-        type->info.struct_info != NULL) {
-      Struct* friend_class =
-          ResolveFriendClassFromEnclosingClasses(befriending, type);
-      StructAddFriendClass(
-          befriending,
-          friend_class != NULL ? friend_class : type->info.struct_info);
-    } else {
-      SyntaxError(syntax,
-                  "friend declaration does not name a class or a function");
+  // C++26 friend-type-declaration:
+  //   friend T;
+  //   friend T, U;
+  //   friend Ts...;
+  // The first form predates C++26; comma-separated and expanded specifiers do
+  // not.  Dependent type patterns are retained on the class template and
+  // resolved for each specialization.
+  if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
+      LexLookingAt(syntax->lex, TOK(comma)) ||
+      LexLookingAt(syntax->lex, TOK(ellipsis))) {
+    bool another = true;
+    while (another) {
+      SourceLocation location = syntax->lex->current_token_location;
+      bool is_pack_expansion = LexMatch(syntax->lex, TOK(ellipsis));
+      bool has_comma = LexLookingAt(syntax->lex, TOK(comma));
+      if ((is_pack_expansion || has_comma) &&
+          !CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(
+            syntax,
+            "variadic and comma-separated friend types require C++26");
+      }
+      RecordFriendTypeSpecifier(syntax, befriending, type,
+                                is_pack_expansion, location);
+      TypeRecordDelete(type);
+      type = NULL;
+      AttributeListDestruct(&attributes);
+
+      another = LexMatch(syntax->lex, TOK(comma));
+      if (!another) {
+        break;
+      }
+      VectorInit(&attributes);
+      storage = STO(implicit);
+      is_inline = false;
+      is_constexpr = false;
+      is_consteval = false;
+      is_constinit = false;
+      is_explicit = false;
+      syntax->parsing_friend_type_specifier =
+          CompilerCXXAtLeast(kLanguageStandardCXX26);
+      ParseDeclarationSpecifier(
+          syntax, &storage, &is_inline, &is_constexpr, &is_consteval,
+          &is_constinit, &is_explicit, &type, &attributes,
+          kParsingFileScope);
+      syntax->parsing_friend_type_specifier = saved_friend_type_context;
+      TypeRecordIncRef(type);
+      if (type == NULL) {
+        SyntaxError(syntax, "expected a friend type specifier");
+        AttributeListDestruct(&attributes);
+        break;
+      }
     }
-    LexMatch(syntax->lex, TOK(semicolon));
-    TypeRecordDelete(type);
-    AttributeListDestruct(&attributes);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    if (type != NULL) {
+      TypeRecordDelete(type);
+      AttributeListDestruct(&attributes);
+    }
     syntax->local_tag_stack = saved_tag_stack;
     return;
   }
@@ -5449,6 +5722,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   // belongs to the nearest enclosing namespace scope, not to the class, so we
   // declare it there and merge with any existing overloads exactly as a normal
   // namespace-scope function declaration would.
+  if (used_friend_type_only_context &&
+      TypeContainsTemplateParameter(type)) {
+    SyntaxError(syntax,
+                "dependent friend function return type requires 'typename'");
+  }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingFileScope);
   parser.is_inline = is_inline;
@@ -6259,6 +6537,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
         if (sym->type->info.function.is_deleted) {
           old_sym->type->info.function.is_deleted = true;
+          old_sym->type->info.function.is_explicitly_deleted =
+              sym->type->info.function.is_explicitly_deleted;
+          if (old_sym->type->info.function.deleted_reason != NULL) {
+            StringDelete(old_sym->type->info.function.deleted_reason);
+          }
+          old_sym->type->info.function.deleted_reason =
+              sym->type->info.function.deleted_reason != NULL
+                  ? NewStringWithLength(
+                        sym->type->info.function.deleted_reason->value,
+                        sym->type->info.function.deleted_reason->length)
+                  : NULL;
         }
         if (sym->flags.is_weak) {
           old_sym->flags.is_weak = true;
@@ -9932,18 +10221,57 @@ static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
   return init;
 }
 
-static Vector* ParseStructuredBindingNames(Syntax* syntax) {
+static Vector* ParseStructuredBindingNames(Syntax* syntax, Vector* symbols,
+                                           int* pack_index) {
   if (!LexMatch(syntax->lex, TOK(lsquare))) {
     return NULL;
   }
   Vector* names = NewVector();
+  *pack_index = -1;
   while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+    bool is_pack = LexMatch(syntax->lex, TOK(ellipsis));
+    if (is_pack) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax,
+                    "Structured binding packs require C++26");
+      }
+      if (*pack_index >= 0) {
+        SyntaxError(syntax,
+                    "Structured binding declaration cannot contain multiple packs");
+      } else {
+        *pack_index = (int)names->length;
+      }
+    }
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected structured binding name");
       break;
     }
-    VectorAppend(names, NewString(syntax->lex->spelling.value));
+    String* name = NewString(syntax->lex->spelling.value);
+    Symbol* sym = NewSymbol(name->value, NewTypeRecord(kTypeAuto, kQualPlain),
+                            STO(implicit));
+    sym->flags.is_local = true;
+    sym->flags.is_defined = true;
+    sym->flags.is_parameter_pack = is_pack;
+    sym->structured_binding_pack_size = -1;
+    sym->location = syntax->lex->current_token_location;
     LexNextToken(syntax->lex);
+    if (SyntaxLookingAtCXXAttribute(syntax)) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax,
+                    "Attributes on structured bindings require C++26");
+      }
+      SyntaxParseCXXAttributes(syntax, &sym->attributes);
+      SyntaxApplyDeclarationAttributes(sym);
+    }
+    if (!SyntaxAddSymbol(syntax, sym)) {
+      SyntaxError(syntax, "Duplicate structured binding name: %s",
+                  name->value);
+      StringDelete(name);
+      SymbolDelete(sym);
+    } else {
+      VectorAppend(names, name);
+      VectorAppend(symbols, sym);
+    }
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
@@ -9995,10 +10323,18 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
     LexCheckpointDestruct(&checkpoint);
     return false;
   }
-  Vector* names = ParseStructuredBindingNames(syntax);
+  Vector* symbols = NewVector();
+  int pack_index = -1;
+  Vector* names =
+      ParseStructuredBindingNames(syntax, symbols, &pack_index);
   LexCheckpointDestruct(&checkpoint);
   if (names == NULL || names->length == 0) {
     SyntaxError(syntax, "Structured binding declaration requires at least one name");
+  }
+  if (pack_index >= 0 && syntax->current_template_parameter_count == 0) {
+    SyntaxError(
+        syntax,
+        "Structured binding pack can only appear in a templated context");
   }
   if (StorageIs(storage, STO(extern))) {
     SyntaxError(syntax, "Structured binding declaration cannot be extern");
@@ -10017,24 +10353,9 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
   } else {
     SyntaxError(syntax, "Structured binding declaration requires an initializer");
   }
-  Vector* symbols = NewVector();
-  for (size_t i = 0; names != NULL && i < names->length; i++) {
-    String* name = names->value.p[i];
-    Symbol* sym = NewSymbol(name->value, NewTypeRecord(kTypeAuto, kQualPlain),
-                            STO(implicit));
-    sym->flags.is_local = true;
-    sym->flags.is_defined = true;
-    sym->location = syntax->lex->current_token_location;
-    if (!SyntaxAddSymbol(syntax, sym)) {
-      SyntaxError(syntax, "Duplicate structured binding name: %s",
-                  name->value);
-      SymbolDelete(sym);
-    } else {
-      VectorAppend(symbols, sym);
-    }
-  }
   VectorAppend(declarations,
                NewStructuredBindingASTNode(declared_type, names, symbols,
+                                           pack_index,
                                            initializer,
                                            syntax->lex->current_token_location));
   return true;
@@ -10820,6 +11141,11 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(typename):
       return CompilerIsCXX();
     case TOK(identifier): {
+      if (CompilerIsCXX() && syntax->parsing_friend_type_specifier &&
+          SyntaxCurrentIdentifierFollowedByScopeOperator(syntax) &&
+          !SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+        return true;
+      }
       if (CompilerIsCXX() &&
           SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(syntax)) {
         LexCheckpoint checkpoint;

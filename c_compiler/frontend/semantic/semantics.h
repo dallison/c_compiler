@@ -48,6 +48,10 @@ typedef enum {
 // contains the conversion operation.
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx);
 
+// Applies the unique non-explicit conversion function from a class-valued
+// switch condition to an integral or enumeration type.
+bool SemanticConvertCXXSwitchCondition(ASTNode* from);
+
 void NormalConversion(ASTNode* from, TypeRecord* to);
 
 void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,

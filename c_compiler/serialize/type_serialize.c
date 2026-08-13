@@ -178,6 +178,7 @@ enum {
   kFn_is_volatile_member = 49,
   kFn_has_explicit_object_parameter = 50,
   kFn_is_decltype_auto_return_deduced = 51,
+  kFn_deleted_reason = 52,
 };
 
 //
@@ -201,6 +202,15 @@ enum {
   kMemberUsing_location = 4,
   kMemberUsing_is_pack_expansion = 5,
   kMemberUsing_qualifier_names_constructor = 6,
+};
+
+//
+// CXXFriendTypeDeclaration (inline sub-message) field numbers.
+//
+enum {
+  kFriendType_type = 1,
+  kFriendType_location = 2,
+  kFriendType_is_pack_expansion = 3,
 };
 
 //
@@ -303,6 +313,7 @@ enum {
   kStruct_partial_specializations = 32,
   kStruct_deduction_guides = 33,
   kStruct_member_using_declarations = 34,
+  kStruct_friend_type_declarations = 35,
 };
 
 static const WireFieldDesc kStructFields[] = {
@@ -340,6 +351,7 @@ static const WireFieldDesc kStructFields[] = {
     {kStruct_partial_specializations, "partial_specializations"},
     {kStruct_deduction_guides, "deduction_guides"},
     {kStruct_member_using_declarations, "member_using_declarations"},
+    {kStruct_friend_type_declarations, "friend_type_declarations"},
 };
 
 // ---------------------------------------------------------------------------
@@ -872,6 +884,7 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kFn_is_auto_return_deduced, f->is_auto_return_deduced);
   WireWriteBool(out, kFn_is_decltype_auto_return_deduced,
                 f->is_decltype_auto_return_deduced);
+  SWriteStringPtr(ctx, out, kFn_deleted_reason, f->deleted_reason);
   WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
   WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
   SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
@@ -1027,6 +1040,9 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_is_decltype_auto_return_deduced:
         WireReadBool(in, &f->is_decltype_auto_return_deduced);
+        break;
+      case kFn_deleted_reason:
+        f->deleted_reason = SReadStringPtr(ctx, in);
         break;
       case kFn_is_deduction_guide:
         WireReadBool(in, &f->is_deduction_guide);
@@ -1252,6 +1268,86 @@ static void ReadMemberUsingVector(DeserializeContext* ctx, WireBuffer* in,
       }
     }
     VectorAppend(out, decl);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CXXFriendTypeDeclaration vector (inline).
+// ---------------------------------------------------------------------------
+static void WriteFriendTypeVector(SerializeContext* ctx, WireBuffer* buf,
+                                  int field, Vector* declarations) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 16);
+  size_t length = declarations == NULL ? 0 : declarations->length;
+  WireWriteRawVarint(&tmp, (uint64_t)length);
+  for (size_t i = 0; i < length; i++) {
+    CXXFriendTypeDeclaration* declaration =
+        declarations->value.p[i];
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 16);
+    SWriteRef(ctx, &elem, kFriendType_type, kSerialKindType,
+              declaration->type);
+    WireWriteUint64(&elem, kFriendType_location,
+                    (uint64_t)declaration->location);
+    WireWriteBool(&elem, kFriendType_is_pack_expansion,
+                  declaration->is_pack_expansion);
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(buf, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+static void ReadFriendTypeVector(DeserializeContext* ctx, WireBuffer* in,
+                                 Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elem_len;
+    if (!WireReadBytes(&sub, &elem, &elem_len)) {
+      return;
+    }
+    WireBuffer reader;
+    WireBufferInitReader(&reader, elem, elem_len);
+    CXXFriendTypeDeclaration* declaration =
+        calloc(1, sizeof(CXXFriendTypeDeclaration));
+    while (!WireBufferEof(&reader) && !WireBufferHasError(&reader)) {
+      int field;
+      WireType wire_type;
+      if (!WireReadTag(&reader, &field, &wire_type)) {
+        break;
+      }
+      switch (field) {
+        case kFriendType_type:
+          declaration->type =
+              (TypeRecord*)SReadRef(ctx, &reader, kSerialKindType);
+          break;
+        case kFriendType_location: {
+          uint64_t location;
+          WireReadUint64(&reader, &location);
+          declaration->location = (SourceLocation)location;
+          break;
+        }
+        case kFriendType_is_pack_expansion:
+          WireReadBool(&reader, &declaration->is_pack_expansion);
+          break;
+        default:
+          WireSkip(&reader, wire_type);
+          break;
+      }
+    }
+    VectorAppend(out, declaration);
   }
 }
 
@@ -1755,6 +1851,8 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                   &s->deduction_guides);
   WriteMemberUsingVector(ctx, buf, kStruct_member_using_declarations,
                          &s->member_using_declarations);
+  WriteFriendTypeVector(ctx, buf, kStruct_friend_type_declarations,
+                        &s->friend_type_declarations);
   return !WireBufferHasError(buf);
 }
 
@@ -1880,6 +1978,9 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kStruct_member_using_declarations:
         ReadMemberUsingVector(ctx, buf, &s->member_using_declarations);
+        break;
+      case kStruct_friend_type_declarations:
+        ReadFriendTypeVector(ctx, buf, &s->friend_type_declarations);
         break;
       default:
         WireSkip(buf, wt);

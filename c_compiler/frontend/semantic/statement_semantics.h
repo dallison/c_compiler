@@ -15,6 +15,13 @@
 void AnalyzeStatement(ASTNode* node);
 void CheckUnusedLabels(ASTNode* body);
 
+// Materializes a structured binding retained in a dependent template body.
+// Fixed binding symbols are recorded in symbol_map and a structured-binding
+// pack is recorded as its concrete element-symbol vector in pack_symbol_map.
+// Takes ownership of node and returns an analyzed declaration-list statement.
+ASTNode* SemanticMaterializeClonedStructuredBinding(
+    ASTNode* node, Map* symbol_map, Map* pack_symbol_map);
+
 // Completes return type deduction for a function whose body has been analyzed
 // but whose placeholder return type is still unresolved.  A body with no
 // operand-carrying `return` deduces as if from `return;` at the closing brace

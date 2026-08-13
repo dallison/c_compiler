@@ -454,6 +454,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       StaticAssertASTNode* a = (StaticAssertASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, a->expr);
       SWriteStringVal(ctx, buf, 17, &a->message);
+      SWriteRef(ctx, buf, 18, kSerialKindAST, a->message_expr);
       break;
     }
     case kASTShapeIf: {
@@ -793,6 +794,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         SReadStringVal(ctx, buf, &a->message);
+        return;
+      }
+      if (field == 18) {
+        a->message_expr = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         return;
       }
       break;

@@ -78,6 +78,71 @@ static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
 static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
                                                    Symbol* alias, Vector* args,
                                                    bool emit_constraint_error);
+static void ApplyFriendTypeDeclarations(TypeParser* parser, Struct* target,
+                                        Struct* source, Vector* args);
+
+static void ResolveInstantiatedFriendType(TypeParser* parser, Struct* target,
+                                          TypeRecord* type,
+                                          bool is_pack_expansion,
+                                          SourceLocation location) {
+  if (type == NULL) {
+    return;
+  }
+  if (TypeContainsTemplateParameter(type) || TypeIsUnknown(type)) {
+    VectorAppend(&target->friend_type_declarations,
+                 NewCXXFriendTypeDeclaration(type, is_pack_expansion,
+                                             location));
+    TypeRecordDelete(type);
+    return;
+  }
+  type = TypeMaterializeClassTemplateSpecialization(parser->syntax, type);
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    // [class.friend]: non-class friend type specifiers are ignored.
+    TypeRecordDelete(type);
+    return;
+  }
+  StructAddFriendClass(target, type->info.struct_info);
+  TypeRecordDelete(type);
+}
+
+static void ApplyFriendTypeDeclarations(TypeParser* parser, Struct* target,
+                                        Struct* source, Vector* args) {
+  for (size_t i = 0; i < source->friend_type_declarations.length; i++) {
+    CXXFriendTypeDeclaration* declaration =
+        source->friend_type_declarations.value.p[i];
+    int pack_index = -1;
+    size_t pack_length = 0;
+    bool can_expand =
+        declaration->is_pack_expansion &&
+        FindPackExpansionInType(declaration->type, args, &pack_index,
+                                &pack_length);
+    if (can_expand) {
+      for (size_t j = 0; j < pack_length; j++) {
+        TemplateArgument* pack = args->value.p[pack_index];
+        TemplateArgument* element = pack->pack_arguments->value.p[j];
+        Vector* element_args =
+            TemplateArgumentVectorCopyWithPackElement(args, pack_index,
+                                                      element);
+        TypeRecord* friend_type = SubstituteTemplateParameters(
+            parser, declaration->type, element_args);
+        ResolveInstantiatedFriendType(parser, target, friend_type,
+                                      /*is_pack_expansion=*/false,
+                                      declaration->location);
+        VectorDeleteWithContents(
+            element_args,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      continue;
+    }
+
+    TypeRecord* friend_type =
+        SubstituteTemplateParameters(parser, declaration->type, args);
+    ResolveInstantiatedFriendType(
+        parser, target, friend_type, declaration->is_pack_expansion,
+        declaration->location);
+  }
+}
 TypeRecord* TypeInstantiateClassTemplateQuiet(Syntax* syntax, Symbol* templ,
                                               Vector* args);
 static bool TypeInstantiateVariableTemplateConstantImpl(
@@ -191,6 +256,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   }
   parser->template_substitution_source = from;
   parser->template_substitution_target = str;
+  ApplyFriendTypeDeclarations(parser, str, from, args);
 
   for (size_t i = 0; i < from->bases.length; i++) {
     CXXBaseSpecifier* template_base = from->bases.value.p[i];
@@ -637,6 +703,11 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
+  func->info.function.deleted_reason =
+      from->info.function.deleted_reason != NULL
+          ? NewStringWithLength(from->info.function.deleted_reason->value,
+                                from->info.function.deleted_reason->length)
+          : NULL;
   func->info.function.cxx_special_member_kind =
       from->info.function.cxx_special_member_kind;
   func->info.function.is_user_declared = from->info.function.is_user_declared;
@@ -6220,6 +6291,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   CopyCXXBaseVirtualMembers(str);
   LayoutCXXBaseSpecifiers(str);
   ApplyCXXMemberUsingDeclarations(parser, str, source_struct, source_args);
+  ApplyFriendTypeDeclarations(parser, str, source_struct, source_args);
 
   // Member function bodies are cloned in a second pass, after every member
   // function signature has been added to `str`, so that a member's body may

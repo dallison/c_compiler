@@ -311,6 +311,10 @@ void TypeRecordDelete(TypeRecord* record) {
       record->info.function.coroutine_promise_type = NULL;
       TypeRecordDelete(record->info.function.coroutine_frame_type);
       record->info.function.coroutine_frame_type = NULL;
+      if (record->info.function.deleted_reason != NULL) {
+        StringDelete(record->info.function.deleted_reason);
+        record->info.function.deleted_reason = NULL;
+      }
       VectorDestructWithContents(&record->info.function.prototype,
                                  (VectorElementDestructor)SymbolDelete,
                                  /*free_element=*/false);
@@ -857,6 +861,12 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
     VectorInit(&r->info.function.template_instantiations);
     r->info.function.associated_constraint =
         ConceptsCloneConstraint(record->info.function.associated_constraint);
+    r->info.function.deleted_reason =
+        record->info.function.deleted_reason != NULL
+            ? NewStringWithLength(
+                  record->info.function.deleted_reason->value,
+                  record->info.function.deleted_reason->length)
+            : NULL;
     TypeRecordIncRef(r->info.function.coroutine_promise_type);
     TypeRecordIncRef(r->info.function.coroutine_frame_type);
   }
@@ -1096,6 +1106,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_noexcept = false;
   t->info.function.is_auto_return_deduced = false;
   t->info.function.is_decltype_auto_return_deduced = false;
+  t->info.function.deleted_reason = NULL;
   t->info.function.is_deduction_guide = false;
   t->info.function.is_coroutine = false;
   t->info.function.coroutine_promise_type = NULL;
@@ -1324,6 +1335,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->friend_classes);
   VectorInit(&s->friend_functions);
   VectorInit(&s->member_using_declarations);
+  VectorInit(&s->friend_type_declarations);
   VectorInit(&s->virtual_bases);
   VectorInit(&s->members);
   VectorInit(&s->virtual_members);
@@ -1382,6 +1394,10 @@ static void StructTeardownMembers(Struct* s) {
       &s->member_using_declarations,
       (VectorElementDestructor)CXXMemberUsingDeclarationDelete,
       /*free_element=*/false);
+  VectorDestructWithContents(
+      &s->friend_type_declarations,
+      (VectorElementDestructor)CXXFriendTypeDeclarationDelete,
+      /*free_element=*/false);
   VectorDestructWithContents(&s->virtual_bases,
                              (VectorElementDestructor)CXXVirtualBaseInfoDelete,
                              /*free_element=*/false);
@@ -1425,6 +1441,25 @@ void StructAddFriendClass(Struct* str, Struct* friend_class) {
     }
   }
   VectorAppend(&str->friend_classes, friend_class);
+}
+
+CXXFriendTypeDeclaration* NewCXXFriendTypeDeclaration(
+    TypeRecord* type, bool is_pack_expansion, SourceLocation location) {
+  CXXFriendTypeDeclaration* declaration =
+      malloc(sizeof(CXXFriendTypeDeclaration));
+  declaration->type = TypeRecordCopy(type);
+  declaration->is_pack_expansion = is_pack_expansion;
+  declaration->location = location;
+  return declaration;
+}
+
+void CXXFriendTypeDeclarationDelete(
+    CXXFriendTypeDeclaration* declaration) {
+  if (declaration == NULL) {
+    return;
+  }
+  TypeRecordDelete(declaration->type);
+  free(declaration);
 }
 
 void StructAddFriendFunction(Struct* str, Symbol* friend_function) {

@@ -64,6 +64,9 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
 bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
                                     ConstexprObject** object);
+// Evaluates a constant char pointer and copies `count` code units from it.
+bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
+                                        String* result);
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);

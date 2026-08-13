@@ -570,7 +570,8 @@ static bool TypeReferencesTemplateParameterAtLeast(TypeRecord* type,
 }
 
 static TypeRecord* BuildDependentMemberTemplateTypename(
-    TypeParser* parser, FullyQualifiedIdentifier* name) {
+    TypeParser* parser, FullyQualifiedIdentifier* name,
+    bool require_member_template_id) {
   if (parser == NULL || name == NULL ||
       parser->syntax->current_template_parameters == NULL ||
       name->components.length < 2 ||
@@ -600,7 +601,7 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
       break;
     }
   }
-  if (!has_member_template_id) {
+  if (require_member_template_id && !has_member_template_id) {
     return NULL;
   }
 
@@ -879,7 +880,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             typename_name.template_arguments.length ==
                 typename_name.components.length) {
           type_record =
-              BuildDependentMemberTemplateTypename(parser, &typename_name);
+              BuildDependentMemberTemplateTypename(
+                  parser, &typename_name,
+                  /*require_member_template_id=*/true);
           if (type_record != NULL) {
             type |= type_record->type;
             handled_dependent_template_member = true;
@@ -1090,7 +1093,11 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       }
       LexCheckpointDestruct(&typename_name_start);
       FullyQualifiedIdentifierDestruct(&typename_name);
-    } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
+    } else if (allow_typedef &&
+               (SyntaxCurrentTokenStartsQualifiedName(parser->syntax) ||
+                (parser->syntax->parsing_friend_type_specifier &&
+                 SyntaxCurrentIdentifierFollowedByScopeOperator(
+                     parser->syntax)))) {
       FullyQualifiedIdentifier typedef_name;
       FullyQualifiedIdentifierInit(&typedef_name);
       SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
@@ -1180,6 +1187,16 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           VectorDestructWithContents(args,
                                      (VectorElementDestructor)TemplateArgumentDelete,
                                      /*free_element=*/false);
+        }
+      } else if (parser->syntax->parsing_friend_type_specifier) {
+        type_record = BuildDependentMemberTemplateTypename(
+            parser, &typedef_name,
+            /*require_member_template_id=*/false);
+        if (type_record != NULL) {
+          type |= type_record->type;
+        } else {
+          SyntaxError(parser->syntax, "Unknown type name %s",
+                      typedef_name.spelling.value);
         }
       } else {
         SyntaxError(parser->syntax, "Unknown type name %s",

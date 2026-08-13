@@ -1116,6 +1116,48 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
   return ambiguous ? NULL : best;
 }
 
+bool SemanticConvertCXXSwitchCondition(ASTNode* from) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL ||
+      !TypeIsStructOrUnion(from->type) ||
+      from->type->info.struct_info == NULL) {
+    return false;
+  }
+
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectConversionOperators(from->type->info.struct_info, &candidates);
+  TypeRecord* target = NULL;
+  size_t viable_count = 0;
+  for (size_t i = 0; i < candidates.length; i++) {
+    StructMember* member = candidates.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->type == NULL || member->symbol->flags.is_template) {
+      continue;
+    }
+    TypeRecord* function = member->symbol->type;
+    if (!ConversionOperatorAllowedInContext(function, function->next,
+                                            kConvertNormal)) {
+      continue;
+    }
+    TypeRecord* result = function->next;
+    if (TypeIsReference(result)) {
+      result = result->next;
+    }
+    if (result == NULL ||
+        (!TypeIsIntegral(result) && !TypeIsEnum(result))) {
+      continue;
+    }
+    viable_count++;
+    target = result;
+  }
+  VectorDestruct(&candidates);
+  if (viable_count != 1 || target == NULL) {
+    return false;
+  }
+  SemanticConvertType(from, TypeRecordCopy(target), kConvertNormal);
+  return true;
+}
+
 // Select a conversion operator template of `str` (or a base) whose target-type
 // deduction against `to` succeeds, returning its member symbol via *out_templ
 // and the deduced template arguments via *out_args (caller owns).  The

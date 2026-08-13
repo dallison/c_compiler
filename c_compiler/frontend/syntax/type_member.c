@@ -1087,6 +1087,7 @@ void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
   if (LexMatch(parser->lex, TOK(delete))) {
     func->info.function.is_deleted = true;
     func->info.function.is_explicitly_deleted = true;
+    SyntaxParseCXXDeletedFunctionReason(parser->syntax, func);
     return;
   }
   if (!LexLookingAt(parser->lex, TOK(number)) || parser->lex->number != 0) {

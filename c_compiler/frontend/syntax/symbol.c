@@ -175,6 +175,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->alias_target = NULL;
   sym->overload_next = NULL;
   sym->default_argument = NULL;
+  sym->constexpr_initializer = NULL;
   sym->variable_template = NULL;
   sym->alias_template = NULL;
   sym->template_template_parameters = NULL;
@@ -197,6 +198,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->is_imported_module_symbol = false;
   sym->destruction_complete = false;
   sym->is_read = false;
+  sym->structured_binding_pack_size = -2;
   sym->is_nrvo = false;
   VectorInit(&sym->imported_function_template_parameters_backup);
   sym->cached_target_symbol_name = NULL;
@@ -261,6 +263,7 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
   ASTNodeDelete(symbol->default_argument);
+  ASTNodeDelete(symbol->constexpr_initializer);
   if (symbol->variable_template != NULL) {
     ASTNodeDelete(symbol->variable_template->initializer);
     VectorDestructWithContents(
@@ -939,6 +942,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->overload_next = NULL;
   new_sym->default_argument =
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
+  new_sym->constexpr_initializer =
+      ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
   new_sym->template_template_parameters =
       TemplateParameterVectorCopy(sym->template_template_parameters);
   new_sym->location = sym->location;
@@ -946,6 +951,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->template_parameter_index = sym->template_parameter_index;
   new_sym->dependent_value_template_parameter_index =
       sym->dependent_value_template_parameter_index;
+  new_sym->structured_binding_pack_size =
+      sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep

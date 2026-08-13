@@ -187,6 +187,17 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(
           p, "__cpp_deduction_guides",
           CompilerCXXAtLeast(kLanguageStandardCXX23) ? "202207L" : "201703L");
+      PreprocessorDefineMacro(
+          p, "__cpp_structured_bindings",
+          CompilerCXXAtLeast(kLanguageStandardCXX26) ? "202411L" : "201606L");
+    }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+      PreprocessorDefineMacro(
+          p, "__cpp_static_assert",
+          CompilerCXXAtLeast(kLanguageStandardCXX26)
+              ? "202306L"
+              : (CompilerCXXAtLeast(kLanguageStandardCXX17) ? "201411L"
+                                                            : "200410L"));
     }
 
     // C++20 feature-test macros for language features implemented by DaveCC.
@@ -219,8 +230,10 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_named_character_escapes", "202207L");
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      PreprocessorDefineMacro(p, "__cpp_deleted_function", "202403L");
       PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");
       PreprocessorDefineMacro(p, "__cpp_pack_indexing", "202311L");
+      PreprocessorDefineMacro(p, "__cpp_variadic_friend", "202403L");
       PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
       PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");
       PreprocessorDefineMacro(p, "__STDC_EMBED_EMPTY__", "2");
