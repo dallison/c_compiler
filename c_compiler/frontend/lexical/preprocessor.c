@@ -9,7 +9,9 @@
 #include "preprocessor.h"
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <string.h>
@@ -17,7 +19,6 @@
 
 #if defined(__APPLE__)
 #include <dirent.h>
-#include <sys/stat.h>
 #endif
 
 #include "compiler.h"
@@ -26,6 +27,7 @@
 #include "expr_parser.h"
 #include "expr_semantics.h"
 #include "lex.h"
+#include "type_compare.h"
 
 // Forward declarations.
 static void Tokenize(Preprocessor* p, String* input, String* output, size_t start,
@@ -162,6 +164,9 @@ static void PredefineMacros(Preprocessor* p) {
       case kLanguageStandardCXX23:
         cplusplus = "202302L";
         break;
+      case kLanguageStandardCXX26:
+        cplusplus = "202603L";
+        break;
       default:
         break;
     }
@@ -212,6 +217,12 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_size_t_suffix", "202011L");
       PreprocessorDefineMacro(p, "__cpp_implicit_move", "202207L");
       PreprocessorDefineMacro(p, "__cpp_named_character_escapes", "202207L");
+    }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");
+      PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
+      PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");
+      PreprocessorDefineMacro(p, "__STDC_EMBED_EMPTY__", "2");
     }
   }
 
@@ -396,6 +407,7 @@ void PreprocessorInit(Preprocessor* p) {
   VectorInit(&p->macro_stack);
   SetInit(&p->pragma_once_files, ComparePragmaOncePath);
   p->is_compiled_in = true;
+  p->directive_produced_output = false;
 
 #ifndef DAVECC_SYSROOT_HDRS
 #error "Please define DAVECC_SYSROOT_HDRS to tell the compiler where the headers are"
@@ -462,6 +474,7 @@ void PreprocessorReset(Preprocessor* p) {
   }
   VectorClear(&p->macro_stack);
   SetClearWithContents(&p->pragma_once_files, free, false);
+  p->directive_produced_output = false;
   PredefineMacros(p);
 }
 
@@ -1817,16 +1830,16 @@ static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
 }
 
 
-// Given a path (vector of strings) and a filename, search the path
-// for the file and open it if found.  If it is found, sets the
-// filename string to the pathname.  Returns NULL if the file couldn't
-// be found or couldn't be opened due to permissions problems.
-static FILE* FindFileInPath(Vector* path, String* filename, size_t* start) {
+// Given a path (vector of strings) and a filename, search the path for the file
+// and open it in `mode` if found.  If it is found, sets the filename string to
+// the pathname.  Returns NULL if the file couldn't be found or opened.
+static FILE* FindFileInPath(Vector* path, String* filename, size_t* start,
+                            const char* mode) {
   for (size_t i = *start; i < path->length; i++) {
     String pathname = {0};
     StringPrintf(&pathname, "%s/%s", ((String*)path->value.p[i])->value,
                  filename->value);
-    FILE* fp = fopen(pathname.value, "r");
+    FILE* fp = fopen(pathname.value, mode);
     if (fp != NULL) {
       StringSetString(filename, &pathname);
       StringDestruct(&pathname);
@@ -2153,12 +2166,13 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   if (!system_include) {
     // Not a system include (#include "...") so search user include
     // paths.
-    fp = FindFileInPath(&p->user_include_paths, &filename, &path_index);
+    fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp = FindFileInPath(&p->system_include_paths, &filename, &path_index);
+    fp =
+        FindFileInPath(&p->system_include_paths, &filename, &path_index, "r");
     found_in_system_path = fp != NULL;
   }
   if (fp == NULL) {
@@ -2238,9 +2252,11 @@ static void UpdateState(Preprocessor* p) {
   p->is_compiled_in = true;
 }
 
-static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
-  static int true_value;
-  
+static bool EvaluatePreprocessorIntegerExpression(Preprocessor* p,
+                                                  String* expr_string,
+                                                  bool expand_macros,
+                                                  int64_t* result,
+                                                  bool* result_is_unsigned) {
   // Allow the lexical analyzer to see the controlling expression.
   p->is_compiled_in = true;
 
@@ -2250,6 +2266,7 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   LexInitFromString(&lex, p->lex->source->filename.value, expr_string, p);
   lex.source->lineno = lineno - 1;      // Will be incremented on first read.
   lex.preprocessor_mode = true;
+  lex.suppress_preprocessing = !expand_macros;
   lex.assembler_mode = p->lex->assembler_mode;
   LexNextToken(&lex);
   
@@ -2257,14 +2274,15 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   SyntaxInit(&syntax, &lex);
   bool prev_abort_on_error = abort_on_error;
   abort_on_error = true;
-  void* controlling_value = NULL;
+  bool evaluated = false;
   if (setjmp(error_abort_state) == 0) {
     ASTNode* expr = SyntaxParseExpression(&syntax, 0);
     if (expr != NULL) {
       expr = AnalyzeExpression(expr);
-      int64_t value;
-      if (EvaluateIntegerExpression(expr, &value)) {
-        controlling_value = value == 0 ? NULL : &true_value;
+      evaluated = EvaluateIntegerExpression(expr, result);
+      if (evaluated && result_is_unsigned != NULL) {
+        *result_is_unsigned =
+            expr->type != NULL && TypeIsUnsigned(expr->type);
       }
       // This expression AST is a throwaway used only to compute the #if
       // condition; release it so its type records aren't leaked.
@@ -2285,7 +2303,529 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   free(src);
   p->lex = prev_lex;
 
-  return controlling_value;
+  return evaluated;
+}
+
+static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
+  static int true_value;
+  int64_t value = 0;
+  if (!EvaluatePreprocessorIntegerExpression(p, expr_string, true, &value,
+                                             NULL)) {
+    return NULL;
+  }
+  return value == 0 ? NULL : &true_value;
+}
+
+typedef struct {
+  String filename;
+  bool system_resource;
+  bool unsupported_parameter;
+  bool has_limit;
+  bool has_prefix;
+  bool has_suffix;
+  bool has_if_empty;
+  uint64_t limit;
+  String prefix;
+  String suffix;
+  String if_empty;
+} EmbedRequest;
+
+static void EmbedRequestDestruct(EmbedRequest* request) {
+  StringDestruct(&request->filename);
+  StringDestruct(&request->prefix);
+  StringDestruct(&request->suffix);
+  StringDestruct(&request->if_empty);
+}
+
+static bool TokenSpellingEqual(TokenIterator* ti, const char* spelling) {
+  String actual = {0};
+  GetCurrentTokenSpelling(ti, &actual);
+  bool equal = StringEqual(&actual, spelling);
+  StringDestruct(&actual);
+  return equal;
+}
+
+// Collects a pp-balanced-token-seq from a parenthesized embed parameter.  The
+// iterator must initially point at the opening parenthesis and is left after
+// its matching close.  Delimiters inside literals are part of one literal token
+// and therefore do not participate in balancing.
+static bool CollectEmbedParameter(Preprocessor* p, TokenIterator* ti,
+                                  String* contents) {
+  StringInit(contents, NULL);
+  if (CurrentToken(ti) != PPTOK(openparen)) {
+    PreprocessorError(p, "Expected '(' after #embed parameter name");
+    return false;
+  }
+  MoveToNextToken(ti);
+
+  String delimiters = {0};
+  StringAppendChar(&delimiters, '(');
+  while (CurrentToken(ti) != PPTOK(end)) {
+    PreprocessingToken token = CurrentToken(ti);
+
+    String spelling = {0};
+    if (token == PPTOK(openparen)) {
+      StringAppendChar(&spelling, '(');
+    } else if (token == PPTOK(closeparen)) {
+      StringAppendChar(&spelling, ')');
+    } else if (token == PPTOK(other_char) ||
+               token == PPTOK(other_string)) {
+      GetCurrentTokenSpelling(ti, &spelling);
+    }
+
+    for (size_t i = 0; i < spelling.length; i++) {
+      char ch = spelling.value[i];
+      if (i + 1 < spelling.length) {
+        char next = spelling.value[i + 1];
+        if (ch == '<' && next == ':') {
+          ch = '[';
+          i++;
+        } else if (ch == ':' && next == '>') {
+          ch = ']';
+          i++;
+        } else if (ch == '<' && next == '%') {
+          ch = '{';
+          i++;
+        } else if (ch == '%' && next == '>') {
+          ch = '}';
+          i++;
+        }
+      }
+      if (ch == '(' || ch == '[' || ch == '{') {
+        StringAppendChar(&delimiters, ch);
+        continue;
+      }
+      if (ch != ')' && ch != ']' && ch != '}') {
+        continue;
+      }
+      char expected =
+          ch == ')' ? '(' : (ch == ']' ? '[' : '{');
+      if (delimiters.length == 0 ||
+          delimiters.value[delimiters.length - 1] != expected) {
+        PreprocessorError(p, "Unbalanced delimiters in #embed parameter");
+        StringDestruct(&spelling);
+        StringDestruct(&delimiters);
+        return false;
+      }
+      delimiters.length--;
+      delimiters.value[delimiters.length] = '\0';
+      if (delimiters.length == 0) {
+        StringDestruct(&spelling);
+        StringDestruct(&delimiters);
+        MoveToNextToken(ti);
+        return true;
+      }
+    }
+    StringDestruct(&spelling);
+
+    AppendCurrentToken(ti, contents);
+    MoveToNextToken(ti);
+  }
+  StringDestruct(&delimiters);
+  PreprocessorError(p, "Missing or unbalanced ')' in #embed parameter");
+  return false;
+}
+
+static bool EmbedIntegerExpressionHasForbiddenProbe(Preprocessor* p,
+                                                    String* tokens) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  while (CurrentToken(&ti) != PPTOK(end)) {
+    if (CurrentToken(&ti) == PPTOK(defined)) {
+      return true;
+    }
+    if (CurrentToken(&ti) == PPTOK(identifier)) {
+      String name = {0};
+      GetCurrentTokenSpelling(&ti, &name);
+      bool forbidden = StringEqual(&name, "__has_include") ||
+                       StringEqual(&name, "__has_cpp_attribute") ||
+                       StringEqual(&name, "__has_embed");
+      StringDestruct(&name);
+      if (forbidden) {
+        return true;
+      }
+    }
+    MoveToNextToken(&ti);
+  }
+  return false;
+}
+
+static bool EvaluateEmbedIntegerParameter(Preprocessor* p, const char* name,
+                                          String* tokens, uint64_t* value) {
+  if (tokens->length == 0) {
+    PreprocessorError(p, "#embed %s parameter needs an expression", name);
+    return false;
+  }
+  if (EmbedIntegerExpressionHasForbiddenProbe(p, tokens)) {
+    PreprocessorError(
+        p, "#embed %s expression cannot use a preprocessor probe", name);
+    return false;
+  }
+
+  String expression = {0};
+  Detokenize(p, tokens, &expression);
+  StringAppend(&expression, "\n\n");
+  int errors_before = NumErrors();
+  int64_t signed_value = 0;
+  bool is_unsigned = false;
+  bool evaluated = EvaluatePreprocessorIntegerExpression(
+      p, &expression, false, &signed_value, &is_unsigned);
+  StringDestruct(&expression);
+  if (!evaluated) {
+    if (NumErrors() == errors_before) {
+      PreprocessorError(p, "#embed %s parameter is not an integer constant",
+                        name);
+    }
+    return false;
+  }
+  if (!is_unsigned && signed_value < 0) {
+    PreprocessorError(p, "#embed %s parameter cannot be negative", name);
+    return false;
+  }
+  *value = (uint64_t)signed_value;
+  return true;
+}
+
+static bool ParseEmbedRequest(Preprocessor* p, String* tokens,
+                              EmbedRequest* request) {
+  memset(request, 0, sizeof(*request));
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  SkipSpaceTokens(&ti);
+
+  if (CurrentToken(&ti) == PPTOK(literal)) {
+    GetCurrentLiteralContent(&ti, &request->filename);
+  } else if (CurrentToken(&ti) == PPTOK(system_header)) {
+    GetCurrentTokenSpelling(&ti, &request->filename);
+    request->system_resource = true;
+  } else {
+    PreprocessorError(p, "#embed needs \"resource\" or <resource>");
+    return false;
+  }
+  if (request->filename.length == 0) {
+    PreprocessorError(p, "#embed resource name cannot be empty");
+    EmbedRequestDestruct(request);
+    memset(request, 0, sizeof(*request));
+    return false;
+  }
+  MoveToNextToken(&ti);
+
+  while (true) {
+    SkipSpaceTokens(&ti);
+    if (CurrentToken(&ti) == PPTOK(end)) {
+      return true;
+    }
+    if (CurrentToken(&ti) != PPTOK(identifier)) {
+      PreprocessorError(p, "Invalid token after #embed resource name");
+      EmbedRequestDestruct(request);
+      memset(request, 0, sizeof(*request));
+      return false;
+    }
+
+    String name = {0};
+    GetCurrentTokenSpelling(&ti, &name);
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+
+    // Vendor parameters have the form vendor::name with optional arguments.
+    // DaveCC does not currently support any, but __has_embed must report
+    // NOT_FOUND rather than reject a syntactically valid unsupported parameter.
+    if (CurrentToken(&ti) == PPTOK(other_string) &&
+        TokenSpellingEqual(&ti, "::")) {
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      if (CurrentToken(&ti) != PPTOK(identifier)) {
+        PreprocessorError(p, "Expected parameter name after '::' in #embed");
+        StringDestruct(&name);
+        EmbedRequestDestruct(request);
+        memset(request, 0, sizeof(*request));
+        return false;
+      }
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      if (CurrentToken(&ti) == PPTOK(openparen)) {
+        String ignored = {0};
+        bool collected = CollectEmbedParameter(p, &ti, &ignored);
+        StringDestruct(&ignored);
+        if (!collected) {
+          StringDestruct(&name);
+          EmbedRequestDestruct(request);
+          memset(request, 0, sizeof(*request));
+          return false;
+        }
+      }
+      request->unsupported_parameter = true;
+      StringDestruct(&name);
+      continue;
+    }
+
+    String contents = {0};
+    if (!CollectEmbedParameter(p, &ti, &contents)) {
+      StringDestruct(&name);
+      StringDestruct(&contents);
+      EmbedRequestDestruct(request);
+      memset(request, 0, sizeof(*request));
+      return false;
+    }
+
+    bool ok = true;
+    if (StringEqual(&name, "limit")) {
+      if (request->has_limit) {
+        PreprocessorError(p, "Duplicate #embed limit parameter");
+        ok = false;
+      } else {
+        request->has_limit = true;
+        ok = EvaluateEmbedIntegerParameter(p, "limit", &contents,
+                                           &request->limit);
+      }
+    } else if (StringEqual(&name, "prefix")) {
+      if (request->has_prefix) {
+        PreprocessorError(p, "Duplicate #embed prefix parameter");
+        ok = false;
+      } else {
+        request->has_prefix = true;
+        Detokenize(p, &contents, &request->prefix);
+      }
+    } else if (StringEqual(&name, "suffix")) {
+      if (request->has_suffix) {
+        PreprocessorError(p, "Duplicate #embed suffix parameter");
+        ok = false;
+      } else {
+        request->has_suffix = true;
+        Detokenize(p, &contents, &request->suffix);
+      }
+    } else if (StringEqual(&name, "if_empty")) {
+      if (request->has_if_empty) {
+        PreprocessorError(p, "Duplicate #embed if_empty parameter");
+        ok = false;
+      } else {
+        request->has_if_empty = true;
+        Detokenize(p, &contents, &request->if_empty);
+      }
+    } else {
+      PreprocessorError(p, "Unknown #embed parameter %s", name.value);
+      ok = false;
+    }
+    StringDestruct(&contents);
+    StringDestruct(&name);
+    if (!ok) {
+      EmbedRequestDestruct(request);
+      memset(request, 0, sizeof(*request));
+      return false;
+    }
+  }
+}
+
+// Macro-expand an embed operand once, while protecting a directly written
+// header-name from expansion.  Retokenizing afterward also recognizes a
+// header-name produced by a macro.
+static void PrepareEmbedTokens(Preprocessor* p, String* text, size_t start,
+                               String* tokens) {
+  Tokenize(p, text, tokens, start, true, p->lex->assembler_mode, true);
+  ReplaceMacrosInTokenizedLine(p, tokens, true);
+  String expanded = {0};
+  Detokenize(p, tokens, &expanded);
+  StringDestruct(tokens);
+  Tokenize(p, &expanded, tokens, 0, true, p->lex->assembler_mode, true);
+  StringDestruct(&expanded);
+}
+
+typedef enum {
+  kEmbedResourceNotFound,
+  kEmbedResourceOpened,
+  kEmbedResourceUnprocessable,
+} EmbedResourceOpenResult;
+
+static EmbedResourceOpenResult OpenEmbedResourceInPath(
+    Vector* path, String* filename, FILE** result) {
+  for (size_t i = 0; i < path->length; i++) {
+    String pathname = {0};
+    StringPrintf(&pathname, "%s/%s", ((String*)path->value.p[i])->value,
+                 filename->value);
+
+    struct stat st;
+    if (stat(pathname.value, &st) != 0) {
+      int stat_error = errno;
+      if (stat_error == ENOENT || stat_error == ENOTDIR) {
+        StringDestruct(&pathname);
+        continue;
+      }
+      StringSetString(filename, &pathname);
+      StringDestruct(&pathname);
+      return kEmbedResourceUnprocessable;
+    }
+    if (!S_ISREG(st.st_mode)) {
+      StringSetString(filename, &pathname);
+      StringDestruct(&pathname);
+      return kEmbedResourceUnprocessable;
+    }
+
+    FILE* fp = fopen(pathname.value, "rb");
+    if (fp == NULL) {
+      StringSetString(filename, &pathname);
+      StringDestruct(&pathname);
+      return kEmbedResourceUnprocessable;
+    }
+    StringSetString(filename, &pathname);
+    StringDestruct(&pathname);
+    *result = fp;
+    return kEmbedResourceOpened;
+  }
+  return kEmbedResourceNotFound;
+}
+
+static EmbedResourceOpenResult OpenEmbedResource(Preprocessor* p,
+                                                 String* filename,
+                                                 bool system_resource,
+                                                 FILE** result) {
+  *result = NULL;
+  EmbedResourceOpenResult open_result = kEmbedResourceNotFound;
+  if (!system_resource) {
+    open_result =
+        OpenEmbedResourceInPath(&p->user_include_paths, filename, result);
+  }
+  if (open_result == kEmbedResourceNotFound) {
+    open_result =
+        OpenEmbedResourceInPath(&p->system_include_paths, filename, result);
+  }
+  return open_result;
+}
+
+static bool GetEmbedResourceRange(Preprocessor* p, FILE* fp,
+                                  const EmbedRequest* request,
+                                  size_t* count) {
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    PreprocessorError(p, "Cannot determine #embed resource size");
+    return false;
+  }
+  long end = ftell(fp);
+  if (end < 0) {
+    PreprocessorError(p, "Cannot determine #embed resource size");
+    return false;
+  }
+  uint64_t size = (uint64_t)end;
+  uint64_t actual_count =
+      request->has_limit && request->limit < size ? request->limit : size;
+  if (actual_count > SIZE_MAX) {
+    PreprocessorError(p, "#embed resource is too large for this compiler");
+    return false;
+  }
+  *count = (size_t)actual_count;
+  return true;
+}
+
+static int ProbeEmbedResource(Preprocessor* p, EmbedRequest* request) {
+  FILE* fp = NULL;
+  EmbedResourceOpenResult open_result = OpenEmbedResource(
+      p, &request->filename, request->system_resource, &fp);
+  if (open_result == kEmbedResourceNotFound) {
+    return 0;
+  }
+  if (open_result == kEmbedResourceUnprocessable) {
+    PreprocessorError(p, "#embed resource \"%s\" cannot be processed",
+                      request->filename.value);
+    return 0;
+  }
+  if (request->unsupported_parameter) {
+    fclose(fp);
+    return 0;  // __STDC_EMBED_NOT_FOUND__
+  }
+  size_t count = 0;
+  bool usable = GetEmbedResourceRange(p, fp, request, &count);
+  fclose(fp);
+  if (!usable) {
+    return 0;
+  }
+  return count == 0 ? 2 : 1;
+}
+
+static void Embed(Preprocessor* p, String* line, size_t pos) {
+  if (!p->is_compiled_in) {
+    return;
+  }
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    PreprocessorError(p, "Invalid preprocessor directive embed");
+    return;
+  }
+
+  String tokens = {0};
+  PrepareEmbedTokens(p, line, pos, &tokens);
+  EmbedRequest request;
+  if (!ParseEmbedRequest(p, &tokens, &request)) {
+    StringDestruct(&tokens);
+    return;
+  }
+  StringDestruct(&tokens);
+  if (request.unsupported_parameter) {
+    PreprocessorError(p, "Unsupported implementation-defined #embed parameter");
+    EmbedRequestDestruct(&request);
+    return;
+  }
+
+  FILE* fp = NULL;
+  EmbedResourceOpenResult open_result = OpenEmbedResource(
+      p, &request.filename, request.system_resource, &fp);
+  if (open_result == kEmbedResourceNotFound) {
+    PreprocessorError(p, "Cannot open #embed resource \"%s\"",
+                      request.filename.value);
+    PrintSearchDetails(p, request.filename.value, request.system_resource);
+    EmbedRequestDestruct(&request);
+    return;
+  }
+  if (open_result == kEmbedResourceUnprocessable) {
+    PreprocessorError(p, "#embed resource \"%s\" cannot be processed",
+                      request.filename.value);
+    EmbedRequestDestruct(&request);
+    return;
+  }
+
+  size_t count = 0;
+  int errors_before = NumErrors();
+  if (!GetEmbedResourceRange(p, fp, &request, &count) ||
+      fseek(fp, 0, SEEK_SET) != 0) {
+    if (NumErrors() == errors_before) {
+      PreprocessorError(p, "Cannot seek in #embed resource \"%s\"",
+                        request.filename.value);
+    }
+    fclose(fp);
+    EmbedRequestDestruct(&request);
+    return;
+  }
+
+  String output = {0};
+  if (count == 0) {
+    if (request.has_if_empty) {
+      StringAppendString(&output, &request.if_empty);
+    }
+  } else {
+    if (request.has_prefix) {
+      StringAppendString(&output, &request.prefix);
+    }
+    for (size_t i = 0; i < count; i++) {
+      int byte = fgetc(fp);
+      if (byte == EOF) {
+        PreprocessorError(p, "Unexpected end of #embed resource \"%s\"",
+                          request.filename.value);
+        StringDestruct(&output);
+        fclose(fp);
+        EmbedRequestDestruct(&request);
+        return;
+      }
+      if (i != 0) {
+        StringAppendChar(&output, ',');
+      }
+      StringPrintf(&output, "%d", byte);
+    }
+    if (request.has_suffix) {
+      StringAppendString(&output, &request.suffix);
+    }
+  }
+  fclose(fp);
+
+  StringSetString(line, &output);
+  StringDestruct(&output);
+  p->directive_produced_output = true;
+  EmbedRequestDestruct(&request);
 }
 
 // #if processing.
@@ -2323,6 +2863,9 @@ static void Endif(Preprocessor* p, String* line, size_t pos) {
 }
 
 bool PreprocessorMacroNameIsDefined(Preprocessor* p, String* name) {
+  if (StringEqual(name, "__has_embed")) {
+    return CompilerCXXAtLeast(kLanguageStandardCXX26);
+  }
   if (StringEqual(name, "__has_include") ||
       StringEqual(name, "__has_include_next") ||
       StringEqual(name, "__has_builtin") ||
@@ -2948,6 +3491,7 @@ static struct {
   PreprocessorCommand command;
 } preprocessor_commands[] = {
     {"define", Define},   {"include", Include},
+    {"embed", Embed},
     {"if", If},           {"ifdef", Ifdef},
     {"ifndef", Ifndef},   {"endif", Endif},
     {"elif", Elif},       {"elifdef", Elifdef},
@@ -2959,6 +3503,7 @@ static struct {
 };
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line) {
+  p->directive_produced_output = false;
   size_t pos = 0;
   if (p->lex->in_comment) {
     pos = SkipToEndOfComment(line, pos);
@@ -3008,6 +3553,10 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   return true;
 }
 
+bool PreprocessorDirectiveProducedOutput(Preprocessor* p) {
+  return p->directive_produced_output;
+}
+
 bool PreprocessorHasInclude(Preprocessor* p, String* filename,
                             bool system_include) {
   FILE* fp = NULL;
@@ -3015,12 +3564,12 @@ bool PreprocessorHasInclude(Preprocessor* p, String* filename,
   if (!system_include) {
     // Not a system include (#include "...") so search user include
     // paths.
-    fp = FindFileInPath(&p->user_include_paths, filename, &path_index);
+    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp = FindFileInPath(&p->system_include_paths, filename, &path_index);
+    fp = FindFileInPath(&p->system_include_paths, filename, &path_index, "r");
   }
   if (fp == NULL) {
     return false;
@@ -3036,12 +3585,12 @@ bool PreprocessorHasIncludeNext(Preprocessor* p, String* filename,
   if (!system_include) {
     // Not a system include (#include "...") so search user include
     // paths.
-    fp = FindFileInPath(&p->user_include_paths, filename, &path_index);
+    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp = FindFileInPath(&p->system_include_paths, filename, &path_index);
+    fp = FindFileInPath(&p->system_include_paths, filename, &path_index, "r");
   }
   if (fp == NULL) {
     return false;
@@ -3487,6 +4036,77 @@ bail:
   ti->next = orig_next;
 }
 
+// Handles __has_embed(...) while macro-replacing a #if expression.  Doing this
+// at preprocessing-token level allows the ordinary expression parser to see
+// only the resulting integer constant.
+static void ProcessHasEmbedOperator(Preprocessor* p, TokenIterator* ti) {
+  size_t start = ti->curr;
+  size_t original_prev = ti->prev;
+  size_t original_next = ti->next;
+
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(openparen)) {
+    goto bail;
+  }
+  MoveToNextToken(ti);
+
+  String arguments = {0};
+  int depth = 1;
+  while (CurrentToken(ti) != PPTOK(end)) {
+    PreprocessingToken token = CurrentToken(ti);
+    if (token == PPTOK(openparen)) {
+      depth++;
+    } else if (token == PPTOK(closeparen)) {
+      depth--;
+      if (depth == 0) {
+        break;
+      }
+    }
+    AppendCurrentToken(ti, &arguments);
+    MoveToNextToken(ti);
+  }
+  if (CurrentToken(ti) != PPTOK(closeparen)) {
+    PreprocessorError(p, "Missing ')' after __has_embed");
+    StringDestruct(&arguments);
+    goto bail;
+  }
+  size_t end = ti->next;
+
+  String argument_text = {0};
+  Detokenize(p, &arguments, &argument_text);
+  StringDestruct(&arguments);
+  String prepared = {0};
+  PrepareEmbedTokens(p, &argument_text, 0, &prepared);
+  StringDestruct(&argument_text);
+
+  int value = 0;
+  EmbedRequest request;
+  if (ParseEmbedRequest(p, &prepared, &request)) {
+    value = ProbeEmbedResource(p, &request);
+    EmbedRequestDestruct(&request);
+  }
+  StringDestruct(&prepared);
+
+  String replacement_text = {0};
+  StringPrintf(&replacement_text, "%d", value);
+  String replacement_tokens = {0};
+  Tokenize(p, &replacement_text, &replacement_tokens, 0, true,
+           p->lex->assembler_mode, false);
+  StringDestruct(&replacement_text);
+  StringReplaceString(ti->input, start, end - start, &replacement_tokens);
+  ti->prev = original_prev;
+  ti->curr = start;
+  ti->next = start + replacement_tokens.length;
+  StringDestruct(&replacement_tokens);
+  return;
+
+bail:
+  ti->prev = original_prev;
+  ti->curr = start;
+  ti->next = original_next;
+}
+
 // We have a possible macro name.  See if it's a macro or other special
 // name and if so, replace it by the replacement text.
 static void ProcessPossibleMacro(Preprocessor* p,
@@ -3497,6 +4117,10 @@ static void ProcessPossibleMacro(Preprocessor* p,
   String replacement = {0};
   if (StringEqual(possible_macro_name, "_Pragma")) {
     ProcessPragmaOperator(p, ti);
+  } else if (StringEqual(possible_macro_name, "__has_embed") &&
+             CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+             p->lex->preprocessor_mode) {
+    ProcessHasEmbedOperator(p, ti);
   } else if (StringEqual(possible_macro_name, "__FILE__")) {
     StringPrintf(&replacement, "\"%s\"", &p->lex->source->filename);
     TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);

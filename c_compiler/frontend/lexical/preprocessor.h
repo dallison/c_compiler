@@ -48,6 +48,10 @@ typedef struct {
   Set pragma_once_files;
   struct Lex* lex;
   bool is_compiled_in;  // Is the current state compiled in?
+  // Set when a directive such as #embed replaces itself with ordinary
+  // preprocessing tokens that must be passed to the lexer without another
+  // round of macro expansion.
+  bool directive_produced_output;
 } Preprocessor;
 
 void PreprocessorInit(Preprocessor* p);
@@ -74,6 +78,7 @@ bool PreprocessorImportMacro(Preprocessor* p, const Macro* macro,
 void PreprocessorReplaceMacros(Preprocessor* p, String* line);
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line);
+bool PreprocessorDirectiveProducedOutput(Preprocessor* p);
 Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name);
 bool PreprocessorMacroNameIsDefined(Preprocessor* p, String* macro_name);
 void PreprocessorWarning(Preprocessor* preprocessor, const char* warn,

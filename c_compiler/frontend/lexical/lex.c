@@ -2176,6 +2176,17 @@ void LexReadLine(Lex* lex) {
       // Check for preprocessing directive.
       bool directive =
           PreprocessorParseDirective(lex->preprocessor, &lex->line);
+      if (directive &&
+          PreprocessorDirectiveProducedOutput(lex->preprocessor)) {
+        // The directive has already performed macro expansion and replaced
+        // itself with ordinary source tokens (for example, #embed).  Expose
+        // those tokens directly rather than expanding them a second time.
+        if (lex->capture != NULL) {
+          StringAppendSegment(lex->capture, lex->line.value, lex->line.length);
+          StringAppendChar(lex->capture, '\n');
+        }
+        break;
+      }
       if (!directive) {
         // Not a preprocessor directive, therefore this is a line that should be
         // seen by the lexical analyzer.

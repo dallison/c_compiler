@@ -160,13 +160,123 @@ expect_compile cxx11_constexpr \
   'constexpr int value = 1; int main(void) { return value; }' \
   -std=c++11
 
-if "$ROOT/$DAVECC" -target pcode -std=c++26 -S "$WORK/no_such.c" \
+expect_compile cxx26_mode \
+  '#if __cplusplus != 202603L
+#error expected C++26 mode
+#endif
+#if __cpp_pp_embed != 202502L
+#error expected #embed feature macro
+#endif
+int main(void) { return 0; }' \
+  -std=c++26
+expect_compile cxx2c_mode_alias \
+  '#if __cplusplus != 202603L
+#error expected C++26 mode
+#endif
+int main(void) { return 0; }' \
+  -std=c++2c
+
+printf '\x00\x01\x7f\x80\xff' > "$WORK/embed.bin"
+: > "$WORK/empty.bin"
+mkdir "$WORK/unprocessable.bin"
+expect_compile cxx26_embed \
+  '#ifndef __has_embed
+#error "__has_embed must be defined in C++26"
+#endif
+#if __has_embed("embed.bin") != __STDC_EMBED_FOUND__
+#error "embed.bin must be found and non-empty"
+#endif
+#if __has_embed("empty.bin") != __STDC_EMBED_EMPTY__
+#error "empty.bin must be found and empty"
+#endif
+#if __has_embed("missing.bin") != __STDC_EMBED_NOT_FOUND__
+#error "missing resource must not be found"
+#endif
+#if __has_embed(<embed.bin>) != __STDC_EMBED_FOUND__
+#error "angle resource search must use system paths"
+#endif
+#if __has_embed("embed.bin" davecc::unknown(1)) != __STDC_EMBED_NOT_FOUND__
+#error "unsupported vendor parameters must report not found"
+#endif
+#if __has_embed("embed.bin" limit(0)) != __STDC_EMBED_EMPTY__
+#error "limit(0) must make the resource empty"
+#endif
+static const unsigned char all[] = {
+#embed "embed.bin"
+};
+static_assert(sizeof(all) == 5);
+constexpr int first =
+#embed "embed.bin" limit(1)
+;
+static_assert(first == 0);
+constexpr int wrapped =
+#embed "embed.bin" limit(1) prefix(1 +) suffix(+ 2)
+;
+static_assert(wrapped == 3);
+static const unsigned char slice[] = {
+#embed "embed.bin" limit(2) prefix(9,) suffix(,10)
+};
+static_assert(sizeof(slice) == 4);
+static const unsigned char uintmax_limit[] = {
+#embed "embed.bin" limit(18446744073709551615ULL)
+};
+static_assert(sizeof(uintmax_limit) == 5);
+constexpr int empty_fallback =
+#embed "empty.bin" if_empty(42)
+;
+static_assert(empty_fallback == 42);
+#define EMBED_RESOURCE "embed.bin"
+#define EMBED_LIMIT (1 + 1)
+static const unsigned char macro_resource[] = {
+#embed EMBED_RESOURCE limit(EMBED_LIMIT)
+};
+static_assert(sizeof(macro_resource) == 2);
+int main(void) { return 0; }' \
+  -std=c++26 -I"$WORK" -isystem "$WORK"
+
+expect_fail cxx23_embed \
+  'constexpr unsigned char data[] = {
+#embed "embed.bin"
+};' \
+  -std=c++23 -I"$WORK"
+expect_fail cxx26_embed_missing \
+  'static const unsigned char data[] = {
+#embed "missing.bin"
+};' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx26_embed_duplicate_parameter \
+  'static const unsigned char data[] = {
+#embed "embed.bin" limit(1) limit(2)
+};' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx26_embed_negative_limit \
+  'static const unsigned char data[] = {
+#embed "embed.bin" limit(-1)
+};' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx26_embed_unbalanced_parameter \
+  '#if __has_embed("embed.bin" prefix({))
+#endif
+int main(void) { return 0; }' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx26_has_embed_unprocessable \
+  '#if __has_embed("unprocessable.bin")
+#endif
+int main(void) { return 0; }' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx26_has_embed_unprocessable_unsupported_parameter \
+  '#if __has_embed("unprocessable.bin" davecc::unknown)
+#endif
+int main(void) { return 0; }' \
+  -std=c++26 -I"$WORK"
+
+if "$ROOT/$DAVECC" -target pcode -std=c++29 -S "$WORK/no_such.c" \
     -o "$WORK/no_such.s" >"$WORK/bad_std.out" 2>&1; then
   echo "bad_std: expected invalid -std failure" >&2
   exit 1
 fi
 bad_std_output="$(<"$WORK/bad_std.out")"
-if [[ "$bad_std_output" != *"Invalid language standard -std=c++26"* ]]; then
+if [[ "$bad_std_output" != *"Invalid language standard -std=c++29"* ]]; then
   echo "bad_std: missing invalid -std diagnostic" >&2
   exit 1
 fi

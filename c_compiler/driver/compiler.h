@@ -46,6 +46,7 @@ typedef enum {
   kLanguageStandardCXX17,
   kLanguageStandardCXX20,
   kLanguageStandardCXX23,
+  kLanguageStandardCXX26,
 } LanguageStandard;
 
 typedef enum {
