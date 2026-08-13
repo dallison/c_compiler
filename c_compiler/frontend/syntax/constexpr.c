@@ -2036,17 +2036,29 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
     ConstexprValue value;
-    if (EvaluateConstexprObjectAccess(ctx, node, &value) &&
-        value.is_address) {
-      *result = value;
-      return true;
+    if (EvaluateConstexprObjectAccess(ctx, node, &value)) {
+      if (value.is_address) {
+        *result = value;
+        return true;
+      }
+      if (value.is_object && value.object != NULL &&
+          TypeIsFixedArray(value.object->type)) {
+        *result = (ConstexprValue){.is_address = true,
+                                   .address_object = value.object,
+                                   .address_index = 0};
+        return true;
+      }
     }
   }
   if (node->op == AST_OP(call)) {
-    if (ConstexprPCodeEvaluateCallAsAddress(ctx, node, result)) {
+    // The AST evaluator preserves an address's containing object and element
+    // index.  The pcode bridge can only recover the pointed-to slot, which is
+    // sufficient for dereference but loses the identity needed for pointer
+    // arithmetic and same-object distance calculations.
+    if (EvaluateConstexprCall(ctx, node, result) && result->is_address) {
       return true;
     }
-    return EvaluateConstexprCall(ctx, node, result) && result->is_address;
+    return ConstexprPCodeEvaluateCallAsAddress(ctx, node, result);
   }
   return false;
 }
@@ -2164,6 +2176,26 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
   } else {
     *result = left.address_index >= right.address_index;
   }
+  return true;
+}
+
+bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
+                                        ASTNode* begin_expr, ASTNode* end_expr,
+                                        size_t* count) {
+  if (ctx == NULL || begin_expr == NULL || end_expr == NULL ||
+      count == NULL) {
+    return false;
+  }
+  ConstexprValue begin_value = {0};
+  ConstexprValue end_value = {0};
+  if (!EvaluateConstexprAddressValue(ctx, begin_expr, &begin_value) ||
+      !EvaluateConstexprAddressValue(ctx, end_expr, &end_value) ||
+      begin_value.address_object == NULL ||
+      begin_value.address_object != end_value.address_object ||
+      end_value.address_index < begin_value.address_index) {
+    return false;
+  }
+  *count = (size_t)(end_value.address_index - begin_value.address_index);
   return true;
 }
 
@@ -2911,6 +2943,74 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   return true;
 }
 
+bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
+                                      VariableDeclarationASTNode* decl) {
+  return EvaluateConstexprVariableDeclaration(ctx, decl);
+}
+
+bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,
+                                       VariableDeclarationASTNode* hidden_decl,
+                                       ASTNode* init_expr) {
+  if (ctx == NULL || hidden_decl == NULL || hidden_decl->symbol == NULL) {
+    return false;
+  }
+  if (init_expr != NULL && init_expr->op == AST_OP(identifier)) {
+    Symbol* range_symbol = ((IdentifierASTNode*)init_expr)->symbol;
+    if (range_symbol != NULL && !range_symbol->flags.value_set &&
+        range_symbol->constexpr_initializer != NULL) {
+      ConstexprEvaluateObjectConstantForSymbol(
+          range_symbol, range_symbol->constexpr_initializer);
+    }
+  }
+  if (ConstexprBindVariableDeclaration(ctx, hidden_decl)) {
+    return true;
+  }
+  if (init_expr == NULL) {
+    return false;
+  }
+  TypeRecord* object_type = hidden_decl->symbol->type;
+  if (object_type != NULL && TypeIsReference(object_type)) {
+    object_type = object_type->next;
+  }
+  ConstexprValue value = {0};
+  if (EvaluateConstexprObjectAccess(ctx, init_expr, &value) &&
+      value.is_object && value.object != NULL) {
+    PushConstexprBinding(ctx, hidden_decl->symbol, value);
+    if (init_expr->op == AST_OP(identifier)) {
+      Symbol* range_sym = ((IdentifierASTNode*)init_expr)->symbol;
+      if (range_sym != NULL && range_sym != hidden_decl->symbol) {
+        PushConstexprBinding(ctx, range_sym, value);
+      }
+    }
+    return true;
+  }
+  if (object_type != NULL &&
+      EvaluateConstexprReferenceInitializer(ctx, init_expr, object_type,
+                                            &value)) {
+    PushConstexprBinding(ctx, hidden_decl->symbol, value);
+    if (init_expr->op == AST_OP(identifier)) {
+      Symbol* range_sym = ((IdentifierASTNode*)init_expr)->symbol;
+      if (range_sym != NULL && range_sym != hidden_decl->symbol) {
+        PushConstexprBinding(ctx, range_sym, value);
+      }
+    }
+    return true;
+  }
+  if (object_type != NULL &&
+      EvaluateConstexprInitializer(ctx, object_type, init_expr, &value) &&
+      value.is_object && value.object != NULL) {
+    PushConstexprBinding(ctx, hidden_decl->symbol, value);
+    if (init_expr->op == AST_OP(identifier)) {
+      Symbol* range_sym = ((IdentifierASTNode*)init_expr)->symbol;
+      if (range_sym != NULL && range_sym != hidden_decl->symbol) {
+        PushConstexprBinding(ctx, range_sym, value);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 static bool EvaluateConstexprDeclarationList(ConstEvalContext* ctx,
                                              DeclarationListASTNode* node) {
   for (size_t i = 0; i < node->declarations->length; i++) {
@@ -3263,6 +3363,8 @@ static ConstexprStatementResult EvaluateConstexprStatement(
     case AST_OP(for):
       return EvaluateConstexprFor(ctx, (ForStatementASTNode*)stmt, return_type,
                                   result);
+    case AST_OP(expansion_for):
+      return kConstexprStmtInvalid;
     case AST_OP(switch):
       return EvaluateConstexprSwitch(ctx, (SwitchStatementASTNode*)stmt,
                                      return_type, result);

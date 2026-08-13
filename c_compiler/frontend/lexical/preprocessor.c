@@ -234,6 +234,7 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");
       PreprocessorDefineMacro(p, "__cpp_pack_indexing", "202311L");
       PreprocessorDefineMacro(p, "__cpp_placeholder_variables", "202306L");
+      PreprocessorDefineMacro(p, "__cpp_expansion_statements", "202506L");
       PreprocessorDefineMacro(p, "__cpp_variadic_friend", "202403L");
       PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
       PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");

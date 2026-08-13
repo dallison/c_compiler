@@ -13,6 +13,7 @@
 #include "compiler.h"
 #include "expr_codegen.h"
 #include "rtti.h"
+#include "semantics.h"
 
 static void GenerateDeclarationList(Generator* gen,
                                     DeclarationListASTNode* node) {
@@ -730,6 +731,10 @@ static ASTNode* FindEnclosingLoop(ASTNode* stmt) {
         ForStatementASTNode* f = (ForStatementASTNode*)stmt;
         return f->stmt;
       }
+      case AST_OP(expansion_for): {
+        ExpansionStatementASTNode* e = (ExpansionStatementASTNode*)stmt;
+        return e->stmt;
+      }
       case AST_OP(while):
       case AST_OP(do): {
         CombinedStatementASTNode* c = (CombinedStatementASTNode*)stmt;
@@ -749,6 +754,10 @@ static ASTNode* FindEnclosingLoopOrSwitch(ASTNode* stmt) {
        case AST_OP(for): {
         ForStatementASTNode* f = (ForStatementASTNode*)stmt;
         return f->stmt;
+      }
+      case AST_OP(expansion_for): {
+        ExpansionStatementASTNode* e = (ExpansionStatementASTNode*)stmt;
+        return e->stmt;
       }
       case AST_OP(while):
       case AST_OP(do): {
@@ -1170,6 +1179,8 @@ static bool StatementContainsLabel(ASTNode* node) {
       return StatementContainsLabel(((CombinedStatementASTNode*)node)->stmt);
     case AST_OP(for):
       return StatementContainsLabel(((ForStatementASTNode*)node)->stmt);
+    case AST_OP(expansion_for):
+      return StatementContainsLabel(((ExpansionStatementASTNode*)node)->stmt);
     case AST_OP(switch):
       return StatementContainsLabel(((SwitchStatementASTNode*)node)->stmt);
     case AST_OP(try): {
@@ -2198,6 +2209,11 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
     break;
   case AST_OP(for):
     GenerateForStatement(gen, (ForStatementASTNode*)node);
+    break;
+  case AST_OP(expansion_for):
+    SemanticError(node,
+                  "Internal error: unlowered expansion statement reached "
+                  "code generation");
     break;
   case AST_OP(return ):
     GenerateReturnStatement(gen, (CombinedStatementASTNode*)node);

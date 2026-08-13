@@ -625,4 +625,21 @@ fi
 grep -Fq "name-independent declaration '_' is ambiguous" "$work/command.log" ||
   fail "imported placeholder member ambiguity diagnostic"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/expansion_statements.dcm" \
+  "$FIXTURES/expansion_statements.cppm" ||
+  fail "emit expansion statements module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_expansion_statements.cpp" \
+  -o "$work/use_expansion_statements.o" ||
+  fail "instantiate imported expansion statement"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_expansion_statements.o" "$LIBC" \
+  -o "$work/expansion_statements.bin" ||
+  fail "link imported expansion statement executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/expansion_statements.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute imported expansion statement"
+
 echo "ok module emit/import/link/execute"

@@ -2907,7 +2907,7 @@ static ASTNode* RewriteDoWhileConditionContinue(ASTNode* node, void* data,
     return NULL;
   }
   if (node->op == AST_OP(while) || node->op == AST_OP(do) ||
-      node->op == AST_OP(for)) {
+      node->op == AST_OP(for) || node->op == AST_OP(expansion_for)) {
     *action = kASTTransformSkipChildren;
     return node;
   }
@@ -3713,7 +3713,8 @@ static ASTNode* EnclosingCoroutineLoopOrSwitch(ASTNode* node,
                                                bool loop_only) {
   for (ASTNode* parent = node != NULL ? node->parent : NULL;
        parent != NULL; parent = parent->parent) {
-    if (parent->op == AST_OP(for) || parent->op == AST_OP(while) ||
+    if (parent->op == AST_OP(for) || parent->op == AST_OP(expansion_for) ||
+        parent->op == AST_OP(while) ||
         parent->op == AST_OP(do) ||
         (!loop_only && parent->op == AST_OP(switch))) {
       return parent;
@@ -5410,6 +5411,14 @@ static void CollectPersistedCoroutineLocalsFromAncestors(
       CollectPersistedCoroutineDeclarationList(
           search->root, (DeclarationListASTNode*)loop->c1, search->point,
           search->persisted_locals, true, search->ok);
+    }
+  } else if (parent->op == AST_OP(expansion_for)) {
+    ExpansionStatementASTNode* expansion = (ExpansionStatementASTNode*)parent;
+    if (expansion->init_stmt != NULL &&
+        expansion->init_stmt->op == AST_OP(decl_list)) {
+      CollectPersistedCoroutineDeclarationList(
+          search->root, (DeclarationListASTNode*)expansion->init_stmt,
+          search->point, search->persisted_locals, true, search->ok);
     }
   }
 }

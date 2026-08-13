@@ -267,28 +267,44 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     SemanticError(diagnostic_node, "auto variable requires an initializer");
     return false;
   }
+  ASTNode* value_initializer = initializer;
+  if (value_initializer->op == AST_OP(init)) {
+    value_initializer = ((BinaryASTNode*)value_initializer)->right;
+  }
   // A dependent initializer only has a placeholder type while its enclosing
   // template is parsed. Preserve the declared auto type so deduction runs
   // against the concrete initializer in each specialization. During that
   // specialization, nested generic lambdas can remain expression-dependent on
   // their own parameters even though their closure type is now concrete; in
   // that case auto deduction must proceed.
-  TypeRecord* dependency_type = initializer->type;
-  if (initializer->op == AST_OP(expr_init)) {
-    ASTNode* expr = ((ExpressionInitializerASTNode*)initializer)->expr;
+  TypeRecord* dependency_type = value_initializer->type;
+  if (value_initializer->op == AST_OP(expr_init)) {
+    ASTNode* expr = ((ExpressionInitializerASTNode*)value_initializer)->expr;
     dependency_type = expr != NULL ? expr->type : NULL;
   }
   bool concrete_lambda =
       LambdaInitializerHasConcreteClosureType(initializer, dependency_type);
   if (CompilerIsCXX() && ExpressionIsTemplateDependent(initializer) &&
       !concrete_lambda) {
-    return true;
+    TypeRecord* concrete_init_type = dependency_type;
+    if (concrete_init_type == NULL &&
+        value_initializer->op == AST_OP(expr_init)) {
+      ASTNode* expr = ((ExpressionInitializerASTNode*)value_initializer)->expr;
+      if (expr != NULL && expr->op == AST_OP(identifier)) {
+        Symbol* init_sym = ((IdentifierASTNode*)expr)->symbol;
+        concrete_init_type = init_sym != NULL ? init_sym->type : NULL;
+      }
+    }
+    if (concrete_init_type == NULL || TypeContainsAuto(concrete_init_type) ||
+        TypeContainsTemplateParameter(concrete_init_type)) {
+      return true;
+    }
   }
 
   bool decltype_auto =
       sym->type->declarator == kDeclPrimitive &&
       (sym->type->type & kTypeDecltypeAuto) != 0;
-  ASTNode* deduction_initializer = initializer;
+  ASTNode* deduction_initializer = value_initializer;
   if (initializer->op == AST_OP(braced_init)) {
     BracedInitializerASTNode* braced =
         (BracedInitializerASTNode*)initializer;

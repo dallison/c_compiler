@@ -7,6 +7,7 @@
 //
 
 #include "statement_semantics.h"
+#include "expansion_semantics.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -629,7 +630,7 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
   return initializer;
 }
 
-static void AppendRangeForTemporaryDestructorStatements(ASTNode* range_decl,
+void AppendRangeForTemporaryDestructorStatements(ASTNode* range_decl,
                                                         Vector* out) {
   Vector temporaries;
   VectorInit(&temporaries);
@@ -710,7 +711,8 @@ static void CollectScopeExitDestructors(ASTNode* jump, ASTNode* limit,
 
 static ASTNode* CXXEnclosingLoopOrSwitch(ASTNode* node) {
   for (ASTNode* p = node->parent; p != NULL; p = p->parent) {
-    if (p->op == AST_OP(for) || p->op == AST_OP(while) ||
+    if (p->op == AST_OP(for) || p->op == AST_OP(expansion_for) ||
+        p->op == AST_OP(while) ||
         p->op == AST_OP(do) || p->op == AST_OP(switch)) {
       return p;
     }
@@ -720,7 +722,8 @@ static ASTNode* CXXEnclosingLoopOrSwitch(ASTNode* node) {
 
 static ASTNode* CXXEnclosingLoop(ASTNode* node) {
   for (ASTNode* p = node->parent; p != NULL; p = p->parent) {
-    if (p->op == AST_OP(for) || p->op == AST_OP(while) ||
+    if (p->op == AST_OP(for) || p->op == AST_OP(expansion_for) ||
+        p->op == AST_OP(while) ||
         p->op == AST_OP(do)) {
       return p;
     }
@@ -1586,6 +1589,29 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // flag if we have all the valid enumeration constants.
   if (TypeIsEnum(node->expr->type)) {
     AnalyzeEnumSwitch(node, control_type);
+  }
+}
+
+static void AnalyzeExpansionStatement(ExpansionStatementASTNode* node) {
+  if (node->init_stmt != NULL) {
+    AnalyzeStatement(node->init_stmt);
+  }
+  if (node->initializer != NULL) {
+    node->initializer = AnalyzeExpression(node->initializer);
+  }
+  int errors_before_materialization = NumErrors();
+  ASTNode* materialized =
+      SemanticMaterializeExpansionStatement(node, NULL, NULL);
+  if (materialized != (ASTNode*)node) {
+    if (node->base.parent != NULL) {
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, materialized,
+                          true);
+    }
+    AnalyzeStatement(materialized);
+    return;
+  }
+  if (NumErrors() == errors_before_materialization) {
+    AnalyzeStatement(node->stmt);
   }
 }
 
@@ -3095,6 +3121,9 @@ void AnalyzeStatement(ASTNode* node) {
     case AST_OP(for):
       AnalyzeForStatement((ForStatementASTNode*)node);
       break;
+    case AST_OP(expansion_for):
+      AnalyzeExpansionStatement((ExpansionStatementASTNode*)node);
+      break;
     case AST_OP(return ):
       AnalyzeReturnStatement((CombinedStatementASTNode*)node);
       break;
@@ -3129,4 +3158,157 @@ void AnalyzeStatement(ASTNode* node) {
       assert(false);
   }
   node->flags |= kASTAnalyzed;
+}
+
+bool SemanticAnalyzeStructuredBindingDecomposition(
+    TypeRecord* type, ASTNode* diagnostic,
+    StructuredBindingDecomposition* out) {
+  if (out == NULL) {
+    return false;
+  }
+  memset(out, 0, sizeof(*out));
+  VectorInit(&out->members);
+  TypeRecord* object_type = type;
+  if (object_type != NULL && TypeIsReference(object_type)) {
+    object_type = object_type->next;
+  }
+  if (object_type != NULL && TypeIsFixedArray(object_type)) {
+    out->array_like = true;
+    out->element_count = (size_t)object_type->info.array.size.fixed;
+    return true;
+  }
+  if (StructuredBindingTupleSize(type, &out->element_count)) {
+    out->tuple_like = true;
+    return out->element_count > 0;
+  }
+  if (StructuredBindingDataMembers(type, &out->members, diagnostic)) {
+    out->element_count = out->members.length;
+    return out->element_count > 0;
+  }
+  return false;
+}
+
+void SemanticStructuredBindingDecompositionDestruct(
+    StructuredBindingDecomposition* decomposition) {
+  if (decomposition == NULL) {
+    return;
+  }
+  VectorDestruct(&decomposition->members);
+}
+
+ASTNode* SemanticStructuredBindingElementAccess(
+    Symbol* hidden, TypeRecord* hidden_type, size_t index,
+    StructMember* member, bool tuple_like, SourceLocation location) {
+  if (tuple_like) {
+    return NewStructuredBindingGetCall(hidden, index, location);
+  }
+  return NewStructuredBindingElementAccess(hidden, hidden_type, index, member,
+                                           location);
+}
+
+Symbol* SemanticCloneExpansionIterationSymbol(Symbol* source) {
+  const char* name =
+      source != NULL && source->name.value != NULL ? source->name.value
+                                                   : "__item";
+  return CloneStructuredBindingSymbol(source, name);
+}
+
+static ASTNode* HiddenBindingCloneNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+ASTNode* SemanticCreateHiddenReferenceBinding(ASTNode* init_expr,
+                                              SourceLocation location,
+                                              Symbol** hidden_out) {
+  TypeRecord* init_type =
+      init_expr != NULL ? init_expr->type : NULL;
+  if (init_type == NULL) {
+    return NULL;
+  }
+  Symbol* hidden = SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(init_type));
+  if (init_expr->value_category != kValueCategoryPrvalue &&
+      !TypeIsReference(hidden->type)) {
+    TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, false);
+    TypeRecordChain(ref, hidden->type);
+    TypeRecordDelete(hidden->type);
+    hidden->type = ref;
+    TypeRecordCalculateSize(hidden->type);
+  }
+  hidden->flags.is_local = true;
+  hidden->flags.is_defined = true;
+  hidden->location = location;
+  ASTNode* init_clone =
+      ASTNodeClone(init_expr, HiddenBindingCloneNode, NULL, NULL);
+  ASTNode* hidden_decl = NewVariableDeclarationASTNode(
+      hidden,
+      NewSemanticInitExpression(
+          hidden, NewExpressionInitializerASTNode(init_clone, location),
+          location),
+      location);
+  if (hidden_out != NULL) {
+    *hidden_out = hidden;
+  }
+  return hidden_decl;
+}
+
+typedef struct {
+  ExpansionStatementASTNode* expansion;
+} ExpansionJumpMarkData;
+
+static void MarkExpansionLoopJumpVisitor(ASTNode* node, void* data, int child_id,
+                                         VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL || data == NULL) {
+    return;
+  }
+  ExpansionJumpMarkData* ctx = data;
+  ASTNode* expansion = (ASTNode*)ctx->expansion;
+  if (node->op == AST_OP(break)) {
+    if (CXXEnclosingLoopOrSwitch(node) == expansion) {
+      node->flags |= kASTExpansionLoopBreak;
+    }
+  } else if (node->op == AST_OP(continue)) {
+    if (CXXEnclosingLoop(node) == expansion) {
+      node->flags |= kASTExpansionLoopContinue;
+    }
+  }
+}
+
+void SemanticMarkExpansionLoopJumps(ExpansionStatementASTNode* expansion) {
+  if (expansion == NULL || expansion->stmt == NULL) {
+    return;
+  }
+  if ((expansion->base.flags & kASTExpansionJumpsMarked) != 0) {
+    return;
+  }
+  expansion->base.flags |= kASTExpansionJumpsMarked;
+  ExpansionJumpMarkData data = {.expansion = expansion};
+  ASTNodeVisit(expansion->stmt, MarkExpansionLoopJumpVisitor, 0, &data);
+}
+
+static void DiagnoseExpansionLabelVisitor(ASTNode* node, void* data, int child_id,
+                                          VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->op == AST_OP(label) && data != NULL) {
+    LabelASTNode* label = (LabelASTNode*)node;
+    SemanticError((ASTNode*)label,
+                  "A label declared in an expansion statement body is not "
+                  "permitted");
+  }
+}
+
+void SemanticDiagnoseExpansionEnclosedLabels(ExpansionStatementASTNode* expansion) {
+  if (expansion == NULL || expansion->stmt == NULL) {
+    return;
+  }
+  ASTNodeVisit(expansion->stmt, DiagnoseExpansionLabelVisitor, 0, expansion);
+}
+
+void SemanticAppendHiddenInitializerTemporaries(ASTNode* hidden_decl,
+                                                Vector* statements) {
+  AppendRangeForTemporaryDestructorStatements(hidden_decl, statements);
 }

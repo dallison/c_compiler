@@ -802,6 +802,27 @@ static void FindStaticInitializer(ASTNode* node, void* data, int child_id,
 // Add all static variable declarations in the current function to the
 // initialized or uninitialized static output.  Walking the final body makes
 // this work for deferred inline members and instantiated templates too.
+static bool LocalStaticAlreadyRegistered(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* existing =
+        compiler->initialized_static_variables.value.p[i];
+    if (existing != NULL && existing->symbol == symbol) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+    UninitializedStaticVariable* existing =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (existing != NULL && existing->symbol == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   Vector declarations;
   VectorInit(&declarations);
@@ -810,6 +831,9 @@ static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   for (size_t i = 0; i < declarations.length; i++) {
     VariableDeclarationASTNode* decl =
         (VariableDeclarationASTNode*)VectorGet(&declarations, i);
+    if (decl->symbol != NULL && LocalStaticAlreadyRegistered(decl->symbol)) {
+      continue;
+    }
     BinaryASTNode* init_node = NULL;
     if (decl->local_static_init_kind == kLocalStaticInitConstant) {
       ASTNodeVisit(decl->initializer, FindStaticInitializer, 0, &init_node);

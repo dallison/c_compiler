@@ -48,6 +48,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->is_constexpr = false;
   parser->is_consteval = false;
   parser->is_constinit = false;
+  parser->allow_constexpr_decl_specifier = false;
   parser->declarator_is_parameter_pack = false;
   parser->context = context;
   parser->cxx_member_owner = NULL;
@@ -1642,6 +1643,14 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
 
   while (parser->found_void || SyntaxLookingAtType(syntax) ||
          CurrentClassTemplateNameStartsType(parser)) {
+    if (parser->allow_constexpr_decl_specifier &&
+        LexMatch(parser->lex, TOK(constexpr))) {
+      if (parser->is_constexpr) {
+        SyntaxError(parser->syntax, "Duplicate 'constexpr' specifier");
+      }
+      parser->is_constexpr = true;
+      continue;
+    }
     if (type_specifier.type != kTypeImplicit &&
         (SyntaxCurrentIdentifierFollowedByScopeOperator(syntax) ||
          SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax))) {

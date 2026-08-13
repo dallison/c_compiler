@@ -34,6 +34,7 @@ typedef struct {
   bool is_constexpr;
   bool is_consteval;
   bool is_constinit;
+  bool allow_constexpr_decl_specifier;
   bool declarator_is_parameter_pack;
   enum ParserContext context;
   Struct* cxx_member_owner;

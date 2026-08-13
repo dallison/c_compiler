@@ -57,6 +57,8 @@ typedef enum {
   AST_OP(arrowstar),
   AST_OP(equal),
   AST_OP(for),
+  // C++26 P1306 expansion statement: `template for (item : init) stmt`.
+  AST_OP(expansion_for),
   AST_OP(goto),
   AST_OP(greater),
   AST_OP(greatereq),
@@ -393,6 +395,10 @@ struct ConstraintExpr;
 #define kASTDeferredRangeContents (1ULL << 41)  // `*begin` in a dependent range-for before iterator auto deduction.
 #define kASTDeletedFunctionDiagnosed (1ULL << 42)  // Deleted-use diagnostic already emitted for this expression.
 #define kASTNameIndependentLookupAmbiguous (1ULL << 43)  // Lookup saw multiple C++26 name-independent declarations.
+#define kASTExpansionLoopBreak (1ULL << 44)  // break targeting an enclosing expansion statement.
+#define kASTExpansionLoopContinue (1ULL << 45)  // continue targeting an enclosing expansion statement.
+#define kASTExpansionInitializer (1ULL << 46)  // Materialized expansion compound carrying a hidden initializer.
+#define kASTExpansionJumpsMarked (1ULL << 47)  // break/continue in body already marked for this expansion.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -434,6 +440,7 @@ typedef enum {
   kASTShapeCatch,
   kASTShapeTry,
   kASTShapeFor,
+  kASTShapeExpansionFor,
   kASTShapeVarDecl,
   kASTShapeDeclList,
   kASTShapeCaseLabel,
@@ -765,6 +772,39 @@ typedef struct {
 
 ASTNode* NewForStatementASTNode(ASTNode* c1, ASTNode* c2, ASTNode* c3,
                                 ASTNode* stmt, SourceLocation location);
+
+typedef enum {
+  kExpansionItemSimple,
+  kExpansionItemStructuredBinding,
+} ExpansionItemKind;
+
+typedef enum {
+  kExpansionInitializerExpression,
+  kExpansionInitializerInitList,
+} ExpansionInitializerKind;
+
+// C++26 expansion statement (`template for`).  Item-declaration metadata is
+// retained inline so module serialization preserves structured-binding packs
+// and simple-declaration symbols without lowering.
+typedef struct {
+  ASTNode base;
+  ASTNode* init_stmt;                    // Optional init-statement.  // @wire 16
+  ExpansionItemKind item_kind;           // @wire 17
+  Symbol* item_symbol;                   // Simple item declaration.   // @wire 18
+  TypeRecord* binding_type;              // Structured-binding type.   // @wire 19
+  Vector* binding_names;                 // String* binding names.     // @wire 20
+  Vector* binding_symbols;               // Symbol* binding symbols.   // @wire 21
+  int binding_pack_index;                // @wire 22
+  ExpansionInitializerKind init_kind;    // @wire 23
+  ASTNode* initializer;                  // Expression or braced-init. // @wire 24
+  ASTNode* stmt;                         // Loop body.                 // @wire 25
+} ExpansionStatementASTNode;
+
+ASTNode* NewExpansionStatementASTNode(
+    ASTNode* init_stmt, ExpansionItemKind item_kind, Symbol* item_symbol,
+    TypeRecord* binding_type, Vector* binding_names, Vector* binding_symbols,
+    int binding_pack_index, ExpansionInitializerKind init_kind,
+    ASTNode* initializer, ASTNode* stmt, SourceLocation location);
 
 typedef enum {
   kLocalStaticInitNone,

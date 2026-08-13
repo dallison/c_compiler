@@ -185,6 +185,9 @@ expect_compile cxx26_mode \
 #if __cpp_placeholder_variables != 202306L
 #error expected placeholder variables feature macro
 #endif
+#if __cpp_expansion_statements != 202506L
+#error expected expansion statements feature macro
+#endif
 int main(void) { return 0; }' \
   -std=c++26
 expect_compile cxx2c_mode_alias \
@@ -344,6 +347,20 @@ expect_compile cxx23_no_placeholder_variables_macro \
 #error placeholder variables macro must not be defined before C++26
 #endif
 int main(void) { return 0; }' \
+  -std=c++23
+expect_compile cxx23_no_expansion_statements_macro \
+  '#ifdef __cpp_expansion_statements
+#error expansion statements macro must not be defined before C++26
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx23_no_expansion_statement \
+  'int main() {
+  template for (auto x : {1, 2, 3}) {
+    (void)x;
+  }
+  return 0;
+}' \
   -std=c++23
 expect_fail cxx23_no_placeholder_variable_redeclaration \
   'int main() {

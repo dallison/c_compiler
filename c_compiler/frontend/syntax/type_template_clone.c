@@ -20,6 +20,7 @@
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "expansion_semantics.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -443,7 +444,7 @@ static void RewriteTemplateBodyIdentifierVisitor(ASTNode* node, void* data,
 }
 
 /* Rewrite all identifiers in `node` to their cloned symbols via `symbol_map`. */
-static void RewriteTemplateBodyIdentifiers(ASTNode* node, Map* symbol_map) {
+void RewriteTemplateBodyIdentifiers(ASTNode* node, Map* symbol_map) {
   ASTNodeVisit(node, RewriteTemplateBodyIdentifierVisitor, 0, symbol_map);
 }
 
@@ -2373,6 +2374,42 @@ static void ExpandClonedBracedInitializerPackElements(
         changed = true;
         continue;
       }
+      int pack_index =
+          pack_symbol != NULL ? pack_symbol->template_parameter_index : -1;
+      if (pack_index < 0 && pack_symbol != NULL) {
+        TypeIsTemplateParameterPlaceholder(pack_symbol->type, &pack_index);
+      }
+      TemplateArgument* value_pack =
+          pack_index >= 0 && (size_t)pack_index < clone->args->length
+              ? clone->args->value.p[(size_t)pack_index]
+              : NULL;
+      if (value_pack != NULL && value_pack->pack_arguments != NULL) {
+        size_t expanded_start = expanded->length;
+        bool materialized = true;
+        for (size_t j = 0; j < value_pack->pack_arguments->length; j++) {
+          ASTNode* replacement = TemplateArgumentMaterializeExpression(
+              value_pack->pack_arguments->value.p[j], location);
+          if (replacement == NULL) {
+            materialized = false;
+            break;
+          }
+          replacement->flags &= ~kASTPackExpansion;
+          ASTNode* expr_init =
+              NewExpressionInitializerASTNode(replacement, location);
+          expr_init->parent = node;
+          expr_init->child_id = (int)expanded->length;
+          VectorAppend(expanded, expr_init);
+        }
+        if (materialized) {
+          ASTNodeDelete(initializer);
+          changed = true;
+          continue;
+        }
+        while (expanded->length > expanded_start) {
+          ASTNodeDelete(VectorLast(expanded));
+          VectorPop(expanded);
+        }
+      }
     }
     if (initializer != NULL && initializer->op == AST_OP(designated_init)) {
       DesignatedInitializerASTNode* designated =
@@ -3567,6 +3604,35 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     ASTNodeVisit(binding->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
     return SemanticMaterializeClonedStructuredBinding(
         node, &clone->symbol_map, &clone->pack_symbol_map);
+  }
+  if (node->op == AST_OP(expansion_for)) {
+    ExpansionStatementASTNode* expansion = (ExpansionStatementASTNode*)node;
+    if (expansion->binding_type != NULL) {
+      TypeRecord* declared =
+          SubstituteTemplateBodyType(clone, expansion->binding_type);
+      RebaseTemplateParameterIndices(
+          declared, clone->rebase_template_parameter_base);
+      TypeRecordDelete(expansion->binding_type);
+      expansion->binding_type = declared;
+    }
+    if (expansion->item_symbol != NULL) {
+      Symbol* mapped =
+          MapFindPointerKey(&clone->symbol_map, expansion->item_symbol);
+      if (mapped != NULL) {
+        expansion->item_symbol = mapped;
+      }
+    }
+    if (expansion->binding_symbols != NULL) {
+      for (size_t i = 0; i < expansion->binding_symbols->length; i++) {
+        Symbol* source = expansion->binding_symbols->value.p[i];
+        Symbol* mapped = MapFindPointerKey(&clone->symbol_map, source);
+        if (mapped != NULL) {
+          expansion->binding_symbols->value.p[i] = mapped;
+        }
+      }
+    }
+    node->flags &= ~kASTAnalyzed;
+    return node;
   }
   ASTNode* indexed = FoldClonedPackIndex(clone, node);
   if (indexed != node) {
@@ -5671,6 +5737,13 @@ static bool IsReanalyzableClonedExpressionOpcode(ASTOpcode op) {
 static ASTNode* ReanalyzeClonedUntypedExpression(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)data;
+  if (node != NULL && node->op == AST_OP(expansion_for)) {
+    // The item declaration's type is deduced separately for every materialized
+    // iteration.  Expressions in the retained pattern cannot be reanalyzed
+    // until that declaration has been instantiated.
+    *action = kASTTransformSkipChildren;
+    return node;
+  }
   bool stale_floating_arithmetic = false;
   if (node != NULL &&
       (node->op == AST_OP(plus) || node->op == AST_OP(minus) ||
@@ -5738,13 +5811,8 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
       decl->initializer == NULL) {
     return;
   }
-  ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
-  decl->initializer = AnalyzeExpression(decl->initializer);
-  if (decl->initializer != NULL) {
-    decl->initializer->parent = node;
-    decl->initializer->child_id = 0;
-  }
-  ASTNodeSetType(node, decl->symbol->type);
+  node->flags &= ~kASTAnalyzed;
+  AnalyzeStatement(node);
 }
 
 typedef struct {
@@ -5827,6 +5895,38 @@ static bool NodeNamesDeferredBindingCondition(ASTNode* node, void* data) {
     }
   }
   return false;
+}
+
+typedef struct {
+  TemplateFunctionBodyClone* clone;
+  bool materialized;
+} DeferredExpansionContext;
+
+static ASTNode* MaterializeDeferredExpansionStatement(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  if (node == NULL || node->op != AST_OP(expansion_for)) {
+    return node;
+  }
+  DeferredExpansionContext* context = data;
+  TemplateFunctionBodyClone* clone = context->clone;
+  ExpansionStatementASTNode* expansion = (ExpansionStatementASTNode*)node;
+  if (ExpansionStatementIsDependent(expansion, &clone->symbol_map,
+                                      &clone->pack_symbol_map)) {
+    return node;
+  }
+  if (expansion->init_stmt != NULL) {
+    ASTNodeVisit(expansion->init_stmt, ClearAnalyzedFlagVisitor, 0, NULL);
+  }
+  if (expansion->initializer != NULL) {
+    ASTNodeVisit(expansion->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
+  }
+  if (expansion->stmt != NULL) {
+    ASTNodeVisit(expansion->stmt, ClearAnalyzedFlagVisitor, 0, NULL);
+  }
+  context->materialized = true;
+  *action = kASTTransformSkipChildren;
+  return SemanticMaterializeExpansionStatement(
+      expansion, &clone->symbol_map, &clone->pack_symbol_map);
 }
 
 static ASTNode* ReanalyzeDeferredStructuredBindingCondition(
@@ -6062,6 +6162,19 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
         ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
     body = ASTNodeVisitAndTransform(
         body, ReanalyzeDeferredStructuredBindingCondition, &deferred_binding);
+  }
+  DeferredExpansionContext deferred_expansion = {.clone = &clone,
+                                                 .materialized = false};
+  body = ASTNodeVisitAndTransform(
+      body, MaterializeDeferredExpansionStatement, &deferred_expansion);
+  if (deferred_expansion.materialized) {
+    ASTNodeVisit(body, ClearAnalyzedFlagVisitor, 0, NULL);
+    ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+    ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
+    body =
+        ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
+    to->info.function.body = body;
+    AnalyzeStatement(body);
   }
   VectorDestruct(&deferred_binding.condition_symbols);
   body = ASTNodeVisitAndTransform(body, RebuildClonedCallResultConversion,

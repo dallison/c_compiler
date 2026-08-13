@@ -39,7 +39,7 @@ typedef struct {
   struct Struct* substitution_target;
 } TemplateFunctionBodyClone;
 
-struct ASTNode* IdentityCloneNode(struct ASTNode* node, void* data);
+void RewriteTemplateBodyIdentifiers(struct ASTNode* node, Map* symbol_map);
 void DeleteMappedVector(MapKeyValue* kv);
 
 TypeRecord* SubstituteTemplateParameters(TypeParser* parser, TypeRecord* type,

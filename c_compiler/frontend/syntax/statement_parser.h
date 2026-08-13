@@ -25,4 +25,13 @@ ASTNode* SyntaxResolveRangeForIterator(ASTNode* node);
 // function body's outermost block.  A no-op in C.
 void SyntaxAppendCXXBlockScopeDestructors(Vector* statements);
 
+// True when `type` names a class with member `begin` and `end` ([stmt.ranged]).
+bool SyntaxTypeHasRangeMemberBeginEnd(TypeRecord* type);
+
+// Builds a deferred range-for begin/end expression (AST_OP(range_begin) /
+// AST_OP(range_end)) for ADL lookup at the expansion/range-for point of
+// definition.  The right child is the unqualified `begin`/`end` call.
+ASTNode* SyntaxNewRangeForBoundExpr(Syntax* syntax, Symbol* range_sym,
+                                    bool is_begin, SourceLocation location);
+
 #endif /* statement_parser_h */

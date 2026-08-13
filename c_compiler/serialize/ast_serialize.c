@@ -506,6 +506,24 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 19, kSerialKindAST, f->stmt);
       break;
     }
+    case kASTShapeExpansionFor: {
+      ExpansionStatementASTNode* e = (ExpansionStatementASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, e->init_stmt);
+      WireWriteInt32(buf, 17, (int32_t)e->item_kind);
+      SWriteRef(ctx, buf, 18, kSerialKindSymbol, e->item_symbol);
+      SWriteRef(ctx, buf, 19, kSerialKindType, e->binding_type);
+      if (e->binding_names != NULL) {
+        SWriteStringVector(ctx, buf, 20, e->binding_names);
+      }
+      if (e->binding_symbols != NULL) {
+        SWriteRefVector(ctx, buf, 21, kSerialKindSymbol, e->binding_symbols);
+      }
+      WireWriteInt32(buf, 22, e->binding_pack_index);
+      WireWriteInt32(buf, 23, (int32_t)e->init_kind);
+      SWriteRef(ctx, buf, 24, kSerialKindAST, e->initializer);
+      SWriteRef(ctx, buf, 25, kSerialKindAST, e->stmt);
+      break;
+    }
     case kASTShapeVarDecl: {
       VariableDeclarationASTNode* v = (VariableDeclarationASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindSymbol, v->symbol);
@@ -910,6 +928,58 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 19) {
         f->stmt = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      break;
+    }
+    case kASTShapeExpansionFor: {
+      ExpansionStatementASTNode* e = (ExpansionStatementASTNode*)n;
+      if (field == 16) {
+        e->init_stmt = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        int32_t kind = 0;
+        WireReadInt32(buf, &kind);
+        e->item_kind = (ExpansionItemKind)kind;
+        return;
+      }
+      if (field == 18) {
+        e->item_symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        return;
+      }
+      if (field == 19) {
+        e->binding_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        return;
+      }
+      if (field == 20) {
+        e->binding_names = NewVector();
+        SReadStringVector(ctx, buf, e->binding_names);
+        return;
+      }
+      if (field == 21) {
+        e->binding_symbols = NewVector();
+        SReadRefVector(ctx, buf, kSerialKindSymbol, e->binding_symbols);
+        return;
+      }
+      if (field == 22) {
+        int32_t pack_index = -1;
+        WireReadInt32(buf, &pack_index);
+        e->binding_pack_index = pack_index;
+        return;
+      }
+      if (field == 23) {
+        int32_t kind = 0;
+        WireReadInt32(buf, &kind);
+        e->init_kind = (ExpansionInitializerKind)kind;
+        return;
+      }
+      if (field == 24) {
+        e->initializer = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 25) {
+        e->stmt = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         return;
       }
       break;

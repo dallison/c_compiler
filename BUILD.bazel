@@ -696,6 +696,7 @@ cc_library(
         "c_compiler/backend/statement_codegen.c",
         "c_compiler/frontend/syntax/statement_parser.c",
         "c_compiler/frontend/semantic/statement_semantics.c",
+        "c_compiler/frontend/semantic/expansion_semantics.c",
         "c_compiler/frontend/syntax/symbol.c",
         "c_compiler/frontend/syntax/symbol_table.c",
         "c_compiler/frontend/syntax/module_identity.c",

@@ -1118,6 +1118,20 @@ static bool RangeTypeHasMemberBeginEnd(TypeRecord* range_type) {
 // where the unqualified lookup of `begin` and `end` has to happen; the array and
 // member forms need nothing but the range itself and are synthesized on
 // resolution.
+bool SyntaxTypeHasRangeMemberBeginEnd(TypeRecord* range_type) {
+  return RangeTypeHasMemberBeginEnd(range_type);
+}
+
+static ASTNode* NewRangeForDependentIterator(Syntax* syntax, ASTOpcode op,
+                                            Symbol* range_sym,
+                                            SourceLocation location);
+
+ASTNode* SyntaxNewRangeForBoundExpr(Syntax* syntax, Symbol* range_sym,
+                                    bool is_begin, SourceLocation location) {
+  ASTOpcode op = is_begin ? AST_OP(range_begin) : AST_OP(range_end);
+  return NewRangeForDependentIterator(syntax, op, range_sym, location);
+}
+
 static ASTNode* NewRangeForDependentIterator(Syntax* syntax, ASTOpcode op,
                                             Symbol* range_sym,
                                             SourceLocation location) {
@@ -1454,6 +1468,319 @@ static bool LookingAtCXXRangeForAfterInit(Syntax* syntax) {
   return found_colon;
 }
 
+typedef struct {
+  ExpansionItemKind item_kind;
+  Symbol* item_symbol;
+  TypeRecord* binding_type;
+  Vector names;
+  Vector symbols;
+  Vector attributes;
+  int pack_index;
+  bool is_constexpr;
+} ExpansionItemBinding;
+
+static void ExpansionItemBindingInit(ExpansionItemBinding* binding) {
+  binding->item_kind = kExpansionItemSimple;
+  binding->item_symbol = NULL;
+  binding->binding_type = NULL;
+  VectorInit(&binding->names);
+  VectorInit(&binding->symbols);
+  VectorInit(&binding->attributes);
+  binding->pack_index = -1;
+  binding->is_constexpr = false;
+}
+
+static void ExpansionItemBindingDestruct(ExpansionItemBinding* binding) {
+  VectorDestructWithContents(&binding->names,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+  for (size_t i = 0; i < binding->attributes.length; i++) {
+    Vector* attributes = binding->attributes.value.p[i];
+    AttributeListDestruct(attributes);
+    VectorDelete(attributes);
+  }
+  VectorDestruct(&binding->attributes);
+  VectorDestruct(&binding->symbols);
+  TypeRecordDelete(binding->binding_type);
+}
+
+static bool ExpansionHasInitStatement(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  int paren = 1;
+  int brace = 0;
+  int bracket = 0;
+  bool found = false;
+  while (!LexEof(lex)) {
+    Token t = lex->current_token;
+    if (t == TOK(lparen)) {
+      paren++;
+    } else if (t == TOK(rparen)) {
+      if (paren == 0) {
+        break;
+      }
+      paren--;
+    } else if (t == TOK(lbrace)) {
+      brace++;
+    } else if (t == TOK(rbrace)) {
+      if (brace == 0) {
+        break;
+      }
+      brace--;
+    } else if (t == TOK(lsquare)) {
+      bracket++;
+    } else if (t == TOK(rsquare)) {
+      if (bracket == 0) {
+        break;
+      }
+      bracket--;
+    } else if (t == TOK(colon) && paren == 1 && brace == 0 && bracket == 0) {
+      break;
+    } else if (t == TOK(semicolon) && paren == 1 && brace == 0 &&
+               bracket == 0) {
+      found = true;
+      break;
+    }
+    LexNextToken(lex);
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return found;
+}
+
+static ASTNode* ParseExpansionInitStatement(Syntax* syntax,
+                                            TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  if (LexLookingAt(syntax->lex, TOK(semicolon))) {
+    LexMatch(syntax->lex, TOK(semicolon));
+    return NewCompoundStatementASTNode(NewVector(), location);
+  }
+  if (LookingAtUsingAliasDeclaration(syntax)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax,
+                  "alias declaration in init-statement requires C++23");
+    }
+    return SyntaxParseLocalDeclaration(syntax);
+  }
+  if (SyntaxLookingAtType(syntax)) {
+    return SyntaxParseLocalDeclaration(syntax);
+  }
+  ASTNode* expr = SyntaxParseExpression(syntax, followers | TC(expr));
+  SyntaxNeedSemicolon(syntax, followers | TC(expr));
+  return NewExpressionStatementASTNode(expr, location);
+}
+
+static bool TryParseExpansionStructuredBinding(Syntax* syntax,
+                                               ExpansionItemBinding* binding) {
+  if (!LexMatch(syntax->lex, TOK(lsquare))) {
+    return false;
+  }
+  while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+    bool is_pack = LexMatch(syntax->lex, TOK(ellipsis));
+    if (is_pack) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax, "Structured binding packs require C++26");
+      }
+      if (binding->pack_index >= 0) {
+        SyntaxError(syntax,
+                    "Structured binding declaration cannot contain multiple packs");
+      } else {
+        binding->pack_index = (int)binding->names.length;
+      }
+    }
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected structured binding name");
+      break;
+    }
+    VectorAppend(&binding->names, NewString(syntax->lex->spelling.value));
+    LexNextToken(syntax->lex);
+    Vector* attributes = NewVector();
+    if (SyntaxLookingAtCXXAttribute(syntax)) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        SyntaxError(syntax,
+                    "Attributes on structured bindings require C++26");
+      }
+      SyntaxParseCXXAttributes(syntax, attributes);
+    }
+    VectorAppend(&binding->attributes, attributes);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+  if (binding->pack_index >= 0 &&
+      syntax->current_template_parameter_count == 0) {
+    SyntaxError(
+        syntax,
+        "Structured binding pack can only appear in a templated context");
+  }
+  return true;
+}
+
+static bool TryParseExpansionItemDeclaration(Syntax* syntax,
+                                             ExpansionItemBinding* binding) {
+  if (!SyntaxLookingAtType(syntax)) {
+    SyntaxError(syntax, "Expected expansion statement item declaration");
+    return false;
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
+  parser.allow_constexpr_decl_specifier = true;
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  if (type == NULL) {
+    TypeParserDestruct(&parser);
+    SyntaxError(syntax, "Expected expansion statement item declaration");
+    return false;
+  }
+  TypeRecordIncRef(type);
+  binding->is_constexpr = parser.is_constexpr;
+
+  LexCheckpoint structured_checkpoint;
+  LexCheckpointSave(syntax->lex, &structured_checkpoint);
+  TypeRecord* declared_type = TypeRecordCopy(type);
+  if (LexLookingAt(syntax->lex, TOK(amp)) ||
+      LexLookingAt(syntax->lex, TOK(ampamp))) {
+    bool rvalue = LexMatch(syntax->lex, TOK(ampamp));
+    if (!rvalue) {
+      LexMatch(syntax->lex, TOK(amp));
+    }
+    TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecordChain(reference, declared_type);
+    TypeRecordCalculateSize(reference);
+    declared_type = reference;
+  }
+  if (TryParseExpansionStructuredBinding(syntax, binding)) {
+    binding->item_kind = kExpansionItemStructuredBinding;
+    binding->binding_type = declared_type;
+    LexCheckpointDestruct(&structured_checkpoint);
+    TypeRecordDelete(type);
+    TypeParserDestruct(&parser);
+    return true;
+  }
+  TypeRecordDelete(declared_type);
+  LexCheckpointRestore(syntax->lex, &structured_checkpoint);
+  LexCheckpointDestruct(&structured_checkpoint);
+
+  binding->item_symbol = TypeParserParseDeclarator(&parser, type);
+  TypeRecordDelete(type);
+  TypeParserDestruct(&parser);
+  if (binding->item_symbol == NULL) {
+    SyntaxError(syntax, "Expected expansion statement item declaration");
+    return false;
+  }
+  binding->item_kind = kExpansionItemSimple;
+  binding->item_symbol->flags.is_local = true;
+  binding->item_symbol->flags.is_defined = true;
+  binding->item_symbol->flags.is_constexpr = binding->is_constexpr;
+  if (binding->is_constexpr && binding->item_symbol->type != NULL) {
+    binding->item_symbol->type->qualifiers |= kQualConst;
+  }
+  return true;
+}
+
+static void AddExpansionStructuredBindingVariables(Syntax* syntax,
+                                                   ExpansionItemBinding* binding,
+                                                   SourceLocation location) {
+  for (size_t i = 0; i < binding->names.length; i++) {
+    String* name = binding->names.value.p[i];
+    Symbol* sym = NewRangeForAutoSymbol(syntax, name->value, location);
+    if (i < binding->attributes.length) {
+      Vector* attributes = binding->attributes.value.p[i];
+      AttributeListDestruct(&sym->attributes);
+      AttributeListClone(&sym->attributes, attributes);
+      SyntaxApplyDeclarationAttributes(sym);
+    }
+    sym->flags.is_parameter_pack = binding->pack_index == (int)i;
+    sym->flags.is_constexpr = binding->is_constexpr;
+    if (binding->is_constexpr && sym->type != NULL) {
+      sym->type->qualifiers |= kQualConst;
+    }
+    sym->structured_binding_pack_size = -1;
+    AddRangeForVariable(syntax, sym);
+    VectorAppend(&binding->symbols, sym);
+  }
+}
+
+static ASTNode* ParseExpansionStatement(Syntax* syntax, TokenClass followers,
+                                        SourceLocation location) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SyntaxError(syntax, "Expansion statements require C++26");
+  }
+  SyntaxNeedBracket(syntax, TOK(lparen), followers);
+
+  SyntaxOpenScope(syntax);
+  ASTNode* init_stmt = NULL;
+  if (ExpansionHasInitStatement(syntax)) {
+    init_stmt = ParseExpansionInitStatement(syntax, followers);
+  }
+
+  ExpansionItemBinding binding;
+  ExpansionItemBindingInit(&binding);
+  if (!TryParseExpansionItemDeclaration(syntax, &binding)) {
+    ExpansionItemBindingDestruct(&binding);
+    SyntaxCloseScope(syntax);
+    return NewExpansionStatementASTNode(
+        init_stmt, kExpansionItemSimple, NULL, NULL, NULL, NULL, -1,
+        kExpansionInitializerExpression, NULL, NULL, location);
+  }
+  if (binding.item_kind == kExpansionItemSimple) {
+    AddRangeForVariable(syntax, binding.item_symbol);
+  } else {
+    AddExpansionStructuredBindingVariables(syntax, &binding, location);
+  }
+
+  if (!LexMatch(syntax->lex, TOK(colon))) {
+    SyntaxError(syntax, "Expected ':' after expansion statement item");
+  }
+
+  ExpansionInitializerKind init_kind = kExpansionInitializerExpression;
+  ASTNode* initializer = NULL;
+  if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    init_kind = kExpansionInitializerInitList;
+    LexNextToken(syntax->lex);
+    initializer = SyntaxParseBracedInitializer(syntax);
+  } else {
+    initializer = SyntaxParseExpression(syntax, followers);
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  syntax->loop_count++;
+  if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax,
+                "Expansion statement body must be a compound statement");
+    SyntaxRecover(syntax, followers | TC(closebra));
+  }
+  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  syntax->loop_count--;
+  SyntaxCloseScope(syntax);
+
+  Vector* binding_names = NULL;
+  Vector* binding_symbols = NULL;
+  if (binding.item_kind == kExpansionItemStructuredBinding) {
+    binding_names = NewVector();
+    binding_symbols = NewVector();
+    for (size_t i = 0; i < binding.names.length; i++) {
+      VectorAppend(binding_names, binding.names.value.p[i]);
+    }
+    for (size_t i = 0; i < binding.symbols.length; i++) {
+      VectorAppend(binding_symbols, binding.symbols.value.p[i]);
+    }
+    VectorInit(&binding.names);
+    VectorInit(&binding.symbols);
+  }
+
+  ASTNode* result = NewExpansionStatementASTNode(
+      init_stmt, binding.item_kind, binding.item_symbol, binding.binding_type,
+      binding_names, binding_symbols, binding.pack_index, init_kind,
+      initializer, stmt, location);
+  binding.item_symbol = NULL;
+  binding.binding_type = NULL;
+  ExpansionItemBindingDestruct(&binding);
+  return result;
+}
+
 // For statement.
 static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
                                   SourceLocation location) {
@@ -1722,6 +2049,23 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     VectorInit(&attrs);
     SyntaxParseCXXAttributes(syntax, &attrs);
     AttributeListDestruct(&attrs);
+  }
+
+  if (CompilerIsCXX() && LexLookingAt(lex, TOK(template))) {
+    LexCheckpoint template_checkpoint;
+    LexCheckpointSave(lex, &template_checkpoint);
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(for))) {
+      LexNextToken(lex);
+      LexCheckpointDestruct(&template_checkpoint);
+      stmt = ParseExpansionStatement(syntax, followers, location);
+      if (stmt != NULL) {
+        stmt->flags |= kASTStatementStart;
+      }
+      return stmt;
+    }
+    LexCheckpointRestore(lex, &template_checkpoint);
+    LexCheckpointDestruct(&template_checkpoint);
   }
 
   bool found = false;

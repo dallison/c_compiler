@@ -167,6 +167,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "==";
     case AST_OP(for):
       return "for";
+    case AST_OP(expansion_for):
+      return "template for";
     case AST_OP(goto):
       return "goto";
     case AST_OP(greater):
@@ -947,6 +949,7 @@ bool ASTNodeIsStatement(ASTNode* node) {
     case AST_OP(do):
     case AST_OP(expr):
     case AST_OP(for):
+    case AST_OP(expansion_for):
     case AST_OP(goto):
     case AST_OP(if):
     case AST_OP(label):
@@ -975,6 +978,8 @@ bool ASTNodeChildIsStatement(ASTNode* parent, int child_id) {
       return child_id == 1;
     case AST_OP(for):
       return child_id == 3;
+    case AST_OP(expansion_for):
+      return child_id == 2;
     case AST_OP(switch):
       return child_id == 1;
     case AST_OP(try):
@@ -3151,6 +3156,189 @@ ASTNode* NewForStatementASTNode(ASTNode* e1, ASTNode* e2, ASTNode* e3,
   return (ASTNode*)node;
 }
 
+static void ExpansionStatementASTNodeDelete(ASTNode* node) {
+  ExpansionStatementASTNode* enode = (ExpansionStatementASTNode*)node;
+  if (enode->init_stmt != NULL) {
+    ASTNodeDelete(enode->init_stmt);
+  }
+  TypeRecordDelete(enode->binding_type);
+  if (enode->binding_names != NULL) {
+    VectorDestructWithContents(enode->binding_names,
+                               (VectorElementDestructor)StringDelete,
+                               /*free_element=*/false);
+    VectorDelete(enode->binding_names);
+  }
+  if (enode->binding_symbols != NULL) {
+    VectorDelete(enode->binding_symbols);
+  }
+  if (enode->initializer != NULL) {
+    ASTNodeDelete(enode->initializer);
+  }
+  if (enode->stmt != NULL) {
+    ASTNodeDelete(enode->stmt);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void ExpansionStatementASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  ExpansionStatementASTNode* enode = (ExpansionStatementASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "template for\n");
+  if (enode->init_stmt != NULL) {
+    ASTNodePrint(enode->init_stmt, indents + 2, fp);
+  }
+  Indent(indents + 2, fp);
+  if (enode->item_kind == kExpansionItemSimple) {
+    SymbolPrint(enode->item_symbol, fp);
+  } else {
+    fprintf(fp, "structured_binding [");
+    for (size_t i = 0; i < enode->binding_names->length; i++) {
+      String* name = enode->binding_names->value.p[i];
+      if (i > 0) {
+        fprintf(fp, ", ");
+      }
+      if (enode->binding_pack_index == (int)i) {
+        fprintf(fp, "...");
+      }
+      fprintf(fp, "%s", name != NULL ? name->value : "<null>");
+    }
+    fprintf(fp, "]\n");
+  }
+  Indent(indents + 2, fp);
+  fprintf(fp, ":\n");
+  if (enode->initializer != NULL) {
+    ASTNodePrint(enode->initializer, indents + 2, fp);
+  }
+  if (enode->stmt != NULL) {
+    ASTNodePrint(enode->stmt, indents + 4, fp);
+  }
+}
+
+static void ExpansionStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                                  ASTNode* child,
+                                                  bool delete_old_child) {
+  ExpansionStatementASTNode* node = (ExpansionStatementASTNode*)parent;
+  ASTNode* old = NULL;
+  switch (child_id) {
+    case 0:
+      old = node->init_stmt;
+      node->init_stmt = child;
+      break;
+    case 1:
+      old = node->initializer;
+      node->initializer = child;
+      break;
+    case 2:
+      old = node->stmt;
+      node->stmt = child;
+      break;
+  }
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* ExpansionStatementASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  ExpansionStatementASTNode* from = (ExpansionStatementASTNode*)node;
+  ExpansionStatementASTNode* to =
+      ASTArenaAlloc(sizeof(ExpansionStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->init_stmt = ASTNodeClone(from->init_stmt, func, data, &to->base);
+  to->item_kind = from->item_kind;
+  to->item_symbol = from->item_symbol;
+  to->binding_type =
+      from->binding_type != NULL ? TypeRecordCopy(from->binding_type) : NULL;
+  to->binding_names = NULL;
+  if (from->binding_names != NULL) {
+    to->binding_names = NewVector();
+    for (size_t i = 0; i < from->binding_names->length; i++) {
+      String* name = from->binding_names->value.p[i];
+      VectorAppend(to->binding_names,
+                   name != NULL ? NewString(name->value) : NULL);
+    }
+  }
+  to->binding_symbols = NULL;
+  if (from->binding_symbols != NULL) {
+    to->binding_symbols = NewVector();
+    for (size_t i = 0; i < from->binding_symbols->length; i++) {
+      VectorAppend(to->binding_symbols, from->binding_symbols->value.p[i]);
+    }
+  }
+  to->binding_pack_index = from->binding_pack_index;
+  to->init_kind = from->init_kind;
+  to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
+  to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void ExpansionStatementASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode* node, void*, int, VisitorMode),
+    int child_id, void* data) {
+  ExpansionStatementASTNode* n = (ExpansionStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->init_stmt, func, 0, data);
+  ASTNodeVisit(n->initializer, func, 1, data);
+  ASTNodeVisit(n->stmt, func, 2, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void ExpansionStatementASTNodeTransform(ASTNode* node,
+                                               ASTNodeTransformer func,
+                                               void* data) {
+  ExpansionStatementASTNode* n = (ExpansionStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->init_stmt, func, data);
+  ASTNodeTransformChild(node, 1, n->initializer, func, data);
+  ASTNodeTransformChild(node, 2, n->stmt, func, data);
+}
+
+static bool ExpansionStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
+  (void)node;
+  (void)value;
+  return false;
+}
+
+static ASTNodeVirtuals expansion_for_stmt_vtbl = {
+    ExpansionStatementASTNodeDelete, ExpansionStatementASTNodePrint,
+    ExpansionStatementASTNodeReplaceChild, ExpansionStatementASTNodeClone,
+    ExpansionStatementASTNodeVisit, ExpansionStatementASTNodeUsesValue,
+    ExpansionStatementASTNodeTransform};
+
+ASTNode* NewExpansionStatementASTNode(
+    ASTNode* init_stmt, ExpansionItemKind item_kind, Symbol* item_symbol,
+    TypeRecord* binding_type, Vector* binding_names, Vector* binding_symbols,
+    int binding_pack_index, ExpansionInitializerKind init_kind,
+    ASTNode* initializer, ASTNode* stmt, SourceLocation location) {
+  ExpansionStatementASTNode* node =
+      ASTArenaAlloc(sizeof(ExpansionStatementASTNode));
+  ASTNodeInit(&node->base, AST_OP(expansion_for), NULL, location,
+              &expansion_for_stmt_vtbl);
+  node->init_stmt = init_stmt;
+  if (init_stmt != NULL) {
+    init_stmt->parent = (ASTNode*)node;
+    init_stmt->child_id = 0;
+  }
+  node->item_kind = item_kind;
+  node->item_symbol = item_symbol;
+  node->binding_type = binding_type;
+  node->binding_names = binding_names;
+  node->binding_symbols = binding_symbols;
+  node->binding_pack_index = binding_pack_index;
+  node->init_kind = init_kind;
+  node->initializer = initializer;
+  if (initializer != NULL) {
+    initializer->parent = (ASTNode*)node;
+    initializer->child_id = 1;
+  }
+  node->stmt = stmt;
+  if (stmt != NULL) {
+    stmt->parent = (ASTNode*)node;
+    stmt->child_id = 2;
+  }
+  return (ASTNode*)node;
+}
+
 static void VariableDeclarationASTNodeDelete(ASTNode* node) {
   VariableDeclarationASTNode* vnode = (VariableDeclarationASTNode*)node;
   if (vnode->initializer != NULL) {
@@ -4287,6 +4475,7 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &catch_vtbl) return kASTShapeCatch;
   if (v == &try_vtbl) return kASTShapeTry;
   if (v == &for_stmt_vtbl) return kASTShapeFor;
+  if (v == &expansion_for_stmt_vtbl) return kASTShapeExpansionFor;
   if (v == &var_decl_vtbl) return kASTShapeVarDecl;
   if (v == &decl_list_vtbl) return kASTShapeDeclList;
   if (v == &case_label_vtbl) return kASTShapeCaseLabel;
@@ -4414,6 +4603,15 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeFor: {
       ForStatementASTNode* n = ASTArenaAlloc(sizeof(ForStatementASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &for_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeExpansionFor: {
+      ExpansionStatementASTNode* n =
+          ASTArenaAlloc(sizeof(ExpansionStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &expansion_for_stmt_vtbl);
+      n->item_kind = kExpansionItemSimple;
+      n->binding_pack_index = -1;
+      n->init_kind = kExpansionInitializerExpression;
       return &n->base;
     }
     case kASTShapeVarDecl: {

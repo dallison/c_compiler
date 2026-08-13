@@ -40,4 +40,38 @@ void CXXInsertScopeExitDestructors(TypeRecord* func);
 void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
                                               Vector* out);
 
+typedef struct {
+  size_t element_count;
+  bool tuple_like;
+  bool array_like;
+  Vector members;  // StructMember* when decomposed from a class type.
+} StructuredBindingDecomposition;
+
+// Fills decomposition metadata for a structured-binding source type.
+bool SemanticAnalyzeStructuredBindingDecomposition(TypeRecord* type,
+                                                   ASTNode* diagnostic,
+                                                   StructuredBindingDecomposition* out);
+void SemanticStructuredBindingDecompositionDestruct(
+    StructuredBindingDecomposition* decomposition);
+
+// Element access for hidden structured-binding decomposition ([dcl.struct.bind]).
+ASTNode* SemanticStructuredBindingElementAccess(
+    Symbol* hidden, TypeRecord* hidden_type, size_t index,
+    StructMember* member, bool tuple_like, SourceLocation location);
+
+// Clone a local symbol for another expansion iteration, preserving spelling.
+Symbol* SemanticCloneExpansionIterationSymbol(Symbol* source);
+
+// Hidden `auto&&` binding for an expansion initializer, with reference
+// extension for lvalues.  Returns the hidden-declaration statement.
+ASTNode* SemanticCreateHiddenReferenceBinding(ASTNode* init_expr,
+                                              SourceLocation location,
+                                              Symbol** hidden_out);
+
+void SemanticMarkExpansionLoopJumps(ExpansionStatementASTNode* expansion);
+void SemanticDiagnoseExpansionEnclosedLabels(ExpansionStatementASTNode* expansion);
+
+void SemanticAppendHiddenInitializerTemporaries(ASTNode* hidden_decl,
+                                                Vector* statements);
+
 #endif /* statement_semantics_h */

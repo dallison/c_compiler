@@ -29,6 +29,11 @@ ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
+                                      VariableDeclarationASTNode* decl);
+bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,
+                                       VariableDeclarationASTNode* hidden_decl,
+                                       ASTNode* init_expr);
 bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
                                               ASTNode* node, double* result);
 
@@ -62,6 +67,9 @@ bool ConstexprEvaluatePointerDereferenceAsFloating(ConstEvalContext* ctx,
                                                    double* result);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
+                                        ASTNode* begin_expr, ASTNode* end_expr,
+                                        size_t* count);
 bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
                                     ConstexprObject** object);
 // Evaluates a constant char pointer and copies `count` code units from it.
