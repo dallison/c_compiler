@@ -9666,6 +9666,33 @@ static TypeRecord* SizeofOperandType(TypeRecord* type) {
   return CompilerIsCXX() && TypeIsReference(type) ? type->next : type;
 }
 
+static void AnalyzePackIndexExpression(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+
+  if (node->left == NULL || node->left->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)node->left)->symbol == NULL ||
+      !((IdentifierASTNode*)node->left)->symbol->flags.is_parameter_pack) {
+    SemanticError((ASTNode*)node,
+                  "pack indexing requires an unexpanded parameter pack name");
+  }
+
+  int64_t index = 0;
+  if (!ExpressionIsTemplateDependent(node->right)) {
+    if (!EvaluateIntegerExpression(node->right, &index)) {
+      SemanticError(node->right,
+                    "pack index must be a constant expression");
+    } else if (index < 0) {
+      SemanticError(node->right, "pack index cannot be negative");
+    }
+  }
+
+  if (node->left != NULL && node->left->type != NULL) {
+    ASTNodeSetType((ASTNode*)node, node->left->type);
+    node->base.value_category = node->left->value_category;
+  }
+}
+
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   bool is_alignof = node->base.base.op == AST_OP(alignof);
   if (node->is_pack_size) {
@@ -10713,6 +10740,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       node = ASTNodeGetShape(node) == kASTShapeVector
                  ? AnalyzeMultidimensionalSubscript(vector_node)
                  : AnalyzeArraySubscript(binary_node);
+      break;
+
+    case AST_OP(pack_index):
+      AnalyzePackIndexExpression(binary_node);
       break;
 
     case AST_OP(call):  // Function call.

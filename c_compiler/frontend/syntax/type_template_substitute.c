@@ -38,13 +38,14 @@ ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
 }
 
 static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base);
+static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
+                                           TypeRecord* type, Vector* args);
 static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
                                                          Vector* actuals);
 static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
                                                               Vector* actuals);
-static bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
-                                          int* pack_index,
-                                          size_t* pack_length);
+bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
+                                   int* pack_index, size_t* pack_length);
 
 static bool RecordPackExpansionIndex(int candidate, Vector* args,
                                      int* pack_index, size_t* pack_length) {
@@ -68,7 +69,14 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
   bool found = false;
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     int index = -1;
-    if (TypeIsTemplateParameterPlaceholder(t, &index) &&
+    if (t->is_pack_index && t->pack_index_expr != NULL &&
+        FindPackExpansionInExpression(t->pack_index_expr, args, pack_index,
+                                      pack_length)) {
+      // In `Ts...[Is]...`, the outer expansion is driven by `Is`; `Ts` is
+      // selected by the pack-indexing specifier itself and must remain whole.
+      found = true;
+    } else if (!t->is_pack_index &&
+               TypeIsTemplateParameterPlaceholder(t, &index) &&
         RecordPackExpansionIndex(index, args, pack_index, pack_length)) {
       found = true;
     }
@@ -164,9 +172,8 @@ static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
   }
 }
 
-static bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
-                                          int* pack_index,
-                                          size_t* pack_length) {
+bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
+                                   int* pack_index, size_t* pack_length) {
   PackExpansionExpressionSearch search = {
       .args = args,
       .pack_index = pack_index,
@@ -589,6 +596,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
   if (arg->is_pack_expansion) {
     TemplateArgument* pack = NULL;
     if (arg->kind == kTemplateParameterType &&
+        (arg->type == NULL || !arg->type->is_pack_index) &&
         TypeIsTemplateParameterPlaceholder(arg->type, &index) &&
         index >= 0 && (size_t)index < args->length) {
       pack = args->value.p[index];
@@ -869,7 +877,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
                                                  Vector* args) {
   if (type->declarator != kDeclPrimitive ||
       type->template_parameter_index < 0 ||
-      type->dependent_member_name == NULL) {
+      type->dependent_member_name == NULL || type->is_pack_index) {
     return NULL;
   }
   int index = type->template_parameter_index;
@@ -1242,6 +1250,93 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
   return TypeRecordCalculateSize(subst);
+}
+
+/* Resolve a C++26 pack-indexing specifier `Ts...[I]` once both the pack and
+ * index are known.  A partially substituted index is retained for a later
+ * nested-template instantiation. */
+static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
+                                           TypeRecord* type, Vector* args) {
+  if (!type->is_pack_index) {
+    return NULL;
+  }
+  int pack_index = type->template_parameter_index;
+  if (args == NULL || pack_index < 0 ||
+      (size_t)pack_index >= args->length) {
+    return TypeRecordCopy(type);
+  }
+  TemplateArgument* pack = args->value.p[pack_index];
+  if (pack == NULL || pack->pack_arguments == NULL) {
+    return TypeRecordCopy(type);
+  }
+
+  int64_t element_index = 0;
+  if (!TryFoldDependentTemplateArgument(parser, type->pack_index_expr, args,
+                                        &element_index)) {
+    ASTNode* partial = CloneDependentExpressionWithArgs(
+        parser, type->pack_index_expr, args);
+    if (partial != NULL &&
+        DependentExpressionContainsTemplateParameter(partial)) {
+      TypeRecord* deferred = TypeRecordCopy(type);
+      ASTNodeDelete(deferred->pack_index_expr);
+      deferred->pack_index_expr = partial;
+      return deferred;
+    }
+    ASTNodeDelete(partial);
+    if (parser != NULL) {
+      parser->template_substitution_failed = true;
+    }
+    SemanticError(type->pack_index_expr,
+                  "pack index must be a constant expression");
+    TypeRecord* fallback =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    return fallback;
+  }
+
+  if (element_index < 0 ||
+      (uint64_t)element_index >= pack->pack_arguments->length) {
+    if (parser != NULL) {
+      parser->template_substitution_failed = true;
+    }
+    SemanticError(type->pack_index_expr,
+                  "pack index %" PRId64
+                  " is out of bounds for a pack of length %zu",
+                  element_index, pack->pack_arguments->length);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+  }
+
+  TemplateArgument* element =
+      pack->pack_arguments->value.p[(size_t)element_index];
+  if (element == NULL || element->kind != kTemplateParameterType ||
+      element->type == NULL) {
+    if (parser != NULL) {
+      parser->template_substitution_failed = true;
+    }
+    SemanticError(type->pack_index_expr,
+                  "pack indexing specifier requires a type pack");
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+  }
+  if (type->dependent_member_name != NULL) {
+    Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
+        args, pack_index, element);
+    TypeRecord* member_pattern = TypeRecordCopy(type);
+    member_pattern->is_pack_index = false;
+    ASTNodeDelete(member_pattern->pack_index_expr);
+    member_pattern->pack_index_expr = NULL;
+    TypeRecord* member = SubstituteDependentMemberType(
+        parser, member_pattern, element_args);
+    TypeRecordDelete(member_pattern);
+    VectorDeleteWithContents(
+        element_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return member;
+  }
+  TypeRecord* result = TypeContainsTemplateParameter(element->type)
+                           ? SubstituteTemplateParameters(parser, element->type,
+                                                          args)
+                           : TypeRecordCopy(element->type);
+  result->qualifiers |= type->qualifiers;
+  return TypeMaterializeClassTemplateSpecialization(parser->syntax, result);
 }
 
 /* Replace a bare type parameter `T` with its actual type argument, preserving
@@ -1661,6 +1756,11 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     return subst;
   }
 
+  subst = SubstituteTypePackIndex(parser, type, args);
+  if (subst != NULL) {
+    return subst;
+  }
+
   subst = SubstituteBareTemplateParameter(parser, type, args);
   if (subst != NULL) {
     return subst;
@@ -1911,6 +2011,12 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
     if (t->dependent_decltype_expr != NULL) {
       t->dependent_decltype_expr =
           CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
+    }
+    if (t->pack_index_expr != NULL) {
+      ASTNode* old_index = t->pack_index_expr;
+      t->pack_index_expr =
+          CloneAndRebaseDependentExpression(old_index, base);
+      ASTNodeDelete(old_index);
     }
   }
 }

@@ -255,6 +255,9 @@ typedef enum {
   // SyntaxResolveRangeForIterator.
   AST_OP(range_begin),
   AST_OP(range_end),
+  // C++26 pack-indexing expression: `pack...[constant-expression]`.
+  // Stored as a BinaryASTNode (left = pack id, right = index).
+  AST_OP(pack_index),
 } ASTOpcode;
 
 const char* ASTOpcodeName(ASTOpcode op);

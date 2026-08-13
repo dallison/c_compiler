@@ -1760,6 +1760,95 @@ static Struct* CloneLambdaClosureOwner(TemplateFunctionBodyClone* clone) {
   return clone->to_func->info.function.cxx_member_owner;
 }
 
+/* Expand `pack...[Indices]...` in a call argument list.  The outer expansion
+ * is driven by the index pack, while the indexed pack must remain whole until
+ * each concrete index has been folded. */
+static bool ExpandClonedPackIndexActual(TemplateFunctionBodyClone* clone,
+                                        ASTNode* parent, ASTNode* actual,
+                                        Vector* expanded) {
+  if (actual == NULL || actual->op != AST_OP(pack_index) ||
+      (actual->flags & kASTPackExpansion) == 0) {
+    return false;
+  }
+  BinaryASTNode* indexed = (BinaryASTNode*)actual;
+  if (indexed->left == NULL || indexed->left->op != AST_OP(identifier) ||
+      indexed->right == NULL) {
+    return false;
+  }
+
+  int index_pack_parameter = -1;
+  size_t index_pack_length = 0;
+  if (!FindPackExpansionInExpression(indexed->right, clone->args,
+                                     &index_pack_parameter,
+                                     &index_pack_length) ||
+      index_pack_parameter < 0 ||
+      (size_t)index_pack_parameter >= clone->args->length) {
+    return false;
+  }
+  TemplateArgument* index_pack =
+      clone->args->value.p[index_pack_parameter];
+  if (index_pack == NULL || index_pack->pack_arguments == NULL) {
+    return false;
+  }
+
+  Symbol* indexed_symbol = ((IdentifierASTNode*)indexed->left)->symbol;
+  Vector* function_elements =
+      MapFindPointerKey(&clone->pack_symbol_map, indexed_symbol);
+  int value_pack_parameter =
+      indexed_symbol != NULL ? indexed_symbol->template_parameter_index : -1;
+  TemplateArgument* value_pack =
+      function_elements == NULL && value_pack_parameter >= 0 &&
+              (size_t)value_pack_parameter < clone->args->length
+          ? clone->args->value.p[value_pack_parameter]
+          : NULL;
+  if (function_elements == NULL &&
+      (value_pack == NULL || value_pack->pack_arguments == NULL)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < index_pack_length; i++) {
+    Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
+        clone->args, index_pack_parameter,
+        index_pack->pack_arguments->value.p[i]);
+    int64_t selected = 0;
+    bool folded = TryFoldDependentTemplateArgument(
+        clone->parser, indexed->right, element_args, &selected);
+    VectorDeleteWithContents(
+        element_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+
+    size_t indexed_length = function_elements != NULL
+                                ? function_elements->length
+                                : value_pack->pack_arguments->length;
+    ASTNode* replacement = NULL;
+    if (!folded) {
+      SemanticError(indexed->right,
+                    "pack index must be a constant expression");
+    } else if (selected < 0 || (uint64_t)selected >= indexed_length) {
+      SemanticError(indexed->right,
+                    "pack index %" PRId64
+                    " is out of bounds for a pack of length %zu",
+                    selected, indexed_length);
+    } else if (function_elements != NULL) {
+      replacement = NewIdentifierASTNode(
+          function_elements->value.p[(size_t)selected], actual->location);
+    } else {
+      replacement = TemplateArgumentMaterializeExpression(
+          value_pack->pack_arguments->value.p[(size_t)selected],
+          actual->location);
+    }
+    if (replacement == NULL) {
+      replacement = NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), actual->location);
+    }
+    replacement->flags &= ~kASTPackExpansion;
+    replacement->parent = parent;
+    replacement->child_id = (int)expanded->length;
+    VectorAppend(expanded, replacement);
+  }
+  return true;
+}
+
 static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
                                         ASTNode* node) {
   if (node->op != AST_OP(call) &&
@@ -1772,6 +1861,11 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
   bool changed = false;
   for (size_t i = 0; i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
+    if (ExpandClonedPackIndexActual(clone, node, actual, expanded)) {
+      ASTNodeDelete(actual);
+      changed = true;
+      continue;
+    }
     if (IsIdentifierPackExpansion(actual)) {
       IdentifierASTNode* id = (IdentifierASTNode*)actual;
       Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map,
@@ -3362,8 +3456,78 @@ static Struct* FindOwnerBaseStructMatchingType(TemplateFunctionBodyClone* clone,
   return NULL;
 }
 
+static ASTNode* FoldClonedPackIndex(TemplateFunctionBodyClone* clone,
+                                    ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(pack_index)) {
+    return node;
+  }
+  BinaryASTNode* pack_index = (BinaryASTNode*)node;
+  if (pack_index->left == NULL ||
+      pack_index->left->op != AST_OP(identifier) ||
+      pack_index->right == NULL) {
+    return node;
+  }
+
+  int64_t index = 0;
+  if (!EvaluateIntegerExpression(pack_index->right, &index)) {
+    if (DependentExpressionContainsTemplateParameter(pack_index->right)) {
+      return node;
+    }
+    SemanticError(pack_index->right,
+                  "pack index must be a constant expression");
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), node->location);
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)pack_index->left;
+  Symbol* pack_symbol = id->symbol;
+
+  Vector* replacements =
+      MapFindPointerKey(&clone->pack_symbol_map, pack_symbol);
+  if (replacements != NULL) {
+    if (index < 0 || (uint64_t)index >= replacements->length) {
+      SemanticError(pack_index->right,
+                    "pack index %" PRId64
+                    " is out of bounds for a pack of length %zu",
+                    index, replacements->length);
+      return NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), node->location);
+    }
+    Symbol* replacement = replacements->value.p[(size_t)index];
+    ASTNode* result =
+        NewIdentifierASTNode(replacement, node->location);
+    result->flags = node->flags & ~kASTAnalyzed;
+    return result;
+  }
+
+  int parameter_index =
+      pack_symbol != NULL ? pack_symbol->template_parameter_index : -1;
+  if (parameter_index < 0 || clone->args == NULL ||
+      (size_t)parameter_index >= clone->args->length) {
+    return node;
+  }
+  TemplateArgument* pack = clone->args->value.p[parameter_index];
+  if (pack == NULL || pack->pack_arguments == NULL) {
+    return node;
+  }
+  if (index < 0 || (uint64_t)index >= pack->pack_arguments->length) {
+    SemanticError(pack_index->right,
+                  "pack index %" PRId64
+                  " is out of bounds for a pack of length %zu",
+                  index, pack->pack_arguments->length);
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), node->location);
+  }
+  ASTNode* result = TemplateArgumentMaterializeExpression(
+      pack->pack_arguments->value.p[(size_t)index], node->location);
+  return result != NULL ? result : node;
+}
+
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
+  ASTNode* indexed = FoldClonedPackIndex(clone, node);
+  if (indexed != node) {
+    return indexed;
+  }
   if (node->op == AST_OP(ptr_scale)) {
     PtrScaleASTNode* scale = (PtrScaleASTNode*)node;
     TypeRecord* ref_type =

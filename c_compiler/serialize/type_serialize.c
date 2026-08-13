@@ -43,6 +43,8 @@ enum {
   kType_dependent_decltype_expr = 15,
   kType_template_parameter_name = 16,
   kType_dependent_member_template_arguments = 17,
+  kType_is_pack_index = 18,
+  kType_pack_index_expr = 19,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -64,6 +66,8 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_template_parameter_name, "template_parameter_name"},
     {kType_dependent_member_template_arguments,
      "dependent_member_template_arguments"},
+    {kType_is_pack_index, "is_pack_index"},
+    {kType_pack_index_expr, "pack_index_expr"},
 };
 
 //
@@ -1281,6 +1285,9 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   }
   SWriteRef(ctx, buf, kType_dependent_decltype_expr, kSerialKindAST,
             t->dependent_decltype_expr);
+  WireWriteBool(buf, kType_is_pack_index, t->is_pack_index);
+  SWriteRef(ctx, buf, kType_pack_index_expr, kSerialKindAST,
+            t->pack_index_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
 
   if (t->declarator == kDeclArray) {
@@ -1366,6 +1373,13 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_dependent_decltype_expr:
         t->dependent_decltype_expr =
+            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        break;
+      case kType_is_pack_index:
+        WireReadBool(buf, &t->is_pack_index);
+        break;
+      case kType_pack_index_expr:
+        t->pack_index_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_next:

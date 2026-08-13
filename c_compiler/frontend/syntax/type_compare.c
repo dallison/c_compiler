@@ -106,6 +106,9 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     if (t->dependent_decltype_expr != NULL) {
       return true;
     }
+    if (t->is_pack_index) {
+      return true;
+    }
     if (t->dependent_member_name != NULL &&
         (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
       return true;
@@ -297,8 +300,55 @@ static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
       return TypeEqual(ca->cast_type, cb->cast_type) &&
              DependentTemplateArgExprEqual(ca->expr, cb->expr);
     }
-    default:
+    case AST_OP(sizeof):
+    case AST_OP(alignof): {
+      if (ASTNodeGetShape(a) != kASTShapeSizeof ||
+          ASTNodeGetShape(b) != kASTShapeSizeof) {
+        return false;
+      }
+      SizeofASTNode* sa = (SizeofASTNode*)a;
+      SizeofASTNode* sb = (SizeofASTNode*)b;
+      return sa->is_pack_size == sb->is_pack_size &&
+             DependentTemplateArgExprEqual(sa->expr, sb->expr) &&
+             TypeEqual(sa->type_operand, sb->type_operand);
+    }
+    default: {
+      ASTNodeShape shape = ASTNodeGetShape(a);
+      if (shape != ASTNodeGetShape(b)) {
+        return false;
+      }
+      if (shape == kASTShapeUnary) {
+        return DependentTemplateArgExprEqual(((UnaryASTNode*)a)->sub,
+                                             ((UnaryASTNode*)b)->sub);
+      }
+      if (shape == kASTShapeBinary) {
+        return DependentTemplateArgExprEqual(((BinaryASTNode*)a)->left,
+                                             ((BinaryASTNode*)b)->left) &&
+               DependentTemplateArgExprEqual(((BinaryASTNode*)a)->right,
+                                             ((BinaryASTNode*)b)->right);
+      }
+      if (shape == kASTShapeVector) {
+        VectorASTNode* va = (VectorASTNode*)a;
+        VectorASTNode* vb = (VectorASTNode*)b;
+        if (!DependentTemplateArgExprEqual(va->left, vb->left)) {
+          return false;
+        }
+        if (va->children == NULL || vb->children == NULL) {
+          return va->children == vb->children;
+        }
+        if (va->children->length != vb->children->length) {
+          return false;
+        }
+        for (size_t i = 0; i < va->children->length; i++) {
+          if (!DependentTemplateArgExprEqual(va->children->value.p[i],
+                                             vb->children->value.p[i])) {
+            return false;
+          }
+        }
+        return true;
+      }
       return false;
+    }
   }
 }
 
@@ -323,7 +373,11 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
   if (left_is_type_parameter || right_is_type_parameter) {
     return left_is_type_parameter == right_is_type_parameter &&
            left->template_parameter_index ==
-               right->template_parameter_index;
+               right->template_parameter_index &&
+           left->is_pack_index == right->is_pack_index &&
+           (!left->is_pack_index ||
+            DependentTemplateArgExprEqual(left->pack_index_expr,
+                                          right->pack_index_expr));
   }
   if (left->type != right->type) {
     return false;
@@ -800,6 +854,14 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   // qualifiers.  The remaining cv-qualifiers stay significant so that template
   // argument identities such as `const T` versus `T` remain distinct.
   if ((t1->qualifiers & ~kQualRestrict) != (t2->qualifiers & ~kQualRestrict)) {
+    return false;
+  }
+  if (t1->is_pack_index != t2->is_pack_index) {
+    return false;
+  }
+  if (t1->is_pack_index &&
+      !DependentTemplateArgExprEqual(t1->pack_index_expr,
+                                     t2->pack_index_expr)) {
     return false;
   }
   // Dependent (unknown) leaves need care.  Only a leaf primitive carries a

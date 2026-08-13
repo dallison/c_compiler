@@ -638,6 +638,82 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   return type;
 }
 
+static bool LookingAtCXXPackIndexedTypename(TypeParser* parser) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(parser->lex, TOK(typename))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool result = LexLookingAt(parser->lex, TOK(identifier));
+  if (result) {
+    LexNextToken(parser->lex);
+    result = LexLookingAt(parser->lex, TOK(ellipsis));
+  }
+  if (result) {
+    LexNextToken(parser->lex);
+    result = LexLookingAt(parser->lex, TOK(lsquare));
+  }
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+/* Parse `typename Ts...[I]::member` (including a qualified member tail). */
+static TypeRecord* ParseCXXPackIndexedTypename(TypeParser* parser) {
+  LexMatch(parser->lex, TOK(typename));
+  String pack_name;
+  StringInit(&pack_name, parser->lex->spelling.value);
+  Symbol* pack_symbol = SyntaxFindSymbol(parser->syntax, &pack_name);
+  StringDestruct(&pack_name);
+  LexNextToken(parser->lex);
+
+  TypeRecord* type =
+      pack_symbol != NULL && pack_symbol->type != NULL
+          ? TypeRecordCopy(pack_symbol->type)
+          : NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  int parameter_index = -1;
+  bool is_type_parameter =
+      TypeIsTemplateParameterPlaceholder(type, &parameter_index);
+  if (!is_type_parameter ||
+      !CurrentTemplateParameterIsPack(parser->syntax, parameter_index)) {
+    SyntaxError(parser->syntax,
+                "pack indexing requires a type template parameter pack");
+  }
+
+  LexMatch(parser->lex, TOK(ellipsis));
+  LexMatch(parser->lex, TOK(lsquare));
+  type->is_pack_index = is_type_parameter;
+  type->pack_index_expr =
+      SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+  SyntaxNeedBracket(parser->syntax, TOK(rsquare), TC(decl));
+  if (!LexMatch(parser->lex, TOK(coloncolon))) {
+    SyntaxError(parser->syntax,
+                "expected '::' after pack indexing specifier");
+    return type;
+  }
+
+  FullyQualifiedIdentifier member;
+  FullyQualifiedIdentifierInit(&member);
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+          parser->syntax, &member, TC(decl))) {
+    SyntaxError(parser->syntax,
+                "expected member type after pack indexing specifier");
+    FullyQualifiedIdentifierDestruct(&member);
+    return type;
+  }
+  type->dependent_member_name = NewString(member.spelling.value);
+  type->dependent_member_template_arguments = NewVector();
+  for (size_t i = 0; i < member.template_arguments.length; i++) {
+    VectorAppend(type->dependent_member_template_arguments,
+                 TemplateArgumentVectorCopy(
+                     member.template_arguments.value.p[i]));
+  }
+  FullyQualifiedIdentifierDestruct(&member);
+  return type;
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
@@ -770,6 +846,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       quals |= kQualRestrict;
     } else if (CompilerIsCXX() && LexLookingAt(lex, TOK(decltype))) {
       type_record = ParseCXXDecltypeSpecifier(parser);
+      type |= type_record->type;
+    } else if (CompilerIsCXX() && allow_typedef &&
+               LookingAtCXXPackIndexedTypename(parser)) {
+      type_record = ParseCXXPackIndexedTypename(parser);
       type |= type_record->type;
     } else if (CompilerIsCXX() && allow_typedef &&
                LexMatch(lex, TOK(typename))) {
@@ -1528,6 +1608,9 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
   }
 }
 
+static bool LookingAtCXXTypePackIndex(TypeParser* parser);
+static void ParseCXXTypePackIndex(TypeParser* parser, TypeRecord* base_type);
+
 TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
   Syntax* syntax = parser->syntax;
   
@@ -1571,7 +1654,60 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     return NULL;
   }
   TypeRecord* built = TypeParserBuildTypeRecord(parser, &type_specifier);
+  if (LookingAtCXXTypePackIndex(parser)) {
+    ParseCXXTypePackIndex(parser, built);
+    while (LexLookingAt(parser->lex, TOK(const)) ||
+           LexLookingAt(parser->lex, TOK(volatile)) ||
+           LexLookingAt(parser->lex, TOK(restrict))) {
+      if (LexMatch(parser->lex, TOK(const))) {
+        built->qualifiers |= kQualConst;
+      } else if (LexMatch(parser->lex, TOK(volatile))) {
+        built->qualifiers |= kQualVolatile;
+      } else {
+        LexMatch(parser->lex, TOK(restrict));
+        built->qualifiers |= kQualRestrict;
+      }
+    }
+  }
   return built;
+}
+
+static bool LookingAtCXXTypePackIndex(TypeParser* parser) {
+  if (!CompilerIsCXX() ||
+      !CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(parser->lex, TOK(ellipsis))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool result = LexLookingAt(parser->lex, TOK(lsquare));
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+static void ParseCXXTypePackIndex(TypeParser* parser, TypeRecord* base_type) {
+  LexMatch(parser->lex, TOK(ellipsis));
+  LexMatch(parser->lex, TOK(lsquare));
+  ASTNode* index =
+      SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+  SyntaxNeedBracket(parser->syntax, TOK(rsquare), TC(decl) | TC(exprsep));
+
+  int parameter_index = -1;
+  bool is_type_parameter =
+      TypeIsTemplateParameterPlaceholder(base_type, &parameter_index);
+  if (!is_type_parameter ||
+      !CurrentTemplateParameterIsPack(parser->syntax, parameter_index)) {
+    SyntaxError(parser->syntax,
+                "pack indexing requires a type template parameter pack");
+  }
+  if (is_type_parameter) {
+    base_type->is_pack_index = true;
+    base_type->pack_index_expr = index;
+  } else {
+    ASTNodeDelete(index);
+  }
 }
 
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
@@ -1585,8 +1721,13 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   VectorClear(&parser->stack);
   parser->symbol = NULL;
   parser->base_type = base_type;
-  parser->declarator_is_parameter_pack =
-      CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis));
+  parser->declarator_is_parameter_pack = false;
+  if (LookingAtCXXTypePackIndex(parser)) {
+    ParseCXXTypePackIndex(parser, base_type);
+  } else {
+    parser->declarator_is_parameter_pack =
+        CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis));
+  }
   if (ParseMemberPointerDeclarator(parser)) {
     // Handled `T C::*` without going through the generic pointer path.
   } else {

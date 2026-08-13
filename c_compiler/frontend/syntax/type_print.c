@@ -212,6 +212,19 @@ static String* TemplateParameterDisplayName(Vector* parameters, int index) {
   return NULL;
 }
 
+static void PackIndexExpressionToString(ASTNode* expr, String* result) {
+  if (expr == NULL) {
+    StringAppend(result, "?");
+  } else if (ASTNodeIsIntConstant(expr)) {
+    StringPrintf(result, "%lld", (long long)ASTNodeConstantValue(expr));
+  } else if (expr->op == AST_OP(identifier) &&
+             ((IdentifierASTNode*)expr)->symbol != NULL) {
+    StringAppendString(result, &((IdentifierASTNode*)expr)->symbol->name);
+  } else {
+    StringAppend(result, "<dependent>");
+  }
+}
+
 static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
                                                      Vector* parameters,
                                                      String* result) {
@@ -235,6 +248,11 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
           StringAppendString(result, type->template_parameter_name);
         } else {
           StringPrintf(result, "T%d", type->template_parameter_index);
+        }
+        if (type->is_pack_index) {
+          StringAppend(result, "...[");
+          PackIndexExpressionToString(type->pack_index_expr, result);
+          StringAppend(result, "]");
         }
         if (type->dependent_member_name != NULL) {
           StringAppend(result, "::");

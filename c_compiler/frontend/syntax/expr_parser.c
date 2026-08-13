@@ -3964,10 +3964,49 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
 // ordinary postfix-expression parser and by named-cast parsing (a named cast
 // such as `static_cast<T>(x)` is itself a postfix-expression and may be
 // directly followed by `.member`, `[i]`, etc.).
+static bool LookingAtCXXPackIndexSuffix(Syntax* syntax) {
+  if (!CompilerIsCXX() ||
+      !CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(syntax->lex, TOK(ellipsis))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = LexLookingAt(syntax->lex, TOK(lsquare));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+static ASTNode* ParseCXXPackIndexExpression(Syntax* syntax, ASTNode* pack,
+                                            TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexMatch(syntax->lex, TOK(ellipsis));
+  LexMatch(syntax->lex, TOK(lsquare));
+  ASTNode* index =
+      SyntaxParseSingleExpression(syntax, followers | TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+
+  bool valid_pack = pack != NULL && pack->op == AST_OP(identifier) &&
+                    (pack->flags & kASTParenthesized) == 0;
+  if (valid_pack) {
+    IdentifierASTNode* id = (IdentifierASTNode*)pack;
+    valid_pack = id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+  }
+  if (!valid_pack) {
+    SyntaxError(syntax,
+                "pack indexing requires an unexpanded parameter pack name");
+  }
+  return NewBinaryASTNode(AST_OP(pack_index), NULL, location, pack, index);
+}
+
 static ASTNode* ParsePostfixOperators(Syntax* syntax, ASTNode* result,
                                       TokenClass followers) {
   while (!LexEof(syntax->lex)) {
-    if (LexMatch(syntax->lex, TOK(lsquare))) {
+    if (LookingAtCXXPackIndexSuffix(syntax)) {
+      result = ParseCXXPackIndexExpression(syntax, result, followers);
+    } else if (LexMatch(syntax->lex, TOK(lsquare))) {
       result = ParseArraySubscript(result, syntax, followers);
     } else if (LexMatch(syntax->lex, TOK(lparen))) {
       result = CXXExpressionNamesTemplateTypeParameter(result)

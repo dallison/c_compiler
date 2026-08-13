@@ -202,6 +202,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "<<=";
     case AST_OP(subscript):
       return "[";
+    case AST_OP(pack_index):
+      return "...[";
     case AST_OP(minus):
       return "-";
     case AST_OP(minuseq):

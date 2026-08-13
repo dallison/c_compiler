@@ -245,6 +245,8 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->template_arguments = NULL;
   record->dependent_member_template_arguments = NULL;
   record->dependent_decltype_expr = NULL;
+  record->is_pack_index = false;
+  record->pack_index_expr = NULL;
   record->refs = 0;
   record->next = NULL;
   record->declarator = kDeclPrimitive;
@@ -288,6 +290,10 @@ void TypeRecordDelete(TypeRecord* record) {
     if (record->template_parameter_name != NULL) {
       StringDelete(record->template_parameter_name);
       record->template_parameter_name = NULL;
+    }
+    if (record->pack_index_expr != NULL) {
+      ASTNodeDelete(record->pack_index_expr);
+      record->pack_index_expr = NULL;
     }
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
@@ -821,6 +827,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   r->template_arguments = TemplateArgumentVectorCopy(record->template_arguments);
   r->dependent_member_template_arguments =
       TemplateArgumentVectorListCopy(record->dependent_member_template_arguments);
+  r->pack_index_expr =
+      ASTNodeClone(record->pack_index_expr, IdentityCloneNode, NULL, NULL);
   if (TypeIsFunction(record)) {
     VectorInit(&r->info.function.prototype);
     for (size_t i = 0; i < record->info.function.prototype.length; i++) {

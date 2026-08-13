@@ -220,6 +220,7 @@ static void PredefineMacros(Preprocessor* p) {
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
       PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");
+      PreprocessorDefineMacro(p, "__cpp_pack_indexing", "202311L");
       PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
       PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");
       PreprocessorDefineMacro(p, "__STDC_EMBED_EMPTY__", "2");

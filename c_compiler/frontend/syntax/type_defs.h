@@ -419,6 +419,10 @@ typedef struct TypeRecord {
   // arena-owned and re-cloned with concrete template arguments during
   // substitution.
   struct ASTNode* dependent_decltype_expr;                          // @wire 15
+  // C++26 pack-indexing specifier `Ts...[I]`.  The parameter index identifies
+  // `Ts`; the unevaluated expression is retained until the pack is bound.
+  bool is_pack_index;                                               // @wire 18
+  struct ASTNode* pack_index_expr;                                  // @wire 19
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
     ArrayInfo array;             // @wire 11 (kDeclArray)

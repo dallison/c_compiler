@@ -167,6 +167,9 @@ expect_compile cxx26_mode \
 #if __cpp_pp_embed != 202502L
 #error expected #embed feature macro
 #endif
+#if __cpp_pack_indexing != 202311L
+#error expected pack indexing feature macro
+#endif
 int main(void) { return 0; }' \
   -std=c++26
 expect_compile cxx2c_mode_alias \
@@ -175,6 +178,145 @@ expect_compile cxx2c_mode_alias \
 #endif
 int main(void) { return 0; }' \
   -std=c++2c
+
+expect_compile cxx26_pack_indexing \
+  'template<class T> struct type_tag;
+template<> struct type_tag<int> { static constexpr int value = 11; };
+template<> struct type_tag<char> { static constexpr int value = 22; };
+template<> struct type_tag<const int> { static constexpr int value = 33; };
+template<class T> struct selected_type_tag;
+template<> struct selected_type_tag<char> {};
+struct pack_base { int member; };
+template<class... Bases> struct derived : Bases...[0] {};
+struct member_holder { using value_type = int; };
+template<class... Ts>
+using first_member_t = typename Ts...[0]::value_type;
+
+template<class... Ts>
+constexpr int first_type_value() {
+  return type_tag<Ts...[0]>::value;
+}
+template<class... Ts>
+using const_first_t = Ts...[0] const;
+
+template<class... Ts>
+constexpr int last_type_value() {
+  return type_tag<Ts...[sizeof...(Ts) - 1]>::value;
+}
+
+template<int I, class... Ts>
+constexpr int select_argument(Ts... values) {
+  return values...[I];
+}
+template<int I, class... Ts>
+int check_selected_type(Ts... values) {
+  selected_type_tag<decltype(values...[I])> selected;
+  return sizeof(selected) == 0;
+}
+
+template<class... Ts>
+constexpr int select_last_argument(Ts... values) {
+  return values...[sizeof...(Ts) - 1];
+}
+
+template<int... Values>
+constexpr int select_value() {
+  return Values...[1];
+}
+
+template<int... Is> struct index_pack {};
+template<class... Ts> struct type_pack {};
+template<class T> struct order_tag;
+template<> struct order_tag<type_pack<char, int>> {
+  static constexpr int value = 1;
+};
+constexpr int combine(int first, int second) { return first * 10 + second; }
+template<class... Ts>
+constexpr int non_deduced_first(Ts...[0], type_pack<Ts...>*) {
+  return sizeof...(Ts);
+}
+template<class Indexes, class Types> struct reordered;
+template<int... Is, class... Ts>
+struct reordered<index_pack<Is...>, type_pack<Ts...>> {
+  using types = type_pack<Ts...[Is]...>;
+  static constexpr int values(Ts... values) {
+    return combine(values...[Is]...);
+  }
+};
+
+template<class T> struct category_tag;
+template<> struct category_tag<int> { static constexpr int value = 1; };
+template<> struct category_tag<int&> { static constexpr int value = 2; };
+template<class... Ts>
+int check_decltype_category(Ts... values) {
+  category_tag<decltype(values...[0])> unparenthesized;
+  category_tag<decltype((values...[0]))> parenthesized;
+  return sizeof(unparenthesized) == sizeof(parenthesized) ? 0 : 1;
+}
+
+static_assert(first_type_value<int, char>() == 11);
+static_assert(type_tag<const_first_t<int>>::value == 33);
+static_assert(type_tag<first_member_t<member_holder>>::value == 11);
+static_assert(last_type_value<int, char>() == 22);
+static_assert(select_argument<1>(3, 7, 9) == 7);
+static_assert(select_last_argument(3, 7, 9) == 9);
+static_assert(select_value<4, 8, 12>() == 8);
+using reordered_type =
+    reordered<index_pack<1, 0>, type_pack<int, char>>::types;
+static_assert(order_tag<reordered_type>::value == 1);
+static_assert(
+    reordered<index_pack<1, 0>, type_pack<int, int>>::values(3, 7) == 73);
+static_assert(non_deduced_first(1, (type_pack<int, char>*)0) == 2);
+int main(void) {
+  derived<pack_base> object;
+  object.member = 3;
+  return check_decltype_category(5) +
+         check_selected_type<1>(1, (char)2) + object.member - 3;
+}' \
+  -std=c++26
+
+expect_compile cxx23_no_pack_indexing_macro \
+  '#ifdef __cpp_pack_indexing
+#error pack indexing macro must not be defined before C++26
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx26_type_pack_index_out_of_bounds \
+  'template<class... Ts> using third_t = Ts...[2];
+third_t<int, char> value;
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_expression_pack_index_out_of_bounds \
+  'template<int I, class... Ts>
+constexpr int select(Ts... values) { return values...[I]; }
+static_assert(select<2>(1, 2) == 0);
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_pack_index_not_constant \
+  'template<class... Ts>
+int select(int i, Ts... values) { return values...[i]; }
+int main(void) { return select(0, 1); }' \
+  -std=c++26
+expect_fail cxx26_pack_index_empty_pack \
+  'template<class... Ts>
+constexpr int select(Ts... values) { return values...[0]; }
+static_assert(select() == 0);
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_pack_index_requires_pack \
+  'template<class T> using indexed = T...[0];
+indexed<int> value;
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_pack_index_requires_unparenthesized_name \
+  'template<class... Ts>
+int select(Ts... values) { return (values)...[0]; }
+int main(void) { return select(1); }' \
+  -std=c++26
+expect_fail cxx26_pack_index_is_non_deduced \
+  'template<class... Ts> void only(Ts...[0]);
+int main(void) { only(1); }' \
+  -std=c++26
 
 printf '\x00\x01\x7f\x80\xff' > "$WORK/embed.bin"
 : > "$WORK/empty.bin"

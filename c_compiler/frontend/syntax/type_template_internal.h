@@ -60,6 +60,8 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
 
 bool FindPackExpansionInType(TypeRecord* type, Vector* args, int* pack_index,
                              size_t* pack_length);
+bool FindPackExpansionInExpression(struct ASTNode* expr, Vector* args,
+                                   int* pack_index, size_t* pack_length);
 bool FindPackExpansionInTemplateArgument(TemplateArgument* arg, Vector* args,
                                          int* pack_index,
                                          size_t* pack_length);

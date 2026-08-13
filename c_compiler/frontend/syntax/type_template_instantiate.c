@@ -2314,6 +2314,11 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   if (formal == NULL || actual == NULL) {
     return false;
   }
+  // [temp.deduct.type]: a C++26 pack-indexing specifier is a non-deduced
+  // context.  The pack must be supplied explicitly or deduced elsewhere.
+  if (formal->is_pack_index) {
+    return true;
+  }
   if (formal->template_origin != NULL &&
       formal->dependent_member_name != NULL) {
     TypeRecord* owner =
@@ -2718,6 +2723,18 @@ static bool FunctionTemplateCanCompleteDeducedArguments(TypeRecord* func,
   return true;
 }
 
+static bool TypeContainsPackIndexSpecifier(TypeRecord* type, int* pack_index) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->is_pack_index) {
+      if (pack_index != NULL) {
+        *pack_index = t->template_parameter_index;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Build the initial deduction-argument vector for a function template, one slot
  * per template parameter. Explicitly provided arguments are placed (a trailing
  * parameter pack absorbs all remaining explicit args), and parameters left to
@@ -2927,6 +2944,30 @@ retry_deduction:
         return NULL;
       }
       break;
+    }
+  }
+  // A pack-indexing parameter is non-deduced, but an empty placeholder pack
+  // created for deduction is not a valid binding: every index is out of range.
+  // Reject the candidate unless that pack was explicitly supplied or deduced
+  // from another parameter.
+  for (size_t i = first_formal_arg;
+       i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    int pack_index = -1;
+    if (formal == NULL ||
+        !TypeContainsPackIndexSpecifier(formal->type, &pack_index)) {
+      continue;
+    }
+    TemplateArgument* pack =
+        pack_index >= 0 && (size_t)pack_index < args->length
+            ? args->value.p[pack_index]
+            : NULL;
+    if (pack == NULL || pack->pack_arguments == NULL ||
+        pack->pack_arguments->length == 0) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      return NULL;
     }
   }
   return args;
@@ -3695,7 +3736,7 @@ static bool TemplateArgumentIsTypeParameterPackPattern(TemplateArgument* arg,
     *index = -1;
   }
   if (arg == NULL || arg->kind != kTemplateParameterType ||
-      arg->type == NULL ||
+      arg->type == NULL || arg->type->is_pack_index ||
       !TypeIsTemplateParameterPlaceholder(arg->type, index)) {
     return false;
   }
@@ -3946,8 +3987,14 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
   if (pattern == NULL || actual == NULL) {
     return pattern == actual;
   }
+  if (pattern->is_pack_index) {
+    // Pack-indexing specifiers are non-deduced contexts; another part of the
+    // partial-specialization pattern must bind the indexed pack.
+    return true;
+  }
   int index = -1;
-  if (TypeIsTemplateParameterPlaceholder(pattern, &index)) {
+  if (TypeIsTemplateParameterPlaceholder(pattern, &index) &&
+      !pattern->is_pack_index) {
     if ((pattern->qualifiers & ~actual->qualifiers) != 0) {
       return false;
     }
@@ -4248,7 +4295,8 @@ static int TemplateTypePatternSpecificity(TypeRecord* type) {
     return 0;
   }
   int placeholder_index = -1;
-  if (TypeIsTemplateParameterPlaceholder(type, &placeholder_index)) {
+  if (TypeIsTemplateParameterPlaceholder(type, &placeholder_index) &&
+      !type->is_pack_index) {
     return 0;
   }
   int score = 1;
