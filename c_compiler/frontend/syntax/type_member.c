@@ -2728,10 +2728,19 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         "static member functions cannot use virtual specifiers");
           }
         }
+        if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+            !member->is_member_function && !member->is_static &&
+            StringEqual(&member_symbol->name, "_")) {
+          member_symbol->flags.is_name_independent = true;
+        }
         StructMember* existing =
             MapFindPointerKey(&str->symbol_table, &member_symbol->name);
         if (existing != NULL) {
-          if (!CanOverloadStructMember(existing, member)) {
+          if (member_symbol->flags.is_name_independent) {
+            existing->symbol->flags.name_independent_lookup_ambiguous = true;
+            member_symbol->flags.name_independent_lookup_ambiguous = true;
+            AddStructMember(parser, str, member);
+          } else if (!CanOverloadStructMember(existing, member)) {
             SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                         member_symbol->name.value);
             StructMemberDelete(member);

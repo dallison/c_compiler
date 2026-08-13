@@ -1643,6 +1643,18 @@ Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
   return FollowAlias(FindGlobalSymbol(name));
 }
 
+static void MarkCXX26AutomaticNameIndependent(Symbol* symbol) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) || symbol == NULL ||
+      !StringEqual(&symbol->name, "_") || !symbol->flags.is_local ||
+      symbol->flags.is_argument || symbol->flags.is_template_parameter ||
+      symbol->type == NULL || TypeIsFunction(symbol->type) ||
+      StorageIs(symbol->storage,
+                STO(static) | STO(extern) | STO(thread) | STO(typedef))) {
+    return;
+  }
+  symbol->flags.is_name_independent = true;
+}
+
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_symbol_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
@@ -1655,6 +1667,7 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
     }
     return InsertGlobalSymbol(symbol);
   }
+  MarkCXX26AutomaticNameIndependent(symbol);
   bool ok = InsertLocalSymbol(syntax->local_symbol_stack, symbol);
   if (ok) {
     // Remember that this name was introduced at block scope.  Per
@@ -10252,6 +10265,12 @@ static Vector* ParseStructuredBindingNames(Syntax* syntax, Vector* symbols,
     sym->flags.is_local = true;
     sym->flags.is_defined = true;
     sym->flags.is_parameter_pack = is_pack;
+    if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        StringEqual(name, "_")) {
+      // A structured binding outside namespace scope is name-independent
+      // regardless of the backing object's storage duration.
+      sym->flags.is_name_independent = true;
+    }
     sym->structured_binding_pack_size = -1;
     sym->location = syntax->lex->current_token_location;
     LexNextToken(syntax->lex);
@@ -10622,10 +10641,16 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           sym->type->qualifiers |= kQualConst;
         }
       }
+      if (!StorageIs(sym->storage, STO(extern))) {
+        // Local declarators need this before duplicate-name handling so C++26
+        // automatic `_` declarations can be recognized as name-independent.
+        sym->flags.is_local = true;
+      }
+      MarkCXX26AutomaticNameIndependent(sym);
       Symbol* old_sym =
           FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
       bool ok = true;
-      if (old_sym != NULL) {
+      if (old_sym != NULL && !sym->flags.is_name_independent) {
         // We have this symbol already.  If it's a declaration then it's
         // OK to declare (and define) it now.  If it's a definition then
         // this must be a declaration.
@@ -10730,11 +10755,6 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       }
       TypeParserReset(parser);
       continue;
-    }
-
-    if (!StorageIs(sym->storage, STO(extern))) {
-      // This is a local variable.
-      sym->flags.is_local = true;
     }
 
     // Parse trailing __attribute__ / C++ attribute syntax.

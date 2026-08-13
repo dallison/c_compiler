@@ -277,6 +277,10 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
       NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
   ASTNode* right = NewStringConstantASTNode(NewString(member_name.value), NULL,
                                             syntax->lex->current_token_location);
+  if (member != NULL && member->symbol != NULL &&
+      member->symbol->flags.name_independent_lookup_ambiguous) {
+    right->flags |= kASTNameIndependentLookupAmbiguous;
+  }
   StringDestruct(&member_name);
   return NewBinaryASTNode(AST_OP(arrow), NULL,
                           syntax->lex->current_token_location, left, right);
@@ -330,6 +334,10 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
       NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
   ASTNode* right =
       NewStructMemberASTNode(member, syntax->lex->current_token_location);
+  if (member->symbol != NULL &&
+      member->symbol->flags.name_independent_lookup_ambiguous) {
+    right->flags |= kASTNameIndependentLookupAmbiguous;
+  }
   StringDestruct(&member_name);
   right->flags |= kASTQualifiedName;
   StructMemberASTNode* member_node = (StructMemberASTNode*)right;
@@ -1472,6 +1480,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       LexLookingAt(lex, TOK(lparen));
   FullyQualifiedIdentifierDestruct(&name);
   ASTNode* node = NewIdentifierASTNode(symbol, lex->current_token_location);
+  if (symbol->flags.name_independent_lookup_ambiguous) {
+    node->flags |= kASTNameIndependentLookupAmbiguous;
+  }
   if (is_qualified_name) {
     node->flags |= kASTQualifiedName;
   }
@@ -2339,8 +2350,13 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
       init_capture->flags.is_defined = true;
       init_capture->flags.is_local = true;
       init_capture->flags.is_parameter_pack = is_pack_expansion;
+      bool name_independent =
+          CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          StringEqual(&name, "_");
+      init_capture->flags.is_name_independent = name_independent;
       init_capture->location = name_location;
-      if (FindLambdaCaptureName(captures, &name) == NULL) {
+      if (name_independent ||
+          FindLambdaCaptureName(captures, &name) == NULL) {
         VectorAppend(captures,
                      NewLambdaCapture(init_capture, by_reference,
                                       is_pack_expansion, initializer,
@@ -2961,8 +2977,19 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
         capture->captured->type = TypeRecordCopy(deduced);
       }
     }
-    Symbol* field = NewSymbol(capture->captured->name.value,
-                              LambdaCaptureFieldType(capture), STO(implicit));
+    String field_name;
+    StringInit(&field_name, capture->captured->name.value);
+    if (capture->captured->flags.is_name_independent) {
+      // Closure fields are an implementation detail.  Give placeholder
+      // init-captures distinct internal field names so designated
+      // initialization and capture rewriting cannot accidentally select a
+      // different `_` field.
+      StringPrintf(&field_name, "__placeholder_capture_%zu", i);
+    }
+    Symbol* field =
+        NewSymbol(field_name.value, LambdaCaptureFieldType(capture),
+                  STO(implicit));
+    StringDestruct(&field_name);
     field->flags.invented = true;
     field->flags.is_defined = true;
     field->flags.is_parameter_pack = capture->is_pack_expansion;
@@ -3879,6 +3906,23 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   ASTNode* member_node = NewStringConstantASTNode(member_name,
                                           NULL,
                                           syntax->lex->current_token_location);
+  TypeRecord* receiver_type = left != NULL ? left->type : NULL;
+  if (receiver_type != NULL && TypeIsReference(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_type != NULL && op == AST_OP(arrow) &&
+      TypeIsPointer(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+      receiver_type->info.struct_info != NULL) {
+    StructMember* member =
+        FindStructMember(receiver_type->info.struct_info, member_name);
+    if (member != NULL && member->symbol != NULL &&
+        member->symbol->flags.name_independent_lookup_ambiguous) {
+      member_node->flags |= kASTNameIndependentLookupAmbiguous;
+    }
+  }
   ((ConstantASTNode*)member_node)->template_arguments = template_arguments;
   return NewBinaryASTNode(op, NULL,
                           syntax->lex->current_token_location, left,
@@ -4319,6 +4363,9 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
           location);
     }
     ASTNode* id = NewIdentifierASTNode(symbol, syntax->lex->current_token_location);
+    if (symbol->flags.name_independent_lookup_ambiguous) {
+      id->flags |= kASTNameIndependentLookupAmbiguous;
+    }
     LexNextToken(syntax->lex);
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
     return NewSizeofPackASTNode(id, location);
@@ -5770,6 +5817,9 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   StructMemberASTNode* member_node =
       (StructMemberASTNode*)NewStructMemberASTNode(member, location);
+  if (member->symbol->flags.name_independent_lookup_ambiguous) {
+    member_node->base.flags |= kASTNameIndependentLookupAmbiguous;
+  }
   ASTNode* result =
       NewUnaryASTNode(AST_OP(member_ptr), NULL, location, (ASTNode*)member_node);
   ASTNodeSetType(result, mptr);

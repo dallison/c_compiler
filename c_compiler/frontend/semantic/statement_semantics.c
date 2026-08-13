@@ -2337,9 +2337,9 @@ static ASTNode* NewStructuredBindingElementAccess(Symbol* hidden,
                               location));
   }
   ASTNode* member_access = NewBinaryASTNode(
-      AST_OP(dot), NULL, location, object,
-      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
-                               location));
+      AST_OP(dot), NULL, location, object, NewStructMemberASTNode(member, location));
+  ((StructMemberASTNode*)((BinaryASTNode*)member_access)->right)->byte_offset =
+      member->byte_offset;
   return member_access;
 }
 

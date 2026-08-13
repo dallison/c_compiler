@@ -169,6 +169,9 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_exported = false;
   sym->flags.is_concept = false;
   sym->flags.is_module_private = false;
+  sym->flags.is_explicit_specialization = false;
+  sym->flags.is_name_independent = false;
+  sym->flags.name_independent_lookup_ambiguous = false;
   sym->concept_definition = NULL;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;

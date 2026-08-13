@@ -92,6 +92,8 @@ enum {
   kSym_template_template_parameters = 56,
   kSym_template_constructor_initializers = 57,
   kSym_constexpr_initializer = 58,
+  kSym_is_name_independent = 59,
+  kSym_name_independent_lookup_ambiguous = 60,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -156,6 +158,9 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_template_constructor_initializers,
      "template_constructor_initializers"},
     {kSym_constexpr_initializer, "constexpr_initializer"},
+    {kSym_is_name_independent, "is_name_independent"},
+    {kSym_name_independent_lookup_ambiguous,
+     "name_independent_lookup_ambiguous"},
 };
 
 //
@@ -559,6 +564,10 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_is_module_private, s->flags.is_module_private);
   WriteBoolField(buf, kSym_is_explicit_specialization,
                  s->flags.is_explicit_specialization);
+  WriteBoolField(buf, kSym_is_name_independent,
+                 s->flags.is_name_independent);
+  WriteBoolField(buf, kSym_name_independent_lookup_ambiguous,
+                 s->flags.name_independent_lookup_ambiguous);
   if (s->template_template_parameters != NULL) {
     SerialWriteTemplateParameterVector(
         ctx, buf, kSym_template_template_parameters,
@@ -851,6 +860,14 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_is_explicit_specialization:
         WireReadBool(buf, &b);
         s->flags.is_explicit_specialization = b;
+        break;
+      case kSym_is_name_independent:
+        WireReadBool(buf, &b);
+        s->flags.is_name_independent = b;
+        break;
+      case kSym_name_independent_lookup_ambiguous:
+        WireReadBool(buf, &b);
+        s->flags.name_independent_lookup_ambiguous = b;
         break;
       case kSym_func_defn:
         s->value.func_defn =

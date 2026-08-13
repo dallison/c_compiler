@@ -613,4 +613,16 @@ fi
 grep -Fq "module-generated assertion" "$work/command.log" ||
   fail "imported generated static_assert message diagnostic"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/placeholder_variables.dcm" \
+  "$FIXTURES/placeholder_variables.cppm" ||
+  fail "emit placeholder variables module"
+if run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+     -fprebuilt-module-path "$work" "$FIXTURES/use_placeholder_variables.cpp" \
+     -o "$work/use_placeholder_variables.o"; then
+  fail "ambiguous imported placeholder member use succeeded"
+fi
+grep -Fq "name-independent declaration '_' is ambiguous" "$work/command.log" ||
+  fail "imported placeholder member ambiguity diagnostic"
+
 echo "ok module emit/import/link/execute"

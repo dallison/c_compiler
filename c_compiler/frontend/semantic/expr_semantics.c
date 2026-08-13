@@ -241,6 +241,16 @@ static void CXXAnalyzeImmediateEscalationCandidate(Symbol* symbol) {
 }
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) && node->symbol != NULL &&
+      (node->base.flags & kASTNameIndependentLookupAmbiguous) != 0 &&
+      (node->base.flags & kASTIsDeclaration) == 0) {
+    SemanticError(&node->base,
+                  "reference to name-independent declaration '%s' is ambiguous",
+                  node->symbol->name.value);
+    ASTNodeSetType(&node->base, TypeRecordCopy(node->symbol->type));
+    node->base.value_category = kValueCategoryLvalue;
+    return &node->base;
+  }
   // A dependent qualified value name (`T::member`) that still carries its flag
   // here was never resolved during template instantiation, meaning the named
   // member does not exist in the substituted scope type.
@@ -9171,6 +9181,14 @@ static void AnalyzePointerToMember(UnaryASTNode* node) {
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
+  if ((member_node->base.flags & kASTNameIndependentLookupAmbiguous) != 0) {
+    SemanticError((ASTNode*)node,
+                  "reference to name-independent declaration '%s' is ambiguous",
+                  member_node->member->symbol->name.value);
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
   member_node->byte_offset = member_node->member->byte_offset;
   node->base.value_category = kValueCategoryPrvalue;
 }
@@ -9304,6 +9322,15 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
             : NULL;
     bool qualified_base_lookup =
         (node->right->flags & kASTQualifiedName) != 0;
+    if (qualified_base_lookup && member != NULL && member->symbol != NULL &&
+        (node->right->flags & kASTNameIndependentLookupAmbiguous) != 0) {
+      SemanticError((ASTNode*)node,
+                    "reference to name-independent declaration '%s' is ambiguous",
+                    member->symbol->name.value);
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      return;
+    }
     if (qualified_base_lookup) {
       Struct* qualified_owner =
           member_node->owner_type != NULL &&
@@ -9546,6 +9573,15 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
                   member_name->value, struct_info->tag_name->value);
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  if (member->symbol != NULL &&
+      (node->right->flags & kASTNameIndependentLookupAmbiguous) != 0) {
+    SemanticError((ASTNode*)node,
+                  "reference to name-independent declaration '%s' is ambiguous",
+                  member->symbol->name.value);
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
   ApplyVirtualBaseAdjustmentToMemberReference(node, struct_info, member_owner,

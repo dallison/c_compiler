@@ -392,6 +392,7 @@ struct ConstraintExpr;
 #define kASTCXXFunctionalConstruction (1ULL << 40)  // Identifier was parsed as a class type followed by a functional-construction argument list.
 #define kASTDeferredRangeContents (1ULL << 41)  // `*begin` in a dependent range-for before iterator auto deduction.
 #define kASTDeletedFunctionDiagnosed (1ULL << 42)  // Deleted-use diagnostic already emitted for this expression.
+#define kASTNameIndependentLookupAmbiguous (1ULL << 43)  // Lookup saw multiple C++26 name-independent declarations.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

@@ -380,7 +380,8 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
     if (symbol->flags.is_temp || symbol->flags.invented ||
-        symbol->name.length == 0 || SymbolHasAttribute(symbol, "unused")) {
+        symbol->flags.is_name_independent || symbol->name.length == 0 ||
+        SymbolHasAttribute(symbol, "unused")) {
       continue;
     }
     // A typedef/alias declared in a function body is diagnosed separately and

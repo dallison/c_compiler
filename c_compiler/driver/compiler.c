@@ -3119,7 +3119,8 @@ static void CheckUnusedPrivateFields(void) {
       if (sym->name.length == 0 || StorageIs(sym->storage, STO(typedef))) {
         continue;
       }
-      if (sym->flags.used || SymbolHasAttribute(sym, "unused")) {
+      if (sym->flags.used || sym->flags.is_name_independent ||
+          SymbolHasAttribute(sym, "unused")) {
         continue;
       }
       // Match clang: do not diagnose members whose type must be destroyed

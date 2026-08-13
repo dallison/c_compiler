@@ -182,6 +182,9 @@ expect_compile cxx26_mode \
 #if __cpp_static_assert != 202306L
 #error expected user-generated static_assert message feature macro
 #endif
+#if __cpp_placeholder_variables != 202306L
+#error expected placeholder variables feature macro
+#endif
 int main(void) { return 0; }' \
   -std=c++26
 expect_compile cxx2c_mode_alias \
@@ -317,6 +320,47 @@ expect_compile cxx23_static_assert_macro \
 #endif
 int main(void) { return 0; }' \
   -std=c++23
+
+expect_compile cxx26_placeholder_variables \
+  'struct holder {
+  int _;
+  long _;
+};
+class intentionally_ignored {
+  int _;
+  long _;
+};
+int main() {
+  int _;
+  double _;
+  auto [_, _] = holder{1, 2};
+  static auto [_, _] = holder{3, 4};
+  auto closure = [_ = 1, _ = 2] { return 0; };
+  return closure();
+}' \
+  -std=c++26 -Wall -Werror
+expect_compile cxx23_no_placeholder_variables_macro \
+  '#ifdef __cpp_placeholder_variables
+#error placeholder variables macro must not be defined before C++26
+#endif
+int main(void) { return 0; }' \
+  -std=c++23
+expect_fail cxx23_no_placeholder_variable_redeclaration \
+  'int main() {
+  int _;
+  double _;
+  return 0;
+}' \
+  -std=c++23
+expect_fail cxx26_placeholder_parameter_not_name_independent \
+  'void consume(int _, long _) {}
+int main(void) { return 0; }' \
+  -std=c++26
+expect_fail cxx26_namespace_placeholder_not_name_independent \
+  'int _ = 1;
+long _ = 2;
+int main(void) { return 0; }' \
+  -std=c++26
 
 expect_compile cxx26_pack_indexing \
   'template<class T> struct type_tag;

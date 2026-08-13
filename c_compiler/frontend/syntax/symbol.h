@@ -141,6 +141,11 @@ typedef struct Symbol {
     bool is_concept: 1;            // C++20 concept definition.       // @wire 43
     bool is_module_private: 1;     // Declared in private fragment.    // @wire 52
     bool is_explicit_specialization: 1;  // `template <>` function.    // @wire 54
+    // C++26 [basic.scope.scope] name-independent declaration (`_`).
+    bool is_name_independent: 1;                                    // @wire 59
+    // Set on every declaration that ordinary lookup may select after a second
+    // name-independent declaration of the same name enters the same scope.
+    bool name_independent_lookup_ambiguous: 1;                       // @wire 60
   } flags;
   
   struct {

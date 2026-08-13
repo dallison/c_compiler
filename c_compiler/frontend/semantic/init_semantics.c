@@ -664,7 +664,7 @@ static StructMember* CXXDirectDesignatedMember(INode* inode,
   return NULL;
 }
 
-static String* CXXSingleDesignatorName(ASTNode* initializer) {
+static Designator* CXXSingleStructDesignator(ASTNode* initializer) {
   if (initializer == NULL || initializer->op != AST_OP(designated_init)) {
     return NULL;
   }
@@ -677,6 +677,14 @@ static String* CXXSingleDesignatorName(ASTNode* initializer) {
   Designator* designator = designated->designators->value.p[0];
   if (designator == NULL ||
       designator->designator_type != kDesignatorStruct) {
+    return NULL;
+  }
+  return designator;
+}
+
+static String* CXXSingleDesignatorName(ASTNode* initializer) {
+  Designator* designator = CXXSingleStructDesignator(initializer);
+  if (designator == NULL) {
     return NULL;
   }
   if (designator->is_resolved_member &&
@@ -701,11 +709,20 @@ static void CheckCXXDesignatedInitializers(
   for (size_t i = 0; i < braced_init->initializers->length; i++) {
     ASTNode* initializer = braced_init->initializers->value.p[i];
     String* designator_name = CXXSingleDesignatorName(initializer);
-    if (designator_name != NULL) {
+    Designator* designator = CXXSingleStructDesignator(initializer);
+    // Only source-level `.member =` designators are constrained to use a name
+    // once.  Positional aggregate initialization is internally flattened to
+    // resolved member designators and may legitimately initialize multiple
+    // C++26 name-independent members that are all spelled `_`.
+    if (designator_name != NULL && designator != NULL &&
+        !designator->is_resolved_member) {
       for (size_t j = 0; j < i; j++) {
+        Designator* prior_designator = CXXSingleStructDesignator(
+            braced_init->initializers->value.p[j]);
         String* prior_name = CXXSingleDesignatorName(
             braced_init->initializers->value.p[j]);
-        if (prior_name != NULL &&
+        if (prior_name != NULL && prior_designator != NULL &&
+            !prior_designator->is_resolved_member &&
             StringEqualString(designator_name, prior_name)) {
           SemanticError(
               initializer,
@@ -721,6 +738,15 @@ static void CheckCXXDesignatedInitializers(
     StructMember* member =
         CXXDirectDesignatedMember(inode, initializer, &declaration_order);
     if (member == NULL) {
+      continue;
+    }
+    if (designator != NULL && !designator->is_resolved_member &&
+        member->symbol != NULL &&
+        member->symbol->flags.name_independent_lookup_ambiguous) {
+      SemanticError(
+          initializer,
+          "reference to name-independent declaration '%s' is ambiguous",
+          member->symbol->name.value);
       continue;
     }
     if (previous != NULL && declaration_order < previous_order) {

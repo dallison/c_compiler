@@ -862,8 +862,19 @@ bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag) {
 }
 
 bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
-  if (FindDirectLocalNamespaceAlias(table, &symbol->name) != NULL) {
+  if (!symbol->flags.is_name_independent &&
+      FindDirectLocalNamespaceAlias(table, &symbol->name) != NULL) {
     return false;
+  }
+  Symbol* existing = FindSymbol(&table->table, &symbol->name);
+  if (existing != NULL && symbol->flags.is_name_independent) {
+    // A name-independent declaration is a distinct entity even when the same
+    // name is already bound in this scope.  Keep the first declaration as the
+    // table's lookup representative and remember that subsequent id-expressions
+    // are ambiguous.  The new symbol remains owned by the syntax symbol list.
+    existing->flags.name_independent_lookup_ambiguous = true;
+    symbol->flags.name_independent_lookup_ambiguous = true;
+    return true;
   }
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&table->table, &node->header);
