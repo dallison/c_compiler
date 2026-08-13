@@ -2427,39 +2427,40 @@ static TargetInstruction* LowerStore(X86_64Generator* rv, IRNode* node) {
 }
 
 static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
-  if (TypeIsCharFamily(type)) {
-    return TypeIsUnsigned(type) ? X86_64_OP(loadb_z) : X86_64_OP(loadb);
-  }
-  if (TypeIsShort(type)) {
-    return TypeIsUnsigned(type) ? X86_64_OP(loadw_z) : X86_64_OP(loadw);
-  }
-  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
-    return X86_64_OP(loadq);
-  }
   if (TypeIsFloat(type)) {
     return X86_64_OP(loadss);
   }
   if (X86_64FpIsDoubleWidth(type)) {
     return X86_64_OP(loadsd);
   }
+  if (type->size == 1) {
+    return TypeIsUnsigned(type) || TypeIsBool(type) ? X86_64_OP(loadb_z)
+                                                    : X86_64_OP(loadb);
+  }
+  if (type->size == 2) {
+    return TypeIsUnsigned(type) ? X86_64_OP(loadw_z) : X86_64_OP(loadw);
+  }
+  if (type->size == 8) {
+    return X86_64_OP(loadq);
+  }
   return X86_64_OP(loadl);
 }
 
 static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
-  if (TypeIsCharFamily(type)) {
-    return X86_64_OP(storeb);
-  }
-  if (TypeIsShort(type)) {
-    return X86_64_OP(storew);
-  }
-  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
-    return X86_64_OP(storeq);
-  }
   if (TypeIsFloat(type)) {
     return X86_64_OP(storess);
   }
   if (X86_64FpIsDoubleWidth(type)) {
     return X86_64_OP(storesd);
+  }
+  if (type->size == 1) {
+    return X86_64_OP(storeb);
+  }
+  if (type->size == 2) {
+    return X86_64_OP(storew);
+  }
+  if (type->size == 8) {
+    return X86_64_OP(storeq);
   }
   return X86_64_OP(storel);
 }

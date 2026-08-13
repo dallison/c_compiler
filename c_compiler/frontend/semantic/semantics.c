@@ -233,6 +233,31 @@ static bool AutoTypeIsForwardingReference(TypeRecord* type) {
          (type->next->type & kTypeAuto) != 0;
 }
 
+static bool LambdaInitializerHasConcreteClosureType(
+    ASTNode* initializer, TypeRecord* initializer_type) {
+  ASTNode* expr = initializer;
+  if (expr != NULL && expr->op == AST_OP(expr_init)) {
+    expr = ((ExpressionInitializerASTNode*)expr)->expr;
+  }
+  if (expr == NULL || (expr->flags & kASTLambdaExpression) == 0 ||
+      !TypeIsStructOrUnion(initializer_type) ||
+      initializer_type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* closure = initializer_type->info.struct_info;
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (TypeContainsTemplateParameter(member->symbol->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                             ASTNode* diagnostic_node) {
   if (sym == NULL || !TypeContainsAuto(sym->type)) {
@@ -244,8 +269,19 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   }
   // A dependent initializer only has a placeholder type while its enclosing
   // template is parsed. Preserve the declared auto type so deduction runs
-  // against the concrete initializer in each specialization.
-  if (CompilerIsCXX() && ExpressionIsTemplateDependent(initializer)) {
+  // against the concrete initializer in each specialization. During that
+  // specialization, nested generic lambdas can remain expression-dependent on
+  // their own parameters even though their closure type is now concrete; in
+  // that case auto deduction must proceed.
+  TypeRecord* dependency_type = initializer->type;
+  if (initializer->op == AST_OP(expr_init)) {
+    ASTNode* expr = ((ExpressionInitializerASTNode*)initializer)->expr;
+    dependency_type = expr != NULL ? expr->type : NULL;
+  }
+  bool concrete_lambda =
+      LambdaInitializerHasConcreteClosureType(initializer, dependency_type);
+  if (CompilerIsCXX() && ExpressionIsTemplateDependent(initializer) &&
+      !concrete_lambda) {
     return true;
   }
 
@@ -1481,6 +1517,9 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     node->initializer = AnalyzeExpression(node->initializer);
     if (!SemanticDeduceAutoType(node->symbol, node->initializer,
                                 (ASTNode*)node)) {
+      return;
+    }
+    if (TypeContainsAuto(node->symbol->type)) {
       return;
     }
     NormalConversion(node->initializer, node->symbol->type);

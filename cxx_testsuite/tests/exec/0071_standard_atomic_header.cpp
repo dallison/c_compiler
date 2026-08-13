@@ -35,6 +35,23 @@ int main(void) {
   if (value.load() != 13) {
     return 10;
   }
+
+  struct adjacent_bools {
+    std::atomic_bool first;
+    std::atomic_bool second;
+  } flags{false, true};
+  if (flags.first.load() || !flags.second.load()) {
+    return 11;
+  }
+  flags.first.store(true);
+  if (!flags.first.load() || !flags.second.load()) {
+    return 12;
+  }
+  flags.second.store(false);
+  if (!flags.first.load() || flags.second.load()) {
+    return 13;
+  }
+
   std::atomic_thread_fence(std::memory_order_seq_cst);
   return 0;
 }

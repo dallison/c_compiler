@@ -3053,6 +3053,12 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     if (!SemanticDeduceAutoType(symbol, init, node)) {
       return init;
     }
+    // A dependent initializer can defer deduction until a later template
+    // specialization. Do not immediately try to convert its concrete-looking
+    // partial initializer to the still-placeholder `auto` target.
+    if (TypeContainsAuto(symbol->type)) {
+      return init;
+    }
     ASTNodeSetType(target, symbol->type);
     ASTNodeSetType(node, symbol->type);
   }
