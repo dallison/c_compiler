@@ -25,6 +25,7 @@ typedef enum {
   kPCodeVMStatusInvalidFree,
   kPCodeVMStatusAllocationFailure,
   kPCodeVMStatusInvalidConstantOperation,
+  kPCodeVMStatusUncaughtException,
 } PCodeVMStatus;
 
 typedef struct PCodeVM PCodeVM;

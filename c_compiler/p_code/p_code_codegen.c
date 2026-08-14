@@ -478,6 +478,7 @@ static void ResolveExceptionRanges(PCodeGenerator* pcode, Generator* gen) {
     range->try_end = try_end;
     range->catch_label = catch_label;
     range->catch_typeinfo = ir_range->catch_typeinfo;
+    range->is_cleanup = ir_range->is_cleanup;
     VectorAppend(&pcode->exception_ranges, range);
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {

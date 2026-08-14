@@ -48,17 +48,45 @@ typedef struct {
 } StringFile;
 
 typedef struct {
+  const char* name;
+  int64_t base_count;
+  const void* bases;
+  int64_t object_size;
+  int64_t object_is_class;
+} ConstexprPCodeTypeInfo;
+
+typedef struct {
+  const char* name;
+  int64_t offset;
+} ConstexprPCodeTypeInfoBase;
+
+typedef struct {
+  uint64_t try_start;
+  uint64_t try_end;
+  uint64_t catch_label;
+  uint64_t catch_typeinfo;
+} ConstexprPCodeExceptionRange;
+
+typedef struct {
   unsigned char* text;
   size_t text_size;
   uint64_t text_base;
+  unsigned char* rodata;
+  size_t rodata_size;
+  unsigned char* exception_table;
+  size_t exception_table_size;
   uint64_t entry;
-  bool owns_text;
+  bool owns_memory;
 } ConstexprPCodeImage;
 
 typedef struct {
   TypeRecord* func;
   unsigned char* text;
   size_t text_size;
+  unsigned char* rodata;
+  size_t rodata_size;
+  unsigned char* exception_table;
+  size_t exception_table_size;
   uint64_t entry_offset;
 } ConstexprPCodeImageCacheEntry;
 
@@ -104,11 +132,60 @@ typedef struct {
 } ConstexprPCodeAddressRegion;
 
 typedef struct {
+  uint64_t pc;
+  uint64_t ap;
+  uint64_t fp;
+  uint64_t scope_start;
+  uint64_t scope_end;
+  bool active;
+} ConstexprPCodeExceptionResume;
+
+typedef enum {
+  kConstexprPCodeExceptionDirect,
+  kConstexprPCodeExceptionI8,
+  kConstexprPCodeExceptionF4,
+  kConstexprPCodeExceptionF8,
+} ConstexprPCodeExceptionKind;
+
+typedef struct {
+  uint64_t typeinfo;
+  uint64_t destructor;
+  uint64_t direct;
+  int64_t i8;
+  float f4;
+  double f8;
+  unsigned char* storage;
+  size_t storage_size;
+  int64_t base_offset;
+  ConstexprPCodeExceptionKind kind;
+  bool handling;
+  int handler_depth;
+} ConstexprPCodeSavedException;
+
+typedef struct {
   Vector heap_blocks;
+  Vector exception_stack;
   unsigned char* heap;
   size_t heap_size;
   ConstexprPCodeFreeBlock* free_list;
   size_t source_size_t_size;
+  ConstexprPCodeImage* image;
+  uint64_t exception_typeinfo;
+  uint64_t exception_destructor;
+  uint64_t exception_direct;
+  int64_t exception_i8;
+  float exception_f4;
+  double exception_f8;
+  unsigned char* exception_storage;
+  size_t exception_storage_size;
+  int64_t exception_base_offset;
+  ConstexprPCodeExceptionKind exception_kind;
+  bool has_exception;
+  bool handling_exception;
+  int exception_handler_depth;
+  bool ending_exception;
+  bool halt_after_exception_destructor;
+  ConstexprPCodeExceptionResume resume;
 } ConstexprPCodeRuntime;
 
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data);
@@ -158,6 +235,18 @@ enum {
   kConstexprPCodeEscapeThrow = 104,
   kConstexprPCodeEscapeMemcpy = 105,
   kConstexprPCodeEscapeInvalidConstantOperation = 106,
+  kConstexprPCodeEscapeThrowI8 = 107,
+  kConstexprPCodeEscapeThrowF4 = 108,
+  kConstexprPCodeEscapeThrowF8 = 109,
+  kConstexprPCodeEscapeCurrentExceptionInteger = 110,
+  kConstexprPCodeEscapeCurrentExceptionF4 = 111,
+  kConstexprPCodeEscapeCurrentExceptionF8 = 112,
+  kConstexprPCodeEscapeCurrentExceptionPointer = 113,
+  kConstexprPCodeEscapeCurrentExceptionAddress = 114,
+  kConstexprPCodeEscapeResume = 115,
+  kConstexprPCodeEscapeConstexprThrow = 116,
+  kConstexprPCodeEscapeEndCatch = 117,
+  kConstexprPCodeEscapeEndCatchComplete = 118,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -182,6 +271,65 @@ static const uint32_t constexpr_pcode_placement_new_stub[] = {
 
 static const uint32_t constexpr_pcode_throw_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeThrow,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_throw_i8_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeThrowI8,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_throw_f4_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeThrowF4,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_throw_f8_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeThrowF8,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_current_exception_integer_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeCurrentExceptionInteger,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_current_exception_f4_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeCurrentExceptionF4,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_current_exception_f8_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeCurrentExceptionF8,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_current_exception_pointer_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeCurrentExceptionPointer,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_current_exception_address_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeCurrentExceptionAddress,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_resume_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeResume,
+};
+
+static const uint32_t constexpr_pcode_constexpr_throw_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeConstexprThrow,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_end_catch_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeEndCatch,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_end_catch_complete_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeEndCatchComplete,
     (PCODE_OP(ret) << 24),
 };
 
@@ -230,19 +378,29 @@ static void ConstexprPCodeImageInit(ConstexprPCodeImage* image) {
   image->text = NULL;
   image->text_size = 0;
   image->text_base = 0;
+  image->rodata = NULL;
+  image->rodata_size = 0;
+  image->exception_table = NULL;
+  image->exception_table_size = 0;
   image->entry = 0;
-  image->owns_text = true;
+  image->owns_memory = true;
 }
 
 static void ConstexprPCodeImageDestruct(ConstexprPCodeImage* image) {
-  if (image->owns_text) {
+  if (image->owns_memory) {
     free(image->text);
+    free(image->rodata);
+    free(image->exception_table);
   }
   image->text = NULL;
   image->text_size = 0;
   image->text_base = 0;
+  image->rodata = NULL;
+  image->rodata_size = 0;
+  image->exception_table = NULL;
+  image->exception_table_size = 0;
   image->entry = 0;
-  image->owns_text = true;
+  image->owns_memory = true;
 }
 
 static size_t ConstexprPCodeHostBufferSize(size_t object_size) {
@@ -256,8 +414,12 @@ static bool ConstexprPCodeImageCopyFromCache(
   image->text = entry->text;
   image->text_size = entry->text_size;
   image->text_base = (uint64_t)(uintptr_t)image->text;
+  image->rodata = entry->rodata;
+  image->rodata_size = entry->rodata_size;
+  image->exception_table = entry->exception_table;
+  image->exception_table_size = entry->exception_table_size;
   image->entry = image->text_base + entry->entry_offset;
-  image->owns_text = false;
+  image->owns_memory = false;
   return true;
 }
 
@@ -289,8 +451,12 @@ static void ConstexprPCodeCacheImage(TypeRecord* func,
   entry->func = func;
   entry->text = image->text;
   entry->text_size = image->text_size;
+  entry->rodata = image->rodata;
+  entry->rodata_size = image->rodata_size;
+  entry->exception_table = image->exception_table;
+  entry->exception_table_size = image->exception_table_size;
   entry->entry_offset = image->entry - image->text_base;
-  image->owns_text = false;
+  image->owns_memory = false;
   VectorAppend(&pcode_image_cache, entry);
 }
 
@@ -335,6 +501,8 @@ void ConstexprPCodeClearImageCache(void) {
       ConstexprPCodeImageCacheEntry* entry = pcode_image_cache.value.p[i];
       if (entry != NULL) {
         free(entry->text);
+        free(entry->rodata);
+        free(entry->exception_table);
         free(entry);
       }
     }
@@ -623,6 +791,33 @@ static AssemblerSection* FindAssemblerSection(Assembler* assembler,
   return NULL;
 }
 
+static unsigned char* ConstexprPCodeImageSectionMemory(
+    Assembler* assembler, ConstexprPCodeImage* image, AssemblerSection* section,
+    size_t* size) {
+  if (section == FindAssemblerSection(assembler, ".text")) {
+    if (size != NULL) {
+      *size = image->text_size;
+    }
+    return image->text;
+  }
+  if (section == FindAssemblerSection(assembler, ".rodata")) {
+    if (size != NULL) {
+      *size = image->rodata_size;
+    }
+    return image->rodata;
+  }
+  if (section == FindAssemblerSection(assembler, ".davecc_except_table")) {
+    if (size != NULL) {
+      *size = image->exception_table_size;
+    }
+    return image->exception_table;
+  }
+  if (size != NULL) {
+    *size = 0;
+  }
+  return NULL;
+}
+
 static bool IsConstexprPCodeRuntimeSymbol(AssemblerSymbol* symbol,
                                           const char* name) {
   return symbol != NULL && symbol->name.value != NULL &&
@@ -677,6 +872,79 @@ static bool ConstexprPCodeRuntimeSymbolAddress(AssemblerSymbol* symbol,
     *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_stub;
     return true;
   }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_i8")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_i8_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_f4")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_f4_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_f8")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_f8_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_i1") ||
+      IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_i2") ||
+      IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_i4") ||
+      IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_i8") ||
+      IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_int")) {
+    *address = (uint64_t)(uintptr_t)
+        constexpr_pcode_current_exception_integer_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_f4")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_f4_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_f8")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_f8_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_object") ||
+      IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_ptr")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_pointer_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_current_exception_addr")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_address_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_resume")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_resume_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_constexpr_throw")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_constexpr_throw_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol,
+                                    "__davecc_constexpr_end_catch")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_end_catch_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_constexpr_invalid_throw")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
+    return true;
+  }
   if (IsConstexprPCodeRuntimeSymbol(symbol, "memcpy")) {
     *address = (uint64_t)(uintptr_t)constexpr_pcode_memcpy_stub;
     return true;
@@ -701,6 +969,15 @@ static bool IsConstexprPCodeRuntimeCallSymbol(Symbol* symbol) {
          strcmp(symbol->name.value, "operator delete") == 0 ||
          strcmp(symbol->name.value, "operator delete[]") == 0 ||
          strcmp(symbol->name.value, "__davecc_throw") == 0 ||
+         strcmp(symbol->name.value, "__davecc_throw_i8") == 0 ||
+         strcmp(symbol->name.value, "__davecc_throw_f4") == 0 ||
+         strcmp(symbol->name.value, "__davecc_throw_f8") == 0 ||
+         strncmp(symbol->name.value, "__davecc_current_exception_", 27) == 0 ||
+         strcmp(symbol->name.value, "__davecc_resume") == 0 ||
+         strcmp(symbol->name.value, "__davecc_constexpr_throw") == 0 ||
+         strcmp(symbol->name.value, "__davecc_constexpr_end_catch") == 0 ||
+         strcmp(symbol->name.value,
+                "__davecc_constexpr_invalid_throw") == 0 ||
          strcmp(symbol->name.value, "memcpy") == 0 ||
          strcmp(symbol->name.value, "abort") == 0;
 }
@@ -840,8 +1117,10 @@ static uint64_t SymbolRuntimeAddress(Assembler* assembler,
     return 0;
   }
   AssemblerSection* section = assembler->sections.value.p[symbol->section];
-  if (section == FindAssemblerSection(assembler, ".text")) {
-    return image->text_base + (uint64_t)symbol->value;
+  unsigned char* section_memory =
+      ConstexprPCodeImageSectionMemory(assembler, image, section, NULL);
+  if (section_memory != NULL) {
+    return (uint64_t)(uintptr_t)section_memory + (uint64_t)symbol->value;
   }
   *ok = false;
   return 0;
@@ -857,17 +1136,15 @@ static bool ApplyConstexprRelocation(Assembler* assembler,
     return false;
   }
   AssemblerSection* section = assembler->sections.value.p[reloc->section];
-  AssemblerSection* text = FindAssemblerSection(assembler, ".text");
-  if (section != text) {
-    // The constexpr image executes only .text. Exception metadata and other
-    // auxiliary sections may carry relocations, but they are irrelevant unless
-    // execution reaches an operation that is already linked to a constexpr
-    // trap.
+  size_t section_size = 0;
+  unsigned char* section_memory =
+      ConstexprPCodeImageSectionMemory(assembler, image, section, &section_size);
+  if (section_memory == NULL) {
     return true;
   }
   if (reloc->offset < 0 ||
-      (size_t)reloc->offset + sizeof(uint64_t) > image->text_size) {
-    *reason = "bad constexpr pcode text relocation";
+      (size_t)reloc->offset + sizeof(uint64_t) > section_size) {
+    *reason = "bad constexpr pcode section relocation";
     return false;
   }
 
@@ -889,8 +1166,9 @@ static bool ApplyConstexprRelocation(Assembler* assembler,
       return false;
     }
   }
-  uint64_t P = image->text_base + (uint64_t)reloc->offset + 12;
-  unsigned char* target = image->text + reloc->offset;
+  uint64_t P = (uint64_t)(uintptr_t)section_memory +
+               (uint64_t)reloc->offset + 12;
+  unsigned char* target = section_memory + reloc->offset;
   int opcode = target[3] & 0x3f;
   switch (reloc->type) {
     case R_PCODE_ABS:
@@ -918,6 +1196,28 @@ static bool ApplyConstexprRelocation(Assembler* assembler,
       *reason = "unsupported pcode relocation in constexpr image";
       return false;
   }
+}
+
+static bool CopyConstexprPCodeSection(AssemblerSection* section,
+                                      unsigned char** memory, size_t* size,
+                                      const char** reason) {
+  *memory = NULL;
+  *size = 0;
+  if (section == NULL) {
+    return true;
+  }
+  if (section->contents.data_location != kSectionContentsBuffered) {
+    *reason = "constexpr pcode section is not buffered";
+    return false;
+  }
+  *size = section->contents.data.buffered.length;
+  *memory = malloc(*size == 0 ? 1 : *size);
+  if (*memory == NULL) {
+    *reason = "could not allocate constexpr pcode section";
+    return false;
+  }
+  memcpy(*memory, section->contents.data.buffered.value, *size);
+  return true;
 }
 
 static bool AssemblePCodeImage(String* assembly, const char* entry_name,
@@ -948,14 +1248,19 @@ static bool AssemblePCodeImage(String* assembly, const char* entry_name,
     return false;
   }
 
-  image->text_size = text->contents.data.buffered.length;
-  image->text = malloc(image->text_size == 0 ? 1 : image->text_size);
-  if (image->text == NULL) {
+  AssemblerSection* rodata =
+      FindAssemblerSection(&assembler.base, ".rodata");
+  AssemblerSection* exception_table =
+      FindAssemblerSection(&assembler.base, ".davecc_except_table");
+  if (!CopyConstexprPCodeSection(text, &image->text, &image->text_size,
+                                 reason) ||
+      !CopyConstexprPCodeSection(rodata, &image->rodata,
+                                 &image->rodata_size, reason) ||
+      !CopyConstexprPCodeSection(exception_table, &image->exception_table,
+                                 &image->exception_table_size, reason)) {
     PCodeAssemblerDestruct(&assembler);
-    *reason = "could not allocate pcode image";
     return false;
   }
-  memcpy(image->text, text->contents.data.buffered.value, image->text_size);
   image->text_base = (uint64_t)(uintptr_t)image->text;
 
   for (size_t i = 0; i < assembler.base.relocations.length; i++) {
@@ -1874,11 +2179,17 @@ static bool PrepareConstexprPCodeConstructorStack(ConstEvalContext* ctx,
 
 static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
                                               ConstexprPCodeImage* image,
+                                              ConstexprPCodeRuntime* runtime,
                                               uint32_t* halt_instruction,
                                               const char** reason) {
   if (!PCodeVMEnableCheckedMemory(vm) ||
       !PCodeVMRegisterMemoryRegion(vm, image->text, image->text_size,
                                    false) ||
+      !PCodeVMRegisterMemoryRegion(vm, image->rodata, image->rodata_size,
+                                   false) ||
+      !PCodeVMRegisterMemoryRegion(vm, image->exception_table,
+                                   image->exception_table_size, false) ||
+      !PCodeVMRegisterMemoryRegion(vm, runtime, sizeof(*runtime), true) ||
       !PCodeVMRegisterMemoryRegion(vm, halt_instruction,
                                    sizeof(*halt_instruction), false) ||
       !PCodeVMRegisterMemoryRegion(
@@ -1896,6 +2207,42 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
       !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_throw_stub,
           sizeof(constexpr_pcode_throw_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_throw_i8_stub,
+          sizeof(constexpr_pcode_throw_i8_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_throw_f4_stub,
+          sizeof(constexpr_pcode_throw_f4_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_throw_f8_stub,
+          sizeof(constexpr_pcode_throw_f8_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_current_exception_integer_stub,
+          sizeof(constexpr_pcode_current_exception_integer_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_current_exception_f4_stub,
+          sizeof(constexpr_pcode_current_exception_f4_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_current_exception_f8_stub,
+          sizeof(constexpr_pcode_current_exception_f8_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_current_exception_pointer_stub,
+          sizeof(constexpr_pcode_current_exception_pointer_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_current_exception_address_stub,
+          sizeof(constexpr_pcode_current_exception_address_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_resume_stub,
+          sizeof(constexpr_pcode_resume_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_constexpr_throw_stub,
+          sizeof(constexpr_pcode_constexpr_throw_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_end_catch_stub,
+          sizeof(constexpr_pcode_end_catch_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_end_catch_complete_stub,
+          sizeof(constexpr_pcode_end_catch_complete_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_memcpy_stub,
           sizeof(constexpr_pcode_memcpy_stub), false) ||
@@ -1918,11 +2265,19 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
   if (pcode_image_cache_initialized) {
     for (size_t i = 0; i < pcode_image_cache.length; i++) {
       ConstexprPCodeImageCacheEntry* entry = pcode_image_cache.value.p[i];
-      if (entry != NULL &&
-          !PCodeVMRegisterMemoryRegion(vm, entry->text, entry->text_size,
-                                       false)) {
-        *reason = "could not register cached constexpr pcode text";
-        return false;
+      if (entry != NULL) {
+        if (entry->text == image->text) {
+          continue;
+        }
+        if (!PCodeVMRegisterMemoryRegion(vm, entry->text, entry->text_size,
+                                         false) ||
+            !PCodeVMRegisterMemoryRegion(vm, entry->rodata,
+                                         entry->rodata_size, false) ||
+            !PCodeVMRegisterMemoryRegion(vm, entry->exception_table,
+                                         entry->exception_table_size, false)) {
+          *reason = "could not register cached constexpr pcode image";
+          return false;
+        }
       }
     }
   }
@@ -1953,9 +2308,11 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   }
   ConstexprPCodeRuntime runtime;
   ConstexprPCodeRuntimeInit(&runtime);
+  runtime.image = &image;
   PCodeVMSetEscapeHandler(&vm, ConstexprEscape, &runtime);
   uint32_t halt_instruction = 0;
-  if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &halt_instruction,
+  if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &runtime,
+                                         &halt_instruction,
                                          reason)) {
     ConstexprPCodeRuntimeDestruct(&runtime);
     PCodeVMDestruct(&vm);
@@ -2138,9 +2495,11 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   }
   ConstexprPCodeRuntime runtime;
   ConstexprPCodeRuntimeInit(&runtime);
+  runtime.image = &image;
   PCodeVMSetEscapeHandler(&vm, ConstexprEscape, &runtime);
   uint32_t halt_instruction = 0;
-  if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &halt_instruction,
+  if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &runtime,
+                                         &halt_instruction,
                                          reason)) {
     ConstexprPCodeRuntimeDestruct(&runtime);
     PCodeVMDestruct(&vm);
@@ -2525,10 +2884,9 @@ bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
 }
 
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
+  memset(runtime, 0, sizeof(*runtime));
   VectorInit(&runtime->heap_blocks);
-  runtime->heap = NULL;
-  runtime->heap_size = 0;
-  runtime->free_list = NULL;
+  VectorInit(&runtime->exception_stack);
   runtime->source_size_t_size =
       compiler->target != NULL ? (size_t)compiler->target->pointer_size
                                : sizeof(size_t);
@@ -2542,10 +2900,22 @@ static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime) {
     }
   }
   VectorDestruct(&runtime->heap_blocks);
+  for (size_t i = 0; i < runtime->exception_stack.length; i++) {
+    ConstexprPCodeSavedException* saved =
+        runtime->exception_stack.value.p[i];
+    if (saved != NULL) {
+      free(saved->storage);
+      free(saved);
+    }
+  }
+  VectorDestruct(&runtime->exception_stack);
   free(runtime->heap);
+  free(runtime->exception_storage);
   runtime->heap = NULL;
   runtime->heap_size = 0;
   runtime->free_list = NULL;
+  runtime->exception_storage = NULL;
+  runtime->exception_storage_size = 0;
 }
 
 static bool ConstexprPCodeRuntimeHasLiveHeap(
@@ -2868,10 +3238,417 @@ static PCodeVMStatus ConstexprPCodeEscapeMemcpy(
   return kPCodeVMStatusRunning;
 }
 
+static bool ConstexprPCodeExceptionStringEqual(const char* left,
+                                               const char* right) {
+  return left == right ||
+         (left != NULL && right != NULL && strcmp(left, right) == 0);
+}
+
+static bool ConstexprPCodeExceptionTypeMatches(
+    const ConstexprPCodeTypeInfo* thrown,
+    const ConstexprPCodeTypeInfo* caught, int64_t* offset) {
+  *offset = 0;
+  if (caught == NULL) {
+    return true;
+  }
+  if (thrown == NULL) {
+    return false;
+  }
+  if (thrown == caught ||
+      ConstexprPCodeExceptionStringEqual(thrown->name, caught->name)) {
+    return true;
+  }
+  const ConstexprPCodeTypeInfoBase* bases = thrown->bases;
+  for (int64_t i = 0; bases != NULL && i < thrown->base_count; i++) {
+    if (ConstexprPCodeExceptionStringEqual(bases[i].name, caught->name)) {
+      *offset = bases[i].offset;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool ConstexprPCodeRangeEncloses(uint64_t start, uint64_t end,
+                                        uint64_t pc, uint64_t scope_start,
+                                        uint64_t scope_end) {
+  if (pc < start || pc > end) {
+    return false;
+  }
+  if (start > scope_start || end < scope_end) {
+    return false;
+  }
+  return start < scope_start || end > scope_end;
+}
+
+static ConstexprPCodeExceptionRange* ConstexprPCodeFindExceptionAction(
+    ConstexprPCodeRuntime* runtime, uint64_t pc, uint64_t scope_start,
+    uint64_t scope_end, bool* is_catch, int64_t* offset) {
+  if (runtime == NULL || runtime->image == NULL ||
+      runtime->image->exception_table == NULL) {
+    return NULL;
+  }
+  size_t count = runtime->image->exception_table_size /
+                 sizeof(ConstexprPCodeExceptionRange);
+  ConstexprPCodeExceptionRange* ranges =
+      (ConstexprPCodeExceptionRange*)runtime->image->exception_table;
+  ConstexprPCodeExceptionRange* best = NULL;
+  bool best_is_catch = false;
+  int64_t best_offset = 0;
+  const ConstexprPCodeTypeInfo* thrown =
+      (const ConstexprPCodeTypeInfo*)(uintptr_t)runtime->exception_typeinfo;
+  for (size_t i = 0; i < count; i++) {
+    ConstexprPCodeExceptionRange* range = &ranges[i];
+    if (!ConstexprPCodeRangeEncloses(range->try_start, range->try_end, pc,
+                                     scope_start, scope_end)) {
+      continue;
+    }
+    bool range_is_catch = range->catch_typeinfo !=
+                          DAVECC_EH_CLEANUP_MARKER;
+    int64_t range_offset = 0;
+    if (range_is_catch &&
+        !ConstexprPCodeExceptionTypeMatches(
+            thrown,
+            (const ConstexprPCodeTypeInfo*)(uintptr_t)range->catch_typeinfo,
+            &range_offset)) {
+      continue;
+    }
+    if (best == NULL || range->try_start > best->try_start ||
+        (range->try_start == best->try_start &&
+         range->try_end < best->try_end)) {
+      best = range;
+      best_is_catch = range_is_catch;
+      best_offset = range_offset;
+    }
+  }
+  if (best != NULL) {
+    *is_catch = best_is_catch;
+    *offset = best_offset;
+  }
+  return best;
+}
+
+static PCodeVMStatus ConstexprPCodeUnwindStep(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime, uint64_t pc, uint64_t ap,
+    uint64_t fp, uint64_t scope_start, uint64_t scope_end) {
+  for (;;) {
+    bool is_catch = false;
+    int64_t offset = 0;
+    ConstexprPCodeExceptionRange* action =
+        ConstexprPCodeFindExceptionAction(runtime, pc, scope_start, scope_end,
+                                          &is_catch, &offset);
+    if (action != NULL) {
+      if (is_catch) {
+        runtime->handling_exception = true;
+        runtime->exception_handler_depth++;
+        runtime->exception_base_offset = offset;
+        runtime->resume.active = false;
+      } else {
+        runtime->resume = (ConstexprPCodeExceptionResume){
+            .pc = pc,
+            .ap = ap,
+            .fp = fp,
+            .scope_start = action->try_start,
+            .scope_end = action->try_end,
+            .active = true,
+        };
+      }
+      vm->iregs[PCODE_PC_REG] = (int64_t)action->catch_label;
+      vm->iregs[PCODE_AP_REG] = (int64_t)ap;
+      vm->iregs[PCODE_FP_REG] = (int64_t)fp;
+      return kPCodeVMStatusRunning;
+    }
+    if (ap == 0 || fp == 0) {
+      return kPCodeVMStatusUncaughtException;
+    }
+    uint64_t normalized_ap = 0;
+    uint64_t normalized_fp = 0;
+    if (!ConstexprPCodeNormalizeAddress(vm, ap, 2 * sizeof(uint64_t), false,
+                                        &normalized_ap) ||
+        !ConstexprPCodeNormalizeAddress(vm, fp, sizeof(uint64_t), false,
+                                        &normalized_fp)) {
+      return kPCodeVMStatusInvalidRead;
+    }
+    uint64_t caller_ap = 0;
+    uint64_t caller_pc = 0;
+    uint64_t caller_fp = 0;
+    memcpy(&caller_ap, (void*)(uintptr_t)normalized_ap, sizeof(caller_ap));
+    memcpy(&caller_pc,
+           (void*)(uintptr_t)(normalized_ap + sizeof(uint64_t)),
+           sizeof(caller_pc));
+    memcpy(&caller_fp, (void*)(uintptr_t)normalized_fp, sizeof(caller_fp));
+    pc = caller_pc;
+    ap = caller_ap;
+    fp = caller_fp;
+    scope_start = caller_pc;
+    scope_end = caller_pc;
+  }
+}
+
+static void ConstexprPCodeClearException(PCodeVM* vm,
+                                         ConstexprPCodeRuntime* runtime);
+
+static PCodeVMStatus ConstexprPCodeInstallException(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime,
+    ConstexprPCodeExceptionKind kind, uint64_t value,
+    uint64_t typeinfo_address, uint64_t destructor_address) {
+  if (runtime->has_exception && !runtime->handling_exception) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  if (runtime->has_exception) {
+    ConstexprPCodeSavedException* saved = malloc(sizeof(*saved));
+    if (saved == NULL) {
+      return kPCodeVMStatusAllocationFailure;
+    }
+    *saved = (ConstexprPCodeSavedException){
+        .typeinfo = runtime->exception_typeinfo,
+        .destructor = runtime->exception_destructor,
+        .direct = runtime->exception_direct,
+        .i8 = runtime->exception_i8,
+        .f4 = runtime->exception_f4,
+        .f8 = runtime->exception_f8,
+        .storage = runtime->exception_storage,
+        .storage_size = runtime->exception_storage_size,
+        .base_offset = runtime->exception_base_offset,
+        .kind = runtime->exception_kind,
+        .handling = runtime->handling_exception,
+        .handler_depth = runtime->exception_handler_depth,
+    };
+    VectorAppend(&runtime->exception_stack, saved);
+  } else {
+    if (runtime->exception_storage != NULL) {
+      PCodeVMUnregisterMemoryRegion(vm, runtime->exception_storage);
+    }
+    free(runtime->exception_storage);
+  }
+  runtime->exception_storage = NULL;
+  runtime->exception_storage_size = 0;
+  runtime->exception_direct = 0;
+  runtime->exception_i8 = 0;
+  runtime->exception_f4 = 0;
+  runtime->exception_f8 = 0;
+  runtime->exception_kind = kind;
+  runtime->exception_typeinfo = typeinfo_address;
+  runtime->exception_destructor = destructor_address;
+  runtime->exception_base_offset = 0;
+  runtime->has_exception = true;
+  runtime->handling_exception = false;
+  runtime->exception_handler_depth = 0;
+  runtime->resume.active = false;
+  if (kind == kConstexprPCodeExceptionDirect) {
+    const ConstexprPCodeTypeInfo* typeinfo =
+        (const ConstexprPCodeTypeInfo*)(uintptr_t)typeinfo_address;
+    runtime->exception_direct = value;
+    if (typeinfo != NULL && typeinfo->object_is_class &&
+        typeinfo->object_size > 0) {
+      uint64_t source = 0;
+      if (!ConstexprPCodeNormalizeAddress(
+              vm, value, (size_t)typeinfo->object_size, false, &source)) {
+        ConstexprPCodeClearException(vm, runtime);
+        return kPCodeVMStatusInvalidRead;
+      }
+      runtime->exception_storage =
+          malloc((size_t)typeinfo->object_size);
+      if (runtime->exception_storage == NULL) {
+        ConstexprPCodeClearException(vm, runtime);
+        return kPCodeVMStatusAllocationFailure;
+      }
+      runtime->exception_storage_size = (size_t)typeinfo->object_size;
+      memcpy(runtime->exception_storage, (void*)(uintptr_t)source,
+             runtime->exception_storage_size);
+      if (!PCodeVMRegisterMemoryRegion(
+              vm, runtime->exception_storage,
+              runtime->exception_storage_size, true)) {
+        free(runtime->exception_storage);
+        runtime->exception_storage = NULL;
+        runtime->exception_storage_size = 0;
+        ConstexprPCodeClearException(vm, runtime);
+        return kPCodeVMStatusAllocationFailure;
+      }
+      runtime->exception_direct =
+          (uint64_t)(uintptr_t)runtime->exception_storage;
+    }
+  } else if (kind == kConstexprPCodeExceptionI8) {
+    runtime->exception_i8 = (int64_t)value;
+  } else if (kind == kConstexprPCodeExceptionF4) {
+    uint32_t bits = (uint32_t)value;
+    memcpy(&runtime->exception_f4, &bits, sizeof(bits));
+  } else {
+    memcpy(&runtime->exception_f8, &value, sizeof(value));
+  }
+  uint64_t throw_pc = 0;
+  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
+  uint64_t normalized_sp = 0;
+  if (!ConstexprPCodeNormalizeAddress(vm, sp, sizeof(throw_pc), false,
+                                      &normalized_sp)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  memcpy(&throw_pc, (void*)(uintptr_t)normalized_sp, sizeof(throw_pc));
+  return ConstexprPCodeUnwindStep(
+      vm, runtime, throw_pc, (uint64_t)vm->iregs[PCODE_AP_REG],
+      (uint64_t)vm->iregs[PCODE_FP_REG], throw_pc, throw_pc);
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeThrow(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime,
+    ConstexprPCodeExceptionKind kind) {
+  uint64_t value = ConstexprPCodeStackArgument(vm, 0);
+  size_t typeinfo_offset =
+      kind == kConstexprPCodeExceptionF4 ? sizeof(float) : sizeof(uint64_t);
+  uint64_t typeinfo = ConstexprPCodeStackArgumentAt(
+      vm, typeinfo_offset, sizeof(uint64_t));
+  if (kind == kConstexprPCodeExceptionDirect && value == 0 &&
+      typeinfo == 0) {
+    if (!runtime->has_exception || !runtime->handling_exception) {
+      return kPCodeVMStatusInvalidConstantOperation;
+    }
+    runtime->handling_exception = false;
+    runtime->exception_base_offset = 0;
+    uint64_t throw_pc = 0;
+    uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
+    uint64_t normalized_sp = 0;
+    if (!ConstexprPCodeNormalizeAddress(vm, sp, sizeof(throw_pc), false,
+                                        &normalized_sp)) {
+      return kPCodeVMStatusInvalidRead;
+    }
+    memcpy(&throw_pc, (void*)(uintptr_t)normalized_sp, sizeof(throw_pc));
+    return ConstexprPCodeUnwindStep(
+        vm, runtime, throw_pc, (uint64_t)vm->iregs[PCODE_AP_REG],
+        (uint64_t)vm->iregs[PCODE_FP_REG], throw_pc, throw_pc);
+  }
+  return ConstexprPCodeInstallException(vm, runtime, kind, value, typeinfo, 0);
+}
+
+static uint64_t ConstexprPCodeCurrentExceptionPointer(
+    ConstexprPCodeRuntime* runtime) {
+  uint64_t pointer = runtime->exception_direct;
+  if (runtime->exception_storage != NULL) {
+    pointer = (uint64_t)(uintptr_t)runtime->exception_storage;
+  }
+  return pointer + (uint64_t)runtime->exception_base_offset;
+}
+
+static void ConstexprPCodeClearException(PCodeVM* vm,
+                                         ConstexprPCodeRuntime* runtime) {
+  if (runtime->exception_storage != NULL) {
+    PCodeVMUnregisterMemoryRegion(vm, runtime->exception_storage);
+    free(runtime->exception_storage);
+  }
+  runtime->exception_storage = NULL;
+  runtime->exception_storage_size = 0;
+  runtime->exception_typeinfo = 0;
+  runtime->exception_destructor = 0;
+  runtime->exception_direct = 0;
+  runtime->exception_base_offset = 0;
+  runtime->has_exception = false;
+  runtime->handling_exception = false;
+  runtime->exception_handler_depth = 0;
+  runtime->ending_exception = false;
+  runtime->resume.active = false;
+  if (runtime->exception_stack.length != 0) {
+    ConstexprPCodeSavedException* saved =
+        VectorLast(&runtime->exception_stack);
+    runtime->exception_stack.length--;
+    runtime->exception_typeinfo = saved->typeinfo;
+    runtime->exception_destructor = saved->destructor;
+    runtime->exception_direct = saved->direct;
+    runtime->exception_i8 = saved->i8;
+    runtime->exception_f4 = saved->f4;
+    runtime->exception_f8 = saved->f8;
+    runtime->exception_storage = saved->storage;
+    runtime->exception_storage_size = saved->storage_size;
+    runtime->exception_base_offset = saved->base_offset;
+    runtime->exception_kind = saved->kind;
+    runtime->has_exception = true;
+    runtime->handling_exception = saved->handling;
+    runtime->exception_handler_depth = saved->handler_depth;
+    free(saved);
+  }
+}
+
+static PCodeVMStatus ConstexprPCodeBeginEndCatch(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime, bool halt_after) {
+  if (!runtime->has_exception || !runtime->handling_exception) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  if (runtime->exception_handler_depth > 1) {
+    runtime->exception_handler_depth--;
+    return halt_after ? kPCodeVMStatusHalted : kPCodeVMStatusRunning;
+  }
+  if (runtime->exception_handler_depth != 1) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  if (runtime->exception_destructor == 0) {
+    ConstexprPCodeClearException(vm, runtime);
+    return halt_after ? kPCodeVMStatusHalted : kPCodeVMStatusRunning;
+  }
+  uint64_t object = runtime->exception_storage != NULL
+                        ? (uint64_t)(uintptr_t)runtime->exception_storage
+                        : runtime->exception_direct;
+  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG] -
+                2 * sizeof(uint64_t);
+  uint64_t normalized_sp = 0;
+  if (!ConstexprPCodeNormalizeAddress(
+          vm, sp, 2 * sizeof(uint64_t), true, &normalized_sp)) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  memcpy((void*)(uintptr_t)(normalized_sp + sizeof(uint64_t)), &object,
+         sizeof(object));
+  uint64_t completion =
+      (uint64_t)(uintptr_t)constexpr_pcode_end_catch_complete_stub;
+  memcpy((void*)(uintptr_t)normalized_sp, &completion, sizeof(completion));
+  vm->iregs[PCODE_SP_REG] = (int64_t)normalized_sp;
+  vm->iregs[PCODE_PC_REG] = (int64_t)runtime->exception_destructor;
+  runtime->handling_exception = false;
+  runtime->ending_exception = true;
+  runtime->halt_after_exception_destructor = halt_after;
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeCompleteEndCatch(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (!runtime->has_exception || !runtime->ending_exception) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  bool halt_after = runtime->halt_after_exception_destructor;
+  vm->iregs[PCODE_SP_REG] += sizeof(uint64_t);
+  ConstexprPCodeClearException(vm, runtime);
+  return halt_after ? kPCodeVMStatusHalted : kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeConstexprThrow(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  uint64_t value = ConstexprPCodeStackArgument(vm, 0);
+  uint64_t typeinfo = ConstexprPCodeStackArgument(vm, 1);
+  uint64_t destructor = ConstexprPCodeStackArgument(vm, 2);
+  if (value == 0 && typeinfo == 0) {
+    return ConstexprPCodeEscapeThrow(
+        vm, runtime, kConstexprPCodeExceptionDirect);
+  }
+  return ConstexprPCodeInstallException(
+      vm, runtime, kConstexprPCodeExceptionDirect, value, typeinfo,
+      destructor);
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeResume(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (!runtime->has_exception || !runtime->resume.active) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  ConstexprPCodeExceptionResume resume = runtime->resume;
+  runtime->resume.active = false;
+  return ConstexprPCodeUnwindStep(
+      vm, runtime, resume.pc, resume.ap, resume.fp, resume.scope_start,
+      resume.scope_end);
+}
+
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
   ConstexprPCodeRuntime* runtime = data;
   switch (code) {
     case 4:
+      if (runtime != NULL && runtime->has_exception &&
+          runtime->handling_exception) {
+        return ConstexprPCodeBeginEndCatch(vm, runtime, true);
+      }
       return kPCodeVMStatusHalted;
     case kConstexprPCodeEscapeMalloc:
       return runtime != NULL ? ConstexprPCodeEscapeMalloc(vm, runtime)
@@ -2886,7 +3663,88 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
       return runtime != NULL ? ConstexprPCodeEscapePlacementNew(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeThrow:
-      return kPCodeVMStatusInvalidConstantOperation;
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeThrow(
+                       vm, runtime, kConstexprPCodeExceptionDirect)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeThrowI8:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeThrow(
+                       vm, runtime, kConstexprPCodeExceptionI8)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeThrowF4:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeThrow(
+                       vm, runtime, kConstexprPCodeExceptionF4)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeThrowF8:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeThrow(
+                       vm, runtime, kConstexprPCodeExceptionF8)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeCurrentExceptionInteger:
+      if (runtime == NULL || !runtime->has_exception) {
+        return kPCodeVMStatusInvalidConstantOperation;
+      }
+      vm->iregs[PCODE_INT_RETURN_REG] =
+          runtime->exception_kind == kConstexprPCodeExceptionI8
+              ? runtime->exception_i8
+              : (int64_t)runtime->exception_direct;
+      return kPCodeVMStatusRunning;
+    case kConstexprPCodeEscapeCurrentExceptionF4:
+      if (runtime == NULL ||
+          runtime->exception_kind != kConstexprPCodeExceptionF4) {
+        return kPCodeVMStatusInvalidConstantOperation;
+      }
+      vm->fregs[PCODE_FLOAT_RETURN_REG] = runtime->exception_f4;
+      return kPCodeVMStatusRunning;
+    case kConstexprPCodeEscapeCurrentExceptionF8:
+      if (runtime == NULL ||
+          runtime->exception_kind != kConstexprPCodeExceptionF8) {
+        return kPCodeVMStatusInvalidConstantOperation;
+      }
+      vm->dregs[PCODE_DOUBLE_RETURN_REG] = runtime->exception_f8;
+      return kPCodeVMStatusRunning;
+    case kConstexprPCodeEscapeCurrentExceptionPointer:
+      if (runtime == NULL || !runtime->has_exception) {
+        return kPCodeVMStatusInvalidConstantOperation;
+      }
+      vm->iregs[PCODE_INT_RETURN_REG] =
+          (int64_t)ConstexprPCodeCurrentExceptionPointer(runtime);
+      return kPCodeVMStatusRunning;
+    case kConstexprPCodeEscapeCurrentExceptionAddress:
+      if (runtime == NULL || !runtime->has_exception) {
+        return kPCodeVMStatusInvalidConstantOperation;
+      }
+      if (runtime->exception_kind == kConstexprPCodeExceptionI8) {
+        vm->iregs[PCODE_INT_RETURN_REG] =
+            (int64_t)(uintptr_t)&runtime->exception_i8;
+      } else if (runtime->exception_kind == kConstexprPCodeExceptionF4) {
+        vm->iregs[PCODE_INT_RETURN_REG] =
+            (int64_t)(uintptr_t)&runtime->exception_f4;
+      } else if (runtime->exception_kind == kConstexprPCodeExceptionF8) {
+        vm->iregs[PCODE_INT_RETURN_REG] =
+            (int64_t)(uintptr_t)&runtime->exception_f8;
+      } else {
+        vm->iregs[PCODE_INT_RETURN_REG] =
+            (int64_t)(uintptr_t)&runtime->exception_direct;
+      }
+      return kPCodeVMStatusRunning;
+    case kConstexprPCodeEscapeResume:
+      return runtime != NULL ? ConstexprPCodeEscapeResume(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeConstexprThrow:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeConstexprThrow(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeEndCatch:
+      return runtime != NULL
+                 ? ConstexprPCodeBeginEndCatch(vm, runtime, false)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeEndCatchComplete:
+      return runtime != NULL
+                 ? ConstexprPCodeCompleteEndCatch(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeMemcpy:
       return runtime != NULL ? ConstexprPCodeEscapeMemcpy(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;

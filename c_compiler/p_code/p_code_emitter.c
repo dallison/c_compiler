@@ -511,10 +511,15 @@ static void PCodePrintExceptionTable(PCodeEmitter* emitter, FILE* fp,
     PrintExceptionTableLabel(fp, func_name, range->try_end);
     fprintf(fp, "\n\t.8byte ");
     PrintExceptionTableLabel(fp, func_name, range->catch_label);
-    fprintf(fp, "\n\t.8byte %s\n",
-            range->catch_typeinfo != NULL
-                ? range->catch_typeinfo->symbol_name.value
-                : "0");
+    fprintf(fp, "\n\t.8byte ");
+    if (range->is_cleanup) {
+      fprintf(fp, "%d", DAVECC_EH_CLEANUP_MARKER);
+    } else {
+      fprintf(fp, "%s", range->catch_typeinfo != NULL
+                            ? range->catch_typeinfo->symbol_name.value
+                            : "0");
+    }
+    fprintf(fp, "\n");
   }
   fprintf(fp, "\t.text\n\n");
 }

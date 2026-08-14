@@ -222,6 +222,7 @@ typedef struct {
   TargetInstruction* try_end;
   TargetInstruction* catch_label;
   EHTypeInfo* catch_typeinfo;
+  bool is_cleanup;
 } PCodeExceptionRange;
 
 // A PCode Generator is derived from a TargetGenerator.  It has

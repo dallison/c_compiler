@@ -2680,15 +2680,15 @@ static IRNode* GenerateItaniumThrowExpression(Generator* gen,
 }
 
 static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
-  if (gen->for_constant_evaluation) {
-    Symbol* throw_symbol =
-        GetDaveCCThrowFunction("__davecc_throw", node->base.location);
+  if (gen->for_constant_evaluation &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    Symbol* throw_symbol = GetDaveCCThrowFunction(
+        "__davecc_constexpr_invalid_throw", node->base.location);
     IRNode* func = GeneratorGetVariable(gen, throw_symbol);
     IRNode* call = NewIR1(IR_OP(calla), func);
     return IRSetType(GeneratorEmit(gen, call),
                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   }
-
   if (RttiUsesItaniumABI()) {
     return GenerateItaniumThrowExpression(gen, node);
   }
@@ -2709,10 +2709,20 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
   if (node->expr != NULL && TypeIsFloatingPoint(node->expr->type)) {
     throw_function = node->expr->type->size == 4 ? "__davecc_throw_f4"
                                                  : "__davecc_throw_f8";
-  } else if (node->expr != NULL && node->expr->type->size > 4 &&
-             compiler->pointer_size < node->expr->type->size &&
-             !TypeIsStructOrUnion(node->expr->type)) {
+  } else if (node->expr != NULL && TypeIsIntegral(node->expr->type)) {
     throw_function = "__davecc_throw_i8";
+    Type wide_type = kTypeLongLong;
+    if (TypeIsUnsigned(node->expr->type)) {
+      wide_type |= kTypeUnsigned;
+    }
+    IRSetType(exception_object,
+              NewTypeRecordWithSize(wide_type, kQualPlain));
+  }
+  bool constexpr_direct_throw =
+      gen->for_constant_evaluation &&
+      strcmp(throw_function, "__davecc_throw") == 0;
+  if (constexpr_direct_throw) {
+    throw_function = "__davecc_constexpr_throw";
   }
   Symbol* throw_symbol =
       GetDaveCCThrowFunction(throw_function, node->base.location);
@@ -2720,14 +2730,33 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
   IRNode* call = NewIR1(IR_OP(calla), func);
   Vector args = {0};
   if (exception_object == NULL || TypeIsVoid(exception_object->type)) {
-    exception_object = GeneratorGetIntConstant(gen, NULL, 0);
+    TypeRecord* intptr_type = NewTypeRecordWithSize(
+        SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
+    exception_object =
+        IRSetType(GeneratorGetIntConstant(gen, intptr_type, 0), intptr_type);
   }
-  IRNode* exception_typeinfo = GeneratorGetIntConstant(gen, NULL, 0);
+  TypeRecord* void_ptr = NewPointerTo(
+      kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  IRNode* exception_typeinfo =
+      IRSetType(GeneratorGetIntConstant(gen, void_ptr, 0), void_ptr);
+  IRNode* exception_destructor =
+      IRSetType(GeneratorGetIntConstant(gen, void_ptr, 0), void_ptr);
   if (node->expr != NULL) {
     EHTypeInfo* info = GeneratorGetExceptionTypeInfo(gen, node->expr->type);
     Symbol* typeinfo_symbol =
         NewExceptionTypeInfoSymbol(info, node->base.location);
     exception_typeinfo = GeneratorGetVariable(gen, typeinfo_symbol);
+    if (constexpr_direct_throw &&
+        TypeIsStructOrUnion(node->expr->type)) {
+      Symbol* destructor = FindExceptionSpecialMember(
+          node->expr->type, kCXXSpecialMemberDestructor);
+      if (!ExceptionSpecialMemberIsTrivial(destructor)) {
+        exception_destructor = GeneratorGetVariable(gen, destructor);
+      }
+    }
+  }
+  if (constexpr_direct_throw) {
+    PushArg(gen, call, exception_destructor, 2, &args);
   }
   PushArg(gen, call, exception_typeinfo, 1, &args);
   PushArg(gen, call, exception_object, 0, &args);

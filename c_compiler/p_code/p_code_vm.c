@@ -1092,6 +1092,8 @@ const char* PCodeVMStatusName(PCodeVMStatus status) {
       return "allocation failure";
     case kPCodeVMStatusInvalidConstantOperation:
       return "invalid constant operation";
+    case kPCodeVMStatusUncaughtException:
+      return "uncaught constexpr exception";
   }
   return "unknown";
 }

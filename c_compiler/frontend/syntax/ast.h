@@ -403,6 +403,7 @@ struct ConstraintExpr;
 #define kASTExpansionLoopContinue (1ULL << 45)  // continue targeting an enclosing expansion statement.
 #define kASTExpansionInitializer (1ULL << 46)  // Materialized expansion compound carrying a hidden initializer.
 #define kASTExpansionJumpsMarked (1ULL << 47)  // break/continue in body already marked for this expansion.
+#define kASTConstexprExceptionDiagnosed (1ULL << 48)  // An uncaught constexpr exception diagnostic was emitted for this throw.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

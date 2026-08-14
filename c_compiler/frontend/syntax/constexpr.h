@@ -10,6 +10,7 @@
 
 typedef struct ConstexprValue ConstexprValue;
 typedef struct ConstexprObject ConstexprObject;
+typedef struct ConstexprException ConstexprException;
 struct ReflectionValue;
 
 typedef struct {
@@ -18,11 +19,13 @@ typedef struct {
   int call_depth;
   int steps;
   int max_steps;
+  ConstexprException* exception;
 } ConstEvalContext;
 
 void ConstEvalContextInit(ConstEvalContext* ctx);
 void ConstEvalContextDestruct(ConstEvalContext* ctx);
 bool ConstEvalStep(ConstEvalContext* ctx);
+bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node);
 
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
 ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,

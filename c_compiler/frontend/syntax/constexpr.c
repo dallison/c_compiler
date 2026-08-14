@@ -63,6 +63,16 @@ struct ConstexprObject {
   StructMember* active_union_member;
 };
 
+struct ConstexprException {
+  TypeRecord* type;
+  ConstexprValue value;
+  ASTNode* throw_node;
+  SourceLocation throw_location;
+  bool handling;
+  bool reported;
+  ConstexprException* previous;
+};
+
 #define CONSTEXPR_MAX_CALL_DEPTH 512
 #define CONSTEXPR_MAX_STEPS 1000000
 
@@ -70,6 +80,7 @@ static bool ConstexprDereferenceAddress(ConstexprValue address,
                                         ConstexprValue* result);
 static ConstexprValue* ConstexprObjectSlot(ConstexprObject* object,
                                            size_t index);
+static TypeRecord* ConstexprExceptionObjectType(TypeRecord* type);
 
 typedef enum {
   kConstexprStmtInvalid,
@@ -77,17 +88,24 @@ typedef enum {
   kConstexprStmtReturn,
   kConstexprStmtBreak,
   kConstexprStmtContinue,
+  kConstexprStmtThrow,
 } ConstexprStatementResult;
 
 void ConstEvalContextInit(ConstEvalContext* ctx) {
   VectorInit(&ctx->bindings);
   VectorInit(&ctx->objects);
+  ctx->exception = NULL;
   ctx->call_depth = 0;
   ctx->steps = 0;
   ctx->max_steps = CONSTEXPR_MAX_STEPS;
 }
 
 void ConstEvalContextDestruct(ConstEvalContext* ctx) {
+  while (ctx->exception != NULL) {
+    ConstexprException* exception = ctx->exception;
+    ctx->exception = exception->previous;
+    free(exception);
+  }
   for (size_t i = 0; i < ctx->bindings.length; i++) {
     free(ctx->bindings.value.p[i]);
   }
@@ -567,6 +585,7 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
                                                   ConstexprObject* object,
                                                   Vector* actuals);
 static Symbol* ConstexprCallSymbol(ASTNode* node);
+static Symbol* ConstexprMemberCallSymbol(ASTNode* node, ASTNode** receiver);
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
 static ASTNode* ConstexprAggregateInitializerExpression(ASTNode* initializer);
 static ConstexprStatementResult EvaluateConstexprStatement(
@@ -820,6 +839,14 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
         break;
     }
   }
+  if (type != NULL && TypeIsReference(type) && node != NULL &&
+      node->op == AST_OP(contents)) {
+    // Binding a reference to `*p` preserves the pointee's address. The regular
+    // contents path below dereferences that address to obtain a value, which is
+    // correct for scalar reads but loses the lvalue identity required here.
+    return EvaluateConstexprAddressValue(
+        ctx, ((UnaryASTNode*)node)->sub, result);
+  }
   if (type != NULL && (TypeIsPointer(type) || TypeIsReference(type))) {
     return EvaluateConstexprAddressValue(ctx, node, result);
   }
@@ -877,6 +904,79 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
   result->ivalue = value;
   result->fvalue = (double)value;
   return true;
+}
+
+static bool ConstexprHasPendingException(ConstEvalContext* ctx) {
+  return ctx != NULL && ctx->exception != NULL && !ctx->exception->handling;
+}
+
+bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node) {
+  if (ctx == NULL || node == NULL || node->op != AST_OP(throw) ||
+      !CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    return false;
+  }
+  ThrowASTNode* throw_node = (ThrowASTNode*)node;
+  if (throw_node->expr == NULL) {
+    if (ctx->exception == NULL || !ctx->exception->handling) {
+      return false;
+    }
+    ctx->exception->handling = false;
+    return true;
+  }
+  if (ConstexprHasPendingException(ctx)) {
+    return false;
+  }
+  ConstexprValue value = {0};
+  if (!EvaluateConstexprValue(ctx, throw_node->expr, throw_node->expr->type,
+                              &value)) {
+    return false;
+  }
+  if (value.is_object) {
+    value.object = CloneConstexprObject(ctx, value.object);
+    if (value.object == NULL) {
+      return false;
+    }
+  }
+  ConstexprException* exception = malloc(sizeof(ConstexprException));
+  exception->type = throw_node->expr->type;
+  exception->value = value;
+  exception->throw_node = node;
+  exception->throw_location = node->location;
+  exception->handling = false;
+  exception->reported = false;
+  exception->previous = ctx->exception;
+  ctx->exception = exception;
+  return true;
+}
+
+static void ReportUncaughtConstexprException(ConstEvalContext* ctx) {
+  if (!ConstexprHasPendingException(ctx) || ctx->call_depth != 0 ||
+      ctx->exception->reported) {
+    return;
+  }
+  if (ctx->exception->throw_node != NULL &&
+      (ctx->exception->throw_node->flags &
+       kASTConstexprExceptionDiagnosed) != 0) {
+    ctx->exception->reported = true;
+    return;
+  }
+  TypeRecord* type = ConstexprExceptionObjectType(ctx->exception->type);
+  String type_name;
+  StringInit(&type_name, "");
+  if (type != NULL) {
+    TypeRecordToString(type, &type_name);
+  } else {
+    StringAppend(&type_name, "<unknown>");
+  }
+  SemanticError(ctx->exception->throw_node,
+                "constant evaluation ended with an uncaught exception of type "
+                "%s",
+                type_name.value);
+  if (ctx->exception->throw_node != NULL) {
+    ctx->exception->throw_node->flags |= kASTConstexprExceptionDiagnosed;
+  }
+  StringDestruct(&type_name);
+  ctx->exception->reported = true;
 }
 
 ReflectionValue* ConstexprEvaluateReflectionExpression(ConstEvalContext* ctx,
@@ -1436,6 +1536,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     return false;
   }
   if (TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
+      TypeIsPointer(type) || TypeIsReference(type) ||
       TypeIsReflection(type)) {
     return EvaluateConstexprValue(ctx, initializer, type, result);
   }
@@ -2068,6 +2169,17 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return true;
     }
     if (binding != NULL && binding->object != NULL &&
+        id->symbol != NULL && TypeIsPointer(id->symbol->type)) {
+      // Implicit object parameters are represented by an object-bearing
+      // binding even though their declared type is a pointer. Preserve an
+      // address to that binding for expressions such as `return *this;`.
+      *result = (ConstexprValue){
+          .is_address = true,
+          .address_binding = binding,
+      };
+      return true;
+    }
+    if (binding != NULL && binding->object != NULL &&
         TypeIsFixedArray(binding->object->type)) {
       *result = (ConstexprValue){.is_address = true,
                                  .address_object = binding->object,
@@ -2130,6 +2242,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     }
   }
   if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+    ConstexprValue* slot = NULL;
+    if (EvaluateConstexprObjectLValue(ctx, node, &slot, true) &&
+        slot != NULL) {
+      *result = (ConstexprValue){
+          .is_address = true,
+          .address_slot = slot,
+      };
+      return true;
+    }
     ConstexprValue value;
     if (EvaluateConstexprObjectAccess(ctx, node, &value)) {
       if (value.is_address) {
@@ -2229,6 +2350,15 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
   if (EvaluateConstexprObjectLValue(ctx, binding_expr, &slot, true)) {
     *value = (ConstexprValue){.is_address = true, .address_slot = slot};
     return true;
+  }
+  if (binding_expr != NULL && binding_expr->op == AST_OP(call)) {
+    ConstexprValue call_value = {0};
+    if (EvaluateConstexprCall(ctx, binding_expr, &call_value) &&
+        (call_value.is_address ||
+         (call_value.is_object && call_value.object != NULL))) {
+      *value = call_value;
+      return true;
+    }
   }
   TypeRecord* plain_type = ConstexprPlainObjectType(formal_object_type);
   bool ok = EvaluateConstexprValue(ctx, binding_expr, plain_type, value);
@@ -3154,6 +3284,12 @@ static bool EvaluateConstexprCondition(ConstEvalContext* ctx, ASTNode* cond,
   return true;
 }
 
+static ConstexprStatementResult ConstexprFailureStatementResult(
+    ConstEvalContext* ctx) {
+  return ConstexprHasPendingException(ctx) ? kConstexprStmtThrow
+                                           : kConstexprStmtInvalid;
+}
+
 static bool ConstexprVoidExpressionThrows(ASTNode* expr) {
   if (expr == NULL) {
     return false;
@@ -3169,6 +3305,273 @@ static bool ConstexprVoidExpressionThrows(ASTNode* expr) {
   return false;
 }
 
+static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
+                                            ASTNode* expr) {
+  if (expr == NULL) {
+    return true;
+  }
+  if (expr->op == AST_OP(throw)) {
+    (void)ConstexprEvaluateThrowExpression(ctx, expr);
+    return false;
+  }
+  if (expr->op == AST_OP(comma)) {
+    BinaryASTNode* comma = (BinaryASTNode*)expr;
+    ConstexprValue ignored = {0};
+    bool left_ok =
+        comma->left == NULL || TypeIsVoid(comma->left->type)
+            ? EvaluateConstexprVoidExpression(ctx, comma->left)
+            : EvaluateConstexprValue(ctx, comma->left, comma->left->type,
+                                     &ignored);
+    if (!left_ok) {
+      return false;
+    }
+    return comma->right == NULL || TypeIsVoid(comma->right->type)
+               ? EvaluateConstexprVoidExpression(ctx, comma->right)
+               : EvaluateConstexprValue(ctx, comma->right, comma->right->type,
+                                        &ignored);
+  }
+  if (expr->op != AST_OP(call)) {
+    return true;
+  }
+  ASTNode* receiver = NULL;
+  Symbol* callee =
+      ConstexprFunctionDefinition(ConstexprCallSymbol(expr));
+  if (callee == NULL) {
+    callee = ConstexprFunctionDefinition(
+        ConstexprMemberCallSymbol(expr, &receiver));
+  }
+  if (callee == NULL || callee->type == NULL ||
+      !TypeIsFunction(callee->type)) {
+    return true;
+  }
+  if (callee->type->info.function.is_constructor) {
+    return EvaluateConstexprConstructorCall(ctx, expr);
+  }
+  if (callee->type->info.function.is_destructor) {
+    return EvaluateConstexprDestructorCall(ctx, expr);
+  }
+  ConstexprValue ignored = {0};
+  return EvaluateConstexprCall(ctx, expr, &ignored);
+}
+
+static TypeRecord* ConstexprExceptionObjectType(TypeRecord* type) {
+  while (type != NULL && TypeIsReference(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
+static bool ConstexprExceptionTypesMatch(TypeRecord* thrown,
+                                         TypeRecord* caught) {
+  thrown = ConstexprExceptionObjectType(thrown);
+  caught = ConstexprExceptionObjectType(caught);
+  if (thrown == NULL || caught == NULL) {
+    return false;
+  }
+  TypeRecord* plain_thrown = TypeRecordCopy(thrown);
+  TypeRecord* plain_caught = TypeRecordCopy(caught);
+  plain_thrown->qualifiers = kQualPlain;
+  plain_caught->qualifiers = kQualPlain;
+  bool matches = TypeEqual(plain_thrown, plain_caught);
+  TypeRecordDelete(plain_thrown);
+  TypeRecordDelete(plain_caught);
+  return matches;
+}
+
+static size_t ConstexprPublicBasePathCount(Struct* derived, Struct* target,
+                                           size_t limit) {
+  if (derived == NULL || target == NULL || limit == 0) {
+    return 0;
+  }
+  size_t count = 0;
+  for (size_t i = 0; i < derived->bases.length && count < limit; i++) {
+    CXXBaseSpecifier* base = derived->bases.value.p[i];
+    if (base == NULL || base->access != kAccessPublic ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == target) {
+      count++;
+    } else {
+      count += ConstexprPublicBasePathCount(
+          base_struct, target, limit - count);
+    }
+  }
+  return count;
+}
+
+static bool ConstexprCatchMatches(CatchASTNode* handler,
+                                  ConstexprException* exception) {
+  if (handler == NULL || exception == NULL) {
+    return false;
+  }
+  if (handler->is_catch_all) {
+    return true;
+  }
+  if (handler->symbol == NULL) {
+    return false;
+  }
+  if (ConstexprExceptionTypesMatch(exception->type, handler->symbol->type)) {
+    return true;
+  }
+  TypeRecord* thrown = ConstexprExceptionObjectType(exception->type);
+  TypeRecord* caught = ConstexprExceptionObjectType(handler->symbol->type);
+  return TypeIsStructOrUnion(thrown) && TypeIsStructOrUnion(caught) &&
+         thrown->info.struct_info != NULL && caught->info.struct_info != NULL &&
+         ConstexprPublicBasePathCount(thrown->info.struct_info,
+                                      caught->info.struct_info, 2) == 1;
+}
+
+static void ConstexprRemoveException(ConstEvalContext* ctx,
+                                     ConstexprException* exception) {
+  if (ctx == NULL || exception == NULL) {
+    return;
+  }
+  if (ctx->exception == exception) {
+    ctx->exception = exception->previous;
+    free(exception);
+    return;
+  }
+  for (ConstexprException* current = ctx->exception;
+       current != NULL && current->previous != NULL;
+       current = current->previous) {
+    if (current->previous == exception) {
+      current->previous = exception->previous;
+      free(exception);
+      return;
+    }
+  }
+}
+
+static bool ConstexprBindCatch(ConstEvalContext* ctx, CatchASTNode* handler,
+                               ConstexprException* exception) {
+  if (handler->symbol == NULL) {
+    return true;
+  }
+  ConstexprValue value = exception->value;
+  if (TypeIsReference(handler->symbol->type)) {
+    value = (ConstexprValue){
+        .is_address = true,
+        .address_slot = &exception->value,
+    };
+  } else if (value.is_object) {
+    value.object = CloneConstexprObject(ctx, value.object);
+    if (value.object == NULL) {
+      return false;
+    }
+  }
+  PushConstexprBinding(ctx, handler->symbol, value);
+  return true;
+}
+
+static bool EvaluateConstexprObjectDestructor(ConstEvalContext* ctx,
+                                              TypeRecord* object_type,
+                                              ConstexprObject* object) {
+  TypeRecord* type = ConstexprExceptionObjectType(object_type);
+  if (type == NULL || !TypeIsStructOrUnion(type) || object == NULL ||
+      type->info.struct_info == NULL) {
+    return true;
+  }
+  Symbol* destructor = NULL;
+  for (size_t i = 0; i < type->info.struct_info->members.length; i++) {
+    StructMember* member = type->info.struct_info->members.value.p[i];
+    if (member != NULL && member->is_member_function &&
+        member->symbol != NULL && member->symbol->type != NULL &&
+        TypeIsFunction(member->symbol->type) &&
+        member->symbol->type->info.function.is_destructor) {
+      destructor = ConstexprFunctionDefinition(member->symbol);
+      break;
+    }
+  }
+  if (destructor == NULL || destructor->type == NULL ||
+      destructor->type->info.function.is_trivial_special_member) {
+    return true;
+  }
+  if (!destructor->type->info.function.is_constexpr ||
+      destructor->type->info.function.body == NULL) {
+    return false;
+  }
+  Vector actuals;
+  VectorInit(&actuals);
+  size_t mark = ctx->bindings.length;
+  ctx->call_depth++;
+  ConstexprValue ignored = {0};
+  bool bound = BindConstexprConstructorObjectActuals(
+      ctx, destructor, object, &actuals);
+  ConstexprStatementResult destructor_result =
+      bound ? EvaluateConstexprStatement(
+                  ctx, destructor->type->info.function.body,
+                  destructor->type->next, &ignored)
+            : kConstexprStmtInvalid;
+  ctx->call_depth--;
+  PopConstexprBindings(ctx, mark);
+  VectorDestruct(&actuals);
+  return destructor_result == kConstexprStmtNormal;
+}
+
+static bool EvaluateConstexprExceptionDestructor(
+    ConstEvalContext* ctx, ConstexprException* exception) {
+  return exception == NULL ||
+         EvaluateConstexprObjectDestructor(ctx, exception->type,
+                                           exception->value.object);
+}
+
+static ConstexprStatementResult EvaluateConstexprTry(
+    ConstEvalContext* ctx, TryASTNode* try_stmt, TypeRecord* return_type,
+    ConstexprValue* result) {
+  ConstexprStatementResult try_result = EvaluateConstexprStatement(
+      ctx, try_stmt->try_stmt, return_type, result);
+  if (try_result != kConstexprStmtThrow) {
+    return try_result;
+  }
+  ConstexprException* exception = ctx->exception;
+  if (exception == NULL) {
+    return kConstexprStmtInvalid;
+  }
+  for (size_t i = 0; i < try_stmt->catches->length; i++) {
+    CatchASTNode* handler = try_stmt->catches->value.p[i];
+    if (!ConstexprCatchMatches(handler, exception)) {
+      continue;
+    }
+    size_t mark = ctx->bindings.length;
+    exception->handling = true;
+    if (!ConstexprBindCatch(ctx, handler, exception)) {
+      exception->handling = false;
+      return kConstexprStmtInvalid;
+    }
+    ConstexprObject* catch_object = NULL;
+    if (handler->symbol != NULL &&
+        !TypeIsReference(handler->symbol->type)) {
+      ConstexprBinding* binding =
+          FindConstexprBinding(ctx, handler->symbol);
+      catch_object = binding != NULL ? binding->object : NULL;
+    }
+    ConstexprStatementResult handler_result = EvaluateConstexprStatement(
+        ctx, handler->stmt, return_type, result);
+    bool catch_destroyed =
+        catch_object == NULL ||
+        EvaluateConstexprObjectDestructor(
+            ctx, handler->symbol->type, catch_object);
+    PopConstexprBindings(ctx, mark);
+    if (!catch_destroyed) {
+      ConstexprRemoveException(ctx, exception);
+      return kConstexprStmtInvalid;
+    }
+    if (handler_result != kConstexprStmtThrow ||
+        ctx->exception != exception) {
+      if (!EvaluateConstexprExceptionDestructor(ctx, exception)) {
+        ConstexprRemoveException(ctx, exception);
+        return kConstexprStmtInvalid;
+      }
+      ConstexprRemoveException(ctx, exception);
+    }
+    return handler_result;
+  }
+  return kConstexprStmtThrow;
+}
+
 static ConstexprStatementResult EvaluateConstexprCompound(
     ConstEvalContext* ctx, CompoundStatementASTNode* body,
     TypeRecord* return_type, ConstexprValue* result) {
@@ -3178,6 +3581,22 @@ static ConstexprStatementResult EvaluateConstexprCompound(
     ConstexprStatementResult stmt_result =
         EvaluateConstexprStatement(ctx, stmt, return_type, result);
     if (stmt_result != kConstexprStmtNormal) {
+      if (stmt_result == kConstexprStmtThrow) {
+        for (size_t j = i + 1; j < body->statements->length; j++) {
+          ASTNode* cleanup = body->statements->value.p[j];
+          if (cleanup == NULL ||
+              (cleanup->flags & kASTFallthroughDestructor) == 0) {
+            continue;
+          }
+          ConstexprValue ignored = {0};
+          ConstexprStatementResult cleanup_result =
+              EvaluateConstexprStatement(ctx, cleanup, return_type, &ignored);
+          if (cleanup_result != kConstexprStmtNormal) {
+            PopConstexprBindings(ctx, mark);
+            return kConstexprStmtInvalid;
+          }
+        }
+      }
       PopConstexprBindings(ctx, mark);
       return stmt_result;
     }
@@ -3192,7 +3611,7 @@ static ConstexprStatementResult EvaluateConstexprWhile(
   for (;;) {
     bool condition;
     if (!EvaluateConstexprCondition(ctx, loop->cond, &condition)) {
-      return kConstexprStmtInvalid;
+      return ConstexprFailureStatementResult(ctx);
     }
     if (!condition) {
       return kConstexprStmtNormal;
@@ -3228,7 +3647,7 @@ static ConstexprStatementResult EvaluateConstexprDo(
     }
     bool condition;
     if (!EvaluateConstexprCondition(ctx, loop->cond, &condition)) {
-      return kConstexprStmtInvalid;
+      return ConstexprFailureStatementResult(ctx);
     }
     if (!condition) {
       return kConstexprStmtNormal;
@@ -3245,13 +3664,13 @@ static ConstexprStatementResult EvaluateConstexprFor(
       if (!EvaluateConstexprDeclarationList(ctx,
                                             (DeclarationListASTNode*)loop->c1)) {
         PopConstexprBindings(ctx, mark);
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
     } else {
       ConstexprValue ignored;
       if (!EvaluateConstexprValue(ctx, loop->c1, loop->c1->type, &ignored)) {
         PopConstexprBindings(ctx, mark);
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
     }
   }
@@ -3260,7 +3679,7 @@ static ConstexprStatementResult EvaluateConstexprFor(
       bool condition;
       if (!EvaluateConstexprCondition(ctx, loop->c2, &condition)) {
         PopConstexprBindings(ctx, mark);
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
       if (!condition) {
         PopConstexprBindings(ctx, mark);
@@ -3284,7 +3703,7 @@ static ConstexprStatementResult EvaluateConstexprFor(
       ConstexprValue ignored;
       if (!EvaluateConstexprValue(ctx, loop->c3, loop->c3->type, &ignored)) {
         PopConstexprBindings(ctx, mark);
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
     }
   }
@@ -3359,7 +3778,7 @@ static ConstexprStatementResult EvaluateConstexprSwitch(
     TypeRecord* return_type, ConstexprValue* result) {
   int64_t value;
   if (!EvaluateIntegerExpressionInContext(ctx, sw->expr, &value)) {
-    return kConstexprStmtInvalid;
+    return ConstexprFailureStatementResult(ctx);
   }
   if (sw->stmt != NULL && sw->stmt->op == AST_OP(compound)) {
     return EvaluateConstexprSwitchCompound(ctx, sw,
@@ -3401,50 +3820,60 @@ static ConstexprStatementResult EvaluateConstexprStatement(
   }
   switch (stmt->op) {
     case AST_OP(decl_list):
-      return EvaluateConstexprDeclarationList(ctx,
-                                              (DeclarationListASTNode*)stmt)
+      return EvaluateConstexprDeclarationList(
+                 ctx, (DeclarationListASTNode*)stmt)
                  ? kConstexprStmtNormal
-                 : kConstexprStmtInvalid;
+                 : ConstexprFailureStatementResult(ctx);
     case AST_OP(vardecl):
       return EvaluateConstexprVariableDeclaration(
                  ctx, (VariableDeclarationASTNode*)stmt)
                  ? kConstexprStmtNormal
-                 : kConstexprStmtInvalid;
+                 : ConstexprFailureStatementResult(ctx);
     case AST_OP(expr): {
       ExpressionStatementASTNode* expr = (ExpressionStatementASTNode*)stmt;
       if (expr->expr == NULL) {
         return kConstexprStmtNormal;
       }
-      if (TypeIsVoid(expr->expr->type)) {
-        if (ConstexprVoidExpressionThrows(expr->expr)) {
-          return kConstexprStmtInvalid;
+      if (expr->expr->op == AST_OP(call)) {
+        ASTNode* receiver = NULL;
+        Symbol* callee =
+            ConstexprFunctionDefinition(ConstexprCallSymbol(expr->expr));
+        if (callee == NULL) {
+          callee = ConstexprFunctionDefinition(
+              ConstexprMemberCallSymbol(expr->expr, &receiver));
         }
-        if (expr->expr->op == AST_OP(call)) {
-          Symbol* callee = ConstexprFunctionDefinition(
-              ConstexprCallSymbol(expr->expr));
-          if (callee != NULL && callee->type != NULL &&
-              TypeIsFunction(callee->type)) {
-            if (callee->type->info.function.is_constructor &&
-                !EvaluateConstexprConstructorCall(ctx, expr->expr)) {
-              return kConstexprStmtInvalid;
-            } else if (callee->type->info.function.is_destructor &&
-                !EvaluateConstexprDestructorCall(ctx, expr->expr)) {
-              return kConstexprStmtInvalid;
-            } else if (!callee->type->info.function.is_constructor &&
-                       !callee->type->info.function.is_destructor) {
-              ConstexprValue ignored = {0};
-              if (!EvaluateConstexprCall(ctx, expr->expr, &ignored)) {
-                return kConstexprStmtInvalid;
-              }
-            }
+        if (callee != NULL && callee->type != NULL &&
+            TypeIsFunction(callee->type)) {
+          bool ok = false;
+          if (callee->type->info.function.is_constructor) {
+            ok = EvaluateConstexprConstructorCall(ctx, expr->expr);
+          } else if (callee->type->info.function.is_destructor) {
+            ok = EvaluateConstexprDestructorCall(ctx, expr->expr);
+          } else {
+            ConstexprValue ignored = {0};
+            ok = EvaluateConstexprCall(ctx, expr->expr, &ignored);
           }
+          return ok ? kConstexprStmtNormal
+                    : ConstexprFailureStatementResult(ctx);
+        }
+      }
+      if (TypeIsVoid(expr->expr->type)) {
+        if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+          if (ConstexprVoidExpressionThrows(expr->expr)) {
+            return kConstexprStmtInvalid;
+          }
+          return kConstexprStmtNormal;
+        }
+        if (!EvaluateConstexprVoidExpression(ctx, expr->expr)) {
+          return ConstexprFailureStatementResult(ctx);
         }
         return kConstexprStmtNormal;
       }
       ConstexprValue ignored;
       bool ok =
           EvaluateConstexprValue(ctx, expr->expr, expr->expr->type, &ignored);
-      return ok ? kConstexprStmtNormal : kConstexprStmtInvalid;
+      return ok ? kConstexprStmtNormal
+                : ConstexprFailureStatementResult(ctx);
     }
     case AST_OP(contract_assert): {
       if (compiler->contract_semantic == kContractSemanticIgnore) {
@@ -3462,12 +3891,14 @@ static ConstexprStatementResult EvaluateConstexprStatement(
       return EvaluateConstexprCompound(ctx, (CompoundStatementASTNode*)stmt,
                                        return_type, result);
     case AST_OP(try):
-      // Before C++26 a reached throw-expression is not a core constant
-      // expression, even when a handler could catch it.  A try block whose
-      // evaluated path does not throw is nevertheless permitted in a constexpr
-      // function, so evaluate that path and leave handlers unreachable here.
-      return EvaluateConstexprStatement(ctx, ((TryASTNode*)stmt)->try_stmt,
-                                        return_type, result);
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        // Before C++26 a reached throw-expression is not a core constant
+        // expression, even when a handler could catch it.  A non-throwing path
+        // through a try block is nevertheless permitted.
+        return EvaluateConstexprStatement(
+            ctx, ((TryASTNode*)stmt)->try_stmt, return_type, result);
+      }
+      return EvaluateConstexprTry(ctx, (TryASTNode*)stmt, return_type, result);
     case AST_OP(if): {
       IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
       if (if_stmt->is_consteval) {
@@ -3479,7 +3910,7 @@ static ConstexprStatementResult EvaluateConstexprStatement(
       }
       bool condition;
       if (!EvaluateConstexprCondition(ctx, if_stmt->cond, &condition)) {
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
       return EvaluateConstexprStatement(ctx,
                                         condition ? if_stmt->if_part
@@ -3517,14 +3948,14 @@ static ConstexprStatementResult EvaluateConstexprStatement(
       CombinedStatementASTNode* ret = (CombinedStatementASTNode*)stmt;
       ConstexprValue return_value = {0};
       if (!EvaluateConstexprValue(ctx, ret->cond, return_type, &return_value)) {
-        return kConstexprStmtInvalid;
+        return ConstexprFailureStatementResult(ctx);
       }
       if (ret->stmt != NULL) {
         ConstexprValue cleanup_value = {0};
         ConstexprStatementResult cleanup = EvaluateConstexprStatement(
             ctx, ret->stmt, return_type, &cleanup_value);
         if (cleanup != kConstexprStmtNormal) {
-          return kConstexprStmtInvalid;
+          return cleanup;
         }
       }
       *result = return_value;
@@ -3677,6 +4108,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                       ConstexprValueAsInteger(overlay_value, &overlay_result);
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
+      ReportUncaughtConstexprException(ctx);
       return false;
     }
     use_overlay_result = true;
@@ -3724,6 +4156,9 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     *result = pcode_result;
     return true;
   }
+  if (!ast_ok) {
+    ReportUncaughtConstexprException(ctx);
+  }
   return ast_ok;
 }
 
@@ -3741,6 +4176,7 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                       ConstexprValueAsFloating(overlay_value, &overlay_result);
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
+      ReportUncaughtConstexprException(ctx);
       return false;
     }
     use_overlay_result = true;
@@ -3781,6 +4217,9 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
     *result = pcode_result;
     return true;
   }
+  if (!ast_ok) {
+    ReportUncaughtConstexprException(ctx);
+  }
   return ast_ok;
 }
 
@@ -3796,6 +4235,7 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
                       overlay_value.object != NULL;
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
+      ReportUncaughtConstexprException(ctx);
       return false;
     }
   }
@@ -3826,6 +4266,9 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
                       : "constexpr evaluator mismatch: pcode failed: %s",
                   ConstexprPCodeFailureReason());
     return false;
+  }
+  if (!pcode_ok && !ast_ok) {
+    ReportUncaughtConstexprException(ctx);
   }
   return pcode_ok || ast_ok;
 }
@@ -3876,6 +4319,7 @@ bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
     bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value);
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
+      ReportUncaughtConstexprException(ctx);
       return false;
     }
   }
@@ -3941,6 +4385,9 @@ done:
                   ConstexprPCodeFailureReason());
     return false;
   }
+  if (!ast_ok) {
+    ReportUncaughtConstexprException(ctx);
+  }
   return ast_ok;
 }
 
@@ -3949,7 +4396,12 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   if (ctx->call_depth > 32) {
     return false;
   }
+  ASTNode* receiver = NULL;
   Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
+  if (callee == NULL) {
+    callee = ConstexprFunctionDefinition(
+        ConstexprMemberCallSymbol(node, &receiver));
+  }
   if (callee == NULL || callee->type == NULL || !TypeIsFunction(callee->type)) {
     return false;
   }
@@ -3967,7 +4419,10 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
   ConstexprValue ignored = {0};
-  bool ok = BindConstexprActuals(ctx, callee, call->children) &&
+  bool ok = (receiver != NULL
+                 ? BindConstexprConstructorActuals(ctx, callee, receiver,
+                                                   call->children)
+                 : BindConstexprActuals(ctx, callee, call->children)) &&
             EvaluateConstexprFunctionContracts(
                 ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,

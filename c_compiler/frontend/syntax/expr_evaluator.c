@@ -192,6 +192,10 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
   if (!ConstEvalStep(ctx)) {
     return false;
   }
+  if (node->op == AST_OP(throw)) {
+    (void)ConstexprEvaluateThrowExpression(ctx, node);
+    return false;
+  }
   if (node->type != NULL &&
       !TypeIsIntegral(node->type) && !TypeIsFloatingPoint(node->type)) {
     return false;
@@ -833,6 +837,10 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
     return false;
   }
   if (!ConstEvalStep(ctx)) {
+    return false;
+  }
+  if (node->op == AST_OP(throw)) {
+    (void)ConstexprEvaluateThrowExpression(ctx, node);
     return false;
   }
   if (node->type == NULL) {

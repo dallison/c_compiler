@@ -37,3 +37,33 @@ SRC
 "$pcode" "$work/printf_smoke.exe" > "$work/output.txt"
 printf 'hello pcode\n' > "$work/expected.txt"
 cmp "$work/expected.txt" "$work/output.txt"
+
+cat > "$work/exception_cleanup.cpp" <<'SRC'
+int destruction_order;
+
+struct Guard {
+  int id;
+  ~Guard() { destruction_order = destruction_order * 10 + id; }
+};
+
+static void fail() {
+  Guard first{1};
+  Guard second{2};
+  throw 42;
+}
+
+int main() {
+  try {
+    fail();
+  } catch (const int& value) {
+    return value == 42 && destruction_order == 21 ? 0 : 1;
+  }
+  return 2;
+}
+SRC
+
+"$davecc" -target pcode -static -std=c++20 -Wl,-e -Wl,main \
+  "$work/exception_cleanup.cpp" -isystem libc/include \
+  -o "$work/exception_cleanup.exe" "$libc"
+
+"$pcode" "$work/exception_cleanup.exe"

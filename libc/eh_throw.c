@@ -216,6 +216,9 @@ void __davecc_resume(void) {
 }
 
 char __davecc_current_exception_i1(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return (char)current_exception_i8;
+  }
   void* adjusted = __davecc_eh_current_adjusted_ptr();
   if (adjusted != NULL) {
     return *(char*)adjusted;
@@ -224,6 +227,9 @@ char __davecc_current_exception_i1(void) {
 }
 
 short __davecc_current_exception_i2(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return (short)current_exception_i8;
+  }
   void* adjusted = __davecc_eh_current_adjusted_ptr();
   if (adjusted != NULL) {
     return *(short*)adjusted;
@@ -232,6 +238,9 @@ short __davecc_current_exception_i2(void) {
 }
 
 int __davecc_current_exception_i4(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return (int)current_exception_i8;
+  }
   void* adjusted = __davecc_eh_current_adjusted_ptr();
   if (adjusted != NULL) {
     return *(int*)adjusted;
@@ -240,12 +249,12 @@ int __davecc_current_exception_i4(void) {
 }
 
 long long __davecc_current_exception_i8(void) {
+  if (current_exception_kind == kExceptionI8) {
+    return current_exception_i8;
+  }
   void* adjusted = __davecc_eh_current_adjusted_ptr();
   if (adjusted != NULL) {
     return *(long long*)adjusted;
-  }
-  if (current_exception_kind == kExceptionI8) {
-    return current_exception_i8;
   }
   return (long long)current_exception_object;
 }
@@ -338,8 +347,7 @@ void __davecc_throw_i8(long long exception_object,
   current_exception_object = (intptr_t)exception_object;
   current_exception_typeinfo = typeinfo;
   current_exception_kind = kExceptionI8;
-  __davecc_eh_sync_legacy_current_exception((void*)current_exception_object,
-                                            typeinfo);
+  __davecc_eh_sync_legacy_current_exception(NULL, typeinfo);
   MarkUncaught();
   UnwindCurrentException();
 }

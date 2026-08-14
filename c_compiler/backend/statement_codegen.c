@@ -30,6 +30,7 @@ static bool UsesItaniumUnwind(Generator* gen) {
 
 static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol);
 static Symbol* GetDaveCCTerminateFunction(SourceLocation location);
+static Symbol* GetDaveCCConstexprEndCatchFunction(SourceLocation location);
 static void RecordExceptionRange(Generator* gen, IRNode* try_start,
                                  IRNode* try_end, IRNode* catch_label,
                                  EHTypeInfo* catch_typeinfo);
@@ -179,7 +180,8 @@ static bool IsSupportedTypedCatch(Symbol* symbol) {
   if (TypeIsReference(type)) {
     type = type->next;
   }
-  return TypeIsIntegral(type) || TypeIsPointer(type) || TypeIsStructOrUnion(type);
+  return TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
+         TypeIsPointer(type) || TypeIsStructOrUnion(type);
 }
 
 static bool IsSupportedCatchHandler(CatchASTNode* handler) {
@@ -534,6 +536,64 @@ static void GenerateCatchBinding(Generator* gen, CatchASTNode* handler) {
   GenerateExpression(gen, assignment);
 }
 
+static Symbol* ConstexprCatchDestructor(CatchASTNode* handler) {
+  if (handler == NULL || handler->symbol == NULL ||
+      TypeIsReference(handler->symbol->type) ||
+      !TypeIsStructOrUnion(handler->symbol->type) ||
+      handler->symbol->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = handler->symbol->type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    for (StructMember* candidate = member; candidate != NULL;
+         candidate = candidate->overload_next) {
+      Symbol* symbol = candidate->symbol;
+      if (symbol != NULL && TypeIsFunction(symbol->type) &&
+          symbol->type->info.function.is_destructor &&
+          !symbol->type->info.function.is_deleted &&
+          !symbol->type->info.function.is_trivial_special_member) {
+        return symbol;
+      }
+    }
+  }
+  return NULL;
+}
+
+static void EmitConstexprCatchDestructor(Generator* gen,
+                                         CatchASTNode* handler) {
+  Symbol* destructor = ConstexprCatchDestructor(handler);
+  if (destructor == NULL) {
+    return;
+  }
+  IRNode* object = GeneratorGetVariable(gen, handler->symbol);
+  IRNode* address = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(addressof), object)),
+      NewPointerTo(kQualPlain, handler->symbol->type));
+  IRNode* call =
+      NewIR1(IR_OP(calla), GeneratorGetVariable(gen, destructor));
+  IRAddInput(call, address, false);
+  GeneratorEmit(gen, IRSetType(
+                         call, NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
+}
+
+static void EmitConstexprCatchCleanupsUntil(Generator* gen, ASTNode* node,
+                                            ASTNode* stop) {
+  if (!gen->for_constant_evaluation) {
+    return;
+  }
+  for (ASTNode* parent = node != NULL ? node->parent : NULL;
+       parent != NULL && parent != stop; parent = parent->parent) {
+    if (parent->op != AST_OP(catch)) {
+      continue;
+    }
+    CatchASTNode* handler = (CatchASTNode*)parent;
+    EmitConstexprCatchDestructor(gen, handler);
+    GenerateNoArgRuntimeCall(
+        gen, GetDaveCCConstexprEndCatchFunction(handler->base.location));
+  }
+}
+
 static void GenerateItaniumCatchBinding(Generator* gen, CatchASTNode* handler,
                                         IRNode* caught_object) {
   if (handler == NULL || handler->is_catch_all || handler->symbol == NULL ||
@@ -716,6 +776,13 @@ static Symbol* GetDaveCCResumeFunction(SourceLocation location) {
   symbol->location = location;
   SyntaxAddSymbol(&compiler->syntax, symbol);
   return symbol;
+}
+
+static Symbol* GetDaveCCConstexprEndCatchFunction(SourceLocation location) {
+  return GetInventedRuntimeFunction("__davecc_constexpr_end_catch",
+                                    NewTypeRecordWithSize(kTypeVoid,
+                                                          kQualPlain),
+                                    location);
 }
 
 static bool IsDestructorStatement(ASTNode* stmt);
@@ -1188,7 +1255,8 @@ static void OpenRangeForTemporaryCleanups(
 
 static bool GenerateCompoundExceptionCleanup(Generator* gen) {
   return CompilerIsCXX() && CompilerExceptionsEnabled() &&
-         !gen->for_constant_evaluation;
+         (!gen->for_constant_evaluation ||
+          CompilerCXXAtLeast(kLanguageStandardCXX26));
 }
 
 // Schedules a cleanup pad for every still-open local automatic object, pairing
@@ -1617,6 +1685,10 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     if (StatementMayFallThrough(handler->stmt)) {
       if (UsesItaniumUnwind(gen)) {
         EmitCxaEndCatch(gen, handler->base.location);
+      } else if (gen->for_constant_evaluation) {
+        EmitConstexprCatchDestructor(gen, handler);
+        GenerateNoArgRuntimeCall(
+            gen, GetDaveCCConstexprEndCatchFunction(handler->base.location));
       }
       GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
     } else if (UsesItaniumUnwind(gen)) {
@@ -2216,6 +2288,7 @@ emit_return_branch:
   if (node->stmt != NULL) {
     GenerateStatement(gen, node->stmt);
   }
+  EmitConstexprCatchCleanupsUntil(gen, &node->base, NULL);
   GenerateFunctionContractAssertions(gen, kContractPostcondition);
   if (have_deferred_result) {
     IRNode* result_value = deferred_result_value;
@@ -2309,6 +2382,7 @@ static void GenerateBreak(Generator* gen, ASTNode* node) {
   if (top_vla != NULL) {
     GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
   }
+  EmitConstexprCatchCleanupsUntil(gen, node, loop_or_switch);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->break_label));
 }
 
@@ -2319,6 +2393,7 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
   if (top_vla != NULL) {
     GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
   }
+  EmitConstexprCatchCleanupsUntil(gen, node, loop);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
 }
 
