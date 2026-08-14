@@ -77,6 +77,23 @@ inline bool TypeIsNullPointer(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeNullPointer) != 0;
 }
 
+inline bool TypeIsReflection(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeReflection) != 0;
+}
+
+// Reflection is a consteval-only type.  Compound declarators preserve that
+// property so pointers, references, and arrays of reflection values cannot
+// escape into runtime code.
+inline bool TypeContainsReflection(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsReflection(current)) {
+      return true;
+    }
+  }
+  return false;
+}
+bool TypeIsConstevalOnly(TypeRecord* type);
+
 inline bool TypeIsVoidFunction(TypeRecord* type) {
   return TypeIsFunction(type) && TypeIsVoid(type->next);
 }

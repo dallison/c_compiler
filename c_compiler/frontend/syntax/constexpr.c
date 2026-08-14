@@ -13,6 +13,8 @@
 #include "constexpr_pcode.h"
 #include "errors.h"
 #include "expr_semantics.h"
+#include "reflection.h"
+#include "reflection_semantics.h"
 #include "semantics.h"
 #include "type.h"
 #include "type_internal.h"
@@ -660,7 +662,12 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
     return false;
   }
   ConstexprEvalMode mode = compiler->constexpr_eval_mode;
-  bool pcode_attempted = mode != kConstexprEvalAST;
+  // Reflection values are compiler handles with no runtime/pcode
+  // representation.  Aggregates containing them must stay in the AST object
+  // evaluator even when automatic pcode evaluation is otherwise enabled.
+  bool pcode_attempted =
+      mode != kConstexprEvalAST && !TypeIsConstevalOnly(symbol->type) &&
+      compiler->reflection_values.length == 0;
   bool pcode_ok =
       pcode_attempted &&
       ConstexprPCodeEvaluateObjectConstantForSymbol(symbol, initializer);
@@ -761,6 +768,9 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     }
     expr = NewStringConstantASTNode(
         contents, TypeRecordCopy(value->address_object->type), location);
+  } else if (TypeIsReflection(type)) {
+    expr = NewReflectionConstantASTNode(
+        (ReflectionValue*)(intptr_t)value->ivalue, location);
   } else if (TypeIsFloatingPoint(type)) {
     expr = NewRealConstantASTNode(value->fvalue, TypeRecordCopy(type),
                                   location);
@@ -816,6 +826,16 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
   if (node != NULL && node->op == AST_OP(contents)) {
     return EvaluateConstexprAddressValue(ctx, node, result);
   }
+  if (type != NULL && TypeIsReflection(type)) {
+    ReflectionValue* reflection =
+        ConstexprEvaluateReflectionExpression(ctx, node);
+    if (reflection == NULL) {
+      return false;
+    }
+    memset(result, 0, sizeof(*result));
+    result->ivalue = (int64_t)(intptr_t)reflection;
+    return true;
+  }
   if (type != NULL && (TypeIsFixedArray(type) || TypeIsStructOrUnion(type))) {
     if (node != NULL && node->type != NULL && TypeIsStructOrUnion(type) &&
         TypeIsStructOrUnion(node->type) && !TypeEqual(node->type, type)) {
@@ -857,6 +877,42 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
   result->ivalue = value;
   result->fvalue = (double)value;
   return true;
+}
+
+ReflectionValue* ConstexprEvaluateReflectionExpression(ConstEvalContext* ctx,
+                                                       ASTNode* node) {
+  ASTNode* expression = ConstexprInitializerExpression(node);
+  expression = AnalyzeExpression(expression);
+  ReflectionValue* value =
+      SemanticReflectionValueFromExpression(expression);
+  if (value != NULL) {
+    return value;
+  }
+  if (expression == NULL || expression->op != AST_OP(identifier)) {
+    ConstexprValue resolved = {0};
+    if (expression != NULL &&
+        EvaluateConstexprObjectAccess(ctx, expression, &resolved) &&
+        !resolved.is_object && !resolved.is_address) {
+      return (ReflectionValue*)(intptr_t)resolved.ivalue;
+    }
+    if (resolved.is_address && resolved.address_slot != NULL &&
+        !resolved.address_slot->is_object) {
+      return (ReflectionValue*)(intptr_t)resolved.address_slot->ivalue;
+    }
+    return NULL;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)expression)->symbol;
+  if (symbol == NULL || !TypeIsReflection(symbol->type)) {
+    return NULL;
+  }
+  ConstexprBinding* binding = FindConstexprBinding(ctx, symbol);
+  if (binding != NULL && !binding->is_address && binding->object == NULL) {
+    return (ReflectionValue*)(intptr_t)binding->ivalue;
+  }
+  if (symbol->flags.value_set) {
+    return (ReflectionValue*)symbol->value.other;
+  }
+  return NULL;
 }
 
 bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
@@ -1195,6 +1251,11 @@ static bool EvaluateConstexprDesignatedInitializer(ConstEvalContext* ctx,
           type, designator, &slot_index)) {
     return false;
   }
+  if (TypeIsArray(type) && type->info.array.is_flexible) {
+    while (object->slots.length <= slot_index) {
+      VectorAppend(&object->slots, NewConstexprValueSlot());
+    }
+  }
   ConstexprValue* slot = ConstexprObjectSlot(object, slot_index);
   TypeRecord* slot_type = ConstexprObjectSlotType(type, slot_index);
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
@@ -1374,7 +1435,8 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   if (initializer == NULL || type == NULL) {
     return false;
   }
-  if (TypeIsIntegral(type) || TypeIsFloatingPoint(type)) {
+  if (TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
+      TypeIsReflection(type)) {
     return EvaluateConstexprValue(ctx, initializer, type, result);
   }
   if (!TypeIsFixedArray(type) && !TypeIsStructOrUnion(type)) {
@@ -1415,6 +1477,13 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     return true;
   }
   size_t slot_count = ConstexprObjectSlotCount(type);
+  if (TypeIsArray(type) && type->info.array.is_flexible &&
+      initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)initializer;
+    slot_count =
+        braced->initializers != NULL ? braced->initializers->length : 0;
+  }
   ConstexprObject* object = NewConstexprObject(ctx, type, slot_count);
   result->is_object = true;
   result->is_address = false;
@@ -1556,8 +1625,15 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     // (e.g. `make().field` or `widen(x) < 0`, where `< 0` is a member operator
     // whose receiver is the by-value result of `widen`).
     ConstexprValue value;
-    if (!EvaluateConstexprCall(ctx, node, &value) || !value.is_object ||
-        value.object == NULL) {
+    if (!EvaluateConstexprCall(ctx, node, &value)) {
+      return false;
+    }
+    if (node->type != NULL && TypeContainsReflection(node->type) &&
+        !value.is_object) {
+      *result = value;
+      return true;
+    }
+    if (!value.is_object || value.object == NULL) {
       return false;
     }
     *result = value;
@@ -1797,6 +1873,25 @@ bool ConstexprEvaluateObjectAccessAsFloating(ConstEvalContext* ctx,
   ConstexprValue value;
   return EvaluateConstexprObjectAccess(ctx, node, &value) &&
          ConstexprValueAsFloating(value, result);
+}
+
+bool ConstexprEvaluateObjectSlotInteger(ASTNode* node, size_t slot,
+                                        int64_t* result) {
+  if (node == NULL || result == NULL) {
+    return false;
+  }
+  ConstEvalContext context;
+  ConstEvalContextInit(&context);
+  ConstexprValue value = {0};
+  bool ok = EvaluateConstexprObjectAccess(&context, node, &value) &&
+            value.is_object && value.object != NULL &&
+            slot < value.object->slots.length;
+  if (ok) {
+    ConstexprValue* member = value.object->slots.value.p[slot];
+    ok = member != NULL && ConstexprValueAsInteger(*member, result);
+  }
+  ConstEvalContextDestruct(&context);
+  return ok;
 }
 
 static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
@@ -2221,6 +2316,19 @@ bool ConstexprEvaluatePointerDereferenceAsFloating(ConstEvalContext* ctx,
          ConstexprValueAsFloating(value, result);
 }
 
+ReflectionValue* ConstexprEvaluatePointerDereferenceAsReflection(
+    ConstEvalContext* ctx, ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(contents)) {
+    return NULL;
+  }
+  ConstexprValue value = {0};
+  if (!EvaluateConstexprAddressValue(ctx, node, &value) ||
+      value.is_object || value.is_address) {
+    return NULL;
+  }
+  return (ReflectionValue*)(intptr_t)value.ivalue;
+}
+
 static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
                                            ASTNode* node,
                                            ConstexprObject** object) {
@@ -2494,7 +2602,8 @@ static Symbol* ConstexprCallSymbol(ASTNode* node) {
 static bool ConstexprParameterTypeSupported(TypeRecord* type) {
   return TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
          TypeIsFixedArray(type) || TypeIsStructOrUnion(type) ||
-         TypeIsPointer(type) || TypeIsReference(type);
+         TypeIsPointer(type) || TypeIsReference(type) ||
+         TypeIsReflection(type);
 }
 
 static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
@@ -2877,6 +2986,17 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
     }
   }
   if (PushConstexprSymbolValue(ctx, decl->symbol)) {
+    return true;
+  }
+  if (TypeIsReflection(decl->symbol->type)) {
+    ReflectionValue* reflection =
+        ConstexprEvaluateReflectionExpression(ctx, decl->initializer);
+    if (reflection == NULL) {
+      return false;
+    }
+    PushConstexprBinding(
+        ctx, decl->symbol,
+        (ConstexprValue){.ivalue = (int64_t)(intptr_t)reflection});
     return true;
   }
   if (TypeIsPointer(decl->symbol->type) || TypeIsReference(decl->symbol->type)) {
@@ -3520,6 +3640,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   int64_t pcode_result = 0;
   bool pcode_ok =
       mode != kConstexprEvalAST &&
+      compiler->reflection_values.length == 0 &&
       ConstexprPCodeEvaluateCallAsInteger(ctx, node, &pcode_result);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
@@ -3583,6 +3704,7 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   double pcode_result = 0;
   bool pcode_ok =
       mode != kConstexprEvalAST &&
+      compiler->reflection_values.length == 0 &&
       ConstexprPCodeEvaluateCallAsFloating(ctx, node, &pcode_result);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
@@ -3635,6 +3757,7 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   }
   bool pcode_ok =
       mode != kConstexprEvalAST &&
+      compiler->reflection_values.length == 0 &&
       ConstexprPCodeEvaluateCallAsObject(ctx, node);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
@@ -3714,6 +3837,7 @@ bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
   }
   bool pcode_ok =
       (mode == kConstexprEvalPCode || mode == kConstexprEvalAudit) &&
+      compiler->reflection_values.length == 0 &&
       ConstexprPCodeEvaluateCall(ctx, node);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {

@@ -52,6 +52,8 @@ const char* TokenName(Token tok) {
       return "^";
     case TOK(careteq):
       return "^=";
+    case TOK(reflect):
+      return "^^";
     case TOK(case):
       return "case";
     case TOK(char):
@@ -60,6 +62,8 @@ const char* TokenName(Token tok) {
       return ":";
     case TOK(coloncolon):
       return "::";
+    case TOK(splice_close):
+      return ":]";
     case TOK(comma):
       return ",";
     case TOK(complex):
@@ -130,6 +134,8 @@ const char* TokenName(Token tok) {
       return "<<=";
     case TOK(lsquare):
       return "[";
+    case TOK(splice_open):
+      return "[:";
     case TOK(minus):
       return "-";
     case TOK(minuseq):

@@ -11,6 +11,7 @@
 #include "assembler.h"
 #include "concepts.h"
 #include "constexpr.h"
+#include "reflection.h"
 #include "syntax.h"
 #include "type.h"
 
@@ -537,6 +538,21 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
 
     case AST_OP(equal):
     case AST_OP(noteq):
+      if ((binary_node->left != NULL && binary_node->left->type != NULL &&
+           TypeContainsReflection(binary_node->left->type)) ||
+          (binary_node->right != NULL && binary_node->right->type != NULL &&
+           TypeContainsReflection(binary_node->right->type))) {
+        ReflectionValue* left_reflection =
+            ConstexprEvaluateReflectionExpression(ctx, binary_node->left);
+        ReflectionValue* right_reflection =
+            ConstexprEvaluateReflectionExpression(ctx, binary_node->right);
+        if (left_reflection != NULL && right_reflection != NULL) {
+          bool equal =
+              ReflectionValueEqual(left_reflection, right_reflection);
+          *result = node->op == AST_OP(equal) ? equal : !equal;
+          return true;
+        }
+      }
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
         return true;
       }

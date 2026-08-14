@@ -716,6 +716,45 @@ static TypeRecord* ParseCXXPackIndexedTypename(TypeParser* parser) {
   return type;
 }
 
+static bool LookingAtCXXSplicedType(TypeParser* parser) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(parser->lex, TOK(typename))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool result = LexLookingAt(parser->lex, TOK(splice_open));
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+static TypeRecord* ParseCXXSplicedType(TypeParser* parser) {
+  SourceLocation location = parser->lex->current_token_location;
+  LexMatch(parser->lex, TOK(typename));
+  SyntaxNeedBracket(parser->syntax, TOK(splice_open), TC(type));
+  ASTNode* reflection =
+      SyntaxParseExpression(parser->syntax, TC(spliceclose));
+  SyntaxNeedBracket(parser->syntax, TOK(splice_close), TC(type));
+
+  if (reflection != NULL && reflection->op == AST_OP(reflect)) {
+    ReflectionASTNode* reflected = (ReflectionASTNode*)reflection;
+    if (reflected->operand_kind == kReflectionOperandType &&
+        reflected->operand_type != NULL) {
+      TypeRecord* result = TypeRecordCopy(reflected->operand_type);
+      ASTNodeDelete(reflection);
+      return result;
+    }
+  }
+
+  TypeRecord* dependent =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  dependent->dependent_splice_expr =
+      NewSpliceASTNode(reflection, kSpliceType, location);
+  return dependent;
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
@@ -852,6 +891,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     } else if (CompilerIsCXX() && allow_typedef &&
                LookingAtCXXPackIndexedTypename(parser)) {
       type_record = ParseCXXPackIndexedTypename(parser);
+      type |= type_record->type;
+    } else if (CompilerIsCXX() && allow_typedef &&
+               LookingAtCXXSplicedType(parser)) {
+      type_record = ParseCXXSplicedType(parser);
       type |= type_record->type;
     } else if (CompilerIsCXX() && allow_typedef &&
                LexMatch(lex, TOK(typename))) {

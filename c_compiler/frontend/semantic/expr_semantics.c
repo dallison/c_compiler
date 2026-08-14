@@ -18,6 +18,7 @@
 #include "errors.h"
 #include "symbol_table.h"
 #include "rtti.h"
+#include "reflection_semantics.h"
 #include "type_traits_semantics.h"
 #include "type_compare.h"
 #include "member_pointer.h"
@@ -627,6 +628,18 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
 }
 
 static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
+  if (symbol != NULL && TypeIsReflection(symbol->type)) {
+    ASTNode* expression = ConstexprInitializerExpression(initializer);
+    expression = AnalyzeExpression(expression);
+    ReflectionValue* value =
+        SemanticReflectionValueFromExpression(expression);
+    if (value != NULL) {
+      symbol->value.other = value;
+      symbol->flags.value_set = true;
+      return true;
+    }
+    return false;
+  }
   if (EvaluateScalarConstantForSymbol(symbol, initializer)) {
     return true;
   }
@@ -8527,6 +8540,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
+  ASTNode* meta_call = SemanticTryAnalyzeMetaCall(node);
+  if (meta_call != NULL) {
+    return meta_call;
+  }
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
   if (CallActualsContainDependentFunctorCall(node)) {
     node->base.flags |= kASTDependentFunctorCall;
@@ -10748,7 +10765,18 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(greatereq):
     case AST_OP(equal):
     case AST_OP(noteq):
-      node = AnalyzeComparisonOperator(binary_node);
+      if ((binary_node->left != NULL &&
+           (binary_node->left->op == AST_OP(reflect) ||
+            binary_node->left->op == AST_OP(reflection_constant) ||
+            TypeIsReflection(binary_node->left->type))) ||
+          (binary_node->right != NULL &&
+           (binary_node->right->op == AST_OP(reflect) ||
+            binary_node->right->op == AST_OP(reflection_constant) ||
+            TypeIsReflection(binary_node->right->type)))) {
+        node = SemanticAnalyzeReflectionComparison(binary_node);
+      } else {
+        node = AnalyzeComparisonOperator(binary_node);
+      }
       break;
 
     case AST_OP(spaceship):
@@ -10797,6 +10825,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(typeid):
       return AnalyzeTypeidExpression((TypeidASTNode*)node);
 
+    case AST_OP(reflect):
+    case AST_OP(reflection_constant):
+      return SemanticAnalyzeReflection((ReflectionASTNode*)node);
+
+    case AST_OP(splice):
+      return SemanticAnalyzeSplice((SpliceASTNode*)node);
+
     case AST_OP(cast):
       node = AnalyzeCastExpression((CastASTNode*)node);
       break;
@@ -10814,6 +10849,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(address):
+      if (unary_node->sub != NULL &&
+          unary_node->sub->op == AST_OP(splice)) {
+        ASTNode* addressed = SemanticAnalyzeAddressedSplice(unary_node);
+        if (addressed != node) {
+          return addressed;
+        }
+      }
       AnalyzeAddressOperator(unary_node);
       break;
 
@@ -10844,7 +10886,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(dot):
     case AST_OP(arrow):
-      AnalyzeMemberReference(binary_node);
+      if (!SemanticLowerMemberSplice(binary_node)) {
+        AnalyzeMemberReference(binary_node);
+      }
       break;
 
     case AST_OP(dotstar):
@@ -11054,12 +11098,15 @@ bool IsConstantExpression(ASTNode* node) {
     case AST_OP(fnumber):
     case AST_OP(string):
     case AST_OP(string_wide):
+    case AST_OP(reflection_constant):
       return true;
     case AST_OP(identifier): {
       // Static identifiers that are arrays are constant.
       IdentifierASTNode* id_node = (IdentifierASTNode*)node;
       if (TypeIsIntConstant(id_node->base.type) ||
-          TypeIsFloatingPointConstant(id_node->base.type)) {
+          TypeIsFloatingPointConstant(id_node->base.type) ||
+          (TypeIsReflection(id_node->base.type) &&
+           id_node->symbol != NULL && id_node->symbol->flags.value_set)) {
         return true;
       }
       // Functions are constant expressions.

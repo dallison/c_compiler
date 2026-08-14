@@ -14,6 +14,7 @@
 #include <assert.h>
 #include "ast.h"
 #include "compiler.h"
+#include "reflection.h"
 #include "concepts.h"
 #include "constexpr.h"
 #include "dstring.h"
@@ -44,6 +45,7 @@ static struct {
     {kTypeStruct, "struct"},      {kTypeUnion, "union"},
     {kTypeVoid, "void"},          {kTypeBool, "bool"},
     {kTypeEnum, "enum"},          {kTypeNullPointer, "std::nullptr_t"},
+    {kTypeReflection, "std::meta::info"},
     {kTypeImplicit, ""},
 };
 
@@ -553,6 +555,20 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
                      argument->member_function != NULL
                          ? argument->member_function->id : -1);
         break;
+      case kTemplateValueReflection: {
+        ReflectionValue* reflection = argument->reflection_value;
+        StringPrintf(result, "R%d:%d:%d:%d:%zu",
+                     reflection != NULL ? (int)reflection->kind : -1,
+                     reflection != NULL && reflection->reflected_type != NULL
+                         ? reflection->reflected_type->id : -1,
+                     reflection != NULL && reflection->symbol != NULL
+                         ? reflection->symbol->id : -1,
+                     reflection != NULL && reflection->member != NULL &&
+                             reflection->member->symbol != NULL
+                         ? reflection->member->symbol->id : -1,
+                     reflection != NULL ? reflection->base_index : 0);
+        break;
+      }
       case kTemplateValueNone:
         StringAppend(result, "?");
         break;

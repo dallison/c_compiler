@@ -776,6 +776,8 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, 'v');
   } else if (TypeIsBool(type)) {
     StringAppendChar(out, 'b');
+  } else if (TypeIsReflection(type)) {
+    StringAppend(out, "u17__reflection_type");
   } else if (TypeIsChar8(type)) {
     StringAppend(out, "Du");
   } else if (TypeIsChar16(type)) {

@@ -3918,6 +3918,20 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       typeid_node->operand_type = concrete;
     }
   }
+  if (node->op == AST_OP(reflect)) {
+    ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+    node->flags &= ~kASTAnalyzed;
+    if (reflection->operand_type != NULL &&
+        TypeContainsTemplateParameter(reflection->operand_type)) {
+      TypeRecord* concrete = SubstituteTemplateParameters(
+          clone->parser, reflection->operand_type, clone->args);
+      RebaseTemplateParameterIndices(
+          concrete, clone->rebase_template_parameter_base);
+      TypeRecordCalculateSize(concrete);
+      TypeRecordDelete(reflection->operand_type);
+      reflection->operand_type = concrete;
+    }
+  }
   node = RewriteClonedDependentMemberAddress(node);
   if (node->op == AST_OP(member_ptr)) {
     return node;

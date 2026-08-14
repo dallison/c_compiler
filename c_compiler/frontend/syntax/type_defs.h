@@ -50,12 +50,16 @@ typedef enum {
   // representations of uint_least16_t and uint_least32_t respectively.
   kTypeChar16 = 1 << 20,
   kTypeChar32 = 1 << 21,
+  // C++26 reflection value type, spelled `decltype(^^::)` and exposed by
+  // <meta> as std::meta::info.  Values are usable only during constant
+  // evaluation and as non-type template arguments.
+  kTypeReflection = 1 << 22,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 21
+#define TYPE_LAST_BIT 22
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {
@@ -90,6 +94,7 @@ typedef enum {
   kTemplateValueNull,
   kTemplateValuePointer,
   kTemplateValueMemberPointer,
+  kTemplateValueReflection,
 } TemplateValueKind;
 
 // Serialized as an inline sub-message (see type_serialize.c); the field
@@ -137,6 +142,7 @@ typedef struct TemplateArgument {
   int64_t value_adjustment;  // Member-function this adjustment.   // @wire 12
   Symbol* member_function;   // Non-virtual member function.       // @wire 13
   Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
+  struct ReflectionValue* reflection_value;  // Reflection NTTP.   // @wire 16
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {
@@ -431,6 +437,9 @@ typedef struct TypeRecord {
   // `Ts`; the unevaluated expression is retained until the pack is bound.
   bool is_pack_index;                                               // @wire 18
   struct ASTNode* pack_index_expr;                                  // @wire 19
+  // C++26 dependent type splice `typename[: r :]`.  Retained until template
+  // substitution makes the reflection value concrete.
+  struct ASTNode* dependent_splice_expr;                             // @wire 20
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
     ArrayInfo array;             // @wire 11 (kDeclArray)

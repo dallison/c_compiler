@@ -21,6 +21,7 @@
 #include "concepts.h"
 #include "constraint_serialize.h"
 #include "constexpr.h"
+#include "reflection.h"
 #include "serialize_common.h"
 #include "symbol.h"
 #include "symbol_table.h"
@@ -583,13 +584,23 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   bool constexpr_object =
       s->flags.value_set && s->type != NULL &&
       (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type));
+  bool constexpr_reflection =
+      s->flags.value_set && s->type != NULL &&
+      TypeIsReflection(s->type);
   if (constexpr_object && s->constexpr_initializer == NULL) {
     s->constexpr_initializer =
         ConstexprObjectInitializerForSymbol(s, s->location);
   }
+  if (constexpr_reflection && s->constexpr_initializer == NULL &&
+      s->value.other != NULL) {
+    s->constexpr_initializer = NewReflectionConstantASTNode(
+        (ReflectionValue*)s->value.other, s->location);
+  }
   if (s->type == NULL || !TypeIsFunction(s->type)) {
     WireWriteInt64(buf, kSym_value_ivalue,
-                   constexpr_object ? 0 : s->value.ivalue);
+                   constexpr_object || constexpr_reflection
+                       ? 0
+                       : s->value.ivalue);
   }
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);
   SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol, s->alias_target);
@@ -890,7 +901,8 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
     }
   }
   if (s->constexpr_initializer != NULL && s->type != NULL &&
-      (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type))) {
+      (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type) ||
+       TypeIsReflection(s->type))) {
     s->flags.value_set = false;
     s->value.other = NULL;
   }

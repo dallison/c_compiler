@@ -1473,8 +1473,14 @@ static void CollectOperator(Lex* lex) {
       lex->pos++;
       break;
     case '[':
-      lex->current_token = TOK(lsquare);
       lex->pos++;
+      if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          lex->line.value[lex->pos] == ':') {
+        lex->current_token = TOK(splice_open);
+        lex->pos++;
+      } else {
+        lex->current_token = TOK(lsquare);
+      }
       break;
     case ']':
       lex->current_token = TOK(rsquare);
@@ -1567,7 +1573,10 @@ static void CollectOperator(Lex* lex) {
       break;
     case '^':
       ch = lex->line.value[++lex->pos];
-      if (ch == '=') {
+      if (CompilerCXXAtLeast(kLanguageStandardCXX26) && ch == '^') {
+        lex->current_token = TOK(reflect);
+        lex->pos++;
+      } else if (ch == '=') {
         lex->current_token = TOK(careteq);
         lex->pos++;
       } else {
@@ -1611,7 +1620,11 @@ static void CollectOperator(Lex* lex) {
       break;
     case ':':
       lex->pos++;
-      if (CompilerIsCXX() && lex->line.value[lex->pos] == ':') {
+      if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          lex->line.value[lex->pos] == ']') {
+        lex->current_token = TOK(splice_close);
+        lex->pos++;
+      } else if (CompilerIsCXX() && lex->line.value[lex->pos] == ':') {
         lex->current_token = TOK(coloncolon);
         lex->pos++;
       } else {

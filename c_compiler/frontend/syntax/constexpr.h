@@ -10,6 +10,7 @@
 
 typedef struct ConstexprValue ConstexprValue;
 typedef struct ConstexprObject ConstexprObject;
+struct ReflectionValue;
 
 typedef struct {
   Vector bindings;  // ConstexprBinding*
@@ -36,6 +37,8 @@ bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,
                                        ASTNode* init_expr);
 bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
                                               ASTNode* node, double* result);
+struct ReflectionValue* ConstexprEvaluateReflectionExpression(
+    ConstEvalContext* ctx, ASTNode* node);
 
 bool ConstexprBindingAsInteger(ConstEvalContext* ctx, Symbol* symbol,
                                int64_t* result);
@@ -65,6 +68,8 @@ bool ConstexprEvaluatePointerDereferenceAsInteger(ConstEvalContext* ctx,
 bool ConstexprEvaluatePointerDereferenceAsFloating(ConstEvalContext* ctx,
                                                    ASTNode* node,
                                                    double* result);
+struct ReflectionValue* ConstexprEvaluatePointerDereferenceAsReflection(
+    ConstEvalContext* ctx, ASTNode* node);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
 bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
@@ -72,6 +77,8 @@ bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
                                         size_t* count);
 bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
                                     ConstexprObject** object);
+bool ConstexprEvaluateObjectSlotInteger(ASTNode* node, size_t slot,
+                                        int64_t* result);
 // Evaluates a constant char pointer and copies `count` code units from it.
 bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
                                         String* result);

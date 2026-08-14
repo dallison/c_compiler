@@ -2573,7 +2573,7 @@ static bool IsKnownAttribute(const char* name) {
     // Acted upon by davecc.
     "packed", "aligned", "format", "deprecated", "unused",
     "warn_unused_result", "noreturn", "noinline", "always_inline",
-    "constructor", "destructor",
+    "constructor", "destructor", "meta_intrinsic",
     // Accepted but not modelled (parsed cleanly, no effect).
     "stdcall", "cdecl", "fastcall", "thiscall", "regparm", "ms_abi",
     "sysv_abi", "may_alias", "gnu_inline", "nothrow", "leaf", "cold", "hot",
@@ -11658,12 +11658,15 @@ TokenClass ClassifyToken(Token tok) {
       return TC(stmt);
     case TOK(lparen):
     case TOK(lsquare):
+    case TOK(splice_open):
       return TC(exprsep) | TC(openbra);
     case TOK(rbrace):
       return TC(closebrace);
     case TOK(rparen):
     case TOK(rsquare):
       return TC(closebra);
+    case TOK(splice_close):
+      return TC(closebra) | TC(spliceclose);
 
     default:
       return 0;

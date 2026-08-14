@@ -23,6 +23,8 @@
 #include "syntax.h"
 #include "debug.h"
 #include "member_pointer.h"
+#include "reflection.h"
+#include "reflection_semantics.h"
 #include "type_inheritance.h"
 #include "type_compare.h"
 #include "type_template.h"
@@ -1713,7 +1715,13 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             MarkFunctionsReferencedByBody(decl->base.type);
             CompileReferencedInlineFunctions(syntax);
           }
-          GenerateFunctionDefinition(syntax, decl);
+          if (!(decl->base.type != NULL &&
+                TypeIsFunction(decl->base.type) &&
+                (decl->base.type->info.function.is_consteval ||
+                 (decl->base.type->info.function.is_constexpr &&
+                  TypeIsConstevalOnly(decl->base.type))))) {
+            GenerateFunctionDefinition(syntax, decl);
+          }
         } else {
           // Declaration is a variable or extern function.
           if (TypeIsFunction(decl->base.type)) {
@@ -1758,6 +1766,43 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     continue;
                   }
                   ASTNodeSetType((ASTNode*)decl, decl->symbol->type);
+                }
+                if (TypeIsConstevalOnly(decl->symbol->type)) {
+                  if (!decl->symbol->flags.is_constexpr) {
+                    SemanticError(
+                        (ASTNode*)decl,
+                        "A variable of consteval-only reflection type must be "
+                        "declared constexpr");
+                  }
+                  ASTNode* reflection_expr =
+                      ConstexprInitializerExpression(decl->initializer);
+                  reflection_expr = AnalyzeExpression(reflection_expr);
+                  ReflectionValue* reflection =
+                      SemanticReflectionValueFromExpression(reflection_expr);
+                  if (reflection == NULL &&
+                      TypeIsReflection(decl->symbol->type)) {
+                    ConstEvalContext context;
+                    ConstEvalContextInit(&context);
+                    reflection = ConstexprEvaluateReflectionExpression(
+                        &context, reflection_expr);
+                    ConstEvalContextDestruct(&context);
+                  }
+                  if (TypeIsReflection(decl->symbol->type) &&
+                      reflection != NULL) {
+                    decl->symbol->value.other = reflection;
+                    decl->symbol->flags.value_set = true;
+                  } else if (!TypeIsReflection(decl->symbol->type) &&
+                             ConstexprEvaluateObjectConstantForSymbol(
+                                 decl->symbol, decl->initializer)) {
+                    decl->symbol->flags.value_set = true;
+                  } else if (!ExpressionIsTemplateDependent(reflection_expr)) {
+                    SemanticError(
+                        (ASTNode*)decl,
+                        "consteval-only reflection initializer is not a "
+                        "constant expression");
+                  }
+                  // Reflection values have no runtime representation.
+                  continue;
                 }
                 if (CompilerIsCXX() && TypeIsStructOrUnion(decl->symbol->type) &&
                     decl->initializer != NULL &&
@@ -2334,6 +2379,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_this_adjustor_thunks);
   VectorInit(&compiler->cxx_lazy_static_variables);
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
+  VectorInit(&compiler->reflection_values);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->cxx_defined_classes);
@@ -2855,6 +2901,11 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(
       &compiler->referenced_variable_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+
+  VectorDestructWithContents(
+      &compiler->reflection_values,
+      (VectorElementDestructor)ReflectionValueDelete,
+      /*free_element=*/false);
 
   // Imported module graphs use heap Symbol/Namespace nodes that must be
   // detached and released after AST/IR teardown has finished using them, but

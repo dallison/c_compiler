@@ -21,6 +21,7 @@
 #include "expr_parser.h"
 #include "expr_semantics.h"
 #include "member_pointer.h"
+#include "reflection_semantics.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -1623,6 +1624,31 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     if (subst != NULL) {
       return subst;
     }
+  }
+  if (type->dependent_splice_expr != NULL) {
+    ASTNode* splice = CloneDependentExpressionWithArgs(
+        parser, type->dependent_splice_expr, args);
+    if (splice != NULL && splice->op == AST_OP(splice)) {
+      ASTNodeVisit(splice, ClearDependentExpressionAnalysis, 0, NULL);
+      SpliceASTNode* splice_node = (SpliceASTNode*)splice;
+      splice_node->reflection = AnalyzeExpression(splice_node->reflection);
+      ReflectionValue* reflection =
+          SemanticReflectionValueFromExpression(splice_node->reflection);
+      if (reflection != NULL) {
+        TypeRecord* result = ReflectionValueType(reflection);
+        if (result != NULL) {
+          result->qualifiers |= type->qualifiers;
+          ASTNodeDelete(splice);
+          return TypeRecordCalculateSize(result);
+        }
+        SemanticError(splice,
+                      "Type splice operand does not reflect a type");
+      }
+    }
+    TypeRecord* dependent =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    dependent->dependent_splice_expr = splice;
+    return dependent;
   }
   if (type->dependent_decltype_expr != NULL &&
       !DependentDecltypeStackContains(type->dependent_decltype_expr)) {

@@ -9,6 +9,8 @@
 #include "constexpr.h"
 #include "errors.h"
 #include "expr_semantics.h"
+#include "reflection.h"
+#include "reflection_semantics.h"
 #include "semantics.h"
 #include "statement_parser.h"
 #include "statement_semantics.h"
@@ -704,6 +706,21 @@ static ASTNode* NewItemBindingStatement(ExpansionStatementASTNode* expansion,
   if (analyze_item_binding) {
     AnalyzeStatement(decl);
   }
+  if (item->type != NULL && TypeIsReflection(item->type)) {
+    ReflectionValue* reflection =
+        SemanticReflectionValueFromExpression(element_clone);
+    if (reflection == NULL) {
+      ConstEvalContext context;
+      ConstEvalContextInit(&context);
+      reflection =
+          ConstexprEvaluateReflectionExpression(&context, element_clone);
+      ConstEvalContextDestruct(&context);
+    }
+    if (reflection != NULL) {
+      item->value.other = reflection;
+      item->flags.value_set = true;
+    }
+  }
   return decl;
 }
 
@@ -713,6 +730,22 @@ static void AppendExpansionIteration(ExpansionStatementASTNode* node,
                                      Map* symbol_map, Map* pack_symbol_map,
                                      const ExpansionLabels* labels,
                                      bool analyze_bindings);
+
+static ASTNode* FoldExpansionReflectionIdentifier(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return node;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || symbol->type == NULL ||
+      !TypeIsReflection(symbol->type) || !symbol->flags.value_set ||
+      symbol->value.other == NULL) {
+    return node;
+  }
+  *action = kASTTransformSkipChildren;
+  return NewReflectionConstantASTNode(symbol->value.other, node->location);
+}
 
 static ASTNode* NewExpansionIterationBlock(ExpansionStatementASTNode* expansion,
                                            ASTNode* element_expr,
@@ -748,6 +781,8 @@ static ASTNode* NewExpansionIterationBlock(ExpansionStatementASTNode* expansion,
   ASTNode* body = CloneExpansionBodyWithFreshLocals(expansion->stmt,
                                                     &iteration_map,
                                                     strip_static_locals);
+  body = ASTNodeVisitAndTransform(
+      body, FoldExpansionReflectionIdentifier, NULL);
   body->flags &= ~kASTAnalyzed;
   ASTNodeVisit(body, ClearExpansionAnalyzedFlagVisitor, 0, NULL);
   if (outer_symbol_map != NULL) {
@@ -1067,6 +1102,12 @@ static ASTNode* FoldConstexprIteratingElement(ConstEvalContext* ctx,
                  ctx, element, &floating)) {
     folded =
         NewRealConstantASTNode(floating, TypeRecordCopy(value_type), location);
+  } else if (TypeContainsReflection(value_type)) {
+    ReflectionValue* reflection =
+        ConstexprEvaluatePointerDereferenceAsReflection(ctx, element);
+    if (reflection != NULL) {
+      folded = NewReflectionConstantASTNode(reflection, location);
+    }
   }
   ASTNodeDelete(element);
   return folded;

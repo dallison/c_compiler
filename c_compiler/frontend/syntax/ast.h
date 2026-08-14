@@ -98,6 +98,9 @@ typedef enum {
   AST_OP(sizeof),
   AST_OP(alignof),
   AST_OP(typeid),
+  AST_OP(reflect),
+  AST_OP(reflection_constant),
+  AST_OP(splice),
   AST_OP(div),
   AST_OP(diveq),
   AST_OP(mult),
@@ -431,6 +434,8 @@ typedef enum {
   kASTShapeCast,
   kASTShapeSizeof,
   kASTShapeTypeid,
+  kASTShapeReflection,
+  kASTShapeSplice,
   kASTShapeMacro,
   kASTShapeExprStmt,
   kASTShapeIf,
@@ -668,6 +673,49 @@ typedef struct {
 
 ASTNode* NewTypeidASTNodeWithType(TypeRecord* type, SourceLocation location);
 ASTNode* NewTypeidASTNodeWithExpression(ASTNode* expr, SourceLocation location);
+
+struct ReflectionValue;
+struct Namespace;
+
+typedef enum {
+  kReflectionOperandGlobalNamespace,
+  kReflectionOperandNamespace,
+  kReflectionOperandType,
+  kReflectionOperandExpression,
+  kReflectionOperandValue,
+} ReflectionOperandKind;
+
+typedef struct {
+  ASTNode base;
+  ReflectionOperandKind operand_kind;  // @wire 16
+  ASTNode* operand;                    // @wire 17
+  TypeRecord* operand_type;            // @wire 18
+  struct Namespace* namespace_;        // @wire 19
+  struct ReflectionValue* value;       // Serialized inline at @wire 20+
+} ReflectionASTNode;
+
+ASTNode* NewReflectionASTNode(ReflectionOperandKind operand_kind,
+                              ASTNode* operand, TypeRecord* operand_type,
+                              struct Namespace* namespace_,
+                              SourceLocation location);
+ASTNode* NewReflectionConstantASTNode(struct ReflectionValue* value,
+                                      SourceLocation location);
+
+typedef enum {
+  kSpliceExpression,
+  kSpliceType,
+  kSpliceMember,
+  kSpliceAddressed,
+} SpliceContext;
+
+typedef struct {
+  ASTNode base;
+  ASTNode* reflection;       // @wire 16
+  SpliceContext context;     // @wire 17
+} SpliceASTNode;
+
+ASTNode* NewSpliceASTNode(ASTNode* reflection, SpliceContext context,
+                          SourceLocation location);
 
 // Macro name.
 typedef struct {

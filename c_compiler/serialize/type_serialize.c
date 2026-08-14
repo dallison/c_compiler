@@ -18,6 +18,7 @@
 
 #include "ast.h"
 #include "constraint_serialize.h"
+#include "reflection.h"
 #include "serialize_common.h"
 #include "type.h"
 #include "type_internal.h"
@@ -45,6 +46,7 @@ enum {
   kType_dependent_member_template_arguments = 17,
   kType_is_pack_index = 18,
   kType_pack_index_expr = 19,
+  kType_dependent_splice_expr = 20,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -68,6 +70,7 @@ static const WireFieldDesc kTypeFields[] = {
      "dependent_member_template_arguments"},
     {kType_is_pack_index, "is_pack_index"},
     {kType_pack_index_expr, "pack_index_expr"},
+    {kType_dependent_splice_expr, "dependent_splice_expr"},
 };
 
 //
@@ -89,6 +92,14 @@ enum {
   kTArg_member_function = 13,
   kTArg_template_symbol = 14,
   kTArg_references_parameter_pack = 15,
+  kTArg_reflection_kind = 16,
+  kTArg_reflection_type = 17,
+  kTArg_reflection_symbol = 18,
+  kTArg_reflection_member = 19,
+  kTArg_reflection_namespace = 20,
+  kTArg_reflection_parent = 21,
+  kTArg_reflection_base_index = 22,
+  kTArg_reflection_location = 23,
 };
 
 //
@@ -556,6 +567,25 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
             a->member_function);
   SWriteRef(ctx, out, kTArg_template_symbol, kSerialKindSymbol,
             a->template_symbol);
+  if (a->reflection_value != NULL) {
+    ReflectionValue* reflection = a->reflection_value;
+    WireWriteInt32(out, kTArg_reflection_kind,
+                   (int32_t)reflection->kind);
+    SWriteRef(ctx, out, kTArg_reflection_type, kSerialKindType,
+              reflection->reflected_type);
+    SWriteRef(ctx, out, kTArg_reflection_symbol, kSerialKindSymbol,
+              reflection->symbol);
+    SWriteRef(ctx, out, kTArg_reflection_member, kSerialKindStructMember,
+              reflection->member);
+    SWriteRef(ctx, out, kTArg_reflection_namespace, kSerialKindNamespace,
+              reflection->namespace_);
+    SWriteRef(ctx, out, kTArg_reflection_parent, kSerialKindStruct,
+              reflection->parent_class);
+    WireWriteUint64(out, kTArg_reflection_base_index,
+                    (uint64_t)reflection->base_index);
+    WireWriteUint64(out, kTArg_reflection_location,
+                    (uint64_t)reflection->location);
+  }
 }
 
 static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
@@ -626,6 +656,69 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         a->template_symbol =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
+      case kTArg_reflection_kind: {
+        int32_t value = 0;
+        WireReadInt32(in, &value);
+        a->reflection_value = ReflectionCreateDeserialized(
+            (ReflectionEntityKind)value, a->location);
+        break;
+      }
+      case kTArg_reflection_type:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->reflected_type =
+              (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindType);
+        }
+        break;
+      case kTArg_reflection_symbol:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->symbol =
+              (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindSymbol);
+        }
+        break;
+      case kTArg_reflection_member:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->member =
+              (StructMember*)SReadRef(ctx, in, kSerialKindStructMember);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindStructMember);
+        }
+        break;
+      case kTArg_reflection_namespace:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->namespace_ =
+              (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindNamespace);
+        }
+        break;
+      case kTArg_reflection_parent:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->parent_class =
+              (Struct*)SReadRef(ctx, in, kSerialKindStruct);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindStruct);
+        }
+        break;
+      case kTArg_reflection_base_index: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        if (a->reflection_value != NULL) {
+          a->reflection_value->base_index = (size_t)value;
+        }
+        break;
+      }
+      case kTArg_reflection_location: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        if (a->reflection_value != NULL) {
+          a->reflection_value->location = (SourceLocation)value;
+        }
+        break;
+      }
       default:
         WireSkip(in, wt);
         break;
@@ -1384,6 +1477,8 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteBool(buf, kType_is_pack_index, t->is_pack_index);
   SWriteRef(ctx, buf, kType_pack_index_expr, kSerialKindAST,
             t->pack_index_expr);
+  SWriteRef(ctx, buf, kType_dependent_splice_expr, kSerialKindAST,
+            t->dependent_splice_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
 
   if (t->declarator == kDeclArray) {
@@ -1476,6 +1571,10 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_pack_index_expr:
         t->pack_index_expr =
+            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        break;
+      case kType_dependent_splice_expr:
+        t->dependent_splice_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_next:

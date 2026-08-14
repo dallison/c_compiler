@@ -5,6 +5,8 @@
 
 #include "type_internal.h"
 #include "member_pointer.h"
+#include "reflection.h"
+#include "reflection_semantics.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,6 +189,7 @@ static struct {
   {kTypeChar32, SizeofChar32},
   {kTypeChar16, SizeofChar16},
   {kTypeChar8, SizeofChar},
+  {kTypeReflection, SizeofPointer},
   {kTypeChar, SizeofChar},
   {kTypeBool, SizeofBool},
   {kTypeShort, SizeofShort},
@@ -247,6 +250,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->dependent_decltype_expr = NULL;
   record->is_pack_index = false;
   record->pack_index_expr = NULL;
+  record->dependent_splice_expr = NULL;
   record->refs = 0;
   record->next = NULL;
   record->declarator = kDeclPrimitive;
@@ -294,6 +298,10 @@ void TypeRecordDelete(TypeRecord* record) {
     if (record->pack_index_expr != NULL) {
       ASTNodeDelete(record->pack_index_expr);
       record->pack_index_expr = NULL;
+    }
+    if (record->dependent_splice_expr != NULL) {
+      ASTNodeDelete(record->dependent_splice_expr);
+      record->dependent_splice_expr = NULL;
     }
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
@@ -527,6 +535,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->value_adjustment = arg->value_adjustment;
   copy->member_function = arg->member_function;
   copy->template_symbol = arg->template_symbol;
+  copy->reflection_value = arg->reflection_value;
   return copy;
 }
 
@@ -632,7 +641,24 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   arg->value_offset = 0;
   arg->value_adjustment = 0;
   arg->member_function = NULL;
+  arg->reflection_value = NULL;
 
+  if (TypeIsReflection(expr->type)) {
+    ReflectionValue* reflection =
+        SemanticReflectionValueFromExpression(expr);
+    if (reflection == NULL) {
+      ConstEvalContext context;
+      ConstEvalContextInit(&context);
+      reflection = ConstexprEvaluateReflectionExpression(&context, expr);
+      ConstEvalContextDestruct(&context);
+    }
+    if (reflection == NULL) {
+      return false;
+    }
+    arg->value_kind = kTemplateValueReflection;
+    arg->reflection_value = reflection;
+    return true;
+  }
   if (TypeIsNullPointer(expr->type)) {
     arg->value_kind = kTemplateValueNull;
     arg->int_value = 0;
@@ -723,6 +749,9 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
              left->value_offset == right->value_offset &&
              left->value_adjustment == right->value_adjustment &&
              left->member_function == right->member_function;
+    case kTemplateValueReflection:
+      return ReflectionValueEqual(left->reflection_value,
+                                  right->reflection_value);
     case kTemplateValueNone:
       return left->dependent_expr == right->dependent_expr;
   }
@@ -781,6 +810,11 @@ ASTNode* TemplateArgumentMaterializeExpression(
       ASTNodeSetType(member_pointer, type);
       return member_pointer;
     }
+    case kTemplateValueReflection:
+      TypeRecordDelete(type);
+      return arg->reflection_value != NULL
+                 ? NewReflectionConstantASTNode(arg->reflection_value, location)
+                 : NULL;
     case kTemplateValueNone:
       TypeRecordDelete(type);
       return NULL;
@@ -833,6 +867,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       TemplateArgumentVectorListCopy(record->dependent_member_template_arguments);
   r->pack_index_expr =
       ASTNodeClone(record->pack_index_expr, IdentityCloneNode, NULL, NULL);
+  r->dependent_splice_expr =
+      ASTNodeClone(record->dependent_splice_expr, IdentityCloneNode, NULL, NULL);
   if (TypeIsFunction(record)) {
     VectorInit(&r->info.function.prototype);
     for (size_t i = 0; i < record->info.function.prototype.length; i++) {

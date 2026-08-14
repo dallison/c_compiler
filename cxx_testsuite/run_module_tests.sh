@@ -642,4 +642,13 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/expansion_statements.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute imported expansion statement"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/reflection.dcm" \
+  "$FIXTURES/reflection.cppm" ||
+  fail "emit reflection module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_reflection.cpp" \
+  -o "$work/use_reflection.o" ||
+  fail "instantiate imported reflection values"
+
 echo "ok module emit/import/link/execute"

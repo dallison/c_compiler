@@ -15,6 +15,7 @@
 #include "expr_semantics.h"
 #include "member_pointer.h"
 #include "lex.h"
+#include "reflection_semantics.h"
 #include "statement_semantics.h"
 #include "var_analysis.h"
 
@@ -510,6 +511,13 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
       node->type->info.function.cxx_member_owner;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
+  if (TypeIsConstevalOnly(node->type) &&
+      !node->type->info.function.is_consteval &&
+      !node->type->info.function.is_constexpr) {
+    SemanticError(node,
+                  "A function with a consteval-only reflection signature "
+                  "must be declared constexpr or consteval");
+  }
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
   SemanticAnalyzeCoroutineFunction(node);
@@ -1581,12 +1589,42 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     if (TypeContainsAuto(node->symbol->type)) {
       return;
     }
-    NormalConversion(node->initializer, node->symbol->type);
+    if (!TypeIsReflection(node->symbol->type)) {
+      NormalConversion(node->initializer, node->symbol->type);
+    }
+  }
+  if (TypeIsConstevalOnly(node->symbol->type) &&
+      !TypeContainsTemplateParameter(node->symbol->type) &&
+      !node->symbol->flags.is_constexpr) {
+    SemanticError((ASTNode*)node,
+                  "A variable of consteval-only reflection type must be "
+                  "declared constexpr");
+  }
+  if (TypeIsReflection(node->symbol->type)) {
+    ASTNode* reflection_expr =
+        ConstexprInitializerExpression(node->initializer);
+    reflection_expr = AnalyzeExpression(reflection_expr);
+    ReflectionValue* reflection =
+        SemanticReflectionValueFromExpression(reflection_expr);
+    if (reflection == NULL) {
+      ConstEvalContext context;
+      ConstEvalContextInit(&context);
+      reflection =
+          ConstexprEvaluateReflectionExpression(&context, reflection_expr);
+      ConstEvalContextDestruct(&context);
+    }
+    if (reflection != NULL) {
+      node->symbol->value.other = reflection;
+      node->symbol->flags.value_set = true;
+    }
   }
   if (TypeIsConst(node->symbol->type) || node->symbol->flags.is_constexpr ||
       node->symbol->flags.is_constinit) {
-    bool scalar =
-        EvaluateScalarConstantForSymbol(node->symbol, node->initializer);
+    bool scalar = TypeIsReflection(node->symbol->type) &&
+                          node->symbol->flags.value_set
+                      ? true
+                      : EvaluateScalarConstantForSymbol(node->symbol,
+                                                        node->initializer);
     bool ordinary_automatic_const =
         node->symbol->flags.is_local &&
         !StorageIs(node->symbol->storage, STO(static) | STO(thread)) &&

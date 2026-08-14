@@ -1,0 +1,97 @@
+#ifndef __davecc_meta__
+#define __davecc_meta__
+
+#if __cplusplus < 202600L
+#error <meta> requires C++26
+#endif
+
+#define __cpp_lib_reflection 202506L
+
+#include <cstddef>
+
+namespace std {
+namespace meta {
+
+using info = decltype(^^::);
+
+struct access_context {
+  bool __include_private;
+
+  static consteval access_context current() {
+    return {false};
+  }
+  static consteval access_context unchecked() {
+    return {true};
+  }
+};
+
+}  // namespace meta
+
+template <class T, class Allocator>
+class vector;
+
+// Reflection query ranges use compiler-backed dynamically sized constexpr
+// storage. They deliberately specialize only vector<meta::info>; ordinary
+// vectors retain the allocator-backed implementation in <vector>.
+template <class Allocator>
+class vector<meta::info, Allocator> {
+ public:
+  using value_type = meta::info;
+  using size_type = size_t;
+  using iterator = value_type*;
+  using const_iterator = const value_type*;
+
+ public:  // implementation payload populated only by compiler intrinsics
+  size_type __size;
+
+  constexpr size_type size() const { return __size; }
+  constexpr bool empty() const { return __size == 0; }
+  constexpr value_type& operator[](size_type index) {
+    return __values[index];
+  }
+  constexpr const value_type& operator[](size_type index) const {
+    return __values[index];
+  }
+  constexpr iterator begin() { return __values; }
+  constexpr iterator end() { return __values + __size; }
+  constexpr const_iterator begin() const { return __values; }
+  constexpr const_iterator end() const { return __values + __size; }
+
+  value_type __values[];
+};
+
+namespace meta {
+
+[[davecc::meta_intrinsic]] consteval bool is_invalid(info);
+[[davecc::meta_intrinsic]] consteval bool is_namespace(info);
+[[davecc::meta_intrinsic]] consteval bool is_type(info);
+[[davecc::meta_intrinsic]] consteval bool is_type_alias(info);
+[[davecc::meta_intrinsic]] consteval bool is_variable(info);
+[[davecc::meta_intrinsic]] consteval bool is_function(info);
+[[davecc::meta_intrinsic]] consteval bool is_data_member(info);
+[[davecc::meta_intrinsic]] consteval bool is_enumerator(info);
+[[davecc::meta_intrinsic]] consteval bool is_template(info);
+[[davecc::meta_intrinsic]] consteval bool is_public(info);
+[[davecc::meta_intrinsic]] consteval bool is_protected(info);
+[[davecc::meta_intrinsic]] consteval bool is_private(info);
+[[davecc::meta_intrinsic]] consteval bool has_identifier(info);
+
+[[davecc::meta_intrinsic]] consteval info type_of(info);
+[[davecc::meta_intrinsic]] consteval info parent_of(info);
+[[davecc::meta_intrinsic]] consteval info dealias(info);
+[[davecc::meta_intrinsic]] consteval const char* identifier_of(info);
+[[davecc::meta_intrinsic]] consteval const char* display_string_of(info);
+
+[[davecc::meta_intrinsic]] consteval vector<info, void> members_of(
+    info, access_context = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void>
+nonstatic_data_members_of(info,
+                          access_context = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> bases_of(
+    info, access_context = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> enumerators_of(info);
+
+}  // namespace meta
+}  // namespace std
+
+#endif

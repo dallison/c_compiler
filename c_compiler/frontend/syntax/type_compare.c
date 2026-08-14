@@ -106,6 +106,9 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     if (t->dependent_decltype_expr != NULL) {
       return true;
     }
+    if (t->dependent_splice_expr != NULL) {
+      return true;
+    }
     if (t->is_pack_index) {
       return true;
     }
@@ -139,6 +142,71 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     }
   }
   return false;
+}
+
+static bool StructStackContains(Vector* stack, Struct* str) {
+  for (size_t i = 0; i < stack->length; i++) {
+    if (stack->value.p[i] == str) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeIsConstevalOnlyRecursive(TypeRecord* type, Vector* active,
+                                         Vector* checked) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsReflection(current)) {
+      return true;
+    }
+    if (TypeIsFunction(current)) {
+      for (size_t i = 0; i < current->info.function.prototype.length; i++) {
+        Symbol* parameter = current->info.function.prototype.value.p[i];
+        if (parameter != NULL &&
+            TypeIsConstevalOnlyRecursive(parameter->type, active, checked)) {
+          return true;
+        }
+      }
+    }
+    if (!TypeIsStructOrUnion(current) ||
+        current->info.struct_info == NULL ||
+        StructStackContains(active, current->info.struct_info) ||
+        StructStackContains(checked, current->info.struct_info)) {
+      continue;
+    }
+    Struct* str = current->info.struct_info;
+    VectorAppend(active, str);
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base != NULL &&
+          TypeIsConstevalOnlyRecursive(base->type, active, checked)) {
+        VectorPop(active);
+        return true;
+      }
+    }
+    for (size_t i = 0; i < str->members.length; i++) {
+      StructMember* member = str->members.value.p[i];
+      if (member != NULL && !member->is_static && member->symbol != NULL &&
+          TypeIsConstevalOnlyRecursive(member->symbol->type, active, checked)) {
+        VectorPop(active);
+        return true;
+      }
+    }
+    VectorPop(active);
+    VectorAppend(checked, str);
+  }
+  return false;
+}
+
+bool TypeIsConstevalOnly(TypeRecord* type) {
+  Vector active;
+  Vector checked;
+  VectorInit(&active);
+  VectorInit(&checked);
+  bool result = TypeIsConstevalOnlyRecursive(type, &active, &checked);
+  VectorDestruct(&checked);
+  VectorDestruct(&active);
+  return result;
 }
 
 static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b);
@@ -610,6 +678,8 @@ bool TypeIsLongDouble(TypeRecord* type);
 bool TypeIsBool(TypeRecord* type);
 bool TypeIsVoid(TypeRecord* type);
 bool TypeIsNullPointer(TypeRecord* type);
+bool TypeIsReflection(TypeRecord* type);
+bool TypeContainsReflection(TypeRecord* type);
 
 bool TypeIsPointer(TypeRecord* type);
 bool TypeIsPrimitive(TypeRecord* type);

@@ -3352,6 +3352,15 @@ static bool TokenStartsFundamentalTypeSpecifier(Token token) {
 static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
 
+  if (LexLookingAt(lex, TOK(splice_open))) {
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    ASTNode* reflection =
+        SyntaxParseExpression(syntax, TC(spliceclose));
+    SyntaxNeedBracket(syntax, TOK(splice_close), followers);
+    return NewSpliceASTNode(reflection, kSpliceExpression, location);
+  }
+
   // Check for parenthesized expression.
   // This either looks at the flag 'found_open_paren' in the Syntax
   // struct or looks for an open paren.  The syntax is slightly ambiguous
@@ -3792,6 +3801,17 @@ static bool MemberAccessObjectIsDependent(ASTNode* object) {
 
 static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                                   TokenClass followers) {
+  if (LexLookingAt(syntax->lex, TOK(splice_open))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    ASTNode* reflection =
+        SyntaxParseExpression(syntax, TC(spliceclose));
+    SyntaxNeedBracket(syntax, TOK(splice_close), followers);
+    ASTNode* splice =
+        NewSpliceASTNode(reflection, kSpliceMember, location);
+    return NewBinaryASTNode(op, NULL, location, left, splice);
+  }
+
   String* member_name;
   // Optional 'template' disambiguator in dependent member access, e.g.
   // `g.template onMessage<R>(...)` or `p->template get<0>()`.  When present the
@@ -4506,6 +4526,109 @@ static ASTNode* ParseTypeid(Syntax* syntax, TokenClass followers) {
   }
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
   return result;
+}
+
+static ASTNode* ParseReflectionExpression(Syntax* syntax,
+                                          TokenClass followers,
+                                          SourceLocation location) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SyntaxError(syntax, "Reflection expressions require C++26");
+  }
+
+  if (LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    LexCheckpoint global_checkpoint;
+    LexCheckpointSave(syntax->lex, &global_checkpoint);
+    LexNextToken(syntax->lex);
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      LexCheckpointDestruct(&global_checkpoint);
+      return NewReflectionASTNode(kReflectionOperandGlobalNamespace, NULL, NULL,
+                                  compiler->global_namespace, location);
+    }
+    LexCheckpointRestore(syntax->lex, &global_checkpoint);
+    LexCheckpointDestruct(&global_checkpoint);
+  }
+
+  if (LexLookingAt(syntax->lex, TOK(identifier)) ||
+      LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    bool parse_named_entity = false;
+    LexCheckpoint namespace_checkpoint;
+    LexCheckpointSave(syntax->lex, &namespace_checkpoint);
+    FullyQualifiedIdentifier name;
+    FullyQualifiedIdentifierInit(&name);
+    if (SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+      Namespace* namespace_ = SyntaxFindQualifiedNamespace(syntax, &name);
+      if (namespace_ != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        LexCheckpointDestruct(&namespace_checkpoint);
+        return NewReflectionASTNode(kReflectionOperandNamespace, NULL, NULL,
+                                    namespace_, location);
+      }
+      if (name.components.length >= 2) {
+        Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
+            syntax, &name, name.components.length - 1);
+        if (owner != NULL && owner->type != NULL &&
+            TypeIsStructOrUnion(owner->type)) {
+          String* member_name =
+              name.components.value.p[name.components.length - 1];
+          StructMember* member = FindStructMember(
+              owner->type->info.struct_info, member_name);
+          if (member != NULL) {
+            StructMemberASTNode* operand =
+                (StructMemberASTNode*)NewStructMemberASTNode(member, location);
+            operand->owner_type = TypeRecordCopy(owner->type);
+            FullyQualifiedIdentifierDestruct(&name);
+            LexCheckpointDestruct(&namespace_checkpoint);
+            return NewReflectionASTNode(kReflectionOperandExpression,
+                                        (ASTNode*)operand, NULL, NULL,
+                                        location);
+          }
+        }
+      }
+      bool has_type_declarator =
+          LexLookingAt(syntax->lex, TOK(star)) ||
+          LexLookingAt(syntax->lex, TOK(amp)) ||
+          LexLookingAt(syntax->lex, TOK(ampamp)) ||
+          LexLookingAt(syntax->lex, TOK(lsquare)) ||
+          LexLookingAt(syntax->lex, TOK(lparen));
+      parse_named_entity =
+          !has_type_declarator &&
+          SyntaxFindQualifiedSymbol(syntax, &name) != NULL;
+    }
+    FullyQualifiedIdentifierDestruct(&name);
+    LexCheckpointRestore(syntax->lex, &namespace_checkpoint);
+    LexCheckpointDestruct(&namespace_checkpoint);
+    if (parse_named_entity) {
+      ASTNode* operand = ParseIdentifier(syntax, followers);
+      return NewReflectionASTNode(kReflectionOperandExpression, operand, NULL,
+                                  NULL, location);
+    }
+  }
+
+  if (SyntaxLookingAtType(syntax)) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    if (sym != NULL && sym->type != NULL) {
+      type = sym->type;
+    }
+    TypeParserDestruct(&parser);
+    return NewReflectionASTNode(kReflectionOperandType, NULL, type, NULL,
+                                location);
+  }
+
+  if (LexLookingAt(syntax->lex, TOK(identifier)) ||
+      LexLookingAt(syntax->lex, TOK(coloncolon)) ||
+      LexLookingAt(syntax->lex, TOK(operator))) {
+    ASTNode* operand = ParseIdentifier(syntax, followers);
+    return NewReflectionASTNode(kReflectionOperandExpression, operand, NULL,
+                                NULL, location);
+  }
+
+  SyntaxError(syntax, "Expected a reflectable entity after '^^'");
+  return NewReflectionASTNode(kReflectionOperandExpression, NULL, NULL, NULL,
+                              location);
 }
 
 static Symbol* FindCXXAllocationFunctionByArgCount(Symbol* first,
@@ -5606,6 +5729,8 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     if (sub->op == AST_OP(identifier)) {
       IdentifierASTNode* ident = (IdentifierASTNode*)sub;
       ident->symbol->flags.address_taken = true;
+    } else if (sub->op == AST_OP(splice)) {
+      ((SpliceASTNode*)sub)->context = kSpliceAddressed;
     }
     return NewUnaryASTNode(AST_OP(address), NULL,
                            syntax->lex->current_token_location, sub);
@@ -5665,6 +5790,14 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     // typeid(...) is a postfix-expression, so allow trailing postfix operators
     // such as the `.name()` member call.
     ASTNode* result = ParseTypeid(syntax, followers);
+    return ParsePostfixOperators(syntax, result, followers);
+  }
+
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(reflect))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    ASTNode* result =
+        ParseReflectionExpression(syntax, followers, location);
     return ParsePostfixOperators(syntax, result, followers);
   }
 

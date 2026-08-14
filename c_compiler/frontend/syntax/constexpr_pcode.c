@@ -2420,7 +2420,12 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
   if (mode != kVisitPreChildren || node == NULL || *(bool*)data) {
     return;
   }
-  if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+  if (node->op == AST_OP(reflect) ||
+      node->op == AST_OP(reflection_constant) ||
+      node->op == AST_OP(splice) ||
+      (node->type != NULL && TypeContainsReflection(node->type))) {
+    *(bool*)data = true;
+  } else if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
     BinaryASTNode* access = (BinaryASTNode*)node;
     TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
     if (node->op == AST_OP(arrow) && TypeIsPointer(receiver)) {
@@ -2441,6 +2446,9 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
 }
 
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
+  if (compiler->reflection_values.length != 0) {
+    return true;
+  }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
   if (callee == NULL || callee->type == NULL ||

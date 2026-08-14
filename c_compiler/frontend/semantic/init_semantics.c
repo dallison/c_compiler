@@ -580,7 +580,8 @@ static INode* FindDesignator(INode* inode,
         return NULL;
       }
       if (TypeIsArray(member->symbol->type) &&
-          member->symbol->type->info.array.is_flexible) {
+          member->symbol->type->info.array.is_flexible &&
+          !designator->is_resolved_member) {
         SemanticError(ast_node, "Use of flexible array member in designator");
         return NULL;
       }
@@ -842,9 +843,11 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
             break;
           }
         }
-        inode->type->info.array.size.fixed = inode->num_initializers;
-        inode->type->info.array.is_flexible = false;
-        TypeRecordCalculateSize(inode->type);
+        if (parent == NULL) {
+          inode->type->info.array.size.fixed = inode->num_initializers;
+          inode->type->info.array.is_flexible = false;
+          TypeRecordCalculateSize(inode->type);
+        }
       }
       inode->parent = parent;
       return AdvanceCurrent(parent);

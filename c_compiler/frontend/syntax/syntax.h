@@ -108,6 +108,7 @@ typedef enum TokenClass {
   TC(exprsep) = 1 << 6,         // An expression separator.
   TC(decl) = 1 << 7,            // A declaration.
   TC(semicolon) = 1 << 8,       // A semicolon
+  TC(spliceclose) = 1 << 9,     // C++26 `:]`.
 } TokenClass;
 
 // Given a token, what class does it belong to?

@@ -14,6 +14,7 @@
 #include <string.h>
 #include "concepts.h"
 #include "errors.h"
+#include "reflection.h"
 #include "symbol.h"
 #include "compiler.h"
 #include "type_compare.h"
@@ -252,6 +253,12 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "alignof";
     case AST_OP(typeid):
       return "typeid";
+    case AST_OP(reflect):
+      return "^^";
+    case AST_OP(reflection_constant):
+      return "<reflection>";
+    case AST_OP(splice):
+      return "[: :]";
     case AST_OP(div):
       return "/";
     case AST_OP(diveq):
@@ -2192,6 +2199,176 @@ ASTNode* NewTypeidASTNodeWithExpression(ASTNode* expr, SourceLocation location) 
   if (expr != NULL) {
     expr->parent = (ASTNode*)node;
   }
+  return (ASTNode*)node;
+}
+
+// C++26 reflection and splice AST nodes.
+
+static void ReflectionASTNodeDelete(ASTNode* node) {
+  ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+  ASTNodeDelete(reflection->operand);
+  TypeRecordDelete(reflection->operand_type);
+  ASTNodeBaseDelete(node);
+}
+
+static void ReflectionASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "%s\n",
+          node->op == AST_OP(reflection_constant) ? "<reflection>" : "^^");
+  if (reflection->operand != NULL) {
+    ASTNodePrint(reflection->operand, indents + 2, fp);
+  } else if (reflection->operand_type != NULL) {
+    TypeRecordPrint(reflection->operand_type, fp);
+    fprintf(fp, "\n");
+  } else if (reflection->value != NULL) {
+    const char* name = ReflectionValueIdentifier(reflection->value);
+    Indent(indents + 2, fp);
+    fprintf(fp, "%s\n", name != NULL ? name : "<unnamed>");
+  }
+}
+
+static void ReflectionASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                          ASTNode* child,
+                                          bool delete_old_child) {
+  ReflectionASTNode* node = (ReflectionASTNode*)parent;
+  ASTNode* old = node->operand;
+  node->operand = child;
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* ReflectionASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const ReflectionASTNode* from = (const ReflectionASTNode*)node;
+  ReflectionASTNode* to = ASTArenaAlloc(sizeof(*to));
+  ASTNodeBaseCopy(&to->base, node);
+  to->operand_kind = from->operand_kind;
+  to->operand =
+      ASTNodeClone(from->operand, func, data, (ASTNode*)to);
+  to->operand_type = from->operand_type != NULL
+                         ? TypeRecordCopy(from->operand_type)
+                         : NULL;
+  to->namespace_ = from->namespace_;
+  to->value = from->value;
+  return func((ASTNode*)to, data);
+}
+
+static void ReflectionASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+    int child_id, void* data) {
+  ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(reflection->operand, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void ReflectionASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                       void* data) {
+  ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+  ASTNodeTransformChild(node, 0, reflection->operand, func, data);
+}
+
+static ASTNodeVirtuals reflection_vtbl = {
+    ReflectionASTNodeDelete,       ReflectionASTNodePrint,
+    ReflectionASTNodeReplaceChild, ReflectionASTNodeClone,
+    ReflectionASTNodeVisit,        ValueAlwaysUsed,
+    ReflectionASTNodeTransform};
+
+ASTNode* NewReflectionASTNode(ReflectionOperandKind operand_kind,
+                              ASTNode* operand, TypeRecord* operand_type,
+                              Namespace* namespace_,
+                              SourceLocation location) {
+  ReflectionASTNode* node = ASTArenaAlloc(sizeof(*node));
+  TypeRecord* type =
+      NewTypeRecordWithSize(kTypeReflection, kQualPlain);
+  ASTNodeInit(&node->base, AST_OP(reflect), type, location, &reflection_vtbl);
+  node->operand_kind = operand_kind;
+  node->operand = operand;
+  node->operand_type = operand_type;
+  node->namespace_ = namespace_;
+  node->value = NULL;
+  SetParent(operand, (ASTNode*)node, 0);
+  return (ASTNode*)node;
+}
+
+ASTNode* NewReflectionConstantASTNode(ReflectionValue* value,
+                                      SourceLocation location) {
+  ASTNode* node = NewReflectionASTNode(kReflectionOperandValue, NULL, NULL, NULL,
+                                      location);
+  node->op = AST_OP(reflection_constant);
+  ((ReflectionASTNode*)node)->value = value;
+  return node;
+}
+
+static void SpliceASTNodeDelete(ASTNode* node) {
+  SpliceASTNode* splice = (SpliceASTNode*)node;
+  ASTNodeDelete(splice->reflection);
+  ASTNodeBaseDelete(node);
+}
+
+static void SpliceASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  SpliceASTNode* splice = (SpliceASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "[:\n");
+  ASTNodePrint(splice->reflection, indents + 2, fp);
+  Indent(indents, fp);
+  fprintf(fp, ":]\n");
+}
+
+static void SpliceASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                      ASTNode* child,
+                                      bool delete_old_child) {
+  SpliceASTNode* node = (SpliceASTNode*)parent;
+  ASTNode* old = node->reflection;
+  node->reflection = child;
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* SpliceASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const SpliceASTNode* from = (const SpliceASTNode*)node;
+  SpliceASTNode* to = ASTArenaAlloc(sizeof(*to));
+  ASTNodeBaseCopy(&to->base, node);
+  to->reflection =
+      ASTNodeClone(from->reflection, func, data, (ASTNode*)to);
+  to->context = from->context;
+  return func((ASTNode*)to, data);
+}
+
+static void SpliceASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+    int child_id, void* data) {
+  SpliceASTNode* splice = (SpliceASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(splice->reflection, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void SpliceASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                   void* data) {
+  SpliceASTNode* splice = (SpliceASTNode*)node;
+  ASTNodeTransformChild(node, 0, splice->reflection, func, data);
+}
+
+static ASTNodeVirtuals splice_vtbl = {
+    SpliceASTNodeDelete,       SpliceASTNodePrint,
+    SpliceASTNodeReplaceChild, SpliceASTNodeClone,
+    SpliceASTNodeVisit,        ValueAlwaysUsed,
+    SpliceASTNodeTransform};
+
+ASTNode* NewSpliceASTNode(ASTNode* reflection, SpliceContext context,
+                          SourceLocation location) {
+  SpliceASTNode* node = ASTArenaAlloc(sizeof(*node));
+  ASTNodeInit(&node->base, AST_OP(splice), NULL, location, &splice_vtbl);
+  node->reflection = reflection;
+  node->context = context;
+  SetParent(reflection, (ASTNode*)node, 0);
   return (ASTNode*)node;
 }
 
@@ -4465,6 +4642,8 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &cast_vtbl) return kASTShapeCast;
   if (v == &sizeof_vtbl) return kASTShapeSizeof;
   if (v == &typeid_vtbl) return kASTShapeTypeid;
+  if (v == &reflection_vtbl) return kASTShapeReflection;
+  if (v == &splice_vtbl) return kASTShapeSplice;
   if (v == &macro_vtbl) return kASTShapeMacro;
   if (v == &expr_stmt_vtbl) return kASTShapeExprStmt;
   if (v == &static_assert_vtbl) return kASTShapeStaticAssert;
@@ -4547,6 +4726,18 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeTypeid: {
       TypeidASTNode* n = ASTArenaAlloc(sizeof(TypeidASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &typeid_vtbl);
+      return &n->base;
+    }
+    case kASTShapeReflection: {
+      ReflectionASTNode* n = ASTArenaAlloc(sizeof(ReflectionASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &reflection_vtbl);
+      n->operand_kind = kReflectionOperandExpression;
+      return &n->base;
+    }
+    case kASTShapeSplice: {
+      SpliceASTNode* n = ASTArenaAlloc(sizeof(SpliceASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &splice_vtbl);
+      n->context = kSpliceExpression;
       return &n->base;
     }
     case kASTShapeMacro: {

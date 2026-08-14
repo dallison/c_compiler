@@ -21,6 +21,7 @@
 
 #include "ast.h"
 #include "constraint_serialize.h"
+#include "reflection.h"
 #include "serialize_common.h"
 #include "symbol.h"
 #include "type.h"
@@ -440,6 +441,34 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 17, kSerialKindType, t->operand_type);
       break;
     }
+    case kASTShapeReflection: {
+      ReflectionASTNode* r = (ReflectionASTNode*)n;
+      WireWriteInt32(buf, 16, (int32_t)r->operand_kind);
+      SWriteRef(ctx, buf, 17, kSerialKindAST, r->operand);
+      SWriteRef(ctx, buf, 18, kSerialKindType, r->operand_type);
+      SWriteRef(ctx, buf, 19, kSerialKindNamespace, r->namespace_);
+      if (r->value != NULL) {
+        WireWriteInt32(buf, 20, (int32_t)r->value->kind);
+        SWriteRef(ctx, buf, 21, kSerialKindType,
+                  r->value->reflected_type);
+        SWriteRef(ctx, buf, 22, kSerialKindSymbol, r->value->symbol);
+        SWriteRef(ctx, buf, 23, kSerialKindStructMember,
+                  r->value->member);
+        SWriteRef(ctx, buf, 24, kSerialKindNamespace,
+                  r->value->namespace_);
+        SWriteRef(ctx, buf, 25, kSerialKindStruct,
+                  r->value->parent_class);
+        WireWriteUint64(buf, 26, (uint64_t)r->value->base_index);
+        WireWriteUint64(buf, 27, (uint64_t)r->value->location);
+      }
+      break;
+    }
+    case kASTShapeSplice: {
+      SpliceASTNode* s = (SpliceASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, s->reflection);
+      WireWriteInt32(buf, 17, (int32_t)s->context);
+      break;
+    }
     case kASTShapeMacro: {
       MacroNameASTNode* m = (MacroNameASTNode*)n;
       SWriteStringVal(ctx, buf, 16, &m->macro_name);
@@ -784,6 +813,93 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       if (field == 17) {
         t->operand_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
         TypeRecordIncRef(t->operand_type);
+        return;
+      }
+      break;
+    }
+    case kASTShapeReflection: {
+      ReflectionASTNode* r = (ReflectionASTNode*)n;
+      if (field == 16) {
+        int32_t kind = 0;
+        WireReadInt32(buf, &kind);
+        r->operand_kind = (ReflectionOperandKind)kind;
+        return;
+      }
+      if (field == 17) {
+        r->operand = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 18) {
+        r->operand_type = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(r->operand_type);
+        return;
+      }
+      if (field == 19) {
+        r->namespace_ =
+            (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);
+        return;
+      }
+      if (field == 20) {
+        int32_t kind = 0;
+        WireReadInt32(buf, &kind);
+        r->value = ReflectionCreateDeserialized(
+            (ReflectionEntityKind)kind, n->location);
+        return;
+      }
+      if (r->value == NULL && field >= 21 && field <= 27) {
+        r->value = ReflectionCreateDeserialized(kReflectionInvalid,
+                                                n->location);
+      }
+      if (field == 21) {
+        r->value->reflected_type =
+            (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(r->value->reflected_type);
+        return;
+      }
+      if (field == 22) {
+        r->value->symbol =
+            (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        return;
+      }
+      if (field == 23) {
+        r->value->member =
+            (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        return;
+      }
+      if (field == 24) {
+        r->value->namespace_ =
+            (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);
+        return;
+      }
+      if (field == 25) {
+        r->value->parent_class =
+            (Struct*)SReadRef(ctx, buf, kSerialKindStruct);
+        return;
+      }
+      if (field == 26) {
+        uint64_t base_index = 0;
+        WireReadUint64(buf, &base_index);
+        r->value->base_index = (size_t)base_index;
+        return;
+      }
+      if (field == 27) {
+        uint64_t location = 0;
+        WireReadUint64(buf, &location);
+        r->value->location = (SourceLocation)location;
+        return;
+      }
+      break;
+    }
+    case kASTShapeSplice: {
+      SpliceASTNode* s = (SpliceASTNode*)n;
+      if (field == 16) {
+        s->reflection = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        int32_t context = 0;
+        WireReadInt32(buf, &context);
+        s->context = (SpliceContext)context;
         return;
       }
       break;

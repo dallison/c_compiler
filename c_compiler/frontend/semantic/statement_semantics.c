@@ -8,6 +8,7 @@
 
 #include "statement_semantics.h"
 #include "expansion_semantics.h"
+#include "reflection_semantics.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2729,6 +2730,36 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
     }
   }
   ASTNode* initializer_expr = InitializerExpression(node->initializer);
+  if (node->symbol != NULL && node->symbol->type != NULL &&
+      TypeIsConstevalOnly(node->symbol->type) &&
+      !TypeContainsTemplateParameter(node->symbol->type)) {
+    if (!node->symbol->flags.is_constexpr &&
+        !node->symbol->flags.invented) {
+      SemanticError((ASTNode*)node,
+                    "A variable of consteval-only reflection type must be "
+                    "declared constexpr");
+    }
+    if (node->symbol->flags.is_local && compiler->current_function != NULL &&
+        TypeIsFunction(compiler->current_function) &&
+        !compiler->current_function->info.function.is_consteval) {
+      SemanticError((ASTNode*)node,
+                    "A local variable of consteval-only reflection type is "
+                    "only permitted in an immediate function");
+    }
+    ReflectionValue* reflection =
+        SemanticReflectionValueFromExpression(initializer_expr);
+    if (reflection == NULL && TypeIsReflection(node->symbol->type)) {
+      ConstEvalContext context;
+      ConstEvalContextInit(&context);
+      reflection =
+          ConstexprEvaluateReflectionExpression(&context, initializer_expr);
+      ConstEvalContextDestruct(&context);
+    }
+    if (TypeIsReflection(node->symbol->type) && reflection != NULL) {
+      node->symbol->value.other = reflection;
+      node->symbol->flags.value_set = true;
+    }
+  }
   bool constructor_call = false;
   if (initializer_expr != NULL && initializer_expr->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)initializer_expr;
@@ -2748,7 +2779,9 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
       TypeEqual(initializer_expr->type, node->symbol->type);
   if (node->initializer != NULL && !constructor_call &&
       !side_effect_initializer && !cxx_return_elision_initializer) {
-    NormalConversion(node->initializer, node->symbol->type);
+    if (!TypeIsReflection(node->symbol->type)) {
+      NormalConversion(node->initializer, node->symbol->type);
+    }
   }
   if (!TypeIsReference(node->symbol->type)) {
     node->initializer =

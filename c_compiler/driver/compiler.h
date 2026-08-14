@@ -391,6 +391,10 @@ typedef struct {
   // Symbol* naming the emitted type_info.  Keys are owned by the map.
   Map rtti_typeinfo_map;
 
+  // Compiler-owned C++26 reflection values.  Their entity pointers borrow from
+  // the normal symbol/type graph and remain valid for the translation unit.
+  Vector reflection_values;
+
   Vector literals;     // Literals
   int next_literal_id;
 
