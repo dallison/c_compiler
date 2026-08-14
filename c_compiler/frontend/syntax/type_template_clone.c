@@ -5988,6 +5988,43 @@ static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
   }
 }
 
+static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(designated_init) || node->parent == NULL ||
+      node->parent->op != AST_OP(braced_init) ||
+      !TypeIsStructOrUnion(node->parent->type)) {
+    return;
+  }
+  DesignatedInitializerASTNode* initializer =
+      (DesignatedInitializerASTNode*)node;
+  TypeRecord* aggregate_type = node->parent->type;
+  for (size_t i = 0; initializer->designators != NULL &&
+                     i < initializer->designators->length; i++) {
+    Designator* designator = initializer->designators->value.p[i];
+    if (designator == NULL ||
+        designator->designator_type != kDesignatorStruct ||
+        !designator->is_resolved_member ||
+        designator->value.struct_member == NULL ||
+        designator->value.struct_member->symbol == NULL ||
+        !TypeIsStructOrUnion(aggregate_type)) {
+      break;
+    }
+    const char* name =
+        designator->value.struct_member->symbol->name.value;
+    StructMember* concrete =
+        FindStructMemberByName(aggregate_type->info.struct_info, name);
+    if (concrete == NULL || concrete->symbol == NULL) {
+      break;
+    }
+    designator->value.struct_member = concrete;
+    aggregate_type = concrete->symbol->type;
+  }
+}
+
 /* Clone the body of function template `from` into the concrete instantiation
  * `to`, substituting template arguments `args`. First builds the original->
  * clone symbol map (mapping each generic formal to its instantiated formal, and
@@ -6140,6 +6177,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNodeDelete(clone_source);
   ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, NULL);
   ASTNodeVisit(body, RebindClonedLoweredDependentMemberCallVisitor, 0, NULL);
+  ASTNodeVisit(body, RebindClonedDesignatorMemberVisitor, 0, NULL);
   // Drop discarded `if constexpr` branches (whose condition the clone above has
   // already folded to a constant) before the re-analysis passes can walk them.
   body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);

@@ -88,7 +88,7 @@ int main(void) {
       return 5;
     }
   }
-  if (destroys != 207) {
+  if (destroys != 217) {
     return 6;
   }
 

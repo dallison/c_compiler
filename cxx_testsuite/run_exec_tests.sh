@@ -81,6 +81,17 @@ fi
 work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-exec.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
+# Time-zone execution tests use a generated database so symlink aliases behave
+# identically in a source checkout and Bazel's runfiles tree.
+if [ -z "${DAVE_TZDIR:-}" ]; then
+  TZIF_GENERATOR="$SUITE_ROOT/../tests/generate_tzif_fixtures.py"
+  if [ -f "$TZIF_GENERATOR" ]; then
+    python3 "$TZIF_GENERATOR" "$work/tzif"
+    export DAVE_TZDIR="$work/tzif"
+    export TZ="${TZ:-FixedOffset}"
+  fi
+fi
+
 pass=0
 fail=0
 

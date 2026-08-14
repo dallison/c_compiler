@@ -45,6 +45,7 @@ CXX_TEST_DATA = glob([
     "run_mangling_tests.sh",
     "run_module_tests.sh",
     "run_weak_binding_tests.sh",
+    "//:chrono_tzif_fixtures",
 ]
 
 sh_test(

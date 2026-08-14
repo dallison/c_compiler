@@ -3068,6 +3068,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   Symbol* symbol = target != NULL && target->op == AST_OP(identifier)
                        ? ((IdentifierASTNode*)target)->symbol
                        : NULL;
+  bool deduced_auto = false;
   if (target == NULL || target->type == NULL) {
     SemanticError(node, "Initialization target has no type");
     return init;
@@ -3084,6 +3085,18 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     }
     ASTNodeSetType(target, symbol->type);
     ASTNodeSetType(node, symbol->type);
+    deduced_auto = true;
+  }
+  if (deduced_auto && TypeIsStructOrUnion(symbol->type) &&
+      init->op == AST_OP(expr_init)) {
+    BinaryASTNode* initialization = (BinaryASTNode*)node;
+    initialization->right = NULL;
+    ASTNode* rewritten = SyntaxRewriteCXXCopyInitConstructorIfNeeded(
+        &compiler->syntax, symbol, init);
+    if (rewritten != init) {
+      return AnalyzeExpression(rewritten);
+    }
+    initialization->right = init;
   }
   bool is_reference_init = TypeIsReference(target->type);
   switch (init->op) {
@@ -9283,7 +9296,21 @@ static ASTValueCategory DataMemberAccessValueCategory(BinaryASTNode* node,
 
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
-    // Already analyzed.
+    // A cloned dependent expression can retain its resolved member and type
+    // while its receiver changes from an lvalue to an xvalue. Recompute the
+    // category because data-member access propagates that distinction.
+    if (CompilerIsCXX() && node->right != NULL &&
+        node->right->op == AST_OP(structmember)) {
+      StructMember* member =
+          ((StructMemberASTNode*)node->right)->member;
+      if (member != NULL && !member->is_member_function &&
+          member->symbol != NULL) {
+        node->base.value_category =
+            TypeIsReference(member->symbol->type)
+                ? kValueCategoryLvalue
+                : DataMemberAccessValueCategory(node, member);
+      }
+    }
     return;
   }
   Struct* struct_info = NULL;
@@ -10931,9 +10958,22 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(init):
-      binary_node->right = AnalyzeInitialization(node,
-                                                 binary_node->left,
-                            binary_node->right);
+      {
+        ASTNode* analyzed = AnalyzeInitialization(
+            node, binary_node->left, binary_node->right);
+        if (binary_node->right == NULL) {
+          ASTNode* parent = node->parent;
+          int child_id = node->child_id;
+          if (parent != NULL) {
+            ASTNodeReplaceChild(parent, child_id, analyzed, true);
+          } else {
+            ASTNodeDelete(node);
+          }
+          node = analyzed;
+        } else {
+          binary_node->right = analyzed;
+        }
+      }
       break;
 
     case AST_OP(expr_init): {

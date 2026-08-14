@@ -486,6 +486,15 @@ static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
   return node;
 }
 
+static ASTNode* CXXMoveMemberwiseSource(ASTNode* source, TypeRecord* type,
+                                        SourceLocation location) {
+  TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, true);
+  TypeRecordChain(reference, TypeRecordCopy(type));
+  ASTNode* cast = NewCastASTNode(reference, location, source);
+  ((CastASTNode*)cast)->kind = kCastStatic;
+  return cast;
+}
+
 // Emits element-wise `dst.member[..] = src.member[..]` assignments for an array
 // data member, recursing through every dimension of a multidimensional array so
 // the assignment finally acts on the array's innermost (scalar or class)
@@ -494,7 +503,8 @@ static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
 static void AppendCXXArrayMemberwiseAssignments(
     TypeRecord* func, Symbol* source, StructMember* member,
     TypeRecord* array_type, size_t* indices, size_t depth,
-    bool is_constructor_initializer, Vector* body, SourceLocation location) {
+    bool is_constructor_initializer, bool move_source, Vector* body,
+    SourceLocation location) {
   TypeRecord* element_type = array_type->next;
   for (size_t index = 0; index < (size_t)array_type->info.array.size.fixed;
        index++) {
@@ -502,8 +512,8 @@ static void AppendCXXArrayMemberwiseAssignments(
     if (TypeIsFixedArray(element_type)) {
       AppendCXXArrayMemberwiseAssignments(func, source, member, element_type,
                                           indices, depth + 1,
-                                          is_constructor_initializer, body,
-                                          location);
+                                          is_constructor_initializer,
+                                          move_source, body, location);
       continue;
     }
     ASTNode* target =
@@ -512,6 +522,9 @@ static void AppendCXXArrayMemberwiseAssignments(
     ASTNode* value = ApplyConstantSubscripts(
         NewCXXSourceMemberReceiver(source, member, location), indices,
         depth + 1, location);
+    if (move_source) {
+      value = CXXMoveMemberwiseSource(value, element_type, location);
+    }
     ASTNode* assign = NewBinaryASTNode(AST_OP(assign), element_type, location,
                                        target, value);
     if (is_constructor_initializer) {
@@ -539,6 +552,11 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
   bool copy_constructor =
       func->info.function.cxx_special_member_kind ==
       kCXXSpecialMemberCopyConstructor;
+  bool move_source =
+      func->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberMoveConstructor ||
+      func->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberMoveAssignment;
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -560,11 +578,14 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
       size_t* indices = calloc(ndims, sizeof(size_t));
       AppendCXXArrayMemberwiseAssignments(func, source, member, member_type,
                                           indices, 0, is_constructor_initializer,
-                                          body, location);
+                                          move_source, body, location);
       free(indices);
     } else {
       ASTNode* target = NewCXXMemberReceiver(func, member, location);
       ASTNode* value = NewCXXSourceMemberReceiver(source, member, location);
+      if (move_source) {
+        value = CXXMoveMemberwiseSource(value, member_type, location);
+      }
       if (is_constructor_initializer && TypeIsStructOrUnion(member_type)) {
         Vector* actuals = NewVector();
         VectorAppend(actuals, value);

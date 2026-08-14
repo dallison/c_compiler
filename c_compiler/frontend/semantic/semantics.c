@@ -296,7 +296,8 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
         concrete_init_type = init_sym != NULL ? init_sym->type : NULL;
       }
     }
-    if (concrete_init_type == NULL || TypeContainsAuto(concrete_init_type) ||
+    if (concrete_init_type == NULL || TypeIsUnknown(concrete_init_type) ||
+        TypeContainsAuto(concrete_init_type) ||
         TypeContainsTemplateParameter(concrete_init_type)) {
       return true;
     }
@@ -1582,6 +1583,19 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
             AST_OP(call)));
   if (!object_initializer) {
     node->initializer = AnalyzeExpression(node->initializer);
+    if (node->initializer != NULL &&
+        node->initializer->op == AST_OP(call)) {
+      VectorASTNode* call = (VectorASTNode*)node->initializer;
+      if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+        Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+        object_initializer =
+            callee != NULL && callee->type != NULL &&
+            TypeIsFunction(callee->type) &&
+            callee->type->info.function.is_constructor;
+      }
+    }
+  }
+  if (!object_initializer) {
     if (!SemanticDeduceAutoType(node->symbol, node->initializer,
                                 (ASTNode*)node)) {
       return;
