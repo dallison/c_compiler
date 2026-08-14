@@ -2009,6 +2009,23 @@ static ASTNode* ParseTryStatement(Syntax* syntax, TokenClass followers,
   return NewTryASTNode(try_stmt, catches, location);
 }
 
+static ASTNode* ParseContractAssertStatement(Syntax* syntax,
+                                             TokenClass followers,
+                                             SourceLocation location) {
+  Vector attributes = {0};
+  VectorInit(&attributes);
+  SyntaxParseCXXAttributes(syntax, &attributes);
+  SyntaxNeedBracket(syntax, TOK(lparen), followers | TC(closebra));
+  ASTNode* predicate =
+      SyntaxParseSingleExpression(syntax, followers | TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers | TC(semicolon));
+  if (predicate == NULL) {
+    AttributeListDestruct(&attributes);
+    return NULL;
+  }
+  return NewContractAssertASTNode(predicate, &attributes, location);
+}
+
 // Table of statement parsers.
 struct StatementParser {
   Token token;
@@ -2031,6 +2048,7 @@ struct StatementParser {
   {TOK(co_return), ParseCoReturnStatement, true},
   {TOK(goto), ParseGotoStatement, true},
   {TOK(try), ParseTryStatement, false},
+  {TOK(contract_assert), ParseContractAssertStatement, true},
   {TOK(asm), ParseAsmStatement, true},
 };
 

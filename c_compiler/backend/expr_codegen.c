@@ -2126,9 +2126,19 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       }
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     } else if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
+      if (IRIsVariable(arg_value)) {
+        IRVariable* variable = (IRVariable*)arg_value;
+        if (variable->symbol != NULL) {
+          variable->symbol->flags.address_taken = true;
+        }
+      }
       arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
-      CheckForVarDef(arg_value, arg);
+      // Binding a reference consumes the object's current storage; it does not
+      // create a fresh definition at the point where its address is taken.
+      // Treating this as a definition lets SSA rename the address to a new,
+      // uninitialized aggregate slot at optimized levels.
+      CheckForVarUse(arg_value, arg);
     } else if (reference_formal) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }

@@ -9,11 +9,14 @@
 #include "aarch64_process.h"
 #include "aarch64_syscalls.h"
 #include "elf.h"
+#include "loader_dynamic.h"
 #include "loader_lifecycle.h"
 #include "loader_arch_aarch64.h"
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 bool print_libraries_only = false;
 
@@ -23,6 +26,52 @@ static void InitSymbolResolverCode(uint32_t* code) {
             (uint32_t)AARCH64_SYSCALL_REG;
   // svc #0
   code[1] = 0xD4000001u;
+}
+
+static bool MapGuestResolver(AARCH64Runtime* runtime) {
+  Loader* loader = &runtime->loader;
+  if (loader->is_static || (loader->flags & LOADER_LAZY_RESOLVE) == 0) {
+    return true;
+  }
+
+  int64_t page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    LoaderError("Cannot determine page size for AArch64 resolver\n");
+    return false;
+  }
+  void* memory = mmap(NULL, (size_t)page_size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (memory == MAP_FAILED) {
+    LoaderError("Cannot map AArch64 resolver\n");
+    return false;
+  }
+  memcpy(memory, runtime->symbol_resolver_code,
+         sizeof(runtime->symbol_resolver_code));
+  if (mprotect(memory, (size_t)page_size, PROT_READ | PROT_EXEC) != 0) {
+    munmap(memory, (size_t)page_size);
+    LoaderError("Cannot make AArch64 resolver executable\n");
+    return false;
+  }
+  uint64_t resolver_address = (uint64_t)(uintptr_t)memory;
+
+  ELFProgramHeader* segment = &runtime->symbol_resolver_segment;
+  memset(segment, 0, sizeof(*segment));
+  segment->type = PT(load);
+  segment->flags = PF(r) | PF(x);
+  segment->vaddr = resolver_address;
+  segment->memsz = (uint64_t)page_size;
+  VectorAppend(&loader->regions,
+               NewRegion(memory, 0, page_size, segment, NULL));
+
+  for (size_t i = 0; i < loader->loaded_libraries.search.length; i++) {
+    LoadedDynamicLibrary* lib = loader->loaded_libraries.search.value.p[i];
+    const void* pltgot =
+        DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(pltgot));
+    if (pltgot != NULL) {
+      *(uint64_t*)pltgot = resolver_address;
+    }
+  }
+  return true;
 }
 
 AARCH64ExecutionMode AARCH64DefaultExecutionMode(void) {
@@ -60,6 +109,11 @@ bool AARCH64RuntimeInit(AARCH64Runtime* runtime, const char* filename,
   InitSymbolResolverCode(runtime->symbol_resolver_code);
   if (!LoaderInitFromFile(&runtime->loader, &path, loader_flags, arch,
                           runtime->symbol_resolver_code, ".")) {
+    StringDestruct(&path);
+    return false;
+  }
+  if (!MapGuestResolver(runtime)) {
+    LoaderDestruct(&runtime->loader);
     StringDestruct(&path);
     return false;
   }

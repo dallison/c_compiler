@@ -366,6 +366,17 @@ static void MarkMemberFunctionTemplateSpecialization(
 
 static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right);
 
+static bool OverloadParameterTypesEqual(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  TypeRecord left_parameter = *left;
+  TypeRecord right_parameter = *right;
+  left_parameter.qualifiers &= ~(kQualConst | kQualVolatile);
+  right_parameter.qualifiers &= ~(kQualConst | kQualVolatile);
+  return OverloadTypesEqual(&left_parameter, &right_parameter);
+}
+
 static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
                                             FunctionInfo* right) {
   if (left->prototype.length != right->prototype.length ||
@@ -379,7 +390,7 @@ static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
     Symbol* left_arg = left->prototype.value.p[i];
     Symbol* right_arg = right->prototype.value.p[i];
     if (left_arg == NULL || right_arg == NULL ||
-        !OverloadTypesEqual(left_arg->type, right_arg->type)) {
+        !OverloadParameterTypesEqual(left_arg->type, right_arg->type)) {
       return false;
     }
   }
@@ -2141,6 +2152,174 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   return NULL;
 }
 
+static bool LookingAtContractSpecifier(Syntax* syntax,
+                                       ContractAssertionKind* kind) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  if (strcmp(syntax->lex->spelling.value, "pre") == 0) {
+    *kind = kContractPrecondition;
+    return true;
+  }
+  if (strcmp(syntax->lex->spelling.value, "post") == 0) {
+    *kind = kContractPostcondition;
+    return true;
+  }
+  return false;
+}
+
+typedef struct {
+  Symbol* formal;
+  bool used;
+} ContractFormalUse;
+
+static void FindContractFormalUse(ASTNode* node, void* data, int child_id,
+                                  VisitorMode mode) {
+  (void)child_id;
+  ContractFormalUse* use = data;
+  if (mode == kVisitPreChildren && node->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)node)->symbol == use->formal) {
+    use->used = true;
+  }
+}
+
+static void DiagnosePostconditionParameterConst(Syntax* syntax,
+                                                TypeRecord* func,
+                                                ASTNode* predicate) {
+  Vector* formals = &func->info.function.prototype;
+  for (size_t i = 0; i < formals->length; i++) {
+    Symbol* formal = formals->value.p[i];
+    if (formal == NULL || formal->name.length == 0 ||
+        StringEqual(&formal->name, "this") ||
+        TypeIsReference(formal->type) || TypeIsConst(formal->type)) {
+      continue;
+    }
+    ContractFormalUse use = {
+        .formal = formal,
+    };
+    ASTNodeVisit(predicate, FindContractFormalUse, 0, &use);
+    if (use.used) {
+      SyntaxError(syntax,
+                  "non-reference parameter '%s' used by a postcondition "
+                  "must have const type",
+                  formal->name.value);
+    }
+  }
+}
+
+static Symbol* ParseContractResultBinding(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  String name = {0};
+  StringInit(&name, syntax->lex->spelling.value);
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);
+
+  Vector attributes = {0};
+  VectorInit(&attributes);
+  SyntaxParseCXXAttributes(syntax, &attributes);
+  if (!LexMatch(syntax->lex, TOK(colon))) {
+    AttributeListDestruct(&attributes);
+    StringDestruct(&name);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+
+  TypeRecord* unknown =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualConst);
+  Symbol* binding = NewSymbol(name.value, unknown, STO(auto));
+  binding->location = location;
+  binding->flags.is_local = true;
+  binding->flags.is_block_scope = true;
+  AttributeListDestruct(&binding->attributes);
+  binding->attributes = attributes;
+  StringDestruct(&name);
+  return binding;
+}
+
+void SyntaxParseFunctionContracts(Syntax* syntax, TypeRecord* func,
+                                  Struct* member_owner,
+                                  bool add_implicit_this) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  ContractAssertionKind kind;
+  if (LookingAtContractSpecifier(syntax, &kind) &&
+      add_implicit_this && member_owner != NULL &&
+      !func->info.function.has_explicit_object_parameter &&
+      !FunctionHasImplicitThisParameter(func)) {
+    TypeRecordAddCXXThisParameter(func, member_owner,
+                                  syntax->lex->current_token_location);
+  }
+  while (LookingAtContractSpecifier(syntax, &kind)) {
+    SourceLocation location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+
+    Vector attributes = {0};
+    VectorInit(&attributes);
+    SyntaxParseCXXAttributes(syntax, &attributes);
+    SyntaxNeedBracket(syntax, TOK(lparen), TC(closebra));
+
+    SyntaxOpenScope(syntax);
+    if (member_owner != NULL) {
+      SyntaxInsertClassMembersForConstraint(syntax, member_owner);
+    }
+    for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+      Symbol* formal = func->info.function.prototype.value.p[i];
+      if (formal != NULL && formal->name.length > 0) {
+        InsertLocalSymbol(syntax->local_symbol_stack, formal);
+      }
+    }
+
+    Symbol* result_binding = NULL;
+    if (kind == kContractPostcondition) {
+      result_binding = ParseContractResultBinding(syntax);
+      if (result_binding != NULL &&
+          !InsertLocalSymbol(syntax->local_symbol_stack, result_binding)) {
+        SyntaxError(syntax,
+                    "postcondition result name '%s' conflicts with a parameter",
+                    result_binding->name.value);
+      }
+    }
+    ASTNode* predicate =
+        SyntaxParseSingleExpression(syntax, TC(closebra));
+    SyntaxCloseScope(syntax);
+    SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
+
+    if (predicate == NULL) {
+      SymbolDelete(result_binding);
+      AttributeListDestruct(&attributes);
+      continue;
+    }
+    if (kind == kContractPostcondition) {
+      DiagnosePostconditionParameterConst(syntax, func, predicate);
+    }
+    VectorAppend(&func->info.function.contract_assertions,
+                 NewContractAssertion(kind, predicate, result_binding,
+                                      &attributes, location));
+  }
+}
+
+void SyntaxDiagnoseInvalidFunctionContracts(Syntax* syntax, TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.contract_assertions.length == 0) {
+    return;
+  }
+  FunctionInfo* info = &func->info.function;
+  if (info->is_virtual || info->is_override) {
+    SyntaxError(syntax, "virtual functions cannot have contract assertions");
+  }
+  if (info->is_deleted || info->is_explicitly_deleted) {
+    SyntaxError(syntax, "deleted functions cannot have contract assertions");
+  }
+}
+
 // Deep-clone an initializer so that the same value can be used for each index
 // of a GCC range designator.
 static ASTNode* CloneInitializer(ASTNode* init) {
@@ -2184,6 +2363,152 @@ static void MergeCXXDefaultArguments(Syntax* syntax, Symbol* old_sym,
                new_formal->default_argument == NULL) {
       new_formal->default_argument =
           CloneCXXDefaultArgument(old_formal->default_argument);
+    }
+  }
+}
+
+typedef struct {
+  uint64_t value;
+  ContractAssertion* assertion;
+} ContractExpressionHash;
+
+static void HashContractBytes(ContractExpressionHash* hash,
+                              const void* bytes, size_t length) {
+  const unsigned char* p = bytes;
+  for (size_t i = 0; i < length; i++) {
+    hash->value ^= p[i];
+    hash->value *= UINT64_C(1099511628211);
+  }
+}
+
+static void HashContractString(ContractExpressionHash* hash,
+                               const String* string) {
+  if (string != NULL) {
+    HashContractBytes(hash, string->value, string->length);
+  }
+}
+
+static void HashContractExpressionNode(ASTNode* node, void* data,
+                                       int child_id, VisitorMode mode) {
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  ContractExpressionHash* hash = data;
+  HashContractBytes(hash, &node->op, sizeof(node->op));
+  HashContractBytes(hash, &child_id, sizeof(child_id));
+  if (node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol == hash->assertion->result_binding) {
+      const unsigned char result_marker = 0xf1;
+      HashContractBytes(hash, &result_marker, sizeof(result_marker));
+    } else if (symbol != NULL && symbol->flags.is_argument) {
+      HashContractBytes(hash, &symbol->value.arg_number,
+                        sizeof(symbol->value.arg_number));
+    } else if (symbol != NULL) {
+      HashContractString(hash, &symbol->name);
+    }
+  } else if (ASTNodeIsIntConstant(node)) {
+    ConstantASTNode* constant = (ConstantASTNode*)node;
+    HashContractBytes(hash, &constant->value.ivalue,
+                      sizeof(constant->value.ivalue));
+  } else if (node->op == AST_OP(fnumber)) {
+    ConstantASTNode* constant = (ConstantASTNode*)node;
+    HashContractBytes(hash, &constant->value.fvalue,
+                      sizeof(constant->value.fvalue));
+  } else if (node->op == AST_OP(string) ||
+             node->op == AST_OP(string_wide)) {
+    HashContractString(hash, ((ConstantASTNode*)node)->value.string);
+  } else if (node->op == AST_OP(structmember)) {
+    StructMember* member = ((StructMemberASTNode*)node)->member;
+    if (member != NULL && member->symbol != NULL) {
+      HashContractString(hash, &member->symbol->name);
+    }
+  }
+}
+
+static uint64_t ContractExpressionFingerprint(ContractAssertion* assertion) {
+  ContractExpressionHash hash = {
+      .value = UINT64_C(1469598103934665603),
+      .assertion = assertion,
+  };
+  ASTNodeVisit(assertion->predicate, HashContractExpressionNode, 0, &hash);
+  return hash.value;
+}
+
+static void DiagnoseOmittedPostconditionParameterConst(
+    Syntax* syntax, TypeRecord* old_func, TypeRecord* new_func) {
+  Vector* old_formals = &old_func->info.function.prototype;
+  Vector* new_formals = &new_func->info.function.prototype;
+  Vector* assertions = &old_func->info.function.contract_assertions;
+  for (size_t i = 0; i < old_formals->length && i < new_formals->length; i++) {
+    Symbol* old_formal = old_formals->value.p[i];
+    Symbol* new_formal = new_formals->value.p[i];
+    if (old_formal == NULL || new_formal == NULL ||
+        old_formal->name.length == 0 ||
+        StringEqual(&old_formal->name, "this") ||
+        TypeIsReference(new_formal->type) ||
+        TypeIsConst(new_formal->type)) {
+      continue;
+    }
+    for (size_t j = 0; j < assertions->length; j++) {
+      ContractAssertion* assertion = assertions->value.p[j];
+      if (assertion->kind != kContractPostcondition) {
+        continue;
+      }
+      ContractFormalUse use = {
+          .formal = old_formal,
+      };
+      ASTNodeVisit(assertion->predicate, FindContractFormalUse, 0, &use);
+      if (use.used) {
+        SyntaxError(syntax,
+                    "non-reference parameter '%s' used by a postcondition "
+                    "must have const type",
+                    new_formal->name.value);
+        break;
+      }
+    }
+  }
+}
+
+static void MergeCXXContractAssertions(Syntax* syntax, Symbol* old_sym,
+                                       Symbol* new_sym) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) || old_sym == NULL ||
+      new_sym == NULL || !TypeIsFunction(old_sym->type) ||
+      !TypeIsFunction(new_sym->type)) {
+    return;
+  }
+  Vector* old_assertions =
+      &old_sym->type->info.function.contract_assertions;
+  Vector* new_assertions =
+      &new_sym->type->info.function.contract_assertions;
+  // A redeclaration may omit the function-contract-specifier-seq.  When it
+  // supplies one, however, it must correspond to the sequence on the reachable
+  // first declaration.
+  if (new_assertions->length == 0) {
+    DiagnoseOmittedPostconditionParameterConst(
+        syntax, old_sym->type, new_sym->type);
+    TypeRecordCopyContractAssertions(new_sym->type, old_sym->type);
+    return;
+  }
+  if (old_assertions->length != new_assertions->length) {
+    SyntaxError(syntax,
+                "redeclarations of '%s' have different contract assertions",
+                new_sym->name.value);
+    return;
+  }
+  for (size_t i = 0; i < old_assertions->length; i++) {
+    ContractAssertion* old_assertion = old_assertions->value.p[i];
+    ContractAssertion* new_assertion = new_assertions->value.p[i];
+    if (old_assertion->kind != new_assertion->kind ||
+        (old_assertion->result_binding != NULL) !=
+            (new_assertion->result_binding != NULL) ||
+        ContractExpressionFingerprint(old_assertion) !=
+            ContractExpressionFingerprint(new_assertion)) {
+      SyntaxError(syntax,
+                  "redeclarations of '%s' have non-corresponding "
+                  "contract assertions",
+                  new_sym->name.value);
+      return;
     }
   }
 }
@@ -4329,10 +4654,63 @@ static void InsertCXXCompleteObjectGuardedStatements(TypeRecord* func,
   (*insert_at)++;
 }
 
+static bool CXXConstructorSetHasUserProvidedDefault(TypeRecord* record_type,
+                                                    StructMember* constructor) {
+  if (record_type == NULL || record_type->info.struct_info == NULL) {
+    return false;
+  }
+  size_t first_user_formal =
+      StructHasVirtualBases(record_type->info.struct_info) ? 2 : 1;
+  for (StructMember* candidate = constructor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type)) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (!info->is_constructor || info->is_deleted ||
+        !info->is_user_provided ||
+        info->prototype.length < first_user_formal) {
+      continue;
+    }
+    bool all_defaulted = true;
+    for (size_t i = first_user_formal; i < info->prototype.length; i++) {
+      Symbol* formal = info->prototype.value.p[i];
+      if (formal == NULL || formal->default_argument == NULL) {
+        all_defaulted = false;
+        break;
+      }
+    }
+    if (all_defaulted) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static ASTNode* NewCXXAggregateMemberZeroInitializer(
+    Syntax* syntax, TypeRecord* func, StructMember* member,
+    SourceLocation location) {
+  ASTNode* target =
+      NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+  if (target == NULL) {
+    return NULL;
+  }
+  Symbol* storage = SyntaxNewTemporary(syntax, member->symbol->type);
+  ASTNode* value = NewCompoundLiteralASTNode(
+      NewIdentifierASTNode(storage, location), location,
+      NewBracedInitializerASTNode(NewVector(), NULL, location));
+  ASTNode* assign = NewBinaryASTNode(AST_OP(assign), member->symbol->type,
+                                     location, target, value);
+  assign->flags |= kASTCXXMemberInitializer;
+  return NewExpressionStatementASTNode(assign, location);
+}
+
 static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
                                                 TypeRecord* func,
                                                 StructMember* member,
                                                 Vector* actuals,
+                                                bool value_initialize_empty,
                                                 SourceLocation location) {
   if (member == NULL || member->symbol == NULL || actuals == NULL) {
     if (actuals != NULL) {
@@ -4342,7 +4720,13 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
   }
 
   TypeRecord* member_type = member->symbol->type;
-  if (TypeIsStructOrUnion(member_type) && FindCXXConstructor(member_type) != NULL) {
+  StructMember* constructor = TypeIsStructOrUnion(member_type)
+                                  ? FindCXXConstructor(member_type)
+                                  : NULL;
+  if (constructor != NULL) {
+    bool zero_before_default =
+        value_initialize_empty && actuals->length == 0 &&
+        !CXXConstructorSetHasUserProvidedDefault(member_type, constructor);
     const char* constructor_name = CXXConstructorNameForType(member_type);
     ASTNode* receiver =
         NewCXXThisMemberAccess(func, member->symbol->name.value, location);
@@ -4356,23 +4740,36 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
         NewStringConstantASTNode(NewString(constructor_name), NULL, location);
     ASTNode* member_access =
         NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
-    return NewExpressionStatementASTNode(
+    ASTNode* constructor_call = NewExpressionStatementASTNode(
         NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals),
         location);
+    if (!zero_before_default) {
+      return constructor_call;
+    }
+    ASTNode* zero = NewCXXAggregateMemberZeroInitializer(
+        syntax, func, member, location);
+    if (zero == NULL) {
+      return constructor_call;
+    }
+    Vector* statements = NewVector();
+    VectorAppend(statements, zero);
+    VectorAppend(statements, constructor_call);
+    return NewCompoundStatementASTNode(statements, location);
   }
 
   if (actuals->length == 0) {
     VectorDelete(actuals);
-    if (TypeIsStructOrUnion(member_type)) {
-      return NULL;
+    if (TypeIsStructOrUnion(member_type) || TypeIsArray(member_type)) {
+      return NewCXXAggregateMemberZeroInitializer(syntax, func, member,
+                                                  location);
     }
     ASTNode* target =
         NewCXXThisMemberAccess(func, member->symbol->name.value, location);
     if (target == NULL) {
       return NULL;
     }
-    ASTNode* value = NewIntConstantASTNode(
-        0, TypeRecordCopy(member_type), location);
+    ASTNode* value =
+        NewIntConstantASTNode(0, TypeRecordCopy(member_type), location);
     ASTNode* assign =
         NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
     assign->flags |= kASTCXXMemberInitializer;
@@ -4402,7 +4799,7 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
 ASTNode* SyntaxNewCXXMemberInitializerStatement(
     Syntax* syntax, TypeRecord* func, StructMember* member, Vector* actuals,
     SourceLocation location) {
-  return NewCXXMemberInitializerStatement(syntax, func, member, actuals,
+  return NewCXXMemberInitializerStatement(syntax, func, member, actuals, true,
                                           location);
 }
 
@@ -4448,7 +4845,8 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
     Vector* actuals = CXXDefaultMemberInitializerActuals(
         member->default_initializer);
     return NewCXXMemberInitializerStatement(
-        syntax, func, member, actuals, member->default_initializer->location);
+        syntax, func, member, actuals, true,
+        member->default_initializer->location);
   }
   // No default member initializer and no explicit mem-initializer: a class-type
   // member that has a default constructor must still be default-constructed by
@@ -4472,8 +4870,8 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
   if (!CXXTypeHasDefaultConstructor(member_type)) {
     return NULL;
   }
-  return NewCXXMemberInitializerStatement(syntax, func, member, NewVector(),
-                                          member->symbol->location);
+  return NewCXXMemberInitializerStatement(
+      syntax, func, member, NewVector(), false, member->symbol->location);
 }
 
 static ASTNode* FindCXXExplicitMemberInitializer(CXXConstructorInitList* init_list,
@@ -4695,7 +5093,7 @@ void SyntaxParseCXXConstructorInitializerList(
             syntax, init_list, init_name,
             CXXDirectMemberOrder(owner, member));
         ASTNode* stmt = NewCXXMemberInitializerStatement(
-            syntax, func, member, actuals, location);
+            syntax, func, member, actuals, true, location);
         if (stmt != NULL) {
           VectorAppend(&init_list->member_specs, member);
           VectorAppend(&init_list->member_statements, stmt);
@@ -4810,7 +5208,7 @@ void SyntaxResolveCXXConstructorInitializerList(
     CheckCXXConstructorInitializerOrder(
         syntax, init_list, init_name, CXXDirectMemberOrder(owner, member));
     ASTNode* stmt = NewCXXMemberInitializerStatement(
-        syntax, func, member, actuals, location);
+        syntax, func, member, actuals, true, location);
     if (stmt != NULL) {
       VectorAppend(&init_list->member_specs, member);
       VectorAppend(&init_list->member_statements, stmt);
@@ -5205,7 +5603,8 @@ void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func) {
 }
 
 static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
-                                                   TypeRecord* func) {
+                                                   TypeRecord* func,
+                                                   bool is_first_declaration) {
   if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
       !LexMatch(syntax->lex, TOK(equal))) {
     return;
@@ -5215,12 +5614,19 @@ static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
     func->info.function.is_explicitly_defaulted = true;
     func->info.function.is_constexpr_eligible = true;
     func->info.function.is_inline = true;
+    if (is_first_declaration &&
+        func->info.function.contract_assertions.length != 0) {
+      SyntaxError(syntax,
+                  "a function defaulted on its first declaration cannot "
+                  "have contract assertions");
+    }
     return;
   }
   if (LexMatch(syntax->lex, TOK(delete))) {
     func->info.function.is_deleted = true;
     func->info.function.is_explicitly_deleted = true;
     SyntaxParseCXXDeletedFunctionReason(syntax, func);
+    SyntaxDiagnoseInvalidFunctionContracts(syntax, func);
     return;
   }
   SyntaxError(syntax, "function specifier must be '= default' or '= delete'");
@@ -5504,7 +5910,7 @@ static Struct* ResolveFriendClassFromEnclosingClasses(Struct* befriending,
 static void SyntaxDeferTemplateFriendFunction(Syntax* syntax,
                                               Struct* befriending, Symbol* sym) {
   sym->namespace_ = syntax->current_namespace;
-  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type, true);
   if (LexLookingAt(syntax->lex, TOK(lbrace))) {
     // Parse and retain the inline body on sym->type; intentionally do not queue
     // the returned definition for emission - that happens per instantiation.
@@ -5899,7 +6305,8 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     SymbolSetCXXMangledAsmName(old_sym);
   }
 
-  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type,
+                                         old_sym == NULL);
   Vector* friend_decls = NewVector();
   Struct* saved_access_context = compiler->current_class_access_context;
   Struct* saved_comparison_owner =
@@ -6440,6 +6847,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           ReportNote(filename, lineno, "Previously declared here");
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
+          MergeCXXContractAssertions(syntax, old_sym, sym);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);
@@ -6543,7 +6951,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     }
     if (TypeIsFunction(sym->type)) {
-      ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+      ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type,
+                                             old_sym == NULL);
       if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
         if (sym->type->info.function.is_defaulted) {
           old_sym->type->info.function.is_defaulted = true;
@@ -7017,6 +7426,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
                      sym->type, old_sym->type);
   } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
     MergeCXXDefaultArguments(syntax, old_sym, sym);
+    MergeCXXContractAssertions(syntax, old_sym, sym);
     old_sym->flags.is_defined = true;
   }
 
@@ -7044,6 +7454,15 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   TypeParserDestruct(&parser);
 
   TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
+  for (TypeRecord* part = alias_type; part != NULL; part = part->next) {
+    if (TypeIsFunction(part) &&
+        part->info.function.contract_assertions.length != 0) {
+      SyntaxError(syntax,
+                  "function contract specifiers cannot be associated with a "
+                  "function type alias");
+      break;
+    }
+  }
   Symbol* alias =
       NewSymbol(FullyQualifiedIdentifierLast(name), alias_type, STO(typedef));
   alias->location = location;
@@ -10724,6 +11143,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
            ReportNote(filename, lineno, "Previously declared here");
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
+          MergeCXXContractAssertions(syntax, old_sym, sym);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);

@@ -208,8 +208,8 @@ static const WireFieldDesc kNamespaceFields[] = {
 // ---------------------------------------------------------------------------
 // Attribute vector (inline).
 // ---------------------------------------------------------------------------
-static void WriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
-                                 int field, Vector* v) {
+void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
+                                int field, Vector* v) {
   WireBuffer tmp;
   WireBufferInitOwned(&tmp, 16);
   WireWriteRawVarint(&tmp, (uint64_t)v->length);
@@ -231,8 +231,8 @@ static void WriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
   WireBufferDestruct(&tmp);
 }
 
-static void ReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
-                                Vector* out) {
+void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
+                               Vector* out) {
   const void* data;
   size_t len;
   if (!WireReadBytes(in, &data, &len)) {
@@ -620,7 +620,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
             s->default_argument);
   SWriteRef(ctx, buf, kSym_constexpr_initializer, kSerialKindAST,
             s->constexpr_initializer);
-  WriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
+  SerialWriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
   if (s->variable_template != NULL) {
     WriteVariableTemplate(ctx, buf, kSym_variable_template,
                           s->variable_template);
@@ -835,7 +835,7 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kSym_attributes:
-        ReadAttributeVector(ctx, buf, &s->attributes);
+        SerialReadAttributeVector(ctx, buf, &s->attributes);
         break;
       case kSym_variable_template:
         s->variable_template = ReadVariableTemplate(ctx, buf);

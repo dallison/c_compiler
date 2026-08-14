@@ -2605,6 +2605,82 @@ ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
   return (ASTNode*)node;
 }
 
+static void ContractAssertASTNodeDelete(ASTNode* node) {
+  ContractAssertASTNode* assert_node = (ContractAssertASTNode*)node;
+  ASTNodeDelete(assert_node->predicate);
+  AttributeListDestruct(&assert_node->attributes);
+  ASTNodeBaseDelete(node);
+}
+
+static void ContractAssertASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  ContractAssertASTNode* assert_node = (ContractAssertASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "contract_assert\n");
+  ASTNodePrint(assert_node->predicate, indents + 2, fp);
+  ASTNodeBasePrint(node, indents + 2, fp);
+}
+
+static void ContractAssertASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                              ASTNode* child,
+                                              bool delete_old_child) {
+  ContractAssertASTNode* assert_node = (ContractAssertASTNode*)parent;
+  assert(child_id == 0);
+  ASTNode* old = assert_node->predicate;
+  assert_node->predicate = child;
+  SetParent(child, parent, 0);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* ContractAssertASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const ContractAssertASTNode* from = (const ContractAssertASTNode*)node;
+  ContractAssertASTNode* to = ASTArenaAlloc(sizeof(ContractAssertASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->predicate = ASTNodeClone(from->predicate, func, data, &to->base);
+  AttributeListClone(&to->attributes, (Vector*)&from->attributes);
+  to->base.flags &= ~kASTAnalyzed;
+  return func(&to->base, data);
+}
+
+static void ContractAssertASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+    int child_id, void* data) {
+  ContractAssertASTNode* assert_node = (ContractAssertASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(assert_node->predicate, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void ContractAssertASTNodeTransform(ASTNode* node,
+                                           ASTNodeTransformer func,
+                                           void* data) {
+  ContractAssertASTNode* assert_node = (ContractAssertASTNode*)node;
+  ASTNodeTransformChild(node, 0, assert_node->predicate, func, data);
+}
+
+static ASTNodeVirtuals contract_assert_vtbl = {
+    ContractAssertASTNodeDelete, ContractAssertASTNodePrint,
+    ContractAssertASTNodeReplaceChild, ContractAssertASTNodeClone,
+    ContractAssertASTNodeVisit, ValueNotUsed, ContractAssertASTNodeTransform};
+
+ASTNode* NewContractAssertASTNode(ASTNode* predicate, Vector* attributes,
+                                  SourceLocation location) {
+  ContractAssertASTNode* node = ASTArenaAlloc(sizeof(ContractAssertASTNode));
+  ASTNodeInit(&node->base, AST_OP(contract_assert), NULL, location,
+              &contract_assert_vtbl);
+  node->predicate = predicate;
+  SetParent(predicate, (ASTNode*)node, 0);
+  if (attributes != NULL) {
+    node->attributes = *attributes;
+    memset(attributes, 0, sizeof(*attributes));
+  } else {
+    VectorInit(&node->attributes);
+  }
+  return (ASTNode*)node;
+}
+
 static void IfStatementASTNodeDelete(ASTNode* node) {
   IfStatementASTNode* enode = (IfStatementASTNode*)node;
   if (enode->cond != NULL) {
@@ -4647,6 +4723,7 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &macro_vtbl) return kASTShapeMacro;
   if (v == &expr_stmt_vtbl) return kASTShapeExprStmt;
   if (v == &static_assert_vtbl) return kASTShapeStaticAssert;
+  if (v == &contract_assert_vtbl) return kASTShapeContractAssert;
   if (v == &if_stmt_vtbl) return kASTShapeIf;
   if (v == &combined_stmt_vtbl) return kASTShapeCombined;
   if (v == &throw_vtbl) return kASTShapeThrow;
@@ -4757,6 +4834,13 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       ASTNodeInit(&n->base, op, NULL, 0, &static_assert_vtbl);
       StringInit(&n->message, NULL);
       n->message_expr = NULL;
+      return &n->base;
+    }
+    case kASTShapeContractAssert: {
+      ContractAssertASTNode* n =
+          ASTArenaAlloc(sizeof(ContractAssertASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &contract_assert_vtbl);
+      VectorInit(&n->attributes);
       return &n->base;
     }
     case kASTShapeIf: {

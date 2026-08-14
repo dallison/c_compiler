@@ -17,7 +17,13 @@ struct ThreadValue {
   }
 };
 
-static_assert(sizeof(ThreadValue) == 16);
+constexpr auto thread_value_data_size =
+    sizeof(std::atomic<int>*) + sizeof(int);
+constexpr auto thread_value_expected_size =
+    ((thread_value_data_size + alignof(ThreadValue) - 1) /
+     alignof(ThreadValue)) *
+    alignof(ThreadValue);
+static_assert(sizeof(ThreadValue) == thread_value_expected_size);
 
 int main() {
   std::atomic<int> destructions{0};

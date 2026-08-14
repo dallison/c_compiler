@@ -2736,6 +2736,7 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
     TypeParserDestruct(&parser);
   }
   ParseLambdaTrailingRequiresClause(syntax, func);
+  SyntaxParseFunctionContracts(syntax, func, NULL, false);
   return return_type;
 }
 

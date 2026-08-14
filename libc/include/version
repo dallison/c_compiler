@@ -50,4 +50,13 @@
 #define __cpp_lib_print 202207L
 #endif
 
+#if __cplusplus > 202302L
+#ifndef __cpp_lib_contracts
+#define __cpp_lib_contracts 202502L
+#endif
+#ifndef __cpp_lib_replaceable_contract_violation_handler
+#define __cpp_lib_replaceable_contract_violation_handler 202603L
+#endif
+#endif
+
 #endif /* version_h */

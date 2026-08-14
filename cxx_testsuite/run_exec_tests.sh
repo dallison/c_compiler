@@ -94,12 +94,14 @@ fi
 
 pass=0
 fail=0
+declare -a TEST_COMPILE_ARGS=()
 
 read_test_directives() {
   local file=$1
   local line
   EXPECT_EXIT=""
   TEST_STANDARD="-std=c++20"
+  TEST_COMPILE_ARGS=()
   while IFS= read -r line; do
     case "$line" in
       "// RUN:"*)
@@ -110,6 +112,7 @@ read_test_directives() {
         for arg in "${run_args[@]}"; do
           case "$arg" in
             -std=*) TEST_STANDARD="$arg" ;;
+            *) TEST_COMPILE_ARGS+=("$arg") ;;
           esac
         done
         ;;
@@ -151,7 +154,8 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   if [ -n "${DAVECC_CONSTEXPR_EVAL:-}" ]; then
     compile_cmd+=("-fconstexpr-eval=${DAVECC_CONSTEXPR_EVAL}")
   fi
-  compile_cmd+=("${COMPILE_ARGS[@]}" "$src" "$LIBC" -o "$bin")
+  compile_cmd+=("${TEST_COMPILE_ARGS[@]}" "${COMPILE_ARGS[@]}"
+                "$src" "$LIBC" -o "$bin")
   if ! "${compile_cmd[@]}" >"$work/compile.log" 2>&1; then
     echo "FAIL $base (compile)"
     sed 's/^/  /' "$work/compile.log" | head -20

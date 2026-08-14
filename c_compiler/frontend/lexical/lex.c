@@ -148,6 +148,7 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"constexpr", TOK(constexpr), kLanguageStandardCXX11},
   {"constinit", TOK(constinit), kLanguageStandardCXX20},
   {"continue", TOK(continue), kLanguageStandardCXX98},
+  {"contract_assert", TOK(contract_assert), kLanguageStandardCXX26},
   {"decltype", TOK(decltype), kLanguageStandardCXX11},
   {"default", TOK(default), kLanguageStandardCXX98},
   {"delete", TOK(delete), kLanguageStandardCXX98},

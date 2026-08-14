@@ -582,8 +582,25 @@ static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
                                      TargetInstruction* inst) {
   AARCH64RegisterType reg_type = RegisterTypeFromInstruction(inst);
   
-  AARCH64Register* reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                 reg_type, CanUseTemp(allocator, inst));
+  AARCH64Register* reg = NULL;
+  if (reg_type == kAARCH64RegTypeInt &&
+      allocator->g->struct_return_reg >= 0) {
+    for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+      RegisterVariable* variable = allocator->g->var_regs.value.p[i];
+      if (variable->inst == inst &&
+          variable->varnum == allocator->g->struct_return_reg) {
+        bool is_leaf = allocator->g->base.num_calls == 0 && compiler->optimize;
+        int first = is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
+                            : AARCH64_FIRST_INT_REG_VAR;
+        reg = &allocator->int_regs[first + variable->varnum];
+        break;
+      }
+    }
+  }
+  if (reg == NULL) {
+    reg = AllocateRegisterWithType(allocator, inst->block, inst, reg_type,
+                                   CanUseTemp(allocator, inst));
+  }
   AssignRegister(reg, inst);
 }
 
@@ -1145,6 +1162,17 @@ static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
 }
 
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
+  // The hidden aggregate-result pointer has an ABI-selected dedicated
+  // register. Reserve that physical register before allocating ordinary
+  // variable registers; otherwise an incoming argument can be assigned the
+  // same register and then be clobbered when x8 is saved in the prologue.
+  if (allocator->g->struct_return_reg >= 0) {
+    bool is_leaf = allocator->g->base.num_calls == 0 && compiler->optimize;
+    int first = is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
+                        : AARCH64_FIRST_INT_REG_VAR;
+    allocator->int_regs[first + allocator->g->struct_return_reg]
+        .base.reserved = true;
+  }
   BuildShortLivedVarRegSet(allocator);
   TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);

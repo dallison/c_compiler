@@ -79,6 +79,8 @@ static CompilerOptionDefinition compiler_options[] = {
      "Select language standard: c89, c99, c11, c17, c++11, c++17, c++20, c++23, c++26"},
     {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
      "Select constexpr evaluator: auto, pcode, ast, or audit"},
+    {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
+     "Select contract semantic: ignore, observe, enforce, or quick-enforce"},
     {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
     {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
     {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false, "Print fron end dump"},
@@ -2608,6 +2610,22 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
     } else {
       fprintf(stderr, "Invalid constexpr evaluator: %s\n",
               constexpr_eval->value);
+      exit(1);
+    }
+  }
+  compiler->contract_semantic = kContractSemanticEnforce;
+  String* contracts = OptionStringValue(kOptionContracts, options);
+  if (contracts != NULL) {
+    if (StringEqual(contracts, "ignore")) {
+      compiler->contract_semantic = kContractSemanticIgnore;
+    } else if (StringEqual(contracts, "observe")) {
+      compiler->contract_semantic = kContractSemanticObserve;
+    } else if (StringEqual(contracts, "enforce")) {
+      compiler->contract_semantic = kContractSemanticEnforce;
+    } else if (StringEqual(contracts, "quick-enforce")) {
+      compiler->contract_semantic = kContractSemanticQuickEnforce;
+    } else {
+      fprintf(stderr, "Invalid contract semantic: %s\n", contracts->value);
       exit(1);
     }
   }

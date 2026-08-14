@@ -565,11 +565,11 @@ bool ARMIsReturn(TargetInstruction* inst) {
   return (ARMOpcode)((int)inst->opcode == (int)ARM_OP(ret));
 }
 
-int ARMIntValue(TargetInstruction* inst) {
+int64_t ARMIntValue(TargetInstruction* inst) {
   if (inst->opcode == (TargetOpcode)ARM_OP(r0)) {
     return 0;
   }
-  return (int)((TargetConstant*)inst)->value.ivalue;
+  return ((TargetConstant*)inst)->value.ivalue;
 }
 
 // Is the value small enough to be encoded in an immediate field?
@@ -4320,6 +4320,19 @@ static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
   return true;
 }
 
+static IRNode* CallArgumentValue(IRNode* argument) {
+  if (argument != NULL && argument->opcode == IR_OP(pusharg) &&
+      argument->inputs.length > 0) {
+    return argument->inputs.value.p[0];
+  }
+  return argument;
+}
+
+static bool CallArgumentIsMemberPointerAggregate(IRNode* argument) {
+  IRNode* value = CallArgumentValue(argument);
+  return value != NULL && TypeIsMemberPointerAggregate(value->type);
+}
+
 /*
  * Named arguments are classified by the declared parameter type, not by the
  * source expression type.  This is observable in AAPCS when a 64-bit parameter
@@ -4330,14 +4343,29 @@ static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
  */
 static TypeRecord* CalleeArgumentABIType(IRNode* call, int arg_ordinal,
                                          IRNode* actual) {
+  IRNode* represented_value = CallArgumentValue(actual);
   TypeRecord* function = CalleeFunctionType(call);
   if (function != NULL && arg_ordinal >= 0 &&
       (size_t)arg_ordinal < function->info.function.prototype.length) {
     Symbol* parameter =
         function->info.function.prototype.value.p[arg_ordinal];
     if (parameter != NULL && parameter->type != NULL) {
+      // A reference to a member pointer is one address-sized argument, not the
+      // two-word member pointer value itself.
+      if (TypeIsReference(parameter->type)) {
+        return parameter->type;
+      }
+      // A member-pointer pair is already represented explicitly in IR.
+      // Preserve that representation if a cloned template prototype still has
+      // a placeholder/scalar type, or its adjustment word would be dropped.
+      if (CallArgumentIsMemberPointerAggregate(actual)) {
+        return represented_value->type;
+      }
       return parameter->type;
     }
+  }
+  if (CallArgumentIsMemberPointerAggregate(actual)) {
+    return represented_value->type;
   }
   return actual->type;
 }
@@ -4431,11 +4459,16 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if ((i == 1 && callee_has_struct_return) ||
-        IsStructReturnArgument(arg_node)) {
+    if (callee_has_struct_return &&
+        (i == 1 || IsStructReturnArgument(arg_node))) {
       // AAPCS passes the hidden aggregate-result pointer in r0.  It is wrapped
       // in pusharg and may have acquired location/argument wrappers by this
       // stage, so also identify it from the callee's aggregate return type.
+      // A constructor can use the enclosing function's struct-return node as
+      // its ordinary `this` argument; when the constructor itself has no
+      // aggregate return, that argument must still consume its prototype
+      // ordinal or every following argument is classified against the wrong
+      // formal parameter.
       VectorAppend(&arg_locations,
                    NewArgLocationRegister(IntArgumentRegister(g, 0)));
       if (next_int_arg_reg == 0) {
@@ -4731,7 +4764,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         break;
       }
       case kArgLocationIntPairSplit: {
-        assert(TypeIsMemberPointerAggregate(arg_node->type));
+        assert(CallArgumentIsMemberPointerAggregate(arg_node));
         TargetInstruction* address = Materialize(g, arg_node);
         TargetInstruction* lo = Emit(g, SetInstructionSize(
             NewInstruction2(
@@ -4758,7 +4791,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         // 64-bit integer passed on the stack: store both halves.
         TargetInstruction* lo;
         TargetInstruction* hi;
-        if (TypeIsMemberPointerAggregate(arg_node->type)) {
+        if (CallArgumentIsMemberPointerAggregate(arg_node)) {
           TargetInstruction* address = Materialize(g, arg_node);
           lo = Emit(g, SetInstructionSize(
                            NewInstruction2(
@@ -4797,7 +4830,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     }
     TargetInstruction* lo;
     TargetInstruction* hi;
-    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+    if (CallArgumentIsMemberPointerAggregate(arg_node)) {
       TargetInstruction* address = Materialize(g, arg_node);
       lo = Emit(g, SetInstructionSize(
                        NewInstruction2(
@@ -5102,7 +5135,38 @@ static TargetInstruction* LowerBuiltinVaEnd(ARMGenerator* g, IRNode* node) {
 }
 
 static TargetInstruction* LowerBuiltinVaCopy(ARMGenerator* g, IRNode* node) {
-  return NULL;  // TODO
+  TargetInstruction* dest_addr;
+  TargetInstruction* dest_offset;
+  TargetInstruction* dest_scale;
+  bool dest_on_stack = GetRegAndOffset(
+      g, node->inputs.value.p[0], &dest_addr, &dest_offset, &dest_scale);
+
+  TargetInstruction* src_addr;
+  TargetInstruction* src_offset;
+  TargetInstruction* src_scale;
+  bool src_on_stack = GetRegAndOffset(
+      g, node->inputs.value.p[1], &src_addr, &src_offset, &src_scale);
+  TargetInstruction* value = src_addr;
+  if (src_on_stack) {
+    value = Emit(g, SetInstructionSize(
+                        NewInstruction2(ARM_OP(ldr), src_addr, src_offset),
+                        kSize32Bit));
+    value->flags |= FrameOffsetFlagForNode(node->inputs.value.p[1]);
+  }
+
+  if (dest_on_stack) {
+    TargetInstruction* store = Emit(
+        g, SetInstructionSize(
+               NewInstruction3(ARM_OP(str), value, dest_addr, dest_offset),
+               kSize32Bit));
+    store->flags |= FrameOffsetFlagForNode(node->inputs.value.p[0]);
+    return SetLoweredNode(node, store);
+  }
+  TargetInstruction* move =
+      Emit(g, SetInstructionSize(NewInstruction1(ARM_OP(mov), value),
+                                 kSize32Bit));
+  move->dest = dest_addr;
+  return SetLoweredNode(node, dest_addr);
 }
 
 static TargetInstruction* LowerLocation(ARMGenerator* g, IRNode* node) {
@@ -6036,9 +6100,8 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         TargetInstruction* hi = Emit(g, SetInstructionSize(
             NewInstruction2(
                 ARM_OP(ldr), FramePointer(g),
-                GetIntConstant(
-                    g, NULL, kTargetType32Bit,
-                    ARM_STACK_FRAME_HEADER_SIZE + (int)location.second_offset)),
+                GetIntConstant(g, NULL, kTargetType32Bit,
+                               (int)location.second_offset)),
             kSize32Bit));
         hi->flags |= kARMIncomingFrameOffset;
         TargetInstruction* store = Emit(g, SetInstructionSize(
@@ -6049,8 +6112,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         store->flags |= kARMFrameStorageOffset;
         entry->pooled->data.ivalue = offset;
       } else {
-        entry->pooled->data.ivalue =
-            ARM_STACK_FRAME_HEADER_SIZE + (int)location.location.offset;
+        entry->pooled->data.ivalue = (int)location.location.offset;
       }
       SetDebugStackLocation(entry, entry->pooled->data.ivalue);
     } else {

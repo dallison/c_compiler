@@ -282,6 +282,8 @@ const char* TokenName(Token tok) {
       return "reinterpret_cast";
     case TOK(requires):
       return "requires";
+    case TOK(contract_assert):
+      return "contract_assert";
     case TOK(static_assert):
       return "static_assert";
     case TOK(static_cast):

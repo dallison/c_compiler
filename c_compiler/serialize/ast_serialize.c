@@ -486,6 +486,12 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 18, kSerialKindAST, a->message_expr);
       break;
     }
+    case kASTShapeContractAssert: {
+      ContractAssertASTNode* a = (ContractAssertASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, a->predicate);
+      SerialWriteAttributeVector(ctx, buf, 17, &a->attributes);
+      break;
+    }
     case kASTShapeIf: {
       IfStatementASTNode* i = (IfStatementASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, i->cond);
@@ -932,6 +938,18 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 18) {
         a->message_expr = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      break;
+    }
+    case kASTShapeContractAssert: {
+      ContractAssertASTNode* a = (ContractAssertASTNode*)n;
+      if (field == 16) {
+        a->predicate = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        SerialReadAttributeVector(ctx, buf, &a->attributes);
         return;
       }
       break;

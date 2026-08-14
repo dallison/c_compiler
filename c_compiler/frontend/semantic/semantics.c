@@ -9,6 +9,7 @@
 #include "semantics.h"
 #include <string.h>
 #include "compiler.h"
+#include "contracts.h"
 #include "coro_semantics.h"
 #include "errors.h"
 #include "expr_evaluator.h"
@@ -531,6 +532,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
+  SemanticAnalyzeFunctionContracts(node->type, node);
   CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);

@@ -61,6 +61,12 @@ void SReadRefVector(DeserializeContext* ctx, WireBuffer* buf, SerialKind kind,
 // initialized), appending a newly allocated String* per entry.
 void SReadStringVector(DeserializeContext* ctx, WireBuffer* buf, Vector* out);
 
+// Attribute vector (de)serialization, implemented in symbol_serialize.c.
+void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
+                                int field, Vector* attributes);
+void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* buf,
+                               Vector* attributes);
+
 // TemplateParameter vector (de)serialization, implemented in type_serialize.c
 // and shared with symbol_serialize.c (variable templates).  `v` / `out` are
 // embedded Vectors of TemplateParameter*.

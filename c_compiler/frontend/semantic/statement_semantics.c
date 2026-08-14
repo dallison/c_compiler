@@ -7,6 +7,7 @@
 //
 
 #include "statement_semantics.h"
+#include "contracts.h"
 #include "expansion_semantics.h"
 #include "reflection_semantics.h"
 #include <assert.h>
@@ -391,7 +392,7 @@ static ASTNode* NewCXXTemporaryDestructorCall(Symbol* sym,
   return call;
 }
 
-static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
+ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   if (!CompilerIsCXX() || expr == NULL ||
       (compiler->current_function != NULL &&
        (compiler->current_function->info.function.is_coroutine ||
@@ -3135,6 +3136,9 @@ void AnalyzeStatement(ASTNode* node) {
       break;
     case AST_OP(static_assert):
       AnalyzeStaticAssert((StaticAssertASTNode*)node);
+      break;
+    case AST_OP(contract_assert):
+      SemanticAnalyzeContractAssert((ContractAssertASTNode*)node);
       break;
     case AST_OP(compound):
       AnalyzeCompoundStatement((CompoundStatementASTNode*)node);

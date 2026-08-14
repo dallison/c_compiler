@@ -469,7 +469,7 @@ bool AARCH64IsFixedRegister(TargetInstruction* inst);
 bool AARCH64IsConst(TargetInstruction* inst);
 bool AARCH64IsSymbol(TargetInstruction* inst);
 bool AARCH64IsIntConst(TargetInstruction* inst);
-int AARCH64IntValue(TargetInstruction* inst);
+int64_t AARCH64IntValue(TargetInstruction* inst);
 bool AARCH64IsPossibleImmediate(int64_t value);
 bool AARCH64IsBranch(TargetInstruction* inst);
 bool AARCH64IsConditionalBranch(TargetInstruction* inst);

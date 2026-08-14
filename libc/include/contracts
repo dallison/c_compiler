@@ -1,0 +1,70 @@
+#ifndef contracts_h
+#define contracts_h
+
+#include <source_location>
+
+#ifndef __cpp_lib_contracts
+#define __cpp_lib_contracts 202502L
+#endif
+#ifndef __cpp_lib_replaceable_contract_violation_handler
+#define __cpp_lib_replaceable_contract_violation_handler 202603L
+#endif
+
+struct __davecc_contract_runtime_access;
+
+namespace std {
+namespace contracts {
+
+enum class assertion_kind : unsigned char {
+  pre = 1,
+  post = 2,
+  assert = 3,
+};
+
+enum class evaluation_semantic : unsigned char {
+  ignore = 1,
+  observe = 2,
+  enforce = 3,
+  quick_enforce = 4,
+};
+
+enum class detection_mode : unsigned char {
+  predicate_false = 1,
+  evaluation_exception = 2,
+};
+
+class contract_violation {
+ public:
+  contract_violation(const contract_violation&) = delete;
+  contract_violation& operator=(const contract_violation&) = delete;
+  ~contract_violation();
+
+  const char* comment() const noexcept;
+  contracts::detection_mode detection_mode() const noexcept;
+  bool is_terminating() const noexcept;
+  assertion_kind kind() const noexcept;
+  source_location location() const noexcept;
+  evaluation_semantic semantic() const noexcept;
+
+ private:
+  friend struct ::__davecc_contract_runtime_access;
+
+  contract_violation(const char* comment, contracts::detection_mode detection,
+                     bool terminating, assertion_kind kind,
+                     source_location location,
+                     evaluation_semantic semantic) noexcept;
+
+  const char* comment_;
+  contracts::detection_mode detection_;
+  bool terminating_;
+  assertion_kind kind_;
+  source_location location_;
+  evaluation_semantic semantic_;
+};
+
+void invoke_default_contract_violation_handler(const contract_violation&);
+
+}  // namespace contracts
+}  // namespace std
+
+#endif

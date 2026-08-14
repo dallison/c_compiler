@@ -57,6 +57,13 @@ typedef enum {
 } ConstexprEvalMode;
 
 typedef enum {
+  kContractSemanticIgnore = 1,
+  kContractSemanticObserve = 2,
+  kContractSemanticEnforce = 3,
+  kContractSemanticQuickEnforce = 4,
+} ContractEvaluationSemantic;
+
+typedef enum {
   kInitTypeByte,    // 8-bit constant.
   kInitTypeHalf,    // 16-bit constant.
   kInitTypeWord,    // 32-bit constant.
@@ -272,6 +279,7 @@ typedef struct {
   int num_errors;
   int max_errors;
   LanguageStandard language_standard;
+  ContractEvaluationSemantic contract_semantic;
   bool convert_warnings_to_errors;
   bool enable_all_warnings;
   Set disabled_warnings;

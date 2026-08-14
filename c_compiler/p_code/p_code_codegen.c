@@ -436,6 +436,7 @@ void PCodeGeneratorInit(PCodeGenerator* pcode, Generator* gen) {
   TargetGeneratorInit(&pcode->base, gen, &virtuals);
 
   pcode->argument_pointer = NULL;
+  pcode->source_pointer_size = gen->source_pointer_size;
   VectorInit(&pcode->exception_ranges);
   VectorInit(&pcode->exception_typeinfos);
   PCodeRegisterAllocatorInit(&pcode->register_allocator, pcode);
@@ -607,6 +608,14 @@ static TargetInstruction* LoadStaticVariable(PCodeGenerator* pcode,
 
 static bool PCodeFpIsDoubleWidth(TypeRecord* type) {
   return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
+static PCodeOpcode PCodeAddressLoadOpcode(PCodeGenerator* pcode) {
+  return pcode->source_pointer_size <= 4 ? P_OP(lduw) : P_OP(ldx);
+}
+
+static PCodeOpcode PCodeAddressStoreOpcode(PCodeGenerator* pcode) {
+  return pcode->source_pointer_size <= 4 ? P_OP(stw) : P_OP(stx);
 }
 
 static struct {
@@ -1398,7 +1407,7 @@ static TargetInstruction* LowerLoad(PCodeGenerator* pcode, IRNode* node) {
       opcode = P_OP(ldd);
       break;
     case IR_OP(loada):
-      opcode = P_OP(ldx);
+      opcode = PCodeAddressLoadOpcode(pcode);
       break;
     default:
       assert(false);
@@ -1453,7 +1462,7 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
       opcode = P_OP(std);
       break;
     case IR_OP(storea):
-      opcode = P_OP(stx);
+      opcode = PCodeAddressStoreOpcode(pcode);
       break;
     default:
       assert(false);
@@ -1463,14 +1472,17 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, Store(pcode, addr_node, src, opcode));
 }
 
-static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
+static PCodeOpcode AtomicLoadOpcode(PCodeGenerator* pcode, TypeRecord* type) {
   if (TypeIsCharFamily(type)) {
     return TypeIsUnsigned(type) ? P_OP(ldub) : P_OP(ldb);
   }
   if (TypeIsShort(type)) {
     return TypeIsUnsigned(type) ? P_OP(lduh) : P_OP(ldh);
   }
-  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+  if (TypeIsPointerOrArray(type)) {
+    return PCodeAddressLoadOpcode(pcode);
+  }
+  if (TypeIsLongLong(type)) {
     return P_OP(ldx);
   }
   if (TypeIsFloat(type)) {
@@ -1482,14 +1494,17 @@ static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
   return TypeIsUnsigned(type) ? P_OP(lduw) : P_OP(ldw);
 }
 
-static PCodeOpcode AtomicStoreOpcode(TypeRecord* type) {
+static PCodeOpcode AtomicStoreOpcode(PCodeGenerator* pcode, TypeRecord* type) {
   if (TypeIsCharFamily(type)) {
     return P_OP(stb);
   }
   if (TypeIsShort(type)) {
     return P_OP(sth);
   }
-  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+  if (TypeIsPointerOrArray(type)) {
+    return PCodeAddressStoreOpcode(pcode);
+  }
+  if (TypeIsLongLong(type)) {
     return P_OP(stx);
   }
   if (TypeIsFloat(type)) {
@@ -1503,7 +1518,8 @@ static PCodeOpcode AtomicStoreOpcode(TypeRecord* type) {
 
 static TargetInstruction* LowerAtomicLoad(PCodeGenerator* pcode, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
-  TargetInstruction* load = Load(pcode, addr_node, AtomicLoadOpcode(node->type));
+  TargetInstruction* load =
+      Load(pcode, addr_node, AtomicLoadOpcode(pcode, node->type));
   ApplyDestInstruction(pcode, node, load);
   return SetLoweredNode(node, load);
 }
@@ -1512,8 +1528,9 @@ static TargetInstruction* LowerAtomicStore(PCodeGenerator* pcode, IRNode* node) 
   IRNode* addr_node = node->inputs.value.p[0];
   IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src = Materialize(pcode, src_node);
-  return SetLoweredNode(node, Store(pcode, addr_node, src,
-                                    AtomicStoreOpcode(src_node->type)));
+  return SetLoweredNode(
+      node,
+      Store(pcode, addr_node, src, AtomicStoreOpcode(pcode, src_node->type)));
 }
 
 static TargetInstruction* LowerAtomicFetchAddSub(PCodeGenerator* pcode,
@@ -1522,11 +1539,11 @@ static TargetInstruction* LowerAtomicFetchAddSub(PCodeGenerator* pcode,
   IRNode* addr_node = node->inputs.value.p[0];
   IRNode* value_node = node->inputs.value.p[1];
   TargetInstruction* old_value =
-      Load(pcode, addr_node, AtomicLoadOpcode(node->type));
+      Load(pcode, addr_node, AtomicLoadOpcode(pcode, node->type));
   TargetInstruction* value = Materialize(pcode, value_node);
   TargetInstruction* new_value =
       Emit(pcode, NewInstruction2(add ? P_OP(add) : P_OP(sub), old_value, value));
-  Store(pcode, addr_node, new_value, AtomicStoreOpcode(node->type));
+  Store(pcode, addr_node, new_value, AtomicStoreOpcode(pcode, node->type));
   TargetInstruction* result = return_new ? new_value : old_value;
   ApplyDestInstruction(pcode, node, result);
   return SetLoweredNode(node, result);
@@ -1538,8 +1555,8 @@ static TargetInstruction* LowerAtomicCompareExchange(PCodeGenerator* pcode,
                                                      bool returns_bool) {
   IRNode* addr_node = node->inputs.value.p[0];
   TypeRecord* value_type = addr_node->type->next;
-  PCodeOpcode load_opcode = AtomicLoadOpcode(value_type);
-  PCodeOpcode store_opcode = AtomicStoreOpcode(value_type);
+  PCodeOpcode load_opcode = AtomicLoadOpcode(pcode, value_type);
+  PCodeOpcode store_opcode = AtomicStoreOpcode(pcode, value_type);
   TargetInstruction* old_value = Load(pcode, addr_node, load_opcode);
 
   TargetInstruction* expected_ptr = NULL;

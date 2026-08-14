@@ -13,8 +13,13 @@ struct employee {
 // A minimal uniform random bit generator, so shuffle/sample can be exercised
 // without <random>.
 struct counter_generator {
+  using result_type = unsigned long long;
+
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return 0x7fffffffull; }
+
   unsigned long long state = 12345;
-  unsigned long long operator()() {
+  result_type operator()() {
     state = state * 6364136223846793005ull + 1442695040888963407ull;
     return state >> 33;
   }

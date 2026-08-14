@@ -98,6 +98,11 @@ typedef struct Generator {
   // p-code interpreter) rather than a real target.  Runtime-only constructs
   // such as the noexcept terminate guard are suppressed in this mode.
   bool for_constant_evaluation;
+
+  // ABI pointer width of the source target at initialization time. Constexpr
+  // p-code lowering temporarily switches compiler->target to p-code, but the
+  // already-analyzed object layouts still use this original width.
+  int source_pointer_size;
 } Generator;
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func);

@@ -329,7 +329,7 @@ bool X86_64IsFixedRegister(TargetInstruction* inst);
 bool X86_64IsConst(TargetInstruction* inst);
 bool X86_64IsSymbol(TargetInstruction* inst);
 bool X86_64IsIntConst(TargetInstruction* inst);
-int X86_64IntValue(TargetInstruction* inst);
+int64_t X86_64IntValue(TargetInstruction* inst);
 bool X86_64IsPossibleImmediate(int64_t value);
 bool X86_64IsBranch(TargetInstruction* inst);
 bool X86_64IsConditionalBranch(TargetInstruction* inst);

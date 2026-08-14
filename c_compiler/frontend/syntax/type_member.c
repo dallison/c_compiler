@@ -1082,6 +1082,12 @@ void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
     func->info.function.is_explicitly_defaulted = true;
     func->info.function.is_constexpr_eligible = true;
     func->info.function.is_inline = true;
+    if (parser->cxx_member_definition == NULL &&
+        func->info.function.contract_assertions.length != 0) {
+      SyntaxError(parser->syntax,
+                  "a function defaulted on its first declaration cannot "
+                  "have contract assertions");
+    }
     return;
   }
   if (LexMatch(parser->lex, TOK(delete))) {
@@ -1824,7 +1830,9 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   ParseCXXExceptionSpecifier(parser, func);
   ParseCXXVirtSpecifiers(parser, func);
   ParseCXXSpecialMemberTrailingRequires(parser, func);
+  SyntaxParseFunctionContracts(parser->syntax, func, str, true);
   ParseCXXPureSpecifier(parser, func);
+  SyntaxDiagnoseInvalidFunctionContracts(parser->syntax, func);
   TypeParserDestruct(&proto_parser);
   if (func->info.function.has_explicit_object_parameter) {
     func->info.function.cxx_member_owner = str;
@@ -2660,11 +2668,15 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           }
         } else if (member->is_member_function && !member->is_static) {
           member_symbol->type->info.function.is_virtual = is_virtual_member;
-          TypeRecordAddCXXThisParameter(member_symbol->type, str,
-                                        member_symbol->location);
+          if (!FunctionHasImplicitThisParameter(member_symbol->type)) {
+            TypeRecordAddCXXThisParameter(member_symbol->type, str,
+                                          member_symbol->location);
+          }
         } else if (member->is_member_function) {
           member_symbol->type->info.function.cxx_member_owner = str;
         }
+        SyntaxDiagnoseInvalidFunctionContracts(parser->syntax,
+                                               member_symbol->type);
         if (is_member_template) {
           if (member->is_member_function) {
             member_symbol->flags.is_template = true;

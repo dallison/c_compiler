@@ -1171,7 +1171,10 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
-    known = sym->defined && sym->section == ASM.current_section;
+    // Keep calls to weak definitions relocatable so the linker can select a
+    // strong override.
+    known = sym->defined && sym->section == ASM.current_section &&
+            sym->binding != SYM_BIND(weak);
     addr = sym->value;
   } else {
     addr = AssemblerEvaluateKnownExpression(&ASM, &known);
@@ -2034,7 +2037,10 @@ static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, in
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
-    known = sym->defined && sym->section == ASM.current_section;
+    // A weak definition can be replaced by a strong definition from another
+    // object. Leave its branch relocatable so the linker can retarget it.
+    known = sym->defined && sym->section == ASM.current_section &&
+            sym->binding != SYM_BIND(weak);
     addr = sym->value;
   } else {
     addr = AssemblerEvaluateKnownExpression(&ASM, &known);

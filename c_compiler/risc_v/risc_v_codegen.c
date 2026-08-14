@@ -756,11 +756,11 @@ bool RVIsReturn(TargetInstruction* inst) {
   return (RVOpcode)((int)inst->opcode == (int)RV_OP(ret));
 }
 
-int RVIntValue(TargetInstruction* inst) {
+int64_t RVIntValue(TargetInstruction* inst) {
   if (inst->opcode == (TargetOpcode)RV_OP(x0)) {
     return 0;
   }
-  return (int)((TargetConstant*)inst)->value.ivalue;
+  return ((TargetConstant*)inst)->value.ivalue;
 }
 
 // Is the value small enough to be encoded in an immediate field?
@@ -3963,7 +3963,28 @@ static TargetInstruction* LowerBuiltinVaEnd(RVGenerator* rv, IRNode* node) {
 }
 
 static TargetInstruction* LowerBuiltinVaCopy(RVGenerator* rv, IRNode* node) {
-  return NULL;  // TODO
+  TargetInstruction* dest_addr;
+  TargetInstruction* dest_offset;
+  bool dest_on_stack =
+      GetRegAndOffset(rv, node->inputs.value.p[0], &dest_addr, &dest_offset);
+
+  TargetInstruction* src_addr;
+  TargetInstruction* src_offset;
+  bool src_on_stack =
+      GetRegAndOffset(rv, node->inputs.value.p[1], &src_addr, &src_offset);
+  TargetInstruction* value =
+      src_on_stack
+          ? Emit(rv, NewInstruction2(RV_OP(ld), src_addr, src_offset))
+          : src_addr;
+
+  if (dest_on_stack) {
+    return SetLoweredNode(
+        node, Emit(rv,
+                   NewInstruction3(RV_OP(sd), value, dest_addr, dest_offset)));
+  }
+  TargetInstruction* move = Emit(rv, NewInstruction1(RV_OP(mv), value));
+  move->dest = dest_addr;
+  return SetLoweredNode(node, dest_addr);
 }
 
 static TargetInstruction* LowerLocation(RVGenerator* rv, IRNode* node) {

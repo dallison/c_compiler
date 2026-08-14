@@ -14,6 +14,7 @@
 
 void AnalyzeStatement(ASTNode* node);
 void CheckUnusedLabels(ASTNode* body);
+ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr);
 
 // Materializes a structured binding retained in a dependent template body.
 // Fixed binding symbols are recorded in symbol_map and a structured-binding

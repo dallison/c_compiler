@@ -135,6 +135,7 @@ typedef enum {
   TOK(consteval),
   TOK(constexpr),
   TOK(constinit),
+  TOK(contract_assert),
   TOK(const_cast),
   TOK(co_await),
   TOK(co_return),

@@ -6168,6 +6168,42 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
     ASTNodeDelete(to_formal->default_argument);
     to_formal->default_argument = default_argument;
   }
+  VectorDestructWithContents(
+      &to->info.function.contract_assertions,
+      (VectorElementDestructor)ContractAssertionDelete,
+      /*free_element=*/false);
+  VectorInit(&to->info.function.contract_assertions);
+  for (size_t i = 0;
+       i < from->info.function.contract_assertions.length; i++) {
+    ContractAssertion* source =
+        from->info.function.contract_assertions.value.p[i];
+    Symbol* result_binding = NULL;
+    if (source->result_binding != NULL) {
+      result_binding =
+          NewSymbol(source->result_binding->name.value,
+                    source->result_binding->type,
+                    source->result_binding->storage);
+      result_binding->flags = source->result_binding->flags;
+      result_binding->location = source->result_binding->location;
+      MapKeyValue kv;
+      kv.key.p = source->result_binding;
+      kv.value.p = result_binding;
+      MapInsert(&clone.symbol_map, kv);
+    }
+    ASTNode* predicate =
+        ASTNodeClone(source->predicate, CloneTemplateFunctionBodyNode,
+                     &clone, NULL);
+    predicate = ASTNodeVisitAndTransform(
+        predicate, ReanalyzeClonedDependentFunctorCall, NULL);
+    predicate = ASTNodeVisitAndTransform(
+        predicate, ReanalyzeClonedResolvedCall, &clone);
+    Vector attrs = {0};
+    AttributeListClone(&attrs, &source->attributes);
+    VectorAppend(&to->info.function.contract_assertions,
+                 NewContractAssertion(source->kind, predicate,
+                                      result_binding, &attrs,
+                                      source->location));
+  }
   ASTNode* clone_source =
       ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
   clone_source = ASTNodeVisitAndTransform(

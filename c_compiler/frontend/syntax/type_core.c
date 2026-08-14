@@ -332,6 +332,10 @@ void TypeRecordDelete(TypeRecord* record) {
       VectorDestructWithContents(&record->info.function.template_instantiations,
                                  (VectorElementDestructor)SymbolDelete,
                                  /*free_element=*/false);
+      VectorDestructWithContents(
+          &record->info.function.contract_assertions,
+          (VectorElementDestructor)ContractAssertionDelete,
+          /*free_element=*/false);
       ConstraintExprDelete(record->info.function.associated_constraint);
       record->info.function.associated_constraint = NULL;
     } else if (TypeIsVLA(record)) {
@@ -848,6 +852,68 @@ Vector* TemplateArgumentVectorListCopy(Vector* list) {
 
 // Copy a type record and chain it to its existing next,
 // incrementing the ref count.
+typedef struct {
+  TypeRecord* from_func;
+  TypeRecord* to_func;
+  Symbol* from_result;
+  Symbol* to_result;
+} ContractCloneMap;
+
+static ASTNode* RebindContractCloneNode(ASTNode* node, void* data) {
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return node;
+  }
+  ContractCloneMap* map = data;
+  IdentifierASTNode* identifier = (IdentifierASTNode*)node;
+  if (identifier->symbol == map->from_result) {
+    identifier->symbol = map->to_result;
+    return node;
+  }
+  Vector* from = &map->from_func->info.function.prototype;
+  Vector* to = &map->to_func->info.function.prototype;
+  for (size_t i = 0; i < from->length && i < to->length; i++) {
+    if (identifier->symbol == from->value.p[i]) {
+      identifier->symbol = to->value.p[i];
+      break;
+    }
+  }
+  return node;
+}
+
+void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
+  for (size_t i = 0;
+       i < from->info.function.contract_assertions.length; i++) {
+    ContractAssertion* source =
+        from->info.function.contract_assertions.value.p[i];
+    Symbol* result_binding =
+        source->result_binding != NULL
+            ? NewSymbol(source->result_binding->name.value,
+                        source->result_binding->type,
+                        source->result_binding->storage)
+            : NULL;
+    if (result_binding != NULL) {
+      result_binding->flags = source->result_binding->flags;
+      result_binding->location = source->result_binding->location;
+      result_binding->alignment = source->result_binding->alignment;
+      result_binding->namespace_ = source->result_binding->namespace_;
+      result_binding->value = source->result_binding->value;
+    }
+    Vector attrs = {0};
+    AttributeListClone(&attrs, &source->attributes);
+    ContractCloneMap map = {
+        .from_func = from,
+        .to_func = to,
+        .from_result = source->result_binding,
+        .to_result = result_binding,
+    };
+    ASTNode* predicate = ASTNodeClone(source->predicate,
+                                      RebindContractCloneNode, &map, NULL);
+    VectorAppend(&to->info.function.contract_assertions,
+                 NewContractAssertion(source->kind, predicate, result_binding,
+                                      &attrs, source->location));
+  }
+}
+
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
   TypeRecord* r = TypeArenaAlloc();
   memcpy(r, record, sizeof(TypeRecord));
@@ -895,6 +961,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
                        record->info.function.template_parameters.value.p[i]));
     }
     VectorInit(&r->info.function.template_instantiations);
+    VectorInit(&r->info.function.contract_assertions);
+    TypeRecordCopyContractAssertions(r, record);
     r->info.function.associated_constraint =
         ConceptsCloneConstraint(record->info.function.associated_constraint);
     r->info.function.deleted_reason =
@@ -1107,6 +1175,36 @@ TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible
   return t;
 }
 
+ContractAssertion* NewContractAssertion(ContractAssertionKind kind,
+                                        ASTNode* predicate,
+                                        Symbol* result_binding,
+                                        Vector* attributes,
+                                        SourceLocation location) {
+  ContractAssertion* assertion = malloc(sizeof(*assertion));
+  memset(assertion, 0, sizeof(*assertion));
+  assertion->kind = kind;
+  assertion->predicate = predicate;
+  assertion->result_binding = result_binding;
+  assertion->location = location;
+  if (attributes != NULL) {
+    assertion->attributes = *attributes;
+    memset(attributes, 0, sizeof(*attributes));
+  } else {
+    VectorInit(&assertion->attributes);
+  }
+  return assertion;
+}
+
+void ContractAssertionDelete(ContractAssertion* assertion) {
+  if (assertion == NULL) {
+    return;
+  }
+  ASTNodeDelete(assertion->predicate);
+  SymbolDelete(assertion->result_binding);
+  AttributeListDestruct(&assertion->attributes);
+  free(assertion);
+}
+
 TypeRecord* NewFunctionTypeRecord() {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, kQualPlain);
   t->declarator = kDeclFunction;
@@ -1161,6 +1259,7 @@ TypeRecord* NewFunctionTypeRecord() {
   VectorInit(&t->info.function.prototype);
   VectorInit(&t->info.function.template_parameters);
   VectorInit(&t->info.function.template_instantiations);
+  VectorInit(&t->info.function.contract_assertions);
   t->info.function.associated_constraint = NULL;
   t->info.function.explicit_condition = NULL;
   return t;

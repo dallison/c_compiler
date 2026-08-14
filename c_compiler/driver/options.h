@@ -56,6 +56,7 @@ typedef enum {
   kOptionDepsFormat,         // Dependency output format (p1689r5).
   kOptionDepsScanOnly,       // Scan module dependencies without compiling.
   kOptionConstexprEval,      // Constant evaluator: auto, pcode, ast, or audit.
+  kOptionContracts,          // Contract semantic: ignore/observe/enforce/quick-enforce.
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

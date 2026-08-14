@@ -2562,15 +2562,27 @@ static void ParseFunctionDecl(TypeParser* parser) {
     TypeRecordChain(func, trailing_return);
   }
   ParseCXXTrailingRequiresClause(parser, func);
-  SyntaxCloseScope(parser->syntax);
+  SyntaxParseFunctionContracts(parser->syntax, func,
+                               parser->cxx_member_owner,
+                               parser->cxx_member_owner != NULL &&
+                                   !StorageIs(parser->storage, STO(static)));
+  if (func->info.function.contract_assertions.length != 0 &&
+      (parser->stack.length != 0 ||
+       StorageIs(parser->storage, STO(typedef)))) {
+    SyntaxError(parser->syntax,
+                "function contract specifiers cannot be associated with a "
+                "function pointer or function type alias");
+  }
   if (parser->cxx_member_definition != NULL &&
       !parser->cxx_member_definition->is_static &&
-      !func->info.function.has_explicit_object_parameter) {
+      !func->info.function.has_explicit_object_parameter &&
+      !FunctionHasImplicitThisParameter(func)) {
     TypeRecordAddCXXThisParameter(
         func, parser->cxx_member_owner, parser->symbol->location);
   } else if (parser->cxx_member_definition != NULL) {
     func->info.function.cxx_member_owner = parser->cxx_member_owner;
   }
+  SyntaxCloseScope(parser->syntax);
 
   VectorAppend(&parser->stack, func);
   TypeParserDestruct(&proto_parser);

@@ -470,7 +470,7 @@ bool ARMIsFixedRegister(TargetInstruction* inst);
 bool ARMIsConst(TargetInstruction* inst);
 bool ARMIsSymbol(TargetInstruction* inst);
 bool ARMIsIntConst(TargetInstruction* inst);
-int ARMIntValue(TargetInstruction* inst);
+int64_t ARMIntValue(TargetInstruction* inst);
 bool ARMIsPossibleImmediate(int64_t value);
 bool ARMIsBranch(TargetInstruction* inst);
 bool ARMIsConditionalBranch(TargetInstruction* inst);

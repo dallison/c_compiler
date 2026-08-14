@@ -190,6 +190,7 @@ enum {
   kFn_has_explicit_object_parameter = 50,
   kFn_is_decltype_auto_return_deduced = 51,
   kFn_deleted_reason = 52,
+  kFn_contract_assertions = 53,
 };
 
 //
@@ -926,6 +927,88 @@ static void ReadArrayInfo(DeserializeContext* ctx, WireBuffer* in,
 // ---------------------------------------------------------------------------
 // FunctionInfo (inline).
 // ---------------------------------------------------------------------------
+static void WriteContractAssertionVector(SerializeContext* ctx,
+                                         WireBuffer* out, int field,
+                                         Vector* assertions) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 32);
+  WireWriteRawVarint(&tmp, (uint64_t)assertions->length);
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 32);
+    WireWriteInt32(&elem, 1, (int32_t)assertion->kind);
+    SWriteRef(ctx, &elem, 2, kSerialKindAST, assertion->predicate);
+    SWriteRef(ctx, &elem, 3, kSerialKindSymbol,
+              assertion->result_binding);
+    WireWriteUint64(&elem, 4, (uint64_t)assertion->location);
+    SerialWriteAttributeVector(ctx, &elem, 5, &assertion->attributes);
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(out, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+static void ReadContractAssertionVector(DeserializeContext* ctx,
+                                        WireBuffer* in, Vector* assertions) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem_data;
+    size_t elem_len;
+    if (!WireReadBytes(&sub, &elem_data, &elem_len)) {
+      return;
+    }
+    WireBuffer elem;
+    WireBufferInitReader(&elem, elem_data, elem_len);
+    ContractAssertionKind kind = kContractPrecondition;
+    ASTNode* predicate = NULL;
+    Symbol* result_binding = NULL;
+    SourceLocation location = SOURCE_LOCATION_MISSING;
+    Vector attrs = {0};
+    VectorInit(&attrs);
+    while (!WireBufferEof(&elem) && !WireBufferHasError(&elem)) {
+      int elem_field;
+      WireType wt;
+      if (!WireReadTag(&elem, &elem_field, &wt)) {
+        break;
+      }
+      if (elem_field == 1) {
+        int32_t value;
+        WireReadInt32(&elem, &value);
+        kind = (ContractAssertionKind)value;
+      } else if (elem_field == 2) {
+        predicate = (ASTNode*)SReadRef(ctx, &elem, kSerialKindAST);
+      } else if (elem_field == 3) {
+        result_binding =
+            (Symbol*)SReadRef(ctx, &elem, kSerialKindSymbol);
+      } else if (elem_field == 4) {
+        uint64_t value;
+        WireReadUint64(&elem, &value);
+        location = (SourceLocation)value;
+      } else if (elem_field == 5) {
+        SerialReadAttributeVector(ctx, &elem, &attrs);
+      } else {
+        WireSkip(&elem, wt);
+      }
+    }
+    VectorAppend(assertions,
+                 NewContractAssertion(kind, predicate, result_binding,
+                                      &attrs, location));
+  }
+}
+
 static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
                               FunctionInfo* f) {
   SWriteRef(ctx, out, kFn_symbol, kSerialKindSymbol, f->symbol);
@@ -978,6 +1061,8 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kFn_is_decltype_auto_return_deduced,
                 f->is_decltype_auto_return_deduced);
   SWriteStringPtr(ctx, out, kFn_deleted_reason, f->deleted_reason);
+  WriteContractAssertionVector(ctx, out, kFn_contract_assertions,
+                               &f->contract_assertions);
   WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
   WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
   SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
@@ -1006,6 +1091,7 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
   VectorInit(&f->prototype);
   VectorInit(&f->template_parameters);
   VectorInit(&f->template_instantiations);
+  VectorInit(&f->contract_assertions);
   f->virtual_index = -1;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {
     int field;
@@ -1136,6 +1222,9 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_deleted_reason:
         f->deleted_reason = SReadStringPtr(ctx, in);
+        break;
+      case kFn_contract_assertions:
+        ReadContractAssertionVector(ctx, in, &f->contract_assertions);
         break;
       case kFn_is_deduction_guide:
         WireReadBool(in, &f->is_deduction_guide);

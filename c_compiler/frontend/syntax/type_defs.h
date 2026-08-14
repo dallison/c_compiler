@@ -175,6 +175,23 @@ typedef enum {
   kCXXRefQualifierRValue,
 } CXXRefQualifier;
 
+typedef enum {
+  kContractPrecondition = 1,
+  kContractPostcondition = 2,
+  kContractAssertionStatement = 3,
+} ContractAssertionKind;
+
+// A precondition or postcondition attached to a function declarator.  Contract
+// assertions do not participate in the function type or ABI, but are retained
+// on FunctionInfo so declarations, templates and modules can carry them.
+typedef struct ContractAssertion {
+  ContractAssertionKind kind;  // @wire 1
+  struct ASTNode* predicate;    // @wire 2
+  Symbol* result_binding;       // Optional postcondition binding. // @wire 3
+  Vector attributes;            // Attribute* appertaining to assertion.
+  SourceLocation location;      // @wire 4
+} ContractAssertion;
+
 // Function info.  Serialized as an inline sub-message of TypeRecord (see
 // type_serialize.c); the field numbers below are local to that sub-message.
 typedef struct {
@@ -230,6 +247,7 @@ typedef struct {
   bool has_explicit_object_parameter;  // C++23 `this T self`.       // @wire 50
   bool is_decltype_auto_return_deduced;  // Return used decltype(auto). // @wire 51
   String* deleted_reason;  // Optional C++26 `= delete("reason")`.  // @wire 52
+  Vector contract_assertions;  // ContractAssertion* in source order. // @wire 53
 } FunctionInfo;
 
 typedef enum {

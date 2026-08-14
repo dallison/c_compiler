@@ -3446,6 +3446,18 @@ static ConstexprStatementResult EvaluateConstexprStatement(
           EvaluateConstexprValue(ctx, expr->expr, expr->expr->type, &ignored);
       return ok ? kConstexprStmtNormal : kConstexprStmtInvalid;
     }
+    case AST_OP(contract_assert): {
+      if (compiler->contract_semantic == kContractSemanticIgnore) {
+        return kConstexprStmtNormal;
+      }
+      bool satisfied = false;
+      ContractAssertASTNode* assertion = (ContractAssertASTNode*)stmt;
+      return EvaluateConstexprCondition(ctx, assertion->predicate,
+                                        &satisfied) &&
+                     satisfied
+                 ? kConstexprStmtNormal
+                 : kConstexprStmtInvalid;
+    }
     case AST_OP(compound):
       return EvaluateConstexprCompound(ctx, (CompoundStatementASTNode*)stmt,
                                        return_type, result);
@@ -3538,6 +3550,34 @@ static bool EvaluateConstexprFunctionBody(ConstEvalContext* ctx, TypeRecord* fun
          (TypeIsVoid(func->next) && stmt_result == kConstexprStmtNormal);
 }
 
+static bool EvaluateConstexprFunctionContracts(
+    ConstEvalContext* ctx, TypeRecord* func, ContractAssertionKind kind,
+    ConstexprValue* result) {
+  if (compiler->contract_semantic == kContractSemanticIgnore) {
+    return true;
+  }
+  Vector* assertions = &func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    if (assertion->kind != kind) {
+      continue;
+    }
+    size_t mark = ctx->bindings.length;
+    if (assertion->result_binding != NULL) {
+      PushConstexprBinding(ctx, assertion->result_binding, *result);
+    }
+    bool satisfied = false;
+    bool ok = EvaluateConstexprCondition(ctx, assertion->predicate,
+                                         &satisfied) &&
+              satisfied;
+    PopConstexprBindings(ctx, mark);
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Resolve a non-static member function call of the form `obj.f(args)` or
 // `obj->f(args)` (including operator and conversion functions, which are
 // member calls under the hood).  On success the receiver expression is
@@ -3613,7 +3653,11 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
                  ? BindConstexprConstructorActuals(ctx, callee, receiver,
                                                    call->children)
                  : BindConstexprActuals(ctx, callee, call->children)) &&
-            EvaluateConstexprFunctionBody(ctx, func, result);
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPrecondition, result) &&
+            EvaluateConstexprFunctionBody(ctx, func, result) &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPostcondition, result);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;
@@ -3924,9 +3968,13 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   ctx->call_depth++;
   ConstexprValue ignored = {0};
   bool ok = BindConstexprActuals(ctx, callee, call->children) &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,
                                        func->next, &ignored) ==
-                kConstexprStmtNormal;
+                kConstexprStmtNormal &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPostcondition, &ignored);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;
@@ -3962,9 +4010,13 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
   ConstexprValue ignored = {0};
   bool ok = BindConstexprConstructorActuals(ctx, callee, receiver,
                                            call->children) &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,
                                        func->next, &ignored) ==
-                kConstexprStmtNormal;
+                kConstexprStmtNormal &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPostcondition, &ignored);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;
@@ -4000,9 +4052,13 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
   ConstexprValue ignored = {0};
   bool ok = BindConstexprConstructorObjectActuals(ctx, callee, object,
                                                   call->children) &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,
                                        func->next, &ignored) ==
-                kConstexprStmtNormal;
+                kConstexprStmtNormal &&
+            EvaluateConstexprFunctionContracts(
+                ctx, func, kContractPostcondition, &ignored);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;

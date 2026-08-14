@@ -1125,7 +1125,11 @@ static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
-    known = sym->defined && sym->section == ASM.current_section;
+    // Keep calls to weak definitions relocatable so the linker can select a
+    // strong override. Strong definitions retain the toolchain's established
+    // local-binding behavior.
+    known = sym->defined && sym->section == ASM.current_section &&
+            sym->binding != SYM_BIND(weak);
     target = sym->value;
   } else {
     target = AssemblerEvaluateKnownExpression(&ASM, &known);

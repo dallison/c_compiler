@@ -581,11 +581,11 @@ bool AARCH64IsReturn(TargetInstruction* inst) {
   return (AARCH64Opcode)((int)inst->opcode == (int)AARCH64_OP(ret));
 }
 
-int AARCH64IntValue(TargetInstruction* inst) {
+int64_t AARCH64IntValue(TargetInstruction* inst) {
   if (inst->opcode == (TargetOpcode)AARCH64_OP(r0)) {
     return 0;
   }
-  return (int)((TargetConstant*)inst)->value.ivalue;
+  return ((TargetConstant*)inst)->value.ivalue;
 }
 
 // Is the value small enough to be encoded in an immediate field?
@@ -678,10 +678,13 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
   // operand width, dropping high bits or using an out-of-range shift amount.
   if (node->type != NULL) {
     int size = kSize32Bit;
+    bool address_operation =
+        node->opcode == IR_OP(adda) || node->opcode == IR_OP(suba) ||
+        node->opcode == IR_OP(mova) || node->opcode == IR_OP(nota);
     // Struct/union-typed nodes denote an aggregate, which in this ABI is
     // referenced by address; size them as 64-bit pointers (e.g. forming
     // &local to copy a struct argument by value).
-    if (node->type->size == 8 ||
+    if (address_operation || node->type->size == 8 ||
         TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
         TypeIsDouble(node->type) || TypeIsLongDouble(node->type) ||
@@ -1985,7 +1988,18 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) && IRIsConst(op2)) {
-        // Both constant, multiply don't replace.
+        uint64_t value =
+            (uint64_t)((IRConstant*)op1)->value.ivalue +
+            (uint64_t)((IRConstant*)op2)->value.ivalue;
+        inst = NewInstruction1(
+            AARCH64_OP(mov),
+            GetIntConstant(g, NULL,
+                           (node->opcode == IR_OP(adda) ||
+                            node->opcode == IR_OP(suba) ||
+                            (node->type != NULL && node->type->size > 4))
+                               ? kTargetType64Bit
+                               : kTargetType32Bit,
+                           (int64_t)value));
         break;
       }
       // Adds are commutative so we can have a const as first or
@@ -1993,16 +2007,26 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         if (AARCH64IsPossibleImmediate(c)) {
-          inst = (TargetInstruction*)NewInstruction(AARCH64_OP(add));
-          inst->operand[0] = Materialize(g, op1);
-          inst->operand[1] = GetLoweredNode(op2);
+          TargetInstruction* lhs = Materialize(g, op1);
+          if ((AARCH64Opcode)(int)lhs->opcode == AARCH64_OP(zr)) {
+            inst = NewInstruction1(AARCH64_OP(mov), GetLoweredNode(op2));
+          } else {
+            inst = (TargetInstruction*)NewInstruction(AARCH64_OP(add));
+            inst->operand[0] = lhs;
+            inst->operand[1] = GetLoweredNode(op2);
+          }
         }
       } else if (IRIsConst(op1)) {
         int64_t c = ((IRConstant*)op1)->value.ivalue;
         if (AARCH64IsPossibleImmediate(c)) {
-          inst = (TargetInstruction*)NewInstruction(AARCH64_OP(add));
-          inst->operand[0] = Materialize(g, op2);
-          inst->operand[1] = GetLoweredNode(op1);
+          TargetInstruction* rhs = Materialize(g, op2);
+          if ((AARCH64Opcode)(int)rhs->opcode == AARCH64_OP(zr)) {
+            inst = NewInstruction1(AARCH64_OP(mov), GetLoweredNode(op1));
+          } else {
+            inst = (TargetInstruction*)NewInstruction(AARCH64_OP(add));
+            inst->operand[0] = rhs;
+            inst->operand[1] = GetLoweredNode(op1);
+          }
         }
       }
       break;
@@ -2014,12 +2038,39 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
-      if (IRIsConst(op2)) {
+      if (IRIsConst(op1) && IRIsConst(op2)) {
+        uint64_t value =
+            (uint64_t)((IRConstant*)op1)->value.ivalue -
+            (uint64_t)((IRConstant*)op2)->value.ivalue;
+        inst = NewInstruction1(
+            AARCH64_OP(mov),
+            GetIntConstant(g, NULL,
+                           (node->opcode == IR_OP(adda) ||
+                            node->opcode == IR_OP(suba) ||
+                            (node->type != NULL && node->type->size > 4))
+                               ? kTargetType64Bit
+                               : kTargetType32Bit,
+                           (int64_t)value));
+      } else if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         if (AARCH64IsPossibleImmediate(c)) {
-          inst = (TargetInstruction*)NewInstruction(AARCH64_OP(sub));
-          inst->operand[0] = Materialize(g, op1);
-          inst->operand[1] = GetIntConstant(g, NULL, kTargetType32Bit, c);
+          TargetInstruction* lhs = Materialize(g, op1);
+          if ((AARCH64Opcode)(int)lhs->opcode == AARCH64_OP(zr)) {
+            inst = NewInstruction1(
+                AARCH64_OP(mov),
+                GetIntConstant(g, NULL,
+                               (node->opcode == IR_OP(adda) ||
+                                node->opcode == IR_OP(suba) ||
+                                (node->type != NULL && node->type->size > 4))
+                                   ? kTargetType64Bit
+                                   : kTargetType32Bit,
+                               (int64_t)(0 - (uint64_t)c)));
+          } else {
+            inst = (TargetInstruction*)NewInstruction(AARCH64_OP(sub));
+            inst->operand[0] = lhs;
+            inst->operand[1] =
+                GetIntConstant(g, NULL, kTargetType32Bit, c);
+          }
         }
       }
     }
@@ -2220,6 +2271,23 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
     for (size_t i = 0; i < node->inputs.length; i++) {
       IRNode* input = node->inputs.value.p[i];
       inst->operand[i] = Materialize(g, input);
+    }
+  }
+
+  // AArch64 register-form address arithmetic is performed in X registers.
+  // When the offset was computed as a signed 32-bit integer, merely naming its
+  // X-register view zero-extends it and turns a negative displacement into a
+  // large positive one.  Widen variable signed offsets explicitly before they
+  // participate in pointer arithmetic.
+  if ((node->opcode == IR_OP(adda) || node->opcode == IR_OP(suba)) &&
+      node->inputs.length == 2 && !IRIsConst(node->inputs.value.p[1])) {
+    IRNode* offset = node->inputs.value.p[1];
+    if (offset->type != NULL && offset->type->size == 4 &&
+        !TypeIsUnsigned(offset->type)) {
+      inst->operand[1] =
+          Emit(g, SetInstructionSize(
+                      NewInstruction1(AARCH64_OP(sxtw), inst->operand[1]),
+                      kSize64Bit));
     }
   }
 

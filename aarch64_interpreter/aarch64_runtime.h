@@ -26,6 +26,7 @@ typedef struct AARCH64Runtime {
   bool trace_instructions;
   bool trace_registers;
   uint32_t symbol_resolver_code[2];
+  ELFProgramHeader symbol_resolver_segment;
   AARCH64ProcessRuntime process;
 } AARCH64Runtime;
 

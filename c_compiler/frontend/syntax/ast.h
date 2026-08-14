@@ -162,6 +162,7 @@ typedef enum {
   AST_OP(stmt_expr),  // GCC statement expression ({ ... }).
   AST_OP(requires_expr),  // C++20 requires-expression.
   AST_OP(static_assert),  // C++11 static_assert declaration.
+  AST_OP(contract_assert),  // C++26 contract assertion statement.
 
   // Type conversions.
   // Integer to...
@@ -459,6 +460,7 @@ typedef enum {
   kASTShapeDesignatedInit,
   kASTShapeCompoundLiteral,
   kASTShapeStaticAssert,
+  kASTShapeContractAssert,
   kASTShapeRequiresExpr,
 } ASTNodeShape;
 
@@ -743,6 +745,15 @@ typedef struct {
 ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
                                 ASTNode* message_expr,
                                 SourceLocation location);
+
+typedef struct {
+  ASTNode base;
+  ASTNode* predicate;  // @wire 16
+  Vector attributes;   // Attribute*
+} ContractAssertASTNode;
+
+ASTNode* NewContractAssertASTNode(ASTNode* predicate, Vector* attributes,
+                                  SourceLocation location);
 
 // If statement with condition, if and else parts.  The else part is optional.
 typedef struct {

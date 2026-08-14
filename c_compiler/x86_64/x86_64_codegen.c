@@ -477,11 +477,11 @@ bool X86_64IsReturn(TargetInstruction* inst) {
   return (X86_64Opcode)((int)inst->opcode == (int)X86_64_OP(ret));
 }
 
-int X86_64IntValue(TargetInstruction* inst) {
+int64_t X86_64IntValue(TargetInstruction* inst) {
   if (inst->opcode == (TargetOpcode)X86_64_OP(x0)) {
     return 0;
   }
-  return (int)((TargetConstant*)inst)->value.ivalue;
+  return ((TargetConstant*)inst)->value.ivalue;
 }
 
 // Is the value small enough to be encoded in an immediate field?

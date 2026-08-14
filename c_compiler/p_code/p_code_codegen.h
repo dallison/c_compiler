@@ -232,6 +232,7 @@ typedef struct PCodeGenerator {
   TargetInstruction* argument_pointer;
   Vector exception_ranges;
   Vector exception_typeinfos;
+  int source_pointer_size;
 
   // Register allocator.
   PCodeRegisterAllocator register_allocator;

@@ -29,6 +29,10 @@ static bool UsesItaniumUnwind(Generator* gen) {
 }
 
 static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol);
+static Symbol* GetDaveCCTerminateFunction(SourceLocation location);
+static void RecordExceptionRange(Generator* gen, IRNode* try_start,
+                                 IRNode* try_end, IRNode* catch_label,
+                                 EHTypeInfo* catch_typeinfo);
 
 static Symbol* GetInventedRuntimeFunction(const char* function_name,
                                           TypeRecord* return_type,
@@ -44,6 +48,36 @@ static Symbol* GetInventedRuntimeFunction(const char* function_name,
   TypeRecord* func_type = NewFunctionTypeRecord();
   TypeRecordChain(func_type, return_type);
   symbol = NewSymbol(function_name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetContractViolationFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__davecc_contract_violation");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  for (int i = 0; i < 8; i++) {
+    TypeRecord* formal_type =
+        i < 5
+            ? NewTypeRecordWithSize(kTypeInt, kQualPlain)
+            : NewPointerTo(kQualPlain,
+                           NewTypeRecordWithSize(kTypeChar, kQualConst));
+    Symbol* formal =
+        NewSymbol("", formal_type, STO(auto));
+    formal->flags.is_argument = true;
+    formal->value.arg_number = i;
+    VectorAppend(&func_type->info.function.prototype, formal);
+  }
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__davecc_contract_violation", func_type, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   symbol->location = location;
@@ -252,6 +286,193 @@ static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol) {
   IRNode* call = NewIR1(IR_OP(calla), func);
   TypeRecord* return_type = symbol->type->next;
   return IRSetType(GeneratorEmit(gen, call), return_type);
+}
+
+static IRNode* GenerateContractViolationRuntimeCall(
+    Generator* gen, ContractAssertionKind kind, int detection,
+    SourceLocation location) {
+  int file = 0;
+  int line = 0;
+  int column = 0;
+  SourceLocationNumbers(location, &file, &line, &column);
+  (void)file;
+  const char* filename = "";
+  int decoded_line = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &decoded_line, &start, &end);
+  (void)decoded_line;
+  (void)start;
+  (void)end;
+  const char* function_name =
+      gen->func != NULL && gen->func->info.function.symbol != NULL
+          ? gen->func->info.function.symbol->name.value
+          : "";
+  int values[] = {
+      (int)kind,
+      (int)compiler->contract_semantic,
+      detection,
+      line,
+      column,
+  };
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  TypeRecord* string_type =
+      NewPointerTo(kQualPlain,
+                   NewTypeRecordWithSize(kTypeChar, kQualConst));
+  const char* strings[] = {"contract assertion",
+                           filename != NULL ? filename : "",
+                           function_name};
+  IRNode* arguments[8];
+  for (size_t i = 0; i < 5; i++) {
+    arguments[i] = GeneratorGetIntConstant(gen, int_type, values[i]);
+  }
+  for (size_t i = 0; i < 3; i++) {
+    String string;
+    StringInit(&string, strings[i]);
+    int literal_id = CompilerAddStringLiteral(&string, 1);
+    StringDestruct(&string);
+    arguments[5 + i] = IRSetType(
+        GeneratorEmit(
+            gen, NewIR1(IR_OP(literalref),
+                        GeneratorGetIntConstant(gen, string_type,
+                                                literal_id))),
+        string_type);
+  }
+  Vector pushes = {0};
+  VectorInit(&pushes);
+  for (size_t i = 8; i-- > 0;) {
+    IRNode* value = arguments[i];
+    IRNode* arg_num = GeneratorGetIntConstant(gen, NULL, (int64_t)i);
+    IRNode* push = NewIR2(IR_OP(pusharg), value, arg_num);
+    IRSetType(push, value->type);
+    GeneratorEmit(gen, push);
+    VectorAppend(&pushes, push);
+  }
+  Symbol* symbol = GetContractViolationFunction(location);
+  IRNode* call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, symbol));
+  size_t num_args = 8;
+  for (size_t argnum = 0; argnum < num_args; argnum++) {
+    for (size_t i = 0; i < pushes.length; i++) {
+      IRNode* push = pushes.value.p[i];
+      IRConstant* index = push->inputs.value.p[1];
+      if ((size_t)index->value.ivalue == argnum) {
+        IRAddInput(call, push, false);
+        break;
+      }
+    }
+  }
+  VectorDestruct(&pushes);
+  return IRSetType(GeneratorEmit(gen, call), symbol->type->next);
+}
+
+static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
+                                  ContractAssertionKind kind,
+                                  SourceLocation location) {
+  if (predicate == NULL ||
+      compiler->contract_semantic == kContractSemanticIgnore) {
+    return;
+  }
+  bool catch_exceptions = CompilerExceptionsEnabled() &&
+                          !gen->for_constant_evaluation;
+  IRNode* try_start = catch_exceptions ? NewIR(IR_OP(label)) : NULL;
+  IRNode* try_end = catch_exceptions ? NewIR(IR_OP(label)) : NULL;
+  IRNode* catch_label = catch_exceptions ? NewIR(IR_OP(label)) : NULL;
+  IRNode* dispatch_label =
+      catch_exceptions && UsesItaniumUnwind(gen) ? NewIR(IR_OP(label)) : NULL;
+  IRNode* passed = NewIR(IR_OP(label));
+  if (try_start != NULL) {
+    GeneratorEmit(gen, try_start);
+  }
+  IRNode* condition = GenerateExpression(gen, predicate);
+  if (try_end != NULL) {
+    GeneratorEmit(gen, try_end);
+    RecordExceptionRange(gen, try_start, try_end,
+                         dispatch_label != NULL ? dispatch_label : catch_label,
+                         NULL);
+  }
+  GeneratorEmit(gen, NewIR2(IR_OP(btrue), condition, passed));
+
+  if (compiler->contract_semantic != kContractSemanticQuickEnforce) {
+    GenerateContractViolationRuntimeCall(gen, kind, 1, location);
+  }
+  if (compiler->contract_semantic == kContractSemanticEnforce ||
+      compiler->contract_semantic == kContractSemanticQuickEnforce) {
+    GenerateNoArgRuntimeCall(gen, GetDaveCCTerminateFunction(location));
+  }
+  if (catch_exceptions) {
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), passed));
+    if (dispatch_label != NULL) {
+      GeneratorEmit(gen, dispatch_label);
+      GenerateNoArgRuntimeCall(gen, GetLandingPadSelectorFunction(location));
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), catch_label));
+    }
+    GeneratorEmit(gen, catch_label);
+    if (UsesItaniumUnwind(gen)) {
+      EmitCxaBeginCatch(gen, location);
+    }
+    if (compiler->contract_semantic != kContractSemanticQuickEnforce) {
+      GenerateContractViolationRuntimeCall(gen, kind, 2, location);
+    }
+    if (compiler->contract_semantic == kContractSemanticEnforce ||
+        compiler->contract_semantic == kContractSemanticQuickEnforce) {
+      GenerateNoArgRuntimeCall(gen, GetDaveCCTerminateFunction(location));
+    } else {
+      if (UsesItaniumUnwind(gen)) {
+        EmitCxaEndCatch(gen, location);
+      }
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), passed));
+    }
+  }
+  GeneratorEmit(gen, passed);
+}
+
+void GenerateFunctionContractAssertions(Generator* gen,
+                                        ContractAssertionKind kind) {
+  Vector* assertions = &gen->func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    if (assertion->kind == kind) {
+      GenerateContractCheck(gen, assertion->predicate, assertion->kind,
+                            assertion->location);
+    }
+  }
+}
+
+static bool FunctionHasPostconditionResultBindings(TypeRecord* func) {
+  Vector* assertions = &func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    if (assertion->kind == kContractPostcondition &&
+        assertion->result_binding != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void BindPostconditionResults(Generator* gen, IRNode* scalar_result) {
+  Vector* assertions = &gen->func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    Symbol* binding = assertion->result_binding;
+    if (assertion->kind != kContractPostcondition || binding == NULL) {
+      continue;
+    }
+    if (TypeIsStructOrUnion(gen->func->next)) {
+      IRNode* destination = GeneratorGetVariable(gen, binding);
+      IRNode* store = GeneratorEmit(
+          gen, NewIR2(IR_OP(storea), destination, gen->struct_return_value));
+      IRSetType(store, binding->type);
+      IRSetVarDef(store, binding);
+    } else if (scalar_result != NULL) {
+      IRNode* destination = GeneratorGetVariable(gen, binding);
+      IRNode* store = GeneratorEmit(
+          gen, NewIR2(GetStoreOpcodeForType(binding->type), destination,
+                      scalar_result));
+      IRSetType(store, binding->type);
+      IRSetVarDef(store, binding);
+    }
+  }
 }
 
 static void GenerateReferenceCatchBinding(Generator* gen, CatchASTNode* handler) {
@@ -1888,6 +2109,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 static void GenerateReturnStatement(Generator* gen,
                                     CombinedStatementASTNode* node) {
   IRNode* nrvo_expr = NULL;
+  IRNode* contract_result_value = NULL;
   // For a scalar/reference return the value must survive the scope-exit
   // destructors (a destructor call would otherwise clobber the return
   // register), so the `result` IR that places it is deferred until after the
@@ -1919,12 +2141,15 @@ static void GenerateReturnStatement(Generator* gen,
         node->cond->flags |= kASTNeedAddress;
       }
       IRNode* expr = GenerateExpression(gen, node->cond);
+      contract_result_value = expr;
       node->cond->flags = old_cond_flags;
       // When scope-exit destructors run between here and the branch, the
       // scalar/reference return value must survive those calls.  The register
       // allocator does not keep it live across the `result` opcode, so spill it
       // to a stack temporary now and reload it after the destructors.
-      bool spill_for_cleanup = node->stmt != NULL;
+      bool spill_for_cleanup =
+          node->stmt != NULL ||
+          gen->func->info.function.contract_assertions.length != 0;
       if (returns_reference) {
         if (spill_for_cleanup) {
           TypeRecord* addr_type = NewPointerTo(kQualPlain, gen->func->next);
@@ -1981,6 +2206,9 @@ static void GenerateReturnStatement(Generator* gen,
   }
 
 emit_return_branch:
+  if (FunctionHasPostconditionResultBindings(gen->func)) {
+    BindPostconditionResults(gen, contract_result_value);
+  }
   // Run the C++ scope-exit destructors for automatic objects going out of
   // scope (attached to the return's `stmt` child by the semantic analyzer).
   // They run after the return value has been materialised but before the
@@ -1988,6 +2216,7 @@ emit_return_branch:
   if (node->stmt != NULL) {
     GenerateStatement(gen, node->stmt);
   }
+  GenerateFunctionContractAssertions(gen, kContractPostcondition);
   if (have_deferred_result) {
     IRNode* result_value = deferred_result_value;
     if (deferred_result_needs_reload) {
@@ -2239,6 +2468,12 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
   case AST_OP(static_assert):
     // Checked during semantic analysis; no runtime code is emitted.
     break;
+  case AST_OP(contract_assert): {
+    ContractAssertASTNode* assertion = (ContractAssertASTNode*)node;
+    GenerateContractCheck(gen, assertion->predicate,
+                          kContractAssertionStatement, node->location);
+    break;
+  }
   default:
     assert(false);
   }

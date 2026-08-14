@@ -240,6 +240,10 @@ bool SyntaxAttributeIsSupported(const char* name);
 bool SyntaxLookingAtCXXAttribute(Syntax* syntax);
 bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs);
 bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs);
+void SyntaxParseFunctionContracts(Syntax* syntax, TypeRecord* func,
+                                  Struct* member_owner,
+                                  bool add_implicit_this);
+void SyntaxDiagnoseInvalidFunctionContracts(Syntax* syntax, TypeRecord* func);
 void SyntaxApplyDeclarationAttributes(Symbol* sym);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);

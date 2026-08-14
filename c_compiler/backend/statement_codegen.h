@@ -14,6 +14,8 @@
 
 void GenerateStatement(Generator* gen, ASTNode* node);
 IRNode* GenerateVLASize(Generator* gen, TypeRecord* type);
+void GenerateFunctionContractAssertions(Generator* gen,
+                                        ContractAssertionKind kind);
 
 // Runtime terminate guard for noexcept functions (see statement_codegen.c).
 // The labels bracket the guarded region (the whole function body); `active`

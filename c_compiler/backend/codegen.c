@@ -236,6 +236,8 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->basic_blocks);
   VectorInit(&gen->loops);
   gen->for_constant_evaluation = false;
+  gen->source_pointer_size =
+      compiler->target != NULL ? compiler->target->pointer_size : SizeofPointer();
 
   IRResetNodeId();
 }
@@ -1347,7 +1349,8 @@ void* GenerateFunction(Generator* gen) {
   // owned by one Generator and are destroyed with its IR, so never reuse the
   // cached pointer left by an earlier emission of the same AST.
   ASTNodeVisit(&body->base, ResetASTIRLabel, 0, NULL);
-  if (body->statements->length == 0) {
+  if (body->statements->length == 0 &&
+      gen->func->info.function.contract_assertions.length == 0) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));
   } else {
@@ -1370,7 +1373,13 @@ void* GenerateFunction(Generator* gen) {
     NoexceptTerminateGuard noexcept_guard;
     GenerateNoexceptGuardEnter(gen, &noexcept_guard);
 
+    GenerateFunctionContractAssertions(gen, kContractPrecondition);
     GenerateStatement(gen, &body->base);
+    // Explicit returns evaluate postconditions in GenerateReturnStatement.
+    // Only a void-returning function can normally exit by falling through.
+    if (TypeIsVoid(gen->func->next)) {
+      GenerateFunctionContractAssertions(gen, kContractPostcondition);
+    }
 
     GenerateNoexceptGuardLeave(gen, &noexcept_guard);
 

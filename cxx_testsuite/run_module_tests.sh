@@ -643,6 +643,23 @@ run "$DAVECC" -target "$TARGET" -static \
 [ "$?" -eq 0 ] || fail "execute imported expansion statement"
 
 run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/contracts.dcm" \
+  "$FIXTURES/contracts.cppm" ||
+  fail "emit contracts module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_contracts.cpp" \
+  -o "$work/use_contracts.o" ||
+  fail "instantiate imported contracts"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_contracts.o" "$LIBC" \
+  -o "$work/contracts.bin" ||
+  fail "link imported contracts executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/contracts.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute imported contracts"
+
+run "$DAVECC" -target "$TARGET" -std=c++26 \
   -Xemit-module "$work/reflection.dcm" \
   "$FIXTURES/reflection.cppm" ||
   fail "emit reflection module"

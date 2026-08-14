@@ -4,6 +4,7 @@
 //
 
 #include "constexpr_pcode.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,6 +108,7 @@ typedef struct {
   unsigned char* heap;
   size_t heap_size;
   ConstexprPCodeFreeBlock* free_list;
+  size_t source_size_t_size;
 } ConstexprPCodeRuntime;
 
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data);
@@ -2414,17 +2416,68 @@ bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason) {
   return ValidateFunction(callee->type, reason);
 }
 
+typedef struct {
+  bool found;
+  Vector* visited;
+} ConstexprContractScan;
+
+static bool PCodeFunctionHasTransitiveContracts(Symbol* callee,
+                                                Vector* visited);
+
+static void DetectTransitiveConstexprContracts(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)child_id;
+  ConstexprContractScan* scan = data;
+  if (mode != kVisitPreChildren || node == NULL || scan->found) {
+    return;
+  }
+  if (node->op == AST_OP(contract_assert)) {
+    scan->found = true;
+  } else if (node->op == AST_OP(call)) {
+    Symbol* callee = PCodeConstexprFunctionDefinition(
+        PCodeConstexprCallSymbol(node));
+    scan->found =
+        PCodeFunctionHasTransitiveContracts(callee, scan->visited);
+  }
+}
+
+static bool PCodeFunctionHasTransitiveContracts(Symbol* callee,
+                                                Vector* visited) {
+  if (callee == NULL || callee->type == NULL ||
+      callee->type->info.function.body == NULL) {
+    return false;
+  }
+  if (callee->type->info.function.contract_assertions.length != 0) {
+    return true;
+  }
+  for (size_t i = 0; i < visited->length; i++) {
+    if (visited->value.p[i] == callee) {
+      return false;
+    }
+  }
+  VectorAppend(visited, callee);
+  ConstexprContractScan scan = {
+      .visited = visited,
+  };
+  ASTNodeVisit(callee->type->info.function.body,
+               DetectTransitiveConstexprContracts, 0, &scan);
+  return scan.found;
+}
+
 static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL || *(bool*)data) {
+  bool* required = data;
+  if (mode != kVisitPreChildren || node == NULL || *required) {
     return;
   }
   if (node->op == AST_OP(reflect) ||
       node->op == AST_OP(reflection_constant) ||
       node->op == AST_OP(splice) ||
+      node->op == AST_OP(contract_assert) ||
       (node->type != NULL && TypeContainsReflection(node->type))) {
-    *(bool*)data = true;
+    *required = true;
   } else if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
     BinaryASTNode* access = (BinaryASTNode*)node;
     TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
@@ -2434,14 +2487,21 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     if (TypeIsStructOrUnion(receiver) &&
         receiver->info.struct_info != NULL &&
         receiver->info.struct_info->is_union) {
-      *(bool*)data = true;
+      *required = true;
     }
   } else if (node->op == AST_OP(plus) || node->op == AST_OP(minus)) {
     BinaryASTNode* binary = (BinaryASTNode*)node;
     if (TypeIsPointer(node->type) && binary->left != NULL &&
         PointerExpressionUsesFixedArray(binary->left)) {
-      *(bool*)data = true;
+      *required = true;
     }
+  } else if (node->op == AST_OP(call)) {
+    Symbol* callee = PCodeConstexprFunctionDefinition(
+        PCodeConstexprCallSymbol(node));
+    Vector visited;
+    VectorInit(&visited);
+    *required = PCodeFunctionHasTransitiveContracts(callee, &visited);
+    VectorDestruct(&visited);
   }
 }
 
@@ -2455,6 +2515,9 @@ bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
       callee->type->info.function.body == NULL) {
     return false;
   }
+  if (callee->type->info.function.contract_assertions.length != 0) {
+    return true;
+  }
   bool required = false;
   ASTNodeVisit(callee->type->info.function.body, DetectConstexprASTOverlay, 0,
                &required);
@@ -2466,6 +2529,9 @@ static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
   runtime->heap = NULL;
   runtime->heap_size = 0;
   runtime->free_list = NULL;
+  runtime->source_size_t_size =
+      compiler->target != NULL ? (size_t)compiler->target->pointer_size
+                               : sizeof(size_t);
 }
 
 static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime) {
@@ -2613,12 +2679,20 @@ static void ConstexprPCodeHeapFree(ConstexprPCodeRuntime* runtime,
   ConstexprPCodeInsertFreeBlock(runtime, block, size + sizeof(size_t));
 }
 
-static uint64_t ConstexprPCodeStackArgument(PCodeVM* vm, size_t index) {
+static uint64_t ConstexprPCodeStackArgumentAt(PCodeVM* vm, size_t byte_offset,
+                                              size_t size) {
+  assert(size <= sizeof(uint64_t));
   uint64_t value = 0;
-  memcpy(&value, (void*)(uintptr_t)(vm->iregs[PCODE_SP_REG] + 8 +
-                                    (int64_t)(index * sizeof(uint64_t))),
-         sizeof(value));
+  memcpy(&value,
+         (void*)(uintptr_t)(vm->iregs[PCODE_SP_REG] + sizeof(uint64_t) +
+                            (int64_t)byte_offset),
+         size);
   return value;
+}
+
+static uint64_t ConstexprPCodeStackArgument(PCodeVM* vm, size_t index) {
+  return ConstexprPCodeStackArgumentAt(
+      vm, index * sizeof(uint64_t), sizeof(uint64_t));
 }
 
 static PCodeVMStatus ConstexprPCodeAllocateHeapBlock(
@@ -2653,8 +2727,9 @@ static PCodeVMStatus ConstexprPCodeAllocateHeapBlock(
 
 static PCodeVMStatus ConstexprPCodeEscapeMalloc(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
-  return ConstexprPCodeAllocateHeapBlock(
-      vm, runtime, (size_t)ConstexprPCodeStackArgument(vm, 0));
+  size_t size = (size_t)ConstexprPCodeStackArgumentAt(
+      vm, 0, runtime->source_size_t_size);
+  return ConstexprPCodeAllocateHeapBlock(vm, runtime, size);
 }
 
 static PCodeVMStatus ConstexprPCodeEscapeFree(
@@ -2677,7 +2752,8 @@ static PCodeVMStatus ConstexprPCodeEscapeFree(
 static PCodeVMStatus ConstexprPCodeEscapeRealloc(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   void* memory = (void*)(uintptr_t)ConstexprPCodeStackArgument(vm, 0);
-  size_t size = (size_t)ConstexprPCodeStackArgument(vm, 1);
+  size_t size = (size_t)ConstexprPCodeStackArgumentAt(
+      vm, sizeof(uint64_t), runtime->source_size_t_size);
   if (memory == NULL) {
     return ConstexprPCodeAllocateHeapBlock(vm, runtime, size);
   }
@@ -2716,9 +2792,11 @@ static PCodeVMStatus ConstexprPCodeEscapeRealloc(
   return kPCodeVMStatusRunning;
 }
 
-static PCodeVMStatus ConstexprPCodeEscapePlacementNew(PCodeVM* vm) {
+static PCodeVMStatus ConstexprPCodeEscapePlacementNew(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   vm->iregs[PCODE_INT_RETURN_REG] =
-      (int64_t)(uintptr_t)ConstexprPCodeStackArgument(vm, 1);
+      (int64_t)(uintptr_t)ConstexprPCodeStackArgumentAt(
+          vm, runtime->source_size_t_size, sizeof(uint64_t));
   return kPCodeVMStatusRunning;
 }
 
@@ -2767,10 +2845,12 @@ static bool ConstexprPCodeNormalizeAddress(PCodeVM* vm, uint64_t raw,
   return false;
 }
 
-static PCodeVMStatus ConstexprPCodeEscapeMemcpy(PCodeVM* vm) {
+static PCodeVMStatus ConstexprPCodeEscapeMemcpy(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   uint64_t raw_dest = ConstexprPCodeStackArgument(vm, 0);
   uint64_t raw_src = ConstexprPCodeStackArgument(vm, 1);
-  size_t size = (size_t)ConstexprPCodeStackArgument(vm, 2);
+  size_t size = (size_t)ConstexprPCodeStackArgumentAt(
+      vm, 2 * sizeof(uint64_t), runtime->source_size_t_size);
   uint64_t dest_address = 0;
   uint64_t src_address = 0;
   if (!ConstexprPCodeNormalizeAddress(vm, raw_dest, size, true,
@@ -2803,11 +2883,13 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
       return runtime != NULL ? ConstexprPCodeEscapeRealloc(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapePlacementNew:
-      return ConstexprPCodeEscapePlacementNew(vm);
+      return runtime != NULL ? ConstexprPCodeEscapePlacementNew(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeThrow:
       return kPCodeVMStatusInvalidConstantOperation;
     case kConstexprPCodeEscapeMemcpy:
-      return ConstexprPCodeEscapeMemcpy(vm);
+      return runtime != NULL ? ConstexprPCodeEscapeMemcpy(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeInvalidConstantOperation:
       return kPCodeVMStatusInvalidConstantOperation;
     default:

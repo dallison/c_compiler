@@ -437,7 +437,7 @@ bool RVIsFixedRegister(TargetInstruction* inst);
 bool RVIsConst(TargetInstruction* inst);
 bool RVIsSymbol(TargetInstruction* inst);
 bool RVIsIntConst(TargetInstruction* inst);
-int RVIntValue(TargetInstruction* inst);
+int64_t RVIntValue(TargetInstruction* inst);
 bool RVIsPossibleImmediate(int64_t value);
 bool RVIsBranch(TargetInstruction* inst);
 bool RVIsConditionalBranch(TargetInstruction* inst);

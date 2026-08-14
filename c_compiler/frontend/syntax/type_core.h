@@ -55,6 +55,13 @@ TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
 TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);
 
 TypeRecord* NewFunctionTypeRecord(void);
+ContractAssertion* NewContractAssertion(ContractAssertionKind kind,
+                                        struct ASTNode* predicate,
+                                        Symbol* result_binding,
+                                        Vector* attributes,
+                                        SourceLocation location);
+void ContractAssertionDelete(ContractAssertion* assertion);
+void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
 Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
                          bool is_volatile_member, SourceLocation location);
