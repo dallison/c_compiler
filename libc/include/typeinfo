@@ -63,14 +63,18 @@ class type_info {
 
 class bad_cast : public exception {
  public:
-  bad_cast() noexcept {}
-  const char* what() const noexcept override { return "std::bad_cast"; }
+  constexpr bad_cast() noexcept {}
+  constexpr const char* what() const noexcept override {
+    return "std::bad_cast";
+  }
 };
 
 class bad_typeid : public exception {
  public:
-  bad_typeid() noexcept {}
-  const char* what() const noexcept override { return "std::bad_typeid"; }
+  constexpr bad_typeid() noexcept {}
+  constexpr const char* what() const noexcept override {
+    return "std::bad_typeid";
+  }
 };
 
 }  // namespace std

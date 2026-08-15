@@ -51,6 +51,9 @@
 #endif
 
 #if __cplusplus > 202302L
+#ifndef __cpp_lib_constexpr_exceptions
+#define __cpp_lib_constexpr_exceptions 202502L
+#endif
 #ifndef __cpp_lib_contracts
 #define __cpp_lib_contracts 202502L
 #endif

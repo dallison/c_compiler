@@ -155,7 +155,9 @@ class bad_expected_access;
 template <>
 class bad_expected_access<void> : public exception {
  public:
-  const char* what() const noexcept override {
+  constexpr bad_expected_access() noexcept = default;
+
+  constexpr const char* what() const noexcept override {
     return "bad expected access";
   }
 };
@@ -167,15 +169,17 @@ class bad_expected_access : public __bad_expected_access_base {
   E __error_;
 
  public:
-  explicit bad_expected_access(E error)
+  constexpr explicit bad_expected_access(E error)
       : __error_(static_cast<E&&>(error)) {}
 
-  const E& error() const& noexcept { return __error_; }
-  E& error() & noexcept { return __error_; }
-  const E&& error() const&& noexcept {
+  constexpr const E& error() const& noexcept { return __error_; }
+  constexpr E& error() & noexcept { return __error_; }
+  constexpr const E&& error() const&& noexcept {
     return static_cast<const E&&>(__error_);
   }
-  E&& error() && noexcept { return static_cast<E&&>(__error_); }
+  constexpr E&& error() && noexcept {
+    return static_cast<E&&>(__error_);
+  }
 };
 
 template <class T, class E>

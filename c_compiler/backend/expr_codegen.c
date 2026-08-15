@@ -2689,7 +2689,7 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
     return IRSetType(GeneratorEmit(gen, call),
                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   }
-  if (RttiUsesItaniumABI()) {
+  if (RttiUsesItaniumABI() && !gen->for_constant_evaluation) {
     return GenerateItaniumThrowExpression(gen, node);
   }
 
@@ -3033,6 +3033,45 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
    return TypeIsBool(node->base.type)
               ? result
               : GenerateZeroExtend(gen, (ASTNode*)node, result);
+ }
+ // Constexpr pcode evaluation spills boolean temps to the stack for && / ||.
+ // That spill can overlap EH catch-binding storage and clobber the caught
+ // object before the short-circuit RHS is evaluated (e.g.
+ // `ex.error() == 23 && ex.what()[0] == 'b'`).  Use an IR tmp merge like
+ // the conditional operator instead.
+ if (gen->for_constant_evaluation) {
+   bool value_is_used = true;
+   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+   IRNode* short_label = NewIR(IR_OP(label));
+   IRNode* end_label = NewIR(IR_OP(label));
+   IRNode* tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+   IRSetType(tmp, bool_type);
+
+   IRNode* left = GenerateExpression(gen, node->left);
+   GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
+                                                             : IR_OP(btrue),
+                               left, short_label));
+
+   IRNode* right =
+       GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
+   right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(bool_type), right)),
+                     bool_type);
+   right->dest = tmp;
+   GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+
+   GeneratorEmit(gen, short_label);
+   IRNode* short_value = GeneratorGetIntConstant(
+       gen, bool_type, node->base.op == AST_OP(logand) ? 0 : 1);
+   short_value =
+       IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(bool_type), short_value)),
+                 bool_type);
+   short_value->dest = tmp;
+
+   GeneratorEmit(gen, end_label);
+   if (!TypeIsBool(node->base.type)) {
+     return GenerateZeroExtend(gen, (ASTNode*)node, tmp);
+   }
+   return tmp;
  }
  // Every logical expression must produce a value for its enclosing expression
  // or branch. Returning the right operand directly is invalid on a

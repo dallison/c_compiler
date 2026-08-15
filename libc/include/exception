@@ -9,32 +9,195 @@
 #ifndef __davecc_exception__
 #define __davecc_exception__
 
+#include <type_traits>
+#include <utility>
+
+#if __cplusplus > 202302L
+#ifndef __cpp_lib_constexpr_exceptions
+#define __cpp_lib_constexpr_exceptions 202502L
+#endif
+#endif
+
+extern "C" {
+void* __davecc_exception_ptr_current() noexcept;
+void __davecc_exception_ptr_retain(void*) noexcept;
+void __davecc_exception_ptr_release(void*) noexcept;
+[[noreturn]] void __davecc_exception_ptr_rethrow(void*);
+int __davecc_uncaught_exceptions() noexcept;
+}
+
 namespace std {
-
-// Base class for all standard library exceptions.  what() is virtual so a
-// handler catching a base reference observes the most-derived message.
-class exception {
- public:
-  exception() noexcept {}
-  exception(const exception&) noexcept {}
-  exception& operator=(const exception&) noexcept { return *this; }
-  virtual ~exception() {}
-  virtual const char* what() const noexcept { return "std::exception"; }
-};
-
-// Thrown when an exception-specification is violated / a bad exception is
-// rethrown.  Rarely used here, but part of the standard surface.
-class bad_exception : public exception {
- public:
-  bad_exception() noexcept {}
-  const char* what() const noexcept override { return "std::bad_exception"; }
-};
 
 typedef void (*terminate_handler)();
 
 terminate_handler set_terminate(terminate_handler handler) noexcept;
 terminate_handler get_terminate() noexcept;
 [[noreturn]] void terminate() noexcept;
+
+// Base class for all standard library exceptions.  what() is virtual so a
+// handler catching a base reference observes the most-derived message.
+class exception {
+ public:
+  constexpr exception() noexcept {}
+  constexpr exception(const exception&) noexcept {}
+  constexpr exception& operator=(const exception&) noexcept { return *this; }
+  constexpr virtual ~exception() {}
+  constexpr virtual const char* what() const noexcept { return "std::exception"; }
+};
+
+// Thrown when an exception-specification is violated / a bad exception is
+// rethrown.  Rarely used here, but part of the standard surface.
+class bad_exception : public exception {
+ public:
+  constexpr bad_exception() noexcept {}
+  constexpr const char* what() const noexcept override {
+    return "std::bad_exception";
+  }
+};
+
+class exception_ptr {
+ public:
+  constexpr exception_ptr() noexcept : __value_(nullptr) {}
+  constexpr exception_ptr(nullptr_t) noexcept : __value_(nullptr) {}
+
+  constexpr exception_ptr(const exception_ptr& other) noexcept
+      : __value_(other.__value_) {
+    __davecc_exception_ptr_retain(__value_);
+  }
+
+  constexpr exception_ptr(exception_ptr&& other) noexcept
+      : __value_(other.__value_) {
+    other.__value_ = nullptr;
+  }
+
+  constexpr ~exception_ptr() {
+    __davecc_exception_ptr_release(__value_);
+  }
+
+  constexpr exception_ptr& operator=(const exception_ptr& other) noexcept {
+    if (__value_ != other.__value_) {
+      __davecc_exception_ptr_retain(other.__value_);
+      __davecc_exception_ptr_release(__value_);
+      __value_ = other.__value_;
+    }
+    return *this;
+  }
+
+  constexpr exception_ptr& operator=(exception_ptr&& other) noexcept {
+    if (this != &other) {
+      __davecc_exception_ptr_release(__value_);
+      __value_ = other.__value_;
+      other.__value_ = nullptr;
+    }
+    return *this;
+  }
+
+  constexpr void swap(exception_ptr& other) noexcept {
+    void* value = __value_;
+    __value_ = other.__value_;
+    other.__value_ = value;
+  }
+
+  constexpr explicit operator bool() const noexcept {
+    return __value_ != nullptr;
+  }
+
+  friend constexpr bool operator==(const exception_ptr& left,
+                                   const exception_ptr& right) noexcept {
+    return left.__value_ == right.__value_;
+  }
+
+ private:
+  struct __adopt_t {};
+
+  constexpr exception_ptr(void* value, __adopt_t) noexcept : __value_(value) {}
+
+  void* __value_;
+
+  friend constexpr exception_ptr current_exception() noexcept;
+  friend constexpr void rethrow_exception(exception_ptr);
+};
+
+constexpr void swap(exception_ptr& left, exception_ptr& right) noexcept {
+  left.swap(right);
+}
+
+constexpr exception_ptr current_exception() noexcept {
+  return exception_ptr(__davecc_exception_ptr_current(),
+                       exception_ptr::__adopt_t{});
+}
+
+[[noreturn]] constexpr void rethrow_exception(exception_ptr value) {
+  __davecc_exception_ptr_rethrow(value.__value_);
+}
+
+template <class E>
+constexpr exception_ptr make_exception_ptr(E value) noexcept {
+  exception_ptr result;
+  try {
+    throw value;
+  } catch (...) {
+    result = current_exception();
+  }
+  return result;
+}
+
+class nested_exception {
+ public:
+  constexpr nested_exception() noexcept : __ptr_(current_exception()) {}
+  constexpr nested_exception(const nested_exception&) noexcept = default;
+  constexpr nested_exception& operator=(const nested_exception&) noexcept =
+      default;
+  constexpr virtual ~nested_exception() = default;
+
+  [[noreturn]] constexpr void rethrow_nested() const {
+    if (!__ptr_) {
+      terminate();
+    }
+    rethrow_exception(__ptr_);
+  }
+
+  constexpr exception_ptr nested_ptr() const noexcept {
+    return __ptr_;
+  }
+
+ private:
+  exception_ptr __ptr_;
+};
+
+namespace __exception_detail {
+template <class T>
+class __with_nested : public T, public nested_exception {
+ public:
+  constexpr explicit __with_nested(T&& value) : T(static_cast<T&&>(value)) {}
+  constexpr explicit __with_nested(const T& value) : T(value) {}
+};
+}  // namespace __exception_detail
+
+template <class T>
+[[noreturn]] constexpr void throw_with_nested(T&& value) {
+  using U = remove_cv_t<remove_reference_t<T>>;
+  if constexpr (is_class_v<U> && !is_base_of_v<nested_exception, U>) {
+    throw __exception_detail::__with_nested<U>(static_cast<T&&>(value));
+  } else {
+    throw static_cast<T&&>(value);
+  }
+}
+
+template <class T>
+constexpr void rethrow_if_nested(const T& value) {
+  if constexpr (is_base_of_v<nested_exception, T>) {
+    static_cast<const nested_exception&>(value).rethrow_nested();
+  }
+}
+
+constexpr int uncaught_exceptions() noexcept {
+  return __davecc_uncaught_exceptions();
+}
+
+constexpr bool uncaught_exception() noexcept {
+  return uncaught_exceptions() != 0;
+}
 
 }  // namespace std
 

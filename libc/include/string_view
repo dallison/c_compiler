@@ -55,7 +55,7 @@ class basic_string_view {
   constexpr basic_string_view(const CharT* s, size_type count)
       : __data(s), __size(count) {}
 
-  basic_string_view(const CharT* s)
+  constexpr basic_string_view(const CharT* s)
       : __data(s), __size(traits_type::length(s)) {}
 
   // Iterators.

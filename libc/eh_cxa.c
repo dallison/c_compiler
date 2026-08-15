@@ -69,7 +69,7 @@ void* __davecc_eh_object_from_header(struct __cxa_exception* header) {
 }
 
 static void DestroyHeaderIfNeeded(struct __cxa_exception* header) {
-  if (header == NULL) {
+  if (header == NULL || header->handlerSwitchValue != 0) {
     return;
   }
   void* object = __davecc_eh_object_from_header(header);
@@ -91,6 +91,28 @@ static void PopCaughtException(struct __cxa_eh_globals* globals) {
   globals->caughtExceptions = caught->nextException;
   caught->nextException = NULL;
   caught->handlerCount = 0;
+}
+
+static int HeaderIsCaught(struct __cxa_exception* header) {
+  struct __cxa_exception* current = GetGlobalsSlow()->caughtExceptions;
+  while (current != NULL) {
+    if (current == header) {
+      return 1;
+    }
+    current = current->nextException;
+  }
+  return 0;
+}
+
+static void ReleaseExceptionReference(struct __cxa_exception* header) {
+  if (header == NULL || header->handlerSwitchValue == 0) {
+    return;
+  }
+  header->handlerSwitchValue--;
+  if (header->handlerSwitchValue == 0 && header->handlerCount == 0 &&
+      active_thrown_header != header && !HeaderIsCaught(header)) {
+    DestroyHeaderIfNeeded(header);
+  }
 }
 
 void* __cxa_allocate_exception(size_t thrown_size) {
@@ -219,6 +241,7 @@ void __cxa_throw(void* thrown_exception, struct type_info* tinfo,
   header->exceptionDestructor = dest;
   header->adjustedPtr = thrown_exception;
   header->handlerCount = 0;
+  header->handlerSwitchValue = 0;
   header->nextException = NULL;
   header->unwindHeader.exception_class = DAVECC_EH_EXCEPTION_CLASS;
   header->unwindHeader.exception_cleanup = NULL;
@@ -319,6 +342,56 @@ void __cxa_rethrow(void) {
     DaveCCTerminateFromThrow();
   }
   abort();
+}
+
+void* __davecc_exception_ptr_current(void) {
+  struct __cxa_exception* header = GetGlobalsSlow()->caughtExceptions;
+  if (header == NULL) {
+    return NULL;
+  }
+  header->handlerSwitchValue++;
+  return header;
+}
+
+void __davecc_exception_ptr_retain(void* value) {
+  struct __cxa_exception* header = (struct __cxa_exception*)value;
+  if (header != NULL) {
+    header->handlerSwitchValue++;
+  }
+}
+
+void __davecc_exception_ptr_release(void* value) {
+  ReleaseExceptionReference((struct __cxa_exception*)value);
+}
+
+void __davecc_exception_ptr_rethrow(void* value) {
+  struct __cxa_exception* header = (struct __cxa_exception*)value;
+  struct __cxa_eh_globals* globals = GetGlobalsSlow();
+  DaveEHFrameRegisters throw_site_regs;
+  _Unwind_Reason_Code reason;
+  if (header == NULL) {
+    DaveCCTerminateFromThrow();
+  }
+  __davecc_capture_regs(&throw_site_regs);
+  if (globals->caughtExceptions == header && header->handlerCount > 0) {
+    header->handlerCount--;
+    if (header->handlerCount == 0) {
+      PopCaughtException(globals);
+    }
+  }
+  __davecc_eh_install_active_exception(
+      header, __davecc_eh_object_from_header(header));
+  DaveUnwindSetContext(throw_site_regs.pc, throw_site_regs.rsp,
+                       throw_site_regs.rbp);
+  reason = _Unwind_RaiseException(&header->unwindHeader);
+  if (reason == _URC_END_OF_STACK) {
+    DaveCCTerminateFromThrow();
+  }
+  abort();
+}
+
+int __davecc_uncaught_exceptions(void) {
+  return (int)__davecc_eh_uncaught_exceptions();
 }
 
 void _Unwind_DeleteException(_Unwind_Exception* exc) {

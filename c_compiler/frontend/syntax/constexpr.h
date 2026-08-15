@@ -13,12 +13,17 @@ typedef struct ConstexprObject ConstexprObject;
 typedef struct ConstexprException ConstexprException;
 struct ReflectionValue;
 
+typedef struct ConstexprHeapBlock ConstexprHeapBlock;
+
 typedef struct {
   Vector bindings;  // ConstexprBinding*
   Vector objects;   // ConstexprObject*
+  Vector heap_blocks;  // ConstexprHeapBlock*
+  Vector exception_handles;  // ConstexprException*
   int call_depth;
   int steps;
   int max_steps;
+  int unwinding_exceptions;
   ConstexprException* exception;
 } ConstEvalContext;
 

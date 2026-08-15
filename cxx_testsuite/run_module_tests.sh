@@ -194,7 +194,9 @@ run "$DAVECC" -target "$TARGET" -static \
   fail "link template-heavy standard module executable"
 "$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
   "$work/std_heavy.bin" >"$work/command.log" 2>&1
-[ "$?" -eq 0 ] || fail "execute template-heavy standard module program"
+std_heavy_status=$?
+[ "$std_heavy_status" -eq 0 ] ||
+  fail "execute template-heavy standard module program (status $std_heavy_status)"
 
 run "$DAVECC" -target "$TARGET" -std=c++23 -c \
   -fmodule-file "std=$STD_MODULE" \
@@ -658,6 +660,23 @@ run "$DAVECC" -target "$TARGET" -static \
 "$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
   "$work/contracts.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute imported contracts"
+
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/constexpr_exceptions.dcm" \
+  "$FIXTURES/constexpr_exceptions.cppm" ||
+  fail "emit constexpr exceptions module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_constexpr_exceptions.cpp" \
+  -o "$work/use_constexpr_exceptions.o" ||
+  fail "evaluate imported constexpr exceptions"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_constexpr_exceptions.o" "$LIBC" \
+  -o "$work/constexpr_exceptions.bin" ||
+  fail "link imported constexpr exceptions executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/constexpr_exceptions.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute imported constexpr exceptions"
 
 run "$DAVECC" -target "$TARGET" -std=c++26 \
   -Xemit-module "$work/reflection.dcm" \

@@ -138,19 +138,23 @@ static bool NormalizeCheckedAddress(PCodeVM* vm, uint64_t raw, size_t size,
   }
   if (vm->stack != NULL && vm->stack_size != 0) {
     uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+    uint64_t stack_end = stack_start + vm->stack_size;
+    if (raw >= stack_start && raw + size <= stack_end) {
+      if (raw >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
+        *normalized = raw;
+        return true;
+      }
+    }
     uint64_t stack_address =
         (stack_start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
-    if (RegionContains(&(PCodeVMMemoryRegion){.start = stack_start,
-                                               .size = vm->stack_size,
-                                               .writable = true},
-                       stack_address, size, write) &&
+    if (stack_address + size <= stack_end &&
         stack_address >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
       *normalized = stack_address;
       return true;
     }
   }
-  for (size_t i = 0; i < vm->memory_region_count; i++) {
-    PCodeVMMemoryRegion* region = &vm->memory_regions[i];
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
     uint64_t region_address =
         (region->start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
     if (RegionContains(region, region_address, size, write)) {

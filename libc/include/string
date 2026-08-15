@@ -62,9 +62,9 @@ class basic_string {
   size_type __cap;  // Total element slots, including the NUL terminator slot.
   allocator_type __alloc;  // Stateless for std::allocator; stored for the API.
 
-  bool __is_small() const noexcept { return __data == __buf; }
+  constexpr bool __is_small() const noexcept { return __data == __buf; }
 
-  void __set_empty() noexcept {
+  constexpr void __set_empty() noexcept {
     __data = __buf;
     __size = 0;
     __cap = __sso_capacity;
@@ -73,7 +73,7 @@ class basic_string {
 
   // Ensure room for at least `need` characters plus a terminator, preserving
   // the current contents.  Grows geometrically to keep append amortized O(1).
-  void __reserve_for(size_type need) {
+  constexpr void __reserve_for(size_type need) {
     if (need + 1 <= __cap) {
       return;
     }
@@ -95,7 +95,7 @@ class basic_string {
 
   // Replace the whole contents with `n` characters copied from `src` (which may
   // alias nothing inside this object).
-  void __assign_raw(const CharT* src, size_type n) {
+  constexpr void __assign_raw(const CharT* src, size_type n) {
     __reserve_for(n);
     if (n != 0) {
       traits_type::copy(__data, src, n);
@@ -105,9 +105,9 @@ class basic_string {
   }
 
  public:
-  basic_string() noexcept : __alloc(Allocator()) { __set_empty(); }
+  constexpr basic_string() noexcept : __alloc(Allocator()) { __set_empty(); }
 
-  basic_string(const CharT* s) : __alloc(Allocator()) {
+  constexpr basic_string(const CharT* s) : __alloc(Allocator()) {
     __set_empty();
     __assign_raw(s, traits_type::length(s));
   }
@@ -203,7 +203,7 @@ class basic_string {
     __assign_raw(other.__data, other.__size);
   }
 
-  ~basic_string() {
+  constexpr ~basic_string() {
     if (!__is_small()) {
       __alloc.deallocate(__data, __cap);
     }
@@ -262,7 +262,7 @@ class basic_string {
   const_reference back() const { return __data[__size - 1]; }
   CharT* data() noexcept { return __data; }
   const CharT* data() const noexcept { return __data; }
-  const CharT* c_str() const noexcept { return __data; }
+  constexpr const CharT* c_str() const noexcept { return __data; }
 
   // Implicit conversion to a view over the current contents.  Requires the
   // complete basic_string_view (i.e. <string_view> included at the point of

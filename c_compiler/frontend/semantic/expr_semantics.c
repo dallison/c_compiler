@@ -9917,10 +9917,9 @@ static ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
     static_type = static_type->next;
   }
 
-  TypeRecord* const_type_info = TypeRecordCopy(type_info_type);
-  const_type_info->qualifiers |= kQualConst;
-  TypeRecord* type_info_ptr = NewPointerTo(kQualPlain, const_type_info);
-  TypeRecordDelete(const_type_info);
+  TypeRecord* type_info_ptr =
+      NewPointerTo(kQualPlain, TypeRecordCopy(type_info_type));
+  type_info_ptr->next->qualifiers |= kQualConst;
 
   ASTNode* result;
   if (polymorphic) {
@@ -9957,11 +9956,15 @@ static ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
       node->base.flags |= kASTAnalyzed;
       return (ASTNode*)node;
     }
-    // *(const type_info*)&__davecc_ti_<type>
-    ASTNode* id = NewIdentifierASTNode(type_info_symbol, location);
-    ASTNode* address = NewUnaryASTNode(AST_OP(address), NULL, location, id);
-    ASTNode* as_ptr = NewCastASTNode(type_info_ptr, location, address);
-    result = NewUnaryASTNode(AST_OP(contents), NULL, location, as_ptr);
+    // The RTTI symbol is emitted as raw storage, but expressions observe it as
+    // a const type_info lvalue. Keep the storage symbol's byte-array type
+    // private to the emitter instead of round-tripping through a synthetic
+    // cast whose pointee type can be discarded with the replaced typeid node.
+    result = NewIdentifierASTNode(type_info_symbol, location);
+    ASTNodeSetType(result, type_info_ptr->next);
+    result->value_category = kValueCategoryLvalue;
+    result->flags |= kASTAnalyzed;
+    TypeRecordDelete(type_info_ptr);
   }
   return AnalyzeExpression(result);
 }

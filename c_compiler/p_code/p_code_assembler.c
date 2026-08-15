@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "elf.h"
+#include "p_code_encoding.h"
 #include "p_code_machine.h"
 
 static COMPILER_UNUSED int CompareString(const void* a, const void* b) {
@@ -485,7 +486,8 @@ static bool ParseRegisterPair(PCodeAssembler* assembler, char type_needed,
 //
 
 static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
-  int32_t inst = opcode << 24 | regs[0] << 16 | regs[1] << 8 | regs[2];
+  uint32_t inst =
+      PCodeEncodeRegisters32(opcode, regs[0], regs[1], regs[2]);
   AssemblerEmitWord(&assembler->base, assembler->base.current_section, inst);
 }
 
@@ -624,8 +626,9 @@ static void AssembleConversion(PCodeAssembler* assembler, int opcode,
     return;
   }
   regs[1] = Register(assembler, from_type, from_type_name);
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    opcode << 24 | regs[0] << 16 | regs[1] << 8);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      PCodeEncodeRegisters32(opcode, regs[0], regs[1], 0));
 }
 
 static void Assemble_i2f(PCodeAssembler* assembler) {
@@ -671,8 +674,9 @@ static void Assemble_d2ui(PCodeAssembler* assembler) {
 static void Assemble_decsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitWord(&ASM, ASM.current_section,
-                      (PCODE_OP(decsp) << 24 | (int)(value & 0xffffff)));
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        PCodeEncodeImmediate24(PCODE_OP(decsp), value));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
   }
@@ -681,8 +685,9 @@ static void Assemble_decsp(PCodeAssembler* assembler) {
 static void Assemble_incsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitWord(&ASM, ASM.current_section,
-                      (PCODE_OP(incsp) << 24 | (int)(value & 0xffffff)));
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        PCodeEncodeImmediate24(PCODE_OP(incsp), value));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
   }
@@ -720,8 +725,9 @@ static void AssembleLoadStore(PCodeAssembler* assembler, int opcode,
 
   // These are 64 bit instructions with the first word containing the
   // two registers and the second containing the offset.
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    0x80000000U | opcode << 24 | regs[0] << 16 | regs[1] << 8);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      PCodeEncodeRegisters64(opcode, regs[0], regs[1]));
   AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
 }
 
@@ -805,7 +811,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
                                (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      0xc0000000U | opcode << 24 | reg << 16);
+                      PCodeEncodeRegister96(opcode, reg));
     AssemblerEmitLong(&ASM, ASM.current_section, 0);
     StringDestruct(&symbol_name);
     StringDestruct(&suffix);
@@ -820,18 +826,18 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
 
       if (opcode == PCODE_OP(movxc)) {
         AssemblerEmitWord(&ASM, ASM.current_section,
-                          0xc0000000U | opcode << 24 | reg << 16);
+                          PCodeEncodeRegister96(opcode, reg));
         AssemblerEmitLong(&ASM, ASM.current_section, value);
       } else {
         AssemblerEmitWord(&ASM, ASM.current_section,
-                          0x80000000U | opcode << 24 | reg << 16);
+                          PCodeEncodeRegister64(opcode, reg));
         AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
       }
       break;
     }
     case 'f': {
       AssemblerEmitWord(&ASM, ASM.current_section,
-                        0x80000000U | opcode << 24 | reg << 16);
+                        PCodeEncodeRegister64(opcode, reg));
       float f = AssemblerGetDoubleConst(&ASM);
       uint32_t* p = (uint32_t*)&f;
       AssemblerEmitWord(&ASM, ASM.current_section, *p);
@@ -841,7 +847,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
       double f = AssemblerGetDoubleConst(&ASM);
       uint64_t* p = (uint64_t*)&f;
       AssemblerEmitWord(&ASM, ASM.current_section,
-                        0xc0000000U | opcode << 24 | reg << 16);
+                        PCodeEncodeRegister96(opcode, reg));
       AssemblerEmitLong(&ASM, ASM.current_section, *p);
       break;
     }
@@ -869,8 +875,9 @@ static void AssembleMove(PCodeAssembler* assembler, int opcode,
                          char type_needed, const char* type_name) {
   int regs[3];
   if (ParseRegisterPair(assembler, type_needed, type_name, regs)) {
-    AssemblerEmitWord(&ASM, ASM.current_section,
-                      opcode << 24 | regs[0] << 16 | regs[1] << 8);
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        PCodeEncodeRegisters32(opcode, regs[0], regs[1], 0));
   }
 }
 
@@ -888,7 +895,8 @@ ASSEMBLE_MOV(movd, 'd', "double");
 static void AssemblePushPPCODE_OP(PCodeAssembler* assembler, int opcode,
                             char type_needed, const char* type_name) {
   int reg = Register(assembler, type_needed, type_name);
-  AssemblerEmitWord(&ASM, ASM.current_section, opcode << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister32(opcode, reg));
 }
 
 #define ASSEMBLE_PUSH_PPCODE_OP(inst, reg_type, type_name)           \
@@ -906,7 +914,8 @@ ASSEMBLE_PUSH_PPCODE_OP(popd, 'd', "double");
 ASSEMBLE_PUSH_PPCODE_OP(popx, 'i', "integer");
 
 static void Assemble_ret(PCodeAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(ret) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeOpcode32(PCODE_OP(ret)));
 }
 
 static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
@@ -918,7 +927,7 @@ static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
   AssemblerEmitWord(&ASM, ASM.current_section,
-                    0x80000000 | opcode << 24 | reg << 16);
+                    PCodeEncodeRegister64(opcode, reg));
   AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
 }
 
@@ -933,7 +942,8 @@ static void Assemble_bnz(PCodeAssembler* assembler) {
 static void Assemble_bra(PCodeAssembler* assembler) {
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0x80000000 | PCODE_OP(bra) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeOpcode64(PCODE_OP(bra)));
   AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
 }
 
@@ -950,19 +960,21 @@ static void Assemble_addc(PCodeAssembler* assembler) {
 
     AssemblerEmitWord(
         &ASM, ASM.current_section,
-        0x80000000 | PCODE_OP(addc) << 24 | regs[0] << 16 | regs[1] << 8);
+        PCodeEncodeRegisters64(PCODE_OP(addc), regs[0], regs[1]));
     AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
   }
 }
 
 static void Assemble_cbra(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(cbra) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister32(PCODE_OP(cbra), reg));
 }
 
 static void Assemble_rcall(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(rcall) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister32(PCODE_OP(rcall), reg));
 }
 
 static void Assemble_call(PCodeAssembler* assembler) {
@@ -983,7 +995,8 @@ static void Assemble_call(PCodeAssembler* assembler) {
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(call) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeOpcode96(PCODE_OP(call)));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -1003,7 +1016,8 @@ static void Assemble_jmp(PCodeAssembler* assembler) {
       NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(jmp) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeOpcode96(PCODE_OP(jmp)));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -1023,8 +1037,8 @@ static void Assemble_cjmp(PCodeAssembler* assembler) {
   NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    PCODE_OP(cjmp) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeOpcode96(PCODE_OP(cjmp)));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -1061,8 +1075,8 @@ static void Assemble_adr(PCodeAssembler* assembler) {
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    PCODE_OP(adr) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister96(PCODE_OP(adr), reg));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
   StringDestruct(&symbol_name);
   StringDestruct(&suffix);
@@ -1090,8 +1104,8 @@ static void Assemble_adrs(PCodeAssembler* assembler) {
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    PCODE_OP(adr) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister96(PCODE_OP(adr), reg));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
   
 }
@@ -1130,8 +1144,8 @@ static void Assemble_adrtls(PCodeAssembler* assembler) {
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    PCODE_OP(adr) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    PCodeEncodeRegister96(PCODE_OP(adr), reg));
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
   StringDestruct(&symbol_name);
   StringDestruct(&suffix);
@@ -1141,7 +1155,7 @@ static void Assemble_esc(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      (PCODE_OP(esc) << 24 | (int)(value & 0xffffff)));
+                      PCodeEncodeImmediate24(PCODE_OP(esc), value));
   } else {
     AssemblerError(&ASM, "Missing #value for esc instruction");
   }

@@ -1177,7 +1177,9 @@ static bool EmitModuleInChild(const char* input, Vector* options,
     return false;
   }
   if (pid == 0) {
-    _exit(EmitModule(input, options, target_opts, module_path) ? 0 : 1);
+    bool ok = EmitModule(input, options, target_opts, module_path);
+    fflush(NULL);
+    _exit(ok ? 0 : 1);
   }
 
   int status;

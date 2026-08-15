@@ -11,11 +11,9 @@
 #include "ast.h"
 #include "codegen.h"
 #include "compiler.h"
-#include "elf.h"
 #include "errors.h"
 #include "member_pointer.h"
-#include "p_code_assembler.h"
-#include "p_code_emitter.h"
+#include "p_code_object.h"
 #include "p_code_reg_alloc.h"
 #include "p_code_target.h"
 #include "symbol.h"
@@ -41,11 +39,6 @@ static bool SetConstexprPCodeResult(bool ok, const char* reason) {
          : (reason != NULL ? reason : "constexpr pcode evaluation failed");
   return ok;
 }
-
-typedef struct {
-  String text;
-  bool failed;
-} StringFile;
 
 typedef struct {
   const char* name;
@@ -90,16 +83,15 @@ typedef struct {
   uint64_t entry_offset;
 } ConstexprPCodeImageCacheEntry;
 
-// Per-function memoization of the lowered pcode *assembly* (not yet assembled
-// into a placed image).  Lowering a function body to pcode (GenerateFunction:
-// IR + SSA + optimization + pcode codegen) is the expensive step and is
-// context-independent, so it is cached once per function and reused whenever the
-// function appears in another root's closure or is called directly.
+// Per-function memoization of relocatable pcode. Lowering a function body to
+// pcode (GenerateFunction: IR + SSA + optimization + pcode codegen) is the
+// expensive step and is context-independent, so it is cached once per function
+// and reused whenever the function appears in another root's closure.
 typedef struct {
   TypeRecord* func;
-  String assembly;    // lowered pcode assembly text for this function alone
+  PCodeObject object;
   Vector referenced;  // TypeRecord* callees referenced by the function body
-} ConstexprPCodeAssemblyCacheEntry;
+} ConstexprPCodeObjectCacheEntry;
 
 typedef struct {
   ASTNode* expression;
@@ -163,8 +155,14 @@ typedef struct {
 } ConstexprPCodeSavedException;
 
 typedef struct {
+  ConstexprPCodeSavedException exception;
+  size_t references;
+} ConstexprPCodeExceptionHandle;
+
+typedef struct {
   Vector heap_blocks;
   Vector exception_stack;
+  Vector exception_handles;
   unsigned char* heap;
   size_t heap_size;
   ConstexprPCodeFreeBlock* free_list;
@@ -203,12 +201,6 @@ static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type);
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol);
 static bool RegisterConstexprPCodeLiteral(const char* name);
 static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(const char* name);
-static uint64_t SymbolRuntimeAddress(Assembler* assembler,
-                                     ConstexprPCodeImage* image,
-                                     AssemblerSymbol* symbol,
-                                     bool* ok);
-static bool RegisterConstexprPCodeGeneratedStatic(
-    Assembler* assembler, ConstexprPCodeImage* image, const char* name);
 static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
                                                     TypeRecord* object_type,
                                                     ASTNode* node,
@@ -217,8 +209,8 @@ static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
 static Vector pcode_image_cache;
 static bool pcode_image_cache_initialized = false;
 
-static Vector pcode_assembly_cache;
-static bool pcode_assembly_cache_initialized = false;
+static Vector pcode_object_cache;
+static bool pcode_object_cache_initialized = false;
 
 static Vector pcode_static_data;
 static bool pcode_static_data_initialized = false;
@@ -247,6 +239,11 @@ enum {
   kConstexprPCodeEscapeConstexprThrow = 116,
   kConstexprPCodeEscapeEndCatch = 117,
   kConstexprPCodeEscapeEndCatchComplete = 118,
+  kConstexprPCodeEscapeExceptionPtrCurrent = 119,
+  kConstexprPCodeEscapeExceptionPtrRetain = 120,
+  kConstexprPCodeEscapeExceptionPtrRelease = 121,
+  kConstexprPCodeEscapeExceptionPtrRethrow = 122,
+  kConstexprPCodeEscapeUncaughtExceptions = 123,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -330,6 +327,30 @@ static const uint32_t constexpr_pcode_end_catch_stub[] = {
 
 static const uint32_t constexpr_pcode_end_catch_complete_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeEndCatchComplete,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_exception_ptr_current_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeExceptionPtrCurrent,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_exception_ptr_retain_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeExceptionPtrRetain,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_exception_ptr_release_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeExceptionPtrRelease,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_exception_ptr_rethrow_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeExceptionPtrRethrow,
+};
+
+static const uint32_t constexpr_pcode_uncaught_exceptions_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeUncaughtExceptions,
     (PCODE_OP(ret) << 24),
 };
 
@@ -460,13 +481,13 @@ static void ConstexprPCodeCacheImage(TypeRecord* func,
   VectorAppend(&pcode_image_cache, entry);
 }
 
-static ConstexprPCodeAssemblyCacheEntry* ConstexprPCodeFindCachedAssembly(
+static ConstexprPCodeObjectCacheEntry* ConstexprPCodeFindCachedObject(
     TypeRecord* func) {
-  if (!pcode_assembly_cache_initialized) {
+  if (!pcode_object_cache_initialized) {
     return NULL;
   }
-  for (size_t i = 0; i < pcode_assembly_cache.length; i++) {
-    ConstexprPCodeAssemblyCacheEntry* entry = pcode_assembly_cache.value.p[i];
+  for (size_t i = 0; i < pcode_object_cache.length; i++) {
+    ConstexprPCodeObjectCacheEntry* entry = pcode_object_cache.value.p[i];
     if (entry != NULL && entry->func == func) {
       return entry;
     }
@@ -474,25 +495,26 @@ static ConstexprPCodeAssemblyCacheEntry* ConstexprPCodeFindCachedAssembly(
   return NULL;
 }
 
-static void ConstexprPCodeCacheAssembly(TypeRecord* func, String* assembly,
-                                        Vector* referenced) {
-  if (!pcode_assembly_cache_initialized) {
-    VectorInit(&pcode_assembly_cache);
-    pcode_assembly_cache_initialized = true;
+static void ConstexprPCodeCacheObject(TypeRecord* func, PCodeObject* object,
+                                      Vector* referenced) {
+  if (!pcode_object_cache_initialized) {
+    VectorInit(&pcode_object_cache);
+    pcode_object_cache_initialized = true;
   }
-  ConstexprPCodeAssemblyCacheEntry* entry =
-      malloc(sizeof(ConstexprPCodeAssemblyCacheEntry));
+  ConstexprPCodeObjectCacheEntry* entry = malloc(sizeof(*entry));
   if (entry == NULL) {
     return;
   }
   entry->func = func;
-  StringInit(&entry->assembly, "");
-  StringAppendString(&entry->assembly, assembly);
+  if (!PCodeObjectCopy(&entry->object, object)) {
+    free(entry);
+    return;
+  }
   VectorInit(&entry->referenced);
   for (size_t i = 0; i < referenced->length; i++) {
     VectorAppend(&entry->referenced, referenced->value.p[i]);
   }
-  VectorAppend(&pcode_assembly_cache, entry);
+  VectorAppend(&pcode_object_cache, entry);
 }
 
 void ConstexprPCodeClearImageCache(void) {
@@ -509,18 +531,18 @@ void ConstexprPCodeClearImageCache(void) {
     VectorDestruct(&pcode_image_cache);
     pcode_image_cache_initialized = false;
   }
-  if (pcode_assembly_cache_initialized) {
-    for (size_t i = 0; i < pcode_assembly_cache.length; i++) {
-      ConstexprPCodeAssemblyCacheEntry* entry =
-          pcode_assembly_cache.value.p[i];
+  if (pcode_object_cache_initialized) {
+    for (size_t i = 0; i < pcode_object_cache.length; i++) {
+      ConstexprPCodeObjectCacheEntry* entry =
+          pcode_object_cache.value.p[i];
       if (entry != NULL) {
-        StringDestruct(&entry->assembly);
+        PCodeObjectDestruct(&entry->object);
         VectorDestruct(&entry->referenced);
         free(entry);
       }
     }
-    VectorDestruct(&pcode_assembly_cache);
-    pcode_assembly_cache_initialized = false;
+    VectorDestruct(&pcode_object_cache);
+    pcode_object_cache_initialized = false;
   }
   if (pcode_static_data_initialized) {
     for (size_t i = 0; i < pcode_static_data.length; i++) {
@@ -538,63 +560,6 @@ void ConstexprPCodeClearImageCache(void) {
     VectorDestructWithContents(&pcode_thunk_cache, NULL, /*free_element=*/true);
     pcode_thunk_cache_initialized = false;
   }
-}
-
-static int StringFileWrite(void* cookie, const char* data, int length) {
-  StringFile* file = cookie;
-  if (file == NULL || length < 0) {
-    return -1;
-  }
-  StringAppendSegment(&file->text, data, (size_t)length);
-  return length;
-}
-
-static int StringFileClose(void* cookie) {
-  (void)cookie;
-  return 0;
-}
-
-static FILE* OpenStringFile(StringFile* file) {
-  StringInit(&file->text, "");
-  file->failed = false;
-#if defined(__APPLE__) || defined(__FreeBSD__)
-  return funopen(file, NULL, StringFileWrite, NULL, StringFileClose);
-#elif defined(__GLIBC__)
-  char* buffer = NULL;
-  size_t size = 0;
-  FILE* fp = open_memstream(&buffer, &size);
-  if (fp == NULL) {
-    file->failed = true;
-    return NULL;
-  }
-  /*
-   * Non-Darwin builds currently use this facade only in tests that run on
-   * Darwin, but keep the code compiling by copying the stream contents on
-   * close in the caller when open_memstream is available.
-   */
-  (void)buffer;
-  (void)size;
-  return fp;
-#else
-  file->failed = true;
-  return NULL;
-#endif
-}
-
-static void CloseStringFile(FILE* fp, StringFile* file) {
-  if (fp == NULL) {
-    return;
-  }
-  fflush(fp);
-#if defined(__GLIBC__) && !defined(__APPLE__)
-  /*
-   * The open_memstream fallback is only a compile-time portability shim here;
-   * the in-tree supported development target is macOS where funopen writes
-   * directly to file->text.
-   */
-  (void)file;
-#endif
-  fclose(fp);
 }
 
 static bool VectorContainsPointer(Vector* vector, void* value) {
@@ -683,9 +648,9 @@ static void CollectReferencedConstexprFunctions(PCodeGenerator* pcode,
   }
 }
 
-static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
-                                           Vector* referenced,
-                                           const char** reason) {
+static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
+                                         Vector* referenced,
+                                         const char** reason) {
   if (func == NULL || func->info.function.symbol == NULL) {
     *reason = "constexpr function has no symbol";
     return false;
@@ -745,30 +710,7 @@ static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
   if (referenced != NULL) {
     CollectReferencedConstexprFunctions(pcode, referenced);
   }
-
-  StringFile output;
-  FILE* fp = OpenStringFile(&output);
-  if (fp == NULL) {
-    compiler->current_function = saved_current_function;
-    compiler->target = saved_target;
-    pcode_target->cleanup(pcode);
-    pcode_target->cleanup = NULL;
-    free(pcode_target);
-    GeneratorDestruct(&gen);
-    *reason = "could not open in-memory pcode assembly stream";
-    return false;
-  }
-
-  fprintf(fp, ".file 1 \"<constexpr-pcode>\"\n");
-  fprintf(fp, ".text\n");
-  PCodeEmitter emitter;
-  PCodeEmitterInit(&emitter, pcode);
-  emitter.emit_locations = false;
-  PCodePrintFunction(&emitter, fp);
-  PCodeEmitterDestruct(&emitter);
-  CloseStringFile(fp, &output);
-  StringSetString(assembly, &output.text);
-  StringDestruct(&output.text);
+  bool built = PCodeObjectBuildFunction(object, pcode, reason);
 
   compiler->current_function = saved_current_function;
   compiler->target = saved_target;
@@ -776,61 +718,20 @@ static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
   pcode_target->cleanup = NULL;
   free(pcode_target);
   GeneratorDestruct(&gen);
-  return true;
+  return built;
 }
 
-static AssemblerSection* FindAssemblerSection(Assembler* assembler,
-                                              const char* name) {
-  for (size_t i = 0; i < assembler->sections.length; i++) {
-    AssemblerSection* section = assembler->sections.value.p[i];
-    if (section != NULL && section->name != NULL &&
-        StringEqual(section->name, name)) {
-      return section;
-    }
-  }
-  return NULL;
+static bool IsConstexprPCodeRuntimeSymbol(const char* symbol,
+                                         const char* name) {
+  return symbol != NULL && strcmp(symbol, name) == 0;
 }
 
-static unsigned char* ConstexprPCodeImageSectionMemory(
-    Assembler* assembler, ConstexprPCodeImage* image, AssemblerSection* section,
-    size_t* size) {
-  if (section == FindAssemblerSection(assembler, ".text")) {
-    if (size != NULL) {
-      *size = image->text_size;
-    }
-    return image->text;
-  }
-  if (section == FindAssemblerSection(assembler, ".rodata")) {
-    if (size != NULL) {
-      *size = image->rodata_size;
-    }
-    return image->rodata;
-  }
-  if (section == FindAssemblerSection(assembler, ".davecc_except_table")) {
-    if (size != NULL) {
-      *size = image->exception_table_size;
-    }
-    return image->exception_table;
-  }
-  if (size != NULL) {
-    *size = 0;
-  }
-  return NULL;
+static bool IsConstexprPCodeRuntimeSymbolPrefix(const char* symbol,
+                                               const char* prefix) {
+  return symbol != NULL && strncmp(symbol, prefix, strlen(prefix)) == 0;
 }
 
-static bool IsConstexprPCodeRuntimeSymbol(AssemblerSymbol* symbol,
-                                          const char* name) {
-  return symbol != NULL && symbol->name.value != NULL &&
-         strcmp(symbol->name.value, name) == 0;
-}
-
-static bool IsConstexprPCodeRuntimeSymbolPrefix(AssemblerSymbol* symbol,
-                                                const char* prefix) {
-  return symbol != NULL && symbol->name.value != NULL &&
-         strncmp(symbol->name.value, prefix, strlen(prefix)) == 0;
-}
-
-static bool ConstexprPCodeRuntimeSymbolAddress(AssemblerSymbol* symbol,
+static bool ConstexprPCodeRuntimeSymbolAddress(const char* symbol,
                                                uint64_t* address) {
   if (IsConstexprPCodeRuntimeSymbol(symbol, "malloc") ||
       IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Z6malloc")) {
@@ -945,6 +846,36 @@ static bool ConstexprPCodeRuntimeSymbolAddress(AssemblerSymbol* symbol,
         (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
     return true;
   }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_exception_ptr_current")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_current_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_exception_ptr_retain")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_retain_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_exception_ptr_release")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_release_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_exception_ptr_rethrow")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_rethrow_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(
+          symbol, "__davecc_uncaught_exceptions")) {
+    *address =
+        (uint64_t)(uintptr_t)constexpr_pcode_uncaught_exceptions_stub;
+    return true;
+  }
   if (IsConstexprPCodeRuntimeSymbol(symbol, "memcpy")) {
     *address = (uint64_t)(uintptr_t)constexpr_pcode_memcpy_stub;
     return true;
@@ -978,6 +909,8 @@ static bool IsConstexprPCodeRuntimeCallSymbol(Symbol* symbol) {
          strcmp(symbol->name.value, "__davecc_constexpr_end_catch") == 0 ||
          strcmp(symbol->name.value,
                 "__davecc_constexpr_invalid_throw") == 0 ||
+         strncmp(symbol->name.value, "__davecc_exception_ptr_", 23) == 0 ||
+         strcmp(symbol->name.value, "__davecc_uncaught_exceptions") == 0 ||
          strcmp(symbol->name.value, "memcpy") == 0 ||
          strcmp(symbol->name.value, "abort") == 0;
 }
@@ -1000,8 +933,29 @@ static InitializedStaticVariable* FindConstexprInitializedStaticByName(
   return NULL;
 }
 
-static bool StoreConstexprPCodeInitializer(
-    Assembler* assembler, ConstexprPCodeImage* image,
+static unsigned char* DirectImageSectionMemory(
+    ConstexprPCodeImage* image, PCodeObjectSection section, size_t* size) {
+  switch (section) {
+    case kPCodeObjectText:
+      if (size != NULL) *size = image->text_size;
+      return image->text;
+    case kPCodeObjectROData:
+      if (size != NULL) *size = image->rodata_size;
+      return image->rodata;
+    case kPCodeObjectExceptionTable:
+      if (size != NULL) *size = image->exception_table_size;
+      return image->exception_table;
+  }
+  if (size != NULL) *size = 0;
+  return NULL;
+}
+
+static uint64_t DirectSymbolRuntimeAddress(PCodeObject* object,
+                                           ConstexprPCodeImage* image,
+                                           const char* name, bool* ok);
+
+static bool StoreDirectConstexprPCodeInitializer(
+    PCodeObject* object, ConstexprPCodeImage* image,
     ConstexprPCodeStaticData* entry, Initializer* init) {
   if (entry == NULL || init == NULL || init->offset < 0 ||
       (size_t)init->offset >= entry->size) {
@@ -1030,13 +984,10 @@ static bool StoreConstexprPCodeInitializer(
       char symbol_name[1024];
       const char* target_name =
           TargetSymbolName(init->value.symbol, symbol_name, sizeof(symbol_name));
-      AssemblerSymbol* target = AssemblerFindSymbol(assembler, target_name);
       bool address_ok = true;
-      uint64_t address =
-          SymbolRuntimeAddress(assembler, image, target, &address_ok);
+      uint64_t address = DirectSymbolRuntimeAddress(
+          object, image, target_name, &address_ok);
       if (!address_ok) {
-        // RTTI and similar metadata may not be needed by the executed path.
-        // Leave those slots null; checked memory traps if they are used.
         address = 0;
       }
       size_t pointer_size = (size_t)SizeofPointer();
@@ -1051,8 +1002,8 @@ static bool StoreConstexprPCodeInitializer(
   return false;
 }
 
-static bool RegisterConstexprPCodeGeneratedStatic(
-    Assembler* assembler, ConstexprPCodeImage* image, const char* name) {
+static bool RegisterDirectConstexprPCodeGeneratedStatic(
+    PCodeObject* object, ConstexprPCodeImage* image, const char* name) {
   InitializedStaticVariable* var =
       FindConstexprInitializedStaticByName(name);
   if (var == NULL) {
@@ -1073,12 +1024,10 @@ static bool RegisterConstexprPCodeGeneratedStatic(
     VectorInit(&pcode_static_data);
     pcode_static_data_initialized = true;
   }
-  // Publish before resolving initializer symbols so self-referential metadata
-  // cannot recurse indefinitely.
   VectorAppend(&pcode_static_data, entry);
   for (size_t i = 0; i < var->initializers.length; i++) {
-    if (!StoreConstexprPCodeInitializer(
-            assembler, image, entry, var->initializers.value.p[i])) {
+    if (!StoreDirectConstexprPCodeInitializer(
+            object, image, entry, var->initializers.value.p[i])) {
       pcode_static_data.length--;
       StringDestruct(&entry->name);
       free(entry->memory);
@@ -1089,226 +1038,182 @@ static bool RegisterConstexprPCodeGeneratedStatic(
   return true;
 }
 
-static uint64_t SymbolRuntimeAddress(Assembler* assembler,
-                                     ConstexprPCodeImage* image,
-                                     AssemblerSymbol* symbol,
-                                     bool* ok) {
+static uint64_t DirectSymbolRuntimeAddress(PCodeObject* object,
+                                           ConstexprPCodeImage* image,
+                                           const char* name, bool* ok) {
   uint64_t runtime_address = 0;
-  if (ConstexprPCodeRuntimeSymbolAddress(symbol, &runtime_address)) {
+  if (ConstexprPCodeRuntimeSymbolAddress(name, &runtime_address)) {
     return runtime_address;
   }
-  ConstexprPCodeStaticData* static_data = FindConstexprPCodeStaticData(
-      symbol != NULL ? symbol->name.value : NULL);
-  if (static_data == NULL && symbol != NULL &&
-      RegisterConstexprPCodeLiteral(symbol->name.value)) {
-    static_data = FindConstexprPCodeStaticData(symbol->name.value);
+  ConstexprPCodeStaticData* static_data =
+      FindConstexprPCodeStaticData(name);
+  if (static_data == NULL && RegisterConstexprPCodeLiteral(name)) {
+    static_data = FindConstexprPCodeStaticData(name);
   }
-  if (static_data == NULL && symbol != NULL &&
-      RegisterConstexprPCodeGeneratedStatic(assembler, image,
-                                            symbol->name.value)) {
-    static_data = FindConstexprPCodeStaticData(symbol->name.value);
+  if (static_data == NULL &&
+      RegisterDirectConstexprPCodeGeneratedStatic(object, image, name)) {
+    static_data = FindConstexprPCodeStaticData(name);
   }
   if (static_data != NULL) {
     return (uint64_t)(uintptr_t)static_data->memory;
   }
-  if (symbol == NULL || !symbol->defined || symbol->section < 0 ||
-      (size_t)symbol->section >= assembler->sections.length) {
+  PCodeObjectSymbol* symbol = PCodeObjectFindSymbol(object, name);
+  if (symbol == NULL || !symbol->defined) {
     *ok = false;
     return 0;
   }
-  AssemblerSection* section = assembler->sections.value.p[symbol->section];
-  unsigned char* section_memory =
-      ConstexprPCodeImageSectionMemory(assembler, image, section, NULL);
-  if (section_memory != NULL) {
-    return (uint64_t)(uintptr_t)section_memory + (uint64_t)symbol->value;
+  unsigned char* memory =
+      DirectImageSectionMemory(image, symbol->section, NULL);
+  if (memory == NULL) {
+    *ok = false;
+    return 0;
   }
-  *ok = false;
-  return 0;
+  return (uint64_t)(uintptr_t)memory + symbol->offset;
 }
 
-static bool ApplyConstexprRelocation(Assembler* assembler,
-                                     ConstexprPCodeImage* image,
-                                     AssemblerRelocation* reloc,
-                                     const char** reason) {
-  if (reloc == NULL || reloc->section < 0 ||
-      (size_t)reloc->section >= assembler->sections.length) {
-    *reason = "bad pcode relocation section";
-    return false;
-  }
-  AssemblerSection* section = assembler->sections.value.p[reloc->section];
-  size_t section_size = 0;
-  unsigned char* section_memory =
-      ConstexprPCodeImageSectionMemory(assembler, image, section, &section_size);
-  if (section_memory == NULL) {
-    return true;
-  }
-  if (reloc->offset < 0 ||
-      (size_t)reloc->offset + sizeof(uint64_t) > section_size) {
-    *reason = "bad constexpr pcode section relocation";
-    return false;
-  }
-
-  bool ok = true;
-  uint64_t S = SymbolRuntimeAddress(assembler, image, reloc->symbol, &ok);
-  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
-    if (reloc->type == R_PCODE_CALL) {
-      S = (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
-    } else if (reloc->type == R_PCODE_ABS ||
-               reloc->type == R_PCODE_DATA64 ||
-               reloc->type == R_PCODE_DATA32) {
-      // Preserve path sensitivity for unavailable objects. The checked-memory
-      // VM rejects this sentinel if evaluation actually dereferences it.
-      S = 1;
-    } else {
-      *reason = "unresolved constexpr pcode symbol";
-      return false;
-    }
-  }
-  uint64_t P = (uint64_t)(uintptr_t)section_memory +
-               (uint64_t)reloc->offset + 12;
-  unsigned char* target = section_memory + reloc->offset;
-  int opcode = target[3] & 0x3f;
-  switch (reloc->type) {
-    case R_PCODE_ABS:
-      if (opcode == PCODE_OP(movxc)) {
-        *((uint64_t*)(target + 4)) = S + reloc->addend;
-      } else if (opcode == PCODE_OP(adr)) {
-        *((uint64_t*)(target + 4)) = S + reloc->addend - P;
-      } else {
-        *reason = "unsupported pcode absolute relocation opcode";
-        return false;
-      }
-      return true;
-    case R_PCODE_CALL:
-    case R_PCODE_JMP:
-    case R_PCODE_PCREL:
-      *((uint64_t*)(target + 4)) = S + reloc->addend - P;
-      return true;
-    case R_PCODE_DATA64:
-      *((uint64_t*)target) = S + reloc->addend;
-      return true;
-    case R_PCODE_DATA32:
-      *((uint32_t*)target) = (uint32_t)(S + reloc->addend);
-      return true;
-    default:
-      *reason = "unsupported pcode relocation in constexpr image";
-      return false;
-  }
-}
-
-static bool CopyConstexprPCodeSection(AssemblerSection* section,
-                                      unsigned char** memory, size_t* size,
-                                      const char** reason) {
-  *memory = NULL;
-  *size = 0;
-  if (section == NULL) {
-    return true;
-  }
-  if (section->contents.data_location != kSectionContentsBuffered) {
-    *reason = "constexpr pcode section is not buffered";
-    return false;
-  }
-  *size = section->contents.data.buffered.length;
+static bool CopyDirectPCodeSection(const String* section,
+                                   unsigned char** memory, size_t* size,
+                                   const char** reason) {
+  *size = section->length;
   *memory = malloc(*size == 0 ? 1 : *size);
   if (*memory == NULL) {
-    *reason = "could not allocate constexpr pcode section";
+    *reason = "could not allocate direct constexpr pcode section";
     return false;
   }
-  memcpy(*memory, section->contents.data.buffered.value, *size);
+  memcpy(*memory, section->value, *size);
   return true;
 }
 
-static bool AssemblePCodeImage(String* assembly, const char* entry_name,
-                               ConstexprPCodeImage* image,
-                               const char** reason) {
-  String outfile;
-  StringInit(&outfile, "/dev/null");
-  PCodeAssembler assembler;
-  if (!PCodeAssemblerInitFromString(&assembler, "<constexpr-pcode>", assembly,
-                                    &outfile)) {
-    StringDestruct(&outfile);
-    *reason = "could not initialize pcode assembler";
+static bool ApplyDirectPCodeFixup(PCodeObject* object,
+                                  ConstexprPCodeImage* image,
+                                  PCodeObjectFixup* fixup,
+                                  const char** reason) {
+  size_t section_size = 0;
+  unsigned char* section = DirectImageSectionMemory(
+      image, fixup->section, &section_size);
+  size_t write_size =
+      fixup->kind == kPCodeFixupData32 ? sizeof(uint32_t) : sizeof(uint64_t);
+  if (section == NULL || fixup->offset > section_size ||
+      write_size > section_size - fixup->offset) {
+    *reason = "bad direct constexpr pcode fixup";
     return false;
   }
-  AssemblerRun(&assembler.base, AssemblePCodeInstruction);
-  StringDestruct(&outfile);
-  if (assembler.base.num_errors != 0) {
-    PCodeAssemblerDestruct(&assembler);
-    *reason = "pcode assembly failed";
+  bool ok = true;
+  uint64_t symbol = DirectSymbolRuntimeAddress(
+      object, image, fixup->symbol_name.value, &ok);
+  if (!ok &&
+      (compiler->constexpr_eval_mode == kConstexprEvalPCode ||
+       compiler->constexpr_eval_mode == kConstexprEvalAudit) &&
+      (compiler->current_function == NULL ||
+       compiler->constant_evaluation_required_depth > 0)) {
+    if (fixup->kind == kPCodeFixupCall) {
+      symbol = (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
+    } else if (fixup->kind == kPCodeFixupAbsolute ||
+               fixup->kind == kPCodeFixupAddress ||
+               fixup->kind == kPCodeFixupData64 ||
+               fixup->kind == kPCodeFixupData32) {
+      symbol = 1;
+    } else {
+      *reason = "unresolved direct constexpr pcode symbol";
+      return false;
+    }
+  } else if (!ok) {
+    *reason = "unresolved direct constexpr pcode symbol";
     return false;
   }
+  unsigned char* target = section + fixup->offset;
+  uint64_t value = symbol + fixup->addend;
+  switch (fixup->kind) {
+    case kPCodeFixupBranch:
+      value -= (uint64_t)(uintptr_t)target + 8;
+      memcpy(target + 4, &value, sizeof(uint32_t));
+      return true;
+    case kPCodeFixupAddress:
+    case kPCodeFixupPCRelative:
+    case kPCodeFixupCall:
+    case kPCodeFixupJump:
+      value -= (uint64_t)(uintptr_t)target + 12;
+      memcpy(target + 4, &value, sizeof(value));
+      return true;
+    case kPCodeFixupAbsolute:
+      memcpy(target + 4, &value, sizeof(value));
+      return true;
+    case kPCodeFixupData64:
+      memcpy(target, &value, sizeof(value));
+      return true;
+    case kPCodeFixupData32: {
+      uint32_t value32 = (uint32_t)value;
+      memcpy(target, &value32, sizeof(value32));
+      return true;
+    }
+  }
+  *reason = "unknown direct constexpr pcode fixup";
+  return false;
+}
 
-  AssemblerSection* text = FindAssemblerSection(&assembler.base, ".text");
-  if (text == NULL ||
-      text->contents.data_location != kSectionContentsBuffered) {
-    PCodeAssemblerDestruct(&assembler);
-    *reason = "pcode image has no text section";
-    return false;
-  }
-
-  AssemblerSection* rodata =
-      FindAssemblerSection(&assembler.base, ".rodata");
-  AssemblerSection* exception_table =
-      FindAssemblerSection(&assembler.base, ".davecc_except_table");
-  if (!CopyConstexprPCodeSection(text, &image->text, &image->text_size,
-                                 reason) ||
-      !CopyConstexprPCodeSection(rodata, &image->rodata,
-                                 &image->rodata_size, reason) ||
-      !CopyConstexprPCodeSection(exception_table, &image->exception_table,
-                                 &image->exception_table_size, reason)) {
-    PCodeAssemblerDestruct(&assembler);
+static bool FinalizeDirectPCodeImage(PCodeObject* object,
+                                     const char* entry_name,
+                                     ConstexprPCodeImage* image,
+                                     const char** reason) {
+  if (!CopyDirectPCodeSection(&object->text, &image->text,
+                              &image->text_size, reason) ||
+      !CopyDirectPCodeSection(&object->rodata, &image->rodata,
+                              &image->rodata_size, reason) ||
+      !CopyDirectPCodeSection(&object->exception_table,
+                              &image->exception_table,
+                              &image->exception_table_size, reason)) {
     return false;
   }
   image->text_base = (uint64_t)(uintptr_t)image->text;
-
-  for (size_t i = 0; i < assembler.base.relocations.length; i++) {
-    AssemblerRelocation* reloc = assembler.base.relocations.value.p[i];
-    if (!ApplyConstexprRelocation(&assembler.base, image, reloc, reason)) {
-      PCodeAssemblerDestruct(&assembler);
+  for (size_t i = 0; i < object->fixups.length; i++) {
+    if (!ApplyDirectPCodeFixup(object, image, object->fixups.value.p[i],
+                               reason)) {
       return false;
     }
   }
-
-  AssemblerSymbol* entry = AssemblerFindSymbol(&assembler.base, entry_name);
   bool ok = true;
-  image->entry = SymbolRuntimeAddress(&assembler.base, image, entry, &ok);
-  PCodeAssemblerDestruct(&assembler);
-  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
-    *reason = "could not resolve constexpr pcode entry";
+  image->entry =
+      DirectSymbolRuntimeAddress(object, image, entry_name, &ok);
+  if (!ok) {
+    *reason = "could not resolve direct constexpr pcode entry";
     return false;
   }
   return true;
 }
 
-// Wraps CompileFunctionToPCodeAssembly with per-function memoization.  The
-// lowering of a single function body is context-independent, so it is performed
-// at most once and reused across every root closure that references the
-// function (and across direct calls).  On a hit the cached assembly text and
-// referenced-callee list are copied into the caller-owned outputs so the closure
-// walk in CompileConstexprFunctionImage proceeds exactly as with a fresh
-// lowering.
-static bool CompileFunctionToPCodeAssemblyCached(TypeRecord* func,
-                                                 String* assembly,
-                                                 Vector* referenced,
-                                                 const char** reason) {
-  ConstexprPCodeAssemblyCacheEntry* cached =
-      ConstexprPCodeFindCachedAssembly(func);
+static bool CompileFunctionToPCodeObjectCached(TypeRecord* func,
+                                                PCodeObject* object,
+                                                Vector* referenced,
+                                                const char** reason) {
+  ConstexprPCodeObjectCacheEntry* cached =
+      ConstexprPCodeFindCachedObject(func);
   if (cached != NULL) {
-    StringAppendString(assembly, &cached->assembly);
+    if (!PCodeObjectAppend(object, &cached->object, reason)) {
+      return false;
+    }
     for (size_t i = 0; i < cached->referenced.length; i++) {
       VectorAppend(referenced, cached->referenced.value.p[i]);
     }
     return true;
   }
-  if (!CompileFunctionToPCodeAssembly(func, assembly, referenced, reason)) {
-    return false;
+  PCodeObject part;
+  PCodeObjectInit(&part);
+  Vector local_referenced;
+  VectorInit(&local_referenced);
+  bool ok =
+      CompileFunctionToPCodeObject(func, &part, &local_referenced, reason);
+  if (ok) {
+    ConstexprPCodeCacheObject(func, &part, &local_referenced);
+    ok = PCodeObjectAppend(object, &part, reason);
   }
-  ConstexprPCodeCacheAssembly(func, assembly, referenced);
-  return true;
+  if (ok) {
+    for (size_t i = 0; i < local_referenced.length; i++) {
+      VectorAppend(referenced, local_referenced.value.p[i]);
+    }
+  }
+  VectorDestruct(&local_referenced);
+  PCodeObjectDestruct(&part);
+  return ok;
 }
 
 static bool CompileConstexprFunctionImage(TypeRecord* func,
@@ -1324,8 +1229,8 @@ static bool CompileConstexprFunctionImage(TypeRecord* func,
     return false;
   }
 
-  String assembly;
-  StringInit(&assembly, "");
+  PCodeObject object;
+  PCodeObjectInit(&object);
   Vector pending;
   Vector emitted;
   VectorInit(&pending);
@@ -1338,14 +1243,11 @@ static bool CompileConstexprFunctionImage(TypeRecord* func,
       continue;
     }
     VectorAppend(&emitted, current);
-    String part;
-    StringInit(&part, "");
     Vector referenced;
     VectorInit(&referenced);
-    ok = CompileFunctionToPCodeAssemblyCached(current, &part, &referenced,
-                                              reason);
+    ok = CompileFunctionToPCodeObjectCached(current, &object, &referenced,
+                                             reason);
     if (ok) {
-      StringAppendString(&assembly, &part);
       for (size_t j = 0; j < referenced.length; j++) {
         TypeRecord* callee = referenced.value.p[j];
         if (!VectorContainsPointer(&emitted, callee) &&
@@ -1355,22 +1257,19 @@ static bool CompileConstexprFunctionImage(TypeRecord* func,
       }
     }
     VectorDestruct(&referenced);
-    StringDestruct(&part);
   }
   VectorDestruct(&pending);
   VectorDestruct(&emitted);
-  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
-    StringDestruct(&assembly);
+  if (!ok) {
+    PCodeObjectDestruct(&object);
     return false;
   }
 
   char namebuf[256];
   const char* entry_name =
       TargetSymbolName(func->info.function.symbol, namebuf, sizeof(namebuf));
-  ok = AssemblePCodeImage(&assembly, entry_name, image, reason);
-  StringDestruct(&assembly);
+  ok = FinalizeDirectPCodeImage(&object, entry_name, image, reason);
+  PCodeObjectDestruct(&object);
   if (ok) {
     ConstexprPCodeCacheImage(func, image);
   }
@@ -2244,6 +2143,21 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
           vm, (void*)constexpr_pcode_end_catch_complete_stub,
           sizeof(constexpr_pcode_end_catch_complete_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_exception_ptr_current_stub,
+          sizeof(constexpr_pcode_exception_ptr_current_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_exception_ptr_retain_stub,
+          sizeof(constexpr_pcode_exception_ptr_retain_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_exception_ptr_release_stub,
+          sizeof(constexpr_pcode_exception_ptr_release_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_exception_ptr_rethrow_stub,
+          sizeof(constexpr_pcode_exception_ptr_rethrow_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_uncaught_exceptions_stub,
+          sizeof(constexpr_pcode_uncaught_exceptions_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_memcpy_stub,
           sizeof(constexpr_pcode_memcpy_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
@@ -2434,6 +2348,38 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
         }
       }
     }
+    bool returns_exception_ptr =
+        func->next != NULL && TypeIsStructOrUnion(func->next) &&
+        func->next->info.struct_info != NULL &&
+        func->next->info.struct_info->tag_name != NULL &&
+        func->next->info.struct_info->tag_name->value != NULL &&
+        strcmp(func->next->info.struct_info->tag_name->value,
+               "exception_ptr") == 0;
+    uint64_t returned_exception_handle = 0;
+    if (object_result != NULL && returns_exception_ptr &&
+        struct_return != NULL) {
+      size_t pointer_size =
+          compiler->target != NULL
+              ? (size_t)compiler->target->pointer_size
+              : sizeof(returned_exception_handle);
+      if (pointer_size > sizeof(returned_exception_handle)) {
+        pointer_size = sizeof(returned_exception_handle);
+      }
+      memcpy(&returned_exception_handle, struct_return, pointer_size);
+    }
+    if (returned_exception_handle != 0) {
+      *reason = "constexpr pcode returned escaping exception_ptr";
+      for (size_t i = 0; i < allocations.length; i++) {
+        free(allocations.value.p[i]);
+      }
+      VectorDestruct(&allocations);
+      VectorDestructWithContents(&address_regions, NULL,
+                                 /*free_element=*/true);
+      ConstexprPCodeRuntimeDestruct(&runtime);
+      PCodeVMDestruct(&vm);
+      ConstexprPCodeImageDestruct(&image);
+      return false;
+    }
     if (object_result != NULL &&
         !LoadConstexprObjectBytes(func->next, struct_return, object_result)) {
       *reason = "could not decode constexpr pcode object result";
@@ -2454,6 +2400,8 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
         free(allocations.value.p[i]);
       }
       VectorDestruct(&allocations);
+      VectorDestructWithContents(&address_regions, NULL,
+                                 /*free_element=*/true);
       ConstexprPCodeRuntimeDestruct(&runtime);
       PCodeVMDestruct(&vm);
       ConstexprPCodeImageDestruct(&image);
@@ -2887,6 +2835,7 @@ static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
   memset(runtime, 0, sizeof(*runtime));
   VectorInit(&runtime->heap_blocks);
   VectorInit(&runtime->exception_stack);
+  VectorInit(&runtime->exception_handles);
   runtime->source_size_t_size =
       compiler->target != NULL ? (size_t)compiler->target->pointer_size
                                : sizeof(size_t);
@@ -2909,6 +2858,15 @@ static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime) {
     }
   }
   VectorDestruct(&runtime->exception_stack);
+  for (size_t i = 0; i < runtime->exception_handles.length; i++) {
+    ConstexprPCodeExceptionHandle* handle =
+        runtime->exception_handles.value.p[i];
+    if (handle != NULL) {
+      free(handle->exception.storage);
+      free(handle);
+    }
+  }
+  VectorDestruct(&runtime->exception_handles);
   free(runtime->heap);
   free(runtime->exception_storage);
   runtime->heap = NULL;
@@ -3186,23 +3144,34 @@ static bool ConstexprPCodeNormalizeAddress(PCodeVM* vm, uint64_t raw,
                                            uint64_t* normalized) {
   if (vm->stack != NULL && vm->stack_size != 0) {
     uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+    uint64_t stack_end = stack_start + vm->stack_size;
+    if (raw >= stack_start && raw + size <= stack_end) {
+      if (raw >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
+        *normalized = raw;
+        return true;
+      }
+    }
+    for (size_t i = vm->memory_region_count; i > 0; --i) {
+      PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+      if ((!write || region->writable) &&
+          ConstexprPCodeRegionContains(region->start, region->size, raw,
+                                       size)) {
+        *normalized = raw;
+        return true;
+      }
+    }
     uint64_t stack_address =
         (stack_start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
-    if (ConstexprPCodeRegionContains(stack_start, vm->stack_size,
-                                     stack_address, size) &&
+    if (stack_address + size <= stack_end &&
         stack_address >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
       *normalized = stack_address;
       return true;
     }
   }
-  for (size_t i = 0; i < vm->memory_region_count; i++) {
-    PCodeVMMemoryRegion* region = &vm->memory_regions[i];
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
     if (write && !region->writable) {
       continue;
-    }
-    if (ConstexprPCodeRegionContains(region->start, region->size, raw, size)) {
-      *normalized = raw;
-      return true;
     }
     uint64_t region_address =
         (region->start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
@@ -3327,6 +3296,13 @@ static ConstexprPCodeExceptionRange* ConstexprPCodeFindExceptionAction(
   return best;
 }
 
+static bool ConstexprPCodeStackContains(PCodeVM* vm, uint64_t address,
+                                        size_t size);
+
+static bool ConstexprPCodeResolveReadableAddress(PCodeVM* vm, uint64_t raw,
+                                                 size_t size,
+                                                 uint64_t* resolved);
+
 static PCodeVMStatus ConstexprPCodeUnwindStep(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime, uint64_t pc, uint64_t ap,
     uint64_t fp, uint64_t scope_start, uint64_t scope_end) {
@@ -3360,22 +3336,22 @@ static PCodeVMStatus ConstexprPCodeUnwindStep(
     if (ap == 0 || fp == 0) {
       return kPCodeVMStatusUncaughtException;
     }
-    uint64_t normalized_ap = 0;
-    uint64_t normalized_fp = 0;
-    if (!ConstexprPCodeNormalizeAddress(vm, ap, 2 * sizeof(uint64_t), false,
-                                        &normalized_ap) ||
-        !ConstexprPCodeNormalizeAddress(vm, fp, sizeof(uint64_t), false,
-                                        &normalized_fp)) {
+    uint64_t readable_ap = 0;
+    uint64_t readable_fp = 0;
+    if (!ConstexprPCodeResolveReadableAddress(
+            vm, ap, 2 * sizeof(uint64_t), &readable_ap) ||
+        !ConstexprPCodeResolveReadableAddress(vm, fp, sizeof(uint64_t),
+                                              &readable_fp)) {
       return kPCodeVMStatusInvalidRead;
     }
     uint64_t caller_ap = 0;
     uint64_t caller_pc = 0;
     uint64_t caller_fp = 0;
-    memcpy(&caller_ap, (void*)(uintptr_t)normalized_ap, sizeof(caller_ap));
+    memcpy(&caller_ap, (void*)(uintptr_t)readable_ap, sizeof(caller_ap));
     memcpy(&caller_pc,
-           (void*)(uintptr_t)(normalized_ap + sizeof(uint64_t)),
+           (void*)(uintptr_t)(readable_ap + sizeof(uint64_t)),
            sizeof(caller_pc));
-    memcpy(&caller_fp, (void*)(uintptr_t)normalized_fp, sizeof(caller_fp));
+    memcpy(&caller_fp, (void*)(uintptr_t)readable_fp, sizeof(caller_fp));
     pc = caller_pc;
     ap = caller_ap;
     fp = caller_fp;
@@ -3386,6 +3362,58 @@ static PCodeVMStatus ConstexprPCodeUnwindStep(
 
 static void ConstexprPCodeClearException(PCodeVM* vm,
                                          ConstexprPCodeRuntime* runtime);
+
+static bool ConstexprPCodeStackContains(PCodeVM* vm, uint64_t address,
+                                        size_t size) {
+  if (vm->stack == NULL || vm->stack_size == 0 || size == 0) {
+    return false;
+  }
+  if (size > UINT64_MAX - address) {
+    return false;
+  }
+  uint64_t start = (uint64_t)(uintptr_t)vm->stack;
+  uint64_t end = start + vm->stack_size;
+  return address >= start && address + size <= end;
+}
+
+static bool ConstexprPCodeResolveReadableAddress(PCodeVM* vm, uint64_t raw,
+                                                 size_t size,
+                                                 uint64_t* resolved) {
+  if (ConstexprPCodeStackContains(vm, raw, size)) {
+    *resolved = raw;
+    return true;
+  }
+  return ConstexprPCodeNormalizeAddress(vm, raw, size, false, resolved);
+}
+
+static bool ConstexprPCodeThrowSitePC(PCodeVM* vm, uint64_t* throw_pc) {
+  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
+  uint64_t readable_sp = 0;
+  if (ConstexprPCodeResolveReadableAddress(vm, sp, sizeof(*throw_pc),
+                                           &readable_sp)) {
+    memcpy(throw_pc, (void*)(uintptr_t)readable_sp, sizeof(*throw_pc));
+    return true;
+  }
+  uint64_t ap = (uint64_t)vm->iregs[PCODE_AP_REG];
+  if (ap != 0 &&
+      ConstexprPCodeResolveReadableAddress(
+          vm, ap + sizeof(uint64_t), sizeof(*throw_pc), &readable_sp)) {
+    memcpy(throw_pc, (void*)(uintptr_t)readable_sp, sizeof(*throw_pc));
+    return true;
+  }
+  return false;
+}
+
+static PCodeVMStatus ConstexprPCodeBeginUnwind(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  uint64_t throw_pc = 0;
+  if (!ConstexprPCodeThrowSitePC(vm, &throw_pc)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  return ConstexprPCodeUnwindStep(
+      vm, runtime, throw_pc, (uint64_t)vm->iregs[PCODE_AP_REG],
+      (uint64_t)vm->iregs[PCODE_FP_REG], throw_pc, throw_pc);
+}
 
 static PCodeVMStatus ConstexprPCodeInstallException(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime,
@@ -3441,8 +3469,8 @@ static PCodeVMStatus ConstexprPCodeInstallException(
     if (typeinfo != NULL && typeinfo->object_is_class &&
         typeinfo->object_size > 0) {
       uint64_t source = 0;
-      if (!ConstexprPCodeNormalizeAddress(
-              vm, value, (size_t)typeinfo->object_size, false, &source)) {
+      if (!ConstexprPCodeResolveReadableAddress(
+              vm, value, (size_t)typeinfo->object_size, &source)) {
         ConstexprPCodeClearException(vm, runtime);
         return kPCodeVMStatusInvalidRead;
       }
@@ -3475,17 +3503,7 @@ static PCodeVMStatus ConstexprPCodeInstallException(
   } else {
     memcpy(&runtime->exception_f8, &value, sizeof(value));
   }
-  uint64_t throw_pc = 0;
-  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
-  uint64_t normalized_sp = 0;
-  if (!ConstexprPCodeNormalizeAddress(vm, sp, sizeof(throw_pc), false,
-                                      &normalized_sp)) {
-    return kPCodeVMStatusInvalidRead;
-  }
-  memcpy(&throw_pc, (void*)(uintptr_t)normalized_sp, sizeof(throw_pc));
-  return ConstexprPCodeUnwindStep(
-      vm, runtime, throw_pc, (uint64_t)vm->iregs[PCODE_AP_REG],
-      (uint64_t)vm->iregs[PCODE_FP_REG], throw_pc, throw_pc);
+  return ConstexprPCodeBeginUnwind(vm, runtime);
 }
 
 static PCodeVMStatus ConstexprPCodeEscapeThrow(
@@ -3503,17 +3521,7 @@ static PCodeVMStatus ConstexprPCodeEscapeThrow(
     }
     runtime->handling_exception = false;
     runtime->exception_base_offset = 0;
-    uint64_t throw_pc = 0;
-    uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
-    uint64_t normalized_sp = 0;
-    if (!ConstexprPCodeNormalizeAddress(vm, sp, sizeof(throw_pc), false,
-                                        &normalized_sp)) {
-      return kPCodeVMStatusInvalidRead;
-    }
-    memcpy(&throw_pc, (void*)(uintptr_t)normalized_sp, sizeof(throw_pc));
-    return ConstexprPCodeUnwindStep(
-        vm, runtime, throw_pc, (uint64_t)vm->iregs[PCODE_AP_REG],
-        (uint64_t)vm->iregs[PCODE_FP_REG], throw_pc, throw_pc);
+    return ConstexprPCodeBeginUnwind(vm, runtime);
   }
   return ConstexprPCodeInstallException(vm, runtime, kind, value, typeinfo, 0);
 }
@@ -3525,6 +3533,185 @@ static uint64_t ConstexprPCodeCurrentExceptionPointer(
     pointer = (uint64_t)(uintptr_t)runtime->exception_storage;
   }
   return pointer + (uint64_t)runtime->exception_base_offset;
+}
+
+static ConstexprPCodeExceptionHandle* ConstexprPCodeFindExceptionHandle(
+    ConstexprPCodeRuntime* runtime, uint64_t address, size_t* index) {
+  ConstexprPCodeExceptionHandle* requested =
+      (ConstexprPCodeExceptionHandle*)(uintptr_t)address;
+  for (size_t i = 0; i < runtime->exception_handles.length; i++) {
+    if (runtime->exception_handles.value.p[i] == requested) {
+      if (index != NULL) {
+        *index = i;
+      }
+      return requested;
+    }
+  }
+  return NULL;
+}
+
+static PCodeVMStatus ConstexprPCodeExceptionPtrCurrent(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (!runtime->has_exception) {
+    vm->iregs[PCODE_INT_RETURN_REG] = 0;
+    return kPCodeVMStatusRunning;
+  }
+  ConstexprPCodeExceptionHandle* handle = calloc(1, sizeof(*handle));
+  if (handle == NULL) {
+    return kPCodeVMStatusAllocationFailure;
+  }
+  handle->exception = (ConstexprPCodeSavedException){
+      .typeinfo = runtime->exception_typeinfo,
+      .destructor = runtime->exception_destructor,
+      .direct = runtime->exception_direct,
+      .i8 = runtime->exception_i8,
+      .f4 = runtime->exception_f4,
+      .f8 = runtime->exception_f8,
+      .storage_size = runtime->exception_storage_size,
+      .base_offset = runtime->exception_base_offset,
+      .kind = runtime->exception_kind,
+  };
+  if (runtime->exception_storage_size != 0) {
+    handle->exception.storage = malloc(runtime->exception_storage_size);
+    if (handle->exception.storage == NULL) {
+      free(handle);
+      return kPCodeVMStatusAllocationFailure;
+    }
+    memcpy(handle->exception.storage, runtime->exception_storage,
+           runtime->exception_storage_size);
+    if (runtime->exception_direct >=
+            (uint64_t)(uintptr_t)runtime->exception_storage &&
+        runtime->exception_direct <
+            (uint64_t)(uintptr_t)runtime->exception_storage +
+                runtime->exception_storage_size) {
+      handle->exception.direct =
+          (uint64_t)(uintptr_t)handle->exception.storage +
+          (runtime->exception_direct -
+           (uint64_t)(uintptr_t)runtime->exception_storage);
+    }
+  }
+  handle->references = 1;
+  VectorAppend(&runtime->exception_handles, handle);
+  vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)(intptr_t)handle;
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeExceptionPtrRetainRelease(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime, bool retain) {
+  uint64_t address = ConstexprPCodeStackArgument(vm, 0);
+  if (address == 0) {
+    return kPCodeVMStatusRunning;
+  }
+  size_t index = 0;
+  ConstexprPCodeExceptionHandle* handle =
+      ConstexprPCodeFindExceptionHandle(runtime, address, &index);
+  if (handle == NULL || handle->references == 0) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  if (retain) {
+    handle->references++;
+    return kPCodeVMStatusRunning;
+  }
+  handle->references--;
+  if (handle->references == 0) {
+    if (handle->exception.destructor != 0) {
+      return kPCodeVMStatusInvalidConstantOperation;
+    }
+    free(handle->exception.storage);
+    free(handle);
+    runtime->exception_handles.value.p[index] = NULL;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeExceptionPtrRethrow(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  uint64_t address = ConstexprPCodeStackArgument(vm, 0);
+  ConstexprPCodeExceptionHandle* handle =
+      ConstexprPCodeFindExceptionHandle(runtime, address, NULL);
+  if (handle == NULL || handle->references == 0 ||
+      (runtime->has_exception && !runtime->handling_exception)) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
+  if (runtime->has_exception) {
+    ConstexprPCodeSavedException* saved = malloc(sizeof(*saved));
+    if (saved == NULL) {
+      return kPCodeVMStatusAllocationFailure;
+    }
+    *saved = (ConstexprPCodeSavedException){
+        .typeinfo = runtime->exception_typeinfo,
+        .destructor = runtime->exception_destructor,
+        .direct = runtime->exception_direct,
+        .i8 = runtime->exception_i8,
+        .f4 = runtime->exception_f4,
+        .f8 = runtime->exception_f8,
+        .storage = runtime->exception_storage,
+        .storage_size = runtime->exception_storage_size,
+        .base_offset = runtime->exception_base_offset,
+        .kind = runtime->exception_kind,
+        .handling = runtime->handling_exception,
+        .handler_depth = runtime->exception_handler_depth,
+    };
+    VectorAppend(&runtime->exception_stack, saved);
+  }
+  runtime->exception_storage = NULL;
+  runtime->exception_storage_size = handle->exception.storage_size;
+  if (handle->exception.storage_size != 0) {
+    runtime->exception_storage = malloc(handle->exception.storage_size);
+    if (runtime->exception_storage == NULL) {
+      return kPCodeVMStatusAllocationFailure;
+    }
+    memcpy(runtime->exception_storage, handle->exception.storage,
+           handle->exception.storage_size);
+    if (!PCodeVMRegisterMemoryRegion(
+            vm, runtime->exception_storage, runtime->exception_storage_size,
+            true)) {
+      free(runtime->exception_storage);
+      runtime->exception_storage = NULL;
+      runtime->exception_storage_size = 0;
+      return kPCodeVMStatusAllocationFailure;
+    }
+  }
+  runtime->exception_typeinfo = handle->exception.typeinfo;
+  runtime->exception_destructor = handle->exception.destructor;
+  runtime->exception_direct = handle->exception.direct;
+  if (handle->exception.storage != NULL &&
+      handle->exception.direct >=
+          (uint64_t)(uintptr_t)handle->exception.storage &&
+      handle->exception.direct <
+          (uint64_t)(uintptr_t)handle->exception.storage +
+              handle->exception.storage_size) {
+    runtime->exception_direct =
+        (uint64_t)(uintptr_t)runtime->exception_storage +
+        (handle->exception.direct -
+         (uint64_t)(uintptr_t)handle->exception.storage);
+  }
+  runtime->exception_i8 = handle->exception.i8;
+  runtime->exception_f4 = handle->exception.f4;
+  runtime->exception_f8 = handle->exception.f8;
+  runtime->exception_base_offset = handle->exception.base_offset;
+  runtime->exception_kind = handle->exception.kind;
+  runtime->has_exception = true;
+  runtime->handling_exception = false;
+  runtime->exception_handler_depth = 0;
+  runtime->ending_exception = false;
+  runtime->resume.active = false;
+  return ConstexprPCodeBeginUnwind(vm, runtime);
+}
+
+static PCodeVMStatus ConstexprPCodeUncaughtExceptions(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  int64_t count =
+      runtime->has_exception && !runtime->handling_exception ? 1 : 0;
+  for (size_t i = 0; i < runtime->exception_stack.length; i++) {
+    ConstexprPCodeSavedException* saved =
+        runtime->exception_stack.value.p[i];
+    if (saved != NULL && !saved->handling) {
+      count++;
+    }
+  }
+  vm->iregs[PCODE_INT_RETURN_REG] = count;
+  return kPCodeVMStatusRunning;
 }
 
 static void ConstexprPCodeClearException(PCodeVM* vm,
@@ -3745,6 +3932,26 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
       return runtime != NULL
                  ? ConstexprPCodeCompleteEndCatch(vm, runtime)
                  : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeExceptionPtrCurrent:
+      return runtime != NULL
+                 ? ConstexprPCodeExceptionPtrCurrent(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeExceptionPtrRetain:
+      return runtime != NULL
+                 ? ConstexprPCodeExceptionPtrRetainRelease(vm, runtime, true)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeExceptionPtrRelease:
+      return runtime != NULL
+                 ? ConstexprPCodeExceptionPtrRetainRelease(vm, runtime, false)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeExceptionPtrRethrow:
+      return runtime != NULL
+                 ? ConstexprPCodeExceptionPtrRethrow(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeUncaughtExceptions:
+      return runtime != NULL
+                 ? ConstexprPCodeUncaughtExceptions(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeMemcpy:
       return runtime != NULL ? ConstexprPCodeEscapeMemcpy(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
@@ -3901,7 +4108,7 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   // and dereference it to obtain the referred-to integer.
   if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
       TypeIsReference(callee->type->next)) {
-    ConstexprValue value;
+    ConstexprValue value = {0};
     return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
            ConstexprValueAsInteger(value, result);
   }
@@ -3933,7 +4140,7 @@ bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   // reinterpreting the address bits as a floating-point value.
   if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
       TypeIsReference(callee->type->next)) {
-    ConstexprValue value;
+    ConstexprValue value = {0};
     return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
            ConstexprValueAsFloating(value, result);
   }
@@ -4036,6 +4243,9 @@ bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
 bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
                                          ConstexprValue* result) {
   const char* reason = NULL;
+  if (result != NULL) {
+    *result = (ConstexprValue){0};
+  }
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
     return SetConstexprPCodeResult(
         false, "constexpr pcode call has an unbound automatic variable");
@@ -4053,7 +4263,9 @@ bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
   }
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, NULL, NULL, result,
                              &reason);
-  if (!ok) {
+  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
+      (compiler->current_function == NULL ||
+       compiler->constant_evaluation_required_depth > 0)) {
     ok = RunConstexprExpressionThunk(ctx, node, NULL, NULL, NULL, result,
                                      &reason);
   }

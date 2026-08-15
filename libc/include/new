@@ -11,6 +11,7 @@
 #ifndef new_h
 #define new_h
 
+#include <exception>
 #include <stddef.h>  // size_t
 
 namespace std {
@@ -25,9 +26,20 @@ typedef void (*new_handler)();
 new_handler set_new_handler(new_handler handler) noexcept;
 new_handler get_new_handler() noexcept;
 
-struct bad_alloc {
-  bad_alloc() noexcept;
-  const char* what() const noexcept;
+class bad_alloc : public exception {
+ public:
+  constexpr bad_alloc() noexcept {}
+  constexpr const char* what() const noexcept override {
+    return "std::bad_alloc";
+  }
+};
+
+class bad_array_new_length : public bad_alloc {
+ public:
+  constexpr bad_array_new_length() noexcept {}
+  constexpr const char* what() const noexcept override {
+    return "std::bad_array_new_length";
+  }
 };
 
 }  // namespace std

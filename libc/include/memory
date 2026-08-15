@@ -46,11 +46,11 @@ struct allocator {
   constexpr allocator(const allocator&) noexcept {
   }
 
-  T* allocate(size_type n) {
+  constexpr T* allocate(size_type n) {
     return static_cast<T*>(::operator new(n * sizeof(T)));
   }
 
-  void deallocate(T* ptr, size_type) noexcept {
+  constexpr void deallocate(T* ptr, size_type) noexcept {
     ::operator delete(static_cast<void*>(ptr));
   }
 

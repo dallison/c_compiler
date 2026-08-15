@@ -4,12 +4,6 @@ namespace std {
 
 const nothrow_t nothrow = {};
 
-bad_alloc::bad_alloc() noexcept {}
-
-const char* bad_alloc::what() const noexcept {
-  return "std::bad_alloc";
-}
-
 }  // namespace std
 
 void operator delete(void* ptr, size_t) noexcept {

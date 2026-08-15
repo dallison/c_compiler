@@ -31,7 +31,7 @@ struct char_traits {
   static constexpr bool lt(char_type a, char_type b) noexcept {
     return a < b;
   }
-  static size_t length(const char_type* s) {
+  static constexpr size_t length(const char_type* s) {
     size_t n = 0;
     while (s[n] != char_type()) {
       ++n;
@@ -49,7 +49,8 @@ struct char_traits {
     }
     return 0;
   }
-  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
+  static constexpr char_type* copy(char_type* dst, const char_type* src,
+                                   size_t n) {
     for (size_t i = 0; i < n; ++i) {
       dst[i] = src[i];
     }
@@ -114,7 +115,13 @@ struct char_traits<char> {
     return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
   }
 
-  static size_t length(const char_type* s) { return strlen(s); }
+  static constexpr size_t length(const char_type* s) {
+    size_t n = 0;
+    while (s[n] != char_type()) {
+      ++n;
+    }
+    return n;
+  }
 
   static int compare(const char_type* a, const char_type* b, size_t n) {
     if (n == 0) {
@@ -123,9 +130,10 @@ struct char_traits<char> {
     return memcmp(a, b, n);
   }
 
-  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
-    if (n != 0) {
-      memcpy(dst, src, n);
+  static constexpr char_type* copy(char_type* dst, const char_type* src,
+                                   size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+      dst[i] = src[i];
     }
     return dst;
   }

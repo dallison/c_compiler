@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "p_code_encoding.h"
 #include "p_code_reg_alloc.h"
 #include "p_code_vm.h"
 
@@ -7,6 +8,21 @@ static PCodeVMStatus TestEscape(PCodeVM* vm, int32_t code, void* data) {
   (void)vm;
   (void)data;
   return code == 4 ? kPCodeVMStatusHalted : kPCodeVMStatusUndefinedEscape;
+}
+
+static int TestInstructionEncoding(void) {
+  if (PCodeEncodeRegisters32(PCODE_OP(add), 3, 4, 5) !=
+          ((PCODE_OP(add) << 24) | (3 << 16) | (4 << 8) | 5) ||
+      PCodeEncodeRegisters64(PCODE_OP(ldx), 6, 7) !=
+          (UINT32_C(0x80000000) | (PCODE_OP(ldx) << 24) | (6 << 16) |
+           (7 << 8)) ||
+      PCodeEncodeRegister96(PCODE_OP(movxc), 8) !=
+          (UINT32_C(0xc0000000) | (PCODE_OP(movxc) << 24) | (8 << 16)) ||
+      PCodeEncodeImmediate24(PCODE_OP(esc), -1) !=
+          ((PCODE_OP(esc) << 24) | UINT32_C(0x00ffffff))) {
+    return 13;
+  }
+  return 0;
 }
 
 static int TestIntegerProgram(void) {
@@ -123,7 +139,11 @@ static int TestCheckedMemory(void) {
 }
 
 int main(void) {
-  int result = TestIntegerProgram();
+  int result = TestInstructionEncoding();
+  if (result != 0) {
+    return result;
+  }
+  result = TestIntegerProgram();
   if (result != 0) {
     return result;
   }

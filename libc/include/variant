@@ -63,9 +63,9 @@ struct hash<monostate> {
 
 class bad_variant_access : public exception {
  public:
-  bad_variant_access() noexcept {}
+  constexpr bad_variant_access() noexcept {}
 
-  const char* what() const noexcept override {
+  constexpr const char* what() const noexcept override {
     return "bad variant access";
   }
 };

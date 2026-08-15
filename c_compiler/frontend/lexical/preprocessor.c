@@ -230,6 +230,7 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_named_character_escapes", "202207L");
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      PreprocessorDefineMacro(p, "__cpp_constexpr_exceptions", "202411L");
       PreprocessorDefineMacro(p, "__cpp_contracts", "202606L");
       PreprocessorDefineMacro(p, "__cpp_deleted_function", "202403L");
       PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");

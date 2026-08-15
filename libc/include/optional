@@ -26,9 +26,9 @@ inline constexpr nullopt_t nullopt(0);
 
 class bad_optional_access : public exception {
  public:
-  bad_optional_access() noexcept {}
+  constexpr bad_optional_access() noexcept {}
 
-  const char* what() const noexcept override {
+  constexpr const char* what() const noexcept override {
     return "bad optional access";
   }
 };
@@ -49,11 +49,11 @@ class optional {
   __storage_type __storage_;
   bool __engaged_;
 
-  T* __ptr() noexcept {
+  constexpr T* __ptr() noexcept {
     return &__storage_.__value_;
   }
 
-  const T* __ptr() const noexcept {
+  constexpr const T* __ptr() const noexcept {
     return &__storage_.__value_;
   }
 
@@ -70,9 +70,9 @@ class optional {
  public:
   using value_type = T;
 
-  optional() noexcept : __engaged_(false) {}
+  constexpr optional() noexcept : __engaged_(false) {}
 
-  optional(nullopt_t) noexcept : __engaged_(false) {}
+  constexpr optional(nullopt_t) noexcept : __engaged_(false) {}
 
   optional(const T& value) : __engaged_(false) {
     __construct_copy(value);
@@ -106,9 +106,7 @@ class optional {
     }
   }
 
-  ~optional() {
-    reset();
-  }
+  constexpr ~optional() { reset(); }
 
   optional& operator=(nullopt_t) noexcept {
     reset();
@@ -185,36 +183,36 @@ class optional {
     return std::move(*__ptr());
   }
 
-  explicit operator bool() const noexcept {
+  constexpr explicit operator bool() const noexcept {
     return __engaged_;
   }
 
-  bool has_value() const noexcept {
+  constexpr bool has_value() const noexcept {
     return __engaged_;
   }
 
-  T& value() & {
+  constexpr T& value() & {
     if (!__engaged_) {
       __DAVECC_THROW(bad_optional_access());
     }
     return *__ptr();
   }
 
-  const T& value() const& {
+  constexpr const T& value() const& {
     if (!__engaged_) {
       __DAVECC_THROW(bad_optional_access());
     }
     return *__ptr();
   }
 
-  T&& value() && {
+  constexpr T&& value() && {
     if (!__engaged_) {
       __DAVECC_THROW(bad_optional_access());
     }
     return std::move(*__ptr());
   }
 
-  const T&& value() const&& {
+  constexpr const T&& value() const&& {
     if (!__engaged_) {
       __DAVECC_THROW(bad_optional_access());
     }
@@ -232,7 +230,7 @@ class optional {
                       : static_cast<T>(std::forward<U>(default_value));
   }
 
-  void reset() noexcept {
+  constexpr void reset() noexcept {
     if (__engaged_) {
       __ptr()->~T();
       __engaged_ = false;

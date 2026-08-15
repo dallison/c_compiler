@@ -57,8 +57,10 @@ back_insert_iterator<Container> back_inserter(Container& container) {
 
 class format_error : public runtime_error {
  public:
-  explicit format_error(const char* message) : runtime_error(message) {}
-  explicit format_error(const string& message) : runtime_error(message) {}
+  constexpr explicit format_error(const char* message)
+      : runtime_error(message) {}
+  constexpr explicit format_error(const string& message)
+      : runtime_error(message) {}
 };
 
 template <class T, class CharT = char>
