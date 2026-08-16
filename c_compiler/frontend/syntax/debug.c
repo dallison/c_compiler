@@ -195,6 +195,16 @@ static BaseTypeDIE base_types[] = {
      "char32_t",
      DW_ATE(UTF),
      4},
+    {{15, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsFloat32,
+     "std::float32_t",
+     DW_ATE(float),
+     4},
+    {{16, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsFloat64,
+     "std::float64_t",
+     DW_ATE(float),
+     8},
 };
 
 #define NUM_BASE_TYPES (sizeof(base_types) / sizeof(BaseTypeDIE))

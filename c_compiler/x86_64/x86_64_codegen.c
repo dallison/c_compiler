@@ -717,7 +717,7 @@ static X86_64Opcode MoveOpcodeForLoad(X86_64Opcode load_opcode) {
 // `movss` where a `movsd` was required).  `TypeIsDouble()` alone does not cover
 // long double, so use this predicate for the double-vs-float choice.
 static bool X86_64FpIsDoubleWidth(TypeRecord* type) {
-  return TypeIsDouble(type) || TypeIsLongDouble(type);
+  return TypeUsesFloat64Representation(type);
 }
 
 static TargetInstruction* GetIntConstant(X86_64Generator* rv, IRNode* node,
@@ -2427,7 +2427,7 @@ static TargetInstruction* LowerStore(X86_64Generator* rv, IRNode* node) {
 }
 
 static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
-  if (TypeIsFloat(type)) {
+  if (TypeUsesFloat32Representation(type)) {
     return X86_64_OP(loadss);
   }
   if (X86_64FpIsDoubleWidth(type)) {
@@ -2447,7 +2447,7 @@ static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
 }
 
 static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
-  if (TypeIsFloat(type)) {
+  if (TypeUsesFloat32Representation(type)) {
     return X86_64_OP(storess);
   }
   if (X86_64FpIsDoubleWidth(type)) {
@@ -3785,10 +3785,9 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
         TargetInstruction* arg;
         if (arg_location->staged) {
           X86_64Opcode load_opcode = X86_64_OP(loadq);
-          if (TypeIsFloat(arg_node->type)) {
+          if (TypeUsesFloat32Representation(arg_node->type)) {
             load_opcode = X86_64_OP(loadss);
-          } else if (TypeIsDouble(arg_node->type) ||
-                     TypeIsLongDouble(arg_node->type)) {
+          } else if (TypeUsesFloat64Representation(arg_node->type)) {
             load_opcode = X86_64_OP(loadsd);
           }
           arg = Emit(rv, NewInstruction2(

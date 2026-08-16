@@ -446,9 +446,8 @@ static struct {
   bool (*type_func)(TypeRecord*);
   IROpcode opcode;
 } type_table[] = {
-    {TypeIsFloat, IR_OP(constf)},
-    {TypeIsDouble, IR_OP(constd)},
-    {TypeIsLongDouble, IR_OP(constd)},
+    {TypeUsesFloat32Representation, IR_OP(constf)},
+    {TypeUsesFloat64Representation, IR_OP(constd)},
   {TypeIsPointerOrArray, IR_OP(consta)},
   {TypeIsMemberPointer, IR_OP(consta)},
   {TypeIsStructOrUnion, IR_OP(consta)},

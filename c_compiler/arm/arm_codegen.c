@@ -607,7 +607,7 @@ static TargetInstruction* CopyInstructionSize(TargetInstruction* inst, int op) {
 // only matches the `double` type bit, so use this wherever a "64-bit FP value"
 // decision is made.
 static bool ARMTypeIsDouble(TypeRecord* type) {
-  return TypeIsDouble(type) || TypeIsLongDouble(type);
+  return TypeUsesFloat64Representation(type);
 }
 
 static TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* inst) {
@@ -618,7 +618,7 @@ static TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstructi
     SetInstructionSize(inst, kSize64Bit);
     return inst;
   }
-  if (node->type != NULL && TypeIsFloat(node->type)) {
+  if (node->type != NULL && TypeUsesFloat32Representation(node->type)) {
     SetInstructionSize(inst, kSize32Bit);
     return inst;
   }
@@ -1553,9 +1553,8 @@ static struct {
     {TypeIsUnsignedInt, ARM_OP(ldur)},
     {TypeIsUnsignedShort, ARM_OP(ldurh)},
     {TypeIsUnsignedChar, ARM_OP(ldurb)},
-    {TypeIsFloat, ARM_OP(fldr)},
-    {TypeIsDouble, ARM_OP(fldr)},
-    {TypeIsLongDouble, ARM_OP(fldr)},
+    {TypeUsesFloat32Representation, ARM_OP(fldr)},
+    {ARMTypeIsDouble, ARM_OP(fldr)},
     {TypeIsBool, ARM_OP(ldrb)},
     {TypeIsPointerOrArray, ARM_OP(ldr)},
     {TypeIsFunction, ARM_OP(ldr)},
@@ -4739,7 +4738,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         }
         ARMOpcode mov_opcode = ARM_OP(mov);
         if (TypeIsFloatingPoint(arg_node->type)) {
-          if (TypeIsDouble(arg_node->type)) {
+          if (ARMTypeIsDouble(arg_node->type)) {
             mov_opcode = ARM_OP(fmov);
           } else {
             mov_opcode = ARM_OP(fmov);
@@ -5917,7 +5916,8 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(ARMGenerator* g,
                 FloatingPointArgumentRegister(g,
                     (int)arg_loc.location.offset - ARM_FP_ARG_START)));
       SetInstructionSize(mv,
-                         TypeIsDouble(symbol->type) ? kSize64Bit : kSize32Bit);
+                         ARMTypeIsDouble(symbol->type) ? kSize64Bit
+                                                       : kSize32Bit);
       mv->dest = var;
       return var;
     }

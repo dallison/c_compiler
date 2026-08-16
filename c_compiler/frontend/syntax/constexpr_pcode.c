@@ -1281,12 +1281,14 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
     return 0;
   }
   TypeRecordCalculateSize(type);
-  if (TypeIsFloat(type) || TypeIsInt(type) || TypeIsShort(type) ||
+  if (TypeUsesFloat32Representation(type) || TypeIsInt(type) ||
+      TypeIsShort(type) ||
       TypeIsCharFamily(type)) {
     return 4;
   }
-  if (TypeIsDouble(type) || TypeIsLong(type) || TypeIsLongLong(type) ||
-      TypeIsPointerOrArray(type) || TypeIsFunction(type)) {
+  if (TypeUsesFloat64Representation(type) || TypeIsLong(type) ||
+      TypeIsLongLong(type) || TypeIsPointerOrArray(type) ||
+      TypeIsFunction(type)) {
     return 8;
   }
   return type->size < 4 ? 4 : type->size;
@@ -1299,7 +1301,7 @@ static bool StoreConstexprScalarBytes(TypeRecord* type, ConstexprValue* value,
     return false;
   }
   if (TypeIsFloatingPoint(type)) {
-    if (TypeIsFloat(type)) {
+    if (TypeUsesFloat32Representation(type)) {
       float fvalue = (float)value->fvalue;
       memcpy(dest, &fvalue, sizeof(fvalue));
       return true;
@@ -1502,7 +1504,7 @@ static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
   }
   *value = (ConstexprValue){0};
   if (TypeIsFloatingPoint(type)) {
-    if (TypeIsFloat(type)) {
+    if (TypeUsesFloat32Representation(type)) {
       float fvalue;
       memcpy(&fvalue, src, sizeof(fvalue));
       value->is_floating = true;
@@ -1939,7 +1941,7 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
       *reason = "could not evaluate floating constexpr argument";
       return false;
     }
-    if (TypeIsFloat(type)) {
+    if (TypeUsesFloat32Representation(type)) {
       float fvalue = (float)value;
       memcpy(*sp, &fvalue, sizeof(fvalue));
     } else {
@@ -2293,7 +2295,9 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       *int_result = vm.iregs[PCODE_INT_RETURN_REG];
     }
     if (double_result != NULL) {
-      *double_result = vm.dregs[PCODE_DOUBLE_RETURN_REG];
+      *double_result = TypeUsesFloat32Representation(func->next)
+                           ? (double)vm.fregs[PCODE_FLOAT_RETURN_REG]
+                           : vm.dregs[PCODE_DOUBLE_RETURN_REG];
     }
     if (address_result != NULL) {
       uint64_t address = (uint64_t)vm.iregs[PCODE_INT_RETURN_REG];

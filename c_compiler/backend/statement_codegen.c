@@ -2255,10 +2255,9 @@ static void GenerateReturnStatement(Generator* gen,
         IROpcode result;
         if (TypeIsIntegral(node->cond->type)) {
           result = IR_OP(resulti);
-        } else if (TypeIsFloat(node->cond->type)) {
+        } else if (TypeUsesFloat32Representation(node->cond->type)) {
           result = IR_OP(resultf);
-        } else if (TypeIsDouble(node->cond->type) ||
-                   TypeIsLongDouble(node->cond->type)) {
+        } else if (TypeUsesFloat64Representation(node->cond->type)) {
           result = IR_OP(resultd);
         } else {
           result = IR_OP(resulta);

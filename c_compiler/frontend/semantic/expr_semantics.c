@@ -698,10 +698,14 @@ static void AnalyzeBinaryExpression(BinaryASTNode* node) {
 // Ranks for types.  Larger ranks are closer to the end
 // of the array.  These are pointers to functions that return true
 // if the type is of the requested value.
+static bool TypeHasDoubleConversionRank(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsFloat64(type);
+}
+
 bool (*type_ranks[])(TypeRecord*) = {
     TypeIsBool,       TypeIsCharFamily, TypeIsShort, TypeIsInt,
-    TypeIsLong,       TypeIsLongLong, TypeIsFloat, TypeIsDouble,
-    TypeIsLongDouble, TypeIsVoid,     NULL,
+    TypeIsLong,       TypeIsLongLong, TypeUsesFloat32Representation,
+    TypeHasDoubleConversionRank, TypeIsLongDouble, TypeIsVoid, NULL,
 };
 
 // The 'int' rank, for promotion to int.
@@ -717,6 +721,18 @@ static int GetRank(TypeRecord* type) {
     }
   }
   return -1;
+}
+
+// C++23 gives the standard floating-point type the greater conversion subrank
+// when an extended type has the same representation and rank.
+static int GetFloatingSubrank(TypeRecord* type) {
+  if (TypeIsFloat(type) || TypeIsDouble(type)) {
+    return 2;
+  }
+  if (TypeIsFloat32(type) || TypeIsFloat64(type)) {
+    return 1;
+  }
+  return 0;
 }
 
 static TypeRecord* NewLogicalResultType(void) {
@@ -984,6 +1000,14 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       ASTNodeSetType((ASTNode*)node, node->left->type);
     } else if (left_rank < right_rank) {
       // Convert left to right.
+      NormalConversion(node->left, node->right->type);
+      ASTNodeSetType((ASTNode*)node, node->right->type);
+    } else if (GetFloatingSubrank(node->left->type) >
+               GetFloatingSubrank(node->right->type)) {
+      NormalConversion(node->right, node->left->type);
+      ASTNodeSetType((ASTNode*)node, node->left->type);
+    } else if (GetFloatingSubrank(node->left->type) <
+               GetFloatingSubrank(node->right->type)) {
       NormalConversion(node->left, node->right->type);
       ASTNodeSetType((ASTNode*)node, node->right->type);
     } else if (TypeIsUnsigned(node->left->type) !=
@@ -3329,8 +3353,8 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
 // keep the historical behaviour of converting the right operand to the left
 // type.
 static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
-  if (TypeIsFloat(node->left->type) &&
-      (TypeIsDouble(node->right->type) || TypeIsLongDouble(node->right->type))) {
+  if (TypeUsesFloat32Representation(node->left->type) &&
+      TypeUsesFloat64Representation(node->right->type)) {
     NormalConversion(node->right, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
     return;
   }

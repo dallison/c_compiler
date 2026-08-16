@@ -196,7 +196,9 @@ static struct {
   {kTypeLong, SizeofLong},
   {kTypeLongLong, SizeofLongLong},
   {kTypeFloat, SizeofFloat},
+  {kTypeFloat32, SizeofFloat},
   {kTypeDouble, SizeofDouble},
+  {kTypeFloat64, SizeofDouble},
   {kTypeLongDouble, SizeofDouble},
   {kTypeInt, SizeofInt},
   {kTypeVoid, SizeofVoid},
@@ -701,7 +703,8 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   }
   if (expr->type->declarator == kDeclPrimitive &&
       (expr->type->type &
-       (kTypeFloat | kTypeDouble | kTypeLongDouble)) != 0) {
+       (kTypeFloat | kTypeDouble | kTypeLongDouble |
+        kTypeFloat32 | kTypeFloat64)) != 0) {
     return false;
   }
 

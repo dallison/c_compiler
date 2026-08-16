@@ -1817,10 +1817,26 @@ static ASTNode* ParseFloatingPointConstant(Syntax* syntax,
   double value = lex->fnumber;
   LexNextToken(lex);
   
-  // Floating point numbers have a suffix: F or L, meaning
-  // F: float, L: long double.
+  // Floating point numbers have the standard F/L suffixes and, in C++23,
+  // fixed-width extended f32/f64 suffixes.
   Type type_specifier = kTypeDouble;
-  if (StringContainsChar(&lex->suffix, 'F')) {
+  if (StringEqual(&lex->suffix, "F32")) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax, "The f32 floating-point suffix requires C++23");
+    }
+    type_specifier = kTypeFloat32;
+  } else if (StringEqual(&lex->suffix, "F64")) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+      SyntaxError(syntax, "The f64 floating-point suffix requires C++23");
+    }
+    if (StringEqual(compiler->target_name, "6502") ||
+        StringEqual(compiler->target_name, "65c02")) {
+      SyntaxError(syntax,
+                  "The binary64 extended floating-point type is not "
+                  "supported on this target");
+    }
+    type_specifier = kTypeFloat64;
+  } else if (StringContainsChar(&lex->suffix, 'F')) {
     type_specifier &= ~kTypeDouble;
     type_specifier |= kTypeFloat;
   } else if (StringContainsChar(&lex->suffix, 'L')) {

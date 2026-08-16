@@ -84,6 +84,14 @@
 #error "__cpp_named_character_escapes has the wrong value"
 #endif
 
+#if __STDCPP_FLOAT32_T__ != 1
+#error "__STDCPP_FLOAT32_T__ has the wrong value"
+#endif
+
+#if __STDCPP_FLOAT64_T__ != 1
+#error "__STDCPP_FLOAT64_T__ has the wrong value"
+#endif
+
 #if __cpp_deduction_guides != 202207L
 #error "__cpp_deduction_guides has the wrong value"
 #endif

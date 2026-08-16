@@ -1,0 +1,31 @@
+//
+//  stdfloat
+//  c_compiler
+//
+//  C++23 fixed-width floating-point types.
+//
+
+#ifndef stdfloat_h
+#define stdfloat_h
+
+#if __cplusplus >= 202302L
+
+#ifndef __cpp_lib_stdfloat
+#define __cpp_lib_stdfloat 202306L
+#endif
+
+namespace std {
+
+#if defined(__STDCPP_FLOAT32_T__)
+using float32_t = decltype(0.0f32);
+#endif
+
+#if defined(__STDCPP_FLOAT64_T__)
+using float64_t = decltype(0.0f64);
+#endif
+
+}  // namespace std
+
+#endif
+
+#endif /* stdfloat_h */

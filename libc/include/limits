@@ -300,6 +300,96 @@ class numeric_limits<double>
   static constexpr int max_exponent10 = DBL_MAX_10_EXP;
 };
 
+#if __cplusplus >= 202302L && defined(__STDCPP_FLOAT32_T__)
+template <>
+class numeric_limits<decltype(0.0f32)>
+    : public __limits_detail::__numeric_limits_float<decltype(0.0f32)> {
+ public:
+  using __type = decltype(0.0f32);
+
+  static constexpr bool is_specialized = true;
+  static constexpr __type min() noexcept {
+    return static_cast<__type>(FLT_MIN);
+  }
+  static constexpr __type max() noexcept {
+    return static_cast<__type>(FLT_MAX);
+  }
+  static constexpr __type lowest() noexcept {
+    return static_cast<__type>(-FLT_MAX);
+  }
+  static constexpr __type epsilon() noexcept {
+    return static_cast<__type>(FLT_EPSILON);
+  }
+  static constexpr __type round_error() noexcept {
+    return static_cast<__type>(0.5F);
+  }
+  static constexpr __type infinity() noexcept {
+    return static_cast<__type>(numeric_limits<float>::infinity());
+  }
+  static constexpr __type quiet_NaN() noexcept {
+    return static_cast<__type>(numeric_limits<float>::quiet_NaN());
+  }
+  static constexpr __type signaling_NaN() noexcept {
+    return static_cast<__type>(numeric_limits<float>::signaling_NaN());
+  }
+  static constexpr __type denorm_min() noexcept {
+    return static_cast<__type>(FLT_TRUE_MIN);
+  }
+  static constexpr int digits = FLT_MANT_DIG;
+  static constexpr int digits10 = FLT_DIG;
+  static constexpr int max_digits10 = 2 + (FLT_MANT_DIG * 30103) / 100000;
+  static constexpr int min_exponent = FLT_MIN_EXP;
+  static constexpr int min_exponent10 = FLT_MIN_10_EXP;
+  static constexpr int max_exponent = FLT_MAX_EXP;
+  static constexpr int max_exponent10 = FLT_MAX_10_EXP;
+};
+#endif
+
+#if __cplusplus >= 202302L && defined(__STDCPP_FLOAT64_T__)
+template <>
+class numeric_limits<decltype(0.0f64)>
+    : public __limits_detail::__numeric_limits_float<decltype(0.0f64)> {
+ public:
+  using __type = decltype(0.0f64);
+
+  static constexpr bool is_specialized = true;
+  static constexpr __type min() noexcept {
+    return static_cast<__type>(DBL_MIN);
+  }
+  static constexpr __type max() noexcept {
+    return static_cast<__type>(DBL_MAX);
+  }
+  static constexpr __type lowest() noexcept {
+    return static_cast<__type>(-DBL_MAX);
+  }
+  static constexpr __type epsilon() noexcept {
+    return static_cast<__type>(DBL_EPSILON);
+  }
+  static constexpr __type round_error() noexcept {
+    return static_cast<__type>(0.5);
+  }
+  static constexpr __type infinity() noexcept {
+    return static_cast<__type>(numeric_limits<double>::infinity());
+  }
+  static constexpr __type quiet_NaN() noexcept {
+    return static_cast<__type>(numeric_limits<double>::quiet_NaN());
+  }
+  static constexpr __type signaling_NaN() noexcept {
+    return static_cast<__type>(numeric_limits<double>::signaling_NaN());
+  }
+  static constexpr __type denorm_min() noexcept {
+    return static_cast<__type>(DBL_TRUE_MIN);
+  }
+  static constexpr int digits = DBL_MANT_DIG;
+  static constexpr int digits10 = DBL_DIG;
+  static constexpr int max_digits10 = 2 + (DBL_MANT_DIG * 30103) / 100000;
+  static constexpr int min_exponent = DBL_MIN_EXP;
+  static constexpr int min_exponent10 = DBL_MIN_10_EXP;
+  static constexpr int max_exponent = DBL_MAX_EXP;
+  static constexpr int max_exponent10 = DBL_MAX_10_EXP;
+};
+#endif
+
 template <>
 class numeric_limits<long double> : public numeric_limits<double> {
  public:

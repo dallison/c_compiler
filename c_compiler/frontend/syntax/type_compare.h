@@ -142,7 +142,8 @@ inline bool TypeIsIntegral(TypeRecord* type) {
 
 inline bool TypeIsFloatingPoint(TypeRecord* type) {
   return TypeIsPrimitive(type) &&
-         (type->type & (kTypeFloat | kTypeDouble | kTypeLongDouble)) != 0;
+         (type->type & (kTypeFloat | kTypeDouble | kTypeLongDouble |
+                        kTypeFloat32 | kTypeFloat64)) != 0;
 }
 
 inline bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2) {
@@ -233,11 +234,23 @@ inline bool TypeIsUnsignedLongLong(TypeRecord* type) {
 inline bool TypeIsFloat(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeFloat) != 0;
 }
+inline bool TypeIsFloat32(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeFloat32) != 0;
+}
 inline bool TypeIsDouble(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeDouble) != 0;
 }
+inline bool TypeIsFloat64(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeFloat64) != 0;
+}
 inline bool TypeIsLongDouble(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeLongDouble) != 0;
+}
+inline bool TypeUsesFloat32Representation(TypeRecord* type) {
+  return TypeIsFloat(type) || TypeIsFloat32(type);
+}
+inline bool TypeUsesFloat64Representation(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsFloat64(type) || TypeIsLongDouble(type);
 }
 inline bool TypeIsBool(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeBool) != 0;

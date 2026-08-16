@@ -5399,6 +5399,7 @@ static bool TemplateNonTypeArgumentMatchesParameter(
     return param->type->declarator == kDeclPrimitive &&
            (param->type->type &
             (kTypeFloat | kTypeDouble | kTypeLongDouble |
+             kTypeFloat32 | kTypeFloat64 |
              kTypeStruct | kTypeUnion | kTypeVoid)) == 0;
   }
   if (arg->type == NULL) {

@@ -512,7 +512,7 @@ static W65C02RegisterType RegisterTypeFromTypeRecord(TypeRecord* type) {
   if (TypeIsPointerOrArray(type) || TypeIsStructOrUnion(type) ||
       TypeIsFunction(type)) {
     return k6502RegTypeI;
-  } else if (TypeIsFloat(type) || TypeIsDouble(type)) {
+  } else if (TypeIsFloatingPoint(type)) {
     return k6502RegTypeF;
   } else if (TypeIsBool(type)) {
     return k6502RegTypeB;

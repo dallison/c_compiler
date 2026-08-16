@@ -558,6 +558,10 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   compiler->current_class_access_context = saved_class_access_context;
 }
 
+static bool TypeHasDoubleRepresentationAndRank(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsFloat64(type);
+}
+
 // This table contains mappings from one type to another.  The 'from'
 // and 'to' are pointers to functions that return true if the passed
 // type is of the type specified by the function.  The 'op' is a new
@@ -577,8 +581,8 @@ struct {
     {TypeIsInt, TypeIsLong, AST_OP(i2l)},
     {TypeIsInt, TypeIsLongLong, AST_OP(i2ll)},
     {TypeIsInt, TypeIsCharFamily, AST_OP(i2c)},
-    {TypeIsInt, TypeIsFloat, AST_OP(i2f)},
-    {TypeIsInt, TypeIsDouble, AST_OP(i2d)},
+    {TypeIsInt, TypeUsesFloat32Representation, AST_OP(i2f)},
+    {TypeIsInt, TypeHasDoubleRepresentationAndRank, AST_OP(i2d)},
     {TypeIsInt, TypeIsLongDouble, AST_OP(i2ld)},
     {TypeIsInt, TypeIsBool, AST_OP(i2b)},
 
@@ -587,8 +591,8 @@ struct {
     {TypeIsCharFamily, TypeIsLong, AST_OP(c2l)},
     {TypeIsCharFamily, TypeIsLongLong, AST_OP(c2ll)},
     {TypeIsCharFamily, TypeIsInt, AST_OP(c2i)},
-    {TypeIsCharFamily, TypeIsFloat, AST_OP(c2f)},
-    {TypeIsCharFamily, TypeIsDouble, AST_OP(c2d)},
+    {TypeIsCharFamily, TypeUsesFloat32Representation, AST_OP(c2f)},
+    {TypeIsCharFamily, TypeHasDoubleRepresentationAndRank, AST_OP(c2d)},
     {TypeIsCharFamily, TypeIsLongDouble, AST_OP(c2ld)},
     {TypeIsCharFamily, TypeIsBool, AST_OP(c2b)},
 
@@ -596,8 +600,8 @@ struct {
     {TypeIsShort, TypeIsLong, AST_OP(s2l)},
     {TypeIsShort, TypeIsLongLong, AST_OP(s2ll)},
     {TypeIsShort, TypeIsInt, AST_OP(s2i)},
-    {TypeIsShort, TypeIsFloat, AST_OP(s2f)},
-    {TypeIsShort, TypeIsDouble, AST_OP(s2d)},
+    {TypeIsShort, TypeUsesFloat32Representation, AST_OP(s2f)},
+    {TypeIsShort, TypeHasDoubleRepresentationAndRank, AST_OP(s2d)},
     {TypeIsShort, TypeIsLongDouble, AST_OP(s2ld)},
     {TypeIsShort, TypeIsBool, AST_OP(s2b)},
 
@@ -605,8 +609,8 @@ struct {
     {TypeIsLong, TypeIsShort, AST_OP(l2s)},
     {TypeIsLong, TypeIsLongLong, AST_OP(l2ll)},
     {TypeIsLong, TypeIsInt, AST_OP(l2i)},
-    {TypeIsLong, TypeIsFloat, AST_OP(l2f)},
-    {TypeIsLong, TypeIsDouble, AST_OP(l2d)},
+    {TypeIsLong, TypeUsesFloat32Representation, AST_OP(l2f)},
+    {TypeIsLong, TypeHasDoubleRepresentationAndRank, AST_OP(l2d)},
     {TypeIsLong, TypeIsLongDouble, AST_OP(l2ld)},
     {TypeIsLong, TypeIsBool, AST_OP(l2b)},
 
@@ -614,36 +618,38 @@ struct {
     {TypeIsLongLong, TypeIsShort, AST_OP(ll2s)},
     {TypeIsLongLong, TypeIsLong, AST_OP(ll2l)},
     {TypeIsLongLong, TypeIsInt, AST_OP(ll2i)},
-    {TypeIsLongLong, TypeIsFloat, AST_OP(ll2f)},
-    {TypeIsLongLong, TypeIsDouble, AST_OP(ll2d)},
+    {TypeIsLongLong, TypeUsesFloat32Representation, AST_OP(ll2f)},
+    {TypeIsLongLong, TypeHasDoubleRepresentationAndRank, AST_OP(ll2d)},
     {TypeIsLongLong, TypeIsLongDouble, AST_OP(ll2ld)},
     {TypeIsLongLong, TypeIsBool, AST_OP(ll2b)},
 
-    {TypeIsFloat, TypeIsCharFamily, AST_OP(f2c)},
-    {TypeIsFloat, TypeIsShort, AST_OP(f2s)},
-    {TypeIsFloat, TypeIsLongLong, AST_OP(f2ll)},
-    {TypeIsFloat, TypeIsInt, AST_OP(f2i)},
-    {TypeIsFloat, TypeIsLong, AST_OP(f2l)},
-    {TypeIsFloat, TypeIsDouble, AST_OP(f2d)},
-    {TypeIsFloat, TypeIsLongDouble, AST_OP(f2ld)},
-    {TypeIsFloat, TypeIsBool, AST_OP(f2b)},
+    {TypeUsesFloat32Representation, TypeIsCharFamily, AST_OP(f2c)},
+    {TypeUsesFloat32Representation, TypeIsShort, AST_OP(f2s)},
+    {TypeUsesFloat32Representation, TypeIsLongLong, AST_OP(f2ll)},
+    {TypeUsesFloat32Representation, TypeIsInt, AST_OP(f2i)},
+    {TypeUsesFloat32Representation, TypeIsLong, AST_OP(f2l)},
+    {TypeUsesFloat32Representation, TypeHasDoubleRepresentationAndRank,
+     AST_OP(f2d)},
+    {TypeUsesFloat32Representation, TypeIsLongDouble, AST_OP(f2ld)},
+    {TypeUsesFloat32Representation, TypeIsBool, AST_OP(f2b)},
 
-    {TypeIsDouble, TypeIsCharFamily, AST_OP(d2c)},
-    {TypeIsDouble, TypeIsLong, AST_OP(d2l)},
-    {TypeIsDouble, TypeIsLongLong, AST_OP(d2ll)},
-    {TypeIsDouble, TypeIsInt, AST_OP(d2i)},
-    {TypeIsDouble, TypeIsFloat, AST_OP(d2f)},
-    {TypeIsDouble, TypeIsShort, AST_OP(d2s)},
-    {TypeIsDouble, TypeIsLongDouble, AST_OP(d2ld)},
-    {TypeIsDouble, TypeIsBool, AST_OP(d2b)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsCharFamily, AST_OP(d2c)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsLong, AST_OP(d2l)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsLongLong, AST_OP(d2ll)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsInt, AST_OP(d2i)},
+    {TypeHasDoubleRepresentationAndRank, TypeUsesFloat32Representation,
+     AST_OP(d2f)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsShort, AST_OP(d2s)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsLongDouble, AST_OP(d2ld)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsBool, AST_OP(d2b)},
 
     {TypeIsLongDouble, TypeIsCharFamily, AST_OP(ld2c)},
     {TypeIsLongDouble, TypeIsLong, AST_OP(ld2l)},
     {TypeIsLongDouble, TypeIsLongLong, AST_OP(ld2ll)},
     {TypeIsLongDouble, TypeIsInt, AST_OP(ld2i)},
-    {TypeIsLongDouble, TypeIsFloat, AST_OP(ld2f)},
+    {TypeIsLongDouble, TypeUsesFloat32Representation, AST_OP(ld2f)},
     {TypeIsLongDouble, TypeIsShort, AST_OP(ld2s)},
-    {TypeIsLongDouble, TypeIsDouble, AST_OP(ld2d)},
+    {TypeIsLongDouble, TypeHasDoubleRepresentationAndRank, AST_OP(ld2d)},
     {TypeIsLongDouble, TypeIsBool, AST_OP(ld2b)},
 
     {TypeIsBool, TypeIsCharFamily, AST_OP(b2c)},
@@ -651,9 +657,9 @@ struct {
     {TypeIsBool, TypeIsLongLong, AST_OP(b2ll)},
     {TypeIsBool, TypeIsInt, AST_OP(b2i)},
     {TypeIsBool, TypeIsLong, AST_OP(b2l)},
-    {TypeIsBool, TypeIsDouble, AST_OP(b2d)},
+    {TypeIsBool, TypeHasDoubleRepresentationAndRank, AST_OP(b2d)},
     {TypeIsBool, TypeIsLongDouble, AST_OP(b2ld)},
-    {TypeIsBool, TypeIsFloat, AST_OP(b2f)},
+    {TypeIsBool, TypeUsesFloat32Representation, AST_OP(b2f)},
 };
 
 #define NUM_TYPE_CONVERSIONS (sizeof(type_conversions) / sizeof(type_conversions[0]))
@@ -1361,6 +1367,17 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
+    return;
+  }
+
+  // The C++23 fixed-width extended types are distinct types, but conversions
+  // to and from the standard type with the same IEC 60559 representation do
+  // not require an IR operation.
+  if ((TypeUsesFloat32Representation(from->type) &&
+       TypeUsesFloat32Representation(to)) ||
+      (TypeHasDoubleRepresentationAndRank(from->type) &&
+       TypeHasDoubleRepresentationAndRank(to))) {
+    ASTNodeSetType(from, to);
     return;
   }
 

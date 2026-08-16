@@ -794,6 +794,10 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 'm' : 'l');
   } else if (TypeIsInt(type)) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 'j' : 'i');
+  } else if (TypeIsFloat32(type)) {
+    StringAppend(out, "DF32_");
+  } else if (TypeIsFloat64(type)) {
+    StringAppend(out, "DF64_");
   } else if (TypeIsFloat(type)) {
     StringAppendChar(out, 'f');
   } else if (TypeIsDouble(type)) {

@@ -5656,7 +5656,9 @@ static ASTNode* RebuildClonedCallResultConversion(
       (TypeIsLong(source) && TypeIsLong(target_type)) ||
       (TypeIsLongLong(source) && TypeIsLongLong(target_type)) ||
       (TypeIsFloat(source) && TypeIsFloat(target_type)) ||
+      (TypeIsFloat32(source) && TypeIsFloat32(target_type)) ||
       (TypeIsDouble(source) && TypeIsDouble(target_type)) ||
+      (TypeIsFloat64(source) && TypeIsFloat64(target_type)) ||
       (TypeIsLongDouble(source) && TypeIsLongDouble(target_type)) ||
       (TypeIsBool(source) && TypeIsBool(target_type));
   if (conversion->sub->op != AST_OP(call) && !same_scalar_kind) {

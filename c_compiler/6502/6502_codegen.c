@@ -1846,10 +1846,10 @@ static void ApplyFixups(W65C02Generator* g, IRNode* label_node) {
 
 // Temp expression in zero page holding value.
 static TargetInstruction* TempRegister(W65C02Generator* g, TypeRecord* type, int size) {
-  if (TypeIsFloat(type)) {
+  if (TypeUsesFloat32Representation(type)) {
     return Emit(g, NewInstruction(W65C02_OP(exprf), kAddrModeZeroPage));
   }
-  if (TypeIsDouble(type)) {
+  if (TypeUsesFloat64Representation(type)) {
     return Emit(g, NewInstruction(W65C02_OP(exprd), kAddrModeZeroPage));
   }
   switch (size) {
@@ -5168,10 +5168,10 @@ static void LowerInc(W65C02Generator* g, IRNode* node) {
     }
   }
   int size = Sizeof(node->type);
-  if (TypeIsDouble(node->type)) {
+  if (TypeUsesFloat64Representation(node->type)) {
     func = is_reg ? g->rincd :g->incd;
     size = 4;
-  } else if (TypeIsFloat(node->type)) {
+  } else if (TypeUsesFloat32Representation(node->type)) {
     func = is_reg ? g->rincf : g->incf;
     size = 8;
   } else {
@@ -5245,9 +5245,9 @@ static void LowerDec(W65C02Generator* g, IRNode* node) {
     }
   }
   int size = Sizeof(node->type);
-  if (TypeIsDouble(node->type)) {
+  if (TypeUsesFloat64Representation(node->type)) {
     func = is_reg ? g->rdecd : g->decd;
-  } else if (TypeIsFloat(node->type)) {
+  } else if (TypeUsesFloat32Representation(node->type)) {
     func = is_reg ? g->rdecf : g->decf;
   } else {
     switch (size) {
@@ -5296,8 +5296,11 @@ static struct {
 } push_map[] = {
     {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},
     {TypeIsCharFamily, 1, 2},
-    {TypeIsLong, 4, 4},     {TypeIsLongLong, 8, 8},      {TypeIsFloat, 4, 4},
-    {TypeIsDouble, 4, 4},   {TypeIsLongDouble, 4, 4},    {TypeIsPointerOrArray, 2, 2},
+    {TypeIsLong, 4, 4},
+    {TypeIsLongLong, 8, 8},
+    {TypeUsesFloat32Representation, 4, 4},
+    {TypeUsesFloat64Representation, 4, 4},
+    {TypeIsPointerOrArray, 2, 2},
   {TypeIsFunction, 2, 2}, {TypeIsStructOrUnion, 2, 2},
   {TypeIsMemberPointerScalar, 2, 2},
   {TypeIsMemberPointerAggregate, 4, 4},
@@ -7928,7 +7931,7 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(Symbol* arg) {
   if (TypeIsFloatingPoint(arg->type)) {
-    if (TypeIsDouble(arg->type)) {
+    if (TypeUsesFloat64Representation(arg->type)) {
       return 4;
     }
     return 4;
@@ -7945,7 +7948,7 @@ static int64_t CalculateArgumentSize(Symbol* arg) {
 
 static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord* type) {
   W65C02RegisterType reg_type;
-  if (TypeIsFloat(type) || TypeIsDouble(type)) {
+  if (TypeIsFloatingPoint(type)) {
     reg_type = k6502RegTypeF;
   } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
     reg_type = k6502RegTypeB;

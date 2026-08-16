@@ -228,6 +228,11 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_size_t_suffix", "202011L");
       PreprocessorDefineMacro(p, "__cpp_implicit_move", "202207L");
       PreprocessorDefineMacro(p, "__cpp_named_character_escapes", "202207L");
+      PreprocessorDefineMacro(p, "__STDCPP_FLOAT32_T__", "1");
+      if (!StringEqual(compiler->target_name, "6502") &&
+          !StringEqual(compiler->target_name, "65c02")) {
+        PreprocessorDefineMacro(p, "__STDCPP_FLOAT64_T__", "1");
+      }
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
       PreprocessorDefineMacro(p, "__cpp_constexpr_exceptions", "202411L");

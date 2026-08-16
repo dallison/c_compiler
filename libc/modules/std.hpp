@@ -43,6 +43,7 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <stdfloat>
 #include <stop_token>
 #include <stack>
 #include <string>

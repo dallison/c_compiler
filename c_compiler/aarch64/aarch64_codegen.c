@@ -687,7 +687,7 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
     if (address_operation || node->type->size == 8 ||
         TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
-        TypeIsDouble(node->type) || TypeIsLongDouble(node->type) ||
+        TypeUsesFloat64Representation(node->type) ||
         TypeIsStructOrUnion(node->type)) {
       size = kSize64Bit;
     }
@@ -1559,8 +1559,8 @@ static struct {
     {TypeIsUnsignedInt, AARCH64_OP(ldur)},
     {TypeIsUnsignedShort, AARCH64_OP(ldurh)},
     {TypeIsUnsignedChar, AARCH64_OP(ldurb)},
-    {TypeIsFloat, AARCH64_OP(fldr)},
-    {TypeIsDouble, AARCH64_OP(fldr)},
+    {TypeUsesFloat32Representation, AARCH64_OP(fldr)},
+    {TypeUsesFloat64Representation, AARCH64_OP(fldr)},
     {TypeIsBool, AARCH64_OP(ldrb)},
     {TypeIsPointerOrArray, AARCH64_OP(ldr)},
     {TypeIsFunction, AARCH64_OP(ldr)},
@@ -5056,7 +5056,9 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(AARCH64Generator* g
       // fmov has no two-operand register-move form in the emitter (it would be
       // mis-assembled as a three-register instruction); emit a destination
       // move into the variable register instead, mirroring the integer path.
-      int size = TypeIsDouble(symbol->type) ? kSize64Bit : kSize32Bit;
+      int size = TypeUsesFloat64Representation(symbol->type)
+                     ? kSize64Bit
+                     : kSize32Bit;
       TargetInstruction* mv =
           Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), arg_reg), size));
       mv->dest = var;

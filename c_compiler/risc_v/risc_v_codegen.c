@@ -22,7 +22,7 @@
 // Keep the source-language distinction, but select double-width instructions
 // and floating-point registers for both types.
 static bool RVFpIsDoubleWidth(TypeRecord* type) {
-  return TypeIsDouble(type) || TypeIsLongDouble(type);
+  return TypeUsesFloat64Representation(type);
 }
 
 static void LowerVariables(RVGenerator* rv, Generator* gen);
@@ -1487,8 +1487,8 @@ static struct {
     {TypeIsUnsignedInt, RV_OP(lwu)},
     {TypeIsUnsignedShort, RV_OP(lhu)},
     {TypeIsUnsignedChar, RV_OP(lbu)},
-    {TypeIsFloat, RV_OP(flw)},
-    {TypeIsDouble, RV_OP(fld)},
+    {TypeUsesFloat32Representation, RV_OP(flw)},
+    {RVFpIsDoubleWidth, RV_OP(fld)},
     {TypeIsBool, RV_OP(lb)},
     {TypeIsPointerOrArray, RV_OP(ld)},
     {TypeIsFunction, RV_OP(ld)},
@@ -3368,7 +3368,7 @@ static bool GetFloatingAggregate(TypeRecord* type,
       continue;
     }
     if (member->bit_size != 0 || member->symbol == NULL ||
-        (!TypeIsFloat(member->symbol->type) &&
+        (!TypeUsesFloat32Representation(member->symbol->type) &&
          !RVFpIsDoubleWidth(member->symbol->type)) ||
         aggregate->count == 2) {
       return false;
@@ -3684,7 +3684,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
       case kArgLocationPushed: {
         TargetInstruction* arg = Materialize(rv, arg_node);
         if (pass_float_as_int) {
-          arg = Emit(rv, NewInstruction1(!TypeIsFloat(arg_node->type)
+          arg = Emit(rv, NewInstruction1(!TypeUsesFloat32Representation(
+                                             arg_node->type)
                                              ? RV_OP(fmv_x_d)
                                              : RV_OP(fmv_x_w),
                                        arg));
@@ -3724,7 +3725,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         }
         RVOpcode mov_opcode = RV_OP(mv);
         if (pass_float_as_int) {
-          arg = Emit(rv, NewInstruction1(!TypeIsFloat(arg_node->type)
+          arg = Emit(rv, NewInstruction1(!TypeUsesFloat32Representation(
+                                             arg_node->type)
                                              ? RV_OP(fmv_x_d)
                                              : RV_OP(fmv_x_w),
                                        arg));

@@ -490,6 +490,14 @@ struct is_floating_point : false_type {
 __DAVECC_FLOATING_POINT(float);
 __DAVECC_FLOATING_POINT(double);
 __DAVECC_FLOATING_POINT(long double);
+#if __cplusplus >= 202302L
+#if defined(__STDCPP_FLOAT32_T__)
+__DAVECC_FLOATING_POINT(decltype(0.0f32));
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+__DAVECC_FLOATING_POINT(decltype(0.0f64));
+#endif
+#endif
 
 #undef __DAVECC_FLOATING_POINT
 

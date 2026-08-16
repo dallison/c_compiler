@@ -89,6 +89,7 @@ filegroup(
         "libc/include/sstream",
         "libc/include/stack",
         "libc/include/stdexcept",
+        "libc/include/stdfloat",
         "libc/include/stop_token",
         "libc/include/streambuf",
         "libc/include/string",

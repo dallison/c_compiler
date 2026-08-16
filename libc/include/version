@@ -48,6 +48,9 @@
 #define __cpp_lib_mdspan 202207L
 #define __cpp_lib_move_only_function 202110L
 #define __cpp_lib_print 202207L
+#ifndef __cpp_lib_stdfloat
+#define __cpp_lib_stdfloat 202306L
+#endif
 #endif
 
 #if __cplusplus > 202302L

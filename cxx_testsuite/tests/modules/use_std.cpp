@@ -20,6 +20,10 @@ static_assert(std::is_same_v<int, int>);
 static_assert(
     std::is_invocable<decltype(&set_threaded_value), int*>::value);
 static_assert(std::mdspan<int, std::extents<std::size_t, 2, 3>>::rank() == 2);
+static_assert(std::is_same_v<decltype(1.0f32), std::float32_t>);
+#if defined(__STDCPP_FLOAT64_T__)
+static_assert(std::is_same_v<decltype(1.0f64), std::float64_t>);
+#endif
 
 int main() {
   std::array<int, 3> values{2, 3, 5};
@@ -60,5 +64,15 @@ int main() {
       matrix[1, 2] != 6) {
     return 4;
   }
+  std::float32_t fixed_float = 1.25f32;
+  if (fixed_float + 0.75f32 != 2.0f32) {
+    return 5;
+  }
+#if defined(__STDCPP_FLOAT64_T__)
+  std::float64_t fixed_double = 2.5f64;
+  if (fixed_double + 1.5f64 != 4.0f64) {
+    return 6;
+  }
+#endif
   return 0;
 }

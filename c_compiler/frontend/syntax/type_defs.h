@@ -54,12 +54,17 @@ typedef enum {
   // <meta> as std::meta::info.  Values are usable only during constant
   // evaluation and as non-type template arguments.
   kTypeReflection = 1 << 22,
+  // C++23 optional extended floating-point types.  These remain distinct from
+  // float and double in the type system while sharing their binary32/binary64
+  // representation and backend operations.
+  kTypeFloat32 = 1 << 23,
+  kTypeFloat64 = 1 << 24,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 22
+#define TYPE_LAST_BIT 24
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {

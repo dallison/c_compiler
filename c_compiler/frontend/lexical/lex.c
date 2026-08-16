@@ -880,14 +880,23 @@ static void CollectIntegerSuffix(Lex* lex) {
   }
 }
 
-// Collect a floating point suffix
-// Allows F or L.
+// Collect a floating point suffix.  In C++23 this also recognizes the
+// fixed-width extended suffixes f32/F32 and f64/F64.
 static void CollectFloatingSuffix(Lex* lex) {
   StringClear(&lex->suffix);
   char ch = toupper(lex->line.value[lex->pos]);
   if (ch == 'F') {
     StringAppendChar(&lex->suffix, 'F');
     lex->pos++;
+    if (lex->pos + 1 < lex->line.length &&
+        ((lex->line.value[lex->pos] == '3' &&
+          lex->line.value[lex->pos + 1] == '2') ||
+         (lex->line.value[lex->pos] == '6' &&
+          lex->line.value[lex->pos + 1] == '4'))) {
+      StringAppendChar(&lex->suffix, lex->line.value[lex->pos]);
+      StringAppendChar(&lex->suffix, lex->line.value[lex->pos + 1]);
+      lex->pos += 2;
+    }
   } else {
     ch = toupper(lex->line.value[lex->pos]);
     if (ch == 'L') {

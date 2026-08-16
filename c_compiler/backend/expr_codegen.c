@@ -18,7 +18,7 @@
 #include "type_template.h"
 
 static bool TypeUsesDoubleIROperations(TypeRecord* type) {
-  return TypeIsDouble(type) || TypeIsLongDouble(type);
+  return TypeUsesFloat64Representation(type);
 }
 
 // Table to translate an AST node and type into an IR operation.
@@ -29,21 +29,21 @@ static struct {
   bool commutative;
 } expr_operators[] = {
     {AST_OP(plus), TypeIsIntegral, IR_OP(addi), true},
-    {AST_OP(plus), TypeIsFloat, IR_OP(addf), true},
+    {AST_OP(plus), TypeUsesFloat32Representation, IR_OP(addf), true},
     {AST_OP(plus), TypeUsesDoubleIROperations, IR_OP(addd), true},
     {AST_OP(plus), TypeIsPointerOrArray, IR_OP(adda), true},
 
     {AST_OP(minus), TypeIsIntegral, IR_OP(subi)},
-    {AST_OP(minus), TypeIsFloat, IR_OP(subf)},
+    {AST_OP(minus), TypeUsesFloat32Representation, IR_OP(subf)},
     {AST_OP(minus), TypeUsesDoubleIROperations, IR_OP(subd)},
     {AST_OP(minus), TypeIsPointerOrArray, IR_OP(suba)},
 
     {AST_OP(mult), TypeIsIntegral, IR_OP(muli), true},
-    {AST_OP(mult), TypeIsFloat, IR_OP(mulf), true},
+    {AST_OP(mult), TypeUsesFloat32Representation, IR_OP(mulf), true},
     {AST_OP(mult), TypeUsesDoubleIROperations, IR_OP(muld), true},
 
     {AST_OP(div), TypeIsIntegral, IR_OP(divi)},
-    {AST_OP(div), TypeIsFloat, IR_OP(divf)},
+    {AST_OP(div), TypeUsesFloat32Representation, IR_OP(divf)},
     {AST_OP(div), TypeUsesDoubleIROperations, IR_OP(divd)},
 
     {AST_OP(mod), TypeIsIntegral, IR_OP(modi)},
@@ -63,12 +63,12 @@ static struct {
     {AST_OP(greater), TypeIsIntegral, IR_OP(cmpgti)},
     {AST_OP(greatereq), TypeIsIntegral, IR_OP(cmpgei)},
 
-    {AST_OP(equal), TypeIsFloat, IR_OP(cmpeqf), true},
-    {AST_OP(noteq), TypeIsFloat, IR_OP(cmpnef), true},
-    {AST_OP(less), TypeIsFloat, IR_OP(cmpltf)},
-    {AST_OP(lesseq), TypeIsFloat, IR_OP(cmplef)},
-    {AST_OP(greater), TypeIsFloat, IR_OP(cmpgtf)},
-    {AST_OP(greatereq), TypeIsFloat, IR_OP(cmpgef)},
+    {AST_OP(equal), TypeUsesFloat32Representation, IR_OP(cmpeqf), true},
+    {AST_OP(noteq), TypeUsesFloat32Representation, IR_OP(cmpnef), true},
+    {AST_OP(less), TypeUsesFloat32Representation, IR_OP(cmpltf)},
+    {AST_OP(lesseq), TypeUsesFloat32Representation, IR_OP(cmplef)},
+    {AST_OP(greater), TypeUsesFloat32Representation, IR_OP(cmpgtf)},
+    {AST_OP(greatereq), TypeUsesFloat32Representation, IR_OP(cmpgef)},
 
     {AST_OP(equal), TypeUsesDoubleIROperations, IR_OP(cmpeqd), true},
     {AST_OP(noteq), TypeUsesDoubleIROperations, IR_OP(cmpned), true},
@@ -97,7 +97,7 @@ static struct {
     {AST_OP(not), TypeIsPointer, IR_OP(nota)},
     {AST_OP(onescomp), TypeIsIntegral, IR_OP(onescomp)},
     {AST_OP(uminus), TypeIsIntegral, IR_OP(negi)},
-    {AST_OP(uminus), TypeIsFloat, IR_OP(negf)},
+    {AST_OP(uminus), TypeUsesFloat32Representation, IR_OP(negf)},
     {AST_OP(uminus), TypeUsesDoubleIROperations, IR_OP(negd)},
  
 
@@ -184,9 +184,9 @@ static struct {
   IROpcode unsigned_load;
   IROpcode store;
 } load_store_ops[] = {
-    {TypeIsFloat, IR_OP(loadf), IR_OP(loadf), IR_OP(storef)},
-  {TypeIsDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
-  {TypeIsLongDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
+    {TypeUsesFloat32Representation, IR_OP(loadf), IR_OP(loadf),
+     IR_OP(storef)},
+    {TypeUsesDoubleIROperations, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
     {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsNullPointer, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsMemberPointerScalar, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
@@ -436,7 +436,8 @@ static struct {
   bool (*type_func)(TypeRecord*);
   IROpcode opcode;
 } mov_opcodes[] = {
-    {TypeIsIntegral, IR_OP(movi)},       {TypeIsFloat, IR_OP(movf)},
+    {TypeIsIntegral, IR_OP(movi)},
+    {TypeUsesFloat32Representation, IR_OP(movf)},
     {TypeUsesDoubleIROperations, IR_OP(movd)},
     {TypeIsStructOrUnion, IR_OP(mova)},
     {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsMemberPointerScalar, IR_OP(mova)},
@@ -608,10 +609,10 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
 
 // Pick the cmp3way IR opcode for the (converted, common) operand type.
 static IROpcode ThreeWayIROpcode(TypeRecord* type) {
-  if (TypeIsFloat(type)) {
+  if (TypeUsesFloat32Representation(type)) {
     return IR_OP(cmp3wayf);
   }
-  if (TypeIsDouble(type) || TypeIsLongDouble(type)) {
+  if (TypeUsesFloat64Representation(type)) {
     return IR_OP(cmp3wayd);
   }
   if (TypeIsPointerOrArray(type)) {
@@ -686,10 +687,10 @@ static IROpcode IncDecArithmeticOp(ASTNode* node, bool is_inc) {
   if (TypeIsIntegral(node->type)) {
     return is_inc ? IR_OP(addi) : IR_OP(subi);
   }
-  if (TypeIsFloat(node->type)) {
+  if (TypeUsesFloat32Representation(node->type)) {
     return is_inc ? IR_OP(addf) : IR_OP(subf);
   }
-  if (TypeIsDouble(node->type)) {
+  if (TypeUsesFloat64Representation(node->type)) {
     return is_inc ? IR_OP(addd) : IR_OP(subd);
   }
   return is_inc ? IR_OP(adda) : IR_OP(suba);
@@ -726,10 +727,10 @@ static IROpcode IncDecOp(ASTNode* node, bool is_inc) {
       }
     }
   }
-  if (TypeIsFloat(node->type)) {
+  if (TypeUsesFloat32Representation(node->type)) {
     return is_inc ? IR_OP(incf) : IR_OP(decf);
   }
-  if (TypeIsDouble(node->type)) {
+  if (TypeUsesFloat64Representation(node->type)) {
     return is_inc ? IR_OP(incd) : IR_OP(decd);
   }
   return is_inc ? IR_OP(inca) : IR_OP(deca);
@@ -2987,10 +2988,10 @@ static IRNode* GenerateBooleanValue(Generator* gen, IRNode* value) {
   }
   IROpcode opcode = IR_OP(cmpnei);
   IRNode* zero = NULL;
-  if (TypeIsFloat(value->type)) {
+  if (TypeUsesFloat32Representation(value->type)) {
     opcode = IR_OP(cmpnef);
     zero = GeneratorGetFloatingPointConstant(gen, value->type, 0.0);
-  } else if (TypeIsDouble(value->type) || TypeIsLongDouble(value->type)) {
+  } else if (TypeUsesFloat64Representation(value->type)) {
     opcode = IR_OP(cmpned);
     zero = GeneratorGetFloatingPointConstant(gen, value->type, 0.0);
   } else {

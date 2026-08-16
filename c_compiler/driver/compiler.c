@@ -306,11 +306,11 @@ static void InitFloatingPoint(ASTNode* expr,
   double value = 0;
   TypeRecord* type = expr->type;
   if (EvaluateFloatingPointExpression(expr, &value)) {
-    if (TypeIsFloat(type)) {
+    if (TypeUsesFloat32Representation(type)) {
       init_out->type = kInitTypeWord;
       float fvalue = (float)value;
       init_out->value.word = *((int32_t*)&fvalue);
-    } else if (TypeIsDouble(type) || TypeIsLongDouble(type)) {
+    } else if (TypeUsesFloat64Representation(type)) {
       if (type->size == 4) {
         init_out->type = kInitTypeWord;
         float f = value;
