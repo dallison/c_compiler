@@ -63,4 +63,34 @@ TypeRecord* TypeRecordNewCommonTypePlaceholder(Vector* type_args);
 TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
                                                  TypeRecord* type);
 
+TypeRecord* CXXTypeTraitMaterializeType(Syntax* syntax, TypeRecord* type);
+
+bool CXXTypeTraitIsConvertible(Syntax* syntax, Vector* type_args);
+
+bool CXXTypeTraitIsInvocableR(Syntax* syntax, TypeRecord* result_type,
+                              Vector* type_args, bool check_nothrow);
+
+TypeRecord* CXXTypeTraitCommonTypeFold(Syntax* syntax, Vector* type_args);
+
+TypeRecord* CXXTypeTraitCommonReference(Syntax* syntax, Vector* type_args);
+
+bool CXXTypeTraitIsTriviallyConstructible(Syntax* syntax, Vector* type_args);
+
+bool CXXTypeTraitIsTriviallyAssignable(Syntax* syntax, Vector* type_args);
+
+bool CXXTypeTraitIsTriviallyDestructible(Syntax* syntax, TypeRecord* type);
+
+bool CXXTypeTraitIsNothrowConvertible(Syntax* syntax, Vector* type_args);
+
+bool CXXTypeTraitReferenceConstructsFromTemporary(Syntax* syntax,
+                                                  Vector* type_args);
+
+bool CXXTypeTraitReferenceConvertsFromTemporary(Syntax* syntax,
+                                                Vector* type_args);
+
+bool CXXTypeTraitIsNothrowSwappable(Syntax* syntax, TypeRecord* type);
+
+bool CXXTypeTraitIsNothrowSwappableWith(Syntax* syntax, TypeRecord* left,
+                                        TypeRecord* right);
+
 #endif /* type_traits_semantics_h */

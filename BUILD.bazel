@@ -704,6 +704,8 @@ cc_library(
         "c_compiler/frontend/semantic/statement_semantics.c",
         "c_compiler/frontend/semantic/expansion_semantics.c",
         "c_compiler/frontend/semantic/reflection_semantics.c",
+        "c_compiler/frontend/semantic/reflection_meta_synthesis.c",
+        "c_compiler/frontend/semantic/reflection_meta_traits.c",
         "c_compiler/frontend/syntax/symbol.c",
         "c_compiler/frontend/syntax/symbol_table.c",
         "c_compiler/frontend/syntax/module_identity.c",

@@ -172,6 +172,7 @@ enum {
   kAttr_args = 2,
   kAttr_dependent_alignas_type = 3,
   kAttr_dependent_alignas_expr = 4,
+  kAttr_annotation_expr = 5,
 };
 
 //
@@ -223,6 +224,8 @@ void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
               kSerialKindType, a->dependent_alignas_type);
     SWriteRef(ctx, &elem, kAttr_dependent_alignas_expr,
               kSerialKindAST, a->dependent_alignas_expr);
+    SWriteRef(ctx, &elem, kAttr_annotation_expr,
+              kSerialKindAST, a->annotation_expr);
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -272,6 +275,10 @@ void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
           break;
         case kAttr_dependent_alignas_expr:
           a->dependent_alignas_expr =
+              (ASTNode*)SReadRef(ctx, &er, kSerialKindAST);
+          break;
+        case kAttr_annotation_expr:
+          a->annotation_expr =
               (ASTNode*)SReadRef(ctx, &er, kSerialKindAST);
           break;
         default:

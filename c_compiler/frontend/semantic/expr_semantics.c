@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <string.h>
 #include "concepts.h"
+#include "constexpr.h"
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "statement_semantics.h"
@@ -18,6 +19,9 @@
 #include "errors.h"
 #include "symbol_table.h"
 #include "rtti.h"
+#include "reflection.h"
+#include "reflection_meta_synthesis.h"
+#include "reflection_meta_traits.h"
 #include "reflection_semantics.h"
 #include "type_traits_semantics.h"
 #include "type_compare.h"
@@ -627,6 +631,94 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   return NULL;
 }
 
+static Symbol* StaticAddressTargetFromExpression(ASTNode* expression) {
+  if (expression == NULL) {
+    return NULL;
+  }
+  if (expression->op == AST_OP(cast)) {
+    return StaticAddressTargetFromExpression(
+        ((CastASTNode*)expression)->expr);
+  }
+  if (expression->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)expression)->symbol;
+    if (symbol != NULL &&
+        (TypeIsFunction(symbol->type) ||
+         StorageIs(symbol->storage, STO(static) | STO(extern)) ||
+         CompilerSymbolIsMetaPromotedStatic(symbol))) {
+      return symbol;
+    }
+    return NULL;
+  }
+  if (expression->op == AST_OP(subscript) &&
+      ASTNodeGetShape(expression) == kASTShapeBinary) {
+    BinaryASTNode* subscript = (BinaryASTNode*)expression;
+    return StaticAddressTargetFromExpression(subscript->left);
+  }
+  return NULL;
+}
+
+bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
+                                              ASTNode* initializer) {
+  if (symbol == NULL || initializer == NULL || symbol->type == NULL ||
+      !TypeIsPointer(symbol->type)) {
+    return false;
+  }
+  ASTNode* expression = ConstexprInitializerExpression(initializer);
+  if (expression == NULL) {
+    return false;
+  }
+  if (expression->op == AST_OP(call)) {
+    ASTNode* synthesized =
+        SemanticTryAnalyzeMetaSynthesisCall((VectorASTNode*)expression);
+    if (synthesized != NULL) {
+      expression = synthesized;
+    }
+  }
+  expression = AnalyzeExpression(expression);
+  if (expression == NULL) {
+    return false;
+  }
+  if (expression->op == AST_OP(expr_init)) {
+    expression = ((ExpressionInitializerASTNode*)expression)->expr;
+    expression = AnalyzeExpression(expression);
+    if (expression == NULL) {
+      return false;
+    }
+  }
+  if (expression->op == AST_OP(call)) {
+    ASTNode* synthesized =
+        SemanticTryAnalyzeMetaSynthesisCall((VectorASTNode*)expression);
+    if (synthesized != NULL) {
+      expression = AnalyzeExpression(synthesized);
+    }
+  }
+  if (expression->op == AST_OP(cast)) {
+    expression = AnalyzeExpression(((CastASTNode*)expression)->expr);
+  }
+  Symbol* target = StaticAddressTargetFromExpression(expression);
+  if (target != NULL) {
+    if (CompilerSymbolIsMetaPromotedStatic(target)) {
+      ConstexprEnsureMetaPromotedStaticObject(target);
+    }
+    symbol->value.other = target;
+    symbol->flags.value_set = true;
+    return true;
+  }
+  if (expression->op == AST_OP(address)) {
+    UnaryASTNode* address = (UnaryASTNode*)expression;
+    target = StaticAddressTargetFromExpression(address->sub);
+    if (target != NULL) {
+      if (CompilerSymbolIsMetaPromotedStatic(target)) {
+        ConstexprEnsureMetaPromotedStaticObject(target);
+      }
+      symbol->value.other = target;
+      symbol->flags.value_set = true;
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   if (symbol != NULL && TypeIsReflection(symbol->type)) {
     ASTNode* expression = ConstexprInitializerExpression(initializer);
@@ -641,6 +733,9 @@ static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
     return false;
   }
   if (EvaluateScalarConstantForSymbol(symbol, initializer)) {
+    return true;
+  }
+  if (SemanticEvaluatePointerConstantForSymbol(symbol, initializer)) {
     return true;
   }
   // Speculatively caching an ordinary automatic const class object is optional.
@@ -8573,6 +8668,11 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     SetDependentMemberTemplateCallType(node);
     return (ASTNode*)node;
   }
+  ASTNode* early_meta_synthesis =
+      SemanticTryAnalyzeMetaSynthesisCallEarly(node);
+  if (early_meta_synthesis != NULL) {
+    return early_meta_synthesis;
+  }
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
@@ -8580,6 +8680,14 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   ASTNode* meta_call = SemanticTryAnalyzeMetaCall(node);
   if (meta_call != NULL) {
     return meta_call;
+  }
+  ASTNode* meta_trait_call = SemanticTryAnalyzeMetaTraitCall(node);
+  if (meta_trait_call != NULL) {
+    return meta_trait_call;
+  }
+  ASTNode* meta_synthesis_call = SemanticTryAnalyzeMetaSynthesisCall(node);
+  if (meta_synthesis_call != NULL) {
+    return meta_synthesis_call;
   }
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
   if (CallActualsContainDependentFunctorCall(node)) {
@@ -10886,6 +10994,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(splice):
       return SemanticAnalyzeSplice((SpliceASTNode*)node);
 
+    case AST_OP(splice_qualified):
+      return SemanticAnalyzeSpliceQualified((SpliceQualifiedASTNode*)node);
+
     case AST_OP(cast):
       node = AnalyzeCastExpression((CastASTNode*)node);
       break;
@@ -11178,6 +11289,14 @@ bool IsConstantExpression(ASTNode* node) {
       }
       // Functions are constant expressions.
       if (TypeIsFunction(id_node->base.type)) {
+        return true;
+      }
+      if (id_node->symbol != NULL &&
+          CompilerSymbolIsMetaPromotedStatic(id_node->symbol)) {
+        return true;
+      }
+      if (id_node->symbol != NULL &&
+          CompilerMetaPromotedPointerTarget(id_node->symbol) != NULL) {
         return true;
       }
       if (!TypeIsArray(id_node->base.type)) {

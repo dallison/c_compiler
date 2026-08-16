@@ -391,6 +391,16 @@ static bool HasStaticAddress(ASTNode* expr) {
   if (expr->op == AST_OP(address)) {
     return true;
   }
+  if (expr->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+    if (symbol != NULL && CompilerSymbolIsMetaPromotedStatic(symbol)) {
+      return true;
+    }
+    if (symbol != NULL &&
+        CompilerMetaPromotedPointerTarget(symbol) != NULL) {
+      return true;
+    }
+  }
   return false;
 }
 

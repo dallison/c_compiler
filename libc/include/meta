@@ -5,30 +5,189 @@
 #error <meta> requires C++26
 #endif
 
-#define __cpp_lib_reflection 202506L
+#ifndef __cpp_lib_reflection
+#define __cpp_lib_reflection 202603L
+#endif
+#ifndef __cpp_lib_define_static
+#define __cpp_lib_define_static 202506L
+#endif
 
+#include <climits>
+#include <compare>
+#include <concepts>
 #include <cstddef>
+#include <exception>
+#include <initializer_list>
+#include <optional>
+#include <ranges>
+#include <source_location>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
 
 namespace std {
+
+template <class T, class Allocator>
+class vector;
+
+[[davecc::meta_intrinsic]] consteval bool is_string_literal(const char* p);
+[[davecc::meta_intrinsic]] consteval bool is_string_literal(const wchar_t* p);
+[[davecc::meta_intrinsic]] consteval bool is_string_literal(const char8_t* p);
+[[davecc::meta_intrinsic]] consteval bool is_string_literal(const char16_t* p);
+[[davecc::meta_intrinsic]] consteval bool is_string_literal(const char32_t* p);
+
 namespace meta {
 
 using info = decltype(^^::);
 
-struct access_context {
-  bool __include_private;
+class exception : public std::exception {
+ private:
+  const char* what_ = "";
+  const char8_t* u8what_ = u8"";
+  size_t u8what_size_ = 0;
+  info from_;
+  source_location where_;
 
-  static consteval access_context current() {
-    return {false};
+ public:
+  consteval exception(u8string_view what, info from,
+                      source_location where = source_location::current()) noexcept
+      : u8what_(what.data()), u8what_size_(what.size()), from_(from),
+        where_(where) {}
+
+  consteval exception(string_view what, info from,
+                      source_location where = source_location::current()) noexcept
+      : what_(what.data()), from_(from), where_(where) {}
+
+  constexpr exception(const exception& other) noexcept
+      : what_(other.what_), u8what_(other.u8what_),
+        u8what_size_(other.u8what_size_), from_(other.from_), where_(other.where_) {}
+  constexpr exception(exception&& other) noexcept
+      : what_(other.what_), u8what_(other.u8what_),
+        u8what_size_(other.u8what_size_), from_(other.from_), where_(other.where_) {}
+  constexpr exception& operator=(const exception& other) noexcept {
+    what_ = other.what_;
+    u8what_ = other.u8what_;
+    u8what_size_ = other.u8what_size_;
+    from_ = other.from_;
+    where_ = other.where_;
+    return *this;
   }
-  static consteval access_context unchecked() {
-    return {true};
+  constexpr exception& operator=(exception&& other) noexcept {
+    what_ = other.what_;
+    u8what_ = other.u8what_;
+    u8what_size_ = other.u8what_size_;
+    from_ = other.from_;
+    where_ = other.where_;
+    return *this;
   }
+
+  constexpr const char* what() const noexcept override {
+    return what_;
+  }
+
+  consteval u8string_view u8what() const noexcept {
+    return {u8what_, u8what_size_};
+  }
+  consteval info from() const noexcept { return from_; }
+  consteval source_location where() const noexcept { return where_; }
 };
 
-}  // namespace meta
+enum class operators {
+  op_new,
+  op_delete,
+  op_array_new,
+  op_array_delete,
+  op_co_await,
+  op_parentheses,
+  op_square_brackets,
+  op_arrow,
+  op_arrow_star,
+  op_tilde,
+  op_exclamation,
+  op_plus,
+  op_minus,
+  op_star,
+  op_slash,
+  op_percent,
+  op_caret,
+  op_ampersand,
+  op_equals,
+  op_pipe,
+  op_plus_equals,
+  op_minus_equals,
+  op_star_equals,
+  op_slash_equals,
+  op_percent_equals,
+  op_caret_equals,
+  op_ampersand_equals,
+  op_pipe_equals,
+  op_equals_equals,
+  op_exclamation_equals,
+  op_less,
+  op_greater,
+  op_less_equals,
+  op_greater_equals,
+  op_spaceship,
+  op_ampersand_ampersand,
+  op_pipe_pipe,
+  op_less_less,
+  op_greater_greater,
+  op_less_less_equals,
+  op_greater_greater_equals,
+  op_plus_plus,
+  op_minus_minus,
+  op_comma,
+};
+using enum operators;
 
-template <class T, class Allocator>
-class vector;
+struct access_context {
+ private:
+  bool __include_private;
+  info __designating_class;
+  info __scope;
+
+  consteval access_context(bool include_private, info designating_class,
+                           info scope) noexcept
+      : __include_private(include_private),
+        __designating_class(designating_class),
+        __scope(scope) {}
+
+ public:
+  access_context() = delete;
+  consteval info designating_class() const { return __designating_class; }
+  consteval info scope() const { return __scope; }
+
+  [[davecc::meta_intrinsic]] static consteval access_context current() noexcept;
+  [[davecc::meta_intrinsic]] static consteval access_context
+  unprivileged() noexcept;
+  [[davecc::meta_intrinsic]] static consteval access_context
+  unchecked() noexcept;
+
+  [[davecc::meta_intrinsic]] consteval access_context via(info cls) const;
+};
+
+struct member_offset {
+  ptrdiff_t bytes;
+  ptrdiff_t bits;
+
+  constexpr ptrdiff_t total_bits() const { return bytes * CHAR_BIT + bits; }
+
+  auto operator<=>(const member_offset&) const = default;
+};
+
+template <ranges::input_range R>
+  requires std::same_as<std::remove_cvref_t<ranges::range_reference_t<R>>, info>
+concept reflection_range = true;
+
+template <ranges::input_range R>
+[[davecc::meta_intrinsic]] consteval info reflect_constant_string(R&& r);
+
+template <ranges::input_range R>
+[[davecc::meta_intrinsic]] consteval info reflect_constant_array(R&& r);
+
+}  // namespace meta
 
 // Reflection query ranges use compiler-backed dynamically sized constexpr
 // storage. They deliberately specialize only vector<meta::info>; ordinary
@@ -41,14 +200,12 @@ class vector<meta::info, Allocator> {
   using iterator = value_type*;
   using const_iterator = const value_type*;
 
- public:  // implementation payload populated only by compiler intrinsics
+ public:
   size_type __size;
 
   constexpr size_type size() const { return __size; }
   constexpr bool empty() const { return __size == 0; }
-  constexpr value_type& operator[](size_type index) {
-    return __values[index];
-  }
+  constexpr value_type& operator[](size_type index) { return __values[index]; }
   constexpr const value_type& operator[](size_type index) const {
     return __values[index];
   }
@@ -62,36 +219,351 @@ class vector<meta::info, Allocator> {
 
 namespace meta {
 
-[[davecc::meta_intrinsic]] consteval bool is_invalid(info);
-[[davecc::meta_intrinsic]] consteval bool is_namespace(info);
-[[davecc::meta_intrinsic]] consteval bool is_type(info);
-[[davecc::meta_intrinsic]] consteval bool is_type_alias(info);
-[[davecc::meta_intrinsic]] consteval bool is_variable(info);
-[[davecc::meta_intrinsic]] consteval bool is_function(info);
-[[davecc::meta_intrinsic]] consteval bool is_data_member(info);
-[[davecc::meta_intrinsic]] consteval bool is_enumerator(info);
-[[davecc::meta_intrinsic]] consteval bool is_template(info);
-[[davecc::meta_intrinsic]] consteval bool is_public(info);
-[[davecc::meta_intrinsic]] consteval bool is_protected(info);
-[[davecc::meta_intrinsic]] consteval bool is_private(info);
-[[davecc::meta_intrinsic]] consteval bool has_identifier(info);
+[[davecc::meta_intrinsic]] consteval operators operator_of(info r);
+[[davecc::meta_intrinsic]] consteval string_view symbol_of(operators op);
+[[davecc::meta_intrinsic]] consteval u8string_view u8symbol_of(operators op);
 
-[[davecc::meta_intrinsic]] consteval info type_of(info);
-[[davecc::meta_intrinsic]] consteval info parent_of(info);
-[[davecc::meta_intrinsic]] consteval info dealias(info);
-[[davecc::meta_intrinsic]] consteval const char* identifier_of(info);
-[[davecc::meta_intrinsic]] consteval const char* display_string_of(info);
+[[davecc::meta_intrinsic]] consteval bool has_identifier(info r);
+[[davecc::meta_intrinsic]] consteval string_view identifier_of(info r);
+[[davecc::meta_intrinsic]] consteval u8string_view u8identifier_of(info r);
+[[davecc::meta_intrinsic]] consteval string_view display_string_of(info r);
+[[davecc::meta_intrinsic]] consteval u8string_view u8display_string_of(info r);
+[[davecc::meta_intrinsic]] consteval source_location source_location_of(info r);
+
+[[davecc::meta_intrinsic]] consteval info type_of(info r);
+[[davecc::meta_intrinsic]] consteval info object_of(info r);
+[[davecc::meta_intrinsic]] consteval info constant_of(info r);
+[[davecc::meta_intrinsic]] consteval bool is_public(info r);
+[[davecc::meta_intrinsic]] consteval bool is_protected(info r);
+[[davecc::meta_intrinsic]] consteval bool is_private(info r);
+[[davecc::meta_intrinsic]] consteval bool is_virtual(info r);
+[[davecc::meta_intrinsic]] consteval bool is_pure_virtual(info r);
+[[davecc::meta_intrinsic]] consteval bool is_override(info r);
+[[davecc::meta_intrinsic]] consteval bool is_final(info r);
+[[davecc::meta_intrinsic]] consteval bool is_deleted(info r);
+[[davecc::meta_intrinsic]] consteval bool is_defaulted(info r);
+[[davecc::meta_intrinsic]] consteval bool is_user_provided(info r);
+[[davecc::meta_intrinsic]] consteval bool is_user_declared(info r);
+[[davecc::meta_intrinsic]] consteval bool is_explicit(info r);
+[[davecc::meta_intrinsic]] consteval bool is_noexcept(info r);
+[[davecc::meta_intrinsic]] consteval bool is_bit_field(info r);
+[[davecc::meta_intrinsic]] consteval bool is_enumerator(info r);
+[[davecc::meta_intrinsic]] consteval bool is_annotation(info r);
+[[davecc::meta_intrinsic]] consteval bool is_const(info r);
+[[davecc::meta_intrinsic]] consteval bool is_volatile(info r);
+[[davecc::meta_intrinsic]] consteval bool is_mutable_member(info r);
+[[davecc::meta_intrinsic]] consteval bool is_lvalue_reference_qualified(info r);
+[[davecc::meta_intrinsic]] consteval bool is_rvalue_reference_qualified(info r);
+[[davecc::meta_intrinsic]] consteval bool has_static_storage_duration(info r);
+[[davecc::meta_intrinsic]] consteval bool has_thread_storage_duration(info r);
+[[davecc::meta_intrinsic]] consteval bool has_automatic_storage_duration(info r);
+[[davecc::meta_intrinsic]] consteval bool has_internal_linkage(info r);
+[[davecc::meta_intrinsic]] consteval bool has_module_linkage(info r);
+[[davecc::meta_intrinsic]] consteval bool has_external_linkage(info r);
+[[davecc::meta_intrinsic]] consteval bool has_c_language_linkage(info r);
+[[davecc::meta_intrinsic]] consteval bool has_linkage(info r);
+[[davecc::meta_intrinsic]] consteval bool is_complete_type(info r);
+[[davecc::meta_intrinsic]] consteval bool is_enumerable_type(info r);
+[[davecc::meta_intrinsic]] consteval bool is_variable(info r);
+[[davecc::meta_intrinsic]] consteval bool is_type(info r);
+[[davecc::meta_intrinsic]] consteval bool is_namespace(info r);
+[[davecc::meta_intrinsic]] consteval bool is_type_alias(info r);
+[[davecc::meta_intrinsic]] consteval bool is_namespace_alias(info r);
+[[davecc::meta_intrinsic]] consteval bool is_function(info r);
+[[davecc::meta_intrinsic]] consteval bool is_conversion_function(info r);
+[[davecc::meta_intrinsic]] consteval bool is_operator_function(info r);
+[[davecc::meta_intrinsic]] consteval bool is_literal_operator(info r);
+[[davecc::meta_intrinsic]] consteval bool is_special_member_function(info r);
+[[davecc::meta_intrinsic]] consteval bool is_constructor(info r);
+[[davecc::meta_intrinsic]] consteval bool is_default_constructor(info r);
+[[davecc::meta_intrinsic]] consteval bool is_copy_constructor(info r);
+[[davecc::meta_intrinsic]] consteval bool is_move_constructor(info r);
+[[davecc::meta_intrinsic]] consteval bool is_assignment(info r);
+[[davecc::meta_intrinsic]] consteval bool is_copy_assignment(info r);
+[[davecc::meta_intrinsic]] consteval bool is_move_assignment(info r);
+[[davecc::meta_intrinsic]] consteval bool is_destructor(info r);
+[[davecc::meta_intrinsic]] consteval bool is_function_parameter(info r);
+[[davecc::meta_intrinsic]] consteval bool is_explicit_object_parameter(info r);
+[[davecc::meta_intrinsic]] consteval bool has_default_argument(info r);
+[[davecc::meta_intrinsic]] consteval bool is_vararg_function(info r);
+[[davecc::meta_intrinsic]] consteval bool is_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_function_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_variable_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_class_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_alias_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_conversion_function_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_operator_function_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_literal_operator_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_constructor_template(info r);
+[[davecc::meta_intrinsic]] consteval bool is_concept(info r);
+[[davecc::meta_intrinsic]] consteval bool is_value(info r);
+[[davecc::meta_intrinsic]] consteval bool is_object(info r);
+[[davecc::meta_intrinsic]] consteval bool is_structured_binding(info r);
+[[davecc::meta_intrinsic]] consteval bool is_class_member(info r);
+[[davecc::meta_intrinsic]] consteval bool is_namespace_member(info r);
+[[davecc::meta_intrinsic]] consteval bool is_static_member(info r);
+[[davecc::meta_intrinsic]] consteval bool is_base(info r);
+[[davecc::meta_intrinsic]] consteval bool has_default_member_initializer(info r);
+[[davecc::meta_intrinsic]] consteval bool has_parent(info r);
+[[davecc::meta_intrinsic]] consteval info parent_of(info r);
+[[davecc::meta_intrinsic]] consteval info dealias(info r);
+[[davecc::meta_intrinsic]] consteval bool has_template_arguments(info r);
+[[davecc::meta_intrinsic]] consteval info template_of(info r);
+[[davecc::meta_intrinsic]] consteval vector<info, void> template_arguments_of(info r);
+[[davecc::meta_intrinsic]] consteval vector<info, void> parameters_of(info r);
+[[davecc::meta_intrinsic]] consteval info variable_of(info r);
+[[davecc::meta_intrinsic]] consteval info return_type_of(info r);
+
+[[davecc::meta_intrinsic]] consteval bool is_accessible(info r, access_context ctx);
+[[davecc::meta_intrinsic]] consteval bool has_inaccessible_nonstatic_data_members(info r,
+                                                       access_context ctx);
+[[davecc::meta_intrinsic]] consteval bool has_inaccessible_bases(info r, access_context ctx);
+[[davecc::meta_intrinsic]] consteval bool has_inaccessible_subobjects(info r, access_context ctx);
+
+[[davecc::meta_intrinsic]] consteval info current_function();
+[[davecc::meta_intrinsic]] consteval info current_class();
+[[davecc::meta_intrinsic]] consteval info current_namespace();
 
 [[davecc::meta_intrinsic]] consteval vector<info, void> members_of(
-    info, access_context = access_context::current());
-[[davecc::meta_intrinsic]] consteval vector<info, void>
-nonstatic_data_members_of(info,
-                          access_context = access_context::current());
+    info r, access_context ctx = access_context::current());
 [[davecc::meta_intrinsic]] consteval vector<info, void> bases_of(
-    info, access_context = access_context::current());
-[[davecc::meta_intrinsic]] consteval vector<info, void> enumerators_of(info);
+    info type, access_context ctx = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> static_data_members_of(
+    info type, access_context ctx = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> nonstatic_data_members_of(
+    info type, access_context ctx = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> subobjects_of(
+    info type, access_context ctx = access_context::current());
+[[davecc::meta_intrinsic]] consteval vector<info, void> enumerators_of(info type_enum);
+
+[[davecc::meta_intrinsic]] consteval member_offset offset_of(info r);
+[[davecc::meta_intrinsic]] consteval size_t size_of(info r);
+[[davecc::meta_intrinsic]] consteval size_t alignment_of(info r);
+[[davecc::meta_intrinsic]] consteval size_t bit_size_of(info r);
+
+[[davecc::meta_intrinsic]] consteval vector<info, void> annotations_of(info item);
+[[davecc::meta_intrinsic]] consteval vector<info, void> annotations_of_with_type(info item, info type);
+
+template <class T>
+[[davecc::meta_intrinsic]] consteval T extract(info r);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool can_substitute(info templ, R&& arguments);
+[[davecc::meta_intrinsic]] consteval bool can_substitute(
+    info templ, initializer_list<info> arguments);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info substitute(info templ, R&& arguments);
+[[davecc::meta_intrinsic]] consteval info substitute(
+    info templ, initializer_list<info> arguments);
+
+template <class T>
+[[davecc::meta_intrinsic]] consteval info reflect_constant(T expr);
+
+template <class T>
+[[davecc::meta_intrinsic]] consteval info reflect_object(T& expr);
+
+template <class T>
+[[davecc::meta_intrinsic]] consteval info reflect_function(T& fn);
+
+struct data_member_options {
+  struct name_type {
+    consteval name_type() = default;
+    template <size_t N>
+    consteval name_type(const char (&value)[N]) : narrow(value) {}
+    template <size_t N>
+    consteval name_type(const char8_t (&value)[N])
+        : utf8(value), is_utf8(true) {}
+    consteval name_type(const char* value) : narrow(value) {}
+    consteval name_type(const char8_t* value) : utf8(value), is_utf8(true) {}
+    consteval name_type(u8string value)
+        : utf8(std::move(value)), is_utf8(true) {}
+    consteval name_type(string value) : narrow(std::move(value)) {}
+
+   private:
+    string narrow;
+    u8string utf8;
+    bool is_utf8 = false;
+
+  };
+
+  name_type name;
+  optional<size_t> alignment;
+  optional<size_t> bit_width;
+  bool no_unique_address = false;
+  vector<info, void> annotations;
+};
+
+[[davecc::meta_intrinsic]] consteval info data_member_spec(info type, data_member_options options);
+[[davecc::meta_intrinsic]] consteval bool is_data_member_spec(info r);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info define_aggregate(info class_type, R&& mdescrs);
+[[davecc::meta_intrinsic]] consteval info define_aggregate(
+    info class_type, initializer_list<info> mdescrs);
+
+[[davecc::meta_intrinsic]] consteval bool is_void_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_null_pointer_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_integral_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_floating_point_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_array_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_pointer_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_lvalue_reference_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_rvalue_reference_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_member_object_pointer_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_member_function_pointer_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_enum_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_union_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_class_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_function_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_reflection_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_reference_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_arithmetic_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_fundamental_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_object_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_scalar_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_compound_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_member_pointer_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_const_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_volatile_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_copyable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_standard_layout_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_empty_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_polymorphic_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_abstract_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_final_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_aggregate_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_structural_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_signed_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_unsigned_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_bounded_array_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_unbounded_array_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_scoped_enum_type(info type);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_constructible_type(info type, R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval bool is_default_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_copy_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_move_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_assignable_type(info type_dst, info type_src);
+[[davecc::meta_intrinsic]] consteval bool is_copy_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_move_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_swappable_with_type(info type1, info type2);
+[[davecc::meta_intrinsic]] consteval bool is_swappable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_destructible_type(info type);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_trivially_constructible_type(info type, R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval bool is_trivially_default_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_copy_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_move_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_assignable_type(info type_dst, info type_src);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_copy_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_move_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_trivially_destructible_type(info type);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_constructible_type(info type, R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_default_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_copy_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_move_constructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_assignable_type(info type_dst, info type_src);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_copy_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_move_assignable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_swappable_with_type(info type1, info type2);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_swappable_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_destructible_type(info type);
+[[davecc::meta_intrinsic]] consteval bool is_implicit_lifetime_type(info type);
+[[davecc::meta_intrinsic]] consteval bool has_virtual_destructor(info type);
+[[davecc::meta_intrinsic]] consteval bool has_unique_object_representations(info type);
+[[davecc::meta_intrinsic]] consteval bool reference_constructs_from_temporary(info type_dst, info type_src);
+[[davecc::meta_intrinsic]] consteval bool reference_converts_from_temporary(info type_dst, info type_src);
+[[davecc::meta_intrinsic]] consteval size_t rank(info type);
+[[davecc::meta_intrinsic]] consteval size_t extent(info type, unsigned i = 0);
+[[davecc::meta_intrinsic]] consteval bool is_same_type(info type1, info type2);
+[[davecc::meta_intrinsic]] consteval bool is_base_of_type(info type_base, info type_derived);
+[[davecc::meta_intrinsic]] consteval bool is_virtual_base_of_type(info type_base, info type_derived);
+[[davecc::meta_intrinsic]] consteval bool is_convertible_type(info type_src, info type_dst);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_convertible_type(info type_src, info type_dst);
+[[davecc::meta_intrinsic]] consteval bool is_layout_compatible_type(info type1, info type2);
+[[davecc::meta_intrinsic]] consteval bool is_pointer_interconvertible_base_of_type(info type_base,
+                                                        info type_derived);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_invocable_type(info type, R&& type_args);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_invocable_r_type(info type_result, info type, R&& type_args);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_invocable_type(info type, R&& type_args);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_invocable_r_type(info type_result, info type,
+                                           R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval info remove_const(info type);
+[[davecc::meta_intrinsic]] consteval info remove_volatile(info type);
+[[davecc::meta_intrinsic]] consteval info remove_cv(info type);
+[[davecc::meta_intrinsic]] consteval info add_const(info type);
+[[davecc::meta_intrinsic]] consteval info add_volatile(info type);
+[[davecc::meta_intrinsic]] consteval info add_cv(info type);
+[[davecc::meta_intrinsic]] consteval info remove_reference(info type);
+[[davecc::meta_intrinsic]] consteval info add_lvalue_reference(info type);
+[[davecc::meta_intrinsic]] consteval info add_rvalue_reference(info type);
+[[davecc::meta_intrinsic]] consteval info make_signed(info type);
+[[davecc::meta_intrinsic]] consteval info make_unsigned(info type);
+[[davecc::meta_intrinsic]] consteval info remove_extent(info type);
+[[davecc::meta_intrinsic]] consteval info remove_all_extents(info type);
+[[davecc::meta_intrinsic]] consteval info remove_pointer(info type);
+[[davecc::meta_intrinsic]] consteval info add_pointer(info type);
+[[davecc::meta_intrinsic]] consteval info remove_cvref(info type);
+[[davecc::meta_intrinsic]] consteval info decay(info type);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info common_type(R&& type_args);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info common_reference(R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval info underlying_type(info type);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info invoke_result(info type, R&& type_args);
+
+[[davecc::meta_intrinsic]] consteval info unwrap_reference(info type);
+[[davecc::meta_intrinsic]] consteval info unwrap_ref_decay(info type);
+[[davecc::meta_intrinsic]] consteval size_t tuple_size(info type);
+[[davecc::meta_intrinsic]] consteval info tuple_element(size_t index, info type);
+[[davecc::meta_intrinsic]] consteval bool is_applicable_type(info fn, info tuple);
+[[davecc::meta_intrinsic]] consteval bool is_nothrow_applicable_type(info fn, info tuple);
+[[davecc::meta_intrinsic]] consteval info apply_result(info fn, info tuple);
+[[davecc::meta_intrinsic]] consteval size_t variant_size(info type);
+[[davecc::meta_intrinsic]] consteval info variant_alternative(size_t index, info type);
+[[davecc::meta_intrinsic]] consteval strong_ordering type_order(info type_a, info type_b);
+
+[[davecc::meta_intrinsic]] consteval bool is_invalid(info);
+[[davecc::meta_intrinsic]] consteval bool is_data_member(info);
+
+inline consteval bool is_nonstatic_data_member(info r) {
+  return is_data_member(r);
+}
 
 }  // namespace meta
+
+template <ranges::input_range R>
+  requires std::same_as<std::remove_cvref_t<ranges::range_reference_t<R>>, char>
+[[davecc::meta_intrinsic]] consteval const ranges::range_value_t<R>* define_static_string(R&& r);
+
+template <ranges::input_range R>
+[[davecc::meta_intrinsic]] consteval span<const ranges::range_value_t<R>> define_static_array(R&& r);
+
+template <class T>
+[[davecc::meta_intrinsic]] consteval const remove_cvref_t<T>* define_static_object(T&& t);
+
 }  // namespace std
 
 #endif

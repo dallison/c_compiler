@@ -1923,8 +1923,8 @@ static bool CXXImplicitSpecialMemberIsNoexcept(Struct* str,
   return true;
 }
 
-static bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
-                                          CXXSpecialMemberKind kind) {
+bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
+                                   CXXSpecialMemberKind kind) {
   if (type == NULL) {
     return true;
   }

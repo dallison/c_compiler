@@ -147,7 +147,20 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
     if (LexMatch(parser->lex, TOK(virtual))) {
       is_virtual = true;
     }
-    TypeRecord* base_type = TypeParserParseType(parser, true);
+    TypeRecord* base_type = NULL;
+    if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        LexLookingAt(parser->lex, TOK(splice_open))) {
+      SourceLocation location = parser->lex->current_token_location;
+      LexNextToken(parser->lex);
+      ASTNode* reflection =
+          SyntaxParseExpression(parser->syntax, TC(spliceclose));
+      SyntaxNeedBracket(parser->syntax, TOK(splice_close), TC(type));
+      base_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      base_type->dependent_splice_expr =
+          NewSpliceASTNode(reflection, kSpliceBase, location);
+    } else {
+      base_type = TypeParserParseType(parser, true);
+    }
     if (!parser->syntax->parsing_template_declaration &&
         parser->syntax->current_template_parameter_count == 0 &&
         !TypeContainsTemplateParameter(base_type)) {

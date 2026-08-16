@@ -523,6 +523,26 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
   SemanticAnalyzeCoroutineFunction(node);
+  Vector* prototype = &node->type->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* param = prototype->value.p[i];
+    if (param == NULL) {
+      continue;
+    }
+    SemanticAttachAnnotationAttributes(&param->attributes, param);
+    if (param->type != NULL) {
+      param->type =
+          SemanticResolveDependentSpliceType(param->type, (ASTNode*)node);
+    }
+  }
+  if (node->type->info.function.cxx_member_owner != NULL) {
+    Struct* owner = node->type->info.function.cxx_member_owner;
+    SemanticResolveStructDependentSplices(owner, (ASTNode*)node);
+    if (owner->tag_symbol != NULL) {
+      SemanticAttachAnnotationAttributes(&owner->tag_symbol->attributes,
+                                         owner->tag_symbol);
+    }
+  }
   
   // Mark this function's body as in-flight so speculative constant folding
   // reached during its own analysis (e.g. a recursive constexpr call) does not
@@ -1658,6 +1678,10 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
                       ? true
                       : EvaluateScalarConstantForSymbol(node->symbol,
                                                         node->initializer);
+    if (!scalar && TypeIsPointer(node->symbol->type)) {
+      scalar = SemanticEvaluatePointerConstantForSymbol(node->symbol,
+                                                        node->initializer);
+    }
     bool ordinary_automatic_const =
         node->symbol->flags.is_local &&
         !StorageIs(node->symbol->storage, STO(static) | STO(thread)) &&

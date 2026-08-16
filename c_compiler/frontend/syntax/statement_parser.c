@@ -2086,6 +2086,23 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     LexCheckpointDestruct(&template_checkpoint);
   }
 
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      LexLookingAt(lex, TOK(consteval))) {
+    LexCheckpoint cp;
+    LexCheckpointSave(lex, &cp);
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(lbrace))) {
+      LexNextToken(lex);
+      LexCheckpointDestruct(&cp);
+      ASTNode* body = ParseCompoundStatement(syntax, followers, location);
+      stmt = NewConstevalBlockASTNode(body, location);
+      if (stmt != NULL) stmt->flags |= kASTStatementStart;
+      return stmt;
+    }
+    LexCheckpointRestore(lex, &cp);
+    LexCheckpointDestruct(&cp);
+  }
+
   bool found = false;
   for (size_t i = 0; i < NUM_STATEMENT_PARSERS; i++) {
     struct StatementParser* parser = &statement_parsers[i];

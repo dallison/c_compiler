@@ -65,4 +65,22 @@
 #endif
 #endif
 
+#if __cplusplus >= 202600L
+#ifndef __cpp_impl_reflection
+#define __cpp_impl_reflection 202603L
+#endif
+#ifndef __cpp_lib_reflection
+#define __cpp_lib_reflection 202603L
+#endif
+#ifndef __cpp_lib_define_static
+#define __cpp_lib_define_static 202506L
+#endif
+#ifndef __cpp_lib_apply
+#define __cpp_lib_apply 202506L
+#endif
+#ifndef __cpp_lib_integer_sequence
+#define __cpp_lib_integer_sequence 202511L
+#endif
+#endif
+
 #endif /* version_h */

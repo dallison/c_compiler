@@ -101,6 +101,8 @@ typedef enum {
   AST_OP(reflect),
   AST_OP(reflection_constant),
   AST_OP(splice),
+  AST_OP(splice_qualified),
+  AST_OP(consteval_block),
   AST_OP(div),
   AST_OP(diveq),
   AST_OP(mult),
@@ -438,6 +440,8 @@ typedef enum {
   kASTShapeTypeid,
   kASTShapeReflection,
   kASTShapeSplice,
+  kASTShapeSpliceQualified,
+  kASTShapeConstevalBlock,
   kASTShapeMacro,
   kASTShapeExprStmt,
   kASTShapeIf,
@@ -686,6 +690,7 @@ typedef enum {
   kReflectionOperandType,
   kReflectionOperandExpression,
   kReflectionOperandValue,
+  kReflectionOperandNamespaceAlias,
 } ReflectionOperandKind;
 
 typedef struct {
@@ -709,6 +714,9 @@ typedef enum {
   kSpliceType,
   kSpliceMember,
   kSpliceAddressed,
+  kSpliceNamespace,
+  kSpliceTemplate,
+  kSpliceBase,
 } SpliceContext;
 
 typedef struct {
@@ -719,6 +727,22 @@ typedef struct {
 
 ASTNode* NewSpliceASTNode(ASTNode* reflection, SpliceContext context,
                           SourceLocation location);
+
+typedef struct {
+  ASTNode base;
+  ASTNode* reflection;
+  ASTNode* suffix;
+} SpliceQualifiedASTNode;
+
+ASTNode* NewSpliceQualifiedASTNode(ASTNode* reflection, ASTNode* suffix,
+                                   SourceLocation location);
+
+typedef struct {
+  ASTNode base;
+  ASTNode* body;
+} ConstevalBlockASTNode;
+
+ASTNode* NewConstevalBlockASTNode(ASTNode* body, SourceLocation location);
 
 // Macro name.
 typedef struct {

@@ -38,7 +38,7 @@ struct char_traits {
     }
     return n;
   }
-  static int compare(const char_type* a, const char_type* b, size_t n) {
+  static constexpr int compare(const char_type* a, const char_type* b, size_t n) {
     for (size_t i = 0; i < n; ++i) {
       if (lt(a[i], b[i])) {
         return -1;
@@ -123,7 +123,7 @@ struct char_traits<char> {
     return n;
   }
 
-  static int compare(const char_type* a, const char_type* b, size_t n) {
+  static constexpr int compare(const char_type* a, const char_type* b, size_t n) {
     if (n == 0) {
       return 0;
     }

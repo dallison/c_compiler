@@ -92,4 +92,13 @@ void SerialWritePartialSpecializationVector(SerializeContext* ctx,
 void SerialReadPartialSpecializationVector(DeserializeContext* ctx,
                                            WireBuffer* in, Vector* out);
 
+struct ReflectionValue;
+void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf,
+                                          int field_sequence,
+                                          int field_substituted_arguments,
+                                          int field_dms_annotations,
+                                          struct ReflectionValue* value);
+bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
+                                       int field, struct ReflectionValue* value);
+
 #endif /* serialize_common_h */

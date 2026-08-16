@@ -57,12 +57,12 @@ class optional {
     return &__storage_.__value_;
   }
 
-  void __construct_copy(const T& value) {
+  constexpr void __construct_copy(const T& value) {
     new (__ptr()) T(value);
     __engaged_ = true;
   }
 
-  void __construct_move(T&& value) {
+  constexpr void __construct_move(T&& value) {
     new (__ptr()) T(std::move(value));
     __engaged_ = true;
   }
@@ -74,12 +74,20 @@ class optional {
 
   constexpr optional(nullopt_t) noexcept : __engaged_(false) {}
 
-  optional(const T& value) : __engaged_(false) {
+  constexpr optional(const T& value) : __engaged_(false) {
     __construct_copy(value);
   }
 
-  optional(T&& value) : __engaged_(false) {
+  constexpr optional(T&& value) : __engaged_(false) {
     __construct_move(std::move(value));
+  }
+
+  template <class U>
+    requires(!is_same_v<remove_cvref_t<U>, optional> &&
+             is_constructible_v<T, U>)
+  constexpr optional(U&& value) : __engaged_(false) {
+    new (__ptr()) T(std::forward<U>(value));
+    __engaged_ = true;
   }
 
   template <class... Args>

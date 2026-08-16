@@ -687,4 +687,13 @@ run "$DAVECC" -target "$TARGET" -std=c++26 -c \
   -o "$work/use_reflection.o" ||
   fail "instantiate imported reflection values"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/meta_synthesis.dcm" \
+  "$FIXTURES/meta_synthesis.cppm" ||
+  fail "emit meta_synthesis module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_meta_synthesis.cpp" \
+  -o "$work/use_meta_synthesis.o" ||
+  fail "instantiate imported meta_synthesis values"
+
 echo "ok module emit/import/link/execute"

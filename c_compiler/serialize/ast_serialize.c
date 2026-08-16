@@ -460,6 +460,32 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
                   r->value->parent_class);
         WireWriteUint64(buf, 26, (uint64_t)r->value->base_index);
         WireWriteUint64(buf, 27, (uint64_t)r->value->location);
+        WireWriteUint64(buf, 28, (uint64_t)r->value->parameter_index);
+        WireWriteInt64(buf, 29, r->value->scalar_ivalue);
+        WireWriteDouble(buf, 30, r->value->scalar_fvalue);
+        WireWriteBool(buf, 31, r->value->scalar_is_float);
+        SWriteRef(ctx, buf, 32, kSerialKindNamespace,
+                  r->value->namespace_alias_target);
+        SWriteRef(ctx, buf, 33, kSerialKindAST,
+                  r->value->constexpr_initializer);
+        SWriteRef(ctx, buf, 34, kSerialKindSymbol, r->value->promoted_symbol);
+        SWriteRef(ctx, buf, 35, kSerialKindSymbol,
+                  r->value->substituted_template);
+        SWriteRef(ctx, buf, 36, kSerialKindType, r->value->extract_type);
+        if (r->value->data_member_spec != NULL) {
+          ReflectionDataMemberSpec* spec = r->value->data_member_spec;
+          SWriteRef(ctx, buf, 37, kSerialKindType, spec->member_type);
+          if (spec->name.value != NULL) {
+            WireWriteString(buf, 38, spec->name.value, spec->name.length);
+          }
+          WireWriteUint64(buf, 39, (uint64_t)spec->alignment);
+          WireWriteUint64(buf, 40, (uint64_t)spec->bit_width);
+          WireWriteBool(buf, 41, spec->no_unique_address);
+          WireWriteBool(buf, 42, spec->has_name);
+          WireWriteBool(buf, 43, spec->has_alignment);
+          WireWriteBool(buf, 44, spec->has_bit_width);
+        }
+        SerialWriteReflectionExtendedPayload(ctx, buf, 41, 42, 43, r->value);
       }
       break;
     }
@@ -467,6 +493,17 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SpliceASTNode* s = (SpliceASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, s->reflection);
       WireWriteInt32(buf, 17, (int32_t)s->context);
+      break;
+    }
+    case kASTShapeSpliceQualified: {
+      SpliceQualifiedASTNode* s = (SpliceQualifiedASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, s->reflection);
+      SWriteRef(ctx, buf, 17, kSerialKindAST, s->suffix);
+      break;
+    }
+    case kASTShapeConstevalBlock: {
+      ConstevalBlockASTNode* b = (ConstevalBlockASTNode*)n;
+      SWriteRef(ctx, buf, 16, kSerialKindAST, b->body);
       break;
     }
     case kASTShapeMacro: {
@@ -852,7 +889,7 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
             (ReflectionEntityKind)kind, n->location);
         return;
       }
-      if (r->value == NULL && field >= 21 && field <= 27) {
+      if (r->value == NULL && field >= 21 && field <= 32) {
         r->value = ReflectionCreateDeserialized(kReflectionInvalid,
                                                 n->location);
       }
@@ -892,6 +929,115 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
         uint64_t location = 0;
         WireReadUint64(buf, &location);
         r->value->location = (SourceLocation)location;
+        return;
+      }
+      if (field == 28) {
+        uint64_t parameter_index = 0;
+        WireReadUint64(buf, &parameter_index);
+        r->value->parameter_index = (size_t)parameter_index;
+        return;
+      }
+      if (field == 29) {
+        WireReadInt64(buf, &r->value->scalar_ivalue);
+        return;
+      }
+      if (field == 30) {
+        WireReadDouble(buf, &r->value->scalar_fvalue);
+        return;
+      }
+      if (field == 31) {
+        WireReadBool(buf, &r->value->scalar_is_float);
+        return;
+      }
+      if (field == 32) {
+        r->value->namespace_alias_target =
+            (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);
+        return;
+      }
+      if (field == 33) {
+        r->value->constexpr_initializer =
+            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 34) {
+        r->value->promoted_symbol =
+            (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        return;
+      }
+      if (field == 35) {
+        r->value->substituted_template =
+            (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        return;
+      }
+      if (field == 36) {
+        r->value->extract_type =
+            (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(r->value->extract_type);
+        return;
+      }
+      if (field == 37) {
+        if (r->value->data_member_spec == NULL) {
+          r->value->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+        }
+        r->value->data_member_spec->member_type =
+            (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        TypeRecordIncRef(r->value->data_member_spec->member_type);
+        return;
+      }
+      if (field == 38 && r->value->data_member_spec != NULL) {
+        SReadStringVal(ctx, buf, &r->value->data_member_spec->name);
+        return;
+      }
+      if (field == 39 && r->value->data_member_spec != NULL) {
+        uint64_t alignment = 0;
+        WireReadUint64(buf, &alignment);
+        r->value->data_member_spec->alignment = (size_t)alignment;
+        return;
+      }
+      if (field == 40 && r->value->data_member_spec != NULL) {
+        uint64_t bit_width = 0;
+        WireReadUint64(buf, &bit_width);
+        r->value->data_member_spec->bit_width = (size_t)bit_width;
+        return;
+      }
+      if (field == 41 && r->value->data_member_spec != NULL) {
+        WireReadBool(buf, &r->value->data_member_spec->no_unique_address);
+        return;
+      }
+      if (field == 42 && r->value->data_member_spec != NULL) {
+        WireReadBool(buf, &r->value->data_member_spec->has_name);
+        return;
+      }
+      if (field == 43 && r->value->data_member_spec != NULL) {
+        WireReadBool(buf, &r->value->data_member_spec->has_alignment);
+        return;
+      }
+      if (field == 44 && r->value->data_member_spec != NULL) {
+        WireReadBool(buf, &r->value->data_member_spec->has_bit_width);
+        return;
+      }
+      if (r->value != NULL &&
+          SerialReadReflectionExtendedField(ctx, buf, field, r->value)) {
+        return;
+      }
+      break;
+    }
+    case kASTShapeSpliceQualified: {
+      SpliceQualifiedASTNode* s = (SpliceQualifiedASTNode*)n;
+      if (field == 16) {
+        s->reflection = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        s->suffix = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      break;
+    }
+    case kASTShapeConstevalBlock: {
+      ConstevalBlockASTNode* b = (ConstevalBlockASTNode*)n;
+      if (field == 16) {
+        b->body = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         return;
       }
       break;

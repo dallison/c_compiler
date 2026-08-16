@@ -259,6 +259,10 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "<reflection>";
     case AST_OP(splice):
       return "[: :]";
+    case AST_OP(splice_qualified):
+      return "[: ]::";
+    case AST_OP(consteval_block):
+      return "consteval { }";
     case AST_OP(div):
       return "/";
     case AST_OP(diveq):
@@ -2369,6 +2373,105 @@ ASTNode* NewSpliceASTNode(ASTNode* reflection, SpliceContext context,
   node->reflection = reflection;
   node->context = context;
   SetParent(reflection, (ASTNode*)node, 0);
+  return (ASTNode*)node;
+}
+
+static void SpliceQualifiedASTNodeDelete(ASTNode* node) {
+  SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
+  ASTNodeDelete(splice->reflection);
+  ASTNodeDelete(splice->suffix);
+  ASTNodeBaseDelete(node);
+}
+static void SpliceQualifiedASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
+  Indent(indents, fp); fprintf(fp, "[: ]::\n");
+  ASTNodePrint(splice->reflection, indents + 2, fp);
+  ASTNodePrint(splice->suffix, indents + 2, fp);
+}
+static void SpliceQualifiedASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                               ASTNode* child, bool delete_old_child) {
+  SpliceQualifiedASTNode* node = (SpliceQualifiedASTNode*)parent;
+  ASTNode** slot = child_id == 0 ? &node->reflection : &node->suffix;
+  ASTNode* old = *slot; *slot = child; SetParent(child, parent, child_id);
+  if (delete_old_child) ASTNodeDelete(old);
+}
+static ASTNode* SpliceQualifiedASTNodeClone(const ASTNode* node,
+    ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const SpliceQualifiedASTNode* from = (const SpliceQualifiedASTNode*)node;
+  SpliceQualifiedASTNode* to = ASTArenaAlloc(sizeof(*to));
+  ASTNodeBaseCopy(&to->base, node);
+  to->reflection = ASTNodeClone(from->reflection, func, data, (ASTNode*)to);
+  to->suffix = ASTNodeClone(from->suffix, func, data, (ASTNode*)to);
+  return func((ASTNode*)to, data);
+}
+static void SpliceQualifiedASTNodeVisit(ASTNode* node,
+    void (*func)(ASTNode*, void*, int, VisitorMode), int child_id, void* data) {
+  SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(splice->reflection, func, 0, data);
+  ASTNodeVisit(splice->suffix, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+static void SpliceQualifiedASTNodeTransform(ASTNode* node, ASTNodeTransformer func, void* data) {
+  SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
+  ASTNodeTransformChild(node, 0, splice->reflection, func, data);
+  ASTNodeTransformChild(node, 1, splice->suffix, func, data);
+}
+static ASTNodeVirtuals splice_qualified_vtbl = {
+    SpliceQualifiedASTNodeDelete, SpliceQualifiedASTNodePrint,
+    SpliceQualifiedASTNodeReplaceChild, SpliceQualifiedASTNodeClone,
+    SpliceQualifiedASTNodeVisit, ValueAlwaysUsed, SpliceQualifiedASTNodeTransform};
+ASTNode* NewSpliceQualifiedASTNode(ASTNode* reflection, ASTNode* suffix,
+                                   SourceLocation location) {
+  SpliceQualifiedASTNode* node = ASTArenaAlloc(sizeof(*node));
+  ASTNodeInit(&node->base, AST_OP(splice_qualified), NULL, location, &splice_qualified_vtbl);
+  node->reflection = reflection; node->suffix = suffix;
+  SetParent(reflection, (ASTNode*)node, 0); SetParent(suffix, (ASTNode*)node, 1);
+  return (ASTNode*)node;
+}
+static void ConstevalBlockASTNodeDelete(ASTNode* node) {
+  ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
+  ASTNodeDelete(block->body); ASTNodeBaseDelete(node);
+}
+static void ConstevalBlockASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
+  Indent(indents, fp); fprintf(fp, "consteval {\n");
+  ASTNodePrint(block->body, indents + 2, fp);
+  Indent(indents, fp); fprintf(fp, "}\n");
+}
+static void ConstevalBlockASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                              ASTNode* child, bool delete_old_child) {
+  ConstevalBlockASTNode* node = (ConstevalBlockASTNode*)parent;
+  ASTNode* old = node->body; node->body = child; SetParent(child, parent, child_id);
+  if (delete_old_child) ASTNodeDelete(old);
+}
+static ASTNode* ConstevalBlockASTNodeClone(const ASTNode* node,
+    ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const ConstevalBlockASTNode* from = (const ConstevalBlockASTNode*)node;
+  ConstevalBlockASTNode* to = ASTArenaAlloc(sizeof(*to));
+  ASTNodeBaseCopy(&to->base, node);
+  to->body = ASTNodeClone(from->body, func, data, (ASTNode*)to);
+  return func((ASTNode*)to, data);
+}
+static void ConstevalBlockASTNodeVisit(ASTNode* node,
+    void (*func)(ASTNode*, void*, int, VisitorMode), int child_id, void* data) {
+  ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(block->body, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+static void ConstevalBlockASTNodeTransform(ASTNode* node, ASTNodeTransformer func, void* data) {
+  ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
+  ASTNodeTransformChild(node, 0, block->body, func, data);
+}
+static ASTNodeVirtuals consteval_block_vtbl = {
+    ConstevalBlockASTNodeDelete, ConstevalBlockASTNodePrint,
+    ConstevalBlockASTNodeReplaceChild, ConstevalBlockASTNodeClone,
+    ConstevalBlockASTNodeVisit, ValueAlwaysUsed, ConstevalBlockASTNodeTransform};
+ASTNode* NewConstevalBlockASTNode(ASTNode* body, SourceLocation location) {
+  ConstevalBlockASTNode* node = ASTArenaAlloc(sizeof(*node));
+  ASTNodeInit(&node->base, AST_OP(consteval_block), NULL, location, &consteval_block_vtbl);
+  node->body = body; SetParent(body, (ASTNode*)node, 0);
   return (ASTNode*)node;
 }
 
@@ -4720,6 +4823,8 @@ ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
   if (v == &typeid_vtbl) return kASTShapeTypeid;
   if (v == &reflection_vtbl) return kASTShapeReflection;
   if (v == &splice_vtbl) return kASTShapeSplice;
+  if (v == &splice_qualified_vtbl) return kASTShapeSpliceQualified;
+  if (v == &consteval_block_vtbl) return kASTShapeConstevalBlock;
   if (v == &macro_vtbl) return kASTShapeMacro;
   if (v == &expr_stmt_vtbl) return kASTShapeExprStmt;
   if (v == &static_assert_vtbl) return kASTShapeStaticAssert;
@@ -4815,6 +4920,16 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       SpliceASTNode* n = ASTArenaAlloc(sizeof(SpliceASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &splice_vtbl);
       n->context = kSpliceExpression;
+      return &n->base;
+    }
+    case kASTShapeSpliceQualified: {
+      SpliceQualifiedASTNode* n = ASTArenaAlloc(sizeof(SpliceQualifiedASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &splice_qualified_vtbl);
+      return &n->base;
+    }
+    case kASTShapeConstevalBlock: {
+      ConstevalBlockASTNode* n = ASTArenaAlloc(sizeof(ConstevalBlockASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &consteval_block_vtbl);
       return &n->base;
     }
     case kASTShapeMacro: {

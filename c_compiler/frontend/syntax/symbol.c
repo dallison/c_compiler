@@ -46,6 +46,8 @@ Attribute* NewAttribute(const char* name) {
   VectorInit(&attr->args);
   attr->dependent_alignas_type = NULL;
   attr->dependent_alignas_expr = NULL;
+  attr->annotation_expr = NULL;
+  attr->annotation_value = NULL;
   return attr;
 }
 
@@ -55,6 +57,7 @@ void AttributeDestruct(Attribute* attr) {
                              /*free_element=*/true);
   TypeRecordDelete(attr->dependent_alignas_type);
   ASTNodeDelete(attr->dependent_alignas_expr);
+  ASTNodeDelete(attr->annotation_expr);
 }
 
 void AttributeDelete(Attribute* attr) {
@@ -81,6 +84,9 @@ Attribute* AttributeClone(Attribute* attr) {
   copy->dependent_alignas_expr =
       ASTNodeClone(attr->dependent_alignas_expr, IdentityCloneNode,
                    NULL, NULL);
+  copy->annotation_expr =
+      ASTNodeClone(attr->annotation_expr, IdentityCloneNode, NULL, NULL);
+  copy->annotation_value = attr->annotation_value;
   return copy;
 }
 

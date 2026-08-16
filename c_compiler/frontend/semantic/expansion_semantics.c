@@ -98,6 +98,58 @@ static TypeRecord* ExpansionObjectType(TypeRecord* type) {
                                                      object_type);
 }
 
+static Symbol* FindStdSymbolByName(const char* name) {
+  Namespace* std_ns = NamespaceFindStdNamespace();
+  if (std_ns == NULL) {
+    return NULL;
+  }
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(std_ns, &symbol_name);
+  StringDestruct(&symbol_name);
+  if (result.status != kInlineLookupUnique) {
+    return NULL;
+  }
+  return result.symbol;
+}
+
+static bool ExpansionTupleLikeElementCount(TypeRecord* type,
+                                           size_t* element_count) {
+  Symbol* tuple_size = FindStdSymbolByName("tuple_size");
+  if (tuple_size == NULL || !tuple_size->flags.is_template ||
+      tuple_size->type == NULL || !TypeIsStructOrUnion(tuple_size->type)) {
+    return false;
+  }
+  TypeRecord* object_type = type;
+  if (object_type != NULL && TypeIsReference(object_type)) {
+    object_type = object_type->next;
+  }
+  if (object_type == NULL) {
+    return false;
+  }
+  Vector* args = NewVector();
+  VectorAppend(args, NewTypeTemplateArgument(object_type));
+  TypeRecord* tuple_size_type =
+      TypeInstantiateClassTemplate(&compiler->syntax, tuple_size, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (tuple_size_type == NULL || !TypeIsStructOrUnion(tuple_size_type) ||
+      tuple_size_type->info.struct_info == NULL) {
+    TypeRecordDelete(tuple_size_type);
+    return false;
+  }
+  StructMember* value = FindStructMemberByName(tuple_size_type->info.struct_info,
+                                                 "value");
+  bool ok = value != NULL && value->symbol != NULL &&
+            value->symbol->flags.value_set && value->symbol->value.ivalue >= 0;
+  if (ok) {
+    *element_count = (size_t)value->symbol->value.ivalue;
+  }
+  TypeRecordDelete(tuple_size_type);
+  return ok;
+}
+
 static bool TypeIsExpansionArray(TypeRecord* type) {
   TypeRecord* object_type = ExpansionObjectType(type);
   return object_type != NULL && TypeIsArray(object_type);
@@ -823,6 +875,27 @@ static ASTNode* FinalizeExpansionCompound(Vector* statements,
   return compound;
 }
 
+static ASTNode* MaterializeEmptyTupleLikeExpansion(
+    ExpansionStatementASTNode* node, ASTNode* hidden_decl,
+    const ExpansionLabels* labels) {
+  Vector hoisted_static;
+  VectorInit(&hoisted_static);
+  CollectStaticLocalDeclarations(node->stmt, &hoisted_static);
+  Vector* statements = NewVector();
+  if (node->init_stmt != NULL) {
+    VectorAppend(statements,
+                 ASTNodeClone(node->init_stmt, ExpansionIdentityCloneNode, NULL,
+                              NULL));
+  }
+  AppendHoistedStaticLocals(statements, &hoisted_static);
+  VectorAppend(statements, hidden_decl);
+  VectorAppend(statements,
+               NewLabelStatement(labels->break_label, node->base.location));
+  VectorDestruct(&hoisted_static);
+  return FinalizeExpansionCompound(statements, hidden_decl, node->base.location,
+                                   labels);
+}
+
 static ASTNode* MaterializeEnumeratingExpansion(ExpansionStatementASTNode* node,
                                                 Map* symbol_map,
                                                 Map* pack_symbol_map,
@@ -878,6 +951,12 @@ static ASTNode* MaterializeDestructuringExpansion(ExpansionStatementASTNode* nod
     return (ASTNode*)node;
   }
   AnalyzeStatement(hidden_decl);
+
+  size_t tuple_like_count = 0;
+  if (ExpansionTupleLikeElementCount(hidden->type, &tuple_like_count) &&
+      tuple_like_count == 0) {
+    return MaterializeEmptyTupleLikeExpansion(node, hidden_decl, labels);
+  }
 
   StructuredBindingDecomposition decomposition;
   if (!SemanticAnalyzeStructuredBindingDecomposition(

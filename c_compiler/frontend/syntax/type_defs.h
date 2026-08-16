@@ -394,6 +394,7 @@ struct Struct {
   int pack;          // #pragma pack(n) cap; 0 = no cap.          // @wire 20
   int next_bit_pos;  // Next bit position for bit fields.         // @wire 21
   int current_offset;  // @wire 22
+  bool meta_aggregate_complete;  // define_aggregate finalized layout. // @wire 36
 };
 
 // An enum type.  Module-serialization field numbers (see type_serialize.c);
