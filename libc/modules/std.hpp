@@ -46,6 +46,7 @@
 #include <stdfloat>
 #include <stop_token>
 #include <stack>
+#include <stacktrace>
 #include <string>
 #include <string_view>
 #include <syncstream>

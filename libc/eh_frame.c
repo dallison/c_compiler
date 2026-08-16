@@ -240,7 +240,23 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
     return 0;
   }
   if (!DaveEHFrameFindFDE(regs->pc, &fde)) {
-    return 0;
+    /*
+     * DaveCC keeps an rbp chain in generated non-leaf functions.  Some
+     * hand-written runtime functions do not carry CFI, but are still safely
+     * walkable through that ABI chain.
+     */
+    if (regs->rbp == 0 ||
+        (regs->rbp & (sizeof(uintptr_t) - 1)) != 0) {
+      return 0;
+    }
+    const uintptr_t* frame = (const uintptr_t*)regs->rbp;
+    out->caller_rbp = frame[0];
+    out->caller_pc = frame[1];
+    out->caller_rsp = regs->rbp + 2 * sizeof(uintptr_t);
+    if (out->caller_rbp != 0 && out->caller_rbp <= regs->rbp) {
+      return 0;
+    }
+    return out->caller_pc != 0;
   }
   if (!DaveEHFrameCFIAtPC(&fde, regs->pc, &cfi)) {
     return 0;

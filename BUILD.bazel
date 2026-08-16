@@ -88,6 +88,7 @@ filegroup(
         "libc/include/span",
         "libc/include/sstream",
         "libc/include/stack",
+        "libc/include/stacktrace",
         "libc/include/stdexcept",
         "libc/include/stdfloat",
         "libc/include/stop_token",
@@ -354,6 +355,7 @@ LIBC_SRCS = [
     "libc/strtox.h",
     "libc/strtox_long.h",
     "libc/string_conversion_helpers.h",
+    "libc/stacktrace.c",
     "libc/syscall.c",
     "libc/cxx_tls.c",
     "libc/cxx_tls_stubs.c",
@@ -589,6 +591,7 @@ cc_library(
         "Linker/linker_file.c",
         "Linker/linker_main.c",
         "Linker/linker_reloc.c",
+        "Linker/linker_stacktrace.c",
         "Linker/linker_symbols.c",
     ],
     hdrs = glob([
@@ -1309,6 +1312,7 @@ runtime_srcs=(
   "6502 support/syscall.s"
   "6502 support/intrinsic.s"
   "6502 support/setjmp.s"
+  "6502 support/stacktrace.s"
 )
 
 runtime_objs=()
@@ -1403,6 +1407,7 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stacktrace.c"
   "libc/syscall.c"
   "libc/threads.c"
   "libc/ungetc.c"
@@ -1570,6 +1575,7 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stacktrace.c"
   "libc/syscall.c"
   "libc/threads.c"
   "libc/ungetc.c"
@@ -1740,6 +1746,7 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stacktrace.c"
   "libc/syscall.c"
   "libc/ungetc.c"
   "libc/acos.c"
@@ -1906,6 +1913,7 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stacktrace.c"
   "libc/syscall.c"
   "libc/threads.c"
   "libc/guest_heap.c"
@@ -2075,6 +2083,7 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stacktrace.c"
   "libc/syscall.c"
   "libc/threads.c"
   "libc/guest_heap.c"
@@ -2778,6 +2787,24 @@ sh_test(
     ],
     data = [
         ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "stacktrace_dso_runtime_x86_64_test",
+    srcs = ["tests/stacktrace_dso_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
         ":libc_headers",
         ":libc_x86_64",
         ":x86_64",

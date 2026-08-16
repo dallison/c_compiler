@@ -17,6 +17,7 @@ layout {
       name: "text"
       section: ".text"
       section: ".rodata"
+      section: ".davecc_stacktrace"
       start_addr: 0xc000
       size: 0x3f00
       alignment: 1
@@ -40,6 +41,7 @@ layout {
       name: "text"
       section: ".text"
       section: ".rodata"
+      section: ".davecc_stacktrace"
       start_addr: 0x200
     }
   }
@@ -63,6 +65,7 @@ layout {
       name: "text"
       section: ".text"
       section: ".rodata"
+      section: ".davecc_stacktrace"
       section: ".eh_frame"
       section: ".gcc_except_table"
       start_addr: 0x400000000
@@ -92,6 +95,7 @@ layout {
       section: ".ARM.exidx"
       section: ".text"
       section: ".rodata"
+      section: ".davecc_stacktrace"
       section: ".gcc_except_table"
       section: ".ARM.exidx"
       section: ".ARM.extab"

@@ -608,10 +608,15 @@ static const char* MoveMnemonic(RVOpcode opcode, RVRegister* dest,
 }
 
 static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
-  assert(inst->operand[0] != NULL);
-  assert(inst->operand[1] != NULL);
+  if (inst->operand[0] == NULL || inst->operand[1] == NULL) {
+    return;
+  }
   if (inst->operand[1]->block == NULL) {
     // Optimized out.
+    return;
+  }
+  if (inst->operand[0]->reg == NULL || inst->operand[1]->reg == NULL) {
+    // Register allocation removed an unused side of the copy.
     return;
   }
   assert(inst->operand[0]->reg != NULL);

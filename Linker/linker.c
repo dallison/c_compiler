@@ -19,6 +19,7 @@
 #include "linker_symbols.h"
 #include "linker_file.h"
 #include "linker_dynamic.h"
+#include "linker_stacktrace.h"
 #include <sys/stat.h>
 #include <limits.h>
 
@@ -146,6 +147,7 @@ void LinkerInit(Linker* linker) {
   linker->so_name = -1;
   linker->fully_static = false;
   linker->origin = 0;
+  linker->stacktrace_info = NULL;
   linker->num_errors = 0;
 
   linker->print_relocations = false;
@@ -191,6 +193,7 @@ void LinkerDestruct(Linker* linker) {
   VectorDestructWithContents(&linker->architectures, NULL, /*free_element=*/true);
   LinkerClearSymbolTable(&linker->global_symbol_table);
   HashTableDestruct(&linker->global_symbol_table);
+  LinkerStacktraceDestruct(linker);
   VectorDestructWithContents(&linker->section_groups, (VectorElementDestructor)SectionGroupDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->static_libraries, (VectorElementDestructor)ARArchiveDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->dynamic_libraries, (VectorElementDestructor)LoadedDynamicLibraryDestruct, /*free_element=*/true);
@@ -1669,6 +1672,9 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Group the TLS nobits sections.
   GroupSections(linker, SHT(nobits), SHF(tls));
 
+  // Add compact runtime symbol metadata only when stacktrace support is linked.
+  LinkerStacktracePrepare(linker);
+
   // Assign all section groups to their appropriate segments.
   AssignSectionGroupsToSegments(linker);
   
@@ -1730,6 +1736,9 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   // Assign section symbol addresses.
   LinkerAssignSectionSymbolAddresses(linker);
+
+  // Function addresses are now final, so materialize the stacktrace table.
+  LinkerStacktraceFinalize(linker);
   
   // The .bss (nobits) address is just after all the other sections.
   linker->nobits_address = SegmentEndAddress(&linker->data_segment);

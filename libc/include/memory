@@ -191,22 +191,22 @@ struct allocator_traits {
   template <class T>
   using rebind_traits = allocator_traits<rebind_alloc<T>>;
 
-  static bool __propagate_on_container_copy_assignment() {
+  static constexpr bool __propagate_on_container_copy_assignment() {
     return __alloc_traits_bool(
         static_cast<propagate_on_container_copy_assignment*>(nullptr));
   }
 
-  static bool __propagate_on_container_move_assignment() {
+  static constexpr bool __propagate_on_container_move_assignment() {
     return __alloc_traits_bool(
         static_cast<propagate_on_container_move_assignment*>(nullptr));
   }
 
-  static bool __propagate_on_container_swap() {
+  static constexpr bool __propagate_on_container_swap() {
     return __alloc_traits_bool(
         static_cast<propagate_on_container_swap*>(nullptr));
   }
 
-  static bool __is_always_equal() {
+  static constexpr bool __is_always_equal() {
     return __alloc_traits_bool(static_cast<is_always_equal*>(nullptr));
   }
 

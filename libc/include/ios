@@ -275,6 +275,17 @@ class basic_ios : public ios_base {
     return old;
   }
 
+  char_type widen(char c) const {
+    return static_cast<char_type>(static_cast<unsigned char>(c));
+  }
+  char narrow(char_type c, char dfault) const {
+    if constexpr (sizeof(char_type) == sizeof(char)) {
+      return static_cast<char>(c);
+    }
+    unsigned long value = static_cast<unsigned long>(c);
+    return value <= 0x7f ? static_cast<char>(value) : dfault;
+  }
+
   locale imbue(const locale& loc);
 
  protected:

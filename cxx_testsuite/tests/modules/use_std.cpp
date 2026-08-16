@@ -21,6 +21,9 @@ static_assert(
     std::is_invocable<decltype(&set_threaded_value), int*>::value);
 static_assert(std::mdspan<int, std::extents<std::size_t, 2, 3>>::rank() == 2);
 static_assert(std::is_same_v<decltype(1.0f32), std::float32_t>);
+static_assert(__cpp_lib_stacktrace == 202011L);
+static_assert(std::is_same_v<std::stacktrace::value_type,
+                             std::stacktrace_entry>);
 #if defined(__STDCPP_FLOAT64_T__)
 static_assert(std::is_same_v<decltype(1.0f64), std::float64_t>);
 #endif
@@ -74,5 +77,9 @@ int main() {
     return 6;
   }
 #endif
+  std::stacktrace trace = std::stacktrace::current(0, 1);
+  if (trace.size() != 1 || !trace[0]) {
+    return 7;
+  }
   return 0;
 }

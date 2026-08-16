@@ -211,6 +211,7 @@ typedef struct Linker {
   int so_name;                // Index into dynstr or -1.
   String entry_symbol;        // Symbol to use for entry point.
   int64_t origin;             // Origin address (or zero for default).
+  void* stacktrace_info;      // Linker-owned stacktrace metadata state.
   
   // Debug printing.
   bool print_symbol_tables;

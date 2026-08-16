@@ -1,0 +1,393 @@
+#ifndef __davecc_stacktrace__
+#define __davecc_stacktrace__
+
+#if __cplusplus >= 202302L
+
+#define __cpp_lib_stacktrace 202011L
+
+#include <__exception_support>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <format>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <ostream>
+#include <stacktrace_runtime.h>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+template <class Allocator>
+class basic_stacktrace;
+
+class stacktrace_entry;
+
+template <class Allocator>
+string to_string(const basic_stacktrace<Allocator>& trace);
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& output,
+    const stacktrace_entry& entry);
+
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& output,
+    const basic_stacktrace<Allocator>& trace);
+
+class stacktrace_entry {
+ public:
+  using native_handle_type = uintptr_t;
+
+ private:
+  native_handle_type __handle;
+
+  constexpr explicit stacktrace_entry(native_handle_type handle) noexcept
+      : __handle(handle) {}
+
+  template <class Allocator>
+  friend class basic_stacktrace;
+
+ public:
+  constexpr stacktrace_entry() noexcept : __handle(0) {}
+  constexpr stacktrace_entry(const stacktrace_entry&) noexcept = default;
+  constexpr stacktrace_entry& operator=(const stacktrace_entry&) noexcept =
+      default;
+  ~stacktrace_entry() = default;
+
+  constexpr native_handle_type native_handle() const noexcept {
+    return __handle;
+  }
+
+  constexpr explicit operator bool() const noexcept {
+    return __handle != 0;
+  }
+
+  string description() const {
+    if (__handle == 0) {
+      return string();
+    }
+    const char* text = __davecc_stacktrace_description(__handle);
+    return text == nullptr ? string() : string(text);
+  }
+
+  string source_file() const { return string(); }
+  uint_least32_t source_line() const { return 0; }
+
+  friend constexpr bool operator==(const stacktrace_entry& left,
+                                   const stacktrace_entry& right) noexcept {
+    return left.__handle == right.__handle;
+  }
+
+  friend constexpr strong_ordering operator<=>(
+      const stacktrace_entry& left,
+      const stacktrace_entry& right) noexcept {
+    return left.__handle <=> right.__handle;
+  }
+};
+
+template <class Allocator>
+class basic_stacktrace {
+ public:
+  using value_type = stacktrace_entry;
+  using const_reference = const value_type&;
+  using reference = value_type&;
+  using const_iterator = const value_type*;
+  using iterator = const_iterator;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+  using difference_type = ptrdiff_t;
+  using size_type = size_t;
+  using allocator_type = Allocator;
+
+ private:
+  using __alloc_traits = allocator_traits<allocator_type>;
+  vector<value_type, allocator_type> __frames;
+
+  static basic_stacktrace __current(size_type skip, size_type max_depth,
+                                    const allocator_type& alloc) noexcept {
+    basic_stacktrace result(alloc);
+    if (max_depth == 0) {
+      return result;
+    }
+
+    size_type count =
+        __davecc_stacktrace_capture(nullptr, 0, skip, max_depth);
+    if (count > result.max_size()) {
+      count = result.max_size();
+    }
+
+    __DAVECC_TRY {
+      result.__frames.reserve(count);
+      constexpr size_type __chunk_size = 16;
+      uintptr_t handles[__chunk_size];
+      size_type offset = 0;
+      while (offset < count) {
+        size_type requested = count - offset;
+        if (requested > __chunk_size) {
+          requested = __chunk_size;
+        }
+        size_type captured = __davecc_stacktrace_capture(
+            handles, requested, skip + offset, requested);
+        if (captured > requested) {
+          captured = requested;
+        }
+        for (size_type i = 0; i < captured; i++) {
+          result.__frames.push_back(value_type(handles[i]));
+        }
+        offset += captured;
+        if (captured != requested) {
+          break;
+        }
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      return basic_stacktrace(alloc);
+    }
+    return result;
+  }
+
+ public:
+  static basic_stacktrace current(
+      const allocator_type& alloc = allocator_type()) noexcept {
+    return __current(0, numeric_limits<size_type>::max(), alloc);
+  }
+
+  static basic_stacktrace current(
+      size_type skip,
+      const allocator_type& alloc = allocator_type()) noexcept {
+    return __current(skip, numeric_limits<size_type>::max(), alloc);
+  }
+
+  static basic_stacktrace current(
+      size_type skip, size_type max_depth,
+      const allocator_type& alloc = allocator_type()) noexcept {
+    return __current(skip, max_depth, alloc);
+  }
+
+  basic_stacktrace() noexcept(
+      is_nothrow_default_constructible_v<allocator_type>) = default;
+  explicit basic_stacktrace(const allocator_type& alloc) noexcept
+      : __frames(alloc) {}
+  basic_stacktrace(const basic_stacktrace&) = default;
+  basic_stacktrace(basic_stacktrace&&) noexcept = default;
+  basic_stacktrace(const basic_stacktrace& other,
+                   const allocator_type& alloc)
+      : __frames(other.__frames, alloc) {}
+  basic_stacktrace(basic_stacktrace&& other,
+                   const allocator_type& alloc)
+      : __frames(std::move(other.__frames), alloc) {}
+  basic_stacktrace& operator=(const basic_stacktrace&) = default;
+  basic_stacktrace& operator=(basic_stacktrace&&) noexcept(
+      __alloc_traits::__propagate_on_container_move_assignment() ||
+      __alloc_traits::__is_always_equal()) = default;
+  ~basic_stacktrace() = default;
+
+  allocator_type get_allocator() const noexcept {
+    return __frames.get_allocator();
+  }
+
+  const_iterator begin() const noexcept { return __frames.begin(); }
+  const_iterator end() const noexcept { return __frames.end(); }
+  const_iterator cbegin() const noexcept { return __frames.cbegin(); }
+  const_iterator cend() const noexcept { return __frames.cend(); }
+  const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+  const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+  const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+  const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+
+  bool empty() const noexcept { return __frames.empty(); }
+  size_type size() const noexcept { return __frames.size(); }
+  size_type max_size() const noexcept { return __frames.max_size(); }
+  const_reference operator[](size_type index) const {
+    return __frames[index];
+  }
+  const_reference at(size_type index) const { return __frames.at(index); }
+
+  template <class OtherAllocator>
+  friend bool operator==(
+      const basic_stacktrace<OtherAllocator>& left,
+      const basic_stacktrace<OtherAllocator>& right) noexcept;
+
+  template <class OtherAllocator>
+  friend strong_ordering operator<=>(
+      const basic_stacktrace<OtherAllocator>& left,
+      const basic_stacktrace<OtherAllocator>& right) noexcept;
+
+  void swap(basic_stacktrace& other) noexcept(
+      __alloc_traits::__propagate_on_container_swap() ||
+      __alloc_traits::__is_always_equal()) {
+    __frames.swap(other.__frames);
+  }
+};
+
+template <class Allocator>
+bool operator==(const basic_stacktrace<Allocator>& left,
+                const basic_stacktrace<Allocator>& right) noexcept {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < left.size(); i++) {
+    if (!(left[i] == right[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class Allocator>
+strong_ordering operator<=>(const basic_stacktrace<Allocator>& left,
+                            const basic_stacktrace<Allocator>& right) noexcept {
+  size_t common_size =
+      left.size() < right.size() ? left.size() : right.size();
+  for (size_t i = 0; i < common_size; i++) {
+    strong_ordering order = left[i] <=> right[i];
+    if (order != strong_ordering::equal) {
+      return order;
+    }
+  }
+  return left.size() <=> right.size();
+}
+
+template <class Allocator>
+void swap(basic_stacktrace<Allocator>& left,
+          basic_stacktrace<Allocator>& right) noexcept(noexcept(
+    left.swap(right))) {
+  left.swap(right);
+}
+
+inline string to_string(const stacktrace_entry& entry) {
+  return entry.description();
+}
+
+template <class Allocator>
+string to_string(const basic_stacktrace<Allocator>& trace) {
+  string result;
+  for (size_t i = 0; i < trace.size(); i++) {
+    if (i != 0) {
+      result.push_back('\n');
+    }
+    result += to_string(trace[i]);
+  }
+  return result;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& output,
+    const stacktrace_entry& entry) {
+  string text = to_string(entry);
+  for (char character : text) {
+    output.put(output.widen(character));
+  }
+  return output;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& output,
+    const basic_stacktrace<Allocator>& trace) {
+  string text = to_string(trace);
+  for (char character : text) {
+    output.put(output.widen(character));
+  }
+  return output;
+}
+
+template <>
+struct hash<stacktrace_entry> {
+  size_t operator()(const stacktrace_entry& entry) const noexcept {
+    return hash<uintptr_t>()(entry.native_handle());
+  }
+};
+
+template <class Allocator>
+struct hash<basic_stacktrace<Allocator>> {
+  size_t operator()(const basic_stacktrace<Allocator>& trace) const noexcept {
+    size_t result = 0;
+    for (const stacktrace_entry& entry : trace) {
+      size_t value = hash<stacktrace_entry>()(entry);
+      result ^= value + (result << 6) + (result >> 2);
+    }
+    return result;
+  }
+};
+
+template <>
+struct formatter<stacktrace_entry, char> {
+  string_view __specification;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    __specification =
+        string_view(context.begin(),
+                    static_cast<size_t>(context.end() - context.begin()));
+    return context.end();
+  }
+
+  format_context::iterator format(const stacktrace_entry& entry,
+                                  format_context& context) const {
+    string text = to_string(entry);
+    __format_detail::__spec specification =
+        __format_detail::__parse_spec(__specification,
+                                      &context.__arguments());
+    __format_detail::__format_builtin(
+        string_view(text.data(), text.size()), specification,
+        context.__buffer(), &context.__arguments());
+    return context.out();
+  }
+};
+
+template <class Allocator>
+struct formatter<basic_stacktrace<Allocator>, char> {
+  string_view __specification;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    __specification =
+        string_view(context.begin(),
+                    static_cast<size_t>(context.end() - context.begin()));
+    return context.end();
+  }
+
+  format_context::iterator format(
+      const basic_stacktrace<Allocator>& trace,
+      format_context& context) const {
+    string text = to_string(trace);
+    __format_detail::__spec specification =
+        __format_detail::__parse_spec(__specification,
+                                      &context.__arguments());
+    __format_detail::__format_builtin(
+        string_view(text.data(), text.size()), specification,
+        context.__buffer(), &context.__arguments());
+    return context.out();
+  }
+};
+
+using stacktrace = basic_stacktrace<allocator<stacktrace_entry>>;
+
+namespace pmr {
+using stacktrace =
+    basic_stacktrace<polymorphic_allocator<stacktrace_entry>>;
+}
+
+}  // namespace std
+
+#endif /* C++23 */
+
+#endif /* __davecc_stacktrace__ */

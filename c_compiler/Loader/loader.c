@@ -761,6 +761,44 @@ static void RegisterDynamicEHModules(Loader* loader) {
                     count);
 }
 
+static void RegisterDynamicStacktraceModules(Loader* loader) {
+  enum { kFieldsPerModule = 2, kMaxModules = 32 };
+  uint64_t modules_address =
+      LoaderLookupSymbol(loader, "__davecc_stacktrace_modules");
+  uint64_t count_address =
+      LoaderLookupSymbol(loader, "__davecc_stacktrace_module_count");
+  if (modules_address == 0 || count_address == 0) {
+    return;
+  }
+
+  size_t pointer_size = loader->elf_file->ops->is_64_bit ? 8 : 4;
+  unsigned char* modules = (unsigned char*)(uintptr_t)modules_address;
+  size_t count = 0;
+  for (size_t i = 0;
+       i < loader->loaded_libraries.search.length && count < kMaxModules; i++) {
+    LoadedDynamicLibrary* lib = loader->loaded_libraries.search.value.p[i];
+    const ELFSectionHeader* section =
+        FindLoadedSection(lib, ".davecc_stacktrace");
+    if (section == NULL || section->size == 0) {
+      continue;
+    }
+    uint64_t runtime_start = 0;
+    if (!LoaderLinkedAddressToRuntime(loader, lib, section->addr,
+                                      &runtime_start)) {
+      continue;
+    }
+    StoreGuestPointer(
+        modules + (count * kFieldsPerModule) * pointer_size,
+        pointer_size, runtime_start);
+    StoreGuestPointer(
+        modules + (count * kFieldsPerModule + 1) * pointer_size,
+        pointer_size, runtime_start + section->size);
+    count++;
+  }
+  StoreGuestPointer((unsigned char*)(uintptr_t)count_address, pointer_size,
+                    count);
+}
+
 
 static bool LoadDynamic(Loader* loader, bool lazy) {
   // Create a new LoaddedDynamicLibrary from the currently loaded
@@ -798,6 +836,7 @@ static bool LoadDynamic(Loader* loader, bool lazy) {
     LoaderFixupStaticAddresses(loader);
   }
   RegisterDynamicEHModules(loader);
+  RegisterDynamicStacktraceModules(loader);
   return true;
 }
 

@@ -331,8 +331,10 @@ void LinkerReadSymbol(Linker* linker,
 }
 
 LinkerSymbol* LinkerInventSymbol(Linker* linker, const char* name, int size) {
-  ELFSymbol* elf_sym = malloc(sizeof(ELFSymbol));
+  ELFSymbol* elf_sym = calloc(1, sizeof(ELFSymbol));
   elf_sym->size = size;
+  elf_sym->info = (STB(global) << 4) | STT(notype);
+  elf_sym->shndx = SHN_ABS;
   LinkerSymbol* sym = NewLinkerSymbol(elf_sym, NULL);
   sym->defined = true;
   sym->invented = true;
