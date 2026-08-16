@@ -10,4 +10,6 @@
 
 bool CXXTypeIsTriviallyCopyable(TypeRecord* type);
 
+bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
+
 #endif /* type_special_member_h */

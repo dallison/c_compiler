@@ -20,6 +20,7 @@
 #include "type_inheritance.h"
 #include "type_template.h"
 #include "type_member.h"
+#include "type_special_member.h"
 #include "type_template_internal.h"
 #include "syntax.h"
 
@@ -329,11 +330,15 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
   return equal;
 }
 
-static TypeRecord* MaterializeTraitType(Syntax* syntax, TypeRecord* type) {
+TypeRecord* CXXTypeTraitMaterializeType(Syntax* syntax, TypeRecord* type) {
   if (type == NULL) {
     return NULL;
   }
   return TypeMaterializeClassTemplateSpecialization(syntax, type);
+}
+
+static TypeRecord* MaterializeTraitType(Syntax* syntax, TypeRecord* type) {
+  return CXXTypeTraitMaterializeType(syntax, type);
 }
 
 static ASTNode* NewSyntheticValue(Syntax* syntax, TypeRecord* type) {
@@ -1736,15 +1741,17 @@ static TypeRecord* TypeTraitConditionalCommonType(Syntax* syntax,
   }
   ASTNode* condition = (ASTNode*)NewIntConstantASTNode(
       0, NewTypeRecordWithSize(kTypeBool, kQualPlain), kTypeTraitLocation);
-  BinaryASTNode* colon =
-      NewBinaryASTNode(AST_OP(colon), NULL, kTypeTraitLocation, left_expr,
-                       right_expr);
-  BinaryASTNode* conditional = NewBinaryASTNode(
+  BinaryASTNode* colon = (BinaryASTNode*)NewBinaryASTNode(
+      AST_OP(colon), NULL, kTypeTraitLocation, left_expr, right_expr);
+  BinaryASTNode* conditional = (BinaryASTNode*)NewBinaryASTNode(
       AST_OP(question), NULL, kTypeTraitLocation, condition, (ASTNode*)colon);
   SyntaxOpenScope(&compiler->syntax);
   bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
+  int saved_speculative_depth =
+      compiler->speculative_template_instantiation_depth;
   ASTNode* analyzed = AnalyzeExpression((ASTNode*)conditional);
+  compiler->speculative_template_instantiation_depth = saved_speculative_depth;
   TypeRecord* result = NULL;
   if (analyzed != NULL && analyzed->type != NULL && !DiagnosticErrorTrapped()) {
     result = TypeRecordCopy(analyzed->type);
@@ -1784,6 +1791,506 @@ static TypeRecord* CXXTypeTraitCommonTypeImpl(Syntax* syntax,
 TypeRecord* CXXTypeTraitCommonType(Syntax* syntax, Vector* type_args) {
   SyntaxOpenScope(syntax);
   TypeRecord* result = CXXTypeTraitCommonTypeImpl(syntax, type_args);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+TypeRecord* CXXTypeTraitCommonTypeFold(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length == 0) {
+    return NULL;
+  }
+  SyntaxOpenScope(syntax);
+  TypeRecord* result =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  for (size_t i = 1; i < type_args->length && result != NULL; i++) {
+    Vector pair;
+    VectorInit(&pair);
+    VectorAppend(&pair, result);
+    VectorAppend(&pair, type_args->value.p[i]);
+    TypeRecord* next = CXXTypeTraitCommonTypeImpl(syntax, &pair);
+    TypeRecordDelete(result);
+    result = next;
+  }
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
+  SyntaxOpenScope(syntax);
+  bool result = TypeTraitIsConvertible(syntax, type_args);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitIsInvocableR(Syntax* syntax, TypeRecord* result_type,
+                              Vector* type_args, bool check_nothrow) {
+  if (result_type == NULL || type_args == NULL || type_args->length == 0) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  bool invocable = TypeTraitIsInvocable(syntax, type_args, check_nothrow);
+  if (!invocable) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  TypeRecord* invoke_result = CXXTypeTraitInvokeResultTypeImpl(syntax, type_args);
+  if (invoke_result == NULL) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  Vector conv_args;
+  VectorInit(&conv_args);
+  VectorAppend(&conv_args, invoke_result);
+  VectorAppend(&conv_args, result_type);
+  bool convertible = TypeTraitIsConvertible(syntax, &conv_args);
+  VectorDestruct(&conv_args);
+  TypeRecordDelete(invoke_result);
+  SyntaxCloseScope(syntax);
+  return convertible;
+}
+
+static TypeRecord* TypeTraitCopyCv(TypeRecord* left, TypeRecord* right) {
+  TypeRecord* left_inner = left;
+  while (left_inner != NULL &&
+         (TypeIsReference(left_inner) || TypeIsArray(left_inner))) {
+    left_inner = left_inner->next;
+  }
+  TypeRecord* right_inner = right;
+  while (right_inner != NULL &&
+         (TypeIsReference(right_inner) || TypeIsArray(right_inner))) {
+    right_inner = right_inner->next;
+  }
+  TypeRecord* base = TypeRecordCalculateSize(
+      TypeRecordCloneSpine(left_inner != NULL ? left_inner : right_inner));
+  if (base == NULL) {
+    return NULL;
+  }
+  base->qualifiers = kQualPlain;
+  if ((left_inner != NULL && TypeIsConst(left_inner)) ||
+      (right_inner != NULL && TypeIsConst(right_inner))) {
+    base->qualifiers |= kQualConst;
+  }
+  if ((left_inner != NULL && TypeIsVolatile(left_inner)) ||
+      (right_inner != NULL && TypeIsVolatile(right_inner))) {
+    base->qualifiers |= kQualVolatile;
+  }
+  return base;
+}
+
+static TypeRecord* TypeTraitAddLvalueReference(TypeRecord* type) {
+  TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, false);
+  TypeRecordChain(ref, TypeRecordCopy(type));
+  ref->type = type->type;
+  return TypeRecordCalculateSize(ref);
+}
+
+static TypeRecord* CXXTypeTraitCommonReferencePair(Syntax* syntax,
+                                                   TypeRecord* left,
+                                                   TypeRecord* right) {
+  left = CXXTypeTraitMaterializeType(syntax, left);
+  right = CXXTypeTraitMaterializeType(syntax, right);
+  if (left == NULL || right == NULL) {
+    TypeRecordDelete(left);
+    TypeRecordDelete(right);
+    return NULL;
+  }
+  left = TypeRecordCopy(left);
+  right = TypeRecordCopy(right);
+  if (left == NULL || right == NULL) {
+    TypeRecordDelete(left);
+    TypeRecordDelete(right);
+    return NULL;
+  }
+  TypeRecord* result = NULL;
+  if (TypeIsReference(left) && TypeIsReference(right)) {
+    TypeRecord* left_base = left;
+    TypeRecord* right_base = right;
+    while (left_base != NULL && TypeIsReference(left_base)) {
+      left_base = left_base->next;
+    }
+    while (right_base != NULL && TypeIsReference(right_base)) {
+      right_base = right_base->next;
+    }
+    TypeRecord* merged = TypeTraitCopyCv(left_base, right_base);
+    if (merged != NULL) {
+      result = TypeTraitAddLvalueReference(merged);
+      TypeRecordDelete(merged);
+    }
+  } else if (TypeIsReference(left)) {
+    TypeRecord* right_plain = right;
+    while (right_plain != NULL &&
+           (TypeIsReference(right_plain) || TypeIsArray(right_plain))) {
+      right_plain = right_plain->next;
+    }
+    TypeRecord* left_base = left;
+    while (left_base != NULL && TypeIsReference(left_base)) {
+      left_base = left_base->next;
+    }
+    TypeRecord* merged = TypeTraitCopyCv(left_base, right_plain);
+    if (merged != NULL) {
+      result = TypeTraitAddLvalueReference(merged);
+      TypeRecordDelete(merged);
+    }
+  } else if (TypeIsReference(right)) {
+    TypeRecord* left_plain = left;
+    while (left_plain != NULL &&
+           (TypeIsReference(left_plain) || TypeIsArray(left_plain))) {
+      left_plain = left_plain->next;
+    }
+    TypeRecord* right_base = right;
+    while (right_base != NULL && TypeIsReference(right_base)) {
+      right_base = right_base->next;
+    }
+    TypeRecord* merged = TypeTraitCopyCv(right_base, left_plain);
+    if (merged != NULL) {
+      result = TypeTraitAddLvalueReference(merged);
+      TypeRecordDelete(merged);
+    }
+  } else {
+    Vector pair;
+    VectorInit(&pair);
+    VectorAppend(&pair, left);
+    VectorAppend(&pair, right);
+    result = CXXTypeTraitCommonTypeImpl(syntax, &pair);
+    VectorDestruct(&pair);
+  }
+  TypeRecordDelete(left);
+  TypeRecordDelete(right);
+  return result;
+}
+
+TypeRecord* CXXTypeTraitCommonReference(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length == 0) {
+    return NULL;
+  }
+  SyntaxOpenScope(syntax);
+  TypeRecord* result = NULL;
+  if (type_args->length == 1) {
+    result = CXXTypeTraitMaterializeType(syntax,
+                                         (TypeRecord*)type_args->value.p[0]);
+  } else {
+    result = CXXTypeTraitCommonReferencePair(
+        syntax, (TypeRecord*)type_args->value.p[0],
+        (TypeRecord*)type_args->value.p[1]);
+    for (size_t i = 2; i < type_args->length && result != NULL; i++) {
+      TypeRecord* next = CXXTypeTraitCommonReferencePair(
+          syntax, result, (TypeRecord*)type_args->value.p[i]);
+      TypeRecordDelete(result);
+      result = next;
+    }
+  }
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+static CXXSpecialMemberKind TypeTraitConstructionSpecialMemberKind(
+    TypeRecord* target, TypeRecord* arg) {
+  if (target == NULL || arg == NULL) {
+    return kCXXSpecialMemberNone;
+  }
+  TypeRecord* object = TypeIsReference(arg) ? arg->next : arg;
+  if (object == NULL || !TypeIsStructOrUnion(object) ||
+      !TypeIsStructOrUnion(target) ||
+      (object->info.struct_info != target->info.struct_info &&
+       !TypeEqualIgnoringQualifiers(object, target))) {
+    return kCXXSpecialMemberNone;
+  }
+  bool rvalue = !TypeIsReference(arg) || arg->declarator == kDeclRValueReference;
+  bool use_move = rvalue && !TypeIsConst(object);
+  return use_move ? kCXXSpecialMemberMoveConstructor
+                  : kCXXSpecialMemberCopyConstructor;
+}
+
+static CXXSpecialMemberKind TypeTraitAssignmentSpecialMemberKind(
+    TypeRecord* lhs, TypeRecord* rhs) {
+  if (lhs == NULL || rhs == NULL || !TypeIsReference(lhs) ||
+      lhs->declarator != kDeclReference) {
+    return kCXXSpecialMemberNone;
+  }
+  TypeRecord* target = lhs->next;
+  TypeRecord* source = TypeIsReference(rhs) ? rhs->next : rhs;
+  if (target == NULL || source == NULL || !TypeIsStructOrUnion(target) ||
+      !TypeIsStructOrUnion(source) || TypeIsConst(target) ||
+      (source->info.struct_info != target->info.struct_info &&
+       !TypeEqualIgnoringQualifiers(source, target))) {
+    return kCXXSpecialMemberNone;
+  }
+  bool use_move =
+      (!TypeIsReference(rhs) || rhs->declarator == kDeclRValueReference) &&
+      !TypeIsConst(source);
+  return use_move ? kCXXSpecialMemberMoveAssignment
+                  : kCXXSpecialMemberCopyAssignment;
+}
+
+bool CXXTypeTraitIsTriviallyDestructible(Syntax* syntax, TypeRecord* type) {
+  if (syntax == NULL) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  type = CXXTypeTraitMaterializeType(syntax, type);
+  if (type == NULL) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  bool result = true;
+  if (TypeIsStructOrUnion(type)) {
+    result = CXXTypeSpecialMemberIsTrivial(type, kCXXSpecialMemberDestructor);
+  }
+  TypeRecordDelete(type);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitIsTriviallyConstructible(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length == 0) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  if (!TypeTraitIsConstructible(syntax, type_args, false)) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  TypeRecord* target =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  if (target == NULL) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  bool result = false;
+  if (!TypeIsStructOrUnion(target)) {
+    result = true;
+  } else if (type_args->length == 1) {
+    result = CXXTypeSpecialMemberIsTrivial(target,
+                                           kCXXSpecialMemberDefaultConstructor);
+  } else if (type_args->length == 2) {
+    CXXSpecialMemberKind kind = TypeTraitConstructionSpecialMemberKind(
+        target, (TypeRecord*)type_args->value.p[1]);
+    if (kind != kCXXSpecialMemberNone) {
+      result = CXXTypeSpecialMemberIsTrivial(target, kind);
+    }
+  }
+  TypeRecordDelete(target);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitIsTriviallyAssignable(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  if (!TypeTraitIsAssignable(syntax, type_args, false)) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  TypeRecord* lhs =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  TypeRecord* rhs =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[1]);
+  CXXSpecialMemberKind kind = TypeTraitAssignmentSpecialMemberKind(lhs, rhs);
+  bool result = kind != kCXXSpecialMemberNone &&
+                lhs != NULL && lhs->next != NULL &&
+                CXXTypeSpecialMemberIsTrivial(lhs->next, kind);
+  TypeRecordDelete(lhs);
+  TypeRecordDelete(rhs);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+static bool TypeTraitConversionSelectedOperationIsNoexcept(TypeRecord* from,
+                                                         TypeRecord* to) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  if (TypeIsIntegral(from) || TypeIsFloatingPoint(from) || TypeIsEnum(from) ||
+      TypeIsNullPointer(from) || TypeIsPointer(from) || TypeIsBool(from)) {
+    return true;
+  }
+  if (TypeIsReference(to)) {
+    to = to->next;
+  }
+  while (from != NULL && TypeIsReference(from)) {
+    from = from->next;
+  }
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  if (TypeEqualIgnoringQualifiers(from, to)) {
+    return true;
+  }
+  if (TypeIsStructOrUnion(from) && TypeIsStructOrUnion(to) &&
+      from->info.struct_info != NULL && to->info.struct_info != NULL) {
+    if (from->info.struct_info == to->info.struct_info ||
+        TypeIsDerivedFrom(from, to)) {
+      return true;
+    }
+    StructMember* ctor = TypeTraitFindSpecialMember(
+        from->info.struct_info, kCXXSpecialMemberCopyConstructor);
+    if (ctor == NULL || ctor->symbol == NULL ||
+        ctor->symbol->type == NULL) {
+      return false;
+    }
+    return ctor->symbol->type->info.function.is_noexcept;
+  }
+  return true;
+}
+
+bool CXXTypeTraitIsNothrowConvertible(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  if (!TypeTraitIsConvertible(syntax, type_args)) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  TypeRecord* from =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  TypeRecord* to =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[1]);
+  bool result = TypeTraitConversionSelectedOperationIsNoexcept(from, to);
+  TypeRecordDelete(from);
+  TypeRecordDelete(to);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitReferenceConstructsFromTemporary(Syntax* syntax,
+                                                  Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  TypeRecord* dst =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  TypeRecord* src =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[1]);
+  if (dst == NULL || src == NULL || !TypeIsReference(dst)) {
+    TypeRecordDelete(dst);
+    TypeRecordDelete(src);
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  Vector args;
+  VectorInit(&args);
+  VectorAppend(&args, src);
+  bool result = TypeIsReferenceConstructibleFrom(syntax, dst, &args);
+  if (result) {
+    TypeRecord* referenced = dst->next;
+    TypeRecord* source = src;
+    while (source != NULL && TypeIsReference(source)) {
+      source = source->next;
+    }
+    if (referenced != NULL && source != NULL &&
+        !TypeEqualIgnoringQualifiers(source, referenced) &&
+        !(TypeIsStructOrUnion(source) && TypeIsStructOrUnion(referenced) &&
+          TypeIsDerivedFrom(source, referenced))) {
+      result = false;
+    }
+  }
+  VectorDestruct(&args);
+  TypeRecordDelete(dst);
+  TypeRecordDelete(src);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitReferenceConvertsFromTemporary(Syntax* syntax,
+                                                Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  TypeRecord* dst =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  if (dst == NULL || !TypeIsReference(dst)) {
+    TypeRecordDelete(dst);
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  bool result = CXXTypeTraitReferenceConstructsFromTemporary(syntax, type_args);
+  if (!result) {
+    result = TypeTraitIsConvertible(syntax, type_args);
+  }
+  TypeRecordDelete(dst);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+static bool TypeTraitTypeIsNothrowMoveSwappable(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  Vector ctor_args;
+  Vector assign_args;
+  VectorInit(&ctor_args);
+  VectorInit(&assign_args);
+  VectorAppend(&ctor_args, type);
+  TypeRecord* rref = NewReferenceTypeRecord(kQualPlain, true);
+  TypeRecordChain(rref, TypeRecordCopy(type));
+  rref->type = type->type;
+  TypeRecordCalculateSize(rref);
+  VectorAppend(&ctor_args, rref);
+  TypeRecord* lref = NewReferenceTypeRecord(kQualPlain, false);
+  TypeRecordChain(lref, TypeRecordCopy(type));
+  lref->type = type->type;
+  TypeRecordCalculateSize(lref);
+  VectorAppend(&assign_args, lref);
+  VectorAppend(&assign_args, rref);
+  bool result = TypeTraitIsConstructible(&compiler->syntax, &ctor_args, true) &&
+                TypeTraitIsAssignable(&compiler->syntax, &assign_args, true);
+  TypeRecordDelete(rref);
+  TypeRecordDelete(lref);
+  VectorDestruct(&ctor_args);
+  VectorDestruct(&assign_args);
+  return result;
+}
+
+bool CXXTypeTraitIsNothrowSwappable(Syntax* syntax, TypeRecord* type) {
+  if (syntax == NULL || type == NULL) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  type = CXXTypeTraitMaterializeType(syntax, type);
+  if (type == NULL) {
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  Vector args;
+  VectorInit(&args);
+  VectorAppend(&args, type);
+  bool result = TypeTraitIsSwappable(syntax, &args) &&
+                TypeTraitTypeIsNothrowMoveSwappable(type);
+  VectorDestruct(&args);
+  TypeRecordDelete(type);
+  SyntaxCloseScope(syntax);
+  return result;
+}
+
+bool CXXTypeTraitIsNothrowSwappableWith(Syntax* syntax, TypeRecord* left,
+                                        TypeRecord* right) {
+  if (syntax == NULL || left == NULL || right == NULL) {
+    return false;
+  }
+  SyntaxOpenScope(syntax);
+  left = CXXTypeTraitMaterializeType(syntax, left);
+  right = CXXTypeTraitMaterializeType(syntax, right);
+  if (left == NULL || right == NULL) {
+    TypeRecordDelete(left);
+    TypeRecordDelete(right);
+    SyntaxCloseScope(syntax);
+    return false;
+  }
+  Vector args;
+  VectorInit(&args);
+  VectorAppend(&args, left);
+  VectorAppend(&args, right);
+  bool result = TypeTraitIsSwappableWith(syntax, &args) &&
+                TypeTraitTypeIsNothrowMoveSwappable(left) &&
+                TypeTraitTypeIsNothrowMoveSwappable(right);
+  VectorDestruct(&args);
+  TypeRecordDelete(left);
+  TypeRecordDelete(right);
   SyntaxCloseScope(syntax);
   return result;
 }

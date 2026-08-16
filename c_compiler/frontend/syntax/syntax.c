@@ -3141,7 +3141,16 @@ bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs) {
     }
 
     while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
-      ParseCXXSingleAttribute(syntax, attrs, using_namespace);
+      if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          LexLookingAt(syntax->lex, TOK(equal))) {
+        LexNextToken(syntax->lex);
+        Attribute* attr = NewAttribute("annotation");
+        attr->annotation_expr =
+            SyntaxParseExpression(syntax, TC(closebra));
+        VectorAppend(attrs, attr);
+      } else {
+        ParseCXXSingleAttribute(syntax, attrs, using_namespace);
+      }
       if (!LexMatch(syntax->lex, TOK(comma))) {
         break;
       }
@@ -9016,9 +9025,135 @@ static ASTNode* ParseExplicitTemplateInstantiation(Syntax* syntax,
   return EmptyDeclarationList(location);
 }
 
+static void SyntaxRegisterClonedTemplateParameter(Syntax* syntax,
+                                                  TemplateParameter* param) {
+  if (param == NULL || param->name.length == 0) {
+    return;
+  }
+  if (param->kind == kTemplateParameterType) {
+    TypeRecord* placeholder =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    placeholder->template_parameter_index = param->index;
+    placeholder->template_parameter_name = NewString(param->name.value);
+    Symbol* sym = NewSymbol(param->name.value, placeholder, STO(typedef));
+    sym->flags.invented = true;
+    sym->flags.is_template_parameter = true;
+    sym->flags.is_template_type_parameter = true;
+    sym->flags.is_parameter_pack = param->is_parameter_pack;
+    sym->template_parameter_index = param->index;
+    SyntaxAddSymbol(syntax, sym);
+    return;
+  }
+  if (param->kind == kTemplateParameterNonType && param->type != NULL) {
+    Symbol* sym =
+        NewSymbol(param->name.value, TypeRecordCopy(param->type), STO(implicit));
+    sym->flags.invented = true;
+    sym->flags.is_template_parameter = true;
+    sym->flags.is_parameter_pack = param->is_parameter_pack;
+    sym->template_parameter_index = param->index;
+    SyntaxAddSymbol(syntax, sym);
+  }
+}
+
+static Vector* SyntaxCloneTemplateParametersFromSymbol(Syntax* syntax,
+                                                       Symbol* templ,
+                                                       int base) {
+  Vector* params = NewVector();
+  Vector* source = NULL;
+  if (templ != NULL && templ->type != NULL && TypeIsStructOrUnion(templ->type) &&
+      templ->type->info.struct_info != NULL) {
+    source = &templ->type->info.struct_info->template_parameters;
+  } else if (templ != NULL && templ->type != NULL &&
+             TypeIsFunction(templ->type)) {
+    source = &templ->type->info.function.template_parameters;
+  }
+  if (source == NULL) {
+    SyntaxError(syntax, "Template splice operand does not reflect a template");
+    return params;
+  }
+  for (size_t i = 0; i < source->length; i++) {
+    TemplateParameter* old_param = source->value.p[i];
+    if (old_param == NULL) {
+      continue;
+    }
+    TemplateParameter* copy = NewTemplateParameter(
+        old_param->name.value, old_param->kind, old_param->is_parameter_pack,
+        old_param->type, old_param->default_type, old_param->has_default_int,
+        old_param->default_int_value,
+        old_param->default_template_parameter_index, base + (int)i);
+    VectorAppend(params, copy);
+    SyntaxRegisterClonedTemplateParameter(syntax, copy);
+  }
+  return params;
+}
+
+static Vector* SyntaxParseTemplateHeadSpliceParameterList(Syntax* syntax,
+                                                          int base) {
+  LexNextToken(syntax->lex);
+  ASTNode* reflection =
+      SyntaxParseExpression(syntax, TC(spliceclose));
+  SyntaxNeedBracket(syntax, TOK(splice_close), TC(decl));
+  Symbol* templ = NULL;
+  if (reflection != NULL && reflection->op == AST_OP(reflect)) {
+    ReflectionASTNode* reflect = (ReflectionASTNode*)reflection;
+    if (reflect->operand_kind == kReflectionOperandExpression &&
+        reflect->operand != NULL &&
+        reflect->operand->op == AST_OP(identifier)) {
+      templ = ((IdentifierASTNode*)reflect->operand)->symbol;
+    }
+  }
+  ASTNodeDelete(reflection);
+  if (templ == NULL || !templ->flags.is_template) {
+    SyntaxError(syntax, "Template splice operand does not reflect a template");
+    return NewVector();
+  }
+  return SyntaxCloneTemplateParametersFromSymbol(syntax, templ, base);
+}
+
 static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // template
+
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      LexLookingAt(syntax->lex, TOK(splice_open))) {
+    SyntaxOpenScope(syntax);
+    LocalSymbolTable* template_tag_scope = syntax->local_tag_stack;
+    syntax->local_tag_stack = template_tag_scope->prev;
+    int old_template_parameter_count = syntax->current_template_parameter_count;
+    Vector* old_template_parameters = syntax->current_template_parameters;
+    ConstraintExpr* old_requires_clause =
+        syntax->current_template_requires_clause;
+    syntax->current_template_parameters =
+        SyntaxParseTemplateHeadSpliceParameterList(
+            syntax, old_template_parameter_count);
+    syntax->current_template_parameter_count =
+        old_template_parameter_count +
+        (int)syntax->current_template_parameters->length;
+    syntax->last_parsed_tag = NULL;
+    bool old_parsing_template = syntax->parsing_template_declaration;
+    bool old_parsing_specialization = syntax->parsing_template_specialization;
+    syntax->parsing_template_declaration = true;
+    syntax->parsing_template_specialization = false;
+    syntax->current_template_requires_clause =
+        ConceptsParseRequiresClause(syntax);
+    ASTNode* declaration = ConceptsParseDefinition(syntax, location);
+    if (declaration == NULL) {
+      declaration = SyntaxParseExternalDeclaration(syntax);
+    }
+    syntax->parsing_template_declaration = old_parsing_template;
+    syntax->parsing_template_specialization = old_parsing_specialization;
+    syntax->local_tag_stack = template_tag_scope;
+    SyntaxCloseScope(syntax);
+    MarkTemplateDeclaration(syntax, declaration);
+    VectorDestructWithContents(syntax->current_template_parameters,
+                               (VectorElementDestructor)TemplateParameterDelete,
+                               /*free_element=*/false);
+    ConstraintExprDelete(syntax->current_template_requires_clause);
+    syntax->current_template_parameter_count = old_template_parameter_count;
+    syntax->current_template_parameters = old_template_parameters;
+    syntax->current_template_requires_clause = old_requires_clause;
+    return declaration != NULL ? declaration : EmptyDeclarationList(location);
+  }
 
   if (!LexLookingAt(syntax->lex, TOK(less))) {
     return ParseExplicitTemplateInstantiation(syntax, location);
@@ -11864,6 +11999,18 @@ static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
 }
 
 bool SyntaxLookingAtDeclaration(Syntax* syntax) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      LexLookingAt(syntax->lex, TOK(consteval))) {
+    LexCheckpoint block_checkpoint;
+    LexCheckpointSave(syntax->lex, &block_checkpoint);
+    LexNextToken(syntax->lex);
+    bool is_consteval_block = LexLookingAt(syntax->lex, TOK(lbrace));
+    LexCheckpointRestore(syntax->lex, &block_checkpoint);
+    LexCheckpointDestruct(&block_checkpoint);
+    if (is_consteval_block) {
+      return false;
+    }
+  }
   if (SyntaxLookingAtCXXAttribute(syntax)) {
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);

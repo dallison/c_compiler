@@ -2679,6 +2679,13 @@ static bool DetermineKnownStructuredBindingPackSize(
 }
 
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
+  if (node->symbol != NULL && node->symbol->type != NULL) {
+    node->symbol->type =
+        SemanticResolveDependentSpliceType(node->symbol->type, (ASTNode*)node);
+  }
+  if (node->symbol != NULL) {
+    SemanticAttachAnnotationAttributes(&node->symbol->attributes, node->symbol);
+  }
   node->initializer = AnalyzeExpression(node->initializer);
   bool is_cxx_local_static =
       CompilerIsCXX() && node->symbol != NULL &&
@@ -3160,6 +3167,9 @@ void AnalyzeStatement(ASTNode* node) {
       break;
     case AST_OP(expansion_for):
       AnalyzeExpansionStatement((ExpansionStatementASTNode*)node);
+      break;
+    case AST_OP(consteval_block):
+      SemanticAnalyzeConstevalBlock((ConstevalBlockASTNode*)node);
       break;
     case AST_OP(return ):
       AnalyzeReturnStatement((CombinedStatementASTNode*)node);

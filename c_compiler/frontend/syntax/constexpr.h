@@ -102,5 +102,8 @@ bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
                                        ConstexprObject** object);
 ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
                                              SourceLocation location);
+bool ConstexprEvaluateBasicStringViewEquality(ConstEvalContext* ctx,
+                                              ASTNode* left, ASTNode* right,
+                                              bool* equal);
 
 #endif /* constexpr_h */

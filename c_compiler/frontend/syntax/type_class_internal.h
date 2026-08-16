@@ -115,6 +115,8 @@ StructMember* FindStructMemberWithAccess(Struct* str, String* name,
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 void CollectConversionOperators(Struct* str, Vector* out);
 
+void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union);
+
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         String* tag_name);
 void CXXFinalizeSpecialMemberMetadata(Symbol* symbol, Struct* owner,

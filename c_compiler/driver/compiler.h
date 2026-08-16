@@ -272,6 +272,11 @@ typedef struct {
 
 void DeleteCompilerTarget(CompilerTarget* t);
 
+typedef struct MetaPromotedStaticEntry {
+  String key;
+  Symbol* symbol;
+} MetaPromotedStaticEntry;
+
 typedef struct {
   String infile;
 
@@ -402,6 +407,9 @@ typedef struct {
   // Compiler-owned C++26 reflection values.  Their entity pointers borrow from
   // the normal symbol/type graph and remain valid for the translation unit.
   Vector reflection_values;
+
+  // Canonical static symbols promoted by define_static_* synthesis calls.
+  Vector meta_promoted_statics;
 
   Vector literals;     // Literals
   int next_literal_id;
@@ -548,6 +556,13 @@ bool CompilerCXXAtLeast(LanguageStandard standard);
 bool CompilerExceptionsEnabled(void);
 void CompilerMarkFunctionReferenced(struct Symbol* symbol);
 void CompilerMarkVariableReferenced(struct Symbol* symbol);
+void CompilerRegisterMetaPromotedStatic(struct Symbol* symbol, struct ASTNode* initializer);
+bool CompilerSymbolIsMetaPromotedStatic(struct Symbol* symbol);
+bool CompilerSymbolIsMetaPromotedString(struct Symbol* symbol);
+struct Symbol* CompilerMetaPromotedPointerTarget(struct Symbol* pointer_symbol);
+struct Symbol* CompilerConstantFunctionPointerTarget(
+    struct Symbol* pointer_symbol);
+bool ConstexprEnsureMetaPromotedStaticObject(struct Symbol* promoted);
 void CompilerRegisterLazyCXXStatic(InitializedStaticVariable* var);
 
 int CharSize(void);

@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "codegen.h"
+#include "constexpr.h"
 #include "constexpr_pcode.h"
 #include "errors.h"
 #include "expr_semantics.h"
@@ -344,6 +345,29 @@ static int StringLiteralElementSize(ASTNode* expr) {
              : 1;
 }
 
+static Symbol* InitPointerAddressTarget(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(cast)) {
+    return InitPointerAddressTarget(((CastASTNode*)expr)->expr);
+  }
+  if (expr->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+    if (symbol != NULL &&
+        (StorageIs(symbol->storage, STO(static) | STO(extern)) ||
+         CompilerSymbolIsMetaPromotedStatic(symbol))) {
+      return symbol;
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(subscript) &&
+      ASTNodeGetShape(expr) == kASTShapeBinary) {
+    return InitPointerAddressTarget(((BinaryASTNode*)expr)->left);
+  }
+  return NULL;
+}
+
 static void InitPointer(ASTNode* expr,
                         ASTNode* subinit,
                         Initializer* init_out,
@@ -403,6 +427,14 @@ static void InitPointer(ASTNode* expr,
   if (var_node->op == AST_OP(cast)) {
     CastASTNode* c = (CastASTNode*)var_node;
     InitScalar(c->expr, subinit, offset, initializers);
+    return;
+  }
+  Symbol* address_target = InitPointerAddressTarget(var_node);
+  if (address_target != NULL) {
+    init_out->type = kInitTypeSymbol;
+    init_out->value.symbol = address_target;
+    init_out->offset = offset;
+    VectorAppend(initializers, init_out);
     return;
   }
   if (var_node->op == AST_OP(identifier)) {
@@ -650,6 +682,112 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
                           &var->initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
   AssignScalarValueToConst(decl->symbol, (BracedInitializerASTNode*)init);
+}
+
+static bool InitializedStaticAlreadyRegistered(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* existing =
+        compiler->initialized_static_variables.value.p[i];
+    if (existing != NULL && existing->symbol == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CompilerRegisterMetaPromotedStatic(Symbol* symbol, ASTNode* initializer) {
+  if (compiler == NULL || symbol == NULL || initializer == NULL) {
+    return;
+  }
+  if (!SymbolHasAttribute(symbol, "meta_promoted_static")) {
+    SymbolAddAttribute(symbol, NewAttribute("meta_promoted_static"));
+  }
+  if (InitializedStaticAlreadyRegistered(symbol)) {
+    return;
+  }
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  ASTNode* init = initializer;
+  if (init->op == AST_OP(expr_init)) {
+    init = ((ExpressionInitializerASTNode*)init)->expr;
+  }
+  ASTNode* simplified = AnalyzeInitializer(symbol->type, init, true);
+  if (simplified == NULL || simplified->op != AST_OP(braced_init)) {
+    return;
+  }
+  InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
+  var->symbol = symbol;
+  var->is_global = !StorageIs(symbol->storage, STO(static));
+  var->is_weak = SymbolHasWeakBinding(symbol);
+  VectorInit(&var->initializers);
+  var->size = symbol->type->size;
+  var->is_tls = StorageIs(symbol->storage, STO(thread));
+  var->is_local = symbol->flags.is_local;
+  var->alignment = SymbolEffectiveAlignment(symbol);
+  ExpandBracedInitializer((BracedInitializerASTNode*)simplified, 0,
+                          &var->initializers);
+  VectorAppend(&compiler->initialized_static_variables, var);
+  AssignScalarValueToConst(symbol, (BracedInitializerASTNode*)simplified);
+  CompilerMarkVariableReferenced(symbol);
+}
+
+bool CompilerSymbolIsMetaPromotedStatic(Symbol* symbol) {
+  return symbol != NULL && SymbolHasAttribute(symbol, "meta_promoted_static");
+}
+
+bool CompilerSymbolIsMetaPromotedString(Symbol* symbol) {
+  if (!CompilerSymbolIsMetaPromotedStatic(symbol)) {
+    return false;
+  }
+  for (size_t i = 0; i < compiler->meta_promoted_statics.length; i++) {
+    MetaPromotedStaticEntry* entry = compiler->meta_promoted_statics.value.p[i];
+    if (entry != NULL && entry->symbol == symbol && entry->key.value != NULL &&
+        strncmp(entry->key.value, "str:", 4) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+Symbol* CompilerMetaPromotedPointerTarget(Symbol* pointer_symbol) {
+  if (pointer_symbol == NULL || pointer_symbol->type == NULL ||
+      !TypeIsPointer(pointer_symbol->type) || pointer_symbol->value.other == NULL ||
+      (!pointer_symbol->flags.value_set &&
+       !pointer_symbol->flags.is_constexpr &&
+       !pointer_symbol->flags.is_constinit)) {
+    return NULL;
+  }
+  Symbol* target = (Symbol*)pointer_symbol->value.other;
+  return CompilerSymbolIsMetaPromotedStatic(target) ? target : NULL;
+}
+
+Symbol* CompilerConstantFunctionPointerTarget(Symbol* pointer_symbol) {
+  if (pointer_symbol == NULL || pointer_symbol->type == NULL ||
+      !TypeIsPointer(pointer_symbol->type) || pointer_symbol->value.other == NULL ||
+      (!pointer_symbol->flags.value_set &&
+       !pointer_symbol->flags.is_constexpr &&
+       !pointer_symbol->flags.is_constinit)) {
+    return NULL;
+  }
+  Symbol* target = (Symbol*)pointer_symbol->value.other;
+  return target->type != NULL && TypeIsFunction(target->type) ? target : NULL;
+}
+
+bool ConstexprEnsureMetaPromotedStaticObject(Symbol* promoted) {
+  if (!CompilerSymbolIsMetaPromotedStatic(promoted)) {
+    return false;
+  }
+  if (promoted->flags.value_set && promoted->value.other != NULL &&
+      !TypeIsPointer(promoted->type)) {
+    return true;
+  }
+  if (promoted->constexpr_initializer == NULL) {
+    return false;
+  }
+  return ConstexprEvaluateObjectConstantForSymbol(promoted,
+                                                  promoted->constexpr_initializer);
 }
 
 void InitializerDelete(Initializer* init) {
@@ -1740,6 +1878,10 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
               continue;
             }
             // Declaration is a variable.
+            if (decl->symbol->type != NULL) {
+              decl->symbol->type = SemanticResolveDependentSpliceType(
+                  decl->symbol->type, (ASTNode*)decl);
+            }
             if (TypeIsVoid(decl->symbol->type)) {
               SemanticError((ASTNode*)decl,
                             "Cannot declare a variable with void type");
@@ -2382,6 +2524,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_lazy_static_variables);
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->reflection_values);
+  VectorInit(&compiler->meta_promoted_statics);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->cxx_defined_classes);
@@ -2924,6 +3067,14 @@ void CompilerDestruct(Compiler* compiler) {
       &compiler->reflection_values,
       (VectorElementDestructor)ReflectionValueDelete,
       /*free_element=*/false);
+  for (size_t i = 0; i < compiler->meta_promoted_statics.length; i++) {
+    MetaPromotedStaticEntry* entry = compiler->meta_promoted_statics.value.p[i];
+    if (entry != NULL) {
+      StringDestruct(&entry->key);
+      free(entry);
+    }
+  }
+  VectorDestruct(&compiler->meta_promoted_statics);
 
   // Imported module graphs use heap Symbol/Namespace nodes that must be
   // detached and released after AST/IR teardown has finished using them, but

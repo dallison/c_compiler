@@ -560,6 +560,14 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
         return true;
       }
+      if (binary_node->left != NULL && binary_node->right != NULL) {
+        bool string_equal = false;
+        if (ConstexprEvaluateBasicStringViewEquality(
+                ctx, binary_node->left, binary_node->right, &string_equal)) {
+          *result = node->op == AST_OP(equal) ? string_equal : !string_equal;
+          return true;
+        }
+      }
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
         double fleft;
         double fright;

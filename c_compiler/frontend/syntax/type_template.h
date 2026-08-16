@@ -123,13 +123,21 @@ TypeRecord* TypeInstantiateClassTemplateQuiet(struct Syntax* syntax,
 // templates) and member lookup must see the instantiated members.
 TypeRecord* TypeMaterializeClassTemplateSpecialization(struct Syntax* syntax,
                                                        TypeRecord* type);
+// Recover the template-argument list describing a class-template specialization
+// type, including from the tag symbol when the type record itself omits them.
+Vector* TypeSpecializationTemplateArguments(TypeRecord* type);
 // Instantiate a variable template's initializer with concrete template
 // arguments and constant-fold it to an integer.  Returns true on success.
 bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,
                                              Symbol* var_template, Vector* args,
                                              int64_t* out);
+bool TypeInstantiateVariableTemplateConstantQuiet(struct Syntax* syntax,
+                                                  Symbol* var_template,
+                                                  Vector* args, int64_t* out);
 // Floating-point counterpart of TypeInstantiateVariableTemplateConstant.
 bool TypeInstantiateVariableTemplateFloatingConstant(
+    struct Syntax* syntax, Symbol* var_template, Vector* args, double* out);
+bool TypeInstantiateVariableTemplateFloatingConstantQuiet(
     struct Syntax* syntax, Symbol* var_template, Vector* args, double* out);
 // Instantiate the type of a variable template (e.g. `in_place_index<1>` ->
 // `in_place_index_t<1>`) with concrete template arguments.  Used for variable
@@ -137,6 +145,9 @@ bool TypeInstantiateVariableTemplateFloatingConstant(
 TypeRecord* TypeInstantiateVariableTemplateType(struct Syntax* syntax,
                                                 Symbol* var_template,
                                                 Vector* args);
+TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(struct Syntax* syntax,
+                                                     Symbol* var_template,
+                                                     Vector* args);
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
 TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
                                              Symbol* class_template,

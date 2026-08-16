@@ -28,6 +28,9 @@
 #include <memory>
 #include <memory_resource>
 #include <mdspan>
+#if __cplusplus >= 202600L
+#include <meta>
+#endif
 #include <mutex>
 #include <new>
 #include <numbers>

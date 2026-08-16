@@ -2543,6 +2543,9 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
   case AST_OP(static_assert):
     // Checked during semantic analysis; no runtime code is emitted.
     break;
+  case AST_OP(consteval_block):
+    // Immediate evaluation only; no runtime code is emitted.
+    break;
   case AST_OP(contract_assert): {
     ContractAssertASTNode* assertion = (ContractAssertASTNode*)node;
     GenerateContractCheck(gen, assertion->predicate,

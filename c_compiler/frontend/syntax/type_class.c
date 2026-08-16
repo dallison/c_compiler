@@ -373,7 +373,7 @@ void TypeEnsureCXXDeductionGuides(Symbol* class_template) {
                                 class_template);
 }
 
-static void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union) {
+void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union) {
   // Check the constraints for flexible arrays.
   // 1. Flexible array cannot be the only member
   // 2. Flexible array must be at the end of the struct.

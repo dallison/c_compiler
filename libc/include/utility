@@ -112,6 +112,45 @@ using make_index_sequence = typename __make_index_sequence<N>::type;
 template <class... Types>
 using index_sequence_for = make_index_sequence<sizeof...(Types)>;
 
+// P1789: structured binding and expansion-statement support for
+// integer_sequence.
+template <class T>
+struct tuple_size;
+
+template <size_t I, class T>
+struct tuple_element;
+
+template <class T, T... Values>
+struct tuple_size<integer_sequence<T, Values...>>
+    : integral_constant<size_t, sizeof...(Values)> {};
+
+template <size_t I, class T, T... Values>
+struct tuple_element<I, integer_sequence<T, Values...>> {
+  using type = T;
+};
+
+template <size_t I, class T, T... Values>
+struct tuple_element<I, const integer_sequence<T, Values...>> {
+  using type = const T;
+};
+
+template <size_t I, class T, T... Values>
+struct __integer_sequence_get;
+
+template <class T, T Value, T... Rest>
+struct __integer_sequence_get<0, T, Value, Rest...> {
+  static constexpr T value = Value;
+};
+
+template <size_t I, class T, T Value, T... Rest>
+struct __integer_sequence_get<I, T, Value, Rest...>
+    : __integer_sequence_get<I - 1, T, Rest...> {};
+
+template <size_t I, class T, T... Values>
+constexpr T get(integer_sequence<T, Values...>) noexcept {
+  return __integer_sequence_get<I, T, Values...>::value;
+}
+
 template <class T1, class T2>
 struct pair {
   T1 first;

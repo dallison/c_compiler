@@ -3375,6 +3375,29 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     ASTNode* reflection =
         SyntaxParseExpression(syntax, TC(spliceclose));
     SyntaxNeedBracket(syntax, TOK(splice_close), followers);
+    if (LexMatch(lex, TOK(coloncolon))) {
+      if (!LexLookingAt(lex, TOK(identifier))) {
+        SyntaxError(syntax, "Expected identifier after namespace splice");
+        return NewSpliceQualifiedASTNode(
+            reflection,
+            NewIdentifierASTNode(
+                NewSymbol(SyntaxFakeName(syntax),
+                          NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                                kQualPlain),
+                          STO(implicit)),
+                location),
+            location);
+      }
+      String* suffix_name = NewString(lex->spelling.value);
+      LexNextToken(lex);
+      TypeRecord* unknown =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      Symbol* suffix_symbol = NewSymbol(suffix_name->value, unknown, STO(implicit));
+      suffix_symbol->flags.invented = true;
+      suffix_symbol->flags.is_forward_declared = true;
+      ASTNode* suffix = NewIdentifierASTNode(suffix_symbol, location);
+      return NewSpliceQualifiedASTNode(reflection, suffix, location);
+    }
     return NewSpliceASTNode(reflection, kSpliceExpression, location);
   }
 
@@ -3836,6 +3859,16 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   // argument list rather than a less-than comparison.
   bool saw_template_keyword =
       CompilerIsCXX() && LexMatch(syntax->lex, TOK(template));
+  if (saw_template_keyword && LexLookingAt(syntax->lex, TOK(splice_open))) {
+    SourceLocation splice_location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    ASTNode* reflection =
+        SyntaxParseExpression(syntax, TC(spliceclose));
+    SyntaxNeedBracket(syntax, TOK(splice_close), followers);
+    ASTNode* splice =
+        NewSpliceASTNode(reflection, kSpliceTemplate, splice_location);
+    return NewBinaryASTNode(op, NULL, splice_location, left, splice);
+  }
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
@@ -4607,6 +4640,29 @@ static ASTNode* ParseReflectionExpression(Syntax* syntax,
           LexLookingAt(syntax->lex, TOK(ampamp)) ||
           LexLookingAt(syntax->lex, TOK(lsquare)) ||
           LexLookingAt(syntax->lex, TOK(lparen));
+      if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(less))) {
+        Symbol* templ = SyntaxFindQualifiedSymbol(syntax, &name);
+        FullyQualifiedIdentifierDestruct(&name);
+        LexCheckpointRestore(syntax->lex, &namespace_checkpoint);
+        LexCheckpointDestruct(&namespace_checkpoint);
+        if (templ != NULL && templ->flags.is_template &&
+            templ->type != NULL && TypeIsFunction(templ->type)) {
+          ASTNode* operand = ParseIdentifier(syntax, followers);
+          return NewReflectionASTNode(kReflectionOperandExpression, operand,
+                                      NULL, NULL, location);
+        }
+        TypeParser parser;
+        TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                       syntax->context);
+        TypeRecord* type = TypeParserParseType(&parser, true);
+        Symbol* sym = TypeParserParseDeclarator(&parser, type);
+        if (sym != NULL && sym->type != NULL) {
+          type = sym->type;
+        }
+        TypeParserDestruct(&parser);
+        return NewReflectionASTNode(kReflectionOperandType, NULL, type, NULL,
+                                    location);
+      }
       parse_named_entity =
           !has_type_declarator &&
           SyntaxFindQualifiedSymbol(syntax, &name) != NULL;
@@ -4638,6 +4694,15 @@ static ASTNode* ParseReflectionExpression(Syntax* syntax,
   if (LexLookingAt(syntax->lex, TOK(identifier)) ||
       LexLookingAt(syntax->lex, TOK(coloncolon)) ||
       LexLookingAt(syntax->lex, TOK(operator))) {
+    if (LexLookingAt(syntax->lex, TOK(identifier))) {
+      Namespace* alias_target = FindDirectLocalNamespaceAlias(
+          syntax->local_symbol_stack, &syntax->lex->spelling);
+      if (alias_target != NULL) {
+        LexNextToken(syntax->lex);
+        return NewReflectionASTNode(kReflectionOperandNamespaceAlias, NULL, NULL,
+                                    alias_target, location);
+      }
+    }
     ASTNode* operand = ParseIdentifier(syntax, followers);
     return NewReflectionASTNode(kReflectionOperandExpression, operand, NULL,
                                 NULL, location);

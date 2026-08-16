@@ -77,6 +77,8 @@ typedef struct Attribute {
   // resulting concrete alignment to the owning Symbol.
   struct TypeRecord* dependent_alignas_type;                  // @wire 3
   struct ASTNode* dependent_alignas_expr;                     // @wire 4
+  struct ASTNode* annotation_expr;                            // @wire 5
+  struct ReflectionValue* annotation_value;                     // @wire 6
 } Attribute;
 
 Attribute* NewAttribute(const char* name);

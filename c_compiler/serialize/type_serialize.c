@@ -100,6 +100,26 @@ enum {
   kTArg_reflection_parent = 21,
   kTArg_reflection_base_index = 22,
   kTArg_reflection_location = 23,
+  kTArg_reflection_parameter_index = 24,
+  kTArg_reflection_scalar_ivalue = 25,
+  kTArg_reflection_scalar_fvalue = 26,
+  kTArg_reflection_scalar_is_float = 27,
+  kTArg_reflection_namespace_alias_target = 28,
+  kTArg_reflection_constexpr_initializer = 29,
+  kTArg_reflection_promoted_symbol = 30,
+  kTArg_reflection_substituted_template = 31,
+  kTArg_reflection_extract_type = 32,
+  kTArg_reflection_dms_member_type = 33,
+  kTArg_reflection_dms_name = 34,
+  kTArg_reflection_dms_alignment = 35,
+  kTArg_reflection_dms_bit_width = 36,
+  kTArg_reflection_dms_no_unique_address = 37,
+  kTArg_reflection_dms_has_name = 38,
+  kTArg_reflection_dms_has_alignment = 39,
+  kTArg_reflection_dms_has_bit_width = 40,
+  kTArg_reflection_sequence = 41,
+  kTArg_reflection_substituted_arguments = 42,
+  kTArg_reflection_dms_annotations = 43,
 };
 
 //
@@ -326,6 +346,7 @@ enum {
   kStruct_deduction_guides = 33,
   kStruct_member_using_declarations = 34,
   kStruct_friend_type_declarations = 35,
+  kStruct_meta_aggregate_complete = 36,
 };
 
 static const WireFieldDesc kStructFields[] = {
@@ -364,6 +385,7 @@ static const WireFieldDesc kStructFields[] = {
     {kStruct_deduction_guides, "deduction_guides"},
     {kStruct_member_using_declarations, "member_using_declarations"},
     {kStruct_friend_type_declarations, "friend_type_declarations"},
+    {kStruct_meta_aggregate_complete, "meta_aggregate_complete"},
 };
 
 // ---------------------------------------------------------------------------
@@ -586,6 +608,46 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
                     (uint64_t)reflection->base_index);
     WireWriteUint64(out, kTArg_reflection_location,
                     (uint64_t)reflection->location);
+    WireWriteUint64(out, kTArg_reflection_parameter_index,
+                    (uint64_t)reflection->parameter_index);
+    WireWriteInt64(out, kTArg_reflection_scalar_ivalue,
+                   reflection->scalar_ivalue);
+    WireWriteDouble(out, kTArg_reflection_scalar_fvalue,
+                    reflection->scalar_fvalue);
+    WireWriteBool(out, kTArg_reflection_scalar_is_float,
+                  reflection->scalar_is_float);
+    SWriteRef(ctx, out, kTArg_reflection_namespace_alias_target,
+              kSerialKindNamespace, reflection->namespace_alias_target);
+    SWriteRef(ctx, out, kTArg_reflection_constexpr_initializer, kSerialKindAST,
+              reflection->constexpr_initializer);
+    SWriteRef(ctx, out, kTArg_reflection_promoted_symbol, kSerialKindSymbol,
+              reflection->promoted_symbol);
+    SWriteRef(ctx, out, kTArg_reflection_substituted_template, kSerialKindSymbol,
+              reflection->substituted_template);
+    SWriteRef(ctx, out, kTArg_reflection_extract_type, kSerialKindType,
+              reflection->extract_type);
+    if (reflection->data_member_spec != NULL) {
+      ReflectionDataMemberSpec* spec = reflection->data_member_spec;
+      SWriteRef(ctx, out, kTArg_reflection_dms_member_type, kSerialKindType,
+                spec->member_type);
+      if (spec->name.value != NULL) {
+        WireWriteString(out, kTArg_reflection_dms_name, spec->name.value,
+                        spec->name.length);
+      }
+      WireWriteUint64(out, kTArg_reflection_dms_alignment,
+                      (uint64_t)spec->alignment);
+      WireWriteUint64(out, kTArg_reflection_dms_bit_width,
+                      (uint64_t)spec->bit_width);
+      WireWriteBool(out, kTArg_reflection_dms_no_unique_address,
+                    spec->no_unique_address);
+      WireWriteBool(out, kTArg_reflection_dms_has_name, spec->has_name);
+      WireWriteBool(out, kTArg_reflection_dms_has_alignment, spec->has_alignment);
+      WireWriteBool(out, kTArg_reflection_dms_has_bit_width, spec->has_bit_width);
+    }
+    SerialWriteReflectionExtendedPayload(
+        ctx, out, kTArg_reflection_sequence,
+        kTArg_reflection_substituted_arguments, kTArg_reflection_dms_annotations,
+        reflection);
   }
 }
 
@@ -720,7 +782,191 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         }
         break;
       }
+      case kTArg_reflection_parameter_index: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        if (a->reflection_value != NULL) {
+          a->reflection_value->parameter_index = (size_t)value;
+        }
+        break;
+      }
+      case kTArg_reflection_scalar_ivalue:
+        if (a->reflection_value != NULL) {
+          WireReadInt64(in, &a->reflection_value->scalar_ivalue);
+        } else {
+          int64_t ignored = 0;
+          WireReadInt64(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_scalar_fvalue:
+        if (a->reflection_value != NULL) {
+          WireReadDouble(in, &a->reflection_value->scalar_fvalue);
+        } else {
+          double ignored = 0.0;
+          WireReadDouble(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_scalar_is_float:
+        if (a->reflection_value != NULL) {
+          WireReadBool(in, &a->reflection_value->scalar_is_float);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_namespace_alias_target:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->namespace_alias_target =
+              (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindNamespace);
+        }
+        break;
+      case kTArg_reflection_constexpr_initializer:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->constexpr_initializer =
+              (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindAST);
+        }
+        break;
+      case kTArg_reflection_promoted_symbol:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->promoted_symbol =
+              (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindSymbol);
+        }
+        break;
+      case kTArg_reflection_substituted_template:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->substituted_template =
+              (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindSymbol);
+        }
+        break;
+      case kTArg_reflection_extract_type:
+        if (a->reflection_value != NULL) {
+          a->reflection_value->extract_type =
+              (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+          TypeRecordIncRef(a->reflection_value->extract_type);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindType);
+        }
+        break;
+      case kTArg_reflection_dms_member_type:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          a->reflection_value->data_member_spec->member_type =
+              (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+          TypeRecordIncRef(
+              a->reflection_value->data_member_spec->member_type);
+        } else {
+          (void)SReadRef(ctx, in, kSerialKindType);
+        }
+        break;
+      case kTArg_reflection_dms_name:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          SReadStringVal(ctx, in, &a->reflection_value->data_member_spec->name);
+        } else {
+          String ignored;
+          StringInit(&ignored, NULL);
+          SReadStringVal(ctx, in, &ignored);
+          StringDestruct(&ignored);
+        }
+        break;
+      case kTArg_reflection_dms_alignment:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          uint64_t alignment = 0;
+          WireReadUint64(in, &alignment);
+          a->reflection_value->data_member_spec->alignment = (size_t)alignment;
+        } else {
+          uint64_t ignored = 0;
+          WireReadUint64(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_dms_bit_width:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          uint64_t bit_width = 0;
+          WireReadUint64(in, &bit_width);
+          a->reflection_value->data_member_spec->bit_width = (size_t)bit_width;
+        } else {
+          uint64_t ignored = 0;
+          WireReadUint64(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_dms_no_unique_address:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          WireReadBool(in,
+                       &a->reflection_value->data_member_spec->no_unique_address);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_dms_has_name:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          WireReadBool(in, &a->reflection_value->data_member_spec->has_name);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_dms_has_alignment:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          WireReadBool(in,
+                       &a->reflection_value->data_member_spec->has_alignment);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_dms_has_bit_width:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->data_member_spec == NULL) {
+            a->reflection_value->data_member_spec =
+                ReflectionDataMemberSpecNew(NULL);
+          }
+          WireReadBool(in, &a->reflection_value->data_member_spec->has_bit_width);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
       default:
+        if (a->reflection_value != NULL &&
+            SerialReadReflectionExtendedField(ctx, in, field,
+                                              a->reflection_value)) {
+          break;
+        }
         WireSkip(in, wt);
         break;
     }
@@ -2041,6 +2287,7 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                          &s->member_using_declarations);
   WriteFriendTypeVector(ctx, buf, kStruct_friend_type_declarations,
                         &s->friend_type_declarations);
+  WireWriteBool(buf, kStruct_meta_aggregate_complete, s->meta_aggregate_complete);
   return !WireBufferHasError(buf);
 }
 
@@ -2170,12 +2417,307 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kStruct_friend_type_declarations:
         ReadFriendTypeVector(ctx, buf, &s->friend_type_declarations);
         break;
+      case kStruct_meta_aggregate_complete:
+        WireReadBool(buf, &s->meta_aggregate_complete);
+        break;
       default:
         WireSkip(buf, wt);
         break;
     }
   }
   return !WireBufferHasError(buf);
+}
+
+static void WriteReflectionValueInline(SerializeContext* ctx, WireBuffer* out,
+                                       ReflectionValue* reflection) {
+  if (reflection == NULL) {
+    return;
+  }
+  WireWriteInt32(out, kTArg_reflection_kind, (int32_t)reflection->kind);
+  SWriteRef(ctx, out, kTArg_reflection_type, kSerialKindType,
+            reflection->reflected_type);
+  SWriteRef(ctx, out, kTArg_reflection_symbol, kSerialKindSymbol,
+            reflection->symbol);
+  SWriteRef(ctx, out, kTArg_reflection_member, kSerialKindStructMember,
+            reflection->member);
+  SWriteRef(ctx, out, kTArg_reflection_namespace, kSerialKindNamespace,
+            reflection->namespace_);
+  SWriteRef(ctx, out, kTArg_reflection_parent, kSerialKindStruct,
+            reflection->parent_class);
+  WireWriteUint64(out, kTArg_reflection_base_index,
+                  (uint64_t)reflection->base_index);
+  WireWriteUint64(out, kTArg_reflection_location,
+                  (uint64_t)reflection->location);
+  WireWriteUint64(out, kTArg_reflection_parameter_index,
+                  (uint64_t)reflection->parameter_index);
+  WireWriteInt64(out, kTArg_reflection_scalar_ivalue, reflection->scalar_ivalue);
+  WireWriteDouble(out, kTArg_reflection_scalar_fvalue,
+                  reflection->scalar_fvalue);
+  WireWriteBool(out, kTArg_reflection_scalar_is_float,
+                reflection->scalar_is_float);
+  SWriteRef(ctx, out, kTArg_reflection_namespace_alias_target,
+            kSerialKindNamespace, reflection->namespace_alias_target);
+  SWriteRef(ctx, out, kTArg_reflection_constexpr_initializer, kSerialKindAST,
+            reflection->constexpr_initializer);
+  SWriteRef(ctx, out, kTArg_reflection_promoted_symbol, kSerialKindSymbol,
+            reflection->promoted_symbol);
+  SWriteRef(ctx, out, kTArg_reflection_substituted_template, kSerialKindSymbol,
+            reflection->substituted_template);
+  SWriteRef(ctx, out, kTArg_reflection_extract_type, kSerialKindType,
+            reflection->extract_type);
+  if (reflection->data_member_spec != NULL) {
+    ReflectionDataMemberSpec* spec = reflection->data_member_spec;
+    SWriteRef(ctx, out, kTArg_reflection_dms_member_type, kSerialKindType,
+              spec->member_type);
+    if (spec->name.value != NULL) {
+      WireWriteString(out, kTArg_reflection_dms_name, spec->name.value,
+                      spec->name.length);
+    }
+    WireWriteUint64(out, kTArg_reflection_dms_alignment,
+                    (uint64_t)spec->alignment);
+    WireWriteUint64(out, kTArg_reflection_dms_bit_width,
+                    (uint64_t)spec->bit_width);
+    WireWriteBool(out, kTArg_reflection_dms_no_unique_address,
+                  spec->no_unique_address);
+    WireWriteBool(out, kTArg_reflection_dms_has_name, spec->has_name);
+    WireWriteBool(out, kTArg_reflection_dms_has_alignment, spec->has_alignment);
+    WireWriteBool(out, kTArg_reflection_dms_has_bit_width, spec->has_bit_width);
+  }
+}
+
+static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
+                                                  WireBuffer* in) {
+  ReflectionValue* reflection = NULL;
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    if (field == kTArg_reflection_kind) {
+      int32_t kind = 0;
+      WireReadInt32(in, &kind);
+      reflection = ReflectionCreateDeserialized((ReflectionEntityKind)kind,
+                                                SOURCE_LOCATION_MISSING);
+      continue;
+    }
+    if (reflection == NULL) {
+      reflection = ReflectionCreateDeserialized(kReflectionInvalid,
+                                              SOURCE_LOCATION_MISSING);
+    }
+    switch (field) {
+      case kTArg_reflection_type:
+        reflection->reflected_type =
+            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kTArg_reflection_symbol:
+        reflection->symbol = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_reflection_member:
+        reflection->member =
+            (StructMember*)SReadRef(ctx, in, kSerialKindStructMember);
+        break;
+      case kTArg_reflection_namespace:
+        reflection->namespace_ =
+            (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
+        break;
+      case kTArg_reflection_parent:
+        reflection->parent_class =
+            (Struct*)SReadRef(ctx, in, kSerialKindStruct);
+        break;
+      case kTArg_reflection_base_index: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        reflection->base_index = (size_t)value;
+        break;
+      }
+      case kTArg_reflection_location: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        reflection->location = (SourceLocation)value;
+        break;
+      }
+      case kTArg_reflection_parameter_index: {
+        uint64_t value = 0;
+        WireReadUint64(in, &value);
+        reflection->parameter_index = (size_t)value;
+        break;
+      }
+      case kTArg_reflection_scalar_ivalue:
+        WireReadInt64(in, &reflection->scalar_ivalue);
+        break;
+      case kTArg_reflection_scalar_fvalue:
+        WireReadDouble(in, &reflection->scalar_fvalue);
+        break;
+      case kTArg_reflection_scalar_is_float:
+        WireReadBool(in, &reflection->scalar_is_float);
+        break;
+      case kTArg_reflection_namespace_alias_target:
+        reflection->namespace_alias_target =
+            (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
+        break;
+      case kTArg_reflection_constexpr_initializer:
+        reflection->constexpr_initializer =
+            (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      case kTArg_reflection_promoted_symbol:
+        reflection->promoted_symbol =
+            (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_reflection_substituted_template:
+        reflection->substituted_template =
+            (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_reflection_extract_type:
+        reflection->extract_type =
+            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(reflection->extract_type);
+        break;
+      case kTArg_reflection_dms_member_type:
+        if (reflection->data_member_spec == NULL) {
+          reflection->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+        }
+        reflection->data_member_spec->member_type =
+            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(reflection->data_member_spec->member_type);
+        break;
+      case kTArg_reflection_dms_name:
+        if (reflection->data_member_spec == NULL) {
+          reflection->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+        }
+        SReadStringVal(ctx, in, &reflection->data_member_spec->name);
+        break;
+      case kTArg_reflection_dms_alignment:
+      case kTArg_reflection_dms_bit_width:
+      case kTArg_reflection_dms_no_unique_address:
+      case kTArg_reflection_dms_has_name:
+      case kTArg_reflection_dms_has_alignment:
+      case kTArg_reflection_dms_has_bit_width:
+        if (reflection->data_member_spec == NULL) {
+          reflection->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+        }
+        if (field == kTArg_reflection_dms_alignment) {
+          uint64_t alignment = 0;
+          WireReadUint64(in, &alignment);
+          reflection->data_member_spec->alignment = (size_t)alignment;
+        } else if (field == kTArg_reflection_dms_bit_width) {
+          uint64_t bit_width = 0;
+          WireReadUint64(in, &bit_width);
+          reflection->data_member_spec->bit_width = (size_t)bit_width;
+        } else if (field == kTArg_reflection_dms_no_unique_address) {
+          WireReadBool(in, &reflection->data_member_spec->no_unique_address);
+        } else if (field == kTArg_reflection_dms_has_name) {
+          WireReadBool(in, &reflection->data_member_spec->has_name);
+        } else if (field == kTArg_reflection_dms_has_alignment) {
+          WireReadBool(in, &reflection->data_member_spec->has_alignment);
+        } else {
+          WireReadBool(in, &reflection->data_member_spec->has_bit_width);
+        }
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+  return reflection;
+}
+
+static void WriteReflectionValueVector(SerializeContext* ctx, WireBuffer* out,
+                                       int field, Vector* values) {
+  WireBuffer payload;
+  WireBufferInitOwned(&payload, 16);
+  size_t count = values != NULL ? values->length : 0;
+  WireWriteRawVarint(&payload, count);
+  for (size_t i = 0; i < count; i++) {
+    WireBuffer element;
+    WireBufferInitOwned(&element, 16);
+    WriteReflectionValueInline(ctx, &element,
+                               (ReflectionValue*)values->value.p[i]);
+    WireWriteRawVarint(&payload, (uint64_t)WireBufferSize(&element));
+    WireWriteRaw(&payload, WireBufferData(&element), WireBufferSize(&element));
+    WireBufferDestruct(&element);
+  }
+  WireWriteBytes(out, field, WireBufferData(&payload), WireBufferSize(&payload));
+  WireBufferDestruct(&payload);
+}
+
+static void ReadReflectionValueVector(DeserializeContext* ctx, WireBuffer* in,
+                                      Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count = 0;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      break;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    ReflectionValue* value = ReadReflectionValueInline(ctx, &er);
+    if (value != NULL) {
+      VectorAppend(out, value);
+    }
+  }
+}
+
+void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf,
+                                          int field_sequence,
+                                          int field_substituted_arguments,
+                                          int field_dms_annotations,
+                                          ReflectionValue* value) {
+  if (value == NULL) {
+    return;
+  }
+  if (value->sequence.length > 0) {
+    WriteReflectionValueVector(ctx, buf, field_sequence, &value->sequence);
+  }
+  if (value->substituted_arguments.length > 0) {
+    SerialWriteTemplateArgumentVector(ctx, buf, field_substituted_arguments,
+                                      &value->substituted_arguments);
+  }
+  if (value->data_member_spec != NULL &&
+      value->data_member_spec->annotations.length > 0) {
+    WriteReflectionValueVector(ctx, buf, field_dms_annotations,
+                               &value->data_member_spec->annotations);
+  }
+}
+
+bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
+                                       int field, ReflectionValue* value) {
+  if (value == NULL) {
+    return false;
+  }
+  if (field == kTArg_reflection_sequence) {
+    ReadReflectionValueVector(ctx, in, &value->sequence);
+    return true;
+  }
+  if (field == kTArg_reflection_substituted_arguments) {
+    Vector* args = SerialReadTemplateArgumentVector(ctx, in);
+    if (args != NULL) {
+      for (size_t i = 0; i < args->length; i++) {
+        VectorAppend(&value->substituted_arguments, args->value.p[i]);
+      }
+      VectorDelete(args);
+    }
+    return true;
+  }
+  if (field == kTArg_reflection_dms_annotations) {
+    if (value->data_member_spec == NULL) {
+      value->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+    }
+    ReadReflectionValueVector(ctx, in, &value->data_member_spec->annotations);
+    return true;
+  }
+  return false;
 }
 
 void SerializeRegisterTypeKinds(void) {

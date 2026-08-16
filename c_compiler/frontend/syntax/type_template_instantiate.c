@@ -893,6 +893,14 @@ bool TypeInstantiateVariableTemplateConstant(Syntax* syntax,
                                                        /*emit_constraint_error=*/true);
 }
 
+bool TypeInstantiateVariableTemplateConstantQuiet(Syntax* syntax,
+                                                  Symbol* var_template,
+                                                  Vector* args, int64_t* out) {
+  return TypeInstantiateVariableTemplateConstantImpl(syntax, var_template, args,
+                                                       out,
+                                                       /*emit_constraint_error=*/false);
+}
+
 static bool TypeInstantiateVariableTemplateConstantImpl(
     Syntax* syntax, Symbol* var_template, Vector* args, int64_t* out,
     bool emit_constraint_error) {
@@ -945,8 +953,9 @@ static bool TypeInstantiateVariableTemplateConstantImpl(
   return ok;
 }
 
-bool TypeInstantiateVariableTemplateFloatingConstant(
-    Syntax* syntax, Symbol* var_template, Vector* args, double* out) {
+static bool TypeInstantiateVariableTemplateFloatingConstantImpl(
+    Syntax* syntax, Symbol* var_template, Vector* args, double* out,
+    bool emit_constraint_error) {
   if (var_template == NULL || var_template->variable_template == NULL ||
       var_template->variable_template->initializer == NULL || out == NULL) {
     return false;
@@ -954,7 +963,7 @@ bool TypeInstantiateVariableTemplateFloatingConstant(
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args, true);
+      &parser, var_template->variable_template, args, emit_constraint_error);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
     return false;
@@ -984,7 +993,7 @@ bool TypeInstantiateVariableTemplateFloatingConstant(
       ok = EvaluateFloatingPointExpression(concrete, out);
       ASTNodeDelete(concrete);
     }
-  } else if (partial == NULL) {
+  } else if (emit_constraint_error && partial == NULL) {
     ReportVariableTemplateConstraintFailure(syntax, var_template,
                                             completed_args);
   }
@@ -1000,14 +1009,21 @@ bool TypeInstantiateVariableTemplateFloatingConstant(
   return ok;
 }
 
-/* Instantiate the *type* of a C++ variable template against concrete template
- * arguments `args`, e.g. `in_place_index<1>` -> `in_place_index_t<1>`.  Used for
- * variable templates whose value is a class-type object (a tag such as
- * `std::in_place_index`) rather than a folded constant.  Returns a freshly
- * allocated concrete type, or NULL if the template has no type. */
-TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
-                                                Symbol* var_template,
-                                                Vector* args) {
+bool TypeInstantiateVariableTemplateFloatingConstant(
+    Syntax* syntax, Symbol* var_template, Vector* args, double* out) {
+  return TypeInstantiateVariableTemplateFloatingConstantImpl(
+      syntax, var_template, args, out, /*emit_constraint_error=*/true);
+}
+
+bool TypeInstantiateVariableTemplateFloatingConstantQuiet(
+    Syntax* syntax, Symbol* var_template, Vector* args, double* out) {
+  return TypeInstantiateVariableTemplateFloatingConstantImpl(
+      syntax, var_template, args, out, /*emit_constraint_error=*/false);
+}
+
+static TypeRecord* TypeInstantiateVariableTemplateTypeImpl(
+    Syntax* syntax, Symbol* var_template, Vector* args,
+    bool emit_constraint_error) {
   if (var_template == NULL || var_template->variable_template == NULL ||
       var_template->type == NULL) {
     return NULL;
@@ -1015,7 +1031,7 @@ TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args, /*emit_error=*/true);
+      &parser, var_template->variable_template, args, emit_constraint_error);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
     return NULL;
@@ -1023,7 +1039,10 @@ TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
   if (!ConceptsConstraintSatisfied(
           var_template->variable_template->associated_constraint,
           completed_args)) {
-    ReportVariableTemplateConstraintFailure(syntax, var_template, completed_args);
+    if (emit_constraint_error) {
+      ReportVariableTemplateConstraintFailure(syntax, var_template,
+                                              completed_args);
+    }
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
@@ -1037,6 +1056,25 @@ TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
                            /*free_element=*/false);
   TypeParserDestruct(&parser);
   return concrete;
+}
+
+/* Instantiate the *type* of a C++ variable template against concrete template
+ * arguments `args`, e.g. `in_place_index<1>` -> `in_place_index_t<1>`.  Used for
+ * variable templates whose value is a class-type object (a tag such as
+ * `std::in_place_index`) rather than a folded constant.  Returns a freshly
+ * allocated concrete type, or NULL if the template has no type. */
+TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
+                                                Symbol* var_template,
+                                                Vector* args) {
+  return TypeInstantiateVariableTemplateTypeImpl(syntax, var_template, args,
+                                                 /*emit_constraint_error=*/true);
+}
+
+TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(Syntax* syntax,
+                                                     Symbol* var_template,
+                                                     Vector* args) {
+  return TypeInstantiateVariableTemplateTypeImpl(syntax, var_template, args,
+                                                 /*emit_constraint_error=*/false);
 }
 
 static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
@@ -1994,7 +2032,7 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
 // q = p;`) -- may not carry `template_arguments` on the record itself, but the
 // specialization's tag symbol always records them.  Recover from the tag so
 // deduction against a same-template argument still sees the concrete arguments.
-static Vector* SpecializationTemplateArguments(TypeRecord* type) {
+Vector* TypeSpecializationTemplateArguments(TypeRecord* type) {
   if (type == NULL) {
     return NULL;
   }
@@ -2104,7 +2142,7 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   }
   bool formal_is_template_parameter =
       formal_origin->flags.is_template_template_parameter;
-  Vector* formal_args = SpecializationTemplateArguments(formal);
+  Vector* formal_args = TypeSpecializationTemplateArguments(formal);
   if (formal_is_template_parameter) {
     if (actual_origin == NULL ||
         !TemplateTemplateParameterListsCompatible(
@@ -2135,7 +2173,7 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
     }
     return false;
   }
-  Vector* actual_args = SpecializationTemplateArguments(actual);
+  Vector* actual_args = TypeSpecializationTemplateArguments(actual);
   if (formal_args == NULL || actual_args == NULL) {
     return false;
   }
@@ -2647,7 +2685,7 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
       break;
     }
   }
-  Vector* specialization_args = SpecializationTemplateArguments(formal);
+  Vector* specialization_args = TypeSpecializationTemplateArguments(formal);
   for (size_t i = 0;
        !non_deduced_member && specialization_args != NULL &&
        i < specialization_args->length;
@@ -4104,7 +4142,7 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
       pattern->template_origin->flags.is_template_template_parameter) {
     Symbol* actual_origin = ClassTemplateOriginOf(actual);
     Vector* pattern_args = pattern->template_arguments;
-    Vector* actual_args = SpecializationTemplateArguments(actual);
+    Vector* actual_args = TypeSpecializationTemplateArguments(actual);
     if (actual_origin == NULL || pattern_args == NULL || actual_args == NULL ||
         !TemplateTemplateParameterListsCompatible(
             pattern->template_origin->template_template_parameters,
@@ -4256,8 +4294,8 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
           return false;
         }
         bool args_match = ClassTemplateArgumentVectorPatternMatches(
-            bindings, SpecializationTemplateArguments(pattern),
-            SpecializationTemplateArguments(actual));
+            bindings, TypeSpecializationTemplateArguments(pattern),
+            TypeSpecializationTemplateArguments(actual));
         if (!args_match) {
           return false;
         }
