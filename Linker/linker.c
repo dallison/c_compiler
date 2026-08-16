@@ -1660,7 +1660,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Find all PROGBITS sections and group by name.  These are sections
   // that have data associated with them in the ELF file.  This also
   // adds the grouped sections to the appropriate segment (code, data or tls).
-  GroupSections(linker, SHT(progbits), 0);
+  GroupSections(linker, SHT(progbits), SHF(alloc));
 
   if (linker->elf_machine_type == ELF_MACHINE_TYPE_ARM) {
     GroupSections(linker, SHT(ARM_EXIDX), 0);

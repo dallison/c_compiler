@@ -417,6 +417,10 @@ static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
   assembler->absolute = false;
 
   DwarfInit(&assembler->dwarf);
+  if (elf_machine_type == ELF_MACHINE_TYPEW65C02 ||
+      elf_machine_type == ELF_MACHINE_TYPE_X86_64) {
+    assembler->dwarf.min_instruction_length = 1;
+  }
 
   // Default label defining function.
   assembler->define_label = DefineLabel;

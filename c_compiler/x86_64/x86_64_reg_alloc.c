@@ -1332,8 +1332,9 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
 
 static void ProcessBasicBlock(X86_64RegisterAllocator* allocator,
                               TargetBasicBlock* block) {
-  TargetTraverseDominatorTree(&allocator->rv->base, ProcessBlock,
-                          kTraversePreOrder, allocator);
+  TargetBasicBlockTraverseDominatorTree(&allocator->rv->base, block,
+                                        ProcessBlock, kTraversePreOrder,
+                                        allocator);
 }
 
 
@@ -1419,12 +1420,29 @@ static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
 void X86_64AllocateRegisters(X86_64RegisterAllocator* allocator) {
   TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
+  for (size_t i = 0; i < allocator->rv->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block =
+        allocator->rv->base.basic_blocks.value.p[i];
+    if (block != allocator->rv->base.entry_block && block->idom == NULL) {
+      TargetBasicBlockTraverseDominatorTree(
+          &allocator->rv->base, block, BuildPreservedInstructionsSet,
+          kTraversePreOrder, allocator);
+    }
+  }
 
   ReserveVariableRegisters(allocator);
 
-  // Process all basic blocks in the RV generator by traversing the
-  // dominator tree.
+  // Process the normal-entry dominator tree, then any disconnected roots such
+  // as exception landing pads. They are emitted too and therefore need the
+  // same register-allocation pass.
   ProcessBasicBlock(allocator, allocator->rv->base.entry_block);
+  for (size_t i = 0; i < allocator->rv->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block =
+        allocator->rv->base.basic_blocks.value.p[i];
+    if (block != allocator->rv->base.entry_block && block->idom == NULL) {
+      ProcessBasicBlock(allocator, block);
+    }
+  }
 }
 
 const char* X86_64RegisterName(X86_64Register* reg, char* buf, size_t len) {

@@ -123,24 +123,53 @@ static void BaseTypeDIEEmit(DebugBuilder* builder, DIE* die);
 static DIEVirtuals base_type_virtuals = {NULL, BaseTypeDIEBuild,
                                          BaseTypeDIEPrint, BaseTypeDIEEmit};
 
+static bool DebugTypeIsPlainChar(TypeRecord* type) {
+  return TypeIsChar(type) && !TypeIsSigned(type) && !TypeIsUnsigned(type);
+}
+
+static bool DebugTypeIsSignedChar(TypeRecord* type) {
+  return TypeIsChar(type) && TypeIsSigned(type);
+}
+
+static bool DebugTypeIsSignedShort(TypeRecord* type) {
+  return TypeIsShort(type) && !TypeIsUnsigned(type);
+}
+
+static bool DebugTypeIsSignedInt(TypeRecord* type) {
+  return TypeIsInt(type) && !TypeIsUnsigned(type);
+}
+
+static bool DebugTypeIsSignedLong(TypeRecord* type) {
+  return TypeIsLong(type) && !TypeIsUnsigned(type);
+}
+
+static bool DebugTypeIsSignedLongLong(TypeRecord* type) {
+  return TypeIsLongLong(type) && !TypeIsUnsigned(type);
+}
+
+static bool DebugTypeIsAuto(TypeRecord* type) {
+  return type != NULL && type->declarator == kDeclPrimitive &&
+         (type->type & kTypeAuto) != 0;
+}
+
 static BaseTypeDIE base_types[] = {
     {{0, DW_TAG(base_type), &base_type_virtuals},
-     TypeIsChar,
+     DebugTypeIsPlainChar,
      "char",
      DW_ATE(signed_char),
      1},
     {{1, DW_TAG(base_type), &base_type_virtuals},
-     TypeIsShort,
+     DebugTypeIsSignedShort,
      "short",
      DW_ATE(signed),
      2},
     {{2, DW_TAG(base_type), &base_type_virtuals},
-     TypeIsInt,
+     DebugTypeIsSignedInt,
      "int",
      DW_ATE(signed),
      4},
     {{3, DW_TAG(base_type), &base_type_virtuals},
-     TypeIsLong,
+     DebugTypeIsSignedLong,
      "long",
      DW_ATE(signed),
      8},
@@ -205,6 +234,36 @@ static BaseTypeDIE base_types[] = {
      "std::float64_t",
      DW_ATE(float),
      8},
+    {{17, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsSignedChar,
+     "signed char",
+     DW_ATE(signed_char),
+     1},
+    {{18, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsSignedLongLong,
+     "long long",
+     DW_ATE(signed),
+     8},
+    {{19, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsUnsignedLongLong,
+     "unsigned long long",
+     DW_ATE(unsigned),
+     8},
+    {{20, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsLongDouble,
+     "long double",
+     DW_ATE(float),
+     8},
+    {{21, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsNullPointer,
+     "std::nullptr_t",
+     DW_ATE(address),
+     8},
+    {{22, DW_TAG(unspecified_type), &base_type_virtuals},
+     DebugTypeIsAuto,
+     "auto",
+     0,
+     0},
 };
 
 #define NUM_BASE_TYPES (sizeof(base_types) / sizeof(BaseTypeDIE))
@@ -212,6 +271,9 @@ static BaseTypeDIE base_types[] = {
 static DIE* PrimitiveToDIE(TypeRecord* type) {
   for (int i = 0; i < NUM_BASE_TYPES; i++) {
     if (base_types[i].func(type)) {
+      if (!TypeIsVoid(type)) {
+        base_types[i].byte_size = type->size;
+      }
       return &base_types[i].die;
     }
   }
@@ -359,9 +421,13 @@ static LexicalScopeDIE* NewLexicalScope(DebugBuilder* builder, DW_TAG tag,
   DIEInit(&scope->die, tag, &lexical_scope_virtuals, true);
   VectorInit(&scope->variables);
   VectorInit(&scope->lexical_scopes);
-  StringInit(&scope->low_pc_label, low_pc->name.value);
+  StringInit(&scope->low_pc_label,
+             low_pc == NULL ? NULL : low_pc->name.value);
   StringInit(&scope->high_pc_expr, NULL);
-  StringPrintf(&scope->high_pc_expr, "%s-%s", high_pc->name.value, low_pc->name.value);
+  if (low_pc != NULL && high_pc != NULL) {
+    StringPrintf(&scope->high_pc_expr, "%s-%s", high_pc->name.value,
+                 low_pc->name.value);
+  }
   scope->parent = parent;
   AddDIE(builder, &scope->die);
   return scope;
@@ -385,6 +451,23 @@ static DIE* NewFunctionDIE(DebugBuilder* builder, DIE* subtype,
   func->top_scope = NewLexicalScope(builder, 0, NULL, low_pc, high_pc);
   AddDIE(builder, &func->die.die);
   return &func->die.die;
+}
+
+static DIE* NewFunctionTypeDIE(DebugBuilder* builder, DIE* subtype) {
+  FunctionTypeDIE* func = malloc(sizeof(FunctionTypeDIE));
+  NamedDIEInit(&func->die, DW_TAG(subroutine_type), &function_virtuals, NULL,
+               true);
+  func->subtype = subtype;
+  func->top_scope = NewLexicalScope(builder, 0, NULL, NULL, NULL);
+  AddDIE(builder, &func->die.die);
+  return &func->die.die;
+}
+
+static bool DebugLabelIsReady(const LabelASTNode* label) {
+  return label != NULL && label->name.value != NULL &&
+         label->name.length != 0 &&
+         (label->name.capacity == STRING_IMMUTABLE ||
+          label->name.length < label->name.capacity);
 }
 
 static void StructDIEDestruct(DIE* die) {
@@ -450,12 +533,17 @@ static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
                                 VisitorMode mode) {
   LexicalScopeBuilder* builder = data;
   if (node->op == AST_OP(compound)) {
+    CompoundStatementASTNode* compound =
+        (CompoundStatementASTNode*)node;
+    bool has_debug_range =
+        DebugLabelIsReady(compound->low_pc) &&
+        DebugLabelIsReady(compound->high_pc);
     if (mode == kVisitPreChildren) {
-      if (builder->level > 0) {
-        CompoundStatementASTNode* c = (CompoundStatementASTNode*)node;
+      if (builder->level > 0 && has_debug_range) {
         LexicalScopeDIE* new_scope =
             NewLexicalScope(builder->builder, DW_TAG(lexical_block),
-                            builder->current, c->low_pc, c->high_pc);
+                            builder->current, compound->low_pc,
+                            compound->high_pc);
 
         VectorAppend(&builder->current->lexical_scopes, new_scope);
         builder->current = new_scope;
@@ -463,7 +551,7 @@ static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
       builder->level++;
     } else {
       builder->level--;
-      if (builder->level > 0) {
+      if (builder->level > 0 && has_debug_range) {
         builder->current = builder->current->parent;
       }
     }
@@ -523,9 +611,17 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
       if (!TypeIsVoid(type->next)) {
         return_type = NewTypeRecordDIE(builder, type->next);
       }
-      die = NewFunctionDIE(builder, return_type,
-                           type->info.function.symbol->name.value, body->low_pc,
-                           body->high_pc);
+      if (body == NULL || body->base.op != AST_OP(compound) ||
+          !DebugLabelIsReady(body->low_pc) ||
+          !DebugLabelIsReady(body->high_pc)) {
+        die = NewFunctionTypeDIE(builder, return_type);
+      } else {
+        const char* name = type->info.function.symbol == NULL
+                               ? NULL
+                               : type->info.function.symbol->name.value;
+        die = NewFunctionDIE(builder, return_type, name, body->low_pc,
+                             body->high_pc);
+      }
       FunctionTypeDIE* func = (FunctionTypeDIE*)die;
       for (size_t i = 0; i < type->info.function.prototype.length; i++) {
         Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
@@ -533,7 +629,9 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
         VectorAppend(&func->top_scope->variables, arg);
         formal->die = arg;
       }
-      BuildLexicalScopes(builder, type, func);
+      if (die->tag == DW_TAG(subprogram)) {
+        BuildLexicalScopes(builder, type, func);
+      }
       break;
     }
     case kDeclPrimitive:
@@ -541,6 +639,10 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
         die = FindTag(builder, type->info.struct_info->tag_name->value);
         if (die == NULL) {
           die = NewStructDIE(builder, type);
+          MapKeyValue kv = {.key.p =
+                                type->info.struct_info->tag_name->value,
+                            .value.p = die};
+          MapInsert(&builder->tags, kv);
           for (size_t i = 0; i < type->info.struct_info->members.length; i++) {
             DIE* member = NewMemberDIE(
                 builder,
@@ -548,9 +650,6 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
             StructDIE* s = (StructDIE*)die;
             VectorAppend(&s->members, member);
           }
-          MapKeyValue kv = {.key.p = type->info.struct_info->tag_name->value,
-                            .value.p = die};
-          MapInsert(&builder->tags, kv);
         }
       } else if (TypeIsEnum(type)) {
         die = FindTag(builder, type->info.enum_info->tag_name->value);
@@ -578,12 +677,14 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
     ConstVolatileDIE* cv = malloc(sizeof(ConstVolatileDIE));
     DIEInit(&cv->die, DW_TAG(const_type), &cv_virtuals, false);
     cv->subtype = die;
+    AddDIE(builder, &cv->die);
     die = &cv->die;
   }
   if (TypeIsVolatile(type)) {
     ConstVolatileDIE* cv = malloc(sizeof(ConstVolatileDIE));
     DIEInit(&cv->die, DW_TAG(volatile_type), &cv_virtuals, false);
     cv->subtype = die;
+    AddDIE(builder, &cv->die);
     die = &cv->die;
   }
 
@@ -913,7 +1014,7 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
       break;
     case DW_FORM(ref4):
       FlushAccumulator(builder);
-      fprintf(builder->fp, "\t.word .DW_DIE%d\n", attr->v.die->id);
+      fprintf(builder->fp, "\t.word __DW_DIE%d\n", attr->v.die->id);
       break;
     case DW_FORM(flag):
       WriteByte(buffer, attr->v.flag);
@@ -967,7 +1068,7 @@ void DIEAllocateAbbreviation(DebugBuilder* builder, DIE* die) {
 
 static void DIEBaseEmit(DebugBuilder* builder, DIE* die) {
   FlushAccumulator(builder);
-  fprintf(builder->fp, ".DW_DIE%d:\t\t// %s (abbrev %d)\n", die->id,
+  fprintf(builder->fp, "__DW_DIE%d:\t\t// %s (abbrev %d)\n", die->id,
           DW_TAGString(die->tag), die->abbrev->num);
   WriteUnsignedLEB128(&builder->bytes, die->abbrev->num);
   for (size_t i = 0; i < die->attr_values.length; i++) {
@@ -986,10 +1087,12 @@ static void DIEEmit(DebugBuilder* builder, DIE* die) {
 
 static void BaseTypeDIEBuild(DebugBuilder* builder, DIE* die) {
   BaseTypeDIE* base = (BaseTypeDIE*)die;
-  AddAttributeAndValue(builder, die,
-                       SignedConstant(DW_AT(byte_size), base->byte_size));
-  AddAttributeAndValue(builder, die,
-                       SignedConstant(DW_AT(encoding), base->encoding));
+  if (die->tag == DW_TAG(base_type)) {
+    AddAttributeAndValue(builder, die,
+                         SignedConstant(DW_AT(byte_size), base->byte_size));
+    AddAttributeAndValue(builder, die,
+                         SignedConstant(DW_AT(encoding), base->encoding));
+  }
   AddAttributeAndValue(
       builder, die, StringConstant(DW_AT(name), base->name));
   DIEAllocateAbbreviation(builder, die);
@@ -1164,18 +1267,22 @@ static void FunctionDIEBuild(DebugBuilder* builder, DIE* die) {
   FunctionTypeDIE* func = (FunctionTypeDIE*)die;
   if (func->subtype != NULL) {
     DIEBuild(builder, func->subtype);
+    AddAttributeAndValue(builder, die,
+                         DIEReference(DW_AT(type), func->subtype));
   }
-  AddAttributeAndValue(
-      builder, die,
-      StringConstant(DW_AT(name),  func->die.name.value));
-  AddAttributeAndValue(builder, die, DIEReference(DW_AT(type), func->subtype));
-
-  AddAttributeAndValue(
-      builder, die,
-      AddressConstant(DW_AT(low_pc), DW_FORM(addr), func->top_scope->low_pc_label.value));
-  AddAttributeAndValue(
-      builder, die,
-      AddressConstant(DW_AT(high_pc), DW_FORM(high_pc), func->top_scope->high_pc_expr.value));
+  if (die->tag == DW_TAG(subprogram)) {
+    AddAttributeAndValue(
+        builder, die,
+        StringConstant(DW_AT(name), func->die.name.value));
+    AddAttributeAndValue(
+        builder, die,
+        AddressConstant(DW_AT(low_pc), DW_FORM(addr),
+                        func->top_scope->low_pc_label.value));
+    AddAttributeAndValue(
+        builder, die,
+        AddressConstant(DW_AT(high_pc), DW_FORM(high_pc),
+                        func->top_scope->high_pc_expr.value));
+  }
   DIEAllocateAbbreviation(builder, die);
 
   // Add variable and parameter children.

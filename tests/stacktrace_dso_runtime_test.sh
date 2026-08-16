@@ -39,10 +39,16 @@ int main() {
   if (description == nullptr) {
     return 1;
   }
-  return std::string(description).find("local_dso_frame") ==
-                 std::string::npos
-             ? 2
-             : 0;
+  if (std::string(description).find("local_dso_frame") ==
+      std::string::npos) {
+    return 2;
+  }
+  const char* source_file = __davecc_stacktrace_source_file(address);
+  if (source_file == nullptr ||
+      std::string(source_file).find("library.cpp") == std::string::npos) {
+    return 3;
+  }
+  return __davecc_stacktrace_source_line(address) == 0 ? 4 : 0;
 }
 EOF
 

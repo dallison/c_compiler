@@ -78,8 +78,17 @@ class stacktrace_entry {
     return text == nullptr ? string() : string(text);
   }
 
-  string source_file() const { return string(); }
-  uint_least32_t source_line() const { return 0; }
+  string source_file() const {
+    if (__handle == 0) {
+      return string();
+    }
+    const char* text = __davecc_stacktrace_source_file(__handle);
+    return text == nullptr ? string() : string(text);
+  }
+
+  uint_least32_t source_line() const {
+    return __handle == 0 ? 0 : __davecc_stacktrace_source_line(__handle);
+  }
 
   friend constexpr bool operator==(const stacktrace_entry& left,
                                    const stacktrace_entry& right) noexcept {

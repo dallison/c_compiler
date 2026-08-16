@@ -104,6 +104,9 @@ void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col,
   if (dwarf->locations.length > 0) {
     LocationEntry* last_loc = VectorLast(&dwarf->locations);
     if (last_loc->address == address) {
+      last_loc->file = file;
+      last_loc->line = line;
+      last_loc->col = col;
       return;
     }
   }
@@ -123,7 +126,7 @@ static void WriteULEB128(int32_t value, Buffer* buffer) {
   } while (value != 0);
 }
 
-static void WriteSLEB128(uint32_t value, Buffer* buffer) {
+static void WriteSLEB128(int32_t value, Buffer* buffer) {
   bool more = true;
   while (more) {
     char byte = value & 0x7f;
@@ -222,8 +225,20 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
   // single
   //                     byte.  Limited range of values allowed.
   LocationEntry* prev_loc = NULL;
+  int current_file = 1;
+  int current_column = 0;
   for (size_t i = 0; i < dwarf->locations.length; i++) {
     LocationEntry* loc = dwarf->locations.value.p[i];
+    if (loc->file != current_file) {
+      BufferAppendByte(debug_line, DW_LNS(set_file));
+      WriteULEB128(loc->file, debug_line);
+      current_file = loc->file;
+    }
+    if (loc->col != current_column) {
+      BufferAppendByte(debug_line, DW_LNS(set_column));
+      WriteULEB128(loc->col, debug_line);
+      current_column = loc->col;
+    }
     if (prev_loc == NULL) {
       // No previous location means this is the first location.  We need
       // to set the initial line and address.  The address is associated
@@ -252,39 +267,32 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
       BufferAppendByte(debug_line, DW_LNS(advance_pc));
       WriteULEB128((int32_t)loc->address / dwarf->min_instruction_length,
                    debug_line);
+      BufferAppendByte(debug_line, DW_LNS(copy));
     } else {
       int line_diff = loc->line - prev_loc->line;
       int32_t address_diff = (int32_t)((loc->address - prev_loc->address) /
                                        dwarf->min_instruction_length);
 
-      // Calculate special opcode and check if we can use it.  The DWARF
-      // standard has a small set of standard and extended opcodes but majority
-      // of the byte values are occupied by "special opcodes".  These are single
-      // byte instructions that can increment both the line number and address
-      // in a single byte.  There are limits to the ranges for both line and
-      // address changes and if these are out of range, we fall back to using a
-      // standard or extended opcode.
-      int special_opcode = (line_diff - dwarf->line_base) +
-                           (dwarf->line_range * address_diff) + opcode_base;
-      if (special_opcode > 255) {
-        // Need to use a standard opcodes.  A standard opcode uses a single byte
-        // for the opcode and this is followed by zero or more operands.  Each
-        // instruction specifies how many operands it takes and the format of
-        // the operands.
-        if (line_diff != 0) {
-          BufferAppendByte(debug_line, DW_LNS(advance_line));
-          WriteSLEB128(line_diff, debug_line);
-        }
-        if (address_diff != 0) {
-          BufferAppendByte(debug_line, DW_LNS(advance_pc));
-          WriteULEB128(address_diff, debug_line);
-        }
-      } else {
-        // Special opcode is in range.
-        BufferAppendByte(debug_line, special_opcode);
+      // Use standard opcodes for every row.  This is slightly larger than
+      // selecting DWARF special opcodes, but preserves exact address and line
+      // deltas for every target and keeps this assembler's line program simple.
+      if (line_diff != 0) {
+        BufferAppendByte(debug_line, DW_LNS(advance_line));
+        WriteSLEB128(line_diff, debug_line);
       }
+      if (address_diff != 0) {
+        BufferAppendByte(debug_line, DW_LNS(advance_pc));
+        WriteULEB128(address_diff, debug_line);
+      }
+      BufferAppendByte(debug_line, DW_LNS(copy));
     }
     prev_loc = loc;
+  }
+
+  if (prev_loc != NULL) {
+    BufferAppendByte(debug_line, 0);
+    WriteULEB128(1, debug_line);
+    BufferAppendByte(debug_line, DW_LNE(end_sequence));
   }
 
   // Now that we know the total length, we can write it into the buffer.

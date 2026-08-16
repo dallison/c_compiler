@@ -2445,8 +2445,9 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
 
   IRSetLocation(node->location);
   
-  // Emit location instructions if the statement will generate code.
-  if (compiler->debug_output) {
+  // Emit location instructions for the assembler's line table. The linker can
+  // consume this table for std::stacktrace even without full debug output.
+  {
     bool emit_loc = true;
     switch (node->op) {
       case AST_OP(decl_list):

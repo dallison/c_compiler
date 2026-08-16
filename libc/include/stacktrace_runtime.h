@@ -29,6 +29,12 @@ size_t __davecc_stacktrace_capture(uintptr_t* frames, size_t capacity,
 /* Return static symbol text for pc, or NULL when no metadata is available. */
 const char* __davecc_stacktrace_description(uintptr_t pc);
 
+/* Return static source-file text for pc, or NULL when unavailable. */
+const char* __davecc_stacktrace_source_file(uintptr_t pc);
+
+/* Return the source line for pc, or zero when unavailable. */
+uint_least32_t __davecc_stacktrace_source_line(uintptr_t pc);
+
 #ifdef __cplusplus
 }
 #endif

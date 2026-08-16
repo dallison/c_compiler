@@ -40,10 +40,9 @@ FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
   // assembler the name of the current file.
   fprintf(fp, "\t.file   \"%s\"\n", src_file->value);
 
-  if (compiler->debug_output) {
-    // Print all source files.
-    SourceTraverseFiles(fp, FilePrinter);
-  }
+  // The assembler's compact line table is also consumed by stacktrace
+  // metadata generation, independently of full DWARF debug information.
+  SourceTraverseFiles(fp, FilePrinter);
   fprintf(fp, "\t.text\n");
   if (compiler->pic) {
     fprintf(fp, "\t.option pic\n");
@@ -261,7 +260,7 @@ void EmitLiteral(Literal* literal, FILE* fp) {
 }
 
 void EmitDebug(FILE* fp) {
-  fprintf(fp, "\t.section \".debug_line\", \"aMS\", @progbits\n");
+  fprintf(fp, "\t.section \".debug_line\", \"\", @progbits\n");
 }
 
 void EmitP2Align(int alignment, FILE* fp) {

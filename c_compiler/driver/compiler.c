@@ -3136,8 +3136,8 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     }
   }
 
+  compiler->target->emit_debug(asm_file);
   if (compiler->debug_output) {
-    compiler->target->emit_debug(asm_file);
     compiler->debug_builder.fp = asm_file;
     DebugBuilderEmitDebugInfo(&compiler->debug_builder);
     DebugBuilderEmitAbbreviations(&compiler->debug_builder);

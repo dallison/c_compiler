@@ -33,7 +33,9 @@ int main() {
   if (trace[1].description().find("capture_middle") == std::string::npos) {
     return 4;
   }
-  if (!trace[0].source_file().empty() || trace[0].source_line() != 0) {
+  if (trace[0].source_file().find("0401_standard_stacktrace.cpp") ==
+          std::string::npos ||
+      trace[0].source_line() == 0) {
     return 5;
   }
 

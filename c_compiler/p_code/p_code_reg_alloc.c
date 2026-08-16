@@ -400,6 +400,7 @@ static bool NeedsRegister(TargetInstruction* inst) {
     case P_OP(literal):
     case P_OP(asm):
     case P_OP(loc):
+    case P_OP(named_label):
       // These instructions do not have registers allocated to them.
       return false;
     default:
