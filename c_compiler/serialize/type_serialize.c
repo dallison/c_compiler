@@ -47,6 +47,7 @@ enum {
   kType_is_pack_index = 18,
   kType_pack_index_expr = 19,
   kType_dependent_splice_expr = 20,
+  kType_bit_width = 21,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -71,6 +72,7 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_is_pack_index, "is_pack_index"},
     {kType_pack_index_expr, "pack_index_expr"},
     {kType_dependent_splice_expr, "dependent_splice_expr"},
+    {kType_bit_width, "bit_width"},
 };
 
 //
@@ -237,6 +239,7 @@ enum {
   kEnum_has_fixed_underlying = 6,
   kEnum_fixed_underlying_type = 7,
   kEnum_fixed_underlying_size = 8,
+  kEnum_fixed_underlying_bit_width = 9,
 };
 
 static const WireFieldDesc kEnumFields[] = {
@@ -248,6 +251,7 @@ static const WireFieldDesc kEnumFields[] = {
     {kEnum_has_fixed_underlying, "has_fixed_underlying"},
     {kEnum_fixed_underlying_type, "fixed_underlying_type"},
     {kEnum_fixed_underlying_size, "fixed_underlying_size"},
+    {kEnum_fixed_underlying_bit_width, "fixed_underlying_bit_width"},
 };
 
 //
@@ -1544,6 +1548,7 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kType_qualifiers, (int32_t)t->qualifiers);
   WireWriteInt32(buf, kType_declarator, (int32_t)t->declarator);
   WireWriteInt32(buf, kType_size, t->size);
+  WireWriteInt32(buf, kType_bit_width, t->bit_width);
   WireWriteInt32(buf, kType_template_parameter_index,
                  t->template_parameter_index);
   SWriteStringPtr(ctx, buf, kType_template_parameter_name,
@@ -1632,6 +1637,9 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kType_size:
         WireReadInt32(buf, &t->size);
         break;
+      case kType_bit_width:
+        WireReadInt32(buf, &t->bit_width);
+        break;
       case kType_template_parameter_index:
         WireReadInt32(buf, &t->template_parameter_index);
         break;
@@ -1716,12 +1724,14 @@ static bool WriteEnum(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SWriteStringPtr(ctx, buf, kEnum_tag_name, e->tag_name);
   SWriteRef(ctx, buf, kEnum_tag_symbol, kSerialKindSymbol, e->tag_symbol);
   SWriteRefVector(ctx, buf, kEnum_constants, kSerialKindSymbol, &e->constants);
-  WireWriteInt32(buf, kEnum_next_value, e->next_value);
+  WireWriteInt64(buf, kEnum_next_value, e->next_value);
   WireWriteBool(buf, kEnum_is_scoped, e->is_scoped);
   WireWriteBool(buf, kEnum_has_fixed_underlying, e->has_fixed_underlying);
   WireWriteInt32(buf, kEnum_fixed_underlying_type,
                  (int32_t)e->fixed_underlying_type);
   WireWriteInt32(buf, kEnum_fixed_underlying_size, e->fixed_underlying_size);
+  WireWriteInt32(buf, kEnum_fixed_underlying_bit_width,
+                 e->fixed_underlying_bit_width);
   return !WireBufferHasError(buf);
 }
 
@@ -1751,7 +1761,7 @@ static bool ReadEnum(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         SReadRefVector(ctx, buf, kSerialKindSymbol, &e->constants);
         break;
       case kEnum_next_value:
-        WireReadInt32(buf, &e->next_value);
+        WireReadInt64(buf, &e->next_value);
         break;
       case kEnum_is_scoped:
         WireReadBool(buf, &e->is_scoped);
@@ -1767,6 +1777,9 @@ static bool ReadEnum(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       }
       case kEnum_fixed_underlying_size:
         WireReadInt32(buf, &e->fixed_underlying_size);
+        break;
+      case kEnum_fixed_underlying_bit_width:
+        WireReadInt32(buf, &e->fixed_underlying_bit_width);
         break;
       default:
         WireSkip(buf, wt);

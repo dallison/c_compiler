@@ -81,4 +81,32 @@
 /* Maximum value an `unsigned long long int' can hold.  (Minimum is 0.)  */
 #   define ULLONG_MAX  18446744073709551615ULL
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#  define BOOL_WIDTH 1
+#  define CHAR_WIDTH CHAR_BIT
+#  define SCHAR_WIDTH CHAR_BIT
+#  define UCHAR_WIDTH CHAR_BIT
+#  define SHRT_WIDTH 16
+#  define USHRT_WIDTH 16
+#  if defined(__6502__)
+#    define INT_WIDTH 16
+#    define UINT_WIDTH 16
+#    define LONG_WIDTH 32
+#    define ULONG_WIDTH 32
+#  else
+#    define INT_WIDTH 32
+#    define UINT_WIDTH 32
+#    if __WORDSIZE == 64
+#      define LONG_WIDTH 64
+#      define ULONG_WIDTH 64
+#    else
+#      define LONG_WIDTH 32
+#      define ULONG_WIDTH 32
+#    endif
+#  endif
+#  define LLONG_WIDTH 64
+#  define ULLONG_WIDTH 64
+#  define BITINT_MAXWIDTH 64
+#endif
+
 #endif /* limits_h */

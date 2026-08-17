@@ -5509,6 +5509,9 @@ static TargetInstruction* PushArg(W65C02Generator* g, IRNode* node) {
   if (node->type == NULL) {
     return Push(g, node, 2);
   }
+  if (TypeIsBitInt(node->type)) {
+    return Push(g, node, node->type->size);
+  }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(node->type)) {
       return Push(g, node, push_map[i].size);
@@ -5527,6 +5530,9 @@ static size_t GetPushedSize(IRNode* node) {
   }
   if (TypeIsStructOrUnion(expr->type)) {
     return Sizeof(expr->type);
+  }
+  if (TypeIsBitInt(expr->type)) {
+    return expr->type->size == 1 ? 2 : (size_t)expr->type->size;
   }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(expr->type)) {

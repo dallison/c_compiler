@@ -438,6 +438,10 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     if (!node->symbol->flags.value_set) {
       return &node->base;
     }
+    if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+        !node->symbol->flags.is_constexpr) {
+      return &node->base;
+    }
     // If the identifier is a constant, replace the node with a constant node.
     if (TypeIsIntConstant(node->base.type)) {
       ASTNode* const_node = NewIntConstantASTNode(
@@ -704,19 +708,33 @@ bool (*type_ranks[])(TypeRecord*) = {
     TypeIsLongDouble, TypeIsVoid,     NULL,
 };
 
-// The 'int' rank, for promotion to int.
-#define kIntRank 4
-
 // Given a type, what is its rank.  According to the standard, types with higher
 // precision are higher in rank, with _Bool being the lowest rank.  Floating
 // point types have the highest rank.
 static int GetRank(TypeRecord* type) {
+  if (TypeIsBitInt(type)) {
+    return type->bit_width * 16;
+  }
   for (int i = 0; type_ranks[i] != NULL; i++) {
     if (type_ranks[i](type)) {
-      return i+1;
+      if (TypeIsIntegral(type)) {
+        // A standard integer type outranks _BitInt(N) at the same width, while
+        // _BitInt(N+1) outranks every standard type no wider than N bits.
+        return type->size * 8 * 16 + i + 1;
+      }
+      return 4096 + i + 1;
     }
   }
   return -1;
+}
+
+static int IntRank(void) {
+  TypeRecord int_type = {
+      .type = kTypeInt,
+      .declarator = kDeclPrimitive,
+      .size = SizeofType(kTypeInt),
+  };
+  return GetRank(&int_type);
 }
 
 static TypeRecord* NewLogicalResultType(void) {
@@ -744,7 +762,7 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
       break;
     case AST_OP(uminus): {
       int rank = GetRank(node->sub->type);
-      if (rank < kIntRank) {
+      if (!TypeIsBitInt(node->sub->type) && rank < IntRank()) {
         NormalConversion(
             node->sub, NewTypeRecordWithSize(kTypeInt, kQualPlain));
       }
@@ -941,13 +959,15 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       // int.  This must happen on the actual operand types (including integer
       // constants such as `(short)1`) before any of the constant-adaption
       // below, otherwise small constants would skip promotion.
-      if (left_rank > 0 && left_rank < kIntRank) {
+      if (!TypeIsBitInt(node->left->type) && left_rank > 0 &&
+          left_rank < IntRank()) {
         NormalConversion(
             node->left, NewTypeRecordWithSize(kTypeInt, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->left->type);
         left_rank = GetRank(node->left->type);
       }
-      if (right_rank > 0 && right_rank < kIntRank) {
+      if (!TypeIsBitInt(node->right->type) && right_rank > 0 &&
+          right_rank < IntRank()) {
         NormalConversion(
             node->right, NewTypeRecordWithSize(kTypeInt, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->right->type);
@@ -959,13 +979,17 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
     // by being treated as the lowest rank.  A constant with an explicit
     // long/long long type keeps its rank so the usual arithmetic conversions
     // widen the result correctly (e.g. `i + 2L` becomes long).
-    if (IsIntConstant(node->left) && left_rank <= kIntRank &&
+    if (IsIntConstant(node->left) && !TypeIsBitInt(node->left->type) &&
+        !TypeIsBitInt(node->right->type) &&
+        left_rank <= IntRank() &&
         !(TypeIsUnsigned(node->left->type) &&
           !TypeIsUnsigned(node->right->type) &&
           left_rank == right_rank)) {
       left_rank = 0;
     }
-    if (IsIntConstant(node->right) && right_rank <= kIntRank &&
+    if (IsIntConstant(node->right) && !TypeIsBitInt(node->right->type) &&
+        !TypeIsBitInt(node->left->type) &&
+        right_rank <= IntRank() &&
         !(TypeIsUnsigned(node->right->type) &&
           !TypeIsUnsigned(node->left->type) &&
           left_rank == right_rank)) {
@@ -1952,7 +1976,8 @@ static ASTNode* AnalyzeShift(BinaryASTNode* node) {
   // usual arithmetic conversions are NOT applied, so the right operand's type
   // (e.g. a `long long` shift count) must not widen the result.
   int left_rank = GetRank(node->left->type);
-  if (left_rank > 0 && left_rank < kIntRank) {
+  if (!TypeIsBitInt(node->left->type) && left_rank > 0 &&
+      left_rank < IntRank()) {
     Type t = kTypeInt;
     if (TypeIsUnsigned(node->left->type)) {
       t |= kTypeUnsigned;
@@ -1960,7 +1985,8 @@ static ASTNode* AnalyzeShift(BinaryASTNode* node) {
     NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
   }
   int right_rank = GetRank(node->right->type);
-  if (right_rank > 0 && right_rank < kIntRank) {
+  if (!TypeIsBitInt(node->right->type) && right_rank > 0 &&
+      right_rank < IntRank()) {
     Type t = kTypeInt;
     if (TypeIsUnsigned(node->right->type)) {
       t |= kTypeUnsigned;
@@ -2279,7 +2305,8 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
     if (node->base.op != AST_OP(equal) &&
         node->base.op != AST_OP(noteq)) {
       SemanticError((ASTNode*)node,
-                    "Only == and != are valid for std::nullptr_t");
+                    "Only == and != are valid for %s",
+                    CompilerIsCXX() ? "std::nullptr_t" : "nullptr_t");
     }
     ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
     return (ASTNode*)node;
@@ -3403,6 +3430,21 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
   // We need the address of this node, not its value.
   node->left->flags |= kASTNeedAddress;
 
+  if (TypeIsAtomic(node->left->type)) {
+    bool supported_rmw =
+        node->base.op == AST_OP(pluseq) || node->base.op == AST_OP(minuseq);
+    if (node->base.op != AST_OP(assign) && !supported_rmw) {
+      SemanticError(
+          (ASTNode*)node,
+          "atomic compound assignment is not supported for this operator");
+    }
+    if (supported_rmw && !TypeIsIntegral(node->left->type) &&
+        !TypeIsPointer(node->left->type)) {
+      SemanticError((ASTNode*)node,
+                    "atomic arithmetic requires integral or pointer type");
+    }
+  }
+
   switch (node->base.op) {
     case AST_OP(assign):
       // During the first (class-level) instantiation of a member function
@@ -3499,6 +3541,12 @@ static ASTNode* AnalyzeIncDec(UnaryASTNode* node) {
   AnalyzeUnaryExpression(node);
   if (!IsAssignable(node->sub, false)) {
     SemanticError(node->sub, "Cannot increment or decrement this value");
+  }
+  if (TypeIsAtomic(node->sub->type) &&
+      !TypeIsIntegral(node->sub->type) &&
+      !TypeIsPointer(node->sub->type)) {
+    SemanticError(node->sub,
+                  "atomic increment and decrement require integral or pointer type");
   }
   // NOTE: the scaling by the size of the pointer is handled by code
   // generation, not here.
@@ -10419,18 +10467,41 @@ static TypeRecord* AtomicPointerPointee(VectorASTNode* node) {
                   "atomic builtin requires pointer to object type");
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
+  if (CompilerTargetSupportsAtomics() &&
+      !CompilerTargetSupportsAtomicSize(ptr->type->next->size)) {
+    SemanticError((ASTNode*)node,
+                  "atomic object size is not supported on this target");
+  }
+  if (!TypeIsIntegral(ptr->type->next) &&
+      !TypeIsFloatingPoint(ptr->type->next) &&
+      !TypeIsPointer(ptr->type->next)) {
+    SemanticError((ASTNode*)node,
+                  "atomic builtin requires scalar or pointer object type");
+  }
   return ptr->type->next;
 }
 
-static void ValidateAtomicTarget(VectorASTNode* node) {
-  if (compiler == NULL || compiler->target_name == NULL) {
-    return;
+static TypeRecord* AtomicOperationValueType(TypeRecord* object_type) {
+  TypeRecord* value_type = TypeRecordCopy(object_type);
+  if (value_type != NULL) {
+    value_type->qualifiers &=
+        ~(kQualAtomic | kQualConst | kQualVolatile | kQualRestrict);
   }
-  if (StringEqual(compiler->target_name, "6502") ||
-      StringEqual(compiler->target_name, "65c02")) {
-    SemanticError((ASTNode*)node,
-                  "atomic operations are unavailable in the single-threaded "
-                  "65(C)02 profile");
+  return value_type;
+}
+
+static void ValidateAtomicTarget(VectorASTNode* node) {
+  if (!CompilerTargetSupportsAtomics()) {
+    if (compiler != NULL && compiler->target_name != NULL &&
+        (StringEqual(compiler->target_name, "6502") ||
+         StringEqual(compiler->target_name, "65c02"))) {
+      SemanticError((ASTNode*)node,
+                    "atomic operations are unavailable in the single-threaded "
+                    "65(C)02 profile");
+    } else {
+      SemanticError((ASTNode*)node,
+                    "atomic operations are unavailable on this target");
+    }
   }
 }
 
@@ -10494,16 +10565,18 @@ static bool AtomicFailureOrderAllowed(int success, int failure) {
 
 static void AnalyzeAtomicLoadBuiltin(VectorASTNode* node) {
   AnalyzeAtomicBuiltinChildren(node);
-  TypeRecord* value_type = AtomicPointerPointee(node);
+  TypeRecord* value_type =
+      AtomicOperationValueType(AtomicPointerPointee(node));
   if (node->children->length > 1) {
     ValidateAtomicMemoryOrder(node->children->value.p[1], kAtomicOrderLoad);
   }
-  ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
+  ASTNodeSetType(&node->base, value_type);
 }
 
 static void AnalyzeAtomicStoreBuiltin(VectorASTNode* node) {
   AnalyzeAtomicBuiltinChildren(node);
-  TypeRecord* value_type = AtomicPointerPointee(node);
+  TypeRecord* value_type =
+      AtomicOperationValueType(AtomicPointerPointee(node));
   if (node->children->length > 1) {
     NormalConversion(node->children->value.p[1], value_type);
   }
@@ -10511,31 +10584,49 @@ static void AnalyzeAtomicStoreBuiltin(VectorASTNode* node) {
     ValidateAtomicMemoryOrder(node->children->value.p[2], kAtomicOrderStore);
   }
   ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  TypeRecordDelete(value_type);
 }
 
 static void AnalyzeAtomicFetchBuiltin(VectorASTNode* node, bool returns_new) {
   (void)returns_new;
   AnalyzeAtomicBuiltinChildren(node);
-  TypeRecord* value_type = AtomicPointerPointee(node);
+  TypeRecord* value_type =
+      AtomicOperationValueType(AtomicPointerPointee(node));
   if (!TypeIsIntegral(value_type) && !TypeIsPointer(value_type)) {
     SemanticError((ASTNode*)node,
                   "atomic arithmetic builtin requires integral or pointer type");
   }
   if (node->children->length > 1) {
-    NormalConversion(node->children->value.p[1], value_type);
+    ASTNode* operand = node->children->value.p[1];
+    if (TypeIsPointer(value_type)) {
+      if (!TypeIsIntegral(operand->type)) {
+        SemanticError(operand,
+                      "atomic pointer arithmetic requires an integer operand");
+      } else {
+        ASTNode* scale =
+            NewPtrScaleASTNode(value_type->next, AST_OP(mult), operand,
+                               operand->location);
+        scale->parent = (ASTNode*)node;
+        node->children->value.p[1] = scale;
+        ASTNodeSetType(scale, value_type);
+      }
+    } else {
+      NormalConversion(operand, value_type);
+    }
   }
   if (node->children->length > 2) {
     ValidateAtomicMemoryOrder(node->children->value.p[2],
                               kAtomicOrderReadModifyWrite);
   }
-  ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
+  ASTNodeSetType(&node->base, value_type);
 }
 
 static void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
                                                 bool expected_is_pointer,
                                                 bool returns_bool) {
   AnalyzeAtomicBuiltinChildren(node);
-  TypeRecord* value_type = AtomicPointerPointee(node);
+  TypeRecord* value_type =
+      AtomicOperationValueType(AtomicPointerPointee(node));
   if (node->children->length > 1) {
     ASTNode* expected = node->children->value.p[1];
     if (expected_is_pointer) {
@@ -10569,9 +10660,13 @@ static void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
                     "atomic compare-exchange failure order is stronger than success order");
     }
   }
-  ASTNodeSetType(&node->base,
-                 returns_bool ? NewTypeRecordWithSize(kTypeBool, kQualPlain)
-                              : TypeRecordCopy(value_type));
+  if (returns_bool) {
+    ASTNodeSetType(&node->base,
+                   NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    TypeRecordDelete(value_type);
+  } else {
+    ASTNodeSetType(&node->base, value_type);
+  }
 }
 
 static TypeRecord* NewConstCharPointerType(void) {

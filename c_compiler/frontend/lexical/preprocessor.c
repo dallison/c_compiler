@@ -134,11 +134,63 @@ static void* FindMacroInHashTable(void* entry, void* value) {
   return BinaryTreeSearch(tree, value);
 }
 
+static bool LanguageSupportsDigitSeparators(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX14);
+}
+
+static bool LanguageSupportsElifdef(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX23);
+}
+
+static bool LanguageSupportsEmbed(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX26);
+}
+
+static bool LanguageSupportsVaOpt(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX20);
+}
+
 static void PredefineMacros(Preprocessor* p) {
   // Define the macros defined by the standard.
   PreprocessorDefineMacro(p, "__STDC__", "1");
   PreprocessorDefineMacro(p, "__STDC_HOSTED__", "1");
-  PreprocessorDefineMacro(p, "__STDC_VERSION__", "199901L");
+  if (!CompilerIsCXX()) {
+    const char* stdc_version = NULL;
+    switch (compiler->language_standard) {
+      case kLanguageStandardC99:
+        stdc_version = "199901L";
+        break;
+      case kLanguageStandardC11:
+        stdc_version = "201112L";
+        break;
+      case kLanguageStandardC17:
+        stdc_version = "201710L";
+        break;
+      case kLanguageStandardC23:
+        stdc_version = "202311L";
+        break;
+      default:
+        break;
+    }
+    if (stdc_version != NULL) {
+      PreprocessorDefineMacro(p, "__STDC_VERSION__", stdc_version);
+    }
+    if (CompilerCAtLeast(kLanguageStandardC11)) {
+      if (!CompilerTargetSupportsC11Atomics()) {
+        PreprocessorDefineMacro(p, "__STDC_NO_ATOMICS__", "1");
+      }
+      // DaveCC's threads.h intentionally remains an extension until its
+      // thread-specific-storage API and destructor iteration are complete.
+      PreprocessorDefineMacro(p, "__STDC_NO_THREADS__", "1");
+    }
+    if (CompilerCAtLeast(kLanguageStandardC23)) {
+      PreprocessorDefineMacro(p, "__STDC_UTF_8__", "1");
+    }
+  }
   PreprocessorDefineMacro(p, "__STDC_MB_MIGHT_NEQ_WC__", "1");
 
   PreprocessorDefineMacro(p, "__DAVECC__", "1");
@@ -239,10 +291,12 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_expansion_statements", "202506L");
       PreprocessorDefineMacro(p, "__cpp_impl_reflection", "202603L");
       PreprocessorDefineMacro(p, "__cpp_variadic_friend", "202403L");
-      PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
-      PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");
-      PreprocessorDefineMacro(p, "__STDC_EMBED_EMPTY__", "2");
     }
+  }
+  if (LanguageSupportsEmbed()) {
+    PreprocessorDefineMacro(p, "__STDC_EMBED_NOT_FOUND__", "0");
+    PreprocessorDefineMacro(p, "__STDC_EMBED_FOUND__", "1");
+    PreprocessorDefineMacro(p, "__STDC_EMBED_EMPTY__", "2");
   }
 
   // Date and time are defined as coming from the 'asctime' function.
@@ -1037,7 +1091,7 @@ static size_t SkipNumber(String* line, size_t pos) {
             ? LexIdentifierSourceCharByteCount(line->value, pos + 1,
                                                line->length, false)
             : 0;
-    if (CompilerCXXAtLeast(kLanguageStandardCXX14) && ch == '\'' &&
+    if (LanguageSupportsDigitSeparators() && ch == '\'' &&
         pos + 1 < line->length &&
         (isdigit((unsigned char)line->value[pos + 1]) ||
          separator_bytes != 0)) {
@@ -1947,6 +2001,69 @@ static void CheckHashHash(Preprocessor* p, String* rep) {
   }
 }
 
+static void CheckVaOpt(Preprocessor* p, String* rep, bool function_like,
+                       bool varargs) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, rep);
+  while (CurrentToken(&ti) != PPTOK(end)) {
+    if (CurrentToken(&ti) != PPTOK(identifier)) {
+      MoveToNextToken(&ti);
+      continue;
+    }
+
+    String spelling = {0};
+    GetCurrentTokenSpelling(&ti, &spelling);
+    bool is_va_opt = StringEqual(&spelling, "__VA_OPT__");
+    StringDestruct(&spelling);
+    if (!is_va_opt) {
+      MoveToNextToken(&ti);
+      continue;
+    }
+
+    if (!LanguageSupportsVaOpt()) {
+      PreprocessorError(
+          p, "__VA_OPT__ requires C23 or C++20 and is not available in this "
+             "language mode");
+    }
+    if (!function_like || !varargs) {
+      PreprocessorError(
+          p, "__VA_OPT__ may only appear in the replacement list of a "
+             "variadic function-like macro");
+    }
+
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+    if (CurrentToken(&ti) != PPTOK(openparen)) {
+      PreprocessorError(p, "__VA_OPT__ must be followed by a parenthesized "
+                           "preprocessing-token sequence");
+      continue;
+    }
+
+    int depth = 1;
+    MoveToNextToken(&ti);
+    while (CurrentToken(&ti) != PPTOK(end) && depth != 0) {
+      if (CurrentToken(&ti) == PPTOK(identifier)) {
+        String nested_spelling = {0};
+        GetCurrentTokenSpelling(&ti, &nested_spelling);
+        if (StringEqual(&nested_spelling, "__VA_OPT__")) {
+          PreprocessorError(p,
+                            "__VA_OPT__ cannot be nested within __VA_OPT__");
+        }
+        StringDestruct(&nested_spelling);
+      } else if (CurrentToken(&ti) == PPTOK(openparen)) {
+        depth++;
+      } else if (CurrentToken(&ti) == PPTOK(closeparen)) {
+        depth--;
+      }
+      MoveToNextToken(&ti);
+    }
+    if (depth != 0) {
+      PreprocessorError(p, "Missing ')' in __VA_OPT__");
+      return;
+    }
+  }
+}
+
 static void Define(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     // Ignore this if it is #ifed out.
@@ -1985,6 +2102,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   
   // Check that ## rules are not violated.
   CheckHashHash(p, &replacement_text);
+  CheckVaOpt(p, &replacement_text, function_like_macro, varargs);
 
   // Check if the macro has already been defined and if so, make sure this
   // definition is the same as the old old.
@@ -2762,7 +2880,7 @@ static void Embed(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+  if (!LanguageSupportsEmbed()) {
     PreprocessorError(p, "Invalid preprocessor directive embed");
     return;
   }
@@ -2883,7 +3001,10 @@ static void Endif(Preprocessor* p, String* line, size_t pos) {
 
 bool PreprocessorMacroNameIsDefined(Preprocessor* p, String* name) {
   if (StringEqual(name, "__has_embed")) {
-    return CompilerCXXAtLeast(kLanguageStandardCXX26);
+    return LanguageSupportsEmbed();
+  }
+  if (StringEqual(name, "__has_c_attribute")) {
+    return CompilerCAtLeast(kLanguageStandardC23);
   }
   if (StringEqual(name, "__has_include") ||
       StringEqual(name, "__has_include_next") ||
@@ -2989,10 +3110,8 @@ static void ElifMacroTest(Preprocessor* p, String* line, size_t pos,
                           bool require_defined, const char* directive) {
   static int condition_true;
 
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
-    if (p->is_compiled_in) {
-      PreprocessorError(p, "Invalid preprocessor directive %s", directive);
-    }
+  if (!LanguageSupportsElifdef()) {
+    PreprocessorError(p, "Invalid preprocessor directive %s", directive);
     return;
   }
   if (p->if_stack.length == 0) {
@@ -3651,6 +3770,7 @@ static void CollectActualArguments(Preprocessor* p,
   while (!end && CurrentToken(ti) != PPTOK(closeparen)) {
     String* actual = NewString(NULL);
     int num_nested_brackets = 1;
+    bool actual_ended_with_comma = false;
     while (!end) {
       PreprocessingToken tok = CurrentToken(ti);
       if (tok == PPTOK(end)) {
@@ -3687,6 +3807,7 @@ static void CollectActualArguments(Preprocessor* p,
           // Comma outside of nested brackets, end of actual.
           MoveToNextToken(ti);
           SkipSpaceTokens(ti);
+          actual_ended_with_comma = true;
           break;
         }
       }
@@ -3704,6 +3825,12 @@ static void CollectActualArguments(Preprocessor* p,
         }
         StringAppend(va_args, actual->value);
         separate_va_arg = true;
+        if (actual_ended_with_comma &&
+            CurrentToken(ti) == PPTOK(closeparen)) {
+          // Preserve a trailing comma that is part of the variadic argument
+          // itself (for example, F(,) when F has only `...`).
+          StringAppendChar(va_args, PPTOK(comma));
+        }
       } else {
         // Note the fact that we have too many arguments for an non-varargs
         // macro.
@@ -3823,6 +3950,88 @@ static void ReplaceFunctionLikeMacroText(TokenIterator* ti,
   ti->next = macro_name_token_index + tokens->length;
 }
 
+static bool ContainsPreprocessingTokens(Preprocessor* p, String* tokens) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  while (CurrentToken(&ti) != PPTOK(end)) {
+    if (CurrentToken(&ti) != PPTOK(space) &&
+        CurrentToken(&ti) != PPTOK(comment)) {
+      return true;
+    }
+    MoveToNextToken(&ti);
+  }
+  return false;
+}
+
+static void ExpandVaOpt(Preprocessor* p, String* rep, bool has_va_args) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, rep);
+  while (CurrentToken(&ti) != PPTOK(end)) {
+    if (CurrentToken(&ti) != PPTOK(identifier)) {
+      MoveToNextToken(&ti);
+      continue;
+    }
+
+    String spelling = {0};
+    GetCurrentTokenSpelling(&ti, &spelling);
+    bool is_va_opt = StringEqual(&spelling, "__VA_OPT__");
+    StringDestruct(&spelling);
+    if (!is_va_opt) {
+      MoveToNextToken(&ti);
+      continue;
+    }
+
+    size_t va_opt_start = ti.curr;
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+    if (CurrentToken(&ti) != PPTOK(openparen)) {
+      // This was diagnosed while the replacement list was defined.
+      return;
+    }
+
+    size_t contents_start = ti.next;
+    int depth = 1;
+    MoveToNextToken(&ti);
+    while (CurrentToken(&ti) != PPTOK(end)) {
+      if (CurrentToken(&ti) == PPTOK(openparen)) {
+        depth++;
+      } else if (CurrentToken(&ti) == PPTOK(closeparen)) {
+        depth--;
+        if (depth == 0) {
+          break;
+        }
+      }
+      MoveToNextToken(&ti);
+    }
+    if (depth != 0) {
+      // This was diagnosed while the replacement list was defined.
+      return;
+    }
+
+    size_t contents_end = ti.curr;
+    size_t va_opt_end = ti.next;
+    String replacement = {0};
+    if (has_va_args) {
+      StringInitFromSegment(&replacement, &rep->value[contents_start],
+                            contents_end - contents_start);
+    } else {
+      // Like an empty macro argument, an omitted __VA_OPT__ contributes a
+      // placemarker so a neighboring ## still has a well-defined operand.
+      StringAppendChar(&replacement, PPTOK(placemarker));
+    }
+    StringReplaceString(rep, va_opt_start, va_opt_end - va_opt_start,
+                        &replacement);
+    StringDestruct(&replacement);
+
+    // Restart at the replacement point so nested __VA_OPT__ occurrences in
+    // retained contents are processed as well.
+    TokenIteratorInit(&ti, p, rep);
+    while (CurrentToken(&ti) != PPTOK(end) && ti.curr < va_opt_start) {
+      MoveToNextToken(&ti);
+    }
+  }
+}
+
 // Process any macros and arguments in the replacement text. This also
 // handles the # operator.
 static void ProcessFunctionLikeReplacementText(Preprocessor* p,
@@ -3834,6 +4043,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   // Copy replacement text tokens.
   String rep;
   StringInit(&rep, macro->replacement_text.value);
+
+  // __VA_OPT__ controls preprocessing tokens before parameter replacement,
+  // stringification, token pasting, and the final rescan.
+  ExpandVaOpt(p, &rep, ContainsPreprocessingTokens(p, va_args));
   
   // Iterator for passing over replacement text (tokens).
   TokenIterator rep_ti;
@@ -3847,7 +4060,14 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
         GetCurrentTokenSpelling(&rep_ti, &possible_arg);
         if (StringEqual(&possible_arg, "__VA_ARGS__")) {
           if (macro->varargs) {
-            ReplaceCurrentToken(&rep_ti, va_args);
+            if (va_args->length == 0) {
+              String placemarker = {0};
+              StringAppendChar(&placemarker, PPTOK(placemarker));
+              ReplaceCurrentToken(&rep_ti, &placemarker);
+              StringDestruct(&placemarker);
+            } else {
+              ReplaceCurrentToken(&rep_ti, va_args);
+            }
           } else {
             PreprocessorError(p, "Use of __VA_ARGS__ outside of varargs macro");
           }
@@ -3895,7 +4115,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
         String possible_arg;
         GetCurrentTokenSpelling(&rep_ti, &possible_arg);
 
-        String* actual = FindMacroArg(args, &possible_arg);
+        String* actual =
+            StringEqual(&possible_arg, "__VA_ARGS__") && macro->varargs
+                ? va_args
+                : FindMacroArg(args, &possible_arg);
         if (actual == NULL) {
           // Not an argument, error.
           PreprocessorError(p, "# is not followed by a macro argument name");
@@ -4137,7 +4360,7 @@ static void ProcessPossibleMacro(Preprocessor* p,
   if (StringEqual(possible_macro_name, "_Pragma")) {
     ProcessPragmaOperator(p, ti);
   } else if (StringEqual(possible_macro_name, "__has_embed") &&
-             CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+             LanguageSupportsEmbed() &&
              p->lex->preprocessor_mode) {
     ProcessHasEmbedOperator(p, ti);
   } else if (StringEqual(possible_macro_name, "__FILE__")) {

@@ -82,7 +82,8 @@ void AddInjectedEnumName(TypeParser* parser, Symbol* tag) {
 static bool EnumUnderlyingTypesMatch(Enum* e, TypeRecord* type) {
   return e != NULL && type != NULL && e->has_fixed_underlying &&
          e->fixed_underlying_type == type->type &&
-         e->fixed_underlying_size == type->size;
+         e->fixed_underlying_size == type->size &&
+         e->fixed_underlying_bit_width == type->bit_width;
 }
 
 static void SetEnumFixedUnderlying(Enum* e, TypeRecord* type) {
@@ -92,12 +93,27 @@ static void SetEnumFixedUnderlying(Enum* e, TypeRecord* type) {
   e->has_fixed_underlying = true;
   e->fixed_underlying_type = type->type;
   e->fixed_underlying_size = type->size;
+  e->fixed_underlying_bit_width = type->bit_width;
 }
 
 static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
-  if (!CompilerIsCXX() || !LexMatch(parser->lex, TOK(colon))) {
+  if (!(CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC23)) ||
+      !LexLookingAt(parser->lex, TOK(colon))) {
     return NULL;
   }
+
+  // In C23, `enum E` can itself be a type-name followed by a grammar colon
+  // (for example in a generic association).  Treat ':' as an underlying-type
+  // introducer only when a type actually follows it.
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  if (!SyntaxLookingAtType(parser->syntax)) {
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
 
   TypeParser underlying_parser;
   TypeParserInit(&underlying_parser, parser->lex, parser->syntax, STO(implicit),
@@ -107,18 +123,46 @@ static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
   if (type == NULL) {
     type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   }
-  if (!TypeIsIntegral(type) || TypeIsEnum(type)) {
+  if (!TypeIsIntegral(type) || TypeIsEnum(type) ||
+      (!CompilerIsCXX() && (TypeIsBool(type) || TypeIsAtomic(type)))) {
     SyntaxError(parser->syntax, "Enum underlying type must be integral");
     TypeRecordDelete(type);
     type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  } else if (!CompilerIsCXX()) {
+    // C23 ignores qualifiers on the specified integer type.
+    type->qualifiers = kQualPlain;
   }
   return type;
+}
+
+static bool FixedEnumValueIsRepresentable(const Enum* e, int64_t value) {
+  if (e == NULL || !e->has_fixed_underlying ||
+      e->fixed_underlying_size <= 0) {
+    return true;
+  }
+  int bits = (e->fixed_underlying_type & kTypeBitInt) != 0
+                 ? e->fixed_underlying_bit_width
+                 : e->fixed_underlying_size * 8;
+  if ((e->fixed_underlying_type & kTypeUnsigned) != 0) {
+    if (value < 0) {
+      return false;
+    }
+    return bits >= 63 ||
+           (uint64_t)value <= (UINT64_C(1) << bits) - UINT64_C(1);
+  }
+  if (bits >= 64) {
+    return true;
+  }
+  int64_t minimum = -(INT64_C(1) << (bits - 1));
+  int64_t maximum = (INT64_C(1) << (bits - 1)) - INT64_C(1);
+  return value >= minimum && value <= maximum;
 }
 
 static void ApplyEnumUnderlyingType(Syntax* syntax, Enum* e,
                                     TypeRecord* enum_type,
                                     TypeRecord* explicit_underlying,
-                                    bool is_scoped) {
+                                    bool is_scoped,
+                                    bool was_previously_declared) {
   TypeRecord* fixed_underlying = explicit_underlying;
   if (fixed_underlying == NULL && is_scoped && !e->has_fixed_underlying) {
     fixed_underlying = NewTypeRecordWithSize(kTypeInt, kQualPlain);
@@ -126,14 +170,23 @@ static void ApplyEnumUnderlyingType(Syntax* syntax, Enum* e,
   if (fixed_underlying == NULL) {
     return;
   }
+  if (explicit_underlying != NULL && was_previously_declared &&
+      !e->has_fixed_underlying) {
+    SyntaxError(syntax,
+                "Enum %s cannot be redeclared with a fixed underlying type",
+                e->tag_name != NULL ? e->tag_name->value : "<anonymous>");
+    return;
+  }
   if (e->has_fixed_underlying &&
       !EnumUnderlyingTypesMatch(e, fixed_underlying)) {
     SyntaxError(syntax, "Enum %s redeclared with different underlying type",
                 e->tag_name != NULL ? e->tag_name->value : "<anonymous>");
+    return;
   }
   SetEnumFixedUnderlying(e, fixed_underlying);
   enum_type->type = kTypeEnum | e->fixed_underlying_type;
   enum_type->size = e->fixed_underlying_size;
+  enum_type->bit_width = e->fixed_underlying_bit_width;
   if (explicit_underlying == NULL) {
     TypeRecordDelete(fixed_underlying);
   }
@@ -147,6 +200,7 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
     kUnsignedInt,
     kSignedInt,
   } type_selection = kUnsignedInt;
+  bool next_value_overflow = false;
   
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
     if (LexLookingAt(parser->lex, TOK(identifier))) {
@@ -169,8 +223,21 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
           }
           next_value = e->next_value;
         }
-        e->next_value = (int32_t)next_value;
+        e->next_value = next_value;
+        next_value_overflow = false;
         ASTNodeDelete(value);
+      } else if (next_value_overflow) {
+        SyntaxError(parser->syntax,
+                    "Value of enum constant %s exceeds the supported integer "
+                    "constant range",
+                    const_name.value);
+      }
+      if (!FixedEnumValueIsRepresentable(e, e->next_value)) {
+        SyntaxError(parser->syntax,
+                    "Value %" PRId64
+                    " of enum constant %s is not representable in the "
+                    "fixed underlying type",
+                    e->next_value, const_name.value);
       }
       // Determine the type of the enum based on the constant value.
       switch (type_selection) {
@@ -203,12 +270,21 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       Symbol* ec = e->is_scoped
           ? NewScopedEnumConstant(const_name.value, e->next_value, enum_type)
           : NewEnumConstant(const_name.value, e->next_value);
+      if (!CompilerIsCXX() && e->has_fixed_underlying) {
+        TypeRecordDelete(ec->type);
+        ec->type = TypeRecordCopy(enum_type);
+        ec->type->qualifiers |= kQualConst;
+      }
       ec->dependent_value_template_parameter_index =
           dependent_value_template_parameter_index;
       if (dependent_value_template_parameter_index >= 0) {
         ec->flags.value_set = false;
       }
-      e->next_value++;
+      if (e->next_value == INT64_MAX) {
+        next_value_overflow = true;
+      } else {
+        e->next_value++;
+      }
       StringDestruct(&const_name);
 
       if (e->is_scoped) {
@@ -261,6 +337,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     SyntaxFakeTagName(parser->syntax, tag_name);
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  bool was_previously_declared = tag != NULL;
   if (tag != NULL) {
     if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of enum %s",
@@ -290,7 +367,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     AddInjectedEnumName(parser, tag);
   }
   ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
-                          is_scoped);
+                          is_scoped, was_previously_declared);
 
   // Note in the symbol that this tag is now defined and not
   // forward declared.
@@ -404,7 +481,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       e->tag_symbol = tag;
       e->is_scoped = is_scoped;
       ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
-                              is_scoped);
+                              is_scoped, false);
       SyntaxAddTag(parser->syntax, tag);
       AddInjectedEnumName(parser, tag);
     } else {
@@ -419,7 +496,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
                     tag->name.value);
       }
       ApplyEnumUnderlyingType(parser->syntax, tag->type->info.enum_info,
-                              tag->type, explicit_underlying, is_scoped);
+                              tag->type, explicit_underlying, is_scoped, true);
     }
   }
 

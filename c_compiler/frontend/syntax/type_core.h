@@ -12,6 +12,8 @@
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
 TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
+TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
+                                Qualifiers quals);
 void TypeRecordDelete(TypeRecord* record);
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
@@ -86,8 +88,9 @@ void CXXFriendTypeDeclarationDelete(CXXFriendTypeDeclaration* declaration);
 void StructAddFriendFunction(Struct* str, Symbol* friend_function);
 bool StructMemberIsBitField(StructMember* member);
 
-Symbol* NewEnumConstant(const char* name, int value);
-Symbol* NewScopedEnumConstant(const char* name, int value, TypeRecord* enum_type);
+Symbol* NewEnumConstant(const char* name, int64_t value);
+Symbol* NewScopedEnumConstant(const char* name, int64_t value,
+                              TypeRecord* enum_type);
 Enum* NewEnum(void);
 void EnumDelete(Enum* e);
 Symbol* EnumFindConstant(Enum* e, String* name);

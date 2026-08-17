@@ -2100,6 +2100,9 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
     } else {
       SyntaxError(syntax, "static_assert message must be a string literal");
     }
+  } else if (!CompilerIsCXX() &&
+             !CompilerCAtLeast(kLanguageStandardC23)) {
+    SyntaxError(syntax, "_Static_assert requires a message before C23");
   }
   SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
@@ -2910,7 +2913,7 @@ static bool IsKnownAttribute(const char* name) {
     "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
     "weakref", "dllimport", "dllexport", "common", "nocommon", "tls_model",
     "aligned_alloc", "assume_aligned", "likely", "unlikely",
-    "no_unique_address",
+    "no_unique_address", "reproducible", "unsequenced",
   };
   for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
     if (strcmp(known[i], name) == 0) {
@@ -2963,7 +2966,8 @@ void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
 }
 
 bool SyntaxLookingAtCXXAttribute(Syntax* syntax) {
-  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(lsquare))) {
+  if ((!CompilerIsCXX() && !CompilerCAtLeast(kLanguageStandardC23)) ||
+      !LexLookingAt(syntax->lex, TOK(lsquare))) {
     return false;
   }
   LexCheckpoint checkpoint;
@@ -3071,6 +3075,9 @@ static const char* CanonicalCXXAttributeName(const char* ns,
   if (strcmp(name, "nodiscard") == 0) {
     return "warn_unused_result";
   }
+  if (strcmp(name, "__noreturn__") == 0) {
+    return "noreturn";
+  }
   return name;
 }
 
@@ -3172,7 +3179,8 @@ static void AppendAlignedAttribute(Vector* attrs, int alignment) {
 }
 
 bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
-  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(alignas))) {
+  if ((!CompilerIsCXX() && !CompilerCAtLeast(kLanguageStandardC11)) ||
+      !LexMatch(syntax->lex, TOK(alignas))) {
     return false;
   }
 
@@ -3229,13 +3237,17 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
 
 // Interprets attributes that have just been attached to a declared symbol and
 // affect the symbol/type directly (layout and function-behavior flags).
-void SyntaxApplyDeclarationAttributes(Symbol* sym) {
+void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
   if (sym == NULL) {
     return;
   }
 
   // Function-behavior flags (also meaningful on forward declarations).
   if (AttributeListHas(&sym->attributes, "noreturn")) {
+    if (!TypeIsFunction(sym->type) ||
+        StorageIs(sym->storage, STO(typedef))) {
+      SyntaxError(syntax, "'noreturn' attribute applies only to functions");
+    }
     sym->flags.noreturn = true;
   }
   if (AttributeListHas(&sym->attributes, "always_inline")) {
@@ -6457,7 +6469,15 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       }
     
       // Remove __thread from mask and check for multiple bits set.
-      if (!IsPowerOf2OrZero((new | old) & ~STO(thread))) {
+      Storage compatibility_mask = STO(thread);
+      if (CompilerCAtLeast(kLanguageStandardC23) &&
+          StorageIs(new | old, STO(auto))) {
+        compatibility_mask |= STO(auto);
+      }
+      if (!IsPowerOf2OrZero((new | old) & ~compatibility_mask) ||
+          (CompilerCAtLeast(kLanguageStandardC23) &&
+           StorageIs(new | old, STO(auto)) &&
+           StorageIs(new | old, STO(typedef)))) {
         SyntaxError(syntax,
                     "Multiple incompatible storage specifiers");
       }
@@ -6468,6 +6488,17 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                       "Duplicate 'inline' specifier");
       }
       *is_inline = true;
+    } else if (LexMatch(syntax->lex, TOK(noreturn))) {
+      if (AttributeListHas(attributes, "noreturn")) {
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate '_Noreturn' specifier");
+      } else {
+        VectorAppend(attributes, NewAttribute("noreturn"));
+      }
+      if (CompilerCAtLeast(kLanguageStandardC23)) {
+        SyntaxWarning(syntax, "deprecated-declarations",
+                      "'_Noreturn' is deprecated in C23; use [[noreturn]]");
+      }
     } else if (LexLookingAt(syntax->lex, TOK(explicit))) {
       bool saw_explicit = false;
       bool explicit_value =
@@ -6538,10 +6569,27 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
     } else {
       if (type_specifier.type == kTypeImplicit &&
           type_specifier.type_record == NULL) {
-        SyntaxWarning(syntax, "implicit-int",
-                      "type specifier missing, defaults to int");
+        if (CompilerCAtLeast(kLanguageStandardC23) &&
+            StorageIs(*storage, STO(auto))) {
+          *type = NewTypeRecordWithSize(kTypeAuto, type_specifier.quals);
+          *storage &= ~STO(auto);
+        } else if (CompilerCAtLeast(kLanguageStandardC23)) {
+          SyntaxError(syntax, "type specifier missing in declaration");
+          *type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+        } else {
+          SyntaxWarning(syntax, "implicit-int",
+                        "type specifier missing, defaults to int");
+          *type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+        }
+      } else {
+        *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+        if (CompilerCAtLeast(kLanguageStandardC23) &&
+            StorageIs(*storage, STO(auto)) &&
+            !IsPowerOf2OrZero(*storage & ~STO(thread))) {
+          SyntaxError(syntax,
+                      "Multiple incompatible storage specifiers");
+        }
       }
-      *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
       if (parser.placeholder_variable_constraint != NULL) {
         ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
         syntax->pending_placeholder_variable_constraint =
@@ -6626,6 +6674,339 @@ static bool TryParseCXXDeductionGuide(Syntax* syntax, Symbol* sym) {
   return true;
 }
 
+static bool IsC23InferredAutoType(TypeRecord* type) {
+  return !CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+         type != NULL && TypeContainsAuto(type);
+}
+
+typedef struct {
+  Symbol* symbol;
+  bool found;
+} C23AutoSelfReference;
+
+static void FindC23AutoSelfReference(ASTNode* node, void* data, int child_id,
+                                    VisitorMode mode) {
+  (void)child_id;
+  C23AutoSelfReference* search = data;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)node)->symbol == search->symbol) {
+    search->found = true;
+  }
+}
+
+static void ValidateC23AutoDeclarator(Syntax* syntax, Symbol* sym) {
+  if (sym == NULL || !IsC23InferredAutoType(sym->type)) {
+    return;
+  }
+  if (sym->type->declarator != kDeclPrimitive ||
+      (sym->type->type & kTypeAuto) == 0) {
+    SyntaxError(syntax,
+                "C23 inferred auto requires a simple object declarator");
+  }
+  if (TypeIsFunction(sym->type)) {
+    SyntaxError(syntax, "C23 auto cannot infer a function type");
+  }
+}
+
+static void ValidateC23AutoInitializer(Syntax* syntax, Symbol* sym,
+                                       ASTNode* initializer) {
+  if (sym == NULL || !IsC23InferredAutoType(sym->type)) {
+    return;
+  }
+  if (initializer == NULL) {
+    SyntaxError(syntax, "C23 inferred auto requires an initializer");
+    return;
+  }
+  ASTNode* deduction_initializer = initializer;
+  if (deduction_initializer->op == AST_OP(init)) {
+    deduction_initializer = ((BinaryASTNode*)deduction_initializer)->right;
+  }
+  if (deduction_initializer == NULL ||
+      deduction_initializer->op != AST_OP(expr_init)) {
+    SyntaxError(syntax,
+                "C23 inferred auto requires an assignment-expression initializer");
+  }
+  C23AutoSelfReference search = {.symbol = sym, .found = false};
+  ASTNodeVisit(deduction_initializer, FindC23AutoSelfReference, 0, &search);
+  if (search.found) {
+    SyntaxError(syntax,
+                "C23 inferred auto initializer cannot refer to itself");
+  }
+}
+
+static bool C23ConstexprTypeContainsVLA(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsVLA(current)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool C23ConstexprObjectTypeIsAllowed(TypeRecord* type) {
+  if (type == NULL || C23ConstexprTypeContainsVLA(type) ||
+      (type->qualifiers &
+       (kQualAtomic | kQualVolatile | kQualRestrict)) != 0) {
+    return false;
+  }
+  if (TypeIsPointer(type)) {
+    return true;
+  }
+  if (TypeIsArray(type)) {
+    return C23ConstexprObjectTypeIsAllowed(type->next);
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    Struct* aggregate = type->info.struct_info;
+    for (size_t i = 0; i < aggregate->members.length; i++) {
+      StructMember* member = aggregate->members.value.p[i];
+      if (member != NULL && member->symbol != NULL &&
+          !member->is_static && !member->is_member_function &&
+          !C23ConstexprObjectTypeIsAllowed(member->symbol->type)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool C23InitializerIsNullPointer(ASTNode* initializer) {
+  if (initializer == NULL) {
+    return false;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    return C23InitializerIsNullPointer(
+        ((ExpressionInitializerASTNode*)initializer)->expr);
+  }
+  if (initializer->op == AST_OP(designated_init)) {
+    return C23InitializerIsNullPointer(
+        ((DesignatedInitializerASTNode*)initializer)->init);
+  }
+  if (initializer->op == AST_OP(cast)) {
+    return C23InitializerIsNullPointer(((CastASTNode*)initializer)->expr);
+  }
+  return TypeIsNullPointer(initializer->type) ||
+         (initializer->op == AST_OP(number) &&
+          ((ConstantASTNode*)initializer)->value.ivalue == 0);
+}
+
+static bool C23ConstexprTypeHasPointerSubobject(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsPointer(type)) {
+    return true;
+  }
+  if (TypeIsArray(type)) {
+    return C23ConstexprTypeHasPointerSubobject(type->next);
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    Struct* aggregate = type->info.struct_info;
+    for (size_t i = 0; i < aggregate->members.length; i++) {
+      StructMember* member = aggregate->members.value.p[i];
+      if (member != NULL && member->symbol != NULL &&
+          !member->is_static && !member->is_member_function &&
+          C23ConstexprTypeHasPointerSubobject(member->symbol->type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool C23ConstexprPointerSubobjectsAreNull(TypeRecord* type,
+                                                 ASTNode* initializer) {
+  if (!C23ConstexprTypeHasPointerSubobject(type)) {
+    return true;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(designated_init)) {
+    DesignatedInitializerASTNode* designated =
+        (DesignatedInitializerASTNode*)initializer;
+    TypeRecord* selected = type;
+    for (size_t i = 0;
+         selected != NULL && designated->designators != NULL &&
+         i < designated->designators->length; i++) {
+      Designator* designator = designated->designators->value.p[i];
+      if (designator->designator_type == kDesignatorArray &&
+          TypeIsArray(selected)) {
+        selected = selected->next;
+      } else if (designator->designator_type == kDesignatorStruct &&
+                 TypeIsStructOrUnion(selected)) {
+        StructMember* member =
+            designator->is_resolved_member
+                ? designator->value.struct_member
+                : FindStructMemberByName(
+                      selected->info.struct_info,
+                      designator->value.struct_member_name->value);
+        selected =
+            member != NULL && member->symbol != NULL ? member->symbol->type
+                                                      : NULL;
+      } else {
+        selected = NULL;
+      }
+    }
+    return selected != NULL &&
+           C23ConstexprPointerSubobjectsAreNull(selected, designated->init);
+  }
+  if (TypeIsPointer(type)) {
+    return C23InitializerIsNullPointer(initializer);
+  }
+  if (initializer != NULL && initializer->op == AST_OP(init)) {
+    initializer = ((BinaryASTNode*)initializer)->right;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer == NULL || initializer->op != AST_OP(braced_init)) {
+    return false;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  if (TypeIsArray(type)) {
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      if (!C23ConstexprPointerSubobjectsAreNull(
+              type->next, braced->initializers->value.p[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  Struct* aggregate = type->info.struct_info;
+  size_t initializer_index = 0;
+  for (size_t i = 0; i < aggregate->members.length; i++) {
+    StructMember* member = aggregate->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    ASTNode* member_initializer =
+        initializer_index < braced->initializers->length
+            ? braced->initializers->value.p[initializer_index]
+            : NULL;
+    if (member_initializer == NULL) {
+      // Omitted aggregate members are zero-initialized.
+      initializer_index++;
+      continue;
+    }
+    if (member_initializer->op == AST_OP(designated_init)) {
+      if (!C23ConstexprPointerSubobjectsAreNull(type, member_initializer)) {
+        return false;
+      }
+    } else if (!C23ConstexprPointerSubobjectsAreNull(member->symbol->type,
+                                                     member_initializer)) {
+      return false;
+    }
+    initializer_index++;
+    if (aggregate->is_union) {
+      break;
+    }
+  }
+  return true;
+}
+
+static bool C23ConstexprIntegerConstantIsRepresentable(TypeRecord* type,
+                                                       ASTNode* initializer) {
+  if (type == NULL || !TypeIsIntegral(type) || initializer == NULL) {
+    return true;
+  }
+  if (initializer->op == AST_OP(init)) {
+    initializer = ((BinaryASTNode*)initializer)->right;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    if (braced->initializers->length != 1) {
+      return true;
+    }
+    initializer = braced->initializers->value.p[0];
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+    }
+  }
+  if (initializer == NULL) {
+    return true;
+  }
+  initializer = AnalyzeExpression(initializer);
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(initializer, &value)) {
+    return true;
+  }
+  if (TypeIsBool(type)) {
+    return value == 0 || value == 1;
+  }
+  int bits = TypeIsBitInt(type) ? type->bit_width : type->size * 8;
+  if (bits <= 0 || bits >= 64) {
+    return !TypeIsUnsigned(type) || value >= 0;
+  }
+  if (TypeIsUnsigned(type)) {
+    uint64_t maximum = (UINT64_C(1) << bits) - 1;
+    return value >= 0 && (uint64_t)value <= maximum;
+  }
+  int64_t minimum = -(INT64_C(1) << (bits - 1));
+  int64_t maximum = (INT64_C(1) << (bits - 1)) - 1;
+  return value >= minimum && value <= maximum;
+}
+
+static bool C23ConstexprFloatingConstantIsRepresentable(TypeRecord* type,
+                                                        ASTNode* initializer) {
+  if (type == NULL || !TypeIsFloatingPoint(type) || initializer == NULL ||
+      !TypeIsFloat(type)) {
+    return true;
+  }
+  if (initializer->op == AST_OP(init)) {
+    initializer = ((BinaryASTNode*)initializer)->right;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer == NULL) {
+    return true;
+  }
+  initializer = AnalyzeExpression(initializer);
+  double value = 0;
+  if (TypeIsIntegral(initializer->type)) {
+    int64_t integer_value = 0;
+    if (!EvaluateIntegerExpression(initializer, &integer_value)) {
+      return true;
+    }
+    value = (double)integer_value;
+  } else if (!EvaluateFloatingPointExpression(initializer, &value)) {
+    return true;
+  }
+  float narrowed = (float)value;
+  return (double)narrowed == value;
+}
+
+static void ValidateC23ConstexprObject(Syntax* syntax, Symbol* sym,
+                                       ASTNode* initializer) {
+  if (CompilerIsCXX() || !CompilerCAtLeast(kLanguageStandardC23) ||
+      sym == NULL || !sym->flags.is_constexpr || TypeIsFunction(sym->type)) {
+    return;
+  }
+  if (!C23ConstexprObjectTypeIsAllowed(sym->type)) {
+    SyntaxError(
+        syntax,
+        "C constexpr object cannot have variably modified, atomic, volatile, "
+        "or restrict-qualified type");
+  }
+  if (initializer != NULL &&
+      !C23ConstexprPointerSubobjectsAreNull(sym->type, initializer)) {
+    SyntaxError(syntax,
+                "C constexpr pointer subobjects must be initialized to null");
+  }
+  if (!C23ConstexprIntegerConstantIsRepresentable(sym->type, initializer)) {
+    SyntaxError(
+        syntax,
+        "C constexpr initializer is not exactly representable in its type");
+  }
+  if (!C23ConstexprFloatingConstantIsRepresentable(sym->type, initializer)) {
+    SyntaxError(
+        syntax,
+        "C constexpr initializer is not exactly representable in its type");
+  }
+}
+
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
                                          Storage storage,
@@ -6640,6 +7021,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
 
     Symbol* sym = TypeParserParseDeclarator(parser, type);
+    ValidateC23AutoDeclarator(syntax, sym);
     // A variable-template specialization: `template<...> T name<pattern> = ...`.
     // The declarator carried a template-argument list and an existing variable
     // template of the same name is in scope.  Register it as a partial/explicit
@@ -6737,6 +7119,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                       "entity",
                       sym->name.value);
         }
+      }
+      if (IsC23InferredAutoType(sym->type) && old_sym != NULL) {
+        SyntaxError(syntax,
+                    "C23 inferred auto declaration cannot redeclare '%s'",
+                    sym->name.value);
       }
       if (parser->cxx_member_definition != NULL &&
           syntax->parsing_template_specialization) {
@@ -6908,7 +7295,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    SyntaxApplyDeclarationAttributes(sym);
+    SyntaxApplyDeclarationAttributes(syntax, sym);
     if (parser->placeholder_variable_constraint != NULL) {
       sym->associated_constraint = parser->placeholder_variable_constraint;
       parser->placeholder_variable_constraint = NULL;
@@ -6943,6 +7330,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (old_sym != NULL) {
       if (sym->flags.is_module_private && !old_sym->flags.is_exported) {
         old_sym->flags.is_module_private = true;
+      }
+      if (sym->flags.noreturn) {
+        old_sym->flags.noreturn = true;
+        if (!AttributeListHas(&old_sym->attributes, "noreturn")) {
+          Attribute* noreturn =
+              AttributeListFind(&sym->attributes, "noreturn");
+          if (noreturn != NULL) {
+            VectorAppend(&old_sym->attributes, AttributeClone(noreturn));
+          }
+        }
       }
       if (sym->asm_name.length != 0) {
         StringSetString(&old_sym->asm_name, &sym->asm_name);
@@ -6988,6 +7385,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
   
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
+      if (!CompilerIsCXX() && parser->is_constexpr) {
+        SyntaxError(syntax, "C constexpr functions are not supported");
+      }
       if (TypeContainsAuto(sym->type) &&
           !TypeFunctionReturnContainsAuto(sym->type)) {
         SyntaxError(syntax, "auto function parameter type is not supported yet");
@@ -7084,6 +7484,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
       }
     }
+    ValidateC23AutoInitializer(syntax, sym, initializer);
+    ValidateC23ConstexprObject(syntax, sym, initializer);
     if (TypeContainsAuto(sym->type) && initializer == NULL) {
       SyntaxError(syntax, "auto variable requires an initializer");
     } else if (TypeContainsAuto(sym->type)) {
@@ -7144,6 +7546,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     }
 
+    if (IsC23InferredAutoType(type) &&
+        LexLookingAt(syntax->lex, TOK(comma))) {
+      SyntaxError(syntax,
+                  "C23 inferred auto declaration must contain one declarator");
+    }
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
@@ -9226,6 +9633,15 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
                             &is_explicit, &type, &attributes,
                             kParsingFileScope);
 
+  if (!CompilerIsCXX() && is_constexpr) {
+    if (StorageIs(storage, STO(extern))) {
+      SyntaxError(syntax,
+                  "file-scope C constexpr object cannot have external linkage");
+    }
+    storage &= ~STO(extern);
+    storage |= STO(static);
+  }
+
   if (StorageIs(storage, STO(auto)|STO(register))) {
     SyntaxError(syntax, "Illegal global storage specified: %s",
                 StorageIs(storage, STO(register)) ? "register" : "auto");
@@ -10700,7 +11116,7 @@ static Vector* ParseStructuredBindingNames(Syntax* syntax, Vector* symbols,
                     "Attributes on structured bindings require C++26");
       }
       SyntaxParseCXXAttributes(syntax, &sym->attributes);
-      SyntaxApplyDeclarationAttributes(sym);
+      SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     if (!SyntaxAddSymbol(syntax, sym)) {
       SyntaxError(syntax, "Duplicate structured binding name: %s",
@@ -11066,6 +11482,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       break;
     }
     Symbol* sym = TypeParserParseDeclarator(parser, type);
+    ValidateC23AutoDeclarator(syntax, sym);
     if (sym != NULL) {
       if (TypeIsFunction(sym->type)) {
         if (parser->is_constinit) {
@@ -11092,6 +11509,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       MarkCXX26AutomaticNameIndependent(sym);
       Symbol* old_sym =
           FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
+      if (IsC23InferredAutoType(sym->type) && old_sym != NULL) {
+        SyntaxError(syntax,
+                    "C23 inferred auto declaration cannot redeclare '%s'",
+                    sym->name.value);
+      }
       bool ok = true;
       if (old_sym != NULL && !sym->flags.is_name_independent) {
         // We have this symbol already.  If it's a declaration then it's
@@ -11214,7 +11636,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     // Symbol takes ownerhip of attribute strings.
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    SyntaxApplyDeclarationAttributes(sym);
+    SyntaxApplyDeclarationAttributes(syntax, sym);
     if (StorageIs(storage, STO(static)) && !TypeIsFunction(sym->type)) {
       SetCXXInlineLocalStaticAsmName(sym, "");
     }
@@ -11224,6 +11646,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
+      if (!CompilerIsCXX() && parser->is_constexpr) {
+        SyntaxError(syntax, "C constexpr functions are not supported");
+      }
       if (TypeContainsAuto(sym->type)) {
         SyntaxError(syntax, "auto function return type is not supported yet");
       }
@@ -11328,6 +11753,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                       "Class template argument deduction requires an initializer");
         }
       }
+      ValidateC23AutoInitializer(syntax, sym, initializer);
+      ValidateC23ConstexprObject(syntax, sym, initializer);
 
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
@@ -11348,7 +11775,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           // later body-analysis pass. Skip this inside a template, where the
           // initializer may be dependent and unanalyzable until instantiation
           // (decltype defers via dependent_decltype_expr there anyway).
-          (CompilerIsCXX() && TypeContainsAuto(sym->type) &&
+          (TypeContainsAuto(sym->type) &&
            syntax->current_template_parameters == NULL)) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
@@ -11360,6 +11787,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       }
     }
 
+    if (IsC23InferredAutoType(type) &&
+        LexLookingAt(syntax->lex, TOK(comma))) {
+      SyntaxError(syntax,
+                  "C23 inferred auto declaration must contain one declarator");
+    }
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
@@ -11573,6 +12005,8 @@ bool SyntaxCurrentClassNameStartsType(Syntax* syntax) {
 
 bool SyntaxLookingAtType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
+    case TOK(atomic):
+    case TOK(bitint):
     case TOK(char):
     case TOK(char8_t):
     case TOK(char16_t):
@@ -11602,6 +12036,9 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       return CompilerIsCXX();
     case TOK(decltype):
       return CompilerIsCXX();
+    case TOK(typeof):
+    case TOK(typeof_unqual):
+      return CompilerCAtLeast(kLanguageStandardC23);
     case TOK(typename):
       return CompilerIsCXX();
     case TOK(identifier): {
@@ -11889,6 +12326,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(register):
     case TOK(thread):
     case TOK(thread_local):
+    case TOK(noreturn):
     case TOK(typedef):
     case TOK(using):
     case TOK(namespace):
@@ -12031,11 +12469,14 @@ TokenClass ClassifyToken(Token tok) {
 
     case TOK(extern):
     case TOK(inline):
+    case TOK(noreturn):
     case TOK(register):
     case TOK(static):
     case TOK(typedef):
       return TC(stmt) | TC(decl);
 
+    case TOK(atomic):
+    case TOK(bitint):
     case TOK(bool):
     case TOK(char):
     case TOK(char8_t):

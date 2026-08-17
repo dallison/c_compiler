@@ -290,9 +290,11 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
   IRNode* lhs_node = inst->inputs.value.p[0];
   bool is_unsigned =
       lhs_node->type != NULL && TypeIsUnsigned(lhs_node->type);
-  int width = inst->type != NULL && inst->type->size > 0
-                  ? inst->type->size * 8
-                  : 64;
+  int width = lhs_node->type != NULL && TypeIsBitInt(lhs_node->type)
+                  ? lhs_node->type->bit_width
+                  : (inst->type != NULL && inst->type->size > 0
+                         ? inst->type->size * 8
+                         : 64);
 
   switch (inst->opcode) {
     case IR_OP(movi):

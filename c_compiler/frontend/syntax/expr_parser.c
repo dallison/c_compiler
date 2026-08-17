@@ -35,8 +35,10 @@ static struct Intrinsic {
     {"__atomic_fetch_add", AST_OP(builtin_atomic_fetch_add), 3},
     {"__atomic_fetch_sub", AST_OP(builtin_atomic_fetch_sub), 3},
     {"__atomic_load_n", AST_OP(builtin_atomic_load), 2},
+    {"__atomic_signal_fence", AST_OP(builtin_atomic_fence), 1},
     {"__atomic_store_n", AST_OP(builtin_atomic_store), 3},
     {"__atomic_sub_fetch", AST_OP(builtin_atomic_sub_fetch), 3},
+    {"__atomic_thread_fence", AST_OP(builtin_atomic_fence), 1},
     {"__builtin_COLUMN", AST_OP(builtin_source_column), 0},
     {"__builtin_FILE", AST_OP(builtin_source_file), 0},
     {"__builtin_FUNCTION", AST_OP(builtin_source_function), 0},
@@ -121,9 +123,7 @@ static bool IntrinsicAvailableOnCurrentTarget(
     default:
       break;
   }
-  return !atomic ||
-         (!StringEqual(compiler->target_name, "6502") &&
-          !StringEqual(compiler->target_name, "65c02"));
+  return !atomic || CompilerTargetSupportsAtomics();
 }
 
 static bool IsBuiltinCallName(const char* name) {
@@ -1353,10 +1353,14 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         }
         if (!CompilerIsCXX() &&
             GetIntrinsic(FullyQualifiedIdentifierLast(&name)) == NULL) {
-          // Calling an unknown function is a warning.
-          SyntaxWarning(syntax, "implicit-function-declaration",
-                        "Calling undeclared function %s",
+          if (CompilerCAtLeast(kLanguageStandardC23)) {
+            SyntaxError(syntax, "Calling undeclared function %s",
                         FullyQualifiedIdentifierLast(&name));
+          } else {
+            SyntaxWarning(syntax, "implicit-function-declaration",
+                          "Calling undeclared function %s",
+                          FullyQualifiedIdentifierLast(&name));
+          }
         }
 
         // Declare the function so we don't get more warnings for the same
@@ -1364,7 +1368,8 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
                                                  kQualPlain);
         TypeRecord* func_type = NewFunctionTypeRecord();
-        func_type->info.function.unknown_args = true;
+        func_type->info.function.unknown_args =
+            !CompilerCAtLeast(kLanguageStandardC23);
         TypeRecordChain(func_type, type);
         symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), func_type,
                            STO(implicit));
@@ -1528,9 +1533,29 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
                        spelling[1] == 'b' || spelling[1] == 'B' ||
                        (spelling[1] >= '0' && spelling[1] <= '7'));
   bool has_u = StringContainsChar(&lex->suffix, 'U');
+  bool has_wb = StringContainsString(&lex->suffix, "WB");
   bool has_z = StringContainsChar(&lex->suffix, 'Z');
   bool has_ll = StringContainsString(&lex->suffix, "LL");
   bool has_l = !has_ll && StringContainsChar(&lex->suffix, 'L');
+  SourceLocation location = lex->current_token_location;
+  if (has_wb) {
+    uint64_t magnitude = (uint64_t)value;
+    int value_bits = 0;
+    for (uint64_t remaining = magnitude; remaining != 0; remaining >>= 1) {
+      value_bits++;
+    }
+    int bit_width = has_u ? (value_bits > 0 ? value_bits : 1)
+                          : (value_bits > 0 ? value_bits + 1 : 2);
+    if (bit_width > DAVECC_BITINT_MAXWIDTH) {
+      SyntaxError(syntax,
+                  "wb integer literal requires more than BITINT_MAXWIDTH bits");
+      bit_width = DAVECC_BITINT_MAXWIDTH;
+    }
+    TypeRecord* type =
+        NewBitIntTypeRecord(bit_width, has_u, kQualPlain);
+    LexNextToken(lex);
+    return NewIntConstantASTNode(value, type, location);
+  }
   if (has_z) {
     TypeRecord* type = NewSizeTypeRecord();
     if (!has_u) {
@@ -1538,7 +1563,6 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
       // size_t; adding u selects size_t itself.
       type->type &= ~kTypeUnsigned;
     }
-    SourceLocation location = lex->current_token_location;
     LexNextToken(lex);
     return NewIntConstantASTNode(value, type, location);
   }
@@ -1581,8 +1605,7 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
   }
 
   TypeRecord* type = NewTypeRecordWithSize(type_specifier, kQualPlain);
-  return NewIntConstantASTNode(value, type,
-                               syntax->lex->current_token_location);
+  return NewIntConstantASTNode(value, type, location);
 }
 
 static bool IsCXXSizeLiteralSuffix(String* suffix) {
@@ -1619,6 +1642,16 @@ static ASTNode* NewCXXLiteralOperatorIdentifier(Syntax* syntax, String* name,
   return NewIdentifierASTNode(symbol, location);
 }
 
+static Type UTF8LiteralElementType(void) {
+  if (CompilerCAtLeast(kLanguageStandardC23)) {
+    return kTypeChar | kTypeUnsigned;
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    return kTypeChar8;
+  }
+  return kTypeChar;
+}
+
 static ASTNode* NewStringLiteralArgument(String* contents,
                                          SourceLocation location,
                                          LiteralEncoding encoding) {
@@ -1633,9 +1666,8 @@ static ASTNode* NewStringLiteralArgument(String* contents,
   } else if (encoding == kLiteralEncodingUTF32) {
     element_size = 4;
     element_type = kTypeChar32;
-  } else if (encoding == kLiteralEncodingUTF8 &&
-             CompilerCXXAtLeast(kLanguageStandardCXX20)) {
-    element_type = kTypeChar8;
+  } else if (encoding == kLiteralEncodingUTF8) {
+    element_type = UTF8LiteralElementType();
   }
   TypeRecord* array = NewBasicArrayTypeRecord(
       kQualPlain, (int)(contents->length / element_size) + 1, false);
@@ -1937,9 +1969,8 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
           ? kTypeChar16
           : encoding == kLiteralEncodingUTF32
                 ? kTypeChar32
-                : encoding == kLiteralEncodingUTF8 &&
-                          CompilerCXXAtLeast(kLanguageStandardCXX20)
-                      ? kTypeChar8
+                : encoding == kLiteralEncodingUTF8
+                      ? UTF8LiteralElementType()
                       : kTypeChar;
   TypeRecord* type = NewTypeRecordWithSize(
       element_type, CompilerIsCXX() ? kQualConst : kQualPlain);
@@ -2010,9 +2041,8 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
           ? kTypeChar16
           : encoding == kLiteralEncodingUTF32
                 ? kTypeChar32
-                : encoding == kLiteralEncodingUTF8 &&
-                          CompilerCXXAtLeast(kLanguageStandardCXX20)
-                      ? kTypeChar8
+                : encoding == kLiteralEncodingUTF8
+                      ? UTF8LiteralElementType()
                       : kTypeChar;
   if (lex->ud_suffix.length != 0) {
     String suffix;
@@ -2148,6 +2178,11 @@ static bool GenericTypeMatch(TypeRecord* a, TypeRecord* b) {
       if (TypeIsEnum(a) || TypeIsEnum(b)) {
         return TypeIsEnum(a) && TypeIsEnum(b) &&
                a->info.enum_info == b->info.enum_info;
+      }
+      if (TypeIsBitInt(a) || TypeIsBitInt(b)) {
+        return TypeIsBitInt(a) && TypeIsBitInt(b) &&
+               a->bit_width == b->bit_width &&
+               TypeIsUnsigned(a) == TypeIsUnsigned(b);
       }
       return CanonicalPrimitive(a->type) == CanonicalPrimitive(b->type);
   }
@@ -3398,7 +3433,8 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   }
 
   // C11 _Generic selection (lexes as an identifier).
-  if (LexLookingAt(lex, TOK(identifier)) &&
+  if (CompilerCAtLeast(kLanguageStandardC11) &&
+      LexLookingAt(lex, TOK(identifier)) &&
       StringEqual(&lex->spelling, "_Generic")) {
     return ParseGenericSelection(syntax, followers);
   }
@@ -4200,6 +4236,35 @@ static int64_t CXXAttributeProbeValue(const char* attribute_namespace,
   return 0;
 }
 
+static int64_t CAttributeProbeValue(const char* attribute_namespace,
+                                    const char* name) {
+  if (!CompilerCAtLeast(kLanguageStandardC23)) {
+    return 0;
+  }
+  if (attribute_namespace != NULL) {
+    return strcmp(attribute_namespace, "gnu") == 0 &&
+                   SyntaxAttributeIsSupported(name)
+               ? 1
+               : 0;
+  }
+  if (strcmp(name, "deprecated") == 0 ||
+      strcmp(name, "fallthrough") == 0 ||
+      strcmp(name, "maybe_unused") == 0) {
+    return 201904L;
+  }
+  if (strcmp(name, "nodiscard") == 0) {
+    return 202003L;
+  }
+  if (strcmp(name, "noreturn") == 0) {
+    return 202202L;
+  }
+  if (strcmp(name, "unsequenced") == 0 ||
+      strcmp(name, "reproducible") == 0) {
+    return 202207L;
+  }
+  return 0;
+}
+
 static bool ParsePreprocessorProbeName(Syntax* syntax, String* name_space,
                                        String* name) {
   StringInit(name_space, NULL);
@@ -4275,16 +4340,23 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
                                    syntax->lex->current_token_location);
     }
   } else if (StringEqual(&syntax->lex->spelling, "__has_attribute") ||
-             StringEqual(&syntax->lex->spelling, "__has_cpp_attribute")) {
+             StringEqual(&syntax->lex->spelling, "__has_cpp_attribute") ||
+             (CompilerCAtLeast(kLanguageStandardC23) &&
+              StringEqual(&syntax->lex->spelling, "__has_c_attribute"))) {
     bool cxx_attribute =
         StringEqual(&syntax->lex->spelling, "__has_cpp_attribute");
+    bool c_attribute =
+        StringEqual(&syntax->lex->spelling, "__has_c_attribute");
     LexNextToken(syntax->lex);
     if (LexMatch(syntax->lex, TOK(lparen))) {
       String name_space;
       String name;
       int64_t value = 0;
       if (ParsePreprocessorProbeName(syntax, &name_space, &name)) {
-        if (cxx_attribute) {
+        if (c_attribute) {
+          value = CAttributeProbeValue(
+              name_space.length == 0 ? NULL : name_space.value, name.value);
+        } else if (cxx_attribute) {
           value = CXXAttributeProbeValue(
               name_space.length == 0 ? NULL : name_space.value, name.value);
         } else if (name_space.length == 0) {
@@ -5771,7 +5843,8 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     return ParseSizeof(syntax, followers);
   }
 
-  if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(alignof))) {
+  if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
+      LexMatch(syntax->lex, TOK(alignof))) {
     return ParseAlignof(syntax, followers);
   }
 

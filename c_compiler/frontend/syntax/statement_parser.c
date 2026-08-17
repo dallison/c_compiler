@@ -1312,7 +1312,7 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
       Vector* attributes = binding->attributes.value.p[i];
       AttributeListDestruct(&sym->attributes);
       AttributeListClone(&sym->attributes, attributes);
-      SyntaxApplyDeclarationAttributes(sym);
+      SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;
     sym->structured_binding_pack_size = -1;
@@ -1690,7 +1690,7 @@ static void AddExpansionStructuredBindingVariables(Syntax* syntax,
       Vector* attributes = binding->attributes.value.p[i];
       AttributeListDestruct(&sym->attributes);
       AttributeListClone(&sym->attributes, attributes);
-      SyntaxApplyDeclarationAttributes(sym);
+      SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;
     sym->flags.is_constexpr = binding->is_constexpr;
@@ -1854,6 +1854,28 @@ static ASTNode* ParseContinueStatement(Syntax* syntax, TokenClass followers,
   return NewASTNode(AST_OP(continue), NULL, location);
 }
 
+static bool LanguageAllowsLabelAtEndOfCompoundStatement(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX23);
+}
+
+static void DiagnoseLabelAtEndOfCompoundStatement(Syntax* syntax) {
+  SyntaxError(
+      syntax,
+      CompilerIsCXX()
+          ? "label at end of compound statement requires C++23"
+          : "label at end of compound statement requires C23");
+}
+
+static ASTNode* ParseStatementAfterLabel(Syntax* syntax,
+                                         TokenClass followers) {
+  if (CompilerCAtLeast(kLanguageStandardC23) &&
+      SyntaxLookingAtDeclaration(syntax)) {
+    return SyntaxParseLocalDeclaration(syntax);
+  }
+  return SyntaxParseStatement(syntax, followers);
+}
+
 static ASTNode* ParseCaseStatement(Syntax* syntax, TokenClass followers,
                                    SourceLocation location) {
   if (syntax->switch_count == 0) {
@@ -1874,10 +1896,10 @@ static ASTNode* ParseCaseStatement(Syntax* syntax, TokenClass followers,
   if (!LexLookingAt(syntax->lex, TOK(case)) &&
       !LexLookingAt(syntax->lex, TOK(default)) &&
       !LexLookingAt(syntax->lex, TOK(rbrace))) {
-    stmt = SyntaxParseStatement(syntax, followers);
+    stmt = ParseStatementAfterLabel(syntax, followers);
   } else if (LexLookingAt(syntax->lex, TOK(rbrace)) &&
-             !CompilerCXXAtLeast(kLanguageStandardCXX23)) {
-    SyntaxError(syntax, "label at end of compound statement requires C++23");
+             !LanguageAllowsLabelAtEndOfCompoundStatement()) {
+    DiagnoseLabelAtEndOfCompoundStatement(syntax);
   }
   return NewCaseLabelASTNode(expr, stmt, location);
 }
@@ -1892,11 +1914,11 @@ static ASTNode* ParseDefaultStatement(Syntax* syntax, TokenClass followers,
   }
   ASTNode* stmt = NULL;
   if (LexLookingAt(syntax->lex, TOK(rbrace))) {
-    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
-      SyntaxError(syntax, "label at end of compound statement requires C++23");
+    if (!LanguageAllowsLabelAtEndOfCompoundStatement()) {
+      DiagnoseLabelAtEndOfCompoundStatement(syntax);
     }
   } else {
-    stmt = SyntaxParseStatement(syntax, followers);
+    stmt = ParseStatementAfterLabel(syntax, followers);
   }
   return NewCaseLabelASTNode(NULL, stmt, location);
 }
@@ -2113,11 +2135,11 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
         LexNextToken(lex);  // Consume colon.
         ASTNode* label_stmt = NULL;
         if (LexLookingAt(lex, TOK(rbrace))) {
-          if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
-            SyntaxError(syntax, "label at end of compound statement requires C++23");
+          if (!LanguageAllowsLabelAtEndOfCompoundStatement()) {
+            DiagnoseLabelAtEndOfCompoundStatement(syntax);
           }
         } else {
-          label_stmt = SyntaxParseStatement(syntax, followers);
+          label_stmt = ParseStatementAfterLabel(syntax, followers);
         }
         stmt = NewLabelASTNode(label_name.value, label_stmt, false,
                                syntax->lex->current_token_location);

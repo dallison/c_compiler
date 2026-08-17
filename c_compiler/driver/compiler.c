@@ -76,7 +76,7 @@ static CompilerOptionDefinition compiler_options[] = {
      "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]"},
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
     {"-std", kCompilerOptionString, kOptionStandard, false,
-     "Select language standard: c89, c99, c11, c17, c++11, c++17, c++20, c++23, c++26"},
+     "Select language standard: c89, c99, c11, c17, c23, c++11, c++17, c++20, c++23, c++26"},
     {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
      "Select constexpr evaluator: auto, pcode, ast, or audit"},
     {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
@@ -124,8 +124,50 @@ bool CompilerIsCXX(void) {
          compiler->language_standard >= kLanguageStandardCXX98;
 }
 
+bool CompilerCAtLeast(LanguageStandard standard) {
+  return compiler != NULL && !CompilerIsCXX() &&
+         compiler->language_standard >= standard;
+}
+
 bool CompilerCXXAtLeast(LanguageStandard standard) {
   return CompilerIsCXX() && compiler->language_standard >= standard;
+}
+
+bool CompilerTargetSupportsAtomics(void) {
+  if (compiler == NULL || compiler->target_name == NULL) {
+    return false;
+  }
+  return !StringEqual(compiler->target_name, "6502") &&
+         !StringEqual(compiler->target_name, "65c02");
+}
+
+bool CompilerTargetSupportsC11Atomics(void) {
+  if (!CompilerTargetSupportsAtomics()) {
+    return false;
+  }
+  // The 32-bit ARM backend has no 64-bit atomic lowering.  C11 requires the
+  // atomic_llong typedef and operations even when they are not lock-free.
+  // AArch64's current atomic lowering also lacks the required bit-preserving
+  // transfer between floating-point values and exclusive-load/store registers.
+  // Do not advertise the complete C11 profile on either backend yet.
+  return !StringEqual(compiler->target_name, "p-code") &&
+         !StringEqual(compiler->target_name, "pcode") &&
+         !StringEqual(compiler->target_name, "aarch64") &&
+         !StringEqual(compiler->target_name, "arm") &&
+         !StringEqual(compiler->target_name, "armv7") &&
+         !StringEqual(compiler->target_name, "armv7-a") &&
+         !StringEqual(compiler->target_name, "arm32");
+}
+
+bool CompilerTargetSupportsAtomicSize(int size) {
+  if (!CompilerTargetSupportsAtomics()) {
+    return false;
+  }
+  bool arm32 = StringEqual(compiler->target_name, "arm") ||
+               StringEqual(compiler->target_name, "armv7") ||
+               StringEqual(compiler->target_name, "armv7-a") ||
+               StringEqual(compiler->target_name, "arm32");
+  return size == 1 || size == 2 || size == 4 || (!arm32 && size == 8);
 }
 
 bool CompilerExceptionsEnabled(void) {
@@ -2531,6 +2573,10 @@ static void ParseStandardOption(Compiler* compiler, Vector* options) {
              StringEqual(value, "iso9899:2017") || StringEqual(value, "gnu17") ||
              StringEqual(value, "gnu18")) {
     compiler->language_standard = kLanguageStandardC17;
+  } else if (StringEqual(value, "c23") || StringEqual(value, "c2x") ||
+             StringEqual(value, "iso9899:2024") || StringEqual(value, "gnu23") ||
+             StringEqual(value, "gnu2x")) {
+    compiler->language_standard = kLanguageStandardC23;
   } else if (StringEqual(value, "c++98") || StringEqual(value, "c++03") ||
              StringEqual(value, "gnu++98") || StringEqual(value, "gnu++03")) {
     compiler->language_standard = StringEqual(value, "c++03") ||

@@ -1623,6 +1623,14 @@ static void PushArg(PCodeGenerator* pcode, IRNode* node,
   if (node->type == NULL) {
     Emit(pcode, NewInstruction1(P_OP(push), inst));
   }
+  if (TypeIsBitInt(node->type)) {
+    bool wide = node->type->size > 4;
+    if (size != NULL) {
+      *size += wide ? 8 : 4;
+    }
+    Emit(pcode, NewInstruction1(wide ? P_OP(pushx) : P_OP(push), inst));
+    return;
+  }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(node->type)) {
       if (size != NULL) {

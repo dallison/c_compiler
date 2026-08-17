@@ -82,7 +82,9 @@ typedef enum {
   TOK(tilde),
 
   // Keywords.
+  TOK(atomic),
   TOK(auto),
+  TOK(bitint),
   TOK(break),
   TOK(bool),
   TOK(case),
@@ -105,6 +107,7 @@ typedef enum {
   TOK(inline),
   TOK(int),
   TOK(long),
+  TOK(noreturn),
   TOK(register),
   TOK(restrict),
   TOK(return),
@@ -168,6 +171,8 @@ typedef enum {
   TOK(true),
   TOK(try),
   TOK(typeid),
+  TOK(typeof),
+  TOK(typeof_unqual),
   TOK(typename),
   TOK(using),
   TOK(virtual),

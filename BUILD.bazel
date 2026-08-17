@@ -257,6 +257,7 @@ LIBC_SRCS = [
     "libc/bsearch.c",
     "libc/calloc.c",
     "libc/cdiv.c",
+    "libc/ckdint.c",
     "libc/ceil.c",
     "libc/ctype.c",
     "libc/cxx_guard.c",
@@ -1325,6 +1326,7 @@ libc_srcs=(
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
+  "libc/ckdint.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1486,6 +1488,7 @@ libc_srcs=(
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
+  "libc/ckdint.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1655,6 +1658,7 @@ libc_srcs=(
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
+  "libc/ckdint.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1821,6 +1825,7 @@ libc_srcs=(
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
+  "libc/ckdint.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1989,6 +1994,7 @@ libc_srcs=(
   "libc/bsearch.c"
   "libc/calloc.c"
   "libc/cdiv.c"
+  "libc/ckdint.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -3036,6 +3042,132 @@ sh_test(
     data = [
         ":davecc",
         ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "c_lexical_mode_test",
+    srcs = ["tests/c_lexical_mode_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "c11_core_mode_test",
+    srcs = ["tests/c11_core_mode_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "c23_core_mode_test",
+    srcs = ["tests/c23_core_mode_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "c23_type_system_test",
+    srcs = ["tests/c23_type_system_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "c23_bitint_test",
+    srcs = ["tests/c23_bitint_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "c23_numeric_headers_test",
+    srcs = ["tests/c23_numeric_headers_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "c11_atomic_exec_test",
+    srcs = ["tests/c11_atomic_exec_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath tests/c11_atomic_exec.c)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/c11_atomic_exec.c",
+    ],
+)
+
+sh_test(
+    name = "c11_atomic_exec_riscv_test",
+    srcs = ["tests/c11_atomic_exec_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "riscv",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv)",
+        "$(rootpath tests/c11_atomic_exec.c)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv",
+        ":riscv",
+        "tests/c11_atomic_exec.c",
     ],
 )
 

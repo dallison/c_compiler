@@ -54,12 +54,18 @@ typedef enum {
   // <meta> as std::meta::info.  Values are usable only during constant
   // evaluation and as non-type template arguments.
   kTypeReflection = 1 << 22,
+  // C23 bit-precise integer type.  The exact value width is stored in
+  // TypeRecord::bit_width; kTypeUnsigned selects the unsigned variant.
+  kTypeBitInt = 1 << 23,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 22
+#define TYPE_LAST_BIT 23
+
+// DaveCC's IR and constant evaluator currently use 64-bit integer lanes.
+#define DAVECC_BITINT_MAXWIDTH 64
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {
@@ -67,6 +73,7 @@ typedef enum {
   kQualConst = 4,
   kQualVolatile = 8,
   kQualRestrict = 16,
+  kQualAtomic = 32,
 } Qualifiers;
 
 // Type declarator (pointer, array, ...)
@@ -398,11 +405,12 @@ typedef struct {
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector constants;  // Symbol* constants (not owned).            // @wire 3
-  int next_value;    // Value to give to next constant.           // @wire 4
+  int64_t next_value;  // Value to give to next constant.         // @wire 4
   bool is_scoped;    // C++ scoped enum (enum class/struct).      // @wire 5
   bool has_fixed_underlying;                                      // @wire 6
   Type fixed_underlying_type;                                     // @wire 7
   int fixed_underlying_size;                                      // @wire 8
+  int fixed_underlying_bit_width;                                 // @wire 9
 } Enum;
 
 // Serialized as an inline sub-message of TypeRecord (see type_serialize.c);
@@ -437,6 +445,7 @@ typedef struct TypeRecord {
   Qualifiers qualifiers;                                          // @wire 3
   Declarator declarator;                                          // @wire 4
   int size;                                                       // @wire 5
+  int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
   String* template_parameter_name;  // Source name for diagnostics. // @wire 16
   String* dependent_member_name;  // For T::type-like types.       // @wire 7

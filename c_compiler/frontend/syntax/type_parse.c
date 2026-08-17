@@ -755,6 +755,133 @@ static TypeRecord* ParseCXXSplicedType(TypeParser* parser) {
   return dependent;
 }
 
+static bool CAtomicTypeIsSupported(TypeRecord* type) {
+  return type != NULL &&
+         (TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
+          TypeIsPointer(type));
+}
+
+// Parse the atomic-type-specifier form `_Atomic(type-name)`.  The qualifier
+// form (`_Atomic int`) is handled by ParseTypeSpecifier's qualifier path.
+static TypeRecord* ParseCAtomicTypeSpecifier(TypeParser* parser) {
+  TypeParser nested;
+  TypeParserInit(&nested, parser->lex, parser->syntax, STO(implicit),
+                 parser->context);
+  TypeRecord* base = TypeParserParseType(&nested, true);
+  Symbol* abstract = TypeParserParseDeclarator(&nested, base);
+  TypeRecord* result =
+      abstract != NULL ? TypeRecordCopy(abstract->type) : TypeRecordCopy(base);
+  if (abstract != NULL) {
+    SymbolDelete(abstract);
+  }
+  TypeParserDestruct(&nested);
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type) | TC(decl));
+
+  if (result == NULL) {
+    return NewTypeRecordWithSize(kTypeInt, kQualAtomic);
+  }
+  if (TypeIsAtomic(result)) {
+    SyntaxError(parser->syntax, "_Atomic cannot be applied to an atomic type");
+  }
+  if ((result->qualifiers &
+       (kQualConst | kQualVolatile | kQualRestrict)) != 0) {
+    SyntaxError(parser->syntax,
+                "_Atomic(type-name) requires an unqualified type");
+  }
+  if (!CAtomicTypeIsSupported(result)) {
+    SyntaxError(parser->syntax,
+                "_Atomic currently supports only scalar and pointer types");
+  }
+  result->qualifiers |= kQualAtomic;
+  return result;
+}
+
+static TypeRecord* ParseCBitIntTypeSpecifier(TypeParser* parser) {
+  Lex* lex = parser->lex;
+  LexNextToken(lex);
+  if (!LexMatch(lex, TOK(lparen))) {
+    SyntaxError(parser->syntax, "Expected '(' after _BitInt");
+    return NewBitIntTypeRecord(2, false, kQualPlain);
+  }
+
+  ASTNode* width_expr =
+      SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+  width_expr = AnalyzeExpression(width_expr);
+  int64_t width = 0;
+  if (!EvaluateIntegerExpression(width_expr, &width)) {
+    SyntaxError(parser->syntax,
+                "_BitInt width must be an integer constant expression");
+    width = 2;
+  } else if (width < 1 || width > DAVECC_BITINT_MAXWIDTH) {
+    SyntaxError(parser->syntax,
+                "_BitInt width must be between 1 and BITINT_MAXWIDTH (%d)",
+                DAVECC_BITINT_MAXWIDTH);
+    width = width < 1 ? 1 : DAVECC_BITINT_MAXWIDTH;
+  }
+  ASTNodeDelete(width_expr);
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type) | TC(decl));
+  return NewBitIntTypeRecord((int)width, false, kQualPlain);
+}
+
+static bool CTypeofOperandIsBitField(ASTNode* expr) {
+  if (expr == NULL || (expr->op != AST_OP(dot) && expr->op != AST_OP(arrow))) {
+    return false;
+  }
+  ASTNode* right = ((BinaryASTNode*)expr)->right;
+  if (right == NULL || right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMember* member = ((StructMemberASTNode*)right)->member;
+  return member != NULL && member->bit_size != 0;
+}
+
+static TypeRecord* ParseCTypeofSpecifier(TypeParser* parser, bool unqualified) {
+  Lex* lex = parser->lex;
+  LexNextToken(lex);
+  if (!LexMatch(lex, TOK(lparen))) {
+    SyntaxError(parser->syntax, "Expected '(' after %s",
+                unqualified ? "typeof_unqual" : "typeof");
+    return NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
+
+  TypeRecord* result = NULL;
+  if (SyntaxLookingAtType(parser->syntax)) {
+    TypeParser nested;
+    TypeParserInit(&nested, lex, parser->syntax, STO(implicit),
+                   parser->context);
+    TypeRecord* base = TypeParserParseType(&nested, true);
+    Symbol* abstract = TypeParserParseDeclarator(&nested, base);
+    result = abstract != NULL ? TypeRecordCopy(abstract->type)
+                              : TypeRecordCopy(base);
+    if (abstract != NULL) {
+      SymbolDelete(abstract);
+    }
+    TypeParserDestruct(&nested);
+  } else {
+    ASTNode* expr =
+        SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+    expr = AnalyzeExpression(expr);
+    if (CTypeofOperandIsBitField(expr)) {
+      SyntaxError(parser->syntax,
+                  "typeof cannot be applied to a bit-field");
+    }
+    if (expr != NULL && expr->type != NULL) {
+      result = TypeRecordCopy(expr->type);
+    }
+    ASTNodeDelete(expr);
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type) | TC(decl));
+
+  if (result == NULL) {
+    result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  if (unqualified) {
+    result->qualifiers &=
+        ~(kQualConst | kQualVolatile | kQualRestrict | kQualAtomic);
+  }
+  return result;
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
@@ -768,6 +895,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
 
   Token tok = lex->current_token;
   bool found = false;
+
+  if (tok == TOK(bitint)) {
+    type_record = ParseCBitIntTypeSpecifier(parser);
+    type |= type_record->type;
+    found = true;
+  }
+
+  if (!found && tok == TOK(atomic)) {
+    LexNextToken(lex);
+    if (LexMatch(lex, TOK(lparen))) {
+      type_record = ParseCAtomicTypeSpecifier(parser);
+      type |= type_record->type;
+    } else {
+      quals |= kQualAtomic;
+    }
+    found = true;
+  }
 
   if (CompilerIsCXX() && allow_typedef && tok == TOK(identifier) &&
       strcmp(lex->spelling.value, "__davecc_invoke_result_t") == 0) {
@@ -885,6 +1029,12 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       quals |= kQualVolatile;
     } else if (LexMatch(lex, TOK(restrict))) {
       quals |= kQualRestrict;
+    } else if (CompilerCAtLeast(kLanguageStandardC23) &&
+               (LexLookingAt(lex, TOK(typeof)) ||
+                LexLookingAt(lex, TOK(typeof_unqual)))) {
+      bool unqualified = LexLookingAt(lex, TOK(typeof_unqual));
+      type_record = ParseCTypeofSpecifier(parser, unqualified);
+      type |= type_record->type;
     } else if (CompilerIsCXX() && LexLookingAt(lex, TOK(decltype))) {
       type_record = ParseCXXDecltypeSpecifier(parser);
       type |= type_record->type;
@@ -1593,6 +1743,26 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
       t1 = t2;
       t2 = tmp;
     }
+    if (TypeIsBitInt(t1->type_record) && t2->type_record == NULL &&
+        (t2->type == kTypeSigned || t2->type == kTypeUnsigned)) {
+      bool conflicting_sign =
+          (t2->type == kTypeSigned && TypeIsUnsigned(t1->type_record));
+      if (conflicting_sign) {
+        TypeComboError2(syntax, t1->type_record, t2->type);
+        result.error = true;
+      } else if (t2->type == kTypeUnsigned) {
+        t1->type_record->type &= ~kTypeSigned;
+        t1->type_record->type |= kTypeUnsigned;
+      }
+      if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
+        QualifierComboError(syntax, t1->quals, t2->quals);
+        result.error = true;
+      }
+      result.type = t1->type_record->type;
+      result.quals = t1->quals | t2->quals;
+      result.type_record = t1->type_record;
+      return result;
+    }
     if (t2->type_record != NULL) {
       TypeComboError3(syntax, t1->type_record, t2->type_record);
       result.error = true;
@@ -1665,6 +1835,11 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
   } else {
     // Add qualifiers to typedef copy.
     type->type_record->qualifiers |= type->quals;
+    if (TypeIsBitInt(type->type_record) &&
+        type->type_record->bit_width == 1 &&
+        !TypeIsUnsigned(type->type_record)) {
+      SyntaxError(parser->syntax, "signed _BitInt width must be at least 2");
+    }
     return type->type_record;
   }
 }
@@ -1779,6 +1954,35 @@ static void ParseCXXTypePackIndex(TypeParser* parser, TypeRecord* base_type) {
   }
 }
 
+static void ValidateCAtomicDeclarator(TypeParser* parser, TypeRecord* type) {
+  if (CompilerIsCXX()) {
+    return;
+  }
+  bool target_supported = CompilerTargetSupportsC11Atomics();
+  bool target_error_reported = false;
+  for (TypeRecord* record = type; record != NULL; record = record->next) {
+    if (!TypeIsAtomic(record)) {
+      continue;
+    }
+    if (TypeIsArray(record) || TypeIsFunction(record)) {
+      SyntaxError(parser->syntax,
+                  "_Atomic cannot qualify an array or function type");
+    } else if (!CAtomicTypeIsSupported(record)) {
+      SyntaxError(parser->syntax,
+                  "_Atomic currently supports only scalar and pointer types");
+    } else if (target_supported &&
+               !CompilerTargetSupportsAtomicSize(record->size)) {
+      SyntaxError(parser->syntax,
+                  "atomic object size is not supported on this target");
+    }
+    if (!target_error_reported && !target_supported) {
+      SyntaxError(parser->syntax,
+                  "atomic types are unavailable on this target");
+      target_error_reported = true;
+    }
+  }
+}
+
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   if (base_type == NULL) {
     return NULL;
@@ -1823,6 +2027,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
 
   // Calculate the size of t, now that we have the complete chain.
   TypeRecordCalculateSize(t);
+  ValidateCAtomicDeclarator(parser, t);
 
   if (parser->symbol != NULL) {
     SymbolSetType(parser->symbol, t);
@@ -1868,6 +2073,7 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
   int num_consts = 0;
   int num_volatiles = 0;
   int num_restricts = 0;
+  int num_atomics = 0;
   while (!LexEof(parser->lex)) {
     if (LexMatch(parser->lex, TOK(const))) {
       quals |= kQualConst;
@@ -1878,6 +2084,9 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
     } else if (LexMatch(parser->lex, TOK(restrict))) {
       num_restricts++;
       quals |= kQualRestrict;
+    } else if (LexMatch(parser->lex, TOK(atomic))) {
+      num_atomics++;
+      quals |= kQualAtomic;
     } else if (LexLookingAt(parser->lex, TOK(attribute)) ||
                SyntaxLookingAtCXXAttribute(parser->syntax)) {
       TypeParserSkipAttributes(parser);
@@ -1885,7 +2094,8 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
       break;
     }
   }
-  if (num_consts > 1 || num_volatiles > 1 || num_restricts > 1) {
+  if (num_consts > 1 || num_volatiles > 1 || num_restricts > 1 ||
+      num_atomics > 1) {
     SyntaxError(parser->syntax, "Invalid pointer qualifier declaration");
   }
   return quals;
@@ -2307,6 +2517,11 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
   } else {
     // Possible old-style function decl, identifiers only.
     if (LexLookingAt(proto_parser->lex, TOK(identifier))) {
+      if (CompilerCAtLeast(kLanguageStandardC23)) {
+        SyntaxError(proto_parser->syntax,
+                    "identifier-list function declarators are not allowed "
+                    "in C23");
+      }
       if (style == kStyleUnknown) {
         style = kStyleOld;
       }
@@ -2341,6 +2556,11 @@ void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
 
   while (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
     if (LexMatch(proto_parser->lex, TOK(ellipsis))) {
+      if (arg_number == 0 && !CompilerIsCXX() &&
+          !CompilerCAtLeast(kLanguageStandardC23)) {
+        SyntaxError(proto_parser->syntax,
+                    "a parameter list consisting only of ... requires C23");
+      }
       // ... must be the last argument in the prototype.
       info->varargs = true;
       if (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
@@ -2382,7 +2602,8 @@ void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
 
   // If we were not told (void) and there are no formal args then the C
   // language says that this is a variable arguments function.
-  if (!CompilerIsCXX() && info->prototype.length == 0 && !void_args) {
+  if (!CompilerIsCXX() && !CompilerCAtLeast(kLanguageStandardC23) &&
+      info->prototype.length == 0 && !void_args) {
     info->unknown_args = true;
     SyntaxWarning(proto_parser->syntax, "strict-prototypes",
                   "function declaration without a prototype");

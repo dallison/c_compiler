@@ -241,6 +241,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->type = type;
   record->qualifiers = quals;
   record->size = 0;
+  record->bit_width = 0;
   record->template_parameter_index = -1;
   record->template_parameter_name = NULL;
   record->dependent_member_name = NULL;
@@ -256,6 +257,29 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->declarator = kDeclPrimitive;
   memset(&record->info, 0, sizeof(record->info));
   Trap(record);
+  return record;
+}
+
+static int BitIntStorageSize(int bit_width) {
+  int bytes = (bit_width + 7) / 8;
+  if (bytes <= 1) {
+    return 1;
+  }
+  if (bytes <= 2) {
+    return 2;
+  }
+  if (bytes <= 4) {
+    return 4;
+  }
+  return 8;
+}
+
+TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
+                                Qualifiers quals) {
+  Type type = kTypeBitInt | (is_unsigned ? kTypeUnsigned : kTypeSigned);
+  TypeRecord* record = NewTypeRecord(type, quals);
+  record->bit_width = bit_width;
+  record->size = BitIntStorageSize(bit_width);
   return record;
 }
 
@@ -368,6 +392,9 @@ int TypeRecordAlignment(TypeRecord* record) {
         int a = record->info.struct_info->alignment;
         return a > 0 ? a : 1;
       }
+      if (TypeIsBitInt(record)) {
+        return record->size > 0 ? record->size : 1;
+      }
       return SizeofType(record->type);
   }
 }
@@ -409,7 +436,9 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
   // sizes are target properties, so recompute them from the concrete type.
   if (record->declarator == kDeclPrimitive && !TypeIsStructOrUnion(record) &&
       !TypeContainsTemplateParameter(record)) {
-    record->size = SizeofType(record->type);
+    record->size = TypeIsBitInt(record)
+                       ? BitIntStorageSize(record->bit_width)
+                       : SizeofType(record->type);
     return record;
   }
   if (record->size == 0) {
@@ -1609,21 +1638,25 @@ void StructAddFriendFunction(Struct* str, Symbol* friend_function) {
   VectorAppend(&str->friend_functions, friend_function);
 }
 
-Symbol* NewEnumConstant(const char* name, int value) {
+Symbol* NewEnumConstant(const char* name, int64_t value) {
   TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualConst);
   Symbol* c = NewSymbol(name, int_type, STO(implicit));
   c->value.ivalue = value;
   c->flags.value_set = true;
+  c->flags.is_constexpr =
+      !CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23);
   return c;
 }
 
-Symbol* NewScopedEnumConstant(const char* name, int value,
+Symbol* NewScopedEnumConstant(const char* name, int64_t value,
                               TypeRecord* enum_type) {
   TypeRecord* type = TypeRecordCopy(enum_type);
   type->qualifiers |= kQualConst;
   Symbol* c = NewSymbol(name, type, STO(implicit));
   c->value.ivalue = value;
   c->flags.value_set = true;
+  c->flags.is_constexpr =
+      !CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23);
   return c;
 }
 
@@ -1637,6 +1670,7 @@ Enum* NewEnum() {
   e->has_fixed_underlying = false;
   e->fixed_underlying_type = 0;
   e->fixed_underlying_size = 0;
+  e->fixed_underlying_bit_width = 0;
   // Track every enum so it can be freed in bulk by StructRegistryRelease; this
   // keeps composite-info teardown uniform and cycle/UAF-safe.
   if (!enum_registry_initialized) {
