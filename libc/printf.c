@@ -204,18 +204,17 @@ STATIC void FixFloatPrecision(ConversionFormat* fmt, size_t max) {
 }
 
 STATIC char* ConvertBinary(unsigned long long v, char* buf, int buflen) {
-  char* p = &buf[buflen - 1];
+  char* p = &buf[buflen];
   if (v == 0) {
-    *p = '0';
+    *--p = '0';
     return p;
   }
   while (v != 0) {
     char ch = (v & 1) + '0';
-    *p-- = ch;
+    *--p = ch;
     v >>= 1;
   }
-  // p is one less than the first char.
-  return p + 1;
+  return p;
 }
 
 STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf,
@@ -405,6 +404,52 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
   return num_chars;
 }
 
+STATIC int WriteBinaryFormatted(Writer writer, void* data,
+                                ConversionFormat* fmt,
+                                unsigned long long value, bool upper) {
+  char buffer[sizeof(unsigned long long) * 8];
+  char* digits = ConvertBinary(value, buffer, sizeof(buffer));
+  int digits_length = (int)(buffer + sizeof(buffer) - digits);
+  if (value == 0 && fmt->precision == 0) {
+    digits_length = 0;
+  }
+  const char* prefix =
+      fmt->alternate_form && value != 0 ? (upper ? "0B" : "0b") : NULL;
+  int prefix_length = prefix == NULL ? 0 : 2;
+  int precision_zeroes = 0;
+  if (fmt->precision != kWidthDefault &&
+      fmt->precision > digits_length) {
+    precision_zeroes = fmt->precision - digits_length;
+  }
+  int content_length = prefix_length + precision_zeroes + digits_length;
+  int width_padding = fmt->field_width == kWidthDefault
+                          ? 0
+                          : fmt->field_width - content_length;
+  if (width_padding < 0) {
+    width_padding = 0;
+  }
+  bool width_zeroes = fmt->fill_zero && !fmt->left_justify &&
+                      fmt->precision == kWidthDefault;
+  int count = 0;
+  if (!fmt->left_justify && !width_zeroes) {
+    count += Pad(writer, data, width_padding, false);
+  }
+  if (prefix != NULL) {
+    count += writer(prefix, 2, data);
+  }
+  if (width_zeroes) {
+    count += Pad(writer, data, width_padding, true);
+  }
+  count += Pad(writer, data, precision_zeroes, true);
+  if (digits_length != 0) {
+    count += writer(digits, (size_t)digits_length, data);
+  }
+  if (fmt->left_justify) {
+    count += Pad(writer, data, width_padding, false);
+  }
+  return count;
+}
+
 STATIC void RemoveFormatting(ConversionFormat* fmt) {
   fmt->fill_zero = false;
   fmt->prepend_sign = false;
@@ -470,35 +515,45 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'x':
     case 'X':
     case 'o':
-      *is_unsigned = cmd == 'u' || cmd == 'x' || cmd == 'X';
+    case 'b':
+    case 'B':
+      *is_unsigned = cmd == 'u' || cmd == 'x' || cmd == 'X' ||
+                     cmd == 'o' || cmd == 'b' || cmd == 'B';
       switch (fmt->modifier) {
         case kModLong:
-          *value_ll = va_arg(*ap, long);
+          *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned long)
+                                   : (long long)va_arg(*ap, long);
           break;
         case kModLongLong:
-          *value_ll = va_arg(*ap, long long);
+          *value_ll =
+              *is_unsigned ? (long long)va_arg(*ap, unsigned long long)
+                           : va_arg(*ap, long long);
           break;
         case kModChar:
-          *value_ll = (int)va_arg(*ap, int);
+          *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned int)
+                                   : (long long)va_arg(*ap, int);
           break;
         case kModShort:
-          *value_ll = (int)va_arg(*ap, int);
+          *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned int)
+                                   : (long long)va_arg(*ap, int);
           break;
         case kModSize_t:
-          *value_ll = (int)va_arg(*ap, size_t);
+          *value_ll = (long long)va_arg(*ap, size_t);
           *is_unsigned = true;
           break;
         case kModIntMax:
-          *value_ll = (int)va_arg(*ap, intmax_t);
+          *value_ll = *is_unsigned ? (long long)va_arg(*ap, uintmax_t)
+                                   : (long long)va_arg(*ap, intmax_t);
           break;
         case kModPtrdiff_t:
-          *value_ll = (int)va_arg(*ap, ptrdiff_t);
+          *value_ll = (long long)va_arg(*ap, ptrdiff_t);
           break;
         case kModLongDouble:
           *value_f = (int)va_arg(*ap, long double);
           break;
        default:
-          *value_ll = (int)va_arg(*ap, int);
+          *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned int)
+                                   : (long long)va_arg(*ap, int);
           break;
       }
       if (!*is_unsigned && *value_ll < 0) {
@@ -582,6 +637,14 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           v = ConvertOctalLongLong(value_ll, buf, sizeof(buf));
           count += WriteFormatted(writer, data, &fmt, v, end - v, false, true);
           break;
+        case 'b':
+        case 'B': {
+          bool upper = *p == 'B';
+          p++;
+          count += WriteBinaryFormatted(writer, data, &fmt,
+                                        (unsigned long long)value_ll, upper);
+          break;
+        }
         case 'p':
           p++;
           v = ConvertHexPointer(value_p, buf, sizeof(buf));
@@ -665,13 +728,19 @@ typedef struct {
 // Writer function to write to a string pointer.
 STATIC int StringWriter(const char* s, size_t len, void* data) {
   StringData* str = data;
-  if (str->len > 0 && len > str->len) {
-    len = str->len;
+  size_t result = len;
+  if (str->len >= 0) {
+    size_t available = str->len > 0 ? (size_t)str->len - 1 : 0;
+    if (len > available) {
+      len = available;
+    }
   }
-  memcpy(str->p, s, len);
-  str->p += len;
+  if (len != 0) {
+    memcpy(str->p, s, len);
+    str->p += len;
+  }
   str->len -= len;
-  return (int)len;
+  return (int)result;
 }
 
 #ifndef PRINTF_SPECIALIZED_LONG
@@ -729,6 +798,7 @@ int sprintf(char* s, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, -1};
   int v = Printf(StringWriter, &data, format, ap);
+  *data.p = '\0';
   va_end(ap);
   return v;
 }
@@ -738,6 +808,7 @@ int __sprintf_fp(char* s, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, -1};
   int v = Printf(StringWriter, &data, format, ap);
+  *data.p = '\0';
   va_end(ap);
   return v;
 }
@@ -754,6 +825,9 @@ int snprintf(char* s, size_t len, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, len};
   int v = Printf(StringWriter, &data, format, ap);
+  if (len != 0) {
+    *data.p = '\0';
+  }
   va_end(ap);
   return v;
 }
@@ -763,6 +837,9 @@ int __snprintf_fp(char* s, size_t len, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, len};
   int v = Printf(StringWriter, &data, format, ap);
+  if (len != 0) {
+    *data.p = '\0';
+  }
   va_end(ap);
   return v;
 }
@@ -798,6 +875,7 @@ int __sprintf_long(char* s, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, -1};
   int v = Printf(StringWriter, &data, format, ap);
+  *data.p = '\0';
   va_end(ap);
   return v;
 }
@@ -807,6 +885,9 @@ int __snprintf_long(char* s, size_t len, const char* format, ...) {
   va_start(ap, format);
   StringData data = {s, len};
   int v = Printf(StringWriter, &data, format, ap);
+  if (len != 0) {
+    *data.p = '\0';
+  }
   va_end(ap);
   return v;
 }

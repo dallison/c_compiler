@@ -46,7 +46,7 @@ typedef enum {
 
 typedef struct {
   bool suppress;
-  Width width;
+  int width;
   Modifier modifier;
 } ConversionFormat;
 
@@ -180,7 +180,11 @@ STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, Conversi
 STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigned,
                           void* data, void* ptr, ConversionFormat* fmt) {
   int length = 0;
-  int max_length = fmt->width == kWidthDefault ? 1024 : (int)fmt->width;
+  int digits = 0;
+  int max_length = 1024;
+  if (fmt->width >= 0) {
+    max_length = fmt->width;
+  }
   unsigned long long v = 0;
   bool sign_ok = true;
   bool negative = false;
@@ -203,8 +207,9 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
     } else {
       switch (base) {
         case 8:
-          if (ch >= 0 && ch < 8) {
+          if (ch >= '0' && ch <= '7') {
             v = v << 3 | ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -214,6 +219,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
         case 10:
           if (isdigit(ch)) {
             v = v * 10 + ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -225,16 +231,36 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             if (!prefix_done) {
               prefix_ok = true;
             }
+            digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
             prefix_done = true;
+            digits = 0;
           } else if (isxdigit(ch)) {
             char uch = toupper(ch);
-            if (uch > 'A') {
+            if (uch >= 'A') {
               v = v << 4 | uch - 'A' + 10;
             } else {
               v = v << 4 | ch - '0';
             }
+            digits++;
+          } else {
+            unget(ch, data);
+            length--;
+            goto done;
+          }
+          break;
+        case 2:
+          if (ch == '0' && !prefix_done && digits == 0) {
+            prefix_ok = true;
+            digits = 1;
+          } else if (prefix_ok && (ch == 'B' || ch == 'b')) {
+            prefix_ok = false;
+            prefix_done = true;
+            digits = 0;
+          } else if (ch == '0' || ch == '1') {
+            v = v << 1 | ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -247,15 +273,31 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             if (!prefix_done) {
               prefix_ok = true;
             }
+            digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
             prefix_done = true;
             base = 16;
+            digits = 0;
+          } else if (prefix_ok && (ch == 'B' || ch == 'b')) {
+            prefix_ok = false;
+            prefix_done = true;
+            base = 2;
+            digits = 0;
           } else if (prefix_ok) {
             base = 8;
+            if (ch >= '0' && ch <= '7') {
+              v = v << 3 | ch - '0';
+              digits++;
+            } else {
+              unget(ch, data);
+              length--;
+              goto done;
+            }
           } else if (isdigit(ch)) {
             v = v * 10 + ch - '0';
             base = 10;
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -272,7 +314,7 @@ done:
   if (!fmt->suppress) {
     WriteInt(v, is_unsigned, ptr, fmt);
   }
-  return length > 0;
+  return digits > 0;
 }
 
 STATIC bool ReadPointer(Getter get, Ungetter unget, void* data, void* ptr, ConversionFormat* fmt) {
@@ -740,6 +782,15 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
           num_items++;
           p++;
          break;
+        case 'b':
+          // Binary, with an optional 0b or 0B prefix.
+          if (!ConvertDecimal(get, unget, 2, true, data, ptr, &fmt)) {
+            input_error = true;
+            goto done;
+          }
+          num_items++;
+          p++;
+          break;
         case 's':
           if (!ReadString(get, unget, data, ptr, &fmt)) {
             input_error = true;

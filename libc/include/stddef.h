@@ -50,6 +50,7 @@ using nullptr_t = decltype(nullptr);
 }
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 typedef typeof(nullptr) nullptr_t;
+#define unreachable() __builtin_unreachable()
 #endif
 
 #define offsetof(type, member) ((size_t)(&((type*)0)->member))

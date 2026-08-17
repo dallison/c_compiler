@@ -10,6 +10,10 @@
 #define string_h
 #ifdef __DAVECC__
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define __STDC_VERSION_STRING_H__ 202311L
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +40,8 @@ typedef long ssize_t;
 
 void *memcpy(void * restrict s1,
 const void * restrict s2, size_t n);
+void *memccpy(void * restrict s1,
+const void * restrict s2, int c, size_t n);
 void *memmove(void *s1, const void *s2, size_t n);
 char *strcpy(char * restrict s1,
           const char * restrict s2);
@@ -62,8 +68,11 @@ size_t strspn(const char *s1, const char *s2);
 char *strstr(const char *s1, const char *s2);
 char *strtok(char * restrict s1, const char * restrict s2);
 void *memset(void *s, int c, size_t n);
+void *memset_explicit(void *s, int c, size_t n);
 char *strerror(int errnum);
 size_t strlen(const char *s);
+char *strdup(const char *s);
+char *strndup(const char *s, size_t n);
 
 #ifdef __cplusplus
 }

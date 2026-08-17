@@ -4137,9 +4137,9 @@ static bool IsValidFormatConversion(char conv, bool is_scanf) {
     return false;
   }
   if (is_scanf) {
-    return strchr("diouxXaAeEfFgGsScCpn[%", conv) != NULL;
+    return strchr("dioubxXaAeEfFgGsScCpn[%", conv) != NULL;
   }
-  return strchr("diouxXcCaAeEfFgGsSpn%", conv) != NULL;
+  return strchr("dioubBxXcCaAeEfFgGsSpn%", conv) != NULL;
 }
 
 static FmtClass FormatConversionClass(char conv, bool is_scanf) {
@@ -4151,7 +4151,7 @@ static FmtClass FormatConversionClass(char conv, bool is_scanf) {
     return (conv == '%') ? kFmtNone : kFmtPointer;
   }
   switch (conv) {
-    case 'd': case 'i': case 'u': case 'o':
+    case 'd': case 'i': case 'u': case 'o': case 'b': case 'B':
     case 'x': case 'X': case 'c':
       return kFmtInteger;
     case 'f': case 'F': case 'e': case 'E':

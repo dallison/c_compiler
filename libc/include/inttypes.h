@@ -79,6 +79,38 @@
 # define PRIoFAST32  __PRIPTR_PREFIX "o"
 # define PRIoFAST64  __PRI64_PREFIX "o"
 
+/* Binary notation.  */
+# define PRIb8    "b"
+# define PRIb16    "b"
+# define PRIb32    __PRI_INT_PREFIX "b"
+# define PRIb64    __PRI64_PREFIX "b"
+
+# define PRIbLEAST8  "b"
+# define PRIbLEAST16  "b"
+# define PRIbLEAST32  __PRI_INT_PREFIX "b"
+# define PRIbLEAST64  __PRI64_PREFIX "b"
+
+# define PRIbFAST8  "b"
+# define PRIbFAST16  "b"
+# define PRIbFAST32  __PRI_INT_PREFIX "b"
+# define PRIbFAST64  __PRI64_PREFIX "b"
+
+/* UPPERCASE binary notation (implementation extension permitted by C23).  */
+# define PRIB8    "B"
+# define PRIB16    "B"
+# define PRIB32    __PRI_INT_PREFIX "B"
+# define PRIB64    __PRI64_PREFIX "B"
+
+# define PRIBLEAST8  "B"
+# define PRIBLEAST16  "B"
+# define PRIBLEAST32  __PRI_INT_PREFIX "B"
+# define PRIBLEAST64  __PRI64_PREFIX "B"
+
+# define PRIBFAST8  "B"
+# define PRIBFAST16  "B"
+# define PRIBFAST32  __PRI_INT_PREFIX "B"
+# define PRIBFAST64  __PRI64_PREFIX "B"
+
 /* Unsigned integers.  */
 # define PRIu8    "u"
 # define PRIu16    "u"
@@ -135,6 +167,8 @@
 # define PRIuMAX  __PRI64_PREFIX "u"
 # define PRIxMAX  __PRI64_PREFIX "x"
 # define PRIXMAX  __PRI64_PREFIX "X"
+# define PRIbMAX  __PRI64_PREFIX "b"
+# define PRIBMAX  __PRI64_PREFIX "B"
 
 
 /* Macros for printing `intptr_t' and `uintptr_t'.  */
@@ -144,6 +178,8 @@
 # define PRIuPTR  __PRIPTR_PREFIX "u"
 # define PRIxPTR  __PRIPTR_PREFIX "x"
 # define PRIXPTR  __PRIPTR_PREFIX "X"
+# define PRIbPTR  __PRIPTR_PREFIX "b"
+# define PRIBPTR  __PRIPTR_PREFIX "B"
 
 
 /* Macros for scanning format specifiers.  */
@@ -212,6 +248,22 @@
 # define SCNoFAST32  __PRIPTR_PREFIX "o"
 # define SCNoFAST64  __PRI64_PREFIX "o"
 
+/* Binary notation.  */
+# define SCNb8    "hhb"
+# define SCNb16    __SCN_SHORT_PREFIX "b"
+# define SCNb32    __SCN_INT_PREFIX "b"
+# define SCNb64    __PRI64_PREFIX "b"
+
+# define SCNbLEAST8  "hhb"
+# define SCNbLEAST16  __SCN_SHORT_PREFIX "b"
+# define SCNbLEAST32  __SCN_INT_PREFIX "b"
+# define SCNbLEAST64  __PRI64_PREFIX "b"
+
+# define SCNbFAST8  "hhb"
+# define SCNbFAST16  __SCN_SHORT_PREFIX "b"
+# define SCNbFAST32  __SCN_INT_PREFIX "b"
+# define SCNbFAST64  __PRI64_PREFIX "b"
+
 /* Hexadecimal notation.  */
 # define SCNx8    "hhx"
 # define SCNx16    __SCN_SHORT_PREFIX "x"
@@ -235,6 +287,7 @@
 # define SCNoMAX  __PRI64_PREFIX "o"
 # define SCNuMAX  __PRI64_PREFIX "u"
 # define SCNxMAX  __PRI64_PREFIX "x"
+# define SCNbMAX  __PRI64_PREFIX "b"
 
 /* Macros for scaning `intptr_t' and `uintptr_t'.  */
 # define SCNdPTR  __PRIPTR_PREFIX "d"
@@ -242,5 +295,6 @@
 # define SCNoPTR  __PRIPTR_PREFIX "o"
 # define SCNuPTR  __PRIPTR_PREFIX "u"
 # define SCNxPTR  __PRIPTR_PREFIX "x"
+# define SCNbPTR  __PRIPTR_PREFIX "b"
 
 #endif /* inttypes_h */
