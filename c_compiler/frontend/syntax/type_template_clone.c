@@ -2150,6 +2150,30 @@ static void RebindClonedLoweredDependentMemberCall(VectorASTNode* call) {
       callee->symbol->type->info.function.cxx_member_owner == NULL) {
     return;
   }
+  Struct* original_owner =
+      callee->symbol->type->info.function.cxx_member_owner;
+  StructMember* original_member =
+      FindStructMember(original_owner, &callee->symbol->name);
+  bool has_nonstatic_overload = false;
+  for (StructMember* overload = original_member; overload != NULL;
+       overload = overload->overload_next) {
+    if (!overload->is_member_function) {
+      continue;
+    }
+    if (!overload->is_static) {
+      has_nonstatic_overload = true;
+    }
+    if (overload->symbol == callee->symbol && overload->is_static) {
+      // Static member calls already carry their first declared argument in
+      // slot zero. Treating that argument as an object receiver can
+      // accidentally rebind `allocator_traits<A>::construct(a, ...)` to
+      // `A::construct(...)`, dropping the required address-of lowering.
+      return;
+    }
+  }
+  if (!has_nonstatic_overload) {
+    return;
+  }
   ASTNode* receiver = call->children->value.p[0];
   TypeRecord* receiver_type = receiver != NULL ? receiver->type : NULL;
   if (receiver_type == NULL) {
@@ -3291,7 +3315,8 @@ static StructMember* FindClonedConcreteMember(Struct* receiver,
   return match;
 }
 
-static void RebindClonedConcreteMemberAccess(ASTNode* node) {
+static void RebindClonedConcreteMemberAccess(
+    TemplateFunctionBodyClone* clone, ASTNode* node) {
   if (node == NULL ||
       (node->op != AST_OP(dot) && node->op != AST_OP(arrow))) {
     return;
@@ -3309,11 +3334,36 @@ static void RebindClonedConcreteMemberAccess(ASTNode* node) {
       TypeIsPointer(receiver_type)) {
     receiver_type = receiver_type->next;
   }
-  if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
-      receiver_type->info.struct_info != NULL &&
+  Struct* receiver_owner =
+      receiver_type != NULL && TypeIsStructOrUnion(receiver_type)
+          ? receiver_type->info.struct_info
+          : NULL;
+  bool rebind_owner_by_clone =
+      clone != NULL && clone->from_owner != NULL &&
+      clone->from_owner->tag_symbol != NULL &&
+      !clone->from_owner->tag_symbol->flags.invented &&
+      clone->to_owner != NULL;
+  if (member_node->member != NULL && clone != NULL &&
+      rebind_owner_by_clone &&
+      receiver_owner == clone->from_owner &&
+      member_node->member->index < clone->to_owner->members.length) {
+    StructMember* indexed =
+        clone->to_owner->members.value.p[member_node->member->index];
+    if (indexed != NULL && indexed->symbol != NULL &&
+        indexed->is_member_function == member_node->member->is_member_function &&
+        indexed->is_static == member_node->member->is_static) {
+      StructMemberASTNodeSetMember(member_node, indexed);
+      node->flags &= ~kASTAnalyzed;
+    }
+  }
+  if (rebind_owner_by_clone &&
+      receiver_owner == clone->from_owner) {
+    receiver_owner = clone->to_owner;
+  }
+  if (receiver_owner != NULL &&
       member_node->member != NULL && member_node->member->symbol != NULL) {
     StructMember* concrete = FindClonedConcreteMember(
-        receiver_type->info.struct_info, member_node->member);
+        receiver_owner, member_node->member);
     if (concrete != NULL && concrete->symbol != NULL) {
       StructMemberASTNodeSetMember(member_node, concrete);
       node->flags &= ~kASTAnalyzed;
@@ -3329,10 +3379,9 @@ static void RebindClonedConcreteMemberAccess(ASTNode* node) {
 
 static void RebindClonedConcreteMemberAccessVisitor(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
-  (void)data;
   (void)child_id;
   if (mode == kVisitPostChildren) {
-    RebindClonedConcreteMemberAccess(node);
+    RebindClonedConcreteMemberAccess(data, node);
   }
 }
 
@@ -3818,7 +3867,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
     }
   }
-  RebindClonedConcreteMemberAccess(node);
+  RebindClonedConcreteMemberAccess(clone, node);
   // A dependent member access `recv.name` / `recv->name` whose member is still an
   // unresolved *string* name (its receiver's type was dependent when the
   // template was defined) must be rebound after substitution.  Clear its
@@ -5124,8 +5173,12 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   }
   size_t original_arity =
       id->symbol->type->info.function.prototype.length;
+  bool provisional_function_template =
+      id->symbol->flags.is_template ||
+      id->symbol->type->info.function.template_origin != NULL;
   if (original_arity == call->children->length) {
-    if (!TypeContainsTemplateParameter(id->symbol->type)) {
+    if (!provisional_function_template &&
+        !TypeContainsTemplateParameter(id->symbol->type)) {
       ASTNodeSetType(call->left, id->symbol->type);
       return true;
     }
@@ -5149,6 +5202,51 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   StructMember* member = FindStructMemberOverloadHead(ctor_owner, ctor_name);
   if (member == NULL || member->symbol == NULL) {
     return false;
+  }
+  if (provisional_function_template) {
+    // A dependent first pass may choose a converting constructor template for
+    // same-type copy initialization. Implicit copy/move constructors can be
+    // stored as separate same-named members rather than in that template's
+    // overload chain, so recover an exact concrete candidate from the owner.
+    StructMember* concrete_candidate = NULL;
+    for (size_t member_index = 0;
+         member_index < ctor_owner->members.length; member_index++) {
+      for (StructMember* candidate = ctor_owner->members.value.p[member_index];
+           candidate != NULL; candidate = candidate->overload_next) {
+        if (candidate->symbol == NULL ||
+            candidate->symbol->flags.is_template ||
+            !StringEqual(&candidate->symbol->name, ctor_name->value) ||
+            candidate->symbol->type == NULL ||
+            !TypeIsFunction(candidate->symbol->type) ||
+            candidate->symbol->type->info.function.template_origin != NULL ||
+            candidate->symbol->type->info.function.prototype.length !=
+                call->children->length) {
+          continue;
+        }
+        bool compatible = true;
+        for (size_t i = 1; i < call->children->length; i++) {
+          ASTNode* actual = call->children->value.p[i];
+          Symbol* formal =
+              candidate->symbol->type->info.function.prototype.value.p[i];
+          if (actual == NULL || actual->type == NULL || formal == NULL ||
+              formal->type == NULL ||
+              !TypeAssignmentCompatible(actual->type, formal->type)) {
+            compatible = false;
+            break;
+          }
+        }
+        if (compatible) {
+          concrete_candidate = candidate;
+          break;
+        }
+      }
+      if (concrete_candidate != NULL) {
+        break;
+      }
+    }
+    if (concrete_candidate != NULL) {
+      member = concrete_candidate;
+    }
   }
   if (original_arity != call->children->length) {
     StructMember* arity_fallback = NULL;
@@ -6225,7 +6323,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNode* body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
                                &clone, NULL);
   ASTNodeDelete(clone_source);
-  ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, NULL);
+  ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedLoweredDependentMemberCallVisitor, 0, NULL);
   ASTNodeVisit(body, RebindClonedDesignatorMemberVisitor, 0, NULL);
   // Drop discarded `if constexpr` branches (whose condition the clone above has

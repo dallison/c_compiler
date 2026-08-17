@@ -197,6 +197,10 @@ static struct {
 };
 
 IROpcode GetLoadOpcodeForType(TypeRecord* type) {
+  if (TypeIsPointerOrArray(type) || TypeIsNullPointer(type) ||
+      TypeIsMemberPointerScalar(type) || TypeIsFunction(type)) {
+    return IR_OP(loada);
+  }
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
@@ -272,6 +276,10 @@ static COMPILER_UNUSED IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_siz
 }
 
 IROpcode GetStoreOpcodeForType(TypeRecord* type) {
+  if (TypeIsPointerOrArray(type) || TypeIsNullPointer(type) ||
+      TypeIsMemberPointerScalar(type) || TypeIsFunction(type)) {
+    return IR_OP(storea);
+  }
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
@@ -2884,7 +2892,184 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
 }
 
 static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
+  if (node->left != NULL &&
+      (node->left->op == AST_OP(dot) ||
+       node->left->op == AST_OP(arrow)) &&
+      gen->func != NULL && TypeIsFunction(gen->func) &&
+      gen->func->info.function.cxx_member_owner != NULL) {
+    BinaryASTNode* receiver_access = (BinaryASTNode*)node->left;
+    if (receiver_access->right != NULL &&
+        receiver_access->right->op == AST_OP(string)) {
+      ConstantASTNode* unresolved =
+          (ConstantASTNode*)receiver_access->right;
+      StructMember* resolved = FindStructMember(
+          gen->func->info.function.cxx_member_owner,
+          unresolved->value.string);
+      if (resolved != NULL && resolved->symbol != NULL) {
+        ASTNode* old_member = receiver_access->right;
+        receiver_access->right =
+            NewStructMemberASTNode(resolved, old_member->location);
+        receiver_access->right->parent = &receiver_access->base;
+        receiver_access->right->child_id = 1;
+        ASTNodeDelete(old_member);
+      }
+    }
+    if (receiver_access->right != NULL &&
+        receiver_access->right->op == AST_OP(structmember)) {
+      StructMemberASTNode* receiver_member =
+          (StructMemberASTNode*)receiver_access->right;
+      if (receiver_member->member != NULL &&
+          receiver_member->member->symbol == NULL) {
+        StructMember* rebound =
+            receiver_member->member->symbol != NULL
+                ? FindStructMember(
+                      gen->func->info.function.cxx_member_owner,
+                      &receiver_member->member->symbol->name)
+                : NULL;
+        if (receiver_member->member->symbol != NULL) {
+          for (size_t i = 0;
+               i <
+               gen->func->info.function.cxx_member_owner->members.length;
+               i++) {
+            StructMember* candidate =
+                gen->func->info.function.cxx_member_owner->members.value.p[i];
+            if (candidate != NULL && candidate->symbol != NULL &&
+                StringEqualString(
+                    &candidate->symbol->name,
+                    &receiver_member->member->symbol->name)) {
+              if (!TypeContainsTemplateParameter(candidate->symbol->type)) {
+                rebound = candidate;
+                break;
+              }
+            }
+          }
+        }
+        if (rebound == NULL &&
+            receiver_member->member->index <
+                gen->func->info.function.cxx_member_owner->members.length) {
+          rebound =
+              gen->func->info.function.cxx_member_owner->members.value.p[
+                  receiver_member->member->index];
+        }
+        if (rebound != NULL && rebound->symbol != NULL &&
+            rebound->is_static == receiver_member->member->is_static &&
+            rebound->is_member_function ==
+                receiver_member->member->is_member_function) {
+          StructMemberASTNodeSetMember(receiver_member, rebound);
+          ASTNodeSetType(node->left, rebound->symbol->type);
+        }
+      }
+    }
+  }
+  if (node->right != NULL && node->right->op == AST_OP(string) &&
+      node->left != NULL) {
+    TypeRecord* receiver_type = node->left->type;
+    while (receiver_type != NULL &&
+           (TypeIsPointer(receiver_type) || TypeIsReference(receiver_type))) {
+      receiver_type = receiver_type->next;
+    }
+    if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+        receiver_type->info.struct_info != NULL) {
+      ConstantASTNode* unresolved = (ConstantASTNode*)node->right;
+      StructMember* resolved = FindStructMember(
+          receiver_type->info.struct_info, unresolved->value.string);
+      if (resolved != NULL && resolved->symbol != NULL) {
+        ASTNode* old_member = node->right;
+        node->right =
+            NewStructMemberASTNode(resolved, old_member->location);
+        node->right->parent = &node->base;
+        node->right->child_id = 1;
+        ASTNodeDelete(old_member);
+      }
+    }
+  }
   StructMemberASTNode* member = (StructMemberASTNode*)node->right;
+  if (member != NULL && member->base.op == AST_OP(structmember) &&
+      member->member != NULL && member->member->symbol == NULL &&
+      node->left != NULL) {
+    TypeRecord* receiver_type = node->left->type;
+    while (receiver_type != NULL &&
+           (TypeIsPointer(receiver_type) || TypeIsReference(receiver_type))) {
+      receiver_type = receiver_type->next;
+    }
+    if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+        receiver_type->info.struct_info != NULL) {
+      Struct* receiver_owner = receiver_type->info.struct_info;
+      if (receiver_owner->lexical_parent != NULL &&
+          receiver_owner->tag_name != NULL && gen->func != NULL &&
+          TypeIsFunction(gen->func) &&
+          gen->func->info.function.cxx_member_owner != NULL) {
+        StructMember* nested = FindStructMember(
+            gen->func->info.function.cxx_member_owner,
+            receiver_owner->tag_name);
+        if (nested != NULL && nested->symbol != NULL &&
+            TypeIsStructOrUnion(nested->symbol->type) &&
+            nested->symbol->type->info.struct_info != NULL) {
+          receiver_owner = nested->symbol->type->info.struct_info;
+        }
+      }
+      StructMember* rebound =
+          member->member->symbol != NULL
+              ? FindStructMember(receiver_owner,
+                                 &member->member->symbol->name)
+              : NULL;
+      if (rebound == NULL) {
+        for (size_t i = 0; i < receiver_owner->members.length; i++) {
+          StructMember* candidate = receiver_owner->members.value.p[i];
+          if (candidate != NULL && candidate->symbol != NULL &&
+              candidate->index == member->member->index &&
+              candidate->is_static == member->member->is_static &&
+              candidate->is_member_function ==
+                  member->member->is_member_function) {
+            rebound = candidate;
+            break;
+          }
+        }
+      }
+      if (rebound == NULL && !member->member->is_static &&
+          !member->member->is_member_function) {
+        for (size_t i = 0; i < receiver_owner->members.length; i++) {
+          StructMember* candidate = receiver_owner->members.value.p[i];
+          if (candidate != NULL && candidate->symbol != NULL &&
+              !candidate->is_static && !candidate->is_member_function &&
+              candidate->byte_offset == member->member->byte_offset) {
+            rebound = candidate;
+            break;
+          }
+        }
+      }
+      if (rebound == NULL &&
+          member->member->index < receiver_owner->members.length) {
+        rebound =
+            receiver_owner->members.value.p[member->member->index];
+      }
+      if (rebound != NULL && rebound->symbol != NULL &&
+          rebound->is_static == member->member->is_static &&
+          rebound->is_member_function == member->member->is_member_function) {
+        StructMemberASTNodeSetMember(member, rebound);
+        ASTNodeSetType(&member->base, rebound->symbol->type);
+        ASTNodeSetType(&node->base, rebound->symbol->type);
+      }
+    }
+  }
+  if (member != NULL && member->base.op == AST_OP(structmember) &&
+      member->member != NULL &&
+      member->member->symbol == NULL && gen->func != NULL &&
+      TypeIsFunction(gen->func) &&
+      gen->func->info.function.cxx_member_owner != NULL &&
+      member->member->index <
+          gen->func->info.function.cxx_member_owner->members.length) {
+    StructMember* rebound =
+        gen->func->info.function.cxx_member_owner->members.value.p[
+            member->member->index];
+    if (rebound != NULL && rebound->symbol != NULL &&
+        rebound->is_static == member->member->is_static &&
+        rebound->is_member_function == member->member->is_member_function) {
+      StructMemberASTNodeSetMember(member, rebound);
+      ASTNodeSetType(&member->base, rebound->symbol->type);
+      ASTNodeSetType(&node->base, rebound->symbol->type);
+    }
+  }
   if (!gen->for_constant_evaluation && member->member->is_member_function) {
     CompilerMarkFunctionReferenced(member->member->symbol);
   }

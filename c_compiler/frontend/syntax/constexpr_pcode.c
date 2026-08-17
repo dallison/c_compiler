@@ -4118,9 +4118,11 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   }
   bool ok = RunRealPCodeCall(ctx, node, callee->type, result, NULL, NULL, NULL,
                              &reason);
-  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
+  if (!ok &&
+      (compiler->constexpr_eval_mode == kConstexprEvalAuto ||
+       (compiler->constexpr_eval_mode == kConstexprEvalPCode &&
+        (compiler->current_function == NULL ||
+         compiler->constant_evaluation_required_depth > 0)))) {
     ok = RunConstexprExpressionThunk(ctx, node, result, NULL, NULL, NULL,
                                      &reason);
   }

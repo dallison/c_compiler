@@ -8574,8 +8574,7 @@ static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
       StringAppendString(&base_destructor_name, base_tag);
       if (!StringEqualString(spelled, &base_destructor_name)) {
         ConstantASTNode* name_node = (ConstantASTNode*)access->right;
-        StringDelete(name_node->value.string);
-        name_node->value.string = NewString(base_destructor_name.value);
+        StringSet(name_node->value.string, base_destructor_name.value);
       }
       StringDestruct(&base_destructor_name);
       return NULL;
@@ -8592,8 +8591,7 @@ static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
       // real destructor name so the ordinary member-call path resolves it.
       if (!StringEqualString(spelled, &destructor_name)) {
         ConstantASTNode* name_node = (ConstantASTNode*)access->right;
-        StringDelete(name_node->value.string);
-        name_node->value.string = NewString(destructor_name.value);
+        StringSet(name_node->value.string, destructor_name.value);
       }
       StringDestruct(&destructor_name);
       return NULL;
@@ -10129,8 +10127,14 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
       return TypeEqual(left, right);
     case kDeclPrimitive:
       if (TypeIsStructOrUnion(left) || TypeIsStructOrUnion(right)) {
-        return TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
-               left->info.struct_info == right->info.struct_info;
+        if (!TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right)) {
+          return false;
+        }
+        TypeRecord unqualified_left = *left;
+        TypeRecord unqualified_right = *right;
+        unqualified_left.qualifiers = kQualPlain;
+        unqualified_right.qualifiers = kQualPlain;
+        return TypeEqual(&unqualified_left, &unqualified_right);
       }
       if (TypeIsEnum(left) || TypeIsEnum(right)) {
         return TypeIsEnum(left) && TypeIsEnum(right) &&
@@ -10437,8 +10441,13 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   
   node->left = AnalyzeExpression(node->left);
-  SemanticConvertType(node->left, bool_type, kConvertContextualBool);
   node->right = AnalyzeExpression(node->right);
+  if (ExpressionIsTemplateDependent(node->left) ||
+      ExpressionIsTemplateDependent(node->right)) {
+    ASTNodeSetType((ASTNode*)node, bool_type);
+    return;
+  }
+  SemanticConvertType(node->left, bool_type, kConvertContextualBool);
   SemanticConvertType(node->right, bool_type, kConvertContextualBool);
   ASTNodeSetType((ASTNode*)node, node->left->type);
   SemanticCheckScalarType(node->left);

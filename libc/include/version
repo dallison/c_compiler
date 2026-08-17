@@ -67,6 +67,9 @@
 #endif
 
 #if __cplusplus >= 202600L
+#ifndef __cpp_lib_hive
+#define __cpp_lib_hive 202502L
+#endif
 #ifndef __cpp_lib_inplace_vector
 #define __cpp_lib_inplace_vector 202603L
 #endif

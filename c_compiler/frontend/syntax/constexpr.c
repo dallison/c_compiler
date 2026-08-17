@@ -2493,6 +2493,49 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
     } else {
       return false;
     }
+    VectorASTNode* constructor_call = (VectorASTNode*)constructor;
+    Symbol* constructor_symbol =
+        ConstexprFunctionDefinition(ConstexprCallSymbol(constructor));
+    CXXSpecialMemberKind constructor_kind =
+        constructor_symbol != NULL && constructor_symbol->type != NULL &&
+                TypeIsFunction(constructor_symbol->type)
+            ? constructor_symbol->type->info.function.cxx_special_member_kind
+            : kCXXSpecialMemberNone;
+    if (constructor_call->children != NULL &&
+        constructor_call->children->length >= 2) {
+      ASTNode* source = constructor_call->children->value.p[
+          constructor_call->children->length - 1];
+      TypeRecord* source_type = source != NULL ? source->type : NULL;
+      while (source_type != NULL && TypeIsReference(source_type)) {
+        source_type = source_type->next;
+      }
+      bool direct_copy =
+          source_type != NULL && TypeIsStructOrUnion(source_type) &&
+          TypeIsStructOrUnion(type) &&
+          (source_type->info.struct_info == type->info.struct_info ||
+           (source_type->info.struct_info != NULL &&
+            type->info.struct_info != NULL &&
+            source_type->info.struct_info->tag_name != NULL &&
+            type->info.struct_info->tag_name != NULL &&
+            StringEqual(source_type->info.struct_info->tag_name,
+                        type->info.struct_info->tag_name->value)));
+      if ((constructor_kind == kCXXSpecialMemberCopyConstructor ||
+           constructor_kind == kCXXSpecialMemberMoveConstructor ||
+           direct_copy) &&
+          source_type != NULL && TypeIsStructOrUnion(source_type)) {
+        ConstexprValue source_value = {0};
+        if (EvaluateConstexprObjectAccess(ctx, source, &source_value) &&
+            source_value.is_object && source_value.object != NULL) {
+          result->is_object = true;
+          result->is_address = false;
+          result->is_floating = false;
+          result->ivalue = 0;
+          result->fvalue = 0;
+          result->object = CloneConstexprObject(ctx, source_value.object);
+          return result->object != NULL;
+        }
+      }
+    }
     result->is_object = true;
     result->is_address = false;
     result->is_floating = false;
@@ -2846,6 +2889,11 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
   if (node == NULL) {
     return false;
   }
+  if (node->op == AST_OP(comma) && node->type != NULL &&
+      (TypeIsStructOrUnion(node->type) || TypeIsFixedArray(node->type))) {
+    return EvaluateConstexprObjectExpressionInitializer(ctx, node->type, node,
+                                                        result);
+  }
   if (node->op == AST_OP(string)) {
     TypeRecord* type = node->type;
     if (type != NULL && TypeIsPointer(type)) {
@@ -3129,9 +3177,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                     member_node->member)) {
       return false;
     }
-    size_t byte_offset = member_node->byte_offset >= 0
-                             ? (size_t)member_node->byte_offset
-                             : (size_t)member_node->member->byte_offset;
+    size_t byte_offset = (size_t)member_node->member->byte_offset;
     ConstexprValue* slot = ConstexprSlotForOffset(
         object_value.object->type, object_value.object, byte_offset);
     if (slot == NULL) {
@@ -3291,10 +3337,10 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
     *slot = ConstexprObjectSlot(
         object_value.object,
         ConstexprMemberSlotIndex(object_value.object, member_node->member));
-    if (*slot != NULL && member_node->byte_offset >= 0) {
+    if (*slot != NULL && member_node->member->byte_offset >= 0) {
       ConstexprValue* offset_slot = ConstexprSlotForOffset(
           object_value.object->type, object_value.object,
-          (size_t)member_node->byte_offset);
+          (size_t)member_node->member->byte_offset);
       if (offset_slot != NULL) {
         *slot = offset_slot;
       }
@@ -6682,10 +6728,13 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     use_overlay_result = true;
   }
   int64_t pcode_result = 0;
-  bool pcode_ok =
-      mode != kConstexprEvalAST &&
-      compiler->reflection_values.length == 0 &&
-      ConstexprPCodeEvaluateCallAsInteger(ctx, node, &pcode_result);
+  if (mode == kConstexprEvalAuto) {
+    compiler->constexpr_eval_mode = kConstexprEvalPCode;
+  }
+  bool pcode_ok = mode != kConstexprEvalAST &&
+                  compiler->reflection_values.length == 0 &&
+                  ConstexprPCodeEvaluateCallAsInteger(ctx, node, &pcode_result);
+  compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
       ReportConstexprPCodeFailure(node, false);
@@ -6770,10 +6819,13 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
     use_overlay_result = true;
   }
   double pcode_result = 0;
-  bool pcode_ok =
-      mode != kConstexprEvalAST &&
-      compiler->reflection_values.length == 0 &&
-      ConstexprPCodeEvaluateCallAsFloating(ctx, node, &pcode_result);
+  if (mode == kConstexprEvalAuto) {
+    compiler->constexpr_eval_mode = kConstexprEvalPCode;
+  }
+  bool pcode_ok = mode != kConstexprEvalAST &&
+                  compiler->reflection_values.length == 0 &&
+                  ConstexprPCodeEvaluateCallAsFloating(ctx, node, &pcode_result);
+  compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
       ReportConstexprPCodeFailure(node, false);
@@ -6827,10 +6879,14 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
       return false;
     }
   }
+  if (mode == kConstexprEvalAuto) {
+    compiler->constexpr_eval_mode = kConstexprEvalPCode;
+  }
   bool pcode_ok =
       mode != kConstexprEvalAST &&
       compiler->reflection_values.length == 0 &&
       ConstexprPCodeEvaluateCallAsObject(ctx, node);
+  compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
       ReportConstexprPCodeFailure(node, false);

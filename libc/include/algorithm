@@ -1157,23 +1157,28 @@ constexpr It __partition_pivot(It first, It last, Compare comp) {
   }
   // Median now at *mid; move it to first as the pivot.
   std::iter_swap(first, mid);
-  typename iterator_traits<It>::value_type pivot = *first;
+  typename iterator_traits<It>::value_type pivot = std::move(*first);
   It i = first;
   It j = last;
   for (;;) {
-    do {
-      ++i;
-    } while (i != last && comp(*i, pivot));
     do {
       --j;
     } while (comp(pivot, *j));
     if (!(i < j)) {
       break;
     }
-    std::iter_swap(i, j);
+    *i = std::move(*j);
+    ++i;
+    while (i < j && comp(*i, pivot)) {
+      ++i;
+    }
+    if (!(i < j)) {
+      break;
+    }
+    *j = std::move(*i);
   }
-  std::iter_swap(first, j);
-  return j;
+  *i = std::move(pivot);
+  return i;
 }
 
 template <class It, class Compare>

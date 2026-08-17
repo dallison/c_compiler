@@ -1468,10 +1468,18 @@ static bool CXXStructHasDeletedBaseSpecialMemberKind(
   return false;
 }
 
-static bool CXXStructHasDeletedMemberSpecialMemberKind(
-    Struct* str, CXXSpecialMemberKind kind) {
+static bool CXXStructHasDeletedMemberSpecialMemberKindImpl(
+    Struct* str, CXXSpecialMemberKind kind, Vector* active) {
   if (str == NULL || kind == kCXXSpecialMemberNone) {
     return false;
+  }
+  for (size_t i = 0; active != NULL && i < active->length; i++) {
+    if (active->value.p[i] == str) {
+      return false;
+    }
+  }
+  if (active != NULL) {
+    VectorAppend(active, str);
   }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
@@ -1487,11 +1495,28 @@ static bool CXXStructHasDeletedMemberSpecialMemberKind(
     Struct* member_struct = type->info.struct_info;
     if (CXXStructHasDeletedSpecialMemberKind(member_struct, kind) ||
         CXXStructHasDeletedBaseSpecialMemberKind(member_struct, kind) ||
-        CXXStructHasDeletedMemberSpecialMemberKind(member_struct, kind)) {
+        CXXStructHasDeletedMemberSpecialMemberKindImpl(member_struct, kind,
+                                                       active)) {
+      if (active != NULL) {
+        active->length--;
+      }
       return true;
     }
   }
+  if (active != NULL) {
+    active->length--;
+  }
   return false;
+}
+
+static bool CXXStructHasDeletedMemberSpecialMemberKind(
+    Struct* str, CXXSpecialMemberKind kind) {
+  Vector active;
+  VectorInit(&active);
+  bool result =
+      CXXStructHasDeletedMemberSpecialMemberKindImpl(str, kind, &active);
+  VectorDestruct(&active);
+  return result;
 }
 
 // True if `accessor` is directly granted friendship by `owner`.  Friendship is
@@ -2101,7 +2126,9 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
       str->tag_name == NULL || str->cxx_special_members_complete ||
       tag->flags.invented ||
       strcmp(tag->name.value, "__va_list_tag") == 0 ||
-      parser->syntax->parsing_template_declaration) {
+      (parser->syntax->parsing_template_declaration &&
+       (str->is_template || str->lexical_parent == NULL ||
+        tag->type == NULL || tag->type->template_origin == NULL))) {
     return;
   }
   bool user_declared_move =

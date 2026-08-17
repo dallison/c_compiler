@@ -1,0 +1,1166 @@
+#ifndef __davecc_hive__
+#define __davecc_hive__
+
+#if __cplusplus >= 202600L
+
+#define __cpp_lib_hive 202502L
+
+#include <__exception_support>
+#include <__hive_storage.h>
+#include <algorithm>
+#include <compare>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <memory_resource>
+#include <ranges>
+#include <stddef.h>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+struct hive_limits {
+  size_t min;
+  size_t max;
+
+  constexpr hive_limits(size_t minimum, size_t maximum) noexcept
+      : min(minimum), max(maximum) {}
+};
+
+namespace __hive_detail {
+
+template <class R, class T>
+concept __container_compatible_range =
+    ranges::input_range<R> &&
+    convertible_to<ranges::range_reference_t<R>, T>;
+
+}  // namespace __hive_detail
+
+template <class T, class Allocator = allocator<T>>
+class hive {
+ public:
+  using value_type = T;
+  using allocator_type = Allocator;
+  using pointer = typename allocator_traits<Allocator>::pointer;
+  using const_pointer = typename allocator_traits<Allocator>::const_pointer;
+  using reference = value_type&;
+  using const_reference = const value_type&;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+
+ private:
+  static constexpr size_type __npos = static_cast<size_type>(-1);
+
+  using __storage_base = __hive_detail::__storage;
+  using __block_base = __hive_detail::__block_base;
+
+  struct __block {
+    __block_base __base;
+    pointer __elements;
+
+    constexpr __block() noexcept
+        : __base(), __elements(nullptr) {}
+  };
+
+  static constexpr __block* __as_block(__block_base* block) noexcept {
+    return reinterpret_cast<__block*>(block);
+  }
+
+  static constexpr __block_base* __as_base(__block* block) noexcept {
+    return block == nullptr ? nullptr : &block->__base;
+  }
+
+  using __alloc_traits = allocator_traits<allocator_type>;
+  using __block_allocator =
+      typename __alloc_traits::template rebind_alloc<__block>;
+  using __block_alloc_traits = allocator_traits<__block_allocator>;
+  using __meta_allocator =
+      typename __alloc_traits::template rebind_alloc<size_type>;
+  using __meta_alloc_traits = allocator_traits<__meta_allocator>;
+
+ public:
+  template <bool Const>
+  class __iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using iterator_concept = bidirectional_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = conditional_t<Const, const T*, T*>;
+    using reference = conditional_t<Const, const T&, T&>;
+
+    __block_base* __block_;
+    size_type __index_;
+
+    constexpr __iterator() noexcept : __block_(nullptr), __index_(0) {}
+    constexpr __iterator(__block_base* block, size_type index) noexcept
+        : __block_(block), __index_(index) {}
+
+    template <bool Other>
+      requires(Const && !Other)
+    constexpr __iterator(const __iterator<Other>& other) noexcept
+        : __block_(other.__block_), __index_(other.__index_) {}
+
+    constexpr reference operator*() const {
+      return static_cast<T*>(__block_->__elements)[__index_];
+    }
+
+    constexpr pointer operator->() const {
+      return &static_cast<T*>(__block_->__elements)[__index_];
+    }
+
+    constexpr __iterator& operator++() {
+      size_type next = __index_ + 1;
+      if (next < __block_->__used) {
+        size_type skip = __block_->__skip[next];
+        if (skip != 0) {
+          next += skip;
+        }
+        if (next < __block_->__used) {
+          __index_ = next;
+          return *this;
+        }
+      }
+      __block_ = __block_->__next;
+      __index_ = __block_->__sentinel ? 0 : __block_->__first;
+      return *this;
+    }
+
+    constexpr __iterator operator++(int) {
+      __iterator result = *this;
+      ++*this;
+      return result;
+    }
+
+    constexpr __iterator& operator--() {
+      if (__block_->__sentinel) {
+        __block_ = __block_->__prev;
+        __index_ = __block_->__last;
+        return *this;
+      }
+      if (__index_ != __block_->__first) {
+        size_type previous = __index_ - 1;
+        size_type skip = __block_->__skip[previous];
+        if (skip != 0) {
+          previous -= skip;
+        }
+        __index_ = previous;
+        return *this;
+      }
+      __block_ = __block_->__prev;
+      __index_ = __block_->__last;
+      return *this;
+    }
+
+    constexpr __iterator operator--(int) {
+      __iterator result = *this;
+      --*this;
+      return result;
+    }
+
+    constexpr __iterator& operator+=(difference_type count) {
+      if (count >= 0) {
+        while (count-- != 0) {
+          ++*this;
+        }
+      } else {
+        while (count++ != 0) {
+          --*this;
+        }
+      }
+      return *this;
+    }
+
+    constexpr __iterator& operator-=(difference_type count) {
+      return *this += -count;
+    }
+
+    constexpr __iterator operator+(difference_type count) const {
+      __iterator result = *this;
+      result += count;
+      return result;
+    }
+
+    friend constexpr __iterator operator+(difference_type count,
+                                           __iterator iterator) {
+      return iterator + count;
+    }
+
+    constexpr __iterator operator-(difference_type count) const {
+      __iterator result = *this;
+      result -= count;
+      return result;
+    }
+
+    template <bool Other>
+    constexpr bool operator==(const __iterator<Other>& other) const noexcept {
+      return __block_ == other.__block_ && __index_ == other.__index_;
+    }
+
+    template <bool Other>
+    constexpr strong_ordering operator<=>(
+        const __iterator<Other>& other) const noexcept {
+      if (__block_ == other.__block_) {
+        if (__index_ < other.__index_) {
+          return strong_ordering::less;
+        }
+        if (__index_ > other.__index_) {
+          return strong_ordering::greater;
+        }
+        return strong_ordering::equal;
+      }
+      if (__block_->__order < other.__block_->__order) {
+        return strong_ordering::less;
+      }
+      return strong_ordering::greater;
+    }
+  };
+
+  using iterator = __iterator<false>;
+  using const_iterator = __iterator<true>;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  __storage_base __storage_;
+  allocator_type __alloc_;
+  __block_allocator __block_alloc_;
+  __meta_allocator __meta_alloc_;
+  hive_limits __limits_;
+
+  static constexpr size_type __hard_max() noexcept {
+    return static_cast<size_type>(9223372036854775807LL) /
+           (sizeof(T) + 3 * sizeof(size_type) + 1);
+  }
+
+  static constexpr size_type __default_max() noexcept {
+    return __hard_max() < 1024 ? __hard_max() : 1024;
+  }
+
+  __block* __allocate_block(size_type capacity) {
+    __block* block = __block_alloc_traits::allocate(__block_alloc_, 1);
+    bool block_constructed = false;
+    __DAVECC_TRY {
+      __block_alloc_traits::construct(__block_alloc_, block);
+      block_constructed = true;
+      block->__elements = __alloc_traits::allocate(__alloc_, capacity);
+      block->__base.__elements = &block->__elements[0];
+      block->__base.__skip =
+          __meta_alloc_traits::allocate(__meta_alloc_, capacity);
+      block->__base.__run_prev =
+          __meta_alloc_traits::allocate(__meta_alloc_, capacity);
+      block->__base.__run_next =
+          __meta_alloc_traits::allocate(__meta_alloc_, capacity);
+      block->__base.__capacity = capacity;
+    }
+    __DAVECC_CATCH_ALL {
+      if (block_constructed) {
+        if (block->__base.__run_next != nullptr) {
+          __meta_alloc_traits::deallocate(
+              __meta_alloc_, block->__base.__run_next, capacity);
+        }
+        if (block->__base.__run_prev != nullptr) {
+          __meta_alloc_traits::deallocate(
+              __meta_alloc_, block->__base.__run_prev, capacity);
+        }
+        if (block->__base.__skip != nullptr) {
+          __meta_alloc_traits::deallocate(
+              __meta_alloc_, block->__base.__skip, capacity);
+        }
+        if (block->__elements != nullptr) {
+          __alloc_traits::deallocate(__alloc_, block->__elements, capacity);
+        }
+        __block_alloc_traits::destroy(__block_alloc_, block);
+      }
+      __block_alloc_traits::deallocate(__block_alloc_, block, 1);
+      __DAVECC_RETHROW;
+    }
+    return block;
+  }
+
+  void __deallocate_block(__block* block) noexcept {
+    __meta_alloc_traits::deallocate(
+        __meta_alloc_, block->__base.__run_next, block->__base.__capacity);
+    __meta_alloc_traits::deallocate(
+        __meta_alloc_, block->__base.__run_prev, block->__base.__capacity);
+    __meta_alloc_traits::deallocate(
+        __meta_alloc_, block->__base.__skip, block->__base.__capacity);
+    __alloc_traits::deallocate(
+        __alloc_, block->__elements, block->__base.__capacity);
+    __block_alloc_traits::destroy(__block_alloc_, block);
+    __block_alloc_traits::deallocate(__block_alloc_, block, 1);
+  }
+
+  void __destroy_elements(__block* block) noexcept {
+    if (block->__base.__live == 0) {
+      return;
+    }
+    size_type index = block->__base.__first;
+    for (size_type remaining = block->__base.__live; remaining != 0;
+         --remaining) {
+      __alloc_traits::destroy(__alloc_, &block->__elements[index]);
+      if (remaining != 1) {
+        ++index;
+        if (block->__base.__skip[index] != 0) {
+          index += block->__base.__skip[index];
+        }
+      }
+    }
+  }
+
+  constexpr void __release_all() noexcept {
+    __block_base* block = __storage_.__end_.__next;
+    while (block != &__storage_.__end_) {
+      __block_base* next = block->__next;
+      __block* allocated = __as_block(block);
+      __destroy_elements(allocated);
+      __deallocate_block(allocated);
+      block = next;
+    }
+    block = __storage_.__reserved_;
+    while (block != nullptr) {
+      __block_base* next = block->__reserved_next;
+      __deallocate_block(__as_block(block));
+      block = next;
+    }
+    __storage_.__init_sentinel();
+  }
+
+  size_type __next_block_capacity() const noexcept {
+    size_type result = __limits_.min;
+    if (__storage_.__end_.__prev != &__storage_.__end_) {
+      size_type previous = __storage_.__end_.__prev->__capacity;
+      result = previous >= __limits_.max / 2 ? __limits_.max : previous * 2;
+      if (result < __limits_.min) {
+        result = __limits_.min;
+      }
+    }
+    if (result > __limits_.max) {
+      result = __limits_.max;
+    }
+    return result;
+  }
+
+  template <class... Args>
+  iterator __emplace(Args&&... args) {
+    if (__storage_.__size_ == max_size()) {
+      __hive_detail::__throw_length_error();
+    }
+
+    if (__storage_.__holes_ != nullptr) {
+      __block* block = __as_block(__storage_.__holes_);
+      size_type index = block->__base.__free_run;
+      __alloc_traits::construct(__alloc_, &block->__elements[index],
+                                std::forward<Args>(args)...);
+      __storage_.__consume_run_start(__as_base(block), index);
+      ++block->__base.__live;
+      ++__storage_.__size_;
+      if (block->__base.__live == 1 || index < block->__base.__first) {
+        block->__base.__first = index;
+      }
+      if (block->__base.__live == 1 || index > block->__base.__last) {
+        block->__base.__last = index;
+      }
+      return iterator(__as_base(block), index);
+    }
+
+    __block_base* last_base = __storage_.__end_.__prev;
+    if (last_base != &__storage_.__end_ &&
+        last_base->__used < last_base->__capacity) {
+      __block* last = __as_block(last_base);
+      size_type index = last->__base.__used;
+      __alloc_traits::construct(__alloc_, &last->__elements[index],
+                                std::forward<Args>(args)...);
+      last->__base.__skip[index] = 0;
+      last->__base.__run_prev[index] = __npos;
+      last->__base.__run_next[index] = __npos;
+      ++last->__base.__used;
+      ++last->__base.__live;
+      last->__base.__last = index;
+      ++__storage_.__size_;
+      return iterator(__as_base(last), index);
+    }
+
+    __block* block = __as_block(__storage_.__take_reserved());
+    bool fresh = false;
+    if (block == nullptr) {
+      block = __allocate_block(__next_block_capacity());
+      fresh = true;
+    }
+    __DAVECC_TRY {
+      __alloc_traits::construct(__alloc_, &block->__elements[0],
+                                std::forward<Args>(args)...);
+    }
+    __DAVECC_CATCH_ALL {
+      if (fresh) {
+        __deallocate_block(block);
+      } else {
+        block->__base.__reserved_next = __storage_.__reserved_;
+        __storage_.__reserved_ = __as_base(block);
+      }
+      __DAVECC_RETHROW;
+    }
+    block->__base.__skip[0] = 0;
+    block->__base.__run_prev[0] = __npos;
+    block->__base.__run_next[0] = __npos;
+    block->__base.__used = 1;
+    block->__base.__live = 1;
+    block->__base.__first = 0;
+    block->__base.__last = 0;
+    block->__base.__free_run = __npos;
+    __storage_.__link_active_back(__as_base(block));
+    if (fresh) {
+      __storage_.__capacity_ += block->__base.__capacity;
+    }
+    ++__storage_.__size_;
+    __storage_.__renumber();
+    return iterator(__as_base(block), 0);
+  }
+
+  void __steal(hive& other) noexcept {
+    __limits_ = other.__limits_;
+    __storage_.__steal_storage(other.__storage_);
+  }
+
+  void __swap_contents(hive& other) noexcept {
+    __storage_.__swap_storage(other.__storage_);
+    std::swap(__limits_, other.__limits_);
+  }
+
+  void __copy_from(const hive& other) {
+    for (const_reference value : other) {
+      emplace(value);
+    }
+  }
+
+  template <class InputIterator>
+  void __insert_iterators(InputIterator first, InputIterator last) {
+    for (; first != last; ++first) {
+      emplace(*first);
+    }
+  }
+
+ public:
+  constexpr hive() noexcept(noexcept(Allocator())) : hive(Allocator()) {}
+
+  constexpr explicit hive(const Allocator& alloc) noexcept
+      : __storage_(),
+        __alloc_(alloc),
+        __block_alloc_(alloc),
+        __meta_alloc_(alloc),
+        __limits_(block_capacity_default_limits()) {}
+
+  constexpr explicit hive(hive_limits block_limits)
+      : __storage_(),
+        __alloc_(),
+        __block_alloc_(__alloc_),
+        __meta_alloc_(__alloc_),
+        __limits_(block_limits) {}
+
+  constexpr hive(hive_limits block_limits, const Allocator& alloc)
+      : __storage_(),
+        __alloc_(alloc),
+        __block_alloc_(alloc),
+        __meta_alloc_(alloc),
+        __limits_(block_limits) {}
+
+  explicit hive(size_type count, const Allocator& alloc = Allocator())
+      : hive(alloc) {
+    __DAVECC_TRY {
+      while (count-- != 0) {
+        emplace();
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(size_type count, hive_limits block_limits,
+       const Allocator& alloc = Allocator())
+      : hive(block_limits, alloc) {
+    __DAVECC_TRY {
+      while (count-- != 0) {
+        emplace();
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(size_type count, const T& value,
+       const Allocator& alloc = Allocator())
+      : hive(alloc) {
+    __DAVECC_TRY {
+      insert(count, value);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(size_type count, const T& value, hive_limits block_limits,
+       const Allocator& alloc = Allocator())
+      : hive(block_limits, alloc) {
+    __DAVECC_TRY {
+      insert(count, value);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <class InputIterator,
+            class = typename iterator_traits<InputIterator>::iterator_category>
+  hive(InputIterator first, InputIterator last,
+       const Allocator& alloc = Allocator())
+      : hive(alloc) {
+    __DAVECC_TRY {
+      __insert_iterators(first, last);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <class InputIterator,
+            class = typename iterator_traits<InputIterator>::iterator_category>
+  hive(InputIterator first, InputIterator last, hive_limits block_limits,
+       const Allocator& alloc = Allocator())
+      : hive(block_limits, alloc) {
+    __DAVECC_TRY {
+      __insert_iterators(first, last);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  hive(from_range_t, R&& range, const Allocator& alloc = Allocator())
+      : hive(alloc) {
+    __DAVECC_TRY {
+      insert_range(std::forward<R>(range));
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  hive(from_range_t, R&& range, hive_limits block_limits,
+       const Allocator& alloc = Allocator())
+      : hive(block_limits, alloc) {
+    __DAVECC_TRY {
+      insert_range(std::forward<R>(range));
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(const hive& other)
+      : hive(other.__limits_,
+             __alloc_traits::select_on_container_copy_construction(
+                 other.__alloc_)) {
+    __DAVECC_TRY {
+      __copy_from(other);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(hive&& other) noexcept
+      : __storage_(),
+        __alloc_(std::move(other.__alloc_)),
+        __block_alloc_(std::move(other.__block_alloc_)),
+        __meta_alloc_(std::move(other.__meta_alloc_)),
+        __limits_(other.__limits_) {
+    __steal(other);
+  }
+
+  hive(const hive& other, const type_identity_t<Allocator>& alloc)
+      : hive(other.__limits_, alloc) {
+    __DAVECC_TRY {
+      __copy_from(other);
+    }
+    __DAVECC_CATCH_ALL {
+      __release_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  hive(hive&& other, const type_identity_t<Allocator>& alloc) : hive(alloc) {
+    if (__alloc_ == other.__alloc_) {
+      __steal(other);
+    } else {
+      __DAVECC_TRY {
+        for (reference value : other) {
+          emplace(std::move(value));
+        }
+      }
+      __DAVECC_CATCH_ALL {
+        __release_all();
+        __DAVECC_RETHROW;
+      }
+      other.clear();
+    }
+  }
+
+  hive(initializer_list<T> values, const Allocator& alloc = Allocator())
+      : hive(values.begin(), values.end(), alloc) {}
+
+  hive(initializer_list<T> values, hive_limits block_limits,
+       const Allocator& alloc = Allocator())
+      : hive(values.begin(), values.end(), block_limits, alloc) {}
+
+  constexpr ~hive() {
+    if (__storage_.__capacity_ != 0) {
+      __release_all();
+    }
+  }
+
+  hive& operator=(const hive& other) {
+    if (this == &other) {
+      return *this;
+    }
+    if constexpr (
+        __alloc_traits::propagate_on_container_copy_assignment::value) {
+      if (!(__alloc_ == other.__alloc_)) {
+        __release_all();
+        __alloc_ = other.__alloc_;
+        __block_alloc_ = __block_allocator(__alloc_);
+        __meta_alloc_ = __meta_allocator(__alloc_);
+      }
+    }
+    assign(other.begin(), other.end());
+    return *this;
+  }
+
+  hive& operator=(hive&& other) noexcept(
+      __alloc_traits::propagate_on_container_move_assignment::value ||
+      __alloc_traits::is_always_equal::value) {
+    if (this == &other) {
+      return *this;
+    }
+    if constexpr (
+        __alloc_traits::propagate_on_container_move_assignment::value) {
+      __release_all();
+      __alloc_ = std::move(other.__alloc_);
+      __block_alloc_ = std::move(other.__block_alloc_);
+      __meta_alloc_ = std::move(other.__meta_alloc_);
+      __steal(other);
+    } else if (__alloc_ == other.__alloc_) {
+      __release_all();
+      __steal(other);
+    } else {
+      clear();
+      for (reference value : other) {
+        emplace(std::move(value));
+      }
+      other.clear();
+    }
+    return *this;
+  }
+
+  hive& operator=(initializer_list<T> values) {
+    assign(values);
+    return *this;
+  }
+
+  template <class InputIterator,
+            class = typename iterator_traits<InputIterator>::iterator_category>
+  void assign(InputIterator first, InputIterator last) {
+    clear();
+    __insert_iterators(first, last);
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  void assign_range(R&& range) {
+    clear();
+    insert_range(std::forward<R>(range));
+  }
+
+  void assign(size_type count, const T& value) {
+    clear();
+    insert(count, value);
+  }
+
+  void assign(initializer_list<T> values) {
+    assign(values.begin(), values.end());
+  }
+
+  allocator_type get_allocator() const noexcept { return __alloc_; }
+
+  iterator begin() noexcept {
+    return __storage_.__size_ == 0
+               ? end()
+               : iterator(__storage_.__end_.__next,
+                          __storage_.__end_.__next->__first);
+  }
+
+  const_iterator begin() const noexcept {
+    return __storage_.__size_ == 0
+               ? end()
+               : const_iterator(__storage_.__end_.__next,
+                                __storage_.__end_.__next->__first);
+  }
+
+  iterator end() noexcept { return iterator(&__storage_.__end_, 0); }
+
+  const_iterator end() const noexcept {
+    return const_iterator(
+        const_cast<__block_base*>(&__storage_.__end_), 0);
+  }
+
+  reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+  const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+  const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  const_iterator cbegin() const noexcept { return begin(); }
+  const_iterator cend() const noexcept { return end(); }
+  const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+  const_reverse_iterator crend() const noexcept { return rend(); }
+
+  constexpr bool empty() const noexcept {
+    return __storage_.__size_ == 0;
+  }
+  constexpr size_type size() const noexcept {
+    return __storage_.__size_;
+  }
+  size_type max_size() const noexcept {
+    size_type allocator_max = __alloc_traits::max_size(__alloc_);
+    return allocator_max < __hard_max() ? allocator_max : __hard_max();
+  }
+  size_type capacity() const noexcept { return __storage_.__capacity_; }
+
+  void reserve(size_type count) {
+    if (count <= __storage_.__capacity_) {
+      return;
+    }
+    if (count > max_size()) {
+      __hive_detail::__throw_length_error();
+    }
+
+    __block* staged = nullptr;
+    size_type staged_capacity = 0;
+    size_type simulated_capacity = __storage_.__capacity_;
+    size_type next = __next_block_capacity();
+    __DAVECC_TRY {
+      while (simulated_capacity < count) {
+        size_type remaining = count - simulated_capacity;
+        size_type block_capacity = next;
+        if (block_capacity < __limits_.min) {
+          block_capacity = __limits_.min;
+        }
+        if (block_capacity > __limits_.max) {
+          block_capacity = __limits_.max;
+        }
+        if (block_capacity > remaining && remaining >= __limits_.min) {
+          block_capacity = remaining;
+        }
+        __block* block = __allocate_block(block_capacity);
+        block->__base.__reserved_next = __as_base(staged);
+        staged = block;
+        staged_capacity += block_capacity;
+        simulated_capacity += block_capacity;
+        next = block_capacity >= __limits_.max / 2
+                   ? __limits_.max
+                   : block_capacity * 2;
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      while (staged != nullptr) {
+        __block* next_block =
+            __as_block(staged->__base.__reserved_next);
+        __deallocate_block(staged);
+        staged = next_block;
+      }
+      __DAVECC_RETHROW;
+    }
+
+    while (staged != nullptr) {
+      __block* next_block =
+          __as_block(staged->__base.__reserved_next);
+      staged->__base.__reserved_next = __storage_.__reserved_;
+      __storage_.__reserved_ = __as_base(staged);
+      staged = next_block;
+    }
+    __storage_.__capacity_ += staged_capacity;
+  }
+
+  void shrink_to_fit() {
+    if (__storage_.__capacity_ == __storage_.__size_) {
+      return;
+    }
+    hive compact(__limits_, __alloc_);
+    compact.reserve(__storage_.__size_);
+    if (compact.capacity() > __storage_.__capacity_) {
+      return;
+    }
+    for (reference value : *this) {
+      compact.emplace(std::move(value));
+    }
+    __swap_contents(compact);
+  }
+
+  void trim_capacity() noexcept {
+    while (__storage_.__reserved_ != nullptr) {
+      __block* block = __as_block(__storage_.__reserved_);
+      __storage_.__reserved_ = block->__base.__reserved_next;
+      __storage_.__capacity_ -= block->__base.__capacity;
+      __deallocate_block(block);
+    }
+  }
+
+  void trim_capacity(size_type count) noexcept {
+    while (__storage_.__reserved_ != nullptr &&
+           __storage_.__capacity_ -
+                   __storage_.__reserved_->__capacity >=
+               count) {
+      __block* block = __as_block(__storage_.__reserved_);
+      __storage_.__reserved_ = block->__base.__reserved_next;
+      __storage_.__capacity_ -= block->__base.__capacity;
+      __deallocate_block(block);
+    }
+  }
+
+  constexpr hive_limits block_capacity_limits() const noexcept {
+    return __limits_;
+  }
+
+  static constexpr hive_limits block_capacity_default_limits() noexcept {
+    return hive_limits(8, __default_max());
+  }
+
+  static constexpr hive_limits block_capacity_hard_limits() noexcept {
+    return hive_limits(1, __hard_max());
+  }
+
+  static constexpr bool is_within_hard_limits(hive_limits limits) noexcept {
+    return limits.min >= 1 && limits.min <= limits.max &&
+           limits.max <= __hard_max();
+  }
+
+  void reshape(hive_limits limits) {
+    if (!is_within_hard_limits(limits)) {
+      __hive_detail::__throw_length_error();
+    }
+    bool active_fits = true;
+    for (__block_base* block = __storage_.__end_.__next;
+         block != &__storage_.__end_;
+         block = block->__next) {
+      if (block->__capacity < limits.min || block->__capacity > limits.max) {
+        active_fits = false;
+        break;
+      }
+    }
+
+    if (!active_fits) {
+      hive replacement(limits, __alloc_);
+      replacement.reserve(__storage_.__size_);
+      for (reference value : *this) {
+        replacement.emplace(std::move(value));
+      }
+      __swap_contents(replacement);
+      return;
+    }
+
+    __block_base** link = &__storage_.__reserved_;
+    while (*link != nullptr) {
+      __block* block = __as_block(*link);
+      if (block->__base.__capacity < limits.min ||
+          block->__base.__capacity > limits.max) {
+        *link = block->__base.__reserved_next;
+        __storage_.__capacity_ -= block->__base.__capacity;
+        __deallocate_block(block);
+      } else {
+        link = &block->__base.__reserved_next;
+      }
+    }
+    __limits_ = limits;
+  }
+
+  template <class... Args>
+  iterator emplace(Args&&... args) {
+    return __emplace(std::forward<Args>(args)...);
+  }
+
+  template <class... Args>
+  iterator emplace_hint(const_iterator, Args&&... args) {
+    return __emplace(std::forward<Args>(args)...);
+  }
+
+  iterator insert(const T& value) { return emplace(value); }
+  iterator insert(T&& value) { return emplace(std::move(value)); }
+  iterator insert(const_iterator, const T& value) { return emplace(value); }
+  iterator insert(const_iterator, T&& value) {
+    return emplace(std::move(value));
+  }
+
+  void insert(initializer_list<T> values) {
+    insert(values.begin(), values.end());
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  void insert_range(R&& range) {
+    __insert_iterators(ranges::begin(range), ranges::end(range));
+  }
+
+  template <class InputIterator,
+            class = typename iterator_traits<InputIterator>::iterator_category>
+  void insert(InputIterator first, InputIterator last) {
+    __insert_iterators(first, last);
+  }
+
+  void insert(size_type count, const T& value) {
+    while (count-- != 0) {
+      emplace(value);
+    }
+  }
+
+  iterator erase(const_iterator position) {
+    __block* block = __as_block(position.__block_);
+    size_type index = position.__index_;
+    iterator result(__as_base(block), index);
+    ++result;
+    __alloc_traits::destroy(__alloc_, &block->__elements[index]);
+    --block->__base.__live;
+    --__storage_.__size_;
+
+    if (block->__base.__live == 0) {
+      __storage_.__unlink_active(__as_base(block));
+      if (block->__base.__free_run != __npos) {
+        __storage_.__remove_hole_block(__as_base(block));
+      }
+      __storage_.__reset_as_reserved(__as_base(block));
+      __storage_.__renumber();
+      return result;
+    }
+
+    __storage_.__mark_erased(__as_base(block), index);
+    if (index == block->__base.__first) {
+      size_type first = index + 1;
+      if (block->__base.__skip[first] != 0) {
+        first += block->__base.__skip[first];
+      }
+      block->__base.__first = first;
+    }
+    if (index == block->__base.__last) {
+      size_type last = index - 1;
+      if (block->__base.__skip[last] != 0) {
+        last -= block->__base.__skip[last];
+      }
+      block->__base.__last = last;
+    }
+    return result;
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    iterator current(first.__block_, first.__index_);
+    iterator finish(last.__block_, last.__index_);
+    while (current != finish) {
+      current = erase(current);
+    }
+    return current;
+  }
+
+  void swap(hive& other) noexcept(
+      __alloc_traits::propagate_on_container_swap::value ||
+      __alloc_traits::is_always_equal::value) {
+    if (this == &other) {
+      return;
+    }
+    if constexpr (__alloc_traits::propagate_on_container_swap::value) {
+      std::swap(__alloc_, other.__alloc_);
+      std::swap(__block_alloc_, other.__block_alloc_);
+      std::swap(__meta_alloc_, other.__meta_alloc_);
+    }
+    __swap_contents(other);
+  }
+
+  void clear() noexcept {
+    __block_base* block = __storage_.__end_.__next;
+    while (block != &__storage_.__end_) {
+      __block_base* next = block->__next;
+      __destroy_elements(__as_block(block));
+      __storage_.__reset_as_reserved(block);
+      block = next;
+    }
+    __storage_.__end_.__next = &__storage_.__end_;
+    __storage_.__end_.__prev = &__storage_.__end_;
+    __storage_.__end_.__order = 0;
+    __storage_.__holes_ = nullptr;
+    __storage_.__size_ = 0;
+  }
+
+  void splice(hive& other) {
+    __storage_.__splice_storage(other.__storage_, __limits_.min,
+                                __limits_.max);
+  }
+
+  void splice(hive&& other) { splice(other); }
+
+  template <class BinaryPredicate = equal_to<T>>
+  size_type unique(BinaryPredicate predicate = BinaryPredicate()) {
+    if (__storage_.__size_ < 2) {
+      return 0;
+    }
+    size_type removed = 0;
+    iterator previous = begin();
+    iterator current(previous.__block_, previous.__index_);
+    ++current;
+    while (current != end()) {
+      if (predicate(*current, *previous)) {
+        current =
+            erase(const_iterator(current.__block_, current.__index_));
+        ++removed;
+      } else {
+        previous = current;
+        ++current;
+      }
+    }
+    return removed;
+  }
+
+  template <class Compare = less<T>>
+  void sort(Compare compare = Compare()) {
+    if (__storage_.__size_ < 2) {
+      return;
+    }
+    vector<T*> order;
+    order.reserve(__storage_.__size_);
+    for (reference value : *this) {
+      order.emplace_back(&value);
+    }
+    std::sort(order.begin(), order.end(),
+              [&compare](T* left, T* right) {
+                return compare(*left, *right);
+              });
+    hive sorted(__limits_, __alloc_);
+    sorted.reserve(__storage_.__size_);
+    for (T* value : order) {
+      sorted.emplace(std::move(*value));
+    }
+    __swap_contents(sorted);
+  }
+
+  iterator get_iterator(const_pointer value) noexcept {
+    less<const_pointer> before;
+    for (__block_base* base = __storage_.__end_.__next;
+         base != &__storage_.__end_;
+         base = base->__next) {
+      __block* block = __as_block(base);
+      const_pointer first = block->__elements;
+      const_pointer last =
+          block->__elements + block->__base.__used;
+      if (!before(value, first) && before(value, last)) {
+        return iterator(base, static_cast<size_type>(value - first));
+      }
+    }
+    return end();
+  }
+
+  const_iterator get_iterator(const_pointer value) const noexcept {
+    less<const_pointer> before;
+    for (__block_base* base = __storage_.__end_.__next;
+         base != &__storage_.__end_;
+         base = base->__next) {
+      __block* block = __as_block(base);
+      const_pointer first = block->__elements;
+      const_pointer last =
+          block->__elements + block->__base.__used;
+      if (!before(value, first) && before(value, last)) {
+        return const_iterator(base, static_cast<size_type>(value - first));
+      }
+    }
+    return end();
+  }
+};
+
+template <class InputIterator,
+          class Allocator =
+              allocator<typename iterator_traits<InputIterator>::value_type>>
+hive(InputIterator, InputIterator, Allocator = Allocator())
+    -> hive<typename iterator_traits<InputIterator>::value_type, Allocator>;
+
+template <class InputIterator,
+          class Allocator =
+              allocator<typename iterator_traits<InputIterator>::value_type>>
+hive(InputIterator, InputIterator, hive_limits, Allocator = Allocator())
+    -> hive<typename iterator_traits<InputIterator>::value_type, Allocator>;
+
+template <ranges::input_range R,
+          class Allocator = allocator<ranges::range_value_t<R>>>
+hive(from_range_t, R&&, Allocator = Allocator())
+    -> hive<ranges::range_value_t<R>, Allocator>;
+
+template <ranges::input_range R,
+          class Allocator = allocator<ranges::range_value_t<R>>>
+hive(from_range_t, R&&, hive_limits, Allocator = Allocator())
+    -> hive<ranges::range_value_t<R>, Allocator>;
+
+template <class T, class Allocator>
+void swap(hive<T, Allocator>& left,
+          hive<T, Allocator>& right) noexcept(noexcept(left.swap(right))) {
+  left.swap(right);
+}
+
+template <class T, class Allocator, class U>
+typename hive<T, Allocator>::size_type erase(hive<T, Allocator>& container,
+                                              const U& value) {
+  return erase_if(container,
+                  [&](const auto& element) { return element == value; });
+}
+
+template <class T, class Allocator, class Predicate>
+typename hive<T, Allocator>::size_type erase_if(hive<T, Allocator>& container,
+                                                 Predicate predicate) {
+  typename hive<T, Allocator>::size_type original = container.size();
+  for (auto iterator = container.begin(); iterator != container.end();) {
+    if (predicate(*iterator)) {
+      typename hive<T, Allocator>::const_iterator position(
+          iterator.__block_, iterator.__index_);
+      iterator = container.erase(position);
+    } else {
+      ++iterator;
+    }
+  }
+  return original - container.size();
+}
+
+namespace pmr {
+
+template <class T>
+using hive = std::hive<T, polymorphic_allocator<T>>;
+
+}  // namespace pmr
+
+}  // namespace std
+
+#endif  // __cplusplus >= 202600L
+
+#endif  // __davecc_hive__

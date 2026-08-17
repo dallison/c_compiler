@@ -46,6 +46,10 @@ struct allocator {
   constexpr allocator(const allocator&) noexcept {
   }
 
+  template <class U>
+  constexpr allocator(const allocator<U>&) noexcept {
+  }
+
   constexpr T* allocate(size_type n) {
     return static_cast<T*>(::operator new(n * sizeof(T)));
   }

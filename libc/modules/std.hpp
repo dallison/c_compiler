@@ -19,6 +19,9 @@
 #include <format>
 #include <functional>
 #include <generator>
+#if __cplusplus >= 202600L
+#include <hive>
+#endif
 #include <initializer_list>
 #if __cplusplus >= 202600L
 #include <inplace_vector>

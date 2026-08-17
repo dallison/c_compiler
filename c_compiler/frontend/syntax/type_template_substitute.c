@@ -1056,6 +1056,48 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     }
     info.origin = actual->template_symbol;
   }
+  bool remapped_enclosing_nested_template = false;
+  if (parser != NULL && type->info.struct_info != NULL &&
+      type->info.struct_info->tag_name != NULL &&
+      ((parser->template_substitution_source != NULL &&
+        parser->template_substitution_target != NULL &&
+        type->info.struct_info->lexical_parent ==
+            parser->template_substitution_source) ||
+       (parser->enclosing_template_substitution_source != NULL &&
+        parser->enclosing_template_substitution_target != NULL &&
+        type->info.struct_info->lexical_parent ==
+            parser->enclosing_template_substitution_source))) {
+    Struct* concrete_parent =
+        type->info.struct_info->lexical_parent ==
+                parser->template_substitution_source
+            ? parser->template_substitution_target
+            : parser->enclosing_template_substitution_target;
+    StructMember* concrete_nested = FindStructMember(
+        concrete_parent, type->info.struct_info->tag_name);
+    if (concrete_nested != NULL && concrete_nested->symbol != NULL &&
+        concrete_nested->symbol->flags.is_template) {
+      info.origin = concrete_nested->symbol;
+      remapped_enclosing_nested_template = true;
+    }
+  }
+  // A template-id naming another specialization of the current class
+  // (`cursor<Other>` inside `cursor<Const>`) must be rebound to the concrete
+  // enclosing template's origin.  Keeping the primary nested-class symbol here
+  // loses the already-substituted outer arguments, so deduction later compares
+  // template-ids from different origins and rejects valid converting
+  // constructors such as iterator-to-const_iterator.
+  if (!remapped_enclosing_nested_template && parser != NULL &&
+      type->info.struct_info != NULL &&
+      parser->template_substitution_source != NULL &&
+      parser->template_substitution_target != NULL &&
+      type->info.struct_info == parser->template_substitution_source &&
+      parser->template_substitution_target->tag_symbol != NULL &&
+      parser->template_substitution_target->tag_symbol->type != NULL &&
+      parser->template_substitution_target->tag_symbol->type->template_origin !=
+          NULL) {
+    info.origin =
+        parser->template_substitution_target->tag_symbol->type->template_origin;
+  }
   Vector* concrete_args =
       SubstituteTemplateArgumentVectorForTypes(parser, info.args, args);
   bool expandable_alias =
@@ -1116,6 +1158,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           /*free_element=*/false);
     }
     deferred->template_arguments = concrete_args;
+    deferred->template_origin = info.origin;
     deferred->qualifiers |= type->qualifiers;
     return deferred;
   }

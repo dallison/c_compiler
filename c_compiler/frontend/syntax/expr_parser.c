@@ -1034,7 +1034,7 @@ done:
 
 static bool TemplateArgumentListIsDependent(Vector* args);
 
-// A qualified name like `T::member` or `Alias<T>::member` whose leading
+// A qualified name like `T::member` or `Alias<T>::member::value` whose leading
 // nested-name-specifier is dependent cannot be resolved until the template is
 // instantiated.  Builds a placeholder identifier carrying the dependent scope
 // and the trailing member name (in dependent_member_name), flagged so the
@@ -1044,7 +1044,7 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
                                                   FullyQualifiedIdentifier* name,
                                                   SourceLocation location) {
   if (!CompilerIsCXX() || !name->is_qualified || name->absolute ||
-      name->components.length != 2) {
+      name->components.length < 2) {
     return NULL;
   }
   // No component may carry template arguments (e.g. `T::tmpl<...>`); that needs
@@ -1075,18 +1075,25 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   if (!dependent_scope) {
     return NULL;
   }
-  String* member = name->components.value.p[1];
+  String* member =
+      name->components.value.p[name->components.length - 1];
   TypeRecord* dependent_type = TypeRecordCopy(scope_symbol->type);
-  if (dependent_type->dependent_member_name != NULL) {
+  if (dependent_type->dependent_member_name == NULL) {
+    dependent_type->dependent_member_name = NewString("");
+  } else {
     // The scope alias is itself a dependent member access (e.g. `q` was
     // `typename W::period`).  Extend the existing member path rather than
     // discarding it, so `q::num` becomes the full `W::period::num` path instead
     // of collapsing to `W::num` (which would drop the intermediate member and
     // leave the name unresolvable).
     StringAppend(dependent_type->dependent_member_name, "::");
-    StringAppendString(dependent_type->dependent_member_name, member);
-  } else {
-    dependent_type->dependent_member_name = NewString(member->value);
+  }
+  for (size_t i = 1; i < name->components.length; i++) {
+    if (i != 1) {
+      StringAppend(dependent_type->dependent_member_name, "::");
+    }
+    StringAppendString(dependent_type->dependent_member_name,
+                       name->components.value.p[i]);
   }
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
