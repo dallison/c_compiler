@@ -12,6 +12,18 @@ ELFDUMP="$ROOT/$2"
 WORK="${TEST_TMPDIR:-/tmp}/6502-codegen-cleanup"
 mkdir -p "$WORK"
 
+cat >"$WORK/argument-result.c" <<'SRC'
+static const char* advance(const char* pointer) {
+  return pointer + 1;
+}
+
+int assign_result_to_argument(const char* pointer) {
+  const char* original = pointer;
+  pointer = advance(pointer);
+  return pointer - original;
+}
+SRC
+
 for target in 6502 65c02; do
   assembly="$WORK/constants-$target.s"
   "$DAVECC" -target "$target" -O1 -S -std=c++20 -nostdinc \
@@ -68,6 +80,22 @@ for target in 6502 65c02; do
             }
             END { exit !found }' <<<"$call_widen_body"; then
     echo "$target: retained a reload immediately after a zero-page store" >&2
+    exit 1
+  fi
+
+  argument_assembly="$WORK/argument-result-$target.s"
+  "$DAVECC" -target "$target" -O1 -S -std=c17 -nostdinc \
+    "$WORK/argument-result.c" -o "$argument_assembly"
+  argument_body=$(
+    awk '/^assign_result_to_argument:$/{inside=1; next} \
+         /^\.func_end_assign_result_to_argument:$/{inside=0} \
+         inside' "$argument_assembly"
+  )
+  if ! grep -Eq 'jsr[[:space:]]+__arg_addr_xy([[:space:]]|$)' \
+       <<<"$argument_body" ||
+     grep -Eq 'jsr[[:space:]]+__arg_addrb_xy([[:space:]]|$)' \
+       <<<"$argument_body"; then
+    echo "$target: small argument result used the wide-offset address helper" >&2
     exit 1
   fi
 done

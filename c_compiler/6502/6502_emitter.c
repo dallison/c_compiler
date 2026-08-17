@@ -1020,7 +1020,8 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
           fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
         }
         fprintf(fp, "\t%-12s __%s\t\t// %s\n", "jsr",
-                opcode == W65C02_OP(arg_addr) ? "arg_addr_xy" : "arg_addrb_xy",
+                opcode == W65C02_OP(arg_addr_xy) ? "arg_addr_xy"
+                                                 : "arg_addrb_xy",
                 ((TargetSymbol*)var)->symbol->name.value);
         break;
       }
