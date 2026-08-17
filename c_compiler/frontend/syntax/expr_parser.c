@@ -5738,6 +5738,15 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
     }
     return node;
   }
+  TypeRecord* deleted_type =
+      TypeIsPointerOrArray(pointer_type) ? pointer_type->next : NULL;
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      TypeIsStructOrUnion(deleted_type) &&
+      !TypeIsCompleteClass(deleted_type)) {
+    SyntaxError(syntax,
+                "deleting a pointer to an incomplete class type is not "
+                "allowed in C++26");
+  }
   if (is_array_delete) {
     if (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)) {
       Vector* actuals = NewVector();

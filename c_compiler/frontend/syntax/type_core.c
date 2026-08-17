@@ -1487,6 +1487,14 @@ bool StructMemberIsBitField(StructMember* member) {
   return member->bit_size > 0;
 }
 
+bool TypeIsCompleteClass(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Symbol* tag = type->info.struct_info->tag_symbol;
+  return tag == NULL || !tag->flags.is_forward_declared;
+}
+
 static int CompareStructMember(const void* a, const void* b) {
   const MapKeyValue* key1 = (const MapKeyValue*)a;
   const MapKeyValue* key2 = (const MapKeyValue*)b;

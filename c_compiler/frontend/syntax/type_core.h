@@ -87,6 +87,10 @@ void CXXFriendTypeDeclarationDelete(CXXFriendTypeDeclaration* declaration);
 // access the private and protected members of str.  Duplicates are ignored.
 void StructAddFriendFunction(Struct* str, Symbol* friend_function);
 bool StructMemberIsBitField(StructMember* member);
+// True when a class/struct/union type has a completed definition.  This is
+// intentionally separate from size: complete empty C++ classes have a size,
+// while a forward declaration is represented by its owning tag symbol.
+bool TypeIsCompleteClass(TypeRecord* type);
 
 Symbol* NewEnumConstant(const char* name, int64_t value);
 Symbol* NewScopedEnumConstant(const char* name, int64_t value,

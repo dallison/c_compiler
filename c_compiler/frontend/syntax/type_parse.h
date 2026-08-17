@@ -36,6 +36,7 @@ typedef struct {
   bool is_constinit;
   bool allow_constexpr_decl_specifier;
   bool declarator_is_parameter_pack;
+  int declarator_ellipsis_count;
   enum ParserContext context;
   Struct* cxx_member_owner;
   Struct* template_substitution_source;

@@ -1013,9 +1013,31 @@ static bool IsIntConstant(ASTNode* node) {
   return node->op == AST_OP(number) || node->op == AST_OP(charconst);
 }
 
+static void DiagnoseCXX26EnumArithmetic(BinaryASTNode* node) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    return;
+  }
+  TypeRecord* left = node->left->type;
+  TypeRecord* right = node->right->type;
+  bool left_enum = TypeIsEnum(left);
+  bool right_enum = TypeIsEnum(right);
+  bool different_enums =
+      left_enum && right_enum && left->info.enum_info != right->info.enum_info;
+  bool enum_and_floating =
+      (left_enum && TypeIsFloatingPoint(right)) ||
+      (right_enum && TypeIsFloatingPoint(left));
+  if (different_enums || enum_and_floating) {
+    SemanticError((ASTNode*)node,
+                  "usual arithmetic conversions between different enumeration "
+                  "types or between an enumeration and floating-point type are "
+                  "not allowed in C++26");
+  }
+}
+
 // Check that we have a valid operands for a numeric expression
 // and insert conversions as necessary.
 static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
+  DiagnoseCXX26EnumArithmetic(node);
   if (TypeIsMemberPointer(node->left->type) ||
       TypeIsMemberPointer(node->right->type)) {
     return;
@@ -2316,6 +2338,16 @@ static void CheckComparisonOfPointerAndInteger(BinaryASTNode* node) {
   }
 }
 
+static bool DiagnoseCXX26ArrayComparison(BinaryASTNode* node) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !TypeIsArray(node->left->type) || !TypeIsArray(node->right->type)) {
+    return false;
+  }
+  SemanticError((ASTNode*)node,
+                "comparison between two arrays is not allowed in C++26");
+  return true;
+}
+
 static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
@@ -2323,6 +2355,10 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
   if (overloaded != NULL) {
     return overloaded;
+  }
+  if (DiagnoseCXX26ArrayComparison(node)) {
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+    return (ASTNode*)node;
   }
   if (TypeIsMemberPointer(node->left->type) &&
       (TypeIsMemberPointer(node->right->type) ||
@@ -2464,6 +2500,11 @@ static ASTNode* AnalyzeThreeWayComparison(BinaryASTNode* node) {
   ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
   if (overloaded != NULL) {
     return overloaded;
+  }
+  if (DiagnoseCXX26ArrayComparison(node)) {
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);

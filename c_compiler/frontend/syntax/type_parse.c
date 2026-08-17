@@ -50,6 +50,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->is_constinit = false;
   parser->allow_constexpr_decl_specifier = false;
   parser->declarator_is_parameter_pack = false;
+  parser->declarator_ellipsis_count = 0;
   parser->context = context;
   parser->cxx_member_owner = NULL;
   parser->template_substitution_source = NULL;
@@ -74,6 +75,7 @@ void TypeParserReset(TypeParser* parser) {
   parser->is_consteval = false;
   parser->is_constinit = false;
   parser->declarator_is_parameter_pack = false;
+  parser->declarator_ellipsis_count = 0;
   parser->cxx_member_owner = NULL;
   parser->template_substitution_source = NULL;
   parser->template_substitution_target = NULL;
@@ -1995,11 +1997,15 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   parser->symbol = NULL;
   parser->base_type = base_type;
   parser->declarator_is_parameter_pack = false;
+  parser->declarator_ellipsis_count = 0;
   if (LookingAtCXXTypePackIndex(parser)) {
     ParseCXXTypePackIndex(parser, base_type);
   } else {
     parser->declarator_is_parameter_pack =
         CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis));
+    if (parser->declarator_is_parameter_pack) {
+      parser->declarator_ellipsis_count++;
+    }
   }
   if (ParseMemberPointerDeclarator(parser)) {
     // Handled `T C::*` without going through the generic pointer path.
@@ -2008,6 +2014,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   }
   if (CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis))) {
     parser->declarator_is_parameter_pack = true;
+    parser->declarator_ellipsis_count++;
   }
 
   // Join all the type records together in reverse order.
@@ -2105,6 +2112,7 @@ void TypeParserParsePointer(TypeParser* parser) {
   TypeParserSkipAttributes(parser);
   if (CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis))) {
     parser->declarator_is_parameter_pack = true;
+    parser->declarator_ellipsis_count++;
     TypeParserParsePointer(parser);
   } else if (LexMatch(parser->lex, TOK(star))) {
     Qualifiers quals = ParseQualifiers(parser);
@@ -2205,16 +2213,43 @@ static bool TemplateArgumentContainsCurrentParameterPack(TypeParser* parser,
   return TypeContainsCurrentParameterPack(parser, arg->type);
 }
 
+static void MarkNonCommaVariadicEllipsis(TypeParser* parser,
+                                         TypeRecord* func) {
+  func->info.function.varargs = true;
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SyntaxWarning(parser->syntax, "deprecated-declarations",
+                  "non-comma-separated ellipsis parameters are deprecated "
+                  "in C++26");
+  }
+}
+
 // Parse a formal argument declaration.  Takes ownership of
 // formal.
 static void ParseFormalArgument(TypeParser* proto_parser,
                                 TypeRecord* func,
                                 Symbol* formal,
-                                int arg_number) {
-  if (formal->flags.is_parameter_pack &&
-      !TypeContainsCurrentParameterPack(proto_parser, formal->type)) {
-    SyntaxError(proto_parser->syntax,
-                "function parameter pack requires a template parameter pack");
+                                int arg_number,
+                                bool abbreviated_parameter) {
+  if (formal->flags.is_parameter_pack) {
+    bool expands_template_pack =
+        abbreviated_parameter ||
+        TypeContainsCurrentParameterPack(proto_parser, formal->type);
+    bool has_noncomma_ellipsis =
+        (!expands_template_pack && formal->flags.invented) ||
+        proto_parser->declarator_ellipsis_count > 1;
+    if (has_noncomma_ellipsis && CompilerIsCXX()) {
+      MarkNonCommaVariadicEllipsis(proto_parser, func);
+      // With one ellipsis and no template pack this is an ordinary named
+      // parameter followed by a C-style ellipsis parameter, not a function
+      // parameter pack.  With two ellipses the first expands the template pack
+      // and the second is the variadic ellipsis.
+      if (!expands_template_pack) {
+        formal->flags.is_parameter_pack = false;
+      }
+    } else if (!expands_template_pack) {
+      SyntaxError(proto_parser->syntax,
+                  "function parameter pack requires a template parameter pack");
+    }
   }
   if (CheckFormalName(&func->info.function.prototype, &formal->name)) {
     // Function arguments are pointer to functions.
@@ -2382,7 +2417,8 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   if (formal->name.length != 0) {
     StringSet(placeholder->template_parameter_name, formal->name.value);
   }
-  ParseFormalArgument(proto_parser, func, formal, arg_number);
+  ParseFormalArgument(proto_parser, func, formal, arg_number,
+                      /*abbreviated_parameter=*/true);
 
   VectorAppend(&func->info.function.template_parameters,
                NewAbbreviatedTypeTemplateParameter(proto_parser, index));
@@ -2487,7 +2523,8 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
 
     Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
     assert(formal != NULL);
-    ParseFormalArgument(proto_parser, func, formal, arg_number);
+    ParseFormalArgument(proto_parser, func, formal, arg_number,
+                        /*abbreviated_parameter=*/false);
     if (explicit_object_parameter && formal->flags.is_parameter_pack) {
       SyntaxError(proto_parser->syntax,
                   "explicit object parameter cannot be a parameter pack");
@@ -2533,7 +2570,8 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
         Symbol* formal = NewSymbol(proto_parser->lex->spelling.value,
                                    unknown, STO(auto));
         LexNextToken(proto_parser->lex);
-        ParseFormalArgument(proto_parser, func, formal, arg_number);
+        ParseFormalArgument(proto_parser, func, formal, arg_number,
+                            /*abbreviated_parameter=*/false);
       }
     } else {
       SyntaxError(proto_parser->syntax,
@@ -2592,6 +2630,15 @@ void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
     style = ParseFunctionParameter(proto_parser, func, style, arg_number,
                                    &seen_default_argument);
     arg_number++;
+    if (CompilerIsCXX() && LexMatch(proto_parser->lex, TOK(ellipsis))) {
+      MarkNonCommaVariadicEllipsis(proto_parser, func);
+      if (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
+        SyntaxError(proto_parser->syntax,
+                    "... must be at the end of a function prototype");
+        SyntaxRecover(proto_parser->syntax, TC(closebra));
+      }
+      break;
+    }
     if (!LexMatch(proto_parser->lex, TOK(comma))) {
       break;
     }

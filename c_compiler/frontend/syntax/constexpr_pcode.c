@@ -745,171 +745,113 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
   return built;
 }
 
-static bool IsConstexprPCodeRuntimeSymbol(const char* symbol,
-                                         const char* name) {
-  return symbol != NULL && strcmp(symbol, name) == 0;
-}
+typedef struct {
+  const char* name;
+  const uint32_t* stub;
+} ConstexprPCodeRuntimeSymbol;
 
-static bool IsConstexprPCodeRuntimeSymbolPrefix(const char* symbol,
-                                               const char* prefix) {
-  return symbol != NULL && strncmp(symbol, prefix, strlen(prefix)) == 0;
-}
+// Keep this table sorted by name for the binary search below.  Mangled names
+// are matched in full: a prefix identifies an overload set, not a particular
+// function ABI.
+static const ConstexprPCodeRuntimeSymbol constexpr_pcode_runtime_symbols[] = {
+    {"_Z4freePv", constexpr_pcode_free_stub},
+    {"_Z6mallocj", constexpr_pcode_malloc_stub},
+    {"_Z6mallocm", constexpr_pcode_malloc_stub},
+    {"_Z6mallocy", constexpr_pcode_malloc_stub},
+    {"_Z7reallocPvj", constexpr_pcode_realloc_stub},
+    {"_Z7reallocPvm", constexpr_pcode_realloc_stub},
+    {"_Z7reallocPvy", constexpr_pcode_realloc_stub},
+    {"_ZdaPv", constexpr_pcode_free_stub},
+    {"_ZdaPvj", constexpr_pcode_free_stub},
+    {"_ZdaPvm", constexpr_pcode_free_stub},
+    {"_ZdaPvy", constexpr_pcode_free_stub},
+    {"_ZdlPv", constexpr_pcode_free_stub},
+    {"_ZdlPvj", constexpr_pcode_free_stub},
+    {"_ZdlPvm", constexpr_pcode_free_stub},
+    {"_ZdlPvy", constexpr_pcode_free_stub},
+    {"_Znaj", constexpr_pcode_malloc_stub},
+    {"_ZnajPv", constexpr_pcode_placement_new_stub},
+    {"_Znam", constexpr_pcode_malloc_stub},
+    {"_ZnamPv", constexpr_pcode_placement_new_stub},
+    {"_Znay", constexpr_pcode_malloc_stub},
+    {"_ZnayPv", constexpr_pcode_placement_new_stub},
+    {"_Znwj", constexpr_pcode_malloc_stub},
+    {"_ZnwjPv", constexpr_pcode_placement_new_stub},
+    {"_Znwm", constexpr_pcode_malloc_stub},
+    {"_ZnwmPv", constexpr_pcode_placement_new_stub},
+    {"_Znwy", constexpr_pcode_malloc_stub},
+    {"_ZnwyPv", constexpr_pcode_placement_new_stub},
+    {"__davecc_constexpr_end_catch", constexpr_pcode_end_catch_stub},
+    {"__davecc_constexpr_invalid_throw",
+     constexpr_pcode_invalid_operation_stub},
+    {"__davecc_constexpr_throw", constexpr_pcode_constexpr_throw_stub},
+    {"__davecc_current_exception_addr",
+     constexpr_pcode_current_exception_address_stub},
+    {"__davecc_current_exception_f4",
+     constexpr_pcode_current_exception_f4_stub},
+    {"__davecc_current_exception_f8",
+     constexpr_pcode_current_exception_f8_stub},
+    {"__davecc_current_exception_i1",
+     constexpr_pcode_current_exception_integer_stub},
+    {"__davecc_current_exception_i2",
+     constexpr_pcode_current_exception_integer_stub},
+    {"__davecc_current_exception_i4",
+     constexpr_pcode_current_exception_integer_stub},
+    {"__davecc_current_exception_i8",
+     constexpr_pcode_current_exception_integer_stub},
+    {"__davecc_current_exception_int",
+     constexpr_pcode_current_exception_integer_stub},
+    {"__davecc_current_exception_object",
+     constexpr_pcode_current_exception_pointer_stub},
+    {"__davecc_current_exception_ptr",
+     constexpr_pcode_current_exception_pointer_stub},
+    {"__davecc_exception_ptr_current",
+     constexpr_pcode_exception_ptr_current_stub},
+    {"__davecc_exception_ptr_release",
+     constexpr_pcode_exception_ptr_release_stub},
+    {"__davecc_exception_ptr_retain",
+     constexpr_pcode_exception_ptr_retain_stub},
+    {"__davecc_exception_ptr_rethrow",
+     constexpr_pcode_exception_ptr_rethrow_stub},
+    {"__davecc_resume", constexpr_pcode_resume_stub},
+    {"__davecc_throw", constexpr_pcode_throw_stub},
+    {"__davecc_throw_f4", constexpr_pcode_throw_f4_stub},
+    {"__davecc_throw_f8", constexpr_pcode_throw_f8_stub},
+    {"__davecc_throw_i8", constexpr_pcode_throw_i8_stub},
+    {"__davecc_uncaught_exceptions",
+     constexpr_pcode_uncaught_exceptions_stub},
+    {"abort", constexpr_pcode_invalid_operation_stub},
+    {"free", constexpr_pcode_free_stub},
+    {"malloc", constexpr_pcode_malloc_stub},
+    {"memcpy", constexpr_pcode_memcpy_stub},
+    {"operator delete", constexpr_pcode_free_stub},
+    {"operator delete[]", constexpr_pcode_free_stub},
+    {"operator new", constexpr_pcode_malloc_stub},
+    {"operator new[]", constexpr_pcode_malloc_stub},
+    {"realloc", constexpr_pcode_realloc_stub},
+};
 
 static bool ConstexprPCodeRuntimeSymbolAddress(const char* symbol,
                                                uint64_t* address) {
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "malloc") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Z6malloc")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_malloc_stub;
-    return true;
+  if (symbol == NULL || address == NULL) {
+    return false;
   }
-  if (IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwmPv") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwyPv") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnamPv") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnayPv")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_placement_new_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "operator new") ||
-      IsConstexprPCodeRuntimeSymbol(symbol, "operator new[]") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Znwm") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Znwy") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Znam") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Znay")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_malloc_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "free") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Z4free")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_free_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "operator delete") ||
-      IsConstexprPCodeRuntimeSymbol(symbol, "operator delete[]") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZdlPv") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZdaPv")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_free_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "realloc") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Z7realloc")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_realloc_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_i8")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_i8_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_f4")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_f4_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw_f8")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_f8_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_i1") ||
-      IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_i2") ||
-      IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_i4") ||
-      IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_i8") ||
-      IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_int")) {
-    *address = (uint64_t)(uintptr_t)
-        constexpr_pcode_current_exception_integer_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_f4")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_f4_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_f8")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_f8_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_object") ||
-      IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_ptr")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_pointer_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_current_exception_addr")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_current_exception_address_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_resume")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_resume_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_constexpr_throw")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_constexpr_throw_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol,
-                                    "__davecc_constexpr_end_catch")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_end_catch_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_constexpr_invalid_throw")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_exception_ptr_current")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_current_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_exception_ptr_retain")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_retain_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_exception_ptr_release")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_release_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_exception_ptr_rethrow")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_exception_ptr_rethrow_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(
-          symbol, "__davecc_uncaught_exceptions")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_uncaught_exceptions_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "memcpy")) {
-    *address = (uint64_t)(uintptr_t)constexpr_pcode_memcpy_stub;
-    return true;
-  }
-  if (IsConstexprPCodeRuntimeSymbol(symbol, "abort")) {
-    *address =
-        (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
-    return true;
+  size_t begin = 0;
+  size_t end = sizeof(constexpr_pcode_runtime_symbols) /
+               sizeof(constexpr_pcode_runtime_symbols[0]);
+  while (begin < end) {
+    size_t middle = begin + (end - begin) / 2;
+    const ConstexprPCodeRuntimeSymbol* candidate =
+        &constexpr_pcode_runtime_symbols[middle];
+    int comparison = strcmp(symbol, candidate->name);
+    if (comparison < 0) {
+      end = middle;
+    } else if (comparison > 0) {
+      begin = middle + 1;
+    } else {
+      *address = (uint64_t)(uintptr_t)candidate->stub;
+      return true;
+    }
   }
   return false;
 }
@@ -918,27 +860,16 @@ static bool IsConstexprPCodeRuntimeCallSymbol(Symbol* symbol) {
   if (symbol == NULL || symbol->name.value == NULL) {
     return false;
   }
-  return strcmp(symbol->name.value, "malloc") == 0 ||
-         strcmp(symbol->name.value, "free") == 0 ||
-         strcmp(symbol->name.value, "realloc") == 0 ||
-         strcmp(symbol->name.value, "operator new") == 0 ||
-         strcmp(symbol->name.value, "operator new[]") == 0 ||
-         strcmp(symbol->name.value, "operator delete") == 0 ||
-         strcmp(symbol->name.value, "operator delete[]") == 0 ||
-         strcmp(symbol->name.value, "__davecc_throw") == 0 ||
-         strcmp(symbol->name.value, "__davecc_throw_i8") == 0 ||
-         strcmp(symbol->name.value, "__davecc_throw_f4") == 0 ||
-         strcmp(symbol->name.value, "__davecc_throw_f8") == 0 ||
-         strncmp(symbol->name.value, "__davecc_current_exception_", 27) == 0 ||
-         strcmp(symbol->name.value, "__davecc_resume") == 0 ||
-         strcmp(symbol->name.value, "__davecc_constexpr_throw") == 0 ||
-         strcmp(symbol->name.value, "__davecc_constexpr_end_catch") == 0 ||
-         strcmp(symbol->name.value,
-                "__davecc_constexpr_invalid_throw") == 0 ||
-         strncmp(symbol->name.value, "__davecc_exception_ptr_", 23) == 0 ||
-         strcmp(symbol->name.value, "__davecc_uncaught_exceptions") == 0 ||
-         strcmp(symbol->name.value, "memcpy") == 0 ||
-         strcmp(symbol->name.value, "abort") == 0;
+  // A source definition takes precedence over a runtime hook with the same
+  // external name.
+  if (PCodeConstexprFunctionDefinition(symbol) != NULL) {
+    return false;
+  }
+  const char* runtime_name = symbol->asm_name.length != 0
+                                 ? symbol->asm_name.value
+                                 : symbol->name.value;
+  uint64_t address;
+  return ConstexprPCodeRuntimeSymbolAddress(runtime_name, &address);
 }
 
 static InitializedStaticVariable* FindConstexprInitializedStaticByName(
@@ -1067,6 +998,16 @@ static bool RegisterDirectConstexprPCodeGeneratedStatic(
 static uint64_t DirectSymbolRuntimeAddress(PCodeObject* object,
                                            ConstexprPCodeImage* image,
                                            const char* name, bool* ok) {
+  PCodeObjectSymbol* object_symbol = PCodeObjectFindSymbol(object, name);
+  if (object_symbol != NULL && object_symbol->defined) {
+    unsigned char* memory =
+        DirectImageSectionMemory(image, object_symbol->section, NULL);
+    if (memory == NULL) {
+      *ok = false;
+      return 0;
+    }
+    return (uint64_t)(uintptr_t)memory + object_symbol->offset;
+  }
   uint64_t runtime_address = 0;
   if (ConstexprPCodeRuntimeSymbolAddress(name, &runtime_address)) {
     return runtime_address;
