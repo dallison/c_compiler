@@ -51,9 +51,16 @@ static __StrtoxLongResult __StrtoxLong(const char* nptr, char** endptr,
   bool hexadecimal_prefix =
       (base == 0 || base == 16) && p[0] == '0' &&
       (p[1] == 'x' || p[1] == 'X');
+  bool binary_prefix =
+      (base == 0 || base == 2) && p[0] == '0' &&
+      (p[1] == 'b' || p[1] == 'B');
   if (hexadecimal_prefix && __StrtoxLongDigit(p[2]) >= 0 &&
       __StrtoxLongDigit(p[2]) < 16) {
     base = 16;
+    p += 2;
+  } else if (binary_prefix && __StrtoxLongDigit(p[2]) >= 0 &&
+             __StrtoxLongDigit(p[2]) < 2) {
+    base = 2;
     p += 2;
   } else if (base == 0) {
     base = *p == '0' ? 8 : 10;

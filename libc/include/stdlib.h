@@ -130,6 +130,14 @@ size_t wcstombs(char * restrict s,
 const wchar_t * restrict pwcs, size_t n);
 char* realpath(const char* path, char* resolved_path);
 
+#if !defined(__cplusplus) && defined(__STDC_VERSION__) && \
+    __STDC_VERSION__ >= 202311L
+#include <__davecc_const_generic.h>
+#define bsearch(key, base, nmemb, size, compar) \
+  __DAVECC_CONST_GENERIC((base), const void*,   \
+                         (bsearch)((key), (base), (nmemb), (size), (compar)))
+#endif
+
 #ifdef __cplusplus
 }
 #endif

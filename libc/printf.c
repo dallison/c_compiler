@@ -51,7 +51,9 @@ typedef enum {
   kModLongDouble,
   kModIntMax,
   kModSize_t,
-  kModPtrdiff_t
+  kModPtrdiff_t,
+  kModWidth,
+  kModWidthFast
 } Modifier;
 
 typedef struct {
@@ -65,6 +67,8 @@ typedef struct {
   int fw_argnum;
   int p_argnum;
   Modifier modifier;
+  int modifier_width;
+  bool modifier_valid;
   int next_arg_value[2];  // [0]: width, [1]: precision
 } ConversionFormat;
 
@@ -78,6 +82,8 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->left_justify = false;
   format->fill_zero = false;
   format->modifier = kModNone;
+  format->modifier_width = 0;
+  format->modifier_valid = true;
 
   int n = 0;
   bool done = false;
@@ -137,6 +143,32 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   }
 
   // Modifier (length field).
+  if (*p == 'w') {
+    format->modifier = kModWidth;
+    p++;
+    if (*p == 'f') {
+      format->modifier = kModWidthFast;
+      p++;
+    }
+    if (*p < '1' || *p > '9') {
+      format->modifier_valid = false;
+    } else {
+      while (isdigit(*p)) {
+        if (format->modifier_width <= 64) {
+          format->modifier_width =
+              format->modifier_width * 10 + *p - '0';
+          if (format->modifier_width > 64) {
+            format->modifier_width = 65;
+          }
+        }
+        p++;
+      }
+      int width = format->modifier_width;
+      format->modifier_valid =
+          width == 8 || width == 16 || width == 32 || width == 64;
+    }
+    return p;
+  }
   switch (*p) {
     case 'l':  // l or ll
       if (p[1] == 'l') {
@@ -456,8 +488,27 @@ STATIC void RemoveFormatting(ConversionFormat* fmt) {
   fmt->prepend_space = false;
 }
 
+STATIC bool IsWidthModifier(const ConversionFormat* fmt);
+
 // Write the value of count into the address specified by p (for %n)
 STATIC void WriteCount(ConversionFormat* fmt, int count, void* p) {
+  if (IsWidthModifier(fmt)) {
+    switch (fmt->modifier_width) {
+      case 8:
+        *(int8_t*)p = (int8_t)count;
+        break;
+      case 16:
+        *(int16_t*)p = (int16_t)count;
+        break;
+      case 32:
+        *(int32_t*)p = (int32_t)count;
+        break;
+      default:
+        *(int64_t*)p = (int64_t)count;
+        break;
+    }
+    return;
+  }
   switch (fmt->modifier) {
     case kModLong:
       *(long*)p = count;
@@ -504,8 +555,59 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
 STATIC void WriteCount(ConversionFormat* fmt, int count, void* p);
 #endif
 
+STATIC bool IsWidthModifier(const ConversionFormat* fmt) {
+  return fmt->modifier == kModWidth || fmt->modifier == kModWidthFast;
+}
+
+STATIC unsigned long long MaskToWidth(unsigned long long value, int width) {
+  if (width >= 64) {
+    return value;
+  }
+  return value & (((unsigned long long)1 << width) - 1);
+}
+
+STATIC long long SignExtendWidth(unsigned long long value, int width) {
+  value = MaskToWidth(value, width);
+  if (width < 64 &&
+      (value & ((unsigned long long)1 << (width - 1))) != 0) {
+    value |= ~(((unsigned long long)1 << width) - 1);
+  }
+  return (long long)value;
+}
+
+STATIC unsigned long long GetWidthArgument(ConversionFormat* fmt, va_list* ap,
+                                           bool is_unsigned) {
+  switch (fmt->modifier_width) {
+    case 8:
+      return (unsigned long long)va_arg(*ap, int);
+    case 16:
+#if defined(__6502__)
+      return is_unsigned ? (unsigned long long)va_arg(*ap, unsigned int)
+                         : (unsigned long long)va_arg(*ap, int);
+#else
+      return (unsigned long long)va_arg(*ap, int);
+#endif
+    case 32:
+#if defined(__6502__)
+      return is_unsigned ? (unsigned long long)va_arg(*ap, unsigned long)
+                         : (unsigned long long)va_arg(*ap, long);
+#else
+      return is_unsigned ? (unsigned long long)va_arg(*ap, unsigned int)
+                         : (unsigned long long)va_arg(*ap, int);
+#endif
+    default:
+#if defined(__LP64__)
+      return is_unsigned ? (unsigned long long)va_arg(*ap, unsigned long)
+                         : (unsigned long long)va_arg(*ap, long);
+#else
+      return is_unsigned ? va_arg(*ap, unsigned long long)
+                         : (unsigned long long)va_arg(*ap, long long);
+#endif
+  }
+}
+
 STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
-                            long long* value_ll, const char** value_s,
+                            unsigned long long* value_ll, const char** value_s,
                             char* value_c, double* value_f, void** value_p,
                             bool* is_unsigned, bool* negative) {
   switch (cmd) {
@@ -519,6 +621,20 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'B':
       *is_unsigned = cmd == 'u' || cmd == 'x' || cmd == 'X' ||
                      cmd == 'o' || cmd == 'b' || cmd == 'B';
+      if (IsWidthModifier(fmt)) {
+        unsigned long long raw = GetWidthArgument(fmt, ap, *is_unsigned);
+        long long signed_value = SignExtendWidth(raw, fmt->modifier_width);
+        if (!*is_unsigned && signed_value < 0) {
+          *negative = true;
+          *value_ll =
+              (unsigned long long)(-(signed_value + 1)) + 1;
+        } else {
+          *value_ll = *is_unsigned
+                          ? MaskToWidth(raw, fmt->modifier_width)
+                          : (unsigned long long)signed_value;
+        }
+        break;
+      }
       switch (fmt->modifier) {
         case kModLong:
           *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned long)
@@ -556,9 +672,10 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
                                    : (long long)va_arg(*ap, int);
           break;
       }
-      if (!*is_unsigned && *value_ll < 0) {
+      long long signed_value = (long long)*value_ll;
+      if (!*is_unsigned && signed_value < 0) {
         *negative = true;
-        *value_ll = -*value_ll;
+        *value_ll = (unsigned long long)(-(signed_value + 1)) + 1;
       }
       break;
     case 'p':
@@ -591,7 +708,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   const char* end = buf + sizeof(buf);
   const char* p = format;
   int count = 0;
-  long long value_ll;
+  unsigned long long value_ll;
   const char* value_s;
   char value_c;
   double value_f;
@@ -602,6 +719,11 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
       p++;
       ConversionFormat fmt = {0};
       p = CollectFormat(p, &fmt);
+      if (!fmt.modifier_valid ||
+          (IsWidthModifier(&fmt) &&
+           strchr("diouxXbBn", *p) == NULL)) {
+        return -1;
+      }
       bool negative = false;
       bool is_unsigned = false;
 

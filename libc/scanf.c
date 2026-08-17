@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 #include "_fpfuncs.h"
 
 
@@ -36,7 +38,9 @@ typedef enum {
   kModLongDouble,
   kModIntMax,
   kModSize_t,
-  kModPtrdiff_t
+  kModPtrdiff_t,
+  kModWidth,
+  kModWidthFast
 } Modifier;
 
 typedef enum {
@@ -48,6 +52,8 @@ typedef struct {
   bool suppress;
   int width;
   Modifier modifier;
+  int modifier_width;
+  bool modifier_valid;
 } ConversionFormat;
 
 typedef struct {
@@ -59,6 +65,8 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->suppress = false;
   format->width = kWidthDefault;
   format->modifier = kModNone;
+  format->modifier_width = 0;
+  format->modifier_valid = true;
   
   // Optional input suppression char.
   if (*p == '*') {
@@ -75,6 +83,32 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   }
   
   // Optional modifier.
+  if (*p == 'w') {
+    format->modifier = kModWidth;
+    p++;
+    if (*p == 'f') {
+      format->modifier = kModWidthFast;
+      p++;
+    }
+    if (*p < '1' || *p > '9') {
+      format->modifier_valid = false;
+    } else {
+      while (isdigit(*p)) {
+        if (format->modifier_width <= 64) {
+          format->modifier_width =
+              format->modifier_width * 10 + *p - '0';
+          if (format->modifier_width > 64) {
+            format->modifier_width = 65;
+          }
+        }
+        p++;
+      }
+      int width = format->modifier_width;
+      format->modifier_valid =
+          width == 8 || width == 16 || width == 32 || width == 64;
+    }
+    return p;
+  }
   switch (*p) {
     case 'l':     // l or ll
       if (p[1] == 'l') {
@@ -130,7 +164,44 @@ STATIC void SkipInputWhiteSpace(Getter get, Ungetter unget, void* data) {
   }
 }
 
+STATIC bool IsWidthModifier(const ConversionFormat* fmt) {
+  return fmt->modifier == kModWidth || fmt->modifier == kModWidthFast;
+}
+
 STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, ConversionFormat* fmt) {
+  if (IsWidthModifier(fmt)) {
+    switch (fmt->modifier_width) {
+      case 8:
+        if (is_unsigned) {
+          *(uint8_t*)ptr = (uint8_t)v;
+        } else {
+          *(int8_t*)ptr = (int8_t)v;
+        }
+        break;
+      case 16:
+        if (is_unsigned) {
+          *(uint16_t*)ptr = (uint16_t)v;
+        } else {
+          *(int16_t*)ptr = (int16_t)v;
+        }
+        break;
+      case 32:
+        if (is_unsigned) {
+          *(uint32_t*)ptr = (uint32_t)v;
+        } else {
+          *(int32_t*)ptr = (int32_t)v;
+        }
+        break;
+      default:
+        if (is_unsigned) {
+          *(uint64_t*)ptr = (uint64_t)v;
+        } else {
+          *(int64_t*)ptr = (int64_t)v;
+        }
+        break;
+    }
+    return;
+  }
   switch (fmt->modifier) {
   case kModNone:
   case kModLongDouble:
@@ -140,8 +211,12 @@ STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, Conversi
         *(int*)ptr = (int)v;
       }
       break;
-  case  kModChar:
-      *(char*)ptr = (char)v;
+  case kModChar:
+      if (is_unsigned) {
+        *(unsigned char*)ptr = (unsigned char)v;
+      } else {
+        *(signed char*)ptr = (signed char)v;
+      }
       break;
   case  kModShort:
     if (is_unsigned) {
@@ -708,7 +783,33 @@ done:
   return present;
 }
 
+typedef struct {
+  Getter get;
+  Ungetter unget;
+  void* data;
+  int count;
+} CountingInput;
+
+STATIC int CountingGet(void* data) {
+  CountingInput* input = data;
+  int ch = input->get(input->data);
+  if (ch != EOF) {
+    input->count++;
+  }
+  return ch;
+}
+
+STATIC void CountingUnget(char ch, void* data) {
+  CountingInput* input = data;
+  input->unget(ch, input->data);
+  input->count--;
+}
+
 STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_list ap) {
+  CountingInput input = {get, unget, data, 0};
+  get = CountingGet;
+  unget = CountingUnget;
+  data = &input;
   const char* p = format;
   int num_items = 0;
   bool input_error = false;
@@ -718,6 +819,11 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
       p++;
       ConversionFormat fmt;
       p = CollectFormat(p, &fmt);
+      if (!fmt.modifier_valid ||
+          (IsWidthModifier(&fmt) &&
+           strchr("diouxXbn", *p) == NULL)) {
+        goto done;
+      }
       void *ptr = NULL;
       if (!fmt.suppress) {
         ptr = va_arg(ap, void*);
@@ -816,8 +922,8 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
           p++;
           break;
         case 'n':
-          // Number of conversions so far.
-          *(int*)ptr = num_items;
+          // Number of input characters consumed so far.
+          WriteInt((unsigned long long)input.count, false, ptr, &fmt);
           p++;
          break;
         case '[': {

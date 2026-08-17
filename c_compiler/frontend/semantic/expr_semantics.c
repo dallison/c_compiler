@@ -2452,6 +2452,43 @@ static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
   return true;
 }
 
+static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
+                                                 BinaryASTNode* colon) {
+  if (CompilerIsCXX() ||
+      !TypeIsPointerOrArray(colon->left->type) ||
+      !TypeIsPointerOrArray(colon->right->type) ||
+      colon->left->type->next == NULL || colon->right->type->next == NULL ||
+      TypeIsFunction(colon->left->type->next) ||
+      TypeIsFunction(colon->right->type->next)) {
+    return false;
+  }
+  TypeRecord* left_pointee = colon->left->type->next;
+  TypeRecord* right_pointee = colon->right->type->next;
+  bool has_void =
+      TypeIsVoid(left_pointee) || TypeIsVoid(right_pointee);
+  Qualifiers cv_mask =
+      kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+  if (!has_void &&
+      !TypeEqualIgnoringTopLevelQualifierMask(left_pointee, right_pointee,
+                                               cv_mask)) {
+    return false;
+  }
+  TypeRecord* pointee =
+      TypeRecordCopy(TypeIsVoid(left_pointee) ? left_pointee :
+                     TypeIsVoid(right_pointee) ? right_pointee :
+                     left_pointee);
+  pointee->qualifiers =
+      (left_pointee->qualifiers | right_pointee->qualifiers) & cv_mask;
+  TypeRecord* result = NewPointerTo(kQualPlain, pointee);
+  ASTNodeSetType((ASTNode*)colon, result);
+  ASTNodeSetType((ASTNode*)node, result);
+  colon->base.value_category = kValueCategoryPrvalue;
+  node->base.value_category = kValueCategoryPrvalue;
+  TypeRecordDelete(result);
+  TypeRecordDelete(pointee);
+  return true;
+}
+
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain),
@@ -2498,6 +2535,9 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   if (TryAnalyzeConditionalFunctionPointer(node, colon)) {
+    return;
+  }
+  if (TryAnalyzeCConditionalObjectPointers(node, colon)) {
     return;
   }
   if (CompilerIsCXX() &&
@@ -4309,9 +4349,32 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
       }
     }
     // Length modifiers.
-    while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'j' || *p == 'z' ||
-           *p == 't') {
+    if (*p == 'w') {
       p++;
+      if (*p == 'f') {
+        p++;
+      }
+      bool valid_width = *p >= '1' && *p <= '9';
+      int width = 0;
+      while (isdigit((unsigned char)*p)) {
+        if (width <= 64) {
+          width = width * 10 + *p - '0';
+          if (width > 64) {
+            width = 65;
+          }
+        }
+        p++;
+      }
+      if (!valid_width ||
+          (width != 8 && width != 16 && width != 32 && width != 64)) {
+        SemanticWarning((ASTNode*)node, "format-invalid-specifier",
+                        "unsupported width-specific format modifier");
+      }
+    } else {
+      while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'j' ||
+             *p == 'z' || *p == 't') {
+        p++;
+      }
     }
     if (*p == '\0') {
       SemanticWarning((ASTNode*)node, "format-invalid-specifier",
@@ -4403,7 +4466,9 @@ static PrintfProfile ClassifyPrintfFormat(const char* format) {
       }
     }
     bool long_value = false;
-    if (*p == 'l') {
+    if (*p == 'w') {
+      return kPrintfProfileFull;
+    } else if (*p == 'l') {
       long_value = true;
       p++;
       if (*p == 'l') {

@@ -74,6 +74,21 @@ size_t strlen(const char *s);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
 
+#if !defined(__cplusplus) && defined(__STDC_VERSION__) && \
+    __STDC_VERSION__ >= 202311L
+#include <__davecc_const_generic.h>
+#define memchr(s, c, n) \
+  __DAVECC_CONST_GENERIC((s), const void*, (memchr)((s), (c), (n)))
+#define strchr(s, c) \
+  __DAVECC_CONST_GENERIC((s), const char*, (strchr)((s), (c)))
+#define strpbrk(s1, s2) \
+  __DAVECC_CONST_GENERIC((s1), const char*, (strpbrk)((s1), (s2)))
+#define strrchr(s, c) \
+  __DAVECC_CONST_GENERIC((s), const char*, (strrchr)((s), (c)))
+#define strstr(s1, s2) \
+  __DAVECC_CONST_GENERIC((s1), const char*, (strstr)((s1), (s2)))
+#endif
+
 #ifdef __cplusplus
 }
 #endif

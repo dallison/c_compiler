@@ -52,6 +52,31 @@ static_assert(__STDC_VERSION_TIME_H__ == 202311L);
 static_assert(sizeof(PRIb64) > 1 && sizeof(PRIB64) > 1);
 static_assert(sizeof(SCNb64) > 1);
 static_assert(sizeof(PRIbFAST32) > 1 && sizeof(SCNbFAST32) > 1);
+char mutable_text[4];
+const char constant_text[4] = "abc";
+int values[2];
+const int constant_values[2] = {1, 2};
+int compare_ints(const void *left, const void *right) {
+  return *(const int *)left - *(const int *)right;
+}
+static_assert(_Generic(strchr(mutable_text, 0), char *: 1, default: 0));
+static_assert(_Generic(strchr(constant_text, 0), const char *: 1, default: 0));
+static_assert(_Generic(strpbrk(mutable_text, "a"), char *: 1, default: 0));
+static_assert(_Generic(strpbrk(constant_text, "a"),
+                       const char *: 1, default: 0));
+static_assert(_Generic(strrchr(mutable_text, 0), char *: 1, default: 0));
+static_assert(_Generic(strrchr(constant_text, 0),
+                       const char *: 1, default: 0));
+static_assert(_Generic(strstr(mutable_text, "a"), char *: 1, default: 0));
+static_assert(_Generic(strstr(constant_text, "a"),
+                       const char *: 1, default: 0));
+static_assert(_Generic(memchr(values, 0, sizeof(values)), void *: 1, default: 0));
+static_assert(_Generic(memchr(constant_values, 0, sizeof(constant_values)),
+                       const void *: 1, default: 0));
+static_assert(_Generic(bsearch(values, values, 2, sizeof(int), compare_ints),
+                       void *: 1, default: 0));
+static_assert(_Generic(bsearch(values, constant_values, 2, sizeof(int),
+                               compare_ints), const void *: 1, default: 0));
 void never_returns(void) { unreachable(); }
 int main(void) {
   char bytes[8];
@@ -71,6 +96,12 @@ expect_compile c17_library_versions_absent c17 \
 #endif
 #ifdef __STDC_VERSION_TIME_H__
 #error time version macro leaked before C23
+#endif
+#ifdef strchr
+#error const-preserving strchr macro leaked before C23
+#endif
+#ifdef bsearch
+#error const-preserving bsearch macro leaked before C23
 #endif
 int main(void) { return 0; }'
 
@@ -153,6 +184,41 @@ int main(void) {
       autodetected != 5) return 32;
   if (sscanf("0123", "%i", &autodetected) != 1 ||
       autodetected != 83) return 33;
+
+  char* conversion_end = NULL;
+  const char binary_number[] = "0b101";
+  if (strtol(binary_number, &conversion_end, 0) != 5 ||
+      *conversion_end != '\0') return 34;
+  if (strtol("-0B101", &conversion_end, 2) != -5 ||
+      *conversion_end != '\0') return 35;
+  const char incomplete_binary[] = "0b";
+  if (strtol(incomplete_binary, &conversion_end, 0) != 0 ||
+      conversion_end != incomplete_binary + 1) return 36;
+  if (strtoul(binary_number, &conversion_end, 0) != 5 ||
+      strtoll(binary_number, &conversion_end, 0) != 5 ||
+      strtoull(binary_number, &conversion_end, 2) != 5) return 37;
+
+  if (snprintf(buffer, sizeof(buffer), "%w8d", (int8_t)-1) != 2 ||
+      strcmp(buffer, "-1") != 0) return 38;
+  if (snprintf(buffer, sizeof(buffer), "%w8u", (uint8_t)255) != 3 ||
+      strcmp(buffer, "255") != 0) return 39;
+  if (snprintf(buffer, sizeof(buffer), "%w16x", (uint16_t)0x2345) != 4 ||
+      strcmp(buffer, "2345") != 0) return 40;
+  if (snprintf(buffer, sizeof(buffer), "%w32d", (int32_t)-123456) != 7 ||
+      strcmp(buffer, "-123456") != 0) return 41;
+  if (snprintf(buffer, sizeof(buffer), "%wf64u",
+               (uint_fast64_t)18446744073709551615ULL) != 20 ||
+      strcmp(buffer, "18446744073709551615") != 0) return 42;
+  int8_t scanned8 = 0;
+  uint32_t scanned32 = 0;
+  if (sscanf("-128", "%w8d", &scanned8) != 1 || scanned8 != -128) return 43;
+  if (sscanf("ffffffff", "%w32x", &scanned32) != 1 ||
+      scanned32 != 0xffffffffU) return 44;
+  int8_t count8 = 0;
+  if (sscanf("17", "%w8d%w8n", &scanned8, &count8) != 1 ||
+      scanned8 != 17 || count8 != 2) return 45;
+  if (snprintf(buffer, sizeof(buffer), "%w128d", 1) >= 0) return 46;
+  if (sscanf("1", "%w128d", &scanned32) != 0) return 47;
 
   struct timespec resolution;
   struct timespec now;
