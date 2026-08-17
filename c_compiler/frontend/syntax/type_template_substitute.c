@@ -284,8 +284,21 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       // after rebasing.
       ASTNode* partial =
           CloneDependentExpressionWithArgs(parser, arg->dependent_expr, args);
-      concrete->dependent_expr =
-          partial != NULL ? partial : arg->dependent_expr;
+      if (partial != NULL &&
+          !DependentExpressionContainsTemplateParameter(partial)) {
+        DiagnosticSuppressBegin();
+        compiler->constant_evaluation_required_depth++;
+        partial = AnalyzeExpression(partial);
+        compiler->constant_evaluation_required_depth--;
+        bool resolved = TemplateArgumentSetFromExpression(concrete, partial);
+        DiagnosticSuppressEnd();
+        if (resolved) {
+          concrete->template_parameter_index = -1;
+          ASTNodeDelete(partial);
+          return concrete;
+        }
+      }
+      concrete->dependent_expr = partial != NULL ? partial : arg->dependent_expr;
     }
     return concrete;
   }

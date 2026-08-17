@@ -862,15 +862,21 @@ static void FindPackExpansionExpressionSymbol(ASTNode* node, void* data,
     return;
   }
   if (search->symbol != NULL && search->symbol != id->symbol) {
-    search->multiple_packs = true;
+    Vector* first = MapFindPointerKey(&search->clone->pack_symbol_map,
+                                      search->symbol);
+    Vector* next =
+        MapFindPointerKey(&search->clone->pack_symbol_map, id->symbol);
+    if (first == NULL || next == NULL || first->length != next->length) {
+      search->multiple_packs = true;
+    }
     return;
   }
   search->symbol = id->symbol;
 }
 
-/* Find the single parameter-pack symbol referenced inside a pack-expansion
- * pattern `node`. Sets `*multiple_packs` if more than one distinct pack appears
- * (which the simple expansion path cannot handle). */
+/* Find a parameter-pack symbol referenced inside a pack-expansion pattern.
+ * Multiple function packs are supported when their concrete lengths match;
+ * `multiple_packs` reports a length mismatch. */
 static Symbol* PackExpansionExpressionSymbol(TemplateFunctionBodyClone* clone,
                                              ASTNode* node,
                                              bool* multiple_packs) {
@@ -881,6 +887,33 @@ static Symbol* PackExpansionExpressionSymbol(TemplateFunctionBodyClone* clone,
     *multiple_packs = search.multiple_packs;
   }
   return search.symbol;
+}
+
+typedef struct {
+  TemplateFunctionBodyClone* clone;
+  Vector symbols;
+} PackExpansionFunctionPacks;
+
+static void CollectPackExpansionFunctionPacks(ASTNode* node, void* data,
+                                              int child_id,
+                                              VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  PackExpansionFunctionPacks* packs = data;
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || !symbol->flags.is_parameter_pack ||
+      MapFindPointerKey(&packs->clone->pack_symbol_map, symbol) == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < packs->symbols.length; i++) {
+    if (packs->symbols.value.p[i] == symbol) {
+      return;
+    }
+  }
+  VectorAppend(&packs->symbols, symbol);
 }
 
 typedef struct {
@@ -910,7 +943,9 @@ static void FindTemplateArgumentPackExpression(ASTNode* node, void* data,
       continue;
     }
     if (search->pack_index >= 0 && search->pack_index != pack_index) {
-      search->multiple_packs = true;
+      if (search->pack_length != pack_length) {
+        search->multiple_packs = true;
+      }
       continue;
     }
     search->pack_index = pack_index;
@@ -1581,6 +1616,9 @@ static void DetachClonedPackExpansionCastTypes(ASTNode* node, void* data,
 static ASTNode* ClonePackExpansionPattern(TemplateFunctionBodyClone* clone,
                                           ASTNode* pattern, Symbol* from,
                                           Symbol* to, size_t element_index) {
+  PackExpansionFunctionPacks packs = {.clone = clone};
+  VectorInit(&packs.symbols);
+  ASTNodeVisit(pattern, CollectPackExpansionFunctionPacks, 0, &packs);
   ASTNode* pattern_clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
   ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
   ReplacePackIdentifierData replace = {0};
@@ -1589,6 +1627,25 @@ static ASTNode* ClonePackExpansionPattern(TemplateFunctionBodyClone* clone,
   replace.to = to;
   replace.element_index = element_index;
   ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &replace);
+  for (size_t i = 0; i < packs.symbols.length; i++) {
+    Symbol* symbol = packs.symbols.value.p[i];
+    if (symbol == from) {
+      continue;
+    }
+    Vector* replacements =
+        MapFindPointerKey(&clone->pack_symbol_map, symbol);
+    if (replacements == NULL || element_index >= replacements->length) {
+      continue;
+    }
+    ReplacePackIdentifierData additional = {
+        .clone = clone,
+        .from = symbol,
+        .to = replacements->value.p[element_index],
+        .element_index = element_index,
+    };
+    ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &additional);
+  }
+  VectorDestruct(&packs.symbols);
   ASTNodeVisit(pattern_clone, InstantiateClonedFunctionTemplateCallVisitor, 0,
                clone);
   pattern_clone = ASTNodeVisitAndTransform(
@@ -1627,7 +1684,7 @@ static void ExpandClonedLocalDirectInitializerPack(
       PackExpansionExpressionSymbol(clone, pattern, &multiple_packs);
   if (multiple_packs) {
     SyntaxError(clone->parser->syntax,
-                "pack expansion with multiple parameter packs is not supported yet");
+                "pack expansion argument packs have different lengths");
     return;
   }
   Vector* replacements =
@@ -1919,7 +1976,7 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
           multiple_packs || template_argument_multiple_packs;
       if (multiple_packs) {
         SyntaxError(clone->parser->syntax,
-                    "pack expansion with multiple parameter packs is not supported yet");
+                    "pack expansion argument packs have different lengths");
       }
       if (pack_symbol == NULL &&
           !has_template_argument_pack &&
@@ -2474,7 +2531,7 @@ static void ExpandClonedBracedInitializerPackElements(
                                                       &multiple_packs);
           if (multiple_packs) {
             SyntaxError(clone->parser->syntax,
-                        "pack expansion with multiple parameter packs is not supported yet");
+                        "pack expansion argument packs have different lengths");
           }
           Vector* replacements =
               pack_symbol != NULL
@@ -2518,7 +2575,7 @@ static void ExpandClonedBracedInitializerPackElements(
                                                     &multiple_packs);
         if (multiple_packs) {
           SyntaxError(clone->parser->syntax,
-                      "pack expansion with multiple parameter packs is not supported yet");
+                      "pack expansion argument packs have different lengths");
         }
         Vector* replacements =
             pack_symbol != NULL
@@ -2842,11 +2899,10 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
   }
   ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
 
-  bool replaced_function_pack = false;
   bool only_capture_packs = true;
   for (size_t i = 0; i < packs->bindings.length; i++) {
     FoldPackBinding* binding = packs->bindings.value.p[i];
-    if (binding->kind == kFoldPackFunction && !replaced_function_pack) {
+    if (binding->kind == kFoldPackFunction) {
       only_capture_packs = false;
       ReplacePackIdentifierData replace = {
           .clone = clone,
@@ -2855,7 +2911,6 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
           .element_index = index,
       };
       ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &replace);
-      replaced_function_pack = true;
     } else if (binding->kind == kFoldPackTemplateArgument) {
       only_capture_packs = false;
     } else if (binding->kind == kFoldPackLambdaCapture) {
@@ -2985,7 +3040,7 @@ static void ExpandClonedScalarMemberInitPack(TemplateFunctionBodyClone* clone,
       PackExpansionExpressionSymbol(clone, assign->right, &multiple_packs);
   if (multiple_packs) {
     SyntaxError(clone->parser->syntax,
-                "pack expansion with multiple parameter packs is not supported yet");
+                "pack expansion argument packs have different lengths");
   }
   Vector* replacements =
       pack_symbol != NULL
@@ -3139,7 +3194,7 @@ static ASTNode* RewriteClonedDependentNewInitializer(
           PackExpansionExpressionSymbol(clone, assign->right, &multiple_packs);
       if (multiple_packs) {
         SyntaxError(clone->parser->syntax,
-                    "pack expansion with multiple parameter packs is not supported yet");
+                    "pack expansion argument packs have different lengths");
       }
       Vector* replacements =
           pack_symbol != NULL
@@ -3188,7 +3243,7 @@ static ASTNode* RewriteClonedDependentNewInitializer(
         PackExpansionExpressionSymbol(clone, assign->right, &multiple_packs);
     if (multiple_packs) {
       SyntaxError(clone->parser->syntax,
-                  "pack expansion with multiple parameter packs is not supported yet");
+                  "pack expansion argument packs have different lengths");
     }
     Vector* replacements =
         pack_symbol != NULL

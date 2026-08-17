@@ -936,8 +936,73 @@ void CXXInsertScopeExitDestructors(TypeRecord* func) {
   VectorDestruct(&jumps);
 }
 
+static ASTNode* ElideCXXMemberInitializerPrvalue(ASTNode* expr) {
+  if (expr == NULL || expr->op != AST_OP(call) ||
+      (expr->flags & kASTCXXMemberInitializer) == 0) {
+    return expr;
+  }
+  VectorASTNode* outer = (VectorASTNode*)expr;
+  if (outer->left == NULL || outer->left->op != AST_OP(identifier) ||
+      outer->children == NULL || outer->children->length < 2) {
+    return expr;
+  }
+  Symbol* outer_constructor = ((IdentifierASTNode*)outer->left)->symbol;
+  ASTNode* actual =
+      outer->children->value.p[outer->children->length - 1];
+  if (outer_constructor == NULL || outer_constructor->type == NULL ||
+      !TypeIsFunction(outer_constructor->type) ||
+      !outer_constructor->type->info.function.is_constructor ||
+      actual == NULL || actual->op != AST_OP(comma)) {
+    return expr;
+  }
+  BinaryASTNode* materialized = (BinaryASTNode*)actual;
+  ASTNode* inner_node = materialized->left;
+  Symbol* temporary =
+      CXXTemporaryConstructionResultSymbol(materialized->right);
+  if (inner_node == NULL || inner_node->op != AST_OP(call) ||
+      temporary == NULL) {
+    return expr;
+  }
+  VectorASTNode* inner = (VectorASTNode*)inner_node;
+  if (inner->left == NULL || inner->left->op != AST_OP(identifier) ||
+      inner->children == NULL || inner->children->length == 0) {
+    return expr;
+  }
+  Symbol* inner_constructor = ((IdentifierASTNode*)inner->left)->symbol;
+  if (inner_constructor == NULL || inner_constructor->type == NULL ||
+      !TypeIsFunction(inner_constructor->type) ||
+      !inner_constructor->type->info.function.is_constructor ||
+      outer_constructor->type->info.function.cxx_member_owner !=
+          inner_constructor->type->info.function.cxx_member_owner ||
+      outer_constructor->type->info.function.cxx_member_owner == NULL) {
+    return expr;
+  }
+
+  ASTNode* target = outer->children->value.p[0];
+  ASTNode* old_inner_target = inner->children->value.p[0];
+  if (target == NULL || old_inner_target == NULL ||
+      old_inner_target->op != AST_OP(address) ||
+      ((UnaryASTNode*)old_inner_target)->sub == NULL ||
+      ((UnaryASTNode*)old_inner_target)->sub->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)((UnaryASTNode*)old_inner_target)->sub)->symbol !=
+          temporary) {
+    return expr;
+  }
+  VectorSet(outer->children, 0, NULL);
+  VectorSet(inner->children, 0, target);
+  target->parent = inner_node;
+  target->child_id = 0;
+  ASTNodeDelete(old_inner_target);
+  materialized->left = NULL;
+  inner_node->parent = expr->parent;
+  inner_node->child_id = expr->child_id;
+  ASTNodeDelete(expr);
+  return inner_node;
+}
+
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+  node->expr = ElideCXXMemberInitializerPrvalue(node->expr);
   node->expr = AppendCXXFullExpressionTemporaryDestructors(node->expr);
 
   // warn_unused_result: a discarded call to a function so annotated.

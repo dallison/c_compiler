@@ -29,5 +29,7 @@ int CXXBaseOffsetForMember(Struct* str, StructMember* member);
 void CollectConversionOperators(Struct* str, Vector* out);
 
 void StructRebuildMemberLookupTables(Struct* str);
+void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
+                               int base_offset);
 
 #endif /* type_member_h */

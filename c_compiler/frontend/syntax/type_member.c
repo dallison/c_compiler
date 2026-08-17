@@ -266,6 +266,69 @@ static void AddCXXUnscopedEnumConstantMembers(TypeParser* parser,
   }
 }
 
+static TypeRecord* ResolveCXXMemberUsingEnumType(
+    TypeParser* parser, FullyQualifiedIdentifier* name) {
+  Symbol* tag = SyntaxFindQualifiedTag(parser->syntax, name);
+  if (tag != NULL && tag->type != NULL && TypeIsEnum(tag->type)) {
+    return tag->type;
+  }
+  Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, name);
+  if (symbol != NULL && symbol->type != NULL && TypeIsEnum(symbol->type)) {
+    return symbol->type;
+  }
+  return NULL;
+}
+
+static void ParseCXXMemberUsingEnumDeclaration(TypeParser* parser,
+                                               Struct* owner,
+                                               CXXAccess access,
+                                               SourceLocation location) {
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(parser->syntax, &name)) {
+    SyntaxError(parser->syntax,
+                "Expected enumeration name after 'using enum'");
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxRecover(parser->syntax, TC(semicolon));
+    return;
+  }
+
+  TypeRecord* type = ResolveCXXMemberUsingEnumType(parser, &name);
+  if (type == NULL || type->info.enum_info == NULL) {
+    SyntaxError(parser->syntax, "'%s' is not an enumeration type",
+                name.spelling.value);
+    FullyQualifiedIdentifierDestruct(&name);
+    return;
+  }
+
+  Enum* e = type->info.enum_info;
+  for (size_t i = 0; i < e->constants.length; i++) {
+    Symbol* constant = e->constants.value.p[i];
+    if (constant == NULL) {
+      continue;
+    }
+    if (FindStructMember(owner, &constant->name) != NULL) {
+      SyntaxError(parser->syntax, "Duplicate enum constant %s",
+                  constant->name.value);
+      continue;
+    }
+    Symbol* member_symbol = SymbolClone(constant);
+    member_symbol->location = location;
+    StructMember* member = NewStructMember(member_symbol);
+    member->access = access;
+    member->is_static = true;
+    member->is_using_declaration = true;
+    AddStructMember(parser, owner, member);
+
+    Symbol* scope_constant = SymbolClone(constant);
+    scope_constant->location = location;
+    if (!SyntaxAddSymbol(parser->syntax, scope_constant)) {
+      SymbolDelete(scope_constant);
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+}
+
 static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
                                     const char* name, TypeRecord* type,
                                     CXXAccess access,
@@ -2018,43 +2081,32 @@ static bool ParseCXXConversionOperatorMember(
   return true;
 }
 
-static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src ) {
+void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
+                               int base_offset) {
   for (size_t i = 0; i < src->members.length; i++) {
     StructMember* member = src->members.value.p[i];
     Symbol* symbol = member->symbol;
     if (member->is_anon) {
       // Anonymous member, deal with recursively.
-      CopyAnonymousMembers(parser, dest, symbol->type->info.struct_info);
+      InjectCXXAnonymousMembers(parser, dest, symbol->type->info.struct_info,
+                                base_offset + member->byte_offset);
       continue;
     }
     if (!CheckStructMember(dest, &symbol->name)) {
       SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                 symbol->name.value);
     } else {
-      // Insert a *copy* of the member into the destination's symbol table with
-      // the byte offset adjusted to be relative to the destination struct.  We
-      // must not mutate the original member's byte_offset: it is shared with the
-      // anonymous aggregate's own members vector, where the offset must stay
-      // relative to that aggregate (otherwise designated/positional static
-      // initializers and member access through the aggregate compute the wrong
-      // offset).
-      if (!src->is_union) {
-        AlignNextOffset(dest, symbol->type);
-      }
+      // Insert a copy into the destination's lookup tables. The owning
+      // anonymous aggregate remains the sole layout member; injected members
+      // merely carry their absolute offset for direct member access.
       StructMember* dest_member = NewStructMember(symbol);
       dest_member->bit_offset = member->bit_offset;
       dest_member->bit_size = member->bit_size;
       dest_member->index = member->index;
       dest_member->is_anon = member->is_anon;
-      dest_member->byte_offset = dest->next_offset;
+      dest_member->byte_offset = base_offset + member->byte_offset;
 
       StructInsertMemberIntoTables(dest, dest_member);
-
-      if (!src->is_union) {
-        // Members of an anonymous struct are laid out sequentially regardless
-        // of whether the enclosing aggregate is a union, so always advance.
-        UpdateStructSize(dest, symbol->type, false);
-      }
     }
   }
 }
@@ -2217,8 +2269,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     parser->cxx_member_owner = str;
 
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(using))) {
-      ParseCXXMemberUsingDeclaration(parser, str, current_access,
-                                     parser->lex->current_token_location);
+      SourceLocation using_location = parser->lex->current_token_location;
+      if (LexMatch(parser->lex, TOK(enum))) {
+        ParseCXXMemberUsingEnumDeclaration(parser, str, current_access,
+                                           using_location);
+      } else {
+        ParseCXXMemberUsingDeclaration(parser, str, current_access,
+                                       using_location);
+      }
       AttributeListDestruct(&member_attributes);
       if (!LexLookingAt(parser->lex, TOK(rbrace))) {
         SyntaxNeedSemicolon(parser->syntax, TC(type));
@@ -2509,7 +2567,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         TypeRecordCalculateSize(member_type);
         AlignNextOffset(str, member_type);
         int anon_base = str->next_offset;
-        CopyAnonymousMembers(parser, str, member_type->info.struct_info);
+        InjectCXXAnonymousMembers(parser, str, member_type->info.struct_info,
+                                  anon_base);
 
         // Make a fake member symbol to represent the anonymous member.  This
         // is inserted into the members vector but not the symbol table.

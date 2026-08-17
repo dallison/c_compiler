@@ -191,12 +191,6 @@ void StructAddSyntheticMember(Struct* str, StructMember* member) {
 }
 
 bool RelayoutStruct(Struct* str) {
-  for (size_t i = 0; i < str->members.length; i++) {
-    StructMember* m = str->members.value.p[i];
-    if (m->is_anon) {
-      return false;
-    }
-  }
   bool is_union = str->is_union;
   str->next_offset = 0;
   str->current_offset = 0;
@@ -207,7 +201,8 @@ bool RelayoutStruct(Struct* str) {
   LayoutCXXBaseSpecifiers(str);
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* m = str->members.value.p[i];
-    if (m->is_using_declaration) {
+    if (m->is_static || m->is_member_function || m->is_using_declaration ||
+        StructMemberIsNestedType(m)) {
       continue;
     }
     TypeRecord* type = m->symbol->type;

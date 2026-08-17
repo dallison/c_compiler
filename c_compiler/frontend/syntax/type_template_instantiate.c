@@ -31,6 +31,10 @@
 #include "rtti.h"
 #include "set.h"
 
+static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
+                                               Struct* str);
+static bool StructHasBitFieldMembers(Struct* str);
+
 // When set, a parameter appearing only in a bare `T::member` non-deduced
 // context is left unbound during argument deduction (so a default template
 // argument can supply it) rather than deduced from the argument via this
@@ -453,7 +457,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       AlignNextOffsetForSymbol(str, member_symbol);
       instantiated->byte_offset = str->next_offset;
       instantiated->index = str->members.length;
-      AddStructMember(parser, str, instantiated);
+      if (instantiated->is_anon) {
+        VectorAppend(&str->members, instantiated);
+      } else {
+        AddStructMember(parser, str, instantiated);
+      }
       UpdateStructSize(str, member_type, str->is_union);
     } else {
       instantiated->byte_offset = member->byte_offset;
@@ -490,6 +498,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       saved_enclosing_substitution_source;
   parser->enclosing_template_substitution_target =
       saved_enclosing_substitution_target;
+  if (StructHasBitFieldMembers(from)) {
+    RelayoutStruct(str);
+  }
+  InjectInstantiatedAnonymousMembers(parser, str);
   FinalizeStructAlignment(str);
   ComputeCXXAggregateStatus(str);
   str->cxx_special_members_complete = false;
@@ -554,8 +566,38 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
   }
 }
 
+static void AppendTemplateNonTypeInstantiationKey(
+    String* name, TemplateArgument* arg) {
+  switch (TemplateArgumentConcreteValueKind(arg)) {
+    case kTemplateValueIntegral:
+      StringPrintf(name, "I%" PRId64, arg->int_value);
+      break;
+    case kTemplateValueNull:
+      StringAppend(name, "N");
+      break;
+    case kTemplateValuePointer:
+      StringPrintf(name, "P%d:%" PRId64,
+                   arg->value_symbol != NULL ? arg->value_symbol->id : -1,
+                   arg->value_offset);
+      break;
+    case kTemplateValueMemberPointer:
+      StringPrintf(
+          name, "M%d:%" PRId64 ":%" PRId64 ":%d",
+          arg->value_symbol != NULL ? arg->value_symbol->id : -1,
+          arg->value_offset, arg->value_adjustment,
+          arg->member_function != NULL ? arg->member_function->id : -1);
+      break;
+    case kTemplateValueReflection:
+      StringPrintf(name, "R%p", (void*)arg->reflection_value);
+      break;
+    case kTemplateValueNone:
+      StringPrintf(name, "D%p", (void*)arg->dependent_expr);
+      break;
+  }
+}
+
 void AppendTemplateInstantiationName(String* name, Symbol* templ,
-                                            Vector* args) {
+                                     Vector* args) {
   Struct* template_struct =
       templ->type != NULL && TypeIsStructOrUnion(templ->type)
           ? templ->type->info.struct_info
@@ -597,9 +639,7 @@ void AppendTemplateInstantiationName(String* name, Symbol* templ,
         } else if (element->template_parameter_index >= 0) {
           StringPrintf(&element_name, "$N%d", element->template_parameter_index);
         } else {
-          char buffer[32];
-          snprintf(buffer, sizeof(buffer), "%lld", element->int_value);
-          StringAppend(&element_name, buffer);
+          AppendTemplateNonTypeInstantiationKey(&element_name, element);
         }
         StringAppendString(&arg_name, &element_name);
         StringDestruct(&element_name);
@@ -619,9 +659,7 @@ void AppendTemplateInstantiationName(String* name, Symbol* templ,
       if (arg->template_parameter_index >= 0) {
         StringPrintf(&arg_name, "$N%d", arg->template_parameter_index);
       } else {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%lld", arg->int_value);
-        StringAppend(&arg_name, buffer);
+        AppendTemplateNonTypeInstantiationKey(&arg_name, arg);
       }
     }
     StringAppendString(name, &arg_name);
@@ -665,22 +703,15 @@ static bool AddTemplateInstantiationTag(TypeParser* parser, Symbol* templ,
   return added;
 }
 
-/* Reject (with a diagnostic) class-template instantiations that use member
- * kinds the instantiation machinery does not yet handle: anonymous members and
- * bit-fields.  Virtual (and pure-virtual) member functions *are* supported: the
- * instantiation path completes the polymorphic layout and emits the vtable(s)
- * the same way a normal class definition does. */
+/* Reject malformed member-function records. Virtual (and pure-virtual) member
+ * functions are supported: the instantiation path completes the polymorphic
+ * layout and emits the vtable(s) the same way a normal class definition does. */
 static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
                                                        Struct* str) {
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     if (StructMemberIsNestedType(member)) {
       continue;
-    }
-    if (member->is_anon || StructMemberIsBitField(member)) {
-      SyntaxError(parser->syntax,
-                  "Class template instantiation is not supported yet");
-      return false;
     }
     if (member->is_member_function &&
         (member->symbol == NULL || member->symbol->type == NULL ||
@@ -691,6 +722,35 @@ static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
     }
   }
   return true;
+}
+
+static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
+                                               Struct* str) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || !member->is_anon || member->symbol == NULL ||
+        member->symbol->type == NULL ||
+        !TypeIsStructOrUnion(member->symbol->type) ||
+        member->symbol->type->info.struct_info == NULL) {
+      continue;
+    }
+    InjectCXXAnonymousMembers(parser, str,
+                              member->symbol->type->info.struct_info,
+                              member->byte_offset);
+  }
+}
+
+static bool StructHasBitFieldMembers(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && StructMemberIsBitField(member)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* Build the concrete function type for a member function of an instantiated
@@ -3037,12 +3097,13 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
     return NULL;
   }
   int formal_pack_index = -1;
+  size_t formal_pack_count = 0;
   for (size_t i = first_formal_arg; i < func->info.function.prototype.length;
        i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     if (formal != NULL && formal->flags.is_parameter_pack) {
       formal_pack_index = (int)i;
-      break;
+      formal_pack_count++;
     }
   }
   size_t fixed_formal_count =
@@ -3052,6 +3113,17 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
   }
   size_t required_formal_count = RequiredFixedFunctionTemplateFormals(
       func, first_formal_arg, fixed_formal_count);
+  if (formal_pack_count > 1) {
+    required_formal_count = 0;
+    for (size_t i = first_formal_arg;
+         i < func->info.function.prototype.length; i++) {
+      Symbol* formal = func->info.function.prototype.value.p[i];
+      if (formal != NULL && !formal->flags.is_parameter_pack &&
+          formal->default_argument == NULL) {
+        required_formal_count++;
+      }
+    }
+  }
   if (func->info.function.template_parameter_count <= 0 ||
       func->info.function.unknown_args || func->info.function.varargs ||
       (formal_pack_index < 0 &&
@@ -3076,6 +3148,79 @@ retry_deduction:
     return NULL;
   }
   g_deduce_defer_bare_member = defer_bare_member;
+  if (formal_pack_count > 1) {
+    size_t actual_index = 0;
+    for (size_t formal_index = first_formal_arg;
+         formal_index < func->info.function.prototype.length; formal_index++) {
+      Symbol* formal = func->info.function.prototype.value.p[formal_index];
+      if (formal == NULL) {
+        continue;
+      }
+      if (formal->flags.is_parameter_pack) {
+        int pack_type_index = -1;
+        size_t pack_length = 0;
+        if (!FindPackExpansionInType(formal->type, args, &pack_type_index,
+                                     &pack_length) ||
+            pack_type_index < 0 ||
+            (size_t)pack_type_index >= args->length) {
+          goto deduction_failed;
+        }
+        bool trailing =
+            formal_index + 1 == func->info.function.prototype.length;
+        TemplateArgument* pack = args->value.p[pack_type_index];
+        size_t consume = 0;
+        if (trailing) {
+          consume = actuals->length - actual_index;
+        } else if (pack != NULL && pack->pack_arguments != NULL) {
+          // A non-trailing function parameter pack is a non-deduced context.
+          // Explicitly supplied pack elements still determine how many call
+          // arguments this formal consumes.
+          consume = pack->pack_arguments->length;
+        } else {
+          args->value.p[pack_type_index] =
+              NewEmptyPackTemplateArgument(kTemplateParameterType);
+          pack = args->value.p[pack_type_index];
+        }
+        if (actual_index + consume > actuals->length) {
+          goto deduction_failed;
+        }
+        if (!trailing) {
+          actual_index += consume;
+          continue;
+        }
+        for (size_t j = 0; j < consume; j++) {
+          ASTNode* actual = actuals->value.p[actual_index++];
+          if (actual == NULL || actual->type == NULL ||
+              !DeduceFunctionTemplatePackCallArgument(
+                  args, explicit_arg_count, pack_type_index, formal->type,
+                  actual)) {
+            goto deduction_failed;
+          }
+        }
+        continue;
+      }
+      if (actual_index >= actuals->length) {
+        if (formal->default_argument == NULL) {
+          goto deduction_failed;
+        }
+        continue;
+      }
+      ASTNode* actual = actuals->value.p[actual_index++];
+      if (actual == NULL ||
+          !(DeduceFunctionTemplateArrayInitializerArgument(
+                args, explicit_arg_count, formal->type, actual) ||
+            DeduceFunctionTemplateInitializerListArgument(
+                args, explicit_arg_count, formal->type, actual) ||
+            DeduceFunctionTemplateCallArgument(args, explicit_arg_count,
+                                               formal->type, actual))) {
+        goto deduction_failed;
+      }
+    }
+    if (actual_index != actuals->length) {
+      goto deduction_failed;
+    }
+    goto deduction_finished;
+  }
   for (size_t i = 0; i < actuals->length; i++) {
     Symbol* formal = NULL;
     if (formal_pack_index >= 0 && i >= fixed_formal_count) {
@@ -3113,6 +3258,7 @@ retry_deduction:
       return NULL;
     }
   }
+deduction_finished:
   g_deduce_defer_bare_member = false;
   if (formal_pack_index >= 0) {
     Symbol* formal = func->info.function.prototype.value.p[formal_pack_index];
@@ -3167,6 +3313,17 @@ retry_deduction:
     }
   }
   return args;
+
+deduction_failed:
+  g_deduce_defer_bare_member = false;
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (defer_bare_member) {
+    defer_bare_member = false;
+    goto retry_deduction;
+  }
+  return NULL;
 }
 
 /* Public: deduce and instantiate a function template from a call's actuals. */
@@ -5566,8 +5723,17 @@ static bool TemplateNonTypeArgumentMatchesParameter(
         arg->type->next != NULL && TypeIsFunction(arg->type->next);
     bool parameter_is_function =
         param->type->next != NULL && TypeIsFunction(param->type->next);
-    return argument_is_function == parameter_is_function &&
-           TypeAssignmentCompatible(arg->type, param->type);
+    if (argument_is_function != parameter_is_function) {
+      return false;
+    }
+    if (argument_is_function) {
+      return arg->type->qualifiers == param->type->qualifiers &&
+             TypeEqualIgnoringFunctionNoexcept(arg->type->next,
+                                               param->type->next) &&
+             (!param->type->next->info.function.is_noexcept ||
+              arg->type->next->info.function.is_noexcept);
+    }
+    return TypeAssignmentCompatible(arg->type, param->type);
   }
   if (value_kind == kTemplateValueMemberPointer) {
     return TypeEqual(arg->type, param->type);
@@ -6591,12 +6757,20 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
       instantiated->byte_offset = member->byte_offset;
     }
     instantiated->index = str->members.length;
-    AddStructMember(parser, str, instantiated);
+    if (instantiated->is_anon) {
+      VectorAppend(&str->members, instantiated);
+    } else {
+      AddStructMember(parser, str, instantiated);
+    }
     if (!instantiated->is_static && !instantiated->is_using_declaration &&
         !StructMemberIsNestedType(instantiated)) {
       UpdateStructSize(str, member_type, str->is_union);
     }
   }
+  if (StructHasBitFieldMembers(source_struct)) {
+    RelayoutStruct(str);
+  }
+  InjectInstantiatedAnonymousMembers(parser, str);
   FinalizeStructAlignment(str);
   TypeRecordCalculateSize(type);
   ComputeCXXAggregateStatus(str);

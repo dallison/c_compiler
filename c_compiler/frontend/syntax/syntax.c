@@ -4760,6 +4760,84 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
   }
 
   TypeRecord* member_type = member->symbol->type;
+  if (TypeIsFixedArray(member_type) && member_type->next != NULL) {
+    size_t element_count = member_type->info.array.size.fixed;
+    if (actuals->length > element_count) {
+      SyntaxError(syntax, "too many initializers for array member %s",
+                  member->symbol->name.value);
+      VectorDeleteWithContents(actuals,
+                               (VectorElementDestructor)ASTNodeDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+    TypeRecord* element_type = member_type->next;
+    StructMember* element_constructor =
+        TypeIsStructOrUnion(element_type) ? FindCXXConstructor(element_type)
+                                         : NULL;
+    Vector* statements = NewVector();
+    for (size_t i = 0; i < element_count; i++) {
+      ASTNode* receiver =
+          NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+      receiver = NewBinaryASTNode(
+          AST_OP(subscript), NULL, location, receiver,
+          NewIntConstantASTNode((int64_t)i,
+                                NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location));
+      ASTNode* stmt = NULL;
+      if (element_constructor != NULL) {
+        Vector* element_actuals = NewVector();
+        if (i < actuals->length) {
+          VectorAppend(element_actuals, actuals->value.p[i]);
+          actuals->value.p[i] = NULL;
+        }
+        CXXPrependCompleteObjectArgument(element_type, element_actuals,
+                                         /*complete_object=*/true, location);
+        ASTNode* constructor_name = NewStringConstantASTNode(
+            NewString(CXXConstructorNameForType(element_type)), NULL, location);
+        ASTNode* access = NewBinaryASTNode(AST_OP(dot), NULL, location,
+                                           receiver, constructor_name);
+        ASTNode* call =
+            NewVectorASTNode(AST_OP(call), NULL, location, access,
+                             element_actuals);
+        call->flags |= kASTCXXMemberInitializer;
+        stmt = NewExpressionStatementASTNode(call, location);
+      } else {
+        ASTNode* value =
+            i < actuals->length
+                ? actuals->value.p[i]
+                : NewIntConstantASTNode(
+                      0, TypeRecordCopy(element_type), location);
+        if (i < actuals->length) {
+          actuals->value.p[i] = NULL;
+        }
+        ASTNode* assign = NewBinaryASTNode(AST_OP(assign), element_type,
+                                           location, receiver, value);
+        assign->flags |= kASTCXXMemberInitializer;
+        stmt = NewExpressionStatementASTNode(assign, location);
+      }
+      VectorAppend(statements, stmt);
+      if (CompilerExceptionsEnabled() &&
+          TypeHasNonTrivialDestructor(element_type)) {
+        ASTNode* cleanup_receiver =
+            NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+        cleanup_receiver = NewBinaryASTNode(
+            AST_OP(subscript), NULL, location, cleanup_receiver,
+            NewIntConstantASTNode((int64_t)i,
+                                  NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                  location));
+        ASTNode* cleanup = NewCXXMemberDestructorCall(
+            syntax, func, member, element_type, cleanup_receiver, location);
+        if (cleanup != NULL) {
+          cleanup->flags |= kASTEHCleanupOnly;
+          VectorAppend(statements, cleanup);
+        }
+      }
+    }
+    VectorDeleteWithContents(actuals,
+                             (VectorElementDestructor)ASTNodeDelete,
+                             /*free_element=*/false);
+    return NewCompoundStatementASTNode(statements, location);
+  }
   StructMember* constructor = TypeIsStructOrUnion(member_type)
                                   ? FindCXXConstructor(member_type)
                                   : NULL;
@@ -4780,9 +4858,11 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
         NewStringConstantASTNode(NewString(constructor_name), NULL, location);
     ASTNode* member_access =
         NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
-    ASTNode* constructor_call = NewExpressionStatementASTNode(
-        NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals),
-        location);
+    ASTNode* call =
+        NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+    call->flags |= kASTCXXMemberInitializer;
+    ASTNode* constructor_call =
+        NewExpressionStatementASTNode(call, location);
     if (!zero_before_default) {
       return constructor_call;
     }
@@ -5275,6 +5355,35 @@ static size_t InsertCXXPartialCleanupDestructor(Vector* body, size_t insert_at,
   return 1;
 }
 
+static ASTNode* NewCXXDelegatingConstructorCleanup(TypeRecord* func,
+                                                   Struct* owner,
+                                                   SourceLocation location) {
+  if (func == NULL || owner == NULL || owner->tag_name == NULL ||
+      owner->tag_symbol == NULL || owner->tag_symbol->type == NULL ||
+      func->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  if (this_symbol == NULL) {
+    return NULL;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, owner->tag_name);
+  ASTNode* destructor =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL, location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access = NewBinaryASTNode(
+      AST_OP(arrow), NULL, location,
+      NewIdentifierASTNode(this_symbol, location), destructor);
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(owner->tag_symbol->type, actuals,
+                                   /*complete_object=*/true, location);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  return NewExpressionStatementASTNode(call, location);
+}
+
 void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
                                         Vector* body,
                                         CXXConstructorInitList* init_list,
@@ -5288,6 +5397,11 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   if (init_list->delegating_statement != NULL) {
     VectorInsertOrAppend(body, 0, init_list->delegating_statement);
     init_list->delegating_statement = NULL;
+    if (CompilerExceptionsEnabled()) {
+      ASTNode* cleanup =
+          NewCXXDelegatingConstructorCleanup(func, owner, location);
+      InsertCXXPartialCleanupDestructor(body, 1, cleanup);
+    }
     return;
   }
   size_t insert_at = 0;
