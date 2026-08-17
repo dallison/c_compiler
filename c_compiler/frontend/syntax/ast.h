@@ -406,6 +406,10 @@ struct ConstraintExpr;
 #define kASTExpansionInitializer (1ULL << 46)  // Materialized expansion compound carrying a hidden initializer.
 #define kASTExpansionJumpsMarked (1ULL << 47)  // break/continue in body already marked for this expansion.
 #define kASTConstexprExceptionDiagnosed (1ULL << 48)  // An uncaught constexpr exception diagnostic was emitted for this throw.
+#define kASTCXXNewExpression (1ULL << 49)  // Cast directly lowering a C++ new-expression.
+#define kASTCXXPlacementNew (1ULL << 50)  // New-expression selected the standard non-allocating placement form.
+#define kASTCXXArrayNew (1ULL << 51)  // New-expression allocated an array type.
+#define kASTConstexprPlacementDiagnosed (1ULL << 52)  // Constexpr placement/provenance diagnostic already emitted.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

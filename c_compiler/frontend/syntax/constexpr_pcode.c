@@ -25,19 +25,40 @@ typedef struct {
   bool ok;
 } ValidationState;
 
-static const char* g_constexpr_pcode_failure_reason;
-
-const char* ConstexprPCodeFailureReason(void) {
-  return g_constexpr_pcode_failure_reason != NULL
-             ? g_constexpr_pcode_failure_reason
+const char* ConstexprPCodeFailureReason(ConstEvalContext* ctx) {
+  return ctx != NULL && ctx->pcode_failure_reason != NULL
+             ? ctx->pcode_failure_reason
              : "constexpr pcode evaluation failed";
 }
 
-static bool SetConstexprPCodeResult(bool ok, const char* reason) {
-  g_constexpr_pcode_failure_reason =
-      ok ? NULL
-         : (reason != NULL ? reason : "constexpr pcode evaluation failed");
-  return ok;
+static bool ConstexprPCodeSuccess(ConstEvalContext* ctx) {
+  ctx->pcode_failure_reason = NULL;
+  ctx->pcode_failure_kind = kConstexprPCodeFailureUnsupported;
+  return true;
+}
+
+static bool ConstexprPCodeFailure(ConstEvalContext* ctx,
+                                  ConstexprPCodeFailureKind kind,
+                                  const char* reason) {
+  ctx->pcode_failure_reason =
+      reason != NULL ? reason : "constexpr pcode evaluation failed";
+  ctx->pcode_failure_kind = kind;
+  return false;
+}
+
+static ConstexprPCodeFailureKind ConstexprPCodeVMFailureKind(
+    PCodeVMStatus status, bool heap_activity) {
+  if (!heap_activity) {
+    return kConstexprPCodeFailureUnsupported;
+  }
+  switch (status) {
+    case kPCodeVMStatusInvalidRead:
+    case kPCodeVMStatusInvalidWrite:
+    case kPCodeVMStatusInvalidFree:
+      return kConstexprPCodeFailureInvalid;
+    default:
+      return kConstexprPCodeFailureUnsupported;
+  }
 }
 
 typedef struct {
@@ -374,12 +395,15 @@ struct ConstexprValue {
   ConstexprValue* address_slot;
   ConstexprObject* address_object;
   size_t address_index;
+  ConstexprHeapBlock* heap_block;
+  size_t heap_index;
 };
 
 struct ConstexprObject {
   TypeRecord* type;
   Vector slots;
   StructMember* active_union_member;
+  bool lifetime_ended;
 };
 
 // Defined in constexpr.c; dereference an address-valued ConstexprValue and
@@ -739,7 +763,9 @@ static bool ConstexprPCodeRuntimeSymbolAddress(const char* symbol,
     return true;
   }
   if (IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwmPv") ||
-      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwyPv")) {
+      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwyPv") ||
+      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnamPv") ||
+      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnayPv")) {
     *address = (uint64_t)(uintptr_t)constexpr_pcode_placement_new_stub;
     return true;
   }
@@ -2205,7 +2231,9 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
                              double* double_result,
                              ConstexprObject** object_result,
                              ConstexprValue* address_result,
+                             ConstexprPCodeFailureKind* failure_kind,
                              const char** reason) {
+  *failure_kind = kConstexprPCodeFailureUnsupported;
   ConstexprPCodeImage image;
   ConstexprPCodeImageInit(&image);
   DiagnosticSuppressBegin();
@@ -2338,6 +2366,7 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
           }
         }
         if (!found) {
+          *failure_kind = kConstexprPCodeFailureInvalid;
           *reason = "constexpr pcode returned escaping address";
           for (size_t j = 0; j < allocations.length; j++) {
             free(allocations.value.p[j]);
@@ -2372,6 +2401,7 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       memcpy(&returned_exception_handle, struct_return, pointer_size);
     }
     if (returned_exception_handle != 0) {
+      *failure_kind = kConstexprPCodeFailureInvalid;
       *reason = "constexpr pcode returned escaping exception_ptr";
       for (size_t i = 0; i < allocations.length; i++) {
         free(allocations.value.p[i]);
@@ -2399,6 +2429,7 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       return false;
     }
     if (ConstexprPCodeRuntimeHasLiveHeap(&runtime)) {
+      *failure_kind = kConstexprPCodeFailureInvalid;
       *reason = "constexpr pcode evaluation leaked allocation";
       for (size_t i = 0; i < allocations.length; i++) {
         free(allocations.value.p[i]);
@@ -2412,6 +2443,8 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       return false;
     }
   } else {
+    *failure_kind = ConstexprPCodeVMFailureKind(
+        status, runtime.heap_blocks.length != 0);
     *reason = PCodeVMStatusName(status);
   }
   for (size_t i = 0; i < allocations.length; i++) {
@@ -2428,7 +2461,9 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
 static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_type,
                                     ASTNode* node, TypeRecord* func,
                                     ConstexprObject** object_result,
+                                    ConstexprPCodeFailureKind* failure_kind,
                                     const char** reason) {
+  *failure_kind = kConstexprPCodeFailureUnsupported;
   ConstexprPCodeImage image;
   ConstexprPCodeImageInit(&image);
   DiagnosticSuppressBegin();
@@ -2503,10 +2538,13 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   bool ok = status == kPCodeVMStatusHalted &&
             LoadConstexprObjectBytes(object_type, object_memory, object_result);
   if (status != kPCodeVMStatusHalted) {
+    *failure_kind = ConstexprPCodeVMFailureKind(
+        status, runtime.heap_blocks.length != 0);
     *reason = PCodeVMStatusName(status);
   } else if (!ok) {
     *reason = "could not decode constexpr pcode constructor object";
   } else if (ConstexprPCodeRuntimeHasLiveHeap(&runtime)) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
     *reason = "constexpr pcode evaluation leaked allocation";
     ok = false;
   }
@@ -2776,20 +2814,62 @@ static bool PCodeFunctionHasTransitiveContracts(Symbol* callee,
   return scan.found;
 }
 
+typedef struct {
+  bool required;
+  bool placement_only;
+  Vector visited_functions;  // Symbol*
+} ConstexprASTOverlayScan;
+
+static bool ConstexprASTOverlayVisited(ConstexprASTOverlayScan* scan,
+                                       Symbol* function) {
+  for (size_t i = 0; i < scan->visited_functions.length; ++i) {
+    if (scan->visited_functions.value.p[i] == function) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
-  bool* required = data;
-  if (mode != kVisitPreChildren || node == NULL || *required) {
+  ConstexprASTOverlayScan* scan = data;
+  if (mode != kVisitPreChildren || node == NULL || scan->required) {
     return;
   }
-  if (node->op == AST_OP(reflect) ||
-      node->op == AST_OP(reflection_constant) ||
-      node->op == AST_OP(splice) ||
-      node->op == AST_OP(contract_assert) ||
-      (node->type != NULL && TypeContainsReflection(node->type))) {
-    *required = true;
-  } else if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+  bool cxx26 = CompilerCXXAtLeast(kLanguageStandardCXX26);
+  bool placement_new =
+      (node->flags & kASTCXXPlacementNew) != 0;
+  if (!placement_new && node->op == AST_OP(cast) &&
+      (node->flags & kASTCXXNewExpression) != 0) {
+    ASTNode* allocation = ((CastASTNode*)node)->expr;
+    placement_new =
+        allocation != NULL && allocation->op == AST_OP(call) &&
+        ((VectorASTNode*)allocation)->children != NULL &&
+        ((VectorASTNode*)allocation)->children->length > 1;
+  }
+  if ((cxx26 && placement_new) ||
+      (!scan->placement_only &&
+       (node->op == AST_OP(reflect) ||
+        node->op == AST_OP(reflection_constant) ||
+        node->op == AST_OP(splice) ||
+        node->op == AST_OP(contract_assert) ||
+        (node->type != NULL && TypeContainsReflection(node->type))))) {
+    scan->required = true;
+  } else if (node->op == AST_OP(cast)) {
+    CastASTNode* cast = (CastASTNode*)node;
+    TypeRecord* source =
+        cast->expr != NULL && TypeIsPointer(cast->expr->type)
+            ? cast->expr->type->next : NULL;
+    TypeRecord* target =
+        TypeIsPointer(cast->cast_type) ? cast->cast_type->next : NULL;
+    if (cxx26 && source != NULL && TypeIsVoid(source) &&
+        target != NULL && !TypeIsVoid(target) &&
+        (node->flags & kASTCXXNewExpression) == 0) {
+      scan->required = true;
+    }
+  } else if (!scan->placement_only &&
+             (node->op == AST_OP(dot) || node->op == AST_OP(arrow))) {
     BinaryASTNode* access = (BinaryASTNode*)node;
     TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
     if (node->op == AST_OP(arrow) && TypeIsPointer(receiver)) {
@@ -2798,21 +2878,43 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     if (TypeIsStructOrUnion(receiver) &&
         receiver->info.struct_info != NULL &&
         receiver->info.struct_info->is_union) {
-      *required = true;
+      scan->required = true;
     }
-  } else if (node->op == AST_OP(plus) || node->op == AST_OP(minus)) {
+  } else if (!scan->placement_only &&
+             (node->op == AST_OP(plus) || node->op == AST_OP(minus))) {
     BinaryASTNode* binary = (BinaryASTNode*)node;
     if (TypeIsPointer(node->type) && binary->left != NULL &&
         PointerExpressionUsesFixedArray(binary->left)) {
-      *required = true;
+      scan->required = true;
     }
   } else if (node->op == AST_OP(call)) {
+    Symbol* call_symbol = PCodeConstexprCallSymbol(node);
+    VectorASTNode* call = (VectorASTNode*)node;
+    if (cxx26 && call_symbol != NULL &&
+        (StringEqual(&call_symbol->name, "operator new") ||
+         StringEqual(&call_symbol->name, "operator new[]")) &&
+        call->children != NULL && call->children->length > 1) {
+      scan->required = true;
+      return;
+    }
     Symbol* callee = PCodeConstexprFunctionDefinition(
-        PCodeConstexprCallSymbol(node));
-    Vector visited;
-    VectorInit(&visited);
-    *required = PCodeFunctionHasTransitiveContracts(callee, &visited);
-    VectorDestruct(&visited);
+        call_symbol);
+    if (!scan->placement_only) {
+      Vector visited;
+      VectorInit(&visited);
+      scan->required = PCodeFunctionHasTransitiveContracts(callee, &visited);
+      VectorDestruct(&visited);
+    }
+    if (!scan->required && callee != NULL && callee->type != NULL &&
+        callee->type->info.function.body != NULL &&
+        !ConstexprASTOverlayVisited(scan, callee)) {
+      VectorAppend(&scan->visited_functions, callee);
+      bool saved_placement_only = scan->placement_only;
+      scan->placement_only = true;
+      ASTNodeVisit(callee->type->info.function.body,
+                   DetectConstexprASTOverlay, 0, scan);
+      scan->placement_only = saved_placement_only;
+    }
   }
 }
 
@@ -2829,10 +2931,13 @@ bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
   if (callee->type->info.function.contract_assertions.length != 0) {
     return true;
   }
-  bool required = false;
+  ConstexprASTOverlayScan scan = {0};
+  VectorInit(&scan.visited_functions);
+  VectorAppend(&scan.visited_functions, callee);
   ASTNodeVisit(callee->type->info.function.body, DetectConstexprASTOverlay, 0,
-               &required);
-  return required;
+               &scan);
+  VectorDestruct(&scan.visited_functions);
+  return scan.required;
 }
 
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
@@ -4073,7 +4178,9 @@ static TypeRecord* NewConstexprExpressionThunk(ASTNode* expression) {
 static bool RunConstexprExpressionThunk(
     ConstEvalContext* ctx, ASTNode* expression, int64_t* integer_result,
     double* floating_result, ConstexprObject** object_result,
-    ConstexprValue* address_result, const char** reason) {
+    ConstexprValue* address_result,
+    ConstexprPCodeFailureKind* failure_kind, const char** reason) {
+  *failure_kind = kConstexprPCodeFailureUnsupported;
   if (!ConstexprExpressionCanUseThunk(ctx, expression)) {
     *reason = "constexpr pcode thunk has an unbound automatic variable";
     return false;
@@ -4089,7 +4196,8 @@ static bool RunConstexprExpressionThunk(
                                    expression->location, callee, NewVector());
   call->flags |= kASTAnalyzed;
   bool ok = RunRealPCodeCall(ctx, call, thunk, integer_result, floating_result,
-                             object_result, address_result, reason);
+                             object_result, address_result, failure_kind,
+                             reason);
   ASTNodeDelete(call);
   return ok;
 }
@@ -4098,11 +4206,13 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                          int64_t* result) {
   const char* reason = NULL;
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has an unbound automatic variable");
   }
   if (!ConstexprPCodeValidateCall(node, &reason)) {
-    return SetConstexprPCodeResult(false, reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, reason);
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
@@ -4113,31 +4223,43 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
       TypeIsReference(callee->type->next)) {
     ConstexprValue value = {0};
-    return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
-           ConstexprValueAsInteger(value, result);
+    if (!ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value)) {
+      return false;
+    }
+    if (!ConstexprValueAsInteger(value, result)) {
+      return ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "could not decode constexpr pcode reference result");
+    }
+    return ConstexprPCodeSuccess(ctx);
   }
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
   bool ok = RunRealPCodeCall(ctx, node, callee->type, result, NULL, NULL, NULL,
-                             &reason);
+                             &failure_kind, &reason);
   if (!ok &&
       (compiler->constexpr_eval_mode == kConstexprEvalAuto ||
        (compiler->constexpr_eval_mode == kConstexprEvalPCode &&
         (compiler->current_function == NULL ||
          compiler->constant_evaluation_required_depth > 0)))) {
     ok = RunConstexprExpressionThunk(ctx, node, result, NULL, NULL, NULL,
-                                     &reason);
+                                     &failure_kind, &reason);
   }
-  return SetConstexprPCodeResult(ok, reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                           double* result) {
   const char* reason = NULL;
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has an unbound automatic variable");
   }
   if (!ConstexprPCodeValidateCall(node, &reason)) {
-    return SetConstexprPCodeResult(false, reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, reason);
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
@@ -4147,52 +4269,67 @@ bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
       TypeIsReference(callee->type->next)) {
     ConstexprValue value = {0};
-    return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
-           ConstexprValueAsFloating(value, result);
+    if (!ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value)) {
+      return false;
+    }
+    if (!ConstexprValueAsFloating(value, result)) {
+      return ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "could not decode constexpr pcode reference result");
+    }
+    return ConstexprPCodeSuccess(ctx);
   }
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
   TypeRecord* return_type =
       callee != NULL && callee->type != NULL ? callee->type->next : NULL;
   if (TypeIsIntegral(return_type)) {
     int64_t integer = 0;
     bool ok = RunRealPCodeCall(ctx, node, callee->type, &integer, NULL, NULL,
-                               NULL, &reason);
+                               NULL, &failure_kind, &reason);
     if (!ok) {
       ok = RunConstexprExpressionThunk(ctx, node, &integer, NULL, NULL, NULL,
-                                       &reason);
+                                       &failure_kind, &reason);
     }
     if (ok) {
       *result = TypeIsUnsigned(return_type) ? (double)(uint64_t)integer
                                             : (double)integer;
     }
-    return SetConstexprPCodeResult(ok, reason);
+    return ok ? ConstexprPCodeSuccess(ctx)
+              : ConstexprPCodeFailure(ctx, failure_kind, reason);
   }
   if (return_type == NULL) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has no function definition");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has no function definition");
   }
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, result, NULL, NULL,
-                             &reason);
+                             &failure_kind, &reason);
   if (!ok) {
     ok = RunConstexprExpressionThunk(ctx, node, NULL, result, NULL, NULL,
-                                     &reason);
+                                     &failure_kind, &reason);
   }
-  return SetConstexprPCodeResult(ok, reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 bool ConstexprPCodeEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
   const char* reason = NULL;
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has an unbound automatic variable");
   }
   if (!ConstexprPCodeValidateCall(node, &reason)) {
-    return SetConstexprPCodeResult(false, reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, reason);
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
   if (callee == NULL || callee->type == NULL) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has no function definition");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has no function definition");
   }
   if (callee->type->info.function.is_constructor &&
       callee->type->info.function.prototype.length != 0) {
@@ -4210,13 +4347,16 @@ bool ConstexprPCodeEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
     DeletePCodeConstexprObject(object);
     return ok;
   }
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, NULL, NULL, NULL,
-                             &reason);
+                             &failure_kind, &reason);
   if (!ok) {
     ok = RunConstexprExpressionThunk(ctx, node, NULL, NULL, NULL, NULL,
-                                     &reason);
+                                     &failure_kind, &reason);
   }
-  return SetConstexprPCodeResult(ok, reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
@@ -4224,26 +4364,32 @@ bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
                                             ConstexprObject** result) {
   const char* reason = NULL;
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has an unbound automatic variable");
   }
   if (!ConstexprPCodeValidateCall(node, &reason)) {
-    return SetConstexprPCodeResult(false, reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, reason);
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
   if (callee == NULL || callee->type == NULL ||
       !TypeIsStructOrUnion(callee->type->next)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call does not return an object");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call does not return an object");
   }
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, NULL, result, NULL,
-                             &reason);
+                             &failure_kind, &reason);
   if (!ok) {
     ok = RunConstexprExpressionThunk(ctx, node, NULL, NULL, result, NULL,
-                                     &reason);
+                                     &failure_kind, &reason);
   }
-  return SetConstexprPCodeResult(ok, reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
@@ -4253,29 +4399,35 @@ bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
     *result = (ConstexprValue){0};
   }
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call has an unbound automatic variable");
   }
   if (!ConstexprPCodeValidateCall(node, &reason)) {
-    return SetConstexprPCodeResult(false, reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, reason);
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
   if (callee == NULL || callee->type == NULL || callee->type->next == NULL ||
       (!TypeIsPointer(callee->type->next) &&
        !TypeIsReference(callee->type->next))) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode call does not return an address");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode call does not return an address");
   }
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
   bool ok = RunRealPCodeCall(ctx, node, callee->type, NULL, NULL, NULL, result,
-                             &reason);
+                             &failure_kind, &reason);
   if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
       (compiler->current_function == NULL ||
        compiler->constant_evaluation_required_depth > 0)) {
     ok = RunConstexprExpressionThunk(ctx, node, NULL, NULL, NULL, result,
-                                     &reason);
+                                     &failure_kind, &reason);
   }
-  return SetConstexprPCodeResult(ok, reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
@@ -4284,8 +4436,9 @@ static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
                                                     ConstexprObject** result) {
   const char* reason = NULL;
   if (!ConstexprExpressionCanUseThunk(ctx, node)) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode constructor has an unbound automatic variable");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode constructor has an unbound automatic variable");
   }
   ASTNode* receiver = NULL;
   Symbol* callee = PCodeConstexprFunctionDefinition(
@@ -4304,35 +4457,43 @@ static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
             object_type, call->children != NULL ? call->children->length : 0));
   }
   if (callee == NULL || callee->type == NULL) {
-    return SetConstexprPCodeResult(false,
-                                   "constexpr pcode constructor has no body");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode constructor has no body");
   }
   if (!callee->type->info.function.is_constexpr) {
-    return SetConstexprPCodeResult(false,
-                                   "pcode constructor is not constexpr");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "pcode constructor is not constexpr");
   }
   if (!callee->type->info.function.is_constructor ||
       callee->type->info.function.is_destructor) {
-    return SetConstexprPCodeResult(false,
-                                   "pcode call target is not a constructor");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "pcode call target is not a constructor");
   }
   if (callee->type->info.function.is_virtual) {
-    return SetConstexprPCodeResult(false,
-                                   "virtual pcode constructor is unsupported");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "virtual pcode constructor is unsupported");
   }
   if (callee->type->info.function.varargs) {
-    return SetConstexprPCodeResult(false,
-                                   "variadic pcode constructor is unsupported");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "variadic pcode constructor is unsupported");
   }
   ValidationState state = {.reason = "ok", .ok = true};
   ASTNodeVisit(callee->type->info.function.body, ValidateASTNode, 0, &state);
   if (!state.ok) {
-    return SetConstexprPCodeResult(false, state.reason);
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported, state.reason);
   }
-  return SetConstexprPCodeResult(
-      RunRealPCodeConstructor(ctx, object_type, node, callee->type, result,
-                              &reason),
-      reason);
+  ConstexprPCodeFailureKind failure_kind =
+      kConstexprPCodeFailureUnsupported;
+  bool ok = RunRealPCodeConstructor(ctx, object_type, node, callee->type,
+                                    result, &failure_kind, &reason);
+  return ok ? ConstexprPCodeSuccess(ctx)
+            : ConstexprPCodeFailure(ctx, failure_kind, reason);
 }
 
 bool ConstexprPCodeEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
@@ -4577,7 +4738,8 @@ static bool PCodeEvaluateScalarInitializer(TypeRecord* type, ASTNode* initialize
   return false;
 }
 
-static bool BuildPCodeConstexprObject(TypeRecord* type, ASTNode* initializer,
+static bool BuildPCodeConstexprObject(ConstEvalContext* ctx, TypeRecord* type,
+                                      ASTNode* initializer,
                                       ConstexprObject** result);
 
 static ASTNode* PCodeAggregateInitializer(ASTNode* initializer) {
@@ -4597,7 +4759,8 @@ static ASTNode* PCodeAggregateInitializer(ASTNode* initializer) {
   return initializer;
 }
 
-static bool PCodeStoreInitializer(TypeRecord* type, ASTNode* initializer,
+static bool PCodeStoreInitializer(ConstEvalContext* ctx, TypeRecord* type,
+                                  ASTNode* initializer,
                                   ConstexprValue* slot) {
   if (type == NULL || initializer == NULL || slot == NULL) {
     return false;
@@ -4605,14 +4768,14 @@ static bool PCodeStoreInitializer(TypeRecord* type, ASTNode* initializer,
   if (TypeIsFixedArray(type) || TypeIsStructOrUnion(type)) {
     ConstexprObject* object = NULL;
     ASTNode* expr = ConstexprInitializerExpression(initializer);
-    ConstEvalContext ctx;
-    ConstEvalContextInit(&ctx);
     bool ok = expr != NULL && expr->op == AST_OP(call) &&
-              (ConstexprPCodeEvaluateCallObjectResult(&ctx, expr, &object) ||
-               ConstexprPCodeEvaluateConstructorObject(&ctx, type, expr,
+              (ConstexprPCodeEvaluateCallObjectResult(ctx, expr, &object) ||
+               ConstexprPCodeEvaluateConstructorObject(ctx, type, expr,
                                                        &object));
-    ConstEvalContextDestruct(&ctx);
-    if (!ok && !BuildPCodeConstexprObject(type, initializer, &object)) {
+    if (!ok) {
+      ok = BuildPCodeConstexprObject(ctx, type, initializer, &object);
+    }
+    if (!ok) {
       return false;
     }
     *slot = (ConstexprValue){
@@ -4624,7 +4787,8 @@ static bool PCodeStoreInitializer(TypeRecord* type, ASTNode* initializer,
   return PCodeEvaluateScalarInitializer(type, initializer, slot);
 }
 
-static bool BuildPCodeArrayObject(TypeRecord* type, ASTNode* initializer,
+static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
+                                  ASTNode* initializer,
                                   ConstexprObject* object) {
   ASTNode* expression = ConstexprInitializerExpression(initializer);
   if (expression != NULL && expression->op == AST_OP(string) &&
@@ -4644,8 +4808,9 @@ static bool BuildPCodeArrayObject(TypeRecord* type, ASTNode* initializer,
       for (size_t i = 0; i < object->slots.length; i++) {
         ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
         if (slot == NULL) {
-          SetConstexprPCodeResult(
-              false, "constexpr pcode string array has no object slot");
+          ConstexprPCodeFailure(
+              ctx, kConstexprPCodeFailureUnsupported,
+              "constexpr pcode string array has no object slot");
           return false;
         }
         slot->ivalue =
@@ -4656,28 +4821,33 @@ static bool BuildPCodeArrayObject(TypeRecord* type, ASTNode* initializer,
     }
   }
   if (initializer == NULL || initializer->op != AST_OP(braced_init)) {
-    SetConstexprPCodeResult(
-        false, "constexpr pcode array initializer is not a braced list");
+    ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode array initializer is not a braced list");
     return false;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
   if (braced->initializers->length > object->slots.length) {
-    SetConstexprPCodeResult(
-        false, "constexpr pcode array initializer has too many elements");
+    ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode array initializer has too many elements");
     return false;
   }
   for (size_t i = 0; i < braced->initializers->length; i++) {
-    if (!PCodeStoreInitializer(type->next, braced->initializers->value.p[i],
+    if (!PCodeStoreInitializer(ctx, type->next,
+                               braced->initializers->value.p[i],
                                PCodeConstexprObjectSlot(object, i))) {
-      SetConstexprPCodeResult(
-          false, "constexpr pcode could not store array initializer element");
+      ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "constexpr pcode could not store array initializer element");
       return false;
     }
   }
   return true;
 }
 
-static bool BuildPCodeStructObject(TypeRecord* type, ASTNode* initializer,
+static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
+                                   ASTNode* initializer,
                                    ConstexprObject* object) {
   if (initializer == NULL || initializer->op != AST_OP(braced_init) ||
       type == NULL || !TypeIsStructOrUnion(type) ||
@@ -4703,14 +4873,14 @@ static bool BuildPCodeStructObject(TypeRecord* type, ASTNode* initializer,
       // ([dcl.init.aggr]/5); the zeroed slot already models the latter.
       if (member->default_initializer != NULL &&
           !PCodeStoreInitializer(
-              member->symbol->type, member->default_initializer,
+              ctx, member->symbol->type, member->default_initializer,
               PCodeConstexprObjectSlot(object, member->index))) {
         return false;
       }
       continue;
     }
     size_t slot_index = str->is_union ? 0 : member->index;
-    if (!PCodeStoreInitializer(member->symbol->type,
+    if (!PCodeStoreInitializer(ctx, member->symbol->type,
                                braced->initializers->value.p[init_index],
                                PCodeConstexprObjectSlot(object, slot_index))) {
       return false;
@@ -4724,28 +4894,32 @@ static bool BuildPCodeStructObject(TypeRecord* type, ASTNode* initializer,
   return init_index == braced->initializers->length || str->is_union;
 }
 
-static bool BuildPCodeConstexprObject(TypeRecord* type, ASTNode* initializer,
+static bool BuildPCodeConstexprObject(ConstEvalContext* ctx, TypeRecord* type,
+                                      ASTNode* initializer,
                                       ConstexprObject** result) {
   initializer = PCodeAggregateInitializer(initializer);
   if (type == NULL || initializer == NULL || result == NULL) {
-    SetConstexprPCodeResult(
-        false, "constexpr pcode object initializer is incomplete");
+    ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode object initializer is incomplete");
     return false;
   }
   ConstexprObject* object = NewPCodeConstexprObject(type);
   if (object == NULL) {
-    SetConstexprPCodeResult(
-        false, "constexpr pcode could not allocate object model");
+    ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode could not allocate object model");
     return false;
   }
   bool ok = false;
   if (TypeIsFixedArray(type)) {
-    ok = BuildPCodeArrayObject(type, initializer, object);
+    ok = BuildPCodeArrayObject(ctx, type, initializer, object);
   } else if (TypeIsStructOrUnion(type)) {
-    ok = BuildPCodeStructObject(type, initializer, object);
+    ok = BuildPCodeStructObject(ctx, type, initializer, object);
   } else {
-    SetConstexprPCodeResult(
-        false, "constexpr pcode object type is not an aggregate");
+    ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode object type is not an aggregate");
   }
   if (!ok) {
     DeletePCodeConstexprObject(object);
@@ -4755,44 +4929,52 @@ static bool BuildPCodeConstexprObject(TypeRecord* type, ASTNode* initializer,
   return true;
 }
 
-bool ConstexprPCodeEvaluateObjectConstantForSymbol(Symbol* symbol,
+bool ConstexprPCodeEvaluateObjectConstantForSymbol(ConstEvalContext* ctx,
+                                                   Symbol* symbol,
                                                    ASTNode* initializer) {
   if (symbol == NULL || symbol->type == NULL || initializer == NULL ||
       (!TypeIsFixedArray(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
-    return SetConstexprPCodeResult(
-        false, "constexpr pcode object initializer has an invalid type");
+    return ConstexprPCodeFailure(
+        ctx, kConstexprPCodeFailureUnsupported,
+        "constexpr pcode object initializer has an invalid type");
   }
   ConstexprObject* object = NULL;
-  bool ok = BuildPCodeConstexprObject(symbol->type, initializer, &object);
+  bool ok =
+      BuildPCodeConstexprObject(ctx, symbol->type, initializer, &object);
   if (!ok) {
     ASTNode* expr = ConstexprInitializerExpression(initializer);
     if (expr == NULL || !TypeIsStructOrUnion(symbol->type)) {
-      return SetConstexprPCodeResult(
-          false, "constexpr pcode initializer has no object expression");
+      return ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "constexpr pcode initializer has no object expression");
     }
-    ConstEvalContext ctx;
-    ConstEvalContextInit(&ctx);
     const char* reason = NULL;
     if (expr->op == AST_OP(call)) {
-      ok = ConstexprPCodeEvaluateCallObjectResult(&ctx, expr, &object) ||
-           ConstexprPCodeEvaluateConstructorObject(&ctx, symbol->type, expr,
+      ok = ConstexprPCodeEvaluateCallObjectResult(ctx, expr, &object) ||
+           ConstexprPCodeEvaluateConstructorObject(ctx, symbol->type, expr,
                                                    &object);
     } else if (compiler->current_function == NULL ||
                compiler->constant_evaluation_required_depth > 0) {
-      ok = RunConstexprExpressionThunk(&ctx, expr, NULL, NULL, &object, NULL,
-                                       &reason);
-      SetConstexprPCodeResult(ok, reason);
+      ConstexprPCodeFailureKind failure_kind =
+          kConstexprPCodeFailureUnsupported;
+      ok = RunConstexprExpressionThunk(ctx, expr, NULL, NULL, &object, NULL,
+                                       &failure_kind, &reason);
+      if (ok) {
+        ConstexprPCodeSuccess(ctx);
+      } else {
+        ConstexprPCodeFailure(ctx, failure_kind, reason);
+      }
     } else {
       ok = false;
-      SetConstexprPCodeResult(
-          false, "object expression is not manifestly constant-evaluated");
+      ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "object expression is not manifestly constant-evaluated");
     }
-    ConstEvalContextDestruct(&ctx);
     if (!ok) {
       return false;
     }
   }
   symbol->value.other = object;
   symbol->flags.value_set = true;
-  return SetConstexprPCodeResult(true, NULL);
+  return ConstexprPCodeSuccess(ctx);
 }

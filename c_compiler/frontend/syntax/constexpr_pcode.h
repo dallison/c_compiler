@@ -10,7 +10,7 @@
 
 bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason);
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node);
-const char* ConstexprPCodeFailureReason(void);
+const char* ConstexprPCodeFailureReason(ConstEvalContext* ctx);
 bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                          int64_t* result);
 bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
@@ -23,7 +23,8 @@ bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
 void ConstexprPCodeDeleteObject(ConstexprObject* object);
 bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
                                          ConstexprValue* result);
-bool ConstexprPCodeEvaluateObjectConstantForSymbol(Symbol* symbol,
+bool ConstexprPCodeEvaluateObjectConstantForSymbol(ConstEvalContext* ctx,
+                                                   Symbol* symbol,
                                                    ASTNode* initializer);
 void ConstexprPCodeClearImageCache(void);
 

@@ -215,7 +215,10 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_conditional_explicit", "201806L");
       PreprocessorDefineMacro(
           p, "__cpp_constexpr",
-          CompilerCXXAtLeast(kLanguageStandardCXX23) ? "202211L" : "202002L");
+          CompilerCXXAtLeast(kLanguageStandardCXX26)
+              ? "202406L"
+              : (CompilerCXXAtLeast(kLanguageStandardCXX23)
+                     ? "202211L" : "202002L"));
       PreprocessorDefineMacro(p, "__cpp_constexpr_dynamic_alloc", "201907L");
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {

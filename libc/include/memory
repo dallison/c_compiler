@@ -58,21 +58,21 @@ struct allocator {
     ::operator delete(static_cast<void*>(ptr));
   }
 
-  void construct(T* ptr, const T& value) {
+  constexpr void construct(T* ptr, const T& value) {
     new (ptr) T(value);
   }
 
-  void construct(T* ptr, T&& value) {
+  constexpr void construct(T* ptr, T&& value) {
     new (ptr) T(static_cast<T&&>(value));
   }
 
   template <class U, class... Args>
-  void construct(U* ptr, Args&&... args) {
+  constexpr void construct(U* ptr, Args&&... args) {
     new (ptr) U(std::forward<Args>(args)...);
   }
 
   template <class U>
-  void destroy(U* ptr) {
+  constexpr void destroy(U* ptr) {
     if constexpr (!is_trivially_destructible<U>::value) {
       ptr->~U();
     }
@@ -222,25 +222,27 @@ struct allocator_traits {
     alloc.deallocate(ptr, n);
   }
 
-  static void construct(Alloc& alloc, pointer ptr) {
+  static constexpr void construct(Alloc& alloc, pointer ptr) {
     alloc.construct(ptr);
   }
 
-  static void construct(Alloc& alloc, pointer ptr, const value_type& value) {
+  static constexpr void construct(Alloc& alloc, pointer ptr,
+                                  const value_type& value) {
     alloc.construct(ptr, value);
   }
 
-  static void construct(Alloc& alloc, pointer ptr, value_type&& value) {
+  static constexpr void construct(Alloc& alloc, pointer ptr,
+                                  value_type&& value) {
     alloc.construct(ptr, static_cast<value_type&&>(value));
   }
 
   template <class T, class... Args>
-  static void construct(Alloc& alloc, T* ptr, Args&&... args) {
+  static constexpr void construct(Alloc& alloc, T* ptr, Args&&... args) {
     alloc.construct(ptr, std::forward<Args>(args)...);
   }
 
   template <class T>
-  static void destroy(Alloc& alloc, T* ptr) {
+  static constexpr void destroy(Alloc& alloc, T* ptr) {
     alloc.destroy(ptr);
   }
 
@@ -252,6 +254,25 @@ struct allocator_traits {
     return alloc;
   }
 };
+
+#if __cplusplus >= 202002L
+template <class T, class... Args>
+constexpr T* construct_at(T* location, Args&&... args) {
+  return ::new (static_cast<void*>(location))
+      T(static_cast<Args&&>(args)...);
+}
+
+template <class T>
+constexpr void destroy_at(T* location) {
+  if constexpr (is_array<T>::value) {
+    for (auto& element : *location) {
+      std::destroy_at(&element);
+    }
+  } else {
+    location->~T();
+  }
+}
+#endif
 
 template <class T, class U>
 constexpr bool operator==(const allocator<T>&, const allocator<U>&) noexcept {

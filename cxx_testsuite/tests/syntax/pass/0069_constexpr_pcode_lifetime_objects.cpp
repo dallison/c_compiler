@@ -284,6 +284,7 @@ static_assert(pcode_scoped_array_destructor_side_effect() == 42,
               "pcode constexpr scoped array destructor side effect");
 static_assert(pcode_delete_array_destructor_side_effect() == 42,
               "pcode constexpr delete array destructor side effect");
+#if __cplusplus > 202302L
 static_assert(pcode_placement_new_object_reuse() == 42,
               "pcode constexpr placement new object reuse");
 static_assert(pcode_placement_new_scalar_reuse() == 84,
@@ -296,6 +297,7 @@ static_assert(pcode_placement_new_array_element_reuse() == 42,
               "pcode constexpr placement new array element reuse");
 static_assert(pcode_placement_new_subobject_reuse() == 42,
               "pcode constexpr placement new subobject reuse");
+#endif
 static_assert(pcode_implicit_member_destructor_cleanup() == 42,
               "pcode constexpr implicit member destructor cleanup");
 static_assert(pcode_defaulted_copy_and_assignment() == 42,

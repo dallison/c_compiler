@@ -15,6 +15,11 @@ struct ReflectionValue;
 
 typedef struct ConstexprHeapBlock ConstexprHeapBlock;
 
+typedef enum {
+  kConstexprPCodeFailureUnsupported,
+  kConstexprPCodeFailureInvalid,
+} ConstexprPCodeFailureKind;
+
 typedef struct {
   Vector bindings;  // ConstexprBinding*
   Vector objects;   // ConstexprObject*
@@ -24,6 +29,10 @@ typedef struct {
   int steps;
   int max_steps;
   int unwinding_exceptions;
+  int destroy_at_depth;
+  ASTNode* allocation_new_expression;
+  const char* pcode_failure_reason;
+  ConstexprPCodeFailureKind pcode_failure_kind;
   ConstexprException* exception;
 } ConstEvalContext;
 

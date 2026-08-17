@@ -5481,10 +5481,17 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   }
 
   Vector* actuals = NewVector();
+  ASTNode* sole_placement =
+      placement_actuals != NULL && placement_actuals->length == 1
+          ? placement_actuals->value.p[0] : NULL;
+  TypeRecord* sole_placement_type =
+      sole_placement != NULL ? sole_placement->type : NULL;
+  if (sole_placement_type == NULL && sole_placement != NULL &&
+      sole_placement->op == AST_OP(cast)) {
+    sole_placement_type = ((CastASTNode*)sole_placement)->cast_type;
+  }
   bool standard_placement =
-      placement_actuals != NULL && placement_actuals->length == 1 &&
-      ((ASTNode*)placement_actuals->value.p[0])->type != NULL &&
-      TypeIsPointer(((ASTNode*)placement_actuals->value.p[0])->type);
+      sole_placement_type != NULL && TypeIsPointer(sole_placement_type);
   ASTNode* allocation_size =
       allocated_type_dependent
           ? NewSizeofASTNodeWithType(allocated_type, location)
@@ -5493,13 +5500,14 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   if (array_size != NULL) {
     array_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
     allocation_size =
-        NewBinaryASTNode(AST_OP(plus), NULL, location,
-                         NewBinaryASTNode(AST_OP(mult), NULL, location,
-                                          NewIdentifierASTNode(array_count,
-                                                               location),
-                                          allocation_size),
-                         NewSizeofASTNodeWithKnownSize(
-                             NewSizeTypeRecord()->size, location));
+        NewBinaryASTNode(AST_OP(mult), NULL, location,
+                         NewIdentifierASTNode(array_count, location),
+                         allocation_size);
+    if (!standard_placement) {
+      allocation_size = NewBinaryASTNode(
+          AST_OP(plus), NULL, location, allocation_size,
+          NewSizeofASTNodeWithKnownSize(NewSizeTypeRecord()->size, location));
+    }
   }
   VectorAppend(actuals, allocation_size);
   if (placement_actuals != NULL) {
@@ -5518,47 +5526,74 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
   ((CastASTNode*)result)->kind = kCastStatic;
+  result->flags |= kASTCXXNewExpression;
+  if (standard_placement) {
+    result->flags |= kASTCXXPlacementNew;
+  }
+  if (array_size != NULL) {
+    result->flags |= kASTCXXArrayNew;
+  }
   if (allocated_type_dependent) {
     result->flags |= kASTDependentNewAllocation;
   }
   if (array_size != NULL) {
     TypeRecord* size_type = NewSizeTypeRecord();
     TypeRecord* size_ptr_type = NewPointerTo(kQualPlain, size_type);
-    Symbol* header = SyntaxNewTemporary(syntax, size_ptr_type);
     Symbol* object_ptr = SyntaxNewTemporary(syntax, result_type);
+    Symbol* header = standard_placement
+        ? NULL : SyntaxNewTemporary(syntax, size_ptr_type);
     Vector* statements = NewVector();
+    if (standard_placement) {
+      VectorAppend(statements,
+                   NewVariableDeclarationASTNode(
+                       array_count,
+                       NewExpressionInitializerASTNode(
+                           NewIntLiteral(0, location), location),
+                       location));
+      VectorAppend(statements,
+                   NewVariableDeclarationASTNode(object_ptr, NULL, location));
+    }
     VectorAppend(statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(array_count, location),
                                array_size, array_count->type, location),
                      location));
-    VectorAppend(statements,
-                 NewExpressionStatement(
-                     NewAssign(NewIdentifierASTNode(header, location),
-                               NewTypedCast(size_ptr_type, result, location),
-                               header->type, location),
-                     location));
-    VectorAppend(statements,
-                 NewExpressionStatement(
-                     NewAssign(NewUnaryASTNode(AST_OP(contents), size_type,
-                                              location,
-                                              NewIdentifierASTNode(header,
-                                                                   location)),
-                               NewIdentifierASTNode(array_count, location),
-                               size_type, location),
-                     location));
-    VectorAppend(statements,
-                 NewExpressionStatement(
-                     NewAssign(NewIdentifierASTNode(object_ptr, location),
-                               NewTypedCast(result_type,
-                                            NewPtrAdd(
+    if (standard_placement) {
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(object_ptr, location),
+                                 result, object_ptr->type, location),
+                       location));
+      TypeRecordDelete(size_ptr_type);
+    } else {
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(header, location),
+                                 NewTypedCast(size_ptr_type, result, location),
+                                 header->type, location),
+                       location));
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewUnaryASTNode(AST_OP(contents), size_type,
+                                                location,
                                                 NewIdentifierASTNode(header,
-                                                                     location),
-                                                NewIntLiteral(1, location),
-                                                location),
-                                            location),
-                               object_ptr->type, location),
-                     location));
+                                                                     location)),
+                                 NewIdentifierASTNode(array_count, location),
+                                 size_type, location),
+                       location));
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(object_ptr, location),
+                                 NewTypedCast(
+                                     result_type,
+                                     NewPtrAdd(NewIdentifierASTNode(header,
+                                                                   location),
+                                               NewIntLiteral(1, location),
+                                               location),
+                                     location),
+                                 object_ptr->type, location),
+                       location));
+    }
     if (TypeIsStructOrUnion(allocated_type) &&
         FindCXXConstructorForType(allocated_type) != NULL) {
       VectorAppend(statements,

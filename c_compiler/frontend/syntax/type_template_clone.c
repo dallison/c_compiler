@@ -54,6 +54,9 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
 static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode);
+static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode);
 static void RestoreSymbolOverloadLinks(Vector* snapshots);
 static bool RebindClonedConstructorCall(VectorASTNode* call, Vector* snapshots);
 static StructMember* FindStructMemberOverloadHead(Struct* owner, String* name);
@@ -4723,6 +4726,26 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
           allocation->base.flags &= ~kASTAnalyzed;
         }
       }
+      if (allocation->children != NULL &&
+          allocation->children->length == 2 &&
+          allocation->left != NULL &&
+          allocation->left->op == AST_OP(identifier)) {
+        Symbol* allocation_symbol =
+            ((IdentifierASTNode*)allocation->left)->symbol;
+        TypeRecord* allocation_type =
+            allocation_symbol != NULL ? allocation_symbol->type : NULL;
+        Symbol* placement_formal =
+            allocation_type != NULL && TypeIsFunction(allocation_type) &&
+                    allocation_type->info.function.prototype.length >= 2
+                ? allocation_type->info.function.prototype.value.p[1] : NULL;
+        TypeRecord* placement_type =
+            placement_formal != NULL ? placement_formal->type : NULL;
+        if (placement_type != NULL && TypeIsPointer(placement_type) &&
+            placement_type->next != NULL &&
+            TypeIsVoid(placement_type->next)) {
+          node->flags |= kASTCXXPlacementNew;
+        }
+      }
       node->flags &= ~kASTDependentNewAllocation;
     }
   }
@@ -6100,6 +6123,34 @@ static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
   }
 }
 
+static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL ||
+      node->op != AST_OP(cast) ||
+      (node->flags & kASTCXXNewExpression) == 0) {
+    return;
+  }
+  CastASTNode* cast = (CastASTNode*)node;
+  if (cast->expr == NULL || cast->expr->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* allocation = (VectorASTNode*)cast->expr;
+  if (allocation->children == NULL || allocation->children->length != 2 ||
+      allocation->children->value.p[1] == NULL) {
+    node->flags &= ~kASTCXXPlacementNew;
+    return;
+  }
+  ASTNode* placement = allocation->children->value.p[1];
+  if (TypeIsPointer(placement->type)) {
+    node->flags |= kASTCXXPlacementNew;
+  } else {
+    node->flags &= ~kASTCXXPlacementNew;
+  }
+}
+
 static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
@@ -6381,6 +6432,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                   NULL);
   body = ASTNodeVisitAndTransform(
       body, NormalizeClonedPointerDifferenceScale, NULL);
+  ASTNodeVisit(body, RefreshClonedCXXNewMetadataVisitor, 0, NULL);
   compiler->current_function = saved_function;
   TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;
@@ -6802,6 +6854,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     ASTNodeVisit(stmt, AnalyzeFunctionTemplateCallActualsVisitor, 0, NULL);
     ASTNodeVisit(stmt, InstantiateClonedFunctionTemplateCallVisitor, 0, &clone);
     AnalyzeStatement(stmt);
+    ASTNodeVisit(stmt, RefreshClonedCXXNewMetadataVisitor, 0, NULL);
     stmt = ASTNodeVisitAndTransform(
         stmt, ReanalyzeClonedConcreteMemberCall, NULL);
     body->value.p[i] = stmt;

@@ -24,12 +24,13 @@
 
 typedef struct ConstexprBinding ConstexprBinding;
 
-static void ReportConstexprPCodeFailure(ASTNode* node, bool always) {
+static void ReportConstexprPCodeFailure(ConstEvalContext* ctx, ASTNode* node,
+                                        bool always) {
   if (always ||
       (compiler->current_function == NULL &&
        compiler->constant_evaluation_required_depth > 0)) {
     SemanticError(node, "constexpr pcode evaluation failed: %s",
-                  ConstexprPCodeFailureReason());
+                  ConstexprPCodeFailureReason(ctx));
   }
 }
 
@@ -38,6 +39,7 @@ struct ConstexprHeapBlock {
   size_t size;
   size_t allocation_size;
   bool live;
+  TypeRecord* object_type;
 };
 
 struct ConstexprValue {
@@ -68,12 +70,15 @@ struct ConstexprBinding {
   size_t address_index;
   ConstexprHeapBlock* heap_block;
   size_t heap_index;
+  TypeRecord* address_type;
+  bool address_storage_began;
 };
 
 struct ConstexprObject {
   TypeRecord* type;
   Vector slots;  // ConstexprValue*
   StructMember* active_union_member;
+  bool lifetime_ended;
 };
 
 struct ConstexprException {
@@ -106,6 +111,8 @@ typedef enum {
 static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
                                              ConstexprObject* object);
 static void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
+static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
+                                                     ConstexprValue value);
 static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value);
 static bool TypeIsBasicStringViewType(TypeRecord* type);
 static bool ConstexprStringViewDataCharacter(ConstEvalContext* ctx,
@@ -143,6 +150,15 @@ static bool ConstexprNullAddress(ConstexprValue* result);
 static Symbol* ConstexprVirtualCallSymbol(ConstEvalContext* ctx, ASTNode* node,
                                           ASTNode** receiver);
 
+static void ReportConstexprPlacementFailure(ASTNode* node,
+                                            const char* message) {
+  if (node != NULL && compiler->constant_evaluation_required_depth > 0 &&
+      (node->flags & kASTConstexprPlacementDiagnosed) == 0) {
+    SemanticError(node, "%s", message);
+    node->flags |= kASTConstexprPlacementDiagnosed;
+  }
+}
+
 static size_t ConstexprAlignHeapSize(size_t size) {
   return (size + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1);
 }
@@ -170,6 +186,95 @@ static bool ConstexprHasHeapBlock(ConstEvalContext* ctx,
     if (ctx->heap_blocks.value.p[i] == requested) {
       return true;
     }
+  }
+  return false;
+}
+
+static bool ConstexprContextOwnsObject(ConstEvalContext* ctx,
+                                       ConstexprObject* requested) {
+  if (ctx == NULL || requested == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < ctx->objects.length; ++i) {
+    if (ctx->objects.value.p[i] == requested) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool ConstexprContextOwnsSlot(ConstEvalContext* ctx,
+                                     ConstexprValue* requested) {
+  if (ctx == NULL || requested == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < ctx->objects.length; ++i) {
+    ConstexprObject* object = ctx->objects.value.p[i];
+    if (object == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < object->slots.length; ++j) {
+      if (object->slots.value.p[j] == requested) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool ConstexprContextOwnsBinding(ConstEvalContext* ctx,
+                                        ConstexprBinding* requested) {
+  if (ctx == NULL || requested == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < ctx->bindings.length; ++i) {
+    if (ctx->bindings.value.p[i] == requested) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TypeRecord* ConstexprAddressPointeeType(ConstEvalContext* ctx,
+                                               ConstexprValue value) {
+  if (value.heap_block != NULL && value.heap_block->object_type != NULL) {
+    return value.heap_block->object_type;
+  }
+  if (ConstexprContextOwnsBinding(ctx, value.address_binding)) {
+    ConstexprBinding* binding = value.address_binding;
+    if (binding->address_type != NULL) {
+      return binding->address_type;
+    }
+    if (binding->symbol != NULL && binding->symbol->type != NULL) {
+      TypeRecord* type = binding->symbol->type;
+      return (TypeIsPointer(type) || TypeIsReference(type)) && type->next != NULL
+                 ? type->next : type;
+    }
+  }
+  if (ConstexprContextOwnsObject(ctx, value.address_object) &&
+      value.address_object->type != NULL) {
+    TypeRecord* type = value.address_object->type;
+    return TypeIsFixedArray(type) && type->next != NULL ? type->next : type;
+  }
+  if (ConstexprContextOwnsSlot(ctx, value.address_slot) &&
+      value.address_slot->is_object &&
+      value.address_slot->object != NULL) {
+    return value.address_slot->object->type;
+  }
+  return NULL;
+}
+
+static bool ConstexprAddressStorageBegan(ConstEvalContext* ctx,
+                                         ConstexprValue value) {
+  if (value.heap_block != NULL ||
+      ConstexprContextOwnsObject(ctx, value.address_object) ||
+      ConstexprContextOwnsSlot(ctx, value.address_slot)) {
+    return true;
+  }
+  if (ConstexprContextOwnsBinding(ctx, value.address_binding)) {
+    ConstexprBinding* binding = value.address_binding;
+    return binding->address_storage_began ||
+           (binding->symbol != NULL && !binding->symbol->flags.is_argument);
   }
   return false;
 }
@@ -339,6 +444,7 @@ static bool ConstexprStructCopySlots(ConstEvalContext* ctx,
     return false;
   }
   dest->active_union_member = source->active_union_member;
+  dest->lifetime_ended = source->lifetime_ended;
   for (size_t i = 0; i < source->slots.length; i++) {
     ConstexprValue* from = source->slots.value.p[i];
     ConstexprValue* to = dest->slots.value.p[i];
@@ -487,6 +593,21 @@ static bool ConstexprIsDeallocationFunction(Symbol* symbol) {
           StringEqual(&symbol->name, "free"));
 }
 
+static CastASTNode* ConstexprAllocationNewCast(ASTNode* allocation) {
+  for (ASTNode* parent = allocation != NULL ? allocation->parent : NULL;
+       parent != NULL; parent = parent->parent) {
+    if (parent->op == AST_OP(cast) &&
+        (parent->flags & kASTCXXNewExpression) != 0) {
+      return (CastASTNode*)parent;
+    }
+    if (parent->op == AST_OP(expr) || parent->op == AST_OP(compound) ||
+        parent->op == AST_OP(call)) {
+      break;
+    }
+  }
+  return NULL;
+}
+
 static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
                                             ASTNode* node,
                                             ConstexprValue* result) {
@@ -512,8 +633,95 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
         TypeIsPointer(placement_type) &&
         placement_type->next != NULL &&
         TypeIsVoid(placement_type->next)) {
-      return EvaluateConstexprAddressValue(ctx, placement, result);
+      CastASTNode* new_cast = ConstexprAllocationNewCast(node);
+      if (new_cast == NULL && ctx->allocation_new_expression != NULL &&
+          ctx->allocation_new_expression->op == AST_OP(cast)) {
+        new_cast = (CastASTNode*)ctx->allocation_new_expression;
+      }
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+        ReportConstexprPlacementFailure(
+            node, "placement new is not permitted in this constant expression");
+        return false;
+      }
+      if (new_cast == NULL) {
+        ReportConstexprPlacementFailure(
+            node, "placement allocation is not associated with a new-expression");
+        return false;
+      }
+      if (!EvaluateConstexprAddressValue(ctx, placement, result)) {
+        ReportConstexprPlacementFailure(
+            node, "placement new target is not a constant address");
+        return false;
+      }
+      TypeRecord* allocated_type =
+          TypeIsPointer(new_cast->cast_type) ? new_cast->cast_type->next : NULL;
+      TypeRecord* placement_pointee =
+          placement->type != NULL && TypeIsPointer(placement->type)
+              ? placement->type->next : NULL;
+      TypeRecord* target_type =
+          placement_pointee != NULL && !TypeIsVoid(placement_pointee)
+              ? placement_pointee : ConstexprAddressPointeeType(ctx, *result);
+      if (allocated_type == NULL || target_type == NULL ||
+          !TypeEqualIgnoringTopLevelQualifierMask(
+              allocated_type, target_type,
+              kQualConst | kQualVolatile | kQualRestrict)) {
+        ReportConstexprPlacementFailure(
+            node, "placement new target does not point to an object of the "
+                  "allocated type");
+        return false;
+      }
+      bool current_storage = ConstexprAddressStorageBegan(ctx, *result);
+      if (!current_storage) {
+        ReportConstexprPlacementFailure(
+            node, "placement new target storage did not begin within this "
+                  "constant evaluation");
+        return false;
+      }
+      int64_t requested_size = 0;
+      if (!EvaluateIntegerExpressionInContext(
+              ctx, call->children->value.p[0], &requested_size) ||
+          requested_size < 0) {
+        ReportConstexprPlacementFailure(
+            node, "placement new size is not a constant expression");
+        return false;
+      }
+      size_t available = 0;
+      if (result->heap_block != NULL &&
+          result->heap_index <= result->heap_block->size) {
+        available = result->heap_block->size - result->heap_index;
+      } else if (result->address_object != NULL) {
+        TypeRecord* storage_type = result->address_object->type;
+        if (TypeIsFixedArray(storage_type) && storage_type->next != NULL &&
+            result->address_index <= result->address_object->slots.length) {
+          available =
+              (result->address_object->slots.length - result->address_index) *
+              (size_t)storage_type->next->size;
+        } else if (result->address_index == 0 && storage_type != NULL) {
+          available = (size_t)storage_type->size;
+        }
+      } else if (result->address_binding != NULL &&
+                 result->address_binding->symbol != NULL &&
+                 result->address_binding->symbol->type != NULL) {
+        available = (size_t)result->address_binding->symbol->type->size;
+      } else if (result->address_slot != NULL && allocated_type->size >= 0) {
+        available = (size_t)allocated_type->size;
+      }
+      if ((uint64_t)requested_size > available) {
+        ReportConstexprPlacementFailure(
+            node, "placement new exceeds the bounds of its target storage");
+        return false;
+      }
+      ConstexprObject* target_object =
+          ConstexprAddressTargetObject(ctx, *result);
+      if (target_object != NULL) {
+        target_object->lifetime_ended = false;
+      }
+      return true;
     }
+    ReportConstexprPlacementFailure(
+        node, "selected placement allocation function is not permitted in a "
+              "constant expression");
+    return false;
   }
   ASTNode* size_expr = call->children->value.p[0];
   int64_t size = 0;
@@ -574,6 +782,10 @@ void ConstEvalContextInit(ConstEvalContext* ctx) {
   ctx->steps = 0;
   ctx->max_steps = CONSTEXPR_MAX_STEPS;
   ctx->unwinding_exceptions = 0;
+  ctx->destroy_at_depth = 0;
+  ctx->allocation_new_expression = NULL;
+  ctx->pcode_failure_reason = NULL;
+  ctx->pcode_failure_kind = kConstexprPCodeFailureUnsupported;
 }
 
 void ConstEvalContextDestruct(ConstEvalContext* ctx) {
@@ -656,6 +868,10 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
   binding->address_index = value.address_index;
   binding->heap_block = value.heap_block;
   binding->heap_index = value.heap_index;
+  binding->address_type =
+      value.is_address ? ConstexprAddressPointeeType(ctx, value) : NULL;
+  binding->address_storage_began =
+      value.is_address && ConstexprAddressStorageBegan(ctx, value);
   VectorAppend(&ctx->bindings, binding);
 }
 
@@ -762,6 +978,7 @@ static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
   ConstexprObject* object = malloc(sizeof(ConstexprObject));
   object->type = type;
   object->active_union_member = NULL;
+  object->lifetime_ended = false;
   VectorInit(&object->slots);
   for (size_t i = 0; i < slot_count; i++) {
     VectorAppend(&object->slots, NewConstexprValueSlot());
@@ -818,6 +1035,27 @@ static void ConstexprCanonicalizeAddressValue(ConstexprValue* value) {
   }
 }
 
+static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
+                                                     ConstexprValue value) {
+  if (ConstexprContextOwnsBinding(ctx, value.address_binding) &&
+      value.address_binding->object != NULL) {
+    return value.address_binding->object;
+  }
+  if (ConstexprContextOwnsSlot(ctx, value.address_slot) &&
+      value.address_slot->is_object) {
+    return value.address_slot->object;
+  }
+  if (ConstexprContextOwnsObject(ctx, value.address_object)) {
+    if (TypeIsFixedArray(value.address_object->type)) {
+      ConstexprValue* slot =
+          ConstexprObjectSlot(value.address_object, value.address_index);
+      return slot != NULL && slot->is_object ? slot->object : NULL;
+    }
+    return value.address_index == 0 ? value.address_object : NULL;
+  }
+  return NULL;
+}
+
 static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
                                              ConstexprObject* object) {
   if (object == NULL) {
@@ -826,6 +1064,7 @@ static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
   ConstexprObject* clone =
       NewConstexprObject(ctx, object->type, object->slots.length);
   clone->active_union_member = object->active_union_member;
+  clone->lifetime_ended = object->lifetime_ended;
   for (size_t i = 0; i < object->slots.length; i++) {
     ConstexprValue* from = object->slots.value.p[i];
     ConstexprValue* to = clone->slots.value.p[i];
@@ -1243,6 +1482,8 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
     binding->address_index = value.address_index;
     binding->heap_block = value.heap_block;
     binding->heap_index = value.heap_index;
+    binding->address_type = ConstexprAddressPointeeType(ctx, value);
+    binding->address_storage_began = ConstexprAddressStorageBegan(ctx, value);
     binding->object = NULL;
     binding->is_floating = false;
     binding->ivalue = 0;
@@ -1256,6 +1497,8 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
   binding->address_index = 0;
   binding->heap_block = NULL;
   binding->heap_index = 0;
+  binding->address_type = NULL;
+  binding->address_storage_began = false;
   if (value.is_object) {
     binding->object = CloneConstexprObject(ctx, value.object);
     binding->is_floating = false;
@@ -1585,17 +1828,22 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   bool pcode_attempted =
       mode != kConstexprEvalAST && !TypeIsConstevalOnly(symbol->type) &&
       compiler->reflection_values.length == 0;
+  ConstEvalContext pcode_context;
+  ConstEvalContextInit(&pcode_context);
   bool pcode_ok =
       pcode_attempted &&
-      ConstexprPCodeEvaluateObjectConstantForSymbol(symbol, initializer);
+      ConstexprPCodeEvaluateObjectConstantForSymbol(
+          &pcode_context, symbol, initializer);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
-      ReportConstexprPCodeFailure(initializer, false);
+      ReportConstexprPCodeFailure(&pcode_context, initializer, false);
     }
+    ConstEvalContextDestruct(&pcode_context);
     return pcode_ok;
   }
   if ((mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) &&
       pcode_ok) {
+    ConstEvalContextDestruct(&pcode_context);
     return true;
   }
   if (mode == kConstexprEvalAuto && pcode_attempted && !pcode_ok &&
@@ -1605,6 +1853,7 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
       symbol->type->info.struct_info->tag_name->value != NULL &&
       strcmp(symbol->type->info.struct_info->tag_name->value,
              "exception_ptr") == 0) {
+    ConstEvalContextDestruct(&pcode_context);
     return false;
   }
   ConstexprObject* pcode_object =
@@ -1622,6 +1871,7 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   if (pcode_object != NULL) {
     ConstexprPCodeDeleteObject(pcode_object);
   }
+  ConstEvalContextDestruct(&pcode_context);
   return ast_ok;
 }
 
@@ -2069,7 +2319,10 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
       (node->left->op == AST_OP(contents) ||
        node->left->op == AST_OP(subscript))) {
     ConstexprValue address = {0};
-    if (EvaluateConstexprAddressValue(ctx, node->left, &address) &&
+    ASTNode* address_expr =
+        node->left->op == AST_OP(contents)
+            ? ((UnaryASTNode*)node->left)->sub : node->left;
+    if (EvaluateConstexprAddressValue(ctx, address_expr, &address) &&
         ConstexprHasHeapBlock(ctx, address.heap_block)) {
       ConstexprValue right = {0};
       TypeRecord* left_type = node->left->type;
@@ -3057,6 +3310,11 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       result->ivalue = 0;
       result->fvalue = 0;
       result->object = id->symbol->value.other;
+      if (result->object != NULL && result->object->lifetime_ended) {
+        ReportConstexprPlacementFailure(
+            node, "read of object outside its lifetime in constant expression");
+        return false;
+      }
       return result->object != NULL;
     }
     if (binding == NULL) {
@@ -3080,6 +3338,11 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       bound = dereferenced;
     }
     ConstexprObject* bound_object = bound.object;
+    if (bound_object != NULL && bound_object->lifetime_ended) {
+      ReportConstexprPlacementFailure(
+          node, "read of object outside its lifetime in constant expression");
+      return false;
+    }
     if (bound_object == NULL) {
       return false;
     }
@@ -3385,7 +3648,53 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
-    return EvaluateConstexprAddressValue(ctx, cast->expr, result);
+    ASTNode* saved_new_expression = ctx->allocation_new_expression;
+    bool lowers_placement_new =
+        cast->expr != NULL && cast->expr->op == AST_OP(call) &&
+        ((VectorASTNode*)cast->expr)->children != NULL &&
+        ((VectorASTNode*)cast->expr)->children->length > 1 &&
+        ConstexprIsAllocationFunction(ConstexprCallSymbol(cast->expr));
+    if ((node->flags & kASTCXXNewExpression) != 0 ||
+        lowers_placement_new) {
+      ctx->allocation_new_expression = node;
+    }
+    bool operand_ok =
+        EvaluateConstexprAddressValue(ctx, cast->expr, result);
+    ctx->allocation_new_expression = saved_new_expression;
+    if (!operand_ok) {
+      return false;
+    }
+    TypeRecord* source_pointee =
+        cast->expr != NULL && TypeIsPointer(cast->expr->type)
+            ? cast->expr->type->next : NULL;
+    TypeRecord* target_pointee =
+        TypeIsPointer(cast->cast_type) ? cast->cast_type->next : NULL;
+    bool establishes_allocated_type =
+        (node->flags & kASTCXXNewExpression) != 0 ||
+        (result->heap_block != NULL && cast->expr != NULL &&
+         cast->expr->op == AST_OP(call) &&
+         ConstexprIsAllocationFunction(ConstexprCallSymbol(cast->expr)));
+    if (source_pointee != NULL && TypeIsVoid(source_pointee) &&
+        target_pointee != NULL && !TypeIsVoid(target_pointee) &&
+        !establishes_allocated_type) {
+      TypeRecord* address_type = ConstexprAddressPointeeType(ctx, *result);
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+          address_type == NULL ||
+          !TypeEqualIgnoringTopLevelQualifierMask(
+              target_pointee, address_type,
+              kQualConst | kQualVolatile | kQualRestrict)) {
+        ReportConstexprPlacementFailure(
+            node, "constexpr conversion from void pointer requires an object "
+                  "of similar type");
+        return false;
+      }
+    }
+    if (establishes_allocated_type && target_pointee != NULL) {
+      if (result->heap_block != NULL) {
+        result->heap_block->object_type = target_pointee;
+      }
+    }
+    return true;
   }
   if (node->op == AST_OP(compound_literal) && node->type != NULL &&
       TypeIsFixedArray(node->type)) {
@@ -3407,7 +3716,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return false;
     }
     *result = (ConstexprValue){
-        .is_address = true, .address_object = object, .address_index = 0};
+        .is_address = true,
+        .address_object = object,
+        .address_index = 0};
     return true;
   }
   if (node->op == AST_OP(number)) {
@@ -3452,7 +3763,10 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return true;
     }
     if (EvaluateConstexprObjectLValue(ctx, address->sub, &slot, true)) {
-      *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+      *result = (ConstexprValue){
+          .is_address = true,
+          .address_slot = slot,
+      };
       return true;
     }
     return false;
@@ -3742,6 +4056,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     // sufficient for dereference but loses the identity needed for pointer
     // arithmetic and same-object distance calculations.
     if (EvaluateConstexprCall(ctx, node, result) && result->is_address) {
+      if (result->heap_block != NULL && result->heap_block->live &&
+          ctx->call_depth == 0) {
+        return false;
+      }
+      if (result->heap_block != NULL && TypeIsPointer(node->type) &&
+          node->type->next != NULL && !TypeIsVoid(node->type->next) &&
+          result->heap_block->object_type == NULL) {
+        result->heap_block->object_type = node->type->next;
+      }
       return true;
     }
     return ConstexprPCodeEvaluateCallAsAddress(ctx, node, result);
@@ -4098,8 +4421,11 @@ bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
   ConstexprValue address = {0};
+  ConstexprEvalMode mode = compiler->constexpr_eval_mode;
+  compiler->constexpr_eval_mode = kConstexprEvalAST;
   bool evaluated = EvaluateConstexprAddressValue(&ctx, pointer, &address) &&
                    address.is_address;
+  compiler->constexpr_eval_mode = mode;
   ConstexprObject* object = address.address_object;
   size_t index = address.address_index;
   if (evaluated && object == NULL && address.heap_block != NULL) {
@@ -6683,7 +7009,16 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   bool pre =
       bound && EvaluateConstexprFunctionContracts(
                    ctx, func, kContractPrecondition, result);
+  bool tracks_destroyed_lifetime =
+      callee->name.value != NULL &&
+      strcmp(callee->name.value, "destroy_at") == 0;
+  if (tracks_destroyed_lifetime) {
+    ctx->destroy_at_depth++;
+  }
   bool body = pre && EvaluateConstexprFunctionBody(ctx, func, result);
+  if (tracks_destroyed_lifetime) {
+    ctx->destroy_at_depth--;
+  }
   bool post =
       body && EvaluateConstexprFunctionContracts(
                   ctx, func, kContractPostcondition, result);
@@ -6714,7 +7049,8 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   ConstexprEvalMode mode = compiler->constexpr_eval_mode;
   bool use_overlay_result = false;
   int64_t overlay_result = 0;
-  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto ||
+       mode == kConstexprEvalAudit) &&
       ConstexprPCodeRequiresASTOverlay(node)) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
     ConstexprValue overlay_value;
@@ -6737,7 +7073,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
-      ReportConstexprPCodeFailure(node, false);
+      ReportConstexprPCodeFailure(ctx, node, false);
       return false;
     }
     *result = use_overlay_result ? overlay_result : pcode_result;
@@ -6765,6 +7101,26 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     *result = use_overlay_result ? overlay_result : pcode_result;
     return true;
   }
+  if (mode == kConstexprEvalAudit && use_overlay_result) {
+    if (!pcode_ok || pcode_result != overlay_result) {
+      if (pcode_ok) {
+        SemanticError(node,
+                      "constexpr evaluator mismatch: pcode=%lld, ast=%lld",
+                      (long long)pcode_result, (long long)overlay_result);
+      } else {
+        SemanticError(node, "constexpr evaluator mismatch: pcode failed: %s",
+                      ConstexprPCodeFailureReason(ctx));
+      }
+      return false;
+    }
+    *result = overlay_result;
+    return true;
+  }
+  if (mode == kConstexprEvalAuto && !use_overlay_result && !pcode_ok &&
+      ctx->pcode_failure_kind == kConstexprPCodeFailureInvalid) {
+    ReportConstexprPCodeFailure(ctx, node, false);
+    return false;
+  }
   if (mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
@@ -6785,7 +7141,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                     pcode_ok
                         ? "constexpr evaluator mismatch"
                         : "constexpr evaluator mismatch: pcode failed: %s",
-                    ConstexprPCodeFailureReason());
+                    ConstexprPCodeFailureReason(ctx));
     }
     return false;
   }
@@ -6805,7 +7161,8 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   ConstexprEvalMode mode = compiler->constexpr_eval_mode;
   bool use_overlay_result = false;
   double overlay_result = 0;
-  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto) &&
+  if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto ||
+       mode == kConstexprEvalAudit) &&
       ConstexprPCodeRequiresASTOverlay(node)) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
     ConstexprValue overlay_value;
@@ -6828,7 +7185,7 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
-      ReportConstexprPCodeFailure(node, false);
+      ReportConstexprPCodeFailure(ctx, node, false);
       return false;
     }
     *result = use_overlay_result ? overlay_result : pcode_result;
@@ -6836,6 +7193,16 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   }
   if (mode == kConstexprEvalAuto && pcode_ok) {
     *result = use_overlay_result ? overlay_result : pcode_result;
+    return true;
+  }
+  if (mode == kConstexprEvalAudit && use_overlay_result) {
+    if (!pcode_ok ||
+        memcmp(&pcode_result, &overlay_result, sizeof(pcode_result)) != 0) {
+      SemanticError(node, "constexpr evaluator mismatch%s",
+                    pcode_ok ? "" : ": pcode evaluation failed");
+      return false;
+    }
+    *result = overlay_result;
     return true;
   }
   if (mode == kConstexprEvalAudit) {
@@ -6889,7 +7256,7 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
-      ReportConstexprPCodeFailure(node, false);
+      ReportConstexprPCodeFailure(ctx, node, false);
     }
     return pcode_ok;
   }
@@ -6921,7 +7288,7 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
                   pcode_ok
                       ? "constexpr evaluator mismatch"
                       : "constexpr evaluator mismatch: pcode failed: %s",
-                  ConstexprPCodeFailureReason());
+                  ConstexprPCodeFailureReason(ctx));
     return false;
   }
   if (!pcode_ok && !ast_ok) {
@@ -6986,7 +7353,7 @@ bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
       ConstexprPCodeEvaluateCall(ctx, node);
   if (mode == kConstexprEvalPCode) {
     if (!pcode_ok) {
-      ReportConstexprPCodeFailure(node, false);
+      ReportConstexprPCodeFailure(ctx, node, false);
     }
     return pcode_ok;
   }
@@ -7041,7 +7408,7 @@ done:
                   pcode_ok
                       ? "constexpr evaluator mismatch"
                       : "constexpr evaluator mismatch: pcode failed: %s",
-                  ConstexprPCodeFailureReason());
+                  ConstexprPCodeFailureReason(ctx));
     return false;
   }
   if (!ast_ok) {
@@ -7132,6 +7499,9 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
                 ctx, func, kContractPostcondition, &ignored);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
+  if (ok && receiver_object != NULL && ctx->destroy_at_depth > 0) {
+    receiver_object->lifetime_ended = true;
+  }
   return ok;
 }
 

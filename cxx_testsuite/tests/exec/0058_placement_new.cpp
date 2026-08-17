@@ -2,6 +2,9 @@
 void* operator new(unsigned long size, void* ptr) {
   return ptr;
 }
+void* operator new[](unsigned long size, void* ptr) {
+  return ptr;
+}
 
 struct Box {
   int value;
@@ -85,6 +88,21 @@ int main(void) {
   }
   if (destroyed != 43) {
     return 9;
+  }
+
+  int placement_array_storage[3] = {};
+  int* placement_array =
+      new ((void*)&placement_array_storage[0]) int[3];
+  if (placement_array != &placement_array_storage[0]) {
+    return 10;
+  }
+  placement_array[0] = 10;
+  placement_array[1] = 11;
+  placement_array[2] = 21;
+  if (placement_array_storage[0] + placement_array_storage[1] +
+          placement_array_storage[2] !=
+      42) {
+    return 11;
   }
 
   return 0;

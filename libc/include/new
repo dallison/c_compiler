@@ -14,6 +14,15 @@
 #include <exception>
 #include <stddef.h>  // size_t
 
+#if __cplusplus > 202302L
+#ifndef __cpp_lib_constexpr_new
+#define __cpp_lib_constexpr_new 202406L
+#endif
+#define __DAVECC_CONSTEXPR_PLACEMENT_NEW constexpr
+#else
+#define __DAVECC_CONSTEXPR_PLACEMENT_NEW
+#endif
+
 namespace std {
 
 // Tag type selecting the non-throwing overloads of operator new.
@@ -65,9 +74,12 @@ void operator delete[](void* ptr, const std::nothrow_t&) noexcept;
 
 // Placement new / delete. The matching placement deletes are no-ops, invoked
 // only when a placement-new constructor throws.
-void* operator new(size_t, void* ptr) noexcept;
-void* operator new[](size_t, void* ptr) noexcept;
-void operator delete(void*, void*) noexcept;
-void operator delete[](void*, void*) noexcept;
+__DAVECC_CONSTEXPR_PLACEMENT_NEW void* operator new(size_t, void* ptr) noexcept;
+__DAVECC_CONSTEXPR_PLACEMENT_NEW void* operator new[](size_t,
+                                                      void* ptr) noexcept;
+__DAVECC_CONSTEXPR_PLACEMENT_NEW void operator delete(void*, void*) noexcept;
+__DAVECC_CONSTEXPR_PLACEMENT_NEW void operator delete[](void*, void*) noexcept;
+
+#undef __DAVECC_CONSTEXPR_PLACEMENT_NEW
 
 #endif /* new_h */
