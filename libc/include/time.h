@@ -9,6 +9,10 @@
 #ifndef time_h
 #define time_h
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define __STDC_VERSION_TIME_H__ 202311L
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +48,10 @@ struct timespec {
    long tv_nsec;
 };
 
+#define TIME_UTC 1
+
+extern int timespec_get(struct timespec *ts, int base);
+extern int timespec_getres(struct timespec *ts, int base);
 extern time_t   time(time_t *);
 
 struct tm {

@@ -9,6 +9,7 @@
 #include "expr_evaluator.h"
 #include <stdio.h>
 #include "assembler.h"
+#include "compiler.h"
 #include "concepts.h"
 #include "constexpr.h"
 #include "reflection.h"
@@ -135,7 +136,8 @@ static int64_t NormalizeIntegerValueForType(int64_t value, TypeRecord* type) {
   if (type == NULL || !TypeIsIntegral(type)) {
     return value;
   }
-  int bits = (int)type->size * 8;
+  int bits =
+      TypeIsBitInt(type) ? type->bit_width : (int)type->size * 8;
   if (bits <= 0 || bits >= 64) {
     return value;
   }
@@ -263,7 +265,11 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
           TypeContainsTemplateParameter(value_node->type)) {
         return false;
       }
-      int width = value_node->type != NULL ? value_node->type->size * 8 : 64;
+      int width = value_node->type != NULL
+                      ? (TypeIsBitInt(value_node->type)
+                             ? value_node->type->bit_width
+                             : value_node->type->size * 8)
+                      : 64;
       if (node->op != AST_OP(builtin_rotl) &&
           node->op != AST_OP(builtin_rotr) &&
           vector_node->children->length == 2) {
@@ -384,6 +390,10 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         return true;
       }
       TypeRecord* type = id_node->symbol->type;
+      if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+          !id_node->symbol->flags.is_constexpr) {
+        return false;
+      }
       if ((type->qualifiers & kQualConst) == 0) {
         return false;
       }
@@ -820,6 +830,9 @@ case AST_OP(ast_op): \
 #undef EVAL_UNARY_OP
 
 bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
+  if (node != NULL && TypeIsNullPointer(node->type)) {
+    return false;
+  }
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
   bool ok = EvaluateIntegerExpressionInContext(&ctx, node, result);
@@ -860,6 +873,12 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
     symbol->flags.value_set =
         EvaluateFloatingPointExpression(initializer, &symbol->value.fvalue);
     return symbol->flags.value_set;
+  }
+  if (TypeIsPointer(symbol->type) && initializer->op == AST_OP(number) &&
+      ((ConstantASTNode*)initializer)->value.ivalue == 0) {
+    symbol->value.ivalue = 0;
+    symbol->flags.value_set = true;
+    return true;
   }
   return false;
 }
@@ -928,6 +947,10 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
         return true;
       }
       TypeRecord* type = id_node->symbol->type;
+      if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+          !id_node->symbol->flags.is_constexpr) {
+        return false;
+      }
       if ((type->qualifiers & kQualConst) == 0) {
         return false;
       }

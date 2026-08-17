@@ -10,6 +10,10 @@
 #define stddef_h
 #ifdef __DAVECC__
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define __STDC_VERSION_STDDEF_H__ 202311L
+#endif
+
 #ifndef __SIZE_T
 #if defined(__6502__)
 typedef unsigned int size_t;
@@ -44,6 +48,9 @@ typedef int wchar_t;
 namespace std {
 using nullptr_t = decltype(nullptr);
 }
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+typedef typeof(nullptr) nullptr_t;
+#define unreachable() __builtin_unreachable()
 #endif
 
 #define offsetof(type, member) ((size_t)(&((type*)0)->member))

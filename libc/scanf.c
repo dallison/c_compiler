@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 #include "_fpfuncs.h"
 
 
@@ -36,7 +38,9 @@ typedef enum {
   kModLongDouble,
   kModIntMax,
   kModSize_t,
-  kModPtrdiff_t
+  kModPtrdiff_t,
+  kModWidth,
+  kModWidthFast
 } Modifier;
 
 typedef enum {
@@ -46,8 +50,10 @@ typedef enum {
 
 typedef struct {
   bool suppress;
-  Width width;
+  int width;
   Modifier modifier;
+  int modifier_width;
+  bool modifier_valid;
 } ConversionFormat;
 
 typedef struct {
@@ -59,6 +65,8 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->suppress = false;
   format->width = kWidthDefault;
   format->modifier = kModNone;
+  format->modifier_width = 0;
+  format->modifier_valid = true;
   
   // Optional input suppression char.
   if (*p == '*') {
@@ -75,6 +83,32 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   }
   
   // Optional modifier.
+  if (*p == 'w') {
+    format->modifier = kModWidth;
+    p++;
+    if (*p == 'f') {
+      format->modifier = kModWidthFast;
+      p++;
+    }
+    if (*p < '1' || *p > '9') {
+      format->modifier_valid = false;
+    } else {
+      while (isdigit(*p)) {
+        if (format->modifier_width <= 64) {
+          format->modifier_width =
+              format->modifier_width * 10 + *p - '0';
+          if (format->modifier_width > 64) {
+            format->modifier_width = 65;
+          }
+        }
+        p++;
+      }
+      int width = format->modifier_width;
+      format->modifier_valid =
+          width == 8 || width == 16 || width == 32 || width == 64;
+    }
+    return p;
+  }
   switch (*p) {
     case 'l':     // l or ll
       if (p[1] == 'l') {
@@ -130,7 +164,44 @@ STATIC void SkipInputWhiteSpace(Getter get, Ungetter unget, void* data) {
   }
 }
 
+STATIC bool IsWidthModifier(const ConversionFormat* fmt) {
+  return fmt->modifier == kModWidth || fmt->modifier == kModWidthFast;
+}
+
 STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, ConversionFormat* fmt) {
+  if (IsWidthModifier(fmt)) {
+    switch (fmt->modifier_width) {
+      case 8:
+        if (is_unsigned) {
+          *(uint8_t*)ptr = (uint8_t)v;
+        } else {
+          *(int8_t*)ptr = (int8_t)v;
+        }
+        break;
+      case 16:
+        if (is_unsigned) {
+          *(uint16_t*)ptr = (uint16_t)v;
+        } else {
+          *(int16_t*)ptr = (int16_t)v;
+        }
+        break;
+      case 32:
+        if (is_unsigned) {
+          *(uint32_t*)ptr = (uint32_t)v;
+        } else {
+          *(int32_t*)ptr = (int32_t)v;
+        }
+        break;
+      default:
+        if (is_unsigned) {
+          *(uint64_t*)ptr = (uint64_t)v;
+        } else {
+          *(int64_t*)ptr = (int64_t)v;
+        }
+        break;
+    }
+    return;
+  }
   switch (fmt->modifier) {
   case kModNone:
   case kModLongDouble:
@@ -140,8 +211,12 @@ STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, Conversi
         *(int*)ptr = (int)v;
       }
       break;
-  case  kModChar:
-      *(char*)ptr = (char)v;
+  case kModChar:
+      if (is_unsigned) {
+        *(unsigned char*)ptr = (unsigned char)v;
+      } else {
+        *(signed char*)ptr = (signed char)v;
+      }
       break;
   case  kModShort:
     if (is_unsigned) {
@@ -180,7 +255,11 @@ STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, Conversi
 STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigned,
                           void* data, void* ptr, ConversionFormat* fmt) {
   int length = 0;
-  int max_length = fmt->width == kWidthDefault ? 1024 : (int)fmt->width;
+  int digits = 0;
+  int max_length = 1024;
+  if (fmt->width >= 0) {
+    max_length = fmt->width;
+  }
   unsigned long long v = 0;
   bool sign_ok = true;
   bool negative = false;
@@ -203,8 +282,9 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
     } else {
       switch (base) {
         case 8:
-          if (ch >= 0 && ch < 8) {
+          if (ch >= '0' && ch <= '7') {
             v = v << 3 | ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -214,6 +294,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
         case 10:
           if (isdigit(ch)) {
             v = v * 10 + ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -225,16 +306,36 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             if (!prefix_done) {
               prefix_ok = true;
             }
+            digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
             prefix_done = true;
+            digits = 0;
           } else if (isxdigit(ch)) {
             char uch = toupper(ch);
-            if (uch > 'A') {
+            if (uch >= 'A') {
               v = v << 4 | uch - 'A' + 10;
             } else {
               v = v << 4 | ch - '0';
             }
+            digits++;
+          } else {
+            unget(ch, data);
+            length--;
+            goto done;
+          }
+          break;
+        case 2:
+          if (ch == '0' && !prefix_done && digits == 0) {
+            prefix_ok = true;
+            digits = 1;
+          } else if (prefix_ok && (ch == 'B' || ch == 'b')) {
+            prefix_ok = false;
+            prefix_done = true;
+            digits = 0;
+          } else if (ch == '0' || ch == '1') {
+            v = v << 1 | ch - '0';
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -247,15 +348,31 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             if (!prefix_done) {
               prefix_ok = true;
             }
+            digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
             prefix_done = true;
             base = 16;
+            digits = 0;
+          } else if (prefix_ok && (ch == 'B' || ch == 'b')) {
+            prefix_ok = false;
+            prefix_done = true;
+            base = 2;
+            digits = 0;
           } else if (prefix_ok) {
             base = 8;
+            if (ch >= '0' && ch <= '7') {
+              v = v << 3 | ch - '0';
+              digits++;
+            } else {
+              unget(ch, data);
+              length--;
+              goto done;
+            }
           } else if (isdigit(ch)) {
             v = v * 10 + ch - '0';
             base = 10;
+            digits++;
           } else {
             unget(ch, data);
             length--;
@@ -272,7 +389,7 @@ done:
   if (!fmt->suppress) {
     WriteInt(v, is_unsigned, ptr, fmt);
   }
-  return length > 0;
+  return digits > 0;
 }
 
 STATIC bool ReadPointer(Getter get, Ungetter unget, void* data, void* ptr, ConversionFormat* fmt) {
@@ -666,7 +783,33 @@ done:
   return present;
 }
 
+typedef struct {
+  Getter get;
+  Ungetter unget;
+  void* data;
+  int count;
+} CountingInput;
+
+STATIC int CountingGet(void* data) {
+  CountingInput* input = data;
+  int ch = input->get(input->data);
+  if (ch != EOF) {
+    input->count++;
+  }
+  return ch;
+}
+
+STATIC void CountingUnget(char ch, void* data) {
+  CountingInput* input = data;
+  input->unget(ch, input->data);
+  input->count--;
+}
+
 STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_list ap) {
+  CountingInput input = {get, unget, data, 0};
+  get = CountingGet;
+  unget = CountingUnget;
+  data = &input;
   const char* p = format;
   int num_items = 0;
   bool input_error = false;
@@ -676,6 +819,11 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
       p++;
       ConversionFormat fmt;
       p = CollectFormat(p, &fmt);
+      if (!fmt.modifier_valid ||
+          (IsWidthModifier(&fmt) &&
+           strchr("diouxXbn", *p) == NULL)) {
+        goto done;
+      }
       void *ptr = NULL;
       if (!fmt.suppress) {
         ptr = va_arg(ap, void*);
@@ -740,6 +888,15 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
           num_items++;
           p++;
          break;
+        case 'b':
+          // Binary, with an optional 0b or 0B prefix.
+          if (!ConvertDecimal(get, unget, 2, true, data, ptr, &fmt)) {
+            input_error = true;
+            goto done;
+          }
+          num_items++;
+          p++;
+          break;
         case 's':
           if (!ReadString(get, unget, data, ptr, &fmt)) {
             input_error = true;
@@ -765,8 +922,8 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
           p++;
           break;
         case 'n':
-          // Number of conversions so far.
-          *(int*)ptr = num_items;
+          // Number of input characters consumed so far.
+          WriteInt((unsigned long long)input.count, false, ptr, &fmt);
           p++;
          break;
         case '[': {

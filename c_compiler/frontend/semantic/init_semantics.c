@@ -828,10 +828,26 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
+      if (braced_init->initializers->length == 0 && !CompilerIsCXX() &&
+          !CompilerCAtLeast(kLanguageStandardC23)) {
+        SemanticError(init_expr,
+                      "empty initializer requires C23");
+      }
       LazyInitINode(inode);
       CheckCXXDesignatedInitializers(inode, braced_init);
       INode* parent = inode->parent;
       inode->parent = NULL;
+      if (braced_init->initializers->length == 0 &&
+          inode->kind == kIScalar &&
+          (CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC23))) {
+        inode->num_initializers++;
+        inode->expr =
+            TypeIsFloatingPoint(inode->type)
+                ? NewRealConstantASTNode(0.0, TypeRecordCopy(inode->type),
+                                         init_expr->location)
+                : NewIntConstantASTNode(0, TypeRecordCopy(inode->type),
+                                        init_expr->location);
+      }
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
         INode* current = inode->current == NULL ? inode : inode->current;
         if (!InitializeINode(current, braced_init->initializers->value.p[i], constants_only)) {

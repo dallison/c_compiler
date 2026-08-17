@@ -47,11 +47,16 @@ static struct {
     {kTypeStruct, "struct"},      {kTypeUnion, "union"},
     {kTypeVoid, "void"},          {kTypeBool, "bool"},
     {kTypeEnum, "enum"},          {kTypeNullPointer, "std::nullptr_t"},
+    {kTypeBitInt, "_BitInt"},
     {kTypeReflection, "std::meta::info"},
     {kTypeImplicit, ""},
 };
 
 void TypeToString(Type type, String* result) {
+  if (type == kTypeNullPointer && !CompilerIsCXX()) {
+    StringAppend(result, "nullptr_t");
+    return;
+  }
   const char* separator = "";
   if ((type & kTypeSigned) != 0) {
     StringAppend(result, "signed");
@@ -86,6 +91,11 @@ void QualifiersToString(Qualifiers quals, String* result) {
   if ((quals & kQualRestrict) != 0) {
     StringAppend(result, separator);
     StringAppend(result, "restrict");
+    separator = " ";
+  }
+  if ((quals & kQualAtomic) != 0) {
+    StringAppend(result, separator);
+    StringAppend(result, "_Atomic");
   }
 }
 
@@ -114,7 +124,14 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
     if (CompilerIsCXX()) {
       printable_type &= ~kTypeStruct;
     }
-    TypeToString(printable_type, &str);
+    if (TypeIsBitInt(record) && !TypeIsEnum(record)) {
+      if (TypeIsUnsigned(record)) {
+        StringAppend(&str, "unsigned ");
+      }
+      StringPrintf(&str, "_BitInt(%d)", record->bit_width);
+    } else {
+      TypeToString(printable_type, &str);
+    }
     if (TypeIsStructOrUnion(record) && record->info.struct_info != NULL &&
         record->info.struct_info->tag_name != NULL) {
       if (printable_type != kTypeImplicit) {
@@ -272,7 +289,14 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
       if (CompilerIsCXX()) {
         printable_type &= ~kTypeStruct;
       }
-      TypeToString(printable_type, result);
+      if (TypeIsBitInt(type) && !TypeIsEnum(type)) {
+        if (TypeIsUnsigned(type)) {
+          StringAppend(result, "unsigned ");
+        }
+        StringPrintf(result, "_BitInt(%d)", type->bit_width);
+      } else {
+        TypeToString(printable_type, result);
+      }
       if (TypeIsStructOrUnion(type)) {
         if (printable_type != kTypeImplicit) {
           StringAppend(result, " ");

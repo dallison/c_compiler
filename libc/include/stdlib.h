@@ -95,6 +95,8 @@ int rand(void);
 void srand(unsigned int seed);
 void *calloc(size_t nmemb, size_t size);
 void free(void *ptr);
+void free_sized(void *ptr, size_t size);
+void free_aligned_sized(void *ptr, size_t alignment, size_t size);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 #ifdef __cplusplus
@@ -127,6 +129,14 @@ size_t mbstowcs(wchar_t * restrict pwcs,
 size_t wcstombs(char * restrict s,
 const wchar_t * restrict pwcs, size_t n);
 char* realpath(const char* path, char* resolved_path);
+
+#if !defined(__cplusplus) && defined(__STDC_VERSION__) && \
+    __STDC_VERSION__ >= 202311L
+#include <__davecc_const_generic.h>
+#define bsearch(key, base, nmemb, size, compar) \
+  __DAVECC_CONST_GENERIC((base), const void*,   \
+                         (bsearch)((key), (base), (nmemb), (size), (compar)))
+#endif
 
 #ifdef __cplusplus
 }

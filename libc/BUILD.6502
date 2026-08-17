@@ -44,11 +44,11 @@ done
 
 # Build libc
 files=( abs.c bsearch.c calloc.c cdiv.c ctype.c exit.c fclose.c fflush.c fgetc.c fgets.c fopen.c fpfuncs.c \
-fputc.c fputs.c fread.c free.c fseek.c ftoa.c fwrite.c getenv.c gets.c ldexp.c libc_test.c malloc.c \
-memchr.c memcmp.c memcpy.c memmove.c memset.c modf.c perror.c posix.c printf.c printf_common.c printf_literal.c printf_long.c qsort.c rand.c realloc.c \
-scanf.c sincos.c stdio.c strcat.c strchr.c strcmp.c strcpy.c strcspn.c strerror.c strings.c strlen.c \
+fputc.c fputs.c fread.c free.c free_sized.c fseek.c ftoa.c fwrite.c getenv.c gets.c ldexp.c libc_test.c malloc.c \
+memccpy.c memchr.c memcmp.c memcpy.c memmove.c memset.c memset_explicit.c modf.c perror.c posix.c printf.c printf_common.c printf_literal.c printf_long.c qsort.c rand.c realloc.c \
+scanf.c sincos.c stdio.c strcat.c strchr.c strcmp.c strcpy.c strcspn.c strdup.c strerror.c strings.c strlen.c \
 strncat.c strncmp.c strncpy.c strpbrk.c strrchr.c strspn.c strstr.c strtod.c strtok.c strtol.c strtoll.c \
-strtoul.c strtoull.c ungetc.c )
+strtoul.c strtoull.c time.c ungetc.c )
 
 libc_objfiles=()
 srcfiles=()

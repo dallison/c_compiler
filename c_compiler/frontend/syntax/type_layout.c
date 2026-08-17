@@ -118,7 +118,9 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
              "only integer types can be used for bitfields");
     goto error;
   }
-  int word_width = member_symbol->type->size * 8;
+  int word_width = TypeIsBitInt(member_symbol->type)
+                       ? member_symbol->type->bit_width
+                       : member_symbol->type->size * 8;
   if (bit_width <= 0 || bit_width > word_width) {
     snprintf(error, sizeof(error),
              "width of %" PRId64 " is out of bounds for type of size %d bits",

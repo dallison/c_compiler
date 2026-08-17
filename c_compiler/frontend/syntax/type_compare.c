@@ -683,6 +683,7 @@ bool TypeIsBool(TypeRecord* type);
 bool TypeIsVoid(TypeRecord* type);
 bool TypeIsNullPointer(TypeRecord* type);
 bool TypeIsReflection(TypeRecord* type);
+bool TypeIsBitInt(TypeRecord* type);
 bool TypeContainsReflection(TypeRecord* type);
 
 bool TypeIsPointer(TypeRecord* type);
@@ -704,6 +705,7 @@ bool TypeIsVoidPointer(TypeRecord* type);
 bool TypeIsArray(TypeRecord* type);
 bool TypeIsConst(TypeRecord* type);
 bool TypeIsVolatile(TypeRecord* type);
+bool TypeIsAtomic(TypeRecord* type);
 bool TypeIsEnum(TypeRecord* type);
 
 bool TypeIsUnsigned(TypeRecord* type) {
@@ -1023,6 +1025,12 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       }
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive:
+      if ((TypeIsBitInt(t1) || TypeIsBitInt(t2)) &&
+          !TypeIsEnum(t1) && !TypeIsEnum(t2)) {
+        return TypeIsBitInt(t1) && TypeIsBitInt(t2) &&
+               t1->bit_width == t2->bit_width &&
+               TypeIsUnsigned(t1) == TypeIsUnsigned(t2);
+      }
       if (TypeIsStructOrUnion(t1) || TypeIsStructOrUnion(t2)) {
         if (!TypeIsStructOrUnion(t1) || !TypeIsStructOrUnion(t2) ||
             t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
@@ -1083,7 +1091,9 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
         // Enums can be char, signed int or unsigned int.
         int e1 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
         int e2 = t2->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
-        return e1 == e2 && t1->qualifiers == t2->qualifiers;
+        return e1 == e2 && t1->qualifiers == t2->qualifiers &&
+               (((t1->type | t2->type) & kTypeBitInt) == 0 ||
+                t1->bit_width == t2->bit_width);
 
       }
       return CanonicalPrimitiveType(t1->type) ==
@@ -1509,6 +1519,16 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       }
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive: {
+      if ((TypeIsBitInt(t1) || TypeIsBitInt(t2)) &&
+          !TypeIsEnum(t1) && !TypeIsEnum(t2)) {
+        return TypeIsBitInt(t1) && TypeIsBitInt(t2) &&
+               t1->bit_width == t2->bit_width;
+      }
+      if (TypeIsEnum(t1) && TypeIsEnum(t2) &&
+          ((t1->type | t2->type) & kTypeBitInt) != 0 &&
+          t1->bit_width != t2->bit_width) {
+        return false;
+      }
       Type a =
           CanonicalPrimitiveType(t1->type) & ~(kTypeUnsigned | kTypeSigned);
       Type b =

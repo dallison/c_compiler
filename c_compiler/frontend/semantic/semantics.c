@@ -273,6 +273,30 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   if (value_initializer->op == AST_OP(init)) {
     value_initializer = ((BinaryASTNode*)value_initializer)->right;
   }
+  if (!CompilerIsCXX()) {
+    ASTNode* initializer_expr = value_initializer;
+    if (initializer_expr != NULL &&
+        initializer_expr->op == AST_OP(expr_init)) {
+      initializer_expr =
+          ((ExpressionInitializerASTNode*)initializer_expr)->expr;
+    }
+    if (initializer_expr == NULL || initializer_expr->type == NULL) {
+      SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
+                    sym->name.value);
+      return false;
+    }
+    TypeRecord* deduced =
+        TypeDecayForByValueDeduction(initializer_expr->type);
+    if (deduced == NULL) {
+      SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
+                    sym->name.value);
+      return false;
+    }
+    deduced->qualifiers |= sym->type->qualifiers;
+    TypeRecordCalculateSize(deduced);
+    SymbolSetType(sym, deduced);
+    return true;
+  }
   // A dependent initializer only has a placeholder type while its enclosing
   // template is parsed. Preserve the declared auto type so deduction runs
   // against the concrete initializer in each specialization. During that
@@ -643,6 +667,11 @@ struct {
     {TypeIsLongLong, TypeIsLongDouble, AST_OP(ll2ld)},
     {TypeIsLongLong, TypeIsBool, AST_OP(ll2b)},
 
+    {TypeIsBitInt, TypeUsesFloat32Representation, AST_OP(ll2f)},
+    {TypeIsBitInt, TypeHasDoubleRepresentationAndRank, AST_OP(ll2d)},
+    {TypeIsBitInt, TypeIsLongDouble, AST_OP(ll2ld)},
+    {TypeIsBitInt, TypeIsBool, AST_OP(ll2b)},
+
     {TypeUsesFloat32Representation, TypeIsCharFamily, AST_OP(f2c)},
     {TypeUsesFloat32Representation, TypeIsShort, AST_OP(f2s)},
     {TypeUsesFloat32Representation, TypeIsLongLong, AST_OP(f2ll)},
@@ -652,6 +681,7 @@ struct {
      AST_OP(f2d)},
     {TypeUsesFloat32Representation, TypeIsLongDouble, AST_OP(f2ld)},
     {TypeUsesFloat32Representation, TypeIsBool, AST_OP(f2b)},
+    {TypeUsesFloat32Representation, TypeIsBitInt, AST_OP(f2ll)},
 
     {TypeHasDoubleRepresentationAndRank, TypeIsCharFamily, AST_OP(d2c)},
     {TypeHasDoubleRepresentationAndRank, TypeIsLong, AST_OP(d2l)},
@@ -662,6 +692,7 @@ struct {
     {TypeHasDoubleRepresentationAndRank, TypeIsShort, AST_OP(d2s)},
     {TypeHasDoubleRepresentationAndRank, TypeIsLongDouble, AST_OP(d2ld)},
     {TypeHasDoubleRepresentationAndRank, TypeIsBool, AST_OP(d2b)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsBitInt, AST_OP(d2ll)},
 
     {TypeIsLongDouble, TypeIsCharFamily, AST_OP(ld2c)},
     {TypeIsLongDouble, TypeIsLong, AST_OP(ld2l)},
@@ -671,6 +702,7 @@ struct {
     {TypeIsLongDouble, TypeIsShort, AST_OP(ld2s)},
     {TypeIsLongDouble, TypeHasDoubleRepresentationAndRank, AST_OP(ld2d)},
     {TypeIsLongDouble, TypeIsBool, AST_OP(ld2b)},
+    {TypeIsLongDouble, TypeIsBitInt, AST_OP(ld2ll)},
 
     {TypeIsBool, TypeIsCharFamily, AST_OP(b2c)},
     {TypeIsBool, TypeIsShort, AST_OP(b2s)},
@@ -724,7 +756,9 @@ static ASTNode* ConvertIntConstantToType(ConstantASTNode* c, TypeRecord* to) {
   // Normalize the source value to a full 64-bit representation according to the
   // source type's width and signedness (char/short constants are stored in
   // their raw low bits, not pre-extended).
-  int src_bits = (int)c->base.type->size * 8;
+  int src_bits = TypeIsBitInt(c->base.type)
+                     ? c->base.type->bit_width
+                     : (int)c->base.type->size * 8;
   uint64_t v = (uint64_t)c->value.ivalue;
   if (src_bits > 0 && src_bits < 64) {
     uint64_t smask = (1ULL << src_bits) - 1ULL;
@@ -734,7 +768,8 @@ static ASTNode* ConvertIntConstantToType(ConstantASTNode* c, TypeRecord* to) {
     }
   }
   // Reduce to the destination width and re-extend per destination signedness.
-  int dst_bits = (int)to->size * 8;
+  int dst_bits =
+      TypeIsBitInt(to) ? to->bit_width : (int)to->size * 8;
   if (dst_bits > 0 && dst_bits < 64) {
     uint64_t dmask = (1ULL << dst_bits) - 1ULL;
     v &= dmask;
@@ -1401,6 +1436,29 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
+  if (TypeIsIntegral(from->type) && TypeIsIntegral(to) &&
+      (TypeIsBitInt(from->type) || TypeIsBitInt(to))) {
+    if (from->op == AST_OP(number)) {
+      ConvertIntConstantToType((ConstantASTNode*)from, to);
+      ASTNodeSetType(from, to);
+      return;
+    }
+    ASTOpcode op = TypeIsBool(to)
+                       ? AST_OP(ll2b)
+                       : (from->type->size <= to->size ? AST_OP(c2ll)
+                                                       : AST_OP(i2c));
+    ASTNode* parent = from->parent;
+    int child_id = from->child_id;
+    if (parent == NULL) {
+      ASTNodeSetType(from, to);
+      return;
+    }
+    TypeRecordIncRef(to);
+    ASTNode* converted = NewUnaryASTNode(op, to, from->location, from);
+    ASTNodeReplaceChild(parent, child_id, converted, false);
+    return;
+  }
+
   // A user-defined conversion operator must be honored before any "compatible
   // layout" shortcut: two distinct class types can be equal-ignoring-sign (the
   // sign bits are meaningless for aggregates, so any two structs/unions compare
@@ -1428,6 +1486,10 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   }
 
   if (TypeIsNullPointer(from->type) && TypeIsPointer(to)) {
+    ASTNodeSetType(from, to);
+    return;
+  }
+  if (TypeIsNullPointer(from->type) && TypeIsBool(to)) {
     ASTNodeSetType(from, to);
     return;
   }
@@ -1469,7 +1531,11 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
   switch (ctx) {
     case kConvertCast:
-      if (TypeIsVoid(to)) {
+      if (!CompilerIsCXX() && TypeIsNullPointer(from->type) &&
+          TypeIsVoid(to)) {
+        SemanticTypeConversionError(from, to,
+                                    "Illegal cast from '%s' to '%s'");
+      } else if (TypeIsVoid(to)) {
          // Casting to void is always allowed.
        } else {
          // Convert the expression to the given type.
@@ -1479,7 +1545,11 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
          // 1. struct/union to/from anything
          // 2. void to anything but void
          bool bad_cast = false;
-         if (TypeIsStructOrUnion(from->type) ||
+         if (!CompilerIsCXX() && TypeIsNullPointer(from->type) &&
+             !TypeIsPointer(to) && !TypeIsBool(to) &&
+             !TypeIsNullPointer(to)) {
+           bad_cast = true;
+         } else if (TypeIsStructOrUnion(from->type) ||
              TypeIsStructOrUnion(to)) {
            bad_cast = true;
          } else if (TypeIsVoid(from->type)) {

@@ -244,7 +244,7 @@ void SyntaxParseFunctionContracts(Syntax* syntax, TypeRecord* func,
                                   Struct* member_owner,
                                   bool add_implicit_this);
 void SyntaxDiagnoseInvalidFunctionContracts(Syntax* syntax, TypeRecord* func);
-void SyntaxApplyDeclarationAttributes(Symbol* sym);
+void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);
 CXXConstructorInitList* SyntaxCXXConstructorInitListCloneRaw(

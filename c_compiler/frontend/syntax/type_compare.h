@@ -81,6 +81,10 @@ inline bool TypeIsReflection(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeReflection) != 0;
 }
 
+inline bool TypeIsBitInt(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeBitInt) != 0;
+}
+
 // Reflection is a consteval-only type.  Compound declarators preserve that
 // property so pointers, references, and arrays of reflection values cannot
 // escape into runtime code.
@@ -116,6 +120,10 @@ inline bool TypeIsVolatile(TypeRecord* type) {
   return (type->qualifiers & kQualVolatile) != 0;
 }
 
+inline bool TypeIsAtomic(TypeRecord* type) {
+  return type != NULL && (type->qualifiers & kQualAtomic) != 0;
+}
+
 inline bool TypeIsArray(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclArray;
 }
@@ -137,7 +145,7 @@ inline bool TypeIsIntegral(TypeRecord* type) {
          (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeChar8 |
                         kTypeChar16 | kTypeChar32 | kTypeLong |
                         kTypeLongLong | kTypeBool | kTypeEnum | kTypeUnsigned |
-                        kTypeSigned)) != 0;
+                        kTypeSigned | kTypeBitInt)) != 0;
 }
 
 inline bool TypeIsFloatingPoint(TypeRecord* type) {

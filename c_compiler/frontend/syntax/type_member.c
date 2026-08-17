@@ -2182,7 +2182,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->deferred_noexcept_specifiers;
   parser->deferred_noexcept_specifiers = &deferred_noexcept_specifiers;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
-    if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(static_assert))) {
+    if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
+        LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
       ASTNodeDelete(node);
       continue;
@@ -2546,7 +2547,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         }
         VectorCopy(&member_symbol->attributes, &member_attributes);
         VectorClear(&member_attributes);
-        SyntaxApplyDeclarationAttributes(member_symbol);
+        SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
         StructMember* member = NewStructMember(member_symbol);
         member_symbol->flags.is_constexpr = is_constexpr_member &&
                                             !TypeIsFunction(member_symbol->type);
@@ -2794,6 +2795,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           if (member->is_static || member->is_member_function) {
             SyntaxError(parser->syntax,
                         "Only non-static data members can be bitfields");
+          }
+          if (TypeIsAtomic(member_symbol->type)) {
+            SyntaxError(parser->syntax,
+                        "Atomic-qualified member cannot be a bitfield");
           }
           ParseBitField(parser, is_union, str, member_symbol, member);
           if (!member->is_static && !member->is_member_function) {

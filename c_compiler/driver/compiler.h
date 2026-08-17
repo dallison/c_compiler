@@ -39,6 +39,7 @@ typedef enum {
   kLanguageStandardC99,
   kLanguageStandardC11,
   kLanguageStandardC17,
+  kLanguageStandardC23,
   kLanguageStandardCXX98,
   kLanguageStandardCXX03,
   kLanguageStandardCXX11,
@@ -552,7 +553,11 @@ bool OptLevel1(void);
 bool OptLevel2(void);
 bool OptLevel3(void);
 bool CompilerIsCXX(void);
+bool CompilerCAtLeast(LanguageStandard standard);
 bool CompilerCXXAtLeast(LanguageStandard standard);
+bool CompilerTargetSupportsAtomics(void);
+bool CompilerTargetSupportsC11Atomics(void);
+bool CompilerTargetSupportsAtomicSize(int size);
 bool CompilerExceptionsEnabled(void);
 void CompilerMarkFunctionReferenced(struct Symbol* symbol);
 void CompilerMarkVariableReferenced(struct Symbol* symbol);

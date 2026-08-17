@@ -13,7 +13,7 @@
 
 #if defined(__6502__)
 // On 6502, pointers and ints are 16 bits long.
-typedef char int8_t;
+typedef signed char int8_t;
 typedef int int16_t;
 typedef long int32_t;
 typedef long long int64_t;
@@ -35,7 +35,7 @@ typedef uint32_t uint_least32_t;
 typedef uint64_t uint_least64_t;
 #elif defined(__LP64__)
 // LP64 (e.g. x86-64): long is 64 bits.
-typedef char int8_t;
+typedef signed char int8_t;
 typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
@@ -57,7 +57,7 @@ typedef uint32_t uint_least32_t;
 typedef uint64_t uint_least64_t;
 #else
 // ILP32 (e.g. 32-bit ARM): long is 32 bits, so 64-bit needs long long.
-typedef char int8_t;
+typedef signed char int8_t;
 typedef short int16_t;
 typedef int int32_t;
 typedef long long int64_t;

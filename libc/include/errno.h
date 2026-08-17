@@ -47,6 +47,7 @@
 #define EOPNOTSUPP      ENOTSUP
 #define EFBIG           30      /* File too large */
 #define ENFILE          31      /* Too many open files in system */
+#define EOVERFLOW       32      /* Value too large for defined data type */
 
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6

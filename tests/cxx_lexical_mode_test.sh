@@ -85,6 +85,17 @@ expect_fail cxx20_char8_t \
   'int char8_t; int main(void) { return 0; }' \
   -std=c++20
 
+expect_compile cxx20_va_opt \
+  '#define VALUE(...) 1 __VA_OPT__(+ (__VA_ARGS__))
+static_assert(VALUE() == 1);
+static_assert(VALUE(2) == 3);
+int main() { return VALUE(); }' \
+  -std=c++20
+expect_fail cxx17_va_opt \
+  '#define VALUE(...) 1 __VA_OPT__(+ (__VA_ARGS__))
+int main() { return VALUE(2); }' \
+  -std=c++17
+
 expect_compile c_mode_alt_operator_word \
   'int and; int main(void) { and = 1; return and; }'
 expect_fail cxx11_alt_operator_word \

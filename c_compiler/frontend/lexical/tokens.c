@@ -38,8 +38,12 @@ const char* TokenName(Token tok) {
       return "->*";
     case TOK(equal):
       return "=";
+    case TOK(atomic):
+      return "_Atomic";
     case TOK(auto):
       return "auto";
+    case TOK(bitint):
+      return "_BitInt";
     case TOK(bang):
       return "!";
     case TOK(bar):
@@ -126,6 +130,8 @@ const char* TokenName(Token tok) {
       return "||";
     case TOK(long):
       return "long";
+    case TOK(noreturn):
+      return "_Noreturn";
     case TOK(lparen):
       return "(";
     case TOK(lessless):
@@ -302,6 +308,10 @@ const char* TokenName(Token tok) {
       return "try";
     case TOK(typeid):
       return "typeid";
+    case TOK(typeof):
+      return "typeof";
+    case TOK(typeof_unqual):
+      return "typeof_unqual";
     case TOK(typename):
       return "typename";
     case TOK(using):

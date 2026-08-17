@@ -4193,10 +4193,12 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
   BinaryASTNode* binary = (BinaryASTNode*)node;
   bool left_is_pointer =
       binary->left != NULL && binary->left->type != NULL &&
-      TypeIsPointer(binary->left->type);
+      (TypeIsPointer(binary->left->type) ||
+       TypeIsNullPointer(binary->left->type));
   bool right_is_pointer =
       binary->right != NULL && binary->right->type != NULL &&
-      TypeIsPointer(binary->right->type);
+      (TypeIsPointer(binary->right->type) ||
+       TypeIsNullPointer(binary->right->type));
   if (!left_is_pointer && !right_is_pointer) {
     return false;
   }

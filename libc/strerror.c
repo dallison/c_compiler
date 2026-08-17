@@ -45,6 +45,7 @@ char* strerror(int errnum) {
     case ENOTSUP: return "Operation not supported";
     case EFBIG: return "File too large";
     case ENFILE: return "Too many open files in system";
+    case EOVERFLOW: return "Value too large for defined data type";
     default: {
 #if defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
       static __thread char buf[32];

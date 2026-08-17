@@ -65,6 +65,12 @@ typedef struct {
   LanguageStandard min_standard;
 } CXXReservedWord;
 
+typedef struct {
+  const char* spelling;
+  Token token;
+  LanguageStandard min_standard;
+} CReservedWord;
+
 // All reserved words with associated token values, sorted in
 // alphabetic order so we can do a binary search on them.
 static ReservedWord reserved_words[] = {
@@ -108,6 +114,29 @@ static ReservedWord reserved_words[] = {
   {"void", TOK(void)},
   {"volatile", TOK(volatile)},
   {"while", TOK(while)},
+};
+
+// C keywords introduced after C99.  Unlike the legacy table above, entries in
+// this table remain ordinary identifiers until their standard is selected.
+static CReservedWord c_reserved_words[] = {
+  {"_Alignas", TOK(alignas), kLanguageStandardC11},
+  {"_Alignof", TOK(alignof), kLanguageStandardC11},
+  {"_Atomic", TOK(atomic), kLanguageStandardC11},
+  {"_BitInt", TOK(bitint), kLanguageStandardC23},
+  {"_Noreturn", TOK(noreturn), kLanguageStandardC11},
+  {"_Static_assert", TOK(static_assert), kLanguageStandardC11},
+  {"_Thread_local", TOK(thread_local), kLanguageStandardC11},
+  {"alignas", TOK(alignas), kLanguageStandardC23},
+  {"alignof", TOK(alignof), kLanguageStandardC23},
+  {"bool", TOK(bool), kLanguageStandardC23},
+  {"constexpr", TOK(constexpr), kLanguageStandardC23},
+  {"false", TOK(false), kLanguageStandardC23},
+  {"nullptr", TOK(nullptr), kLanguageStandardC23},
+  {"static_assert", TOK(static_assert), kLanguageStandardC23},
+  {"thread_local", TOK(thread_local), kLanguageStandardC23},
+  {"true", TOK(true), kLanguageStandardC23},
+  {"typeof", TOK(typeof), kLanguageStandardC23},
+  {"typeof_unqual", TOK(typeof_unqual), kLanguageStandardC23},
 };
 
 // C++ reserved words and alternative operator spellings.  This table is sorted
@@ -222,6 +251,8 @@ static CXXReservedWord cxx_reserved_words[] = {
 
 // Number of reserved words in the array.
 #define NUM_RESERVED_WORDS() (sizeof(reserved_words) / sizeof(ReservedWord))
+#define NUM_C_RESERVED_WORDS() \
+  (sizeof(c_reserved_words) / sizeof(CReservedWord))
 #define NUM_CXX_RESERVED_WORDS() \
   (sizeof(cxx_reserved_words) / sizeof(CXXReservedWord))
 
@@ -234,6 +265,12 @@ static int CompareReservedWord(const void* a, const void* b) {
 static int CompareCXXReservedWord(const void* a, const void* b) {
   const CXXReservedWord* word1 = a;
   const CXXReservedWord* word2 = b;
+  return strcmp(word1->spelling, word2->spelling);
+}
+
+static int CompareCReservedWord(const void* a, const void* b) {
+  const CReservedWord* word1 = a;
+  const CReservedWord* word2 = b;
   return strcmp(word1->spelling, word2->spelling);
 }
 
@@ -252,6 +289,16 @@ static bool IsReservedWord(const char* spelling, Token* token) {
       return true;
     }
     return false;
+  }
+
+  CReservedWord c_key;
+  c_key.spelling = spelling;
+  CReservedWord* c_value =
+      bsearch(&c_key, c_reserved_words, NUM_C_RESERVED_WORDS(),
+              sizeof(CReservedWord), CompareCReservedWord);
+  if (c_value != NULL && CompilerCAtLeast(c_value->min_standard)) {
+    *token = c_value->token;
+    return true;
   }
 
   ReservedWord key;
@@ -804,6 +851,31 @@ static void AppendEncodedSourceCharacter(Lex* lex, LiteralEncoding encoding,
 // If LLU or LU then it is reversed to ULL or UL.
 static void CollectIntegerSuffix(Lex* lex) {
   StringClear(&lex->suffix);
+  // C23 bit-precise integer suffixes are wb/WB and the unsigned forms
+  // uwb/uWB/Uwb/UWB.
+  if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23)) {
+    size_t start = lex->pos;
+    size_t offset =
+        toupper((unsigned char)lex->line.value[start]) == 'U' ? 1 : 0;
+    size_t pair = start + offset;
+    bool lower_pair =
+        pair + 1 < lex->line.length && lex->line.value[pair] == 'w' &&
+        lex->line.value[pair + 1] == 'b';
+    bool upper_pair =
+        pair + 1 < lex->line.length && lex->line.value[pair] == 'W' &&
+        lex->line.value[pair + 1] == 'B';
+    size_t length = offset + 2;
+    if ((lower_pair || upper_pair) &&
+        LexIdentifierCharByteCount(lex->line.value, start + length,
+                                   lex->line.length, false) == 0) {
+      if (offset != 0) {
+        StringAppendChar(&lex->suffix, 'U');
+      }
+      StringAppend(&lex->suffix, "WB");
+      lex->pos += length;
+      return;
+    }
+  }
   // C++23 adds the size suffix `z`/`Z`, optionally combined with `u`/`U`
   // in either order.  Recognize the complete suffix before the C++ user-
   // defined-literal path sees it, but only when it ends the preprocessing
@@ -1308,6 +1380,21 @@ static void CollectIdentifierOrWide(Lex* lex) {
       lex->pos++;
       lex->number = CollectWideCharConst(lex);
       lex->current_token = TOK(charconst_wide);
+    }
+    return;
+  }
+
+  if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC11) &&
+      CharAt(lex, 0, 'u') && CharAt(lex, 1, '8') &&
+      (CharAt(lex, 2, '"') ||
+       (CompilerCAtLeast(kLanguageStandardC23) && CharAt(lex, 2, '\'')))) {
+    lex->pos += 2;
+    if (CurrentChar(lex) == '"') {
+      CollectStringLiteral(lex, kLiteralEncodingUTF8);
+      lex->current_token = TOK(string);
+    } else {
+      lex->number = CollectCharConst(lex, kLiteralEncodingUTF8);
+      lex->current_token = TOK(charconst);
     }
     return;
   }
@@ -1852,9 +1939,14 @@ static void CollectHex(Lex* lex) {
   lex->current_token = TOK(number);
 }
 
+static bool LanguageSupportsBinaryLiteralsAndDigitSeparators(void) {
+  return CompilerCAtLeast(kLanguageStandardC23) ||
+         CompilerCXXAtLeast(kLanguageStandardCXX14);
+}
+
 static bool IsDigitSeparator(Lex* lex, bool ishex, bool isoctal,
                              bool isbinary) {
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX14) ||
+  if (!LanguageSupportsBinaryLiteralsAndDigitSeparators() ||
       lex->line.value[lex->pos] != '\'' || lex->pos + 1 >= lex->line.length) {
     return false;
   }
@@ -1891,13 +1983,13 @@ static void CollectNumber(Lex* lex, char ch) {
     StringAppendChar(&lex->spelling, ch);
     StringAppendChar(&lex->literal_spelling, ch);
     lex->pos++;
-    if (seenzero && !CompilerCXXAtLeast(kLanguageStandardCXX14) &&
+    if (seenzero && !LanguageSupportsBinaryLiteralsAndDigitSeparators() &&
         lex->pos + 1 < lex->line.length &&
         (lex->line.value[lex->pos] == 'b' ||
          lex->line.value[lex->pos] == 'B') &&
         (lex->line.value[lex->pos + 1] == '0' ||
          lex->line.value[lex->pos + 1] == '1')) {
-      LexError(lex, "Binary integer literals require C++14");
+      LexError(lex, "Binary integer literals require C23 or C++14");
     }
     // Collect the number into spelling.  Then, when we know
     // what type of number it is, we can do the conversion to
@@ -1908,7 +2000,8 @@ static void CollectNumber(Lex* lex, char ch) {
         // 0x or 0X.
         ishex = true;
         isoctal = false;
-      } else if (seenzero && CompilerCXXAtLeast(kLanguageStandardCXX14) &&
+      } else if (seenzero &&
+                 LanguageSupportsBinaryLiteralsAndDigitSeparators() &&
                  (ch == 'b' || ch == 'B')) {
         // 0b or 0B.
         isbinary = true;

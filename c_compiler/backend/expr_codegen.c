@@ -202,7 +202,7 @@ IROpcode GetLoadOpcodeForType(TypeRecord* type) {
     return IR_OP(loada);
   }
   // Get size of integral type from compiler object.
-  int size = 0;
+  int size = TypeIsBitInt(type) ? type->size : 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
     if (int_type_sizes[i].type_func(type)) {
       size = int_type_sizes[i].size_func();
@@ -281,7 +281,7 @@ IROpcode GetStoreOpcodeForType(TypeRecord* type) {
     return IR_OP(storea);
   }
   // Get size of integral type from compiler object.
-  int size = 0;
+  int size = TypeIsBitInt(type) ? type->size : 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
     if (int_type_sizes[i].type_func(type)) {
       size = int_type_sizes[i].size_func();
@@ -309,6 +309,57 @@ IROpcode GetStoreOpcodeForType(TypeRecord* type) {
 
 static IROpcode GetStoreOpcode(ASTNode* node) {
   return GetStoreOpcodeForType(node->type);
+}
+
+static IRNode* RemoveUnnecesaryShortening(Generator* gen, IRNode* value,
+                                           IROpcode store);
+static IRNode* NormalizeBitIntValue(Generator* gen, IRNode* value,
+                                    TypeRecord* type);
+
+static IRNode* AtomicSeqCstOrder(Generator* gen) {
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  return GeneratorGetIntConstant(gen, int_type, 5);
+}
+
+static TypeRecord* AtomicValueType(TypeRecord* type) {
+  TypeRecord* value_type = TypeRecordCopy(type);
+  if (value_type != NULL) {
+    value_type->qualifiers &=
+        ~(kQualAtomic | kQualConst | kQualVolatile | kQualRestrict);
+  }
+  return value_type;
+}
+
+static IRNode* AtomicObjectAddress(Generator* gen, IRNode* address,
+                                   TypeRecord* object_type) {
+  if (IRIsVariable(address)) {
+    address = GeneratorEmit(gen, NewIR1(IR_OP(addressof), address));
+  }
+  return IRSetType(address, NewPointerTo(kQualPlain, object_type));
+}
+
+static IRNode* EmitObjectLoad(Generator* gen, ASTNode* node, IRNode* address) {
+  if (!TypeIsAtomic(node->type)) {
+    return IRSetType(
+        GeneratorEmit(gen, NewIR1(GetLoadOpcode(node), address)), node->type);
+  }
+  address = AtomicObjectAddress(gen, address, node->type);
+  IRNode* load = GeneratorEmit(
+      gen, NewIR2(IR_OP(atomic_load), address, AtomicSeqCstOrder(gen)));
+  return IRSetType(load, AtomicValueType(node->type));
+}
+
+static IRNode* EmitObjectStore(Generator* gen, ASTNode* node, IRNode* address,
+                               IRNode* value) {
+  IROpcode ordinary_store = GetStoreOpcode(node);
+  value = RemoveUnnecesaryShortening(gen, value, ordinary_store);
+  if (!TypeIsAtomic(node->type)) {
+    return GeneratorEmit(gen, NewIR2(ordinary_store, address, value));
+  }
+  address = AtomicObjectAddress(gen, address, node->type);
+  IRNode* store = GeneratorEmit(
+      gen, NewIR3(IR_OP(atomic_store), address, value, AtomicSeqCstOrder(gen)));
+  return IRSetType(store, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
 // Spills a scalar/pointer `value` of `type` into a fresh stack temporary and
@@ -898,9 +949,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
         TypeIsFunction(node->base.type)) {
       return ref_addr;
     }
-    IROpcode load = GetLoadOpcode(&node->base);
-    IRNode* result = IRSetType(GeneratorEmit(gen, NewIR1(load, ref_addr)),
-                               node->base.type);
+    IRNode* result = EmitObjectLoad(gen, &node->base, ref_addr);
     IRSetVarUse(result, node->symbol);
     return result;
   }
@@ -922,9 +971,13 @@ static IRNode* GenerateVariableReference(Generator* gen,
     // to the load-like node (`structarg`, ...) they build around it.
     result = var_ref;
   } else {
-    IROpcode load = GetLoadOpcode(&node->base);
-    result = GeneratorEmit(gen, NewIR1(load, var_ref));
-    IRSetVarUse(result, node->symbol);
+    if (TypeIsAtomic(node->base.type) && node->symbol != NULL) {
+      node->symbol->flags.address_taken = true;
+    }
+    result = EmitObjectLoad(gen, &node->base, var_ref);
+    if (!TypeIsAtomic(node->base.type)) {
+      IRSetVarUse(result, node->symbol);
+    }
   }
   if ((node->base.flags & kASTNrvoMarker) != 0) {
     var_ref->flags |= kIRNrvoMarker;
@@ -1003,6 +1056,8 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
    if (IsBitfieldReference(node->sub)) {
      new_value = CalculateNewBitfieldValue(gen, load, new_value,
                                            (BinaryASTNode*)node->sub);
+   } else if (TypeIsBitInt(node->base.type)) {
+     new_value = NormalizeBitIntValue(gen, new_value, node->base.type);
    }
 
   IROpcode store = GetStoreOpcode((ASTNode*)node);
@@ -1023,11 +1078,32 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
   return tmp;
 }
 
+static IRNode* GenerateAtomicIncDec(Generator* gen, UnaryASTNode* node,
+                                    bool is_post, bool is_inc) {
+  IRNode* address = GenerateExpression(gen, node->sub);
+  address = AtomicObjectAddress(gen, address, node->sub->type);
+  int amount = TypeIsPointer(node->sub->type) && node->sub->type->next != NULL
+                   ? node->sub->type->next->size
+                   : 1;
+  TypeRecord* value_type = AtomicValueType(node->sub->type);
+  IRNode* increment = GeneratorGetIntConstant(gen, value_type, amount);
+  IROpcode opcode =
+      is_inc ? (is_post ? IR_OP(atomic_fetch_add) : IR_OP(atomic_add_fetch))
+             : (is_post ? IR_OP(atomic_fetch_sub) : IR_OP(atomic_sub_fetch));
+  IRNode* result = GeneratorEmit(
+      gen, NewIR3(opcode, address, increment, AtomicSeqCstOrder(gen)));
+  IRSetType(result, AtomicValueType(node->sub->type));
+  return result;
+}
+
 // Increment and decrement, both pre and post.
 // This is a little complex because of the variations in the
 // types.
 static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
                               bool is_inc) {
+  if (TypeIsAtomic(node->sub->type)) {
+    return GenerateAtomicIncDec(gen, node, is_post, is_inc);
+  }
   // For a bitfield or VLA, we use a load/add/store operation sequence.
   if (IsBitfieldReference(node->sub) ||
       (TypeIsPointer(node->sub->type) && TypeIsVLA(node->sub->type->next))) {
@@ -1563,15 +1639,15 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     }
 
     // Simple scalar assignment.
-    IROpcode store = GetStoreOpcode((ASTNode*)node);
-    assignment = GeneratorEmit(gen, NewIR2(store, dest,
-                                       RemoveUnnecesaryShortening(gen, value, store)));
+    assignment = EmitObjectStore(gen, node->left, dest, value);
     if (dest_was_spilled) {
       return result_address_needed ? dest : value;
     }
   }
 
-  CheckForVarDef(assignment, node->left);
+  if (!TypeIsAtomic(node->left->type)) {
+    CheckForVarDef(assignment, node->left);
+  }
 
   return result_address_needed ? dest : value;
 }
@@ -1590,9 +1666,28 @@ static struct {
     {AST_OP(bad), AST_OP(bad)},
 };
 
+static IRNode* GenerateAtomicCompoundAssignment(Generator* gen,
+                                                 BinaryASTNode* node) {
+  IRNode* value = GenerateExpression(gen, node->right);
+  IRNode* address = GenerateExpression(gen, node->left);
+  address = AtomicObjectAddress(gen, address, node->left->type);
+  bool add = node->base.op == AST_OP(pluseq);
+  IRNode* result = GeneratorEmit(
+      gen, NewIR3(add ? IR_OP(atomic_add_fetch) : IR_OP(atomic_sub_fetch),
+                  address, value, AtomicSeqCstOrder(gen)));
+  IRSetType(result, AtomicValueType(node->left->type));
+  return AssignmentResultIsOuterAssignmentLHS((ASTNode*)node) ? address
+                                                               : result;
+}
+
 // Compound assignment.
 static IRNode* GenerateCompoundAssignment(Generator* gen,
                                            BinaryASTNode* node) {
+  if (TypeIsAtomic(node->left->type) &&
+      (node->base.op == AST_OP(pluseq) ||
+       node->base.op == AST_OP(minuseq))) {
+    return GenerateAtomicCompoundAssignment(gen, node);
+  }
   bool result_address_needed =
       AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
   // Get value of operation.
@@ -1659,6 +1754,8 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   if (IsBitfieldReference(node->left)) {
     value = CalculateNewBitfieldValue(gen, load, value,
                                     (BinaryASTNode*)node->left);
+  } else if (TypeIsBitInt(store_type)) {
+    value = NormalizeBitIntValue(gen, value, store_type);
   }
 
   // Store back to the destination.
@@ -1713,10 +1810,11 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
       TypeIsFunction(node->base.type)) {
     return IRSetType(addr, node->base.type);
   }
-  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-  IRNode* result = GeneratorEmit(gen, NewIR1(load_op, addr));
-  CheckForVarUse(result, node->left);
-  return IRSetType(result, node->base.type);
+  IRNode* result = EmitObjectLoad(gen, (ASTNode*)node, addr);
+  if (!TypeIsAtomic(node->base.type)) {
+    CheckForVarUse(result, node->left);
+  }
+  return result;
 }
 
 static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_type) {
@@ -2811,8 +2909,7 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
   }
 
   // All other types: load the value.
-  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-  return IRSetType(GeneratorEmit(gen, NewIR1(load_op, addr)), node->base.type);
+  return EmitObjectLoad(gen, (ASTNode*)node, addr);
 }
 
 // An inline function call is an InlineCallASTNode containing a
@@ -3084,10 +3181,13 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       IRSetType(var_ref, node->base.type);
       return var_ref;
     }
-    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-    IRNode* load = GeneratorEmit(gen, NewIR1(load_op, var_ref));
-    IRSetType(load, node->base.type);
-    IRSetVarUse(load, symbol);
+    if (TypeIsAtomic(node->base.type)) {
+      symbol->flags.address_taken = true;
+    }
+    IRNode* load = EmitObjectLoad(gen, (ASTNode*)node, var_ref);
+    if (!TypeIsAtomic(node->base.type)) {
+      IRSetVarUse(load, symbol);
+    }
     return load;
   }
 
@@ -3153,10 +3253,10 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       IRSetType(addr, node->base.type);
       return addr;
     }
-    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-    IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
-    IRSetType(load, node->base.type);
-    CheckForVarUse(load, (ASTNode*)node);
+    IRNode* load = EmitObjectLoad(gen, (ASTNode*)node, addr);
+    if (!TypeIsAtomic(node->base.type)) {
+      CheckForVarUse(load, (ASTNode*)node);
+    }
     return load;
   }
 }
@@ -3467,7 +3567,7 @@ static IRNode* GenerateBuiltinAtomic(Generator* gen, VectorASTNode* node,
   // contract is sequential consistency, so make that part of the shared IR
   // rather than asking each target to infer it from a missing operand.
   bool needs_default_order =
-      opcode == IR_OP(atomic_fence) ||
+      (opcode == IR_OP(atomic_fence) && node->children->length == 0) ||
       ((opcode == IR_OP(atomic_fetch_add) ||
         opcode == IR_OP(atomic_fetch_sub) ||
         opcode == IR_OP(atomic_add_fetch) ||
@@ -3540,8 +3640,7 @@ static IRNode* BitConstant(Generator* gen, TypeRecord* type, uint64_t value) {
 
 static IRNode* GenerateSoftwarePopcount(Generator* gen, IRNode* value,
                                         TypeRecord* value_type,
-                                        TypeRecord* result_type) {
-  int width = value_type->size * 8;
+                                        TypeRecord* result_type, int width) {
   IRNode* shifted = EmitBitIR2(gen, IR_OP(lsri), value,
                                BitConstant(gen, value_type, 1), value_type);
   IRNode* masked = EmitBitIR2(gen, IR_OP(andi), shifted,
@@ -3596,7 +3695,8 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
                                            VectorASTNode* node) {
   IRNode* value = GenerateExpression(gen, node->children->value.p[0]);
   TypeRecord* value_type = value->type;
-  int width = value_type->size * 8;
+  int width = TypeIsBitInt(value_type) ? value_type->bit_width
+                                       : value_type->size * 8;
   ASTOpcode op = node->base.op;
   if (op != AST_OP(builtin_rotl) && op != AST_OP(builtin_rotr) &&
       node->children->length == 2) {
@@ -3611,9 +3711,7 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
         have_width = true;
       }
     }
-    if (have_width &&
-        (explicit_width == 8 || explicit_width == 16 ||
-         explicit_width == 32 || explicit_width == 64)) {
+    if (have_width && explicit_width > 0 && explicit_width <= 64) {
       width = (int)explicit_width;
       if (width > value_type->size * 8) {
         value_type = NewTypeRecordWithSize(
@@ -3623,7 +3721,13 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
       }
     }
   }
+  if (width < value_type->size * 8) {
+    value = EmitBitIR2(
+        gen, IR_OP(andi), value,
+        BitConstant(gen, value_type, (UINT64_C(1) << width) - 1), value_type);
+  }
   bool native = !gen->for_constant_evaluation &&
+                width == value_type->size * 8 &&
                 TargetHasNativeBitOperation(op, value_type->size);
   if (native) {
     IROpcode ir_op = IR_OP(popcounti);
@@ -3660,7 +3764,8 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
     }
   }
   if (op == AST_OP(builtin_popcount)) {
-    return GenerateSoftwarePopcount(gen, value, value_type, node->base.type);
+    return GenerateSoftwarePopcount(gen, value, value_type, node->base.type,
+                                    width);
   }
   if (op == AST_OP(builtin_clz)) {
     for (int shift = 1; shift < width; shift *= 2) {
@@ -3669,7 +3774,8 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
       value = EmitBitIR2(gen, IR_OP(ori), value, part, value_type);
     }
     IRNode* count =
-        GenerateSoftwarePopcount(gen, value, value_type, node->base.type);
+        GenerateSoftwarePopcount(gen, value, value_type, node->base.type,
+                                 width);
     return EmitBitIR2(gen, IR_OP(subi),
                       BitConstant(gen, node->base.type, width), count,
                       node->base.type);
@@ -3687,7 +3793,8 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
                       (UINT64_C(1) << (value_type->size * 8)) - 1),
           value_type);
     }
-    return GenerateSoftwarePopcount(gen, below, value_type, node->base.type);
+    return GenerateSoftwarePopcount(gen, below, value_type, node->base.type,
+                                    width);
   }
   if (width < 64) {
     value = EmitBitIR2(
@@ -3738,7 +3845,7 @@ static IRNode* GenerateBuiltinTerminator(Generator* gen, VectorASTNode* node) {
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) {
   int diff = node->type->size - input->type->size;  // Difference in bytes.
    if (diff == 0) {
-     return input;
+     return IRSetType(input, node->type);
    }
    
    if (IRIsConst(input)) {
@@ -3759,7 +3866,7 @@ static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) 
 static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {
   int diff = to->type->size - from->type->size;  // Difference in bytes.
   if (diff == 0) {
-    return from;
+    return IRSetType(from, to->type);
   }
   
   if (IRIsConst(from)) {
@@ -4011,6 +4118,37 @@ static IRNode* GenerateMemberPointerValue(Generator* gen, TypeRecord* type,
   GeneratorEmit(gen, NewIR2(store_adj, adj_addr, adj_val));
 
   return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(mova), var)), type);
+}
+
+static IRNode* NormalizeBitIntValue(Generator* gen, IRNode* value,
+                                    TypeRecord* type) {
+  if (value == NULL || !TypeIsBitInt(type) || type->bit_width <= 0) {
+    return value;
+  }
+  int storage_bits = type->size * 8;
+  if (type->bit_width >= storage_bits) {
+    return IRSetType(value, type);
+  }
+  uint64_t mask = (UINT64_C(1) << type->bit_width) - UINT64_C(1);
+  IRNode* masked = IRSetType(
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(andi), value,
+                      GeneratorGetIntConstant(gen, type, (int64_t)mask))),
+      type);
+  if (TypeIsUnsigned(type)) {
+    return masked;
+  }
+  int64_t sign_bit = (int64_t)(UINT64_C(1) << (type->bit_width - 1));
+  IRNode* biased = IRSetType(
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(xori), masked,
+                      GeneratorGetIntConstant(gen, type, sign_bit))),
+      type);
+  return IRSetType(
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(subi), biased,
+                      GeneratorGetIntConstant(gen, type, sign_bit))),
+      type);
 }
 
 // Main expression code generator.  Generates code for one expression and
@@ -4502,6 +4640,9 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
   // Compiler::constexpr_codegen_recover.
   if (result->type == NULL && compiler->constexpr_codegen_recover) {
     longjmp(compiler->constexpr_codegen_abort, 1);
+  }
+  if (TypeIsBitInt(node->type) && (node->flags & kASTNeedAddress) == 0) {
+    result = NormalizeBitIntValue(gen, result, node->type);
   }
   assert(result->type != NULL);
   return result;
