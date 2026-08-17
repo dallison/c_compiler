@@ -2610,7 +2610,7 @@ static ConstraintExpr* ParseConceptPrimaryConstraint(Syntax* syntax,
   if (qualified != NULL) {
     return qualified;
   }
-  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(semicolon));
+  ASTNode* expr = SyntaxParseConstraintExpression(syntax, TC(semicolon));
   return NewConstraintFromExpression(expr, location);
 }
 

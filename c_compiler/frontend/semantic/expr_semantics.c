@@ -4929,6 +4929,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
       bool selected_member_template_specialization =
           member->symbol->type->info.function.template_origin != NULL;
       if (same_constructor_owner && concrete_owner != NULL &&
+          selected_owner != concrete_owner &&
           !selected_member_template_specialization &&
           concrete_owner->tag_name != NULL) {
         StructMember* concrete_head =
@@ -7148,6 +7149,14 @@ static bool MemberFunctionConstraintsSatisfied(StructMember* candidate,
   ConstraintExpr* constraint =
       candidate->symbol->type->info.function.associated_constraint;
   Vector* class_args = ClassTemplateArgumentsFromMemberAccess(member_access);
+  if (class_args == NULL) {
+    Struct* owner =
+        candidate->symbol->type->info.function.cxx_member_owner;
+    if (owner != NULL && owner->tag_symbol != NULL &&
+        owner->tag_symbol->type != NULL) {
+      class_args = owner->tag_symbol->type->template_arguments;
+    }
+  }
   if (class_args == NULL &&
       ConceptsConstraintContainsTemplateParameter(constraint)) {
     return true;

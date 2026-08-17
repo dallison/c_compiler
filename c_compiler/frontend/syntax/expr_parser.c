@@ -160,7 +160,12 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
     {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
     {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
+    {"__davecc_is_trivially_assignable", kCXXTypeTraitIsTriviallyAssignable},
+    {"__davecc_is_trivially_constructible",
+     kCXXTypeTraitIsTriviallyConstructible},
     {"__davecc_is_trivially_copyable", kCXXTypeTraitIsTriviallyCopyable},
+    {"__davecc_is_trivially_destructible",
+     kCXXTypeTraitIsTriviallyDestructible},
     {"__davecc_is_union", kCXXTypeTraitIsUnion},
 };
 
@@ -6482,4 +6487,9 @@ ASTNode* SyntaxParseExpression(Syntax* syntax, TokenClass followers) {
 
 ASTNode* SyntaxParseSingleExpression(Syntax* syntax, TokenClass followers) {
   return ParseAssignmentExpression(syntax, followers);
+}
+
+ASTNode* SyntaxParseConstraintExpression(Syntax* syntax,
+                                         TokenClass followers) {
+  return ParseLogicalOrExpression(syntax, followers);
 }

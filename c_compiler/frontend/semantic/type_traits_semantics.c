@@ -1540,10 +1540,21 @@ bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
     case kCXXTypeTraitIsNothrowDestructible:
       result = TypeTraitIsDestructible(syntax, type_args, true);
       break;
+    case kCXXTypeTraitIsTriviallyAssignable:
+      result = CXXTypeTraitIsTriviallyAssignable(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsTriviallyConstructible:
+      result = CXXTypeTraitIsTriviallyConstructible(syntax, type_args);
+      break;
     case kCXXTypeTraitIsTriviallyCopyable:
       result = type_args != NULL && type_args->length == 1 &&
                CXXTypeIsTriviallyCopyable(
                    (TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsTriviallyDestructible:
+      result = type_args != NULL && type_args->length == 1 &&
+               CXXTypeTraitIsTriviallyDestructible(
+                   syntax, (TypeRecord*)type_args->value.p[0]);
       break;
     case kCXXTypeTraitIsBaseOf:
       result = TypeTraitIsBaseOf(syntax, type_args);

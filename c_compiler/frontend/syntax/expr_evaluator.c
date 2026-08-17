@@ -701,6 +701,30 @@ case AST_OP(ast_op): \
       }
       break;
 
+    case AST_OP(ptr_scale): {
+      PtrScaleASTNode* scale = (PtrScaleASTNode*)node;
+      if (scale->scale_op == AST_OP(div) &&
+          ConstexprEvaluatePointerDifference(ctx, scale->expr, result)) {
+        return true;
+      }
+      if (!EvaluateIntegerExpressionInContext(ctx, scale->expr, &left)) {
+        break;
+      }
+      int64_t element_size =
+          scale->ref_type != NULL && scale->ref_type->size > 0
+              ? scale->ref_type->size
+              : 1;
+      if (scale->scale_op == AST_OP(mult)) {
+        *result = NormalizeIntegerValueForNode(left * element_size, node);
+        return true;
+      }
+      if (scale->scale_op == AST_OP(div)) {
+        *result = NormalizeIntegerValueForNode(left / element_size, node);
+        return true;
+      }
+      break;
+    }
+
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {

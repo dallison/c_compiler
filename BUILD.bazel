@@ -56,6 +56,7 @@ filegroup(
         "libc/include/functional",
         "libc/include/generator",
         "libc/include/initializer_list",
+        "libc/include/inplace_vector",
         "libc/include/ios",
         "libc/include/iosfwd",
         "libc/include/iostream",

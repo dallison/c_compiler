@@ -961,12 +961,12 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   return NULL;
 }
 
-// Like FindStructMemberOverload, but for two function templates that share the
-// same signature it additionally requires their associated constraints
+// Like FindStructMemberOverload, but for functions that share the same
+// signature it additionally requires their associated constraints
 // (requires-clauses / constrained template parameters) to be equivalent before
-// treating them as the *same* declaration.  This lets a class declare several
-// overloads of e.g. `operator()` distinguished solely by their `requires`
-// clause, as the range-access CPOs in <ranges> do.
+// treating them as the *same* declaration. This includes constrained
+// non-template members of class templates, such as conditionally trivial
+// special members.
 static StructMember* FindConstrainedMemberOverload(StructMember* first,
                                                    Symbol* candidate) {
   if (candidate == NULL) {
@@ -987,8 +987,7 @@ static StructMember* FindConstrainedMemberOverload(StructMember* first,
     if (!TypeEqual(overload->symbol->type, candidate->type)) {
       continue;
     }
-    if (overload_is_template &&
-        !ConceptsFunctionTemplateConstraintsEquivalent(overload->symbol,
+    if (!ConceptsFunctionTemplateConstraintsEquivalent(overload->symbol,
                                                        candidate)) {
       continue;
     }
@@ -1894,7 +1893,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
       SkipInlineMemberFunctionBody(parser);
       return true;
     }
-    if (FindStructMemberOverload(existing, member_symbol->type) != NULL) {
+    if (FindConstrainedMemberOverload(existing, member_symbol) != NULL) {
       String diagnostic_name;
       StringInit(&diagnostic_name, NULL);
       SymbolFunctionDiagnosticName(member_symbol, &diagnostic_name);

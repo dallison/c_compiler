@@ -695,6 +695,26 @@ struct is_move_constructible
     : __type_traits_detail::__move_constructible<T, T> {
 };
 
+template <class T, class... Args>
+struct is_trivially_constructible
+    : bool_constant<__davecc_is_trivially_constructible(T, Args...) != 0> {
+};
+
+template <class T>
+struct is_trivially_default_constructible
+    : is_trivially_constructible<T> {
+};
+
+template <class T>
+struct is_trivially_copy_constructible
+    : is_trivially_constructible<T, add_lvalue_reference_t<const T>> {
+};
+
+template <class T>
+struct is_trivially_move_constructible
+    : is_trivially_constructible<T, add_rvalue_reference_t<T>> {
+};
+
 template <class From, class To>
 struct is_convertible
     : __type_traits_detail::__is_convertible<From, To> {
@@ -712,6 +732,23 @@ struct is_copy_assignable
 template <class T>
 struct is_move_assignable
     : __type_traits_detail::__move_assignable<T, T> {
+};
+
+template <class T, class U>
+struct is_trivially_assignable
+    : bool_constant<__davecc_is_trivially_assignable(T, U) != 0> {
+};
+
+template <class T>
+struct is_trivially_copy_assignable
+    : is_trivially_assignable<add_lvalue_reference_t<T>,
+                              add_lvalue_reference_t<const T>> {
+};
+
+template <class T>
+struct is_trivially_move_assignable
+    : is_trivially_assignable<add_lvalue_reference_t<T>,
+                              add_rvalue_reference_t<T>> {
 };
 
 template <class T>
@@ -910,39 +947,8 @@ template <class... T>
 using common_reference_t = typename common_reference<T...>::type;
 
 template <class T>
-struct is_trivially_destructible : false_type {
-};
-
-#define __DAVECC_TRIVIALLY_DESTRUCTIBLE(T)                  \
-  template <>                                               \
-  struct is_trivially_destructible<T> : true_type {};       \
-  template <>                                               \
-  struct is_trivially_destructible<const T> : true_type {}; \
-  template <>                                               \
-  struct is_trivially_destructible<volatile T> : true_type {}; \
-  template <>                                               \
-  struct is_trivially_destructible<const volatile T> : true_type {}
-
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(bool);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(char);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(signed char);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned char);
-#if __cplusplus >= 202002L
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(char8_t);
-#endif
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(short);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned short);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(int);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned int);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(long);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned long);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(long long);
-__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned long long);
-
-#undef __DAVECC_TRIVIALLY_DESTRUCTIBLE
-
-template <class T>
-struct is_trivially_destructible<T*> : true_type {
+struct is_trivially_destructible
+    : bool_constant<__davecc_is_trivially_destructible(T) != 0> {
 };
 
 template <class T, class U>
@@ -1001,6 +1007,38 @@ inline constexpr bool is_trivially_copyable_v =
     is_trivially_copyable<T>::value;
 
 template <class T, class... Args>
+inline constexpr bool is_trivially_constructible_v =
+    is_trivially_constructible<T, Args...>::value;
+
+template <class T>
+inline constexpr bool is_trivially_default_constructible_v =
+    is_trivially_default_constructible<T>::value;
+
+template <class T>
+inline constexpr bool is_trivially_copy_constructible_v =
+    is_trivially_copy_constructible<T>::value;
+
+template <class T>
+inline constexpr bool is_trivially_move_constructible_v =
+    is_trivially_move_constructible<T>::value;
+
+template <class T, class U>
+inline constexpr bool is_trivially_assignable_v =
+    is_trivially_assignable<T, U>::value;
+
+template <class T>
+inline constexpr bool is_trivially_copy_assignable_v =
+    is_trivially_copy_assignable<T>::value;
+
+template <class T>
+inline constexpr bool is_trivially_move_assignable_v =
+    is_trivially_move_assignable<T>::value;
+
+template <class T>
+inline constexpr bool is_trivially_destructible_v =
+    is_trivially_destructible<T>::value;
+
+template <class T, class... Args>
 inline constexpr bool is_constructible_v = is_constructible<T, Args...>::value;
 
 template <class T, class... Args>
@@ -1038,6 +1076,10 @@ inline constexpr bool is_destructible_v = is_destructible<T>::value;
 
 template <class T>
 inline constexpr bool is_swappable_v = is_swappable<T>::value;
+
+template <class T>
+inline constexpr bool is_nothrow_swappable_v =
+    is_nothrow_swappable<T>::value;
 
 template <class T, class U>
 inline constexpr bool is_swappable_with_v = is_swappable_with<T, U>::value;

@@ -30,6 +30,8 @@
 
 static Symbol* CXXSourceObjectParameter(TypeRecord* func);
 static bool CXXFunctionNeedsMemberwiseCopy(TypeRecord* func);
+static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
+                                              CXXSpecialMemberKind kind);
 static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
                                      SourceLocation location);
 static ASTNode* NewCXXSourceMemberReceiver(Symbol* source, StructMember* member,
@@ -954,6 +956,14 @@ void SynthesizeExplicitlyDefaultedMemberFunctionBodies(TypeParser* parser,
           !symbol->type->info.function.is_explicitly_defaulted ||
           symbol->type->info.function.body != NULL) {
         continue;
+      }
+      CXXSpecialMemberKind kind =
+          symbol->type->info.function.cxx_special_member_kind;
+      if (kind != kCXXSpecialMemberNone &&
+          !symbol->type->info.function.is_user_provided) {
+        symbol->type->info.function.is_trivial_special_member =
+            !symbol->type->info.function.is_deleted &&
+            CXXImplicitSpecialMemberIsTrivial(str, kind);
       }
       if (symbol->type->info.function.cxx_special_member_kind ==
           kCXXSpecialMemberDefaultConstructor) {

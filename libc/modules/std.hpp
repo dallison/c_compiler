@@ -20,6 +20,9 @@
 #include <functional>
 #include <generator>
 #include <initializer_list>
+#if __cplusplus >= 202600L
+#include <inplace_vector>
+#endif
 #include <iterator>
 #include <latch>
 #include <locale>

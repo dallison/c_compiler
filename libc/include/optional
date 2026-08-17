@@ -8,6 +8,10 @@
 #ifndef optional_h
 #define optional_h
 
+#if __cplusplus >= 202600L
+#define __cpp_lib_optional 202506L
+#endif
+
 #include <__exception_support>
 #include <compare>
 #include <exception>
@@ -273,6 +277,75 @@ class optional {
     }
   }
 };
+
+#if __cplusplus >= 202600L
+
+template <class T>
+class optional<T&> {
+  T* __ptr_ = nullptr;
+
+ public:
+  using value_type = T&;
+
+  constexpr optional() noexcept = default;
+  constexpr optional(nullopt_t) noexcept {}
+  constexpr optional(T& value) noexcept : __ptr_(&value) {}
+  constexpr explicit optional(in_place_t, T& value) noexcept
+      : __ptr_(&value) {}
+
+  template <class U>
+    requires is_convertible_v<U*, T*>
+  constexpr optional(U& value) noexcept : __ptr_(&value) {}
+
+  constexpr optional(const optional&) noexcept = default;
+  constexpr optional(optional&&) noexcept = default;
+  constexpr optional& operator=(const optional&) noexcept = default;
+  constexpr optional& operator=(optional&&) noexcept = default;
+
+  constexpr optional& operator=(nullopt_t) noexcept {
+    __ptr_ = nullptr;
+    return *this;
+  }
+
+  constexpr optional& operator=(T& value) noexcept {
+    __ptr_ = &value;
+    return *this;
+  }
+
+  constexpr T* operator->() const noexcept { return __ptr_; }
+  constexpr T& operator*() const noexcept { return *__ptr_; }
+  constexpr explicit operator bool() const noexcept { return __ptr_ != nullptr; }
+  constexpr bool has_value() const noexcept { return __ptr_ != nullptr; }
+
+  constexpr T& value() const {
+    if (__ptr_ == nullptr) {
+      __DAVECC_THROW(bad_optional_access());
+    }
+    return *__ptr_;
+  }
+
+  template <class U>
+  constexpr remove_cv_t<T> value_or(U&& default_value) const {
+    return __ptr_ == nullptr
+               ? static_cast<remove_cv_t<T>>(std::forward<U>(default_value))
+               : *__ptr_;
+  }
+
+  constexpr void reset() noexcept { __ptr_ = nullptr; }
+
+  constexpr T& emplace(T& value) noexcept {
+    __ptr_ = &value;
+    return value;
+  }
+
+  constexpr void swap(optional& other) noexcept {
+    T* value = __ptr_;
+    __ptr_ = other.__ptr_;
+    other.__ptr_ = value;
+  }
+};
+
+#endif
 
 template <class T>
 void swap(optional<T>& left, optional<T>& right) {

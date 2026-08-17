@@ -80,6 +80,8 @@ struct ReflectionValue* ConstexprEvaluatePointerDereferenceAsReflection(
     ConstEvalContext* ctx, ASTNode* node);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+bool ConstexprEvaluatePointerDifference(ConstEvalContext* ctx, ASTNode* node,
+                                        int64_t* result);
 bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
                                         ASTNode* begin_expr, ASTNode* end_expr,
                                         size_t* count);

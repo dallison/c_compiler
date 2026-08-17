@@ -1,0 +1,899 @@
+#ifndef __davecc_inplace_vector__
+#define __davecc_inplace_vector__
+
+#if __cplusplus >= 202600L
+
+#define __cpp_lib_inplace_vector 202603L
+#define __cpp_lib_constexpr_inplace_vector 202502L
+
+#include <__exception_support>
+#include <compare>
+#include <initializer_list>
+#include <iterator>
+#include <new>
+#include <optional>
+#include <ranges>
+#include <stddef.h>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __inplace_vector_detail {
+
+template <class T, size_t N, bool = is_trivially_destructible_v<T>>
+union __storage;
+
+template <class T, size_t N>
+union __storage<T, N, true> {
+  char __dummy_;
+  T __values_[N];
+
+  constexpr __storage() noexcept : __dummy_() {}
+  ~__storage() = default;
+};
+
+template <class T, size_t N>
+union __storage<T, N, false> {
+  char __dummy_;
+  T __values_[N];
+
+  constexpr __storage() noexcept : __dummy_() {}
+  constexpr ~__storage() {}
+};
+
+constexpr void __throw_bad_alloc() {
+  __DAVECC_THROW(bad_alloc());
+}
+
+constexpr void __throw_out_of_range() {
+  __DAVECC_THROW(out_of_range("inplace_vector::at"));
+}
+
+template <class T>
+  requires requires(const T& left, const T& right) { left <=> right; }
+constexpr auto __synth_three_way(const T& left, const T& right) {
+  return left <=> right;
+}
+
+template <class T>
+  requires(!requires(const T& left, const T& right) { left <=> right; } &&
+           requires(const T& left, const T& right) {
+             left < right;
+             right < left;
+           })
+constexpr weak_ordering __synth_three_way(const T& left, const T& right) {
+  if (left < right) {
+    return weak_ordering::less;
+  }
+  if (right < left) {
+    return weak_ordering::greater;
+  }
+  return weak_ordering::equivalent;
+}
+
+}  // namespace __inplace_vector_detail
+
+template <class T, size_t N>
+class inplace_vector {
+  static_assert(N > 0);
+  static_assert(is_object_v<T>);
+  static_assert(is_destructible_v<T>);
+  static_assert(is_same_v<T, remove_cv_t<T>>);
+
+ public:
+  using value_type = T;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using iterator = T*;
+  using const_iterator = const T*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  using __storage_type = __inplace_vector_detail::__storage<T, N>;
+
+  __storage_type __storage_;
+  size_type __size_ = 0;
+
+  constexpr pointer __ptr(size_type index = 0) noexcept {
+    return __storage_.__values_ + index;
+  }
+
+  constexpr const_pointer __ptr(size_type index = 0) const noexcept {
+    return __storage_.__values_ + index;
+  }
+
+  constexpr size_type __index(const_iterator pos) const noexcept {
+    return static_cast<size_type>(pos - __ptr());
+  }
+
+  static constexpr void __check_capacity(size_type count) {
+    if (count > N) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+  }
+
+  template <class... Args>
+  constexpr reference __construct_back(Args&&... args) {
+    pointer result =
+        ::new (static_cast<void*>(__ptr(__size_)))
+            T(std::forward<Args>(args)...);
+    ++__size_;
+    return *result;
+  }
+
+  constexpr void __destroy_back() noexcept {
+    --__size_;
+    __ptr(__size_)->~T();
+  }
+
+  constexpr void __destroy_all() noexcept {
+    while (__size_ != 0) {
+      __destroy_back();
+    }
+  }
+
+  template <class InputIt>
+  constexpr void __construct_range(InputIt first, InputIt last) {
+    __DAVECC_TRY {
+      for (; first != last; ++first) {
+        if (__size_ == N) {
+          __inplace_vector_detail::__throw_bad_alloc();
+        }
+        __construct_back(*first);
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <class InputIt>
+  constexpr void __assign_range(InputIt first, InputIt last) {
+    inplace_vector<T, N> pending;
+    pending.__construct_range(first, last);
+    clear();
+    for (auto& value : pending) {
+      __construct_back(std::move(value));
+    }
+  }
+
+  constexpr iterator __insert_staged(size_type index, T&& staged) {
+    if (__size_ == N) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+    if (index == __size_) {
+      __construct_back(std::move(staged));
+      return __ptr(index);
+    }
+
+    __construct_back(std::move(back()));
+    for (size_type i = __size_ - 2; i > index; --i) {
+      *__ptr(i) = std::move(*__ptr(i - 1));
+    }
+    *__ptr(index) = std::move(staged);
+    return __ptr(index);
+  }
+
+  template <class InputIt>
+  constexpr iterator __insert_range(const_iterator pos, InputIt first,
+                                    InputIt last) {
+    size_type index = __index(pos);
+    inplace_vector<T, N> pending;
+    pending.__construct_range(first, last);
+    if (pending.size() > N - __size_) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+    if (pending.empty()) {
+      return __ptr(index);
+    }
+    for (size_type i = 0; i < pending.size(); ++i) {
+      __insert_staged(index + i, std::move(pending[i]));
+    }
+    return __ptr(index);
+  }
+
+ public:
+  constexpr inplace_vector() noexcept : __storage_(), __size_(0) {}
+
+  constexpr explicit inplace_vector(size_type count) {
+    __check_capacity(count);
+    __DAVECC_TRY {
+      while (__size_ != count) {
+        __construct_back();
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  constexpr inplace_vector(size_type count, const T& value) {
+    __check_capacity(count);
+    __DAVECC_TRY {
+      while (__size_ != count) {
+        __construct_back(value);
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  template <class InputIt>
+  constexpr inplace_vector(
+      InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    __construct_range(first, last);
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  constexpr inplace_vector(from_range_t, R&& range) {
+    __construct_range(ranges::begin(range), ranges::end(range));
+  }
+
+  constexpr inplace_vector(const inplace_vector&)
+    requires is_trivially_copy_constructible_v<T>
+  = default;
+
+  constexpr inplace_vector(const inplace_vector& other)
+    requires(!is_trivially_copy_constructible_v<T>)
+  {
+    __construct_range(other.begin(), other.end());
+  }
+
+  constexpr inplace_vector(inplace_vector&&)
+      noexcept(is_nothrow_move_constructible_v<T>)
+    requires is_trivially_move_constructible_v<T>
+  = default;
+
+  constexpr inplace_vector(inplace_vector&& other)
+      noexcept(is_nothrow_move_constructible_v<T>)
+    requires(!is_trivially_move_constructible_v<T>)
+  {
+    __DAVECC_TRY {
+      for (auto& value : other) {
+        __construct_back(std::move(value));
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_all();
+      __DAVECC_RETHROW;
+    }
+  }
+
+  constexpr inplace_vector(initializer_list<T> init) {
+    __construct_range(init.begin(), init.end());
+  }
+
+  ~inplace_vector()
+    requires is_trivially_destructible_v<T>
+  = default;
+
+  constexpr ~inplace_vector()
+    requires(!is_trivially_destructible_v<T>)
+  {
+    __destroy_all();
+  }
+
+  constexpr inplace_vector& operator=(const inplace_vector&)
+    requires(is_trivially_copy_constructible_v<T> &&
+             is_trivially_copy_assignable_v<T> &&
+             is_trivially_destructible_v<T>)
+  = default;
+
+  constexpr inplace_vector& operator=(const inplace_vector& other)
+    requires(!(is_trivially_copy_constructible_v<T> &&
+               is_trivially_copy_assignable_v<T> &&
+               is_trivially_destructible_v<T>))
+  {
+    if (this != &other) {
+      __assign_range(other.begin(), other.end());
+    }
+    return *this;
+  }
+
+  constexpr inplace_vector& operator=(inplace_vector&&)
+      noexcept(is_nothrow_move_constructible_v<T> &&
+               is_nothrow_move_assignable_v<T>)
+    requires(is_trivially_move_constructible_v<T> &&
+             is_trivially_move_assignable_v<T> &&
+             is_trivially_destructible_v<T>)
+  = default;
+
+  constexpr inplace_vector& operator=(inplace_vector&& other)
+      noexcept(is_nothrow_move_constructible_v<T> &&
+               is_nothrow_move_assignable_v<T>)
+    requires(!(is_trivially_move_constructible_v<T> &&
+               is_trivially_move_assignable_v<T> &&
+               is_trivially_destructible_v<T>))
+  {
+    if (this != &other) {
+      clear();
+      for (auto& value : other) {
+        __construct_back(std::move(value));
+      }
+    }
+    return *this;
+  }
+
+  constexpr inplace_vector& operator=(initializer_list<T> init) {
+    assign(init);
+    return *this;
+  }
+
+  constexpr void assign(size_type count, const T& value) {
+    __check_capacity(count);
+    inplace_vector<T, N> pending(count, value);
+    *this = std::move(pending);
+  }
+
+  template <class InputIt>
+  constexpr void assign(
+      InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    __assign_range(first, last);
+  }
+
+  constexpr void assign(initializer_list<T> init) {
+    __assign_range(init.begin(), init.end());
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  constexpr void assign_range(R&& range) {
+    __assign_range(ranges::begin(range), ranges::end(range));
+  }
+
+  constexpr reference at(size_type pos) {
+    if (pos >= __size_) {
+      __inplace_vector_detail::__throw_out_of_range();
+    }
+    return *__ptr(pos);
+  }
+
+  constexpr const_reference at(size_type pos) const {
+    if (pos >= __size_) {
+      __inplace_vector_detail::__throw_out_of_range();
+    }
+    return *__ptr(pos);
+  }
+
+  constexpr reference operator[](size_type pos) { return *__ptr(pos); }
+  constexpr const_reference operator[](size_type pos) const {
+    return *__ptr(pos);
+  }
+  constexpr reference front() { return *__ptr(); }
+  constexpr const_reference front() const { return *__ptr(); }
+  constexpr reference back() { return *__ptr(__size_ - 1); }
+  constexpr const_reference back() const { return *__ptr(__size_ - 1); }
+  constexpr pointer data() noexcept { return __ptr(); }
+  constexpr const_pointer data() const noexcept { return __ptr(); }
+
+  constexpr iterator begin() noexcept { return __ptr(); }
+  constexpr const_iterator begin() const noexcept { return __ptr(); }
+  constexpr const_iterator cbegin() const noexcept { return __ptr(); }
+  constexpr iterator end() noexcept { return __ptr(__size_); }
+  constexpr const_iterator end() const noexcept { return __ptr(__size_); }
+  constexpr const_iterator cend() const noexcept { return __ptr(__size_); }
+  constexpr reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+  constexpr reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+
+  constexpr bool empty() const noexcept { return __size_ == 0; }
+  constexpr size_type size() const noexcept { return __size_; }
+  static constexpr size_type max_size() noexcept { return N; }
+  static constexpr size_type capacity() noexcept { return N; }
+
+  constexpr void resize(size_type count) {
+    __check_capacity(count);
+    if (count < __size_) {
+      while (__size_ != count) {
+        __destroy_back();
+      }
+    } else {
+      size_type old_size = __size_;
+      __DAVECC_TRY {
+        while (__size_ != count) {
+          __construct_back();
+        }
+      } __DAVECC_CATCH_ALL {
+        while (__size_ != old_size) {
+          __destroy_back();
+        }
+        __DAVECC_RETHROW;
+      }
+    }
+  }
+
+  constexpr void resize(size_type count, const T& value) {
+    __check_capacity(count);
+    if (count < __size_) {
+      while (__size_ != count) {
+        __destroy_back();
+      }
+    } else {
+      size_type old_size = __size_;
+      __DAVECC_TRY {
+        while (__size_ != count) {
+          __construct_back(value);
+        }
+      } __DAVECC_CATCH_ALL {
+        while (__size_ != old_size) {
+          __destroy_back();
+        }
+        __DAVECC_RETHROW;
+      }
+    }
+  }
+
+  static constexpr void reserve(size_type new_cap) {
+    __check_capacity(new_cap);
+  }
+
+  static constexpr void shrink_to_fit() noexcept {}
+
+  constexpr iterator insert(const_iterator pos, const T& value) {
+    T staged(value);
+    return __insert_staged(__index(pos), std::move(staged));
+  }
+
+  constexpr iterator insert(const_iterator pos, T&& value) {
+    T staged(std::move(value));
+    return __insert_staged(__index(pos), std::move(staged));
+  }
+
+  constexpr iterator insert(const_iterator pos, size_type count,
+                            const T& value) {
+    size_type index = __index(pos);
+    if (count > N - __size_) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+    if (count == 0) {
+      return __ptr(index);
+    }
+    inplace_vector<T, N> pending(count, value);
+    for (size_type i = 0; i < count; ++i) {
+      __insert_staged(index + i, std::move(pending[i]));
+    }
+    return __ptr(index);
+  }
+
+  template <class InputIt>
+  constexpr iterator insert(
+      const_iterator pos, InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    return __insert_range(pos, first, last);
+  }
+
+  constexpr iterator insert(const_iterator pos, initializer_list<T> init) {
+    return __insert_range(pos, init.begin(), init.end());
+  }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  constexpr iterator insert_range(const_iterator pos, R&& range) {
+    return __insert_range(pos, ranges::begin(range), ranges::end(range));
+  }
+
+  template <class... Args>
+  constexpr iterator emplace(const_iterator pos, Args&&... args) {
+    size_type index = __index(pos);
+    if (index == __size_) {
+      emplace_back(std::forward<Args>(args)...);
+      return __ptr(index);
+    }
+    T staged(std::forward<Args>(args)...);
+    return __insert_staged(index, std::move(staged));
+  }
+
+  template <class... Args>
+  constexpr reference emplace_back(Args&&... args) {
+    if (__size_ == N) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+    return __construct_back(std::forward<Args>(args)...);
+  }
+
+  template <class... Args>
+  constexpr optional<T&> try_emplace_back(Args&&... args) {
+    if (__size_ == N) {
+      return nullopt;
+    }
+    return optional<T&>(in_place,
+                        __construct_back(std::forward<Args>(args)...));
+  }
+
+  template <class... Args>
+  constexpr reference unchecked_emplace_back(Args&&... args) {
+    return __construct_back(std::forward<Args>(args)...);
+  }
+
+  constexpr reference push_back(const T& value) {
+    return emplace_back(value);
+  }
+  constexpr reference push_back(T&& value) {
+    return emplace_back(std::move(value));
+  }
+
+  constexpr optional<T&> try_push_back(const T& value) {
+    return try_emplace_back(value);
+  }
+
+  constexpr optional<T&> try_push_back(T&& value) {
+    return try_emplace_back(std::move(value));
+  }
+
+  constexpr reference unchecked_push_back(const T& value) {
+    return unchecked_emplace_back(value);
+  }
+
+  constexpr reference unchecked_push_back(T&& value) {
+    return unchecked_emplace_back(std::move(value));
+  }
+
+  constexpr void pop_back() { __destroy_back(); }
+
+  template <ranges::input_range R>
+    requires is_convertible_v<ranges::range_reference_t<R>, T>
+  constexpr void append_range(R&& range) {
+    inplace_vector<T, N> pending(from_range, std::forward<R>(range));
+    if (pending.size() > N - __size_) {
+      __inplace_vector_detail::__throw_bad_alloc();
+    }
+    for (auto& value : pending) {
+      __construct_back(std::move(value));
+    }
+  }
+
+  constexpr void clear() noexcept { __destroy_all(); }
+
+  constexpr iterator erase(const_iterator pos) {
+    return erase(pos, pos + 1);
+  }
+
+  constexpr iterator erase(const_iterator first, const_iterator last) {
+    size_type index = __index(first);
+    size_type count = static_cast<size_type>(last - first);
+    for (size_type i = index; i + count < __size_; ++i) {
+      *__ptr(i) = std::move(*__ptr(i + count));
+    }
+    while (count-- != 0) {
+      __destroy_back();
+    }
+    return __ptr(index);
+  }
+
+  constexpr void swap(inplace_vector& other)
+      noexcept(is_nothrow_swappable_v<T> &&
+               is_nothrow_move_constructible_v<T>) {
+    size_type common = __size_ < other.__size_ ? __size_ : other.__size_;
+    for (size_type i = 0; i < common; ++i) {
+      std::swap(*__ptr(i), *other.__ptr(i));
+    }
+    if (__size_ > other.__size_) {
+      size_type old_size = __size_;
+      for (size_type i = common; i < old_size; ++i) {
+        other.__construct_back(std::move(*__ptr(i)));
+      }
+      while (__size_ != common) {
+        __destroy_back();
+      }
+    } else {
+      size_type old_size = other.__size_;
+      for (size_type i = common; i < old_size; ++i) {
+        __construct_back(std::move(*other.__ptr(i)));
+      }
+      while (other.__size_ != common) {
+        other.__destroy_back();
+      }
+    }
+  }
+};
+
+template <class T>
+class inplace_vector<T, 0> {
+  static_assert(is_object_v<T>);
+  static_assert(is_destructible_v<T>);
+  static_assert(is_same_v<T, remove_cv_t<T>>);
+
+ public:
+  using value_type = T;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using iterator = T*;
+  using const_iterator = const T*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  static constexpr void __fail() {
+    __inplace_vector_detail::__throw_bad_alloc();
+  }
+
+ public:
+  constexpr inplace_vector() noexcept = default;
+  constexpr explicit inplace_vector(size_type count) {
+    if (count != 0) __fail();
+  }
+  constexpr inplace_vector(size_type count, const T&) {
+    if (count != 0) __fail();
+  }
+  template <class InputIt>
+  constexpr inplace_vector(
+      InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    if (first != last) __fail();
+  }
+  template <ranges::input_range R>
+  constexpr inplace_vector(from_range_t, R&& range) {
+    if (ranges::begin(range) != ranges::end(range)) __fail();
+  }
+  constexpr inplace_vector(initializer_list<T> init) {
+    if (init.size() != 0) __fail();
+  }
+
+  constexpr inplace_vector& operator=(initializer_list<T> init) {
+    if (init.size() != 0) __fail();
+    return *this;
+  }
+  constexpr void assign(size_type count, const T&) {
+    if (count != 0) __fail();
+  }
+  template <class InputIt>
+  constexpr void assign(
+      InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    if (first != last) __fail();
+  }
+  constexpr void assign(initializer_list<T> init) {
+    if (init.size() != 0) __fail();
+  }
+  template <ranges::input_range R>
+  constexpr void assign_range(R&& range) {
+    if (ranges::begin(range) != ranges::end(range)) __fail();
+  }
+
+  constexpr reference at(size_type) {
+    __inplace_vector_detail::__throw_out_of_range();
+    return (*this)[0];
+  }
+  constexpr const_reference at(size_type) const {
+    __inplace_vector_detail::__throw_out_of_range();
+    return (*this)[0];
+  }
+  constexpr reference operator[](size_type) {
+    return *static_cast<pointer>(nullptr);
+  }
+  constexpr const_reference operator[](size_type) const {
+    return *static_cast<const_pointer>(nullptr);
+  }
+  constexpr reference front() { return (*this)[0]; }
+  constexpr const_reference front() const { return (*this)[0]; }
+  constexpr reference back() { return (*this)[0]; }
+  constexpr const_reference back() const { return (*this)[0]; }
+  constexpr pointer data() noexcept { return nullptr; }
+  constexpr const_pointer data() const noexcept { return nullptr; }
+  constexpr iterator begin() noexcept { return nullptr; }
+  constexpr const_iterator begin() const noexcept { return nullptr; }
+  constexpr const_iterator cbegin() const noexcept { return nullptr; }
+  constexpr iterator end() noexcept { return nullptr; }
+  constexpr const_iterator end() const noexcept { return nullptr; }
+  constexpr const_iterator cend() const noexcept { return nullptr; }
+  constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(); }
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator();
+  }
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator();
+  }
+  constexpr reverse_iterator rend() noexcept { return reverse_iterator(); }
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator();
+  }
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator();
+  }
+  constexpr bool empty() const noexcept { return true; }
+  constexpr size_type size() const noexcept { return 0; }
+  static constexpr size_type max_size() noexcept { return 0; }
+  static constexpr size_type capacity() noexcept { return 0; }
+  constexpr void resize(size_type count) {
+    if (count != 0) __fail();
+  }
+  constexpr void resize(size_type count, const T&) {
+    if (count != 0) __fail();
+  }
+  static constexpr void reserve(size_type count) {
+    if (count != 0) __fail();
+  }
+  static constexpr void shrink_to_fit() noexcept {}
+
+  constexpr iterator insert(const_iterator, const T&) {
+    __fail();
+    return nullptr;
+  }
+  constexpr iterator insert(const_iterator, T&&) {
+    __fail();
+    return nullptr;
+  }
+  constexpr iterator insert(const_iterator pos, size_type count, const T&) {
+    if (count != 0) __fail();
+    return const_cast<iterator>(pos);
+  }
+  template <class InputIt>
+  constexpr iterator insert(
+      const_iterator pos, InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0) {
+    if (first != last) __fail();
+    return const_cast<iterator>(pos);
+  }
+  constexpr iterator insert(const_iterator pos, initializer_list<T> init) {
+    if (init.size() != 0) __fail();
+    return const_cast<iterator>(pos);
+  }
+  template <ranges::input_range R>
+  constexpr iterator insert_range(const_iterator pos, R&& range) {
+    if (ranges::begin(range) != ranges::end(range)) __fail();
+    return const_cast<iterator>(pos);
+  }
+  template <class... Args>
+  constexpr iterator emplace(const_iterator, Args&&...) {
+    __fail();
+    return nullptr;
+  }
+  template <class... Args>
+  constexpr reference emplace_back(Args&&...) {
+    __fail();
+    return (*this)[0];
+  }
+  template <class... Args>
+  constexpr optional<T&> try_emplace_back(Args&&...) {
+    return nullopt;
+  }
+  template <class... Args>
+  constexpr reference unchecked_emplace_back(Args&&...) {
+    return (*this)[0];
+  }
+  constexpr reference push_back(const T&) {
+    __fail();
+    return (*this)[0];
+  }
+  constexpr reference push_back(T&&) {
+    __fail();
+    return (*this)[0];
+  }
+  constexpr optional<T&> try_push_back(const T&) { return nullopt; }
+  constexpr optional<T&> try_push_back(T&&) { return nullopt; }
+  constexpr reference unchecked_push_back(const T&) { return (*this)[0]; }
+  constexpr reference unchecked_push_back(T&&) { return (*this)[0]; }
+  constexpr void pop_back() {}
+  template <ranges::input_range R>
+  constexpr void append_range(R&& range) {
+    if (ranges::begin(range) != ranges::end(range)) __fail();
+  }
+  constexpr void clear() noexcept {}
+  constexpr iterator erase(const_iterator pos) {
+    return const_cast<iterator>(pos);
+  }
+  constexpr iterator erase(const_iterator, const_iterator last) {
+    return const_cast<iterator>(last);
+  }
+  constexpr void swap(inplace_vector&) noexcept {}
+};
+
+template <class T, size_t N>
+constexpr bool operator==(const inplace_vector<T, N>& left,
+                          const inplace_vector<T, N>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < left.size(); ++i) {
+    if (!(left[i] == right[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class T, size_t N>
+constexpr auto operator<=>(const inplace_vector<T, N>& left,
+                           const inplace_vector<T, N>& right)
+    -> decltype(__inplace_vector_detail::__synth_three_way(
+        std::declval<const T&>(), std::declval<const T&>()))
+    requires(requires(const T& a, const T& b) { a <=> b; } ||
+             requires(const T& a, const T& b) {
+               a < b;
+               b < a;
+             })
+{
+  using result_type = decltype(
+      __inplace_vector_detail::__synth_three_way(left[0], right[0]));
+  size_t common = left.size() < right.size() ? left.size() : right.size();
+  for (size_t i = 0; i < common; ++i) {
+    auto order =
+        __inplace_vector_detail::__synth_three_way(left[i], right[i]);
+    if (order != 0) {
+      return order;
+    }
+  }
+  if (left.size() < right.size()) {
+    return result_type::less;
+  }
+  if (right.size() < left.size()) {
+    return result_type::greater;
+  }
+  return result_type::equivalent;
+}
+
+template <class T, size_t N>
+constexpr void swap(inplace_vector<T, N>& left,
+                    inplace_vector<T, N>& right)
+    noexcept(noexcept(left.swap(right))) {
+  left.swap(right);
+}
+
+template <class T, size_t N, class U = T>
+constexpr typename inplace_vector<T, N>::size_type erase(
+    inplace_vector<T, N>& container, const U& value) {
+  auto old_size = container.size();
+  auto out = container.begin();
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    if (!(*it == value)) {
+      if (out != it) {
+        *out = std::move(*it);
+      }
+      ++out;
+    }
+  }
+  container.erase(out, container.end());
+  return old_size - container.size();
+}
+
+template <class T, size_t N, class Predicate>
+constexpr typename inplace_vector<T, N>::size_type erase_if(
+    inplace_vector<T, N>& container, Predicate predicate) {
+  auto old_size = container.size();
+  auto out = container.begin();
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    if (!predicate(*it)) {
+      if (out != it) {
+        *out = std::move(*it);
+      }
+      ++out;
+    }
+  }
+  container.erase(out, container.end());
+  return old_size - container.size();
+}
+
+}  // namespace std
+
+#endif
+
+#endif /* __davecc_inplace_vector__ */

@@ -2227,15 +2227,62 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
   }
   ConstexprValue old_value = binding != NULL
       ? (ConstexprValue){
+            .is_object = binding->object != NULL,
+            .is_address = binding->is_address,
             .is_floating = binding->is_floating,
             .ivalue = binding->ivalue,
             .fvalue = binding->fvalue,
+            .object = binding->object,
+            .address_binding = binding->address_binding,
+            .address_slot = binding->address_slot,
+            .address_object = binding->address_object,
+            .address_index = binding->address_index,
+            .heap_block = binding->heap_block,
+            .heap_index = binding->heap_index,
         }
       : *slot;
   ConstexprValue new_value = old_value;
   bool increment = node->base.op == AST_OP(preinc) ||
                    node->base.op == AST_OP(postinc);
-  if (node->sub->type != NULL && TypeIsFloatingPoint(node->sub->type)) {
+  TypeRecord* value_type = node->sub->type;
+  if (TypeIsReference(value_type)) {
+    value_type = value_type->next;
+  }
+  if (value_type != NULL && TypeIsPointer(value_type)) {
+    new_value = ConstexprResolveForwardedAddress(new_value);
+    old_value = new_value;
+    if (new_value.address_object != NULL) {
+      if ((increment &&
+           new_value.address_index >= new_value.address_object->slots.length) ||
+          (!increment && new_value.address_index == 0)) {
+        return false;
+      }
+      if (increment) {
+        new_value.address_index++;
+      } else {
+        new_value.address_index--;
+      }
+    } else if (new_value.heap_block != NULL) {
+      size_t element_size = value_type->next != NULL &&
+              value_type->next->size > 0
+          ? (size_t)value_type->next->size
+          : 1;
+      if ((increment &&
+           (element_size > SIZE_MAX - new_value.heap_index ||
+            new_value.heap_index + element_size >
+                new_value.heap_block->size)) ||
+          (!increment && element_size > new_value.heap_index)) {
+        return false;
+      }
+      if (increment) {
+        new_value.heap_index += element_size;
+      } else {
+        new_value.heap_index -= element_size;
+      }
+    } else {
+      return false;
+    }
+  } else if (value_type != NULL && TypeIsFloatingPoint(value_type)) {
     double value;
     ConstexprValueAsFloating(old_value, &value);
     new_value.is_floating = true;
@@ -2249,8 +2296,8 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
     new_value.fvalue = (double)new_value.ivalue;
   }
   bool stored = binding != NULL
-      ? StoreConstexprBinding(ctx, binding, node->sub->type, new_value)
-      : StoreConstexprSlot(ctx, slot, node->sub->type, new_value);
+      ? StoreConstexprBinding(ctx, binding, value_type, new_value)
+      : StoreConstexprSlot(ctx, slot, value_type, new_value);
   if (!stored) {
     return false;
   }
@@ -2743,7 +2790,8 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   }
   free(initialized);
   if (ok && TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
-      !type->info.struct_info->is_union) {
+      !type->info.struct_info->is_union &&
+      !type->info.struct_info->is_aggregate) {
     ok = ConstexprMaterializeBaseSubobjectSlots(ctx, object);
     if (ok) {
       Symbol* ctor_symbol = ConstexprConstructorForObjectType(type, 0);
@@ -3273,6 +3321,11 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   if (node == NULL) {
     return false;
   }
+  if (node->op == AST_OP(stmt_expr)) {
+    return EvaluateConstexprStatementExpression(ctx, node, node->type,
+                                                result) &&
+           result->is_address;
+  }
   if (node->op == AST_OP(call)) {
     ASTNode* synthesized =
         SemanticTryAnalyzeMetaSynthesisCall((VectorASTNode*)node);
@@ -3287,6 +3340,20 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
     return EvaluateConstexprAddressValue(ctx, cast->expr, result);
+  }
+  if (node->op == AST_OP(compound_literal) && node->type != NULL &&
+      TypeIsFixedArray(node->type)) {
+    ConstexprValue value = {0};
+    if (!EvaluateConstexprInitializer(ctx, node->type, node, &value) ||
+        !value.is_object || value.object == NULL) {
+      return false;
+    }
+    *result = (ConstexprValue){
+        .is_address = true,
+        .address_object = value.object,
+        .address_index = 0,
+    };
+    return true;
   }
   if (node->op == AST_OP(string)) {
     ConstexprObject* object = ConstexprStringObject(ctx, node, node->type);
@@ -3303,6 +3370,14 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(address)) {
     UnaryASTNode* address = (UnaryASTNode*)node;
+    if (address->sub != NULL &&
+        address->sub->op == AST_OP(identifier)) {
+      Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
+      if (symbol != NULL && TypeIsReference(symbol->type) &&
+          EvaluateConstexprAddressValue(ctx, address->sub, result)) {
+        return true;
+      }
+    }
     if (address->sub != NULL &&
         address->sub->op == AST_OP(subscript) &&
         ASTNodeGetShape(address->sub) == kASTShapeBinary) {
@@ -3585,6 +3660,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     ConstexprValue* slot = NULL;
     if (EvaluateConstexprObjectLValue(ctx, node, &slot, true) &&
         slot != NULL) {
+      if (slot->is_object && slot->object != NULL &&
+          TypeIsFixedArray(slot->object->type)) {
+        *result = (ConstexprValue){
+            .is_address = true,
+            .address_object = slot->object,
+            .address_index = 0,
+        };
+        return true;
+      }
       *result = (ConstexprValue){
           .is_address = true,
           .address_slot = slot,
@@ -3687,6 +3771,13 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
       return true;
     }
   }
+  if (binding_expr != NULL && binding_expr->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)binding_expr)->symbol;
+    if (symbol != NULL && TypeIsReference(symbol->type) &&
+        EvaluateConstexprAddressValue(ctx, binding_expr, value)) {
+      return true;
+    }
+  }
   if (binding_expr != NULL && binding_expr->op == AST_OP(cast) &&
       TypeIsStructOrUnion(formal_object_type)) {
     ConstexprValue object_value = {0};
@@ -3731,6 +3822,15 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   BinaryASTNode* binary = (BinaryASTNode*)node;
+  bool left_is_pointer =
+      binary->left != NULL && binary->left->type != NULL &&
+      TypeIsPointer(binary->left->type);
+  bool right_is_pointer =
+      binary->right != NULL && binary->right->type != NULL &&
+      TypeIsPointer(binary->right->type);
+  if (!left_is_pointer && !right_is_pointer) {
+    return false;
+  }
   ConstexprValue left;
   ConstexprValue right;
   if (!EvaluateConstexprAddressValue(ctx, binary->left, &left) ||
@@ -3758,6 +3858,68 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
     *result = left.address_index > right.address_index;
   } else {
     *result = left.address_index >= right.address_index;
+  }
+  return true;
+}
+
+bool ConstexprEvaluatePointerDifference(ConstEvalContext* ctx, ASTNode* node,
+                                        int64_t* result) {
+  if (ctx == NULL || node == NULL || node->op != AST_OP(minus) ||
+      result == NULL) {
+    return false;
+  }
+  BinaryASTNode* difference = (BinaryASTNode*)node;
+  if (difference->left == NULL || difference->right == NULL ||
+      !TypeIsPointer(difference->left->type) ||
+      !TypeIsPointer(difference->right->type)) {
+    return false;
+  }
+  ConstexprValue left = {0};
+  ConstexprValue right = {0};
+  if (!EvaluateConstexprAddressValue(ctx, difference->left, &left) ||
+      !EvaluateConstexprAddressValue(ctx, difference->right, &right)) {
+    return false;
+  }
+  left = ConstexprResolveForwardedAddress(left);
+  right = ConstexprResolveForwardedAddress(right);
+
+  size_t left_index;
+  size_t right_index;
+  if (left.address_object != NULL &&
+      left.address_object == right.address_object) {
+    left_index = left.address_index;
+    right_index = right.address_index;
+  } else if (left.heap_block != NULL &&
+             left.heap_block == right.heap_block) {
+    size_t element_size = difference->left->type->next != NULL &&
+            difference->left->type->next->size > 0
+        ? (size_t)difference->left->type->next->size
+        : 1;
+    if (left.heap_index % element_size != 0 ||
+        right.heap_index % element_size != 0) {
+      return false;
+    }
+    left_index = left.heap_index / element_size;
+    right_index = right.heap_index / element_size;
+  } else if (ConstexprAddressEqual(left, right)) {
+    *result = 0;
+    return true;
+  } else {
+    return false;
+  }
+
+  if (left_index >= right_index) {
+    size_t distance = left_index - right_index;
+    if (distance > INT64_MAX) {
+      return false;
+    }
+    *result = (int64_t)distance;
+  } else {
+    size_t distance = right_index - left_index;
+    if (distance > INT64_MAX) {
+      return false;
+    }
+    *result = -(int64_t)distance;
   }
   return true;
 }
@@ -4109,10 +4271,14 @@ static Symbol* ConstexprCallSymbol(ASTNode* node) {
     return NULL;
   }
   VectorASTNode* call = (VectorASTNode*)node;
-  if (call->left == NULL || call->left->op != AST_OP(identifier)) {
+  ASTNode* callee = call->left;
+  while (callee != NULL && callee->op == AST_OP(comma)) {
+    callee = ((BinaryASTNode*)callee)->right;
+  }
+  if (callee == NULL || callee->op != AST_OP(identifier)) {
     return NULL;
   }
-  Symbol* symbol = ((IdentifierASTNode*)call->left)->symbol;
+  Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
   Symbol* function = CompilerConstantFunctionPointerTarget(symbol);
   return function != NULL ? function : symbol;
 }
@@ -6450,6 +6616,15 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   VectorASTNode* call = (VectorASTNode*)node;
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
+  if (call->left != NULL && call->left->op == AST_OP(comma)) {
+    ConstexprValue discarded;
+    if (!EvaluateConstexprValue(
+            ctx, ((BinaryASTNode*)call->left)->left,
+            ((BinaryASTNode*)call->left)->left->type, &discarded)) {
+      ctx->call_depth--;
+      return false;
+    }
+  }
   // A member call binds the receiver to the implicit `this` parameter and the
   // explicit arguments to the remaining parameters; an ordinary call binds the
   // arguments positionally.  BindConstexprConstructorActuals implements exactly
@@ -6932,9 +7107,8 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
   ConstexprValue ignored = {0};
-  bool bound = BindConstexprConstructorActuals(ctx, callee, receiver,
-                                               call->children);
-  bool ok = bound &&
+  bool ok = BindConstexprConstructorActuals(ctx, callee, receiver,
+                                            call->children) &&
             EvaluateConstexprFunctionContracts(
                 ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,

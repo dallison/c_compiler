@@ -582,15 +582,27 @@ static bool RewriteClonedConcreteLocalDirectInitializer(
     braced->initializers->value.p[0] = NULL;
     ASTNode* parent = root->parent;
     int child_id = root->child_id;
+    SourceLocation location = root->location;
     if (expression != NULL) {
-      expression->parent = parent;
-      expression->child_id = child_id;
+      expression->parent = NULL;
     }
     if (initializer != expression) {
       ASTNodeDelete(initializer);
     }
     ASTNodeDelete(root);
-    decl->initializer = expression;
+    if (TypeIsReference(replacement->type) && expression != NULL) {
+      expression->parent = parent;
+      expression->child_id = child_id;
+      decl->initializer = expression;
+      return true;
+    }
+    ASTNode* target = NewIdentifierASTNode(replacement, location);
+    target->flags |= kASTNeedAddress | kASTIsDeclaration;
+    decl->initializer =
+        NewBinaryASTNode(AST_OP(init), TypeRecordCopy(replacement->type),
+                         location, target, expression);
+    decl->initializer->parent = parent;
+    decl->initializer->child_id = child_id;
     return true;
   }
 

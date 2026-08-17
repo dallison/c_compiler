@@ -535,6 +535,7 @@ static bool ContainsCall(ASTNode* node) {
 }
 
 static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_type);
+static bool ExpressionReturnsReference(ASTNode* node);
 
 static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
@@ -1527,7 +1528,13 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       dest_tmp_addr =
           GeneratorSpillValueToTemp(gen, dest, dest_tmp_type);
     }
+    int right_flags = node->right->flags;
+    bool right_returns_reference = ExpressionReturnsReference(node->right);
+    if (right_returns_reference && !TypeIsReference(node->left->type)) {
+      node->right->flags &= ~kASTNeedAddress;
+    }
     value = GenerateExpression(gen, node->right);
+    node->right->flags = right_flags;
     if (dest_tmp_addr != NULL) {
       dest = GeneratorReloadSpilledValue(gen, dest_tmp_addr, dest_tmp_type);
       dest_was_spilled = true;
