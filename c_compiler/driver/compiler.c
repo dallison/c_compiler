@@ -134,6 +134,14 @@ bool CompilerCXXAtLeast(LanguageStandard standard) {
   return CompilerIsCXX() && compiler->language_standard >= standard;
 }
 
+bool CompilerTargetSupportsThreads(void) {
+  if (compiler == NULL || compiler->target_name == NULL) {
+    return false;
+  }
+  return !StringEqual(compiler->target_name, "6502") &&
+         !StringEqual(compiler->target_name, "65c02");
+}
+
 bool CompilerTargetSupportsAtomics(void) {
   if (compiler == NULL || compiler->target_name == NULL) {
     return false;

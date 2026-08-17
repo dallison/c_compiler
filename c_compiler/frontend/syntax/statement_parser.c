@@ -243,8 +243,12 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
   }
   // Parse the sequence of statements or declarations, adding them to the vector.
   bool seen_statement = false;
+  bool source_empty = true;
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(rbrace))) {
-    if (!LexMatch(lex, TOK(semicolon))) {
+    if (LexMatch(lex, TOK(semicolon))) {
+      source_empty = false;
+    } else {
+      source_empty = false;
       ASTNode* stmt;
       if (SyntaxLookingAtDeclaration(syntax)) {
         if (seen_statement) {
@@ -275,7 +279,11 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
 
   // Close the scope.
   SyntaxCloseScope(syntax);
-  return NewCompoundStatementASTNode(statements, location);
+  ASTNode* compound = NewCompoundStatementASTNode(statements, location);
+  if (source_empty) {
+    compound->flags |= kASTSourceEmptyCompound;
+  }
+  return compound;
 }
 
 // An 'if' statement can have an optional 'else' clause.

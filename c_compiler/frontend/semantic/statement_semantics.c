@@ -1254,14 +1254,33 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
   SemanticCheckScalarType(node->cond);
 }
 
+static bool IsTriviallyEmptyIterationBody(ASTNode* stmt) {
+  return stmt == NULL ||
+         (stmt->op == AST_OP(compound) &&
+          (stmt->flags & kASTSourceEmptyCompound) != 0);
+}
+
+static bool CXXLoopConditionIsConstantTrue(ASTNode* cond) {
+  int64_t value = 0;
+  return cond != NULL && IsConstantExpression(cond) &&
+         EvaluateIntegerExpression(cond, &value) && value != 0;
+}
+
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
+  bool trivial_infinite =
+      CompilerCXXAtLeast(kLanguageStandardCXX11) &&
+      IsTriviallyEmptyIterationBody(node->stmt) &&
+      CXXLoopConditionIsConstantTrue(node->cond);
   node->cond =
       AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->cond);
   AnalyzeStatement(node->stmt);
+  if (trivial_infinite) {
+    node->base.flags |= kASTTrivialInfiniteLoop;
+  }
   SemanticCheckScalarType(node->cond);
 }
 
@@ -1270,9 +1289,16 @@ static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
+  bool trivial_infinite =
+      CompilerCXXAtLeast(kLanguageStandardCXX11) &&
+      IsTriviallyEmptyIterationBody(node->stmt) &&
+      CXXLoopConditionIsConstantTrue(node->cond);
   node->cond =
       AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->cond);
   AnalyzeStatement(node->stmt);
+  if (trivial_infinite) {
+    node->base.flags |= kASTTrivialInfiniteLoop;
+  }
   SemanticCheckScalarType(node->cond);
 }
 
@@ -1643,10 +1669,12 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 
   node->c2 = AnalyzeExpression(node->c2);
+  bool constant_true_condition = node->c2 == NULL;
   if (node->c2 != NULL) {
     SemanticConvertType(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                         kConvertContextualBool);
     SemanticCheckScalarType(node->c2);
+    constant_true_condition = CXXLoopConditionIsConstantTrue(node->c2);
     node->c2 =
         AppendCXXFullExpressionTemporaryDestructorsPreservingValue(node->c2);
   }
@@ -1657,6 +1685,11 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 
   // Finally the statment.
   AnalyzeStatement(node->stmt);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX11) &&
+      node->c3 == NULL && IsTriviallyEmptyIterationBody(node->stmt) &&
+      constant_true_condition) {
+    node->base.flags |= kASTTrivialInfiniteLoop;
+  }
 }
 
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
@@ -2021,6 +2054,48 @@ static ASTNode* MaterializeCXXReturnByMove(ASTNode* return_value) {
   return analyzed;
 }
 
+// [class.temporary] identifies the glvalues that continue to designate an
+// object produced by temporary materialization.  DaveCC represents the
+// materialized root as a compound literal and preserves the standard's
+// propagating expression forms around it.
+static bool CXXExpressionDesignatesTemporary(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  if (expr->value_category == kValueCategoryPrvalue ||
+      expr->op == AST_OP(compound_literal) ||
+      (expr->flags & kASTCXXBracedTemporary) != 0) {
+    return true;
+  }
+  switch (expr->op) {
+    case AST_OP(cast):
+      return CXXExpressionDesignatesTemporary(((CastASTNode*)expr)->expr);
+    case AST_OP(comma):
+      return CXXExpressionDesignatesTemporary(
+          ((BinaryASTNode*)expr)->right);
+    case AST_OP(dot):
+    case AST_OP(dotstar):
+      return CXXExpressionDesignatesTemporary(
+          ((BinaryASTNode*)expr)->left);
+    case AST_OP(subscript): {
+      ASTNode* array = ((BinaryASTNode*)expr)->left;
+      return array != NULL && TypeIsArray(array->type) &&
+             CXXExpressionDesignatesTemporary(array);
+    }
+    case AST_OP(question): {
+      ASTNode* alternatives = ((BinaryASTNode*)expr)->right;
+      if (alternatives == NULL || alternatives->op != AST_OP(colon)) {
+        return false;
+      }
+      BinaryASTNode* colon = (BinaryASTNode*)alternatives;
+      return CXXExpressionDesignatesTemporary(colon->left) ||
+             CXXExpressionDesignatesTemporary(colon->right);
+    }
+    default:
+      return false;
+  }
+}
+
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   if (compiler->current_function != NULL &&
       compiler->current_function->info.function.is_coroutine &&
@@ -2147,7 +2222,18 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     } else if (TypeIsReference(compiler->current_function->next)) {
       TypeRecord* reference_type = compiler->current_function->next;
       NormalConversion(return_value, reference_type->next);
-      if (reference_type->declarator == kDeclRValueReference) {
+      // A conversion can replace the operand node, so classify and generate
+      // from the converted expression retained by the return statement.
+      return_value = node->cond;
+      bool temporary_return =
+          CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          CXXExpressionDesignatesTemporary(return_value);
+      if (temporary_return) {
+        SemanticError(
+            return_value,
+            "returned reference cannot be initialized with a temporary "
+            "expression");
+      } else if (reference_type->declarator == kDeclRValueReference) {
         if (return_value->value_category == kValueCategoryLvalue) {
           SemanticError(return_value,
                         "Rvalue reference return value must not be an lvalue");

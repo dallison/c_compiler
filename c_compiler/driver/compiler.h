@@ -555,6 +555,7 @@ bool OptLevel3(void);
 bool CompilerIsCXX(void);
 bool CompilerCAtLeast(LanguageStandard standard);
 bool CompilerCXXAtLeast(LanguageStandard standard);
+bool CompilerTargetSupportsThreads(void);
 bool CompilerTargetSupportsAtomics(void);
 bool CompilerTargetSupportsC11Atomics(void);
 bool CompilerTargetSupportsAtomicSize(int size);

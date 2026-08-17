@@ -256,6 +256,15 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     node->base.value_category = kValueCategoryLvalue;
     return &node->base;
   }
+  if (CompilerIsCXX() && node->symbol != NULL &&
+      (node->base.flags & kASTIsDeclaration) == 0 &&
+      StringEqual(&node->symbol->name, "main") &&
+      node->symbol->namespace_ == NULL &&
+      TypeIsFunction(node->symbol->type) &&
+      node->symbol->type->info.function.cxx_member_owner == NULL) {
+    SemanticError(&node->base,
+                  "the function 'main' cannot be named by an expression");
+  }
   // A dependent qualified value name (`T::member`) that still carries its flag
   // here was never resolved during template instantiation, meaning the named
   // member does not exist in the substituted scope type.

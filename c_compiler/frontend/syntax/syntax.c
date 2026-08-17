@@ -1512,7 +1512,8 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->pending_placeholder_variable_constraint = NULL;
   syntax->cxx_class_head = NULL;
   syntax->context = kParsingFileScope;
-  syntax->extern_c_depth = 0;
+  syntax->c_linkage = false;
+  syntax->explicit_cxx_linkage = false;
   syntax->export_depth = 0;
 }
 
@@ -7036,6 +7037,74 @@ static void ValidateC23ConstexprObject(Syntax* syntax, Symbol* sym,
   }
 }
 
+static bool IsGlobalMainSymbol(Symbol* sym) {
+  if (sym == NULL || !StringEqual(&sym->name, "main") ||
+      sym->namespace_ != NULL) {
+    return false;
+  }
+  return !TypeIsFunction(sym->type) ||
+         sym->type->info.function.cxx_member_owner == NULL;
+}
+
+static void ApplyExplicitCXXLinkageAttachment(Syntax* syntax, Symbol* sym,
+                                              Storage storage) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      !syntax->explicit_cxx_linkage || sym == NULL) {
+    return;
+  }
+  StringClear(&sym->owning_module_name);
+  StringClear(&sym->owning_module_partition);
+  sym->flags.is_module_private = false;
+  sym->cxx_linkage = StorageIs(storage, STO(static)) ? kCXXLinkageInternal
+                                                      : kCXXLinkageExternal;
+}
+
+static void ValidateCXX26MainDeclaration(Syntax* syntax, Symbol* sym,
+                                         Storage storage) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) || sym == NULL ||
+      !StringEqual(&sym->name, "main")) {
+    return;
+  }
+  if (sym->flags.is_c_linkage) {
+    SyntaxError(syntax, "an entity named 'main' cannot have C language linkage");
+    return;
+  }
+  if (!IsGlobalMainSymbol(sym)) {
+    return;
+  }
+  if (!TypeIsFunction(sym->type)) {
+    SyntaxError(syntax, "a variable named 'main' cannot belong to global scope");
+    return;
+  }
+  FunctionInfo* info = &sym->type->info.function;
+  if (sym->flags.is_template) {
+    SyntaxError(syntax, "'main' cannot be a function template");
+  }
+  if (StorageIs(storage, STO(static))) {
+    SyntaxError(syntax, "'main' cannot be declared static");
+  }
+  if (info->is_inline) {
+    SyntaxError(syntax, "'main' cannot be declared inline");
+  }
+  if (info->is_constexpr) {
+    SyntaxError(syntax, "'main' cannot be declared constexpr");
+  }
+  if (info->is_consteval) {
+    SyntaxError(syntax, "'main' cannot be declared consteval");
+  }
+  if (sym->owning_module_name.length != 0) {
+    SyntaxError(syntax, "'main' cannot be attached to a named module");
+  }
+}
+
+static void ValidateCXX26DeletedMain(Syntax* syntax, Symbol* sym) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      IsGlobalMainSymbol(sym) && TypeIsFunction(sym->type) &&
+      sym->type->info.function.is_deleted) {
+    SyntaxError(syntax, "'main' cannot be defined as deleted");
+  }
+}
+
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
                                          Storage storage,
@@ -7091,13 +7160,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (sym != NULL) {
       // A declaration appearing inside an `extern "C"` linkage specification
       // has C language linkage, so its name is not mangled.
-      if (syntax->extern_c_depth > 0) {
+      if (syntax->c_linkage) {
         sym->flags.is_c_linkage = true;
       }
       if (syntax->export_depth > 0) {
         sym->flags.is_exported = true;
       }
       SymbolAttachModuleContext(sym, storage);
+      ApplyExplicitCXXLinkageAttachment(syntax, sym, storage);
       // `constexpr` on an object implies `const` on its type.  Apply it before
       // matching against any previous declaration so that an out-of-class
       // definition (`constexpr T C::x;`) compares equal to the in-class
@@ -7120,6 +7190,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         sym->type->info.function.template_parameter_base =
             CurrentTemplateParameterBase(syntax);
       }
+      ValidateCXX26MainDeclaration(syntax, sym, storage);
       if (TypeIsFunction(sym->type)) {
         sym->type->info.function.is_explicit = is_explicit;
         if (syntax->pending_explicit_condition != NULL) {
@@ -7379,6 +7450,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (TypeIsFunction(sym->type)) {
       ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type,
                                              old_sym == NULL);
+      ValidateCXX26DeletedMain(syntax, sym);
       if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
         if (sym->type->info.function.is_defaulted) {
           old_sym->type->info.function.is_defaulted = true;
@@ -9673,39 +9745,37 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
     LexNextToken(syntax->lex);
   }
   bool is_c = StringEqual(&linkage, "C");
-  if (!is_c && !StringEqual(&linkage, "C++")) {
+  bool is_cpp = StringEqual(&linkage, "C++");
+  if (!is_c && !is_cpp) {
     SyntaxError(syntax, "Unknown linkage specification \"%s\"", linkage.value);
   }
   StringDestruct(&linkage);
 
-  // C linkage suppresses name mangling for the enclosed declarations; C++
-  // linkage is the default, so it only needs to parse the declarations.
-  bool apply_c_linkage = is_c;
+  // A nested linkage specification overrides the surrounding linkage while
+  // its declaration sequence is parsed.
+  bool saved_c_linkage = syntax->c_linkage;
+  bool saved_explicit_cxx_linkage = syntax->explicit_cxx_linkage;
 
   if (LexMatch(syntax->lex, TOK(lbrace))) {
     Vector* declarations = NewVector();
-    if (apply_c_linkage) {
-      syntax->extern_c_depth++;
-    }
+    syntax->c_linkage = is_c;
+    syntax->explicit_cxx_linkage = is_cpp;
     while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
       ASTNode* node = SyntaxParseExternalDeclaration(syntax);
       AppendDeclarationsFromNode(declarations, node);
     }
-    if (apply_c_linkage) {
-      syntax->extern_c_depth--;
-    }
+    syntax->c_linkage = saved_c_linkage;
+    syntax->explicit_cxx_linkage = saved_explicit_cxx_linkage;
     SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebrace) | TC(decl));
     return NewDeclarationListASTNode(declarations, location);
   }
 
   // Single-declaration form: `extern "C" <declaration>`.
-  if (apply_c_linkage) {
-    syntax->extern_c_depth++;
-  }
+  syntax->c_linkage = is_c;
+  syntax->explicit_cxx_linkage = is_cpp;
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
-  if (apply_c_linkage) {
-    syntax->extern_c_depth--;
-  }
+  syntax->c_linkage = saved_c_linkage;
+  syntax->explicit_cxx_linkage = saved_explicit_cxx_linkage;
   return node;
 }
 
@@ -11607,28 +11677,6 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
   ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
 }
 
-// True if any element of a braced initializer is a pack expansion, so the
-// element count at parse time is not the number of values it will produce.
-static bool BracedInitializerHasPackExpansion(
-    BracedInitializerASTNode* braced) {
-  for (size_t i = 0; i < braced->initializers->length; i++) {
-    ASTNode* init = braced->initializers->value.p[i];
-    if (init == NULL) {
-      continue;
-    }
-    if ((init->flags & kASTPackExpansion) != 0) {
-      return true;
-    }
-    if (init->op == AST_OP(expr_init)) {
-      ASTNode* expr = ((ExpressionInitializerASTNode*)init)->expr;
-      if (expr != NULL && (expr->flags & kASTPackExpansion) != 0) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -11842,27 +11890,6 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (LexMatch(syntax->lex, TOK(equal))) {
         syntax->init_storage = storage;
         initializer = SyntaxParseInitializer(syntax, sym, storage);
-        // Complete a C++ array of unknown bound as soon as its braced
-        // initializer has been parsed.  Local declarations are normally
-        // analyzed after the whole function body, but a following `auto`
-        // declaration is analyzed eagerly so that later `decltype(auto_var)`
-        // works.  Leaving the earlier array flexible until that later pass
-        // makes calls in the eager initializer see `T[0]` instead of `T[N]`.
-        // C++ has no array designators, so the top-level initializer count is
-        // the array bound -- unless an element is an unexpanded pack, whose
-        // length is only known once the template is instantiated.
-        if (CompilerIsCXX() && initializer != NULL &&
-            initializer->op == AST_OP(braced_init) &&
-            sym->type != NULL && sym->type->declarator == kDeclArray &&
-            sym->type->info.array.is_flexible) {
-          BracedInitializerASTNode* braced =
-              (BracedInitializerASTNode*)initializer;
-          if (!BracedInitializerHasPackExpansion(braced)) {
-            sym->type->info.array.size.fixed = (int)braced->initializers->length;
-            sym->type->info.array.is_flexible = false;
-            TypeRecordCalculateSize(sym->type);
-          }
-        }
         ResolveCXXClassTemplateArgumentDeductionFromInitializer(
             syntax, sym, initializer);
         initializer =
@@ -11932,7 +11959,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           // later body-analysis pass. Skip this inside a template, where the
           // initializer may be dependent and unanalyzable until instantiation
           // (decltype defers via dependent_decltype_expr there anyway).
-          (TypeContainsAuto(sym->type) &&
+          ((TypeContainsAuto(sym->type) ||
+            (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
+             sym->type->info.array.is_flexible && initializer != NULL)) &&
            syntax->current_template_parameters == NULL)) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);

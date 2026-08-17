@@ -290,6 +290,27 @@ static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol) {
   return IRSetType(GeneratorEmit(gen, call), return_type);
 }
 
+static Symbol* GetThreadYieldFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "thrd_yield");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  return GetInventedRuntimeFunction(
+      "thrd_yield", NewTypeRecordWithSize(kTypeVoid, kQualPlain), location);
+}
+
+static void GenerateTrivialInfiniteLoopYield(Generator* gen, ASTNode* loop) {
+  if ((loop->flags & kASTTrivialInfiniteLoop) == 0 ||
+      !CompilerTargetSupportsThreads()) {
+    return;
+  }
+  Symbol* yield = GetThreadYieldFunction(loop->location);
+  GenerateNoArgRuntimeCall(gen, yield);
+}
+
 static IRNode* GenerateContractViolationRuntimeCall(
     Generator* gen, ContractAssertionKind kind, int detection,
     SourceLocation location) {
@@ -1745,6 +1766,7 @@ static void GenerateWhileStatement(Generator* gen,
 
       // stmt
       GenerateStatement(gen, node->stmt);
+      GenerateTrivialInfiniteLoopYield(gen, (ASTNode*)node);
       GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
       break;
     }
@@ -1760,6 +1782,7 @@ static void GenerateWhileStatement(Generator* gen,
 
       GeneratorEmit(gen, loop_label);
       GenerateStatement(gen, node->stmt);
+      GenerateTrivialInfiniteLoopYield(gen, (ASTNode*)node);
 
       // continue_label:
       GeneratorEmit(gen, gen->continue_label);
@@ -1794,6 +1817,7 @@ static void GenerateDoStatement(Generator* gen,
  
   // stmt
   GenerateStatement(gen, node->stmt);
+  GenerateTrivialInfiniteLoopYield(gen, (ASTNode*)node);
 
   // continue_label:
   GeneratorEmit(gen, gen->continue_label);
@@ -2123,6 +2147,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
     
       // stmt
       GenerateStatement(gen, node->stmt);
+      GenerateTrivialInfiniteLoopYield(gen, (ASTNode*)node);
 
       // Continue label.
       GeneratorEmit(gen, gen->continue_label);
@@ -2150,6 +2175,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 
       // stmt
       GenerateStatement(gen, node->stmt);
+      GenerateTrivialInfiniteLoopYield(gen, (ASTNode*)node);
 
       // Continue label.
       GeneratorEmit(gen, gen->continue_label);

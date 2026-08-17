@@ -410,6 +410,8 @@ struct ConstraintExpr;
 #define kASTCXXPlacementNew (1ULL << 50)  // New-expression selected the standard non-allocating placement form.
 #define kASTCXXArrayNew (1ULL << 51)  // New-expression allocated an array type.
 #define kASTConstexprPlacementDiagnosed (1ULL << 52)  // Constexpr placement/provenance diagnostic already emitted.
+#define kASTSourceEmptyCompound (1ULL << 53)  // Source spelling was exactly an empty compound-statement.
+#define kASTTrivialInfiniteLoop (1ULL << 54)  // P2809 trivial infinite loop; runtime iterations yield.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
