@@ -52,6 +52,10 @@ typedef struct {
   // preprocessing tokens that must be passed to the lexer without another
   // round of macro expansion.
   bool directive_produced_output;
+  // Phase-4 module-file state. Before the first module directive, only #line
+  // directives (plus whitespace/comments) may occur.
+  bool module_leading_group_has_other_content;
+  bool module_file_started;
 } Preprocessor;
 
 void PreprocessorInit(Preprocessor* p);

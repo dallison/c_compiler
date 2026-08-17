@@ -346,14 +346,22 @@ void SourceReadLine(Source* src, String* line) {
       StringAppendChar(line, c);  // Add char to line.
     }
 
-    // If the last character is \ then we replace it with a space and
-    // keep reading.
+    // Translation phase 2 deletes a trailing backslash, any intervening
+    // non-newline whitespace, and the newline.  Deletion is significant:
+    // replacing the splice with a space prevents tokens and universal
+    // character names from being formed across physical source lines.
     if (line->length > 0) {
-      size_t len = line->length;
-      if (line->value[len - 1] == '\\') {  // Last char is \?
-        line->value[len - 1] = ' ';        // Replace by space.
-
-        // Read another line.
+      size_t splice = line->length;
+      while (splice > 0 &&
+             (line->value[splice - 1] == ' ' ||
+              line->value[splice - 1] == '\t' ||
+              line->value[splice - 1] == '\v' ||
+              line->value[splice - 1] == '\f' ||
+              line->value[splice - 1] == '\r')) {
+        splice--;
+      }
+      if (splice > 0 && line->value[splice - 1] == '\\') {
+        StringErase(line, splice - 1, line->length - (splice - 1));
         StringDestruct(&newline);
         continue;
       }

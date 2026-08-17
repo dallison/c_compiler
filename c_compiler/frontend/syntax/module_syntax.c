@@ -477,6 +477,10 @@ static ASTNode* ParseNamedModuleDeclaration(Syntax* syntax, bool exported) {
     RecordNamedModuleDeclaration(syntax, exported, &id, location);
   }
   ModuleIdDestruct(&id);
+  Vector attributes;
+  VectorInit(&attributes);
+  SyntaxParseCXXAttributes(syntax, &attributes);
+  AttributeListDestruct(&attributes);
   SyntaxNeedSemicolon(syntax, TC(decl));
   return EmptyDeclarationList(location);
 }

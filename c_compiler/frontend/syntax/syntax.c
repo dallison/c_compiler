@@ -618,6 +618,8 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
   Token op = syntax->lex->current_token;
   switch (op) {
     case TOK(string): {
+      LexValidateUnevaluatedString(syntax->lex, "literal operator name",
+                                   /*allow_user_defined_suffix=*/true);
       if (syntax->lex->spelling.length != 0) {
         SyntaxError(syntax, "Expected empty string in literal operator name");
       }
@@ -2091,7 +2093,9 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   StringInit(&message, "static assertion failed");
   ASTNode* message_expr = NULL;
   if (LexMatch(syntax->lex, TOK(comma))) {
-    if (LexLookingAt(syntax->lex, TOK(string))) {
+    if (LexLookingAtStringLiteral(syntax->lex)) {
+      LexValidateUnevaluatedString(syntax->lex, "static_assert",
+                                   /*allow_user_defined_suffix=*/false);
       StringSetString(&message, &syntax->lex->spelling);
       LexNextToken(syntax->lex);
     } else if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
@@ -3013,9 +3017,19 @@ static void AppendCXXAttributeArgToken(Lex* lex, String* arg) {
   }
 }
 
-static void ParseCXXAttributeArguments(Syntax* syntax, Attribute* attr) {
+static void ParseCXXAttributeArguments(Syntax* syntax, Attribute* attr,
+                                       bool unevaluated_string_argument) {
   if (!LexMatch(syntax->lex, TOK(lparen))) {
     return;
+  }
+  if (unevaluated_string_argument) {
+    if (LexLookingAtStringLiteral(syntax->lex)) {
+      LexValidateUnevaluatedString(syntax->lex, "attribute argument",
+                                   /*allow_user_defined_suffix=*/false);
+    } else {
+      SyntaxError(syntax,
+                  "attribute argument must be an unevaluated string");
+    }
   }
 
   int depth = 1;
@@ -3109,7 +3123,11 @@ static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
 
   Attribute* attr =
       NewAttribute(CanonicalCXXAttributeName(namespace_name, attr_name));
-  ParseCXXAttributeArguments(syntax, attr);
+  bool unevaluated_string_argument =
+      namespace_name == NULL &&
+      (strcmp(attr_name, "deprecated") == 0 ||
+       strcmp(attr_name, "nodiscard") == 0);
+  ParseCXXAttributeArguments(syntax, attr, unevaluated_string_argument);
   if (StringEqual(&attr->name, "aligned") && AttributeArgCount(attr) > 0) {
     long ignored = 0;
     if (!AttributeArgInt(attr, 0, &ignored)) {
@@ -5602,22 +5620,24 @@ void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
     SyntaxError(syntax, "deleted function reasons require C++26");
   }
-  if (!LexLookingAt(syntax->lex, TOK(string)) ||
-      syntax->lex->literal_encoding != kLiteralEncodingNone ||
-      syntax->lex->ud_suffix.length != 0) {
+  if (!LexLookingAtStringLiteral(syntax->lex)) {
     SyntaxError(syntax,
-                "deleted function reason must be an ordinary string literal");
+                "deleted function reason must be an unevaluated string");
     if (!LexLookingAt(syntax->lex, TOK(rparen)) &&
         !LexLookingAt(syntax->lex, TOK(semicolon))) {
       LexNextToken(syntax->lex);
     }
   } else {
-    if (func->info.function.deleted_reason != NULL) {
-      StringDelete(func->info.function.deleted_reason);
+    if (LexValidateUnevaluatedString(
+            syntax->lex, "deleted function reason",
+            /*allow_user_defined_suffix=*/false)) {
+      if (func->info.function.deleted_reason != NULL) {
+        StringDelete(func->info.function.deleted_reason);
+      }
+      func->info.function.deleted_reason =
+          NewStringWithLength(syntax->lex->spelling.value,
+                              syntax->lex->spelling.length);
     }
-    func->info.function.deleted_reason =
-        NewStringWithLength(syntax->lex->spelling.value,
-                            syntax->lex->spelling.length);
     LexNextToken(syntax->lex);
   }
   SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
@@ -9637,7 +9657,7 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
   LexCheckpointSave(syntax->lex, &checkpoint);
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // extern
-  if (!LexLookingAt(syntax->lex, TOK(string))) {
+  if (!LexLookingAtStringLiteral(syntax->lex)) {
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     return NULL;
@@ -9646,7 +9666,9 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
 
   String linkage;
   StringInit(&linkage, "");
-  while (LexLookingAt(syntax->lex, TOK(string))) {
+  while (LexLookingAtStringLiteral(syntax->lex)) {
+    LexValidateUnevaluatedString(syntax->lex, "linkage specification",
+                                 /*allow_user_defined_suffix=*/false);
     StringAppend(&linkage, syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
   }

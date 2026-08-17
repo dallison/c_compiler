@@ -65,6 +65,7 @@ typedef struct Lex {
   String ud_suffix;     // C++ user-defined literal suffix.
   LiteralEncoding literal_encoding;
   bool literal_is_raw;
+  bool literal_has_numeric_escape;
   
   bool preprocessor_mode;  // Running in preprocessor mode.
   bool in_comment;         // We are inside a multi-line comment.
@@ -103,6 +104,7 @@ typedef struct {
   String ud_suffix;
   LiteralEncoding literal_encoding;
   bool literal_is_raw;
+  bool literal_has_numeric_escape;
   bool preprocessor_mode;
   bool in_comment;
   bool assembler_mode;
@@ -140,6 +142,14 @@ void LexSkipSpacesAndComments(Lex* lex);
 
 // End of file?
 bool LexEof(Lex* lex);
+
+// True for any ordinary, UTF, or wide string-literal token.
+bool LexLookingAtStringLiteral(Lex* lex);
+
+// Enforce the C++26 unevaluated-string spelling restrictions on the current
+// string-literal token. Returns false after issuing a diagnostic on failure.
+bool LexValidateUnevaluatedString(Lex* lex, const char* context,
+                                  bool allow_user_defined_suffix);
 
 // Does the current token match that given?  If so, move on to the next
 // token and return true.

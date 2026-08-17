@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -489,6 +490,8 @@ void PreprocessorInit(Preprocessor* p) {
   SetInit(&p->pragma_once_files, ComparePragmaOncePath);
   p->is_compiled_in = true;
   p->directive_produced_output = false;
+  p->module_leading_group_has_other_content = false;
+  p->module_file_started = false;
 
 #ifndef DAVECC_SYSROOT_HDRS
 #error "Please define DAVECC_SYSROOT_HDRS to tell the compiler where the headers are"
@@ -556,6 +559,8 @@ void PreprocessorReset(Preprocessor* p) {
   VectorClear(&p->macro_stack);
   SetClearWithContents(&p->pragma_once_files, free, false);
   p->directive_produced_output = false;
+  p->module_leading_group_has_other_content = false;
+  p->module_file_started = false;
   PredefineMacros(p);
 }
 
@@ -837,6 +842,8 @@ typedef struct {
   size_t curr;        // Index of start of current token.
   size_t next;        // Index of start of next token.
 } TokenIterator;
+
+static void SkipSpaceTokens(TokenIterator* t);
 
 // Encode the integer length into the string in LEB128.
 // Since we are putting the output in a string, a value of zero is
@@ -1408,6 +1415,16 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       break;
     }
     char ch = input->value[i];
+    if (CompilerIsCXX() && ch == '\\' && i + 1 < input->length &&
+        (input->value[i + 1] == 'u' || input->value[i + 1] == 'U' ||
+         input->value[i + 1] == 'N') &&
+        LexIdentifierSourceCharByteCount(input->value, i, input->length,
+                                         true) == 0) {
+      PreprocessorError(
+          p,
+          "universal character name cannot name a basic character or an "
+          "invalid identifier character");
+    }
     if (LexIdentifierSourceCharByteCount(input->value, i, input->length,
                                          true) != 0 ||
         (assembler_mode && (ch == '.' || ch == '@'))) {
@@ -1544,6 +1561,202 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
     // Other token.  This is a sequence of arbitrary characters terminated
     // by something that can start a different token.
     i = AppendOtherToken(input, output, i);
+  }
+}
+
+static bool ModuleTokenSpellingEquals(TokenIterator* ti,
+                                      const char* spelling) {
+  String current = {0};
+  GetCurrentTokenSpelling(ti, &current);
+  bool equal = StringEqual(&current, spelling);
+  StringDestruct(&current);
+  return equal;
+}
+
+static bool ModuleTokenIsIdentifier(TokenIterator* ti, const char* spelling) {
+  return CurrentToken(ti) == PPTOK(identifier) &&
+         ModuleTokenSpellingEquals(ti, spelling);
+}
+
+static bool ModuleTokenIsPunctuator(TokenIterator* ti, const char* spelling) {
+  PreprocessingToken token = CurrentToken(ti);
+  return (token == PPTOK(other_char) || token == PPTOK(other_string) ||
+          token == PPTOK(comma) || token == PPTOK(hash) ||
+          token == PPTOK(hashhash) || token == PPTOK(openparen) ||
+          token == PPTOK(closeparen)) &&
+         ModuleTokenSpellingEquals(ti, spelling);
+}
+
+static bool ActiveObjectLikeMacro(Preprocessor* p, String* name) {
+  Macro* macro = PreprocessorFindMacro(p, name);
+  return macro != NULL && !macro->undefined && !macro->is_function_like;
+}
+
+static void DiagnoseModuleMacro(Preprocessor* p, TokenIterator* ti) {
+  String name = {0};
+  GetCurrentTokenSpelling(ti, &name);
+  if (ActiveObjectLikeMacro(p, &name)) {
+    PreprocessorError(
+        p,
+        "object-like macro '%s' cannot be used in a module declaration",
+        name.value);
+  }
+  StringDestruct(&name);
+}
+
+static bool ClassifyModuleTokens(Preprocessor* p, String* tokens,
+                                 bool* has_tokens) {
+  *has_tokens = false;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    return false;
+  }
+
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  SkipSpaceTokens(&ti);
+  if (CurrentToken(&ti) == PPTOK(end)) {
+    return false;
+  }
+  *has_tokens = true;
+
+  bool exported = ModuleTokenIsIdentifier(&ti, "export");
+  if (exported) {
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+  }
+  if (!ModuleTokenIsIdentifier(&ti, "module")) {
+    return false;
+  }
+  MoveToNextToken(&ti);
+  SkipSpaceTokens(&ti);
+
+  bool module_line = false;
+  if (ModuleTokenIsPunctuator(&ti, ";")) {
+    module_line = !exported;
+  } else if (ModuleTokenIsPunctuator(&ti, ":")) {
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+    if (CurrentToken(&ti) == PPTOK(identifier)) {
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      module_line = true;
+    }
+  } else if (CurrentToken(&ti) == PPTOK(identifier)) {
+    for (;;) {
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      if (!ModuleTokenIsPunctuator(&ti, ".")) {
+        break;
+      }
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      if (CurrentToken(&ti) != PPTOK(identifier)) {
+        module_line = true;
+        break;
+      }
+    }
+    if (ModuleTokenIsPunctuator(&ti, ":")) {
+      do {
+        MoveToNextToken(&ti);
+        SkipSpaceTokens(&ti);
+        if (CurrentToken(&ti) != PPTOK(identifier)) {
+          break;
+        }
+        MoveToNextToken(&ti);
+        SkipSpaceTokens(&ti);
+      } while (ModuleTokenIsPunctuator(&ti, "."));
+    }
+    module_line = true;
+  }
+
+  if (module_line) {
+    while (CurrentToken(&ti) != PPTOK(end) &&
+           !ModuleTokenIsPunctuator(&ti, ";")) {
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+    }
+    module_line = ModuleTokenIsPunctuator(&ti, ";");
+  }
+  return module_line;
+}
+
+static void DiagnoseModuleMacros(Preprocessor* p, String* tokens) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  SkipSpaceTokens(&ti);
+  if (ModuleTokenIsIdentifier(&ti, "export")) {
+    DiagnoseModuleMacro(p, &ti);
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+  }
+  if (!ModuleTokenIsIdentifier(&ti, "module")) {
+    return;
+  }
+  DiagnoseModuleMacro(p, &ti);
+  MoveToNextToken(&ti);
+  SkipSpaceTokens(&ti);
+
+  if (ModuleTokenIsPunctuator(&ti, ";")) {
+    return;
+  }
+  if (ModuleTokenIsPunctuator(&ti, ":")) {
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+    if (CurrentToken(&ti) == PPTOK(identifier)) {
+      DiagnoseModuleMacro(p, &ti);
+    }
+    return;
+  }
+  while (CurrentToken(&ti) == PPTOK(identifier)) {
+    DiagnoseModuleMacro(p, &ti);
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+    if (ModuleTokenIsPunctuator(&ti, ":")) {
+      MoveToNextToken(&ti);
+      SkipSpaceTokens(&ti);
+      continue;
+    }
+    if (!ModuleTokenIsPunctuator(&ti, ".")) {
+      break;
+    }
+    MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
+  }
+}
+
+static bool PrepareModuleTokens(Preprocessor* p, String* tokens) {
+  if (p->lex != NULL && p->lex->source != NULL &&
+      StringEqual(&p->lex->source->filename, "builtin")) {
+    return false;
+  }
+  bool has_tokens = false;
+  bool module_line = ClassifyModuleTokens(p, tokens, &has_tokens);
+  if (module_line) {
+    DiagnoseModuleMacros(p, tokens);
+    if (!p->module_file_started &&
+        p->module_leading_group_has_other_content) {
+      PreprocessorError(
+          p, "only #line directives may precede the first module directive");
+    }
+    p->module_file_started = true;
+  } else if (has_tokens && !p->module_file_started) {
+    p->module_leading_group_has_other_content = true;
+  }
+  return module_line;
+}
+
+static void ValidateExpandedModuleTokens(Preprocessor* p, String* tokens,
+                                         bool source_was_module_line) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      source_was_module_line ||
+      (p->lex != NULL && p->lex->source != NULL &&
+       StringEqual(&p->lex->source->filename, "builtin"))) {
+    return;
+  }
+  bool has_tokens = false;
+  if (ClassifyModuleTokens(p, tokens, &has_tokens)) {
+    PreprocessorError(
+        p, "module declarations cannot be produced by macro expansion");
   }
 }
 
@@ -3202,16 +3415,30 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
   if (CurrentToken(&ti) == PPTOK(number)) {
     String spelling;
     GetCurrentTokenSpelling(&ti, &spelling);
-    lineno = 0;
+    uint64_t parsed_lineno = 0;
     for (size_t i = 0; i < spelling.length; i++) {
       if (!isdigit((unsigned char)spelling.value[i])) {
-        PreprocessorError(p, "#line neeed a simple digit sequence");
+        PreprocessorError(p, "#line needs a simple digit sequence");
         error = true;
         break;
       }
-      lineno = lineno * 10 + spelling.value[i] - '0';
+      unsigned digit = (unsigned)(spelling.value[i] - '0');
+      if (parsed_lineno > (UINT64_MAX - digit) / 10) {
+        PreprocessorError(p, "#line number is too large");
+        error = true;
+        break;
+      }
+      parsed_lineno = parsed_lineno * 10 + digit;
+    }
+    if (!error && (parsed_lineno == 0 || parsed_lineno > INT_MAX)) {
+      PreprocessorError(
+          p, "#line number must be between 1 and %d", INT_MAX);
+      error = true;
+    } else if (!error) {
+      lineno = (int)parsed_lineno;
     }
     MoveToNextToken(&ti);
+    SkipSpaceTokens(&ti);
     StringDestruct(&spelling);
   }
   if (!error && lineno < 0) {
@@ -3230,11 +3457,10 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
     p->lex->source->lineno = lineno - 1;     // Next line will have this number.
 
     if (filename_set) {
-       StringSetString(&p->lex->source->filename, &filename);
-       StringDestruct(&filename);
-     } else {
-       StringSetString(&p->lex->source->filename, &p->lex->source->original);
-     }
+      StringSetString(&p->lex->source->filename, &filename);
+      p->lex->source->file_index = -1;
+      StringDestruct(&filename);
+    }
   }
   StringDestruct(&tokenized_line);
 }
@@ -3674,6 +3900,13 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   // pos is the index of the character after the last in the command name.
   pos = SkipSpacesAndComments(p, pos, line, NULL);
 
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      !p->module_file_started && !StringEqual(&command_name, "line") &&
+      (p->lex == NULL || p->lex->source == NULL ||
+       !StringEqual(&p->lex->source->filename, "builtin"))) {
+    p->module_leading_group_has_other_content = true;
+  }
+
   PreprocessorCommand command = NULL;
   for (size_t i = 0; preprocessor_commands[i].command_name != NULL; i++) {
     if (StringEqual(&command_name, preprocessor_commands[i].command_name)) {
@@ -3882,8 +4115,65 @@ static void CollectActualArguments(Preprocessor* p,
   }
 }
 
-// The current token is ##.  Join the previous and next
-// tokens together.
+static bool IsPreprocessingPunctuator(String* spelling) {
+  static const char* const punctuators[] = {
+      "{",   "}",   "[",   "]",   "#",   "##",  "(",   ")",   "<:",
+      ":>",  "<%",  "%>",  "%:",  "%:%:", ";",   ":",   "...", "?",
+      "::",  ".",   ".*",  "->",  "->*", "~",   "!",   "+",   "-",
+      "*",   "/",   "%",   "^",   "&",   "|",   "=",   "+=",  "-=",
+      "*=",  "/=",  "%=",  "^=",  "&=",  "|=",  "==",  "!=",  "<",
+      ">",   "<=",  ">=",  "<=>", "&&",  "||",  "<<",  ">>",  "<<=",
+      ">>=", "++",  "--",  ",",
+  };
+  for (size_t i = 0; i < sizeof(punctuators) / sizeof(punctuators[0]); i++) {
+    if (StringEqual(spelling, punctuators[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TokenizedPasteIsSinglePreprocessingToken(Preprocessor* p,
+                                                     String* tokens) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, p, tokens);
+  SkipSpaceTokens(&ti);
+  PreprocessingToken token = CurrentToken(&ti);
+  if (token == PPTOK(end) || token == PPTOK(comment) ||
+      token == PPTOK(placemarker) || token == PPTOK(space)) {
+    return false;
+  }
+  size_t token_index = ti.curr;
+  MoveToNextToken(&ti);
+  SkipSpaceTokens(&ti);
+  if (CurrentToken(&ti) != PPTOK(end)) {
+    return false;
+  }
+  if (token == PPTOK(other_string)) {
+    String spelling = {0};
+    AppendTokenSpelling(tokens, token_index, &spelling);
+    bool valid = IsPreprocessingPunctuator(&spelling);
+    StringDestruct(&spelling);
+    return valid;
+  }
+  if (token == PPTOK(other_char)) {
+    unsigned char ch = (unsigned char)tokens->value[token_index + 1];
+    if (ch == '\'' || ch == '"') {
+      return false;
+    }
+    bool basic_graphic = ch >= 0x21 && ch <= 0x7e;
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        (ch == '$' || ch == '@' || ch == '`')) {
+      basic_graphic = false;
+    }
+    return basic_graphic;
+  }
+  return true;
+}
+
+// The current token is ##. Join the previous and next tokens, then re-tokenize
+// the result. P2621 requires the concatenation to produce exactly one valid
+// preprocessing token and permits it to form a universal-character-name.
 static void Paste(TokenIterator* ti) {
   PreprocessingToken prev = PrevToken(ti);
   PreprocessingToken next = NextToken(ti);
@@ -3906,11 +4196,39 @@ static void Paste(TokenIterator* ti) {
   DetokenizeToken(ti->input, prev_index, &pasted);
   DetokenizeToken(ti->input, next_index, &pasted);
   
-  // The result is a single token containing the pasted tokens.
+  // Re-tokenizing is what makes a UCN or identifier formed by ## available for
+  // subsequent macro replacement. It also distinguishes valid multi-character
+  // punctuators such as >>= from invalid combinations such as **.
   String tokenized_paste = {0};
-  StringAppendChar(&tokenized_paste, PPTOK(other_string));
-  EncodeLength(&tokenized_paste, pasted.length);
-  StringAppendString(&tokenized_paste, &pasted);
+  if (CompilerIsCXX()) {
+    // Do not feed a newly formed comment opener to the general tokenizer:
+    // comment collection can read subsequent physical source lines, whereas
+    // paste validation must be local to the two operands.
+    bool forms_comment =
+        pasted.length >= 2 && pasted.value[0] == '/' &&
+        (pasted.value[1] == '/' || pasted.value[1] == '*');
+    if (!forms_comment) {
+      Tokenize(ti->p, &pasted, &tokenized_paste, 0, true,
+               ti->p->lex->assembler_mode, false);
+    }
+    if (forms_comment ||
+        !TokenizedPasteIsSinglePreprocessingToken(ti->p,
+                                                  &tokenized_paste)) {
+      PreprocessorError(ti->p,
+                        "token paste result '%s' is not a valid "
+                        "preprocessing token",
+                        pasted.value);
+      StringClear(&tokenized_paste);
+      static const char invalid_paste[] = "__invalid_token_paste";
+      StringAppendChar(&tokenized_paste, PPTOK(identifier));
+      EncodeLength(&tokenized_paste, sizeof(invalid_paste) - 1);
+      StringAppend(&tokenized_paste, invalid_paste);
+    }
+  } else {
+    StringAppendChar(&tokenized_paste, PPTOK(other_string));
+    EncodeLength(&tokenized_paste, pasted.length);
+    StringAppendString(&tokenized_paste, &pasted);
+  }
   StringDestruct(&pasted);
   StringReplaceString(ti->input,
                       prev_index,
@@ -4447,6 +4765,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
     start = SkipToEndOfComment(line, 0);
   }
   Tokenize(p, line, &tokenized_line, start, true, p->lex->assembler_mode, false);
+  bool source_module_line = PrepareModuleTokens(p, &tokenized_line);
   int limit = 20;
   while (--limit > 0) {
     String copy;
@@ -4463,6 +4782,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   if (limit == 0) {
     PreprocessorError(p, "Infinite macro expansion detected");
   }
+  ValidateExpandedModuleTokens(p, &tokenized_line, source_module_line);
   
   // Detokenize new line into output.
   if (start != 0) {

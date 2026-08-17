@@ -641,6 +641,7 @@ static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
       }
       *universal = true;
     } else {
+      lex->literal_has_numeric_escape = true;
       int bytes = LiteralEncodingSize(encoding);
       uint64_t maximum =
           bytes == 4 ? UINT32_MAX : ((UINT64_C(1) << (bytes * 8)) - 1);
@@ -694,6 +695,7 @@ static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
     return (int)value;
   }
   if (ch == 'x' || ch == 'X') {
+    lex->literal_has_numeric_escape = true;
     lex->pos++;
     int n = 0;
     while (lex->pos < lex->line.length &&
@@ -735,6 +737,7 @@ static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
     return (int)n;
   } else if (ch >= '0' && ch <= '7') {
     // Octal constant.
+    lex->literal_has_numeric_escape = true;
     int n = 0;
     while (lex->pos < lex->line.length && lex->line.value[lex->pos] >= '0' &&
            lex->line.value[lex->pos] <= '7') {
@@ -1288,6 +1291,12 @@ static int CollectCharConst(Lex* lex, LiteralEncoding encoding) {
     LexError(lex, "Max of 4 characters allowed in character constant");
   }
   if (nchars > 1) {
+    if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        encoding != kLiteralEncodingNone) {
+      LexError(lex,
+               "multi-character character literal cannot have an encoding "
+               "prefix in C++26");
+    }
     LexWarning(lex, "multichar", "multi-character character constant");
   }
   if (nchars == 0 || newline) {
@@ -1343,6 +1352,11 @@ static int CollectWideCharConst(Lex* lex) {
   }
   if (nchars > compiler->wchar_size) {
     LexError(lex, "Max of %d characters allowed in wide character constant", compiler->wchar_size);
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) && nchars > 1) {
+    LexError(lex,
+             "multi-character character literal cannot have an encoding "
+             "prefix in C++26");
   }
   if (nchars == 0 || newline) {
     LexError(lex, "Newline in character constant");
@@ -1764,6 +1778,7 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->fnumber = 0;
   lex->literal_encoding = kLiteralEncodingNone;
   lex->literal_is_raw = false;
+  lex->literal_has_numeric_escape = false;
   lex->pos = 0;
   lex->preprocessor = preprocessor;
   lex->preprocessor_mode = false;
@@ -1844,6 +1859,7 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
                         lex->ud_suffix.length);
   checkpoint->literal_encoding = lex->literal_encoding;
   checkpoint->literal_is_raw = lex->literal_is_raw;
+  checkpoint->literal_has_numeric_escape = lex->literal_has_numeric_escape;
   checkpoint->preprocessor_mode = lex->preprocessor_mode;
   checkpoint->in_comment = lex->in_comment;
   checkpoint->assembler_mode = lex->assembler_mode;
@@ -1875,6 +1891,7 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   StringSetString(&lex->ud_suffix, &checkpoint->ud_suffix);
   lex->literal_encoding = checkpoint->literal_encoding;
   lex->literal_is_raw = checkpoint->literal_is_raw;
+  lex->literal_has_numeric_escape = checkpoint->literal_has_numeric_escape;
   lex->preprocessor_mode = checkpoint->preprocessor_mode;
   lex->in_comment = checkpoint->in_comment;
   lex->assembler_mode = checkpoint->assembler_mode;
@@ -2112,6 +2129,7 @@ void LexNextToken(Lex* lex) {
   StringClear(&lex->ud_suffix);
   lex->literal_encoding = kLiteralEncodingNone;
   lex->literal_is_raw = false;
+  lex->literal_has_numeric_escape = false;
   LexSkipSpacesAndComments(lex);
 
   // Keep track of the start of the token before we read it.
@@ -2210,6 +2228,42 @@ bool LexMatchIdentifier(Lex* lex, String* string) {
 }
 
 bool LexLookingAt(Lex* lex, Token tok) { return lex->current_token == tok; }
+
+bool LexLookingAtStringLiteral(Lex* lex) {
+  return LexLookingAt(lex, TOK(string)) ||
+         LexLookingAt(lex, TOK(string_wide));
+}
+
+bool LexValidateUnevaluatedString(Lex* lex, const char* context,
+                                  bool allow_user_defined_suffix) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    return true;
+  }
+  bool valid = true;
+  if (!LexLookingAtStringLiteral(lex)) {
+    LexError(lex, "%s requires an unevaluated string", context);
+    return false;
+  }
+  if (lex->literal_encoding != kLiteralEncodingNone) {
+    LexError(lex, "unevaluated string in %s cannot have an encoding prefix",
+             context);
+    valid = false;
+  }
+  if (!allow_user_defined_suffix && lex->ud_suffix.length != 0) {
+    LexError(lex,
+             "unevaluated string in %s cannot have a user-defined suffix",
+             context);
+    valid = false;
+  }
+  if (lex->literal_has_numeric_escape) {
+    LexError(lex,
+             "unevaluated string in %s cannot contain a numeric escape "
+             "sequence",
+             context);
+    valid = false;
+  }
+  return valid;
+}
 
 int LexClosingAngleCount(Token token) {
   switch (token) {
