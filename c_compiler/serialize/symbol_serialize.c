@@ -95,6 +95,7 @@ enum {
   kSym_constexpr_initializer = 58,
   kSym_is_name_independent = 59,
   kSym_name_independent_lookup_ambiguous = 60,
+  kSym_template_template_parameter_kind = 61,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -162,6 +163,8 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_is_name_independent, "is_name_independent"},
     {kSym_name_independent_lookup_ambiguous,
      "name_independent_lookup_ambiguous"},
+    {kSym_template_template_parameter_kind,
+     "template_template_parameter_kind"},
 };
 
 //
@@ -462,6 +465,7 @@ static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
 // ---------------------------------------------------------------------------
 enum {
   kAt_parameters = 1,
+  kAt_ctad_names_template_template_parameter = 2,
 };
 
 static void WriteAliasTemplate(SerializeContext* ctx, WireBuffer* buf,
@@ -470,6 +474,9 @@ static void WriteAliasTemplate(SerializeContext* ctx, WireBuffer* buf,
   WireBufferInitOwned(&sub, 32);
   SerialWriteTemplateParameterVector(ctx, &sub, kAt_parameters,
                                      &at->parameters);
+  if (at->ctad_names_template_template_parameter) {
+    WireWriteBool(&sub, kAt_ctad_names_template_template_parameter, true);
+  }
   WireWriteBytes(buf, field, WireBufferData(&sub), WireBufferSize(&sub));
   WireBufferDestruct(&sub);
 }
@@ -483,6 +490,7 @@ static AliasTemplate* ReadAliasTemplate(DeserializeContext* ctx,
   }
   AliasTemplate* at = malloc(sizeof(AliasTemplate));
   VectorInit(&at->parameters);
+  at->ctad_names_template_template_parameter = false;
   WireBuffer sub;
   WireBufferInitReader(&sub, data, len);
   while (!WireBufferEof(&sub) && !WireBufferHasError(&sub)) {
@@ -493,6 +501,8 @@ static AliasTemplate* ReadAliasTemplate(DeserializeContext* ctx,
     }
     if (field == kAt_parameters) {
       SerialReadTemplateParameterVector(ctx, &sub, &at->parameters);
+    } else if (field == kAt_ctad_names_template_template_parameter) {
+      WireReadBool(&sub, &at->ctad_names_template_template_parameter);
     } else {
       WireSkip(&sub, wt);
     }
@@ -581,6 +591,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
         ctx, buf, kSym_template_template_parameters,
         s->template_template_parameters);
   }
+  WireWriteInt32(buf, kSym_template_template_parameter_kind,
+                 (int32_t)s->template_template_parameter_kind);
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -779,6 +791,13 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         SerialReadTemplateParameterVector(
             ctx, buf, s->template_template_parameters);
         break;
+      case kSym_template_template_parameter_kind: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        s->template_template_parameter_kind =
+            (TemplateTemplateParameterKind)v;
+        break;
+      }
       case kSym_is_parameter_pack:
         WireReadBool(buf, &b);
         s->flags.is_parameter_pack = b;

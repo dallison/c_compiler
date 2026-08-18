@@ -595,6 +595,13 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
                      reflection != NULL ? reflection->base_index : 0);
         break;
       }
+      case kTemplateValueObject:
+        StringAppend(result, "O");
+        if (!ConstexprObjectInitializerTemplateKey(
+                argument->type, argument->object_initializer, result)) {
+          StringAppend(result, "?");
+        }
+        break;
       case kTemplateValueNone:
         StringAppend(result, "?");
         break;

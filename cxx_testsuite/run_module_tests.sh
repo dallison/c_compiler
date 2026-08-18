@@ -338,6 +338,29 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/template_surface.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute template surface module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/template_parameter_objects.dcm" \
+  "$FIXTURES/template_parameter_objects.cppm" ||
+  fail "emit template parameter object module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  "$FIXTURES/template_parameter_objects.cppm" \
+  -o "$work/template_parameter_objects.o" ||
+  fail "compile template parameter object module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" \
+  "$FIXTURES/use_template_parameter_objects.cpp" \
+  -o "$work/use_template_parameter_objects.o" ||
+  fail "compile template parameter object importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_template_parameter_objects.o" \
+  "$work/template_parameter_objects.o" "$LIBC" \
+  -o "$work/template_parameter_objects.bin" ||
+  fail "link template parameter object executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/template_parameter_objects.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute template parameter object module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 \
   -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||
   fail "emit reachability.dcm"

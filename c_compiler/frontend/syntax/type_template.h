@@ -163,6 +163,11 @@ bool TypeIsClassTemplatePlaceholder(TypeRecord* type);
 Symbol* TypeClassTemplatePlaceholderOrigin(TypeRecord* type);
 bool TypeClassTemplatePlaceholderAcceptsDeduced(TypeRecord* placeholder,
                                                 TypeRecord* deduced);
+bool TypeTemplateTemplateParameterAcceptsDeduced(Symbol* parameter,
+                                                 TypeRecord* deduced);
+TypeRecord* TypeTemplateTemplateParameterApplyDefaults(
+    TypeParser* parser, Symbol* parameter, Symbol* argument_template,
+    TypeRecord* deduced);
 bool TypeIsCXXInitializerList(TypeRecord* type);
 bool CXXConstructorIsInitializerListConstructor(FunctionInfo* info);
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);

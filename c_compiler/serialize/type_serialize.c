@@ -122,6 +122,7 @@ enum {
   kTArg_reflection_sequence = 41,
   kTArg_reflection_substituted_arguments = 42,
   kTArg_reflection_dms_annotations = 43,
+  kTArg_object_initializer = 44,
 };
 
 //
@@ -140,6 +141,7 @@ enum {
   kTParam_associated_constraint = 10,
   kTParam_default_argument = 11,
   kTParam_template_parameters = 12,
+  kTParam_template_template_kind = 13,
 };
 
 //
@@ -444,6 +446,8 @@ static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
     SerialWriteTemplateParameterVector(
         ctx, out, kTParam_template_parameters, p->template_parameters);
   }
+  WireWriteInt32(out, kTParam_template_template_kind,
+                 (int32_t)p->template_template_kind);
 }
 
 static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
@@ -497,6 +501,12 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
         p->template_parameters = NewVector();
         SerialReadTemplateParameterVector(ctx, in, p->template_parameters);
         break;
+      case kTParam_template_template_kind: {
+        int32_t v;
+        WireReadInt32(in, &v);
+        p->template_template_kind = (TemplateTemplateParameterKind)v;
+        break;
+      }
       default:
         WireSkip(in, wt);
         break;
@@ -594,6 +604,8 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
             a->member_function);
   SWriteRef(ctx, out, kTArg_template_symbol, kSerialKindSymbol,
             a->template_symbol);
+  SWriteRef(ctx, out, kTArg_object_initializer, kSerialKindAST,
+            a->object_initializer);
   if (a->reflection_value != NULL) {
     ReflectionValue* reflection = a->reflection_value;
     WireWriteInt32(out, kTArg_reflection_kind,
@@ -722,6 +734,10 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
       case kTArg_template_symbol:
         a->template_symbol =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_object_initializer:
+        a->object_initializer =
+            (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kTArg_reflection_kind: {
         int32_t value = 0;

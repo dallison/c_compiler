@@ -106,6 +106,8 @@ typedef enum {
 
 #define CONSTEXPR_MAX_CALL_DEPTH 512
 #define CONSTEXPR_MAX_STEPS 1000000
+
+static int template_argument_object_evaluation_depth;
 #define CONSTEXPR_HEAP_SIZE (256 * 1024)
 
 static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
@@ -152,7 +154,7 @@ static Symbol* ConstexprVirtualCallSymbol(ConstEvalContext* ctx, ASTNode* node,
 
 static void ReportConstexprPlacementFailure(ASTNode* node,
                                             const char* message) {
-  if (node != NULL && compiler->constant_evaluation_required_depth > 0 &&
+  if (node != NULL && !DiagnosticsSuppressed() &&
       (node->flags & kASTConstexprPlacementDiagnosed) == 0) {
     SemanticError(node, "%s", message);
     node->flags |= kASTConstexprPlacementDiagnosed;
@@ -648,7 +650,37 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
             node, "placement allocation is not associated with a new-expression");
         return false;
       }
+      ASTNode* placement_core = placement;
+      while (placement_core != NULL &&
+             (placement_core->op == AST_OP(cast) ||
+              placement_core->op == AST_OP(expr_init))) {
+        placement_core =
+            placement_core->op == AST_OP(cast)
+                ? ((CastASTNode*)placement_core)->expr
+                : ((ExpressionInitializerASTNode*)placement_core)->expr;
+      }
+      if (placement_core != NULL &&
+          placement_core->op == AST_OP(address) &&
+          ((UnaryASTNode*)placement_core)->sub != NULL &&
+          ((UnaryASTNode*)placement_core)->sub->op == AST_OP(identifier)) {
+        Symbol* target =
+            ((IdentifierASTNode*)((UnaryASTNode*)placement_core)->sub)->symbol;
+        if (target != NULL && !target->flags.is_local &&
+            !StorageIs(target->storage, STO(static))) {
+          ReportConstexprPlacementFailure(
+              node, "placement new target is not a constant address");
+          return false;
+        }
+      }
       if (!EvaluateConstexprAddressValue(ctx, placement, result)) {
+        ReportConstexprPlacementFailure(
+            node, "placement new target is not a constant address");
+        return false;
+      }
+      if (result->address_binding != NULL &&
+          result->address_binding->symbol != NULL &&
+          !result->address_binding->symbol->flags.is_local &&
+          !StorageIs(result->address_binding->symbol->storage, STO(static))) {
         ReportConstexprPlacementFailure(
             node, "placement new target is not a constant address");
         return false;
@@ -1877,7 +1909,8 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
 
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           TypeRecord* type,
-                                          SourceLocation location);
+                                          SourceLocation location,
+                                          bool preserve_external_addresses);
 
 static bool EvaluateConstexprStatementExpression(ConstEvalContext* ctx,
                                                  ASTNode* node,
@@ -1919,7 +1952,8 @@ static bool EvaluateConstexprStatementExpression(ConstEvalContext* ctx,
 }
 
 static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
-                                           SourceLocation location) {
+                                           SourceLocation location,
+                                           bool preserve_external_addresses) {
   if (object == NULL || object->type == NULL) {
     return NULL;
   }
@@ -1927,7 +1961,8 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
   if (TypeIsFixedArray(object->type)) {
     for (size_t i = 0; i < object->slots.length; i++) {
       ASTNode* init = ConstexprValueInitializer(
-          object->slots.value.p[i], object->type->next, location);
+          object->slots.value.p[i], object->type->next, location,
+          preserve_external_addresses);
       if (init != NULL) {
         VectorAppend(initializers, init);
       }
@@ -1946,7 +1981,7 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
       }
       ASTNode* init = ConstexprValueInitializer(
           object->slots.value.p[ConstexprMemberSlotIndex(object, member)],
-          member->symbol->type, location);
+          member->symbol->type, location, preserve_external_addresses);
       if (init != NULL) {
         VectorAppend(initializers, init);
       }
@@ -1960,12 +1995,14 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
 
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           TypeRecord* type,
-                                          SourceLocation location) {
+                                          SourceLocation location,
+                                          bool preserve_external_addresses) {
   if (value == NULL || type == NULL) {
     return NULL;
   }
   if (value->is_object) {
-    return ConstexprObjectInitializer(value->object, location);
+    return ConstexprObjectInitializer(value->object, location,
+                                      preserve_external_addresses);
   }
   ConstexprValue resolved = ConstexprResolveForwardedAddress(*value);
   ConstexprCanonicalizeAddressValue(&resolved);
@@ -1987,6 +2024,15 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     }
     expr = NewStringConstantASTNode(
         contents, TypeRecordCopy(value->address_object->type), location);
+  } else if (preserve_external_addresses &&
+             (TypeIsPointer(type) || TypeIsReference(type)) &&
+             value->is_address && value->address_binding != NULL &&
+             value->address_index == 0) {
+    Symbol* symbol = value->address_binding->symbol;
+    ASTNode* object =
+        NewIdentifierASTNode(symbol, location);
+    expr = NewUnaryASTNode(AST_OP(address), NULL, location, object);
+    ASTNodeSetType(expr, TypeRecordCopy(type));
   } else if (TypeIsReflection(type)) {
     expr = NewReflectionConstantASTNode(
         (ReflectionValue*)(intptr_t)value->ivalue, location);
@@ -2008,7 +2054,8 @@ ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
     return NULL;
   }
   return ConstexprObjectInitializer((ConstexprObject*)symbol->value.other,
-                                    location);
+                                    location,
+                                    /*preserve_external_addresses=*/false);
 }
 
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
@@ -3119,21 +3166,230 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   return ok;
 }
 
-ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
-                                                 ASTNode* expression) {
+static bool ConstexprValuePermittedInTemplateArgument(ConstexprValue* value);
+
+static bool ConstexprObjectPermittedInTemplateArgument(ConstexprObject* object) {
+  if (object == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < object->slots.length; i++) {
+    if (!ConstexprValuePermittedInTemplateArgument(object->slots.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool ConstexprValuePermittedInTemplateArgument(ConstexprValue* value) {
+  if (value == NULL) {
+    return true;
+  }
+  if (value->is_object) {
+    return ConstexprObjectPermittedInTemplateArgument(value->object);
+  }
+  if (!value->is_address) {
+    return true;
+  }
+  if (value->heap_block != NULL) {
+    return false;
+  }
+  if (value->address_binding != NULL) {
+    Symbol* symbol = value->address_binding->symbol;
+    return symbol != NULL && !symbol->flags.is_temp &&
+           !symbol->flags.is_argument &&
+           !StorageIs(symbol->storage, STO(auto)) &&
+           !StorageIs(symbol->storage, STO(register));
+  }
+  if (value->address_object != NULL) {
+    return false;
+  }
+  return value->address_slot == NULL && value->address_index == 0;
+}
+
+static ASTNode* ConstexprObjectInitializerForExpressionImpl(
+    TypeRecord* type, ASTNode* expression, bool template_argument) {
   if (type == NULL || expression == NULL ||
       (!TypeIsFixedArray(type) && !TypeIsStructOrUnion(type))) {
     return NULL;
   }
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
+  if (template_argument) {
+    template_argument_object_evaluation_depth++;
+  }
   ConstexprValue value = {0};
   bool ok = EvaluateConstexprInitializer(&ctx, type, expression, &value) &&
-            value.is_object && value.object != NULL;
+            value.is_object && value.object != NULL &&
+            (!template_argument ||
+             ConstexprObjectPermittedInTemplateArgument(value.object));
+  if (template_argument) {
+    template_argument_object_evaluation_depth--;
+  }
   ASTNode* initializer =
-      ok ? ConstexprValueInitializer(&value, type, expression->location) : NULL;
+      ok ? ConstexprValueInitializer(&value, type, expression->location,
+                                     template_argument)
+         : NULL;
   ConstEvalContextDestruct(&ctx);
   return initializer;
+}
+
+ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
+                                                 ASTNode* expression) {
+  return ConstexprObjectInitializerForExpressionImpl(
+      type, expression, /*template_argument=*/false);
+}
+
+ASTNode* ConstexprTemplateArgumentObjectInitializerForExpression(
+    TypeRecord* type, ASTNode* expression) {
+  return ConstexprObjectInitializerForExpressionImpl(
+      type, expression, /*template_argument=*/true);
+}
+
+static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
+                                                       ConstexprObject* right);
+
+static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
+                                                      ConstexprValue* right) {
+  if (left == NULL || right == NULL) {
+    return left == right;
+  }
+  if (left->is_object || right->is_object) {
+    return left->is_object == right->is_object &&
+           ConstexprObjectsTemplateArgumentEquivalent(left->object,
+                                                      right->object);
+  }
+  if (left->is_address || right->is_address) {
+    if (left->is_address != right->is_address ||
+        left->address_index != right->address_index ||
+        left->heap_index != right->heap_index) {
+      return false;
+    }
+    if (left->address_binding != NULL || right->address_binding != NULL) {
+      return left->address_binding != NULL && right->address_binding != NULL &&
+             left->address_binding->symbol == right->address_binding->symbol;
+    }
+    if (left->address_object != NULL || right->address_object != NULL) {
+      return left->address_object == right->address_object;
+    }
+    return left->address_slot == right->address_slot &&
+           left->heap_block == right->heap_block;
+  }
+  if (left->is_floating || right->is_floating) {
+    return left->is_floating == right->is_floating &&
+           memcmp(&left->fvalue, &right->fvalue, sizeof(left->fvalue)) == 0;
+  }
+  return left->ivalue == right->ivalue;
+}
+
+static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
+                                                       ConstexprObject* right) {
+  if (left == NULL || right == NULL) {
+    return left == right;
+  }
+  if (!TypeEqual(left->type, right->type) ||
+      left->active_union_member != right->active_union_member ||
+      left->slots.length != right->slots.length) {
+    return false;
+  }
+  for (size_t i = 0; i < left->slots.length; i++) {
+    if (!ConstexprValuesTemplateArgumentEquivalent(left->slots.value.p[i],
+                                                   right->slots.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ConstexprObjectInitializersEquivalent(TypeRecord* type, ASTNode* left,
+                                           ASTNode* right) {
+  if (type == NULL || left == NULL || right == NULL) {
+    return left == right;
+  }
+  ConstEvalContext left_context;
+  ConstEvalContext right_context;
+  ConstEvalContextInit(&left_context);
+  ConstEvalContextInit(&right_context);
+  ConstexprValue left_value = {0};
+  ConstexprValue right_value = {0};
+  bool equivalent =
+      EvaluateConstexprInitializer(&left_context, type, left, &left_value) &&
+      EvaluateConstexprInitializer(&right_context, type, right, &right_value) &&
+      left_value.is_object && right_value.is_object &&
+      ConstexprObjectsTemplateArgumentEquivalent(left_value.object,
+                                                 right_value.object);
+  ConstEvalContextDestruct(&left_context);
+  ConstEvalContextDestruct(&right_context);
+  return equivalent;
+}
+
+static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
+                                                    String* result);
+
+static void AppendConstexprTemplateArgumentObjectKey(ConstexprObject* object,
+                                                     String* result) {
+  StringAppendChar(result, '{');
+  if (object != NULL) {
+    StringPrintf(result, "T%dU%d:",
+                 object->type != NULL ? object->type->id : -1,
+                 object->active_union_member != NULL &&
+                         object->active_union_member->symbol != NULL
+                     ? object->active_union_member->symbol->id
+                     : -1);
+    for (size_t i = 0; i < object->slots.length; i++) {
+      if (i != 0) {
+        StringAppendChar(result, ',');
+      }
+      AppendConstexprTemplateArgumentValueKey(object->slots.value.p[i], result);
+    }
+  }
+  StringAppendChar(result, '}');
+}
+
+static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
+                                                    String* result) {
+  if (value == NULL) {
+    StringAppend(result, "?");
+  } else if (value->is_object) {
+    AppendConstexprTemplateArgumentObjectKey(value->object, result);
+  } else if (value->is_address) {
+    StringPrintf(result, "A%d:%d:%lld",
+                 value->address_binding != NULL &&
+                         value->address_binding->symbol != NULL
+                     ? value->address_binding->symbol->id
+                     : -1,
+                 value->heap_index, (long long)value->address_index);
+    if (value->address_object != NULL) {
+      StringPrintf(result, ":O%p", (void*)value->address_object);
+    } else if (value->address_slot != NULL) {
+      StringPrintf(result, ":S%p", (void*)value->address_slot);
+    }
+  } else if (value->is_floating) {
+    unsigned char bytes[sizeof(value->fvalue)];
+    memcpy(bytes, &value->fvalue, sizeof(bytes));
+    StringAppendChar(result, 'F');
+    for (size_t i = 0; i < sizeof(bytes); i++) {
+      StringPrintf(result, "%02x", bytes[i]);
+    }
+  } else {
+    StringPrintf(result, "I%lld", (long long)value->ivalue);
+  }
+}
+
+bool ConstexprObjectInitializerTemplateKey(TypeRecord* type, ASTNode* expression,
+                                           String* result) {
+  if (type == NULL || expression == NULL || result == NULL) {
+    return false;
+  }
+  ConstEvalContext context;
+  ConstEvalContextInit(&context);
+  ConstexprValue value = {0};
+  bool ok = EvaluateConstexprInitializer(&context, type, expression, &value) &&
+            value.is_object;
+  if (ok) {
+    AppendConstexprTemplateArgumentObjectKey(value.object, result);
+  }
+  ConstEvalContextDestruct(&context);
+  return ok;
 }
 
 bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
@@ -3769,6 +4025,23 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       };
       return true;
     }
+    if (template_argument_object_evaluation_depth > 0 &&
+        address->sub != NULL &&
+        address->sub->op == AST_OP(identifier)) {
+      Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
+      if (symbol != NULL && !symbol->flags.is_temp &&
+          !symbol->flags.is_argument &&
+          (!symbol->flags.is_local ||
+           StorageIs(symbol->storage, STO(static)))) {
+        PushConstexprBinding(ctx, symbol, (ConstexprValue){0});
+        ConstexprBinding* external = FindConstexprBinding(ctx, symbol);
+        *result = (ConstexprValue){
+            .is_address = true,
+            .address_binding = external,
+        };
+        return external != NULL;
+      }
+    }
     return false;
   }
   if (node->op == AST_OP(contents)) {
@@ -3798,6 +4071,14 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       *result = (ConstexprValue){.is_address = true,
                                  .address_binding = binding};
       return true;
+    }
+    if (template_argument_object_evaluation_depth > 0 && binding == NULL &&
+        id->symbol != NULL &&
+        id->symbol->constexpr_initializer != NULL &&
+        (TypeIsPointer(id->symbol->type) ||
+         TypeIsReference(id->symbol->type))) {
+      return EvaluateConstexprAddressValue(
+          ctx, id->symbol->constexpr_initializer, result);
     }
     if (binding != NULL && binding->object == NULL && !binding->is_floating &&
         id->symbol != NULL && TypeIsPointer(id->symbol->type) &&

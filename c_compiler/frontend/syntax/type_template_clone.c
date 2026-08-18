@@ -552,6 +552,88 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
   return substituted;
 }
 
+static bool ResolveClonedTemplateTemplateParameterCTAD(
+    TemplateFunctionBodyClone* clone, VariableDeclarationASTNode* decl,
+    Symbol* original, Symbol* replacement) {
+  if (clone == NULL || decl == NULL || replacement == NULL ||
+      replacement->type == NULL ||
+      !TypeIsClassTemplatePlaceholder(replacement->type)) {
+    return true;
+  }
+  if (decl->initializer == NULL ||
+      decl->initializer->op != AST_OP(braced_init)) {
+    SyntaxError(clone->parser->syntax,
+                "Could not deduce template arguments for %s",
+                replacement->name.value);
+    return false;
+  }
+
+  BracedInitializerASTNode* braced =
+      (BracedInitializerASTNode*)decl->initializer;
+  Vector actuals;
+  VectorInit(&actuals);
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    ASTNode* expression = initializer;
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)initializer;
+      expr_init->expr = AnalyzeExpression(expr_init->expr);
+      expression = expr_init->expr;
+    } else if (initializer != NULL) {
+      expression = AnalyzeExpression(initializer);
+      VectorSet(braced->initializers, i, expression);
+    }
+    if (expression != NULL) {
+      VectorAppend(&actuals, expression);
+    }
+  }
+
+  bool alias_rejected = false;
+  TypeRecord* deduced = TypeDeduceClassTemplateFromPlaceholder(
+      clone->parser->syntax, replacement->type, &actuals,
+      /*allow_explicit=*/true, &alias_rejected);
+  VectorDestruct(&actuals);
+  Symbol* template_parameter =
+      original != NULL && original->type != NULL
+              && original->type->template_origin != NULL
+              && original->type->template_origin->flags
+                     .is_template_template_parameter
+          ? original->type->template_origin
+          : NULL;
+  if (deduced != NULL && template_parameter != NULL &&
+      !TypeTemplateTemplateParameterAcceptsDeduced(template_parameter,
+                                                   deduced)) {
+    Symbol* argument_template =
+        TypeClassTemplatePlaceholderOrigin(replacement->type);
+    TypeRecord* adjusted = TypeTemplateTemplateParameterApplyDefaults(
+        clone->parser, template_parameter, argument_template, deduced);
+    TypeRecordDelete(deduced);
+    deduced = adjusted;
+  }
+  bool accepted =
+      deduced != NULL &&
+      TypeClassTemplatePlaceholderAcceptsDeduced(replacement->type, deduced) &&
+      (template_parameter == NULL ||
+       TypeTemplateTemplateParameterAcceptsDeduced(template_parameter, deduced));
+  if (!accepted) {
+    if (deduced != NULL || alias_rejected) {
+      SyntaxError(clone->parser->syntax,
+                  "Deduced template arguments do not match template template "
+                  "parameter");
+    } else {
+      SyntaxError(clone->parser->syntax,
+                  "Could not deduce template arguments for %s",
+                  replacement->name.value);
+    }
+    TypeRecordDelete(deduced);
+    return false;
+  }
+  SymbolSetType(replacement, deduced);
+  TypeRecordDelete(deduced);
+  return true;
+}
+
 /* A direct initializer parsed while a local's type was dependent cannot be
  * classified as scalar initialization or a constructor call. Keep its
  * parenthesized arguments in a braced-initializer container until substitution,
@@ -708,8 +790,14 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   kv.value.p = replacement;
   MapInsert(&clone->symbol_map, kv);
   decl->symbol = replacement;
-  ASTNodeSetType(node, replacement->type);
   RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
+  bool ctad_ok = ResolveClonedTemplateTemplateParameterCTAD(
+      clone, decl, old_symbol, replacement);
+  ASTNodeSetType(node, replacement->type);
+  if (!ctad_ok) {
+    node->flags &= ~kASTAnalyzed;
+    return;
+  }
   ExpandClonedLocalDirectInitializerPack(clone, decl, replacement);
   if (RewriteClonedConcreteLocalDirectInitializer(
           clone, decl, old_symbol, replacement)) {
@@ -2782,7 +2870,7 @@ static void AddFoldPackBinding(FoldPackSearch* search, FoldPackKind kind,
   }
 }
 
-static TemplateArgument* ConcreteNonTypeTemplatePack(
+static TemplateArgument* ConcreteTemplateArgumentPack(
     TemplateFunctionBodyClone* clone, Symbol* symbol) {
   if (clone == NULL || symbol == NULL || clone->args == NULL) {
     return NULL;
@@ -2795,8 +2883,7 @@ static TemplateArgument* ConcreteNonTypeTemplatePack(
     return NULL;
   }
   TemplateArgument* argument = clone->args->value.p[pack_index];
-  return argument != NULL && argument->kind == kTemplateParameterNonType &&
-                 argument->pack_arguments != NULL
+  return argument != NULL && argument->pack_arguments != NULL
              ? argument
              : NULL;
 }
@@ -2819,7 +2906,7 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
         return;
       }
       TemplateArgument* argument =
-          ConcreteNonTypeTemplatePack(search->clone, id->symbol);
+          ConcreteTemplateArgumentPack(search->clone, id->symbol);
       if (argument != NULL) {
         AddFoldPackBinding(search, kFoldPackTemplateArgument, id->symbol,
                            id->symbol->template_parameter_index, NULL,
@@ -3371,6 +3458,31 @@ static StructMember* FindClonedConcreteMember(Struct* receiver,
     }
   }
   return match;
+}
+
+static Symbol* FindClonedOwnerMemberSymbol(TemplateFunctionBodyClone* clone,
+                                           Symbol* source) {
+  if (clone == NULL || source == NULL || clone->from_owner == NULL ||
+      clone->to_owner == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < clone->from_owner->members.length; i++) {
+    StructMember* original = clone->from_owner->members.value.p[i];
+    if (original == NULL || original->symbol != source) {
+      continue;
+    }
+    StructMember* concrete =
+        i < clone->to_owner->members.length
+            ? clone->to_owner->members.value.p[i] : NULL;
+    if (concrete != NULL && concrete->symbol != NULL &&
+        concrete->is_static == original->is_static &&
+        concrete->is_member_function == original->is_member_function) {
+      return concrete->symbol;
+    }
+    concrete = FindClonedConcreteMember(clone->to_owner, original);
+    return concrete != NULL ? concrete->symbol : NULL;
+  }
+  return NULL;
 }
 
 static void RebindClonedConcreteMemberAccess(
@@ -4403,6 +4515,17 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
       TypeRecordDelete(concrete);
     }
+    if (id->symbol != NULL &&
+        id->symbol->flags.is_template_template_parameter &&
+        id->symbol->template_parameter_index >= 0 && clone->args != NULL &&
+        (size_t)id->symbol->template_parameter_index < clone->args->length) {
+      TemplateArgument* actual =
+          clone->args->value.p[id->symbol->template_parameter_index];
+      if (actual != NULL && actual->kind == kTemplateParameterTemplate &&
+          actual->template_symbol != NULL) {
+        id->symbol = actual->template_symbol;
+      }
+    }
     bool template_args_contain_pack = false;
     if (id->template_arguments != NULL) {
       int pack_index = -1;
@@ -4482,6 +4605,12 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                : replacement->type);
       node->value_category = kValueCategoryLvalue;
       return node;
+    }
+    replacement = FindClonedOwnerMemberSymbol(clone, id->symbol);
+    if (replacement != NULL) {
+      id->symbol = replacement;
+      ASTNodeSetType(node, replacement->type);
+      node->value_category = kValueCategoryLvalue;
     }
     replacement = CloneTemplateDependentTemporarySymbol(clone, id->symbol);
     if (replacement != NULL) {

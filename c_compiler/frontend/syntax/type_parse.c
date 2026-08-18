@@ -1352,6 +1352,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           }
           if (symbol->flags.is_template && args == NULL &&
               !parser->syntax->parsing_template_declaration &&
+              symbol->alias_template != NULL &&
+              !CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+            SyntaxError(parser->syntax,
+                        "Alias template %s does not name a deducible class "
+                        "template",
+                        symbol->name.value);
+          }
+          if (symbol->flags.is_template && args == NULL &&
+              !parser->syntax->parsing_template_declaration &&
               TypeIsStructOrUnion(symbol->type)) {
             if (CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
               SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
@@ -1475,6 +1484,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = TypeRecordCopy(symbol->type);
             if (symbol->flags.is_template_template_parameter) {
               type_record->template_origin = symbol;
+            }
+            if (symbol->flags.is_template && args == NULL &&
+                !parser->syntax->parsing_template_declaration &&
+                symbol->alias_template != NULL &&
+                !CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+              SyntaxError(parser->syntax,
+                          "Alias template %s does not name a deducible class "
+                          "template",
+                          symbol->name.value);
             }
             if (symbol->flags.is_template && args == NULL &&
                 !parser->syntax->parsing_template_declaration &&

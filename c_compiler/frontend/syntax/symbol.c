@@ -463,6 +463,129 @@ static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
 static Namespace* CXXStructNamespace(Struct* str);
 static void AppendCXXStructNameComponents(String* out, Struct* str);
 
+static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
+                                         TypeRecord* type) {
+  if (initializer == NULL) {
+    StringAppend(out, "Li0E");
+    return;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)initializer;
+    StringAppend(out, "tl");
+    AppendCXXTypeEncoding(out, type);
+    for (size_t i = 0; braced->initializers != NULL &&
+                       i < braced->initializers->length; i++) {
+      ASTNode* child = braced->initializers->value.p[i];
+      TypeRecord* child_type = child != NULL && child->type != NULL
+                                   ? child->type
+                                   : type;
+      if (child != NULL && child->op == AST_OP(expr_init) &&
+          ((ExpressionInitializerASTNode*)child)->expr != NULL) {
+        child_type = ((ExpressionInitializerASTNode*)child)->expr->type;
+      }
+      AppendCXXTemplateObjectValue(out, child, child_type);
+    }
+    StringAppendChar(out, 'E');
+    return;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(address)) {
+    ASTNode* operand = ((UnaryASTNode*)initializer)->sub;
+    if (operand != NULL && operand->op == AST_OP(identifier) &&
+        ((IdentifierASTNode*)operand)->symbol != NULL) {
+      Symbol* symbol = ((IdentifierASTNode*)operand)->symbol;
+      StringAppend(out, "adL");
+      if (symbol->asm_name.length != 0) {
+        StringAppendString(out, &symbol->asm_name);
+      } else {
+        StringAppend(out, "_Z");
+        AppendCXXNameComponent(out, symbol->name.value);
+      }
+      StringAppendChar(out, 'E');
+      return;
+    }
+  }
+  if (initializer != NULL && initializer->op == AST_OP(fnumber)) {
+    ConstantASTNode* constant = (ConstantASTNode*)initializer;
+    StringAppendChar(out, 'L');
+    AppendCXXTypeEncoding(out, initializer->type != NULL
+                                  ? initializer->type : type);
+    if (TypeUsesFloat32Representation(initializer->type)) {
+      float value = (float)constant->value.fvalue;
+      uint32_t bits;
+      memcpy(&bits, &value, sizeof(bits));
+      StringPrintf(out, "%08x", (unsigned)bits);
+    } else {
+      double value = constant->value.fvalue;
+      uint64_t bits;
+      memcpy(&bits, &value, sizeof(bits));
+      StringPrintf(out, "%016llx", (unsigned long long)bits);
+    }
+    StringAppendChar(out, 'E');
+    return;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(number)) {
+    ConstantASTNode* constant = (ConstantASTNode*)initializer;
+    long long value = constant->value.ivalue;
+    StringAppendChar(out, 'L');
+    AppendCXXTypeEncoding(out, initializer->type != NULL
+                                  ? initializer->type : type);
+    if (value < 0) {
+      StringPrintf(out, "n%lld", -value);
+    } else {
+      StringPrintf(out, "%lld", value);
+    }
+    StringAppendChar(out, 'E');
+    return;
+  }
+  // Keep unsupported structural subvalues collision-free while retaining a
+  // valid vendor expression encoding.
+  StringAppend(out, "u16dave_object_value");
+}
+
+Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
+  if (argument == NULL || argument->type == NULL ||
+      argument->object_initializer == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, "_ZTA");
+  StringAppendChar(&name, 'X');
+  AppendCXXTemplateObjectValue(&name, argument->object_initializer,
+                               argument->type);
+  StringAppendChar(&name, 'E');
+  Symbol* symbol = NULL;
+  for (size_t i = 0; compiler != NULL &&
+                     i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* existing =
+        compiler->initialized_static_variables.value.p[i];
+    if (existing != NULL && existing->symbol != NULL &&
+        StringEqual(&existing->symbol->asm_name, name.value)) {
+      symbol = existing->symbol;
+      break;
+    }
+  }
+  if (symbol == NULL) {
+    TypeRecord* type = TypeRecordCopy(argument->type);
+    type->qualifiers |= kQualConst;
+    symbol = NewSymbol(name.value, type, STO(static));
+    TypeRecordDelete(type);
+    symbol->flags.invented = true;
+    symbol->flags.is_defined = true;
+    symbol->flags.is_weak = true;
+    symbol->flags.is_constexpr = true;
+    StringSetString(&symbol->asm_name, &name);
+    CompilerRegisterTemplateParameterObject(
+        symbol, ASTNodeClone(argument->object_initializer, IdentityCloneNode,
+                             NULL, NULL));
+  }
+  StringDestruct(&name);
+  return symbol;
+}
+
 static void AppendCXXTemplateNonTypeArgument(String* out,
                                              TemplateArgument* arg) {
   TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
@@ -491,6 +614,12 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
       AppendCXXTypeEncoding(out, arg->type);
       StringAppend(out, "0E");
     }
+    return;
+  }
+  if (kind == kTemplateValueObject) {
+    StringAppendChar(out, 'X');
+    AppendCXXTemplateObjectValue(out, arg->object_initializer, arg->type);
+    StringAppendChar(out, 'E');
     return;
   }
   Symbol* symbol = kind == kTemplateValueMemberPointer &&
@@ -961,6 +1090,8 @@ Symbol* SymbolClone(Symbol* sym) {
       ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
   new_sym->template_template_parameters =
       TemplateParameterVectorCopy(sym->template_template_parameters);
+  new_sym->template_template_parameter_kind =
+      sym->template_template_parameter_kind;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;

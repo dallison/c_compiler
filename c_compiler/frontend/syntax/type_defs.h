@@ -107,6 +107,7 @@ typedef enum {
   kTemplateValuePointer,
   kTemplateValueMemberPointer,
   kTemplateValueReflection,
+  kTemplateValueObject,
 } TemplateValueKind;
 
 // Serialized as an inline sub-message (see type_serialize.c); the field
@@ -124,6 +125,7 @@ typedef struct TemplateParameter {
   int index;                        // @wire 9
   struct TemplateArgument* default_argument;  // Typed NTTP default. // @wire 11
   Vector* template_parameters;  // Inner parameters for template-template params. // @wire 12
+  TemplateTemplateParameterKind template_template_kind;             // @wire 13
 } TemplateParameter;
 
 // Serialized as an inline sub-message (see type_serialize.c); the field
@@ -155,6 +157,7 @@ typedef struct TemplateArgument {
   Symbol* member_function;   // Non-virtual member function.       // @wire 13
   Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
   struct ReflectionValue* reflection_value;  // Reflection NTTP.   // @wire 16
+  struct ASTNode* object_initializer;  // Canonical class NTTP value. // @wire 44
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {

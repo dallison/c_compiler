@@ -36,6 +36,7 @@ static void ReportConstraintFailure(ConstraintExpr* constraint, Vector* argument
 static bool ConstraintSubsumesWithMapping(ConstraintExpr* stronger,
                                           ConstraintExpr* weaker,
                                           Vector* parameter_mapping);
+static int FoldConstraintPackIndex(ASTNode* pattern);
 
 static ConstraintExpr* NewConstraintExpr(ConstraintExprKind kind,
                                          SourceLocation location) {
@@ -635,6 +636,27 @@ static AtomicConstraintResult EvaluateAtomicConstraint(ASTNode* expr,
   if (expr == NULL) {
     return kAtomicConstraintSubstitutionFailed;
   }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      (expr->flags & kASTFoldExpression) != 0 &&
+      (expr->op == AST_OP(logand) || expr->op == AST_OP(logor))) {
+    BinaryASTNode* fold = (BinaryASTNode*)expr;
+    ASTNode* pattern = (expr->flags & kASTFoldPackOnLeft) != 0
+                           ? fold->left
+                           : fold->right;
+    int pack_index = FoldConstraintPackIndex(pattern);
+    if (pack_index >= 0 && arguments != NULL &&
+        (size_t)pack_index < arguments->length) {
+      TemplateArgument* pack = arguments->value.p[pack_index];
+      if (pack != NULL && pack->pack_arguments != NULL &&
+          pack->pack_arguments->length == 0) {
+        int64_t identity = expr->op == AST_OP(logand) ? 1 : 0;
+        if (result != NULL) {
+          *result = identity;
+        }
+        return identity != 0 ? kAtomicConstraintOk : kAtomicConstraintFalse;
+      }
+    }
+  }
   bool saved_trap = DiagnosticErrorTrapBegin();
   ASTNode* evaluated = NULL;
   if (arguments != NULL) {
@@ -1108,10 +1130,25 @@ static bool EvaluateConstraintInteger(ConstraintExpr* constraint,
       return true;
     }
     case kConstraintConceptId: {
+      Symbol* concept_symbol = constraint->as.concept_id.concept_symbol;
+      if (concept_symbol != NULL &&
+          concept_symbol->flags.is_template_template_parameter &&
+          concept_symbol->template_template_parameter_kind ==
+              kTemplateTemplateParameterConcept &&
+          concept_symbol->template_parameter_index >= 0 && arguments != NULL &&
+          (size_t)concept_symbol->template_parameter_index <
+              arguments->length) {
+        TemplateArgument* actual =
+            arguments->value.p[concept_symbol->template_parameter_index];
+        if (actual != NULL && actual->kind == kTemplateParameterTemplate &&
+            actual->template_symbol != NULL) {
+          concept_symbol = actual->template_symbol;
+        }
+      }
       Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
           &compiler->syntax, constraint->as.concept_id.arguments, arguments);
       bool ok = EvaluateConceptDefinitionInteger(
-          constraint->as.concept_id.concept_symbol, concrete_args,
+          concept_symbol, concrete_args,
           constraint->location, result);
       if (concrete_args != NULL) {
         VectorDeleteWithContents(
@@ -1407,6 +1444,10 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   copy->value_offset = arg->value_offset;
   copy->value_adjustment = arg->value_adjustment;
   copy->member_function = arg->member_function;
+  copy->template_symbol = arg->template_symbol;
+  copy->reflection_value = arg->reflection_value;
+  copy->object_initializer =
+      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
   return copy;
 }
 
@@ -1439,6 +1480,9 @@ static bool NormalizationTemplateArgumentsEqual(TemplateArgument* left,
 typedef struct NormalizedAtomic {
   ASTNode* expr;
   RequiresExpr* requires_expr;
+  ASTNode* fold_pattern;
+  ASTOpcode fold_operator;
+  int fold_pack_index;
   Vector* parameter_mapping;  // TemplateArgument* owned.
   SourceLocation location;
 } NormalizedAtomic;
@@ -1519,6 +1563,8 @@ static NormalizedAtomic* NewNormalizedAtomic(ASTNode* expr,
   memset(atom, 0, sizeof(*atom));
   atom->expr = expr;
   atom->requires_expr = requires_expr;
+  atom->fold_operator = AST_OP(bad);
+  atom->fold_pack_index = -1;
   atom->parameter_mapping = parameter_mapping;
   atom->location = location;
   return atom;
@@ -1657,6 +1703,105 @@ static bool ExprIsFoldConstraint(ASTNode* expr) {
   return expr != NULL && (expr->flags & kASTFoldExpression) != 0;
 }
 
+static int FoldConstraintTemplateArgumentPackIndex(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return -1;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      int index = FoldConstraintTemplateArgumentPackIndex(
+          arg->pack_arguments->value.p[i]);
+      if (index >= 0) {
+        return index;
+      }
+    }
+  }
+  if (!arg->references_parameter_pack && !arg->is_pack_expansion) {
+    return -1;
+  }
+  if (arg->template_parameter_index >= 0) {
+    return arg->template_parameter_index;
+  }
+  for (TypeRecord* type = arg->type; type != NULL; type = type->next) {
+    if (type->template_parameter_index >= 0) {
+      return type->template_parameter_index;
+    }
+  }
+  return -1;
+}
+
+typedef struct {
+  int index;
+} FoldConstraintPackSearch;
+
+static void FindFoldConstraintPack(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren) {
+    return;
+  }
+  FoldConstraintPackSearch* search = data;
+  if (search->index >= 0) {
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      search->index = id->symbol->template_parameter_index;
+      return;
+    }
+  }
+  if (node->op == AST_OP(sizeof)) {
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    for (TypeRecord* type = sizeof_node->type_operand; type != NULL;
+         type = type->next) {
+      if (type->template_parameter_index >= 0) {
+        search->index = type->template_parameter_index;
+        return;
+      }
+    }
+  }
+  Vector* arguments = NULL;
+  switch (ASTNodeGetShape(node)) {
+    case kASTShapeIdentifier:
+      arguments = ((IdentifierASTNode*)node)->template_arguments;
+      break;
+    case kASTShapeStructMember:
+      arguments = ((StructMemberASTNode*)node)->template_arguments;
+      break;
+    case kASTShapeConstant:
+      arguments = ((ConstantASTNode*)node)->template_arguments;
+      break;
+    default:
+      break;
+  }
+  for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
+    int index =
+        FoldConstraintTemplateArgumentPackIndex(arguments->value.p[i]);
+    if (index >= 0) {
+      search->index = index;
+      return;
+    }
+  }
+}
+
+static int FoldConstraintPackIndex(ASTNode* pattern) {
+  FoldConstraintPackSearch search = {.index = -1};
+  ASTNodeVisit(pattern, FindFoldConstraintPack, 0, &search);
+  return search.index;
+}
+
+static NormalizedAtomic* NewNormalizedFoldAtomic(
+    ASTNode* fold, ASTNode* pattern, Vector* parameter_mapping,
+    SourceLocation location) {
+  NormalizedAtomic* atom = NewNormalizedAtomic(
+      fold, NULL, CopyParameterMapping(parameter_mapping), location);
+  atom->fold_pattern = pattern;
+  atom->fold_operator = fold != NULL ? fold->op : AST_OP(bad);
+  atom->fold_pack_index = FoldConstraintPackIndex(pattern);
+  return atom;
+}
+
 static bool ExprIsConceptIdentifier(ASTNode* expr, Symbol** concept_symbol,
                                     Vector** arguments) {
   if (expr == NULL || expr->op != AST_OP(identifier)) {
@@ -1689,9 +1834,13 @@ static NormalizedAtomic* CopyNormalizedAtomic(NormalizedAtomic* atom) {
   if (atom == NULL) {
     return NULL;
   }
-  return NewNormalizedAtomic(atom->expr, atom->requires_expr,
-                           CopyParameterMapping(atom->parameter_mapping),
-                           atom->location);
+  NormalizedAtomic* copy = NewNormalizedAtomic(
+      atom->expr, atom->requires_expr,
+      CopyParameterMapping(atom->parameter_mapping), atom->location);
+  copy->fold_pattern = atom->fold_pattern;
+  copy->fold_operator = atom->fold_operator;
+  copy->fold_pack_index = atom->fold_pack_index;
+  return copy;
 }
 
 static NormalizedConstraintForm* NormalizedFormDnfMergeClauses(
@@ -1827,10 +1976,32 @@ static NormalizedConstraintForm* NormalizeConceptIdToCnf(
 static NormalizedConstraintForm* NormalizeAtomicExpressionToDnf(
     ASTNode* expr, SourceLocation location, Vector* parameter_mapping,
     Set* expanding) {
-  if (expr == NULL || ExprIsFoldConstraint(expr)) {
+  if (expr == NULL) {
     NormalizedAtomic* atom = NewNormalizedAtomic(
         expr, NULL, CopyParameterMapping(parameter_mapping), location);
     return NormalizedFormFromAtom(atom);
+  }
+  if (ExprIsFoldConstraint(expr)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+        (expr->op != AST_OP(logand) && expr->op != AST_OP(logor))) {
+      NormalizedAtomic* atom = NewNormalizedAtomic(
+          expr, NULL, CopyParameterMapping(parameter_mapping), location);
+      return NormalizedFormFromAtom(atom);
+    }
+    BinaryASTNode* fold = (BinaryASTNode*)expr;
+    bool pack_on_left = (expr->flags & kASTFoldPackOnLeft) != 0;
+    ASTNode* pattern = pack_on_left ? fold->left : fold->right;
+    ASTNode* seed = pack_on_left ? fold->right : fold->left;
+    NormalizedConstraintForm* folded = NormalizedFormFromAtom(
+        NewNormalizedFoldAtomic(expr, pattern, parameter_mapping, location));
+    if (seed == NULL) {
+      return folded;
+    }
+    NormalizedConstraintForm* initial = NormalizeAtomicExpressionToDnf(
+        seed, seed->location, parameter_mapping, expanding);
+    return expr->op == AST_OP(logand)
+               ? NormalizedFormDnfConjoin(folded, initial)
+               : NormalizedFormDnfDisjoin(folded, initial);
   }
   if (expr->op == AST_OP(logand)) {
     BinaryASTNode* binary = (BinaryASTNode*)expr;
@@ -1874,10 +2045,32 @@ static NormalizedConstraintForm* NormalizeAtomicExpressionToDnf(
 static NormalizedConstraintForm* NormalizeAtomicExpressionToCnf(
     ASTNode* expr, SourceLocation location, Vector* parameter_mapping,
     Set* expanding) {
-  if (expr == NULL || ExprIsFoldConstraint(expr)) {
+  if (expr == NULL) {
     NormalizedAtomic* atom = NewNormalizedAtomic(
         expr, NULL, CopyParameterMapping(parameter_mapping), location);
     return NormalizedFormFromAtom(atom);
+  }
+  if (ExprIsFoldConstraint(expr)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+        (expr->op != AST_OP(logand) && expr->op != AST_OP(logor))) {
+      NormalizedAtomic* atom = NewNormalizedAtomic(
+          expr, NULL, CopyParameterMapping(parameter_mapping), location);
+      return NormalizedFormFromAtom(atom);
+    }
+    BinaryASTNode* fold = (BinaryASTNode*)expr;
+    bool pack_on_left = (expr->flags & kASTFoldPackOnLeft) != 0;
+    ASTNode* pattern = pack_on_left ? fold->left : fold->right;
+    ASTNode* seed = pack_on_left ? fold->right : fold->left;
+    NormalizedConstraintForm* folded = NormalizedFormFromAtom(
+        NewNormalizedFoldAtomic(expr, pattern, parameter_mapping, location));
+    if (seed == NULL) {
+      return folded;
+    }
+    NormalizedConstraintForm* initial = NormalizeAtomicExpressionToCnf(
+        seed, seed->location, parameter_mapping, expanding);
+    return expr->op == AST_OP(logand)
+               ? NormalizedFormCnfConjoin(folded, initial)
+               : NormalizedFormCnfDisjoin(folded, initial);
   }
   if (expr->op == AST_OP(logand)) {
     BinaryASTNode* binary = (BinaryASTNode*)expr;
@@ -1992,6 +2185,40 @@ static NormalizedConstraintForm* NormalizeConstraintToCnf(
   return NewNormalizedConstraintForm();
 }
 
+static bool NormalizedFormSubsumes(NormalizedConstraintForm* stronger_dnf,
+                                   NormalizedConstraintForm* weaker_cnf);
+
+static bool NormalizedAtomSubsumes(NormalizedAtomic* stronger,
+                                   NormalizedAtomic* weaker) {
+  if (stronger == NULL || weaker == NULL) {
+    return stronger == weaker;
+  }
+  bool stronger_is_fold = stronger->fold_pattern != NULL;
+  bool weaker_is_fold = weaker->fold_pattern != NULL;
+  if (!stronger_is_fold || !weaker_is_fold) {
+    return !stronger_is_fold && !weaker_is_fold &&
+           NormalizedAtomsIdentical(stronger, weaker);
+  }
+  if (stronger->fold_operator != weaker->fold_operator ||
+      stronger->fold_pack_index < 0 || weaker->fold_pack_index < 0 ||
+      stronger->fold_pack_index != weaker->fold_pack_index) {
+    return false;
+  }
+
+  Set* expanding = NewSet(SymbolPointerCompare);
+  NormalizedConstraintForm* stronger_dnf = NormalizeAtomicExpressionToDnf(
+      stronger->fold_pattern, stronger->fold_pattern->location,
+      stronger->parameter_mapping, expanding);
+  NormalizedConstraintForm* weaker_cnf = NormalizeAtomicExpressionToCnf(
+      weaker->fold_pattern, weaker->fold_pattern->location,
+      weaker->parameter_mapping, expanding);
+  bool result = NormalizedFormSubsumes(stronger_dnf, weaker_cnf);
+  NormalizedConstraintFormDelete(stronger_dnf);
+  NormalizedConstraintFormDelete(weaker_cnf);
+  SetDelete(expanding);
+  return result;
+}
+
 static bool NormalizedClauseSubsumes(NormalizedClause* disjunctive,
                                      NormalizedClause* conjunctive) {
   if (conjunctive == NULL || conjunctive->atoms == NULL ||
@@ -2003,8 +2230,8 @@ static bool NormalizedClauseSubsumes(NormalizedClause* disjunctive,
   }
   for (size_t i = 0; i < disjunctive->atoms->length; i++) {
     for (size_t j = 0; j < conjunctive->atoms->length; j++) {
-      if (NormalizedAtomsIdentical(disjunctive->atoms->value.p[i],
-                                   conjunctive->atoms->value.p[j])) {
+      if (NormalizedAtomSubsumes(disjunctive->atoms->value.p[i],
+                                 conjunctive->atoms->value.p[j])) {
         return true;
       }
     }
@@ -2035,11 +2262,83 @@ static bool NormalizedFormSubsumes(NormalizedConstraintForm* stronger_dnf,
   return true;
 }
 
+static void FindConceptTemplateParameterReference(ASTNode* node, void* data,
+                                                  int child_id,
+                                                  VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren || *(bool*)data ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol != NULL && symbol->flags.is_template_template_parameter &&
+      symbol->template_template_parameter_kind ==
+          kTemplateTemplateParameterConcept) {
+    *(bool*)data = true;
+  }
+}
+
+bool ConceptsConstraintReferencesConceptTemplateParameter(
+    ConstraintExpr* constraint) {
+  if (constraint == NULL) {
+    return false;
+  }
+  switch (constraint->kind) {
+    case kConstraintConjunction:
+    case kConstraintDisjunction:
+      return ConceptsConstraintReferencesConceptTemplateParameter(
+                 constraint->as.binary.left) ||
+             ConceptsConstraintReferencesConceptTemplateParameter(
+                 constraint->as.binary.right);
+    case kConstraintConceptId: {
+      Symbol* symbol = constraint->as.concept_id.concept_symbol;
+      return symbol != NULL &&
+             symbol->flags.is_template_template_parameter &&
+             symbol->template_template_parameter_kind ==
+                 kTemplateTemplateParameterConcept;
+    }
+    case kConstraintAtomic: {
+      bool found = false;
+      ASTNodeVisit(constraint->as.atomic.expr,
+                   FindConceptTemplateParameterReference, 0, &found);
+      return found;
+    }
+    case kConstraintRequires: {
+      RequiresExpr* requires_expr = constraint->as.requires_.requires_expr;
+      for (size_t i = 0;
+           requires_expr != NULL && requires_expr->requirements != NULL &&
+           i < requires_expr->requirements->length;
+           i++) {
+        Requirement* requirement = requires_expr->requirements->value.p[i];
+        if (requirement == NULL) {
+          continue;
+        }
+        bool found = false;
+        ASTNodeVisit(requirement->expr, FindConceptTemplateParameterReference,
+                     0, &found);
+        if (found ||
+            ConceptsConstraintReferencesConceptTemplateParameter(
+                requirement->return_type_constraint) ||
+            ConceptsConstraintReferencesConceptTemplateParameter(
+                requirement->nested)) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
 static bool ConstraintSubsumesWithMapping(ConstraintExpr* stronger,
                                             ConstraintExpr* weaker,
                                             Vector* parameter_mapping) {
   if (stronger == NULL || weaker == NULL) {
     return stronger == weaker;
+  }
+  if (ConceptsConstraintReferencesConceptTemplateParameter(stronger) ||
+      ConceptsConstraintReferencesConceptTemplateParameter(weaker)) {
+    return false;
   }
   Set* expanding = NewSet(SymbolPointerCompare);
   NormalizedConstraintForm* stronger_dnf =

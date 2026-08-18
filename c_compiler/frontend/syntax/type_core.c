@@ -532,6 +532,7 @@ TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
   copy->default_argument = TemplateArgumentCopy(param->default_argument);
   copy->template_parameters =
       TemplateParameterVectorCopy(param->template_parameters);
+  copy->template_template_kind = param->template_template_kind;
   return copy;
 }
 
@@ -571,6 +572,8 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->member_function = arg->member_function;
   copy->template_symbol = arg->template_symbol;
   copy->reflection_value = arg->reflection_value;
+  copy->object_initializer =
+      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
   return copy;
 }
 
@@ -677,6 +680,8 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   arg->value_adjustment = 0;
   arg->member_function = NULL;
   arg->reflection_value = NULL;
+  ASTNodeDelete(arg->object_initializer);
+  arg->object_initializer = NULL;
 
   if (TypeIsReflection(expr->type)) {
     ReflectionValue* reflection =
@@ -692,6 +697,22 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     }
     arg->value_kind = kTemplateValueReflection;
     arg->reflection_value = reflection;
+    return true;
+  }
+  if (TypeIsStructOrUnion(expr->type)) {
+    arg->type->qualifiers &= ~(kQualConst | kQualVolatile);
+    ASTNode* initializer =
+        ConstexprTemplateArgumentObjectInitializerForExpression(arg->type,
+                                                                expr);
+    if (initializer == NULL) {
+      return false;
+    }
+    arg->value_kind = kTemplateValueObject;
+    arg->object_initializer = initializer;
+    arg->value_symbol = GetCXXTemplateParameterObject(arg);
+    if (arg->value_symbol == NULL) {
+      return false;
+    }
     return true;
   }
   if (TypeIsNullPointer(expr->type)) {
@@ -788,6 +809,9 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
     case kTemplateValueReflection:
       return ReflectionValueEqual(left->reflection_value,
                                   right->reflection_value);
+    case kTemplateValueObject:
+      return ConstexprObjectInitializersEquivalent(
+          left->type, left->object_initializer, right->object_initializer);
     case kTemplateValueNone:
       return left->dependent_expr == right->dependent_expr;
   }
@@ -851,6 +875,16 @@ ASTNode* TemplateArgumentMaterializeExpression(
       return arg->reflection_value != NULL
                  ? NewReflectionConstantASTNode(arg->reflection_value, location)
                  : NULL;
+    case kTemplateValueObject: {
+      if (arg->value_symbol == NULL) {
+        TypeRecordDelete(type);
+        return NULL;
+      }
+      ASTNode* object =
+          NewIdentifierASTNode(arg->value_symbol, location);
+      ASTNodeSetType(object, type);
+      return object;
+    }
     case kTemplateValueNone:
       TypeRecordDelete(type);
       return NULL;
@@ -1357,6 +1391,7 @@ void TemplateArgumentDelete(TemplateArgument* arg) {
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
+  ASTNodeDelete(arg->object_initializer);
   free(arg);
 }
 

@@ -22,6 +22,13 @@ struct DIE;
 struct Namespace;
 struct ASTNode;
 struct Concept;
+struct TemplateArgument;
+
+typedef enum {
+  kTemplateTemplateParameterType,
+  kTemplateTemplateParameterVariable,
+  kTemplateTemplateParameterConcept,
+} TemplateTemplateParameterKind;
 
 typedef enum {
   kCXXLinkageExternal = 0,
@@ -59,6 +66,10 @@ typedef struct VariableTemplate {
 // pattern (e.g. `template<typename T> using X = int;`).
 typedef struct AliasTemplate {
   Vector parameters;  // TemplateParameter* entries (owned). // @wire 1
+  // The defining type-id names one of this alias's template-template
+  // parameters (directly or through another alias). Such an alias is not a
+  // deducible template for CTAD.
+  bool ctad_names_template_template_parameter;                // @wire 2
 } AliasTemplate;
 
 // A parsed __attribute__((...)) clause: a name with optional argument tokens.
@@ -181,6 +192,7 @@ typedef struct Symbol {
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
   // Owned signature copy for a template-template parameter placeholder.
   Vector* template_template_parameters;  // TemplateParameter*.          // @wire 56
+  TemplateTemplateParameterKind template_template_parameter_kind;       // @wire 57
   struct Concept* concept_definition;  // C++20 concept body when flags.is_concept. // @wire 45
   // C++20 requires-clause for alias templates (`template<...> using A = ...`).
   // Function/class/variable templates store constraints on their type bodies;
@@ -237,6 +249,7 @@ void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol);
 // canonical, stable keys/symbol names for RTTI type_info objects.
 void AppendCXXMangledTypeName(String* out, struct TypeRecord* type);
 void SymbolSetCXXDataAsmName(Symbol* symbol, struct Struct* owner);
+Symbol* GetCXXTemplateParameterObject(struct TemplateArgument* argument);
 
 // Adds attribute and takes ownership of the Attribute.
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);

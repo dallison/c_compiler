@@ -263,6 +263,9 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   concrete->value_adjustment = arg->value_adjustment;
   concrete->member_function = arg->member_function;
   concrete->template_symbol = arg->template_symbol;
+  concrete->reflection_value = arg->reflection_value;
+  concrete->object_initializer =
+      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
   // A value-dependent non-type argument (e.g. an `enable_if` SFINAE condition):
   // try to fold it now that some parameters are concrete.  If it folds, the
   // argument becomes an ordinary integer; otherwise keep the expression so a
@@ -1410,6 +1413,23 @@ static TypeRecord* SubstituteBareTemplateParameter(TypeParser* parser,
     return TypeRecordCopy(type);
   }
   TemplateArgument* arg = args->value.p[index];
+  if (type->template_origin != NULL &&
+      type->template_origin->flags.is_template_template_parameter &&
+      arg != NULL && arg->kind == kTemplateParameterTemplate &&
+      arg->template_symbol != NULL && arg->template_symbol->type != NULL &&
+      TypeIsStructOrUnion(arg->template_symbol->type)) {
+    TypeRecord* placeholder = TypeRecordCopy(arg->template_symbol->type);
+    placeholder->template_origin = arg->template_symbol;
+    if (placeholder->template_arguments != NULL) {
+      VectorDeleteWithContents(
+          placeholder->template_arguments,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      placeholder->template_arguments = NULL;
+    }
+    placeholder->qualifiers |= type->qualifiers;
+    return placeholder;
+  }
   if (arg == NULL || arg->kind != kTemplateParameterType ||
       arg->type == NULL) {
     return TypeRecordCopy(type);

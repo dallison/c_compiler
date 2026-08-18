@@ -563,6 +563,8 @@ bool CompilerExceptionsEnabled(void);
 void CompilerMarkFunctionReferenced(struct Symbol* symbol);
 void CompilerMarkVariableReferenced(struct Symbol* symbol);
 void CompilerRegisterMetaPromotedStatic(struct Symbol* symbol, struct ASTNode* initializer);
+void CompilerRegisterTemplateParameterObject(struct Symbol* symbol,
+                                             struct ASTNode* initializer);
 bool CompilerSymbolIsMetaPromotedStatic(struct Symbol* symbol);
 bool CompilerSymbolIsMetaPromotedString(struct Symbol* symbol);
 struct Symbol* CompilerMetaPromotedPointerTarget(struct Symbol* pointer_symbol);

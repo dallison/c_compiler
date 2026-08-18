@@ -44,6 +44,12 @@ bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node);
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
 ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
                                                  ASTNode* expression);
+ASTNode* ConstexprTemplateArgumentObjectInitializerForExpression(
+    TypeRecord* type, ASTNode* expression);
+bool ConstexprObjectInitializersEquivalent(TypeRecord* type, ASTNode* left,
+                                           ASTNode* right);
+bool ConstexprObjectInitializerTemplateKey(TypeRecord* type, ASTNode* expression,
+                                           String* result);
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);

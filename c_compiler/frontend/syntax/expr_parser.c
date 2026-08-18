@@ -480,6 +480,112 @@ static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index) {
   return false;
 }
 
+static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax,
+                                                       int index) {
+  Vector* parameters = syntax != NULL ? syntax->current_template_parameters
+                                      : NULL;
+  for (size_t i = 0; parameters != NULL && i < parameters->length; i++) {
+    TemplateParameter* parameter = parameters->value.p[i];
+    if (parameter != NULL && parameter->index == index) {
+      return parameter;
+    }
+  }
+  TypeRecord* function = compiler->current_function;
+  if (function != NULL && TypeIsFunction(function)) {
+    parameters = &function->info.function.template_parameters;
+    for (size_t i = 0; i < parameters->length; i++) {
+      TemplateParameter* parameter = parameters->value.p[i];
+      if (parameter != NULL && parameter->index == index) {
+        return parameter;
+      }
+    }
+  }
+  return NULL;
+}
+
+typedef struct {
+  Syntax* syntax;
+  bool concept_template_pack;
+  bool other_pack;
+} CXXFoldPackKinds;
+
+static void ClassifyCXXFoldPackIndex(CXXFoldPackKinds* kinds, int index) {
+  TemplateParameter* parameter =
+      CXXTemplateParameterForIndex(kinds->syntax, index);
+  if (parameter == NULL || !parameter->is_parameter_pack) {
+    return;
+  }
+  if (parameter->kind == kTemplateParameterTemplate &&
+      parameter->template_template_kind ==
+          kTemplateTemplateParameterConcept) {
+    kinds->concept_template_pack = true;
+  } else {
+    kinds->other_pack = true;
+  }
+}
+
+static void ClassifyCXXFoldTemplateArgument(CXXFoldPackKinds* kinds,
+                                            TemplateArgument* argument) {
+  if (argument == NULL) {
+    return;
+  }
+  ClassifyCXXFoldPackIndex(kinds, argument->template_parameter_index);
+  if (argument->template_symbol != NULL &&
+      argument->template_symbol->flags.is_parameter_pack) {
+    ClassifyCXXFoldPackIndex(
+        kinds, argument->template_symbol->template_parameter_index);
+  }
+  for (TypeRecord* type = argument->type; type != NULL; type = type->next) {
+    ClassifyCXXFoldPackIndex(kinds, type->template_parameter_index);
+  }
+  for (size_t i = 0;
+       argument->pack_arguments != NULL &&
+       i < argument->pack_arguments->length;
+       i++) {
+    ClassifyCXXFoldTemplateArgument(
+        kinds, argument->pack_arguments->value.p[i]);
+  }
+}
+
+static void ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id,
+                                 VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren) {
+    return;
+  }
+  CXXFoldPackKinds* kinds = data;
+  Vector* arguments = NULL;
+  switch (ASTNodeGetShape(node)) {
+    case kASTShapeIdentifier: {
+      IdentifierASTNode* id = (IdentifierASTNode*)node;
+      if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+        ClassifyCXXFoldPackIndex(kinds,
+                                 id->symbol->template_parameter_index);
+      }
+      arguments = id->template_arguments;
+      break;
+    }
+    case kASTShapeStructMember:
+      arguments = ((StructMemberASTNode*)node)->template_arguments;
+      break;
+    case kASTShapeConstant:
+      arguments = ((ConstantASTNode*)node)->template_arguments;
+      break;
+    default:
+      break;
+  }
+  for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
+    ClassifyCXXFoldTemplateArgument(kinds, arguments->value.p[i]);
+  }
+}
+
+static bool CXXFoldMixesConceptAndOtherPacks(Syntax* syntax,
+                                             ASTNode* pattern) {
+  CXXFoldPackKinds kinds = {.syntax = syntax};
+  ASTNodeVisit(pattern, ClassifyCXXFoldPacks, 0, &kinds);
+  return kinds.concept_template_pack && kinds.other_pack;
+}
+
 static bool CXXTemplateArgumentReferencesParameterPack(
     CXXPackExpressionSearch* search, TemplateArgument* argument) {
   if (argument == NULL) {
@@ -941,6 +1047,12 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
     }
   }
 
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      CXXFoldMixesConceptAndOtherPacks(syntax, pack)) {
+    SyntaxError(syntax,
+                "fold expression cannot expand a concept template parameter "
+                "pack together with another parameter pack");
+  }
   ASTNode* fold =
       pack_on_left ? NewBinaryASTNode(op, NULL, location, pack, seed)
                    : NewBinaryASTNode(op, NULL, location, seed, pack);

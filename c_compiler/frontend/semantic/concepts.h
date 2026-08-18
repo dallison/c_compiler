@@ -167,6 +167,8 @@ bool ConceptsEvaluateConstraintWithArguments(ConstraintExpr* constraint,
                                              int64_t* result);
 bool ConceptsConstraintSatisfied(ConstraintExpr* constraint, Vector* arguments);
 bool ConceptsHasAssociatedConstraint(ConstraintExpr* constraint);
+bool ConceptsConstraintReferencesConceptTemplateParameter(
+    ConstraintExpr* constraint);
 void ConceptsReportAssociatedConstraintFailure(ConstraintExpr* constraint,
                                                Vector* arguments,
                                                SourceLocation location,

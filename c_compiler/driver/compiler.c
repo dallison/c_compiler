@@ -405,9 +405,18 @@ static Symbol* InitPointerAddressTarget(ASTNode* expr) {
   if (expr->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
     if (symbol != NULL &&
-        (StorageIs(symbol->storage, STO(static) | STO(extern)) ||
+        (TypeIsFunction(symbol->type) ||
+         StorageIs(symbol->storage, STO(static) | STO(extern)) ||
          CompilerSymbolIsMetaPromotedStatic(symbol))) {
       return symbol;
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(structmember)) {
+    StructMember* member = ((StructMemberASTNode*)expr)->member;
+    if (member != NULL && member->symbol != NULL &&
+        (member->is_static || member->is_member_function)) {
+      return member->symbol;
     }
     return NULL;
   }
@@ -748,12 +757,10 @@ static bool InitializedStaticAlreadyRegistered(Symbol* symbol) {
   return false;
 }
 
-void CompilerRegisterMetaPromotedStatic(Symbol* symbol, ASTNode* initializer) {
+static void CompilerRegisterConstexprStatic(Symbol* symbol,
+                                            ASTNode* initializer) {
   if (compiler == NULL || symbol == NULL || initializer == NULL) {
     return;
-  }
-  if (!SymbolHasAttribute(symbol, "meta_promoted_static")) {
-    SymbolAddAttribute(symbol, NewAttribute("meta_promoted_static"));
   }
   if (InitializedStaticAlreadyRegistered(symbol)) {
     return;
@@ -781,6 +788,18 @@ void CompilerRegisterMetaPromotedStatic(Symbol* symbol, ASTNode* initializer) {
   VectorAppend(&compiler->initialized_static_variables, var);
   AssignScalarValueToConst(symbol, (BracedInitializerASTNode*)simplified);
   CompilerMarkVariableReferenced(symbol);
+}
+
+void CompilerRegisterMetaPromotedStatic(Symbol* symbol, ASTNode* initializer) {
+  if (symbol != NULL && !SymbolHasAttribute(symbol, "meta_promoted_static")) {
+    SymbolAddAttribute(symbol, NewAttribute("meta_promoted_static"));
+  }
+  CompilerRegisterConstexprStatic(symbol, initializer);
+}
+
+void CompilerRegisterTemplateParameterObject(Symbol* symbol,
+                                             ASTNode* initializer) {
+  CompilerRegisterConstexprStatic(symbol, initializer);
 }
 
 bool CompilerSymbolIsMetaPromotedStatic(Symbol* symbol) {
@@ -1629,8 +1648,9 @@ static void MarkReferencedCXXMetadataDependencies(void) {
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
     InitializedStaticVariable* var =
         compiler->initialized_static_variables.value.p[i];
-    if (var == NULL || !IsLazyCXXStatic(var) ||
-        !VariableSymbolIsReferenced(var->symbol)) {
+    if (var == NULL ||
+        (IsLazyCXXStatic(var) &&
+         !VariableSymbolIsReferenced(var->symbol))) {
       continue;
     }
     for (size_t j = 0; j < var->initializers.length; j++) {
