@@ -6,6 +6,7 @@
 #include "reflection_semantics.h"
 
 #include "compiler.h"
+#include "contracts.h"
 #include "constexpr.h"
 #include "errors.h"
 #include "expr_evaluator.h"
@@ -175,11 +176,14 @@ ReflectionValue* SemanticReflectionValueFromExpression(ASTNode* expression) {
     return NULL;
   }
   if (expression->op == AST_OP(reflection_constant)) {
-    return ((ReflectionASTNode*)expression)->value;
+    ReflectionASTNode* reflection = (ReflectionASTNode*)expression;
+    reflection->value = ReflectionCanonicalize(reflection->value);
+    return reflection->value;
   }
   if (expression->op == AST_OP(reflect)) {
     ReflectionASTNode* reflection = (ReflectionASTNode*)expression;
     if (reflection->value != NULL) {
+      reflection->value = ReflectionCanonicalize(reflection->value);
       return reflection->value;
     }
   }
@@ -206,6 +210,19 @@ ReflectionValue* SemanticReflectionValueFromExpression(ASTNode* expression) {
     }
   }
   return NULL;
+}
+
+ReflectionValue* SemanticEvaluateReflection(ASTNode* expression) {
+  ReflectionValue* value =
+      SemanticReflectionValueFromExpression(expression);
+  if (value != NULL || expression == NULL) {
+    return value;
+  }
+  ConstEvalContext context;
+  ConstEvalContextInit(&context);
+  value = ConstexprEvaluateReflectionExpression(&context, expression);
+  ConstEvalContextDestruct(&context);
+  return value;
 }
 
 ASTNode* SemanticAnalyzeReflection(ReflectionASTNode* node) {
@@ -235,24 +252,6 @@ ASTNode* SemanticAnalyzeReflection(ReflectionASTNode* node) {
       }
       value = ReflectionCreateType(node->operand_type, NULL,
                                    node->base.location);
-      if (value != NULL && node->operand_type != NULL &&
-          node->operand_type->template_arguments != NULL) {
-        for (size_t i = 0; i < node->operand_type->template_arguments->length;
-             i++) {
-          VectorAppend(
-              &value->substituted_arguments,
-              TemplateArgumentCopy(
-                  node->operand_type->template_arguments->value.p[i]));
-        }
-      } else if (value != NULL) {
-        Vector* template_args = MetaTemplateArgumentsVector(node->operand_type);
-        if (template_args != NULL) {
-          for (size_t i = 0; i < template_args->length; i++) {
-            VectorAppend(&value->substituted_arguments,
-                         TemplateArgumentCopy(template_args->value.p[i]));
-          }
-        }
-      }
       break;
     case kReflectionOperandExpression:
       if (node->operand == NULL) {
@@ -339,6 +338,34 @@ ASTNode* SemanticAnalyzeReflection(ReflectionASTNode* node) {
   node->base.flags |= kASTAnalyzed;
   return (ASTNode*)node;
 }
+static ASTNode* MaterializeLambdaCapture(Symbol* source,
+                                         SourceLocation location) {
+  TypeRecord* function = compiler->current_function;
+  if (source == NULL || function == NULL || !TypeIsFunction(function) ||
+      function->info.function.cxx_member_owner == NULL ||
+      function->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Struct* closure = function->info.function.cxx_member_owner;
+  Symbol* this_symbol = function->info.function.prototype.value.p[0];
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    Symbol* field = member != NULL ? member->symbol : NULL;
+    if (field == NULL || field->lambda_capture_source != source) {
+      continue;
+    }
+    ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
+    ASTNode* member_name = NewStringConstantASTNode(
+        NewString(field->name.value), NULL, location);
+    ASTNode* access = NewBinaryASTNode(
+        AST_OP(arrow), NULL, location, this_node, member_name);
+    return field->lambda_capture_by_reference
+               ? NewUnaryASTNode(AST_OP(contents), NULL, location, access)
+               : access;
+  }
+  return NULL;
+}
+
 static ASTNode* MaterializeReflectedEntity(ReflectionValue* value,
                                            SpliceContext context,
                                            SourceLocation location) {
@@ -358,9 +385,14 @@ static ASTNode* MaterializeReflectedEntity(ReflectionValue* value,
     case kReflectionConcept:
     case kReflectionTemplate:
     case kReflectionFunctionParameter:
-      return value->symbol != NULL
-                 ? NewIdentifierASTNode(value->symbol, location)
-                 : NULL;
+      if (value->symbol == NULL) {
+        return NULL;
+      }
+      ASTNode* capture =
+          MaterializeLambdaCapture(value->symbol, location);
+      return capture != NULL
+                 ? capture
+                 : NewIdentifierASTNode(value->symbol, location);
     case kReflectionDataMember:
     case kReflectionClassMember:
     case kReflectionUnnamedBitField:
@@ -601,7 +633,14 @@ ASTNode* SemanticAnalyzeSplice(SpliceASTNode* node) {
     node->base.flags |= kASTAnalyzed;
     return (ASTNode*)node;
   }
-  return AnalyzeExpression(result);
+  result = AnalyzeExpression(result);
+  TypeRecord* contract_view = SemanticContractIdentifierViewType(
+      value->symbol, result != NULL ? result->type : NULL);
+  if (contract_view != NULL) {
+    ASTNodeSetType(result, contract_view);
+    TypeRecordDelete(contract_view);
+  }
+  return result;
 }
 
 ASTNode* SemanticAnalyzeSpliceQualified(SpliceQualifiedASTNode* node) {
@@ -1165,7 +1204,9 @@ static ASTNode* MetaMaterializeConstexprObjectResult(VectorASTNode* call,
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(return_type));
   temp->location = location;
   temp->flags.is_constexpr = true;
+  temp->requires_ast_constexpr = true;
   ASTNode* init = NewExpressionInitializerASTNode(initializer, location);
+  init->flags |= kASTRequiresASTConstexpr;
   if (!ConstexprEvaluateObjectConstantForSymbol(temp, init)) {
     SemanticError((ASTNode*)call,
                   "Reflection result is not a constant expression");
@@ -1255,14 +1296,7 @@ static ReflectionValue* MetaEvaluateReflectionArg(ASTNode* node) {
   if (node == NULL) {
     return NULL;
   }
-  ReflectionValue* value = SemanticReflectionValueFromExpression(node);
-  if (value == NULL) {
-    ConstEvalContext context;
-    ConstEvalContextInit(&context);
-    value = ConstexprEvaluateReflectionExpression(&context, node);
-    ConstEvalContextDestruct(&context);
-  }
-  return value;
+  return SemanticEvaluateReflection(node);
 }
 
 typedef struct {
@@ -2960,13 +2994,7 @@ static void EvaluateAnnotationAttribute(Attribute* attr) {
     return;
   }
   ASTNode* expression = AnalyzeExpression(attr->annotation_expr);
-  ReflectionValue* value = SemanticReflectionValueFromExpression(expression);
-  if (value == NULL) {
-    ConstEvalContext context;
-    ConstEvalContextInit(&context);
-    value = ConstexprEvaluateReflectionExpression(&context, expression);
-    ConstEvalContextDestruct(&context);
-  }
+  ReflectionValue* value = SemanticEvaluateReflection(expression);
   if (value != NULL) {
     attr->annotation_value = value;
   }

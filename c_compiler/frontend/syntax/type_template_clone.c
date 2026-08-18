@@ -4754,6 +4754,9 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       copy->value = old->value;
       copy->stack_offset = old->stack_offset;
       copy->alias_target = old->alias_target;
+      copy->lambda_capture_source = old->lambda_capture_source;
+      copy->lambda_capture_by_reference =
+          old->lambda_capture_by_reference;
       id->symbol = copy;
       ASTNodeSetType(node, copy->type);
       return node;

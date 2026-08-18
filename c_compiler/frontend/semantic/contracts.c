@@ -71,6 +71,25 @@ static void SetResultBindingType(TypeRecord* func,
   SymbolSetType(assertion->result_binding, binding_type);
 }
 
+TypeRecord* SemanticContractIdentifierViewType(Symbol* symbol,
+                                               TypeRecord* expression_type) {
+  if (compiler->contract_assertion_depth <= 0 || symbol == NULL ||
+      expression_type == NULL || TypeIsFunction(expression_type) ||
+      StorageIs(symbol->storage, STO(typedef)) ||
+      symbol->flags.is_template_parameter ||
+      StringEqual(&symbol->name, "this")) {
+    return NULL;
+  }
+  if (symbol->flags.is_local && !symbol->flags.is_argument &&
+      compiler->contract_assertion_location != 0 &&
+      symbol->location >= compiler->contract_assertion_location) {
+    return NULL;
+  }
+  TypeRecord* view = TypeRecordCloneSpine(expression_type);
+  view->qualifiers |= kQualConst;
+  return view;
+}
+
 static TypeRecord* ContractParameterViewType(Symbol* formal) {
   TypeRecord* view = TypeRecordCloneSpine(formal->type);
   if (StringEqual(&formal->name, "this") && TypeIsPointer(view) &&
@@ -86,6 +105,9 @@ static TypeRecord* ContractParameterViewType(Symbol* formal) {
 
 static void EnterContractParameterView(TypeRecord* func, Vector* saved_types) {
   VectorInit(saved_types);
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
   Vector* prototype = &func->info.function.prototype;
   for (size_t i = 0; i < prototype->length; i++) {
     Symbol* formal = prototype->value.p[i];
@@ -101,15 +123,17 @@ static void EnterContractParameterView(TypeRecord* func, Vector* saved_types) {
 
 static void LeaveContractParameterView(TypeRecord* func,
                                        Vector* saved_types) {
-  Vector* prototype = &func->info.function.prototype;
-  for (size_t i = 0; i < prototype->length && i < saved_types->length; i++) {
-    Symbol* formal = prototype->value.p[i];
-    TypeRecord* saved = saved_types->value.p[i];
-    if (formal == NULL || saved == NULL) {
-      continue;
+  if (func != NULL && TypeIsFunction(func)) {
+    Vector* prototype = &func->info.function.prototype;
+    for (size_t i = 0; i < prototype->length && i < saved_types->length; i++) {
+      Symbol* formal = prototype->value.p[i];
+      TypeRecord* saved = saved_types->value.p[i];
+      if (formal == NULL || saved == NULL) {
+        continue;
+      }
+      SymbolSetType(formal, saved);
+      TypeRecordDecRef(saved);
     }
-    SymbolSetType(formal, saved);
-    TypeRecordDecRef(saved);
   }
   VectorDestruct(saved_types);
 }
@@ -133,7 +157,12 @@ void SemanticAnalyzeFunctionContracts(TypeRecord* func, ASTNode* declaration) {
     }
     Vector saved_parameter_types = {0};
     EnterContractParameterView(func, &saved_parameter_types);
+    SourceLocation saved_location = compiler->contract_assertion_location;
+    compiler->contract_assertion_location = assertion->predicate->location;
+    compiler->contract_assertion_depth++;
     assertion->predicate = AnalyzeExpression(assertion->predicate);
+    compiler->contract_assertion_depth--;
+    compiler->contract_assertion_location = saved_location;
     LeaveContractParameterView(func, &saved_parameter_types);
     if (assertion->predicate == NULL) {
       SemanticError(declaration, "invalid contract assertion predicate");
@@ -148,7 +177,17 @@ void SemanticAnalyzeFunctionContracts(TypeRecord* func, ASTNode* declaration) {
 }
 
 void SemanticAnalyzeContractAssert(ContractAssertASTNode* node) {
+  Vector saved_parameter_types = {0};
+  EnterContractParameterView(compiler->current_function,
+                             &saved_parameter_types);
+  SourceLocation saved_location = compiler->contract_assertion_location;
+  compiler->contract_assertion_location = node->predicate->location;
+  compiler->contract_assertion_depth++;
   node->predicate = AnalyzeExpression(node->predicate);
+  compiler->contract_assertion_depth--;
+  compiler->contract_assertion_location = saved_location;
+  LeaveContractParameterView(compiler->current_function,
+                             &saved_parameter_types);
   if (node->predicate == NULL) {
     SemanticError((ASTNode*)node, "invalid contract assertion predicate");
     return;

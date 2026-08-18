@@ -22,6 +22,15 @@
 
 static int semantic_catch_depth = 0;
 
+static bool SemanticExpressionRequiresASTConstexpr(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL &&
+         (((node->flags & kASTRequiresASTConstexpr) != 0) ||
+          (node->op == AST_OP(identifier) &&
+           ((IdentifierASTNode*)node)->symbol != NULL &&
+           ((IdentifierASTNode*)node)->symbol->requires_ast_constexpr));
+}
+
 void SemanticEnterCatchHandler(void) {
   semantic_catch_depth++;
 }
@@ -1728,14 +1737,7 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
         ConstexprInitializerExpression(node->initializer);
     reflection_expr = AnalyzeExpression(reflection_expr);
     ReflectionValue* reflection =
-        SemanticReflectionValueFromExpression(reflection_expr);
-    if (reflection == NULL) {
-      ConstEvalContext context;
-      ConstEvalContextInit(&context);
-      reflection =
-          ConstexprEvaluateReflectionExpression(&context, reflection_expr);
-      ConstEvalContextDestruct(&context);
-    }
+        SemanticEvaluateReflection(reflection_expr);
     if (reflection != NULL) {
       node->symbol->value.other = reflection;
       node->symbol->flags.value_set = true;
@@ -1758,6 +1760,10 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
         !node->symbol->flags.is_constexpr &&
         !node->symbol->flags.is_constinit;
     if (!scalar && !ordinary_automatic_const) {
+      if (ASTNodeAny(node->initializer,
+                     SemanticExpressionRequiresASTConstexpr, NULL)) {
+        node->symbol->requires_ast_constexpr = true;
+      }
       ConstexprEvaluateObjectConstantForSymbol(node->symbol,
                                                node->initializer);
     }

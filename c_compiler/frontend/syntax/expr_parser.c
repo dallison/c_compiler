@@ -3169,6 +3169,8 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
     field->flags.invented = true;
     field->flags.is_defined = true;
     field->flags.is_parameter_pack = capture->is_pack_expansion;
+    field->lambda_capture_source = capture->captured;
+    field->lambda_capture_by_reference = capture->by_reference;
     field->location = location;
     StructMember* member = NewStructMember(field);
     member->access = kAccessPrivate;
@@ -3298,6 +3300,10 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
                                      int child_id, VisitorMode mode) {
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
+    return;
+  }
+  if (node->parent != NULL && node->parent->op == AST_OP(reflect) &&
+      ((ReflectionASTNode*)node->parent)->operand == node) {
     return;
   }
   LambdaRewrite* rewrite = data;

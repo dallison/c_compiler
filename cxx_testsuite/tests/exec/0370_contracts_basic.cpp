@@ -60,12 +60,9 @@ struct pair_value {
   int second;
 };
 
-static const pair_value* returned_pair_address;
-
 pair_value make_pair(const int value)
-    post (result: (returned_pair_address = &result,
-                   result.first == value &&
-                       result.second == value + 1)) {
+    post (result: result.first == value &&
+                  result.second == value + 1) {
   return pair_value{value, value + 1};
 }
 
@@ -87,7 +84,6 @@ int main() {
                  deduced_template(4) == 9 && declared(9) == 9 &&
                  holder.get() == 11 &&
                  pair.first == 7 && pair.second == 8 &&
-                 returned_pair_address == &pair &&
                  &identity(pair) == &pair && lambda(6) == 18
              ? 0
              : 1;

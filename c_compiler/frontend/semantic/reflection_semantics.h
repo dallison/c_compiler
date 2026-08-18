@@ -23,6 +23,7 @@ void SemanticAttachAnnotationAttributes(Vector* attributes, Symbol* symbol);
 ReflectionEntityKind ReflectionKindForSymbol(Symbol* symbol);
 
 ReflectionValue* SemanticReflectionValueFromExpression(ASTNode* expression);
+ReflectionValue* SemanticEvaluateReflection(ASTNode* expression);
 TypeRecord* SemanticMaterializeReflectedType(ReflectionValue* value,
                                              SourceLocation location);
 Symbol* SemanticMaterializeReflectedTemplate(ReflectionValue* value,

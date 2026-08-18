@@ -11,6 +11,7 @@
 #include "type_compare.h"
 #include "type_core.h"
 #include "type_internal.h"
+#include "type_template.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -337,8 +338,20 @@ ReflectionValue* ReflectionCreateInvalid(SourceLocation location) {
 
 ReflectionValue* ReflectionCreateType(TypeRecord* type, Symbol* alias,
                                       SourceLocation location) {
-  return ReflectionCreate(alias != NULL ? kReflectionTypeAlias : kReflectionType,
-                          type, alias, NULL, NULL, NULL, 0, location);
+  ReflectionValue candidate = ReflectionCandidate(
+      alias != NULL ? kReflectionTypeAlias : kReflectionType, type, alias, NULL,
+      NULL, NULL, 0, 0, NULL, 0, 0.0, false, NULL, location);
+  Vector* arguments = TypeSpecializationTemplateArguments(type);
+  if (arguments == NULL) {
+    TypeRecord* materialized =
+        TypeMaterializeClassTemplateSpecialization(&compiler->syntax, type);
+    arguments = TypeSpecializationTemplateArguments(materialized);
+  }
+  for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
+    VectorAppend(&candidate.substituted_arguments,
+                 TemplateArgumentCopy(arguments->value.p[i]));
+  }
+  return ReflectionIntern(candidate);
 }
 
 ReflectionValue* ReflectionCreateSymbol(ReflectionEntityKind kind,
@@ -506,7 +519,9 @@ bool ReflectionValueEqual(const ReflectionValue* left,
     case kReflectionNamespaceAlias:
       return left->namespace_alias_target == right->namespace_alias_target;
     case kReflectionType:
-      return TypeEqual(left->reflected_type, right->reflected_type);
+      return TypeEqual(left->reflected_type, right->reflected_type) &&
+             ReflectionTemplateArgumentsEqual(&left->substituted_arguments,
+                                              &right->substituted_arguments);
     case kReflectionTypeAlias:
     case kReflectionVariable:
     case kReflectionFunction:
@@ -557,6 +572,19 @@ bool ReflectionValueEqual(const ReflectionValue* left,
   return false;
 }
 
+ReflectionValue* ReflectionCanonicalize(ReflectionValue* value) {
+  if (value == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < compiler->reflection_values.length; i++) {
+    ReflectionValue* existing = compiler->reflection_values.value.p[i];
+    if (existing != value && ReflectionValueEqual(existing, value)) {
+      return existing;
+    }
+  }
+  return value;
+}
+
 const char* ReflectionValueIdentifier(const ReflectionValue* value) {
   if (value == NULL) {
     return NULL;
@@ -590,9 +618,14 @@ const char* ReflectionValueIdentifier(const ReflectionValue* value) {
 }
 
 TypeRecord* ReflectionValueType(const ReflectionValue* value) {
-  return value != NULL && value->reflected_type != NULL
-             ? TypeRecordCopy(value->reflected_type)
-             : NULL;
+  if (value == NULL) {
+    return NULL;
+  }
+  TypeRecord* type =
+      value->reflected_type != NULL
+          ? value->reflected_type
+          : value->symbol != NULL ? value->symbol->type : NULL;
+  return type != NULL ? TypeRecordCopy(type) : NULL;
 }
 
 void ReflectionValueDelete(ReflectionValue* value) {

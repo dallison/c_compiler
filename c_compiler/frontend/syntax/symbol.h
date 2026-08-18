@@ -183,6 +183,10 @@ typedef struct Symbol {
   } value;
   int32_t stack_offset;     // Stack offset if local.            // @wire 37
   struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
+  // Original entity represented by an implementation-generated lambda
+  // capture field. Transient: closure fields never cross module boundaries.
+  struct Symbol* lambda_capture_source;
+  bool lambda_capture_by_reference;
   struct Symbol* overload_next; // Next overload, same name.     // @wire 39
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
   // Portable initializer for serialized constexpr aggregate values. The live
@@ -192,6 +196,7 @@ typedef struct Symbol {
   // object relative to the current function frame. This is transient because
   // automatic-storage identities cannot cross a module boundary.
   bool is_constexpr_representable;
+  bool requires_ast_constexpr;
   struct TypeRecord* constexpr_reference_scope;
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47

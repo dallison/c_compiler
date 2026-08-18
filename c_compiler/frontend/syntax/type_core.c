@@ -684,14 +684,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   arg->object_initializer = NULL;
 
   if (TypeIsReflection(expr->type)) {
-    ReflectionValue* reflection =
-        SemanticReflectionValueFromExpression(expr);
-    if (reflection == NULL) {
-      ConstEvalContext context;
-      ConstEvalContextInit(&context);
-      reflection = ConstexprEvaluateReflectionExpression(&context, expr);
-      ConstEvalContextDestruct(&context);
-    }
+    ReflectionValue* reflection = SemanticEvaluateReflection(expr);
     if (reflection == NULL) {
       return false;
     }

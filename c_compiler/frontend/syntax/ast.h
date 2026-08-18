@@ -412,6 +412,7 @@ struct ConstraintExpr;
 #define kASTConstexprPlacementDiagnosed (1ULL << 52)  // Constexpr placement/provenance diagnostic already emitted.
 #define kASTSourceEmptyCompound (1ULL << 53)  // Source spelling was exactly an empty compound-statement.
 #define kASTTrivialInfiniteLoop (1ULL << 54)  // P2809 trivial infinite loop; runtime iterations yield.
+#define kASTRequiresASTConstexpr (1ULL << 55)  // Result contains evaluator-only semantic state (for example a materialized reflection query).
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

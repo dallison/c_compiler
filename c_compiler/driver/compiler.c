@@ -1992,15 +1992,10 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                       ConstexprInitializerExpression(decl->initializer);
                   reflection_expr = AnalyzeExpression(reflection_expr);
                   ReflectionValue* reflection =
-                      SemanticReflectionValueFromExpression(reflection_expr);
-                  if (reflection == NULL &&
-                      TypeIsReflection(decl->symbol->type)) {
-                    ConstEvalContext context;
-                    ConstEvalContextInit(&context);
-                    reflection = ConstexprEvaluateReflectionExpression(
-                        &context, reflection_expr);
-                    ConstEvalContextDestruct(&context);
-                  }
+                      TypeIsReflection(decl->symbol->type)
+                          ? SemanticEvaluateReflection(reflection_expr)
+                          : SemanticReflectionValueFromExpression(
+                                reflection_expr);
                   if (TypeIsReflection(decl->symbol->type) &&
                       reflection != NULL) {
                     decl->symbol->value.other = reflection;
@@ -2612,6 +2607,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->diagnostic_suppression_depth = 0;
   compiler->diagnostic_error_trap_depth = 0;
   compiler->diagnostic_error_trapped = false;
+  compiler->contract_assertion_depth = 0;
+  compiler->contract_assertion_location = 0;
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;

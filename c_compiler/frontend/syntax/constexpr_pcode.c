@@ -2709,59 +2709,14 @@ bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason) {
 }
 
 typedef struct {
-  bool found;
-  Vector* visited;
-} ConstexprContractScan;
-
-static bool PCodeFunctionHasTransitiveContracts(Symbol* callee,
-                                                Vector* visited);
-
-static void DetectTransitiveConstexprContracts(ASTNode* node, void* data,
-                                                int child_id,
-                                                VisitorMode mode) {
-  (void)child_id;
-  ConstexprContractScan* scan = data;
-  if (mode != kVisitPreChildren || node == NULL || scan->found) {
-    return;
-  }
-  if (node->op == AST_OP(contract_assert)) {
-    scan->found = true;
-  } else if (node->op == AST_OP(call)) {
-    Symbol* callee = PCodeConstexprFunctionDefinition(
-        PCodeConstexprCallSymbol(node));
-    scan->found =
-        PCodeFunctionHasTransitiveContracts(callee, scan->visited);
-  }
-}
-
-static bool PCodeFunctionHasTransitiveContracts(Symbol* callee,
-                                                Vector* visited) {
-  if (callee == NULL || callee->type == NULL ||
-      callee->type->info.function.body == NULL) {
-    return false;
-  }
-  if (callee->type->info.function.contract_assertions.length != 0) {
-    return true;
-  }
-  for (size_t i = 0; i < visited->length; i++) {
-    if (visited->value.p[i] == callee) {
-      return false;
-    }
-  }
-  VectorAppend(visited, callee);
-  ConstexprContractScan scan = {
-      .visited = visited,
-  };
-  ASTNodeVisit(callee->type->info.function.body,
-               DetectTransitiveConstexprContracts, 0, &scan);
-  return scan.found;
-}
-
-typedef struct {
   bool required;
-  bool placement_only;
+  bool ast_only;
+  int function_depth;
   Vector visited_functions;  // Symbol*
 } ConstexprASTOverlayScan;
+
+static void ScanConstexprFunctionCapabilities(
+    Symbol* function, ConstexprASTOverlayScan* scan);
 
 static bool ConstexprASTOverlayVisited(ConstexprASTOverlayScan* scan,
                                        Symbol* function) {
@@ -2777,7 +2732,7 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   ConstexprASTOverlayScan* scan = data;
-  if (mode != kVisitPreChildren || node == NULL || scan->required) {
+  if (mode != kVisitPreChildren || node == NULL || scan->ast_only) {
     return;
   }
   bool cxx26 = CompilerCXXAtLeast(kLanguageStandardCXX26);
@@ -2791,13 +2746,19 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         ((VectorASTNode*)allocation)->children != NULL &&
         ((VectorASTNode*)allocation)->children->length > 1;
   }
-  if ((cxx26 && placement_new) ||
-      (!scan->placement_only &&
-       (node->op == AST_OP(reflect) ||
-        node->op == AST_OP(reflection_constant) ||
-        node->op == AST_OP(splice) ||
-        node->op == AST_OP(contract_assert) ||
-        (node->type != NULL && TypeContainsReflection(node->type))))) {
+  if ((node->flags & kASTRequiresASTConstexpr) != 0 ||
+      (node->op == AST_OP(identifier) &&
+       ((IdentifierASTNode*)node)->symbol != NULL &&
+       ((IdentifierASTNode*)node)->symbol->requires_ast_constexpr) ||
+      node->op == AST_OP(reflect) ||
+      node->op == AST_OP(reflection_constant) ||
+      node->op == AST_OP(splice) ||
+      node->op == AST_OP(splice_qualified) ||
+      node->op == AST_OP(contract_assert) ||
+      (node->type != NULL && TypeContainsReflection(node->type))) {
+    scan->required = true;
+    scan->ast_only = true;
+  } else if (cxx26 && placement_new) {
     scan->required = true;
   } else if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
@@ -2811,7 +2772,7 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         (node->flags & kASTCXXNewExpression) == 0) {
       scan->required = true;
     }
-  } else if (!scan->placement_only &&
+  } else if (scan->function_depth <= 1 &&
              (node->op == AST_OP(dot) || node->op == AST_OP(arrow))) {
     BinaryASTNode* access = (BinaryASTNode*)node;
     TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
@@ -2823,7 +2784,7 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         receiver->info.struct_info->is_union) {
       scan->required = true;
     }
-  } else if (!scan->placement_only &&
+  } else if (scan->function_depth <= 1 &&
              (node->op == AST_OP(plus) || node->op == AST_OP(minus))) {
     BinaryASTNode* binary = (BinaryASTNode*)node;
     if (TypeIsPointer(node->type) && binary->left != NULL &&
@@ -2842,45 +2803,45 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     }
     Symbol* callee = PCodeConstexprFunctionDefinition(
         call_symbol);
-    if (!scan->placement_only) {
-      Vector visited;
-      VectorInit(&visited);
-      scan->required = PCodeFunctionHasTransitiveContracts(callee, &visited);
-      VectorDestruct(&visited);
-    }
-    if (!scan->required && callee != NULL && callee->type != NULL &&
-        callee->type->info.function.body != NULL &&
-        !ConstexprASTOverlayVisited(scan, callee)) {
-      VectorAppend(&scan->visited_functions, callee);
-      bool saved_placement_only = scan->placement_only;
-      scan->placement_only = true;
-      ASTNodeVisit(callee->type->info.function.body,
-                   DetectConstexprASTOverlay, 0, scan);
-      scan->placement_only = saved_placement_only;
-    }
+    ScanConstexprFunctionCapabilities(callee, scan);
   }
 }
 
-bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
-  if (compiler->reflection_values.length != 0) {
-    return true;
+static void ScanConstexprFunctionCapabilities(
+    Symbol* function, ConstexprASTOverlayScan* scan) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) ||
+      ConstexprASTOverlayVisited(scan, function)) {
+    return;
   }
-  Symbol* callee = PCodeConstexprFunctionDefinition(
-      PCodeConstexprCallSymbol(node));
-  if (callee == NULL || callee->type == NULL ||
-      callee->type->info.function.body == NULL) {
-    return false;
+  VectorAppend(&scan->visited_functions, function);
+  if (function->type->info.function.contract_assertions.length != 0) {
+    scan->required = true;
+    scan->ast_only = true;
+    return;
   }
-  if (callee->type->info.function.contract_assertions.length != 0) {
-    return true;
+  if (function->type->info.function.body != NULL) {
+    scan->function_depth++;
+    ASTNodeVisit(function->type->info.function.body,
+                 DetectConstexprASTOverlay, 0, scan);
+    scan->function_depth--;
   }
+}
+
+ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node) {
   ConstexprASTOverlayScan scan = {0};
   VectorInit(&scan.visited_functions);
-  VectorAppend(&scan.visited_functions, callee);
-  ASTNodeVisit(callee->type->info.function.body, DetectConstexprASTOverlay, 0,
-               &scan);
+  ASTNodeVisit(node, DetectConstexprASTOverlay, 0, &scan);
   VectorDestruct(&scan.visited_functions);
-  return scan.required;
+  return scan.ast_only
+             ? kConstexprPCodeASTOnly
+             : scan.required ? kConstexprPCodeRequiresOverlay
+                             : kConstexprPCodeEligible;
+}
+
+bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
+  return ConstexprPCodeCapabilityForExpression(node) !=
+         kConstexprPCodeEligible;
 }
 
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {

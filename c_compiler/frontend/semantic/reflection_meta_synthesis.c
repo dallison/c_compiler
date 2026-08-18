@@ -116,16 +116,7 @@ static ReflectionValue* MetaSynthesisEvaluateReflection(ASTNode* expression) {
   if (expression == NULL) {
     return NULL;
   }
-  ReflectionValue* value =
-      SemanticReflectionValueFromExpression(expression);
-  if (value != NULL) {
-    return value;
-  }
-  ConstEvalContext context;
-  ConstEvalContextInit(&context);
-  value = ConstexprEvaluateReflectionExpression(&context, expression);
-  ConstEvalContextDestruct(&context);
-  return value;
+  return SemanticEvaluateReflection(expression);
 }
 
 static Symbol* MetaSynthesisReferencedSymbol(ASTNode* expression) {
@@ -800,19 +791,9 @@ static ReflectionValue* MetaSynthesisReflectConstantFromExpression(
     return NULL;
   }
   expression = AnalyzeExpression(expression);
-  ReflectionValue* existing =
-      SemanticReflectionValueFromExpression(expression);
+  ReflectionValue* existing = SemanticEvaluateReflection(expression);
   if (existing != NULL) {
     return existing;
-  }
-  if (expression->type != NULL && TypeIsReflection(expression->type)) {
-    ConstEvalContext context;
-    ConstEvalContextInit(&context);
-    existing = ConstexprEvaluateReflectionExpression(&context, expression);
-    ConstEvalContextDestruct(&context);
-    if (existing != NULL) {
-      return existing;
-    }
   }
   if (expression->type != NULL && TypeIsIntegral(expression->type)) {
     int64_t value = 0;

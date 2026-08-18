@@ -182,10 +182,13 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
+  sym->lambda_capture_source = NULL;
+  sym->lambda_capture_by_reference = false;
   sym->overload_next = NULL;
   sym->default_argument = NULL;
   sym->constexpr_initializer = NULL;
   sym->is_constexpr_representable = false;
+  sym->requires_ast_constexpr = false;
   sym->constexpr_reference_scope = NULL;
   sym->variable_template = NULL;
   sym->alias_template = NULL;
@@ -1085,12 +1088,16 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
   new_sym->alias_target = sym->alias_target;
+  new_sym->lambda_capture_source = sym->lambda_capture_source;
+  new_sym->lambda_capture_by_reference =
+      sym->lambda_capture_by_reference;
   new_sym->overload_next = NULL;
   new_sym->default_argument =
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
   new_sym->constexpr_initializer =
       ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
   new_sym->is_constexpr_representable = sym->is_constexpr_representable;
+  new_sym->requires_ast_constexpr = sym->requires_ast_constexpr;
   new_sym->constexpr_reference_scope = sym->constexpr_reference_scope;
   new_sym->template_template_parameters =
       TemplateParameterVectorCopy(sym->template_template_parameters);

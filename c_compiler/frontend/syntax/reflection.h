@@ -142,6 +142,7 @@ bool ReflectionDataMemberSpecEqual(const ReflectionDataMemberSpec* left,
 
 bool ReflectionValueEqual(const ReflectionValue* left,
                           const ReflectionValue* right);
+ReflectionValue* ReflectionCanonicalize(ReflectionValue* value);
 const char* ReflectionValueIdentifier(const ReflectionValue* value);
 TypeRecord* ReflectionValueType(const ReflectionValue* value);
 bool ReflectionKindIsTemplate(ReflectionEntityKind kind);

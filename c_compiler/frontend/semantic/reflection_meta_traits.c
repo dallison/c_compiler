@@ -230,15 +230,6 @@ static TypeRecord* MetaTraitRecoverQueryType(TypeRecord* type,
       return rebuilt;
     }
   }
-  if (value != NULL && MetaTraitNeedsTemplateArgumentRecovery(query)) {
-    TypeRecord* reparsed =
-        MetaTraitReparseReflectedTypeFromSource(value->location);
-    if (reparsed != NULL) {
-      TypeRecord* recovered = MetaTraitRecoverQueryType(reparsed, NULL);
-      TypeRecordDelete(reparsed);
-      return recovered;
-    }
-  }
   return MetaTraitRecoverTemplateIdType(type);
 }
 
@@ -693,18 +684,6 @@ static TypeRecord* MetaTraitRecoverConcreteQueryType(TypeRecord* object_type,
         return TypeRecordCalculateSize(ref);
       }
       return rebuilt;
-    }
-  }
-  TypeRecord* seed =
-      value != NULL && value->reflected_type != NULL ? value->reflected_type
-                                                     : object_type;
-  if (value != NULL && value->location != SOURCE_LOCATION_MISSING &&
-      value->location != SOURCE_LOCATION_COMMAND_LINE && seed != NULL) {
-    TypeRecord* from_source =
-        MetaTraitBuildTemplateIdFromReflectionSource(value->location, seed);
-    if (from_source != NULL) {
-      TypeRecordDelete(recovered);
-      return from_source;
     }
   }
   return recovered;
@@ -1359,14 +1338,7 @@ static ReflectionValue* MetaTraitReflectionFromTemplateParameterSymbol(
     ASTNode* materialized =
         TemplateArgumentMaterializeExpression(arg, location);
     if (materialized != NULL) {
-      reflection = SemanticReflectionValueFromExpression(materialized);
-      if (reflection == NULL) {
-        ConstEvalContext context;
-        ConstEvalContextInit(&context);
-        reflection =
-            ConstexprEvaluateReflectionExpression(&context, materialized);
-        ConstEvalContextDestruct(&context);
-      }
+      reflection = SemanticEvaluateReflection(materialized);
       ASTNodeDelete(materialized);
       if (reflection != NULL) {
         return reflection;
@@ -1447,14 +1419,7 @@ static ReflectionValue* MetaTraitReflectionFromExpression(ASTNode* expression,
       return from_symbol;
     }
   }
-  ReflectionValue* value =
-      SemanticReflectionValueFromExpression(expression);
-  if (value == NULL) {
-    ConstEvalContext context;
-    ConstEvalContextInit(&context);
-    value = ConstexprEvaluateReflectionExpression(&context, expression);
-    ConstEvalContextDestruct(&context);
-  }
+  ReflectionValue* value = SemanticEvaluateReflection(expression);
   if (value != NULL) {
     return value;
   }
@@ -1769,6 +1734,14 @@ static ASTNode* MetaTraitPreserveDependent(VectorASTNode* call,
 static bool MetaTraitTypeEqual(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL) {
     return false;
+  }
+  Symbol* left_primary = MetaTraitPrimaryTemplateSymbol(left);
+  Symbol* right_primary = MetaTraitPrimaryTemplateSymbol(right);
+  Vector* left_arguments = MetaTraitFindTemplateArguments(left);
+  Vector* right_arguments = MetaTraitFindTemplateArguments(right);
+  if (left_primary != NULL && left_primary == right_primary &&
+      left_arguments != NULL && right_arguments != NULL) {
+    return TypeTemplateArgumentVectorEqual(left_arguments, right_arguments);
   }
   TypeRecord* plain_left =
       TypeRecordCalculateSize(TypeRecordCloneSpine(left));

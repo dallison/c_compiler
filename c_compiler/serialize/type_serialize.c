@@ -997,6 +997,7 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
     // Modules written before typed NTTPs only carried int_value.
     a->value_kind = kTemplateValueIntegral;
   }
+  a->reflection_value = ReflectionCanonicalize(a->reflection_value);
   return a;
 }
 
@@ -2693,7 +2694,7 @@ static void ReadReflectionValueVector(DeserializeContext* ctx, WireBuffer* in,
     WireBufferInitReader(&er, elem, elen);
     ReflectionValue* value = ReadReflectionValueInline(ctx, &er);
     if (value != NULL) {
-      VectorAppend(out, value);
+      VectorAppend(out, ReflectionCanonicalize(value));
     }
   }
 }

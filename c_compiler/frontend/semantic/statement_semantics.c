@@ -2957,14 +2957,9 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
                     "only permitted in an immediate function");
     }
     ReflectionValue* reflection =
-        SemanticReflectionValueFromExpression(initializer_expr);
-    if (reflection == NULL && TypeIsReflection(node->symbol->type)) {
-      ConstEvalContext context;
-      ConstEvalContextInit(&context);
-      reflection =
-          ConstexprEvaluateReflectionExpression(&context, initializer_expr);
-      ConstEvalContextDestruct(&context);
-    }
+        TypeIsReflection(node->symbol->type)
+            ? SemanticEvaluateReflection(initializer_expr)
+            : SemanticReflectionValueFromExpression(initializer_expr);
     if (TypeIsReflection(node->symbol->type) && reflection != NULL) {
       node->symbol->value.other = reflection;
       node->symbol->flags.value_set = true;

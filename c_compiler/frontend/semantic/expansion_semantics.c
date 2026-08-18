@@ -760,14 +760,7 @@ static ASTNode* NewItemBindingStatement(ExpansionStatementASTNode* expansion,
   }
   if (item->type != NULL && TypeIsReflection(item->type)) {
     ReflectionValue* reflection =
-        SemanticReflectionValueFromExpression(element_clone);
-    if (reflection == NULL) {
-      ConstEvalContext context;
-      ConstEvalContextInit(&context);
-      reflection =
-          ConstexprEvaluateReflectionExpression(&context, element_clone);
-      ConstEvalContextDestruct(&context);
-    }
+        SemanticEvaluateReflection(element_clone);
     if (reflection != NULL) {
       item->value.other = reflection;
       item->flags.value_set = true;

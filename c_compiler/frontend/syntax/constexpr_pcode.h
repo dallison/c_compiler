@@ -8,7 +8,14 @@
 
 #include "constexpr.h"
 
+typedef enum {
+  kConstexprPCodeEligible,
+  kConstexprPCodeRequiresOverlay,
+  kConstexprPCodeASTOnly,
+} ConstexprPCodeCapability;
+
 bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason);
+ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node);
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node);
 const char* ConstexprPCodeFailureReason(ConstEvalContext* ctx);
 bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,

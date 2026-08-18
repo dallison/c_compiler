@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <string.h>
 #include "concepts.h"
+#include "contracts.h"
 #include "constexpr.h"
 #include "expr_evaluator.h"
 #include "init_semantics.h"
@@ -31,6 +32,15 @@
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
+
+static bool ExpressionRequiresASTConstexpr(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL &&
+         (((node->flags & kASTRequiresASTConstexpr) != 0) ||
+          (node->op == AST_OP(identifier) &&
+           ((IdentifierASTNode*)node)->symbol != NULL &&
+           ((IdentifierASTNode*)node)->symbol->requires_ast_constexpr));
+}
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -416,6 +426,12 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     } else {
       ASTNodeSetType(&node->base, node->symbol->type);
     }
+    TypeRecord* contract_view =
+        SemanticContractIdentifierViewType(node->symbol, node->base.type);
+    if (contract_view != NULL) {
+      ASTNodeSetType(&node->base, contract_view);
+      TypeRecordDelete(contract_view);
+    }
   }
 
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
@@ -778,6 +794,10 @@ static bool MarkCXX26SymbolicConstexprReference(Symbol* symbol,
 }
 
 static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
+  if (symbol != NULL &&
+      ASTNodeAny(initializer, ExpressionRequiresASTConstexpr, NULL)) {
+    symbol->requires_ast_constexpr = true;
+  }
   if (symbol != NULL && TypeIsReflection(symbol->type)) {
     ASTNode* expression = ConstexprInitializerExpression(initializer);
     expression = AnalyzeExpression(expression);
@@ -3379,6 +3399,10 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   Symbol* symbol = target != NULL && target->op == AST_OP(identifier)
                        ? ((IdentifierASTNode*)target)->symbol
                        : NULL;
+  if (symbol != NULL &&
+      ASTNodeAny(init, ExpressionRequiresASTConstexpr, NULL)) {
+    symbol->requires_ast_constexpr = true;
+  }
   bool deduced_auto = false;
   if (target == NULL || target->type == NULL) {
     SemanticError(node, "Initialization target has no type");
@@ -8919,6 +8943,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   ASTNode* early_meta_synthesis =
       SemanticTryAnalyzeMetaSynthesisCallEarly(node);
   if (early_meta_synthesis != NULL) {
+    early_meta_synthesis->flags |= kASTRequiresASTConstexpr;
     return early_meta_synthesis;
   }
   size_t num_actual_args = node->children->length;
@@ -8927,14 +8952,17 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   ASTNode* meta_call = SemanticTryAnalyzeMetaCall(node);
   if (meta_call != NULL) {
+    meta_call->flags |= kASTRequiresASTConstexpr;
     return meta_call;
   }
   ASTNode* meta_trait_call = SemanticTryAnalyzeMetaTraitCall(node);
   if (meta_trait_call != NULL) {
+    meta_trait_call->flags |= kASTRequiresASTConstexpr;
     return meta_trait_call;
   }
   ASTNode* meta_synthesis_call = SemanticTryAnalyzeMetaSynthesisCall(node);
   if (meta_synthesis_call != NULL) {
+    meta_synthesis_call->flags |= kASTRequiresASTConstexpr;
     return meta_synthesis_call;
   }
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);

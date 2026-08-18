@@ -361,6 +361,29 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/template_parameter_objects.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute template parameter object module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/reflection_roundtrip.dcm" \
+  "$FIXTURES/reflection_roundtrip.cppm" ||
+  fail "emit reflection round-trip module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  "$FIXTURES/reflection_roundtrip.cppm" \
+  -o "$work/reflection_roundtrip.o" ||
+  fail "compile reflection round-trip module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" \
+  "$FIXTURES/use_reflection_roundtrip.cpp" \
+  -o "$work/use_reflection_roundtrip.o" ||
+  fail "compile reflection round-trip importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_reflection_roundtrip.o" \
+  "$work/reflection_roundtrip.o" "$LIBC" \
+  -o "$work/reflection_roundtrip.bin" ||
+  fail "link reflection round-trip executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/reflection_roundtrip.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute reflection round-trip module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 \
   -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||
   fail "emit reachability.dcm"

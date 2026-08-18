@@ -286,6 +286,8 @@ typedef struct {
   int max_errors;
   LanguageStandard language_standard;
   ContractEvaluationSemantic contract_semantic;
+  int contract_assertion_depth;
+  SourceLocation contract_assertion_location;
   bool convert_warnings_to_errors;
   bool enable_all_warnings;
   Set disabled_warnings;

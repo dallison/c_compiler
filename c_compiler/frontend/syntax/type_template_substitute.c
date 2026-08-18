@@ -1709,9 +1709,10 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       SpliceASTNode* splice_node = (SpliceASTNode*)splice;
       splice_node->reflection = AnalyzeExpression(splice_node->reflection);
       ReflectionValue* reflection =
-          SemanticReflectionValueFromExpression(splice_node->reflection);
+          SemanticEvaluateReflection(splice_node->reflection);
       if (reflection != NULL) {
-        TypeRecord* result = ReflectionValueType(reflection);
+        TypeRecord* result = SemanticMaterializeReflectedType(
+            reflection, splice_node->base.location);
         if (result != NULL) {
           result->qualifiers |= type->qualifiers;
           ASTNodeDelete(splice);
@@ -2276,6 +2277,9 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   copy->value = old->value;
   copy->stack_offset = old->stack_offset;
   copy->alias_target = old->alias_target;
+  copy->lambda_capture_source = old->lambda_capture_source;
+  copy->lambda_capture_by_reference =
+      old->lambda_capture_by_reference;
   id->symbol = copy;
   ASTNodeSetType(node, copy->type);
   // Explicit template arguments on the id (e.g. the `R&` in `declval<R&>()`

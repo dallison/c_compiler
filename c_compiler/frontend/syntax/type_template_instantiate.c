@@ -22,6 +22,7 @@
 #include "expr_semantics.h"
 #include "init_semantics.h"
 #include "member_pointer.h"
+#include "reflection.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -568,6 +569,65 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
 }
 
 static void AppendTemplateNonTypeInstantiationKey(
+    String* name, TemplateArgument* arg);
+
+static void AppendReflectionInstantiationKey(String* name,
+                                             ReflectionValue* reflection) {
+  if (reflection == NULL) {
+    StringAppend(name, "R-");
+    return;
+  }
+  StringPrintf(
+      name, "R%d:T%d:S%d:M%d:B%zu:P%zu:Q",
+      (int)reflection->kind,
+      reflection->reflected_type != NULL ? reflection->reflected_type->id : -1,
+      reflection->symbol != NULL ? reflection->symbol->id : -1,
+      reflection->member != NULL && reflection->member->symbol != NULL
+          ? reflection->member->symbol->id
+          : -1,
+      reflection->base_index, reflection->parameter_index);
+  if (reflection->namespace_ != NULL) {
+    StringAppendString(name, &reflection->namespace_->qualified_name);
+  } else if (reflection->namespace_alias_target != NULL) {
+    StringAppendString(name,
+                       &reflection->namespace_alias_target->qualified_name);
+  }
+  StringAppend(name, ":A[");
+  for (size_t i = 0; i < reflection->substituted_arguments.length; i++) {
+    if (i != 0) {
+      StringAppendChar(name, ',');
+    }
+    TemplateArgument* argument =
+        reflection->substituted_arguments.value.p[i];
+    if (argument->kind == kTemplateParameterType) {
+      TypeRecordToTemplateKeyString(argument->type, name);
+    } else if (argument->kind == kTemplateParameterTemplate) {
+      StringPrintf(name, "TT%d",
+                   argument->template_symbol != NULL
+                       ? argument->template_symbol->id
+                       : argument->template_parameter_index);
+    } else {
+      AppendTemplateNonTypeInstantiationKey(name, argument);
+    }
+  }
+  StringAppendChar(name, ']');
+  if (reflection->kind == kReflectionValue) {
+    if (reflection->constexpr_initializer != NULL) {
+      StringAppend(name, ":O");
+      if (!ConstexprObjectInitializerTemplateKey(
+              reflection->reflected_type, reflection->constexpr_initializer,
+              name)) {
+        StringAppend(name, "?");
+      }
+    } else if (reflection->scalar_is_float) {
+      StringPrintf(name, ":F%a", reflection->scalar_fvalue);
+    } else {
+      StringPrintf(name, ":I%" PRId64, reflection->scalar_ivalue);
+    }
+  }
+}
+
+static void AppendTemplateNonTypeInstantiationKey(
     String* name, TemplateArgument* arg) {
   switch (TemplateArgumentConcreteValueKind(arg)) {
     case kTemplateValueIntegral:
@@ -589,7 +649,7 @@ static void AppendTemplateNonTypeInstantiationKey(
           arg->member_function != NULL ? arg->member_function->id : -1);
       break;
     case kTemplateValueReflection:
-      StringPrintf(name, "R%p", (void*)arg->reflection_value);
+      AppendReflectionInstantiationKey(name, arg->reflection_value);
       break;
     case kTemplateValueObject:
       StringAppend(name, "O");
