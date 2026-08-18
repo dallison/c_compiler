@@ -3828,6 +3828,7 @@ static ASTNode* StructuredBindingASTNodeClone(
       ASTArenaAlloc(sizeof(StructuredBindingASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->declared_type = TypeRecordCopy(from->declared_type);
+  to->storage = from->storage;
   to->names = NewVector();
   to->symbols = NewVector();
   for (size_t i = 0; i < from->names->length; i++) {
@@ -3867,8 +3868,8 @@ static ASTNodeVirtuals structured_binding_vtbl = {
     StructuredBindingASTNodeVisit, ValueAlwaysUsed,
     StructuredBindingASTNodeTransform};
 
-ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
-                                     Vector* symbols, int pack_index,
+ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Storage storage,
+                                     Vector* names, Vector* symbols, int pack_index,
                                      ASTNode* initializer,
                                      SourceLocation location) {
   StructuredBindingASTNode* node =
@@ -3876,6 +3877,7 @@ ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
   ASTNodeInit(&node->base, AST_OP(structured_binding), declared_type, location,
               &structured_binding_vtbl);
   node->declared_type = declared_type;
+  node->storage = storage;
   node->names = names;
   node->symbols = symbols;
   node->pack_index = pack_index;

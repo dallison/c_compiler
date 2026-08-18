@@ -696,7 +696,7 @@ static ASTNode* NewItemBindingStatement(ExpansionStatementASTNode* expansion,
     }
     StructuredBindingASTNode* binding =
         (StructuredBindingASTNode*)NewStructuredBindingASTNode(
-            TypeRecordCopy(expansion->binding_type), names, symbols,
+            TypeRecordCopy(expansion->binding_type), STO(auto), names, symbols,
             expansion->binding_pack_index,
             NewExpressionInitializerASTNode(
                 ASTNodeClone(element_expr, ExpansionIdentityCloneNode, NULL,

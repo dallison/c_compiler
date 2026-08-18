@@ -921,6 +921,7 @@ ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
 typedef struct {
   ASTNode base;
   TypeRecord* declared_type;  // Type pattern before the [x, y] binding list.
+  Storage storage;            // Storage duration of the hidden binding object.
   Vector* names;              // String* binding names.
   Vector* symbols;            // Symbol* binding symbols; owned by symbol table.
   int pack_index;              // Slot introduced by `...name`, or -1.
@@ -928,8 +929,8 @@ typedef struct {
   ASTNode* initializer;
 } StructuredBindingASTNode;
 
-ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
-                                     Vector* symbols, int pack_index,
+ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Storage storage,
+                                     Vector* names, Vector* symbols, int pack_index,
                                      ASTNode* initializer,
                                      SourceLocation location);
 

@@ -2662,6 +2662,17 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   SourceLocation location = binding->base.location;
   Symbol* hidden = binding->condition_symbol;
   TypeRecord* hidden_type = TypeRecordCopy(binding->declared_type);
+  Symbol* first_binding =
+      binding->symbols != NULL && binding->symbols->length != 0
+          ? binding->symbols->value.p[0]
+          : NULL;
+  bool is_constexpr =
+      first_binding != NULL && first_binding->flags.is_constexpr;
+  bool is_constinit =
+      first_binding != NULL && first_binding->flags.is_constinit;
+  if (is_constexpr && !TypeIsReference(hidden_type)) {
+    hidden_type->qualifiers |= kQualConst;
+  }
   if (hidden != NULL && symbol_map != NULL) {
     Symbol* source_hidden = hidden;
     hidden = MapFindPointerKey(symbol_map, source_hidden);
@@ -2680,6 +2691,9 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   }
   hidden->flags.is_local = true;
   hidden->flags.is_defined = true;
+  hidden->flags.is_constexpr = is_constexpr;
+  hidden->flags.is_constinit = is_constinit;
+  hidden->storage = binding->storage;
   hidden->location = location;
 
   ASTNode* initializer = binding->initializer;
@@ -2751,12 +2765,49 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
       ASTNodeDelete((ASTNode*)binding);
       return false;
     }
+    if (is_constexpr || is_constinit) {
+      access = AnalyzeExpression(access);
+      TypeRecord* element_type = access != NULL ? access->type : NULL;
+      if (element_type == NULL && array_binding) {
+        element_type = object_type->next;
+      } else if (element_type == NULL && !tuple_like_binding) {
+        StructMember* element = elements.value.p[i];
+        element_type =
+            element != NULL && element->symbol != NULL
+                ? element->symbol->type
+                : NULL;
+      }
+      if (element_type != NULL) {
+        TypeRecord* concrete_element = TypeRecordCopy(element_type);
+        if (TypeIsConst(object_type)) {
+          concrete_element->qualifiers |= kQualConst;
+        }
+        TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, false);
+        TypeRecordChain(reference, concrete_element);
+        TypeRecordCalculateSize(reference);
+        SymbolSetType(sym, reference);
+      }
+    }
     ASTNode* decl = NewVariableDeclarationASTNode(
         sym, NewSemanticInitExpression(
                  sym, NewExpressionInitializerASTNode(access, location),
                  location),
         location);
+    if (is_constexpr || is_constinit) {
+      sym->is_constexpr_representable = true;
+      sym->constexpr_reference_scope = compiler->current_function;
+      ASTNodeDelete(sym->constexpr_initializer);
+      sym->constexpr_initializer =
+          ASTNodeClone(access, StaticAssertIdentityClone, NULL, NULL);
+      // Analyze the invented reference using the ordinary structured-binding
+      // path. Its constexpr property belongs to the binding declaration, while
+      // representability is tracked separately from scalar constant folding.
+      sym->flags.is_constexpr = false;
+      sym->flags.is_constinit = false;
+    }
     AnalyzeStatement(decl);
+    sym->flags.is_constexpr = is_constexpr;
+    sym->flags.is_constinit = is_constinit;
     VectorInsertAfter(list->declarations, index + i, decl);
   }
   VectorDestruct(&elements);

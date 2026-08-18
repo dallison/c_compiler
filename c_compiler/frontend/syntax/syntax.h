@@ -51,6 +51,7 @@ typedef struct Syntax {
   bool parsing_template_specialization;  // Parsing declaration after template<>.
   bool parsing_template_argument;  // Parsing expression inside template args.
   bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
+  int parsing_lambda_body_depth;
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.

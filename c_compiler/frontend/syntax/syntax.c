@@ -1505,6 +1505,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_specialization = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
+  syntax->parsing_lambda_body_depth = 0;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
@@ -1964,6 +1965,35 @@ bool ExpressionIsTemplateDependent(ASTNode* expr) {
   return ASTNodeAny(expr, ExpressionNodeIsTemplateDependent, NULL);
 }
 
+static bool ExpressionNodeNamesPendingStructuredBinding(ASTNode* node,
+                                                        void* data) {
+  (void)data;
+  return node != NULL && node->op == AST_OP(identifier) &&
+         ((IdentifierASTNode*)node)->symbol != NULL &&
+         ((IdentifierASTNode*)node)->symbol->structured_binding_pack_size >= -1;
+}
+
+static bool ExpressionNodeNamesPendingConstexprObject(ASTNode* node,
+                                                      void* data) {
+  (void)data;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || symbol->type == NULL) {
+    return false;
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      TypeIsStructOrUnion(symbol->type) &&
+      StructHasVirtualBases(symbol->type->info.struct_info)) {
+    return true;
+  }
+  return symbol->flags.is_constexpr && !symbol->flags.value_set &&
+         (TypeIsStructOrUnion(symbol->type) ||
+          TypeIsFixedArray(symbol->type)) &&
+         symbol->constexpr_initializer != NULL;
+}
+
 static void ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_id,
                                           VisitorMode mode) {
   (void)data;
@@ -2113,10 +2143,15 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
 
   bool dependent =
-      syntax->current_template_parameter_count > 0 &&
-      (ExpressionIsTemplateDependent(expr) ||
-       (message_expr != NULL &&
-        ExpressionIsTemplateDependent(message_expr)));
+      syntax->parsing_lambda_body_depth > 0 ||
+      (syntax->current_template_parameter_count > 0 &&
+       (ExpressionIsTemplateDependent(expr) ||
+        (message_expr != NULL &&
+         ExpressionIsTemplateDependent(message_expr)))) ||
+      ASTNodeAny(expr, ExpressionNodeNamesPendingStructuredBinding, NULL);
+  dependent =
+      dependent ||
+      ASTNodeAny(expr, ExpressionNodeNamesPendingConstexprObject, NULL);
   if (dependent) {
     ASTNode* node =
         NewStaticAssertASTNode(expr, &message, message_expr, location);
@@ -11603,6 +11638,8 @@ static TypeRecord* ParseStructuredBindingDeclaredType(Syntax* syntax,
 static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
                                                  TypeRecord* base_type,
                                                  Storage storage,
+                                                 bool is_constexpr,
+                                                 bool is_constinit,
                                                  Vector* declarations) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX17)) {
     return false;
@@ -11630,6 +11667,18 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
   Vector* names =
       ParseStructuredBindingNames(syntax, symbols, &pack_index);
   LexCheckpointDestruct(&checkpoint);
+  if ((is_constexpr || is_constinit) &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SyntaxError(syntax,
+                "constexpr and constinit structured bindings require C++26");
+  }
+  for (size_t i = 0; i < symbols->length; i++) {
+    Symbol* symbol = symbols->value.p[i];
+    if (symbol != NULL) {
+      symbol->flags.is_constexpr = is_constexpr;
+      symbol->flags.is_constinit = is_constinit;
+    }
+  }
   if (names == NULL || names->length == 0) {
     SyntaxError(syntax, "Structured binding declaration requires at least one name");
   }
@@ -11656,7 +11705,7 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
     SyntaxError(syntax, "Structured binding declaration requires an initializer");
   }
   VectorAppend(declarations,
-               NewStructuredBindingASTNode(declared_type, names, symbols,
+               NewStructuredBindingASTNode(declared_type, storage, names, symbols,
                                            pack_index,
                                            initializer,
                                            syntax->lex->current_token_location));
@@ -12264,6 +12313,8 @@ static ASTNode* ParseLocalDeclarationImpl(Syntax* syntax,
 
   // Now we get a sequence of declarations, separated by commas.
   if (!TryParseStructuredBindingDeclaration(syntax, type, storage,
+                                            parser.is_constexpr,
+                                            parser.is_constinit,
                                             declarations)) {
     ParseLocalDeclarationList(&parser, type, storage, &attributes,
                               declarations);

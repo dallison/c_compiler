@@ -1008,7 +1008,7 @@ static void AppendRangeForBindingDeclarations(Syntax* syntax,
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewStructuredBindingASTNode(
-                   TypeRecordCopy(binding->structured_binding_type), names,
+                   TypeRecordCopy(binding->structured_binding_type), STO(auto), names,
                    symbols, binding->pack_index,
                    NewExpressionInitializerASTNode(current, location),
                    location));

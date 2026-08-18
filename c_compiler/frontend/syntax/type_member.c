@@ -29,6 +29,25 @@
 #include "set.h"
 
 
+static bool ParsedClassHasVirtualBases(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  if (StructHasVirtualBases(str)) {
+    return true;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        (base->is_virtual ||
+         (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+          StructHasVirtualBases(base->type->info.struct_info)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static StructMember* FindDirectStructMemberByName(Struct* str,
                                                   const char* name);
 
@@ -1852,6 +1871,14 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
     return false;
   }
   LexCheckpointDestruct(&checkpoint);
+
+  if ((is_constexpr || is_consteval) &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      ParsedClassHasVirtualBases(str)) {
+    SyntaxError(
+        parser->syntax,
+        "constexpr constructor or destructor with virtual bases requires C++26");
+  }
 
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),

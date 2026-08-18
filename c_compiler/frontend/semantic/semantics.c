@@ -1778,6 +1778,7 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   }
   if ((node->symbol->flags.is_constexpr || node->symbol->flags.is_constinit) &&
       !node->symbol->flags.value_set &&
+      !node->symbol->is_constexpr_representable &&
       !ExpressionIsTemplateDependent(node->initializer)) {
     SemanticError(node->initializer,
                   node->symbol->flags.is_constinit

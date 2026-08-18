@@ -404,6 +404,8 @@ struct ConstexprObject {
   Vector slots;
   StructMember* active_union_member;
   bool lifetime_ended;
+  ConstexprObject* complete_object;
+  size_t complete_offset;
 };
 
 // Defined in constexpr.c; dereference an address-valued ConstexprValue and

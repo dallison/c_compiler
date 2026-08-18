@@ -79,6 +79,8 @@ struct ConstexprObject {
   Vector slots;  // ConstexprValue*
   StructMember* active_union_member;
   bool lifetime_ended;
+  ConstexprObject* complete_object;
+  size_t complete_offset;
 };
 
 struct ConstexprException {
@@ -108,6 +110,7 @@ typedef enum {
 #define CONSTEXPR_MAX_STEPS 1000000
 
 static int template_argument_object_evaluation_depth;
+static int symbolic_constexpr_reference_depth;
 #define CONSTEXPR_HEAP_SIZE (256 * 1024)
 
 static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
@@ -853,6 +856,38 @@ bool ConstEvalStep(ConstEvalContext* ctx) {
   return ctx->steps <= ctx->max_steps;
 }
 
+bool ConstexprReferenceUsableInCurrentFunction(Symbol* symbol) {
+  if (symbol == NULL || !symbol->is_constexpr_representable ||
+      symbol->constexpr_reference_scope == NULL ||
+      compiler->current_function == NULL) {
+    return false;
+  }
+  TypeRecord* scope = symbol->constexpr_reference_scope;
+  TypeRecord* current = compiler->current_function;
+  if (scope == current) {
+    return true;
+  }
+  Symbol* scope_symbol =
+      TypeIsFunction(scope) ? scope->info.function.symbol : NULL;
+  Symbol* current_symbol =
+      TypeIsFunction(current) ? current->info.function.symbol : NULL;
+  Symbol* current_origin =
+      TypeIsFunction(current) ? current->info.function.template_origin : NULL;
+  Symbol* scope_origin =
+      TypeIsFunction(scope) ? scope->info.function.template_origin : NULL;
+  if (scope_symbol != NULL && current_symbol != NULL &&
+      StringEqualString(&scope_symbol->name, &current_symbol->name) &&
+      scope_symbol->location == current_symbol->location &&
+      scope->info.function.cxx_member_owner ==
+          current->info.function.cxx_member_owner) {
+    return true;
+  }
+  bool usable = current_origin != NULL &&
+         (current_origin == scope_symbol ||
+          (scope_origin != NULL && current_origin == scope_origin));
+  return usable;
+}
+
 static ConstexprBinding* FindConstexprBinding(ConstEvalContext* ctx,
                                               Symbol* symbol) {
   if (symbol == NULL) {
@@ -1011,6 +1046,8 @@ static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
   object->type = type;
   object->active_union_member = NULL;
   object->lifetime_ended = false;
+  object->complete_object = object;
+  object->complete_offset = 0;
   VectorInit(&object->slots);
   for (size_t i = 0; i < slot_count; i++) {
     VectorAppend(&object->slots, NewConstexprValueSlot());
@@ -1088,8 +1125,47 @@ static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
   return NULL;
 }
 
-static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
-                                             ConstexprObject* object) {
+static ConstexprObject* CloneConstexprObjectImpl(ConstEvalContext* ctx,
+                                                 ConstexprObject* object,
+                                                 Vector* sources,
+                                                 Vector* clones) {
+  if (object == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < sources->length; i++) {
+    if (sources->value.p[i] == object) {
+      return clones->value.p[i];
+    }
+  }
+  ConstexprObject* clone =
+      NewConstexprObject(ctx, object->type, object->slots.length);
+  VectorAppend(sources, object);
+  VectorAppend(clones, clone);
+  clone->active_union_member = object->active_union_member;
+  clone->lifetime_ended = object->lifetime_ended;
+  clone->complete_offset = object->complete_offset;
+  for (size_t i = 0; i < object->slots.length; i++) {
+    ConstexprValue* from = object->slots.value.p[i];
+    ConstexprValue* to = clone->slots.value.p[i];
+    *to = *from;
+    if (from->is_object) {
+      to->object =
+          CloneConstexprObjectImpl(ctx, from->object, sources, clones);
+      if (to->object == NULL) {
+        return NULL;
+      }
+    }
+  }
+  clone->complete_object =
+      object->complete_object != NULL
+          ? CloneConstexprObjectImpl(ctx, object->complete_object, sources,
+                                     clones)
+          : clone;
+  return clone;
+}
+
+static ConstexprObject* CloneNonVirtualConstexprObject(
+    ConstEvalContext* ctx, ConstexprObject* object) {
   if (object == NULL) {
     return NULL;
   }
@@ -1102,12 +1178,35 @@ static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
     ConstexprValue* to = clone->slots.value.p[i];
     *to = *from;
     if (from->is_object) {
-      to->object = CloneConstexprObject(ctx, from->object);
+      to->object = CloneNonVirtualConstexprObject(ctx, from->object);
       if (to->object == NULL) {
         return NULL;
       }
     }
   }
+  return clone;
+}
+
+static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
+                                             ConstexprObject* object) {
+  ConstexprObject* root =
+      object != NULL && object->complete_object != NULL
+          ? object->complete_object
+          : object;
+  if (root != NULL && root->type != NULL &&
+      TypeIsStructOrUnion(root->type) &&
+      root->type->info.struct_info != NULL &&
+      !StructHasVirtualBases(root->type->info.struct_info)) {
+    return CloneNonVirtualConstexprObject(ctx, object);
+  }
+  Vector sources;
+  Vector clones;
+  VectorInit(&sources);
+  VectorInit(&clones);
+  ConstexprObject* clone =
+      CloneConstexprObjectImpl(ctx, object, &sources, &clones);
+  VectorDestruct(&sources);
+  VectorDestruct(&clones);
   return clone;
 }
 
@@ -1140,11 +1239,17 @@ static size_t ConstexprBaseStorageIndex(Struct* str, size_t base_vector_index) {
   return storage;
 }
 
+static size_t ConstexprVirtualBaseStorageIndex(Struct* str,
+                                               size_t virtual_base_index) {
+  return ConstexprNonVirtualBaseCount(str) + virtual_base_index;
+}
+
 static size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member) {
   if (str == NULL || member == NULL || str->is_union) {
     return member != NULL ? member->index : 0;
   }
-  return ConstexprNonVirtualBaseCount(str) + member->index;
+  return ConstexprNonVirtualBaseCount(str) + str->virtual_bases.length +
+         member->index;
 }
 
 static size_t ConstexprObjectSlotCount(TypeRecord* type) {
@@ -1154,8 +1259,10 @@ static size_t ConstexprObjectSlotCount(TypeRecord* type) {
   if (type != NULL && TypeIsStructOrUnion(type) &&
       type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
-    return str->is_union ? 1
-                         : str->members.length + ConstexprNonVirtualBaseCount(str);
+    return str->is_union
+               ? 1
+               : str->members.length + ConstexprNonVirtualBaseCount(str) +
+                     str->virtual_bases.length;
   }
   return 0;
 }
@@ -1221,6 +1328,25 @@ static ConstexprValue* ConstexprSlotForOffset(TypeRecord* type,
       return ConstexprSlotForOffset(
           base->type, base_slot->object, offset - (size_t)base->byte_offset);
     }
+    for (size_t i = 0; i < str->virtual_bases.length; i++) {
+      CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+      if (base == NULL || base->type == NULL) {
+        continue;
+      }
+      size_t base_size = (size_t)base->type->size;
+      if (offset < (size_t)base->byte_offset ||
+          offset >= (size_t)base->byte_offset + base_size) {
+        continue;
+      }
+      ConstexprValue* base_slot = ConstexprObjectSlot(
+          object, ConstexprVirtualBaseStorageIndex(str, i));
+      if (base_slot == NULL || !base_slot->is_object ||
+          base_slot->object == NULL) {
+        return NULL;
+      }
+      return ConstexprSlotForOffset(
+          base->type, base_slot->object, offset - (size_t)base->byte_offset);
+    }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -1249,6 +1375,59 @@ static ConstexprValue* ConstexprSlotForOffset(TypeRecord* type,
     }
   }
   return offset == 0 ? ConstexprObjectSlot(object, 0) : NULL;
+}
+
+static ConstexprObject* ConstexprSubobjectAtOffset(ConstexprObject* object,
+                                                   TypeRecord* target_type,
+                                                   size_t offset) {
+  if (object == NULL || object->type == NULL || target_type == NULL) {
+    return NULL;
+  }
+  if (offset == 0 && TypeEqual(object->type, target_type)) {
+    return object;
+  }
+  if (!TypeIsStructOrUnion(object->type) ||
+      object->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = object->type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        offset < (size_t)base->byte_offset) {
+      continue;
+    }
+    ConstexprValue* slot = ConstexprObjectSlot(
+        object, ConstexprBaseStorageIndex(str, i));
+    if (slot == NULL || !slot->is_object || slot->object == NULL) {
+      continue;
+    }
+    size_t relative = offset - (size_t)base->byte_offset;
+    ConstexprObject* found =
+        ConstexprSubobjectAtOffset(slot->object, target_type, relative);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        offset < (size_t)base->byte_offset) {
+      continue;
+    }
+    ConstexprValue* slot = ConstexprObjectSlot(
+        object, ConstexprVirtualBaseStorageIndex(str, i));
+    if (slot == NULL || !slot->is_object || slot->object == NULL) {
+      continue;
+    }
+    size_t relative = offset - (size_t)base->byte_offset;
+    ConstexprObject* found =
+        ConstexprSubobjectAtOffset(slot->object, target_type, relative);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  return NULL;
 }
 
 static bool ConstexprMaterializeBaseSubobjectSlots(ConstEvalContext* ctx,
@@ -1283,10 +1462,68 @@ static bool ConstexprMaterializeBaseSubobjectSlots(ConstEvalContext* ctx,
     slot->fvalue = 0;
     slot->object =
         NewConstexprObject(ctx, base->type, ConstexprObjectSlotCount(base->type));
+    ConstexprObject* root =
+        object->complete_object != NULL ? object->complete_object : object;
+    if (root->type != NULL && TypeIsStructOrUnion(root->type) &&
+        root->type->info.struct_info != NULL &&
+        StructHasVirtualBases(root->type->info.struct_info)) {
+      slot->object->complete_object = root;
+      slot->object->complete_offset =
+          object->complete_offset + (size_t)base->byte_offset;
+    }
     if (slot->object == NULL ||
         !ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object)) {
       return false;
     }
+  }
+  ConstexprObject* complete =
+      object->complete_object != NULL ? object->complete_object : object;
+  Struct* complete_struct =
+      complete->type != NULL && TypeIsStructOrUnion(complete->type)
+          ? complete->type->info.struct_info
+          : NULL;
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* info = str->virtual_bases.value.p[i];
+    if (info == NULL || info->type == NULL || complete_struct == NULL) {
+      continue;
+    }
+    size_t complete_index = SIZE_MAX;
+    CXXVirtualBaseInfo* complete_info = NULL;
+    for (size_t j = 0; j < complete_struct->virtual_bases.length; j++) {
+      CXXVirtualBaseInfo* candidate =
+          complete_struct->virtual_bases.value.p[j];
+      if (candidate != NULL && candidate->type != NULL &&
+          TypeEqual(candidate->type, info->type)) {
+        complete_index = j;
+        complete_info = candidate;
+        break;
+      }
+    }
+    if (complete_index == SIZE_MAX || complete_info == NULL) {
+      continue;
+    }
+    ConstexprValue* complete_slot = ConstexprObjectSlot(
+        complete,
+        ConstexprVirtualBaseStorageIndex(complete_struct, complete_index));
+    ConstexprValue* local_slot = ConstexprObjectSlot(
+        object, ConstexprVirtualBaseStorageIndex(str, i));
+    if (complete_slot == NULL || local_slot == NULL) {
+      return false;
+    }
+    if (!complete_slot->is_object || complete_slot->object == NULL) {
+      complete_slot->is_object = true;
+      complete_slot->object = NewConstexprObject(
+          ctx, complete_info->type,
+          ConstexprObjectSlotCount(complete_info->type));
+      complete_slot->object->complete_object = complete;
+      complete_slot->object->complete_offset =
+          (size_t)complete_info->byte_offset;
+      if (!ConstexprMaterializeBaseSubobjectSlots(ctx,
+                                                 complete_slot->object)) {
+        return false;
+      }
+    }
+    *local_slot = *complete_slot;
   }
   return true;
 }
@@ -1342,6 +1579,59 @@ static size_t ConstexprMemberSlotIndex(ConstexprObject* object,
     return member != NULL ? member->index : 0;
   }
   return ConstexprMemberStorageIndex(object->type->info.struct_info, member);
+}
+
+static ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
+                                                 StructMember* member) {
+  if (object == NULL || member == NULL || object->type == NULL ||
+      !TypeIsStructOrUnion(object->type) ||
+      object->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = object->type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    if (str->members.value.p[i] == member) {
+      return object;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual) {
+      continue;
+    }
+    ConstexprValue* slot = ConstexprObjectSlot(
+        object, ConstexprBaseStorageIndex(str, i));
+    ConstexprObject* found =
+        slot != NULL && slot->is_object
+            ? ConstexprObjectForMember(slot->object, member)
+            : NULL;
+    if (found != NULL) {
+      return found;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    ConstexprValue* slot = ConstexprObjectSlot(
+        object, ConstexprVirtualBaseStorageIndex(str, i));
+    ConstexprObject* found =
+        slot != NULL && slot->is_object
+            ? ConstexprObjectForMember(slot->object, member)
+            : NULL;
+    if (found != NULL) {
+      return found;
+    }
+  }
+  return NULL;
+}
+
+static bool ConstexprObjectHasVirtualBases(ConstexprObject* object) {
+  ConstexprObject* root =
+      object != NULL && object->complete_object != NULL
+          ? object->complete_object
+          : object;
+  return root != NULL && root->type != NULL &&
+         TypeIsStructOrUnion(root->type) &&
+         root->type->info.struct_info != NULL &&
+         StructHasVirtualBases(root->type->info.struct_info);
 }
 
 static bool ConstexprUnionMemberActive(ConstexprObject* object,
@@ -1766,7 +2056,16 @@ static TypeRecord* ConstexprObjectSlotType(TypeRecord* type,
         seen++;
       }
     }
-    size_t member_index = str->is_union ? slot_index : slot_index - base_count;
+    size_t virtual_count = str->virtual_bases.length;
+    if (!str->is_union && slot_index >= base_count &&
+        slot_index < base_count + virtual_count) {
+      CXXVirtualBaseInfo* virtual_base =
+          str->virtual_bases.value.p[slot_index - base_count];
+      return virtual_base != NULL ? virtual_base->type : NULL;
+    }
+    size_t member_index =
+        str->is_union ? slot_index
+                      : slot_index - base_count - virtual_count;
     if (member_index < str->members.length) {
       StructMember* member = str->members.value.p[member_index];
       return member != NULL && member->symbol != NULL ? member->symbol->type
@@ -1819,6 +2118,12 @@ static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
       object_value.is_object = true;
       object_value.object = NewConstexprObject(
           &ctx, symbol->type, ConstexprObjectSlotCount(symbol->type));
+      if (StructHasVirtualBases(symbol->type->info.struct_info) &&
+          !ConstexprMaterializeBaseSubobjectSlots(&ctx,
+                                                  object_value.object)) {
+        ConstEvalContextDestruct(&ctx);
+        return false;
+      }
       size_t mark = ctx.bindings.length;
       PushConstexprBinding(&ctx, symbol, object_value);
       ok = EvaluateConstexprConstructorCall(&ctx, expr);
@@ -2314,7 +2619,8 @@ static bool ConstexprIsVirtualPointerAssignment(BinaryASTNode* node) {
   }
   StructMember* member = ((StructMemberASTNode*)member_node)->member;
   return member != NULL && member->symbol != NULL &&
-         StringStartsWith(&member->symbol->name, "__vptr");
+         (StringStartsWith(&member->symbol->name, "__vptr") ||
+          StringStartsWith(&member->symbol->name, "__vbptr"));
 }
 
 static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
@@ -3392,6 +3698,62 @@ bool ConstexprObjectInitializerTemplateKey(TypeRecord* type, ASTNode* expression
   return ok;
 }
 
+static ConstexprObject* ConstexprVirtualMemberRootObject(
+    ConstEvalContext* ctx, ASTNode* node, StructMember* member) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->op == AST_OP(address)) {
+    ASTNode* target = ((UnaryASTNode*)node)->sub;
+    ConstexprValue value = {0};
+    if (target != NULL &&
+        EvaluateConstexprObjectAccess(ctx, target, &value) &&
+        value.object != NULL &&
+        ConstexprObjectForMember(value.object, member) != NULL) {
+      return value.object;
+    }
+  }
+  if (node->op == AST_OP(cast)) {
+    return ConstexprVirtualMemberRootObject(
+        ctx, ((CastASTNode*)node)->expr, member);
+  }
+  if (node->op == AST_OP(ptr_scale)) {
+    return ConstexprVirtualMemberRootObject(
+        ctx, ((PtrScaleASTNode*)node)->expr, member);
+  }
+  if (node->op == AST_OP(expr_init)) {
+    return ConstexprVirtualMemberRootObject(
+        ctx, ((ExpressionInitializerASTNode*)node)->expr, member);
+  }
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeBinary) {
+    BinaryASTNode* binary = (BinaryASTNode*)node;
+    ConstexprObject* object =
+        ConstexprVirtualMemberRootObject(ctx, binary->left, member);
+    return object != NULL
+               ? object
+               : ConstexprVirtualMemberRootObject(ctx, binary->right, member);
+  }
+  if (shape == kASTShapeUnary) {
+    return ConstexprVirtualMemberRootObject(
+        ctx, ((UnaryASTNode*)node)->sub, member);
+  }
+  if (shape == kASTShapeVector) {
+    VectorASTNode* vector = (VectorASTNode*)node;
+    ConstexprObject* object =
+        ConstexprVirtualMemberRootObject(ctx, vector->left, member);
+    for (size_t i = 0;
+         object == NULL && vector->children != NULL &&
+         i < vector->children->length;
+         i++) {
+      object = ConstexprVirtualMemberRootObject(
+          ctx, vector->children->value.p[i], member);
+    }
+    return object;
+  }
+  return NULL;
+}
+
 bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           ConstexprValue* result) {
@@ -3538,6 +3900,33 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
     if (binding == NULL && id->symbol != NULL &&
+        ConstexprReferenceUsableInCurrentFunction(id->symbol) &&
+        TypeIsReference(id->symbol->type) &&
+        id->symbol->constexpr_initializer != NULL) {
+      ConstexprValue address = {0};
+      symbolic_constexpr_reference_depth++;
+      bool ok = EvaluateConstexprAddressValue(
+          ctx, ConstexprInitializerExpression(
+                   id->symbol->constexpr_initializer),
+          &address);
+      symbolic_constexpr_reference_depth--;
+      if (!ok ||
+          (address.address_binding != NULL &&
+           address.address_binding->symbol != NULL &&
+           !address.address_binding->symbol->flags.value_set)) {
+        return false;
+      }
+      while (address.is_address) {
+        ConstexprValue dereferenced;
+        if (!ConstexprDereferenceAddress(address, &dereferenced)) {
+          return false;
+        }
+        address = dereferenced;
+      }
+      *result = address;
+      return true;
+    }
+    if (binding == NULL && id->symbol != NULL &&
         CompilerSymbolIsMetaPromotedStatic(id->symbol)) {
       ConstexprEnsureMetaPromotedStaticObject(id->symbol);
     }
@@ -3682,15 +4071,29 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       return false;
     }
     ConstexprValue object_value;
-    if (!EvaluateConstexprObjectAccess(ctx, member_access->left,
-                                       &object_value) ||
-        object_value.object == NULL) {
-      return false;
-    }
     StructMemberASTNode* member_node =
         (StructMemberASTNode*)member_access->right;
     if (member_node->member == NULL) {
       return false;
+    }
+    if (!EvaluateConstexprObjectAccess(ctx, member_access->left,
+                                       &object_value) ||
+        object_value.object == NULL) {
+      object_value = (ConstexprValue){
+          .is_object = true,
+          .object = ConstexprVirtualMemberRootObject(
+              ctx, member_access->left, member_node->member),
+      };
+      if (object_value.object == NULL) {
+        return false;
+      }
+    }
+    if (ConstexprObjectHasVirtualBases(object_value.object)) {
+      ConstexprObject* member_object =
+          ConstexprObjectForMember(object_value.object, member_node->member);
+      if (member_object != NULL) {
+        object_value.object = member_object;
+      }
     }
     if (!ConstexprUnionMemberActive(object_value.object,
                                     member_node->member)) {
@@ -3846,6 +4249,13 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
         (StructMemberASTNode*)member_access->right;
     if (member_node->member == NULL) {
       return false;
+    }
+    if (ConstexprObjectHasVirtualBases(object_value.object)) {
+      ConstexprObject* member_object =
+          ConstexprObjectForMember(object_value.object, member_node->member);
+      if (member_object != NULL) {
+        object_value.object = member_object;
+      }
     }
     if (allow_object) {
       ConstexprActivateUnionMember(object_value.object, member_node->member);
@@ -4025,15 +4435,32 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       };
       return true;
     }
-    if (template_argument_object_evaluation_depth > 0 &&
+    if ((template_argument_object_evaluation_depth > 0 ||
+         symbolic_constexpr_reference_depth > 0) &&
         address->sub != NULL &&
         address->sub->op == AST_OP(identifier)) {
       Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
-      if (symbol != NULL && !symbol->flags.is_temp &&
-          !symbol->flags.is_argument &&
+      bool template_argument_target =
+          template_argument_object_evaluation_depth > 0 && symbol != NULL &&
+          !symbol->flags.is_temp && !symbol->flags.is_argument &&
           (!symbol->flags.is_local ||
-           StorageIs(symbol->storage, STO(static)))) {
-        PushConstexprBinding(ctx, symbol, (ConstexprValue){0});
+           StorageIs(symbol->storage, STO(static)));
+      bool symbolic_reference_target =
+          symbolic_constexpr_reference_depth > 0 && symbol != NULL &&
+          !StorageIs(symbol->storage, STO(thread));
+      if (template_argument_target || symbolic_reference_target) {
+        ConstexprValue initial = {0};
+        if (symbol->flags.value_set) {
+          initial.is_floating = TypeIsFloatingPoint(symbol->type);
+          initial.ivalue = symbol->value.ivalue;
+          initial.fvalue = symbol->value.fvalue;
+          if (TypeIsFixedArray(symbol->type) ||
+              TypeIsStructOrUnion(symbol->type)) {
+            initial.is_object = true;
+            initial.object = symbol->value.other;
+          }
+        }
+        PushConstexprBinding(ctx, symbol, initial);
         ConstexprBinding* external = FindConstexprBinding(ctx, symbol);
         *result = (ConstexprValue){
             .is_address = true,
@@ -4072,13 +4499,25 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                  .address_binding = binding};
       return true;
     }
-    if (template_argument_object_evaluation_depth > 0 && binding == NULL &&
+    if ((template_argument_object_evaluation_depth > 0 ||
+         ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
+        binding == NULL &&
         id->symbol != NULL &&
         id->symbol->constexpr_initializer != NULL &&
         (TypeIsPointer(id->symbol->type) ||
          TypeIsReference(id->symbol->type))) {
-      return EvaluateConstexprAddressValue(
-          ctx, id->symbol->constexpr_initializer, result);
+      bool symbolic = id->symbol->is_constexpr_representable;
+      if (symbolic) {
+        symbolic_constexpr_reference_depth++;
+      }
+      bool ok = EvaluateConstexprAddressValue(
+          ctx, ConstexprInitializerExpression(
+                   id->symbol->constexpr_initializer),
+          result);
+      if (symbolic) {
+        symbolic_constexpr_reference_depth--;
+      }
+      return ok;
     }
     if (binding != NULL && binding->object == NULL && !binding->is_floating &&
         id->symbol != NULL && TypeIsPointer(id->symbol->type) &&
@@ -4179,11 +4618,19 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       offset_expr = ((PtrScaleASTNode*)offset_expr)->expr;
       offset_is_elements = true;
     }
-    if (!EvaluateConstexprAddressValue(ctx, arithmetic->left, &base) ||
-        !EvaluateIntegerExpressionInContext(ctx, offset_expr, &offset)) {
+    bool base_ok =
+        EvaluateConstexprAddressValue(ctx, arithmetic->left, &base);
+    bool offset_ok =
+        EvaluateIntegerExpressionInContext(ctx, offset_expr, &offset);
+    if (!base_ok || !offset_ok) {
       return false;
     }
     base = ConstexprResolveForwardedAddress(base);
+    ConstexprValue canonical_base = base;
+    ConstexprCanonicalizeAddressValue(&canonical_base);
+    if (ConstexprObjectHasVirtualBases(canonical_base.address_object)) {
+      base = canonical_base;
+    }
     if (base.heap_block != NULL) {
       if (node->op == AST_OP(minus)) {
         if (offset == INT64_MIN) {
@@ -4211,6 +4658,23 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       *result = base;
       return true;
     }
+    TypeRecord* pointer_type = node->type;
+    TypeRecord* pointee =
+        TypeIsPointer(pointer_type) ? pointer_type->next : NULL;
+    if (!offset_is_elements && offset >= 0 &&
+        base.address_object != NULL && pointee != NULL &&
+        TypeIsStructOrUnion(pointee)) {
+      ConstexprObject* subobject = ConstexprSubobjectAtOffset(
+          base.address_object, pointee, (size_t)offset);
+      if (subobject != NULL) {
+        *result = (ConstexprValue){
+            .is_address = true,
+            .address_object = subobject,
+            .address_index = 0,
+        };
+        return true;
+      }
+    }
     if (offset == 0) {
       *result = base;
       return true;
@@ -4224,7 +4688,6 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
       offset = -offset;
     }
-    TypeRecord* pointer_type = node->type;
     if (!offset_is_elements && TypeIsPointer(pointer_type) &&
         pointer_type->next != NULL &&
         pointer_type->next->size > 1) {
@@ -4682,7 +5145,15 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
   }
   ConstexprValue address = {0};
   ConstexprValue pointee = {0};
-  if (EvaluateConstexprAddressValue(ctx, node, &address) &&
+  bool address_ok = EvaluateConstexprAddressValue(ctx, node, &address);
+  if (address_ok &&
+      address.address_object != NULL && address.address_index == 0 &&
+      node->type != NULL && TypeIsPointer(node->type) &&
+      TypeEqual(address.address_object->type, node->type->next)) {
+    *object = address.address_object;
+    return true;
+  }
+  if (address_ok && address.is_address &&
       ConstexprDereferenceAddress(address, &pointee) &&
       pointee.is_object && pointee.object != NULL) {
     *object = pointee.object;
@@ -5039,7 +5510,15 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = function->type;
-  if (func->info.function.prototype.length != actuals->length + 1) {
+  size_t formal_offset = 1;
+  bool has_complete_object_parameter =
+      func->info.function.prototype.length == actuals->length + 2 &&
+      func->info.function.prototype.value.p[1] != NULL &&
+      StringEqual(
+          &((Symbol*)func->info.function.prototype.value.p[1])->name,
+          "__complete_object");
+  if (func->info.function.prototype.length !=
+      actuals->length + 1 + (has_complete_object_parameter ? 1 : 0)) {
     return false;
   }
   Symbol* this_formal = func->info.function.prototype.value.p[0];
@@ -5048,8 +5527,15 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
   }
   PushConstexprBinding(ctx, this_formal,
                        (ConstexprValue){.is_object = true, .object = object});
+  if (has_complete_object_parameter) {
+    Symbol* complete_formal = func->info.function.prototype.value.p[1];
+    PushConstexprBinding(ctx, complete_formal,
+                         (ConstexprValue){.ivalue = 1});
+    formal_offset++;
+  }
   for (size_t i = 0; i < actuals->length; i++) {
-    Symbol* formal = func->info.function.prototype.value.p[i + 1];
+    Symbol* formal =
+        func->info.function.prototype.value.p[i + formal_offset];
     ASTNode* actual = actuals->value.p[i];
     if (formal == NULL || actual == NULL ||
         !ConstexprParameterTypeSupported(formal->type)) {
@@ -5482,6 +5968,11 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
               ctx, decl->symbol->type,
               ConstexprObjectSlotCount(decl->symbol->type)),
       };
+      if (StructHasVirtualBases(decl->symbol->type->info.struct_info) &&
+          !ConstexprMaterializeBaseSubobjectSlots(ctx,
+                                                  object_value.object)) {
+        return false;
+      }
       size_t mark = ctx->bindings.length;
       PushConstexprBinding(ctx, decl->symbol, object_value);
       if (!EvaluateConstexprConstructorCall(ctx, class_call) ||
@@ -7816,15 +8307,18 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
   ConstexprValue ignored = {0};
-  bool ok = BindConstexprConstructorActuals(ctx, callee, receiver,
-                                            call->children) &&
-            EvaluateConstexprFunctionContracts(
-                ctx, func, kContractPrecondition, &ignored) &&
-            EvaluateConstexprStatement(ctx, func->info.function.body,
-                                       func->next, &ignored) ==
-                kConstexprStmtNormal &&
-            EvaluateConstexprFunctionContracts(
-                ctx, func, kContractPostcondition, &ignored);
+  bool bound =
+      BindConstexprConstructorActuals(ctx, callee, receiver, call->children);
+  bool pre = bound && EvaluateConstexprFunctionContracts(
+                          ctx, func, kContractPrecondition, &ignored);
+  ConstexprStatementResult body_result =
+      pre ? EvaluateConstexprStatement(ctx, func->info.function.body,
+                                       func->next, &ignored)
+          : kConstexprStmtInvalid;
+  bool post = body_result == kConstexprStmtNormal &&
+              EvaluateConstexprFunctionContracts(
+                  ctx, func, kContractPostcondition, &ignored);
+  bool ok = bound && pre && body_result == kConstexprStmtNormal && post;
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;

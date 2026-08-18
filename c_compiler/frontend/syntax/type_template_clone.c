@@ -791,6 +791,25 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   MapInsert(&clone->symbol_map, kv);
   decl->symbol = replacement;
   RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
+  if (old_symbol->is_constexpr_representable) {
+    replacement->is_constexpr_representable = true;
+    replacement->constexpr_reference_scope = clone->to_func;
+    ASTNodeDelete(replacement->constexpr_initializer);
+    replacement->constexpr_initializer =
+        ASTNodeClone(decl->initializer, IdentityCloneNode, NULL, NULL);
+  }
+  if (replacement->flags.is_constexpr &&
+      !TypeIsReference(replacement->type) &&
+      !TypeIsPointer(replacement->type) && decl->initializer != NULL) {
+    int64_t value = 0;
+    ASTNode* expression =
+        ConstexprInitializerExpression(decl->initializer);
+    if (expression != NULL &&
+        EvaluateIntegerExpression(expression, &value)) {
+      replacement->value.ivalue = value;
+      replacement->flags.value_set = true;
+    }
+  }
   bool ctad_ok = ResolveClonedTemplateTemplateParameterCTAD(
       clone, decl, old_symbol, replacement);
   ASTNodeSetType(node, replacement->type);
@@ -3485,6 +3504,49 @@ static Symbol* FindClonedOwnerMemberSymbol(TemplateFunctionBodyClone* clone,
   return NULL;
 }
 
+static Symbol* FindClonedLocalSymbolByDeclarationIdentity(
+    TemplateFunctionBodyClone* clone, Symbol* source) {
+  if (clone == NULL || source == NULL || !source->flags.is_local ||
+      !source->is_constexpr_representable) {
+    return NULL;
+  }
+  for (size_t i = 0; i < clone->symbol_map.length; i++) {
+    Symbol* original = clone->symbol_map.values[i].key.p;
+    Symbol* replacement = clone->symbol_map.values[i].value.p;
+    if (original != NULL && replacement != NULL &&
+        original->flags.is_local &&
+        original->location == source->location &&
+        StringEqualString(&original->name, &source->name)) {
+      return replacement;
+    }
+  }
+  return NULL;
+}
+
+static void RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  TemplateFunctionBodyClone* clone = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  Symbol* replacement = MapFindPointerKey(&clone->symbol_map, id->symbol);
+  if (replacement == NULL) {
+    replacement =
+        FindClonedLocalSymbolByDeclarationIdentity(clone, id->symbol);
+  }
+  if (replacement != NULL) {
+    id->symbol = replacement;
+    ASTNodeSetType(node, TypeIsReference(replacement->type)
+                             ? replacement->type->next
+                             : replacement->type);
+    node->value_category = kValueCategoryLvalue;
+  }
+}
+
 static void RebindClonedConcreteMemberAccess(
     TemplateFunctionBodyClone* clone, ASTNode* node) {
   if (node == NULL ||
@@ -4598,6 +4660,10 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       return node;
     }
     Symbol* replacement = MapFindPointerKey(&clone->symbol_map, id->symbol);
+    if (replacement == NULL) {
+      replacement =
+          FindClonedLocalSymbolByDeclarationIdentity(clone, id->symbol);
+    }
     if (replacement != NULL) {
       id->symbol = replacement;
       ASTNodeSetType(node, TypeIsReference(replacement->type)
@@ -6558,6 +6624,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNode* body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
                                &clone, NULL);
   ASTNodeDelete(clone_source);
+  ASTNodeVisit(body, RebindClonedLocalIdentifierVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedLoweredDependentMemberCallVisitor, 0, NULL);
   ASTNodeVisit(body, RebindClonedDesignatorMemberVisitor, 0, NULL);

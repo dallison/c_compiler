@@ -58,6 +58,7 @@ bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
 bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,
                                        VariableDeclarationASTNode* hidden_decl,
                                        ASTNode* init_expr);
+bool ConstexprReferenceUsableInCurrentFunction(Symbol* symbol);
 bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
                                               ASTNode* node, double* result);
 struct ReflectionValue* ConstexprEvaluateReflectionExpression(

@@ -30,6 +30,7 @@
 #include "type_parse.h"
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -444,6 +445,9 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     if ((node->base.flags & kASTIsDeclaration) != 0) {
       return &node->base;
     }
+    if ((node->base.flags & kASTNeedAddress) != 0) {
+      return &node->base;
+    }
     if (node->base.parent != NULL &&
         node->base.parent->op == AST_OP(address)) {
       return &node->base;
@@ -732,6 +736,47 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   return false;
 }
 
+static bool MarkCXX26SymbolicConstexprReference(Symbol* symbol,
+                                                ASTNode* initializer) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) && symbol != NULL &&
+      symbol->flags.is_local &&
+      !StorageIs(symbol->storage, STO(static) | STO(thread)) &&
+      symbol->flags.is_constexpr &&
+      (TypeIsReference(symbol->type) || TypeIsPointer(symbol->type))) {
+    ASTNode* expression = ConstexprInitializerExpression(initializer);
+    while (expression != NULL &&
+           (expression->op == AST_OP(cast) ||
+            expression->op == AST_OP(address) ||
+            expression->op == AST_OP(contents))) {
+      expression = expression->op == AST_OP(cast)
+                       ? ((CastASTNode*)expression)->expr
+                       : ((UnaryASTNode*)expression)->sub;
+    }
+    while (expression != NULL &&
+           (expression->op == AST_OP(dot) ||
+            expression->op == AST_OP(arrow) ||
+            expression->op == AST_OP(subscript))) {
+      expression = ((BinaryASTNode*)expression)->left;
+    }
+    if (expression != NULL && expression->op == AST_OP(identifier)) {
+      Symbol* target = ((IdentifierASTNode*)expression)->symbol;
+      bool target_referenceable =
+          target != NULL && target->flags.is_local &&
+          !StorageIs(target->storage,
+                     STO(static) | STO(thread));
+      if (target_referenceable) {
+        symbol->is_constexpr_representable = true;
+        symbol->constexpr_reference_scope = compiler->current_function;
+        ASTNodeDelete(symbol->constexpr_initializer);
+        symbol->constexpr_initializer =
+            ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   if (symbol != NULL && TypeIsReflection(symbol->type)) {
     ASTNode* expression = ConstexprInitializerExpression(initializer);
@@ -744,6 +789,9 @@ static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
       return true;
     }
     return false;
+  }
+  if (MarkCXX26SymbolicConstexprReference(symbol, initializer)) {
+    return true;
   }
   if (EvaluateScalarConstantForSymbol(symbol, initializer)) {
     return true;
@@ -3300,6 +3348,33 @@ static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target) {
 static ASTNode* AnalyzeInitialization(ASTNode* node,
                                       ASTNode* target, ASTNode* init) {
   target = AnalyzeExpression(target);
+  if (target != NULL && target->type != NULL &&
+      TypeIsReference(target->type)) {
+    ASTNode* reference_initializer = init;
+    while (reference_initializer != NULL &&
+           (reference_initializer->op == AST_OP(expr_init) ||
+            reference_initializer->op == AST_OP(braced_init) ||
+            reference_initializer->op == AST_OP(designated_init))) {
+      if (reference_initializer->op == AST_OP(expr_init)) {
+        reference_initializer =
+            ((ExpressionInitializerASTNode*)reference_initializer)->expr;
+      } else if (reference_initializer->op == AST_OP(braced_init)) {
+        BracedInitializerASTNode* braced =
+            (BracedInitializerASTNode*)reference_initializer;
+        reference_initializer =
+            braced->initializers != NULL &&
+                    braced->initializers->length == 1
+                ? braced->initializers->value.p[0]
+                : NULL;
+      } else {
+        reference_initializer =
+            ((DesignatedInitializerASTNode*)reference_initializer)->init;
+      }
+    }
+    if (reference_initializer != NULL) {
+      reference_initializer->flags |= kASTNeedAddress;
+    }
+  }
   init = AnalyzeExpression(init);
   Symbol* symbol = target != NULL && target->op == AST_OP(identifier)
                        ? ((IdentifierASTNode*)target)->symbol
@@ -3465,6 +3540,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       !symbol->flags.is_constinit) {
     constants_only = false;
   }
+  MarkCXX26SymbolicConstexprReference(symbol, init);
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -3481,8 +3557,9 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     init = object_init;
   }
   bool requires_constant_initializer =
-      constants_only || symbol->flags.is_constexpr ||
-      symbol->flags.is_constinit;
+      constants_only ||
+      ((symbol->flags.is_constexpr || symbol->flags.is_constinit) &&
+       !symbol->is_constexpr_representable);
   if (TypeIsMemberPointer(symbol->type)) {
     ASTNode* init_expr = init;
     if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
@@ -3529,6 +3606,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     // expose a scalar constant that was not foldable during the first pass.
     EvaluateConstantForSymbol(symbol, simplified_init);
     if (!symbol->flags.value_set &&
+        !symbol->is_constexpr_representable &&
         !ExpressionIsTemplateDependent(simplified_init)) {
       SemanticError(
           simplified_init,

@@ -376,6 +376,16 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (ConstexprBindingAsInteger(ctx, id_node->symbol, result)) {
         return true;
       }
+      if (id_node->symbol != NULL &&
+          ConstexprReferenceUsableInCurrentFunction(id_node->symbol) &&
+          id_node->symbol->constexpr_initializer != NULL) {
+        ASTNode* initializer = ConstexprInitializerExpression(
+            id_node->symbol->constexpr_initializer);
+        if (initializer != NULL && initializer != node &&
+            EvaluateIntegerExpressionInContext(ctx, initializer, result)) {
+          return true;
+        }
+      }
       if (StorageIs(id_node->symbol->storage, STO(assembler))) {
         // Assembler symbol, extract the value from the 'other'
         // value field.

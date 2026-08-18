@@ -185,6 +185,8 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->overload_next = NULL;
   sym->default_argument = NULL;
   sym->constexpr_initializer = NULL;
+  sym->is_constexpr_representable = false;
+  sym->constexpr_reference_scope = NULL;
   sym->variable_template = NULL;
   sym->alias_template = NULL;
   sym->template_template_parameters = NULL;
@@ -1088,6 +1090,8 @@ Symbol* SymbolClone(Symbol* sym) {
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
   new_sym->constexpr_initializer =
       ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
+  new_sym->is_constexpr_representable = sym->is_constexpr_representable;
+  new_sym->constexpr_reference_scope = sym->constexpr_reference_scope;
   new_sym->template_template_parameters =
       TemplateParameterVectorCopy(sym->template_template_parameters);
   new_sym->template_template_parameter_kind =

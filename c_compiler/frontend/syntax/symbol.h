@@ -188,6 +188,11 @@ typedef struct Symbol {
   // Portable initializer for serialized constexpr aggregate values. The live
   // ConstexprObject cache in value.other is process-local and cannot be wired.
   struct ASTNode* constexpr_initializer;                       // @wire 58
+  // C++26 symbolic constexpr reference/pointer whose initializer designates an
+  // object relative to the current function frame. This is transient because
+  // automatic-storage identities cannot cross a module boundary.
+  bool is_constexpr_representable;
+  struct TypeRecord* constexpr_reference_scope;
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
   // Owned signature copy for a template-template parameter placeholder.

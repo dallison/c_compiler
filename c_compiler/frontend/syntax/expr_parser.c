@@ -3418,7 +3418,12 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
        capture_default != kLambdaCaptureDefaultNone)) {
     SyntaxError(syntax, "static lambda cannot have captures");
   }
+  TypeRecord* enclosing_function = compiler->current_function;
+  compiler->current_function = call_operator->type;
+  syntax->parsing_lambda_body_depth++;
   ParseLambdaBody(syntax, call_operator, &captures, followers);
+  syntax->parsing_lambda_body_depth--;
+  compiler->current_function = enclosing_function;
   if (opened_template_scope) {
     // The TemplateParameter objects were transferred into the operator()'s
     // template-parameter list; free only the vector container here.
