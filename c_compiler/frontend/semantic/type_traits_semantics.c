@@ -612,7 +612,8 @@ static bool TypeTraitSameClassSpecialMemberConstruction(
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL ||
       member->access != kAccessPublic ||
-      member->symbol->type->info.function.is_deleted) {
+      member->symbol->type->info.function.is_deleted ||
+      CXXTypeSpecialMemberIsDeleted(target, kind)) {
     return false;
   }
   if (TypeIsConst(object)) {
@@ -671,7 +672,10 @@ static bool TypeTraitSameClassSpecialMemberAssignment(
   }
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL || member->access != kAccessPublic ||
-      member->symbol->type->info.function.is_deleted) {
+      member->symbol->type->info.function.is_deleted ||
+      CXXTypeSpecialMemberIsDeleted(
+          target, use_move ? kCXXSpecialMemberMoveAssignment
+                           : kCXXSpecialMemberCopyAssignment)) {
     return false;
   }
   return !check_nothrow ||
@@ -697,6 +701,22 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
 
   bool result = false;
   bool handled_special_member = false;
+  if (arg_types.length == 0 && TypeIsStructOrUnion(target) &&
+      target->info.struct_info != NULL &&
+      target->info.struct_info->is_union) {
+    StructMember* constructor = TypeTraitFindSpecialMember(
+        target->info.struct_info, kCXXSpecialMemberDefaultConstructor);
+    result =
+        constructor != NULL && constructor->symbol != NULL &&
+        constructor->symbol->type != NULL &&
+        constructor->access == kAccessPublic &&
+        !CXXTypeSpecialMemberIsDeleted(
+            target, kCXXSpecialMemberDefaultConstructor) &&
+        (!check_nothrow ||
+         constructor->symbol->type->info.function.is_noexcept);
+    VectorDestruct(&arg_types);
+    return result;
+  }
   result = TypeTraitSameClassSpecialMemberConstruction(
       target, &arg_types, check_nothrow, &handled_special_member);
   if (handled_special_member) {
@@ -892,6 +912,10 @@ static bool TypeTraitIsDestructible(Syntax* syntax, Vector* type_args,
   }
   Struct* str = target->info.struct_info;
   if (str == NULL || str->tag_name == NULL) {
+    return false;
+  }
+  if (CXXTypeSpecialMemberIsDeleted(
+          target, kCXXSpecialMemberDestructor)) {
     return false;
   }
   StructMember* dtor = TypeTraitFindDestructor(str);

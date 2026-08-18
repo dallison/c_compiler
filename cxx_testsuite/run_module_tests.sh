@@ -384,6 +384,29 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/reflection_roundtrip.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute reflection round-trip module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/trivial_union_lifetime.dcm" \
+  "$FIXTURES/trivial_union_lifetime.cppm" ||
+  fail "emit trivial union lifetime module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  "$FIXTURES/trivial_union_lifetime.cppm" \
+  -o "$work/trivial_union_lifetime.o" ||
+  fail "compile trivial union lifetime module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" \
+  "$FIXTURES/use_trivial_union_lifetime.cpp" \
+  -o "$work/use_trivial_union_lifetime.o" ||
+  fail "compile trivial union lifetime importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_trivial_union_lifetime.o" \
+  "$work/trivial_union_lifetime.o" "$LIBC" \
+  -o "$work/trivial_union_lifetime.bin" ||
+  fail "link trivial union lifetime executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/trivial_union_lifetime.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute trivial union lifetime module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 \
   -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||
   fail "emit reachability.dcm"

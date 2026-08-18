@@ -180,10 +180,26 @@ typedef struct {
   size_t references;
 } ConstexprPCodeExceptionHandle;
 
+typedef enum {
+  kConstexprPCodeLifetimeStartAggregate,
+  kConstexprPCodeLifetimePlacementConstruction,
+  kConstexprPCodeLifetimeEnd,
+  kConstexprPCodeUnionMemberAddress,
+} ConstexprPCodeLifetimeEventKind;
+
+typedef struct {
+  uint64_t address;
+  size_t size;
+  uint64_t type_token;
+  size_t union_member_index_plus_one;
+  ConstexprPCodeLifetimeEventKind kind;
+} ConstexprPCodeLifetimeEvent;
+
 typedef struct {
   Vector heap_blocks;
   Vector exception_stack;
   Vector exception_handles;
+  Vector lifetime_events;
   unsigned char* heap;
   size_t heap_size;
   ConstexprPCodeFreeBlock* free_list;
@@ -207,10 +223,38 @@ typedef struct {
   ConstexprPCodeExceptionResume resume;
 } ConstexprPCodeRuntime;
 
+static bool ConstexprPCodeCopyLifetimeEvents(
+    ConstexprPCodeRuntime* runtime, uint64_t source, uint64_t destination,
+    size_t size) {
+  size_t original_event_count = runtime->lifetime_events.length;
+  for (size_t i = 0; i < original_event_count; i++) {
+    ConstexprPCodeLifetimeEvent* event =
+        runtime->lifetime_events.value.p[i];
+    if (event == NULL || event->address < source) {
+      continue;
+    }
+    uint64_t offset = event->address - source;
+    if (offset > size || event->size > size - offset) {
+      continue;
+    }
+    ConstexprPCodeLifetimeEvent* copy = malloc(sizeof(*copy));
+    if (copy == NULL) {
+      return false;
+    }
+    *copy = *event;
+    copy->address = destination + offset;
+    VectorAppend(&runtime->lifetime_events, copy);
+  }
+  return true;
+}
+
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data);
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime);
 static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime);
 static bool ConstexprPCodeRuntimeHasLiveHeap(ConstexprPCodeRuntime* runtime);
+static bool ConstexprPCodeNormalizeAddress(PCodeVM* vm, uint64_t raw,
+                                           size_t size, bool write,
+                                           uint64_t* normalized);
 static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol);
 static ConstexprValue* PCodeConstexprObjectSlot(ConstexprObject* object,
                                                 size_t index);
@@ -265,6 +309,7 @@ enum {
   kConstexprPCodeEscapeExceptionPtrRelease = 121,
   kConstexprPCodeEscapeExceptionPtrRethrow = 122,
   kConstexprPCodeEscapeUncaughtExceptions = 123,
+  kConstexprPCodeEscapeStartLifetime = 124,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -284,6 +329,11 @@ static const uint32_t constexpr_pcode_realloc_stub[] = {
 
 static const uint32_t constexpr_pcode_placement_new_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapePlacementNew,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_start_lifetime_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeStartLifetime,
     (PCODE_OP(ret) << 24),
 };
 
@@ -388,6 +438,7 @@ struct ConstexprValue {
   bool is_object;
   bool is_address;
   bool is_floating;
+  bool lifetime_ended;
   int64_t ivalue;
   double fvalue;
   ConstexprObject* object;
@@ -816,6 +867,7 @@ static const ConstexprPCodeRuntimeSymbol constexpr_pcode_runtime_symbols[] = {
     {"__davecc_exception_ptr_rethrow",
      constexpr_pcode_exception_ptr_rethrow_stub},
     {"__davecc_resume", constexpr_pcode_resume_stub},
+    {"__davecc_start_lifetime", constexpr_pcode_start_lifetime_stub},
     {"__davecc_throw", constexpr_pcode_throw_stub},
     {"__davecc_throw_f4", constexpr_pcode_throw_f4_stub},
     {"__davecc_throw_f8", constexpr_pcode_throw_f8_stub},
@@ -1325,6 +1377,11 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
           StorageIs(member->symbol->storage, STO(typedef))) {
         continue;
       }
+      if (str->is_union &&
+          (object->active_union_member == NULL ||
+           object->active_union_member != member)) {
+        continue;
+      }
       size_t slot_index = str->is_union ? 0 : member->index;
       ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
       unsigned char* member_dest = dest + member->byte_offset;
@@ -1514,13 +1571,15 @@ static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
 }
 
 static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
+                                     ConstexprPCodeRuntime* runtime,
                                      ConstexprObject** result);
 
 static bool LoadConstexprValueBytes(TypeRecord* type, unsigned char* src,
+                                    ConstexprPCodeRuntime* runtime,
                                     ConstexprValue* value) {
   if (TypeIsFixedArray(type) || TypeIsStructOrUnion(type)) {
     ConstexprObject* object = NULL;
-    if (!LoadConstexprObjectBytes(type, src, &object)) {
+    if (!LoadConstexprObjectBytes(type, src, runtime, &object)) {
       return false;
     }
     *value = (ConstexprValue){
@@ -1533,6 +1592,7 @@ static bool LoadConstexprValueBytes(TypeRecord* type, unsigned char* src,
 }
 
 static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
+                                     ConstexprPCodeRuntime* runtime,
                                      ConstexprObject** result) {
   if (type == NULL || src == NULL || result == NULL) {
     return false;
@@ -1543,12 +1603,44 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
   }
   if (TypeIsFixedArray(type)) {
     size_t elem_size = type->next != NULL ? type->next->size : 0;
+    bool aggregate_started = false;
+    if (runtime != NULL) {
+      for (size_t i = 0; i < runtime->lifetime_events.length; i++) {
+        ConstexprPCodeLifetimeEvent* event =
+            runtime->lifetime_events.value.p[i];
+        if (event != NULL &&
+            event->kind == kConstexprPCodeLifetimeStartAggregate &&
+            event->address == (uint64_t)(uintptr_t)src &&
+            (event->type_token == 0 ||
+             event->type_token == TypeRecordSemanticIdentityHash(type))) {
+          aggregate_started = true;
+        }
+      }
+    }
     for (size_t i = 0; i < object->slots.length; i++) {
       ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
       if (slot == NULL ||
-          !LoadConstexprValueBytes(type->next, src + i * elem_size, slot)) {
+          !LoadConstexprValueBytes(type->next, src + i * elem_size, runtime,
+                                   slot)) {
         DeletePCodeConstexprObject(object);
         return false;
+      }
+      if (aggregate_started) {
+        slot->lifetime_ended = true;
+        uint64_t element_address =
+            (uint64_t)(uintptr_t)(src + i * elem_size);
+        for (size_t j = 0; j < runtime->lifetime_events.length; j++) {
+          ConstexprPCodeLifetimeEvent* event =
+              runtime->lifetime_events.value.p[j];
+          if (event != NULL && event->address == element_address) {
+            if (event->kind ==
+                kConstexprPCodeLifetimePlacementConstruction) {
+              slot->lifetime_ended = false;
+            } else if (event->kind == kConstexprPCodeLifetimeEnd) {
+              slot->lifetime_ended = true;
+            }
+          }
+        }
       }
     }
     *result = object;
@@ -1556,6 +1648,32 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
   }
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
+    uint64_t started_union_member_token = 0;
+    size_t started_union_member_index_plus_one = 0;
+    bool started_union_member_ended = false;
+    if (str->is_union && runtime != NULL) {
+      for (size_t i = 0; i < runtime->lifetime_events.length; i++) {
+        ConstexprPCodeLifetimeEvent* event =
+            runtime->lifetime_events.value.p[i];
+        if (event != NULL &&
+            (event->kind == kConstexprPCodeLifetimeStartAggregate ||
+             event->kind == kConstexprPCodeLifetimePlacementConstruction) &&
+            event->address == (uint64_t)(uintptr_t)src) {
+          started_union_member_token = event->type_token;
+          started_union_member_index_plus_one =
+              event->union_member_index_plus_one;
+          started_union_member_ended = false;
+        } else if (event != NULL &&
+                   event->kind == kConstexprPCodeLifetimeEnd &&
+                   event->address == (uint64_t)(uintptr_t)src) {
+          started_union_member_ended = true;
+        }
+      }
+    }
+    if (str->is_union && started_union_member_ended) {
+      *result = object;
+      return true;
+    }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -1563,11 +1681,22 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
           StorageIs(member->symbol->storage, STO(typedef))) {
         continue;
       }
+      if (str->is_union) {
+        if (started_union_member_index_plus_one != 0) {
+          if (member->index + 1 != started_union_member_index_plus_one) {
+            continue;
+          }
+        } else if (started_union_member_token != 0 &&
+                   TypeRecordSemanticIdentityHash(member->symbol->type) !=
+                       started_union_member_token) {
+          continue;
+        }
+      }
       size_t slot_index = str->is_union ? 0 : member->index;
       ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
       if (slot == NULL ||
           !LoadConstexprValueBytes(member->symbol->type,
-                                   src + member->byte_offset, slot)) {
+                                   src + member->byte_offset, runtime, slot)) {
         DeletePCodeConstexprObject(object);
         return false;
       }
@@ -2069,6 +2198,9 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
           vm, (void*)constexpr_pcode_placement_new_stub,
           sizeof(constexpr_pcode_placement_new_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_start_lifetime_stub,
+          sizeof(constexpr_pcode_start_lifetime_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_free_stub, sizeof(constexpr_pcode_free_stub),
           false) ||
       !PCodeVMRegisterMemoryRegion(
@@ -2272,6 +2404,13 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
     }
     if (address_result != NULL) {
       uint64_t address = (uint64_t)vm.iregs[PCODE_INT_RETURN_REG];
+      if (runtime.source_size_t_size < sizeof(uint64_t) && address != 0) {
+        uint64_t normalized_address = 0;
+        if (ConstexprPCodeNormalizeAddress(
+                &vm, address, 0, false, &normalized_address)) {
+          address = normalized_address;
+        }
+      }
       *address_result = (ConstexprValue){0};
       if (address == 0) {
         address_result->is_address = true;
@@ -2357,8 +2496,55 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       ConstexprPCodeImageDestruct(&image);
       return false;
     }
+    if (object_result != NULL && struct_return != NULL &&
+        func->next->size != 0) {
+      uint64_t return_address = (uint64_t)(uintptr_t)struct_return;
+      bool return_has_lifetime_state = false;
+      for (size_t i = 0; i < runtime.lifetime_events.length; i++) {
+        ConstexprPCodeLifetimeEvent* event =
+            runtime.lifetime_events.value.p[i];
+        if (event != NULL &&
+            event->kind == kConstexprPCodeLifetimeStartAggregate &&
+            event->address == return_address) {
+          return_has_lifetime_state = true;
+          break;
+        }
+      }
+      if (!return_has_lifetime_state) {
+        for (size_t i = runtime.lifetime_events.length; i > 0; i--) {
+          ConstexprPCodeLifetimeEvent* event =
+              runtime.lifetime_events.value.p[i - 1];
+          uint64_t source_address = 0;
+          if (event == NULL ||
+              event->kind != kConstexprPCodeLifetimeStartAggregate ||
+              event->size != func->next->size ||
+              !ConstexprPCodeNormalizeAddress(
+                  &vm, event->address, event->size, false, &source_address) ||
+              memcmp((void*)(uintptr_t)source_address, struct_return,
+                     event->size) != 0) {
+            continue;
+          }
+          if (!ConstexprPCodeCopyLifetimeEvents(
+                  &runtime, source_address, return_address, event->size)) {
+            *reason = "could not marshal constexpr pcode lifetime state";
+            for (size_t j = 0; j < allocations.length; j++) {
+              free(allocations.value.p[j]);
+            }
+            VectorDestruct(&allocations);
+            VectorDestructWithContents(&address_regions, NULL,
+                                       /*free_element=*/true);
+            ConstexprPCodeRuntimeDestruct(&runtime);
+            PCodeVMDestruct(&vm);
+            ConstexprPCodeImageDestruct(&image);
+            return false;
+          }
+          break;
+        }
+      }
+    }
     if (object_result != NULL &&
-        !LoadConstexprObjectBytes(func->next, struct_return, object_result)) {
+        !LoadConstexprObjectBytes(func->next, struct_return, &runtime,
+                                  object_result)) {
       *reason = "could not decode constexpr pcode object result";
       for (size_t i = 0; i < allocations.length; i++) {
         free(allocations.value.p[i]);
@@ -2479,7 +2665,8 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   vm.max_steps = 100000;
   PCodeVMStatus status = PCodeVMRun(&vm);
   bool ok = status == kPCodeVMStatusHalted &&
-            LoadConstexprObjectBytes(object_type, object_memory, object_result);
+            LoadConstexprObjectBytes(object_type, object_memory, &runtime,
+                                     object_result);
   if (status != kPCodeVMStatusHalted) {
     *failure_kind = ConstexprPCodeVMFailureKind(
         status, runtime.heap_blocks.length != 0);
@@ -2849,6 +3036,7 @@ static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
   VectorInit(&runtime->heap_blocks);
   VectorInit(&runtime->exception_stack);
   VectorInit(&runtime->exception_handles);
+  VectorInit(&runtime->lifetime_events);
   runtime->source_size_t_size =
       compiler->target != NULL ? (size_t)compiler->target->pointer_size
                                : sizeof(size_t);
@@ -2880,6 +3068,8 @@ static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime) {
     }
   }
   VectorDestruct(&runtime->exception_handles);
+  VectorDestructWithContents(&runtime->lifetime_events, NULL,
+                             /*free_element=*/true);
   free(runtime->heap);
   free(runtime->exception_storage);
   runtime->heap = NULL;
@@ -3135,9 +3325,119 @@ static PCodeVMStatus ConstexprPCodeEscapeRealloc(
 
 static PCodeVMStatus ConstexprPCodeEscapePlacementNew(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
-  vm->iregs[PCODE_INT_RETURN_REG] =
-      (int64_t)(uintptr_t)ConstexprPCodeStackArgumentAt(
-          vm, runtime->source_size_t_size, sizeof(uint64_t));
+  size_t size = (size_t)ConstexprPCodeStackArgumentAt(
+      vm, 0, runtime->source_size_t_size);
+  uint64_t source_address = ConstexprPCodeStackArgumentAt(
+      vm, sizeof(uint64_t), runtime->source_size_t_size);
+  uint64_t address = source_address;
+  if (runtime->source_size_t_size < sizeof(uint64_t)) {
+    uint64_t normalized_address = 0;
+    if (!ConstexprPCodeNormalizeAddress(
+            vm, address, 0, false, &normalized_address)) {
+      return kPCodeVMStatusInvalidRead;
+    }
+    address = normalized_address;
+  }
+  ConstexprPCodeLifetimeEvent* event = malloc(sizeof(*event));
+  if (event == NULL) {
+    return kPCodeVMStatusAllocationFailure;
+  }
+  size_t union_member_index_plus_one = 0;
+  for (size_t i = runtime->lifetime_events.length; i > 0; i--) {
+    ConstexprPCodeLifetimeEvent* provenance =
+        runtime->lifetime_events.value.p[i - 1];
+    if (provenance != NULL &&
+        provenance->kind == kConstexprPCodeUnionMemberAddress &&
+        provenance->address == address) {
+      union_member_index_plus_one = (size_t)provenance->type_token;
+      break;
+    }
+  }
+  *event = (ConstexprPCodeLifetimeEvent){
+      .address = address,
+      .size = size,
+      .union_member_index_plus_one = union_member_index_plus_one,
+      .kind = kConstexprPCodeLifetimePlacementConstruction,
+  };
+  VectorAppend(&runtime->lifetime_events, event);
+  vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)source_address;
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  uint64_t address =
+      ConstexprPCodeStackArgumentAt(vm, 0, runtime->source_size_t_size);
+  size_t size = (size_t)ConstexprPCodeStackArgument(vm, 1);
+  uint64_t type_token = ConstexprPCodeStackArgument(vm, 2);
+  if (runtime->source_size_t_size < sizeof(uint64_t)) {
+    uint64_t normalized_address = 0;
+    if (!ConstexprPCodeNormalizeAddress(
+            vm, address, 0, false, &normalized_address)) {
+      return kPCodeVMStatusInvalidRead;
+    }
+    address = normalized_address;
+  }
+  ConstexprPCodeLifetimeEvent* event = malloc(sizeof(*event));
+  if (event == NULL) {
+    return kPCodeVMStatusAllocationFailure;
+  }
+  if (size == CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER) {
+    *event = (ConstexprPCodeLifetimeEvent){
+        .address = address,
+        .type_token = type_token,
+        .kind = kConstexprPCodeUnionMemberAddress,
+    };
+    VectorAppend(&runtime->lifetime_events, event);
+    return kPCodeVMStatusRunning;
+  }
+  if (size == CONSTEXPR_PCODE_LIFETIME_END_MARKER) {
+    *event = (ConstexprPCodeLifetimeEvent){
+        .address = address,
+        .kind = kConstexprPCodeLifetimeEnd,
+    };
+    VectorAppend(&runtime->lifetime_events, event);
+    return kPCodeVMStatusRunning;
+  }
+  if (size == CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER) {
+    size_t union_member_index_plus_one = 0;
+    for (size_t i = runtime->lifetime_events.length; i > 0; i--) {
+      ConstexprPCodeLifetimeEvent* provenance =
+          runtime->lifetime_events.value.p[i - 1];
+      if (provenance != NULL &&
+          provenance->kind == kConstexprPCodeUnionMemberAddress &&
+          provenance->address == address) {
+        union_member_index_plus_one = (size_t)provenance->type_token;
+        break;
+      }
+    }
+    *event = (ConstexprPCodeLifetimeEvent){
+        .address = address,
+        .union_member_index_plus_one = union_member_index_plus_one,
+        .kind = kConstexprPCodeLifetimePlacementConstruction,
+    };
+    VectorAppend(&runtime->lifetime_events, event);
+    return kPCodeVMStatusRunning;
+  }
+  size_t union_member_index_plus_one = 0;
+  for (size_t i = runtime->lifetime_events.length; i > 0; i--) {
+    ConstexprPCodeLifetimeEvent* provenance =
+        runtime->lifetime_events.value.p[i - 1];
+    if (provenance != NULL &&
+        provenance->kind == kConstexprPCodeUnionMemberAddress &&
+        provenance->address == address) {
+      union_member_index_plus_one = (size_t)provenance->type_token;
+      break;
+    }
+  }
+  *event = (ConstexprPCodeLifetimeEvent){
+      .address = address,
+      .size = size,
+      .type_token = type_token,
+      .union_member_index_plus_one = union_member_index_plus_one,
+      .kind = kConstexprPCodeLifetimeStartAggregate,
+  };
+  VectorAppend(&runtime->lifetime_events, event);
   return kPCodeVMStatusRunning;
 }
 
@@ -3216,6 +3516,10 @@ static PCodeVMStatus ConstexprPCodeEscapeMemcpy(
   void* dest = (void*)(uintptr_t)dest_address;
   void* src = (void*)(uintptr_t)src_address;
   memcpy(dest, src, size);
+  if (!ConstexprPCodeCopyLifetimeEvents(
+          runtime, src_address, dest_address, size)) {
+    return kPCodeVMStatusAllocationFailure;
+  }
   vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)dest_address;
   return kPCodeVMStatusRunning;
 }
@@ -3862,6 +4166,10 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
     case kConstexprPCodeEscapePlacementNew:
       return runtime != NULL ? ConstexprPCodeEscapePlacementNew(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeStartLifetime:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeStartLifetime(vm, runtime)
+                 : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeThrow:
       return runtime != NULL
                  ? ConstexprPCodeEscapeThrow(
@@ -4482,6 +4790,9 @@ static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type) {
   }
   object->type = type;
   object->active_union_member = NULL;
+  object->lifetime_ended = false;
+  object->complete_object = object;
+  object->complete_offset = 0;
   VectorInit(&object->slots);
   size_t slots = PCodeConstexprObjectSlotCount(type);
   for (size_t i = 0; i < slots; i++) {
@@ -4731,21 +5042,54 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
     return false;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  bool sparse_lifetime_initializer =
+      (initializer->flags & kASTConstexprLifetimeInitializer) != 0;
+  if (sparse_lifetime_initializer) {
+    for (size_t i = 0; i < object->slots.length; i++) {
+      ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
+      if (slot != NULL) {
+        slot->lifetime_ended = true;
+      }
+    }
+  }
   if (braced->initializers->length > object->slots.length) {
     ConstexprPCodeFailure(
         ctx, kConstexprPCodeFailureUnsupported,
         "constexpr pcode array initializer has too many elements");
     return false;
   }
+  size_t next_index = 0;
   for (size_t i = 0; i < braced->initializers->length; i++) {
-    if (!PCodeStoreInitializer(ctx, type->next,
-                               braced->initializers->value.p[i],
-                               PCodeConstexprObjectSlot(object, i))) {
+    ASTNode* entry = braced->initializers->value.p[i];
+    ASTNode* entry_initializer = entry;
+    size_t slot_index = next_index;
+    if (entry != NULL && entry->op == AST_OP(designated_init)) {
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)entry;
+      if (designated->designators == NULL ||
+          designated->designators->length != 1) {
+        return false;
+      }
+      Designator* designator = designated->designators->value.p[0];
+      if (designator == NULL ||
+          designator->designator_type != kDesignatorArray ||
+          designator->value.array_index < 0 ||
+          designator->array_index_end != designator->value.array_index) {
+        return false;
+      }
+      slot_index = (size_t)designator->value.array_index;
+      entry_initializer = designated->init;
+    }
+    ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
+    if (slot == NULL ||
+        !PCodeStoreInitializer(ctx, type->next, entry_initializer, slot)) {
       ConstexprPCodeFailure(
           ctx, kConstexprPCodeFailureUnsupported,
           "constexpr pcode could not store array initializer element");
       return false;
     }
+    slot->lifetime_ended = false;
+    next_index = slot_index + 1;
   }
   return true;
 }
@@ -4760,6 +5104,45 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
   Struct* str = type->info.struct_info;
+  if (str->is_union && braced->initializers->length != 0) {
+    ASTNode* first = braced->initializers->value.p[0];
+    if (first != NULL && first->op == AST_OP(designated_init)) {
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)first;
+      if (designated->designators == NULL ||
+          designated->designators->length != 1) {
+        return false;
+      }
+      Designator* designator = designated->designators->value.p[0];
+      StructMember* selected =
+          designator != NULL &&
+                  designator->designator_type == kDesignatorStruct &&
+                  designator->is_resolved_member
+              ? designator->value.struct_member
+              : NULL;
+      if (selected == NULL && designator != NULL &&
+          designator->designator_type == kDesignatorStruct &&
+          designator->value.struct_member_name != NULL) {
+        for (size_t i = 0; i < str->members.length; i++) {
+          StructMember* candidate = str->members.value.p[i];
+          if (candidate != NULL && candidate->symbol != NULL &&
+              StringEqual(designator->value.struct_member_name,
+                          candidate->symbol->name.value)) {
+            selected = candidate;
+            break;
+          }
+        }
+      }
+      if (selected == NULL || selected->symbol == NULL ||
+          !PCodeStoreInitializer(
+              ctx, selected->symbol->type, designated->init,
+              PCodeConstexprObjectSlot(object, 0))) {
+        return false;
+      }
+      object->active_union_member = selected;
+      return braced->initializers->length == 1;
+    }
+  }
   size_t init_index = 0;
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];

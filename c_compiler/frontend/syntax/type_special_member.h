@@ -11,5 +11,7 @@
 bool CXXTypeIsTriviallyCopyable(TypeRecord* type);
 
 bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
+bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type, CXXSpecialMemberKind kind);
+bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type);
 
 #endif /* type_special_member_h */

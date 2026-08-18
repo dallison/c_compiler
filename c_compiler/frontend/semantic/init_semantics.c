@@ -206,7 +206,7 @@ static void AppendArrayINodeChildren(INode* inode, size_t min) {
   size_t first = inode->children.length;
   INode* prev = VectorLast(&inode->children);
   // Only append if we're out of nodes.
-  if (inode->current != prev ||
+  if ((min == 0 && inode->current != prev) ||
       (!inode->type->info.array.is_flexible && first == inode->type->info.array.size.fixed)) {
     return;
   }
@@ -216,6 +216,10 @@ static void AppendArrayINodeChildren(INode* inode, size_t min) {
   if (min > 0 && last <= min) {
     // Make sure we add the minimum amount.
     last = min + 1;
+  }
+  if (!inode->type->info.array.is_flexible &&
+      last > inode->type->info.array.size.fixed) {
+    last = inode->type->info.array.size.fixed;
   }
   for (size_t i = first; i < last; i++) {
     INode* child = BuildINode(inode->type->next, inode);

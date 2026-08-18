@@ -299,6 +299,7 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_placeholder_variables", "202306L");
       PreprocessorDefineMacro(p, "__cpp_expansion_statements", "202506L");
       PreprocessorDefineMacro(p, "__cpp_impl_reflection", "202603L");
+      PreprocessorDefineMacro(p, "__cpp_trivial_union", "202603L");
       PreprocessorDefineMacro(p, "__cpp_variadic_friend", "202403L");
     }
   }

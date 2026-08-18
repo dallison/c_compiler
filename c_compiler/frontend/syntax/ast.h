@@ -145,6 +145,7 @@ typedef enum {
   AST_OP(builtin_rotr),
   AST_OP(builtin_expect),
   AST_OP(builtin_prefetch),
+  AST_OP(builtin_start_lifetime),
   AST_OP(builtin_trap),
   AST_OP(builtin_unreachable),
 
@@ -413,6 +414,7 @@ struct ConstraintExpr;
 #define kASTSourceEmptyCompound (1ULL << 53)  // Source spelling was exactly an empty compound-statement.
 #define kASTTrivialInfiniteLoop (1ULL << 54)  // P2809 trivial infinite loop; runtime iterations yield.
 #define kASTRequiresASTConstexpr (1ULL << 55)  // Result contains evaluator-only semantic state (for example a materialized reflection query).
+#define kASTConstexprLifetimeInitializer (1ULL << 56)  // Synthesized sparse initializer preserves inactive constexpr subobjects.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

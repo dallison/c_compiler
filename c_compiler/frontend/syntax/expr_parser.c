@@ -46,6 +46,7 @@ static struct Intrinsic {
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
     {"__builtin_prefetch", AST_OP(builtin_prefetch), 3},
+    {"__builtin_start_lifetime", AST_OP(builtin_start_lifetime), 1},
     {"__builtin_trap", AST_OP(builtin_trap), 0},
     {"__builtin_unreachable", AST_OP(builtin_unreachable), 0},
     {"__builtin_va_arg", AST_OP(builtin_va_arg), 2},

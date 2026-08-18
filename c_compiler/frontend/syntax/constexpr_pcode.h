@@ -8,6 +8,12 @@
 
 #include "constexpr.h"
 
+// Lifetime markers travel through the source target's calling convention.
+// Keep them representable on both 32-bit and 64-bit targets.
+#define CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER UINT64_C(0xffffffff)
+#define CONSTEXPR_PCODE_LIFETIME_END_MARKER UINT64_C(0xfffffffe)
+#define CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER UINT64_C(0xfffffffd)
+
 typedef enum {
   kConstexprPCodeEligible,
   kConstexprPCodeRequiresOverlay,

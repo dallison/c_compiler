@@ -24,6 +24,7 @@ void TypeRecordArenaRelease(void);
 // because they can form reference cycles.
 void StructRegistryRelease(void);
 TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
+uint64_t TypeRecordSemanticIdentityHash(TypeRecord* record);
 void TypeRecordSyncStructSizes(Struct* str);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);

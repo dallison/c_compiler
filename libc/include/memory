@@ -17,7 +17,18 @@
 #include <type_traits>
 #include <utility>
 
+#if __cplusplus >= 202600L && !defined(__cpp_lib_start_lifetime)
+#define __cpp_lib_start_lifetime 202603L
+#endif
+
 namespace std {
+
+#if __cplusplus >= 202600L
+template <class T>
+constexpr void start_lifetime(T& object) noexcept {
+  __builtin_start_lifetime(&object);
+}
+#endif
 
 // Minimal std::allocator: a stateless allocator that obtains and releases raw
 // storage through the global ::operator new / ::operator delete.

@@ -494,6 +494,39 @@ void TypeRecordSyncStructSizes(Struct* str) {
   }
 }
 
+static uint64_t TypeIdentityHashBytes(uint64_t hash, const char* value) {
+  if (value == NULL) {
+    return hash;
+  }
+  while (*value != '\0') {
+    hash ^= (unsigned char)*value++;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+uint64_t TypeRecordSemanticIdentityHash(TypeRecord* record) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+  for (TypeRecord* node = record; node != NULL; node = node->next) {
+    hash ^= (uint64_t)node->type;
+    hash *= UINT64_C(1099511628211);
+    hash ^= (uint64_t)node->declarator;
+    hash *= UINT64_C(1099511628211);
+    hash ^= (uint64_t)(uint32_t)node->size;
+    hash *= UINT64_C(1099511628211);
+    if (TypeIsFixedArray(node)) {
+      hash ^= (uint64_t)node->info.array.size.fixed;
+      hash *= UINT64_C(1099511628211);
+    }
+    if (TypeIsStructOrUnion(node) && node->info.struct_info != NULL &&
+        node->info.struct_info->tag_name != NULL) {
+      hash = TypeIdentityHashBytes(
+          hash, node->info.struct_info->tag_name->value);
+    }
+  }
+  return hash;
+}
+
 TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals) {
   return TypeRecordCalculateSize(NewTypeRecord(type, quals));
 }

@@ -606,9 +606,12 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   bool constexpr_reflection =
       s->flags.value_set && s->type != NULL &&
       TypeIsReflection(s->type);
-  if (constexpr_object && s->constexpr_initializer == NULL) {
-    s->constexpr_initializer =
+  if (constexpr_object) {
+    ASTNode* semantic_initializer =
         ConstexprObjectInitializerForSymbol(s, s->location);
+    if (semantic_initializer != NULL) {
+      s->constexpr_initializer = semantic_initializer;
+    }
   }
   if (constexpr_reflection && s->constexpr_initializer == NULL &&
       s->value.other != NULL) {

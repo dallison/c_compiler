@@ -29,6 +29,7 @@
 #include "member_pointer.h"
 #include "statement_parser.h"
 #include "type_parse.h"
+#include "type_special_member.h"
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
@@ -11126,6 +11127,33 @@ static void AnalyzeBuiltinPrefetch(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
+static void AnalyzeBuiltinStartLifetime(VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    node->children->value.p[i] =
+        AnalyzeExpression(node->children->value.p[i]);
+  }
+  ASTNode* operand =
+      node->children->length == 1 ? node->children->value.p[0] : NULL;
+  TypeRecord* target =
+      operand != NULL && operand->type != NULL &&
+              TypeIsPointer(operand->type)
+          ? operand->type->next
+          : NULL;
+  if (target == NULL) {
+    SemanticError(&node->base,
+                  "__builtin_start_lifetime requires a pointer operand");
+  } else if (target->size <= 0) {
+    SemanticError(&node->base,
+                  "__builtin_start_lifetime requires a complete type");
+  } else if (!CXXTypeIsImplicitLifetimeAggregate(target)) {
+    SemanticError(
+        &node->base,
+        "__builtin_start_lifetime requires an implicit-lifetime aggregate");
+  }
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static void AnalyzeBuiltinTerminator(VectorASTNode* node) {
   ASTNodeSetType(&node->base,
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
@@ -11536,6 +11564,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(builtin_prefetch):
       AnalyzeBuiltinPrefetch(vector_node);
+      break;
+
+    case AST_OP(builtin_start_lifetime):
+      AnalyzeBuiltinStartLifetime(vector_node);
       break;
 
     case AST_OP(builtin_trap):

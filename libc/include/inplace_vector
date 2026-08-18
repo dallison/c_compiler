@@ -31,7 +31,7 @@ union __storage<T, N, true> {
   T __values_[N];
 
   constexpr __storage() noexcept : __dummy_() {}
-  ~__storage() = default;
+  constexpr ~__storage() {}
 };
 
 template <class T, size_t N>

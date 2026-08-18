@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "compiler.h"
+#include "constexpr_pcode.h"
 #include "expr_evaluator.h"
 #include "symbol_table.h"
 #include "rtti.h"
@@ -595,6 +596,9 @@ static bool ContainsCall(ASTNode* node) {
 
 static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_type);
 static bool ExpressionReturnsReference(ASTNode* node);
+static void GenerateConstexprLifetimeMarker(
+    Generator* gen, IRNode* address, uint64_t marker_value,
+    uint64_t semantic_token, SourceLocation location);
 
 static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
@@ -1640,6 +1644,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
 
     // Simple scalar assignment.
     assignment = EmitObjectStore(gen, node->left, dest, value);
+    GenerateConstexprLifetimeMarker(
+        gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
+        node->base.location);
     if (dest_was_spilled) {
       return result_address_needed ? dest : value;
     }
@@ -1647,6 +1654,12 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
 
   if (!TypeIsAtomic(node->left->type)) {
     CheckForVarDef(assignment, node->left);
+  }
+  if (TypeIsStructOrUnion(node->left->type) ||
+      TypeIsMemberPointerAggregate(node->left->type)) {
+    GenerateConstexprLifetimeMarker(
+          gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
+          node->base.location);
   }
 
   return result_address_needed ? dest : value;
@@ -2090,6 +2103,9 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
                         !returns_reference;
   bool cxx_constructor_call = TypeIsFunction(callee_type) &&
                               callee_type->info.function.is_constructor;
+  bool cxx_destructor_call = TypeIsFunction(callee_type) &&
+                             callee_type->info.function.is_destructor;
+  IRNode* destructor_object_address = NULL;
   
   // Evaluate right-to-left. If an argument to the left contains a call, the
   // current scalar must be preserved before that later evaluation clobbers
@@ -2256,6 +2272,9 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else if (reference_formal) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
+    if (cxx_destructor_call && i == 0) {
+      destructor_object_address = arg_value;
+    }
 
     // Preserve the final argument representation. In particular, aggregate
     // reference binding above turns the materialized class temporary into an
@@ -2398,6 +2417,11 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       returns_reference ? NewPointerTo(kQualPlain, node->base.type)
                         : node->base.type;
   call = IRSetType(GeneratorEmit(gen, call), call_result_type);
+  if (destructor_object_address != NULL) {
+    GenerateConstexprLifetimeMarker(
+        gen, destructor_object_address, CONSTEXPR_PCODE_LIFETIME_END_MARKER, 0,
+        node->base.location);
+  }
   if (returns_struct) {
     // We are returning a struct.  The result in whatever was passed
     // as the first arguments to the call (the second input to the
@@ -2479,6 +2503,52 @@ static Symbol* GetBuiltinAbortFunction(SourceLocation location) {
   symbol->location = location;
   SyntaxAddSymbol(&compiler->syntax, symbol);
   return symbol;
+}
+
+static Symbol* GetBuiltinStartLifetimeFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__davecc_start_lifetime");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  func_type->info.function.unknown_args = true;
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__davecc_start_lifetime", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static void GenerateConstexprLifetimeMarker(
+    Generator* gen, IRNode* address, uint64_t marker_value,
+    uint64_t semantic_token, SourceLocation location) {
+  if (!gen->for_constant_evaluation || address == NULL) {
+    return;
+  }
+  TypeRecord* integer_type =
+      NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
+  integer_type->type |= kTypeUnsigned;
+  IRNode* marker = GeneratorGetIntConstant(
+      gen, integer_type, (int64_t)marker_value);
+  IRNode* semantic = GeneratorGetIntConstant(
+      gen, integer_type, (int64_t)semantic_token);
+  Symbol* function = GetBuiltinStartLifetimeFunction(location);
+  IRNode* call =
+      NewIR1(IR_OP(calla), GeneratorGetVariable(gen, function));
+  Vector args = {0};
+  PushArg(gen, call, semantic, 2, &args);
+  PushArg(gen, call, marker, 1, &args);
+  PushArg(gen, call, address, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  GeneratorEmit(gen, call);
 }
 
 static Symbol* GetDaveCCDynamicCastFunction(bool is_reference,
@@ -3201,6 +3271,19 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       NewIR2(IR_OP(adda), addr,
              GeneratorGetIntConstant(gen, NULL, member->byte_offset)));
   IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
+  TypeRecord* receiver_type = node->left->type;
+  while (receiver_type != NULL &&
+         (TypeIsPointer(receiver_type) || TypeIsReference(receiver_type))) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+      receiver_type->info.struct_info != NULL &&
+      receiver_type->info.struct_info->is_union) {
+    GenerateConstexprLifetimeMarker(
+        gen, addr, CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER,
+        member->member->index + 1,
+        node->base.location);
+  }
 
   TypeRecord* member_decl_type = member->member->symbol->type;
   if (!member->member->is_member_function && TypeIsReference(member_decl_type)) {
@@ -3833,6 +3916,42 @@ static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
     GenerateExpression(gen, node->children->value.p[i]);
   }
   return IRSetType(GeneratorEmit(gen, NewIR(IR_OP(nop))), node->base.type);
+}
+
+static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
+                                            VectorASTNode* node) {
+  if (!gen->for_constant_evaluation) {
+    return GenerateBuiltinPrefetch(gen, node);
+  }
+  IRNode* address = GenerateExpression(gen, node->children->value.p[0]);
+  TypeRecord* target =
+      node->children->length == 1 &&
+              ((ASTNode*)node->children->value.p[0])->type != NULL &&
+              TypeIsPointer(((ASTNode*)node->children->value.p[0])->type)
+          ? ((ASTNode*)node->children->value.p[0])->type->next
+          : NULL;
+  TypeRecord* integer_type =
+      NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
+  integer_type->type |= kTypeUnsigned;
+  IRNode* size = GeneratorGetIntConstant(
+      gen, integer_type, target != NULL ? target->size : 0);
+  IRNode* type_token = GeneratorGetIntConstant(
+      gen, integer_type,
+      target != NULL
+          ? (int64_t)TypeRecordSemanticIdentityHash(target) : 0);
+  Symbol* function =
+      GetBuiltinStartLifetimeFunction(node->base.location);
+  IRNode* call =
+      NewIR1(IR_OP(calla), GeneratorGetVariable(gen, function));
+  Vector args = {0};
+  PushArg(gen, call, type_token, 2, &args);
+  PushArg(gen, call, size, 1, &args);
+  PushArg(gen, call, address, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  return IRSetType(GeneratorEmit(gen, call), node->base.type);
 }
 
 static IRNode* GenerateBuiltinTerminator(Generator* gen, VectorASTNode* node) {
@@ -4591,6 +4710,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(builtin_prefetch):
       result = GenerateBuiltinPrefetch(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_start_lifetime):
+      result = GenerateBuiltinStartLifetime(gen, vector_node);
       break;
 
     case AST_OP(builtin_trap):

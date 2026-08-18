@@ -79,6 +79,9 @@
 #ifndef __cpp_lib_constexpr_inplace_vector
 #define __cpp_lib_constexpr_inplace_vector 202502L
 #endif
+#ifndef __cpp_lib_start_lifetime
+#define __cpp_lib_start_lifetime 202603L
+#endif
 #ifndef __cpp_lib_optional
 #define __cpp_lib_optional 202506L
 #endif

@@ -46,6 +46,7 @@ struct ConstexprValue {
   bool is_object;
   bool is_address;
   bool is_floating;
+  bool lifetime_ended;
   int64_t ivalue;
   double fvalue;
   ConstexprObject* object;
@@ -154,6 +155,8 @@ static ConstexprStatementResult EvaluateConstexprStatement(
 static bool ConstexprNullAddress(ConstexprValue* result);
 static Symbol* ConstexprVirtualCallSymbol(ConstEvalContext* ctx, ASTNode* node,
                                           ASTNode** receiver);
+static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
+                                                       ConstexprObject* right);
 
 static void ReportConstexprPlacementFailure(ASTNode* node,
                                             const char* message) {
@@ -225,6 +228,26 @@ static bool ConstexprContextOwnsSlot(ConstEvalContext* ctx,
     }
   }
   return false;
+}
+
+static ConstexprValue* ConstexprSlotOwningObject(ConstEvalContext* ctx,
+                                                ConstexprObject* requested) {
+  if (ctx == NULL || requested == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < ctx->objects.length; i++) {
+    ConstexprObject* object = ctx->objects.value.p[i];
+    if (object == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < object->slots.length; j++) {
+      ConstexprValue* slot = object->slots.value.p[j];
+      if (slot != NULL && slot->is_object && slot->object == requested) {
+        return slot;
+      }
+    }
+  }
+  return NULL;
 }
 
 static bool ConstexprContextOwnsBinding(ConstEvalContext* ctx,
@@ -750,6 +773,14 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
           ConstexprAddressTargetObject(ctx, *result);
       if (target_object != NULL) {
         target_object->lifetime_ended = false;
+      }
+      ConstexprValue* target_slot = result->address_slot;
+      if (target_slot == NULL && result->address_object != NULL) {
+        target_slot = ConstexprObjectSlot(result->address_object,
+                                          result->address_index);
+      }
+      if (target_slot != NULL) {
+        target_slot->lifetime_ended = false;
       }
       return true;
     }
@@ -2179,8 +2210,7 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
     ConstEvalContextDestruct(&pcode_context);
     return pcode_ok;
   }
-  if ((mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) &&
-      pcode_ok) {
+  if (mode == kConstexprEvalAuto && pcode_ok) {
     ConstEvalContextDestruct(&pcode_context);
     return true;
   }
@@ -2207,6 +2237,21 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   bool ast_ok =
       ConstexprEvaluateObjectConstantForSymbolAST(symbol, initializer);
   compiler->constexpr_eval_mode = mode;
+  ConstexprObject* ast_object =
+      ast_ok ? (ConstexprObject*)symbol->value.other : NULL;
+  bool values_match =
+      pcode_ok && ast_ok &&
+      ConstexprObjectsTemplateArgumentEquivalent(pcode_object, ast_object);
+  if (mode == kConstexprEvalAudit && pcode_attempted && pcode_ok &&
+      (!ast_ok || !values_match)) {
+    SemanticError(
+        initializer,
+        pcode_ok
+            ? "constexpr evaluator object mismatch"
+            : "constexpr evaluator mismatch: pcode failed: %s",
+        ConstexprPCodeFailureReason(&pcode_context));
+    ast_ok = false;
+  }
   if (pcode_object != NULL) {
     ConstexprPCodeDeleteObject(pcode_object);
   }
@@ -2265,13 +2310,23 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
     return NULL;
   }
   Vector* initializers = NewVector();
+  bool has_inactive_subobjects = false;
   if (TypeIsFixedArray(object->type)) {
     for (size_t i = 0; i < object->slots.length; i++) {
+      ConstexprValue* slot = object->slots.value.p[i];
+      if (slot == NULL || slot->lifetime_ended) {
+        has_inactive_subobjects = true;
+        continue;
+      }
       ASTNode* init = ConstexprValueInitializer(
-          object->slots.value.p[i], object->type->next, location,
+          slot, object->type->next, location,
           preserve_external_addresses);
       if (init != NULL) {
-        VectorAppend(initializers, init);
+        Vector* designators = NewVector();
+        VectorAppend(designators,
+                     NewArrayDesignator(object->type, (int)i));
+        VectorAppend(initializers, NewDesignatedInitializerASTNode(
+                                       designators, init, location));
       }
     }
   } else if (TypeIsStructOrUnion(object->type) &&
@@ -2290,6 +2345,11 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
           object->slots.value.p[ConstexprMemberSlotIndex(object, member)],
           member->symbol->type, location, preserve_external_addresses);
       if (init != NULL) {
+        if (str->is_union) {
+          Vector* designators = NewVector();
+          VectorAppend(designators, NewStructMemberDesignator(member));
+          init = NewDesignatedInitializerASTNode(designators, init, location);
+        }
         VectorAppend(initializers, init);
       }
       if (str->is_union) {
@@ -2297,7 +2357,12 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
       }
     }
   }
-  return NewBracedInitializerASTNode(initializers, object->type, location);
+  ASTNode* result =
+      NewBracedInitializerASTNode(initializers, object->type, location);
+  if (has_inactive_subobjects) {
+    result->flags |= kASTConstexprLifetimeInitializer;
+  }
+  return result;
 }
 
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
@@ -2305,6 +2370,9 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           SourceLocation location,
                                           bool preserve_external_addresses) {
   if (value == NULL || type == NULL) {
+    return NULL;
+  }
+  if (value->lifetime_ended) {
     return NULL;
   }
   if (value->is_object) {
@@ -2721,6 +2789,9 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
         : StoreConstexprSlot(ctx, slot, left_type, right);
     if (!stored) {
       return false;
+    }
+    if (slot != NULL) {
+      slot->lifetime_ended = false;
     }
     *result = right;
     return true;
@@ -3326,6 +3397,17 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     return false;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  bool sparse_lifetime_initializer =
+      TypeIsFixedArray(type) &&
+      (initializer->flags & kASTConstexprLifetimeInitializer) != 0;
+  if (sparse_lifetime_initializer) {
+    for (size_t i = 0; i < object->slots.length; i++) {
+      ConstexprValue* slot = object->slots.value.p[i];
+      if (slot != NULL) {
+        slot->lifetime_ended = true;
+      }
+    }
+  }
   bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
   bool ok = slot_count == 0 || initialized != NULL;
   size_t next_index = 0;
@@ -3367,6 +3449,9 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     if (slot == NULL) {
       ok = false;
       break;
+    }
+    if (sparse_lifetime_initializer) {
+      slot->lifetime_ended = false;
     }
     TypeRecord* slot_type = ConstexprObjectSlotType(type, slot_index);
     if (!is_designated_entry &&
@@ -3600,6 +3685,15 @@ static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
     return false;
   }
   for (size_t i = 0; i < left->slots.length; i++) {
+    ConstexprValue* left_slot = left->slots.value.p[i];
+    ConstexprValue* right_slot = right->slots.value.p[i];
+    if (left_slot != NULL && right_slot != NULL &&
+        (left_slot->lifetime_ended || right_slot->lifetime_ended)) {
+      if (left_slot->lifetime_ended != right_slot->lifetime_ended) {
+        return false;
+      }
+      continue;
+    }
     if (!ConstexprValuesTemplateArgumentEquivalent(left->slots.value.p[i],
                                                    right->slots.value.p[i])) {
       return false;
@@ -3637,17 +3731,21 @@ static void AppendConstexprTemplateArgumentObjectKey(ConstexprObject* object,
                                                      String* result) {
   StringAppendChar(result, '{');
   if (object != NULL) {
-    StringPrintf(result, "T%dU%d:",
-                 object->type != NULL ? object->type->id : -1,
-                 object->active_union_member != NULL &&
-                         object->active_union_member->symbol != NULL
-                     ? object->active_union_member->symbol->id
-                     : -1);
+    StringPrintf(
+        result, "T%016llxU%lld:",
+        (unsigned long long)TypeRecordSemanticIdentityHash(object->type),
+        object->active_union_member != NULL
+            ? (long long)object->active_union_member->index : -1LL);
     for (size_t i = 0; i < object->slots.length; i++) {
       if (i != 0) {
         StringAppendChar(result, ',');
       }
-      AppendConstexprTemplateArgumentValueKey(object->slots.value.p[i], result);
+      ConstexprValue* slot = object->slots.value.p[i];
+      if (slot != NULL && slot->lifetime_ended) {
+        StringAppend(result, "X");
+      } else {
+        AppendConstexprTemplateArgumentValueKey(slot, result);
+      }
     }
   }
   StringAppendChar(result, '}');
@@ -3660,16 +3758,27 @@ static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
   } else if (value->is_object) {
     AppendConstexprTemplateArgumentObjectKey(value->object, result);
   } else if (value->is_address) {
-    StringPrintf(result, "A%d:%d:%lld",
-                 value->address_binding != NULL &&
-                         value->address_binding->symbol != NULL
-                     ? value->address_binding->symbol->id
-                     : -1,
-                 value->heap_index, (long long)value->address_index);
+    StringAppend(result, "A");
+    if (value->address_binding != NULL &&
+        value->address_binding->symbol != NULL) {
+      Symbol* symbol = value->address_binding->symbol;
+      if (symbol->asm_name.length != 0) {
+        StringAppendString(result, &symbol->asm_name);
+      } else {
+        StringAppendString(result, &symbol->name);
+      }
+    } else {
+      StringAppend(result, "-");
+    }
+    StringPrintf(result, ":%d:%lld", value->heap_index,
+                 (long long)value->address_index);
     if (value->address_object != NULL) {
-      StringPrintf(result, ":O%p", (void*)value->address_object);
+      StringPrintf(
+          result, ":O%016llx",
+          (unsigned long long)TypeRecordSemanticIdentityHash(
+              value->address_object->type));
     } else if (value->address_slot != NULL) {
-      StringPrintf(result, ":S%p", (void*)value->address_slot);
+      StringAppend(result, ":S");
     }
   } else if (value->is_floating) {
     unsigned char bytes[sizeof(value->fvalue)];
@@ -4061,6 +4170,11 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                  address.address_index + (size_t)index);
     }
     if (slot == NULL) {
+      return false;
+    }
+    if (slot->lifetime_ended) {
+      ReportConstexprPlacementFailure(
+          node, "read of object outside its lifetime in constant expression");
       return false;
     }
     *result = *slot;
@@ -5940,6 +6054,20 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   if (TypeIsFixedArray(decl->symbol->type) ||
       TypeIsStructOrUnion(decl->symbol->type)) {
     ASTNode* initializer = ConstexprInitializerExpression(decl->initializer);
+    if (initializer == NULL &&
+        CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        TypeIsStructOrUnion(decl->symbol->type) &&
+        decl->symbol->type->info.struct_info != NULL &&
+        decl->symbol->type->info.struct_info->is_union) {
+      ConstexprValue object_value = {
+          .is_object = true,
+          .object = NewConstexprObject(
+              ctx, decl->symbol->type,
+              ConstexprObjectSlotCount(decl->symbol->type)),
+      };
+      PushConstexprBinding(ctx, decl->symbol, object_value);
+      return true;
+    }
     ASTNode* result_call = ConstexprFindClassResultCall(initializer);
     if (result_call != NULL) {
       ConstexprValue object_value = {0};
@@ -6121,6 +6249,49 @@ static bool ConstexprVoidExpressionThrows(ASTNode* expr) {
   return false;
 }
 
+static bool EvaluateConstexprStartLifetime(ConstEvalContext* ctx,
+                                           ASTNode* expr) {
+  if (expr == NULL || expr->op != AST_OP(builtin_start_lifetime)) {
+    return false;
+  }
+  VectorASTNode* builtin = (VectorASTNode*)expr;
+  if (builtin->children == NULL || builtin->children->length != 1) {
+    return false;
+  }
+  ASTNode* operand = builtin->children->value.p[0];
+  ConstexprValue address = {0};
+  if (!EvaluateConstexprAddressValue(ctx, operand, &address)) {
+    return false;
+  }
+  ConstexprObject* object = ConstexprAddressTargetObject(ctx, address);
+  if (object == NULL && address.address_slot != NULL &&
+      address.address_slot->is_object) {
+    object = address.address_slot->object;
+  }
+  if (object == NULL) {
+    return false;
+  }
+  object->lifetime_ended = false;
+  if (TypeIsStructOrUnion(object->type) &&
+      object->type->info.struct_info != NULL &&
+      object->type->info.struct_info->is_union) {
+    object->active_union_member = NULL;
+  }
+  for (size_t i = 0; i < object->slots.length; i++) {
+    ConstexprValue* slot = object->slots.value.p[i];
+    if (slot != NULL) {
+      slot->lifetime_ended = true;
+      if (slot->is_object && slot->object != NULL) {
+        slot->object->lifetime_ended = true;
+      }
+    }
+  }
+  if (address.address_slot != NULL) {
+    address.address_slot->lifetime_ended = false;
+  }
+  return true;
+}
+
 static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
                                             ASTNode* expr) {
   if (expr == NULL) {
@@ -6129,6 +6300,9 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   if (expr->op == AST_OP(throw)) {
     (void)ConstexprEvaluateThrowExpression(ctx, expr);
     return false;
+  }
+  if (expr->op == AST_OP(builtin_start_lifetime)) {
+    return EvaluateConstexprStartLifetime(ctx, expr);
   }
   if (expr->op == AST_OP(comma)) {
     BinaryASTNode* comma = (BinaryASTNode*)expr;
@@ -7745,6 +7919,110 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     }
   }
   TypeRecord* func = callee->type;
+  VectorASTNode* call = (VectorASTNode*)node;
+  CXXSpecialMemberKind special_member_kind =
+      func->info.function.cxx_special_member_kind;
+  if (special_member_kind == kCXXSpecialMemberCopyAssignment ||
+      special_member_kind == kCXXSpecialMemberMoveAssignment) {
+    ASTNode* assignment_actual =
+        receiver != NULL
+            ? receiver
+            : call->children != NULL && call->children->length != 0
+                  ? call->children->value.p[0] : NULL;
+    ConstexprValue* assigned_slot = NULL;
+    bool assignment_lvalue =
+        assignment_actual != NULL &&
+        EvaluateConstexprObjectLValue(
+            ctx, assignment_actual, &assigned_slot, /*allow_object=*/true);
+    ConstexprObject* assigned_object = NULL;
+    if (!assignment_lvalue && assignment_actual != NULL) {
+      ConstexprValue assigned_address = {0};
+      bool address_ok = EvaluateConstexprAddressValue(
+          ctx, assignment_actual, &assigned_address);
+      if (address_ok) {
+        assigned_slot = assigned_address.address_slot;
+        assigned_object =
+            ConstexprAddressTargetObject(ctx, assigned_address);
+        if (assigned_slot == NULL &&
+            assigned_address.address_object != NULL) {
+          assigned_slot = ConstexprObjectSlot(
+              assigned_address.address_object,
+              assigned_address.address_index);
+          if (assigned_slot != NULL && assigned_slot->is_object) {
+            assigned_object = assigned_slot->object;
+          }
+        }
+        if (assigned_slot == NULL) {
+          assigned_slot =
+              ConstexprSlotOwningObject(ctx, assigned_object);
+        }
+        assignment_lvalue =
+            assigned_slot != NULL || assigned_object != NULL;
+      }
+    }
+    if (assignment_lvalue && assigned_slot != NULL) {
+      assigned_slot->lifetime_ended = false;
+      if (assigned_slot->is_object && assigned_slot->object != NULL) {
+        assigned_slot->object->lifetime_ended = false;
+      }
+    }
+    if (assignment_lvalue && assigned_object != NULL) {
+      assigned_object->lifetime_ended = false;
+    }
+  }
+  if (callee->name.value != NULL &&
+      strcmp(callee->name.value, "construct_at") == 0 &&
+      call->children != NULL && call->children->length == 2 &&
+      func->next != NULL && TypeIsPointer(func->next) &&
+      func->next->next != NULL) {
+    TypeRecord* target_type = func->next->next;
+    ConstexprValue address = {0};
+    ConstexprValue constructed = {0};
+    bool address_ok = EvaluateConstexprAddressValue(
+        ctx, call->children->value.p[0], &address);
+    ASTNode* argument = call->children->value.p[1];
+    TypeRecord* argument_type = argument != NULL ? argument->type : NULL;
+    while (TypeIsReference(argument_type)) {
+      argument_type = argument_type->next;
+    }
+    bool same_class_type =
+        TypeIsStructOrUnion(argument_type) &&
+        TypeIsStructOrUnion(target_type) &&
+        argument_type->info.struct_info == target_type->info.struct_info;
+    bool constructed_ok =
+        address_ok &&
+        (TypeIsStructOrUnion(target_type) &&
+                 !same_class_type
+             ? EvaluateConstexprConvertingConstruction(
+                   ctx, call->children->value.p[1], target_type,
+                   /*allow_explicit=*/true, &constructed)
+             : EvaluateConstexprValue(ctx, call->children->value.p[1],
+                                      target_type, &constructed));
+    if (!address_ok || !constructed_ok) {
+      return false;
+    }
+    ConstexprValue* slot = address.address_slot;
+    if (slot == NULL && address.address_object != NULL) {
+      slot = ConstexprObjectSlot(address.address_object,
+                                 address.address_index);
+    }
+    if (slot == NULL && address.address_binding != NULL &&
+        StoreConstexprBinding(ctx, address.address_binding, target_type,
+                              constructed)) {
+      if (address.address_binding->object != NULL) {
+        address.address_binding->object->lifetime_ended = false;
+      }
+      *result = address;
+      return true;
+    }
+    if (slot == NULL ||
+        !StoreConstexprSlot(ctx, slot, target_type, constructed)) {
+      return false;
+    }
+    slot->lifetime_ended = false;
+    *result = address;
+    return true;
+  }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       func->info.function.is_constructor ||
@@ -7761,7 +8039,6 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     }
   }
 
-  VectorASTNode* call = (VectorASTNode*)node;
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
   if (call->left != NULL && call->left->op == AST_OP(comma)) {
@@ -7788,6 +8065,27 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   bool tracks_destroyed_lifetime =
       callee->name.value != NULL &&
       strcmp(callee->name.value, "destroy_at") == 0;
+  ConstexprValue destroyed_address = {0};
+  bool has_destroyed_address = false;
+  if (tracks_destroyed_lifetime && bound &&
+      func->info.function.prototype.length != 0) {
+    Symbol* location_formal = func->info.function.prototype.value.p[0];
+    ConstexprBinding* location =
+        FindConstexprBinding(ctx, location_formal);
+    if (location != NULL && location->is_address) {
+      destroyed_address = (ConstexprValue){
+          .is_address = true,
+          .address_binding = location->address_binding,
+          .address_slot = location->address_slot,
+          .address_object = location->address_object,
+          .address_index = location->address_index,
+          .heap_block = location->heap_block,
+          .heap_index = location->heap_index,
+      };
+      ConstexprCanonicalizeAddressValue(&destroyed_address);
+      has_destroyed_address = true;
+    }
+  }
   if (tracks_destroyed_lifetime) {
     ctx->destroy_at_depth++;
   }
@@ -7798,6 +8096,20 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   bool post =
       body && EvaluateConstexprFunctionContracts(
                   ctx, func, kContractPostcondition, result);
+  if (body && has_destroyed_address) {
+    ConstexprObject* destroyed_object =
+        ConstexprAddressTargetObject(ctx, destroyed_address);
+    if (destroyed_object != NULL) {
+      destroyed_object->lifetime_ended = true;
+    }
+    ConstexprValue* destroyed_slot = destroyed_address.address_slot;
+    if (destroyed_slot == NULL) {
+      destroyed_slot = ConstexprSlotOwningObject(ctx, destroyed_object);
+    }
+    if (destroyed_slot != NULL) {
+      destroyed_slot->lifetime_ended = true;
+    }
+  }
   bool ok = bound && pre && body && post;
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
@@ -8235,6 +8547,36 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = callee->type;
+  VectorASTNode* call = (VectorASTNode*)node;
+  ASTNode* object_actual =
+      receiver != NULL
+          ? receiver
+          : call->children != NULL && call->children->length > 0
+                ? call->children->value.p[0] : NULL;
+  ConstexprObject* receiver_object = NULL;
+  ConstexprValue* receiver_slot = NULL;
+  if (object_actual != NULL) {
+    (void)EvaluateConstexprObjectAddress(
+        ctx, object_actual, &receiver_object);
+    (void)EvaluateConstexprObjectLValue(
+        ctx, object_actual, &receiver_slot, /*allow_object=*/true);
+  }
+  if (func->info.function.is_destructor &&
+      func->info.function.body == NULL &&
+      func->info.function.is_trivial_special_member) {
+    if (ctx->destroy_at_depth > 0) {
+      if (receiver_object != NULL) {
+        receiver_object->lifetime_ended = true;
+      }
+      if (receiver_slot == NULL) {
+        receiver_slot = ConstexprSlotOwningObject(ctx, receiver_object);
+      }
+      if (receiver_slot != NULL) {
+        receiver_slot->lifetime_ended = true;
+      }
+    }
+    return true;
+  }
   if (receiver != NULL && func->info.function.is_virtual) {
     ConstexprObject* receiver_object = NULL;
     if (EvaluateConstexprObjectAddress(ctx, receiver, &receiver_object) &&
@@ -8255,12 +8597,6 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
     return false;
   }
 
-  VectorASTNode* call = (VectorASTNode*)node;
-  ASTNode* object_actual =
-      receiver != NULL
-          ? receiver
-          : call->children != NULL && call->children->length > 0
-                ? call->children->value.p[0] : NULL;
   Symbol* this_formal =
       func->info.function.prototype.length > 0
           ? func->info.function.prototype.value.p[0] : NULL;
@@ -8268,7 +8604,6 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
       this_formal != NULL && this_formal->type != NULL &&
               TypeIsPointer(this_formal->type)
           ? this_formal->type->next : NULL;
-  ConstexprObject* receiver_object = NULL;
   if (object_actual != NULL && formal_object_type != NULL &&
       EvaluateConstexprObjectAddress(ctx, object_actual, &receiver_object) &&
       receiver_object != NULL &&
@@ -8298,6 +8633,12 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   if (ok && receiver_object != NULL && ctx->destroy_at_depth > 0) {
     receiver_object->lifetime_ended = true;
   }
+  if (ok && receiver_slot == NULL && ctx->destroy_at_depth > 0) {
+    receiver_slot = ConstexprSlotOwningObject(ctx, receiver_object);
+  }
+  if (ok && receiver_slot != NULL && ctx->destroy_at_depth > 0) {
+    receiver_slot->lifetime_ended = true;
+  }
   return ok;
 }
 
@@ -8316,6 +8657,11 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = callee->type;
+  if (func->info.function.is_constructor &&
+      func->info.function.body == NULL &&
+      func->info.function.is_trivial_special_member) {
+    return true;
+  }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       !func->info.function.is_constructor ||
@@ -8362,6 +8708,16 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = callee->type;
+  if (func->info.function.is_constructor &&
+      func->info.function.body == NULL &&
+      func->info.function.is_trivial_special_member) {
+    if (TypeIsStructOrUnion(object->type) &&
+        object->type->info.struct_info != NULL &&
+        object->type->info.struct_info->is_union) {
+      object->active_union_member = NULL;
+    }
+    return true;
+  }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       !func->info.function.is_constructor ||

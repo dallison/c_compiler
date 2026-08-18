@@ -77,6 +77,7 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
     case AST_OP(builtin_atomic_compare_exchange_n):
     case AST_OP(builtin_atomic_fence):
     case AST_OP(builtin_prefetch):
+    case AST_OP(builtin_start_lifetime):
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
       return true;

@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
+#include "constexpr.h"
 #include "dstring.h"
 #include "compiler.h"
 #include "member_pointer.h"
@@ -468,6 +469,19 @@ static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
 static Namespace* CXXStructNamespace(Struct* str);
 static void AppendCXXStructNameComponents(String* out, Struct* str);
 
+static void AppendCXXVendorObjectExpression(String* out, const char* prefix,
+                                            String* key) {
+  String encoded;
+  StringInit(&encoded, prefix);
+  for (size_t i = 0; key != NULL && i < key->length; i++) {
+    StringPrintf(&encoded, "%02x", (unsigned char)key->value[i]);
+  }
+  StringAppendChar(out, 'u');
+  StringPrintf(out, "%zu", encoded.length);
+  StringAppendString(out, &encoded);
+  StringDestruct(&encoded);
+}
+
 static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
                                          TypeRecord* type) {
   if (initializer == NULL) {
@@ -476,6 +490,40 @@ static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
   }
   if (initializer->op == AST_OP(expr_init)) {
     initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(designated_init)) {
+    DesignatedInitializerASTNode* designated =
+        (DesignatedInitializerASTNode*)initializer;
+    String key;
+    StringInit(&key, "");
+    for (size_t i = 0; designated->designators != NULL &&
+                       i < designated->designators->length; i++) {
+      Designator* designator = designated->designators->value.p[i];
+      if (designator == NULL) {
+        StringAppend(&key, "?");
+      } else if (designator->designator_type == kDesignatorArray) {
+        StringPrintf(&key, "A%d;", designator->value.array_index);
+      } else if (designator->designator_type == kDesignatorStruct) {
+        StructMember* member =
+            designator->is_resolved_member
+                ? designator->value.struct_member : NULL;
+        if (member != NULL) {
+          StringPrintf(&key, "M%zu;", member->index);
+        } else if (designator->value.struct_member_name != NULL) {
+          StringAppend(&key, "N");
+          StringAppendString(&key, designator->value.struct_member_name);
+          StringAppendChar(&key, ';');
+        }
+      }
+    }
+    AppendCXXTemplateObjectValue(
+        &key, designated->init,
+        designated->init != NULL && designated->init->type != NULL
+            ? designated->init->type : type);
+    AppendCXXVendorObjectExpression(
+        out, "dave_designated_object_", &key);
+    StringDestruct(&key);
+    return;
   }
   if (initializer != NULL && initializer->op == AST_OP(braced_init)) {
     BracedInitializerASTNode* braced =
@@ -546,8 +594,14 @@ static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
     StringAppendChar(out, 'E');
     return;
   }
-  // Keep unsupported structural subvalues collision-free while retaining a
-  // valid vendor expression encoding.
+  String key;
+  StringInit(&key, "");
+  if (ConstexprObjectInitializerTemplateKey(type, initializer, &key)) {
+    AppendCXXVendorObjectExpression(out, "dave_object_value_", &key);
+    StringDestruct(&key);
+    return;
+  }
+  StringDestruct(&key);
   StringAppend(out, "u16dave_object_value");
 }
 
