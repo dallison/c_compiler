@@ -468,6 +468,7 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
   VectorInit(&inst->users);
   inst->block = NULL;
   inst->flags = 0;
+  inst->observable_checkpoint = false;
 }
 
 void TargetUpdateOperandUsers(TargetInstruction* inst) {

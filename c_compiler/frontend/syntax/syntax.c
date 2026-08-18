@@ -2520,6 +2520,29 @@ static void MergeCXXContractAssertions(Syntax* syntax, Symbol* old_sym,
       !TypeIsFunction(new_sym->type)) {
     return;
   }
+  Vector* old_parameters = &old_sym->type->info.function.prototype;
+  Vector* new_parameters = &new_sym->type->info.function.prototype;
+  for (size_t i = 0;
+       i < old_parameters->length && i < new_parameters->length; i++) {
+    Symbol* old_parameter = old_parameters->value.p[i];
+    Symbol* new_parameter = new_parameters->value.p[i];
+    if (old_parameter == NULL || new_parameter == NULL) {
+      continue;
+    }
+    bool first_is_indeterminate =
+        SymbolHasAttribute(old_parameter, "indeterminate");
+    bool redeclaration_is_indeterminate =
+        SymbolHasAttribute(new_parameter, "indeterminate");
+    if (!first_is_indeterminate && redeclaration_is_indeterminate) {
+      SyntaxError(syntax,
+                  "'indeterminate' on a parameter must appear on the first "
+                  "declaration of '%s'",
+                  new_sym->name.value);
+    } else if (first_is_indeterminate &&
+               !redeclaration_is_indeterminate) {
+      SymbolAddAttribute(new_parameter, NewAttribute("indeterminate"));
+    }
+  }
   Vector* old_assertions =
       &old_sym->type->info.function.contract_assertions;
   Vector* new_assertions =
@@ -2941,7 +2964,7 @@ static bool IsKnownAttribute(const char* name) {
     // Acted upon by davecc.
     "packed", "aligned", "format", "deprecated", "unused",
     "warn_unused_result", "noreturn", "noinline", "always_inline",
-    "constructor", "destructor", "meta_intrinsic",
+    "constructor", "destructor", "meta_intrinsic", "indeterminate",
     // Accepted but not modelled (parsed cleanly, no effect).
     "stdcall", "cdecl", "fastcall", "thiscall", "regparm", "ms_abi",
     "sysv_abi", "may_alias", "gnu_inline", "nothrow", "leaf", "cold", "hot",
@@ -2968,7 +2991,7 @@ bool SyntaxAttributeIsSupported(const char* name) {
       "packed",          "aligned",          "format",
       "deprecated",      "unused",           "warn_unused_result",
       "noreturn",        "noinline",         "always_inline",
-      "constructor",     "destructor",
+      "constructor",     "destructor",        "indeterminate",
   };
   for (size_t i = 0; i < sizeof(supported) / sizeof(supported[0]); i++) {
     if (strcmp(supported[i], name) == 0) {
@@ -3321,6 +3344,26 @@ void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
   }
   if (AttributeListHas(&sym->attributes, "weak")) {
     sym->flags.is_weak = true;
+  }
+  Attribute* indeterminate =
+      AttributeListFind(&sym->attributes, "indeterminate");
+  if (indeterminate != NULL) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      SyntaxError(syntax, "'indeterminate' attribute requires C++26");
+    }
+    if (AttributeArgCount(indeterminate) != 0) {
+      SyntaxError(syntax, "'indeterminate' attribute takes no arguments");
+    }
+    bool automatic_block_variable =
+        sym->flags.is_block_scope &&
+            (sym->storage == STO(implicit) ||
+             StorageIs(sym->storage, STO(auto)) ||
+         StorageIs(sym->storage, STO(register)));
+    if (!sym->flags.is_argument && !automatic_block_variable) {
+      SyntaxError(syntax,
+                  "'indeterminate' attribute applies only to parameters and "
+                  "automatic block variables");
+    }
   }
 
   if (StorageIs(sym->storage, STO(typedef))) {
@@ -7542,7 +7585,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     }
     
-    VectorCopy(&sym->attributes, attributes);
+    VectorAppendVector(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(syntax, sym);
     if (parser->placeholder_variable_constraint != NULL) {
@@ -10688,6 +10731,7 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   // member initializers or members with non-trivial default constructors.
   if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
       sym->type->info.struct_info->is_aggregate &&
+      ctor->symbol->flags.invented &&
       (ctor->symbol->type->info.function.is_deleted ||
        ctor->symbol->type->info.function.is_trivial_special_member)) {
     return NULL;
@@ -12108,7 +12152,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     }
 
     // Symbol takes ownerhip of attribute strings.
-    VectorCopy(&sym->attributes, attributes);
+    VectorAppendVector(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(syntax, sym);
     if (StorageIs(storage, STO(static)) && !TypeIsFunction(sym->type)) {

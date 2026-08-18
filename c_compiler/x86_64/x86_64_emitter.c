@@ -2336,8 +2336,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     }
       
     case X86_64_OP(nop):
-      fprintf(fp, (inst->flags & X86_64_MFENCE) != 0 ? "\tmfence\n"
-                                                     : "\tnop\n");
+      if (!inst->observable_checkpoint) {
+        fprintf(fp, (inst->flags & X86_64_MFENCE) != 0 ? "\tmfence\n"
+                                                       : "\tnop\n");
+      }
       break;
       
     case X86_64_OP(je):

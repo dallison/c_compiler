@@ -349,6 +349,13 @@ static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
   for (IRNode* inst = block->code; inst != NULL && block->end_code != NULL &&
        IRPrev(inst) != block->end_code; inst = next) {
     next = block->end_code == NULL ? NULL : IRNext(inst);
+    if (IRIsObservableCheckpoint(inst)) {
+      int32_t next_value_number = set->next_value_number;
+      ValueSetDelete(set);
+      ValueSetInit(set);
+      set->next_value_number = next_value_number;
+      continue;
+    }
     if (IRIsExpression(inst)) {
       IRNode* prev_inst = LookupInstruction(set, inst);
       if (prev_inst != inst) {

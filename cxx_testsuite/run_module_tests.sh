@@ -407,6 +407,29 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/trivial_union_lifetime.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute trivial union lifetime module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++26 \
+  -Xemit-module "$work/erroneous_value_state.dcm" \
+  "$FIXTURES/erroneous_value_state.cppm" ||
+  fail "emit erroneous value-state module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  "$FIXTURES/erroneous_value_state.cppm" \
+  -o "$work/erroneous_value_state.o" ||
+  fail "compile erroneous value-state module"
+run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+  -fprebuilt-module-path "$work" \
+  "$FIXTURES/use_erroneous_value_state.cpp" \
+  -o "$work/use_erroneous_value_state.o" ||
+  fail "compile erroneous value-state importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_erroneous_value_state.o" \
+  "$work/erroneous_value_state.o" "$LIBC" \
+  -o "$work/erroneous_value_state.bin" ||
+  fail "link erroneous value-state executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/erroneous_value_state.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute erroneous value-state module program"
+
 run "$DAVECC" -target "$TARGET" -std=c++20 \
   -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||
   fail "emit reachability.dcm"

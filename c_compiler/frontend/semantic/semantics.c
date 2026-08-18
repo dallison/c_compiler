@@ -193,6 +193,7 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
     case AST_OP(builtin_expect):
     case AST_OP(builtin_prefetch):
     case AST_OP(builtin_start_lifetime):
+    case AST_OP(builtin_observable_checkpoint):
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
       return true;

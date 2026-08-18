@@ -2631,7 +2631,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         while (SyntaxParseCXXAlignas(parser->syntax, &member_attributes) ||
                SyntaxParseCXXAttributes(parser->syntax, &member_attributes)) {
         }
-        VectorCopy(&member_symbol->attributes, &member_attributes);
+        VectorAppendVector(&member_symbol->attributes, &member_attributes);
         VectorClear(&member_attributes);
         SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
         StructMember* member = NewStructMember(member_symbol);

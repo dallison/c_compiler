@@ -36,6 +36,7 @@ static void ReportConstexprPCodeFailure(ConstEvalContext* ctx, ASTNode* node,
 
 struct ConstexprHeapBlock {
   unsigned char* memory;
+  unsigned char* states;  // ValueState for each byte.
   size_t size;
   size_t allocation_size;
   bool live;
@@ -47,6 +48,7 @@ struct ConstexprValue {
   bool is_address;
   bool is_floating;
   bool lifetime_ended;
+  ValueState state;
   int64_t ivalue;
   double fvalue;
   ConstexprObject* object;
@@ -62,6 +64,7 @@ struct ConstexprBinding {
   Symbol* symbol;
   bool is_address;
   bool is_floating;
+  ValueState state;
   int64_t ivalue;
   double fvalue;
   ConstexprObject* object;
@@ -365,13 +368,21 @@ static void* ConstexprHeapMalloc(ConstEvalContext* ctx, size_t size,
   if (memory == NULL) {
     return NULL;
   }
+  unsigned char* states = malloc(allocation_size);
+  if (states == NULL) {
+    free(memory);
+    return NULL;
+  }
+  memset(states, kValueStateIndeterminate, allocation_size);
   ConstexprHeapBlock* block = malloc(sizeof(*block));
   if (block == NULL) {
+    free(states);
     free(memory);
     return NULL;
   }
   *block = (ConstexprHeapBlock){
       .memory = memory,
+      .states = states,
       .size = object_size,
       .allocation_size = allocation_size,
       .live = true,
@@ -416,7 +427,9 @@ static bool ConstexprValueFromHeapAddress(ConstEvalContext* ctx,
   unsigned char* byte =
       address.heap_block->memory + address.heap_index;
   if (type != NULL && TypeIsCharFamily(type)) {
-    *result = (ConstexprValue){.ivalue = (int64_t)(signed char)*byte};
+    *result = (ConstexprValue){
+        .state = (ValueState)address.heap_block->states[address.heap_index],
+        .ivalue = (int64_t)(signed char)*byte};
     return true;
   }
   if (type != NULL && TypeIsIntegral(type)) {
@@ -426,7 +439,13 @@ static bool ConstexprValueFromHeapAddress(ConstEvalContext* ctx,
       return false;
     }
     memcpy(&value, byte, size);
-    *result = (ConstexprValue){.ivalue = value};
+    ValueState state = kValueStateValid;
+    for (size_t i = 0; i < size; i++) {
+      state = ValueStateMerge(
+          state, (ValueState)address.heap_block
+                     ->states[address.heap_index + i]);
+    }
+    *result = (ConstexprValue){.state = state, .ivalue = value};
     return true;
   }
   (void)ctx;
@@ -876,6 +895,7 @@ void ConstEvalContextDestruct(ConstEvalContext* ctx) {
     ConstexprHeapBlock* block = ctx->heap_blocks.value.p[i];
     if (block != NULL) {
       free(block->memory);
+      free(block->states);
       free(block);
     }
   }
@@ -957,6 +977,7 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
   binding->symbol = symbol;
   binding->is_address = value.is_address;
   binding->is_floating = value.is_floating;
+  binding->state = value.state;
   binding->ivalue = value.ivalue;
   binding->fvalue = value.fvalue;
   binding->object = value.object;
@@ -987,6 +1008,9 @@ bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result) {
   if (value.is_object) {
     return false;
   }
+  if (value.state != kValueStateValid) {
+    return false;
+  }
   *result = value.is_floating ? (int64_t)value.fvalue : value.ivalue;
   return true;
 }
@@ -1000,6 +1024,9 @@ bool ConstexprValueAsFloating(ConstexprValue value, double* result) {
   if (value.is_object) {
     return false;
   }
+  if (value.state != kValueStateValid) {
+    return false;
+  }
   *result = value.is_floating ? value.fvalue : (double)value.ivalue;
   return true;
 }
@@ -1008,6 +1035,14 @@ bool ConstexprBindingAsInteger(ConstEvalContext* ctx, Symbol* symbol,
                                int64_t* result) {
   ConstexprBinding* binding = FindConstexprBinding(ctx, symbol);
   if (binding == NULL || binding->object != NULL) {
+    return false;
+  }
+  if (binding->state != kValueStateValid) {
+    ctx->pcode_failure_reason =
+        binding->state == kValueStateErroneous
+            ? "erroneous value read in constant expression"
+            : "indeterminate value read in constant expression";
+    ctx->pcode_failure_kind = kConstexprPCodeFailureInvalid;
     return false;
   }
   if (binding->is_address) {
@@ -1038,6 +1073,14 @@ bool ConstexprBindingAsFloating(ConstEvalContext* ctx, Symbol* symbol,
                                 double* result) {
   ConstexprBinding* binding = FindConstexprBinding(ctx, symbol);
   if (binding == NULL || binding->object != NULL) {
+    return false;
+  }
+  if (binding->state != kValueStateValid) {
+    ctx->pcode_failure_reason =
+        binding->state == kValueStateErroneous
+            ? "erroneous value read in constant expression"
+            : "indeterminate value read in constant expression";
+    ctx->pcode_failure_kind = kConstexprPCodeFailureInvalid;
     return false;
   }
   if (binding->is_address) {
@@ -1087,6 +1130,30 @@ static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
     VectorAppend(&ctx->objects, object);
   }
   return object;
+}
+
+static void ConstexprSetObjectValueState(ConstexprObject* object,
+                                         ValueState state) {
+  if (object == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < object->slots.length; i++) {
+    ConstexprValue* slot = object->slots.value.p[i];
+    if (slot == NULL) {
+      continue;
+    }
+    slot->state = state;
+    if (slot->is_object) {
+      ConstexprSetObjectValueState(slot->object, state);
+    }
+  }
+}
+
+void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state) {
+  if (symbol == NULL || !symbol->flags.value_set || symbol->value.other == NULL) {
+    return;
+  }
+  ConstexprSetObjectValueState((ConstexprObject*)symbol->value.other, state);
 }
 
 static void ConstexprCanonicalizeAddressValue(ConstexprValue* value) {
@@ -1745,6 +1812,7 @@ static bool ConstexprDereferenceAddress(ConstexprValue address,
         .is_object = binding->object != NULL,
         .is_address = binding->is_address,
         .is_floating = binding->is_floating,
+        .state = binding->state,
         .ivalue = binding->ivalue,
         .fvalue = binding->fvalue,
         .object = binding->object,
@@ -1762,6 +1830,7 @@ static bool ConstexprDereferenceAddress(ConstexprValue address,
       return false;
     }
     *result = (ConstexprValue){
+        .state = (ValueState)address.heap_block->states[address.heap_index],
         .ivalue = (int64_t)(signed char)address.heap_block->memory[address.heap_index],
     };
     return true;
@@ -1826,6 +1895,7 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
   if (binding == NULL) {
     return false;
   }
+  binding->state = value.state;
   if (value.is_address) {
     value = ConstexprResolveForwardedAddress(value);
     binding->is_address = true;
@@ -1882,6 +1952,7 @@ static bool StoreConstexprSlot(ConstEvalContext* ctx, ConstexprValue* slot,
   if (slot == NULL) {
     return false;
   }
+  slot->state = value.state;
   if (value.is_address) {
     value = ConstexprResolveForwardedAddress(value);
     ConstexprCanonicalizeAddressValue(&value);
@@ -1947,6 +2018,13 @@ static bool StoreConstexprHeapAddress(ConstexprValue address, TypeRecord* type,
   }
   unsigned char* memory =
       address.heap_block->memory + address.heap_index;
+  if (value.state != kValueStateValid) {
+    if (value.state == kValueStateErroneous) {
+      memset(memory, 0, size);
+    }
+    memset(address.heap_block->states + address.heap_index, value.state, size);
+    return true;
+  }
   if (TypeIsFloatingPoint(type)) {
     double fvalue = 0;
     if (!ConstexprValueAsFloating(value, &fvalue) ||
@@ -1954,6 +2032,7 @@ static bool StoreConstexprHeapAddress(ConstexprValue address, TypeRecord* type,
       return false;
     }
     memcpy(memory, &fvalue, size);
+    memset(address.heap_block->states + address.heap_index, value.state, size);
     return true;
   }
   int64_t ivalue = 0;
@@ -1961,6 +2040,7 @@ static bool StoreConstexprHeapAddress(ConstexprValue address, TypeRecord* type,
     return false;
   }
   memcpy(memory, &ivalue, size);
+  memset(address.heap_block->states + address.heap_index, value.state, size);
   return true;
 }
 
@@ -2436,6 +2516,31 @@ ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type,
                                    ConstexprValue* result) {
+  if (result != NULL) {
+    result->state = kValueStateValid;
+  }
+  if (node != NULL && node->op == AST_OP(identifier) && type != NULL &&
+      TypeIsUninitializedFriendly(type)) {
+    ASTNode* parent = node->parent;
+    bool propagating_context =
+        parent != NULL && TypeIsUninitializedFriendly(type) &&
+        (parent->op == AST_OP(init) || parent->op == AST_OP(expr_init) ||
+         parent->op == AST_OP(designated_init) ||
+         parent->op == AST_OP(assign) || parent->op == AST_OP(cast) ||
+         parent->op == AST_OP(comma) || parent->op == AST_OP(question));
+    ConstexprBinding* binding = FindConstexprBinding(
+        ctx, ((IdentifierASTNode*)node)->symbol);
+    if (propagating_context && binding != NULL &&
+        binding->object == NULL && !binding->is_address &&
+        binding->state != kValueStateValid) {
+      *result = (ConstexprValue){
+          .state = binding->state,
+          .ivalue = binding->ivalue,
+          .fvalue = binding->fvalue,
+      };
+      return true;
+    }
+  }
   if (node != NULL && node->op == AST_OP(stmt_expr)) {
     return EvaluateConstexprStatementExpression(ctx, node, type, result);
   }
@@ -2800,6 +2905,7 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
   ConstexprValue current = binding != NULL
       ? (ConstexprValue){
             .is_floating = binding->is_floating,
+            .state = binding->state,
             .ivalue = binding->ivalue,
             .fvalue = binding->fvalue,
         }
@@ -2909,6 +3015,7 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
             .is_object = binding->object != NULL,
             .is_address = binding->is_address,
             .is_floating = binding->is_floating,
+            .state = binding->state,
             .ivalue = binding->ivalue,
             .fvalue = binding->fvalue,
             .object = binding->object,
@@ -3646,6 +3753,9 @@ static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
   if (left == NULL || right == NULL) {
     return left == right;
   }
+  if (left->state != right->state) {
+    return false;
+  }
   if (left->is_object || right->is_object) {
     return left->is_object == right->is_object &&
            ConstexprObjectsTemplateArgumentEquivalent(left->object,
@@ -3755,7 +3865,9 @@ static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
                                                     String* result) {
   if (value == NULL) {
     StringAppend(result, "?");
-  } else if (value->is_object) {
+  } else {
+    StringPrintf(result, "S%d;", (int)value->state);
+    if (value->is_object) {
     AppendConstexprTemplateArgumentObjectKey(value->object, result);
   } else if (value->is_address) {
     StringAppend(result, "A");
@@ -3789,6 +3901,7 @@ static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
     }
   } else {
     StringPrintf(result, "I%lld", (long long)value->ivalue);
+  }
   }
 }
 
@@ -6014,6 +6127,33 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
       return false;
     }
   }
+  bool directly_track_uninitialized_state =
+      !TypeIsStructOrUnion(decl->symbol->type) ||
+      decl->symbol->type->info.struct_info == NULL ||
+      decl->symbol->type->info.struct_info->is_aggregate ||
+      decl->symbol->type->info.struct_info->is_union;
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      directly_track_uninitialized_state &&
+      decl->initializer == NULL &&
+      (decl->symbol->storage == STO(implicit) ||
+       StorageIs(decl->symbol->storage, STO(auto)) ||
+       StorageIs(decl->symbol->storage, STO(register)))) {
+    ValueState state = SymbolInitialValueState(decl->symbol);
+    ConstexprValue value = {.state = state};
+    if (TypeIsFixedArray(decl->symbol->type) ||
+        TypeIsStructOrUnion(decl->symbol->type)) {
+      value.is_object = true;
+      value.state = kValueStateValid;
+      value.object = NewConstexprObject(
+          ctx, decl->symbol->type,
+          ConstexprObjectSlotCount(decl->symbol->type));
+      ConstexprSetObjectValueState(value.object, state);
+    } else if (TypeIsFloatingPoint(decl->symbol->type)) {
+      value.is_floating = true;
+    }
+    PushConstexprBinding(ctx, decl->symbol, value);
+    return true;
+  }
   if (PushConstexprSymbolValue(ctx, decl->symbol)) {
     return true;
   }
@@ -6303,6 +6443,9 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   }
   if (expr->op == AST_OP(builtin_start_lifetime)) {
     return EvaluateConstexprStartLifetime(ctx, expr);
+  }
+  if (expr->op == AST_OP(builtin_observable_checkpoint)) {
+    return true;
   }
   if (expr->op == AST_OP(comma)) {
     BinaryASTNode* comma = (BinaryASTNode*)expr;
@@ -8144,8 +8287,23 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
       capability != kConstexprPCodeEligible) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
     ConstexprValue overlay_value;
-    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value) &&
-                      ConstexprValueAsInteger(overlay_value, &overlay_result);
+    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value);
+    if (overlay_ok && overlay_value.state != kValueStateValid &&
+        node->op == AST_OP(call)) {
+      VectorASTNode* call = (VectorASTNode*)node;
+      ASTNode* receiver =
+          call->children != NULL && call->children->length != 0
+              ? call->children->value.p[0]
+              : NULL;
+      if (receiver != NULL && receiver->op == AST_OP(identifier)) {
+        Symbol* symbol = ((IdentifierASTNode*)receiver)->symbol;
+        if (symbol != NULL && symbol->requires_ast_constexpr) {
+          overlay_value.state = kValueStateValid;
+        }
+      }
+    }
+    overlay_ok =
+        overlay_ok && ConstexprValueAsInteger(overlay_value, &overlay_result);
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
       ReportUncaughtConstexprException(ctx);
@@ -8214,7 +8372,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     ReportConstexprPCodeFailure(ctx, node, false);
     return false;
   }
-  if (mode == kConstexprEvalAudit) {
+  if (mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
   ConstexprValue value;

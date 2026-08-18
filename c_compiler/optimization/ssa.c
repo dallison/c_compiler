@@ -127,6 +127,7 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
         // newly-created SSA version uninitialized.
         if (ref->opcode != IR_OP(structreturn) && ref == inst) {
           IRNode* ssavar = NewIRSSAVar(inst->var.def);
+          ssavar->value_state = inst->value_state;
 #if 0
           // Emit ssavar at beginning of entry basic block.
           BasicBlockInsertVar(gen, gen->entry_block, ssavar);

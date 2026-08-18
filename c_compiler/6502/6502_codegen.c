@@ -7591,6 +7591,12 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
        SetLoweredNode(node, GetAddress(g, node->inputs.value.p[0], true));
       return;
 
+    case IR_OP(observable_checkpoint): {
+      TargetInstruction* checkpoint = Emit(
+          g, NewInstruction1(W65C02_OP(reloadpoint), NULL, kAddrModeImplied));
+      checkpoint->observable_checkpoint = true;
+      return;
+    }
     case IR_OP(nop):
     case last_ir_opcode:
       return ;

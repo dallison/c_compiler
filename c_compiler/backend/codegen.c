@@ -1303,12 +1303,53 @@ static void DetectUninitializedVars(Generator* gen) {
           int lineno;
           int start, end;
           DecodeSourceLocation(ref->location, &filename, &lineno, &start, &end);
-          ReportWarning(filename, lineno, "uninitialized",
-                    "Variable '%s' is used uninitialized here in function '%s'",
-                    var->symbol->name.value,
-                    gen->func->info.function.symbol->name.value);
+          if (ref->value_state == kValueStateIndeterminate) {
+            ReportWarning(
+                filename, lineno, "uninitialized",
+                "Variable '%s' is read with an indeterminate value here in "
+                "function '%s'",
+                var->symbol->name.value,
+                gen->func->info.function.symbol->name.value);
+          } else {
+            ReportWarning(
+                filename, lineno, "uninitialized",
+                "Variable '%s' is used uninitialized here in function '%s'",
+                var->symbol->name.value,
+                gen->func->info.function.symbol->name.value);
+          }
         }
       }
+    }
+  }
+}
+
+static void DetectInvalidValueReads(Generator* gen) {
+  if (gen->for_constant_evaluation) {
+    return;
+  }
+  for (size_t block_index = 0; block_index < gen->basic_blocks.length;
+       block_index++) {
+    BasicBlock* block = gen->basic_blocks.value.p[block_index];
+    if (block == NULL || block->is_unreachable || BasicBlockIsEmpty(block)) {
+      continue;
+    }
+    for (IRNode* inst = BasicBlockBegin(block); inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      if (!IRIsVarRef(inst) ||
+          inst->value_state != kValueStateErroneous ||
+          inst->var.use == NULL) {
+        continue;
+      }
+      const char* filename;
+      int lineno;
+      int start;
+      int end;
+      DecodeSourceLocation(inst->location, &filename, &lineno, &start, &end);
+      ReportWarning(
+          filename, lineno, "uninitialized",
+          "Variable '%s' is read with an erroneous value here in function '%s'",
+          inst->var.use->name.value,
+          gen->func->info.function.symbol->name.value);
     }
   }
 }
@@ -1495,6 +1536,8 @@ void* GenerateFunction(Generator* gen) {
       DeadCodeEliminationOptimization(gen);
     }
   }
+
+  DetectInvalidValueReads(gen);
     
   // printf("AFTER otimizations\n");
   // PrintBasicBlocks(gen);

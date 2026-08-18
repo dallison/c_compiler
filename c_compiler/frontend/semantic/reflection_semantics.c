@@ -1213,6 +1213,8 @@ static ASTNode* MetaMaterializeConstexprObjectResult(VectorASTNode* call,
     return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeBool, kQualConst),
                                  location);
   }
+  // The compiler builds every field of a reflection result explicitly.
+  ConstexprSetSymbolObjectValueState(temp, kValueStateValid);
   temp->constexpr_initializer = init;
   ASTNode* value = NewIdentifierASTNode(temp, location);
   ASTNodeSetType(value, TypeRecordCopy(return_type));
@@ -2307,11 +2309,16 @@ static ASTNode* MetaRangeExpression(VectorASTNode* call, Vector* values) {
               TypeIsFunction(call->left->type)
           ? call->left->type->next
           : NULL;
+  aggregate->flags |= kASTRequiresASTConstexpr;
   if (return_type == NULL) {
     return aggregate;
   }
   aggregate = LowerCXXBracedInitToTarget(aggregate, return_type);
-  return MetaMaterializeConstexprObjectResult(call, aggregate);
+  ASTNode* result = MetaMaterializeConstexprObjectResult(call, aggregate);
+  if (result != NULL) {
+    result->flags |= kASTRequiresASTConstexpr;
+  }
+  return result;
 }
 
 static bool MetaEvaluatePredicate(MetaOperation operation,

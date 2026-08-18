@@ -1042,6 +1042,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       clone->alignment = formal->alignment;
       clone->namespace_ = formal->namespace_;
       clone->value = formal->value;
+      AttributeListDestruct(&clone->attributes);
+      AttributeListClone(&clone->attributes, &formal->attributes);
       clone->default_argument =
           ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
       VectorAppend(&r->info.function.prototype, clone);

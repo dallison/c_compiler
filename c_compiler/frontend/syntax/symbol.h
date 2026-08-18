@@ -15,6 +15,7 @@
 #include "dstring.h"
 #include "vector.h"
 #include "source.h"
+#include "value_state.h"
 
 struct TypeRecord;
 struct Struct;
@@ -267,6 +268,7 @@ bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 // Returns the attribute with the given (normalized) name, or NULL.
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute);
 bool SymbolHasWeakBinding(Symbol* symbol);
+ValueState SymbolInitialValueState(Symbol* symbol);
 
 void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp);
 void SymbolPrint(Symbol* sym, FILE* fp);

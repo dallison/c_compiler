@@ -657,6 +657,16 @@ void AppendFunctionTemplateInstantiation(Symbol* templ,
                instantiated);
 }
 
+bool TypeIsUninitializedFriendly(TypeRecord* type) {
+  if (TypeIsUnsignedChar(type)) {
+    return true;
+  }
+  Enum* info = TypeIsEnum(type) ? type->info.enum_info : NULL;
+  return info != NULL && info->tag_name != NULL &&
+         strcmp(info->tag_name->value, "byte") == 0 &&
+         SymbolIsInStdNamespace(info->tag_symbol);
+}
+
 bool TypeIsInt(TypeRecord* type);
 bool TypeIsChar(TypeRecord* type);
 bool TypeIsChar8(TypeRecord* type);

@@ -70,6 +70,9 @@
 #endif
 
 #if __cplusplus >= 202600L
+#ifndef __cpp_lib_observable_checkpoint
+#define __cpp_lib_observable_checkpoint 202506L
+#endif
 #ifndef __cpp_lib_hive
 #define __cpp_lib_hive 202502L
 #endif

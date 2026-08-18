@@ -193,6 +193,37 @@ if grep -Eq '[[:space:]]muli\(' <<<"$dead_body"; then
   exit 1
 fi
 
+# Observable checkpoints survive IR optimization, preserve source ordering, and
+# lower to no target instruction.
+checkpoint_body=$(
+  awk '/IR for function checkpoint_order/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+checkpoint_store_line=$(grep -n -m1 '[[:space:]]store32(' <<<"$checkpoint_body" |
+                        cut -d: -f1 || true)
+checkpoint_line=$(grep -n -m1 '[[:space:]]observable_checkpoint(' \
+                         <<<"$checkpoint_body" | cut -d: -f1 || true)
+checkpoint_load_line=$(grep -n -m1 '[[:space:]]load32(' <<<"$checkpoint_body" |
+                       cut -d: -f1 || true)
+if [[ -z "$checkpoint_store_line" || -z "$checkpoint_line" ||
+      -z "$checkpoint_load_line" ||
+      "$checkpoint_store_line" -ge "$checkpoint_line" ||
+      "$checkpoint_line" -ge "$checkpoint_load_line" ]]; then
+  echo "observable checkpoint did not preserve optimized IR ordering" >&2
+  exit 1
+fi
+checkpoint_asm=$(
+  awk '/^checkpoint_order:/{inside=1} \
+       inside{print} \
+       /^\.func_end_checkpoint_order:/{exit}' "$WORK/optimizer.s"
+)
+if grep -Eq '^[[:space:]]*nop([[:space:]]|$)' <<<"$checkpoint_asm"; then
+  echo "observable checkpoint emitted a machine instruction" >&2
+  exit 1
+fi
+
 # SCCP must use executable edges when meeting phi inputs.  The infeasible
 # multiply is removed and the surviving value is folded through the join.
 sccp_body=$(

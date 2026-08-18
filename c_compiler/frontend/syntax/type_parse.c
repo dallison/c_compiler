@@ -41,6 +41,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->syntax = syntax;
   parser->storage = storage;
   VectorInit(&parser->stack);
+  VectorInit(&parser->pending_declaration_attributes);
   parser->symbol = NULL;
   parser->found_void = false;
   parser->dimension_count = 0;
@@ -92,6 +93,8 @@ void TypeParserReset(TypeParser* parser) {
   }
   VectorDestruct(&parser->stack);
   VectorInit(&parser->stack);
+  AttributeListDestruct(&parser->pending_declaration_attributes);
+  VectorInit(&parser->pending_declaration_attributes);
 }
 
 void TypeParserDestruct(TypeParser* parser) {
@@ -105,6 +108,7 @@ void TypeParserDestruct(TypeParser* parser) {
     parser->declarator_template_arguments = NULL;
   }
   VectorDestruct(&parser->stack);
+  AttributeListDestruct(&parser->pending_declaration_attributes);
 }
 
 TypeSubstitutionScope TypeParserPushTemplateSubstitution(
@@ -2063,6 +2067,13 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   }
   parser->symbol->flags.is_parameter_pack =
       parser->declarator_is_parameter_pack;
+  for (size_t attr_index = 0;
+       attr_index < parser->pending_declaration_attributes.length;
+       attr_index++) {
+    VectorAppend(&parser->symbol->attributes,
+                 parser->pending_declaration_attributes.value.p[attr_index]);
+  }
+  VectorClear(&parser->pending_declaration_attributes);
   if (TypeIsFunction(parser->symbol->type) &&
       parser->declarator_template_arguments != NULL) {
     parser->symbol->type->template_arguments =
@@ -2087,7 +2098,11 @@ bool TypeParserSkipAttributes(TypeParser* parser) {
     } else {
       SyntaxParseCXXAttributes(parser->syntax, &attrs);
     }
-    AttributeListDestruct(&attrs);
+    for (size_t i = 0; i < attrs.length; i++) {
+      VectorAppend(&parser->pending_declaration_attributes, attrs.value.p[i]);
+    }
+    VectorClear(&attrs);
+    VectorDestruct(&attrs);
     any = true;
   }
   return any;
@@ -2286,6 +2301,7 @@ static void ParseFormalArgument(TypeParser* proto_parser,
     formal->flags.is_defined = true;
     formal->flags.is_argument = true;
     formal->value.arg_number = arg_number;
+    SyntaxApplyDeclarationAttributes(proto_parser->syntax, formal);
     if (proto_parser->syntax->local_symbol_stack != NULL) {
       InsertLocalSymbol(proto_parser->syntax->local_symbol_stack,
                       formal);
@@ -2474,6 +2490,7 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
                                              PrototypeStyle style,
                                              int arg_number,
                                              bool* seen_default_argument) {
+  TypeParserSkipAttributes(proto_parser);
   if (LexLookingAt(proto_parser->lex, TOK(thread)) ||
       LexLookingAt(proto_parser->lex, TOK(thread_local))) {
     const char* keyword =
@@ -2541,6 +2558,15 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
 
     Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
     assert(formal != NULL);
+    TypeParserSkipAttributes(proto_parser);
+    for (size_t attr_index = 0;
+         attr_index < proto_parser->pending_declaration_attributes.length;
+         attr_index++) {
+      VectorAppend(
+          &formal->attributes,
+          proto_parser->pending_declaration_attributes.value.p[attr_index]);
+    }
+    VectorClear(&proto_parser->pending_declaration_attributes);
     ParseFormalArgument(proto_parser, func, formal, arg_number,
                         /*abbreviated_parameter=*/false);
     if (explicit_object_parameter && formal->flags.is_parameter_pack) {
@@ -3030,6 +3056,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       !LexLookingAt(parser->lex, TOK(ellipsis)) &&
       !LexLookingAt(parser->lex, TOK(this)) &&
       !LexLookingAt(parser->lex, TOK(thread_local)) &&
+      !SyntaxLookingAtCXXAttribute(parser->syntax) &&
       !SyntaxLookingAtType(parser->syntax);
   LexCheckpointRestore(parser->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
@@ -3048,9 +3075,11 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   LexCheckpoint file_checkpoint;
   LexCheckpointSave(parser->lex, &file_checkpoint);
   LexNextToken(parser->lex);
+  bool parameter_attribute =
+      SyntaxLookingAtCXXAttribute(parser->syntax);
   bool direct_initializer =
       !LexLookingAt(parser->lex, TOK(rparen)) &&
-      !SyntaxLookingAtType(parser->syntax);
+      !SyntaxLookingAtType(parser->syntax) && !parameter_attribute;
   LexCheckpointRestore(parser->lex, &file_checkpoint);
   LexCheckpointDestruct(&file_checkpoint);
   return direct_initializer;
@@ -3061,6 +3090,9 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
   while (parser->syntax->found_open_paren ||
          LexLookingAt(parser->lex, TOK(lparen)) ||
          LexLookingAt(parser->lex, TOK(lsquare))) {
+    if (SyntaxLookingAtCXXAttribute(parser->syntax)) {
+      break;
+    }
     if (CXXDirectInitializerAfterDeclarator(parser)) {
       // In `T obj(args);`, the parens are direct initialization of `obj`,
       // not a function declarator. At namespace scope this is limited to

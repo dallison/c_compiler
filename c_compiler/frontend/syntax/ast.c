@@ -332,6 +332,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_prefetch";
     case AST_OP(builtin_start_lifetime):
       return "builtin_start_lifetime";
+    case AST_OP(builtin_observable_checkpoint):
+      return "builtin_observable_checkpoint";
     case AST_OP(builtin_clz):
       return "builtin_clz";
     case AST_OP(builtin_ctz):

@@ -109,6 +109,9 @@ typedef struct TargetInstruction {
   // Flags.  The lower 16 bits are reserved for TargetInstruction use
   // The upper 16 bits are free for code generators.
   int flags;
+  // C++26 semantic ordering marker. Kept separate from flags because every
+  // backend already assigns target-specific meanings to overlapping flag bits.
+  bool observable_checkpoint;
 } TargetInstruction;
 
 // Flag for TargetInstruction to mark an instruction as dead.
@@ -132,7 +135,6 @@ typedef struct TargetInstruction {
 // Used for exception landing pads, which are reached by unwind metadata.
 #define TARGET_INST_KEEP_UNREACHABLE 32
 #define TARGET_INST_EXCEPTION_LANDING 64
-
 // A constant.
 typedef struct {
   TargetInstruction base;

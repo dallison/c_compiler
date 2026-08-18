@@ -111,6 +111,7 @@ bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
+void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state);
 Symbol* ConstexprFunctionDefinition(Symbol* symbol);
 Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver);
 Symbol* ConstexprConstructorForObjectType(TypeRecord* type,

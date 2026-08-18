@@ -187,6 +187,7 @@ static struct {
 
     {IR_OP(literalref), "literalref"},
     {IR_OP(loc), "loc"},
+    {IR_OP(observable_checkpoint), "observable_checkpoint"},
     {IR_OP(named_label), "label"},
 
     {IR_OP(pusharg), "pusharg"},
@@ -284,6 +285,7 @@ void IRInit(IRNode* inst, IROpcode opcode) {
   inst->data.ptr = NULL;
   inst->var.def = NULL;
   inst->type = NULL;
+  inst->value_state = kValueStateValid;
   inst->location = current_location;
   inst->aux = NULL;
   inst->dest = NULL;
@@ -327,6 +329,50 @@ bool IRInList(IRNode* node) {
   return node->header.next != NULL || node->header.prev != NULL;
 }
 
+static void IRRecomputeValueState(IRNode* node) {
+  if (node == NULL || node->inputs.length == 0 ||
+      node->opcode == IR_OP(addressof) ||
+      node->opcode == IR_OP(observable_checkpoint)) {
+    return;
+  }
+  if ((node->flags & kIRInvalidValueDefinition) != 0) {
+    IRNode* storage = node->inputs.value.p[0];
+    while (storage != NULL && storage->opcode == IR_OP(addressof) &&
+           storage->inputs.length != 0) {
+      storage = storage->inputs.value.p[0];
+    }
+    if (storage != NULL && IRIsVariable(storage)) {
+      storage->value_state = node->value_state;
+    }
+    return;
+  }
+  if ((IRIsStoreOnly(node) || node->opcode == IR_OP(memcpy) ||
+       node->opcode == IR_OP(atomic_store)) &&
+      node->inputs.length > 1) {
+    IRNode* destination = node->inputs.value.p[0];
+    IRNode* source = node->inputs.value.p[1];
+    node->value_state =
+        source != NULL ? source->value_state : kValueStateValid;
+    IRNode* storage = destination;
+    while (storage != NULL && storage->opcode == IR_OP(addressof) &&
+           storage->inputs.length != 0) {
+      storage = storage->inputs.value.p[0];
+    }
+    if (storage != NULL && IRIsVariable(storage)) {
+      storage->value_state = node->value_state;
+    }
+    return;
+  }
+  ValueState state = kValueStateValid;
+  for (size_t i = 0; i < node->inputs.length; i++) {
+    IRNode* input = node->inputs.value.p[i];
+    if (input != NULL) {
+      state = ValueStateMerge(state, input->value_state);
+    }
+  }
+  node->value_state = state;
+}
+
 void IRAddInput(IRNode* from, IRNode* to, bool copy_type) {
   if (to->opcode != IR_OP(label)) {
     // For nodes other than labels we need to have seen the input before
@@ -339,6 +385,7 @@ void IRAddInput(IRNode* from, IRNode* to, bool copy_type) {
   if (copy_type) {
     IRSetType(from, to->type);
   }
+  IRRecomputeValueState(from);
 }
 
 void IRSetVarUse(IRNode* inst, Symbol* var) {
@@ -368,6 +415,7 @@ void IRReplaceInput(IRNode* node, size_t index, IRNode* new) {
 
       node->inputs.value.p[index] = new;
       VectorAppend(&new->outputs, node);
+      IRRecomputeValueState(node);
       return;
     }
   }
@@ -381,6 +429,7 @@ void IRRemoveInput(IRNode* node, size_t index) {
     if (output == node) {
       VectorDeleteElement(&input->outputs, i);
       VectorDeleteElement(&node->inputs, index);
+      IRRecomputeValueState(node);
       return;
     }
   }
@@ -667,6 +716,7 @@ void IRPrint(IRNode* inst, FILE* fp) {
         "deferredargrebuildaddress",
         "asmmemoryclobber",
         "bitwidth64",
+        "invalidvaluedefinition",
     };
     size_t flag_name_count = sizeof(kFlagNames) / sizeof(kFlagNames[0]);
     for (size_t i = 0; i < 32; i++) {
@@ -1152,6 +1202,9 @@ static bool TypeChainIsVolatile(TypeRecord* type) {
 }
 
 bool IRHasSideEffects(IRNode* node) {
+  if (IRIsObservableCheckpoint(node)) {
+    return true;
+  }
   if (IRIsBranch(node) || IRIsReturn(node) || IRIsCall(node) ||
       IRIsResult(node)) {
     return true;
@@ -1187,6 +1240,25 @@ bool IRHasSideEffects(IRNode* node) {
       if (input != NULL && TypeChainIsVolatile(input->type)) {
         return true;
       }
+    }
+  }
+  return false;
+}
+
+bool IRIsObservableCheckpoint(IRNode* node) {
+  return node != NULL && node->opcode == IR_OP(observable_checkpoint);
+}
+
+bool IRCheckpointBetween(IRNode* earlier, IRNode* later) {
+  if (earlier == NULL || later == NULL || earlier->block == NULL ||
+      earlier->block != later->block) {
+    return false;
+  }
+  for (IRNode* node = IRNext(earlier);
+       node != NULL && node->block == earlier->block && node != later;
+       node = IRNext(node)) {
+    if (IRIsObservableCheckpoint(node)) {
+      return true;
     }
   }
   return false;

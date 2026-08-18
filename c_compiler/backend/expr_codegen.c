@@ -962,10 +962,6 @@ static IRNode* GenerateVariableReference(Generator* gen,
       TypeIsFunction(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
-    if ((node->base.flags & kASTNeedAddress) != 0 &&
-        node->symbol != NULL) {
-      node->symbol->flags.address_taken = true;
-    }
     // Need the address of the node, not the value.  A whole struct/union is
     // likewise handled by its address: the raw variable/argument node is
     // returned directly and never loaded here.  Do NOT mark it as a var-use --
@@ -3524,10 +3520,16 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   IRNode* end_label = NewIR(IR_OP(label));
 
   IRNode* tmp = NULL;
-  if (value_is_used && !direct_struct_destination) {
+  IRNode* tmp_addr = NULL;
+  TypeRecord* merge_type =
+      need_address ? NewPointerTo(kQualPlain, node->base.type)
+                   : node->base.type;
+  bool use_ir_tmp =
+      gen->for_constant_evaluation || TypeIsVoid(merge_type);
+  if (value_is_used && !direct_struct_destination &&
+      use_ir_tmp) {
     tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-    IRSetType(tmp, need_address ? NewPointerTo(kQualPlain, node->base.type)
-                                 : node->base.type);
+    IRSetType(tmp, merge_type);
   }
 
   // Evaluate condition.
@@ -3543,16 +3545,19 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   IRNode* left = GenerateExpression(gen, colon->left);
   if (value_is_used && !direct_struct_destination &&
       colon->left->op != AST_OP(throw)) {
-    if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left) ||
-        left->opcode == IR_OP(addressof) ||
-        left->opcode == IR_OP(literalref)) {
-      IROpcode move_opcode = need_address ? IR_OP(mova) :
-          MoveToTmpOpcode(colon->left->type);
-      left = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, left)),
-                       need_address ? tmp->type : colon->left->type);
+    if (use_ir_tmp) {
+      if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left) ||
+          left->opcode == IR_OP(addressof) ||
+          left->opcode == IR_OP(literalref)) {
+        IROpcode move_opcode =
+            need_address ? IR_OP(mova) : MoveToTmpOpcode(colon->left->type);
+        left = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, left)),
+                         merge_type);
+      }
+      left->dest = tmp;
+    } else {
+      tmp_addr = GeneratorSpillValueToTemp(gen, left, merge_type);
     }
-    left->dest = tmp;
-    // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left)), colon->left->type);
   }
   
   // Branch to end.
@@ -3570,16 +3575,30 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   IRNode* right = GenerateExpression(gen, colon->right);
   if (value_is_used && !direct_struct_destination &&
       colon->right->op != AST_OP(throw)) {
-    if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right) ||
-        right->opcode == IR_OP(addressof) ||
-        right->opcode == IR_OP(literalref)) {
-      IROpcode move_opcode = need_address ? IR_OP(mova) :
-          MoveToTmpOpcode(colon->left->type);
-      right = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, right)),
-                        need_address ? tmp->type : colon->left->type);
+    if (use_ir_tmp) {
+      if (!IRIsExpression(right) || IRIsConstant(right) ||
+          IRIsVariable(right) || right->opcode == IR_OP(addressof) ||
+          right->opcode == IR_OP(literalref)) {
+        IROpcode move_opcode =
+            need_address ? IR_OP(mova) : MoveToTmpOpcode(colon->left->type);
+        right = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, right)),
+                          merge_type);
+      }
+      right->dest = tmp;
+    } else {
+      if (tmp_addr == NULL) {
+        tmp_addr = GeneratorSpillValueToTemp(gen, right, merge_type);
+      } else {
+        IRNode* right_addr =
+            IRSetType(GeneratorEmit(
+                          gen, NewIR1(IR_OP(addressof),
+                                      tmp_addr->inputs.value.p[0])),
+                      tmp_addr->type);
+        GeneratorEmit(gen,
+                      NewIR2(GetStoreOpcodeForType(merge_type), right_addr,
+                             right));
+      }
     }
-    right->dest = tmp;
-    // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right)), colon->right->type);
   }
   // end_label:
   GeneratorEmit(gen, end_label);
@@ -3588,6 +3607,9 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   // the value will be ignored so we just return zero.
   if (direct_struct_destination) {
     return gen->current_struct_address;
+  }
+  if (tmp_addr != NULL) {
+    return GeneratorReloadSpilledValue(gen, tmp_addr, merge_type);
   }
   return value_is_used ? tmp :
       GeneratorGetIntConstant(gen, NULL, 0);
@@ -3954,6 +3976,13 @@ static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
   return IRSetType(GeneratorEmit(gen, call), node->base.type);
 }
 
+static IRNode* GenerateBuiltinObservableCheckpoint(Generator* gen,
+                                                   VectorASTNode* node) {
+  return IRSetType(
+      GeneratorEmit(gen, NewIR(IR_OP(observable_checkpoint))),
+      node->base.type);
+}
+
 static IRNode* GenerateBuiltinTerminator(Generator* gen, VectorASTNode* node) {
   Symbol* abort_function = GetBuiltinAbortFunction(node->base.location);
   IRNode* function = GeneratorGetVariable(gen, abort_function);
@@ -4020,6 +4049,9 @@ static IRNode* GenerateToInt(Generator* gen, ASTNode* node, IROpcode op,
                              IRNode* input, int mask) {
   IRNode* convert = GeneratorEmit(gen, NewIR1(op, input));
   IRSetType(convert, node->type);
+  if (!TypeIsUnsigned(node->type)) {
+    return convert;
+  }
   return IRSetType(GeneratorEmit(gen,
                        NewIR2(IR_OP(zeroextendi), convert,
                               GeneratorGetIntConstant(gen, node->type, mask))), node->type);
@@ -4714,6 +4746,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(builtin_start_lifetime):
       result = GenerateBuiltinStartLifetime(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_observable_checkpoint):
+      result = GenerateBuiltinObservableCheckpoint(gen, vector_node);
       break;
 
     case AST_OP(builtin_trap):

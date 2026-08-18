@@ -33,7 +33,9 @@ static bool CanPropagateMove(IRNode* inst) {
 
   // Keep this first version pressure-neutral: it only removes a copy inside
   // one block and never lengthens the source's cross-block live range.
-  return source->block == inst->block && user->block == inst->block;
+  return source->block == inst->block && user->block == inst->block &&
+         !IRCheckpointBetween(source, inst) &&
+         !IRCheckpointBetween(inst, user);
 }
 
 static bool IsSafeSSAVariable(IRNode* node) {
@@ -112,14 +114,15 @@ static bool PropagateSSALoad(Generator* gen, BasicBlock* block, IRNode* load) {
     }
   }
   if (store == NULL || store->block != block || load->block != block ||
-      !InstructionPrecedesInBlock(store, load)) {
+      !InstructionPrecedesInBlock(store, load) ||
+      IRCheckpointBetween(store, load)) {
     return false;
   }
 
   IRNode* source = store->inputs.value.p[1];
   if (source == NULL || source->block != block || source->type == NULL ||
       TypeIsVolatile(source->type) || !TypeEqual(source->type, load->type) ||
-      IRHasSideEffects(source)) {
+      IRHasSideEffects(source) || IRCheckpointBetween(source, load)) {
     return false;
   }
 

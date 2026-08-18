@@ -126,7 +126,8 @@ static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst
   }
   IRNode* src = inst->inputs.value.p[0];
   if (src->outputs.length != 1 || src->inputs.length < 2 ||
-      !IRIsIntConst(src->inputs.value.p[1])) {
+      !IRIsIntConst(src->inputs.value.p[1]) ||
+      IRCheckpointBetween(src, inst)) {
     return;
   }
 
@@ -170,7 +171,8 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
   // We are subtracting a constant.
   IRNode* src = inst->inputs.value.p[0];
   if (src->outputs.length != 1 || src->inputs.length < 2 ||
-      !IRIsIntConst(src->inputs.value.p[1])) {
+      !IRIsIntConst(src->inputs.value.p[1]) ||
+      IRCheckpointBetween(src, inst)) {
     return;
   }
 
@@ -211,7 +213,9 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
       inst->inputs.value.p[1] != NULL && \
       IRIsIntConst(inst->inputs.value.p[1])) {\
     IRNode* src = inst->inputs.value.p[0];\
-    if (src->opcode == IR_OP(ir_opcode) && IRIsIntConst(src->inputs.value.p[1])) {\
+    if (src->opcode == IR_OP(ir_opcode) && \
+        !IRCheckpointBetween(src, inst) && \
+        IRIsIntConst(src->inputs.value.p[1])) {\
       if (src->outputs.length == 1) {\
         IRReplaceInput(inst, 0, src->inputs.value.p[0]);\
         int64_t src_value = IRIntConstValue(src->inputs.value.p[1]);\
@@ -233,7 +237,8 @@ static void PropagateDivConstant(Generator* gen, BasicBlock* block,
   IRNode* src = inst->inputs.value.p[0];
   if (src == NULL || src->opcode != IR_OP(divi) ||
       src->outputs.length != 1 || src->inputs.length < 2 ||
-      !IRIsIntConst(src->inputs.value.p[1])) {
+      !IRIsIntConst(src->inputs.value.p[1]) ||
+      IRCheckpointBetween(src, inst)) {
     return;
   }
 
@@ -261,7 +266,8 @@ static void PropagateShiftConstant(Generator* gen, BasicBlock* block,
   }
   IRNode* src = inst->inputs.value.p[0];
   if (src == NULL || src->opcode != opcode || src->outputs.length != 1 ||
-      src->inputs.length < 2 || !IRIsIntConst(src->inputs.value.p[1])) {
+      src->inputs.length < 2 || !IRIsIntConst(src->inputs.value.p[1]) ||
+      IRCheckpointBetween(src, inst)) {
     return;
   }
 
@@ -290,7 +296,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
        !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
        inst = next) {
     next = IRNext(inst);
-    if (IRAsmClobbersMemory(inst)) {
+    if (IRAsmClobbersMemory(inst) || IRIsObservableCheckpoint(inst)) {
       // Values cached for stack variables may be stale after inline assembly
       // that can access arbitrary memory.
       MapClear(&p->constants);

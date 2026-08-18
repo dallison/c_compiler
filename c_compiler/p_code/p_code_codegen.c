@@ -2303,6 +2303,12 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
       // These are handled before we get here.
       return NULL;
 
+    case IR_OP(observable_checkpoint): {
+      TargetInstruction* checkpoint =
+          Emit(pcode, NewInstruction(P_OP(loc)));
+      checkpoint->observable_checkpoint = true;
+      return checkpoint;
+    }
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

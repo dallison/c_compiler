@@ -146,6 +146,7 @@ typedef enum {
   AST_OP(builtin_expect),
   AST_OP(builtin_prefetch),
   AST_OP(builtin_start_lifetime),
+  AST_OP(builtin_observable_checkpoint),
   AST_OP(builtin_trap),
   AST_OP(builtin_unreachable),
 

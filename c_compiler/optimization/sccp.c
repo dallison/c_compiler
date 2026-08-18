@@ -47,9 +47,23 @@ static Symbol* VariableSymbol(IRNode* node) {
   }
 }
 
-static bool IsSafeSSASymbol(Symbol* symbol) {
-  return symbol != NULL && !symbol->flags.address_taken &&
-         !TypeIsArray(symbol->type) &&
+static bool HasResidualVariableUse(SCCPContext* context, Symbol* symbol) {
+  for (IRNode* inst = GeneratorFirstInstruction(context->gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if ((inst->opcode == IR_OP(localvar) ||
+         inst->opcode == IR_OP(argument) ||
+         inst->opcode == IR_OP(tempvar)) &&
+        VariableSymbol(inst) == symbol && inst->outputs.length != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool IsSafeSSASymbol(SCCPContext* context, Symbol* symbol) {
+  return symbol != NULL && !TypeIsArray(symbol->type) &&
+         (!symbol->flags.address_taken ||
+          !HasResidualVariableUse(context, symbol)) &&
          (symbol->flags.is_argument || symbol->flags.is_temp ||
           (symbol->flags.is_local &&
            !StorageIs(symbol->storage, STO(static))));
@@ -521,8 +535,8 @@ static void EvaluateDefinition(SCCPContext* context, IRNode* inst) {
       defined->opcode != IR_OP(ssavar)) {
     return;
   }
-  if (IsSafeSSASymbol(inst->var.def) && IsIntegerStore(inst) &&
-      inst->inputs.length > 1) {
+  if (IsSafeSSASymbol(context, inst->var.def) && IsIntegerStore(inst) &&
+      inst->inputs.length > 1 && inst->value_state == kValueStateValid) {
     UpdateValue(context, defined,
                 ValueOf(context, inst->inputs.value.p[1]));
   } else {
@@ -532,11 +546,17 @@ static void EvaluateDefinition(SCCPContext* context, IRNode* inst) {
 
 static void EvaluateInstruction(SCCPContext* context, IRNode* inst) {
   if (IRIsIntConst(inst)) {
-    UpdateValue(context, inst, ConstantValue(IRIntConstValue(inst)));
+    UpdateValue(context, inst,
+                inst->value_state == kValueStateValid
+                    ? ConstantValue(IRIntConstValue(inst))
+                    : OverdefinedValue());
     return;
   }
   if (inst->opcode == IR_OP(phi)) {
-    UpdateValue(context, inst, EvaluatePhi(context, inst));
+    UpdateValue(context, inst,
+                inst->value_state == kValueStateValid
+                    ? EvaluatePhi(context, inst)
+                    : OverdefinedValue());
     return;
   }
   EvaluateDefinition(context, inst);
@@ -549,6 +569,10 @@ static void EvaluateInstruction(SCCPContext* context, IRNode* inst) {
     if (inst->outputs.length != 0) {
       UpdateValue(context, inst, OverdefinedValue());
     }
+    return;
+  }
+  if (inst->value_state != kValueStateValid) {
+    UpdateValue(context, inst, OverdefinedValue());
     return;
   }
   if (inst->opcode == IR_OP(ssavar) || IRIsBranch(inst) ||
@@ -565,7 +589,7 @@ static void EvaluateInstruction(SCCPContext* context, IRNode* inst) {
     Symbol* symbol = inst->inputs.length == 0
                          ? NULL
                          : VariableSymbol(inst->inputs.value.p[0]);
-    if (!IsSafeSSASymbol(symbol)) {
+    if (!IsSafeSSASymbol(context, symbol)) {
       UpdateValue(context, inst, OverdefinedValue());
       return;
     }
@@ -674,7 +698,8 @@ static bool Analyze(SCCPContext* context) {
 }
 
 static bool IsRewritableConstant(IRNode* inst) {
-  if (IRIsIntConst(inst) || inst->opcode == IR_OP(ssavar) ||
+  if (inst->value_state != kValueStateValid || IRIsIntConst(inst) ||
+      inst->opcode == IR_OP(ssavar) ||
       (IRIsVariable(inst) && inst->opcode != IR_OP(phi)) ||
       IRIsBranch(inst) || IRIsReturn(inst) || IRIsStore(inst) ||
       IRIsCall(inst) || inst->dest != NULL || IRHasSideEffects(inst) ||

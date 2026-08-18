@@ -1841,6 +1841,25 @@ static TargetInstruction* LowerExpression(X86_64Generator* rv, Generator* gen,
   if (!ref_counts_ok) {
     TargetUpdateOperandUsers(inst);
   }
+  bool signed_float_to_int =
+      opcode == X86_64_OP(cvttss2si) || opcode == X86_64_OP(cvttsd2si);
+  bool sign_extend_narrow_result =
+      node->type != NULL && node->type->size < 8 &&
+      !TypeIsUnsigned(node->type) &&
+      ((node->type->size == 4 &&
+        (opcode == X86_64_OP(addl) || opcode == X86_64_OP(subl) ||
+         opcode == X86_64_OP(imull))) ||
+       signed_float_to_int);
+  if (sign_extend_narrow_result) {
+    if (inst->block == NULL) {
+      Emit(rv, inst);
+    }
+    int shift_amount = 64 - (int)node->type->size * 8;
+    TargetInstruction* shift =
+        GetIntConstant(rv, NULL, kTargetType32Bit, shift_amount);
+    inst = Emit(rv, NewInstruction2(X86_64_OP(shl), inst, shift));
+    inst = NewInstruction2(X86_64_OP(sar), inst, shift);
+  }
   TargetInstruction* dest = GetDestInstruction(rv, gen, node);
   if (dest != NULL && inst != NULL) {
     X86_64Opcode mov_opcode = X86_64_OP(mv);
@@ -2305,8 +2324,7 @@ static TargetInstruction* Load(X86_64Generator* rv, IRNode* addr_node, X86_64Opc
     if ((X86_64Opcode)immed->opcode == X86_64_OP(movxc) &&
         (immed->flags & X86_64_TLS_RELOC) != 0) {
       result = Emit(rv, NewInstruction2(opcode, src, immed));
-    } else {
-      assert(TargetIsConst(immed));
+    } else if (TargetIsConst(immed)) {
       result = Emit(rv, NewInstruction2(opcode, src, immed));
     }
   }
@@ -4215,6 +4233,12 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       // These are handled before we get here.
       return NULL;
 
+    case IR_OP(observable_checkpoint): {
+      TargetInstruction* checkpoint =
+          Emit(rv, NewInstruction(X86_64_OP(nop)));
+      checkpoint->observable_checkpoint = true;
+      return checkpoint;
+    }
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

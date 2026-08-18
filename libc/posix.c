@@ -15,7 +15,7 @@
 // and posix_lseek.c so they only link when used.  write/abort/_Exit stay
 // here; virtually every program needs them.
 #if defined(__p_code__)
-int write(int fd, const char* buffer, size_t len) {
+static int PCodeWrite(int fd, const char* buffer, size_t len) {
   (void)fd;
   (void)buffer;
   (void)len;
@@ -24,6 +24,14 @@ int write(int fd, const char* buffer, size_t len) {
       "ldx r1, [ap, #20]\n"
       "ldx r2, [ap, #28]\n"
       "esc #2");
+}
+
+int write(int fd, const char* buffer, size_t len) {
+  int result = PCodeWrite(fd, buffer, len);
+  if (result > 0) {
+    __builtin_observable_checkpoint();
+  }
+  return result;
 }
 
 __attribute__((noreturn)) void abort() {
@@ -38,7 +46,11 @@ void _Exit(int status) {
 }
 #else
 int write(int fd, const char* buffer, size_t len) {
-  return syscall(SYS_WRITE, fd, buffer, len);
+  int result = syscall(SYS_WRITE, fd, buffer, len);
+  if (result > 0) {
+    __builtin_observable_checkpoint();
+  }
+  return result;
 }
 
 __attribute__((noreturn)) void abort() {

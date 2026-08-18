@@ -95,6 +95,11 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
   if (node->dest != NULL) {
     return;
   }
+  for (size_t i = 0; i < node->inputs.length; i++) {
+    if (IRCheckpointBetween(node->inputs.value.p[i], node)) {
+      return;
+    }
+  }
   switch (node->opcode) {
     case IR_OP(addi):
       // Adding constant 0 is a nop.

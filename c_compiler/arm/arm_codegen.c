@@ -5365,6 +5365,11 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       // These are handled before we get here.
       return NULL;
 
+    case IR_OP(observable_checkpoint): {
+      TargetInstruction* checkpoint = Emit(g, NewInstruction(ARM_OP(nop)));
+      checkpoint->observable_checkpoint = true;
+      return checkpoint;
+    }
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

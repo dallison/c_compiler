@@ -93,7 +93,8 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     X86_64Opcode opcode = (X86_64Opcode)inst->opcode;
-    if (X86_64IsExpression(inst) &&
+    if (!inst->observable_checkpoint &&
+        X86_64IsExpression(inst) &&
         !X86_64IsSymbol(inst) && !X86_64IsConst(inst) && opcode != X86_64_OP(tmp) &&
         opcode != X86_64_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)
@@ -165,7 +166,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= X86_64_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 1, label);
         inst->flags |= X86_64_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)X86_64_OP(add)) {
+      } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
+                 X86_64IsIntConst(base->operand[1])) {
         // Load from an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = X86_64IntValue(inst->operand[1]);
@@ -196,7 +198,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= X86_64_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 2, label);
         inst->flags |= X86_64_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)X86_64_OP(add)) {
+      } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
+                 X86_64IsIntConst(base->operand[1])) {
         // Store to an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = X86_64IntValue(inst->operand[2]);

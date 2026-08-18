@@ -33,6 +33,7 @@
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
+static void SetNeedAddress(ASTNode* node);
 
 static bool ExpressionRequiresASTConstexpr(ASTNode* node, void* data) {
   (void)data;
@@ -3915,8 +3916,6 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
     }
     StringDestruct(&name);
   }
-  SemanticConvertType(node->right,
-                      NewTypeRecordWithSize(kTypeInt, kQualPlain), kConvertNormal);
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
     SemanticError(node->right, "Subscripts must be integral types");
   }
@@ -9319,7 +9318,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
           ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
           actual = materialized;
         }
-        actual->flags |= kASTNeedAddress;
+        SetNeedAddress(actual);
       } else {
         if (actual->value_category != kValueCategoryPrvalue) {
           ASTNode* materialized =
@@ -11154,6 +11153,11 @@ static void AnalyzeBuiltinStartLifetime(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
+static void AnalyzeBuiltinObservableCheckpoint(VectorASTNode* node) {
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static void AnalyzeBuiltinTerminator(VectorASTNode* node) {
   ASTNodeSetType(&node->base,
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
@@ -11568,6 +11572,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(builtin_start_lifetime):
       AnalyzeBuiltinStartLifetime(vector_node);
+      break;
+
+    case AST_OP(builtin_observable_checkpoint):
+      AnalyzeBuiltinObservableCheckpoint(vector_node);
       break;
 
     case AST_OP(builtin_trap):

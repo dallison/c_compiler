@@ -13,6 +13,9 @@
 #include "target_basic_block.h"
 
 static bool AARCH64HasImplicitEffect(TargetInstruction* inst) {
+  if (inst->observable_checkpoint) {
+    return true;
+  }
   switch ((AARCH64Opcode)inst->opcode) {
     // Condition flags are not represented by target-instruction operands.
     case AARCH64_OP(cmp):
@@ -111,7 +114,7 @@ static bool WritesFixedValue(TargetInstruction* inst,
          (WritesRegisterOperand(inst) && inst->operand[0] == value);
 }
 
-static bool IsPointerSizedVariable(TargetInstruction* inst) {
+static bool IsCoalescibleIncomingVariable(TargetInstruction* inst) {
   if (!AARCH64IsVarRegister(inst)) {
     return false;
   }
@@ -120,7 +123,8 @@ static bool IsPointerSizedVariable(TargetInstruction* inst) {
     return false;
   }
   TypeRecordCalculateSize(symbol->type);
-  return symbol->type->size == 8;
+  return symbol->type->size == 8 ||
+         (symbol->type->size == 4 && TypeIsIntegral(symbol->type));
 }
 
 static bool HasUnusedVariableDestination(TargetInstruction* inst) {
@@ -161,7 +165,7 @@ static bool EliminateLeafIncomingMove(AARCH64Generator* generator,
   TargetInstruction* source = MoveSource(move);
   bool incoming_argument =
       source != NULL && (source->flags & TARGET_INST_INCOMING_ARG) != 0 &&
-      IsPointerSizedVariable(move->dest);
+      IsCoalescibleIncomingVariable(move->dest);
   bool indirect_result =
       source != NULL &&
       source->opcode == (TargetOpcode)AARCH64_OP(xr) &&

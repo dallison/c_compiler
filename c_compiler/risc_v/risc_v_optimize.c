@@ -85,7 +85,8 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     RVOpcode opcode = (RVOpcode)inst->opcode;
-    if (RVIsExpression(inst) &&
+    if (!inst->observable_checkpoint &&
+        RVIsExpression(inst) &&
         !RVIsSymbol(inst) && !RVIsConst(inst) && opcode != RV_OP(tmp) &&
         opcode != RV_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)

@@ -13,6 +13,7 @@ struct Syntax;
 
 bool TypeContainsTemplateParameter(TypeRecord* type);
 bool SymbolIsInStdNamespace(Symbol* symbol);
+bool TypeIsUninitializedFriendly(TypeRecord* type);
 inline bool TypeIsPointer(TypeRecord* type) {
   if (type == NULL) {
     return false;

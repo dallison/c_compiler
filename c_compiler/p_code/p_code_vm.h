@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "p_code_machine.h"
+#include "value_state.h"
 
 #define P_CODE_VM_DEFAULT_STACK_SIZE (8 * 1024 * 1024)
 
@@ -34,6 +35,7 @@ typedef struct {
   uint64_t start;
   size_t size;
   bool writable;
+  unsigned char* states;
 } PCodeVMMemoryRegion;
 
 typedef PCodeVMStatus (*PCodeVMEscapeHandler)(PCodeVM* vm, int32_t code,
@@ -71,6 +73,11 @@ void PCodeVMSetEscapeHandler(PCodeVM* vm, PCodeVMEscapeHandler handler,
 bool PCodeVMEnableCheckedMemory(PCodeVM* vm);
 bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
                                  bool writable);
+bool PCodeVMRegisterStatefulMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                         bool writable,
+                                         ValueState initial_state);
+bool PCodeVMCopyMemoryState(PCodeVM* vm, uint64_t destination,
+                            uint64_t source, size_t size);
 bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory);
 PCodeVMStatus PCodeVMStep(PCodeVM* vm);
 PCodeVMStatus PCodeVMRun(PCodeVM* vm);

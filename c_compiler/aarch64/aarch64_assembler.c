@@ -1026,7 +1026,7 @@ static bool AARCH64EncodeLogicalImmediate(uint64_t imm, int sf,
     }
     unsigned clo = (unsigned)__builtin_clzll(~imm);
     i = 64 - clo;
-    cto = clo + (unsigned)__builtin_ctzll(imm) - (64 - size);
+    cto = size - (unsigned)__builtin_popcountll(~imm);
   }
 
   unsigned immr = (size - i) & (size - 1);

@@ -211,6 +211,9 @@ static void RestoreExceptionLandingState(PCodeEmitter* emitter, FILE* fp) {
 // Main instruction printer.
 static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
+  if (inst->observable_checkpoint) {
+    return;
+  }
   if (((int)inst->opcode == (int)P_OP(label))) {
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {

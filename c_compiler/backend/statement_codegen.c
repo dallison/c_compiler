@@ -403,6 +403,9 @@ static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
   IRNode* dispatch_label =
       catch_exceptions && UsesItaniumUnwind(gen) ? NewIR(IR_OP(label)) : NULL;
   IRNode* passed = NewIR(IR_OP(label));
+  // [basic.contract]: beginning evaluation of a checked contract predicate is
+  // an observable checkpoint.
+  GeneratorEmit(gen, NewIR(IR_OP(observable_checkpoint)));
   if (try_start != NULL) {
     GeneratorEmit(gen, try_start);
   }
@@ -417,6 +420,9 @@ static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
 
   if (compiler->contract_semantic != kContractSemanticQuickEnforce) {
     GenerateContractViolationRuntimeCall(gen, kind, 1, location);
+    if (compiler->contract_semantic == kContractSemanticObserve) {
+      GeneratorEmit(gen, NewIR(IR_OP(observable_checkpoint)));
+    }
   }
   if (compiler->contract_semantic == kContractSemanticEnforce ||
       compiler->contract_semantic == kContractSemanticQuickEnforce) {
@@ -435,6 +441,9 @@ static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
     }
     if (compiler->contract_semantic != kContractSemanticQuickEnforce) {
       GenerateContractViolationRuntimeCall(gen, kind, 2, location);
+      if (compiler->contract_semantic == kContractSemanticObserve) {
+        GeneratorEmit(gen, NewIR(IR_OP(observable_checkpoint)));
+      }
     }
     if (compiler->contract_semantic == kContractSemanticEnforce ||
         compiler->contract_semantic == kContractSemanticQuickEnforce) {
@@ -1189,6 +1198,50 @@ static void GenerateVariableDeclaration(Generator* gen,
     } else {
       GenerateExpression(gen, node->initializer);
     }
+  } else if (!TypeIsVLA(node->symbol->type)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      return;
+    }
+    ValueState state = SymbolInitialValueState(node->symbol);
+    IRNode* variable = GeneratorGetVariable(gen, node->symbol);
+    variable->value_state = state;
+    if (state != kValueStateErroneous) {
+      return;
+    }
+    // Non-aggregate class declarations are initialized by a separately
+    // synthesized constructor statement. Zeroing at the declaration node
+    // would run after that statement for some lowered forms and clobber the
+    // constructed object.
+    if (TypeIsStructOrUnion(node->symbol->type) &&
+        node->symbol->type->info.struct_info != NULL &&
+        !node->symbol->type->info.struct_info->is_aggregate) {
+      return;
+    }
+    if (!TypeIsArray(node->symbol->type) &&
+        !TypeIsStructOrUnion(node->symbol->type)) {
+      IRNode* zero =
+          TypeIsFloatingPoint(node->symbol->type)
+              ? NewFloatingPointIRConstant(node->symbol->type, 0.0)
+              : NewIntIRConstant(node->symbol->type, 0);
+      zero = GeneratorEmit(gen, zero);
+      IRNode* store = GeneratorEmit(
+          gen, NewIR2(GetStoreOpcodeForType(node->symbol->type), variable, zero));
+      IRSetVarDef(store, node->symbol);
+      store->flags |= kIRInvalidValueDefinition;
+      store->value_state = kValueStateErroneous;
+      variable->value_state = kValueStateErroneous;
+      return;
+    }
+    // P2795R5 permits implementation-defined bytes for an erroneous value.
+    // DaveCC's documented choice is deterministic zero bytes.  The IR state
+    // remains erroneous, so this physical store is not a semantic
+    // initialization and provable reads are still diagnosed.
+    IRNode* memzero = GeneratorEmit(gen, NewIR1(IR_OP(memzero), variable));
+    IRSetType(memzero, node->symbol->type);
+    IRSetVarDef(memzero, node->symbol);
+    memzero->flags |= kIRInvalidValueDefinition;
+    memzero->value_state = kValueStateErroneous;
+    variable->value_state = kValueStateErroneous;
   }
 }
 

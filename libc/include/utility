@@ -204,6 +204,15 @@ constexpr auto operator<=>(const pair<T1, T2>& left,
   return left.second <=> right.second;
 }
 
+#if __cplusplus >= 202600L
+#ifndef __cpp_lib_observable_checkpoint
+#define __cpp_lib_observable_checkpoint 202506L
+#endif
+inline void observable_checkpoint() noexcept {
+  __builtin_observable_checkpoint();
+}
+#endif
+
 }  // namespace std
 
 #endif /* utility_h */

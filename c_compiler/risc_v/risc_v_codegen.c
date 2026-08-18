@@ -827,6 +827,7 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   rv->struct_return_reg = -1;
   rv->zero = NULL;
   rv->tmp = NULL;
+  rv->tmp2 = NULL;
   rv->not_leaf = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
@@ -4184,6 +4185,11 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
       // These are handled before we get here.
       return NULL;
 
+    case IR_OP(observable_checkpoint): {
+      TargetInstruction* checkpoint = Emit(rv, NewInstruction(RV_OP(nop)));
+      checkpoint->observable_checkpoint = true;
+      return checkpoint;
+    }
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

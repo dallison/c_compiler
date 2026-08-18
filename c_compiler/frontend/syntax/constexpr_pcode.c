@@ -439,6 +439,7 @@ struct ConstexprValue {
   bool is_address;
   bool is_floating;
   bool lifetime_ended;
+  ValueState state;
   int64_t ivalue;
   double fvalue;
   ConstexprObject* object;
@@ -725,6 +726,40 @@ static void CollectReferencedConstexprFunctions(PCodeGenerator* pcode,
   }
 }
 
+static bool IsUninitializedFriendlyPCodePropagation(IRNode* inst) {
+  if (inst == NULL || !TypeIsUninitializedFriendly(inst->type) ||
+      inst->outputs.length == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < inst->outputs.length; i++) {
+    IRNode* user = inst->outputs.value.p[i];
+    if (user == NULL || !TypeIsUninitializedFriendly(user->type) ||
+        (!IRIsStore(user) && user->opcode != IR_OP(movi) &&
+         user->opcode != IR_OP(cast))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static IRNode* FindInvalidPCodeValueRead(Generator* gen) {
+  for (IRNode* inst = GeneratorFirstInstruction(gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if (inst->value_state == kValueStateValid || IRIsVariable(inst) ||
+        IRIsStore(inst) || inst->opcode == IR_OP(memzero) ||
+        inst->opcode == IR_OP(addressof) ||
+        inst->opcode == IR_OP(observable_checkpoint) ||
+        inst->opcode == IR_OP(pusharg) ||
+        (IRIsCall(inst) && inst->outputs.length == 0) ||
+        (inst->type != NULL && TypeIsVoid(inst->type)) ||
+        IsUninitializedFriendlyPCodePropagation(inst)) {
+      continue;
+    }
+    return inst;
+  }
+  return NULL;
+}
+
 static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
                                          Vector* referenced,
                                          const char** reason) {
@@ -782,6 +817,20 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
     free(pcode_target);
     GeneratorDestruct(&gen);
     *reason = "pcode lowering failed";
+    return false;
+  }
+  IRNode* invalid_read = FindInvalidPCodeValueRead(&gen);
+  if (invalid_read != NULL) {
+    *reason =
+        invalid_read->value_state == kValueStateErroneous
+            ? "erroneous value read in constexpr pcode"
+            : "indeterminate value read in constexpr pcode";
+    compiler->current_function = saved_current_function;
+    compiler->target = saved_target;
+    pcode_target->cleanup(pcode);
+    pcode_target->cleanup = NULL;
+    free(pcode_target);
+    GeneratorDestruct(&gen);
     return false;
   }
   if (referenced != NULL) {
@@ -2981,6 +3030,12 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
   } else if (node->op == AST_OP(call)) {
     Symbol* call_symbol = PCodeConstexprCallSymbol(node);
     VectorASTNode* call = (VectorASTNode*)node;
+    if (call_symbol != NULL &&
+        SymbolHasAttribute(call_symbol, "meta_intrinsic")) {
+      scan->required = true;
+      scan->ast_only = true;
+      return;
+    }
     if (cxx26 && call_symbol != NULL &&
         (StringEqual(&call_symbol->name, "operator new") ||
          StringEqual(&call_symbol->name, "operator new[]")) &&
@@ -3246,7 +3301,8 @@ static PCodeVMStatus ConstexprPCodeAllocateHeapBlock(
       .allocation_size = allocation_size,
       .live = true,
   };
-  if (!PCodeVMRegisterMemoryRegion(vm, memory, object_size, true)) {
+  if (!PCodeVMRegisterStatefulMemoryRegion(
+          vm, memory, object_size, true, kValueStateIndeterminate)) {
     free(block);
     ConstexprPCodeHeapFree(runtime, memory, allocation_size);
     return kPCodeVMStatusAllocationFailure;
@@ -3309,9 +3365,17 @@ static PCodeVMStatus ConstexprPCodeEscapeRealloc(
   memset(new_memory, 0, allocation_size);
   size_t copy_size = block->size < object_size ? block->size : object_size;
   memcpy(new_memory, memory, copy_size);
-  if (!PCodeVMRegisterMemoryRegion(vm, new_memory, object_size, true)) {
+  if (!PCodeVMRegisterStatefulMemoryRegion(
+          vm, new_memory, object_size, true, kValueStateIndeterminate)) {
     ConstexprPCodeHeapFree(runtime, new_memory, allocation_size);
     return kPCodeVMStatusAllocationFailure;
+  }
+  if (!PCodeVMCopyMemoryState(
+          vm, (uint64_t)(uintptr_t)new_memory,
+          (uint64_t)(uintptr_t)memory, copy_size)) {
+    PCodeVMUnregisterMemoryRegion(vm, new_memory);
+    ConstexprPCodeHeapFree(runtime, new_memory, allocation_size);
+    return kPCodeVMStatusInvalidWrite;
   }
   PCodeVMUnregisterMemoryRegion(vm, memory);
   ConstexprPCodeHeapFree(runtime, memory, block->allocation_size);
@@ -3516,6 +3580,9 @@ static PCodeVMStatus ConstexprPCodeEscapeMemcpy(
   void* dest = (void*)(uintptr_t)dest_address;
   void* src = (void*)(uintptr_t)src_address;
   memcpy(dest, src, size);
+  if (!PCodeVMCopyMemoryState(vm, dest_address, src_address, size)) {
+    return kPCodeVMStatusInvalidWrite;
+  }
   if (!ConstexprPCodeCopyLifetimeEvents(
           runtime, src_address, dest_address, size)) {
     return kPCodeVMStatusAllocationFailure;

@@ -1185,6 +1185,23 @@ bool SymbolHasWeakBinding(Symbol* symbol) {
   return symbol != NULL && symbol->flags.is_weak;
 }
 
+ValueState SymbolInitialValueState(Symbol* symbol) {
+  if (symbol == NULL) {
+    return kValueStateValid;
+  }
+  if (SymbolHasAttribute(symbol, "indeterminate")) {
+    return kValueStateIndeterminate;
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      symbol->flags.is_block_scope && !symbol->flags.is_argument &&
+      (symbol->storage == STO(implicit) ||
+       StorageIs(symbol->storage, STO(auto)) ||
+       StorageIs(symbol->storage, STO(register)))) {
+    return kValueStateErroneous;
+  }
+  return kValueStateIndeterminate;
+}
+
 static const char* storages[] = {
   "",
   "auto ",

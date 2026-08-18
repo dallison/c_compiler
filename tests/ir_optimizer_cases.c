@@ -12,6 +12,7 @@ static int induction_output[6];
 static int alias_read = 7;
 static int alias_write;
 static int sccp_global;
+static int checkpoint_value;
 
 __attribute__((noinline)) int update_loop_value(void) {
   return ++loop_update;
@@ -148,6 +149,12 @@ __attribute__((noinline)) int sccp_call_clobber(void) {
   return sccp_global;
 }
 
+__attribute__((noinline)) int checkpoint_order(int* pointer) {
+  checkpoint_value = 31;
+  __builtin_observable_checkpoint();
+  return checkpoint_value + *pointer;
+}
+
 __attribute__((noinline)) int alias_distinct_globals(int count) {
   int result = 0;
   alias_write = 0;
@@ -171,6 +178,7 @@ __attribute__((noinline)) int alias_may_alias(int count, int* left,
 
 int main(void) {
   int result = 0;
+  int checkpoint_input = 31;
   if (signed_arithmetic(-17) != 0) {
     result |= 1;
   }
@@ -205,6 +213,9 @@ int main(void) {
   }
   if (induction_reverse_sum(4) != 7532 || induction_reverse_sum(0) != 0) {
     result |= 16;
+  }
+  if (checkpoint_order(&checkpoint_input) != 62) {
+    result |= 8;
   }
   return result;
 }

@@ -187,6 +187,9 @@ typedef enum {
   
   IR_OP(literalref),  // Load literal op0
   IR_OP(loc),         // Source location
+  // C++26 observable checkpoint.  This has semantic side effects for code
+  // motion but lowers to no machine instruction and is not a memory clobber.
+  IR_OP(observable_checkpoint),
 
   IR_OP(pusharg),     // Push function arg (optional)
   
@@ -283,6 +286,8 @@ typedef struct IRNode {
   Vector outputs;
   struct BasicBlock* block;
   TypeRecord* type;
+  // C++26 byte/value state carried independently from the physical bits.
+  ValueState value_state;
   int flags;    // Bottom 16 bits for IR, top 16 for target.
   struct {
     void* ptr;
@@ -314,6 +319,7 @@ typedef struct IRNode {
 #define kIRDeferredArgRebuildAddress (1 << 12)  // Rebuild spill address late.
 #define kIRAsmMemoryClobber (1 << 13)  // Inline asm may read or write any memory.
 #define kIRBitWidth64 (1 << 14)  // Bit intrinsic operates on 64-bit values.
+#define kIRInvalidValueDefinition (1 << 15)  // Physical store preserves invalid state.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);
@@ -410,5 +416,7 @@ bool IRIsIncDec(IRNode* node);
 
 bool IRIsResult(IRNode* node);
 bool IRHasSideEffects(IRNode* node);
+bool IRIsObservableCheckpoint(IRNode* node);
+bool IRCheckpointBetween(IRNode* earlier, IRNode* later);
 
 #endif /* ir_h */

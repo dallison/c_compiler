@@ -116,7 +116,8 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     ARMOpcode opcode = (ARMOpcode)inst->opcode;
-    if (ARMIsExpression(inst) && !ARMSetsConditionFlags(inst) &&
+    if (!inst->observable_checkpoint &&
+        ARMIsExpression(inst) && !ARMSetsConditionFlags(inst) &&
         !ARMIsSymbol(inst) && !ARMIsConst(inst) && opcode != ARM_OP(tmp) &&
         opcode != ARM_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)

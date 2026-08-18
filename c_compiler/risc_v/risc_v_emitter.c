@@ -1098,6 +1098,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
   if (!IsPrintable(inst)) {
     return;
   }
+  if (inst->observable_checkpoint) {
+    return;
+  }
   
   const bool show_id = 1;
 

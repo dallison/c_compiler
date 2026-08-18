@@ -17,6 +17,25 @@ typedef struct {
   bool calls;
 } LoopMemoryEffects;
 
+static bool LoopContainsObservableCheckpoint(Generator* gen,
+                                             const LoopInfo* loop) {
+  BitSetIterator it;
+  BitSetIteratorStart(&it, (BitSet*)&loop->blocks);
+  while (!BitSetIteratorDone(&it)) {
+    BasicBlock* block =
+        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      if (IRIsObservableCheckpoint(inst)) {
+        return true;
+      }
+    }
+    BitSetIteratorNext(&it);
+  }
+  return false;
+}
+
 static LoopMemoryEffects GetLoopMemoryEffects(Generator* gen,
                                               const LoopInfo* loop) {
   LoopMemoryEffects effects = {false, false};
@@ -116,7 +135,8 @@ static void HoistToPreheader(Generator* gen, const LoopInfo* loop,
 
 static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
   if (loop->parent != NULL || loop->children.length != 0 ||
-      loop->preheader == NULL || BasicBlockIsEmpty(loop->preheader)) {
+      loop->preheader == NULL || BasicBlockIsEmpty(loop->preheader) ||
+      LoopContainsObservableCheckpoint(gen, loop)) {
     return false;
   }
   LoopMemoryEffects effects = GetLoopMemoryEffects(gen, loop);

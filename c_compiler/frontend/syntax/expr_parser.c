@@ -45,6 +45,8 @@ static struct Intrinsic {
     {"__builtin_LINE", AST_OP(builtin_source_line), 0},
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
+    {"__builtin_observable_checkpoint",
+     AST_OP(builtin_observable_checkpoint), 0},
     {"__builtin_prefetch", AST_OP(builtin_prefetch), 3},
     {"__builtin_start_lifetime", AST_OP(builtin_start_lifetime), 1},
     {"__builtin_trap", AST_OP(builtin_trap), 0},
@@ -4417,6 +4419,10 @@ static int64_t CXXAttributeProbeValue(const char* attribute_namespace,
   }
   if (strcmp(name, "nodiscard") == 0) {
     return 201907L;
+  }
+  if (strcmp(name, "indeterminate") == 0 &&
+      CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    return 202403L;
   }
   return 0;
 }

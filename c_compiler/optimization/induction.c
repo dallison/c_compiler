@@ -23,6 +23,25 @@ typedef struct {
   BasicBlock* block;
 } DerivedAddress;
 
+static bool LoopContainsObservableCheckpoint(Generator* gen,
+                                             const LoopInfo* loop) {
+  BitSetIterator it;
+  BitSetIteratorStart(&it, (BitSet*)&loop->blocks);
+  while (!BitSetIteratorDone(&it)) {
+    BasicBlock* block =
+        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      if (IRIsObservableCheckpoint(inst)) {
+        return true;
+      }
+    }
+    BitSetIteratorNext(&it);
+  }
+  return false;
+}
+
 static Symbol* VariableSymbol(IRNode* node) {
   switch (node->opcode) {
     case IR_OP(localvar):
@@ -416,6 +435,9 @@ static void StrengthReduceDerivedAddress(
 void DerivedInductionVariableOptimization(Generator* gen) {
   for (size_t i = 0; i < gen->loops.length; i++) {
     LoopInfo* loop = gen->loops.value.p[i];
+    if (LoopContainsObservableCheckpoint(gen, loop)) {
+      continue;
+    }
     CanonicalInductionVariable iv;
     DerivedAddress derived;
     if (FindCanonicalInductionVariable(gen, loop, &iv) &&

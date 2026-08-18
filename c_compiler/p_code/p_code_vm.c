@@ -176,6 +176,25 @@ static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
     }
     vm->status = kPCodeVMStatusRunning;
   }
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+    if (region->states == NULL ||
+        !RegionContains(region, normalized, size, write)) {
+      continue;
+    }
+    size_t offset = (size_t)(normalized - region->start);
+    if (write) {
+      memset(region->states + offset, kValueStateValid, size);
+      break;
+    }
+    for (size_t byte = 0; byte < size; byte++) {
+      if (region->states[offset + byte] != kValueStateValid) {
+        vm->status = kPCodeVMStatusInvalidRead;
+        return NULL;
+      }
+    }
+    break;
+  }
   return (void*)(uintptr_t)normalized;
 }
 
@@ -310,6 +329,9 @@ void PCodeVMDestruct(PCodeVM* vm) {
   if (vm->owns_stack) {
     free(vm->stack);
   }
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    free(vm->memory_regions[i].states);
+  }
   free(vm->memory_regions);
   vm->stack = NULL;
   vm->stack_size = 0;
@@ -349,9 +371,10 @@ bool PCodeVMEnableCheckedMemory(PCodeVM* vm) {
   return true;
 }
 
-bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
-                                 bool writable) {
+static bool RegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                 bool writable, unsigned char* states) {
   if (memory == NULL || size == 0) {
+    free(states);
     return true;
   }
   if (vm->memory_region_count == vm->memory_region_capacity) {
@@ -360,6 +383,7 @@ bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
     PCodeVMMemoryRegion* new_regions =
         realloc(vm->memory_regions, new_capacity * sizeof(*new_regions));
     if (new_regions == NULL) {
+      free(states);
       return false;
     }
     vm->memory_regions = new_regions;
@@ -369,7 +393,60 @@ bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
       .start = (uint64_t)(uintptr_t)memory,
       .size = size,
       .writable = writable,
+      .states = states,
   };
+  return true;
+}
+
+bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                 bool writable) {
+  return RegisterMemoryRegion(vm, memory, size, writable, NULL);
+}
+
+bool PCodeVMRegisterStatefulMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                         bool writable,
+                                         ValueState initial_state) {
+  unsigned char* states = size == 0 ? NULL : malloc(size);
+  if (size != 0 && states == NULL) {
+    return false;
+  }
+  if (states != NULL) {
+    memset(states, initial_state, size);
+  }
+  return RegisterMemoryRegion(vm, memory, size, writable, states);
+}
+
+bool PCodeVMCopyMemoryState(PCodeVM* vm, uint64_t destination,
+                            uint64_t source, size_t size) {
+  PCodeVMMemoryRegion* destination_region = NULL;
+  PCodeVMMemoryRegion* source_region = NULL;
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+    if (destination_region == NULL &&
+        RegionContains(region, destination, size, true)) {
+      destination_region = region;
+    }
+    if (source_region == NULL &&
+        RegionContains(region, source, size, false)) {
+      source_region = region;
+    }
+  }
+  if (destination_region == NULL || source_region == NULL) {
+    return false;
+  }
+  if (destination_region->states == NULL) {
+    return true;
+  }
+  size_t destination_offset =
+      (size_t)(destination - destination_region->start);
+  if (source_region->states == NULL) {
+    memset(destination_region->states + destination_offset,
+           kValueStateValid, size);
+    return true;
+  }
+  size_t source_offset = (size_t)(source - source_region->start);
+  memmove(destination_region->states + destination_offset,
+          source_region->states + source_offset, size);
   return true;
 }
 
@@ -377,6 +454,7 @@ bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory) {
   uint64_t start = (uint64_t)(uintptr_t)memory;
   for (size_t i = 0; i < vm->memory_region_count; i++) {
     if (vm->memory_regions[i].start == start) {
+      free(vm->memory_regions[i].states);
       vm->memory_regions[i] = vm->memory_regions[vm->memory_region_count - 1];
       vm->memory_region_count--;
       return true;
