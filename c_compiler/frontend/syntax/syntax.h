@@ -240,6 +240,7 @@ ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
 ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax);
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
 bool SyntaxAttributeIsSupported(const char* name);
+bool SyntaxAttributeIsReflectable(const Attribute* attr);
 bool SyntaxLookingAtCXXAttribute(Syntax* syntax);
 bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs);
 bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs);

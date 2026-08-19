@@ -175,17 +175,95 @@ void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union) {
    }
 }
 
+static bool TypeIsEmptyClassForNoUniqueAddress(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_union) {
+    return false;
+  }
+  Struct* nested = type->info.struct_info;
+  if (nested->bases.length > 0 || nested->virtual_bases.length > 0 ||
+      nested->virtual_members.length > 0) {
+    return false;
+  }
+  for (size_t i = 0; i < nested->members.length; i++) {
+    StructMember* member = nested->members.value.p[i];
+    if (member != NULL && !member->is_static && !member->is_member_function &&
+        !member->is_using_declaration && !StructMemberIsNestedType(member)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool TryPlaceNoUniqueAddressMember(Struct* str,
+                                          StructMember* member) {
+  if (str == NULL || member == NULL || member->symbol == NULL ||
+      str->is_union ||
+      !AttributeListHas(&member->symbol->attributes, "no_unique_address") ||
+      !TypeIsEmptyClassForNoUniqueAddress(member->symbol->type)) {
+    return false;
+  }
+  int alignment = TypeRecordAlignment(member->symbol->type);
+  if (alignment <= 0) {
+    alignment = 1;
+  }
+  int occupied_size = str->size > 0 ? str->size : 1;
+  for (int candidate = 0; candidate < occupied_size;
+       candidate += alignment) {
+    bool same_type_at_offset = false;
+    for (size_t i = 0; i < str->members.length; i++) {
+      StructMember* existing = str->members.value.p[i];
+      if (existing == member) {
+        break;
+      }
+      if (existing != NULL && existing->symbol != NULL &&
+          existing->byte_offset == candidate &&
+          TypeEqual(existing->symbol->type, member->symbol->type)) {
+        same_type_at_offset = true;
+        break;
+      }
+    }
+    if (!same_type_at_offset) {
+      member->byte_offset = candidate;
+      return true;
+    }
+  }
+
+  // Distinct potentially-overlapping subobjects of the same type still need
+  // distinct addresses. If every existing byte is occupied by that type,
+  // append this subobject normally.
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* existing = str->members.value.p[i];
+    if (existing == member) {
+      break;
+    }
+    if (existing != NULL && existing->symbol != NULL &&
+        TypeEqual(existing->symbol->type, member->symbol->type)) {
+      int after_existing =
+          existing->byte_offset + existing->symbol->type->size;
+      if (after_existing > str->next_offset) {
+        str->next_offset = after_existing;
+      }
+    }
+  }
+  AlignNextOffsetForSymbol(str, member->symbol);
+  member->byte_offset = str->next_offset;
+  return false;
+}
+
 void StructAddSyntheticMember(Struct* str, StructMember* member) {
+  bool overlaps = false;
   if (member->is_member_function) {
     SymbolSetCXXMangledAsmName(member->symbol);
   } else if (!member->is_static) {
     AlignNextOffset(str, member->symbol->type);
     member->byte_offset = str->next_offset;
+    overlaps = TryPlaceNoUniqueAddressMember(str, member);
   }
   member->index = str->members.length;
   VectorAppend(&str->members, member);
   StructInsertMemberIntoTables(str, member);
-  if (!member->is_static && !member->is_member_function) {
+  if (!member->is_static && !member->is_member_function && !overlaps) {
     UpdateStructSize(str, member->symbol->type, str->is_union);
   }
 }
@@ -231,7 +309,9 @@ bool RelayoutStruct(Struct* str) {
       AlignNextOffsetForSymbol(str, m->symbol);
       m->byte_offset = str->next_offset;
       m->index = i;
-      UpdateStructSize(str, type, is_union);
+      if (!TryPlaceNoUniqueAddressMember(str, m)) {
+        UpdateStructSize(str, type, is_union);
+      }
     }
   }
   str->non_virtual_size = str->size;

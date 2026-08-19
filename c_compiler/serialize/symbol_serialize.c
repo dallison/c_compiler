@@ -176,6 +176,8 @@ enum {
   kAttr_dependent_alignas_type = 3,
   kAttr_dependent_alignas_expr = 4,
   kAttr_annotation_expr = 5,
+  kAttr_namespace = 7,
+  kAttr_token = 8,
 };
 
 //
@@ -229,6 +231,8 @@ void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
               kSerialKindAST, a->dependent_alignas_expr);
     SWriteRef(ctx, &elem, kAttr_annotation_expr,
               kSerialKindAST, a->annotation_expr);
+    SWriteStringVal(ctx, &elem, kAttr_namespace, &a->attribute_namespace);
+    SWriteStringVal(ctx, &elem, kAttr_token, &a->token);
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -284,10 +288,21 @@ void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
           a->annotation_expr =
               (ASTNode*)SReadRef(ctx, &er, kSerialKindAST);
           break;
+        case kAttr_namespace:
+          SReadStringVal(ctx, &er, &a->attribute_namespace);
+          break;
+        case kAttr_token:
+          SReadStringVal(ctx, &er, &a->token);
+          break;
         default:
           WireSkip(&er, wt);
           break;
       }
+    }
+    // Modules written before P3385 only contain the normalized semantic name.
+    // Use it as the best available source token for compatibility.
+    if (a->token.length == 0 && a->name.length > 0) {
+      StringSetString(&a->token, &a->name);
     }
     VectorAppend(out, a);
   }

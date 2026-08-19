@@ -116,6 +116,10 @@
 #ifndef __davecc_p4033_define_enum
 #define __davecc_p4033_define_enum 202603L
 #endif
+// Vendor probe for DaveCC's experimental P3385R8 attribute reflection.
+#ifndef __davecc_p3385_attribute_reflection
+#define __davecc_p3385_attribute_reflection 202606L
+#endif
 #endif
 
 #endif /* version_h */

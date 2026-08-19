@@ -130,6 +130,8 @@ enum {
   kTArg_reflection_ens_has_name = 49,
   kTArg_reflection_ens_attributes = 50,
   kTArg_reflection_ens_annotations = 51,
+  kTArg_reflection_dms_attributes = 52,
+  kTArg_reflection_attribute = 53,
 };
 
 enum {
@@ -2676,8 +2678,7 @@ static void WriteReflectionValueInline(SerializeContext* ctx, WireBuffer* out,
     SWriteRef(ctx, out, kTArg_reflection_dms_member_type, kSerialKindType,
               spec->member_type);
     if (spec->name.value != NULL) {
-      WireWriteString(out, kTArg_reflection_dms_name, spec->name.value,
-                      spec->name.length);
+      SWriteStringVal(ctx, out, kTArg_reflection_dms_name, &spec->name);
     }
     WireWriteUint64(out, kTArg_reflection_dms_alignment,
                     (uint64_t)spec->alignment);
@@ -2698,6 +2699,10 @@ static void WriteReflectionValueInline(SerializeContext* ctx, WireBuffer* out,
     WireWriteBool(out, kTArg_reflection_ens_has_value, spec->has_value);
     WireWriteBool(out, kTArg_reflection_ens_has_name, spec->has_name);
   }
+  SerialWriteReflectionExtendedPayload(
+      ctx, out, kTArg_reflection_sequence,
+      kTArg_reflection_substituted_arguments, kTArg_reflection_dms_annotations,
+      kTArg_reflection_token_sequence, reflection);
 }
 
 static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
@@ -2928,6 +2933,11 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
                                       &value->substituted_arguments);
   }
   if (value->data_member_spec != NULL &&
+      value->data_member_spec->attributes.length > 0) {
+    WriteReflectionValueVector(ctx, buf, kTArg_reflection_dms_attributes,
+                               &value->data_member_spec->attributes);
+  }
+  if (value->data_member_spec != NULL &&
       value->data_member_spec->annotations.length > 0) {
     WriteReflectionValueVector(ctx, buf, field_dms_annotations,
                                &value->data_member_spec->annotations);
@@ -2945,6 +2955,14 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
   if (value->token_sequence.length > 0) {
     WriteTokenSequenceTokenVector(ctx, buf, field_token_sequence,
                                   &value->token_sequence);
+  }
+  if (value->attribute != NULL) {
+    Vector attribute;
+    VectorInit(&attribute);
+    VectorAppend(&attribute, value->attribute);
+    SerialWriteAttributeVector(ctx, buf, kTArg_reflection_attribute,
+                               &attribute);
+    VectorDestruct(&attribute);
   }
 }
 
@@ -2974,6 +2992,13 @@ bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
     ReadReflectionValueVector(ctx, in, &value->data_member_spec->annotations);
     return true;
   }
+  if (field == kTArg_reflection_dms_attributes) {
+    if (value->data_member_spec == NULL) {
+      value->data_member_spec = ReflectionDataMemberSpecNew(NULL);
+    }
+    ReadReflectionValueVector(ctx, in, &value->data_member_spec->attributes);
+    return true;
+  }
   if (field == kTArg_reflection_ens_attributes) {
     if (value->enumerator_spec == NULL) {
       value->enumerator_spec = ReflectionEnumeratorSpecNew();
@@ -2990,6 +3015,20 @@ bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
   }
   if (field == kTArg_reflection_token_sequence) {
     ReadTokenSequenceTokenVector(ctx, in, &value->token_sequence);
+    return true;
+  }
+  if (field == kTArg_reflection_attribute) {
+    Vector attributes;
+    VectorInit(&attributes);
+    SerialReadAttributeVector(ctx, in, &attributes);
+    if (attributes.length > 0) {
+      AttributeDelete(value->attribute);
+      value->attribute = attributes.value.p[0];
+      for (size_t i = 1; i < attributes.length; i++) {
+        AttributeDelete(attributes.value.p[i]);
+      }
+    }
+    VectorDestruct(&attributes);
     return true;
   }
   return false;

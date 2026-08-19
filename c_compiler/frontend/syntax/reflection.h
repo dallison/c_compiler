@@ -42,6 +42,7 @@ typedef enum {
   kReflectionDataMemberDescription,
   kReflectionEnumeratorDescription,
   kReflectionTokenSequence,
+  kReflectionAttribute,
 } ReflectionEntityKind;
 
 typedef enum {
@@ -73,6 +74,7 @@ typedef struct ReflectionDataMemberSpec {
   bool has_name;
   bool has_alignment;
   bool has_bit_width;
+  Vector attributes;
   Vector annotations;
 } ReflectionDataMemberSpec;
 
@@ -96,6 +98,7 @@ typedef struct ReflectionValue {
   SourceLocation location;
   size_t parameter_index;
   struct Attribute* annotation;
+  struct Attribute* attribute;
   int64_t scalar_ivalue;
   double scalar_fvalue;
   bool scalar_is_float;
@@ -150,6 +153,8 @@ ReflectionValue* ReflectionCreateScalar(TypeRecord* type, int64_t ivalue,
                                         SourceLocation location);
 ReflectionValue* ReflectionCreateAnnotation(struct Attribute* annotation,
                                             SourceLocation location);
+ReflectionValue* ReflectionCreateAttribute(const struct Attribute* attribute,
+                                           SourceLocation location);
 ReflectionValue* ReflectionCreateNamespaceAlias(Namespace* alias_target,
                                                 SourceLocation location);
 ReflectionValue* ReflectionCreateDataMemberSpec(

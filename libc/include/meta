@@ -46,6 +46,9 @@ using info = decltype(^^::);
 #ifndef __davecc_p3294_token_injection
 #define __davecc_p3294_token_injection 202406L
 #endif
+#ifndef __davecc_p3385_attribute_reflection
+#define __davecc_p3385_attribute_reflection 202606L
+#endif
 [[davecc::meta_intrinsic]] consteval void queue_injection(info tokens);
 [[davecc::meta_intrinsic]] consteval void namespace_inject(info namespace_,
                                                            info tokens);
@@ -240,6 +243,25 @@ namespace meta {
 [[davecc::meta_intrinsic]] consteval u8string_view u8display_string_of(info r);
 [[davecc::meta_intrinsic]] consteval source_location source_location_of(info r);
 
+#if __cplusplus >= 202700L
+enum class attribute_comparison {
+  ignore_namespace = 1,
+  ignore_argument = 2,
+};
+
+constexpr attribute_comparison operator|(attribute_comparison left,
+                                         attribute_comparison right) {
+  return static_cast<attribute_comparison>(
+      static_cast<int>(left) | static_cast<int>(right));
+}
+
+[[davecc::meta_intrinsic]] consteval bool is_attribute(info r);
+[[davecc::meta_intrinsic]] consteval vector<info, void> attributes_of(info r);
+[[davecc::meta_intrinsic]] consteval bool has_attribute(info r, info attribute);
+[[davecc::meta_intrinsic]] consteval bool has_attribute(
+    info r, info attribute, attribute_comparison flags);
+#endif
+
 [[davecc::meta_intrinsic]] consteval info type_of(info r);
 [[davecc::meta_intrinsic]] consteval info object_of(info r);
 [[davecc::meta_intrinsic]] consteval info constant_of(info r);
@@ -400,7 +422,8 @@ struct data_member_options {
   name_type name;
   optional<size_t> alignment;
   optional<size_t> bit_width;
-  bool no_unique_address = false;
+  [[deprecated("use attributes")]] bool no_unique_address = false;
+  vector<info, void> attributes;
   vector<info, void> annotations;
 };
 

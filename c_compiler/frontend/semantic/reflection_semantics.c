@@ -1107,6 +1107,7 @@ typedef enum {
   kMetaAlignmentOf,
   kMetaAnnotationsOf,
   kMetaAnnotationsOfWithType,
+  kMetaAttributesOf,
   kMetaBasesOf,
   kMetaBitSizeOf,
   kMetaConstantOf,
@@ -1117,6 +1118,7 @@ typedef enum {
   kMetaDisplayStringOf,
   kMetaEnumeratorsOf,
   kMetaHasAutomaticStorageDuration,
+  kMetaHasAttribute,
   kMetaHasCLanguageLinkage,
   kMetaHasDefaultArgument,
   kMetaHasDefaultMemberInitializer,
@@ -1136,6 +1138,7 @@ typedef enum {
   kMetaIsAccessible,
   kMetaIsAliasTemplate,
   kMetaIsAnnotation,
+  kMetaIsAttribute,
   kMetaIsAssignment,
   kMetaIsBase,
   kMetaIsBitField,
@@ -1232,6 +1235,7 @@ static const MetaOperationEntry kMetaOperations[] = {
     {"alignment_of", kMetaAlignmentOf},
     {"annotations_of", kMetaAnnotationsOf},
     {"annotations_of_with_type", kMetaAnnotationsOfWithType},
+    {"attributes_of", kMetaAttributesOf},
     {"bases_of", kMetaBasesOf},
     {"bit_size_of", kMetaBitSizeOf},
     {"constant_of", kMetaConstantOf},
@@ -1242,6 +1246,7 @@ static const MetaOperationEntry kMetaOperations[] = {
     {"dealias", kMetaDealias},
     {"display_string_of", kMetaDisplayStringOf},
     {"enumerators_of", kMetaEnumeratorsOf},
+    {"has_attribute", kMetaHasAttribute},
     {"has_automatic_storage_duration", kMetaHasAutomaticStorageDuration},
     {"has_c_language_linkage", kMetaHasCLanguageLinkage},
     {"has_default_argument", kMetaHasDefaultArgument},
@@ -1264,6 +1269,7 @@ static const MetaOperationEntry kMetaOperations[] = {
     {"is_alias_template", kMetaIsAliasTemplate},
     {"is_annotation", kMetaIsAnnotation},
     {"is_assignment", kMetaIsAssignment},
+    {"is_attribute", kMetaIsAttribute},
     {"is_base", kMetaIsBase},
     {"is_bit_field", kMetaIsBitField},
     {"is_class_member", kMetaIsClassMember},
@@ -1707,6 +1713,27 @@ static void MetaFormatDisplayString(const ReflectionValue* value, String* out) {
   StringDestruct(out);
   StringInit(out, NULL);
   if (value == NULL) {
+    return;
+  }
+  if (value->kind == kReflectionAttribute && value->attribute != NULL) {
+    StringAppend(out, "[[");
+    if (value->attribute->attribute_namespace.length > 0) {
+      StringAppendString(out, &value->attribute->attribute_namespace);
+      StringAppend(out, "::");
+    }
+    const char* token = AttributeIdentifier(value->attribute);
+    StringAppend(out, token != NULL ? token : "");
+    if (value->attribute->args.length > 0) {
+      StringAppendChar(out, '(');
+      for (size_t i = 0; i < value->attribute->args.length; i++) {
+        if (i > 0) {
+          StringAppend(out, ", ");
+        }
+        StringAppendString(out, value->attribute->args.value.p[i]);
+      }
+      StringAppendChar(out, ')');
+    }
+    StringAppend(out, "]]");
     return;
   }
   TypeRecord* type = MetaEntityType(value);
@@ -2435,6 +2462,43 @@ static Vector* MetaCollectSubobjects(TypeRecord* type, SourceLocation location,
   return values;
 }
 
+static Symbol* MetaAttributeOwner(const ReflectionValue* value) {
+  if (value == NULL) {
+    return NULL;
+  }
+  if (value->symbol != NULL) {
+    return value->symbol;
+  }
+  if (value->member != NULL) {
+    return value->member->symbol;
+  }
+  TypeRecord* type = value->reflected_type;
+  if (type != NULL && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL) {
+    return type->info.struct_info->tag_symbol;
+  }
+  if (type != NULL && TypeIsEnum(type) && type->info.enum_info != NULL) {
+    return type->info.enum_info->tag_symbol;
+  }
+  return NULL;
+}
+
+static Vector* MetaCollectAttributes(ReflectionValue* value,
+                                     SourceLocation location) {
+  Vector* values = NewVector();
+  Symbol* symbol = MetaAttributeOwner(value);
+  if (symbol == NULL) {
+    return values;
+  }
+  for (size_t i = 0; i < symbol->attributes.length; i++) {
+    Attribute* attribute = symbol->attributes.value.p[i];
+    if (SyntaxAttributeIsReflectable(attribute)) {
+      VectorAppend(values, ReflectionCreateAttribute(attribute, location));
+    }
+  }
+  return values;
+}
+
 static Vector* MetaCollectRange(MetaOperation operation, ReflectionValue* value,
                                 SourceLocation location,
                                 const MetaAccessContext* ctx,
@@ -2465,6 +2529,10 @@ static Vector* MetaCollectRange(MetaOperation operation, ReflectionValue* value,
   if (operation == kMetaAnnotationsOf) {
     VectorDelete(values);
     return MetaCollectAnnotations(value, NULL, location);
+  }
+  if (operation == kMetaAttributesOf) {
+    VectorDelete(values);
+    return MetaCollectAttributes(value, location);
   }
   if (type == NULL) {
     return values;
@@ -2657,6 +2725,9 @@ static bool MetaEvaluatePredicate(MetaOperation operation,
       return true;
     case kMetaIsAnnotation:
       *result = value != NULL && value->kind == kReflectionAnnotation;
+      return true;
+    case kMetaIsAttribute:
+      *result = value != NULL && value->kind == kReflectionAttribute;
       return true;
     case kMetaIsStructuredBinding:
       *result = value != NULL && value->kind == kReflectionStructuredBinding;
@@ -2920,7 +2991,8 @@ static bool MetaOperationIsRangeQuery(MetaOperation operation) {
          operation == kMetaParametersOf ||
          operation == kMetaTemplateArgumentsOf ||
          operation == kMetaAnnotationsOf ||
-         operation == kMetaAnnotationsOfWithType;
+         operation == kMetaAnnotationsOfWithType ||
+         operation == kMetaAttributesOf;
 }
 
 static bool MetaRangeOperandIsValid(MetaOperation operation,
@@ -2951,6 +3023,7 @@ static bool MetaRangeOperandIsValid(MetaOperation operation,
     }
     case kMetaAnnotationsOf:
     case kMetaAnnotationsOfWithType:
+    case kMetaAttributesOf:
       return true;
     default:
       return false;
@@ -3056,6 +3129,48 @@ ASTNode* SemanticTryAnalyzeMetaCall(VectorASTNode* call) {
   bool predicate = false;
   if (MetaEvaluatePredicate(operation, value, &predicate)) {
     return NewMetaBool(predicate, call->base.location);
+  }
+
+  if (operation == kMetaHasAttribute) {
+    if (call->children->length < 2) {
+      return NULL;
+    }
+    ReflectionValue* attribute =
+        MetaEvaluateReflectionArg(call->children->value.p[1]);
+    if (attribute == NULL) {
+      ASTNodeSetType((ASTNode*)call, function->type->next);
+      call->base.flags |= kASTAnalyzed | kASTDependentFunctorCall;
+      return (ASTNode*)call;
+    }
+    if (attribute->kind != kReflectionAttribute ||
+        attribute->attribute == NULL) {
+      return MetaThrowException(
+          call, function,
+          "has_attribute requires an attribute reflection");
+    }
+    int64_t flags = 0;
+    if (call->children->length > 2 &&
+        !EvaluateIntegerExpression(call->children->value.p[2], &flags)) {
+      ASTNodeSetType((ASTNode*)call, function->type->next);
+      call->base.flags |= kASTAnalyzed | kASTDependentFunctorCall;
+      return (ASTNode*)call;
+    }
+    if ((flags & ~3LL) != 0) {
+      return MetaThrowException(call, function,
+                                "invalid attribute comparison flags");
+    }
+    bool found = false;
+    Symbol* owner = MetaAttributeOwner(value);
+    for (size_t i = 0; owner != NULL && i < owner->attributes.length; i++) {
+      Attribute* candidate = owner->attributes.value.p[i];
+      if (SyntaxAttributeIsReflectable(candidate) &&
+          AttributeIdentityEqual(candidate, attribute->attribute,
+                                 (flags & 1) != 0, (flags & 2) != 0)) {
+        found = true;
+        break;
+      }
+    }
+    return NewMetaBool(found, call->base.location);
   }
 
   if (operation == kMetaIsAccessible) {

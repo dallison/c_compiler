@@ -398,10 +398,43 @@ static bool MetaSynthesisParseOptionalBool(ASTNode* node, bool* out_value) {
   return false;
 }
 
+static bool MetaSynthesisParseAttributes(ASTNode* initializer, Vector* out,
+                                         ASTNode* diagnostic,
+                                         const char* operation) {
+  while (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer == NULL || initializer->op != AST_OP(braced_init)) {
+    return true;
+  }
+  BracedInitializerASTNode* items = (BracedInitializerASTNode*)initializer;
+  for (size_t i = 0; i < items->initializers->length; i++) {
+    ReflectionValue* attribute =
+        MetaSynthesisEvaluateReflection(items->initializers->value.p[i]);
+    if (attribute == NULL || attribute->kind != kReflectionAttribute ||
+        attribute->attribute == NULL) {
+      if (diagnostic != NULL) {
+        SemanticError(diagnostic, "%s: attributes must be attribute reflections",
+                      operation);
+      }
+      return false;
+    }
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+      if (diagnostic != NULL) {
+        SemanticError(diagnostic, "%s: attributes require C++29", operation);
+      }
+      return false;
+    }
+    VectorAppend(out, attribute);
+  }
+  return true;
+}
+
 static bool MetaSynthesisParseDataMemberOptions(ASTNode* options,
                                                 TypeRecord* default_member_type,
                                                 ReflectionDataMemberSpec** out_spec,
-                                                SourceLocation location) {
+                                                SourceLocation location,
+                                                ASTNode* diagnostic) {
   if (options == NULL || out_spec == NULL) {
     return false;
   }
@@ -503,6 +536,12 @@ static bool MetaSynthesisParseDataMemberOptions(ASTNode* options,
       } else if (strcmp(field, "no_unique_address") == 0) {
         MetaSynthesisParseOptionalBool(designated->init,
                                        &spec->no_unique_address);
+      } else if (strcmp(field, "attributes") == 0) {
+        if (!MetaSynthesisParseAttributes(designated->init, &spec->attributes,
+                                          diagnostic, "data_member_spec")) {
+          ReflectionDataMemberSpecDelete(spec);
+          return false;
+        }
       } else if (strcmp(field, "annotations") == 0) {
         Vector values;
         VectorInit(&values);
@@ -631,20 +670,10 @@ static bool MetaSynthesisParseEnumeratorOptions(ASTNode* options,
         spec->value = value->scalar_ivalue;
         spec->has_value = true;
       } else if (strcmp(field, "attributes") == 0) {
-        ASTNode* attributes = designated->init;
-        while (attributes != NULL && attributes->op == AST_OP(expr_init)) {
-          attributes = ((ExpressionInitializerASTNode*)attributes)->expr;
-        }
-        if (attributes != NULL && attributes->op == AST_OP(braced_init)) {
-          BracedInitializerASTNode* items =
-              (BracedInitializerASTNode*)attributes;
-          for (size_t j = 0; j < items->initializers->length; j++) {
-            ReflectionValue* attribute = MetaSynthesisEvaluateReflection(
-                items->initializers->value.p[j]);
-            if (attribute != NULL) {
-              VectorAppend(&spec->attributes, attribute);
-            }
-          }
+        if (!MetaSynthesisParseAttributes(designated->init, &spec->attributes,
+                                          diagnostic, "enumerator_spec")) {
+          ReflectionEnumeratorSpecDelete(spec);
+          return false;
         }
       } else if (strcmp(field, "annotations") == 0) {
         ASTNode* annotations = designated->init;
@@ -669,13 +698,6 @@ static bool MetaSynthesisParseEnumeratorOptions(ASTNode* options,
     if (diagnostic != NULL) {
       SemanticError(diagnostic, "enumerator_spec: name is required");
     }
-    ReflectionEnumeratorSpecDelete(spec);
-    return false;
-  }
-  if (spec->attributes.length > 0 && diagnostic != NULL) {
-    SemanticError(
-        diagnostic,
-        "enumerator_spec: attributes require P3385 attribute reflection support");
     ReflectionEnumeratorSpecDelete(spec);
     return false;
   }
@@ -842,12 +864,37 @@ static ReflectionValue* MetaSynthesisDefineEnum(ReflectionValue* target_enum,
       VectorDestruct(&seen_names);
       return NULL;
     }
+    for (size_t j = 0; j < spec->attributes.length; j++) {
+      ReflectionValue* attribute = spec->attributes.value.p[j];
+      if (attribute == NULL || attribute->kind != kReflectionAttribute ||
+          attribute->attribute == NULL) {
+        SemanticError(
+            diagnostic,
+            "define_enum: attributes must be attribute reflections");
+        MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                            old_next_value, old_forward_declared,
+                                            old_defined);
+        VectorDestruct(&seen_names);
+        return NULL;
+      }
+      VectorAppend(&constant->attributes,
+                   AttributeClone(attribute->attribute));
+    }
     for (size_t j = 0; j < spec->annotations.length; j++) {
       ReflectionValue* annotation = spec->annotations.value.p[j];
       if (annotation != NULL && annotation->annotation != NULL) {
         VectorAppend(&constant->attributes,
                      AttributeClone(annotation->annotation));
       }
+    }
+    int errors_before_attributes = NumErrors();
+    SyntaxApplyDeclarationAttributes(&compiler->syntax, constant);
+    if (NumErrors() != errors_before_attributes) {
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
     }
   }
 
@@ -911,6 +958,34 @@ static bool MetaSynthesisMemberMatchesSpec(StructMember* member,
       return false;
     }
   }
+  for (size_t i = 0; i < spec->attributes.length; i++) {
+    ReflectionValue* reflected = spec->attributes.value.p[i];
+    if (reflected == NULL || reflected->kind != kReflectionAttribute ||
+        reflected->attribute == NULL) {
+      return false;
+    }
+    size_t required_count = 0;
+    for (size_t j = 0; j <= i; j++) {
+      ReflectionValue* required = spec->attributes.value.p[j];
+      if (required != NULL && required->kind == kReflectionAttribute &&
+          required->attribute != NULL &&
+          AttributeIdentityEqual(required->attribute, reflected->attribute,
+                                 false, false)) {
+        required_count++;
+      }
+    }
+    size_t installed_count = 0;
+    for (size_t j = 0; j < member->symbol->attributes.length; j++) {
+      Attribute* installed = member->symbol->attributes.value.p[j];
+      if (AttributeIdentityEqual(installed, reflected->attribute, false,
+                                 false)) {
+        installed_count++;
+      }
+    }
+    if (installed_count < required_count) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -950,7 +1025,19 @@ static bool MetaSynthesisApplyDataMemberSpec(Struct* str,
   if (spec->has_alignment) {
     member_symbol->alignment = (int)spec->alignment;
   }
-  if (spec->no_unique_address) {
+  for (size_t i = 0; i < spec->attributes.length; i++) {
+    ReflectionValue* attribute = spec->attributes.value.p[i];
+    if (attribute == NULL || attribute->kind != kReflectionAttribute ||
+        attribute->attribute == NULL) {
+      SymbolDelete(member_symbol);
+      StringDestruct(&member_name);
+      return false;
+    }
+    VectorAppend(&member_symbol->attributes,
+                 AttributeClone(attribute->attribute));
+  }
+  if (spec->no_unique_address &&
+      !AttributeListHas(&member_symbol->attributes, "no_unique_address")) {
     VectorAppend(&member_symbol->attributes, NewAttribute("no_unique_address"));
   }
   for (size_t i = 0; i < spec->annotations.length; i++) {
@@ -960,6 +1047,13 @@ static bool MetaSynthesisApplyDataMemberSpec(Struct* str,
       VectorAppend(&member_symbol->attributes,
                    NewAttribute(annotation->annotation->name.value));
     }
+  }
+  int errors_before_attributes = NumErrors();
+  SyntaxApplyDeclarationAttributes(&compiler->syntax, member_symbol);
+  if (NumErrors() != errors_before_attributes) {
+    SymbolDelete(member_symbol);
+    StringDestruct(&member_name);
+    return false;
   }
   StructMember* member = NewStructMember(member_symbol);
   member->access = kAccessPublic;
@@ -1572,7 +1666,8 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
       ReflectionDataMemberSpec* spec = NULL;
       if (!MetaSynthesisParseDataMemberOptions(call->children->value.p[1],
                                                member_type, &spec,
-                                               call->base.location)) {
+                                               call->base.location,
+                                               (ASTNode*)call)) {
         TypeRecordDelete(member_type);
         SemanticError((ASTNode*)call, "invalid data_member_spec arguments");
         return NULL;

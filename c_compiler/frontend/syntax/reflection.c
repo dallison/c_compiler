@@ -201,6 +201,7 @@ static void ReflectionDataMemberSpecDestructContents(
   }
   TypeRecordDelete(spec->member_type);
   StringDestruct(&spec->name);
+  VectorDestruct(&spec->attributes);
   VectorDestruct(&spec->annotations);
 }
 
@@ -209,6 +210,7 @@ ReflectionDataMemberSpec* ReflectionDataMemberSpecNew(TypeRecord* member_type) {
   spec->member_type =
       member_type != NULL ? TypeRecordCopy(member_type) : NULL;
   StringInit(&spec->name, NULL);
+  VectorInit(&spec->attributes);
   VectorInit(&spec->annotations);
   return spec;
 }
@@ -228,6 +230,9 @@ ReflectionDataMemberSpec* ReflectionDataMemberSpecCopy(
   copy->has_name = spec->has_name;
   copy->has_alignment = spec->has_alignment;
   copy->has_bit_width = spec->has_bit_width;
+  for (size_t i = 0; i < spec->attributes.length; i++) {
+    VectorAppend(&copy->attributes, spec->attributes.value.p[i]);
+  }
   for (size_t i = 0; i < spec->annotations.length; i++) {
     VectorAppend(&copy->annotations, spec->annotations.value.p[i]);
   }
@@ -263,8 +268,15 @@ bool ReflectionDataMemberSpecEqual(const ReflectionDataMemberSpec* left,
       !StringEqualString((String*)&left->name, (String*)&right->name)) {
     return false;
   }
-  if (left->annotations.length != right->annotations.length) {
+  if (left->attributes.length != right->attributes.length ||
+      left->annotations.length != right->annotations.length) {
     return false;
+  }
+  for (size_t i = 0; i < left->attributes.length; i++) {
+    if (!ReflectionValueEqual(left->attributes.value.p[i],
+                              right->attributes.value.p[i])) {
+      return false;
+    }
   }
   for (size_t i = 0; i < left->annotations.length; i++) {
     ReflectionValue* l = left->annotations.value.p[i];
@@ -366,6 +378,8 @@ static void ReflectionValueDestructOwned(ReflectionValue* value) {
   value->data_member_spec = NULL;
   ReflectionEnumeratorSpecDelete(value->enumerator_spec);
   value->enumerator_spec = NULL;
+  AttributeDelete(value->attribute);
+  value->attribute = NULL;
   ASTNodeDelete(value->constexpr_initializer);
   value->constexpr_initializer = NULL;
   VectorDestruct(&value->sequence);
@@ -455,6 +469,8 @@ static void ReflectionCopyPayload(ReflectionValue* dest,
       source->enumerator_spec != NULL
           ? ReflectionEnumeratorSpecCopy(source->enumerator_spec)
           : NULL;
+  dest->attribute =
+      source->attribute != NULL ? AttributeClone(source->attribute) : NULL;
   dest->constexpr_initializer =
       source->constexpr_initializer != NULL
           ? ASTNodeClone(source->constexpr_initializer, IdentityCloneNode,
@@ -643,6 +659,16 @@ ReflectionValue* ReflectionCreateAnnotation(Attribute* annotation,
                                   NULL, location);
 }
 
+ReflectionValue* ReflectionCreateAttribute(const Attribute* attribute,
+                                           SourceLocation location) {
+  ReflectionValue candidate =
+      ReflectionCandidate(kReflectionAttribute, NULL, NULL, NULL, NULL, NULL,
+                          0, 0, NULL, 0, 0.0, false, NULL, location);
+  candidate.attribute =
+      attribute != NULL ? AttributeClone((Attribute*)attribute) : NULL;
+  return ReflectionIntern(candidate);
+}
+
 ReflectionValue* ReflectionCreateNamespaceAlias(Namespace* alias_target,
                                                 SourceLocation location) {
   return ReflectionCreateExtended(kReflectionNamespaceAlias, NULL, NULL, NULL,
@@ -812,6 +838,9 @@ bool ReflectionValueEqual(const ReflectionValue* left,
                   : left->scalar_ivalue == right->scalar_ivalue);
     case kReflectionAnnotation:
       return left->annotation == right->annotation;
+    case kReflectionAttribute:
+      return AttributeIdentityEqual(left->attribute, right->attribute, false,
+                                    false);
     case kReflectionTokenSequence:
       return ReflectionTokenSequenceEqual(&left->token_sequence,
                                           &right->token_sequence);
@@ -846,6 +875,9 @@ const char* ReflectionValueIdentifier(const ReflectionValue* value) {
   if (value->enumerator_spec != NULL && value->enumerator_spec->has_name &&
       value->enumerator_spec->name.value != NULL) {
     return value->enumerator_spec->name.value;
+  }
+  if (value->attribute != NULL) {
+    return AttributeIdentifier(value->attribute);
   }
   if (value->namespace_ != NULL && value->namespace_->name.value != NULL) {
     return value->namespace_->name.value;

@@ -476,7 +476,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
           ReflectionDataMemberSpec* spec = r->value->data_member_spec;
           SWriteRef(ctx, buf, 37, kSerialKindType, spec->member_type);
           if (spec->name.value != NULL) {
-            WireWriteString(buf, 38, spec->name.value, spec->name.length);
+            SWriteStringVal(ctx, buf, 38, &spec->name);
           }
           WireWriteUint64(buf, 39, (uint64_t)spec->alignment);
           WireWriteUint64(buf, 40, (uint64_t)spec->bit_width);

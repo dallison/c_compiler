@@ -18,13 +18,14 @@ accidentally claim final-standard conformance.
 2. [P4033R1: Synthesizing enum at compile time with
    `define_enum`](https://wg21.link/p4033r1) is implemented experimentally for
    opaque scoped enums.
-3. [P3385R8: Attributes reflection](https://wg21.link/p3385r8) would allow
-   attributes to be inspected and attached to synthesized declarations.
+3. [P3385R8: Attributes reflection](https://wg21.link/p3385r8) is implemented
+   experimentally for DaveCC's supported standard and GNU attributes.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
-`__davecc_p4033_define_enum`. No standard feature-test macro is defined because
-WG21 has not assigned one.
+`__davecc_p4033_define_enum`, and
+`__davecc_p3385_attribute_reflection`. No standard feature-test macro is
+defined because WG21 has not assigned one.
 
 Token pieces retain their preprocessed boundaries and source locations.
 `\tokens` concatenates sequences without token pasting, while `\(value)` is
@@ -52,9 +53,28 @@ qualified lookup, reflection-query, switch/code-generation, debug-info, and
 module-serialization paths. A failed enclosing block rolls the enum back,
 including through nested injection frames.
 
-The `enumerator_options::attributes` member is present for source
-compatibility, but a nonempty attribute list is diagnosed until P3385
-attribute reflection is implemented.
+P3385 support includes `^^[[attribute]]`, structural attribute identity,
+`is_attribute`, `attributes_of`, both `has_attribute` overloads, identifier and
+display-string queries, and module persistence. Reflected attributes can be
+attached through `data_member_options::attributes` and
+`enumerator_options::attributes`; synthesized `[[no_unique_address]]` members
+participate in empty-member layout. The legacy
+`data_member_options::no_unique_address` field remains as a deprecated
+compatibility spelling.
+
+Namespaced user-defined attributes such as `[[acme::audit("write")]]` are
+preserved as identity-only metadata and can be reflected, queried, serialized,
+and attached to synthesized members and enumerators. They do not require a C++
+namespace declaration. Unqualified unknown attributes and unknown attributes
+in the reserved `std` or `gnu` namespaces remain diagnosed in attribute
+reflect-expressions.
+
+DaveCC diagnoses `[[assume]]`, multiple attributes in one attribute
+reflect-expression, and unsupported argument forms. Annotation reflections are
+intentionally distinct from attribute reflections. Attribute appertainment and
+effects are limited to the attributes already modeled by DaveCC;
+accepted-but-unmodeled attributes retain identity but have no new semantic
+effect.
 
 ## Adopted C++29 language features
 

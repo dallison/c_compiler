@@ -3034,6 +3034,44 @@ bool SyntaxAttributeIsSupported(const char* name) {
   return false;
 }
 
+static bool IsUserDefinedAttributeNamespace(const char* namespace_name) {
+  return namespace_name != NULL && namespace_name[0] != '\0' &&
+         strcmp(namespace_name, "gnu") != 0 &&
+         strcmp(namespace_name, "std") != 0;
+}
+
+bool SyntaxAttributeIsReflectable(const Attribute* attr) {
+  if (attr == NULL) {
+    return false;
+  }
+  const char* token = AttributeIdentifier(attr);
+  const char* namespace_name = attr->attribute_namespace.value;
+  if (token == NULL || strcmp(token, "assume") == 0) {
+    return false;
+  }
+  if (namespace_name == NULL || attr->attribute_namespace.length == 0) {
+    static const char* standard[] = {
+        "carries_dependency", "deprecated",        "fallthrough",
+        "indeterminate",      "likely",            "maybe_unused",
+        "nodiscard",          "noreturn",          "no_unique_address",
+        "reproducible",       "unlikely",          "unsequenced",
+    };
+    for (size_t i = 0; i < sizeof(standard) / sizeof(standard[0]); i++) {
+      if (strcmp(token, standard[i]) == 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // P3385 permits implementation-defined support for vendor attributes.
+  // DaveCC reflects the GNU attributes its parser already understands and
+  // arbitrary namespaced user attributes as identity-only metadata.
+  if (strcmp(namespace_name, "gnu") == 0) {
+    return IsKnownAttribute(attr->name.value);
+  }
+  return IsUserDefinedAttributeNamespace(namespace_name);
+}
+
 static bool IsUnsupportedTypeAttribute(const char* name) {
   return strcmp(name, "vector_size") == 0 ||
          strcmp(name, "ext_vector_type") == 0 ||
@@ -3215,6 +3253,7 @@ static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
 
   Attribute* attr =
       NewAttribute(CanonicalCXXAttributeName(namespace_name, attr_name));
+  AttributeSetCXXIdentity(attr, namespace_name, attr_name);
   bool unevaluated_string_argument =
       namespace_name == NULL &&
       (strcmp(attr_name, "deprecated") == 0 ||
@@ -3229,7 +3268,9 @@ static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
   if (IsUnsupportedTypeAttribute(attr->name.value)) {
     SyntaxError(syntax, "'%s' type attribute is not supported",
                 attr->name.value);
-  } else if (!IsKnownAttribute(attr->name.value)) {
+  } else if (!IsKnownAttribute(attr->name.value) &&
+             !(CompilerCXXAtLeast(kLanguageStandardCXX29) &&
+               IsUserDefinedAttributeNamespace(namespace_name))) {
     SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
                   attr->name.value);
   }

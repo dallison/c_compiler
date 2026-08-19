@@ -82,7 +82,7 @@ typedef struct AliasTemplate {
 // Serialized as an inline sub-message (see WriteAttributeVector); the field
 // numbers below are local to that sub-message.
 typedef struct Attribute {
-  String name;   // Normalized attribute name.               // @wire 1
+  String name;   // Normalized semantic name.                // @wire 1
   Vector args;   // Vector of String* argument tokens.       // @wire 2
   // Unevaluated operands for a dependent C++ alignas specifier. Exactly one
   // is non-NULL; template instantiation substitutes it and writes the
@@ -91,12 +91,21 @@ typedef struct Attribute {
   struct ASTNode* dependent_alignas_expr;                     // @wire 4
   struct ASTNode* annotation_expr;                            // @wire 5
   struct ReflectionValue* annotation_value;                     // @wire 6
+  // P3385 identity. `name` remains normalized for existing semantic queries,
+  // while these preserve the source-level attribute-token.
+  String attribute_namespace;                                 // @wire 7
+  String token;                                               // @wire 8
 } Attribute;
 
 Attribute* NewAttribute(const char* name);
+void AttributeSetCXXIdentity(Attribute* attr, const char* namespace_name,
+                             const char* token);
 void AttributeDestruct(Attribute* attr);
 void AttributeDelete(Attribute* attr);
 Attribute* AttributeClone(Attribute* attr);
+const char* AttributeIdentifier(const Attribute* attr);
+bool AttributeIdentityEqual(const Attribute* left, const Attribute* right,
+                            bool ignore_namespace, bool ignore_arguments);
 
 // Append an argument token (a copy is made).
 void AttributeAddArg(Attribute* attr, const char* arg, size_t length);

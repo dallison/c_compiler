@@ -4948,6 +4948,37 @@ static ASTNode* ParseReflectionExpression(Syntax* syntax,
     SyntaxError(syntax, "Reflection expressions require C++26");
   }
 
+  if (SyntaxLookingAtCXXAttribute(syntax)) {
+    Vector attributes;
+    VectorInit(&attributes);
+    SyntaxParseCXXAttributes(syntax, &attributes);
+    ReflectionValue* value = NULL;
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+      SyntaxError(syntax, "Attribute reflection requires C++29");
+    } else if (attributes.length != 1) {
+      SyntaxError(syntax,
+                  "Attribute reflection requires exactly one attribute");
+    } else {
+      Attribute* attribute = attributes.value.p[0];
+      const char* identifier = AttributeIdentifier(attribute);
+      if (attribute != NULL && StringEqual(&attribute->name, "annotation")) {
+        SyntaxError(syntax, "Annotations are not attribute reflections");
+      } else if (identifier != NULL && strcmp(identifier, "assume") == 0) {
+        SyntaxError(syntax, "The assume attribute cannot be reflected");
+      } else if (!SyntaxAttributeIsReflectable(attribute)) {
+        SyntaxError(syntax, "Attribute '%s' is not reflectable",
+                    identifier != NULL ? identifier : "<unknown>");
+      } else {
+        value = ReflectionCreateAttribute(attribute, location);
+      }
+    }
+    if (value == NULL) {
+      value = ReflectionCreateInvalid(location);
+    }
+    AttributeListDestruct(&attributes);
+    return NewReflectionConstantASTNode(value, location);
+  }
+
   if (LexLookingAt(syntax->lex, TOK(coloncolon))) {
     LexCheckpoint global_checkpoint;
     LexCheckpointSave(syntax->lex, &global_checkpoint);

@@ -1,5 +1,5 @@
 // RUN: -std=c++29
-// EXPECT: attributes require P3385 attribute reflection support
+// EXPECT: attributes must be attribute reflections
 
 #include <meta>
 

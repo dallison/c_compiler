@@ -44,6 +44,8 @@ Attribute* NewAttribute(const char* name) {
   Attribute* attr = malloc(sizeof(Attribute));
   StringInit(&attr->name, name);
   NormalizeAttributeName(&attr->name);
+  StringInit(&attr->attribute_namespace, NULL);
+  StringInit(&attr->token, attr->name.value);
   VectorInit(&attr->args);
   attr->dependent_alignas_type = NULL;
   attr->dependent_alignas_expr = NULL;
@@ -52,8 +54,19 @@ Attribute* NewAttribute(const char* name) {
   return attr;
 }
 
+void AttributeSetCXXIdentity(Attribute* attr, const char* namespace_name,
+                             const char* token) {
+  if (attr == NULL) {
+    return;
+  }
+  StringSet(&attr->attribute_namespace, namespace_name);
+  StringSet(&attr->token, token);
+}
+
 void AttributeDestruct(Attribute* attr) {
   StringDestruct(&attr->name);
+  StringDestruct(&attr->attribute_namespace);
+  StringDestruct(&attr->token);
   VectorDestructWithContents(&attr->args, (VectorElementDestructor)StringDestruct,
                              /*free_element=*/true);
   TypeRecordDelete(attr->dependent_alignas_type);
@@ -62,6 +75,9 @@ void AttributeDestruct(Attribute* attr) {
 }
 
 void AttributeDelete(Attribute* attr) {
+  if (attr == NULL) {
+    return;
+  }
   AttributeDestruct(attr);
   free(attr);
 }
@@ -73,6 +89,8 @@ void AttributeAddArg(Attribute* attr, const char* arg, size_t length) {
 Attribute* AttributeClone(Attribute* attr) {
   Attribute* copy = malloc(sizeof(Attribute));
   StringInit(&copy->name, attr->name.value);
+  StringInit(&copy->attribute_namespace, attr->attribute_namespace.value);
+  StringInit(&copy->token, attr->token.value);
   VectorInit(&copy->args);
   for (size_t i = 0; i < attr->args.length; i++) {
     String* a = attr->args.value.p[i];
@@ -89,6 +107,46 @@ Attribute* AttributeClone(Attribute* attr) {
       ASTNodeClone(attr->annotation_expr, IdentityCloneNode, NULL, NULL);
   copy->annotation_value = attr->annotation_value;
   return copy;
+}
+
+const char* AttributeIdentifier(const Attribute* attr) {
+  if (attr == NULL) {
+    return NULL;
+  }
+  return attr->token.value != NULL ? attr->token.value : attr->name.value;
+}
+
+bool AttributeIdentityEqual(const Attribute* left, const Attribute* right,
+                            bool ignore_namespace, bool ignore_arguments) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (!ignore_namespace &&
+      !StringEqualString((String*)&left->attribute_namespace,
+                         (String*)&right->attribute_namespace)) {
+    return false;
+  }
+  const char* left_token = AttributeIdentifier(left);
+  const char* right_token = AttributeIdentifier(right);
+  if (left_token == NULL || right_token == NULL ||
+      strcmp(left_token, right_token) != 0) {
+    return false;
+  }
+  if (ignore_arguments) {
+    return true;
+  }
+  if (left->args.length != right->args.length) {
+    return false;
+  }
+  for (size_t i = 0; i < left->args.length; i++) {
+    if (!StringEqualString(left->args.value.p[i], right->args.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 size_t AttributeArgCount(Attribute* attr) { return attr->args.length; }
