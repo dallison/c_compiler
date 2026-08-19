@@ -561,7 +561,9 @@ static INode* FindDesignator(INode* inode,
         SemanticError(ast_node, "Use of array designator on a non-array");
         return NULL;
       }
-      AppendArrayINodeChildren(inode, designator->value.array_index);
+      if (designator->value.array_index >= inode->children.length) {
+        AppendArrayINodeChildren(inode, designator->value.array_index);
+      }
       INode* element = GetChildAtIndex(inode,
                                        designator->value.array_index, false);
       if (element == NULL) {
