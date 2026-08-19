@@ -1300,7 +1300,9 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
               offset += d->value.struct_member->byte_offset;
               break;
             case kDesignatorBase:
-              offset += d->value.base->byte_offset;
+              offset += d->value.base != NULL
+                            ? d->value.base->byte_offset
+                            : d->base_byte_offset;
               break;
           }
         }
@@ -1423,7 +1425,9 @@ static bool InitializerCoversWholeObject(
           offset += designator->value.struct_member->byte_offset;
           break;
         case kDesignatorBase:
-          offset += designator->value.base->byte_offset;
+          offset += designator->value.base != NULL
+                        ? designator->value.base->byte_offset
+                        : designator->base_byte_offset;
           break;
         case kDesignatorArray:
           return false;

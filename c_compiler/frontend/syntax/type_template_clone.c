@@ -6525,12 +6525,35 @@ static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
   for (size_t i = 0; initializer->designators != NULL &&
                      i < initializer->designators->length; i++) {
     Designator* designator = initializer->designators->value.p[i];
-    if (designator == NULL ||
-        designator->designator_type != kDesignatorStruct ||
+    if (designator == NULL || !TypeIsStructOrUnion(aggregate_type) ||
+        aggregate_type->info.struct_info == NULL) {
+      break;
+    }
+    if (designator->designator_type == kDesignatorBase) {
+      CXXBaseSpecifier* concrete_base = NULL;
+      for (size_t j = 0;
+           j < aggregate_type->info.struct_info->bases.length; j++) {
+        CXXBaseSpecifier* candidate =
+            aggregate_type->info.struct_info->bases.value.p[j];
+        if (candidate != NULL && candidate->type != NULL &&
+            designator->type != NULL &&
+            TypeEqual(candidate->type, designator->type)) {
+          concrete_base = candidate;
+          break;
+        }
+      }
+      if (concrete_base == NULL) {
+        break;
+      }
+      designator->value.base = concrete_base;
+      designator->base_byte_offset = concrete_base->byte_offset;
+      aggregate_type = concrete_base->type;
+      continue;
+    }
+    if (designator->designator_type != kDesignatorStruct ||
         !designator->is_resolved_member ||
         designator->value.struct_member == NULL ||
-        designator->value.struct_member->symbol == NULL ||
-        !TypeIsStructOrUnion(aggregate_type)) {
+        designator->value.struct_member->symbol == NULL) {
       break;
     }
     const char* name =

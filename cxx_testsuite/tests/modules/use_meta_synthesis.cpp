@@ -11,6 +11,7 @@ static_assert(std::meta::identifier_of(imported_user_attribute) == "module");
 static_assert(std::meta::has_attribute(^^imported_user_attributed_type,
                                        imported_user_attribute));
 static_assert(std::meta::is_data_member_spec(imported_member));
+static_assert(imported_designated_sum() == 52);
 static_assert(std::meta::is_enumerator_spec(imported_negative));
 static_assert(static_cast<int>(imported_enum::negative) == -3);
 static_assert(static_cast<int>(imported_enum::zero) == -2);

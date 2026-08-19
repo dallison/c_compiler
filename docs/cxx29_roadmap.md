@@ -20,6 +20,8 @@ accidentally claim final-standard conformance.
    opaque scoped enums.
 3. [P3385R8: Attributes reflection](https://wg21.link/p3385r8) is implemented
    experimentally for DaveCC's supported standard and GNU attributes.
+4. [P2287R6: Designated initializers for base
+   classes](https://wg21.link/p2287r6) is implemented in C++29 mode.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
@@ -76,11 +78,17 @@ effects are limited to the attributes already modeled by DaveCC;
 accepted-but-unmodeled attributes retain identity but have no new semantic
 effect.
 
+P2287 support permits inherited non-static data members to be named directly
+in designated initializer lists and permits a positional prefix when every
+positional clause initializes a direct base class. The implementation preserves
+recursive base-member ordering, rejects ambiguous or non-aggregate lookup
+paths, diagnoses a base initialized by both forms, supports direct braced
+designators, constant evaluation, code generation, and module serialization,
+and defines `__cpp_designated_initializers` as `202606L` in C++29 mode.
+
 ## Adopted C++29 language features
 
 - [P3097R3: Contracts for virtual functions](https://wg21.link/p3097r3)
-- [P2287R6: Designated initializers for base
-  classes](https://wg21.link/p2287r6)
 - [P3670R4: Pack indexing for templates](https://wg21.link/p3670r4)
 - [P3540R3: `#embed` offset parameter](https://wg21.link/p3540r3)
 - [P3822R2: Conditional `noexcept` in compound

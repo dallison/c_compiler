@@ -270,6 +270,9 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_using_enum", "201907L");
       PreprocessorDefineMacro(p, "__cpp_conditional_explicit", "201806L");
       PreprocessorDefineMacro(
+          p, "__cpp_designated_initializers",
+          CompilerCXXAtLeast(kLanguageStandardCXX29) ? "202606L" : "201707L");
+      PreprocessorDefineMacro(
           p, "__cpp_constexpr",
           CompilerCXXAtLeast(kLanguageStandardCXX26)
               ? "202406L"

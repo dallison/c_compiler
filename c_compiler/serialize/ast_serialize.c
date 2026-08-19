@@ -170,6 +170,7 @@ enum {
   kDesig_array_index = 5,
   kDesig_struct_member_name = 6,
   kDesig_struct_member = 7,
+  kDesig_base_byte_offset = 8,
 };
 
 static void WriteDesignatorVector(SerializeContext* ctx, WireBuffer* buf,
@@ -196,8 +197,9 @@ static void WriteDesignatorVector(SerializeContext* ctx, WireBuffer* buf,
         SWriteStringPtr(ctx, &elem, kDesig_struct_member_name,
                         d->value.struct_member_name);
       }
+    } else if (d->designator_type == kDesignatorBase) {
+      WireWriteInt32(&elem, kDesig_base_byte_offset, d->base_byte_offset);
     }
-    // kDesignatorBase (CXXBaseSpecifier*) is not pooled and is not serialized.
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -260,6 +262,9 @@ static Vector* ReadDesignatorVector(DeserializeContext* ctx, WireBuffer* buf) {
         case kDesig_struct_member:
           d->value.struct_member =
               (StructMember*)SReadRef(ctx, &er, kSerialKindStructMember);
+          break;
+        case kDesig_base_byte_offset:
+          WireReadInt32(&er, &d->base_byte_offset);
           break;
         default:
           WireSkip(&er, wt);

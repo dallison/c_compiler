@@ -1721,6 +1721,24 @@ static ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
   return NULL;
 }
 
+static bool ConstexprObjectHasDirectMemberNamed(ConstexprObject* object,
+                                                StructMember* member) {
+  if (object == NULL || member == NULL || member->symbol == NULL ||
+      object->type == NULL || !TypeIsStructOrUnion(object->type) ||
+      object->type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = object->type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* direct = str->members.value.p[i];
+    if (direct != NULL && direct->symbol != NULL &&
+        StringEqualString(&direct->symbol->name, &member->symbol->name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool ConstexprObjectHasVirtualBases(ConstexprObject* object) {
   ConstexprObject* root =
       object != NULL && object->complete_object != NULL
@@ -2412,6 +2430,22 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
   } else if (TypeIsStructOrUnion(object->type) &&
              object->type->info.struct_info != NULL) {
     Struct* str = object->type->info.struct_info;
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base == NULL || base->is_virtual || base->type == NULL) {
+        continue;
+      }
+      ConstexprValue* slot = ConstexprObjectSlot(
+          object, ConstexprBaseStorageIndex(str, i));
+      ASTNode* init =
+          slot != NULL && slot->is_object && slot->object != NULL
+              ? ConstexprValueInitializer(slot, base->type, location,
+                                          preserve_external_addresses)
+              : NewBracedInitializerASTNode(NewVector(), base->type, location);
+      if (init != NULL) {
+        VectorAppend(initializers, init);
+      }
+    }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -3158,6 +3192,60 @@ static StructMember* ConstexprDesignatorMember(TypeRecord* type,
                           designator->value.struct_member_name);
 }
 
+static StructMember* ConstexprDirectDesignatorMember(TypeRecord* type,
+                                                     Designator* designator) {
+  StructMember* member = ConstexprDesignatorMember(type, designator);
+  if (member == NULL || member->symbol == NULL || type == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* owner = type->info.struct_info;
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* direct = owner->members.value.p[i];
+    if (direct == member) {
+      return member;
+    }
+    if (direct != NULL && direct->is_anon && direct->symbol != NULL &&
+        TypeIsStructOrUnion(direct->symbol->type) &&
+        FindStructMember(direct->symbol->type->info.struct_info,
+                         &member->symbol->name) != NULL) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static bool ConstexprInheritedDesignatorBase(TypeRecord* type,
+                                             Designator* designator,
+                                             size_t* base_index) {
+  if (type == NULL || designator == NULL || base_index == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      designator->designator_type != kDesignatorStruct ||
+      designator->is_resolved_member) {
+    return false;
+  }
+  Struct* owner = type->info.struct_info;
+  size_t matches = 0;
+  size_t selected = 0;
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (ConstexprDesignatorMember(base->type, designator) != NULL) {
+      matches++;
+      selected = i;
+    }
+  }
+  if (matches != 1) {
+    return false;
+  }
+  *base_index = selected;
+  return true;
+}
+
 static bool ConstexprDesignatorSlotIndex(TypeRecord* type, Designator* designator,
                                          size_t* slot_index) {
   if (type == NULL || designator == NULL || slot_index == NULL) {
@@ -3177,14 +3265,20 @@ static bool ConstexprDesignatorSlotIndex(TypeRecord* type, Designator* designato
     Struct* str = type->info.struct_info;
     for (size_t i = 0; i < str->bases.length; i++) {
       CXXBaseSpecifier* base = str->bases.value.p[i];
-      if (base == designator->value.base) {
+      if (base == designator->value.base ||
+          (designator->value.base == NULL && base != NULL &&
+           designator->type != NULL &&
+           TypeEqual(base->type, designator->type))) {
+        designator->value.base = base;
+        designator->base_byte_offset = base->byte_offset;
         *slot_index = ConstexprBaseStorageIndex(str, i);
         return true;
       }
     }
     return false;
   }
-  StructMember* member = ConstexprDesignatorMember(type, designator);
+  StructMember* member =
+      ConstexprDirectDesignatorMember(type, designator);
   if (member == NULL) {
     return false;
   }
@@ -3207,6 +3301,32 @@ static bool EvaluateConstexprDesignatedInitializer(ConstEvalContext* ctx,
 
   size_t slot_index;
   Designator* designator = designators->value.p[designator_index];
+  size_t inherited_base_index = 0;
+  if (ConstexprInheritedDesignatorBase(type, designator,
+                                       &inherited_base_index)) {
+    Struct* owner = type->info.struct_info;
+    CXXBaseSpecifier* base = owner->bases.value.p[inherited_base_index];
+    size_t base_slot_index =
+        ConstexprBaseStorageIndex(owner, inherited_base_index);
+    ConstexprValue* base_slot =
+        ConstexprObjectSlot(object, base_slot_index);
+    if (base_slot == NULL || base == NULL || base->type == NULL) {
+      return false;
+    }
+    if (!base_slot->is_object || base_slot->object == NULL) {
+      base_slot->is_object = true;
+      base_slot->is_address = false;
+      base_slot->is_floating = false;
+      base_slot->ivalue = 0;
+      base_slot->fvalue = 0;
+      base_slot->object = NewConstexprObject(
+          ctx, base->type, ConstexprObjectSlotCount(base->type));
+    }
+    return base_slot->object != NULL &&
+           EvaluateConstexprDesignatedInitializer(
+               ctx, base->type, base_slot->object, designators,
+               designator_index, initializer);
+  }
   if (!ConstexprDesignatorSlotIndex(
           type, designator, &slot_index)) {
     return false;
@@ -3233,7 +3353,9 @@ static bool EvaluateConstexprDesignatedInitializer(ConstEvalContext* ctx,
   }
 
   if (designator_index + 1 == designators->length) {
-    return EvaluateConstexprInitializer(ctx, slot_type, initializer, slot);
+    bool initialized =
+        EvaluateConstexprInitializer(ctx, slot_type, initializer, slot);
+    return initialized;
   }
 
   if (!TypeIsFixedArray(slot_type) && !TypeIsStructOrUnion(slot_type)) {
@@ -3422,6 +3544,148 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
   return true;
 }
 
+static bool ConstexprInitializerDesignatesMember(
+    TypeRecord* root_type, BracedInitializerASTNode* braced,
+    StructMember* target) {
+  if (root_type == NULL || braced == NULL || target == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* entry = braced->initializers->value.p[i];
+    if (entry == NULL || entry->op != AST_OP(designated_init)) {
+      continue;
+    }
+    DesignatedInitializerASTNode* designated =
+        (DesignatedInitializerASTNode*)entry;
+    TypeRecord* current = root_type;
+    for (size_t j = 0; designated->designators != NULL &&
+                       j < designated->designators->length; j++) {
+      Designator* designator = designated->designators->value.p[j];
+      if (designator == NULL || current == NULL ||
+          !TypeIsStructOrUnion(current) ||
+          current->info.struct_info == NULL) {
+        break;
+      }
+      if (designator->designator_type == kDesignatorBase) {
+        CXXBaseSpecifier* base = designator->value.base;
+        if (base == NULL && designator->type != NULL) {
+          for (size_t k = 0;
+               k < current->info.struct_info->bases.length; k++) {
+            CXXBaseSpecifier* candidate =
+                current->info.struct_info->bases.value.p[k];
+            if (candidate != NULL &&
+                TypeEqual(candidate->type, designator->type)) {
+              base = candidate;
+              break;
+            }
+          }
+        }
+        current = base != NULL ? base->type : NULL;
+        continue;
+      }
+      if (designator->designator_type != kDesignatorStruct) {
+        break;
+      }
+      StructMember* member =
+          ConstexprDesignatorMember(current, designator);
+      if (member == target) {
+        return true;
+      }
+      current = member != NULL && member->symbol != NULL
+                    ? member->symbol->type
+                    : NULL;
+    }
+  }
+  return false;
+}
+
+static bool ApplyConstexprDesignatedBaseDefaults(
+    ConstEvalContext* ctx, TypeRecord* root_type,
+    BracedInitializerASTNode* braced, TypeRecord* base_type,
+    ConstexprObject* base_object) {
+  if (base_type == NULL || base_object == NULL ||
+      !TypeIsStructOrUnion(base_type) ||
+      base_type->info.struct_info == NULL) {
+    return true;
+  }
+  Struct* str = base_type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        member->default_initializer == NULL ||
+        ConstexprInitializerDesignatesMember(root_type, braced, member)) {
+      continue;
+    }
+    size_t storage_index = ConstexprMemberStorageIndex(str, member);
+    ConstexprValue* slot =
+        ConstexprObjectSlot(base_object, storage_index);
+    if (slot == NULL ||
+        !EvaluateConstexprInitializer(ctx, member->symbol->type,
+                                      member->default_initializer, slot)) {
+      return false;
+    }
+  }
+  if (!ConstexprMaterializeBaseSubobjectSlots(ctx, base_object)) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL) {
+      continue;
+    }
+    ConstexprValue* slot = ConstexprObjectSlot(
+        base_object, ConstexprBaseStorageIndex(str, i));
+    if (slot == NULL || !slot->is_object || slot->object == NULL ||
+        !ApplyConstexprDesignatedBaseDefaults(
+            ctx, root_type, braced, base->type, slot->object)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool ApplyConstexprDesignatedBaseDefaultInitializers(
+    ConstEvalContext* ctx, TypeRecord* type, ConstexprObject* object,
+    BracedInitializerASTNode* braced) {
+  if (type == NULL || object == NULL || braced == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return true;
+  }
+  size_t positional_prefix = 0;
+  bool has_designated = false;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* entry = braced->initializers->value.p[i];
+    if (entry != NULL && entry->op == AST_OP(designated_init)) {
+      has_designated = true;
+      break;
+    }
+    positional_prefix++;
+  }
+  if (!has_designated) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  if (!ConstexprMaterializeBaseSubobjectSlots(ctx, object)) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        i < positional_prefix) {
+      continue;
+    }
+    ConstexprValue* slot =
+        ConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
+    if (slot == NULL || !slot->is_object || slot->object == NULL ||
+        !ApplyConstexprDesignatedBaseDefaults(
+            ctx, type, braced, base->type, slot->object)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                          TypeRecord* type,
                                          ASTNode* initializer,
@@ -3532,12 +3796,22 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         ok = false;
         break;
       }
-      if (!ConstexprDesignatorSlotIndex(
-              type, designated->designators->value.p[0], &slot_index)) {
+      size_t inherited_base_index = 0;
+      bool inherited_designator = ConstexprInheritedDesignatorBase(
+          type, designated->designators->value.p[0],
+          &inherited_base_index);
+      if (inherited_designator) {
+        slot_index =
+            ConstexprBaseStorageIndex(type->info.struct_info,
+                                      inherited_base_index);
+      } else if (!ConstexprDesignatorSlotIndex(
+                     type, designated->designators->value.p[0],
+                     &slot_index)) {
         ok = false;
         break;
       }
-      if (designated->designators->length > 1) {
+      if (designated->designators->length > 1 ||
+          inherited_designator) {
         if (!EvaluateConstexprDesignatedInitializer(
                 ctx, type, object, designated->designators, 0,
                 designated->init)) {
@@ -3589,6 +3863,20 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         ConstexprActivateUnionMember(object, member);
       }
     }
+    if (!is_designated_entry && TypeIsStructOrUnion(slot_type) &&
+        entry_init != NULL && entry_init->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* expression_initializer =
+          (ExpressionInitializerASTNode*)entry_init;
+      if (expression_initializer->expr != NULL &&
+          expression_initializer->expr->type == NULL) {
+        expression_initializer->expr =
+            AnalyzeExpression(expression_initializer->expr);
+        if (expression_initializer->expr != NULL) {
+          expression_initializer->expr->parent = entry_init;
+          expression_initializer->expr->child_id = 0;
+        }
+      }
+    }
     if (!EvaluateConstexprInitializer(ctx, slot_type, entry_init, slot)) {
       if (!is_designated_entry && TypeIsStructOrUnion(slot_type) &&
           slot_type->info.struct_info != NULL &&
@@ -3631,12 +3919,15 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     ok = ApplyConstexprDefaultMemberInitializers(ctx, type, object, initialized,
                                                  slot_count);
   }
+  if (ok) {
+    ok = ApplyConstexprDesignatedBaseDefaultInitializers(
+        ctx, type, object, braced);
+  }
   free(initialized);
   if (ok && TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
-      !type->info.struct_info->is_union &&
-      !type->info.struct_info->is_aggregate) {
+      !type->info.struct_info->is_union) {
     ok = ConstexprMaterializeBaseSubobjectSlots(ctx, object);
-    if (ok) {
+    if (ok && !type->info.struct_info->is_aggregate) {
       Symbol* ctor_symbol = ConstexprConstructorForObjectType(type, 0);
       Symbol* ctor = ConstexprFunctionDefinition(ctor_symbol);
       if (ctor != NULL && ctor->type != NULL &&
@@ -4317,7 +4608,8 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
         return false;
       }
     }
-    if (ConstexprObjectHasVirtualBases(object_value.object)) {
+    if (!ConstexprObjectHasDirectMemberNamed(object_value.object,
+                                             member_node->member)) {
       ConstexprObject* member_object =
           ConstexprObjectForMember(object_value.object, member_node->member);
       if (member_object != NULL) {
@@ -4479,7 +4771,9 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
     if (member_node->member == NULL) {
       return false;
     }
-    if (ConstexprObjectHasVirtualBases(object_value.object)) {
+    if (ConstexprObjectHasVirtualBases(object_value.object) ||
+        !ConstexprObjectHasDirectMemberNamed(object_value.object,
+                                             member_node->member)) {
       ConstexprObject* member_object =
           ConstexprObjectForMember(object_value.object, member_node->member);
       if (member_object != NULL) {

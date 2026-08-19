@@ -419,6 +419,7 @@ struct ConstraintExpr;
 #define kASTRequiresASTConstexpr (1ULL << 55)  // Result contains evaluator-only semantic state (for example a materialized reflection query).
 #define kASTConstexprLifetimeInitializer (1ULL << 56)  // Synthesized sparse initializer preserves inactive constexpr subobjects.
 #define kASTUnparenthesizedDecltypeEntity (1ULL << 57)  // Deferred decltype operand uses the declared type, not its value category.
+#define kASTSourceDesignatedInitializer (1ULL << 58)  // Designated-initializer-clause written in source, not synthesized by lowering.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -1093,8 +1094,9 @@ typedef struct {
     int array_index;              // @wire 5 (kDesignatorArray)
     String* struct_member_name;   // @wire 6 (kDesignatorStruct, unresolved)
     StructMember* struct_member;  // @wire 7 (kDesignatorStruct, resolved)
-    CXXBaseSpecifier* base;       // @wire - (kDesignatorBase, not serialized)
+    CXXBaseSpecifier* base;       // Non-owning, restored from type when needed.
   } value;
+  int base_byte_offset;           // @wire 8 (kDesignatorBase)
 } Designator;
 
 Designator* NewArrayDesignator(TypeRecord* type, int index);

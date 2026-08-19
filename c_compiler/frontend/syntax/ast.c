@@ -4617,6 +4617,7 @@ Designator* NewArrayDesignator(TypeRecord* type, int index) {
   d->array_index_end = index;
   d->type = type;
   d->is_resolved_member = false;
+  d->base_byte_offset = 0;
   TypeRecordIncRef(type);
   return d;
 }
@@ -4627,6 +4628,7 @@ Designator* NewStructDesignator(String* member) {
   d->value.struct_member_name = member;
   d->type = NULL;
   d->is_resolved_member = false;
+  d->base_byte_offset = 0;
   return d;
 }
 
@@ -4636,6 +4638,7 @@ Designator* NewStructMemberDesignator(StructMember* member) {
   d->value.struct_member = member;
   d->type = NULL;
   d->is_resolved_member = true;
+  d->base_byte_offset = 0;
   return d;
 }
 
@@ -4643,8 +4646,9 @@ Designator* NewCXXBaseDesignator(CXXBaseSpecifier* base) {
   Designator* d = malloc(sizeof(Designator));
   d->designator_type = kDesignatorBase;
   d->value.base = base;
-  d->type = NULL;
+  d->type = base != NULL ? TypeRecordCopy(base->type) : NULL;
   d->is_resolved_member = true;
+  d->base_byte_offset = base != NULL ? base->byte_offset : 0;
   return d;
 }
 
@@ -4720,6 +4724,7 @@ static ASTNode* DesignatedInitializerASTNodeClone(
     memcpy(&to_d->value, &from_d->value, sizeof(to_d->value));
     to_d->array_index_end = from_d->array_index_end;
     to_d->is_resolved_member = from_d->is_resolved_member;
+    to_d->base_byte_offset = from_d->base_byte_offset;
     VectorAppend(to->designators, to_d);
   }
   to->init = ASTNodeClone(from->init, func, data, &to->base);

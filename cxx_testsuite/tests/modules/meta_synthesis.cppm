@@ -13,6 +13,24 @@ export constexpr auto imported_member = std::meta::data_member_spec(
 export struct [[nodiscard("module")]] imported_attributed_type {};
 export struct [[acme::module("persist")]] imported_user_attributed_type {};
 
+export struct imported_designated_base {
+  int base_value;
+};
+
+export struct imported_designated_derived : imported_designated_base {
+  int derived_value;
+};
+
+export constexpr imported_designated_derived make_imported_designated() {
+  return {.base_value = 23, .derived_value = 29};
+}
+
+export constexpr int imported_designated_sum() {
+  imported_designated_derived value{
+      .base_value = 23, .derived_value = 29};
+  return value.base_value + value.derived_value;
+}
+
 export enum class imported_enum : int;
 
 export constexpr auto imported_negative = std::meta::enumerator_spec(

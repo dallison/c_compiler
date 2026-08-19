@@ -614,7 +614,12 @@ static INode* FindDesignator(INode* inode,
       AppendStructMembers(inode);
       for (size_t i = 0; i < inode->type->info.struct_info->bases.length; i++) {
         CXXBaseSpecifier* base = inode->type->info.struct_info->bases.value.p[i];
-        if (base == designator->value.base) {
+        if (base == designator->value.base ||
+            (designator->value.base == NULL && base != NULL &&
+             designator->type != NULL &&
+             TypeEqual(base->type, designator->type))) {
+          designator->value.base = base;
+          designator->base_byte_offset = base->byte_offset;
           return GetChildAtIndex(inode, i, true);
         }
       }
@@ -625,60 +630,160 @@ static INode* FindDesignator(INode* inode,
   return NULL;
 }
 
-// Return the direct object member named by the first designator in a C++
-// designated-initializer clause.  C++ declaration-order checking applies to
-// this top-level field only, which is the only ordering case reachable in an
-// otherwise-valid C++ designated-initializer list.
-static StructMember* CXXDirectDesignatedMember(INode* inode,
-                                               ASTNode* initializer,
+static StructMember* CXXDirectAssociatedMember(Struct* owner, String* name,
                                                size_t* declaration_order) {
-  if (!CompilerIsCXX() || inode == NULL || inode->kind != kIStruct ||
-      initializer == NULL || initializer->op != AST_OP(designated_init) ||
-      declaration_order == NULL) {
+  if (owner == NULL || name == NULL) {
     return NULL;
   }
-  DesignatedInitializerASTNode* designated =
-      (DesignatedInitializerASTNode*)initializer;
-  if (designated->designators == NULL ||
-      designated->designators->length == 0) {
-    return NULL;
-  }
-  Designator* first = designated->designators->value.p[0];
-  if (first == NULL || first->designator_type != kDesignatorStruct) {
-    return NULL;
-  }
-
-  Struct* owner = inode->type->info.struct_info;
-  if (owner == NULL || !owner->is_aggregate) {
-    return NULL;
-  }
-  StructMember* member =
-      first->is_resolved_member
-          ? first->value.struct_member
-          : FindStructMember(owner, first->value.struct_member_name);
+  StructMember* member = FindStructMember(owner, name);
   if (!StructMemberIsObjectMember(member)) {
     return NULL;
   }
 
-  // FindStructMember also searches base classes.  C++ designated initializers
-  // name direct non-static data members, so inherited members do not
-  // participate in this ordering check.  A member injected by an anonymous
-  // aggregate has the declaration position of that aggregate.
+  // A member injected by an anonymous aggregate has the declaration position
+  // of that aggregate. FindStructMember also searches base classes, so failure
+  // to associate the result with a direct element means it is inherited.
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* direct = owner->members.value.p[i];
     if (direct == member) {
-      *declaration_order = i;
+      if (declaration_order != NULL) {
+        *declaration_order = i;
+      }
       return member;
     }
     if (direct != NULL && direct->is_anon && direct->symbol != NULL &&
         TypeIsStructOrUnion(direct->symbol->type) &&
         FindStructMember(direct->symbol->type->info.struct_info,
                          &member->symbol->name) != NULL) {
-      *declaration_order = i;
+      if (declaration_order != NULL) {
+        *declaration_order = i;
+      }
       return member;
     }
   }
   return NULL;
+}
+
+typedef enum {
+  kCXXDesignatedMemberNotFound,
+  kCXXDesignatedMemberUnique,
+  kCXXDesignatedMemberAmbiguous,
+  kCXXDesignatedMemberNonAggregateBase,
+} CXXDesignatedMemberStatus;
+
+// Find the path of direct base classes from `owner` to the class that directly
+// contains `name`. P2287 only permits that path when every traversed base is an
+// aggregate. Multiple matching base subobjects make member lookup ambiguous.
+static CXXDesignatedMemberStatus CXXFindDesignatedMemberBasePath(
+    Struct* owner, String* name, Vector* path, StructMember** member) {
+  StructMember* direct = CXXDirectAssociatedMember(owner, name, NULL);
+  if (direct != NULL) {
+    if (member != NULL) {
+      *member = direct;
+    }
+    return kCXXDesignatedMemberUnique;
+  }
+
+  size_t matches = 0;
+  CXXDesignatedMemberStatus selected = kCXXDesignatedMemberNotFound;
+  StructMember* selected_member = NULL;
+  for (size_t i = 0; owner != NULL && i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Vector nested;
+    VectorInit(&nested);
+    StructMember* nested_member = NULL;
+    CXXDesignatedMemberStatus status = CXXFindDesignatedMemberBasePath(
+        base->type->info.struct_info, name, &nested, &nested_member);
+    if (status == kCXXDesignatedMemberNotFound) {
+      VectorDestruct(&nested);
+      continue;
+    }
+    if (status == kCXXDesignatedMemberAmbiguous) {
+      VectorDestruct(&nested);
+      return kCXXDesignatedMemberAmbiguous;
+    }
+    matches++;
+    if (matches > 1) {
+      VectorDestruct(&nested);
+      return kCXXDesignatedMemberAmbiguous;
+    }
+    VectorAppend(path, base);
+    for (size_t j = 0; j < nested.length; j++) {
+      VectorAppend(path, nested.value.p[j]);
+    }
+    VectorDestruct(&nested);
+    selected =
+        status == kCXXDesignatedMemberNonAggregateBase ||
+                !base->type->info.struct_info->is_aggregate
+            ? kCXXDesignatedMemberNonAggregateBase
+            : kCXXDesignatedMemberUnique;
+    selected_member = nested_member;
+  }
+  if (matches == 1 && member != NULL) {
+    *member = selected_member;
+  }
+  return selected;
+}
+
+// Resolve a source `.member` designator. For an inherited member in C++29,
+// prepend internal base-class designators so the existing initializer tree,
+// constexpr evaluator, and code generators initialize the correct subobject.
+static CXXDesignatedMemberStatus CXXResolveDesignatedMemberPath(
+    INode* inode, ASTNode* initializer, StructMember** member) {
+  if (inode == NULL || inode->kind != kIStruct || initializer == NULL ||
+      initializer->op != AST_OP(designated_init)) {
+    return kCXXDesignatedMemberNotFound;
+  }
+  DesignatedInitializerASTNode* designated =
+      (DesignatedInitializerASTNode*)initializer;
+  if (designated->designators == NULL ||
+      designated->designators->length == 0) {
+    return kCXXDesignatedMemberNotFound;
+  }
+  Designator* first = designated->designators->value.p[0];
+  if (first == NULL || first->designator_type != kDesignatorStruct) {
+    return kCXXDesignatedMemberNotFound;
+  }
+  String* name = first->is_resolved_member
+                     ? &first->value.struct_member->symbol->name
+                     : first->value.struct_member_name;
+  Struct* owner = inode->type->info.struct_info;
+  StructMember* direct = CXXDirectAssociatedMember(owner, name, NULL);
+  if (direct != NULL) {
+    if (member != NULL) {
+      *member = direct;
+    }
+    return kCXXDesignatedMemberUnique;
+  }
+
+  Vector bases;
+  VectorInit(&bases);
+  StructMember* inherited = NULL;
+  CXXDesignatedMemberStatus status =
+      CXXFindDesignatedMemberBasePath(owner, name, &bases, &inherited);
+  if ((status == kCXXDesignatedMemberUnique ||
+       status == kCXXDesignatedMemberNonAggregateBase) &&
+      bases.length > 0) {
+    Vector* resolved = NewVector();
+    for (size_t i = 0; i < bases.length; i++) {
+      VectorAppend(resolved, NewCXXBaseDesignator(bases.value.p[i]));
+    }
+    for (size_t i = 0; i < designated->designators->length; i++) {
+      VectorAppend(resolved, designated->designators->value.p[i]);
+    }
+    VectorDelete(designated->designators);
+    designated->designators = resolved;
+  }
+  VectorDestruct(&bases);
+  if (member != NULL) {
+    *member = inherited;
+  }
+  return status;
 }
 
 static Designator* CXXSingleStructDesignator(ASTNode* initializer) {
@@ -714,6 +819,105 @@ static String* CXXSingleDesignatorName(ASTNode* initializer) {
              : designator->value.struct_member_name;
 }
 
+typedef struct {
+  Vector* designators;
+  size_t index;
+  TypeRecord* type;
+  bool done;
+} CXXDesignatorOrderCursor;
+
+static bool CXXNextDesignatorOrder(CXXDesignatorOrderCursor* cursor,
+                                   size_t* order) {
+  if (cursor == NULL || cursor->done || cursor->designators == NULL ||
+      cursor->index >= cursor->designators->length ||
+      cursor->type == NULL || !TypeIsStructOrUnion(cursor->type) ||
+      cursor->type->info.struct_info == NULL) {
+    return false;
+  }
+  Designator* designator = cursor->designators->value.p[cursor->index++];
+  Struct* owner = cursor->type->info.struct_info;
+  if (designator->designator_type == kDesignatorBase) {
+    for (size_t i = 0; i < owner->bases.length; i++) {
+      CXXBaseSpecifier* base = owner->bases.value.p[i];
+      if (base == designator->value.base ||
+          (designator->value.base == NULL && base != NULL &&
+           designator->type != NULL &&
+           TypeEqual(base->type, designator->type))) {
+        designator->value.base = base;
+        designator->base_byte_offset = base->byte_offset;
+        *order = i;
+        cursor->type = base->type;
+        return true;
+      }
+    }
+    return false;
+  }
+  if (designator->designator_type != kDesignatorStruct) {
+    return false;
+  }
+  String* name =
+      designator->is_resolved_member
+          ? &designator->value.struct_member->symbol->name
+          : designator->value.struct_member_name;
+  size_t member_order = 0;
+  StructMember* member =
+      CXXDirectAssociatedMember(owner, name, &member_order);
+  if (member == NULL) {
+    return false;
+  }
+  *order = owner->bases.length + member_order;
+  cursor->type = member->symbol->type;
+  // DaveCC accepts nested C-style designators as an extension. Their ordering
+  // remains based on the first named field, while P2287-inserted base
+  // designators participate recursively.
+  cursor->done = true;
+  return true;
+}
+
+static int CXXCompareDesignatorOrder(TypeRecord* type, ASTNode* left,
+                                     ASTNode* right) {
+  if (left == NULL || right == NULL ||
+      left->op != AST_OP(designated_init) ||
+      right->op != AST_OP(designated_init)) {
+    return 0;
+  }
+  CXXDesignatorOrderCursor l = {
+      .designators = ((DesignatedInitializerASTNode*)left)->designators,
+      .type = type,
+  };
+  CXXDesignatorOrderCursor r = {
+      .designators = ((DesignatedInitializerASTNode*)right)->designators,
+      .type = type,
+  };
+  for (;;) {
+    size_t left_order = 0;
+    size_t right_order = 0;
+    bool has_left = CXXNextDesignatorOrder(&l, &left_order);
+    bool has_right = CXXNextDesignatorOrder(&r, &right_order);
+    if (!has_left || !has_right) {
+      return 0;
+    }
+    if (left_order < right_order) {
+      return -1;
+    }
+    if (left_order > right_order) {
+      return 1;
+    }
+    if (l.done && r.done) {
+      return 0;
+    }
+  }
+}
+
+static size_t CXXDirectBaseIndex(Struct* owner, CXXBaseSpecifier* target) {
+  for (size_t i = 0; owner != NULL && i < owner->bases.length; i++) {
+    if (owner->bases.value.p[i] == target) {
+      return i;
+    }
+  }
+  return SIZE_MAX;
+}
+
 static void CheckCXXDesignatedInitializers(
     INode* inode, BracedInitializerASTNode* braced_init) {
   if (!CompilerIsCXX() || inode == NULL || inode->kind != kIStruct ||
@@ -721,10 +925,66 @@ static void CheckCXXDesignatedInitializers(
     return;
   }
 
-  StructMember* previous = NULL;
-  size_t previous_order = 0;
+  Struct* owner = inode->type->info.struct_info;
+  bool saw_designated = false;
+  bool saw_source_designated = false;
+  bool saw_nondesignated = false;
+  bool nondesignated_after_designated = false;
+  ASTNode* first_nondesignated_after_designated = NULL;
+  size_t positional_prefix = 0;
   for (size_t i = 0; i < braced_init->initializers->length; i++) {
     ASTNode* initializer = braced_init->initializers->value.p[i];
+    if (initializer != NULL &&
+        initializer->op == AST_OP(designated_init)) {
+      saw_designated = true;
+      if ((initializer->flags & kASTSourceDesignatedInitializer) != 0) {
+        saw_source_designated = true;
+      }
+    } else {
+      saw_nondesignated = true;
+      if (saw_designated) {
+        nondesignated_after_designated = true;
+        if (first_nondesignated_after_designated == NULL) {
+          first_nondesignated_after_designated = initializer;
+        }
+      } else {
+        positional_prefix++;
+      }
+    }
+  }
+  if (saw_source_designated && nondesignated_after_designated) {
+    SemanticError(
+        first_nondesignated_after_designated,
+        "non-designated initializer cannot follow a designated initializer");
+  }
+  if (saw_source_designated && (owner == NULL || !owner->is_aggregate)) {
+    SemanticError((ASTNode*)braced_init,
+                  "designated initialization requires an aggregate class");
+  }
+  if (saw_source_designated && saw_nondesignated &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+    SemanticError(
+        (ASTNode*)braced_init,
+        "mixing designated and non-designated initializers requires C++29");
+  } else if (saw_source_designated && saw_nondesignated &&
+             !nondesignated_after_designated && owner != NULL &&
+             positional_prefix > owner->bases.length) {
+    SemanticError(
+        braced_init->initializers->value.p[owner->bases.length],
+        "non-designated initializer in a mixed list must initialize a direct "
+        "base class");
+  }
+
+  ASTNode* previous = NULL;
+  for (size_t i = 0; i < braced_init->initializers->length; i++) {
+    ASTNode* initializer = braced_init->initializers->value.p[i];
+    if (initializer == NULL ||
+        initializer->op != AST_OP(designated_init)) {
+      continue;
+    }
+    if ((initializer->flags & kASTSourceDesignatedInitializer) == 0) {
+      continue;
+    }
     String* designator_name = CXXSingleDesignatorName(initializer);
     Designator* designator = CXXSingleStructDesignator(initializer);
     // Only source-level `.member =` designators are constrained to use a name
@@ -751,9 +1011,29 @@ static void CheckCXXDesignatedInitializers(
       }
     }
 
-    size_t declaration_order = 0;
-    StructMember* member =
-        CXXDirectDesignatedMember(inode, initializer, &declaration_order);
+    StructMember* member = NULL;
+    CXXDesignatedMemberStatus status =
+        CXXResolveDesignatedMemberPath(inode, initializer, &member);
+    DesignatedInitializerASTNode* designated =
+        (DesignatedInitializerASTNode*)initializer;
+    bool inherited =
+        designated->designators != NULL &&
+        designated->designators->length > 0 &&
+        ((Designator*)designated->designators->value.p[0])->designator_type ==
+            kDesignatorBase;
+    if (status == kCXXDesignatedMemberAmbiguous) {
+      SemanticError(initializer, "designated member lookup is ambiguous");
+      continue;
+    }
+    if (status == kCXXDesignatedMemberNonAggregateBase) {
+      SemanticError(
+          initializer,
+          "designated member is inherited through a non-aggregate base class");
+    }
+    if (inherited && !CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+      SemanticError(initializer,
+                    "designating an inherited member requires C++29");
+    }
     if (member == NULL) {
       continue;
     }
@@ -766,8 +1046,17 @@ static void CheckCXXDesignatedInitializers(
           member->symbol->name.value);
       continue;
     }
-    if (previous != NULL && declaration_order < previous_order) {
-      Struct* owner = inode->type->info.struct_info;
+    if (positional_prefix > 0 && inherited) {
+      CXXBaseSpecifier* base =
+          ((Designator*)designated->designators->value.p[0])->value.base;
+      if (CXXDirectBaseIndex(owner, base) < positional_prefix) {
+        SemanticError(initializer,
+                      "base class is initialized by both positional and "
+                      "designated initializers");
+      }
+    }
+    if (previous != NULL &&
+        CXXCompareDesignatorOrder(inode->type, previous, initializer) > 0) {
       SemanticError(
           initializer,
           "designator order for field '%s' does not match declaration order "
@@ -775,8 +1064,7 @@ static void CheckCXXDesignatedInitializers(
           member->symbol->name.value,
           owner->tag_name != NULL ? owner->tag_name->value : "<anonymous>");
     }
-    previous = member;
-    previous_order = declaration_order;
+    previous = initializer;
   }
 }
 
@@ -841,6 +1129,21 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       }
       LazyInitINode(inode);
       CheckCXXDesignatedInitializers(inode, braced_init);
+      size_t cxx_positional_prefix = 0;
+      bool cxx_has_designated = false;
+      if (CompilerIsCXX() &&
+          CompilerCXXAtLeast(kLanguageStandardCXX29) &&
+          inode->kind == kIStruct) {
+        for (size_t i = 0; i < braced_init->initializers->length; i++) {
+          ASTNode* initializer = braced_init->initializers->value.p[i];
+          if (initializer != NULL &&
+              initializer->op == AST_OP(designated_init)) {
+            cxx_has_designated = true;
+            break;
+          }
+          cxx_positional_prefix++;
+        }
+      }
       INode* parent = inode->parent;
       inode->parent = NULL;
       if (braced_init->initializers->length == 0 &&
@@ -856,10 +1159,43 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       }
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
         INode* current = inode->current == NULL ? inode : inode->current;
-        if (!InitializeINode(current, braced_init->initializers->value.p[i], constants_only)) {
-          SemanticError((ASTNode*)braced_init->initializers->value.p[i],
+        ASTNode* initializer = braced_init->initializers->value.p[i];
+        bool mixed_positional_base =
+            cxx_has_designated && i < cxx_positional_prefix &&
+            current != NULL && current->is_base_subobject;
+        bool directly_targets_base =
+            mixed_positional_base &&
+            initializer->op == AST_OP(braced_init);
+        if (mixed_positional_base &&
+            initializer->op == AST_OP(expr_init)) {
+          ASTNode* expression =
+              ((ExpressionInitializerASTNode*)initializer)->expr;
+          directly_targets_base =
+              expression != NULL &&
+              (expression->op == AST_OP(compound_literal) ||
+               (expression->type != NULL &&
+                StructInitializationTypesMatch(expression->type,
+                                                current->type)));
+        }
+        if (!InitializeINode(current, initializer, constants_only)) {
+          SemanticError(initializer,
                         "Too many initializers");
           break;
+        }
+        if (mixed_positional_base &&
+            initializer->op == AST_OP(expr_init) &&
+            current->expr == NULL && !directly_targets_base) {
+          ASTNode* analyzed_expression =
+              ((ExpressionInitializerASTNode*)initializer)->expr;
+          if (analyzed_expression == NULL ||
+              analyzed_expression->type == NULL ||
+              !StructInitializationTypesMatch(analyzed_expression->type,
+                                              current->type)) {
+            SemanticError(
+                initializer,
+                "non-designated initializer in a mixed list must initialize a "
+                "direct base class");
+          }
         }
       }
       if (inode->kind == kIArray && inode->type->info.array.is_flexible) {

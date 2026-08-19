@@ -2680,15 +2680,20 @@ static void ParseDesignatedInitializer(Syntax* syntax,
       VectorAppend(designators, NewStructDesignator(member_name));
     }
   }
-  // This is followed by an = sign and an initializer.
-  if (!LexMatch(syntax->lex, TOK(equal))) {
-    SyntaxError(syntax, "Expected = in designated initializer");
+  // This is followed by either `= initializer-clause` or a direct braced
+  // initializer.  C++ designated initializers permit both `.member = value`
+  // and `.member { value }`.
+  bool has_equal = LexMatch(syntax->lex, TOK(equal));
+  bool has_direct_braces =
+      !has_equal && LexMatch(syntax->lex, TOK(lbrace));
+  if (!has_equal && !has_direct_braces) {
+    SyntaxError(syntax, "Expected = or { in designated initializer");
     SyntaxRecover(syntax, TC(exprsep));
   } else {
     ASTNode* init;
     // The initialization expression is either a brace-enclosed
     // initializer or a single expression.
-    if (LexMatch(syntax->lex, TOK(lbrace))) {
+    if (has_direct_braces || LexMatch(syntax->lex, TOK(lbrace))) {
       init = ParseBracedInitializer(syntax);
     } else {
       init = NewExpressionInitializerASTNode(
@@ -2712,13 +2717,17 @@ static void ParseDesignatedInitializer(Syntax* syntax,
       for (int v = start; v <= end; v++) {
         Vector* desigs = CloneDesignators(designators, range_pos, v);
         ASTNode* init_for_index = (v == end) ? init : CloneInitializer(init);
-        VectorAppend(initializers, NewDesignatedInitializerASTNode(
-                                       desigs, init_for_index, location));
+        ASTNode* designated = NewDesignatedInitializerASTNode(
+            desigs, init_for_index, location);
+        designated->flags |= kASTSourceDesignatedInitializer;
+        VectorAppend(initializers, designated);
       }
       VectorDelete(designators);
     } else {
-      VectorAppend(initializers, NewDesignatedInitializerASTNode(
-                                                               designators, init, location));
+      ASTNode* designated =
+          NewDesignatedInitializerASTNode(designators, init, location);
+      designated->flags |= kASTSourceDesignatedInitializer;
+      VectorAppend(initializers, designated);
     }
   }
 
