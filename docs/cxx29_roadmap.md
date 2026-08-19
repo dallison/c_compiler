@@ -16,14 +16,15 @@ accidentally claim final-standard conformance.
    `namespace_inject`, structural token-sequence equality, token replay, and
    module serialization. The proposal's design is still evolving.
 2. [P4033R1: Synthesizing enum at compile time with
-   `define_enum`](https://wg21.link/p4033r1) is a smaller generative-reflection
-   step that fits DaveCC's existing `define_aggregate` machinery.
+   `define_enum`](https://wg21.link/p4033r1) is implemented experimentally for
+   opaque scoped enums.
 3. [P3385R8: Attributes reflection](https://wg21.link/p3385r8) would allow
    attributes to be inspected and attached to synthesized declarations.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
-the vendor probe `__davecc_p3294_token_injection`. No standard feature-test
-macro is defined because WG21 has not assigned one.
+the vendor probes `__davecc_p3294_token_injection` and
+`__davecc_p4033_define_enum`. No standard feature-test macro is defined because
+WG21 has not assigned one.
 
 Token pieces retain their preprocessed boundaries and source locations.
 `\tokens` concatenates sequences without token pasting, while `\(value)` is
@@ -40,6 +41,20 @@ DaveCC's class parser is generalized to replay every member-declaration form.
 
 Because P3294 has not been adopted and is marked as needing revision, DaveCC
 should treat this syntax as experimental until WG21 settles the design.
+
+`enumerator_spec` accepts validated identifier names, explicit reflected
+integral constants or implicit values, and reflected annotations.
+`define_enum` completes an opaque scoped enum inside a `consteval` block,
+preserving source order, fixed-underlying-type representability, explicit
+values, and ordinary implicit incrementing. Duplicate names are rejected
+except for repeated `_` placeholders. Synthesized enumerators use the normal
+qualified lookup, reflection-query, switch/code-generation, debug-info, and
+module-serialization paths. A failed enclosing block rolls the enum back,
+including through nested injection frames.
+
+The `enumerator_options::attributes` member is present for source
+compatibility, but a nonempty attribute list is diagnosed until P3385
+attribute reflection is implemented.
 
 ## Adopted C++29 language features
 
@@ -62,5 +77,4 @@ should treat this syntax as experimental until WG21 settles the design.
 
 Good small follow-up projects are the `#embed` offset parameter and defaulted
 postfix operators. Good projects that reuse DaveCC's strongest existing
-subsystems are virtual-function contracts, template pack indexing, and
-`define_enum`.
+subsystems are virtual-function contracts and template pack indexing.

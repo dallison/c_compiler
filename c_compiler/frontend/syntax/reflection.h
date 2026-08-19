@@ -40,6 +40,7 @@ typedef enum {
   kReflectionConcept,
   kReflectionNamespaceAlias,
   kReflectionDataMemberDescription,
+  kReflectionEnumeratorDescription,
   kReflectionTokenSequence,
 } ReflectionEntityKind;
 
@@ -75,6 +76,15 @@ typedef struct ReflectionDataMemberSpec {
   Vector annotations;
 } ReflectionDataMemberSpec;
 
+typedef struct ReflectionEnumeratorSpec {
+  String name;
+  int64_t value;
+  bool has_value;
+  bool has_name;
+  Vector attributes;
+  Vector annotations;
+} ReflectionEnumeratorSpec;
+
 typedef struct ReflectionValue {
   ReflectionEntityKind kind;
   TypeRecord* reflected_type;
@@ -91,6 +101,7 @@ typedef struct ReflectionValue {
   bool scalar_is_float;
   Namespace* namespace_alias_target;
   ReflectionDataMemberSpec* data_member_spec;
+  ReflectionEnumeratorSpec* enumerator_spec;
   struct ASTNode* constexpr_initializer;
   Symbol* promoted_symbol;
   Vector sequence;
@@ -143,6 +154,8 @@ ReflectionValue* ReflectionCreateNamespaceAlias(Namespace* alias_target,
                                                 SourceLocation location);
 ReflectionValue* ReflectionCreateDataMemberSpec(
     ReflectionDataMemberSpec* spec, SourceLocation location);
+ReflectionValue* ReflectionCreateEnumeratorSpec(
+    ReflectionEnumeratorSpec* spec, SourceLocation location);
 ReflectionValue* ReflectionCreateSequence(ReflectionEntityKind kind,
                                           TypeRecord* element_type,
                                           Vector* values,
@@ -171,6 +184,13 @@ ReflectionDataMemberSpec* ReflectionDataMemberSpecCopy(
 void ReflectionDataMemberSpecDelete(ReflectionDataMemberSpec* spec);
 bool ReflectionDataMemberSpecEqual(const ReflectionDataMemberSpec* left,
                                    const ReflectionDataMemberSpec* right);
+
+ReflectionEnumeratorSpec* ReflectionEnumeratorSpecNew(void);
+ReflectionEnumeratorSpec* ReflectionEnumeratorSpecCopy(
+    const ReflectionEnumeratorSpec* spec);
+void ReflectionEnumeratorSpecDelete(ReflectionEnumeratorSpec* spec);
+bool ReflectionEnumeratorSpecEqual(const ReflectionEnumeratorSpec* left,
+                                   const ReflectionEnumeratorSpec* right);
 
 bool ReflectionValueEqual(const ReflectionValue* left,
                           const ReflectionValue* right);

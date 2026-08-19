@@ -11,6 +11,7 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "init_semantics.h"
+#include "lex.h"
 #include "reflection.h"
 #include "reflection_semantics.h"
 #include "symbol.h"
@@ -18,10 +19,12 @@
 #include "syntax.h"
 #include "type_class_internal.h"
 #include "type_compare.h"
+#include "type_enum.h"
 #include "type_internal.h"
 #include "type_template.h"
 #include "vector.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +40,10 @@ typedef enum {
   kMetaSynthSubstitute,
   kMetaSynthDataMemberSpec,
   kMetaSynthIsDataMemberSpec,
+  kMetaSynthEnumeratorSpec,
+  kMetaSynthIsEnumeratorSpec,
   kMetaSynthDefineAggregate,
+  kMetaSynthDefineEnum,
   kMetaSynthReflectConstantString,
   kMetaSynthReflectConstantArray,
   kMetaSynthDefineStaticString,
@@ -58,11 +64,14 @@ static const MetaSynthesisOperationEntry kMetaSynthesisOperations[] = {
     {"can_substitute", kMetaSynthCanSubstitute},
     {"data_member_spec", kMetaSynthDataMemberSpec},
     {"define_aggregate", kMetaSynthDefineAggregate},
+    {"define_enum", kMetaSynthDefineEnum},
     {"define_static_array", kMetaSynthDefineStaticArray},
     {"define_static_object", kMetaSynthDefineStaticObject},
     {"define_static_string", kMetaSynthDefineStaticString},
+    {"enumerator_spec", kMetaSynthEnumeratorSpec},
     {"extract", kMetaSynthExtract},
     {"is_data_member_spec", kMetaSynthIsDataMemberSpec},
+    {"is_enumerator_spec", kMetaSynthIsEnumeratorSpec},
     {"is_string_literal", kMetaSynthIsStringLiteral},
     {"namespace_inject", kMetaSynthNamespaceInject},
     {"queue_injection", kMetaSynthQueueInjection},
@@ -230,6 +239,38 @@ static bool MetaSynthesisReflectionRange(VectorASTNode* call, size_t arg_index,
       VectorAppend(out_values, value);
     }
     return true;
+  }
+  if (arg->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)arg)->symbol;
+    if (symbol != NULL && symbol->type != NULL &&
+        TypeIsFixedArray(symbol->type)) {
+      ASTNode* initializer =
+          ConstexprObjectInitializerForSymbol(symbol, arg->location);
+      if (initializer == NULL && symbol->constexpr_initializer != NULL) {
+        initializer = ASTNodeClone(symbol->constexpr_initializer,
+                                   IdentityCloneNode, NULL, NULL);
+      }
+      ASTNode* elements = initializer;
+      while (elements != NULL && elements->op == AST_OP(expr_init)) {
+        elements = ((ExpressionInitializerASTNode*)elements)->expr;
+      }
+      if (elements != NULL && elements->op == AST_OP(braced_init)) {
+        BracedInitializerASTNode* braced = (BracedInitializerASTNode*)elements;
+        bool ok = true;
+        for (size_t i = 0; i < braced->initializers->length; i++) {
+          ReflectionValue* value = MetaSynthesisEvaluateReflection(
+              braced->initializers->value.p[i]);
+          if (value == NULL) {
+            ok = false;
+            break;
+          }
+          VectorAppend(out_values, value);
+        }
+        ASTNodeDelete(initializer);
+        return ok;
+      }
+      ASTNodeDelete(initializer);
+    }
   }
   ReflectionValue* single = MetaSynthesisEvaluateReflection(arg);
   if (single == NULL) {
@@ -483,6 +524,336 @@ static bool MetaSynthesisParseDataMemberOptions(ASTNode* options,
   }
   *out_spec = spec;
   return true;
+}
+
+static const char* MetaSynthesisDesignatedFieldName(
+    DesignatedInitializerASTNode* designated) {
+  if (designated == NULL || designated->designators == NULL ||
+      designated->designators->length == 0) {
+    return NULL;
+  }
+  Designator* designator = designated->designators->value.p[0];
+  if (designator == NULL || designator->designator_type != kDesignatorStruct) {
+    return NULL;
+  }
+  if (designator->is_resolved_member &&
+      designator->value.struct_member != NULL &&
+      designator->value.struct_member->symbol != NULL) {
+    return designator->value.struct_member->symbol->name.value;
+  }
+  if (!designator->is_resolved_member &&
+      designator->value.struct_member_name != NULL) {
+    return designator->value.struct_member_name->value;
+  }
+  return NULL;
+}
+
+static bool MetaSynthesisReflectionIsAbsent(ASTNode* node) {
+  while (node != NULL && node->op == AST_OP(expr_init)) {
+    node = ((ExpressionInitializerASTNode*)node)->expr;
+  }
+  if (node == NULL) {
+    return true;
+  }
+  if (node->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)node;
+    return braced->initializers == NULL || braced->initializers->length == 0;
+  }
+  ReflectionValue* value = MetaSynthesisEvaluateReflection(node);
+  return value == NULL || value->kind == kReflectionInvalid;
+}
+
+static bool MetaSynthesisParseEnumeratorOptions(ASTNode* options,
+                                                ReflectionEnumeratorSpec** out_spec,
+                                                ASTNode* diagnostic) {
+  if (options == NULL || out_spec == NULL) {
+    if (diagnostic != NULL) {
+      SemanticError(diagnostic, "enumerator_spec requires enumerator_options");
+    }
+    return false;
+  }
+  ReflectionEnumeratorSpec* spec = ReflectionEnumeratorSpecNew();
+  if (options->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)options;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* entry = braced->initializers->value.p[i];
+      if (entry == NULL || entry->op != AST_OP(designated_init)) {
+        continue;
+      }
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)entry;
+      const char* field = MetaSynthesisDesignatedFieldName(designated);
+      if (field == NULL) {
+        continue;
+      }
+      if (strcmp(field, "name") == 0) {
+        ASTNode* name = designated->init;
+        while (name != NULL && name->op == AST_OP(expr_init)) {
+          name = ((ExpressionInitializerASTNode*)name)->expr;
+        }
+        if (name != NULL && name->op == AST_OP(string)) {
+          String* text = ((ConstantASTNode*)name)->value.string;
+          if (text != NULL && text->value != NULL &&
+              LexSpellingIsIdentifier(text->value, text->length)) {
+            StringSetString(&spec->name, text);
+            spec->has_name = true;
+          } else if (diagnostic != NULL) {
+            SemanticError(diagnostic,
+                          "enumerator_spec: name must be a valid non-keyword "
+                          "C++ identifier");
+            ReflectionEnumeratorSpecDelete(spec);
+            return false;
+          }
+        } else if (diagnostic != NULL) {
+          SemanticError(diagnostic, "enumerator_spec: name must be a string");
+          ReflectionEnumeratorSpecDelete(spec);
+          return false;
+        }
+      } else if (strcmp(field, "value") == 0) {
+        if (MetaSynthesisReflectionIsAbsent(designated->init)) {
+          continue;
+        }
+        ReflectionValue* value =
+            MetaSynthesisEvaluateReflection(designated->init);
+        if (value == NULL || value->kind == kReflectionInvalid) {
+          continue;
+        }
+        if (value->kind != kReflectionValue || value->reflected_type == NULL ||
+            !TypeIsIntegral(value->reflected_type)) {
+          if (diagnostic != NULL) {
+            SemanticError(
+                diagnostic,
+                "enumerator_spec: value must be an integral reflection constant");
+          }
+          ReflectionEnumeratorSpecDelete(spec);
+          return false;
+        }
+        spec->value = value->scalar_ivalue;
+        spec->has_value = true;
+      } else if (strcmp(field, "attributes") == 0) {
+        ASTNode* attributes = designated->init;
+        while (attributes != NULL && attributes->op == AST_OP(expr_init)) {
+          attributes = ((ExpressionInitializerASTNode*)attributes)->expr;
+        }
+        if (attributes != NULL && attributes->op == AST_OP(braced_init)) {
+          BracedInitializerASTNode* items =
+              (BracedInitializerASTNode*)attributes;
+          for (size_t j = 0; j < items->initializers->length; j++) {
+            ReflectionValue* attribute = MetaSynthesisEvaluateReflection(
+                items->initializers->value.p[j]);
+            if (attribute != NULL) {
+              VectorAppend(&spec->attributes, attribute);
+            }
+          }
+        }
+      } else if (strcmp(field, "annotations") == 0) {
+        ASTNode* annotations = designated->init;
+        while (annotations != NULL && annotations->op == AST_OP(expr_init)) {
+          annotations = ((ExpressionInitializerASTNode*)annotations)->expr;
+        }
+        if (annotations != NULL && annotations->op == AST_OP(braced_init)) {
+          BracedInitializerASTNode* items =
+              (BracedInitializerASTNode*)annotations;
+          for (size_t j = 0; j < items->initializers->length; j++) {
+            ReflectionValue* annotation = MetaSynthesisEvaluateReflection(
+                items->initializers->value.p[j]);
+            if (annotation != NULL) {
+              VectorAppend(&spec->annotations, annotation);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (!spec->has_name || spec->name.value == NULL) {
+    if (diagnostic != NULL) {
+      SemanticError(diagnostic, "enumerator_spec: name is required");
+    }
+    ReflectionEnumeratorSpecDelete(spec);
+    return false;
+  }
+  if (spec->attributes.length > 0 && diagnostic != NULL) {
+    SemanticError(
+        diagnostic,
+        "enumerator_spec: attributes require P3385 attribute reflection support");
+    ReflectionEnumeratorSpecDelete(spec);
+    return false;
+  }
+  *out_spec = spec;
+  return true;
+}
+
+static bool MetaSynthesisEnumeratorNameAlreadyUsed(const Vector* seen_names,
+                                                   const char* name) {
+  if (name == NULL || seen_names == NULL) {
+    return true;
+  }
+  if (strcmp(name, "_") == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < seen_names->length; i++) {
+    const char* existing = seen_names->value.p[i];
+    if (existing != NULL && strcmp(existing, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void MetaSynthesisRollbackEnumDefinition(Enum* enumeration,
+                                                Symbol* tag,
+                                                size_t old_constant_count,
+                                                int64_t old_next_value,
+                                                bool old_forward_declared,
+                                                bool old_defined) {
+  if (enumeration == NULL) {
+    return;
+  }
+  EnumRemoveConstantsFrom(enumeration, old_constant_count);
+  enumeration->next_value = old_next_value;
+  if (tag != NULL) {
+    tag->flags.is_forward_declared = old_forward_declared;
+    tag->flags.is_defined = old_defined;
+  }
+}
+
+static ReflectionValue* MetaSynthesisDefineEnum(ReflectionValue* target_enum,
+                                                Vector* specs,
+                                                ASTNode* diagnostic,
+                                                SourceLocation location) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+    SemanticError(diagnostic, "define_enum requires C++29");
+    return NULL;
+  }
+  if (!CompilerInjectionFrameActive()) {
+    SemanticError(diagnostic, "define_enum requires an active consteval block");
+    return NULL;
+  }
+  if (target_enum == NULL || target_enum->kind != kReflectionType ||
+      target_enum->reflected_type == NULL ||
+      !TypeIsEnum(target_enum->reflected_type) ||
+      target_enum->reflected_type->info.enum_info == NULL) {
+    SemanticError(diagnostic,
+                  "define_enum requires a reflected enumeration type");
+    return NULL;
+  }
+  TypeRecord* enum_type = target_enum->reflected_type;
+  Enum* enumeration = enum_type->info.enum_info;
+  if (!enumeration->is_scoped) {
+    SemanticError(diagnostic, "define_enum requires a scoped enumeration type");
+    return NULL;
+  }
+  Symbol* tag = enumeration->tag_symbol;
+  if (tag == NULL) {
+    SemanticError(diagnostic, "define_enum requires a named enumeration type");
+    return NULL;
+  }
+  if (!tag->flags.is_forward_declared) {
+    SemanticError(diagnostic,
+                  "define_enum target enumeration is already complete");
+    return NULL;
+  }
+
+  size_t old_constant_count = enumeration->constants.length;
+  int64_t old_next_value = enumeration->next_value;
+  bool old_forward_declared = tag->flags.is_forward_declared;
+  bool old_defined = tag->flags.is_defined;
+  CompilerRecordSynthesizedEnum(enumeration, enum_type, tag);
+
+  Vector seen_names;
+  VectorInit(&seen_names);
+  bool implicit_overflow = false;
+
+  for (size_t i = 0; i < specs->length; i++) {
+    ReflectionValue* spec_value = specs->value.p[i];
+    if (spec_value == NULL ||
+        spec_value->kind != kReflectionEnumeratorDescription ||
+        spec_value->enumerator_spec == NULL ||
+        !spec_value->enumerator_spec->has_name ||
+        spec_value->enumerator_spec->name.value == NULL) {
+      SemanticError(diagnostic,
+                    "define_enum requires enumerator descriptions");
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+    ReflectionEnumeratorSpec* spec = spec_value->enumerator_spec;
+    const char* name = spec->name.value;
+    if (!LexSpellingIsIdentifier(name, strlen(name))) {
+      SemanticError(
+          diagnostic,
+          "define_enum: enumerator name must be a valid non-keyword C++ identifier");
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+    if (MetaSynthesisEnumeratorNameAlreadyUsed(&seen_names, name)) {
+      SemanticError(diagnostic,
+                    "define_enum: duplicate enumerator name '%s'", name);
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+    if (strcmp(name, "_") != 0) {
+      VectorAppend(&seen_names, (void*)name);
+    }
+
+    int64_t assigned_value = 0;
+    EnumValueAssignStatus assign_status = EnumAssignEnumeratorValue(
+        enumeration, spec->has_value, spec->value, &implicit_overflow,
+        &assigned_value);
+    if (assign_status == kEnumValueAssignOverflow) {
+      SemanticError(
+          diagnostic,
+          "define_enum: value of enumerator '%s' exceeds the supported integer "
+          "constant range",
+          name);
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+    if (assign_status == kEnumValueAssignNotRepresentable) {
+      SemanticError(
+          diagnostic,
+          "define_enum: value %" PRId64
+          " of enumerator '%s' is not representable in the fixed underlying type",
+          assigned_value, name);
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+
+    Symbol* constant =
+        EnumAddScopedConstant(enumeration, enum_type, name, assigned_value);
+    if (constant == NULL) {
+      MetaSynthesisRollbackEnumDefinition(enumeration, tag, old_constant_count,
+                                          old_next_value, old_forward_declared,
+                                          old_defined);
+      VectorDestruct(&seen_names);
+      return NULL;
+    }
+    for (size_t j = 0; j < spec->annotations.length; j++) {
+      ReflectionValue* annotation = spec->annotations.value.p[j];
+      if (annotation != NULL && annotation->annotation != NULL) {
+        VectorAppend(&constant->attributes,
+                     AttributeClone(annotation->annotation));
+      }
+    }
+  }
+
+  VectorDestruct(&seen_names);
+  EnumCompleteDefinition(enumeration, enum_type, tag);
+  return ReflectionCreateType(enum_type, NULL, location);
 }
 
 static StructMember* MetaSynthesisFindMatchingMember(Struct* str,
@@ -1125,6 +1496,20 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
           value != NULL && value->kind == kReflectionDataMemberDescription,
           call->base.location);
     }
+    case kMetaSynthIsEnumeratorSpec: {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+        SemanticError((ASTNode*)call, "is_enumerator_spec requires C++29");
+        return NULL;
+      }
+      if (call->children == NULL || call->children->length < 1) {
+        return NULL;
+      }
+      ReflectionValue* value =
+          MetaSynthesisEvaluateReflection(call->children->value.p[0]);
+      return MetaSynthesisBool(
+          value != NULL && value->kind == kReflectionEnumeratorDescription,
+          call->base.location);
+    }
     case kMetaSynthIsStringLiteral: {
       if (call->children == NULL || call->children->length < 1) {
         return NULL;
@@ -1197,6 +1582,25 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
           spec, call->base.location);
       return NewReflectionConstantASTNode(value, call->base.location);
     }
+    case kMetaSynthEnumeratorSpec: {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+        SemanticError((ASTNode*)call, "enumerator_spec requires C++29");
+        return NULL;
+      }
+      if (call->children == NULL || call->children->length < 1) {
+        SemanticError((ASTNode*)call,
+                      "enumerator_spec requires enumerator_options");
+        return NULL;
+      }
+      ReflectionEnumeratorSpec* spec = NULL;
+      if (!MetaSynthesisParseEnumeratorOptions(call->children->value.p[0],
+                                               &spec, (ASTNode*)call)) {
+        return NULL;
+      }
+      ReflectionValue* value =
+          ReflectionCreateEnumeratorSpec(spec, call->base.location);
+      return NewReflectionConstantASTNode(value, call->base.location);
+    }
     case kMetaSynthDefineAggregate: {
       if (call->children == NULL || call->children->length < 2) {
         return NULL;
@@ -1212,6 +1616,35 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
       }
       ReflectionValue* result = MetaSynthesisDefineAggregate(
           class_type, &specs, call->base.location);
+      VectorDestruct(&specs);
+      return result != NULL
+                 ? NewReflectionConstantASTNode(result, call->base.location)
+                 : NULL;
+    }
+    case kMetaSynthDefineEnum: {
+      if (call->children == NULL || call->children->length < 2) {
+        SemanticError((ASTNode*)call,
+                      "define_enum requires a target enumeration and members");
+        return NULL;
+      }
+      ReflectionValue* target_enum =
+          MetaSynthesisEvaluateReflection(call->children->value.p[0]);
+      Vector specs;
+      VectorInit(&specs);
+      if (target_enum == NULL ||
+          !MetaSynthesisReflectionRange(call, 1, &specs)) {
+        VectorDestruct(&specs);
+        if (target_enum == NULL) {
+          SemanticError((ASTNode*)call,
+                        "define_enum requires a reflected enumeration type");
+        } else {
+          SemanticError((ASTNode*)call,
+                        "define_enum requires enumerator descriptions");
+        }
+        return NULL;
+      }
+      ReflectionValue* result = MetaSynthesisDefineEnum(
+          target_enum, &specs, (ASTNode*)call, call->base.location);
       VectorDestruct(&specs);
       return result != NULL
                  ? NewReflectionConstantASTNode(result, call->base.location)

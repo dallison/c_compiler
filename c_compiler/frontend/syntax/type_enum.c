@@ -3,12 +3,14 @@
 //  c_compiler
 //
 
+#include "type_enum.h"
 #include "type_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdint.h>
 
 #include <assert.h>
 #include "ast.h"
@@ -135,7 +137,7 @@ static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
   return type;
 }
 
-static bool FixedEnumValueIsRepresentable(const Enum* e, int64_t value) {
+bool EnumFixedValueIsRepresentable(const Enum* e, int64_t value) {
   if (e == NULL || !e->has_fixed_underlying ||
       e->fixed_underlying_size <= 0) {
     return true;
@@ -156,6 +158,137 @@ static bool FixedEnumValueIsRepresentable(const Enum* e, int64_t value) {
   int64_t minimum = -(INT64_C(1) << (bits - 1));
   int64_t maximum = (INT64_C(1) << (bits - 1)) - INT64_C(1);
   return value >= minimum && value <= maximum;
+}
+
+EnumValueAssignStatus EnumAssignEnumeratorValue(Enum* e, bool has_explicit_value,
+                                                int64_t explicit_value,
+                                                bool* inout_implicit_overflow,
+                                                int64_t* out_assigned_value) {
+  if (e == NULL || inout_implicit_overflow == NULL ||
+      out_assigned_value == NULL) {
+    return kEnumValueAssignOverflow;
+  }
+  if (has_explicit_value) {
+    *out_assigned_value = explicit_value;
+    *inout_implicit_overflow = false;
+  } else {
+    if (*inout_implicit_overflow) {
+      return kEnumValueAssignOverflow;
+    }
+    *out_assigned_value = e->next_value;
+  }
+  if (!EnumFixedValueIsRepresentable(e, *out_assigned_value)) {
+    return kEnumValueAssignNotRepresentable;
+  }
+  if (*out_assigned_value == INT64_MAX) {
+    *inout_implicit_overflow = true;
+  } else {
+    e->next_value = *out_assigned_value + 1;
+    *inout_implicit_overflow = false;
+  }
+  return kEnumValueAssignOk;
+}
+
+Symbol* EnumAddScopedConstant(Enum* e, TypeRecord* enum_type, const char* name,
+                              int64_t value) {
+  if (e == NULL || enum_type == NULL || name == NULL) {
+    return NULL;
+  }
+  Symbol* constant = NewScopedEnumConstant(name, value, enum_type);
+  VectorAppend(&e->constants, constant);
+  return constant;
+}
+
+void EnumRemoveConstantsFrom(Enum* e, size_t old_count) {
+  if (e == NULL) {
+    return;
+  }
+  while (e->constants.length > old_count) {
+    Symbol* constant = e->constants.value.p[e->constants.length - 1];
+    VectorPop(&e->constants);
+    SymbolDelete(constant);
+  }
+}
+
+static Type EnumInferUnderlyingTypeFromConstants(const Enum* e) {
+  enum TypeSelection {
+    kUnsignedChar,
+    kSignedChar,
+    kUnsignedInt,
+    kSignedInt,
+  } type_selection = kUnsignedInt;
+  for (size_t i = 0; i < e->constants.length; i++) {
+    Symbol* constant = e->constants.value.p[i];
+    if (constant == NULL || !constant->flags.value_set) {
+      continue;
+    }
+    int64_t value = constant->value.ivalue;
+    switch (type_selection) {
+      case kUnsignedInt:
+        if (value < 0) {
+          type_selection = kSignedInt;
+        }
+        break;
+      case kUnsignedChar:
+        if (value > 255) {
+          type_selection = kUnsignedInt;
+        }
+        if (value < 0) {
+          if (value < 256) {
+            type_selection = kSignedInt;
+          } else {
+            type_selection = kUnsignedInt;
+          }
+        }
+        break;
+      case kSignedInt:
+        break;
+      case kSignedChar:
+        if (value > 255) {
+          type_selection = kSignedInt;
+        }
+        break;
+    }
+  }
+  switch (type_selection) {
+    case kUnsignedInt:
+      return kTypeInt | kTypeUnsigned;
+    case kUnsignedChar:
+      return kTypeChar | kTypeUnsigned;
+    case kSignedInt:
+      return kTypeInt;
+    case kSignedChar:
+      return kTypeChar;
+  }
+}
+
+void EnumCompleteDefinition(Enum* e, TypeRecord* enum_type, Symbol* tag) {
+  if (e == NULL || enum_type == NULL || tag == NULL) {
+    return;
+  }
+  Type underlying = e->has_fixed_underlying
+                        ? e->fixed_underlying_type
+                        : EnumInferUnderlyingTypeFromConstants(e);
+  enum_type->type = kTypeEnum | underlying;
+  enum_type->size =
+      e->has_fixed_underlying ? e->fixed_underlying_size : SizeofType(underlying);
+  if (e->has_fixed_underlying) {
+    enum_type->bit_width = e->fixed_underlying_bit_width;
+  }
+  TypeRecordCalculateSize(enum_type);
+  if (e->is_scoped) {
+    for (size_t i = 0; i < e->constants.length; i++) {
+      Symbol* constant = e->constants.value.p[i];
+      if (constant == NULL || constant->type == NULL) {
+        continue;
+      }
+      constant->type->type = enum_type->type;
+      constant->type->size = enum_type->size;
+      constant->type->bit_width = enum_type->bit_width;
+    }
+  }
+  tag->flags.is_forward_declared = false;
+  tag->flags.is_defined = true;
 }
 
 static void ApplyEnumUnderlyingType(Syntax* syntax, Enum* e,
@@ -208,6 +341,8 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       StringInit(&const_name, parser->lex->spelling.value);
       LexNextToken(parser->lex);
       int dependent_value_template_parameter_index = -1;
+      int64_t assigned_value = e->next_value;
+      EnumValueAssignStatus assign_status = kEnumValueAssignOk;
       if (LexMatch(parser->lex, TOK(equal))) {
         ASTNode* value =
             SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
@@ -221,37 +356,41 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
                         "enum constant %s",
                         const_name.value);
           }
-          next_value = e->next_value;
+          assign_status = EnumAssignEnumeratorValue(
+              e, true, e->next_value, &next_value_overflow, &assigned_value);
+        } else {
+          assign_status = EnumAssignEnumeratorValue(
+              e, true, next_value, &next_value_overflow, &assigned_value);
         }
-        e->next_value = next_value;
-        next_value_overflow = false;
         ASTNodeDelete(value);
-      } else if (next_value_overflow) {
+      } else {
+        assign_status = EnumAssignEnumeratorValue(
+            e, false, 0, &next_value_overflow, &assigned_value);
+      }
+      if (assign_status == kEnumValueAssignOverflow) {
         SyntaxError(parser->syntax,
                     "Value of enum constant %s exceeds the supported integer "
                     "constant range",
                     const_name.value);
-      }
-      if (!FixedEnumValueIsRepresentable(e, e->next_value)) {
+      } else if (assign_status == kEnumValueAssignNotRepresentable) {
         SyntaxError(parser->syntax,
                     "Value %" PRId64
                     " of enum constant %s is not representable in the "
                     "fixed underlying type",
-                    e->next_value, const_name.value);
+                    assigned_value, const_name.value);
       }
-      // Determine the type of the enum based on the constant value.
       switch (type_selection) {
         case kUnsignedInt:
-          if (e->next_value < 0) {
+          if (assigned_value < 0) {
             type_selection = kSignedInt;
           }
           break;
         case kUnsignedChar:
-          if (e->next_value > 255) {
+          if (assigned_value > 255) {
             type_selection = kUnsignedInt;
           }
-          if (e->next_value < 0) {
-            if (e->next_value < 256) {
+          if (assigned_value < 0) {
+            if (assigned_value < 256) {
               type_selection = kSignedInt;
             } else {
               type_selection = kUnsignedInt;
@@ -261,15 +400,15 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
         case kSignedInt:
           break;
         case kSignedChar:
-          if (e->next_value > 255) {
+          if (assigned_value > 255) {
             type_selection = kSignedInt;
           }
           break;
       }
 
       Symbol* ec = e->is_scoped
-          ? NewScopedEnumConstant(const_name.value, e->next_value, enum_type)
-          : NewEnumConstant(const_name.value, e->next_value);
+          ? NewScopedEnumConstant(const_name.value, assigned_value, enum_type)
+          : NewEnumConstant(const_name.value, assigned_value);
       if (!CompilerIsCXX() && e->has_fixed_underlying) {
         TypeRecordDelete(ec->type);
         ec->type = TypeRecordCopy(enum_type);
@@ -279,11 +418,6 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
           dependent_value_template_parameter_index;
       if (dependent_value_template_parameter_index >= 0) {
         ec->flags.value_set = false;
-      }
-      if (e->next_value == INT64_MAX) {
-        next_value_overflow = true;
-      } else {
-        e->next_value++;
       }
       StringDestruct(&const_name);
 

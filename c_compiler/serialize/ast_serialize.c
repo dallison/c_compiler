@@ -485,6 +485,15 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
           WireWriteBool(buf, 43, spec->has_alignment);
           WireWriteBool(buf, 44, spec->has_bit_width);
         }
+        if (r->value->enumerator_spec != NULL) {
+          ReflectionEnumeratorSpec* spec = r->value->enumerator_spec;
+          if (spec->name.value != NULL) {
+            SWriteStringVal(ctx, buf, 46, &spec->name);
+          }
+          WireWriteInt64(buf, 47, spec->value);
+          WireWriteBool(buf, 48, spec->has_value);
+          WireWriteBool(buf, 49, spec->has_name);
+        }
         SerialWriteReflectionExtendedPayload(ctx, buf, 41, 42, 43, 45,
                                              r->value);
       }
@@ -505,6 +514,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
     case kASTShapeConstevalBlock: {
       ConstevalBlockASTNode* b = (ConstevalBlockASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, b->body);
+      WireWriteBool(buf, 17, b->had_parse_errors);
       break;
     }
     case kASTShapeMacro: {
@@ -1017,6 +1027,34 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
         WireReadBool(buf, &r->value->data_member_spec->has_bit_width);
         return;
       }
+      if (field == 46) {
+        if (r->value->enumerator_spec == NULL) {
+          r->value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        SReadStringVal(ctx, buf, &r->value->enumerator_spec->name);
+        return;
+      }
+      if (field == 47) {
+        if (r->value->enumerator_spec == NULL) {
+          r->value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadInt64(buf, &r->value->enumerator_spec->value);
+        return;
+      }
+      if (field == 48) {
+        if (r->value->enumerator_spec == NULL) {
+          r->value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadBool(buf, &r->value->enumerator_spec->has_value);
+        return;
+      }
+      if (field == 49) {
+        if (r->value->enumerator_spec == NULL) {
+          r->value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadBool(buf, &r->value->enumerator_spec->has_name);
+        return;
+      }
       if (r->value != NULL &&
           SerialReadReflectionExtendedField(ctx, buf, field, r->value)) {
         return;
@@ -1039,6 +1077,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       ConstevalBlockASTNode* b = (ConstevalBlockASTNode*)n;
       if (field == 16) {
         b->body = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        WireReadBool(buf, &b->had_parse_errors);
         return;
       }
       break;

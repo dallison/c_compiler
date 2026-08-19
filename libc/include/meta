@@ -412,6 +412,27 @@ template <reflection_range R = initializer_list<info>>
 [[davecc::meta_intrinsic]] consteval info define_aggregate(
     info class_type, initializer_list<info> mdescrs);
 
+#if __cplusplus >= 202700L
+#ifndef __davecc_p4033_define_enum
+#define __davecc_p4033_define_enum 202603L
+#endif
+
+struct enumerator_options {
+  data_member_options::name_type name;
+  info value;
+  vector<info, void> attributes;
+  vector<info, void> annotations;
+};
+
+[[davecc::meta_intrinsic]] consteval info enumerator_spec(enumerator_options options);
+[[davecc::meta_intrinsic]] consteval bool is_enumerator_spec(info r);
+
+template <reflection_range R = initializer_list<info>>
+[[davecc::meta_intrinsic]] consteval info define_enum(info target_enum, R&& members);
+[[davecc::meta_intrinsic]] consteval info define_enum(
+    info target_enum, initializer_list<info> members);
+#endif
+
 [[davecc::meta_intrinsic]] consteval bool is_void_type(info type);
 [[davecc::meta_intrinsic]] consteval bool is_null_pointer_type(info type);
 [[davecc::meta_intrinsic]] consteval bool is_integral_type(info type);

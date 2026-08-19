@@ -124,6 +124,12 @@ enum {
   kTArg_reflection_dms_annotations = 43,
   kTArg_object_initializer = 44,
   kTArg_reflection_token_sequence = 45,
+  kTArg_reflection_ens_name = 46,
+  kTArg_reflection_ens_value = 47,
+  kTArg_reflection_ens_has_value = 48,
+  kTArg_reflection_ens_has_name = 49,
+  kTArg_reflection_ens_attributes = 50,
+  kTArg_reflection_ens_annotations = 51,
 };
 
 enum {
@@ -669,6 +675,15 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
       WireWriteBool(out, kTArg_reflection_dms_has_alignment, spec->has_alignment);
       WireWriteBool(out, kTArg_reflection_dms_has_bit_width, spec->has_bit_width);
     }
+    if (reflection->enumerator_spec != NULL) {
+      ReflectionEnumeratorSpec* spec = reflection->enumerator_spec;
+      if (spec->name.value != NULL) {
+        SWriteStringVal(ctx, out, kTArg_reflection_ens_name, &spec->name);
+      }
+      WireWriteInt64(out, kTArg_reflection_ens_value, spec->value);
+      WireWriteBool(out, kTArg_reflection_ens_has_value, spec->has_value);
+      WireWriteBool(out, kTArg_reflection_ens_has_name, spec->has_name);
+    }
     SerialWriteReflectionExtendedPayload(
         ctx, out, kTArg_reflection_sequence,
         kTArg_reflection_substituted_arguments, kTArg_reflection_dms_annotations,
@@ -985,6 +1000,52 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
                 ReflectionDataMemberSpecNew(NULL);
           }
           WireReadBool(in, &a->reflection_value->data_member_spec->has_bit_width);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_ens_name:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->enumerator_spec == NULL) {
+            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+          }
+          SReadStringVal(ctx, in, &a->reflection_value->enumerator_spec->name);
+        } else {
+          String ignored;
+          StringInit(&ignored, NULL);
+          SReadStringVal(ctx, in, &ignored);
+          StringDestruct(&ignored);
+        }
+        break;
+      case kTArg_reflection_ens_value:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->enumerator_spec == NULL) {
+            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+          }
+          WireReadInt64(in, &a->reflection_value->enumerator_spec->value);
+        } else {
+          int64_t ignored = 0;
+          WireReadInt64(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_ens_has_value:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->enumerator_spec == NULL) {
+            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+          }
+          WireReadBool(in, &a->reflection_value->enumerator_spec->has_value);
+        } else {
+          bool ignored = false;
+          WireReadBool(in, &ignored);
+        }
+        break;
+      case kTArg_reflection_ens_has_name:
+        if (a->reflection_value != NULL) {
+          if (a->reflection_value->enumerator_spec == NULL) {
+            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+          }
+          WireReadBool(in, &a->reflection_value->enumerator_spec->has_name);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
@@ -2628,6 +2689,15 @@ static void WriteReflectionValueInline(SerializeContext* ctx, WireBuffer* out,
     WireWriteBool(out, kTArg_reflection_dms_has_alignment, spec->has_alignment);
     WireWriteBool(out, kTArg_reflection_dms_has_bit_width, spec->has_bit_width);
   }
+  if (reflection->enumerator_spec != NULL) {
+    ReflectionEnumeratorSpec* spec = reflection->enumerator_spec;
+    if (spec->name.value != NULL) {
+      SWriteStringVal(ctx, out, kTArg_reflection_ens_name, &spec->name);
+    }
+    WireWriteInt64(out, kTArg_reflection_ens_value, spec->value);
+    WireWriteBool(out, kTArg_reflection_ens_has_value, spec->has_value);
+    WireWriteBool(out, kTArg_reflection_ens_has_name, spec->has_name);
+  }
 }
 
 static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
@@ -2759,6 +2829,30 @@ static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
           WireReadBool(in, &reflection->data_member_spec->has_bit_width);
         }
         break;
+      case kTArg_reflection_ens_name:
+        if (reflection->enumerator_spec == NULL) {
+          reflection->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        SReadStringVal(ctx, in, &reflection->enumerator_spec->name);
+        break;
+      case kTArg_reflection_ens_value:
+        if (reflection->enumerator_spec == NULL) {
+          reflection->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadInt64(in, &reflection->enumerator_spec->value);
+        break;
+      case kTArg_reflection_ens_has_value:
+        if (reflection->enumerator_spec == NULL) {
+          reflection->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadBool(in, &reflection->enumerator_spec->has_value);
+        break;
+      case kTArg_reflection_ens_has_name:
+        if (reflection->enumerator_spec == NULL) {
+          reflection->enumerator_spec = ReflectionEnumeratorSpecNew();
+        }
+        WireReadBool(in, &reflection->enumerator_spec->has_name);
+        break;
       default:
         if (SerialReadReflectionExtendedField(ctx, in, field, reflection)) {
           break;
@@ -2838,6 +2932,16 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
     WriteReflectionValueVector(ctx, buf, field_dms_annotations,
                                &value->data_member_spec->annotations);
   }
+  if (value->enumerator_spec != NULL &&
+      value->enumerator_spec->attributes.length > 0) {
+    WriteReflectionValueVector(ctx, buf, kTArg_reflection_ens_attributes,
+                               &value->enumerator_spec->attributes);
+  }
+  if (value->enumerator_spec != NULL &&
+      value->enumerator_spec->annotations.length > 0) {
+    WriteReflectionValueVector(ctx, buf, kTArg_reflection_ens_annotations,
+                               &value->enumerator_spec->annotations);
+  }
   if (value->token_sequence.length > 0) {
     WriteTokenSequenceTokenVector(ctx, buf, field_token_sequence,
                                   &value->token_sequence);
@@ -2868,6 +2972,20 @@ bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
       value->data_member_spec = ReflectionDataMemberSpecNew(NULL);
     }
     ReadReflectionValueVector(ctx, in, &value->data_member_spec->annotations);
+    return true;
+  }
+  if (field == kTArg_reflection_ens_attributes) {
+    if (value->enumerator_spec == NULL) {
+      value->enumerator_spec = ReflectionEnumeratorSpecNew();
+    }
+    ReadReflectionValueVector(ctx, in, &value->enumerator_spec->attributes);
+    return true;
+  }
+  if (field == kTArg_reflection_ens_annotations) {
+    if (value->enumerator_spec == NULL) {
+      value->enumerator_spec = ReflectionEnumeratorSpecNew();
+    }
+    ReadReflectionValueVector(ctx, in, &value->enumerator_spec->annotations);
     return true;
   }
   if (field == kTArg_reflection_token_sequence) {

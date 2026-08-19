@@ -112,6 +112,10 @@
 #ifndef __davecc_p3294_token_injection
 #define __davecc_p3294_token_injection 202406L
 #endif
+// Vendor probe for DaveCC's experimental P4033R1 define_enum implementation.
+#ifndef __davecc_p4033_define_enum
+#define __davecc_p4033_define_enum 202603L
+#endif
 #endif
 
 #endif /* version_h */

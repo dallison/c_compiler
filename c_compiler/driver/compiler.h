@@ -602,6 +602,8 @@ int LongLongSize(void);
 void PrintCompilerHelp(void);
 
 bool CompilerInjectionFrameActive(void);
+void CompilerRecordSynthesizedEnum(Enum* enumeration, TypeRecord* enum_type,
+                                   struct Symbol* tag);
 bool CompilerBeginInjectionFrame(InjectionTargetKind kind,
                                  struct Namespace* target_ns,
                                  struct Struct* target_class,

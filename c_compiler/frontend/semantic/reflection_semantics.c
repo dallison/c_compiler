@@ -3310,7 +3310,7 @@ static ASTNode* SemanticAnalyzeConstevalBlockInActiveFrame(
   }
   compiler->constant_evaluation_required_depth--;
   compiler->immediate_function_context_depth--;
-  if (NumErrors() != errors_before) {
+  if (node->had_parse_errors || NumErrors() != errors_before) {
     CompilerRollbackInjectionFrame();
     return (ASTNode*)node;
   }

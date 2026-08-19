@@ -264,7 +264,8 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
       }
       if (stmt != NULL) {
         VectorAppend(statements, stmt);
-        if (stmt->op == AST_OP(consteval_block)) {
+        if (stmt->op == AST_OP(consteval_block) &&
+            syntax->parsing_consteval_block_depth == 0) {
           SemanticAnalyzeFunctionConstevalBlockDuringParse(
               (ConstevalBlockASTNode*)stmt, statements, statements->length);
         }
@@ -2127,11 +2128,18 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     LexCheckpointSave(lex, &cp);
     LexNextToken(lex);
     if (LexLookingAt(lex, TOK(lbrace))) {
+      int errors_before = compiler->num_errors;
       LexNextToken(lex);
       LexCheckpointDestruct(&cp);
+      syntax->parsing_consteval_block_depth++;
       ASTNode* body = ParseCompoundStatement(syntax, followers, location);
+      syntax->parsing_consteval_block_depth--;
       stmt = NewConstevalBlockASTNode(body, location);
-      if (stmt != NULL) stmt->flags |= kASTStatementStart;
+      if (stmt != NULL) {
+        stmt->flags |= kASTStatementStart;
+        ((ConstevalBlockASTNode*)stmt)->had_parse_errors =
+            compiler->num_errors != errors_before;
+      }
       return stmt;
     }
     LexCheckpointRestore(lex, &cp);
@@ -2202,12 +2210,18 @@ ASTNode* SyntaxParseConstevalBlock(Syntax* syntax, TokenClass followers) {
     return NULL;
   }
   SourceLocation location = syntax->lex->current_token_location;
+  int errors_before = compiler->num_errors;
   LexNextToken(syntax->lex);
   if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
     SyntaxError(syntax, "expected '{' after consteval");
     return NULL;
   }
   LexNextToken(syntax->lex);
+  syntax->parsing_consteval_block_depth++;
   ASTNode* body = ParseCompoundStatement(syntax, followers, location);
-  return NewConstevalBlockASTNode(body, location);
+  syntax->parsing_consteval_block_depth--;
+  ConstevalBlockASTNode* block =
+      (ConstevalBlockASTNode*)NewConstevalBlockASTNode(body, location);
+  block->had_parse_errors = compiler->num_errors != errors_before;
+  return (ASTNode*)block;
 }

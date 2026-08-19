@@ -755,6 +755,7 @@ ASTNode* NewSpliceQualifiedASTNode(ASTNode* reflection, ASTNode* suffix,
 typedef struct {
   ASTNode base;
   ASTNode* body;
+  bool had_parse_errors;
 } ConstevalBlockASTNode;
 
 ASTNode* NewConstevalBlockASTNode(ASTNode* body, SourceLocation location);

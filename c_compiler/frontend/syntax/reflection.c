@@ -73,6 +73,12 @@ enum {
   kRefWire_sequence_value = 50,
   kRefWire_token_sequence = 51,
   kRefWire_token_sequence_piece_kind = 52,
+  kRefWire_ens_name = 53,
+  kRefWire_ens_value = 54,
+  kRefWire_ens_has_value = 55,
+  kRefWire_ens_has_name = 56,
+  kRefWire_ens_attributes = 57,
+  kRefWire_ens_annotations = 58,
 };
 
 TokenSequenceToken* TokenSequenceTokenNew(Token kind, const char* spelling,
@@ -270,12 +276,96 @@ bool ReflectionDataMemberSpecEqual(const ReflectionDataMemberSpec* left,
   return true;
 }
 
+static void ReflectionEnumeratorSpecDestructContents(
+    ReflectionEnumeratorSpec* spec) {
+  if (spec == NULL) {
+    return;
+  }
+  StringDestruct(&spec->name);
+  VectorDestruct(&spec->attributes);
+  VectorDestruct(&spec->annotations);
+}
+
+ReflectionEnumeratorSpec* ReflectionEnumeratorSpecNew(void) {
+  ReflectionEnumeratorSpec* spec = calloc(1, sizeof(*spec));
+  StringInit(&spec->name, NULL);
+  VectorInit(&spec->attributes);
+  VectorInit(&spec->annotations);
+  return spec;
+}
+
+ReflectionEnumeratorSpec* ReflectionEnumeratorSpecCopy(
+    const ReflectionEnumeratorSpec* spec) {
+  if (spec == NULL) {
+    return NULL;
+  }
+  ReflectionEnumeratorSpec* copy = ReflectionEnumeratorSpecNew();
+  if (spec->name.value != NULL) {
+    StringSetString(&copy->name, (String*)&spec->name);
+  }
+  copy->value = spec->value;
+  copy->has_value = spec->has_value;
+  copy->has_name = spec->has_name;
+  for (size_t i = 0; i < spec->attributes.length; i++) {
+    VectorAppend(&copy->attributes, spec->attributes.value.p[i]);
+  }
+  for (size_t i = 0; i < spec->annotations.length; i++) {
+    VectorAppend(&copy->annotations, spec->annotations.value.p[i]);
+  }
+  return copy;
+}
+
+void ReflectionEnumeratorSpecDelete(ReflectionEnumeratorSpec* spec) {
+  if (spec == NULL) {
+    return;
+  }
+  ReflectionEnumeratorSpecDestructContents(spec);
+  free(spec);
+}
+
+bool ReflectionEnumeratorSpecEqual(const ReflectionEnumeratorSpec* left,
+                                   const ReflectionEnumeratorSpec* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (left->has_name != right->has_name || left->has_value != right->has_value ||
+      left->value != right->value) {
+    return false;
+  }
+  if (left->has_name &&
+      !StringEqualString((String*)&left->name, (String*)&right->name)) {
+    return false;
+  }
+  if (left->attributes.length != right->attributes.length ||
+      left->annotations.length != right->annotations.length) {
+    return false;
+  }
+  for (size_t i = 0; i < left->attributes.length; i++) {
+    if (!ReflectionValueEqual(left->attributes.value.p[i],
+                              right->attributes.value.p[i])) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < left->annotations.length; i++) {
+    if (!ReflectionValueEqual(left->annotations.value.p[i],
+                              right->annotations.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void ReflectionValueDestructOwned(ReflectionValue* value) {
   if (value == NULL) {
     return;
   }
   ReflectionDataMemberSpecDelete(value->data_member_spec);
   value->data_member_spec = NULL;
+  ReflectionEnumeratorSpecDelete(value->enumerator_spec);
+  value->enumerator_spec = NULL;
   ASTNodeDelete(value->constexpr_initializer);
   value->constexpr_initializer = NULL;
   VectorDestruct(&value->sequence);
@@ -360,6 +450,10 @@ static void ReflectionCopyPayload(ReflectionValue* dest,
   dest->data_member_spec =
       source->data_member_spec != NULL
           ? ReflectionDataMemberSpecCopy(source->data_member_spec)
+          : NULL;
+  dest->enumerator_spec =
+      source->enumerator_spec != NULL
+          ? ReflectionEnumeratorSpecCopy(source->enumerator_spec)
           : NULL;
   dest->constexpr_initializer =
       source->constexpr_initializer != NULL
@@ -565,6 +659,15 @@ ReflectionValue* ReflectionCreateDataMemberSpec(
   return ReflectionIntern(candidate);
 }
 
+ReflectionValue* ReflectionCreateEnumeratorSpec(
+    ReflectionEnumeratorSpec* spec, SourceLocation location) {
+  ReflectionValue candidate = ReflectionCandidate(
+      kReflectionEnumeratorDescription, NULL, NULL, NULL, NULL, NULL, 0, 0,
+      NULL, 0, 0.0, false, NULL, location);
+  candidate.enumerator_spec = spec;
+  return ReflectionIntern(candidate);
+}
+
 ReflectionValue* ReflectionCreateSequence(ReflectionEntityKind kind,
                                           TypeRecord* element_type,
                                           Vector* values,
@@ -686,6 +789,9 @@ bool ReflectionValueEqual(const ReflectionValue* left,
     case kReflectionDataMemberDescription:
       return ReflectionDataMemberSpecEqual(left->data_member_spec,
                                            right->data_member_spec);
+    case kReflectionEnumeratorDescription:
+      return ReflectionEnumeratorSpecEqual(left->enumerator_spec,
+                                         right->enumerator_spec);
     case kReflectionBase:
       return left->parent_class == right->parent_class &&
              left->base_index == right->base_index;
@@ -736,6 +842,10 @@ const char* ReflectionValueIdentifier(const ReflectionValue* value) {
   if (value->data_member_spec != NULL && value->data_member_spec->has_name &&
       value->data_member_spec->name.value != NULL) {
     return value->data_member_spec->name.value;
+  }
+  if (value->enumerator_spec != NULL && value->enumerator_spec->has_name &&
+      value->enumerator_spec->name.value != NULL) {
+    return value->enumerator_spec->name.value;
   }
   if (value->namespace_ != NULL && value->namespace_->name.value != NULL) {
     return value->namespace_->name.value;

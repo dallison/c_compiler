@@ -779,11 +779,11 @@ run "$DAVECC" -target "$TARGET" -std=c++26 -c \
   -o "$work/use_reflection.o" ||
   fail "instantiate imported reflection values"
 
-run "$DAVECC" -target "$TARGET" -std=c++26 \
+run "$DAVECC" -target "$TARGET" -std=c++29 \
   -Xemit-module "$work/meta_synthesis.dcm" \
   "$FIXTURES/meta_synthesis.cppm" ||
   fail "emit meta_synthesis module"
-run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+run "$DAVECC" -target "$TARGET" -std=c++29 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_meta_synthesis.cpp" \
   -o "$work/use_meta_synthesis.o" ||
   fail "instantiate imported meta_synthesis values"

@@ -2502,6 +2502,7 @@ static ASTNode* ConstevalBlockASTNodeClone(const ASTNode* node,
   ConstevalBlockASTNode* to = ASTArenaAlloc(sizeof(*to));
   ASTNodeBaseCopy(&to->base, node);
   to->body = ASTNodeClone(from->body, func, data, (ASTNode*)to);
+  to->had_parse_errors = from->had_parse_errors;
   return func((ASTNode*)to, data);
 }
 static void ConstevalBlockASTNodeVisit(ASTNode* node,
@@ -2522,7 +2523,9 @@ static ASTNodeVirtuals consteval_block_vtbl = {
 ASTNode* NewConstevalBlockASTNode(ASTNode* body, SourceLocation location) {
   ConstevalBlockASTNode* node = ASTArenaAlloc(sizeof(*node));
   ASTNodeInit(&node->base, AST_OP(consteval_block), NULL, location, &consteval_block_vtbl);
-  node->body = body; SetParent(body, (ASTNode*)node, 0);
+  node->body = body;
+  node->had_parse_errors = false;
+  SetParent(body, (ASTNode*)node, 0);
   return (ASTNode*)node;
 }
 
@@ -4983,6 +4986,8 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeConstevalBlock: {
       ConstevalBlockASTNode* n = ASTArenaAlloc(sizeof(ConstevalBlockASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &consteval_block_vtbl);
+      n->body = NULL;
+      n->had_parse_errors = false;
       return &n->base;
     }
     case kASTShapeMacro: {

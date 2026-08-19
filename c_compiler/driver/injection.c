@@ -16,6 +16,7 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "type_class_internal.h"
+#include "type_enum.h"
 #include "type_parse.h"
 
 #include <stdlib.h>
@@ -40,6 +41,19 @@ typedef struct InjectionNamespaceSnapshot {
   size_t child_count;
 } InjectionNamespaceSnapshot;
 
+typedef struct InjectionEnumSnapshot {
+  Enum* enumeration;
+  TypeRecord* enum_type;
+  Symbol* tag;
+  size_t constant_count;
+  int64_t next_value;
+  Type type;
+  int size;
+  int bit_width;
+  bool tag_is_forward_declared;
+  bool tag_is_defined;
+} InjectionEnumSnapshot;
+
 typedef struct InjectionSyntaxSnapshot {
   Namespace* current_namespace;
   Struct* cxx_class_head;
@@ -48,6 +62,7 @@ typedef struct InjectionSyntaxSnapshot {
   bool parsing_template_declaration;
   bool parsing_template_specialization;
   bool parsing_template_argument;
+  int parsing_consteval_block_depth;
   int current_template_parameter_count;
   Vector* current_template_parameters;
   struct ConstraintExpr* current_template_requires_clause;
@@ -91,6 +106,7 @@ typedef struct InjectionFrame {
   Vector installed_entries;
   Vector pending_declaration_roots;
   Vector namespace_snapshots;
+  Vector enum_snapshots;
   bool snapshot_initialized;
 } InjectionFrame;
 
@@ -137,6 +153,10 @@ static void InjectionNamespaceSnapshotDelete(
   free(snapshot);
 }
 
+static void InjectionEnumSnapshotDelete(InjectionEnumSnapshot* snapshot) {
+  free(snapshot);
+}
+
 static void InjectionSyntaxSnapshotSave(Syntax* syntax,
                                         InjectionSyntaxSnapshot* snapshot) {
   snapshot->current_namespace = syntax->current_namespace;
@@ -149,6 +169,8 @@ static void InjectionSyntaxSnapshotSave(Syntax* syntax,
   snapshot->parsing_template_specialization =
       syntax->parsing_template_specialization;
   snapshot->parsing_template_argument = syntax->parsing_template_argument;
+  snapshot->parsing_consteval_block_depth =
+      syntax->parsing_consteval_block_depth;
   snapshot->current_template_parameter_count =
       syntax->current_template_parameter_count;
   snapshot->current_template_parameters = syntax->current_template_parameters;
@@ -171,6 +193,8 @@ static void InjectionSyntaxSnapshotRestore(Syntax* syntax,
   syntax->parsing_template_specialization =
       snapshot->parsing_template_specialization;
   syntax->parsing_template_argument = snapshot->parsing_template_argument;
+  syntax->parsing_consteval_block_depth =
+      snapshot->parsing_consteval_block_depth;
   syntax->current_template_parameter_count =
       snapshot->current_template_parameter_count;
   syntax->current_template_parameters = snapshot->current_template_parameters;
@@ -205,10 +229,14 @@ static void InjectionFrameDelete(InjectionFrame* frame) {
   for (size_t i = 0; i < frame->namespace_snapshots.length; i++) {
     InjectionNamespaceSnapshotDelete(frame->namespace_snapshots.value.p[i]);
   }
+  for (size_t i = 0; i < frame->enum_snapshots.length; i++) {
+    InjectionEnumSnapshotDelete(frame->enum_snapshots.value.p[i]);
+  }
   VectorDestruct(&frame->queued_sequences);
   VectorDestruct(&frame->installed_entries);
   VectorDestruct(&frame->pending_declaration_roots);
   VectorDestruct(&frame->namespace_snapshots);
+  VectorDestruct(&frame->enum_snapshots);
   if (frame->snapshot_initialized) {
     LexCheckpointDestruct(&frame->lex_checkpoint);
   }
@@ -232,6 +260,21 @@ static void InjectionRecordNamespaceSnapshot(InjectionFrame* frame,
   snapshot->alias_count = namespace_->namespace_aliases.length;
   snapshot->child_count = namespace_->children.length;
   VectorAppend(&frame->namespace_snapshots, snapshot);
+}
+
+static void InjectionRestoreEnumSnapshot(InjectionEnumSnapshot* snapshot) {
+  if (snapshot == NULL || snapshot->enumeration == NULL ||
+      snapshot->enum_type == NULL || snapshot->tag == NULL) {
+    return;
+  }
+  EnumRemoveConstantsFrom(snapshot->enumeration, snapshot->constant_count);
+  snapshot->enumeration->next_value = snapshot->next_value;
+  snapshot->enum_type->type = snapshot->type;
+  snapshot->enum_type->size = snapshot->size;
+  snapshot->enum_type->bit_width = snapshot->bit_width;
+  snapshot->tag->flags.is_forward_declared =
+      snapshot->tag_is_forward_declared;
+  snapshot->tag->flags.is_defined = snapshot->tag_is_defined;
 }
 
 static void InjectionFrameRestoreState(InjectionFrame* frame) {
@@ -265,6 +308,9 @@ static void InjectionUninstallEntries(InjectionFrame* frame) {
 }
 
 static void InjectionRollbackTargetMutations(InjectionFrame* frame) {
+  for (size_t i = frame->enum_snapshots.length; i > 0; i--) {
+    InjectionRestoreEnumSnapshot(frame->enum_snapshots.value.p[i - 1]);
+  }
   for (size_t i = frame->namespace_snapshots.length; i > 0; i--) {
     InjectionNamespaceSnapshot* snapshot =
         frame->namespace_snapshots.value.p[i - 1];
@@ -738,6 +784,25 @@ static bool InjectionDrainFrame(Syntax* syntax, InjectionFrame* frame) {
         }
       }
       VectorClear(&frame->namespace_snapshots);
+      for (size_t i = 0; i < frame->enum_snapshots.length; i++) {
+        InjectionEnumSnapshot* snapshot = frame->enum_snapshots.value.p[i];
+        bool already_recorded = false;
+        for (size_t j = 0; j < parent->enum_snapshots.length; j++) {
+          InjectionEnumSnapshot* parent_snapshot =
+              parent->enum_snapshots.value.p[j];
+          if (parent_snapshot != NULL && snapshot != NULL &&
+              parent_snapshot->enumeration == snapshot->enumeration) {
+            already_recorded = true;
+            break;
+          }
+        }
+        if (already_recorded) {
+          InjectionEnumSnapshotDelete(snapshot);
+        } else {
+          VectorAppend(&parent->enum_snapshots, snapshot);
+        }
+      }
+      VectorClear(&frame->enum_snapshots);
     }
     frame->committed = true;
     for (size_t i = 0; i < frame->queued_sequences.length; i++) {
@@ -796,6 +861,32 @@ bool CompilerInjectionFrameActive(void) {
   return InjectionActiveFrame() != NULL;
 }
 
+void CompilerRecordSynthesizedEnum(Enum* enumeration, TypeRecord* enum_type,
+                                   Symbol* tag) {
+  InjectionFrame* frame = InjectionActiveFrame();
+  if (frame == NULL || enumeration == NULL || enum_type == NULL || tag == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < frame->enum_snapshots.length; i++) {
+    InjectionEnumSnapshot* existing = frame->enum_snapshots.value.p[i];
+    if (existing != NULL && existing->enumeration == enumeration) {
+      return;
+    }
+  }
+  InjectionEnumSnapshot* snapshot = calloc(1, sizeof(*snapshot));
+  snapshot->enumeration = enumeration;
+  snapshot->enum_type = enum_type;
+  snapshot->tag = tag;
+  snapshot->constant_count = enumeration->constants.length;
+  snapshot->next_value = enumeration->next_value;
+  snapshot->type = enum_type->type;
+  snapshot->size = enum_type->size;
+  snapshot->bit_width = enum_type->bit_width;
+  snapshot->tag_is_forward_declared = tag->flags.is_forward_declared;
+  snapshot->tag_is_defined = tag->flags.is_defined;
+  VectorAppend(&frame->enum_snapshots, snapshot);
+}
+
 bool CompilerBeginInjectionFrame(InjectionTargetKind kind, struct Namespace* target_ns,
                                    struct Struct* target_class,
                                    int target_class_access,
@@ -838,6 +929,7 @@ bool CompilerBeginInjectionFrame(InjectionTargetKind kind, struct Namespace* tar
   VectorInit(&frame->installed_entries);
   VectorInit(&frame->pending_declaration_roots);
   VectorInit(&frame->namespace_snapshots);
+  VectorInit(&frame->enum_snapshots);
   InjectionRecordNamespaceSnapshot(frame, target_ns);
   VectorAppend(&compiler->injection_frames, frame);
   return true;
@@ -1023,6 +1115,7 @@ bool CompilerNamespaceInject(ReflectionValue* ns_value,
   VectorInit(&scratch.installed_entries);
   VectorInit(&scratch.pending_declaration_roots);
   VectorInit(&scratch.namespace_snapshots);
+  VectorInit(&scratch.enum_snapshots);
   bool ok = InjectionDrainOneSequence(syntax, &scratch, sequence, location,
                                       kInjectionTargetNamespace, target, NULL,
                                       kAccessPublic, NULL, NULL);
@@ -1045,9 +1138,13 @@ bool CompilerNamespaceInject(ReflectionValue* ns_value,
   for (size_t i = 0; i < scratch.namespace_snapshots.length; i++) {
     InjectionNamespaceSnapshotDelete(scratch.namespace_snapshots.value.p[i]);
   }
+  for (size_t i = 0; i < scratch.enum_snapshots.length; i++) {
+    InjectionEnumSnapshotDelete(scratch.enum_snapshots.value.p[i]);
+  }
   VectorDestruct(&scratch.installed_entries);
   VectorDestruct(&scratch.pending_declaration_roots);
   VectorDestruct(&scratch.namespace_snapshots);
+  VectorDestruct(&scratch.enum_snapshots);
   return ok;
 }
 

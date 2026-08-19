@@ -1507,6 +1507,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
   syntax->parsing_lambda_body_depth = 0;
+  syntax->parsing_consteval_block_depth = 0;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
@@ -1566,6 +1567,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->parsing_template_declaration = false;
   syntax->parsing_template_specialization = false;
   syntax->parsing_template_argument = false;
+  syntax->parsing_consteval_block_depth = 0;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   ConstraintExprDelete(syntax->current_template_requires_clause);
@@ -6068,7 +6070,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       }
       if (stmt != NULL) {
         VectorAppend(body, stmt);
-        if (stmt->op == AST_OP(consteval_block)) {
+        if (stmt->op == AST_OP(consteval_block) &&
+            syntax->parsing_consteval_block_depth == 0) {
           SemanticAnalyzeFunctionConstevalBlockDuringParse(
               (ConstevalBlockASTNode*)stmt, body, body->length);
         }
