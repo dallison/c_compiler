@@ -71,7 +71,122 @@ enum {
   kRefWire_spec_annotations = 48,
   kRefWire_sequence_kind = 49,
   kRefWire_sequence_value = 50,
+  kRefWire_token_sequence = 51,
+  kRefWire_token_sequence_piece_kind = 52,
 };
+
+TokenSequenceToken* TokenSequenceTokenNew(Token kind, const char* spelling,
+                                          size_t spelling_length,
+                                          SourceLocation location,
+                                          ASTNode* pseudo_value) {
+  TokenSequenceToken* token = calloc(1, sizeof(*token));
+  token->kind = kind;
+  StringInit(&token->spelling, NULL);
+  if (spelling != NULL && spelling_length > 0) {
+    StringAppendSegment(&token->spelling, spelling, spelling_length);
+  }
+  token->location = location;
+  token->piece_kind = kTokenSequencePieceRaw;
+  token->pseudo_value = pseudo_value;
+  return token;
+}
+
+TokenSequenceToken* TokenSequenceTokenCopy(const TokenSequenceToken* token) {
+  if (token == NULL) {
+    return NULL;
+  }
+  ASTNode* pseudo_value =
+      token->pseudo_value != NULL
+          ? ASTNodeClone(token->pseudo_value, IdentityCloneNode, NULL, NULL)
+          : NULL;
+  TokenSequenceToken* copy = TokenSequenceTokenNew(
+      token->kind, token->spelling.value, token->spelling.length,
+      token->location, pseudo_value);
+  copy->piece_kind = token->piece_kind;
+  return copy;
+}
+
+void TokenSequenceTokenDelete(TokenSequenceToken* token) {
+  if (token == NULL) {
+    return;
+  }
+  StringDestruct(&token->spelling);
+  ASTNodeDelete(token->pseudo_value);
+  free(token);
+}
+
+static bool TokenSequencePseudoValueEqual(const ASTNode* left,
+                                          const ASTNode* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL || left->op != right->op) {
+    return false;
+  }
+  switch (left->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide): {
+      ConstantASTNode* l = (ConstantASTNode*)left;
+      ConstantASTNode* r = (ConstantASTNode*)right;
+      return l->value.ivalue == r->value.ivalue &&
+             TypeEqual(l->base.type, r->base.type);
+    }
+    case AST_OP(fnumber): {
+      ConstantASTNode* l = (ConstantASTNode*)left;
+      ConstantASTNode* r = (ConstantASTNode*)right;
+      return l->value.fvalue == r->value.fvalue &&
+             TypeEqual(l->base.type, r->base.type);
+    }
+    case AST_OP(string):
+    case AST_OP(string_wide): {
+      ConstantASTNode* l = (ConstantASTNode*)left;
+      ConstantASTNode* r = (ConstantASTNode*)right;
+      return l->value.string != NULL && r->value.string != NULL &&
+             StringEqualString(l->value.string, r->value.string);
+    }
+    case AST_OP(reflection_constant): {
+      ReflectionASTNode* l = (ReflectionASTNode*)left;
+      ReflectionASTNode* r = (ReflectionASTNode*)right;
+      return ReflectionValueEqual(l->value, r->value);
+    }
+    default:
+      return false;
+  }
+}
+
+bool TokenSequenceTokenEqual(const TokenSequenceToken* left,
+                             const TokenSequenceToken* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (left->kind != right->kind || left->piece_kind != right->piece_kind) {
+    return false;
+  }
+  if (!StringEqualString((String*)&left->spelling, (String*)&right->spelling)) {
+    return false;
+  }
+  return TokenSequencePseudoValueEqual(left->pseudo_value, right->pseudo_value);
+}
+
+static bool ReflectionTokenSequenceEqual(const Vector* left,
+                                         const Vector* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL || left->length != right->length) {
+    return false;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    if (!TokenSequenceTokenEqual(left->value.p[i], right->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
 
 static void ReflectionDataMemberSpecDestructContents(
     ReflectionDataMemberSpec* spec) {
@@ -165,6 +280,9 @@ static void ReflectionValueDestructOwned(ReflectionValue* value) {
   value->constexpr_initializer = NULL;
   VectorDestruct(&value->sequence);
   VectorDestructWithContents(
+      &value->token_sequence,
+      (VectorElementDestructor)TokenSequenceTokenDelete, /*free_element=*/false);
+  VectorDestructWithContents(
       &value->substituted_arguments,
       (VectorElementDestructor)TemplateArgumentDelete, /*free_element=*/false);
   TypeRecordDelete(value->extract_type);
@@ -256,6 +374,11 @@ static void ReflectionCopyPayload(ReflectionValue* dest,
   for (size_t i = 0; i < source->sequence.length; i++) {
     VectorAppend(&dest->sequence, source->sequence.value.p[i]);
   }
+  VectorInit(&dest->token_sequence);
+  for (size_t i = 0; i < source->token_sequence.length; i++) {
+    VectorAppend(&dest->token_sequence,
+                 TokenSequenceTokenCopy(source->token_sequence.value.p[i]));
+  }
   VectorInit(&dest->substituted_arguments);
   for (size_t i = 0; i < source->substituted_arguments.length; i++) {
     VectorAppend(&dest->substituted_arguments,
@@ -326,6 +449,7 @@ ReflectionValue* ReflectionCreateDeserialized(ReflectionEntityKind kind,
   value->kind = kind;
   value->location = location;
   VectorInit(&value->sequence);
+  VectorInit(&value->token_sequence);
   VectorInit(&value->substituted_arguments);
   VectorAppend(&compiler->reflection_values, value);
   return value;
@@ -490,6 +614,20 @@ ReflectionValue* ReflectionCreateSubstituted(Symbol* template_symbol,
   return ReflectionIntern(candidate);
 }
 
+ReflectionValue* ReflectionCreateTokenSequence(Vector* tokens,
+                                               SourceLocation location) {
+  ReflectionValue candidate =
+      ReflectionCandidate(kReflectionTokenSequence, NULL, NULL, NULL, NULL,
+                          NULL, 0, 0, NULL, 0, 0.0, false, NULL, location);
+  if (tokens != NULL) {
+    for (size_t i = 0; i < tokens->length; i++) {
+      VectorAppend(&candidate.token_sequence,
+                   TokenSequenceTokenCopy(tokens->value.p[i]));
+    }
+  }
+  return ReflectionIntern(candidate);
+}
+
 bool ReflectionKindIsTemplate(ReflectionEntityKind kind) {
   return kind == kReflectionTemplate || kind == kReflectionClassTemplate ||
          kind == kReflectionFunctionTemplate ||
@@ -568,6 +706,9 @@ bool ReflectionValueEqual(const ReflectionValue* left,
                   : left->scalar_ivalue == right->scalar_ivalue);
     case kReflectionAnnotation:
       return left->annotation == right->annotation;
+    case kReflectionTokenSequence:
+      return ReflectionTokenSequenceEqual(&left->token_sequence,
+                                          &right->token_sequence);
   }
   return false;
 }

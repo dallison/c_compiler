@@ -18,10 +18,12 @@
 #include "expr_parser.h"
 #include "expr_semantics.h"
 #include "preprocessor.h"
+#include "reflection.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "type.h"
 #include "type_class_internal.h"
+#include "type_internal.h"
 #include "compiler.h"
 #include "type_traits_semantics.h"
 
@@ -3539,6 +3541,128 @@ static bool TokenStartsFundamentalTypeSpecifier(Token token) {
   }
 }
 
+static void AppendTokenSequenceRawPiece(Lex* lex, Vector* tokens) {
+  String spelling;
+  StringInit(&spelling, NULL);
+  LexCurrentTokenSpelling(lex, &spelling);
+  TokenSequenceToken* piece = TokenSequenceTokenNew(
+      lex->current_token, spelling.value, spelling.length,
+      lex->current_token_location, NULL);
+  piece->piece_kind = kTokenSequencePieceRaw;
+  VectorAppend(tokens, piece);
+  StringDestruct(&spelling);
+}
+
+static void ParseTokenSequenceInterpolator(Syntax* syntax, Vector* tokens,
+                                           TokenClass followers) {
+  Lex* lex = syntax->lex;
+  SourceLocation location = lex->current_token_location;
+  LexNextToken(lex);
+
+  if (LexLookingAt(lex, TOK(lparen))) {
+    LexNextToken(lex);
+    ASTNode* expr = SyntaxParseExpression(syntax, TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    TokenSequenceToken* piece = TokenSequenceTokenNew(
+        TOK(injected_value), NULL, 0, location, expr);
+    piece->piece_kind = kTokenSequencePieceTokenInterpolation;
+    VectorAppend(tokens, piece);
+    return;
+  }
+
+  if (LexLookingAt(lex, TOK(identifier)) &&
+      StringEqual(&lex->spelling, "id")) {
+    LexNextToken(lex);
+    SyntaxNeedBracket(syntax, TOK(lparen), followers);
+    Vector* args = NewVector();
+    if (!LexLookingAt(lex, TOK(rparen))) {
+      do {
+        VectorAppend(args, ParseAssignmentExpression(syntax, TC(closebra)));
+      } while (LexMatch(lex, TOK(comma)));
+    }
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    ASTNode* arg_holder = NewVectorASTNode(AST_OP(token_sequence_id_args), NULL,
+                                           location, NULL, args);
+    TokenSequenceToken* piece = TokenSequenceTokenNew(
+        TOK(injected_value), NULL, 0, location, arg_holder);
+    piece->piece_kind = kTokenSequencePieceIdentifierInterpolation;
+    VectorAppend(tokens, piece);
+    return;
+  }
+
+  if (LexLookingAt(lex, TOK(identifier)) &&
+      StringEqual(&lex->spelling, "tokens")) {
+    LexNextToken(lex);
+    SyntaxNeedBracket(syntax, TOK(lparen), followers);
+    ASTNode* expr = SyntaxParseExpression(syntax, TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    TokenSequenceToken* piece = TokenSequenceTokenNew(
+        TOK(injected_value), NULL, 0, location, expr);
+    piece->piece_kind = kTokenSequencePieceTokensInterpolation;
+    VectorAppend(tokens, piece);
+    return;
+  }
+
+  SyntaxError(syntax,
+              "expected '\\(', '\\id(', or '\\tokens(' after '\\' in token "
+              "sequence literal");
+}
+
+static ASTNode* ParseTokenSequenceLiteral(Syntax* syntax, TokenClass followers,
+                                          SourceLocation location) {
+  Lex* lex = syntax->lex;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+    SyntaxError(syntax, "token sequence literals require C++29");
+  }
+  LexNextToken(lex);
+
+  Vector tokens;
+  VectorInit(&tokens);
+  int brace_depth = 1;
+  while (!LexEof(lex) && brace_depth > 0) {
+    if (LexLookingAt(lex, TOK(lbrace))) {
+      AppendTokenSequenceRawPiece(lex, &tokens);
+      brace_depth++;
+      LexNextToken(lex);
+      continue;
+    }
+    if (LexLookingAt(lex, TOK(rbrace))) {
+      brace_depth--;
+      if (brace_depth == 0) {
+        break;
+      }
+      AppendTokenSequenceRawPiece(lex, &tokens);
+      LexNextToken(lex);
+      continue;
+    }
+    if (LexLookingAt(lex, TOK(backslash))) {
+      ParseTokenSequenceInterpolator(syntax, &tokens, followers);
+      continue;
+    }
+    AppendTokenSequenceRawPiece(lex, &tokens);
+    LexNextToken(lex);
+  }
+
+  if (brace_depth != 0) {
+    SyntaxError(syntax, "unbalanced braces in token sequence literal");
+    for (size_t i = 0; i < tokens.length; i++) {
+      TokenSequenceTokenDelete(tokens.value.p[i]);
+    }
+    VectorDestruct(&tokens);
+    SyntaxRecover(syntax, followers);
+    return NewTokenSequenceLiteralASTNode(
+        ReflectionCreateTokenSequence(NULL, location), location);
+  }
+
+  LexNextToken(lex);
+  ReflectionValue* value = ReflectionCreateTokenSequence(&tokens, location);
+  for (size_t i = 0; i < tokens.length; i++) {
+    TokenSequenceTokenDelete(tokens.value.p[i]);
+  }
+  VectorDestruct(&tokens);
+  return NewTokenSequenceLiteralASTNode(value, location);
+}
+
 static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
 
@@ -3572,6 +3696,19 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
       return NewSpliceQualifiedASTNode(reflection, suffix, location);
     }
     return NewSpliceASTNode(reflection, kSpliceExpression, location);
+  }
+
+  if (LexLookingAt(lex, TOK(caret))) {
+    LexCheckpoint caret_checkpoint;
+    LexCheckpointSave(lex, &caret_checkpoint);
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(lbrace))) {
+      LexCheckpointDestruct(&caret_checkpoint);
+      SourceLocation location = caret_checkpoint.current_token_location;
+      return ParseTokenSequenceLiteral(syntax, followers, location);
+    }
+    LexCheckpointRestore(lex, &caret_checkpoint);
+    LexCheckpointDestruct(&caret_checkpoint);
   }
 
   // Check for parenthesized expression.
@@ -3711,6 +3848,18 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     ((CastASTNode*)result)->kind =
         brace_init ? kCastAutoBrace : kCastAutoParen;
     return result;
+  }
+
+  if (LexLookingAt(lex, TOK(injected_value))) {
+    ASTNode* injected = LexCurrentInjectedValue(lex);
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    if (injected == NULL) {
+      SyntaxError(syntax, "missing injected value during token replay");
+      return NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+    }
+    return ASTNodeClone(injected, IdentityCloneNode, NULL, NULL);
   }
 
   // Check for identifier.  In C++ an unqualified operator-function-id (e.g.

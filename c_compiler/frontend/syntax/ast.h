@@ -100,6 +100,8 @@ typedef enum {
   AST_OP(typeid),
   AST_OP(reflect),
   AST_OP(reflection_constant),
+  AST_OP(token_sequence_literal),
+  AST_OP(token_sequence_id_args),
   AST_OP(splice),
   AST_OP(splice_qualified),
   AST_OP(consteval_block),
@@ -719,6 +721,8 @@ ASTNode* NewReflectionASTNode(ReflectionOperandKind operand_kind,
                               SourceLocation location);
 ASTNode* NewReflectionConstantASTNode(struct ReflectionValue* value,
                                       SourceLocation location);
+ASTNode* NewTokenSequenceLiteralASTNode(struct ReflectionValue* value,
+                                        SourceLocation location);
 
 typedef enum {
   kSpliceExpression,

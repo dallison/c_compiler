@@ -19,6 +19,7 @@
 #include "expr_semantics.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
+#include "reflection_semantics.h"
 #include "symbol_table.h"
 #include "syntax.h"
 #include "semantics.h"
@@ -2266,6 +2267,25 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
       ASTNodeDelete(node);
       continue;
+    }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        LexLookingAt(parser->lex, TOK(consteval))) {
+      LexCheckpoint block_checkpoint;
+      LexCheckpointSave(parser->lex, &block_checkpoint);
+      LexNextToken(parser->lex);
+      bool is_consteval_block = LexLookingAt(parser->lex, TOK(lbrace));
+      LexCheckpointRestore(parser->lex, &block_checkpoint);
+      LexCheckpointDestruct(&block_checkpoint);
+      if (is_consteval_block) {
+        ASTNode* block = SyntaxParseConstevalBlock(
+            parser->syntax, TC(type) | TC(closebrace));
+        if (block != NULL) {
+          SemanticAnalyzeConstevalBlockWithAccess(
+              (ConstevalBlockASTNode*)block, current_access);
+          ASTNodeDelete(block);
+        }
+        continue;
+      }
     } else if (LexLookingAt(parser->lex, TOK(public))) {
       current_access = kAccessPublic;
       LexNextToken(parser->lex);
@@ -2994,4 +3014,66 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       saved_deferred_noexcept_specifiers;
   VectorDestruct(&deferred_inline_bodies);
   VectorDestruct(&deferred_noexcept_specifiers);
+}
+
+bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
+                              SourceLocation location) {
+  if (parser == NULL || parser->syntax == NULL || str == NULL) {
+    return false;
+  }
+  if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
+      LexLookingAt(parser->lex, TOK(static_assert))) {
+    ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
+    ASTNodeDelete(node);
+    return true;
+  }
+  if (LexLookingAt(parser->lex, TOK(using)) ||
+      LexLookingAt(parser->lex, TOK(typedef)) ||
+      LexLookingAt(parser->lex, TOK(template)) ||
+      LexLookingAt(parser->lex, TOK(friend))) {
+    SyntaxErrorAtLocation(parser->syntax, location,
+                          "unsupported injected class member declaration");
+    return false;
+  }
+
+  parser->is_inline = false;
+  parser->is_constexpr = false;
+  parser->is_consteval = false;
+  parser->is_constinit = false;
+  parser->cxx_member_owner = str;
+
+  TypeRecord* member_type = TypeParserParseType(parser, true);
+  if (member_type == NULL) {
+    return false;
+  }
+  Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
+  if (member_symbol == NULL) {
+    TypeRecordDelete(member_type);
+    SyntaxError(parser->syntax, "invalid injected class member");
+    return false;
+  }
+  if (TypeIsFunction(member_symbol->type)) {
+    SymbolDelete(member_symbol);
+    TypeRecordDelete(member_type);
+    SyntaxErrorAtLocation(parser->syntax, location,
+                          "injected class member functions are not supported");
+    return false;
+  }
+
+  StructMember* member = NewStructMember(member_symbol);
+  member->access = access;
+  member->is_static = false;
+  member->is_member_function = false;
+  AddStructMember(parser, str, member);
+  AlignNextOffsetForSymbol(str, member_symbol);
+  member->byte_offset = str->next_offset;
+  member->index = str->members.length - 1;
+  UpdateStructSize(str, member_symbol->type, str->is_union);
+  if (!LexLookingAt(parser->lex, TOK(semicolon))) {
+    SyntaxNeedSemicolon(parser->syntax, TC(type));
+  } else {
+    LexNextToken(parser->lex);
+  }
+  TypeRecordDelete(member_type);
+  return true;
 }

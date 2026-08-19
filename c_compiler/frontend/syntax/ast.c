@@ -257,6 +257,10 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "^^";
     case AST_OP(reflection_constant):
       return "<reflection>";
+    case AST_OP(token_sequence_literal):
+      return "^{...}";
+    case AST_OP(token_sequence_id_args):
+      return "token_sequence_id_args";
     case AST_OP(splice):
       return "[: :]";
     case AST_OP(splice_qualified):
@@ -1757,7 +1761,9 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
   VectorASTNode* node = ASTArenaAlloc(sizeof(VectorASTNode));
   ASTNodeInit(&node->base, op, type, location, &vector_vtbl);
   node->left = left;
-  left->parent = &node->base;
+  if (left != NULL) {
+    left->parent = &node->base;
+  }
   node->children = children;
   for (size_t i = 0; i < children->length; i++) {
     ASTNode* child = children->value.p[i];
@@ -2222,8 +2228,13 @@ static void ReflectionASTNodeDelete(ASTNode* node) {
 static void ReflectionASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   ReflectionASTNode* reflection = (ReflectionASTNode*)node;
   Indent(indents, fp);
-  fprintf(fp, "%s\n",
-          node->op == AST_OP(reflection_constant) ? "<reflection>" : "^^");
+  if (node->op == AST_OP(reflection_constant)) {
+    fprintf(fp, "<reflection>\n");
+  } else if (node->op == AST_OP(token_sequence_literal)) {
+    fprintf(fp, "^{...}\n");
+  } else {
+    fprintf(fp, "^^\n");
+  }
   if (reflection->operand != NULL) {
     ASTNodePrint(reflection->operand, indents + 2, fp);
   } else if (reflection->operand_type != NULL) {
@@ -2261,6 +2272,33 @@ static ASTNode* ReflectionASTNodeClone(
                          : NULL;
   to->namespace_ = from->namespace_;
   to->value = from->value;
+  if (node->op == AST_OP(token_sequence_literal) && from->value != NULL &&
+      from->value->kind == kReflectionTokenSequence) {
+    Vector pieces;
+    VectorInit(&pieces);
+    for (size_t i = 0; i < from->value->token_sequence.length; i++) {
+      TokenSequenceToken* source = from->value->token_sequence.value.p[i];
+      ASTNode* pseudo =
+          source != NULL && source->pseudo_value != NULL
+              ? ASTNodeClone(source->pseudo_value, func, data, NULL)
+              : NULL;
+      TokenSequenceToken* copy =
+          source != NULL
+              ? TokenSequenceTokenNew(
+                    source->kind, source->spelling.value,
+                    source->spelling.length, source->location, pseudo)
+              : NULL;
+      if (copy != NULL) {
+        copy->piece_kind = source->piece_kind;
+        VectorAppend(&pieces, copy);
+      }
+    }
+    to->value =
+        ReflectionCreateTokenSequence(&pieces, from->value->location);
+    VectorDestructWithContents(
+        &pieces, (VectorElementDestructor)TokenSequenceTokenDelete,
+        /*free_element=*/false);
+  }
   return func((ASTNode*)to, data);
 }
 
@@ -2307,6 +2345,15 @@ ASTNode* NewReflectionConstantASTNode(ReflectionValue* value,
   ASTNode* node = NewReflectionASTNode(kReflectionOperandValue, NULL, NULL, NULL,
                                       location);
   node->op = AST_OP(reflection_constant);
+  ((ReflectionASTNode*)node)->value = value;
+  return node;
+}
+
+ASTNode* NewTokenSequenceLiteralASTNode(ReflectionValue* value,
+                                        SourceLocation location) {
+  ASTNode* node = NewReflectionASTNode(kReflectionOperandValue, NULL, NULL, NULL,
+                                      location);
+  node->op = AST_OP(token_sequence_literal);
   ((ReflectionASTNode*)node)->value = value;
   return node;
 }

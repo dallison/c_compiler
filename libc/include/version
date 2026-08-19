@@ -105,4 +105,12 @@
 #endif
 #endif
 
+#if __cplusplus >= 202700L
+// Vendor probe for DaveCC's experimental P3294R2 implementation. WG21 has not
+// assigned a standard feature-test macro to token-sequence injection.
+#ifndef __davecc_p3294_token_injection
+#define __davecc_p3294_token_injection 202406L
+#endif
+#endif
+
 #endif /* version_h */

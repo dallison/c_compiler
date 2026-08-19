@@ -11296,10 +11296,12 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       if ((binary_node->left != NULL &&
            (binary_node->left->op == AST_OP(reflect) ||
             binary_node->left->op == AST_OP(reflection_constant) ||
+            binary_node->left->op == AST_OP(token_sequence_literal) ||
             TypeIsReflection(binary_node->left->type))) ||
           (binary_node->right != NULL &&
            (binary_node->right->op == AST_OP(reflect) ||
             binary_node->right->op == AST_OP(reflection_constant) ||
+            binary_node->right->op == AST_OP(token_sequence_literal) ||
             TypeIsReflection(binary_node->right->type)))) {
         node = SemanticAnalyzeReflectionComparison(binary_node);
       } else {
@@ -11355,6 +11357,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(reflect):
     case AST_OP(reflection_constant):
+    case AST_OP(token_sequence_literal):
       return SemanticAnalyzeReflection((ReflectionASTNode*)node);
 
     case AST_OP(splice):

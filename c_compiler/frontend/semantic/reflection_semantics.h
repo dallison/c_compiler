@@ -17,6 +17,10 @@ bool SemanticLowerMemberSplice(BinaryASTNode* access);
 ASTNode* SemanticAnalyzeReflectionComparison(BinaryASTNode* comparison);
 ASTNode* SemanticTryAnalyzeMetaCall(VectorASTNode* call);
 ASTNode* SemanticAnalyzeConstevalBlock(ConstevalBlockASTNode* node);
+ASTNode* SemanticAnalyzeConstevalBlockWithAccess(ConstevalBlockASTNode* node,
+                                                 int class_access);
+ASTNode* SemanticAnalyzeFunctionConstevalBlockDuringParse(
+    ConstevalBlockASTNode* node, Vector* statements, size_t insert_index);
 
 void SemanticAttachAnnotationAttributes(Vector* attributes, Symbol* symbol);
 

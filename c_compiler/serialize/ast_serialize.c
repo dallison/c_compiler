@@ -485,7 +485,8 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
           WireWriteBool(buf, 43, spec->has_alignment);
           WireWriteBool(buf, 44, spec->has_bit_width);
         }
-        SerialWriteReflectionExtendedPayload(ctx, buf, 41, 42, 43, r->value);
+        SerialWriteReflectionExtendedPayload(ctx, buf, 41, 42, 43, 45,
+                                             r->value);
       }
       break;
     }

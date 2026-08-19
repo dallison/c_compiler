@@ -788,4 +788,24 @@ run "$DAVECC" -target "$TARGET" -std=c++26 -c \
   -o "$work/use_meta_synthesis.o" ||
   fail "instantiate imported meta_synthesis values"
 
+run "$DAVECC" -target "$TARGET" -std=c++29 \
+  -Xemit-module "$work/token_injection.dcm" \
+  "$FIXTURES/token_injection.cppm" ||
+  fail "emit token injection module"
+run "$DAVECC" -target "$TARGET" -std=c++29 -c \
+  "$FIXTURES/token_injection.cppm" -o "$work/token_injection.o" ||
+  fail "compile token injection module object"
+run "$DAVECC" -target "$TARGET" -std=c++29 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_token_injection.cpp" \
+  -o "$work/use_token_injection.o" ||
+  fail "compile token injection importer"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_token_injection.o" "$work/token_injection.o" "$LIBC" \
+  -o "$work/token_injection.bin" ||
+  fail "link token injection module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/token_injection.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute token injection module program"
+
 echo "ok module emit/import/link/execute"

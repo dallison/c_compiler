@@ -23,6 +23,16 @@
 
 struct Generator;
 struct Namespace;
+struct ASTNode;
+struct Syntax;
+struct Struct;
+struct ReflectionValue;
+
+typedef enum {
+  kInjectionTargetNamespace,
+  kInjectionTargetClass,
+  kInjectionTargetFunction,
+} InjectionTargetKind;
 
 // Thread local storage model.
 #define TLS(x) kTls_##x
@@ -493,6 +503,11 @@ typedef struct {
   // time. This distinguishes manifest constant evaluation from speculative
   // runtime folding for context-sensitive constructs such as `if consteval`.
   int constant_evaluation_required_depth;
+
+  // P3294 token-sequence injection frame stack (InjectionFrame*, owned).
+  Vector injection_frames;
+  // Parsed declaration roots produced by injection; drained at safe driver points.
+  Vector pending_injected_declarations;
 } Compiler;
 
 // Globals to avoid passing these around.
@@ -585,5 +600,34 @@ int LongSize(void);
 int LongLongSize(void);
 
 void PrintCompilerHelp(void);
+
+bool CompilerInjectionFrameActive(void);
+bool CompilerBeginInjectionFrame(InjectionTargetKind kind,
+                                 struct Namespace* target_ns,
+                                 struct Struct* target_class,
+                                 int target_class_access,
+                                 struct ASTNode* target_function_body,
+                                 size_t function_insert_index, bool temporary);
+bool CompilerBeginInjectionFrameForSyntax(struct Syntax* syntax,
+                                          int target_class_access);
+bool CompilerBeginFunctionInjectionFrame(Vector* statements,
+                                         size_t function_insert_index);
+void CompilerRollbackInjectionFrame(void);
+bool CompilerCommitInjectionFrame(struct Syntax* syntax);
+bool CompilerQueueInjection(struct ReflectionValue* sequence,
+                            SourceLocation location, struct ASTNode* diagnostic);
+bool CompilerNamespaceInject(struct ReflectionValue* ns_value,
+                             struct ReflectionValue* sequence,
+                             SourceLocation location, struct ASTNode* diagnostic);
+void CompilerQueueInjectedDeclaration(struct ASTNode* declaration_root);
+void CompilerRecordInjectedSymbol(struct Namespace* namespace_,
+                                  struct LocalSymbolTable* local_table,
+                                  struct Symbol* symbol, bool is_tag,
+                                  bool is_global);
+struct ASTNode* CompilerPopPendingInjectedDeclaration(void);
+void CompilerDrainPendingInjectedDeclarations(struct Syntax* syntax);
+void CompilerCompileQueuedDeclaration(struct Syntax* syntax,
+                                      struct ASTNode* node);
+void CompilerInjectionFramesTeardown(void);
 
 #endif /* compiler_h */

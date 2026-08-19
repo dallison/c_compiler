@@ -80,6 +80,10 @@ typedef enum {
   TOK(star),
   TOK(stareq),
   TOK(tilde),
+  TOK(backslash),
+
+  // Injected pseudo-value token produced by token-sequence replay.
+  TOK(injected_value),
 
   // Keywords.
   TOK(atomic),

@@ -861,6 +861,37 @@ bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag) {
   return true;
 }
 
+bool UninstallLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
+  if (table == NULL || symbol == NULL ||
+      FindSymbol(&table->table, &symbol->name) != symbol) {
+    return false;
+  }
+  RebuildBinaryTreeWithout(&table->table, symbol);
+  return true;
+}
+
+void NamespaceRollbackToSizes(Namespace* ns, size_t alias_count,
+                              size_t child_count) {
+  if (ns == NULL) {
+    return;
+  }
+  while (ns->namespace_aliases.length > alias_count) {
+    size_t last = ns->namespace_aliases.length - 1;
+    NamespaceAlias* alias = ns->namespace_aliases.value.p[last];
+    VectorDeleteElement(&ns->namespace_aliases, last);
+    NamespaceAliasDelete(alias);
+  }
+  while (ns->children.length > child_count) {
+    size_t last = ns->children.length - 1;
+    Namespace* child = ns->children.value.p[last];
+    VectorDeleteElement(&ns->children, last);
+    if (ns->anonymous_child == child) {
+      ns->anonymous_child = NULL;
+    }
+    NamespaceDelete(child);
+  }
+}
+
 bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
   if (!symbol->flags.is_name_independent &&
       FindDirectLocalNamespaceAlias(table, &symbol->name) != NULL) {

@@ -6,6 +6,7 @@
 #ifndef reflection_h
 #define reflection_h
 
+#include "tokens.h"
 #include "type.h"
 #include "symbol_table.h"
 #include "vector.h"
@@ -39,7 +40,26 @@ typedef enum {
   kReflectionConcept,
   kReflectionNamespaceAlias,
   kReflectionDataMemberDescription,
+  kReflectionTokenSequence,
 } ReflectionEntityKind;
+
+typedef enum {
+  kTokenSequencePieceRaw,
+  // An evaluated typed pseudo-token.  Replay exposes its AST value directly
+  // to the expression parser without detokenizing it.
+  kTokenSequencePieceValue,
+  kTokenSequencePieceTokenInterpolation,
+  kTokenSequencePieceIdentifierInterpolation,
+  kTokenSequencePieceTokensInterpolation,
+} TokenSequencePieceKind;
+
+typedef struct TokenSequenceToken {
+  Token kind;
+  String spelling;
+  SourceLocation location;
+  TokenSequencePieceKind piece_kind;
+  struct ASTNode* pseudo_value;
+} TokenSequenceToken;
 
 struct Attribute;
 
@@ -74,6 +94,7 @@ typedef struct ReflectionValue {
   struct ASTNode* constexpr_initializer;
   Symbol* promoted_symbol;
   Vector sequence;
+  Vector token_sequence;
   Symbol* substituted_template;
   Vector substituted_arguments;
   TypeRecord* extract_type;
@@ -132,6 +153,17 @@ ReflectionValue* ReflectionCreateWithInitializer(TypeRecord* type,
 ReflectionValue* ReflectionCreateSubstituted(Symbol* template_symbol,
                                              Vector* arguments,
                                              SourceLocation location);
+ReflectionValue* ReflectionCreateTokenSequence(Vector* tokens,
+                                               SourceLocation location);
+
+TokenSequenceToken* TokenSequenceTokenNew(Token kind, const char* spelling,
+                                          size_t spelling_length,
+                                          SourceLocation location,
+                                          struct ASTNode* pseudo_value);
+TokenSequenceToken* TokenSequenceTokenCopy(const TokenSequenceToken* token);
+void TokenSequenceTokenDelete(TokenSequenceToken* token);
+bool TokenSequenceTokenEqual(const TokenSequenceToken* left,
+                             const TokenSequenceToken* right);
 
 ReflectionDataMemberSpec* ReflectionDataMemberSpecNew(TypeRecord* member_type);
 ReflectionDataMemberSpec* ReflectionDataMemberSpecCopy(

@@ -6,6 +6,7 @@
 #include "reflection_semantics.h"
 
 #include "compiler.h"
+#include "reflection_meta_synthesis.h"
 #include "contracts.h"
 #include "constexpr.h"
 #include "errors.h"
@@ -19,9 +20,13 @@
 #include "type_internal.h"
 #include "type_print.h"
 #include "type_template.h"
+#include "lex.h"
 #include "source.h"
 
+#include <errno.h>
 #include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static Vector* MetaTemplateArgumentsVector(TypeRecord* type);
@@ -171,9 +176,278 @@ static bool ReflectionOperandIsDependent(ASTNode* expression) {
          TypeContainsTemplateParameter(expression->type);
 }
 
+static bool TokenSequenceExpressionIsSupportedPseudoValue(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  switch (expr->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+    case AST_OP(fnumber):
+    case AST_OP(string):
+    case AST_OP(string_wide):
+    case AST_OP(reflection_constant):
+      return true;
+    default:
+      return TypeIsReflection(expr->type) ||
+             TypeIsIntegral(expr->type) || TypeIsFloatingPoint(expr->type) ||
+             TypeIsBool(expr->type) || TypeIsNullPointer(expr->type);
+  }
+}
+
+static bool TokenSequenceAppendIdArgumentFragment(String* combined, ASTNode* arg,
+                                                  ASTNode* diagnostic) {
+  if (arg == NULL) {
+    SemanticError(diagnostic, "Invalid argument in '\\id(...)' interpolation");
+    return false;
+  }
+  arg = AnalyzeExpression(arg);
+  if (arg->op == AST_OP(string)) {
+    ConstantASTNode* string_node = (ConstantASTNode*)arg;
+    if (string_node->value.string == NULL) {
+      SemanticError(diagnostic,
+                    "String argument in '\\id(...)' is not a constant expression");
+      return false;
+    }
+    size_t length = string_node->value.string->length;
+    if (length > 0 && string_node->value.string->value[length - 1] == '\0') {
+      length--;
+    }
+    StringAppendSegment(combined, string_node->value.string->value, length);
+    return true;
+  }
+  if (arg->op == AST_OP(charconst) || arg->op == AST_OP(charwide)) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%lld",
+             (long long)((ConstantASTNode*)arg)->value.ivalue);
+    StringAppend(combined, buffer);
+    return true;
+  }
+  int64_t ivalue = 0;
+  if (EvaluateIntegerExpression(arg, &ivalue)) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%lld", (long long)ivalue);
+    StringAppend(combined, buffer);
+    return true;
+  }
+  SemanticError(
+      diagnostic,
+      "Argument in '\\id(...)' must be a string-like or integral constant "
+      "expression");
+  return false;
+}
+
+static ASTNode* TokenSequenceMaterializePseudoValue(ASTNode* expr,
+                                                    SourceLocation location,
+                                                    ASTNode* diagnostic) {
+  expr = AnalyzeExpression(expr);
+  ReflectionValue* reflection = SemanticEvaluateReflection(expr);
+  if (reflection != NULL) {
+    return NewReflectionConstantASTNode(reflection, location);
+  }
+  if (expr->op == AST_OP(reflection_constant) ||
+      expr->op == AST_OP(number) || expr->op == AST_OP(charconst) ||
+      expr->op == AST_OP(charwide) || expr->op == AST_OP(fnumber) ||
+      expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
+    return ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
+  }
+  if (TypeIsNullPointer(expr->type)) {
+    return NewIntConstantASTNode(
+        0, TypeRecordCopy(expr->type), location);
+  }
+  if (TypeIsBool(expr->type)) {
+    int64_t ivalue = 0;
+    if (!EvaluateIntegerExpression(expr, &ivalue)) {
+      SemanticError(diagnostic,
+                    "Boolean argument in token interpolation is not a "
+                    "constant expression");
+      return NULL;
+    }
+    return NewIntConstantASTNode(
+        ivalue, NewTypeRecordWithSize(kTypeBool, kQualPlain), location);
+  }
+  int64_t ivalue = 0;
+  if (EvaluateIntegerExpression(expr, &ivalue)) {
+    return NewIntConstantASTNode(ivalue, TypeRecordCopy(expr->type), location);
+  }
+  double fvalue = 0.0;
+  if (EvaluateFloatingPointExpression(expr, &fvalue)) {
+    return NewRealConstantASTNode(fvalue, TypeRecordCopy(expr->type), location);
+  }
+  if (!TokenSequenceExpressionIsSupportedPseudoValue(expr)) {
+    SemanticError(
+        diagnostic,
+        "Token interpolation expression has unsupported or non-constant value");
+  } else {
+    SemanticError(
+        diagnostic,
+        "Token interpolation expression is not a constant expression");
+  }
+  return NULL;
+}
+
+static TokenSequenceToken* TokenSequenceMakeIdentifierPiece(
+    const String* spelling, SourceLocation location) {
+  TokenSequenceToken* piece = TokenSequenceTokenNew(
+      TOK(identifier), spelling->value, spelling->length, location, NULL);
+  piece->piece_kind = kTokenSequencePieceRaw;
+  return piece;
+}
+
+static TokenSequenceToken* TokenSequenceMakePseudoValuePiece(
+    ASTNode* pseudo_value, SourceLocation location) {
+  TokenSequenceToken* piece = TokenSequenceTokenNew(
+      TOK(injected_value), NULL, 0, location, pseudo_value);
+  piece->piece_kind = kTokenSequencePieceValue;
+  return piece;
+}
+
+static bool TokenSequenceEvaluateIdentifierInterpolation(
+    TokenSequenceToken* piece, Vector* output, ASTNode* diagnostic) {
+  if (piece == NULL || piece->pseudo_value == NULL ||
+      piece->pseudo_value->op != AST_OP(token_sequence_id_args)) {
+    SemanticError(diagnostic, "Invalid '\\id(...)' interpolation");
+    return false;
+  }
+  VectorASTNode* args_node = (VectorASTNode*)piece->pseudo_value;
+  if (args_node->children == NULL || args_node->children->length == 0) {
+    SemanticError(diagnostic, "'\\id(...)' requires at least one argument");
+    return false;
+  }
+  String combined;
+  StringInit(&combined, NULL);
+  bool ok = true;
+  for (size_t i = 0; i < args_node->children->length; i++) {
+    if (!TokenSequenceAppendIdArgumentFragment(
+            &combined, args_node->children->value.p[i], diagnostic)) {
+      ok = false;
+      break;
+    }
+  }
+  if (ok && !LexSpellingIsIdentifier(combined.value, combined.length)) {
+    SemanticError(diagnostic,
+                  "'\\id(...)' must produce exactly one valid C++ identifier");
+    ok = false;
+  }
+  if (ok) {
+    VectorAppend(output,
+                 TokenSequenceMakeIdentifierPiece(&combined, piece->location));
+  }
+  StringDestruct(&combined);
+  return ok;
+}
+
+static bool TokenSequenceEvaluateTokenInterpolation(TokenSequenceToken* piece,
+                                                    Vector* output,
+                                                    ASTNode* diagnostic) {
+  if (piece == NULL || piece->pseudo_value == NULL) {
+    SemanticError(diagnostic, "Invalid '\\(...)' interpolation");
+    return false;
+  }
+  ASTNode* pseudo =
+      TokenSequenceMaterializePseudoValue(piece->pseudo_value, piece->location,
+                                          diagnostic);
+  if (pseudo == NULL) {
+    return false;
+  }
+  VectorAppend(output, TokenSequenceMakePseudoValuePiece(pseudo, piece->location));
+  return true;
+}
+
+static bool TokenSequenceEvaluateTokensInterpolation(TokenSequenceToken* piece,
+                                                     Vector* output,
+                                                     ASTNode* diagnostic) {
+  if (piece == NULL || piece->pseudo_value == NULL) {
+    SemanticError(diagnostic, "Invalid '\\tokens(...)' interpolation");
+    return false;
+  }
+  ASTNode* expr = AnalyzeExpression(piece->pseudo_value);
+  ReflectionValue* sequence = SemanticEvaluateReflection(expr);
+  if (sequence == NULL || sequence->kind != kReflectionTokenSequence) {
+    SemanticError(
+        diagnostic,
+        "'\\tokens(...)' argument must be a constant token-sequence expression");
+    return false;
+  }
+  for (size_t i = 0; i < sequence->token_sequence.length; i++) {
+    TokenSequenceToken* spliced =
+        sequence->token_sequence.value.p[i];
+    if (spliced == NULL) {
+      continue;
+    }
+    if (spliced->piece_kind != kTokenSequencePieceRaw &&
+        spliced->piece_kind != kTokenSequencePieceValue) {
+      SemanticError(
+          diagnostic,
+          "'\\tokens(...)' operand contains unevaluated token interpolation");
+      return false;
+    }
+    VectorAppend(output, TokenSequenceTokenCopy(spliced));
+  }
+  return true;
+}
+
+static ReflectionValue* SemanticEvaluateTokenSequenceValue(
+    ReflectionValue* value, ASTNode* diagnostic) {
+  if (value == NULL || value->kind != kReflectionTokenSequence) {
+    return value;
+  }
+  Vector evaluated;
+  VectorInit(&evaluated);
+  bool ok = true;
+  for (size_t i = 0; i < value->token_sequence.length; i++) {
+    TokenSequenceToken* piece = value->token_sequence.value.p[i];
+    if (piece == NULL) {
+      continue;
+    }
+    switch (piece->piece_kind) {
+      case kTokenSequencePieceRaw:
+      case kTokenSequencePieceValue:
+        VectorAppend(&evaluated, TokenSequenceTokenCopy(piece));
+        break;
+      case kTokenSequencePieceTokenInterpolation:
+        ok = TokenSequenceEvaluateTokenInterpolation(piece, &evaluated,
+                                                     diagnostic);
+        break;
+      case kTokenSequencePieceIdentifierInterpolation:
+        ok = TokenSequenceEvaluateIdentifierInterpolation(piece, &evaluated,
+                                                          diagnostic);
+        break;
+      case kTokenSequencePieceTokensInterpolation:
+        ok = TokenSequenceEvaluateTokensInterpolation(piece, &evaluated,
+                                                      diagnostic);
+        break;
+    }
+    if (!ok) {
+      break;
+    }
+  }
+  ReflectionValue* result = ok
+                                ? ReflectionCreateTokenSequence(&evaluated,
+                                                              value->location)
+                                : ReflectionCreateTokenSequence(NULL,
+                                                              value->location);
+  for (size_t i = 0; i < evaluated.length; i++) {
+    TokenSequenceTokenDelete(evaluated.value.p[i]);
+  }
+  VectorDestruct(&evaluated);
+  return result;
+}
+
 ReflectionValue* SemanticReflectionValueFromExpression(ASTNode* expression) {
   if (expression == NULL) {
     return NULL;
+  }
+  if (expression->op == AST_OP(token_sequence_literal)) {
+    ReflectionASTNode* literal = (ReflectionASTNode*)expression;
+    if (literal->value != NULL &&
+        literal->value->kind == kReflectionTokenSequence) {
+      literal->value =
+          SemanticEvaluateTokenSequenceValue(literal->value, expression);
+      literal->value = ReflectionCanonicalize(literal->value);
+      return literal->value;
+    }
   }
   if (expression->op == AST_OP(reflection_constant)) {
     ReflectionASTNode* reflection = (ReflectionASTNode*)expression;
@@ -228,6 +502,16 @@ ReflectionValue* SemanticEvaluateReflection(ASTNode* expression) {
 ASTNode* SemanticAnalyzeReflection(ReflectionASTNode* node) {
   if (node == NULL) {
     return NULL;
+  }
+  if (node->base.op == AST_OP(token_sequence_literal) && node->value != NULL) {
+    node->value = SemanticEvaluateTokenSequenceValue(node->value, (ASTNode*)node);
+    node->operand_kind = kReflectionOperandValue;
+    node->base.op = AST_OP(reflection_constant);
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeReflection, kQualPlain));
+    node->base.value_category = kValueCategoryPrvalue;
+    node->base.flags |= kASTAnalyzed;
+    return (ASTNode*)node;
   }
   if (node->base.op == AST_OP(reflection_constant) && node->value != NULL) {
     node->base.flags |= kASTAnalyzed;
@@ -3017,13 +3301,8 @@ void SemanticAttachAnnotationAttributes(Vector* attributes, Symbol* symbol) {
   }
 }
 
-ASTNode* SemanticAnalyzeConstevalBlock(ConstevalBlockASTNode* node) {
-  if (node == NULL) {
-    return NULL;
-  }
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
-    SemanticError((ASTNode*)node, "consteval blocks require C++26");
-  }
+static ASTNode* SemanticAnalyzeConstevalBlockInActiveFrame(
+    ConstevalBlockASTNode* node, int errors_before) {
   compiler->immediate_function_context_depth++;
   compiler->constant_evaluation_required_depth++;
   if (node->body != NULL) {
@@ -3031,6 +3310,50 @@ ASTNode* SemanticAnalyzeConstevalBlock(ConstevalBlockASTNode* node) {
   }
   compiler->constant_evaluation_required_depth--;
   compiler->immediate_function_context_depth--;
+  if (NumErrors() != errors_before) {
+    CompilerRollbackInjectionFrame();
+    return (ASTNode*)node;
+  }
+  if (!CompilerCommitInjectionFrame(&compiler->syntax)) {
+    return (ASTNode*)node;
+  }
   node->base.flags |= kASTAnalyzed;
   return (ASTNode*)node;
+}
+
+ASTNode* SemanticAnalyzeConstevalBlockWithAccess(ConstevalBlockASTNode* node,
+                                                 int class_access) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SemanticError((ASTNode*)node, "consteval blocks require C++26");
+  }
+  Syntax* syntax = &compiler->syntax;
+  int errors_before = NumErrors();
+  if (!CompilerBeginInjectionFrameForSyntax(syntax, class_access)) {
+    SemanticError((ASTNode*)node, "could not begin injection frame");
+    return (ASTNode*)node;
+  }
+  return SemanticAnalyzeConstevalBlockInActiveFrame(node, errors_before);
+}
+
+ASTNode* SemanticAnalyzeFunctionConstevalBlockDuringParse(
+    ConstevalBlockASTNode* node, Vector* statements, size_t insert_index) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    SemanticError((ASTNode*)node, "consteval blocks require C++26");
+  }
+  int errors_before = NumErrors();
+  if (!CompilerBeginFunctionInjectionFrame(statements, insert_index)) {
+    SemanticError((ASTNode*)node, "could not begin function injection frame");
+    return (ASTNode*)node;
+  }
+  return SemanticAnalyzeConstevalBlockInActiveFrame(node, errors_before);
+}
+
+ASTNode* SemanticAnalyzeConstevalBlock(ConstevalBlockASTNode* node) {
+  return SemanticAnalyzeConstevalBlockWithAccess(node, kAccessPublic);
 }

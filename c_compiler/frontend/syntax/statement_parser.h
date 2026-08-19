@@ -13,6 +13,9 @@
 
 ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers);
 
+// Parses a C++26/29 `consteval { ... }` block and returns a ConstevalBlockASTNode.
+ASTNode* SyntaxParseConstevalBlock(Syntax* syntax, TokenClass followers);
+
 // Replaces a deferred range-for begin-expr / end-expr (AST_OP(range_begin) /
 // AST_OP(range_end), emitted for a loop whose range type was dependent at parse
 // time) with the form [stmt.ranged] prescribes for the now-known range type.

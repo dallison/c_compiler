@@ -119,6 +119,9 @@ void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union);
 
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         String* tag_name);
+
+bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
+                              SourceLocation location);
 void CXXFinalizeSpecialMemberMetadata(Symbol* symbol, Struct* owner,
                                       bool user_declared);
 void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func);

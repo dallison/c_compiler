@@ -204,6 +204,10 @@ const char* TokenName(Token tok) {
       return "switch";
     case TOK(tilde):
       return "~";
+    case TOK(backslash):
+      return "\\";
+    case TOK(injected_value):
+      return "<injected>";
     case TOK(typedef):
       return "typedef";
     case TOK(thread):

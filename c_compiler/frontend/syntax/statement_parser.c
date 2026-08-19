@@ -11,6 +11,7 @@
 
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "reflection_semantics.h"
 #include "statement_parser.h"
 #include "compiler.h"
 #include "errors.h"
@@ -263,6 +264,10 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
       }
       if (stmt != NULL) {
         VectorAppend(statements, stmt);
+        if (stmt->op == AST_OP(consteval_block)) {
+          SemanticAnalyzeFunctionConstevalBlockDuringParse(
+              (ConstevalBlockASTNode*)stmt, statements, statements->length);
+        }
       }
     }
   }
@@ -2189,4 +2194,20 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     stmt->flags |= kASTStatementStart;
   }
   return stmt;
+}
+
+ASTNode* SyntaxParseConstevalBlock(Syntax* syntax, TokenClass followers) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+      !LexLookingAt(syntax->lex, TOK(consteval))) {
+    return NULL;
+  }
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);
+  if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax, "expected '{' after consteval");
+    return NULL;
+  }
+  LexNextToken(syntax->lex);
+  ASTNode* body = ParseCompoundStatement(syntax, followers, location);
+  return NewConstevalBlockASTNode(body, location);
 }

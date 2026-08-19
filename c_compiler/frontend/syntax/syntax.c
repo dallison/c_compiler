@@ -29,6 +29,7 @@
 #include "compiler.h"
 #include "module_identity.h"
 #include "module_syntax.h"
+#include "reflection_semantics.h"
 
 jmp_buf error_abort_state;       // Where to abort to.
 bool abort_on_error;
@@ -1674,17 +1675,32 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_symbol_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {
-      return NamespaceInsertSymbol(syntax->current_namespace, symbol);
+      bool ok = NamespaceInsertSymbol(syntax->current_namespace, symbol);
+      if (ok && LexIsTokenReplaying(syntax->lex)) {
+        CompilerRecordInjectedSymbol(
+            syntax->current_namespace, NULL, symbol, /*is_tag=*/false,
+            /*is_global=*/false);
+      }
+      return ok;
     }
     if (NamespaceFindDirectAlias(compiler->global_namespace,
                                  &symbol->name) != NULL) {
       return false;
     }
-    return InsertGlobalSymbol(symbol);
+    bool ok = InsertGlobalSymbol(symbol);
+    if (ok && LexIsTokenReplaying(syntax->lex)) {
+      CompilerRecordInjectedSymbol(NULL, NULL, symbol, /*is_tag=*/false,
+                                   /*is_global=*/true);
+    }
+    return ok;
   }
   MarkCXX26AutomaticNameIndependent(symbol);
   bool ok = InsertLocalSymbol(syntax->local_symbol_stack, symbol);
   if (ok) {
+    if (LexIsTokenReplaying(syntax->lex)) {
+      CompilerRecordInjectedSymbol(NULL, syntax->local_symbol_stack, symbol,
+                                   /*is_tag=*/false, /*is_global=*/false);
+    }
     // Remember that this name was introduced at block scope.  Per
     // [basic.lookup.argdep], if ordinary lookup for a function call finds a
     // block-scope function declaration, argument-dependent lookup is
@@ -1760,13 +1776,24 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_tag_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {
-      return NamespaceInsertTag(syntax->current_namespace, symbol);
+      bool ok = NamespaceInsertTag(syntax->current_namespace, symbol);
+      if (ok && LexIsTokenReplaying(syntax->lex)) {
+        CompilerRecordInjectedSymbol(
+            syntax->current_namespace, NULL, symbol, /*is_tag=*/true,
+            /*is_global=*/false);
+      }
+      return ok;
     }
     if (NamespaceFindDirectAlias(compiler->global_namespace,
                                  &symbol->name) != NULL) {
       return false;
     }
-    return InsertGlobalTag(symbol);
+    bool ok = InsertGlobalTag(symbol);
+    if (ok && LexIsTokenReplaying(syntax->lex)) {
+      CompilerRecordInjectedSymbol(NULL, NULL, symbol, /*is_tag=*/true,
+                                   /*is_global=*/true);
+    }
+    return ok;
   }
   if (syntax->local_symbol_stack != NULL &&
       FindDirectLocalNamespaceAlias(syntax->local_symbol_stack,
@@ -1775,6 +1802,10 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
   }
   bool ok = InsertLocalSymbol(syntax->local_tag_stack, symbol);
   if (ok) {
+    if (LexIsTokenReplaying(syntax->lex)) {
+      CompilerRecordInjectedSymbol(NULL, syntax->local_tag_stack, symbol,
+                                   /*is_tag=*/true, /*is_global=*/false);
+    }
     VectorAppend(&syntax->all_local_symbols, symbol);
   }
   return ok;
@@ -6037,6 +6068,10 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       }
       if (stmt != NULL) {
         VectorAppend(body, stmt);
+        if (stmt->op == AST_OP(consteval_block)) {
+          SemanticAnalyzeFunctionConstevalBlockDuringParse(
+              (ConstevalBlockASTNode*)stmt, body, body->length);
+        }
       }
     }
     SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
@@ -8468,6 +8503,19 @@ static ASTNode* ParseNamespaceDeclaration(Syntax* syntax, bool leading_inline) {
   syntax->current_namespace = ns;
   while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
     ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+    if (node != NULL && node->op == AST_OP(consteval_block)) {
+      SemanticAnalyzeConstevalBlock((ConstevalBlockASTNode*)node);
+      ASTNode* injected = NULL;
+      while ((injected = CompilerPopPendingInjectedDeclaration()) != NULL) {
+        bool was_list = injected->op == AST_OP(decl_list);
+        AppendDeclarationsFromNode(declarations, injected);
+        if (was_list) {
+          ASTNodeDelete(injected);
+        }
+      }
+      ASTNodeDelete(node);
+      continue;
+    }
     AppendDeclarationsFromNode(declarations, node);
   }
   syntax->current_namespace = previous_namespace;
@@ -10096,6 +10144,19 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   }
 
   ModuleSyntaxNoteNonImportDeclaration(syntax);
+
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      LexLookingAt(syntax->lex, TOK(consteval))) {
+    LexCheckpoint block_checkpoint;
+    LexCheckpointSave(syntax->lex, &block_checkpoint);
+    LexNextToken(syntax->lex);
+    bool is_consteval_block = LexLookingAt(syntax->lex, TOK(lbrace));
+    LexCheckpointRestore(syntax->lex, &block_checkpoint);
+    LexCheckpointDestruct(&block_checkpoint);
+    if (is_consteval_block) {
+      return SyntaxParseConstevalBlock(syntax, TC(decl) | TC(closebrace));
+    }
+  }
 
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
     SourceLocation location = syntax->lex->current_token_location;

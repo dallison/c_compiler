@@ -11,23 +11,32 @@ accidentally claim final-standard conformance.
 ## Injection-first work
 
 1. [P3294R2: Code Injection with Token Sequences](https://wg21.link/p3294r2)
-   proposes token-sequence literals written `^{ ... }`, interpolation, queued
-   injection, and namespace injection. This is the most capable option, but its
-   design is still evolving.
+   is implemented experimentally in C++29 mode. DaveCC supports `^{ ... }`,
+   `\(value)`, `\id(...)`, `\tokens(...)`, `queue_injection`,
+   `namespace_inject`, structural token-sequence equality, token replay, and
+   module serialization. The proposal's design is still evolving.
 2. [P4033R1: Synthesizing enum at compile time with
    `define_enum`](https://wg21.link/p4033r1) is a smaller generative-reflection
    step that fits DaveCC's existing `define_aggregate` machinery.
 3. [P3385R8: Attributes reflection](https://wg21.link/p3385r8) would allow
    attributes to be inspected and attached to synthesized declarations.
 
-The recommended first P3294 implementation slice is:
+`<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
+the vendor probe `__davecc_p3294_token_injection`. No standard feature-test
+macro is defined because WG21 has not assigned one.
 
-1. represent token sequences as compile-time values;
-2. parse `^{ ... }` literals while retaining source tokens;
-3. implement token, identifier, and reflection interpolation;
-4. implement local `queue_injection`;
-5. add namespace injection after declaration ordering, lookup, diagnostics, and
-   module serialization are stable.
+Token pieces retain their preprocessed boundaries and source locations.
+`\tokens` concatenates sequences without token pasting, while `\(value)` is
+replayed as a typed compiler pseudo-token. Namespace declarations follow the
+ordinary symbol, ODR, code-generation, and module paths.
+
+`queue_injection` drains at the end of its active mandatory constant
+evaluation in source order. Namespace, class-data-member, and block-scope
+declaration targets are supported; local declarations are installed before
+parsing resumes after the `consteval` block. Failed replay rolls back installed
+symbols, class layout changes, and injected AST statements. Class member
+function, template, `friend`, and type-alias injection remain unsupported while
+DaveCC's class parser is generalized to replay every member-declaration form.
 
 Because P3294 has not been adopted and is marked as needing revision, DaveCC
 should treat this syntax as experimental until WG21 settles the design.

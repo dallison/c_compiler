@@ -50,6 +50,7 @@
 #include <limits.h>
 
 #include "errors.h"
+#include "reflection.h"
 #include "unicode_name.h"
 #include "vector.h"
 
@@ -310,6 +311,25 @@ static bool IsReservedWord(const char* spelling, Token* token) {
     return true;
   }
   return false;
+}
+
+bool LexSpellingIsIdentifier(const char* spelling, size_t length) {
+  if (spelling == NULL || length == 0) {
+    return false;
+  }
+  size_t pos = 0;
+  bool start = true;
+  while (pos < length) {
+    size_t consumed =
+        LexIdentifierSourceCharByteCount(spelling, pos, length, start);
+    if (consumed == 0) {
+      return false;
+    }
+    pos += consumed;
+    start = false;
+  }
+  Token keyword = TOK(identifier);
+  return !IsReservedWord(spelling, &keyword);
 }
 
 // Get the next char while in a multi-line comment, reading another line
@@ -1753,6 +1773,11 @@ static void CollectOperator(Lex* lex) {
       lex->pos++;
       break;
 
+    case '\\':
+      lex->current_token = TOK(backslash);
+      lex->pos++;
+      break;
+
     // # is a token in assembler mode.
     case '#':
       if (lex->assembler_mode) {
@@ -1786,6 +1811,10 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->in_comment = false;
   lex->capture = NULL;
   lex->suppress_preprocessing = false;
+  lex->replay_active = false;
+  lex->replay_tokens = NULL;
+  lex->replay_index = 0;
+  lex->replay_injected_value = NULL;
   preprocessor->lex = lex;
 }
 
@@ -1863,6 +1892,10 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->preprocessor_mode = lex->preprocessor_mode;
   checkpoint->in_comment = lex->in_comment;
   checkpoint->assembler_mode = lex->assembler_mode;
+  checkpoint->replay_active = lex->replay_active;
+  checkpoint->replay_tokens = lex->replay_tokens;
+  checkpoint->replay_index = lex->replay_index;
+  checkpoint->replay_injected_value = lex->replay_injected_value;
 }
 
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
@@ -1895,6 +1928,10 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->preprocessor_mode = checkpoint->preprocessor_mode;
   lex->in_comment = checkpoint->in_comment;
   lex->assembler_mode = checkpoint->assembler_mode;
+  lex->replay_active = checkpoint->replay_active;
+  lex->replay_tokens = checkpoint->replay_tokens;
+  lex->replay_index = checkpoint->replay_index;
+  lex->replay_injected_value = checkpoint->replay_injected_value;
 }
 
 void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
@@ -2123,7 +2160,175 @@ static void CollectNumber(Lex* lex, char ch) {
 }
 
 // Reads another token into current_token.
+static bool TokenNeedsLiteralReplay(Token token) {
+  return token == TOK(number) || token == TOK(fnumber) ||
+         token == TOK(string) || token == TOK(string_wide) ||
+         token == TOK(charconst) || token == TOK(charconst_wide);
+}
+
+static void LexApplyLiteralFieldsFromSpelling(Lex* lex,
+                                              TokenSequenceToken* token) {
+  if (lex->preprocessor == NULL || token->spelling.length == 0) {
+    return;
+  }
+  String* source = NewString(token->spelling.value);
+  StringAppendChar(source, '\n');
+  Lex* saved_preprocessor_lex = lex->preprocessor->lex;
+  Lex literal_lex;
+  LexInitFromString(&literal_lex, "<token-sequence-value>", source,
+                    lex->preprocessor);
+  literal_lex.suppress_preprocessing = true;
+  LexNextToken(&literal_lex);
+  if (literal_lex.current_token == token->kind) {
+    lex->number = literal_lex.number;
+    lex->fnumber = literal_lex.fnumber;
+    StringSetString(&lex->spelling, &literal_lex.spelling);
+    StringSetString(&lex->literal_spelling, &literal_lex.literal_spelling);
+    StringSetString(&lex->suffix, &literal_lex.suffix);
+    StringSetString(&lex->ud_suffix, &literal_lex.ud_suffix);
+    lex->literal_encoding = literal_lex.literal_encoding;
+    lex->literal_is_raw = literal_lex.literal_is_raw;
+    lex->literal_has_numeric_escape =
+        literal_lex.literal_has_numeric_escape;
+  }
+  LexDestruct(&literal_lex);
+  lex->preprocessor->lex = saved_preprocessor_lex;
+}
+
+static void LexApplyReplayToken(Lex* lex, TokenSequenceToken* token) {
+  lex->replay_injected_value = NULL;
+  lex->current_greatereq_is_split = false;
+  StringClear(&lex->ud_suffix);
+  lex->literal_encoding = kLiteralEncodingNone;
+  lex->literal_is_raw = false;
+  lex->literal_has_numeric_escape = false;
+  lex->number = 0;
+  lex->fnumber = 0.0;
+  StringClear(&lex->suffix);
+  lex->current_token_location = token->location;
+
+  if (token->piece_kind != kTokenSequencePieceRaw) {
+    lex->current_token = TOK(injected_value);
+    lex->replay_injected_value = token->pseudo_value;
+    StringClear(&lex->spelling);
+    return;
+  }
+
+  lex->current_token = token->kind;
+  StringClear(&lex->spelling);
+  StringClear(&lex->literal_spelling);
+  if (token->spelling.length > 0) {
+    StringSetString(&lex->spelling, (String*)&token->spelling);
+    StringSetString(&lex->literal_spelling, (String*)&token->spelling);
+  } else if (token->kind == TOK(identifier) ||
+             token->kind == TOK(number) || token->kind == TOK(fnumber) ||
+             token->kind == TOK(string) || token->kind == TOK(string_wide) ||
+             token->kind == TOK(charconst) || token->kind == TOK(charconst_wide)) {
+    const char* name = TokenName(token->kind);
+    if (name != NULL) {
+      StringAppend(&lex->spelling, name);
+      StringAppend(&lex->literal_spelling, name);
+    }
+  }
+
+  if (TokenNeedsLiteralReplay(token->kind)) {
+    LexApplyLiteralFieldsFromSpelling(lex, token);
+  }
+
+  if (lex->current_token == TOK(identifier) && lex->spelling.length > 0 &&
+      !lex->preprocessor_mode && !lex->assembler_mode) {
+    Token keyword = TOK(identifier);
+    if (IsReservedWord(lex->spelling.value, &keyword)) {
+      lex->current_token = keyword;
+    }
+  }
+}
+
+static void LexNextReplayToken(Lex* lex) {
+  if (lex->replay_tokens == NULL ||
+      lex->replay_index >= lex->replay_tokens->length) {
+    lex->current_token = TOK(eof);
+    lex->replay_injected_value = NULL;
+    return;
+  }
+  TokenSequenceToken* token =
+      lex->replay_tokens->value.p[lex->replay_index++];
+  LexApplyReplayToken(lex, token);
+}
+
+void LexSwitchTokenReplay(Lex* lex, Vector* tokens) {
+  lex->replay_active = true;
+  lex->replay_tokens = tokens;
+  lex->replay_index = 0;
+  lex->replay_injected_value = NULL;
+  LexNextReplayToken(lex);
+}
+
+void LexBeginTokenReplay(Lex* lex, Vector* tokens) {
+  LexSwitchTokenReplay(lex, tokens);
+}
+
+void LexEndTokenReplay(Lex* lex) {
+  lex->replay_active = false;
+  lex->replay_tokens = NULL;
+  lex->replay_index = 0;
+  lex->replay_injected_value = NULL;
+}
+
+bool LexIsTokenReplaying(const Lex* lex) { return lex->replay_active; }
+
+ASTNode* LexCurrentInjectedValue(const Lex* lex) {
+  return lex->replay_injected_value;
+}
+
+void LexCurrentTokenSpelling(Lex* lex, String* spelling) {
+  StringInit(spelling, NULL);
+  if (lex->current_token == TOK(injected_value)) {
+    return;
+  }
+  if (lex->replay_active && lex->spelling.length > 0) {
+    StringSetString(spelling, &lex->spelling);
+    return;
+  }
+  if (lex->literal_spelling.length > 0 &&
+      (lex->current_token == TOK(number) ||
+       lex->current_token == TOK(fnumber) ||
+       lex->current_token == TOK(string) ||
+       lex->current_token == TOK(string_wide) ||
+       lex->current_token == TOK(charconst) ||
+       lex->current_token == TOK(charconst_wide))) {
+    size_t length = lex->literal_spelling.length;
+    if (length > 0 && lex->literal_spelling.value[length - 1] == '\0') {
+      length--;
+    }
+    StringAppendSegment(spelling, lex->literal_spelling.value, length);
+    return;
+  }
+  int start = 0;
+  int end = 0;
+  int lineno = 0;
+  const char* filename = NULL;
+  DecodeSourceLocation(lex->current_token_location, &filename, &lineno, &start,
+                       &end);
+  if (end > start && (size_t)end <= lex->line.length) {
+    StringAppendSegment(spelling, lex->line.value + start, (size_t)(end - start));
+    return;
+  }
+  if (lex->spelling.length > 0) {
+    StringSetString(spelling, &lex->spelling);
+    return;
+  }
+  const char* name = TokenName(lex->current_token);
+  if (name != NULL) {
+    StringAppend(spelling, name);
+  }
+}
+
 void LexNextToken(Lex* lex) {
+  if (lex->replay_active) {
+    LexNextReplayToken(lex);
+    return;
+  }
   // lex->current_token = TOK(eof);
   lex->current_greatereq_is_split = false;
   StringClear(&lex->ud_suffix);

@@ -2988,6 +2988,7 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
        ((IdentifierASTNode*)node)->symbol->requires_ast_constexpr) ||
       node->op == AST_OP(reflect) ||
       node->op == AST_OP(reflection_constant) ||
+      node->op == AST_OP(token_sequence_literal) ||
       node->op == AST_OP(splice) ||
       node->op == AST_OP(splice_qualified) ||
       node->op == AST_OP(contract_assert) ||

@@ -42,6 +42,16 @@ namespace meta {
 
 using info = decltype(^^::);
 
+#if __cplusplus >= 202700L
+#ifndef __davecc_p3294_token_injection
+#define __davecc_p3294_token_injection 202406L
+#endif
+[[davecc::meta_intrinsic]] consteval void queue_injection(info tokens);
+[[davecc::meta_intrinsic]] consteval void namespace_inject(info namespace_,
+                                                           info tokens);
+[[davecc::meta_intrinsic]] consteval void __report_tokens(info tokens);
+#endif
+
 class exception : public std::exception {
  private:
   const char* what_ = "";

@@ -195,6 +195,9 @@ Symbol* FindGlobalTag(String* name);
 // Removes a symbol from a lookup table without deleting the Symbol object.
 bool UninstallGlobalSymbol(Symbol* symbol, bool is_tag);
 bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag);
+bool UninstallLocalSymbol(LocalSymbolTable* table, Symbol* symbol);
+void NamespaceRollbackToSizes(Namespace* ns, size_t alias_count,
+                              size_t child_count);
 
 // True when `sym` is the tag symbol for a struct/union/enum type.
 bool SymbolIsTagSymbol(Symbol* sym);

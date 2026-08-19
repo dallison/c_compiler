@@ -97,6 +97,7 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
                                           int field_sequence,
                                           int field_substituted_arguments,
                                           int field_dms_annotations,
+                                          int field_token_sequence,
                                           struct ReflectionValue* value);
 bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
                                        int field, struct ReflectionValue* value);

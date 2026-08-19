@@ -123,6 +123,15 @@ enum {
   kTArg_reflection_substituted_arguments = 42,
   kTArg_reflection_dms_annotations = 43,
   kTArg_object_initializer = 44,
+  kTArg_reflection_token_sequence = 45,
+};
+
+enum {
+  kTokenSeqWire_kind = 1,
+  kTokenSeqWire_spelling = 2,
+  kTokenSeqWire_location = 3,
+  kTokenSeqWire_pseudo_value = 4,
+  kTokenSeqWire_piece_kind = 5,
 };
 
 //
@@ -663,7 +672,7 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
     SerialWriteReflectionExtendedPayload(
         ctx, out, kTArg_reflection_sequence,
         kTArg_reflection_substituted_arguments, kTArg_reflection_dms_annotations,
-        reflection);
+        kTArg_reflection_token_sequence, reflection);
   }
 }
 
@@ -2458,6 +2467,112 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
   return !WireBufferHasError(buf);
 }
 
+static void WriteTokenSequenceToken(SerializeContext* ctx, WireBuffer* out,
+                                    TokenSequenceToken* token) {
+  if (token == NULL) {
+    return;
+  }
+  WireWriteInt32(out, kTokenSeqWire_kind, (int32_t)token->kind);
+  if (token->spelling.value != NULL) {
+    SWriteStringVal(ctx, out, kTokenSeqWire_spelling, &token->spelling);
+  }
+  WireWriteUint64(out, kTokenSeqWire_location, (uint64_t)token->location);
+  WireWriteInt32(out, kTokenSeqWire_piece_kind, (int32_t)token->piece_kind);
+  SWriteRef(ctx, out, kTokenSeqWire_pseudo_value, kSerialKindAST,
+            token->pseudo_value);
+}
+
+static TokenSequenceToken* ReadTokenSequenceToken(DeserializeContext* ctx,
+                                                  WireBuffer* in) {
+  TokenSequenceToken* token = TokenSequenceTokenNew(
+      kToken_bad, NULL, 0, SOURCE_LOCATION_MISSING, NULL);
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kTokenSeqWire_kind: {
+        int32_t kind = 0;
+        WireReadInt32(in, &kind);
+        token->kind = (Token)kind;
+        break;
+      }
+      case kTokenSeqWire_spelling:
+        SReadStringVal(ctx, in, &token->spelling);
+        break;
+      case kTokenSeqWire_location: {
+        uint64_t location = 0;
+        WireReadUint64(in, &location);
+        token->location = (SourceLocation)location;
+        break;
+      }
+      case kTokenSeqWire_piece_kind: {
+        int32_t piece_kind = 0;
+        WireReadInt32(in, &piece_kind);
+        token->piece_kind = (TokenSequencePieceKind)piece_kind;
+        break;
+      }
+      case kTokenSeqWire_pseudo_value:
+        token->pseudo_value = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+  return token;
+}
+
+static void WriteTokenSequenceTokenVector(SerializeContext* ctx,
+                                          WireBuffer* out, int field,
+                                          Vector* tokens) {
+  WireBuffer payload;
+  WireBufferInitOwned(&payload, 16);
+  size_t count = tokens != NULL ? tokens->length : 0;
+  WireWriteRawVarint(&payload, count);
+  for (size_t i = 0; i < count; i++) {
+    WireBuffer element;
+    WireBufferInitOwned(&element, 16);
+    WriteTokenSequenceToken(ctx, &element,
+                            (TokenSequenceToken*)tokens->value.p[i]);
+    WireWriteRawVarint(&payload, (uint64_t)WireBufferSize(&element));
+    WireWriteRaw(&payload, WireBufferData(&element), WireBufferSize(&element));
+    WireBufferDestruct(&element);
+  }
+  WireWriteBytes(out, field, WireBufferData(&payload), WireBufferSize(&payload));
+  WireBufferDestruct(&payload);
+}
+
+static void ReadTokenSequenceTokenVector(DeserializeContext* ctx, WireBuffer* in,
+                                         Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count = 0;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      break;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    TokenSequenceToken* token = ReadTokenSequenceToken(ctx, &er);
+    if (token != NULL) {
+      VectorAppend(out, token);
+    }
+  }
+}
+
 static void WriteReflectionValueInline(SerializeContext* ctx, WireBuffer* out,
                                        ReflectionValue* reflection) {
   if (reflection == NULL) {
@@ -2645,6 +2760,9 @@ static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
         }
         break;
       default:
+        if (SerialReadReflectionExtendedField(ctx, in, field, reflection)) {
+          break;
+        }
         WireSkip(in, wt);
         break;
     }
@@ -2703,6 +2821,7 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
                                           int field_sequence,
                                           int field_substituted_arguments,
                                           int field_dms_annotations,
+                                          int field_token_sequence,
                                           ReflectionValue* value) {
   if (value == NULL) {
     return;
@@ -2718,6 +2837,10 @@ void SerialWriteReflectionExtendedPayload(SerializeContext* ctx, WireBuffer* buf
       value->data_member_spec->annotations.length > 0) {
     WriteReflectionValueVector(ctx, buf, field_dms_annotations,
                                &value->data_member_spec->annotations);
+  }
+  if (value->token_sequence.length > 0) {
+    WriteTokenSequenceTokenVector(ctx, buf, field_token_sequence,
+                                  &value->token_sequence);
   }
 }
 
@@ -2745,6 +2868,10 @@ bool SerialReadReflectionExtendedField(DeserializeContext* ctx, WireBuffer* in,
       value->data_member_spec = ReflectionDataMemberSpecNew(NULL);
     }
     ReadReflectionValueVector(ctx, in, &value->data_member_spec->annotations);
+    return true;
+  }
+  if (field == kTArg_reflection_token_sequence) {
+    ReadTokenSequenceTokenVector(ctx, in, &value->token_sequence);
     return true;
   }
   return false;

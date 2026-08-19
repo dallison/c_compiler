@@ -80,6 +80,13 @@ typedef struct Lex {
   // (already-expanded) text so it is not expanded a second time against a
   // possibly drifted macro state.
   bool suppress_preprocessing;
+
+  // Token-sequence replay state.  When active, LexNextToken replays stored
+  // TokenSequenceToken values instead of reading source text.
+  bool replay_active;
+  Vector* replay_tokens;
+  size_t replay_index;
+  struct ASTNode* replay_injected_value;
 } Lex;
 
 typedef struct {
@@ -108,6 +115,11 @@ typedef struct {
   bool preprocessor_mode;
   bool in_comment;
   bool assembler_mode;
+
+  bool replay_active;
+  Vector* replay_tokens;
+  size_t replay_index;
+  struct ASTNode* replay_injected_value;
 } LexCheckpoint;
 
 // Initializes a lexical analyzer from a file.
@@ -198,5 +210,20 @@ void LexWarning(Lex* lex, const char* warn, const char* error, ...);
 void VLexWarning(Lex* lex, const char* warn, const char* error, va_list ap);
 
 void LexReadAttributes(Lex* lex, String* attrs);
+
+// Append the exact spelling of the current token to `spelling`.
+void LexCurrentTokenSpelling(Lex* lex, String* spelling);
+// True when `spelling` is a valid C++ identifier and not a keyword.
+bool LexSpellingIsIdentifier(const char* spelling, size_t length);
+
+// Begin/end replaying a vector of TokenSequenceToken values.  The vector is
+// not owned by the lexer.  Pseudo-value pieces are surfaced as TOK(injected_value).
+void LexBeginTokenReplay(Lex* lex, Vector* tokens);
+// Switch an already-initialized lexer to a different replay vector, resetting
+// the replay cursor and injected pseudo-value state.
+void LexSwitchTokenReplay(Lex* lex, Vector* tokens);
+void LexEndTokenReplay(Lex* lex);
+bool LexIsTokenReplaying(const Lex* lex);
+struct ASTNode* LexCurrentInjectedValue(const Lex* lex);
 
 #endif /* lex_h */

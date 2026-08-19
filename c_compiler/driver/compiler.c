@@ -1886,13 +1886,25 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
     VectorAppend(&compiler->declaration_asts, node);
+    if (node->op == AST_OP(consteval_block)) {
+      SemanticAnalyzeConstevalBlock((ConstevalBlockASTNode*)node);
+      return;
+    }
     // 'node' will be a declaration list containing declarations.
     if (node->op == AST_OP(decl_list)) {
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
       size_t num_decls = decls->declarations->length;
       for (size_t i = 0; i < num_decls; i++) {
+        ASTNode* decl_node = decls->declarations->value.p[i];
+        if (decl_node != NULL && decl_node->op == AST_OP(consteval_block)) {
+          SemanticAnalyzeConstevalBlock((ConstevalBlockASTNode*)decl_node);
+          continue;
+        }
+        if (decl_node == NULL || decl_node->op != AST_OP(vardecl)) {
+          continue;
+        }
         VariableDeclarationASTNode* decl =
-            (VariableDeclarationASTNode*)decls->declarations->value.p[i];
+            (VariableDeclarationASTNode*)decl_node;
 
         if (decl->symbol->flags.is_template) {
           continue;
@@ -2109,6 +2121,14 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
       }
     }
   }
+}
+
+void CompilerCompileQueuedDeclaration(Syntax* syntax, ASTNode* node) {
+  if (node == NULL) {
+    return;
+  }
+  CompileDeclarationNode(syntax, node);
+  (void)syntax;
 }
 
 static void CompilePendingTemplateInstantiations(Syntax* syntax) {
@@ -2388,6 +2408,7 @@ static void CompileDeclaration(Syntax* syntax) {
   DiagnosticSwapState(diag_state);
   CompileDeclarationNode(syntax, node);
   CompilePendingTemplateInstantiations(syntax);
+  CompilerDrainPendingInjectedDeclarations(syntax);
   CompileDeferredCXXStaticMembers(syntax);
   // Restore the post-parse diagnostic state so the next declaration starts from
   // where the lexer left off.
@@ -2599,6 +2620,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->pending_template_instantiations);
   MapInitForCharPointerKeys(
       &compiler->pending_template_instantiation_names);
+  VectorInit(&compiler->injection_frames);
+  VectorInit(&compiler->pending_injected_declarations);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
   SetInit(&compiler->error_warnings, CompareWarning);
@@ -3106,6 +3129,7 @@ void CompilerDestruct(Compiler* compiler) {
   MapDestructWithContents(
       &compiler->pending_template_instantiation_names,
       FreePendingTemplateInstantiationKey);
+  CompilerInjectionFramesTeardown();
 
   // Free function-definition symbols that were superseded by an earlier
   // declaration and so never entered the global symbol table.  Deleting each

@@ -4784,6 +4784,15 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
                    ? GenerateBuiltinTerminator(gen, (VectorASTNode*)node)
                    : GenerateAsm(gen, (AsmASTNode*)node);
       break;
+
+    case AST_OP(reflection_constant):
+    case AST_OP(token_sequence_literal): {
+      ReflectionASTNode* reflection = (ReflectionASTNode*)node;
+      int64_t encoded =
+          reflection->value != NULL ? (int64_t)(intptr_t)reflection->value : 0;
+      result = GeneratorGetIntConstant(gen, NULL, encoded);
+      break;
+    }
       
     default:
       fprintf(stderr, "Invalid expression AST op: %s (%d)\n", ASTOpcodeName(node->op), node->op);

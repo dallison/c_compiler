@@ -28,6 +28,7 @@
 
 typedef enum {
   kMetaSynthUnknown,
+  kMetaSynthReportTokens,
   kMetaSynthReflectConstant,
   kMetaSynthReflectObject,
   kMetaSynthReflectFunction,
@@ -43,6 +44,8 @@ typedef enum {
   kMetaSynthDefineStaticArray,
   kMetaSynthDefineStaticObject,
   kMetaSynthIsStringLiteral,
+  kMetaSynthQueueInjection,
+  kMetaSynthNamespaceInject,
 } MetaSynthesisOperation;
 
 typedef struct {
@@ -51,6 +54,7 @@ typedef struct {
 } MetaSynthesisOperationEntry;
 
 static const MetaSynthesisOperationEntry kMetaSynthesisOperations[] = {
+    {"__report_tokens", kMetaSynthReportTokens},
     {"can_substitute", kMetaSynthCanSubstitute},
     {"data_member_spec", kMetaSynthDataMemberSpec},
     {"define_aggregate", kMetaSynthDefineAggregate},
@@ -60,6 +64,8 @@ static const MetaSynthesisOperationEntry kMetaSynthesisOperations[] = {
     {"extract", kMetaSynthExtract},
     {"is_data_member_spec", kMetaSynthIsDataMemberSpec},
     {"is_string_literal", kMetaSynthIsStringLiteral},
+    {"namespace_inject", kMetaSynthNamespaceInject},
+    {"queue_injection", kMetaSynthQueueInjection},
     {"reflect_constant", kMetaSynthReflectConstant},
     {"reflect_constant_array", kMetaSynthReflectConstantArray},
     {"reflect_constant_string", kMetaSynthReflectConstantString},
@@ -110,6 +116,53 @@ static ASTNode* MetaSynthesisBool(bool value, SourceLocation location) {
   return NewIntConstantASTNode(value ? 1 : 0,
                                NewTypeRecordWithSize(kTypeBool, kQualConst),
                                location);
+}
+
+static ASTNode* MetaSynthesisVoid(SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  ASTNode* zero = NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                        location);
+  return NewCastASTNode(void_type, location, zero);
+}
+
+static void MetaSynthesisReportTokens(const ReflectionValue* sequence) {
+  fputs("token sequence:", stderr);
+  for (size_t i = 0; sequence != NULL &&
+                     i < sequence->token_sequence.length;
+       i++) {
+    TokenSequenceToken* token = sequence->token_sequence.value.p[i];
+    if (token == NULL) {
+      continue;
+    }
+    fputc(' ', stderr);
+    if (token->piece_kind == kTokenSequencePieceRaw) {
+      fprintf(stderr, "%.*s", (int)token->spelling.length,
+              token->spelling.value != NULL ? token->spelling.value : "");
+      continue;
+    }
+    ASTNode* value = token->pseudo_value;
+    if (value == NULL) {
+      fputs("\\(<invalid>)", stderr);
+    } else if (ASTNodeIsIntConstant(value)) {
+      fprintf(stderr, "\\(%lld)", (long long)ASTNodeConstantValue(value));
+    } else if (value->op == AST_OP(fnumber)) {
+      fprintf(stderr, "\\(%.17g)", ((ConstantASTNode*)value)->value.fvalue);
+    } else if (value->op == AST_OP(string) ||
+               value->op == AST_OP(string_wide)) {
+      String* string = ((ConstantASTNode*)value)->value.string;
+      fprintf(stderr, "\\(\"%.*s\")",
+              string != NULL ? (int)string->length : 0,
+              string != NULL && string->value != NULL ? string->value : "");
+    } else if (value->op == AST_OP(reflection_constant)) {
+      const char* identifier = ReflectionValueIdentifier(
+          ((ReflectionASTNode*)value)->value);
+      fprintf(stderr, "\\(<reflection%s%s>)", identifier != NULL ? " " : "",
+              identifier != NULL ? identifier : "");
+    } else {
+      fprintf(stderr, "\\(<%s>)", ASTOpcodeName(value->op));
+    }
+  }
+  fputc('\n', stderr);
 }
 
 static ReflectionValue* MetaSynthesisEvaluateReflection(ASTNode* expression) {
@@ -1046,6 +1099,22 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
   }
 
   switch (operation) {
+    case kMetaSynthReportTokens: {
+      if (call->children == NULL || call->children->length != 1) {
+        SemanticError((ASTNode*)call,
+                      "__report_tokens requires exactly one argument");
+        return NULL;
+      }
+      ReflectionValue* sequence =
+          MetaSynthesisEvaluateReflection(call->children->value.p[0]);
+      if (sequence == NULL || sequence->kind != kReflectionTokenSequence) {
+        SemanticError((ASTNode*)call,
+                      "__report_tokens requires a constant token sequence");
+        return NULL;
+      }
+      MetaSynthesisReportTokens(sequence);
+      return MetaSynthesisVoid(call->base.location);
+    }
     case kMetaSynthIsDataMemberSpec: {
       if (call->children == NULL || call->children->length < 1) {
         return NULL;
@@ -1368,6 +1437,38 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
     }
     case kMetaSynthUnknown:
       return NULL;
+    case kMetaSynthQueueInjection: {
+      if (call->children == NULL || call->children->length != 1) {
+        SemanticError((ASTNode*)call,
+                      "queue_injection requires exactly one argument");
+        return NULL;
+      }
+      ReflectionValue* sequence =
+          MetaSynthesisEvaluateReflection(call->children->value.p[0]);
+      if (sequence == NULL ||
+          !CompilerQueueInjection(sequence, call->base.location,
+                                  (ASTNode*)call)) {
+        return NULL;
+      }
+      return MetaSynthesisVoid(call->base.location);
+    }
+    case kMetaSynthNamespaceInject: {
+      if (call->children == NULL || call->children->length != 2) {
+        SemanticError((ASTNode*)call,
+                      "namespace_inject requires exactly two arguments");
+        return NULL;
+      }
+      ReflectionValue* ns_value =
+          MetaSynthesisEvaluateReflection(call->children->value.p[0]);
+      ReflectionValue* sequence =
+          MetaSynthesisEvaluateReflection(call->children->value.p[1]);
+      if (ns_value == NULL || sequence == NULL ||
+          !CompilerNamespaceInject(ns_value, sequence, call->base.location,
+                                   (ASTNode*)call)) {
+        return NULL;
+      }
+      return MetaSynthesisVoid(call->base.location);
+    }
   }
   return NULL;
 }
