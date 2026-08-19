@@ -21,6 +21,10 @@
 #define __cpp_lib_start_lifetime 202603L
 #endif
 
+#if __cplusplus >= 202002L && !defined(__cpp_lib_constexpr_dynamic_alloc)
+#define __cpp_lib_constexpr_dynamic_alloc 201907L
+#endif
+
 namespace std {
 
 #if __cplusplus >= 202600L
@@ -272,8 +276,11 @@ constexpr T* construct_at(T* location, Args&&... args) {
   return ::new (static_cast<void*>(location))
       T(static_cast<Args&&>(args)...);
 }
+#endif
 
+#if __cplusplus >= 201703L
 template <class T>
+#if __cplusplus >= 202002L
 constexpr void destroy_at(T* location) {
   if constexpr (is_array<T>::value) {
     for (auto& element : *location) {
@@ -283,6 +290,11 @@ constexpr void destroy_at(T* location) {
     location->~T();
   }
 }
+#else
+void destroy_at(T* location) {
+  location->~T();
+}
+#endif
 #endif
 
 template <class T, class U>
