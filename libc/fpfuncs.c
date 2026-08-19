@@ -197,6 +197,21 @@ bool __IsOneHalf(uint64_t a[FIXED_SIZE_WORDS]) {
   return true;
 }
 
+static uint8_t __DivModWordsBy10(uint64_t* words, size_t count) {
+  uint64_t remainder = 0;
+  for (size_t i = count; i > 0; --i) {
+    uint64_t word = words[i - 1];
+    uint64_t high = (remainder << 32) | (word >> 32);
+    uint64_t quotient_high = high / 10;
+    remainder = high % 10;
+    uint64_t low = (remainder << 32) | (uint32_t)word;
+    uint64_t quotient_low = low / 10;
+    remainder = low % 10;
+    words[i - 1] = (quotient_high << 32) | quotient_low;
+  }
+  return (uint8_t)remainder;
+}
+
 // Divide a by 10, where a is a big number.  Return
 // the modulus.  A is modified to be a/10.
 uint8_t __DivModBy10Half(uint64_t a[FIXED_SIZE_HALF]){
@@ -212,24 +227,7 @@ uint8_t __DivModBy10Half(uint64_t a[FIXED_SIZE_HALF]){
   if (upper_zero) {
     return __DivMod64By10(a);
   }
-  uint64_t quotient[FIXED_SIZE_HALF] = {0};
-  uint8_t rem = 0;
-  const int kHiWord = FIXED_SIZE_HALF - 1;
-  for (uint16_t i = 0; i < FIXED_SIZE_HALF * 64; i++) {
-    // Shift high bit of a into rem and shift a left by one.
-    rem <<= 1;
-    if ((a[kHiWord] & (1LL << 63)) != 0) {
-      rem |= 1;
-    }
-    __LShiftHalf(a);
-    __LShiftHalf(quotient);
-    if (rem >= 10) {
-       __IncrementHalf(quotient);
-       rem -= 10;
-    }
-  }
-  memcpy(a, quotient, sizeof(quotient));
-  return rem;
+  return __DivModWordsBy10(a, FIXED_SIZE_HALF);
 }
 
 // Divide a by 10, where a is a big number.
@@ -239,24 +237,7 @@ uint8_t __DivideBy10(uint64_t a[FIXED_SIZE_WORDS]) {
   if (__IsZeroUpper(a)) {
     return __DivModBy10Half(a);
   }
-  uint64_t quotient[FIXED_SIZE_WORDS] = {0};
-  uint8_t rem = 0;
-  const int kHiWord = FIXED_SIZE_WORDS - 1;
-  for (uint16_t i = 0; i < FIXED_SIZE_WORDS * 64; i++) {
-    // Shift high bit of a into rem and shift a left by one.
-    rem <<= 1;
-    if ((a[kHiWord] & (1LL << 63)) != 0) {
-      rem |= 1;
-    }
-    __LShift(a);
-    __LShift(quotient);
-    if (rem >= 10) {
-       __Increment(quotient);
-       rem -= 10;
-    }
-  }
-  memcpy(a, quotient, sizeof(quotient));
-  return rem;
+  return __DivModWordsBy10(a, FIXED_SIZE_WORDS);
 }
 
 // Round.  If top bit of the fraction part of v is set we have a
