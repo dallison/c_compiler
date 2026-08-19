@@ -1796,7 +1796,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           return TypeRecordCalculateSize(opaque);
         }
         TypeRecord* result = NULL;
-        if (expr->value_category == kValueCategoryLvalue) {
+        if ((expr->flags & kASTUnparenthesizedDecltypeEntity) != 0) {
+          result = TypeRecordCopy(expr->type);
+        } else if (expr->value_category == kValueCategoryLvalue) {
           result = NewDecltypeReference(expr->type, false);
         } else if (expr->value_category == kValueCategoryXvalue) {
           result = NewDecltypeReference(expr->type, true);

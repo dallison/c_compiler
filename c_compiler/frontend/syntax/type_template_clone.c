@@ -521,6 +521,99 @@ static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
   return false;
 }
 
+static void FindPackIndexExpressionVisitor(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op == AST_OP(pack_index)) {
+    *(bool*)data = true;
+  }
+}
+
+static bool ExpressionContainsPackIndex(ASTNode* expression) {
+  bool found = false;
+  ASTNodeVisit(expression, FindPackIndexExpressionVisitor, 0, &found);
+  return found;
+}
+
+static bool TemplateArgumentContainsDeferredDecltypePackIndex(
+    TemplateArgument* argument);
+
+static bool TypeContainsDeferredDecltypePackIndex(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_decltype_expr != NULL &&
+        ExpressionContainsPackIndex(current->dependent_decltype_expr)) {
+      return true;
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      if (TemplateArgumentContainsDeferredDecltypePackIndex(
+              current->template_arguments->value.p[i])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentContainsDeferredDecltypePackIndex(
+    TemplateArgument* argument) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (TypeContainsDeferredDecltypePackIndex(argument->type)) {
+    return true;
+  }
+  if (argument->pack_arguments != NULL) {
+    for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+      if (TemplateArgumentContainsDeferredDecltypePackIndex(
+              argument->pack_arguments->value.p[i])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void RewriteTemplateBodyDecltypePackIndices(
+    TemplateFunctionBodyClone* clone, TypeRecord* type);
+
+static void RewriteTemplateArgumentDecltypePackIndices(
+    TemplateFunctionBodyClone* clone, TemplateArgument* argument) {
+  if (argument == NULL) {
+    return;
+  }
+  RewriteTemplateBodyDecltypePackIndices(clone, argument->type);
+  if (argument->pack_arguments != NULL) {
+    for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+      RewriteTemplateArgumentDecltypePackIndices(
+          clone, argument->pack_arguments->value.p[i]);
+    }
+  }
+}
+
+static void RewriteTemplateBodyDecltypePackIndices(
+    TemplateFunctionBodyClone* clone, TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_decltype_expr != NULL &&
+        ExpressionContainsPackIndex(current->dependent_decltype_expr)) {
+      ASTNode* old = current->dependent_decltype_expr;
+      current->dependent_decltype_expr = ASTNodeClone(
+          old, CloneTemplateFunctionBodyNode, clone, NULL);
+      ASTNodeDelete(old);
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      RewriteTemplateArgumentDecltypePackIndices(
+          clone, current->template_arguments->value.p[i]);
+    }
+  }
+}
+
 /* Substitute a type in a nested class-template member body.  Besides the
  * nested class itself, such a body can name the injected class name of its
  * enclosing specialization (for example `outer result;` inside
@@ -529,6 +622,11 @@ static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
  * type chain names the enclosing class. */
 static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
                                               TypeRecord* type) {
+  TypeRecord* prepared = type;
+  if (TypeContainsDeferredDecltypePackIndex(type)) {
+    prepared = TypeRecordCopy(type);
+    RewriteTemplateBodyDecltypePackIndices(clone, prepared);
+  }
   Struct* source =
       clone->from_owner != NULL ? clone->from_owner->lexical_parent : NULL;
   Struct* target =
@@ -539,16 +637,22 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
         clone->parser, clone->substitution_source,
         clone->substitution_target);
     TypeRecord* substituted =
-        SubstituteTemplateParameters(clone->parser, type, clone->args);
+        SubstituteTemplateParameters(clone->parser, prepared, clone->args);
     TypeParserPopTemplateSubstitution(&substitution);
+    if (prepared != type) {
+      TypeRecordDelete(prepared);
+    }
     return substituted;
   }
 
   TypeSubstitutionScope substitution =
       TypeParserPushTemplateSubstitution(clone->parser, source, target);
   TypeRecord* substituted =
-      SubstituteTemplateParameters(clone->parser, type, clone->args);
+      SubstituteTemplateParameters(clone->parser, prepared, clone->args);
   TypeParserPopTemplateSubstitution(&substitution);
+  if (prepared != type) {
+    TypeRecordDelete(prepared);
+  }
   return substituted;
 }
 

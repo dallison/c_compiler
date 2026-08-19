@@ -345,6 +345,13 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
       expr->op == AST_OP(identifier)) {
     declared_symbol = ((IdentifierASTNode*)expr)->symbol;
   }
+  if (!parenthesized_expression && expr != NULL &&
+      expr->op == AST_OP(pack_index)) {
+    // [dcl.type.decltype]: an unparenthesized pack-index-expression names the
+    // selected entity's declared type. Preserve that distinction while its
+    // dependent operand is deferred and re-evaluated during instantiation.
+    expr->flags |= kASTUnparenthesizedDecltypeEntity;
+  }
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
 
   TypeRecord* result = NULL;

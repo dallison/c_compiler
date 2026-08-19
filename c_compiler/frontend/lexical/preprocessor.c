@@ -220,6 +220,9 @@ static void PredefineMacros(Preprocessor* p) {
       case kLanguageStandardCXX26:
         cplusplus = "202603L";
         break;
+      case kLanguageStandardCXX29:
+        cplusplus = "202700L";
+        break;
       default:
         break;
     }

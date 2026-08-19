@@ -77,7 +77,7 @@ static CompilerOptionDefinition compiler_options[] = {
      "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]"},
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
     {"-std", kCompilerOptionString, kOptionStandard, false,
-     "Select language standard: c89, c99, c11, c17, c23, c++11, c++17, c++20, c++23, c++26"},
+     "Select language standard: c89, c99, c11, c17, c23, c++11, c++17, c++20, c++23, c++26, c++29"},
     {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
      "Select constexpr evaluator: auto, pcode, ast, or audit"},
     {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
@@ -2769,6 +2769,9 @@ static void ParseStandardOption(Compiler* compiler, Vector* options) {
   } else if (StringEqual(value, "c++26") || StringEqual(value, "c++2c") ||
              StringEqual(value, "gnu++26") || StringEqual(value, "gnu++2c")) {
     compiler->language_standard = kLanguageStandardCXX26;
+  } else if (StringEqual(value, "c++29") || StringEqual(value, "c++2d") ||
+             StringEqual(value, "gnu++29") || StringEqual(value, "gnu++2d")) {
+    compiler->language_standard = kLanguageStandardCXX29;
   } else {
     fprintf(stderr, "Invalid language standard -std=%s\n", value->value);
     exit(1);

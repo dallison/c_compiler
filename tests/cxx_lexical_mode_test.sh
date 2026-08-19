@@ -207,6 +207,33 @@ expect_compile cxx2c_mode_alias \
 #endif
 int main(void) { return 0; }' \
   -std=c++2c
+expect_compile cxx29_mode \
+  '#if __cplusplus != 202700L
+#error expected C++29 mode
+#endif
+#if __cpp_impl_reflection != 202603L
+#error expected inherited C++26 features
+#endif
+int main(void) { return 0; }' \
+  -std=c++29
+expect_compile cxx2d_mode_alias \
+  '#if __cplusplus != 202700L
+#error expected C++29 mode
+#endif
+int main(void) { return 0; }' \
+  -std=c++2d
+expect_compile gnu_cxx29_mode \
+  '#if __cplusplus != 202700L
+#error expected GNU C++29 mode
+#endif
+int main(void) { return 0; }' \
+  -std=gnu++29
+expect_compile gnu_cxx2d_mode_alias \
+  '#if __cplusplus != 202700L
+#error expected GNU C++2d mode
+#endif
+int main(void) { return 0; }' \
+  -std=gnu++2d
 
 expect_compile cxx26_variadic_friend \
   'struct Audit;
@@ -714,13 +741,13 @@ expect_fail cxx26_has_embed_unprocessable_unsupported_parameter \
 int main(void) { return 0; }' \
   -std=c++26 -I"$WORK"
 
-if "$ROOT/$DAVECC" -target pcode -std=c++29 -S "$WORK/no_such.c" \
+if "$ROOT/$DAVECC" -target pcode -std=c++30 -S "$WORK/no_such.c" \
     -o "$WORK/no_such.s" >"$WORK/bad_std.out" 2>&1; then
   echo "bad_std: expected invalid -std failure" >&2
   exit 1
 fi
 bad_std_output="$(<"$WORK/bad_std.out")"
-if [[ "$bad_std_output" != *"Invalid language standard -std=c++29"* ]]; then
+if [[ "$bad_std_output" != *"Invalid language standard -std=c++30"* ]]; then
   echo "bad_std: missing invalid -std diagnostic" >&2
   exit 1
 fi
