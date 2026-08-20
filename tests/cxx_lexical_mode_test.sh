@@ -214,6 +214,9 @@ expect_compile cxx29_mode \
 #if __cpp_impl_reflection != 202603L
 #error expected inherited C++26 features
 #endif
+#if __cpp_pp_embed != 202606L
+#error expected C++29 #embed offset feature macro
+#endif
 int main(void) { return 0; }' \
   -std=c++29
 expect_compile cxx2d_mode_alias \
@@ -705,6 +708,47 @@ static_assert(sizeof(macro_resource) == 2);
 int main(void) { return 0; }' \
   -std=c++26 -I"$WORK" -isystem "$WORK"
 
+expect_compile cxx29_embed_offset \
+  '#if __cpp_pp_embed != 202606L
+#error "C++29 #embed feature macro must advertise offset support"
+#endif
+#if __has_embed("embed.bin" offset(0)) != __STDC_EMBED_FOUND__
+#error "offset(0) must preserve a non-empty resource"
+#endif
+#if __has_embed("embed.bin" offset(5)) != __STDC_EMBED_EMPTY__
+#error "offset at the resource size must make it empty"
+#endif
+#if __has_embed("embed.bin" offset(2) limit(2)) != __STDC_EMBED_FOUND__
+#error "offset followed by limit must preserve the selected range"
+#endif
+static const unsigned char offset_two[] = {
+#embed "embed.bin" offset(2)
+};
+static_assert(sizeof(offset_two) == 3);
+constexpr int byte_at_two =
+#embed "embed.bin" offset(2) limit(1)
+;
+static_assert(byte_at_two == 0x7f);
+constexpr int byte_at_three =
+#embed "embed.bin" offset(3) limit(1)
+;
+static_assert(byte_at_three == 0x80);
+static const unsigned char limit_then_offset[] = {
+#embed "embed.bin" limit(2) offset(2)
+};
+static_assert(sizeof(limit_then_offset) == 2);
+constexpr int exhausted =
+#embed "embed.bin" offset(99) if_empty(42)
+;
+static_assert(exhausted == 42);
+#define EMBED_OFFSET (1 + 2)
+static const unsigned char macro_offset[] = {
+#embed "embed.bin" offset(EMBED_OFFSET) limit(1)
+};
+static_assert(sizeof(macro_offset) == 1);
+int main(void) { return 0; }' \
+  -std=c++29 -I"$WORK"
+
 expect_fail cxx23_embed \
   'constexpr unsigned char data[] = {
 #embed "embed.bin"
@@ -725,6 +769,21 @@ expect_fail cxx26_embed_negative_limit \
 #embed "embed.bin" limit(-1)
 };' \
   -std=c++26 -I"$WORK"
+expect_fail cxx26_embed_offset_before_cxx29 \
+  'static const unsigned char data[] = {
+#embed "embed.bin" offset(1)
+};' \
+  -std=c++26 -I"$WORK"
+expect_fail cxx29_embed_duplicate_offset \
+  'static const unsigned char data[] = {
+#embed "embed.bin" offset(1) offset(2)
+};' \
+  -std=c++29 -I"$WORK"
+expect_fail cxx29_embed_negative_offset \
+  'static const unsigned char data[] = {
+#embed "embed.bin" offset(-1)
+};' \
+  -std=c++29 -I"$WORK"
 expect_fail cxx26_embed_unbalanced_parameter \
   '#if __has_embed("embed.bin" prefix({))
 #endif

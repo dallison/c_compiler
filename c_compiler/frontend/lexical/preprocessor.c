@@ -300,7 +300,9 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(p, "__cpp_constexpr_exceptions", "202411L");
       PreprocessorDefineMacro(p, "__cpp_contracts", "202606L");
       PreprocessorDefineMacro(p, "__cpp_deleted_function", "202403L");
-      PreprocessorDefineMacro(p, "__cpp_pp_embed", "202502L");
+      PreprocessorDefineMacro(
+          p, "__cpp_pp_embed",
+          CompilerCXXAtLeast(kLanguageStandardCXX29) ? "202606L" : "202502L");
       PreprocessorDefineMacro(p, "__cpp_pack_indexing", "202311L");
       PreprocessorDefineMacro(p, "__cpp_placeholder_variables", "202306L");
       PreprocessorDefineMacro(p, "__cpp_expansion_statements", "202506L");
@@ -2686,10 +2688,12 @@ typedef struct {
   bool system_resource;
   bool unsupported_parameter;
   bool has_limit;
+  bool has_offset;
   bool has_prefix;
   bool has_suffix;
   bool has_if_empty;
   uint64_t limit;
+  uint64_t offset;
   String prefix;
   String suffix;
   String if_empty;
@@ -2943,6 +2947,16 @@ static bool ParseEmbedRequest(Preprocessor* p, String* tokens,
         ok = EvaluateEmbedIntegerParameter(p, "limit", &contents,
                                            &request->limit);
       }
+    } else if (StringEqual(&name, "offset") &&
+               CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+      if (request->has_offset) {
+        PreprocessorError(p, "Duplicate #embed offset parameter");
+        ok = false;
+      } else {
+        request->has_offset = true;
+        ok = EvaluateEmbedIntegerParameter(p, "offset", &contents,
+                                           &request->offset);
+      }
     } else if (StringEqual(&name, "prefix")) {
       if (request->has_prefix) {
         PreprocessorError(p, "Duplicate #embed prefix parameter");
@@ -3058,7 +3072,7 @@ static EmbedResourceOpenResult OpenEmbedResource(Preprocessor* p,
 
 static bool GetEmbedResourceRange(Preprocessor* p, FILE* fp,
                                   const EmbedRequest* request,
-                                  size_t* count) {
+                                  size_t* offset, size_t* count) {
   if (fseek(fp, 0, SEEK_END) != 0) {
     PreprocessorError(p, "Cannot determine #embed resource size");
     return false;
@@ -3069,12 +3083,19 @@ static bool GetEmbedResourceRange(Preprocessor* p, FILE* fp,
     return false;
   }
   uint64_t size = (uint64_t)end;
+  uint64_t actual_offset =
+      !request->has_offset
+          ? 0
+          : (request->offset < size ? request->offset : size);
+  uint64_t remaining = size - actual_offset;
   uint64_t actual_count =
-      request->has_limit && request->limit < size ? request->limit : size;
+      request->has_limit && request->limit < remaining ? request->limit
+                                                       : remaining;
   if (actual_count > SIZE_MAX) {
     PreprocessorError(p, "#embed resource is too large for this compiler");
     return false;
   }
+  *offset = (size_t)actual_offset;
   *count = (size_t)actual_count;
   return true;
 }
@@ -3095,8 +3116,9 @@ static int ProbeEmbedResource(Preprocessor* p, EmbedRequest* request) {
     fclose(fp);
     return 0;  // __STDC_EMBED_NOT_FOUND__
   }
+  size_t offset = 0;
   size_t count = 0;
-  bool usable = GetEmbedResourceRange(p, fp, request, &count);
+  bool usable = GetEmbedResourceRange(p, fp, request, &offset, &count);
   fclose(fp);
   if (!usable) {
     return 0;
@@ -3144,10 +3166,11 @@ static void Embed(Preprocessor* p, String* line, size_t pos) {
     return;
   }
 
+  size_t offset = 0;
   size_t count = 0;
   int errors_before = NumErrors();
-  if (!GetEmbedResourceRange(p, fp, &request, &count) ||
-      fseek(fp, 0, SEEK_SET) != 0) {
+  if (!GetEmbedResourceRange(p, fp, &request, &offset, &count) ||
+      fseek(fp, (long)offset, SEEK_SET) != 0) {
     if (NumErrors() == errors_before) {
       PreprocessorError(p, "Cannot seek in #embed resource \"%s\"",
                         request.filename.value);

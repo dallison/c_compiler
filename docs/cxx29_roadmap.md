@@ -24,6 +24,8 @@ accidentally claim final-standard conformance.
    classes](https://wg21.link/p2287r6) is implemented in C++29 mode.
 5. [P3668R4: Defaulted postfix increment and decrement
    operators](https://wg21.link/p3668r4) is implemented in C++29 mode.
+6. [P3540R3: `#embed` offset parameter](https://wg21.link/p3540r3) is
+   implemented in C++29 mode.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
@@ -96,11 +98,16 @@ or prefix operations define the postfix operator as deleted, and class-template
 members are synthesized after substitution. As specified by P3668R4, no feature
 test macro is provided.
 
+P3540 support adds the standard `offset(constant-expression)` parameter to
+`#embed` and `__has_embed`. The offset is applied to the original resource
+before `limit`, an offset at or beyond the resource size makes it empty, and
+duplicate or negative offsets are diagnosed. `__cpp_pp_embed` is `202606L` in
+C++29 mode and remains `202502L` in C++26 mode.
+
 ## Adopted C++29 language features
 
 - [P3097R3: Contracts for virtual functions](https://wg21.link/p3097r3)
 - [P3670R4: Pack indexing for templates](https://wg21.link/p3670r4)
-- [P3540R3: `#embed` offset parameter](https://wg21.link/p3540r3)
 - [P3822R2: Conditional `noexcept` in compound
   requirements](https://wg21.link/p3822r2)
 
@@ -111,6 +118,5 @@ test macro is provided.
 - [P3125R6: `constexpr` pointer tagging](https://wg21.link/p3125r6)
 - [P3248R4: Require `intptr_t` and `uintptr_t`](https://wg21.link/p3248r4)
 
-The `#embed` offset parameter is a good small follow-up project. Good projects
-that reuse DaveCC's strongest existing subsystems are virtual-function contracts
-and template pack indexing.
+Good follow-up projects that reuse DaveCC's strongest existing subsystems are
+virtual-function contracts and template pack indexing.
