@@ -2781,8 +2781,6 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         } else if (member->is_member_function) {
           member_symbol->type->info.function.cxx_member_owner = str;
         }
-        SyntaxDiagnoseInvalidFunctionContracts(parser->syntax,
-                                               member_symbol->type);
         if (is_member_template) {
           if (member->is_member_function) {
             member_symbol->flags.is_template = true;
@@ -2829,7 +2827,12 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         }
         if (member->is_member_function) {
           ParseCXXVirtSpecifiers(parser, member_symbol->type);
+          SyntaxParseFunctionContracts(
+              parser->syntax, member_symbol->type, str,
+              !member->is_static && !has_explicit_object);
           ParseCXXPureSpecifier(parser, member_symbol->type);
+          SyntaxDiagnoseInvalidFunctionContracts(parser->syntax,
+                                                 member_symbol->type);
           CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
           if (has_explicit_object &&
               (member_symbol->type->info.function.is_constructor ||

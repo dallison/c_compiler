@@ -1678,6 +1678,7 @@ static void VectorASTNodeDelete(ASTNode* node) {
   }
   // children is heap-allocated (NewVector), so free the struct too.
   VectorDelete(vnode->children);
+  TypeRecordDelete(vnode->caller_contract_function);
   ASTNodeBaseDelete(node);
 }
 
@@ -1719,6 +1720,10 @@ static ASTNode* VectorASTNodeClone(const ASTNode* node,
         ASTNodeClone(from->children->value.p[i], func, data, &to->base);
     VectorAppend(to->children, child);
   }
+  to->caller_contract_function =
+      from->caller_contract_function != NULL
+          ? TypeRecordCopy(from->caller_contract_function)
+          : NULL;
   return func(&to->base, data);
 }
 
@@ -1765,6 +1770,7 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
     left->parent = &node->base;
   }
   node->children = children;
+  node->caller_contract_function = NULL;
   for (size_t i = 0; i < children->length; i++) {
     ASTNode* child = children->value.p[i];
     child->parent = (ASTNode*)node;
@@ -2797,6 +2803,7 @@ static ASTNode* ContractAssertASTNodeClone(
   ASTNodeBaseCopy(&to->base, node);
   to->predicate = ASTNodeClone(from->predicate, func, data, &to->base);
   AttributeListClone(&to->attributes, (Vector*)&from->attributes);
+  to->kind = from->kind;
   to->base.flags &= ~kASTAnalyzed;
   return func(&to->base, data);
 }
@@ -2828,6 +2835,7 @@ ASTNode* NewContractAssertASTNode(ASTNode* predicate, Vector* attributes,
   ASTNodeInit(&node->base, AST_OP(contract_assert), NULL, location,
               &contract_assert_vtbl);
   node->predicate = predicate;
+  node->kind = kContractAssertionStatement;
   SetParent(predicate, (ASTNode*)node, 0);
   if (attributes != NULL) {
     node->attributes = *attributes;
@@ -4933,6 +4941,9 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeVector: {
       VectorASTNode* n = ASTArenaAlloc(sizeof(VectorASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &vector_vtbl);
+      n->left = NULL;
+      n->children = NULL;
+      n->caller_contract_function = NULL;
       return &n->base;
     }
     case kASTShapeRequiresExpr: {
@@ -5019,6 +5030,7 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
           ASTArenaAlloc(sizeof(ContractAssertASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &contract_assert_vtbl);
       VectorInit(&n->attributes);
+      n->kind = kContractAssertionStatement;
       return &n->base;
     }
     case kASTShapeIf: {

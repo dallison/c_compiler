@@ -736,11 +736,11 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/expansion_statements.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute imported expansion statement"
 
-run "$DAVECC" -target "$TARGET" -std=c++26 \
+run "$DAVECC" -target "$TARGET" -std=c++29 \
   -Xemit-module "$work/contracts.dcm" \
   "$FIXTURES/contracts.cppm" ||
   fail "emit contracts module"
-run "$DAVECC" -target "$TARGET" -std=c++26 -c \
+run "$DAVECC" -target "$TARGET" -std=c++29 -c \
   -fprebuilt-module-path "$work" "$FIXTURES/use_contracts.cpp" \
   -o "$work/use_contracts.o" ||
   fail "instantiate imported contracts"

@@ -2547,6 +2547,38 @@ ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
                                     /*preserve_external_addresses=*/false);
 }
 
+static bool EvaluateConstexprInlineCall(ConstEvalContext* ctx,
+                                        InlineCallASTNode* call,
+                                        TypeRecord* type,
+                                        ConstexprValue* result) {
+  if (call == NULL || call->inlined == NULL ||
+      call->inlined->op != AST_OP(compound)) {
+    return false;
+  }
+  size_t mark = ctx->bindings.length;
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)call->inlined;
+  bool ok = true;
+  for (size_t i = 0; i < body->statements->length; i++) {
+    ConstexprStatementResult statement = EvaluateConstexprStatement(
+        ctx, body->statements->value.p[i], type, result);
+    if (statement != kConstexprStmtNormal) {
+      ok = false;
+      break;
+    }
+  }
+  if (ok) {
+    if (call->ret_value != NULL) {
+      ok = EvaluateConstexprValue(ctx, call->ret_value,
+                                  call->ret_value->type, result);
+    } else {
+      ok = type != NULL && TypeIsVoid(type);
+    }
+  }
+  PopConstexprBindings(ctx, mark);
+  return ok;
+}
+
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type,
                                    ConstexprValue* result) {
@@ -2577,6 +2609,10 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node != NULL && node->op == AST_OP(stmt_expr)) {
     return EvaluateConstexprStatementExpression(ctx, node, type, result);
+  }
+  if (node != NULL && node->op == AST_OP(inline_call)) {
+    return EvaluateConstexprInlineCall(
+        ctx, (InlineCallASTNode*)node, type, result);
   }
   if (node != NULL) {
     switch (node->op) {
@@ -7461,7 +7497,12 @@ static ConstexprStatementResult EvaluateConstexprStatement(
       }
       bool satisfied = false;
       ContractAssertASTNode* assertion = (ContractAssertASTNode*)stmt;
-      return EvaluateConstexprCondition(ctx, assertion->predicate,
+      ASTNode* predicate = assertion->predicate;
+      if ((stmt->flags & kASTVirtualCallerContract) != 0 &&
+          predicate != NULL && predicate->op == AST_OP(logor)) {
+        predicate = ((BinaryASTNode*)predicate)->right;
+      }
+      return EvaluateConstexprCondition(ctx, predicate,
                                         &satisfied) &&
                      satisfied
                  ? kConstexprStmtNormal
@@ -7585,6 +7626,51 @@ static bool EvaluateConstexprFunctionContracts(
     if (!ok) {
       return false;
     }
+  }
+  return true;
+}
+
+static ConstexprValue ConstexprValueFromBinding(ConstexprBinding* binding) {
+  if (binding == NULL) {
+    return (ConstexprValue){0};
+  }
+  return (ConstexprValue){
+      .is_object = binding->object != NULL && !binding->is_address,
+      .is_address = binding->is_address,
+      .is_floating = binding->is_floating,
+      .state = binding->state,
+      .ivalue = binding->ivalue,
+      .fvalue = binding->fvalue,
+      .object = binding->object,
+      .address_binding = binding->address_binding,
+      .address_slot = binding->address_slot,
+      .address_object = binding->address_object,
+      .address_index = binding->address_index,
+      .heap_block = binding->heap_block,
+      .heap_index = binding->heap_index,
+  };
+}
+
+static bool BindConstexprCallerContractParameters(ConstEvalContext* ctx,
+                                                  TypeRecord* callee_func,
+                                                  TypeRecord* caller_func) {
+  if (callee_func == NULL || caller_func == NULL ||
+      !TypeIsFunction(callee_func) || !TypeIsFunction(caller_func) ||
+      callee_func->info.function.prototype.length !=
+          caller_func->info.function.prototype.length) {
+    return false;
+  }
+  for (size_t i = 0; i < callee_func->info.function.prototype.length; i++) {
+    Symbol* callee_formal =
+        callee_func->info.function.prototype.value.p[i];
+    Symbol* caller_formal =
+        caller_func->info.function.prototype.value.p[i];
+    ConstexprBinding* binding = FindConstexprBinding(ctx, callee_formal);
+    if (caller_formal == NULL || binding == NULL) {
+      return false;
+    }
+    PushConstexprBinding(ctx, caller_formal,
+                         ConstexprValueFromBinding(binding));
   }
   return true;
 }
@@ -8329,6 +8415,9 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   }
   ASTNode* receiver = NULL;
   bool receiver_is_explicit_actual = false;
+  VectorASTNode* call = (VectorASTNode*)node;
+  TypeRecord* caller_contract_func =
+      node->op == AST_OP(call) ? call->caller_contract_function : NULL;
   Symbol* call_symbol = allocation_symbol;
   Symbol* callee = ConstexprFunctionDefinition(call_symbol);
   if (callee == NULL) {
@@ -8356,7 +8445,6 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     }
   }
   TypeRecord* func = callee->type;
-  VectorASTNode* call = (VectorASTNode*)node;
   CXXSpecialMemberKind special_member_kind =
       func->info.function.cxx_special_member_kind;
   if (special_member_kind == kCXXSpecialMemberCopyAssignment ||
@@ -8496,9 +8584,22 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
           ? BindConstexprConstructorActuals(ctx, callee, receiver,
                                             call->children)
           : BindConstexprActuals(ctx, callee, call->children);
+  bool distinct_caller_contracts =
+      caller_contract_func != NULL &&
+      caller_contract_func->info.function.symbol != callee;
+  bool caller_bound =
+      !distinct_caller_contracts ||
+      (bound && BindConstexprCallerContractParameters(
+                    ctx, func, caller_contract_func));
+  bool caller_pre =
+      caller_bound &&
+      (!distinct_caller_contracts ||
+       EvaluateConstexprFunctionContracts(
+           ctx, caller_contract_func, kContractPrecondition, result));
   bool pre =
-      bound && EvaluateConstexprFunctionContracts(
-                   ctx, func, kContractPrecondition, result);
+      bound && caller_pre &&
+      EvaluateConstexprFunctionContracts(
+          ctx, func, kContractPrecondition, result);
   bool tracks_destroyed_lifetime =
       callee->name.value != NULL &&
       strcmp(callee->name.value, "destroy_at") == 0;
@@ -8530,9 +8631,14 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   if (tracks_destroyed_lifetime) {
     ctx->destroy_at_depth--;
   }
-  bool post =
+  bool callee_post =
       body && EvaluateConstexprFunctionContracts(
                   ctx, func, kContractPostcondition, result);
+  bool post =
+      callee_post &&
+      (!distinct_caller_contracts ||
+       EvaluateConstexprFunctionContracts(
+           ctx, caller_contract_func, kContractPostcondition, result));
   if (body && has_destroyed_address) {
     ConstexprObject* destroyed_object =
         ConstexprAddressTargetObject(ctx, destroyed_address);
@@ -8547,7 +8653,7 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
       destroyed_slot->lifetime_ended = true;
     }
   }
-  bool ok = bound && pre && body && post;
+  bool ok = bound && caller_bound && pre && body && post;
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
   return ok;

@@ -30,6 +30,8 @@ accidentally claim final-standard conformance.
    requirements](https://wg21.link/p3822r2) is implemented in C++29 mode.
 8. [P3670R4: Pack indexing for template
    names](https://wg21.link/p3670r4) is implemented in C++29 mode.
+9. [P3097R3: Contracts for virtual
+   functions](https://wg21.link/p3097r3) is implemented in C++29 mode.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
@@ -120,9 +122,16 @@ bounds diagnostics, and persist through module serialization.
 `__cpp_pack_indexing` is `202606L` in C++29 mode and remains `202311L` in
 C++26 mode.
 
-## Adopted C++29 language features
-
-- [P3097R3: Contracts for virtual functions](https://wg21.link/p3097r3)
+P3097 support permits contracts on virtual, pure virtual, and overriding
+functions. Virtual calls evaluate caller-facing assertions from the statically
+chosen function around callee-facing assertions from the final overrider:
+caller preconditions, callee preconditions, the body, callee postconditions,
+then caller postconditions. Direct and fully qualified calls avoid duplicate
+checks, pointer-to-member calls retain only callee-facing checks, and the
+lowering supports parameter and result bindings, constant evaluation, and
+module serialization. Caller-facing lowering currently requires by-value class
+parameters and class results to be trivially copyable; DaveCC diagnoses the
+unsupported nontrivial case rather than introducing extra copy operations.
 
 ## Adopted C++29 library features
 
@@ -130,5 +139,3 @@ C++26 mode.
   containers](https://wg21.link/p3091r6)
 - [P3125R6: `constexpr` pointer tagging](https://wg21.link/p3125r6)
 - [P3248R4: Require `intptr_t` and `uintptr_t`](https://wg21.link/p3248r4)
-
-Virtual-function contracts are the strongest remaining language follow-up.

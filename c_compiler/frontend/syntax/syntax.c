@@ -2389,7 +2389,8 @@ void SyntaxDiagnoseInvalidFunctionContracts(Syntax* syntax, TypeRecord* func) {
     return;
   }
   FunctionInfo* info = &func->info.function;
-  if (info->is_virtual || info->is_override) {
+  if ((info->is_virtual || info->is_override) &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX29)) {
     SyntaxError(syntax, "virtual functions cannot have contract assertions");
   }
   if (info->is_deleted || info->is_explicitly_deleted) {

@@ -76,6 +76,10 @@ static bool MemberReceiverIsVolatile(BinaryASTNode* node);
 static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
                                               BinaryASTNode* member_access);
 static bool LowerMemberFunctionCall(VectorASTNode* node);
+static ASTNode* NewVirtualCalleeFromFunction(ASTNode* receiver,
+                                             TypeRecord* function_type,
+                                             bool receiver_is_pointer,
+                                             SourceLocation location);
 
 // A user-defined conversion (via a converting constructor) involves a standard
 // conversion of the argument to the constructor's parameter.  While ranking
@@ -4162,11 +4166,14 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
 // to copy the Symbols too.  The ownership of all actual expressions is
 // changed to the variable declaration.  The inliner's argument_map
 // will contains a mapping of old symbol to new symbol.
-static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* inliner) {
+static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call,
+                              Inliner* inliner) {
   SourceLocation location = call->base.location;
   Vector* decls = NewVector();
   for (size_t i = 0; i < info->prototype.length; i++) {
-    Symbol* formal = SymbolClone(info->prototype.value.p[i]);
+    Symbol* original_formal = info->prototype.value.p[i];
+    ASTNode* actual = ASTNodeMove(call->children->value.p[i]);
+    Symbol* formal = SymbolClone(original_formal);
     formal->flags.is_argument = false;
     formal->flags.is_local = true;
     VectorAppend(&compiler->syntax.all_local_symbols, formal);
@@ -4174,37 +4181,22 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* 
     // Insert old and new into inliner's argument map so we can translate
     // the argument references to the local variables.
     MapKeyValue kv;
-    kv.key.p = info->prototype.value.p[i];
+    kv.key.p = original_formal;
     kv.value.p = formal;
     MapInsert(&inliner->argument_map, kv);
     
-    ASTNode* actual = ASTNodeMove(call->children->value.p[i]);
-    if (TypeIsReference(formal->type)) {
-      // Bind reference parameters through the normal declaration-initializer
-      // path.  Treating this as `formal = actual` invokes operator= on the
-      // referent instead of binding the reference, and is ill-formed for
-      // `const T&`.
-      ASTNode* formal_id = NewIdentifierASTNode(formal, location);
-      formal_id->flags |= kASTNeedAddress | kASTIsDeclaration;
-      ASTNode* initializer = NewBinaryASTNode(
-          AST_OP(init), formal->type, actual->location, formal_id,
-          NewExpressionInitializerASTNode(actual, actual->location));
-      initializer = AnalyzeExpression(initializer);
-      VectorAppend(
-          decls,
-          NewVariableDeclarationASTNode(formal, initializer, location));
-    } else {
-      ASTNode* assign = NewBinaryASTNode(AST_OP(assign),
-                                         actual->type,
-                                         actual->location,
-                                         NewIdentifierASTNode(formal, location),
-                                         actual);
-      assign = AnalyzeExpression(assign);
-      VectorAppend(decls,
-                   NewVariableDeclarationASTNode(formal,
-                                                 assign,
-                                                 location));
-    }
+    // Initialize the local parameter object directly. Assignment would be
+    // ill-formed for const parameters, would assign through references instead
+    // of binding them, and would give class parameters the wrong copy semantics.
+    ASTNode* formal_id = NewIdentifierASTNode(formal, location);
+    formal_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    ASTNode* initializer = NewBinaryASTNode(
+        AST_OP(init), formal->type, actual->location, formal_id,
+        NewExpressionInitializerASTNode(actual, actual->location));
+    initializer = AnalyzeExpression(initializer);
+    VectorAppend(
+        decls,
+        NewVariableDeclarationASTNode(formal, initializer, location));
   }
   
   // Allocate a temporary for the return value if it's not void.
@@ -4285,6 +4277,243 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
       NewInlineCallASTNode(call->base.type, location, inlined, ret_node);
   result->value_category = call->base.value_category;
   return result;
+}
+
+static Symbol* InlineMappedSymbol(Inliner* inliner, Symbol* original) {
+  if (inliner == NULL || original == NULL) {
+    return NULL;
+  }
+  MapKeyType key = {.p = original};
+  return MapFind(&inliner->argument_map, key);
+}
+
+static ASTNode* NewCallerContractStatement(ContractAssertion* assertion,
+                                           Inliner* inliner,
+                                           VectorASTNode* call,
+                                           TypeRecord* caller_func) {
+  if (assertion == NULL || assertion->predicate == NULL) {
+    return NULL;
+  }
+  ASTNode* predicate =
+      ASTNodeClone(assertion->predicate, InlineFunctionBodyStatement,
+                   inliner, NULL);
+  FunctionInfo* info = &caller_func->info.function;
+  bool has_runtime_dedup_guard = false;
+  if (!info->is_pure_virtual && info->symbol != NULL &&
+      call->left != NULL) {
+    ASTNode* selected =
+        ASTNodeClone(call->left, IdentityCloneNode, NULL, NULL);
+    ASTNode* statically_chosen =
+        AnalyzeExpression(NewIdentifierASTNode(info->symbol,
+                                               assertion->location));
+    ASTNode* same_function = NewBinaryASTNode(
+        AST_OP(equal), NULL, assertion->location, selected, statically_chosen);
+    same_function = AnalyzeExpression(same_function);
+    predicate = AnalyzeExpression(NewBinaryASTNode(
+        AST_OP(logor), NULL, assertion->location, same_function, predicate));
+    has_runtime_dedup_guard = true;
+  }
+  Vector attributes = {0};
+  AttributeListClone(&attributes, &assertion->attributes);
+  ASTNode* statement = NewContractAssertASTNode(
+      predicate, &attributes, assertion->location);
+  ((ContractAssertASTNode*)statement)->kind = assertion->kind;
+  statement->flags |= kASTAnalyzed;
+  if (has_runtime_dedup_guard) {
+    statement->flags |= kASTVirtualCallerContract;
+  }
+  return statement;
+}
+
+static void AppendCallerContractStatements(Vector* statements,
+                                           TypeRecord* func,
+                                           ContractAssertionKind kind,
+                                           Inliner* inliner,
+                                           VectorASTNode* call) {
+  Vector* assertions = &func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    if (assertion == NULL || assertion->kind != kind) {
+      continue;
+    }
+    ASTNode* statement =
+        NewCallerContractStatement(assertion, inliner, call, func);
+    if (statement != NULL) {
+      VectorAppend(statements, statement);
+    }
+  }
+}
+
+static bool VirtualCallerContractsRequireNontrivialCopy(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  TypeRecord* return_type = func->next;
+  if (return_type != NULL && !TypeIsReference(return_type) &&
+      TypeIsStructOrUnion(return_type) &&
+      !CXXTypeIsTriviallyCopyable(return_type)) {
+    return true;
+  }
+  Vector* prototype = &func->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    if (formal != NULL && !TypeIsReference(formal->type) &&
+        TypeIsStructOrUnion(formal->type) &&
+        !CXXTypeIsTriviallyCopyable(formal->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
+  TypeRecord* caller_func = call->caller_contract_function;
+  if (caller_func == NULL || !TypeIsFunction(caller_func) ||
+      caller_func->info.function.contract_assertions.length == 0 ||
+      call->children == NULL ||
+      call->children->length !=
+          caller_func->info.function.prototype.length) {
+    return (ASTNode*)call;
+  }
+  if (VirtualCallerContractsRequireNontrivialCopy(caller_func)) {
+    SemanticError(
+        (ASTNode*)call,
+        "caller-facing virtual contracts with non-trivially-copyable "
+        "by-value parameters or results are not supported");
+    TypeRecordDelete(call->caller_contract_function);
+    call->caller_contract_function = NULL;
+    return (ASTNode*)call;
+  }
+
+  ASTNode* outer_parent = call->base.parent;
+  int outer_child_id = call->base.child_id;
+  if (outer_parent != NULL) {
+    ASTNodeReplaceChild(outer_parent, outer_child_id, NULL, false);
+    call->base.parent = NULL;
+  }
+
+  call->caller_contract_function = NULL;
+  SourceLocation location = call->base.location;
+  Inliner inliner = {0};
+  MapInitForPointerKeys(&inliner.argument_map);
+  inliner.return_is_reference = TypeIsReference(caller_func->next);
+
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               CopyArguments(&caller_func->info.function, call, &inliner));
+
+  Symbol* this_formal =
+      caller_func->info.function.prototype.length != 0
+          ? caller_func->info.function.prototype.value.p[0]
+          : NULL;
+  Symbol* local_this = InlineMappedSymbol(&inliner, this_formal);
+  if (local_this != NULL) {
+    ASTNode* receiver = NewIdentifierASTNode(local_this, location);
+    receiver = AnalyzeExpression(receiver);
+    ASTNode* virtual_callee = NewVirtualCalleeFromFunction(
+        receiver, caller_func, true, location);
+    if (virtual_callee != NULL) {
+      ASTNodeDelete(call->left);
+      call->left = virtual_callee;
+      call->left->parent = &call->base;
+      call->left->child_id = 0;
+    }
+  }
+
+  for (size_t i = 0;
+       i < caller_func->info.function.prototype.length; i++) {
+    Symbol* formal =
+        caller_func->info.function.prototype.value.p[i];
+    Symbol* local = InlineMappedSymbol(&inliner, formal);
+    ASTNode* actual = NewIdentifierASTNode(local, location);
+    actual = AnalyzeExpression(actual);
+    VectorSet(call->children, i, actual);
+    actual->parent = &call->base;
+    actual->child_id = (int)i;
+  }
+
+  AppendCallerContractStatements(statements, caller_func,
+                                 kContractPrecondition, &inliner, call);
+
+  ASTNode* call_statement = NULL;
+  if (inliner.return_value == NULL) {
+    call_statement = NewExpressionStatementASTNode((ASTNode*)call, location);
+  } else {
+    ASTNode* value = (ASTNode*)call;
+    if (inliner.return_is_reference) {
+      value = NewUnaryASTNode(AST_OP(address), inliner.return_value->type,
+                              location, value);
+    }
+    ASTNode* assignment = NewBinaryASTNode(
+        AST_OP(assign), value->type, location,
+        NewIdentifierASTNode(inliner.return_value, location), value);
+    assignment = AnalyzeExpression(assignment);
+    call_statement = NewExpressionStatementASTNode(assignment, location);
+  }
+  VectorAppend(statements, call_statement);
+
+  Vector* assertions = &caller_func->info.function.contract_assertions;
+  for (size_t i = 0; i < assertions->length; i++) {
+    ContractAssertion* assertion = assertions->value.p[i];
+    if (assertion != NULL &&
+        assertion->kind == kContractPostcondition &&
+        assertion->result_binding != NULL &&
+        inliner.return_value != NULL) {
+      Symbol* mapped_result = inliner.return_value;
+      if (inliner.return_is_reference) {
+        mapped_result = SymbolClone(assertion->result_binding);
+        mapped_result->flags.is_argument = false;
+        mapped_result->flags.is_local = true;
+        VectorAppend(&compiler->syntax.all_local_symbols, mapped_result);
+
+        ASTNode* returned_pointer =
+            NewIdentifierASTNode(inliner.return_value, location);
+        ASTNode* returned_reference = NewUnaryASTNode(
+            AST_OP(contents), call->base.type, location, returned_pointer);
+        returned_reference = AnalyzeExpression(returned_reference);
+        ASTNode* result_id =
+            NewIdentifierASTNode(mapped_result, assertion->location);
+        result_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+        ASTNode* initializer = NewBinaryASTNode(
+            AST_OP(init), mapped_result->type, assertion->location, result_id,
+            NewExpressionInitializerASTNode(returned_reference,
+                                            assertion->location));
+        initializer = AnalyzeExpression(initializer);
+        VectorAppend(
+            statements,
+            NewVariableDeclarationASTNode(
+                mapped_result, initializer, assertion->location));
+      }
+      MapKeyValue mapping = {
+          .key.p = assertion->result_binding,
+          .value.p = mapped_result,
+      };
+      MapInsert(&inliner.argument_map, mapping);
+    }
+  }
+  AppendCallerContractStatements(statements, caller_func,
+                                 kContractPostcondition, &inliner, call);
+
+  ASTNode* compound = NewCompoundStatementASTNode(statements, location);
+  for (size_t i = 0; i < statements->length; i++) {
+    ASTNode* statement = statements->value.p[i];
+    statement->parent = compound;
+    statement->child_id = (int)i;
+  }
+  ASTNode* result = NULL;
+  if (inliner.return_value != NULL) {
+    result = NewIdentifierASTNode(inliner.return_value, location);
+  }
+  ASTNode* lowered =
+      NewInlineCallASTNode(call->base.type, location, compound, result);
+  lowered->value_category = call->base.value_category;
+  MapDestruct(&inliner.argument_map);
+  TypeRecordDelete(caller_func);
+
+  if (outer_parent != NULL) {
+    ASTNodeReplaceChild(outer_parent, outer_child_id, lowered, false);
+  }
+  return lowered;
 }
 
 typedef struct {
@@ -5033,13 +5262,13 @@ static ASTNode* NewAnalyzedBuiltinAddressOf(ASTNode* sub,
   return address;
 }
 
-static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
-                                            StructMember* member,
+static ASTNode* NewVirtualCalleeFromFunction(ASTNode* receiver,
+                                            TypeRecord* function_type,
                                             bool receiver_is_pointer,
                                             SourceLocation location) {
-  if (receiver == NULL || member == NULL || member->symbol == NULL ||
-      !TypeIsFunction(member->symbol->type) ||
-      member->symbol->type->info.function.virtual_index < 0) {
+  if (receiver == NULL || function_type == NULL ||
+      !TypeIsFunction(function_type) ||
+      function_type->info.function.virtual_index < 0) {
     return NULL;
   }
   ASTNode* receiver_clone = CloneReceiverForVirtualLookup(receiver);
@@ -5052,17 +5281,27 @@ static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
       NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver_clone,
                        vptr_name);
   ASTNode* index =
-      NewIntConstantASTNode(member->symbol->type->info.function.virtual_index,
+      NewIntConstantASTNode(function_type->info.function.virtual_index,
                             NewTypeRecordWithSize(kTypeInt, kQualPlain),
                             location);
   ASTNode* slot =
       NewBinaryASTNode(AST_OP(subscript), NULL, location, vptr, index);
-  TypeRecord* function_type =
-      CopyFunctionTypeForVirtualCall(member->symbol->type);
-  TypeRecord* function_pointer = NewPointerTo(kQualPlain, function_type);
+  TypeRecord* callable_type =
+      CopyFunctionTypeForVirtualCall(function_type);
+  TypeRecord* function_pointer = NewPointerTo(kQualPlain, callable_type);
   slot = AnalyzeExpression(slot);
   ASTNodeSetType(slot, function_pointer);
   return slot;
+}
+
+static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
+                                            StructMember* member,
+                                            bool receiver_is_pointer,
+                                            SourceLocation location) {
+  return member != NULL && member->symbol != NULL
+             ? NewVirtualCalleeFromFunction(receiver, member->symbol->type,
+                                            receiver_is_pointer, location)
+             : NULL;
 }
 
 static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
@@ -5292,7 +5531,16 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   bool use_virtual_dispatch =
       member->symbol->type->info.function.is_virtual &&
       !member->is_static && !explicit_object &&
+      !qualified_base_member &&
       !CurrentFunctionIsCXXCtorOrDtor();
+  if (use_virtual_dispatch &&
+      CompilerCXXAtLeast(kLanguageStandardCXX29) &&
+      compiler->contract_semantic != kContractSemanticIgnore &&
+      member->symbol->type->info.function.contract_assertions.length != 0) {
+    TypeRecordDelete(node->caller_contract_function);
+    node->caller_contract_function =
+        TypeRecordCopy(member->symbol->type);
+  }
   bool polymorphic_special_member =
       (member->symbol->type->info.function.is_constructor ||
        member->symbol->type->info.function.is_destructor) &&
@@ -9423,6 +9671,11 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       CheckFormatCall(node, callee);
       SpecializePrintfCall(node, callee);
     }
+  }
+
+  if (call_ok && node->caller_contract_function != NULL &&
+      compiler->constant_evaluation_required_depth == 0) {
+    return LowerVirtualCallerContracts(node);
   }
 
   // Inline function call if possible.  Only possible if we are calling

@@ -382,6 +382,8 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       VectorASTNode* v = (VectorASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, v->left);
       WriteASTVectorPtr(ctx, buf, 17, v->children);
+      SWriteRef(ctx, buf, 18, kSerialKindType,
+                v->caller_contract_function);
       break;
     }
     case kASTShapeRequiresExpr: {
@@ -543,6 +545,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       ContractAssertASTNode* a = (ContractAssertASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, a->predicate);
       SerialWriteAttributeVector(ctx, buf, 17, &a->attributes);
+      WireWriteInt64(buf, 18, a->kind);
       break;
     }
     case kASTShapeIf: {
@@ -748,6 +751,11 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         v->children = ReadASTVectorPtr(ctx, buf);
+        return;
+      }
+      if (field == 18) {
+        v->caller_contract_function =
+            (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
         return;
       }
       break;
@@ -1144,6 +1152,12 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         SerialReadAttributeVector(ctx, buf, &a->attributes);
+        return;
+      }
+      if (field == 18) {
+        int64_t kind = 0;
+        WireReadInt64(buf, &kind);
+        a->kind = (ContractAssertionKind)kind;
         return;
       }
       break;

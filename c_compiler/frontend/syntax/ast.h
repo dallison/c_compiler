@@ -420,6 +420,7 @@ struct ConstraintExpr;
 #define kASTConstexprLifetimeInitializer (1ULL << 56)  // Synthesized sparse initializer preserves inactive constexpr subobjects.
 #define kASTUnparenthesizedDecltypeEntity (1ULL << 57)  // Deferred decltype operand uses the declared type, not its value category.
 #define kASTSourceDesignatedInitializer (1ULL << 58)  // Designated-initializer-clause written in source, not synthesized by lowering.
+#define kASTVirtualCallerContract (1ULL << 59)  // P3097 caller check with a runtime dedup guard.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -569,6 +570,8 @@ typedef struct {
   ASTNode base;
   ASTNode* left;       // @wire 16
   Vector* children;    // @wire 17
+  // P3097 caller-facing contracts for a lowered virtual member call.
+  TypeRecord* caller_contract_function;  // @wire 18
 } VectorASTNode;
 
 ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
@@ -792,6 +795,7 @@ typedef struct {
   ASTNode base;
   ASTNode* predicate;  // @wire 16
   Vector attributes;   // Attribute*
+  ContractAssertionKind kind;  // @wire 18
 } ContractAssertASTNode;
 
 ASTNode* NewContractAssertASTNode(ASTNode* predicate, Vector* attributes,

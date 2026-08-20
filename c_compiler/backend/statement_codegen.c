@@ -2628,7 +2628,7 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
   case AST_OP(contract_assert): {
     ContractAssertASTNode* assertion = (ContractAssertASTNode*)node;
     GenerateContractCheck(gen, assertion->predicate,
-                          kContractAssertionStatement, node->location);
+                          assertion->kind, node->location);
     break;
   }
   default:
