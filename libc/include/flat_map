@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <ranges>
 #ifdef __cpp_exceptions
 #include <stdexcept>
@@ -21,6 +22,10 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#if __cplusplus >= 202700L && !defined(__cpp_lib_map_lookup)
+#define __cpp_lib_map_lookup 202606L
+#endif
 
 namespace std {
 
@@ -770,6 +775,36 @@ class flat_map
     __base::operator=(values);
     return *this;
   }
+
+#if __cplusplus >= 202700L
+  constexpr optional<T&> lookup(const Key& key) {
+    auto found = this->find(key);
+    return found == this->end() ? optional<T&>()
+                                : optional<T&>(found->second);
+  }
+
+  constexpr optional<const T&> lookup(const Key& key) const {
+    auto found = this->find(key);
+    return found == this->end() ? optional<const T&>()
+                                : optional<const T&>(found->second);
+  }
+
+  template <class K>
+    requires __flat_detail::__is_transparent<Compare>::value
+  constexpr optional<T&> lookup(const K& key) {
+    auto found = this->find(key);
+    return found == this->end() ? optional<T&>()
+                                : optional<T&>(found->second);
+  }
+
+  template <class K>
+    requires __flat_detail::__is_transparent<Compare>::value
+  constexpr optional<const T&> lookup(const K& key) const {
+    auto found = this->find(key);
+    return found == this->end() ? optional<const T&>()
+                                : optional<const T&>(found->second);
+  }
+#endif
 };
 
 template <class Key, class T, class Compare = less<Key>,

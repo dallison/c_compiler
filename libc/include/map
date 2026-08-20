@@ -14,11 +14,16 @@
 #include <iterator>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <stddef.h>
 #ifdef __cpp_exceptions
 #include <stdexcept>
 #endif
 #include <utility>
+
+#if __cplusplus >= 202700L && !defined(__cpp_lib_map_lookup)
+#define __cpp_lib_map_lookup 202606L
+#endif
 
 namespace std {
 
@@ -1047,6 +1052,39 @@ class map {
     }
     return node->value.second;
   }
+
+#if __cplusplus >= 202700L
+  constexpr optional<mapped_type&> lookup(const key_type& key) {
+    __node* node = __find_node(key);
+    return node == nullptr ? optional<mapped_type&>()
+                           : optional<mapped_type&>(node->value.second);
+  }
+
+  constexpr optional<const mapped_type&> lookup(
+      const key_type& key) const {
+    __node* node = __find_node(key);
+    return node == nullptr
+               ? optional<const mapped_type&>()
+               : optional<const mapped_type&>(node->value.second);
+  }
+
+  template <class K>
+    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  constexpr optional<mapped_type&> lookup(const K& key) {
+    __node* node = __find_node_as(key);
+    return node == nullptr ? optional<mapped_type&>()
+                           : optional<mapped_type&>(node->value.second);
+  }
+
+  template <class K>
+    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  constexpr optional<const mapped_type&> lookup(const K& key) const {
+    __node* node = __find_node_as(key);
+    return node == nullptr
+               ? optional<const mapped_type&>()
+               : optional<const mapped_type&>(node->value.second);
+  }
+#endif
 
   iterator find(const key_type& key) {
     return iterator(__find_node(key), __root_);

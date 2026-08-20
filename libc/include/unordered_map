@@ -17,11 +17,16 @@
 #include <initializer_list>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #ifdef __cpp_exceptions
 #include <stdexcept>
 #endif
 #include <type_traits>
 #include <utility>
+
+#if __cplusplus >= 202700L && !defined(__cpp_lib_map_lookup)
+#define __cpp_lib_map_lookup 202606L
+#endif
 
 namespace std {
 
@@ -206,6 +211,45 @@ class unordered_map {
     }
     return node->__value.second;
   }
+
+#if __cplusplus >= 202700L
+  constexpr optional<mapped_type&> lookup(const key_type& key) {
+    __node* node = __table_.__find_node(key);
+    return node == nullptr ? optional<mapped_type&>()
+                           : optional<mapped_type&>(node->__value.second);
+  }
+
+  constexpr optional<const mapped_type&> lookup(
+      const key_type& key) const {
+    __node* node = __table_.__find_node(key);
+    return node == nullptr
+               ? optional<const mapped_type&>()
+               : optional<const mapped_type&>(node->__value.second);
+  }
+
+  template <class K>
+    requires requires {
+      typename Hash::is_transparent;
+      typename KeyEqual::is_transparent;
+    }
+  constexpr optional<mapped_type&> lookup(const K& key) {
+    __node* node = __table_.__find_node_as(key);
+    return node == nullptr ? optional<mapped_type&>()
+                           : optional<mapped_type&>(node->__value.second);
+  }
+
+  template <class K>
+    requires requires {
+      typename Hash::is_transparent;
+      typename KeyEqual::is_transparent;
+    }
+  constexpr optional<const mapped_type&> lookup(const K& key) const {
+    __node* node = __table_.__find_node_as(key);
+    return node == nullptr
+               ? optional<const mapped_type&>()
+               : optional<const mapped_type&>(node->__value.second);
+  }
+#endif
 
   iterator find(const key_type& key) { return __table_.find(key); }
   const_iterator find(const key_type& key) const { return __table_.find(key); }

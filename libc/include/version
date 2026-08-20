@@ -107,6 +107,9 @@
 #endif
 
 #if __cplusplus >= 202700L
+#ifndef __cpp_lib_map_lookup
+#define __cpp_lib_map_lookup 202606L
+#endif
 // Vendor probe for DaveCC's experimental P3294R2 implementation. WG21 has not
 // assigned a standard feature-test macro to token-sequence injection.
 #ifndef __davecc_p3294_token_injection
