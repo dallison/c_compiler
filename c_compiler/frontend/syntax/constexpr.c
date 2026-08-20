@@ -9032,12 +9032,28 @@ bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node) {
   ConstexprEvalMode mode = compiler->constexpr_eval_mode;
   ConstexprPCodeCapability capability =
       ConstexprPCodeCapabilityForExpression(node);
+  ASTNode* constructor_receiver = NULL;
+  Symbol* function =
+      ConstexprRawConstructorCallSymbol(node, &constructor_receiver);
+  if (function == NULL) {
+    function = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
+  }
+  ConstexprPCodeCapability function_capability =
+      ConstexprPCodeCapabilityForFunction(function);
+  if (function != NULL && function->type != NULL &&
+      TypeIsFunction(function->type) &&
+      function->type->info.function.is_constructor &&
+      ConstexprPCodeFunctionContainsThrow(function)) {
+    function_capability = kConstexprPCodeASTOnly;
+  }
+  if (function_capability > capability) {
+    capability = function_capability;
+  }
   if ((mode == kConstexprEvalPCode || mode == kConstexprEvalAuto ||
        mode == kConstexprEvalAudit) &&
       capability != kConstexprPCodeEligible) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
-    ConstexprValue overlay_value = {0};
-    bool overlay_ok = EvaluateConstexprCall(ctx, node, &overlay_value);
+    bool overlay_ok = ConstexprEvaluateCall(ctx, node);
     compiler->constexpr_eval_mode = mode;
     if (!overlay_ok) {
       ReportUncaughtConstexprException(ctx);

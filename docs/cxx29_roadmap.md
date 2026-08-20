@@ -145,6 +145,8 @@ unsupported nontrivial case rather than introducing extra copy operations.
 - [P3052R2:
   `view_interface::at()`](https://wg21.link/p3052r2) is implemented in C++29
   mode.
+- [P3395R6: Formatting of
+  `std::error_code`](https://wg21.link/p3395r6) is implemented in C++29 mode.
 
 `map`, `unordered_map`, and `flat_map` provide mutable, const, and transparent
 heterogeneous `lookup` overloads returning `optional<T&>` or
@@ -164,3 +166,12 @@ remains `202211L` in earlier modes.
 sized random-access views, including negative-index and upper-bound checks and
 constexpr mutation through returned references. `__cpp_lib_view_interface`
 is `202606L` in C++29 mode.
+
+`formatter<error_code, charT>` supports category-and-value and error-message
+presentations, debug escaping, fill, alignment, width, and dynamic width.
+Error messages are converted to well-formed UTF-8 for narrow formatting, with
+replacement characters for malformed input. P3395R6 does not define a
+feature-test macro. C++26 and later constant evaluation routes constexpr
+constructors containing exception paths through the AST evaluator, so
+compile-time format-string validation remains available when exceptions are
+enabled.

@@ -22,6 +22,8 @@ typedef enum {
 
 bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason);
 ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node);
+ConstexprPCodeCapability ConstexprPCodeCapabilityForFunction(Symbol* function);
+bool ConstexprPCodeFunctionContainsThrow(Symbol* function);
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node);
 const char* ConstexprPCodeFailureReason(ConstEvalContext* ctx);
 bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,

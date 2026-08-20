@@ -214,6 +214,14 @@ struct __spec {
         precision(-1) {}
 };
 
+struct __error_code_spec {
+  __spec spec;
+  bool use_message;
+  bool debug;
+
+  __error_code_spec() : spec(), use_message(false), debug(false) {}
+};
+
 struct __format_specification {
   const __spec* parsed;
   const char* data;
@@ -222,12 +230,15 @@ struct __format_specification {
 
 int __dynamic_integer(const __format_args* args, size_t index);
 __spec __parse_spec(string_view text, const __format_args* args);
+__error_code_spec __parse_error_code_spec(
+    string_view text, const __format_args* args);
 size_t __prefix_length(const string& value);
 void __append_padded(string* output, const string* value, const __spec* spec,
                      bool numeric, bool unicode_text = false);
 size_t __utf8_display_width(string_view value);
 size_t __utf8_prefix_for_width(string_view value, size_t width);
 void __append_debug_string(string_view value, bool character, string* output);
+void __append_sanitized_utf8(string_view value, string* output);
 void __unsigned_integer_to(unsigned long long value, char type, bool alternate,
                            string* output);
 void __signed_integer_to(long long value, const __spec& spec, string* output);

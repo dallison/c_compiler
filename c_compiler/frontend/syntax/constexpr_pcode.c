@@ -2947,6 +2947,7 @@ bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason) {
 typedef struct {
   bool required;
   bool ast_only;
+  bool has_throw;
   int function_depth;
   Vector visited_functions;  // Symbol*
 } ConstexprASTOverlayScan;
@@ -2972,6 +2973,9 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     return;
   }
   bool cxx26 = CompilerCXXAtLeast(kLanguageStandardCXX26);
+  if (cxx26 && node->op == AST_OP(throw)) {
+    scan->has_throw = true;
+  }
   bool placement_new =
       (node->flags & kASTCXXPlacementNew) != 0;
   if (!placement_new && node->op == AST_OP(cast) &&
@@ -3080,6 +3084,26 @@ ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node) {
              ? kConstexprPCodeASTOnly
              : scan.required ? kConstexprPCodeRequiresOverlay
                              : kConstexprPCodeEligible;
+}
+
+ConstexprPCodeCapability ConstexprPCodeCapabilityForFunction(
+    Symbol* function) {
+  ConstexprASTOverlayScan scan = {0};
+  VectorInit(&scan.visited_functions);
+  ScanConstexprFunctionCapabilities(function, &scan);
+  VectorDestruct(&scan.visited_functions);
+  return scan.ast_only
+             ? kConstexprPCodeASTOnly
+             : scan.required ? kConstexprPCodeRequiresOverlay
+                             : kConstexprPCodeEligible;
+}
+
+bool ConstexprPCodeFunctionContainsThrow(Symbol* function) {
+  ConstexprASTOverlayScan scan = {0};
+  VectorInit(&scan.visited_functions);
+  ScanConstexprFunctionCapabilities(function, &scan);
+  VectorDestruct(&scan.visited_functions);
+  return scan.has_throw;
 }
 
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {

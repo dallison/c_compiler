@@ -10,6 +10,9 @@
 
 #include <cerrno>
 #include <cstring>
+#if __cplusplus >= 202700L
+#include <format>
+#endif
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -290,6 +293,137 @@ class system_error : public runtime_error {
  private:
   error_code __code_;
 };
+
+#if __cplusplus >= 202700L
+template <class CharT>
+struct formatter<error_code, CharT> {
+  basic_string_view<CharT> __specification;
+  bool __debug = false;
+
+  constexpr void set_debug_format() noexcept { __debug = true; }
+
+  constexpr typename basic_format_parse_context<CharT>::iterator parse(
+      basic_format_parse_context<CharT>& context) {
+    auto current = context.begin();
+    auto end = context.end();
+    auto is_align = [](CharT value) constexpr {
+      return value == static_cast<CharT>('<') ||
+             value == static_cast<CharT>('>') ||
+             value == static_cast<CharT>('^');
+    };
+    auto is_digit = [](CharT value) constexpr {
+      return value >= static_cast<CharT>('0') &&
+             value <= static_cast<CharT>('9');
+    };
+
+    if (current + 1 < end && is_align(current[1])) {
+      if (*current == static_cast<CharT>('{') ||
+          *current == static_cast<CharT>('}')) {
+        __DAVECC_THROW(
+            format_error("invalid error_code format specification"));
+      }
+      current += 2;
+    } else if (current != end && is_align(*current)) {
+      ++current;
+    }
+
+    if (current != end && is_digit(*current)) {
+      if (*current == static_cast<CharT>('0')) {
+        __DAVECC_THROW(
+            format_error("invalid error_code format specification"));
+      }
+      do {
+        ++current;
+      } while (current != end && is_digit(*current));
+    } else if (current != end &&
+               *current == static_cast<CharT>('{')) {
+      ++current;
+      bool has_id = false;
+      size_t id = 0;
+      while (current != end && is_digit(*current)) {
+        has_id = true;
+        id = id * 10 +
+             static_cast<size_t>(*current - static_cast<CharT>('0'));
+        ++current;
+      }
+      if (current == end || *current != static_cast<CharT>('}')) {
+        __DAVECC_THROW(
+            format_error("invalid error_code format specification"));
+      }
+      ++current;
+      if (has_id) {
+        context.check_arg_id(id);
+      } else {
+        static_cast<void>(context.next_arg_id());
+      }
+    }
+
+    if (current != end && *current == static_cast<CharT>('?')) {
+      ++current;
+    }
+    if (current != end && *current == static_cast<CharT>('s')) {
+      ++current;
+    }
+    if (current != end) {
+      __DAVECC_THROW(
+          format_error("invalid error_code format specification"));
+    }
+    __specification = basic_string_view<CharT>(
+        context.begin(),
+        static_cast<size_t>(context.end() - context.begin()));
+    return context.end();
+  }
+
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator format(
+      const error_code& code,
+      basic_format_context<OutputIt, CharT>& context) const {
+    string narrow_specification;
+    for (size_t i = 0; i < __specification.size(); ++i) {
+      unsigned long value =
+          static_cast<unsigned long>(__specification[i]);
+      if (value > 0x7f) {
+        __format_detail::__fail(
+            "invalid error_code format specification");
+      }
+      narrow_specification.push_back(static_cast<char>(value));
+    }
+    __format_detail::__error_code_spec specification =
+        __format_detail::__parse_error_code_spec(
+            string_view(narrow_specification.data(),
+                        narrow_specification.size()),
+            &context.__arguments());
+
+    string text;
+    if (specification.use_message) {
+      string message = code.message();
+      __format_detail::__append_sanitized_utf8(
+          string_view(message.data(), message.size()), &text);
+    } else {
+      const char* name = code.category().name();
+      text += name;
+      text.push_back(':');
+      __format_detail::__spec integer_specification;
+      string value;
+      __format_detail::__signed_integer_to(
+          static_cast<long long>(code.value()), integer_specification,
+          &value);
+      text += value;
+    }
+
+    string converted;
+    if (__debug || specification.debug) {
+      __format_detail::__append_debug_string(
+          string_view(text.data(), text.size()), false, &converted);
+    } else {
+      converted = text;
+    }
+    __format_detail::__append_padded(
+        &context.__buffer(), &converted, &specification.spec, false, true);
+    return context.out();
+  }
+};
+#endif
 
 }  // namespace std
 

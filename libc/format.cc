@@ -125,6 +125,27 @@ __spec __parse_spec(string_view text, const __format_args* arguments) {
   return result;
 }
 
+__error_code_spec __parse_error_code_spec(
+    string_view text, const __format_args* arguments) {
+  __error_code_spec result;
+  size_t size = text.size();
+  if (size != 0 && text[size - 1] == 's') {
+    result.use_message = true;
+    --size;
+  }
+  if (size != 0 && text[size - 1] == '?') {
+    result.debug = true;
+    --size;
+  }
+  result.spec = __parse_spec(string_view(text.data(), size), arguments);
+  if (result.spec.sign != 0 || result.spec.type != 0 ||
+      result.spec.alternate || result.spec.zero ||
+      result.spec.localized || result.spec.precision >= 0) {
+    __fail("invalid error_code format specification");
+  }
+  return result;
+}
+
 size_t __prefix_length(const string& value) {
   size_t result = 0;
   if (!value.empty() &&
@@ -290,6 +311,48 @@ void __append_debug_string(string_view value, bool character, string* output) {
     }
   }
   output->push_back(quote);
+}
+
+static size_t __utf8_invalid_subpart_length(string_view value,
+                                            size_t position) {
+  unsigned char first = static_cast<unsigned char>(value[position]);
+  size_t expected =
+      first >= 0xC2 && first <= 0xDF
+          ? 2
+          : first >= 0xE0 && first <= 0xEF
+                ? 3
+                : first >= 0xF0 && first <= 0xF4 ? 4 : 1;
+  size_t length = 1;
+  while (length < expected && position + length < value.size()) {
+    unsigned char next =
+        static_cast<unsigned char>(value[position + length]);
+    bool valid = (next & 0xC0) == 0x80;
+    if (length == 1) {
+      valid = valid && !(first == 0xE0 && next < 0xA0) &&
+              !(first == 0xED && next >= 0xA0) &&
+              !(first == 0xF0 && next < 0x90) &&
+              !(first == 0xF4 && next >= 0x90);
+    }
+    if (!valid) {
+      break;
+    }
+    ++length;
+  }
+  return length;
+}
+
+void __append_sanitized_utf8(string_view value, string* output) {
+  for (size_t position = 0; position < value.size();) {
+    unsigned long code_point = 0;
+    size_t length = 1;
+    if (__utf8_decode(value, position, &code_point, &length)) {
+      output->append(value.data() + position, length);
+    } else {
+      output->append("\xef\xbf\xbd", 3);
+      length = __utf8_invalid_subpart_length(value, position);
+    }
+    position += length;
+  }
 }
 
 void __append_padded(string* output, const string* value,
