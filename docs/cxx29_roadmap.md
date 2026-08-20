@@ -138,9 +138,15 @@ unsupported nontrivial case rather than introducing extra copy operations.
 - [P3091R6: `lookup` for associative
   containers](https://wg21.link/p3091r6) is implemented in C++29 mode.
 - [P3125R6: `constexpr` pointer tagging](https://wg21.link/p3125r6)
-- [P3248R4: Require `intptr_t` and `uintptr_t`](https://wg21.link/p3248r4)
+- [P3248R5: Require `intptr_t` and
+  `uintptr_t`](https://wg21.link/p3248r5) is implemented.
 
 `map`, `unordered_map`, and `flat_map` provide mutable, const, and transparent
 heterogeneous `lookup` overloads returning `optional<T&>` or
 `optional<const T&>`. `<version>` and the affected container headers define
 `__cpp_lib_map_lookup` as `202606L` in C++29 mode.
+
+`intptr_t`, `uintptr_t`, their limit macros, and the corresponding atomic
+aliases are available on every DaveCC C++ target. Pointer-width macros are
+also provided by the C23 `<stdbit.h>` implementation. P3248R5 does not define
+a feature-test macro.

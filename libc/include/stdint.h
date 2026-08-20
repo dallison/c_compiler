@@ -10,6 +10,7 @@
 #define stdint_h
 #ifdef __DAVECC__
 
+#include <limits.h>
 
 #if defined(__6502__)
 // On 6502, pointers and ints are 16 bits long.
@@ -87,6 +88,16 @@ typedef uint8_t uint_fast8_t;
 typedef uint16_t uint_fast16_t;
 typedef uint32_t uint_fast32_t;
 typedef uint64_t uint_fast64_t;
+
+#if defined(__LP64__)
+#define INTPTR_MIN LONG_MIN
+#define INTPTR_MAX LONG_MAX
+#define UINTPTR_MAX ULONG_MAX
+#else
+#define INTPTR_MIN INT_MIN
+#define INTPTR_MAX INT_MAX
+#define UINTPTR_MAX UINT_MAX
+#endif
 
 #endif /* __DAVECC__ */
 #endif /* stdint_h */

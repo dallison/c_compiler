@@ -12,6 +12,7 @@
 #error "<atomic> is unavailable in the single-threaded 65(C)02 profile"
 #else
 
+#include <cstdint>
 #include <stddef.h>
 #include <string.h>
 #include <syscall.h>
@@ -469,6 +470,8 @@ using atomic_llong = atomic<long long>;
 using atomic_uint = atomic<unsigned int>;
 using atomic_ulong = atomic<unsigned long>;
 using atomic_ullong = atomic<unsigned long long>;
+using atomic_intptr_t = atomic<intptr_t>;
+using atomic_uintptr_t = atomic<uintptr_t>;
 
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
 template <class T>

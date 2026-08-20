@@ -9,12 +9,24 @@
 
 #include <limits.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define __STDC_VERSION_STDBIT_H__ 202311L
 
 #define __STDC_ENDIAN_LITTLE__ 1234
 #define __STDC_ENDIAN_BIG__ 4321
 #define __STDC_ENDIAN_NATIVE__ __STDC_ENDIAN_LITTLE__
+
+#if defined(__LP64__)
+#define INTPTR_WIDTH 64
+#define UINTPTR_WIDTH 64
+#elif defined(__6502__)
+#define INTPTR_WIDTH 16
+#define UINTPTR_WIDTH 16
+#else
+#define INTPTR_WIDTH 32
+#define UINTPTR_WIDTH 32
+#endif
 
 #define __DAVECC_STDBIT_FUNCTIONS(suffix, type, width)                     \
   [[unsequenced]] static unsigned int                                      \
