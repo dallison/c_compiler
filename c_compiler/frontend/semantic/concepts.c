@@ -109,11 +109,13 @@ Requirement* NewTypeRequirement(TypeRecord* type, SourceLocation location) {
 }
 
 Requirement* NewCompoundRequirement(ASTNode* expr, bool is_noexcept,
+                                    ASTNode* noexcept_condition,
                                     ConstraintExpr* return_type_constraint,
                                     SourceLocation location) {
   Requirement* r = NewRequirement(kRequirementCompound, location);
   r->expr = expr;
   r->is_noexcept = is_noexcept;
+  r->noexcept_condition = noexcept_condition;
   r->return_type_constraint = return_type_constraint;
   return r;
 }
@@ -295,6 +297,8 @@ static Requirement* RequirementClone(Requirement* requirement) {
       return NewCompoundRequirement(
           ASTNodeClone(requirement->expr, IdentityCloneNode, NULL, NULL),
           requirement->is_noexcept,
+          ASTNodeClone(requirement->noexcept_condition, IdentityCloneNode, NULL,
+                       NULL),
           ConceptsCloneConstraint(requirement->return_type_constraint),
           requirement->location);
     case kRequirementNested:
@@ -458,6 +462,9 @@ static Requirement* RequirementSubstitute(Syntax* syntax,
               syntax, requirement->expr, arguments, rebase_base,
               requirement->location),
           requirement->is_noexcept,
+          TypeSubstituteTemplateExpressionAndRebase(
+              syntax, requirement->noexcept_condition, arguments, rebase_base,
+              requirement->location),
           ConceptsSubstituteConstraint(
               syntax, requirement->return_type_constraint, arguments,
               rebase_base),
@@ -570,6 +577,8 @@ static bool RequirementContainsTemplateParameter(Requirement* requirement) {
     case kRequirementSimple:
     case kRequirementCompound:
       return ExpressionContainsTemplateParameter(requirement->expr) ||
+             ExpressionContainsTemplateParameter(
+                 requirement->noexcept_condition) ||
              ConceptsConstraintContainsTemplateParameter(
                  requirement->return_type_constraint);
     case kRequirementType:
@@ -814,6 +823,7 @@ static bool EvaluateReturnTypeRequirement(ConstraintExpr* constraint,
 typedef enum {
   kRequirementSatisfied,
   kRequirementExpressionInvalid,
+  kRequirementNoexceptConditionInvalid,
   kRequirementNoexceptUnsatisfied,
   kRequirementReturnTypeUnsatisfied,
 } RequirementFailureReason;
@@ -891,6 +901,58 @@ static TypeRecord* PristineParameterPattern(Symbol* param) {
   return copy;
 }
 
+static bool EvaluateCompoundNoexceptCondition(Requirement* requirement,
+                                              Vector* arguments,
+                                              bool* require_noexcept) {
+  *require_noexcept = requirement->is_noexcept;
+  if (!requirement->is_noexcept || requirement->noexcept_condition == NULL) {
+    return true;
+  }
+  ASTNode* condition = TypeSubstituteTemplateExpression(
+      &compiler->syntax, requirement->noexcept_condition, arguments,
+      requirement->location);
+  if (condition == NULL || DiagnosticErrorTrapped()) {
+    ASTNodeDelete(condition);
+    return false;
+  }
+  ASTNodeVisit(condition, ClearRequirementExpressionAnalysis, 0, NULL);
+  DiagnosticSuppressBegin();
+  condition = AnalyzeExpression(condition);
+  bool failed = condition == NULL || DiagnosticErrorTrapped();
+  DiagnosticSuppressEnd();
+  if (failed) {
+    ASTNodeDelete(condition);
+    return false;
+  }
+  TypeRecord* type = ConstraintExpressionPrvalueType(condition);
+  int64_t value = 0;
+  bool valid = false;
+  if (type != NULL && (TypeIsBool(type) || TypeIsIntegral(type))) {
+    valid = EvaluateIntegerExpression(condition, &value) &&
+            (TypeIsBool(type) || value == 0 || value == 1);
+  } else if (type != NULL) {
+    ASTNode* holder = NewExpressionStatementASTNode(
+        condition, requirement->location);
+    DiagnosticSuppressBegin();
+    SemanticConvertType(condition,
+                        NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                        kConvertContextualBool);
+    condition = ASTNodeMove(((ExpressionStatementASTNode*)holder)->expr);
+    failed = DiagnosticErrorTrapped() || condition == NULL ||
+             !TypeIsBool(condition->type);
+    DiagnosticSuppressEnd();
+    ASTNodeDelete(holder);
+    if (!failed) {
+      valid = EvaluateIntegerExpression(condition, &value);
+    }
+  }
+  ASTNodeDelete(condition);
+  if (valid) {
+    *require_noexcept = value != 0;
+  }
+  return valid;
+}
+
 static bool EvaluateExpressionRequirement(Requirement* requirement,
                                           RequiresExpr* requires_expr,
                                           Vector* arguments,
@@ -962,7 +1024,15 @@ static bool EvaluateExpressionRequirement(Requirement* requirement,
   if (failed && failure_info != NULL) {
     failure_info->reason = kRequirementExpressionInvalid;
   }
-  if (!failed && requirement->is_noexcept &&
+  bool require_noexcept = requirement->is_noexcept;
+  if (!failed && !EvaluateCompoundNoexceptCondition(
+                     requirement, arguments, &require_noexcept)) {
+    failed = true;
+    if (failure_info != NULL) {
+      failure_info->reason = kRequirementNoexceptConditionInvalid;
+    }
+  }
+  if (!failed && require_noexcept &&
       !ExpressionRequirementNoexceptSatisfied(cloned)) {
     failed = true;
     if (failure_info != NULL) {
@@ -1025,6 +1095,8 @@ static const char* RequirementFailureReasonMessage(RequirementKind kind,
       return kind == kRequirementCompound
                  ? "because this compound requirement expression is invalid after substituting template arguments"
                  : "because this simple requirement expression is invalid after substituting template arguments";
+    case kRequirementNoexceptConditionInvalid:
+      return "because this compound requirement noexcept condition is not a contextually converted constant expression of type bool";
     case kRequirementNoexceptUnsatisfied:
       return "because this compound requirement is not noexcept; the required expression can throw";
     case kRequirementReturnTypeUnsatisfied:
@@ -1446,6 +1518,7 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   copy->member_function = arg->member_function;
   copy->template_symbol = arg->template_symbol;
   copy->reflection_value = arg->reflection_value;
+  copy->pack_index_expr = arg->pack_index_expr;
   copy->object_initializer =
       ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
   return copy;
@@ -1473,6 +1546,9 @@ static bool NormalizationTemplateArgumentsEqual(TemplateArgument* left,
   if (left->kind == kTemplateParameterType) {
     return TypeEqual(left->type, right->type) &&
            left->template_parameter_index == right->template_parameter_index;
+  }
+  if (left->kind == kTemplateParameterTemplate) {
+    return TemplateArgumentEqual(left, right);
   }
   return TemplateArgumentValuesEqual(left, right);
 }
@@ -2693,6 +2769,18 @@ static Requirement* ParseRequiresRequirement(Syntax* syntax) {
     ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebra) | TC(semicolon));
     bool is_noexcept = LexMatch(lex, TOK(noexcept));
+    ASTNode* noexcept_condition = NULL;
+    if (is_noexcept && LexMatch(lex, TOK(lparen))) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+        SyntaxError(syntax,
+                    "Conditional noexcept compound requirements require "
+                    "C++29");
+      }
+      noexcept_condition =
+          SyntaxParseSingleExpression(syntax, TC(closebra));
+      SyntaxNeedBracket(syntax, TOK(rparen),
+                        TC(semicolon) | TC(closebra));
+    }
     ConstraintExpr* return_type_constraint = NULL;
     if (LexLookingAt(lex, TOK(arrow))) {
       SourceLocation arrow_location = lex->current_token_location;
@@ -2700,7 +2788,7 @@ static Requirement* ParseRequiresRequirement(Syntax* syntax) {
       return_type_constraint = ParseConceptConstraintOr(syntax, arrow_location);
     }
     SyntaxNeedSemicolon(syntax, TC(closebra) | TC(semicolon));
-    return NewCompoundRequirement(expr, is_noexcept,
+    return NewCompoundRequirement(expr, is_noexcept, noexcept_condition,
                                   return_type_constraint,
                                   requirement_location);
   }
@@ -2858,7 +2946,9 @@ static ConstraintExpr* TryParseQualifiedConceptIdConstraint(Syntax* syntax) {
                                                          TC(semicolon))) {
     symbol = SyntaxFindQualifiedSymbol(syntax, &concept_id);
   }
-  if (symbol == NULL || !symbol->flags.is_concept) {
+  if (symbol == NULL || !symbol->flags.is_concept ||
+      (symbol->flags.is_template_template_parameter &&
+       symbol->flags.is_parameter_pack)) {
     FullyQualifiedIdentifierDestruct(&concept_id);
     LexCheckpointRestore(lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
@@ -2893,7 +2983,9 @@ static ConstraintExpr* ParseConceptPrimaryConstraint(Syntax* syntax,
     StringInit(&name, syntax->lex->spelling.value);
     Symbol* symbol = SyntaxFindSymbol(syntax, &name);
     StringDestruct(&name);
-    if (symbol != NULL && symbol->flags.is_concept) {
+    if (symbol != NULL && symbol->flags.is_concept &&
+        !(symbol->flags.is_template_template_parameter &&
+          symbol->flags.is_parameter_pack)) {
       SourceLocation concept_location = syntax->lex->current_token_location;
       LexNextToken(syntax->lex);
       Vector* args = NULL;

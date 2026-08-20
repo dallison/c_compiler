@@ -258,7 +258,9 @@ static void PredefineMacros(Preprocessor* p) {
 
     // C++20 feature-test macros for language features implemented by DaveCC.
     if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
-      PreprocessorDefineMacro(p, "__cpp_concepts", "202002L");
+      PreprocessorDefineMacro(
+          p, "__cpp_concepts",
+          CompilerCXXAtLeast(kLanguageStandardCXX29) ? "202606L" : "202002L");
       PreprocessorDefineMacro(
           p, "__cpp_consteval",
           CompilerCXXAtLeast(kLanguageStandardCXX23) ? "202211L" : "201811L");
@@ -303,7 +305,9 @@ static void PredefineMacros(Preprocessor* p) {
       PreprocessorDefineMacro(
           p, "__cpp_pp_embed",
           CompilerCXXAtLeast(kLanguageStandardCXX29) ? "202606L" : "202502L");
-      PreprocessorDefineMacro(p, "__cpp_pack_indexing", "202311L");
+      PreprocessorDefineMacro(
+          p, "__cpp_pack_indexing",
+          CompilerCXXAtLeast(kLanguageStandardCXX29) ? "202606L" : "202311L");
       PreprocessorDefineMacro(p, "__cpp_placeholder_variables", "202306L");
       PreprocessorDefineMacro(p, "__cpp_expansion_statements", "202506L");
       PreprocessorDefineMacro(p, "__cpp_impl_reflection", "202603L");

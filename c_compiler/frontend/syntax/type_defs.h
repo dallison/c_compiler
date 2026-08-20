@@ -157,6 +157,8 @@ typedef struct TemplateArgument {
   Symbol* member_function;   // Non-virtual member function.       // @wire 13
   Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
   struct ReflectionValue* reflection_value;  // Reflection NTTP.   // @wire 16
+  // C++29 indexed template-name `Templates...[I]`.
+  struct ASTNode* pack_index_expr;  // @wire 54
   struct ASTNode* object_initializer;  // Canonical class NTTP value. // @wire 44
 } TemplateArgument;
 
@@ -473,6 +475,9 @@ typedef struct TypeRecord {
   // `Ts`; the unevaluated expression is retained until the pack is bound.
   bool is_pack_index;                                               // @wire 18
   struct ASTNode* pack_index_expr;                                  // @wire 19
+  // Concrete pack retained when its index remains dependent across a nested
+  // template substitution.
+  struct TemplateArgument* pack_index_pack;                          // @wire 22
   // C++26 dependent type splice `typename[: r :]`.  Retained until template
   // substitution makes the reflection value concrete.
   struct ASTNode* dependent_splice_expr;                             // @wire 20

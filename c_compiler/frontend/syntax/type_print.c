@@ -552,6 +552,11 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
     } else {
       StringAppend(result, "TT?");
     }
+    if (argument->pack_index_expr != NULL) {
+      StringAppend(result, "...[");
+      PackIndexExpressionToString(argument->pack_index_expr, result);
+      StringAppendChar(result, ']');
+    }
   } else if (argument->template_parameter_index >= 0) {
     StringPrintf(result, "$N%d", argument->template_parameter_index);
   } else {

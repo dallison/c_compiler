@@ -4430,6 +4430,16 @@ static ASTNode* ParseCXXPackIndexExpression(Syntax* syntax, ASTNode* pack,
   if (valid_pack) {
     IdentifierASTNode* id = (IdentifierASTNode*)pack;
     valid_pack = id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+    if (valid_pack && id->symbol->flags.is_template_template_parameter) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+        SyntaxError(syntax,
+                    "Template-name pack indexing requires C++29");
+      }
+      if (LexLookingAt(syntax->lex, TOK(less))) {
+        id->template_arguments =
+            SyntaxParseTemplateArgumentList(syntax, followers);
+      }
+    }
   }
   if (!valid_pack) {
     SyntaxError(syntax,

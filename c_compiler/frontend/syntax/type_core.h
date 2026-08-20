@@ -47,6 +47,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg,
                                        struct ASTNode* expr);
 bool TemplateArgumentValuesEqual(const TemplateArgument* left,
                                  const TemplateArgument* right);
+bool TemplateArgumentEqual(TemplateArgument* left, TemplateArgument* right);
 struct ASTNode* TemplateArgumentMaterializeExpression(
     const TemplateArgument* arg, SourceLocation location);
 Vector* TemplateArgumentVectorCopy(Vector* args);

@@ -85,6 +85,7 @@ typedef struct Requirement {
   struct ASTNode* expr;    // simple/compound: the tested expression.
   struct TypeRecord* type; // type requirement: the named type.
   bool is_noexcept;        // compound: `noexcept` was required.
+  struct ASTNode* noexcept_condition;  // compound: optional `noexcept(expr)`.
   struct ConstraintExpr* return_type_constraint;  // compound: `-> ConceptId`.
   struct ConstraintExpr* nested;  // nested: the nested constraint expression.
 } Requirement;
@@ -128,6 +129,7 @@ Requirement* NewSimpleRequirement(struct ASTNode* expr, SourceLocation location)
 Requirement* NewTypeRequirement(struct TypeRecord* type,
                                 SourceLocation location);
 Requirement* NewCompoundRequirement(struct ASTNode* expr, bool is_noexcept,
+                                    struct ASTNode* noexcept_condition,
                                     ConstraintExpr* return_type_constraint,
                                     SourceLocation location);
 Requirement* NewNestedRequirement(ConstraintExpr* nested,

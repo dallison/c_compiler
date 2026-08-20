@@ -31,6 +31,34 @@ export constexpr int imported_designated_sum() {
   return value.base_value + value.derived_value;
 }
 
+export struct imported_nothrow_callable {
+  int operator()() noexcept;
+};
+
+export struct imported_throwing_callable {
+  int operator()();
+};
+
+export template <typename F, bool RequireNoexcept>
+concept imported_callable_as_requested = requires(F function) {
+  { function() } noexcept(RequireNoexcept);
+};
+
+export template <typename T>
+struct imported_first_template {
+  static constexpr int id = 1;
+};
+
+export template <typename T>
+struct imported_second_template {
+  static constexpr int id = 2;
+};
+
+export template <template <typename> typename... Templates>
+struct imported_template_selector {
+  using selected = Templates...[1]<int>;
+};
+
 export enum class imported_enum : int;
 
 export constexpr auto imported_negative = std::meta::enumerator_spec(

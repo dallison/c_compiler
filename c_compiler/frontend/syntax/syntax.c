@@ -9393,10 +9393,16 @@ static void NormalizeTemplateNameArgument(TemplateArgument* arg,
     return;
   }
   Symbol* origin = bare_template;
+  ASTNode* pack_index_expr =
+      arg->type->is_pack_index
+          ? ASTNodeClone(arg->type->pack_index_expr, IdentityCloneNode, NULL,
+                         NULL)
+          : NULL;
   TypeRecordDelete(arg->type);
   arg->type = NULL;
   arg->kind = kTemplateParameterTemplate;
   arg->template_symbol = origin;
+  arg->pack_index_expr = pack_index_expr;
   arg->template_parameter_index =
       origin->flags.is_template_template_parameter
           ? origin->template_parameter_index : -1;
@@ -9441,9 +9447,23 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           bare_template->flags.is_template_template_parameter
               ? bare_template->template_parameter_index
               : -1;
-      arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
+      if (LexMatch(lex, TOK(ellipsis))) {
+        if (LexMatch(lex, TOK(lsquare))) {
+          if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+            SyntaxError(syntax,
+                        "Template-name pack indexing requires C++29");
+          }
+          arg->pack_index_expr =
+              SyntaxParseSingleExpression(syntax, TC(closebra));
+          SyntaxNeedBracket(syntax, TOK(rsquare),
+                            TC(closebra) | TC(exprsep));
+        } else {
+          arg->is_pack_expansion = true;
+        }
+      }
       arg->references_parameter_pack =
-          arg->is_pack_expansion || bare_template->flags.is_parameter_pack;
+          arg->is_pack_expansion || arg->pack_index_expr != NULL ||
+          bare_template->flags.is_parameter_pack;
     } else if (SyntaxTemplateArgumentLooksLikeType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);

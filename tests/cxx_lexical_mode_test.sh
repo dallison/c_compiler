@@ -217,6 +217,12 @@ expect_compile cxx29_mode \
 #if __cpp_pp_embed != 202606L
 #error expected C++29 #embed offset feature macro
 #endif
+#if __cpp_concepts != 202606L
+#error expected C++29 conditional noexcept requirements macro
+#endif
+#if __cpp_pack_indexing != 202606L
+#error expected C++29 template-name pack indexing macro
+#endif
 int main(void) { return 0; }' \
   -std=c++29
 expect_compile cxx2d_mode_alias \

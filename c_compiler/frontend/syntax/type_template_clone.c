@@ -3957,8 +3957,20 @@ static ASTNode* FoldClonedPackIndex(TemplateFunctionBodyClone* clone,
     return NewIntConstantASTNode(
         0, NewTypeRecordWithSize(kTypeInt, kQualPlain), node->location);
   }
-  ASTNode* result = TemplateArgumentMaterializeExpression(
-      pack->pack_arguments->value.p[(size_t)index], node->location);
+  TemplateArgument* selected =
+      pack->pack_arguments->value.p[(size_t)index];
+  if (selected != NULL &&
+      selected->kind == kTemplateParameterTemplate &&
+      selected->template_symbol != NULL) {
+    ASTNode* result =
+        NewIdentifierASTNode(selected->template_symbol, node->location);
+    ((IdentifierASTNode*)result)->template_arguments =
+        TemplateArgumentVectorCopy(id->template_arguments);
+    result->flags = node->flags & ~kASTAnalyzed;
+    return result;
+  }
+  ASTNode* result =
+      TemplateArgumentMaterializeExpression(selected, node->location);
   return result != NULL ? result : node;
 }
 

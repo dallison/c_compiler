@@ -10212,7 +10212,14 @@ static TypeRecord* SizeofOperandType(TypeRecord* type) {
 }
 
 static void AnalyzePackIndexExpression(BinaryASTNode* node) {
-  node->left = AnalyzeExpression(node->left);
+  bool indexes_template_name =
+      node->left != NULL && node->left->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)node->left)->symbol != NULL &&
+      ((IdentifierASTNode*)node->left)
+          ->symbol->flags.is_template_template_parameter;
+  if (!indexes_template_name) {
+    node->left = AnalyzeExpression(node->left);
+  }
   node->right = AnalyzeExpression(node->right);
 
   if (node->left == NULL || node->left->op != AST_OP(identifier) ||

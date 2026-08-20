@@ -1972,14 +1972,44 @@ static void ParseCXXTypePackIndex(TypeParser* parser, TypeRecord* base_type) {
   int parameter_index = -1;
   bool is_type_parameter =
       TypeIsTemplateParameterPlaceholder(base_type, &parameter_index);
-  if (!is_type_parameter ||
-      !CurrentTemplateParameterIsPack(parser->syntax, parameter_index)) {
-    SyntaxError(parser->syntax,
-                "pack indexing requires a type template parameter pack");
+  Symbol* template_parameter =
+      base_type != NULL && base_type->template_origin != NULL &&
+              base_type->template_origin->flags.is_template_template_parameter
+          ? base_type->template_origin
+          : NULL;
+  bool is_template_parameter = template_parameter != NULL;
+  if (is_template_parameter) {
+    parameter_index = template_parameter->template_parameter_index;
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+      SyntaxError(parser->syntax,
+                  "Template-name pack indexing requires C++29");
+    }
   }
-  if (is_type_parameter) {
+  bool is_parameter_pack =
+      is_template_parameter
+          ? template_parameter->flags.is_parameter_pack
+          : CurrentTemplateParameterIsPack(parser->syntax, parameter_index);
+  if ((!is_type_parameter && !is_template_parameter) || !is_parameter_pack) {
+    SyntaxError(
+        parser->syntax,
+        "pack indexing requires a type or template template parameter pack");
+  }
+  if (is_type_parameter || is_template_parameter) {
     base_type->is_pack_index = true;
     base_type->pack_index_expr = index;
+    base_type->template_parameter_index = parameter_index;
+    if (is_template_parameter &&
+        LexLookingAt(parser->lex, TOK(less))) {
+      Vector* arguments =
+          SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+      if (base_type->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            base_type->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      base_type->template_arguments = arguments;
+    }
   } else {
     ASTNodeDelete(index);
   }

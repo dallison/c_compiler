@@ -26,6 +26,10 @@ accidentally claim final-standard conformance.
    operators](https://wg21.link/p3668r4) is implemented in C++29 mode.
 6. [P3540R3: `#embed` offset parameter](https://wg21.link/p3540r3) is
    implemented in C++29 mode.
+7. [P3822R2: Conditional `noexcept` in compound
+   requirements](https://wg21.link/p3822r2) is implemented in C++29 mode.
+8. [P3670R4: Pack indexing for template
+   names](https://wg21.link/p3670r4) is implemented in C++29 mode.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
@@ -104,12 +108,21 @@ before `limit`, an offset at or beyond the resource size makes it empty, and
 duplicate or negative offsets are diagnosed. `__cpp_pp_embed` is `202606L` in
 C++29 mode and remains `202502L` in C++26 mode.
 
+P3822 support accepts `noexcept(constant-expression)` in compound requirements.
+The condition is substituted and contextually converted to a constant `bool`;
+an invalid condition makes the requirement unsatisfied, while `false` permits
+a potentially throwing operand. `__cpp_concepts` is `202606L` in C++29 mode.
+
+P3670 support extends pack indexing to type, variable, and concept
+template-template parameter packs. Indexed template names can be applied
+directly or passed as template arguments, use the existing dependent-index and
+bounds diagnostics, and persist through module serialization.
+`__cpp_pack_indexing` is `202606L` in C++29 mode and remains `202311L` in
+C++26 mode.
+
 ## Adopted C++29 language features
 
 - [P3097R3: Contracts for virtual functions](https://wg21.link/p3097r3)
-- [P3670R4: Pack indexing for templates](https://wg21.link/p3670r4)
-- [P3822R2: Conditional `noexcept` in compound
-  requirements](https://wg21.link/p3822r2)
 
 ## Adopted C++29 library features
 
@@ -118,5 +131,4 @@ C++29 mode and remains `202502L` in C++26 mode.
 - [P3125R6: `constexpr` pointer tagging](https://wg21.link/p3125r6)
 - [P3248R4: Require `intptr_t` and `uintptr_t`](https://wg21.link/p3248r4)
 
-Good follow-up projects that reuse DaveCC's strongest existing subsystems are
-virtual-function contracts and template pack indexing.
+Virtual-function contracts are the strongest remaining language follow-up.

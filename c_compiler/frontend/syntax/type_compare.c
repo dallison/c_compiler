@@ -235,7 +235,9 @@ bool TemplateArgumentEqual(TemplateArgument* left,
   if (left->kind == kTemplateParameterTemplate) {
     return left->template_symbol == right->template_symbol &&
            left->template_parameter_index ==
-               right->template_parameter_index;
+               right->template_parameter_index &&
+           DependentTemplateArgExprEqual(left->pack_index_expr,
+                                         right->pack_index_expr);
   }
   // Value-dependent non-type arguments (e.g. two `enable_if` SFINAE conditions)
   // are distinguished by comparing their stored expressions structurally, so
@@ -444,8 +446,10 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
                right->template_parameter_index &&
            left->is_pack_index == right->is_pack_index &&
            (!left->is_pack_index ||
-            DependentTemplateArgExprEqual(left->pack_index_expr,
-                                          right->pack_index_expr));
+            (DependentTemplateArgExprEqual(left->pack_index_expr,
+                                           right->pack_index_expr) &&
+             TemplateArgumentEqual(left->pack_index_pack,
+                                   right->pack_index_pack)));
   }
   if (left->type != right->type) {
     return false;
@@ -946,9 +950,10 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
     return false;
   }
   if (t1->is_pack_index &&
-      !DependentTemplateArgExprEqual(t1->pack_index_expr,
-                                     t2->pack_index_expr)) {
-    return false;
+      (!DependentTemplateArgExprEqual(t1->pack_index_expr,
+                                      t2->pack_index_expr) ||
+       !TemplateArgumentEqual(t1->pack_index_pack, t2->pack_index_pack))) {
+      return false;
   }
   // Dependent (unknown) leaves need care.  Only a leaf primitive carries a
   // template parameter's positional identity, so pointer/reference/array

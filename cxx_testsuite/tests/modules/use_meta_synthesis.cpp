@@ -12,6 +12,16 @@ static_assert(std::meta::has_attribute(^^imported_user_attributed_type,
                                        imported_user_attribute));
 static_assert(std::meta::is_data_member_spec(imported_member));
 static_assert(imported_designated_sum() == 52);
+static_assert(
+    imported_callable_as_requested<imported_nothrow_callable, true>);
+static_assert(
+    imported_callable_as_requested<imported_throwing_callable, false>);
+static_assert(
+    !imported_callable_as_requested<imported_throwing_callable, true>);
+using imported_selected_template =
+    imported_template_selector<imported_first_template,
+                               imported_second_template>::selected;
+static_assert(imported_selected_template::id == 2);
 static_assert(std::meta::is_enumerator_spec(imported_negative));
 static_assert(static_cast<int>(imported_enum::negative) == -3);
 static_assert(static_cast<int>(imported_enum::zero) == -2);

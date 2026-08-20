@@ -56,6 +56,7 @@ enum {
   kRmt_is_noexcept = 5,             // compound.
   kRmt_return_type_constraint = 6,   // compound: ConstraintExpr sub.
   kRmt_nested = 7,                   // nested: ConstraintExpr sub.
+  kRmt_noexcept_condition = 8,       // compound: optional ASTNode ref.
 };
 
 //
@@ -218,6 +219,8 @@ static void WriteRequirementInto(SerializeContext* ctx, WireBuffer* out,
   SWriteRef(ctx, out, kRmt_expr, kSerialKindAST, r->expr);
   SWriteRef(ctx, out, kRmt_type, kSerialKindType, r->type);
   WireWriteBool(out, kRmt_is_noexcept, r->is_noexcept);
+  SWriteRef(ctx, out, kRmt_noexcept_condition, kSerialKindAST,
+            r->noexcept_condition);
   SerialWriteConstraint(ctx, out, kRmt_return_type_constraint,
                         r->return_type_constraint);
   SerialWriteConstraint(ctx, out, kRmt_nested, r->nested);
@@ -230,6 +233,7 @@ static Requirement* ReadRequirementFrom(DeserializeContext* ctx,
   ASTNode* expr = NULL;
   TypeRecord* type = NULL;
   bool is_noexcept = false;
+  ASTNode* noexcept_condition = NULL;
   ConstraintExpr* return_type_constraint = NULL;
   ConstraintExpr* nested = NULL;
 
@@ -258,6 +262,10 @@ static Requirement* ReadRequirementFrom(DeserializeContext* ctx,
       case kRmt_is_noexcept:
         WireReadBool(in, &is_noexcept);
         break;
+      case kRmt_noexcept_condition:
+        noexcept_condition =
+            (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
       case kRmt_return_type_constraint:
         return_type_constraint = SerialReadConstraint(ctx, in);
         break;
@@ -276,8 +284,8 @@ static Requirement* ReadRequirementFrom(DeserializeContext* ctx,
     case kRequirementType:
       return NewTypeRequirement(type, location);
     case kRequirementCompound:
-      return NewCompoundRequirement(expr, is_noexcept, return_type_constraint,
-                                    location);
+      return NewCompoundRequirement(expr, is_noexcept, noexcept_condition,
+                                    return_type_constraint, location);
     case kRequirementNested:
       return NewNestedRequirement(nested, location);
   }

@@ -48,6 +48,7 @@ enum {
   kType_pack_index_expr = 19,
   kType_dependent_splice_expr = 20,
   kType_bit_width = 21,
+  kType_pack_index_pack = 22,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -73,6 +74,7 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_pack_index_expr, "pack_index_expr"},
     {kType_dependent_splice_expr, "dependent_splice_expr"},
     {kType_bit_width, "bit_width"},
+    {kType_pack_index_pack, "pack_index_pack"},
 };
 
 //
@@ -132,6 +134,7 @@ enum {
   kTArg_reflection_ens_annotations = 51,
   kTArg_reflection_dms_attributes = 52,
   kTArg_reflection_attribute = 53,
+  kTArg_pack_index_expr = 54,
 };
 
 enum {
@@ -621,6 +624,8 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
             a->member_function);
   SWriteRef(ctx, out, kTArg_template_symbol, kSerialKindSymbol,
             a->template_symbol);
+  SWriteRef(ctx, out, kTArg_pack_index_expr, kSerialKindAST,
+            a->pack_index_expr);
   SWriteRef(ctx, out, kTArg_object_initializer, kSerialKindAST,
             a->object_initializer);
   if (a->reflection_value != NULL) {
@@ -760,6 +765,10 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
       case kTArg_template_symbol:
         a->template_symbol =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kTArg_pack_index_expr:
+        a->pack_index_expr =
+            (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kTArg_object_initializer:
         a->object_initializer =
@@ -1906,6 +1915,8 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteBool(buf, kType_is_pack_index, t->is_pack_index);
   SWriteRef(ctx, buf, kType_pack_index_expr, kSerialKindAST,
             t->pack_index_expr);
+  WriteTemplateArgumentField(ctx, buf, kType_pack_index_pack,
+                             t->pack_index_pack);
   SWriteRef(ctx, buf, kType_dependent_splice_expr, kSerialKindAST,
             t->dependent_splice_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
@@ -2004,6 +2015,9 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kType_pack_index_expr:
         t->pack_index_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        break;
+      case kType_pack_index_pack:
+        t->pack_index_pack = ReadTemplateArgumentField(ctx, buf);
         break;
       case kType_dependent_splice_expr:
         t->dependent_splice_expr =

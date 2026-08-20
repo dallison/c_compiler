@@ -7163,6 +7163,17 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
   if (syntax == NULL || type == NULL || !CompilerIsCXX()) {
     return type;
   }
+  if (type->is_pack_index && type->pack_index_pack != NULL) {
+    Vector no_arguments;
+    VectorInit(&no_arguments);
+    TypeRecord* selected =
+        TypeSubstituteTemplateType(syntax, type, &no_arguments);
+    VectorDestruct(&no_arguments);
+    if (selected != NULL && !selected->is_pack_index) {
+      return selected;
+    }
+    TypeRecordDelete(selected);
+  }
   if (TypeIsPointer(type) || TypeIsReference(type)) {
     TypeRecord* next =
         TypeMaterializeClassTemplateSpecialization(syntax, type->next);

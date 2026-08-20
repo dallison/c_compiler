@@ -253,6 +253,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->dependent_decltype_expr = NULL;
   record->is_pack_index = false;
   record->pack_index_expr = NULL;
+  record->pack_index_pack = NULL;
   record->dependent_splice_expr = NULL;
   record->refs = 0;
   record->next = NULL;
@@ -325,6 +326,8 @@ void TypeRecordDelete(TypeRecord* record) {
       ASTNodeDelete(record->pack_index_expr);
       record->pack_index_expr = NULL;
     }
+    TemplateArgumentDelete(record->pack_index_pack);
+    record->pack_index_pack = NULL;
     if (record->dependent_splice_expr != NULL) {
       ASTNodeDelete(record->dependent_splice_expr);
       record->dependent_splice_expr = NULL;
@@ -605,6 +608,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->member_function = arg->member_function;
   copy->template_symbol = arg->template_symbol;
   copy->reflection_value = arg->reflection_value;
+  copy->pack_index_expr = arg->pack_index_expr;
   copy->object_initializer =
       ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
   return copy;
@@ -1025,6 +1029,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       TemplateArgumentVectorListCopy(record->dependent_member_template_arguments);
   r->pack_index_expr =
       ASTNodeClone(record->pack_index_expr, IdentityCloneNode, NULL, NULL);
+  r->pack_index_pack = TemplateArgumentCopy(record->pack_index_pack);
   r->dependent_splice_expr =
       ASTNodeClone(record->dependent_splice_expr, IdentityCloneNode, NULL, NULL);
   if (TypeIsFunction(record)) {
