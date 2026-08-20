@@ -14,4 +14,8 @@ bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type);
 
+bool CXXFunctionIsDefaultedPostfixOperator(Symbol* symbol);
+void CXXFinalizeDefaultedPostfixFriendFunctions(TypeParser* parser,
+                                                Struct* owner);
+
 #endif /* type_special_member_h */

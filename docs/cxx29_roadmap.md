@@ -22,6 +22,8 @@ accidentally claim final-standard conformance.
    experimentally for DaveCC's supported standard and GNU attributes.
 4. [P2287R6: Designated initializers for base
    classes](https://wg21.link/p2287r6) is implemented in C++29 mode.
+5. [P3668R4: Defaulted postfix increment and decrement
+   operators](https://wg21.link/p3668r4) is implemented in C++29 mode.
 
 `<meta>` exposes the experimental APIs in C++29 mode and `<version>` defines
 the vendor probes `__davecc_p3294_token_injection` and
@@ -86,6 +88,14 @@ paths, diagnoses a base initialized by both forms, supports direct braced
 designators, constant evaluation, code generation, and module serialization,
 and defines `__cpp_designated_initializers` as `202606L` in C++29 mode.
 
+P3668 support permits member, explicit-object member, and non-member postfix
+`operator++` and `operator--` definitions to use `= default`. Their generated
+bodies copy the operand, invoke the corresponding prefix operator, and return
+the saved value. Invalid signatures are diagnosed, unavailable copy, destructor,
+or prefix operations define the postfix operator as deleted, and class-template
+members are synthesized after substitution. As specified by P3668R4, no feature
+test macro is provided.
+
 ## Adopted C++29 language features
 
 - [P3097R3: Contracts for virtual functions](https://wg21.link/p3097r3)
@@ -93,8 +103,6 @@ and defines `__cpp_designated_initializers` as `202606L` in C++29 mode.
 - [P3540R3: `#embed` offset parameter](https://wg21.link/p3540r3)
 - [P3822R2: Conditional `noexcept` in compound
   requirements](https://wg21.link/p3822r2)
-- [P3668R4: Defaulted postfix increment and decrement
-  operators](https://wg21.link/p3668r4)
 
 ## Adopted C++29 library features
 
@@ -103,6 +111,6 @@ and defines `__cpp_designated_initializers` as `202606L` in C++29 mode.
 - [P3125R6: `constexpr` pointer tagging](https://wg21.link/p3125r6)
 - [P3248R4: Require `intptr_t` and `uintptr_t`](https://wg21.link/p3248r4)
 
-Good small follow-up projects are the `#embed` offset parameter and defaulted
-postfix operators. Good projects that reuse DaveCC's strongest existing
-subsystems are virtual-function contracts and template pack indexing.
+The `#embed` offset parameter is a good small follow-up project. Good projects
+that reuse DaveCC's strongest existing subsystems are virtual-function contracts
+and template pack indexing.

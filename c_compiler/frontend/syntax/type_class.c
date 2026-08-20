@@ -4,6 +4,7 @@
 //
 #include "type_class_internal.h"
 #include "type_internal.h"
+#include "type_special_member.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -585,7 +586,6 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   parser->cxx_member_owner = str;
   parser->syntax->cxx_class_head = str;
   ParseStructMembers(parser, str, is_union, tag_name);
-  SynthesizeExplicitlyDefaultedMemberFunctionBodies(parser, str);
   parser->cxx_member_owner = saved_member_owner;
   parser->syntax->cxx_class_head = saved_class_head;
   if (class_symbol_scope != NULL) {
@@ -597,6 +597,11 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
   AddImplicitCXXDeductionGuides(str, tag);
+  CXXFinalizeDefaultedPostfixFriendFunctions(parser, str);
+  // P3668 defaulted postfix operators copy their operand. Add implicit copy
+  // operations before building explicitly defaulted bodies so constructor
+  // lookup sees the complete special-member set.
+  SynthesizeExplicitlyDefaultedMemberFunctionBodies(parser, str);
   if (class_tag_scope != NULL) {
     assert(parser->syntax->local_tag_stack == class_tag_scope);
     parser->syntax->local_tag_stack = class_tag_scope->prev;

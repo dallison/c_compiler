@@ -25,6 +25,7 @@
 #include "type_class_internal.h"
 #include "type_inheritance.h"
 #include "type_internal.h"
+#include "type_special_member.h"
 #include "errors.h"
 #include "compiler.h"
 #include "module_identity.h"
@@ -6015,15 +6016,25 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         sym->type->info.function.cxx_member_owner != NULL &&
         (StringEqual(&sym->name, "operator==") ||
          StringEqual(&sym->name, "operator<=>"));
-    if (defaulted_comparison) {
+    bool defaulted_postfix =
+        CXXFunctionIsDefaultedPostfixOperator(sym);
+    if (defaulted_comparison || defaulted_postfix) {
       TypeParser parser;
       TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                      kParsingFileScope);
       SynthesizeDefaultedMemberFunctionBody(&parser, sym);
       TypeParserDestruct(&parser);
+      if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
+        old_sym->type->info.function.is_deleted =
+            sym->type->info.function.is_deleted;
+        old_sym->type->info.function.is_implicitly_deleted =
+            sym->type->info.function.is_implicitly_deleted;
+      }
       SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
       SyntaxNeedSemicolon(syntax, TC(decl));
-      return NewVariableDeclarationASTNode(sym, NULL, sym->location);
+      VectorAppend(declarations,
+                   NewVariableDeclarationASTNode(sym, NULL, sym->location));
+      return NewDeclarationListASTNode(declarations, sym->location);
     }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;

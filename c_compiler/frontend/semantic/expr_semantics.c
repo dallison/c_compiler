@@ -1697,7 +1697,21 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
   bool postfix = IsPostIncDec(node->base.op);
   StructMember* member =
       FindStructMemberByName(node->sub->type->info.struct_info, op_name);
-  if (member != NULL && member->is_member_function) {
+  bool has_matching_member = false;
+  for (StructMember* candidate = member; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->is_member_function && candidate->symbol != NULL &&
+        candidate->symbol->type != NULL &&
+        TypeIsFunction(candidate->symbol->type)) {
+      size_t expected_parameters = postfix ? 2 : 1;
+      if (candidate->symbol->type->info.function.prototype.length ==
+          expected_parameters) {
+        has_matching_member = true;
+        break;
+      }
+    }
+  }
+  if (has_matching_member) {
     Vector* actuals = NewVector();
     if (postfix) {
       VectorAppend(actuals, NewPostfixDummyArgument(node->base.location));

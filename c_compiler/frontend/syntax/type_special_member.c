@@ -786,6 +786,349 @@ static bool CXXCategoryIsPartial(TypeRecord* category) {
   return CXXComparisonCategoryConstant(category, "unordered") != NULL;
 }
 
+static bool CXXFunctionIsIncrementOrDecrementOperator(Symbol* symbol) {
+  return symbol != NULL && symbol->type != NULL &&
+         TypeIsFunction(symbol->type) &&
+         (StringEqual(&symbol->name, "operator++") ||
+          StringEqual(&symbol->name, "operator--"));
+}
+
+bool CXXFunctionIsDefaultedPostfixOperator(Symbol* symbol) {
+  return CXXFunctionIsIncrementOrDecrementOperator(symbol) &&
+         symbol->type->info.function.is_defaulted;
+}
+
+static TypeRecord* CXXDefaultedPostfixObjectType(Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  if (FunctionHasImplicitThisParameter(func)) {
+    Struct* owner = func->info.function.cxx_member_owner;
+    if (owner == NULL) {
+      return NULL;
+    }
+    TypeRecord* object = NewTypeRecord(
+        owner->is_union ? kTypeUnion : kTypeStruct,
+        func->info.function.is_volatile_member ? kQualVolatile : kQualPlain);
+    object->info.struct_info = owner;
+    return object;
+  }
+  if (func->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Symbol* first = func->info.function.prototype.value.p[0];
+  if (first == NULL || !TypeIsReference(first->type) ||
+      first->type->next == NULL) {
+    return NULL;
+  }
+  return TypeRecordCopy(first->type->next);
+}
+
+static bool CXXDefaultedPostfixTypesMatch(TypeRecord* object,
+                                         TypeRecord* result) {
+  if (object == NULL || result == NULL || TypeIsConst(object) ||
+      TypeIsConst(result) || TypeIsVolatile(result) ||
+      (object->qualifiers & ~kQualVolatile) != 0) {
+    return false;
+  }
+  return TypeEqualIgnoringTopLevelQualifierMask(object, result,
+                                                 kQualVolatile);
+}
+
+static TypeRecord* ValidateCXXDefaultedPostfixOperator(TypeParser* parser,
+                                                       Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  SourceLocation location = symbol->location;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX29)) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "defaulted postfix increment and decrement operators require C++29");
+    return NULL;
+  }
+  if (symbol->flags.is_template ||
+      func->info.function.template_parameter_count != 0) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "a defaulted postfix increment or decrement operator cannot be a template");
+    return NULL;
+  }
+  if (func->info.function.prototype.length != 2) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "only postfix increment and decrement operators can be defaulted");
+    return NULL;
+  }
+  Symbol* dummy = func->info.function.prototype.value.p[1];
+  if (dummy == NULL || !TypeIsInt(dummy->type)) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "a defaulted postfix increment or decrement operator requires an int parameter");
+    return NULL;
+  }
+  TypeRecord* object = CXXDefaultedPostfixObjectType(symbol);
+  if (object == NULL ||
+      (!TypeIsStructOrUnion(object) && !TypeIsEnum(object))) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "the first parameter of a defaulted postfix operator must be a reference to its operand type");
+    TypeRecordDelete(object);
+    return NULL;
+  }
+  if (func->info.function.cxx_member_owner != NULL &&
+      (FunctionHasImplicitThisParameter(func) ||
+       FunctionHasExplicitObjectParameter(func)) &&
+      (!TypeIsStructOrUnion(object) ||
+       object->info.struct_info != func->info.function.cxx_member_owner)) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "the object parameter of a defaulted postfix operator must reference its declaring class");
+    TypeRecordDelete(object);
+    return NULL;
+  }
+  if (!CXXDefaultedPostfixTypesMatch(object, func->next)) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "a defaulted postfix operator must return its operand type");
+    TypeRecordDelete(object);
+    return NULL;
+  }
+  if (TypeIsStructOrUnion(object) && !TypeIsCompleteClass(object)) {
+    SyntaxErrorAtLocation(
+        parser->syntax, location,
+        "the operand type of a defaulted postfix operator must be complete");
+    TypeRecordDelete(object);
+    return NULL;
+  }
+  return object;
+}
+
+static ASTNode* NewCXXDefaultedPostfixObject(Symbol* symbol,
+                                             TypeRecord* object_type,
+                                             SourceLocation location) {
+  TypeRecord* func = symbol->type;
+  Symbol* object = func->info.function.prototype.value.p[0];
+  ASTNode* expression = NewIdentifierASTNode(object, location);
+  if (FunctionHasImplicitThisParameter(func)) {
+    expression = NewUnaryASTNode(AST_OP(contents), TypeRecordCopy(object_type),
+                                 location, expression);
+  }
+  return expression;
+}
+
+static bool CXXDefaultedPostfixPrefixIsUsable(Symbol* symbol,
+                                              TypeRecord* object_type) {
+  SourceLocation location = symbol->location;
+  ASTOpcode prefix =
+      StringEqual(&symbol->name, "operator++") ? AST_OP(preinc)
+                                                : AST_OP(predec);
+  ASTNode* operand =
+      NewCXXDefaultedPostfixObject(symbol, object_type, location);
+  ASTNode* expression =
+      NewUnaryASTNode(prefix, NULL, location, operand);
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  TypeRecord* saved_function = compiler->current_function;
+  compiler->current_function = symbol->type;
+  ASTNode* analyzed = AnalyzeExpression(expression);
+  compiler->current_function = saved_function;
+  bool failed = DiagnosticErrorTrapped();
+  DiagnosticErrorTrapEnd(saved_trap);
+  ASTNodeDelete(analyzed);
+  return !failed;
+}
+
+static bool CXXDefaultedPostfixCopyIsUsable(TypeParser* parser, Symbol* symbol,
+                                            TypeRecord* object_type) {
+  Struct* owner = object_type->info.struct_info;
+  if (owner == NULL || StructContainsTemplateParameter(owner) ||
+      compiler->current_class_access_context == owner) {
+    // A member of a class template is checked after substitution. A hidden
+    // friend can be parsed before later class members, while the language gives
+    // its defaulted definition complete-class context; defer that check to the
+    // generated body once the class is complete.
+    return true;
+  }
+  Symbol* temporary =
+      NewSymbol("__defaulted_postfix_copy_probe",
+                TypeRecordCopy(object_type), STO(auto));
+  temporary->flags.is_local = true;
+  temporary->flags.is_temp = true;
+  temporary->flags.invented = true;
+  temporary->flags.is_defined = true;
+  temporary->location = symbol->location;
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, NewCXXDefaultedPostfixObject(
+                            symbol, object_type, symbol->location));
+  ASTNode* expression = SyntaxNewCXXConstructorCall(
+      parser->syntax, temporary, actuals, symbol->location);
+
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  TypeRecord* saved_function = compiler->current_function;
+  compiler->current_function = symbol->type;
+  ASTNode* analyzed = AnalyzeExpression(expression);
+  compiler->current_function = saved_function;
+  bool failed = DiagnosticErrorTrapped();
+  DiagnosticErrorTrapEnd(saved_trap);
+  ASTNodeDelete(analyzed);
+  SymbolDelete(temporary);
+  return !failed;
+}
+
+static bool CXXDefaultedPostfixIsFriendOf(Symbol* symbol, Struct* owner) {
+  for (size_t i = 0; i < owner->friend_functions.length; i++) {
+    Symbol* friend_symbol = owner->friend_functions.value.p[i];
+    if (friend_symbol == symbol ||
+        (friend_symbol != NULL && friend_symbol->type != NULL &&
+         StringEqualString(&friend_symbol->name, &symbol->name) &&
+         TypeEqual(friend_symbol->type, symbol->type))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXDefaultedPostfixCanAccessSpecialMember(
+    Symbol* symbol, TypeRecord* object_type, CXXSpecialMemberKind kind) {
+  if (!TypeIsStructOrUnion(object_type) ||
+      object_type->info.struct_info == NULL) {
+    return true;
+  }
+  Struct* owner = object_type->info.struct_info;
+  if (symbol->type->info.function.cxx_member_owner == owner ||
+      compiler->current_class_access_context == owner ||
+      CXXDefaultedPostfixIsFriendOf(symbol, owner)) {
+    return true;
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    for (StructMember* member = owner->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      if (member->is_member_function && member->symbol != NULL &&
+          member->symbol->type != NULL &&
+          member->symbol->type->info.function.cxx_special_member_kind ==
+              kind) {
+        return member->access == kAccessPublic;
+      }
+    }
+  }
+  return true;
+}
+
+static ASTNode* NewCXXPostfixTemporaryInitializer(
+    TypeParser* parser, Symbol* temporary, ASTNode* object,
+    SourceLocation location) {
+  if (TypeIsStructOrUnion(temporary->type)) {
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, object);
+    return SyntaxNewCXXConstructorCall(parser->syntax, temporary, actuals,
+                                       location);
+  }
+  ASTNode* destination = NewIdentifierASTNode(temporary, location);
+  destination->flags |= kASTNeedAddress | kASTIsDeclaration;
+  return NewBinaryASTNode(
+      AST_OP(init), TypeRecordCopy(temporary->type), location, destination,
+      NewExpressionInitializerASTNode(object, location));
+}
+
+static bool CXXDefaultedPostfixOperationsAreUsable(
+    TypeParser* parser, Symbol* symbol, TypeRecord* object_type) {
+  return (!TypeIsStructOrUnion(object_type) ||
+          (!CXXTypeSpecialMemberIsDeleted(
+               object_type, kCXXSpecialMemberCopyConstructor) &&
+           !CXXTypeSpecialMemberIsDeleted(
+               object_type, kCXXSpecialMemberDestructor) &&
+           CXXDefaultedPostfixCopyIsUsable(parser, symbol, object_type) &&
+           CXXDefaultedPostfixCanAccessSpecialMember(
+               symbol, object_type, kCXXSpecialMemberDestructor))) &&
+         CXXDefaultedPostfixPrefixIsUsable(symbol, object_type);
+}
+
+static bool AppendCXXDefaultedPostfixBody(TypeParser* parser, Symbol* symbol,
+                                          Vector* body) {
+  TypeRecord* object_type =
+      ValidateCXXDefaultedPostfixOperator(parser, symbol);
+  if (object_type == NULL) {
+    return false;
+  }
+  bool awaiting_complete_class =
+      TypeIsStructOrUnion(object_type) &&
+      compiler->current_class_access_context == object_type->info.struct_info;
+  if (!awaiting_complete_class &&
+      !CXXDefaultedPostfixOperationsAreUsable(parser, symbol, object_type)) {
+    symbol->type->info.function.is_deleted = true;
+    symbol->type->info.function.is_implicitly_deleted = true;
+    TypeRecordDelete(object_type);
+    return false;
+  }
+  SourceLocation location = symbol->location;
+  Symbol* temporary =
+      SyntaxNewTemporary(parser->syntax, TypeRecordCopy(object_type));
+  temporary->flags.is_local = true;
+  temporary->flags.is_defined = true;
+  temporary->location = location;
+
+  ASTNode* copy_source =
+      NewCXXDefaultedPostfixObject(symbol, object_type, location);
+  ASTNode* initializer = NewCXXPostfixTemporaryInitializer(
+      parser, temporary, copy_source, location);
+  VectorAppend(body,
+               NewVariableDeclarationASTNode(temporary, initializer, location));
+
+  ASTOpcode prefix =
+      StringEqual(&symbol->name, "operator++") ? AST_OP(preinc)
+                                                : AST_OP(predec);
+  ASTNode* operand =
+      NewCXXDefaultedPostfixObject(symbol, object_type, location);
+  VectorAppend(body,
+               NewExpressionStatementASTNode(
+                   NewUnaryASTNode(prefix, NULL, location, operand), location));
+  VectorAppend(body,
+               NewCombinedStatementASTNode(
+                   AST_OP(return), NewIdentifierASTNode(temporary, location),
+                   NULL, location));
+  TypeRecordDelete(object_type);
+  return true;
+}
+
+void CXXFinalizeDefaultedPostfixFriendFunctions(TypeParser* parser,
+                                                Struct* owner) {
+  if (parser == NULL || owner == NULL ||
+      StructContainsTemplateParameter(owner)) {
+    return;
+  }
+  for (size_t i = 0; i < owner->friend_functions.length; i++) {
+    Symbol* declaration = owner->friend_functions.value.p[i];
+    Symbol* definition =
+        declaration != NULL && declaration->value.func_defn != NULL
+            ? declaration->value.func_defn
+            : declaration;
+    if (!CXXFunctionIsDefaultedPostfixOperator(definition) ||
+        definition->type->info.function.is_deleted) {
+      continue;
+    }
+    TypeRecord* object_type =
+        CXXDefaultedPostfixObjectType(definition);
+    if (object_type == NULL ||
+        (TypeIsStructOrUnion(object_type) &&
+         object_type->info.struct_info != owner)) {
+      TypeRecordDelete(object_type);
+      continue;
+    }
+    if (!CXXDefaultedPostfixOperationsAreUsable(
+            parser, definition, object_type)) {
+      definition->type->info.function.is_deleted = true;
+      definition->type->info.function.is_implicitly_deleted = true;
+      // The hidden-friend body was provisionally built before the rest of the
+      // class was parsed. Once complete-class lookup shows that the operator is
+      // deleted, detach that body so deferred semantic analysis does not
+      // diagnose the very operations whose unavailability causes deletion.
+      definition->type->info.function.body = NULL;
+      if (declaration != NULL && declaration != definition &&
+          declaration->type != NULL) {
+        declaration->type->info.function.is_deleted = true;
+        declaration->type->info.function.is_implicitly_deleted = true;
+      }
+    }
+    TypeRecordDelete(object_type);
+  }
+}
+
 static TypeRecord* CXXDeduceComparisonCategory(Struct* owner) {
   bool has_floating = false;
   for (size_t i = 0; i < owner->members.length; i++) {
@@ -883,13 +1226,32 @@ void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
   member_symbol->value.func_defn = member_symbol;
   member_symbol->type->info.function.is_inline = true;
   member_symbol->type->info.function.definition = true;
-  // An explicitly defaulted function is implicitly constexpr whenever the
-  // corresponding implicit declaration would be ([dcl.fct.def.default]/3,
-  // [class.compare.default]).  Implicitly declared special members are marked
-  // constexpr where they are synthesized, so mark the explicitly defaulted ones
-  // here to match.  A body that turns out not to be constant simply fails the
-  // fold in the evaluator rather than being diagnosed up front.
-  member_symbol->type->info.function.is_constexpr = true;
+  // Explicitly defaulted special members and comparisons are implicitly
+  // constexpr when their corresponding implicit declarations would be.
+  // P3668 postfix operators have an ordinary function body and are constexpr
+  // only when the declaration says so.
+  if (!CXXFunctionIsDefaultedPostfixOperator(member_symbol)) {
+    member_symbol->type->info.function.is_constexpr = true;
+  }
+
+  if (CXXFunctionIsDefaultedPostfixOperator(member_symbol)) {
+    Vector* postfix_body = NewVector();
+    if (!AppendCXXDefaultedPostfixBody(parser, member_symbol, postfix_body)) {
+      VectorDeleteWithContents(
+          postfix_body, (VectorElementDestructor)ASTNodeDelete,
+          /*free_element=*/false);
+      return;
+    }
+    member_symbol->type->info.function.body =
+        NewCompoundStatementASTNode(postfix_body, member_symbol->location);
+    VectorAppend(&compiler->declaration_asts,
+                 member_symbol->type->info.function.body);
+    if (member_symbol->type->info.function.cxx_member_owner != NULL &&
+        !parser->syntax->parsing_template_declaration) {
+      QueueInlineMemberFunctionDefinition(member_symbol);
+    }
+    return;
+  }
 
   if (CXXFunctionIsThreeWayComparison(member_symbol->type) ||
       CXXFunctionIsEqualityComparison(member_symbol->type)) {
@@ -992,6 +1354,16 @@ void SynthesizeExplicitlyDefaultedMemberFunctionBodies(TypeParser* parser,
         if (has_dependent_member) {
           continue;
         }
+      }
+      if (CXXFunctionIsDefaultedPostfixOperator(symbol) &&
+          StructContainsTemplateParameter(str)) {
+        // The copy constructor and prefix operation are selected from the
+        // concrete specialization. Leave the body absent so instantiation
+        // performs P3668 deletion checks after substitution.
+        TypeRecord* object_type =
+            ValidateCXXDefaultedPostfixOperator(parser, symbol);
+        TypeRecordDelete(object_type);
+        continue;
       }
       SynthesizeDefaultedMemberFunctionBody(parser, symbol);
     }
