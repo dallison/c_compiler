@@ -142,6 +142,9 @@ unsupported nontrivial case rather than introducing extra copy operations.
   `uintptr_t`](https://wg21.link/p3248r5) is implemented.
 - [P3798R1: The unexpected in
   `std::expected`](https://wg21.link/p3798r1) is implemented in C++29 mode.
+- [P3052R2:
+  `view_interface::at()`](https://wg21.link/p3052r2) is implemented in C++29
+  mode.
 
 `map`, `unordered_map`, and `flat_map` provide mutable, const, and transparent
 heterogeneous `lookup` overloads returning `optional<T&>` or
@@ -156,3 +159,8 @@ a feature-test macro.
 Both `expected<T, E>` and `expected<void, E>` provide the constexpr
 `has_error()` observer. `__cpp_lib_expected` is `202606L` in C++29 mode and
 remains `202211L` in earlier modes.
+
+`ranges::view_interface` provides const and non-const `at()` overloads for
+sized random-access views, including negative-index and upper-bound checks and
+constexpr mutation through returned references. `__cpp_lib_view_interface`
+is `202606L` in C++29 mode.

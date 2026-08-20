@@ -9,6 +9,7 @@
 #ifndef __davecc_ranges__
 #define __davecc_ranges__
 
+#include <__exception_support>
 #include <compare>
 #include <concepts>
 #include <functional>
@@ -16,9 +17,16 @@
 #include <istream>
 #include <iterator>
 #include <new>
+#ifdef __cpp_exceptions
+#include <stdexcept>
+#endif
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#if __cplusplus >= 202700L && !defined(__cpp_lib_view_interface)
+#define __cpp_lib_view_interface 202606L
+#endif
 
 namespace std {
 
@@ -819,6 +827,26 @@ class view_interface : public view_base {
   constexpr decltype(auto) operator[](range_difference_t<R> n) const {
     return ranges::begin(__derived())[n];
   }
+
+#if __cplusplus >= 202700L
+  template <random_access_range R = D>
+    requires sized_range<R>
+  constexpr decltype(auto) at(range_difference_t<R> n) {
+    if (n < 0 || n >= ranges::distance(__derived())) {
+      __DAVECC_THROW(out_of_range("view_interface::at"));
+    }
+    return (*this)[n];
+  }
+
+  template <random_access_range R = const D>
+    requires sized_range<R>
+  constexpr decltype(auto) at(range_difference_t<R> n) const {
+    if (n < 0 || n >= ranges::distance(__derived())) {
+      __DAVECC_THROW(out_of_range("view_interface::at"));
+    }
+    return (*this)[n];
+  }
+#endif
 };
 
 // [range.subrange] ------------------------------------------------------------

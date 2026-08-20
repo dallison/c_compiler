@@ -2161,6 +2161,39 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
 static bool ConstexprDereferenceAddress(ConstexprValue address,
                                         ConstexprValue* result);
 
+static bool EvaluateConstexprMutationLValue(ConstEvalContext* ctx,
+                                            ASTNode* node,
+                                            ConstexprBinding** binding,
+                                            ConstexprValue** slot,
+                                            bool allow_object) {
+  *binding = NULL;
+  *slot = NULL;
+  if (EvaluateConstexprLValue(ctx, node, binding) ||
+      EvaluateConstexprObjectLValue(ctx, node, slot, allow_object)) {
+    return true;
+  }
+
+  // Calls returning references remain calls on the assignment LHS. Resolve
+  // their returned address just as the constexpr read path does, then map the
+  // address back to the binding or object slot that owns the referred value.
+  ConstexprValue address = {0};
+  if (!EvaluateConstexprAddressValue(ctx, node, &address)) {
+    return false;
+  }
+  address = ConstexprResolveForwardedAddress(address);
+  if (address.address_binding != NULL) {
+    *binding = address.address_binding;
+    return true;
+  }
+  if (address.address_object != NULL) {
+    *slot =
+        ConstexprObjectSlot(address.address_object, address.address_index);
+  } else {
+    *slot = address.address_slot;
+  }
+  return *slot != NULL && (allow_object || !(*slot)->is_object);
+}
+
 static TypeRecord* ConstexprObjectSlotType(TypeRecord* type,
                                            size_t slot_index) {
   if (type == NULL) {
@@ -2948,8 +2981,8 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     left_type =
         left_type->next != NULL ? left_type->next : node->right->type;
   }
-  if (!EvaluateConstexprLValue(ctx, node->left, &binding) &&
-      !EvaluateConstexprObjectLValue(ctx, node->left, &slot, is_assignment)) {
+  if (!EvaluateConstexprMutationLValue(ctx, node->left, &binding, &slot,
+                                       is_assignment)) {
     return false;
   }
 
@@ -3076,8 +3109,8 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
                                        ConstexprValue* result) {
   ConstexprBinding* binding = NULL;
   ConstexprValue* slot = NULL;
-  if (!EvaluateConstexprLValue(ctx, node->sub, &binding) &&
-      !EvaluateConstexprObjectLValue(ctx, node->sub, &slot, false)) {
+  if (!EvaluateConstexprMutationLValue(ctx, node->sub, &binding, &slot,
+                                       false)) {
     return false;
   }
   ConstexprValue old_value = binding != NULL
