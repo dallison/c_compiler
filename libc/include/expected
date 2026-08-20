@@ -16,7 +16,11 @@
 #include <type_traits>
 #include <utility>
 
+#if __cplusplus >= 202700L
+#define __cpp_lib_expected 202606L
+#else
 #define __cpp_lib_expected 202211L
+#endif
 
 namespace std {
 
@@ -511,6 +515,9 @@ class expected {
 
   constexpr explicit operator bool() const noexcept { return __has_value_; }
   constexpr bool has_value() const noexcept { return __has_value_; }
+#if __cplusplus >= 202700L
+  constexpr bool has_error() const noexcept { return !has_value(); }
+#endif
 
   constexpr T& value() & {
     if (!__has_value_) {
@@ -992,6 +999,9 @@ class expected<void, E> {
 
   constexpr explicit operator bool() const noexcept { return __has_value_; }
   constexpr bool has_value() const noexcept { return __has_value_; }
+#if __cplusplus >= 202700L
+  constexpr bool has_error() const noexcept { return !has_value(); }
+#endif
 
   constexpr void operator*() const noexcept {}
 
