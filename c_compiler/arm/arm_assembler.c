@@ -138,10 +138,8 @@ static AssemblerSymbol* GetOrCreateSymbol(ARMAssembler* assembler,
   if (sym == NULL) {
     sym = NewAssemblerSymbol(name, ASM.current_section, SYM_TYPE(none),
                              SYM_BIND(local),
-                             AssemblerCurrentAddress(&ASM));
-    // Not inserted into the symbol table (only referenced by the relocation we
-    // are about to create), so track it for cleanup at destruct.
-    AssemblerTrackOrphanSymbol(&ASM, sym);
+                             0);
+    AssemblerInsertSymbol(&ASM, sym);
   }
   return sym;
 }

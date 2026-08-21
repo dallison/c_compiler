@@ -4,6 +4,7 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:davecc/modules.bzl", "davecc_module")
+load("//:tools/linux_libc.bzl", "linux_libc_archive", "linux_start_object")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -213,10 +214,15 @@ AARCH64_COPTS = select({
     "//conditions:default": [],
 })
 
+LINUX_COPTS = select({
+    "@platforms//os:linux": ["-D_GNU_SOURCE"],
+    "//conditions:default": [],
+})
+
 COMMON_COPTS = [
     "-std=c99",
     "-fPIC",
-]
+] + LINUX_COPTS
 
 COMMON_INCLUDES = [
     "6502_interpreter",
@@ -821,7 +827,7 @@ cc_library(
         "c_compiler/Loader/Architecture/*.h",
         "c_compiler/risc_v/*.h",
         "risc_v_interpreter/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [
@@ -852,7 +858,7 @@ cc_library(
         "c_compiler/arm/*.h",
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS + AARCH64_COPTS,
     includes = COMMON_INCLUDES,
     deps = [
@@ -880,7 +886,7 @@ cc_library(
         "c_compiler/arm/*.h",
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [
@@ -910,7 +916,7 @@ cc_library(
         "c_compiler/x86_64/*.h",
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [
@@ -938,7 +944,7 @@ cc_library(
         "c_compiler/p_code/*.h",
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES + ["p_code_interpreter"],
     deps = [
@@ -1985,6 +1991,99 @@ esac
 cd "$$work"
 "$$archivist" r "$$out_file" *.o
 """,
+)
+
+linux_start_object(
+    name = "aarch64_linux_start",
+    architecture = "aarch64",
+    source = "aarch64 support/linux_start.s",
+    output = "aarch64_linux_start.o",
+)
+
+linux_libc_archive(
+    name = "libc_aarch64_linux",
+    architecture = "aarch64",
+    syscall_source = "aarch64 support/linux_syscall.s",
+    clone_source = "aarch64 support/linux_clone.s",
+    support_sources = [
+        "aarch64 support/cxx_guard.s",
+        "aarch64 support/eh_transfer.s",
+        "aarch64 support/longjmp.s",
+        "aarch64 support/setjmp.s",
+    ],
+    output = "libcaarch64_linux.a",
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+)
+
+linux_start_object(
+    name = "x86_64_linux_start",
+    architecture = "x86_64",
+    source = "x86_64 support/linux_start.s",
+    output = "x86_64_linux_start.o",
+)
+
+linux_start_object(
+    name = "arm_linux_start",
+    architecture = "arm",
+    source = "arm support/linux_start.s",
+    output = "arm_linux_start.o",
+)
+
+linux_start_object(
+    name = "riscv_linux_start",
+    architecture = "riscv",
+    source = "RISCV_support/linux_start.s",
+    output = "riscv_linux_start.o",
+)
+
+linux_libc_archive(
+    name = "libc_x86_64_linux",
+    architecture = "x86_64",
+    syscall_source = "x86_64 support/linux_syscall.s",
+    clone_source = "x86_64 support/linux_clone.s",
+    support_sources = [
+        "x86_64 support/cxx_guard.s",
+        "x86_64 support/eh_transfer.s",
+        "x86_64 support/longjmp.s",
+        "x86_64 support/setjmp.s",
+    ],
+    output = "libcx86_64_linux.a",
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+)
+
+linux_libc_archive(
+    name = "libc_arm_linux",
+    architecture = "arm",
+    syscall_source = "arm support/linux_syscall.s",
+    clone_source = "arm support/linux_clone.s",
+    support_sources = [
+        "arm support/cxx_guard.s",
+        "arm support/eh_transfer.s",
+        "arm support/eh_unwind.s",
+        "arm support/longjmp.s",
+        "arm support/setjmp.s",
+    ],
+    output = "libcarm_linux.a",
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+)
+
+linux_libc_archive(
+    name = "libc_riscv_linux",
+    architecture = "riscv",
+    syscall_source = "RISCV_support/linux_syscall.s",
+    clone_source = "RISCV_support/linux_clone.s",
+    support_sources = [
+        "RISCV_support/cxx_guard.s",
+        "RISCV_support/eh_transfer.s",
+        "RISCV_support/longjmp.s",
+        "RISCV_support/setjmp.s",
+    ],
+    output = "libcriscv_linux.a",
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
 )
 
 genrule(
@@ -3266,6 +3365,71 @@ sh_test(
         ":libc_aarch64",
         ":libc_arm",
         ":libc_headers",
+    ],
+)
+
+sh_test(
+    name = "native_linux_target_test",
+    srcs = ["tests/native_linux_target_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_binary(
+    name = "allocator_benchmark",
+    srcs = ["tools/run_allocator_benchmark.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :allocator_benchmark_source)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        ":allocator_benchmark_source",
+    ],
+)
+
+filegroup(
+    name = "allocator_benchmark_source",
+    srcs = ["libc/tests/runtime/allocator_benchmark.c"],
+)
+
+filegroup(
+    name = "native_linux_smoke_source",
+    srcs = ["tests/native_linux_smoke.cpp"],
+)
+
+sh_test(
+    name = "native_linux_aarch64_smoke_test",
+    srcs = ["tests/native_linux_aarch64_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_aarch64_linux)",
+        "$(rootpath :aarch64_linux_start)",
+        "$(rootpath :native_linux_smoke_source)",
+    ],
+    data = [
+        ":aarch64_linux_start",
+        ":davecc",
+        ":libc_aarch64_linux",
+        ":libc_headers",
+        ":native_linux_smoke_source",
+    ],
+    env_inherit = [
+        "COLIMA_HOME",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
     ],
 )
 

@@ -19,8 +19,14 @@ random_device::~random_device() {}
 
 random_device::result_type random_device::operator()() {
   result_type value = 0;
+#if defined(__DAVECC_NATIVE_LINUX__)
+  long result = syscall(SYS_getrandom, &value, sizeof(value), 0);
+  bool failed = result != static_cast<long>(sizeof(value));
+#else
+  bool failed = syscall(SYS_RANDOM_BYTES, &value, sizeof(value)) != 0;
+#endif
   if (!available_ ||
-      syscall(SYS_RANDOM_BYTES, &value, sizeof(value)) != 0) {
+      failed) {
     available_ = false;
     __DAVECC_THROW(runtime_error("random_device: entropy source unavailable"));
   }

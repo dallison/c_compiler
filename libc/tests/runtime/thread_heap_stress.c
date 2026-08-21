@@ -5,7 +5,9 @@
 #include <string.h>
 #include <threads.h>
 
-enum { kThreads = 3, kIters = 60 };
+enum { kThreads = 4, kIters = 600 };
+
+static void* transferred[kThreads];
 
 static int worker(void* arg) {
   int id = *(int*)arg;
@@ -34,7 +36,7 @@ static int worker(void* arg) {
     checksum += (uintptr_t)((unsigned char*)p)[0];
   }
 
-  free(p);
+  transferred[id - 1] = p;
   return (int)(checksum & 0x7f);
 }
 
@@ -59,6 +61,10 @@ int main(void) {
     if (results[i] <= 0) {
       return 10 + i;
     }
+    if (transferred[i] == NULL) {
+      return 15 + i;
+    }
+    free(transferred[i]);
     combined += (uintptr_t)results[i];
   }
 

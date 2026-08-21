@@ -12,8 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool print_libraries_only = false;
-
 static void InitSymbolResolverCode(uint8_t* code) {
   // movabs rax, imm64
   code[0] = 0x48;

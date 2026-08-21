@@ -8,10 +8,201 @@
 #include <threads.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <syscall.h>
 #include <stdlib.h>
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+#define __DAVECC_HAS_GUEST_THREADS__ 1
+#endif
+
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+void __davecc_tls_thread_init(void);
+void __davecc_tls_thread_fini(void);
+long __davecc_linux_clone(void* stack_top, unsigned long flags, void* argument,
+                          int (*entry)(void*), void* tls, int* tid);
+void __davecc_linux_tls_copy(void* thread_pointer);
+#if defined(__arm__)
+#define DAVE_THREAD_MMAP SYS_mmap2
+#else
+#define DAVE_THREAD_MMAP SYS_mmap
+#endif
+
+typedef struct DaveCCConditionAtExit {
+  cnd_t* condition;
+  mtx_t* mutex;
+  struct DaveCCConditionAtExit* next;
+} DaveCCConditionAtExit;
+
+static __thread DaveCCConditionAtExit* condition_at_exit;
+
+typedef struct LinuxThread {
+  volatile int tid;
+  int result;
+  int detached;
+  struct LinuxThread* next_detached;
+  thrd_start_t function;
+  void* argument;
+  void* stack;
+  size_t stack_size;
+  void* tls;
+  size_t tls_size;
+} LinuxThread;
+
+__thread LinuxThread* __davecc_linux_current_thread;
+static LinuxThread* detached_threads;
+static unsigned int detached_threads_lock;
+
+static void LockDetachedThreads(void) {
+  for (;;) {
+    unsigned int expected = 0;
+    if (__atomic_compare_exchange_n(&detached_threads_lock, &expected, 1, 0, 2,
+                                    0)) {
+      return;
+    }
+    syscall(SYS_futex, &detached_threads_lock, 0, 1, 0, 0, 0);
+  }
+}
+
+static void UnlockDetachedThreads(void) {
+  __atomic_store_n(&detached_threads_lock, 0, 3);
+  syscall(SYS_futex, &detached_threads_lock, 1, 1, 0, 0, 0);
+}
+
+static void ReapDetachedThreads(void) {
+  LinuxThread* ready = NULL;
+  LockDetachedThreads();
+  LinuxThread** link = &detached_threads;
+  while (*link != NULL) {
+    LinuxThread* thread = *link;
+    if (__atomic_load_n(&thread->tid, 2) == 0) {
+      *link = thread->next_detached;
+      thread->next_detached = ready;
+      ready = thread;
+    } else {
+      link = &thread->next_detached;
+    }
+  }
+  UnlockDetachedThreads();
+
+  while (ready != NULL) {
+    LinuxThread* thread = ready;
+    ready = thread->next_detached;
+    syscall(SYS_munmap, thread->stack, thread->stack_size);
+    syscall(SYS_munmap, thread->tls, thread->tls_size);
+    free(thread);
+  }
+}
+
+int __davecc_linux_thread_entry(void* value) {
+  LinuxThread* thread = (LinuxThread*)value;
+  __davecc_linux_current_thread = thread;
+  __davecc_tls_thread_init();
+  int result = thread->function(thread->argument);
+  thread->result = result;
+  ReapDetachedThreads();
+  __davecc_tls_thread_fini();
+  return result;
+}
+
+int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
+  if (thr == NULL || func == NULL) return thrd_error;
+  ReapDetachedThreads();
+  LinuxThread* thread = (LinuxThread*)calloc(1, sizeof(LinuxThread));
+  if (thread == NULL) return thrd_nomem;
+  thread->stack_size = 1024 * 1024;
+  thread->tls_size = 64 * 1024;
+  thread->stack = (void*)syscall(DAVE_THREAD_MMAP, 0, thread->stack_size, 3,
+                                 0x22, -1, 0);
+  thread->tls =
+      (void*)syscall(DAVE_THREAD_MMAP, 0, thread->tls_size, 3, 0x22, -1, 0);
+  if (thread->stack == (void*)-1 || thread->tls == (void*)-1) {
+    if (thread->stack != (void*)-1)
+      syscall(SYS_munmap, thread->stack, thread->stack_size);
+    if (thread->tls != (void*)-1)
+      syscall(SYS_munmap, thread->tls, thread->tls_size);
+    free(thread);
+    return thrd_nomem;
+  }
+  thread->function = func;
+  thread->argument = arg;
+  __davecc_linux_tls_copy(thread->tls);
+  unsigned long flags = 0x3d0f00;
+  long child = __davecc_linux_clone(
+      (char*)thread->stack + thread->stack_size, flags, thread,
+      __davecc_linux_thread_entry, thread->tls, (int*)&thread->tid);
+  if (child < 0) {
+    syscall(SYS_munmap, thread->stack, thread->stack_size);
+    syscall(SYS_munmap, thread->tls, thread->tls_size);
+    free(thread);
+    return child == -ENOMEM || child == -EAGAIN ? thrd_nomem : thrd_error;
+  }
+  *thr = (thrd_t)(uintptr_t)thread;
+  return thrd_success;
+}
+
+int thrd_detach(thrd_t thr) {
+  LinuxThread* thread = (LinuxThread*)(uintptr_t)thr;
+  if (thread == NULL) return thrd_error;
+  LockDetachedThreads();
+  if (thread->detached) {
+    UnlockDetachedThreads();
+    return thrd_error;
+  }
+  thread->detached = 1;
+  thread->next_detached = detached_threads;
+  detached_threads = thread;
+  UnlockDetachedThreads();
+  ReapDetachedThreads();
+  return thrd_success;
+}
+
+int thrd_join(thrd_t thr, int* res) {
+  LinuxThread* thread = (LinuxThread*)(uintptr_t)thr;
+  if (thread == NULL || thread->detached) return thrd_error;
+  while (__atomic_load_n(&thread->tid, 2) != 0) {
+    int expected = __atomic_load_n(&thread->tid, 0);
+    if (expected != 0)
+      syscall(SYS_futex, &thread->tid, 0, expected, 0, 0, 0);
+  }
+  if (res != NULL) *res = thread->result;
+  syscall(SYS_munmap, thread->stack, thread->stack_size);
+  syscall(SYS_munmap, thread->tls, thread->tls_size);
+  free(thread);
+  ReapDetachedThreads();
+  return thrd_success;
+}
+
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
+  if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
+      duration->tv_nsec >= 1000000000)
+    return -1;
+  long result = syscall(SYS_nanosleep, duration, remaining);
+  return result == 0 ? 0 : (errno == EINTR ? -2 : -1);
+}
+
+thrd_t thrd_current(void) {
+  if (__davecc_linux_current_thread != NULL) {
+    return (thrd_t)(uintptr_t)__davecc_linux_current_thread;
+  }
+  return (thrd_t)syscall(SYS_gettid);
+}
+
+int thrd_equal(thrd_t a, thrd_t b) {
+  return a == b;
+}
+
+void thrd_exit(int res) {
+  if (__davecc_linux_current_thread != NULL) {
+    __davecc_linux_current_thread->result = res;
+    ReapDetachedThreads();
+    __davecc_tls_thread_fini();
+  }
+  syscall(SYS_exit, res);
+  for (;;) {}
+}
+
+#elif defined(__DAVECC_HAS_GUEST_THREADS__)
 void __davecc_tls_thread_init(void);
 void __davecc_tls_thread_fini(void);
 
@@ -114,7 +305,21 @@ int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
 
 int __davecc_addr_wait(const volatile void* address, const void* expected,
                        size_t size, long long timeout_us) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  if (size != sizeof(unsigned int)) return thrd_error;
+  unsigned int expected_value = *(const unsigned int*)expected;
+  struct timespec timeout;
+  struct timespec* timeout_pointer = NULL;
+  if (timeout_us >= 0) {
+    timeout.tv_sec = timeout_us / 1000000;
+    timeout.tv_nsec = (timeout_us % 1000000) * 1000;
+    timeout_pointer = &timeout;
+  }
+  long result =
+      syscall(SYS_futex, address, 0, expected_value, timeout_pointer, 0, 0);
+  if (result == 0 || errno == EAGAIN) return thrd_success;
+  return errno == ETIMEDOUT ? thrd_timedout : thrd_error;
+#elif defined(__DAVECC_HAS_GUEST_THREADS__)
   long result = syscall(SYS_ADDR_WAIT, address, expected, size, timeout_us);
   if (result == 0) {
     return thrd_success;
@@ -130,7 +335,11 @@ int __davecc_addr_wait(const volatile void* address, const void* expected,
 }
 
 int __davecc_addr_wake(const volatile void* address, int wake_all) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  return syscall(SYS_futex, address, 1, wake_all ? INT_MAX : 1, 0, 0, 0) >= 0
+             ? thrd_success
+             : thrd_error;
+#elif defined(__DAVECC_HAS_GUEST_THREADS__)
   return syscall(SYS_ADDR_WAKE, address, wake_all) >= 0 ? thrd_success
                                                         : thrd_error;
 #else
@@ -141,7 +350,20 @@ int __davecc_addr_wake(const volatile void* address, int wake_all) {
 }
 
 unsigned int __davecc_hardware_concurrency(void) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  unsigned long mask[16] = {0};
+  long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+  if (bytes < 0) return 0;
+  unsigned int count = 0;
+  for (size_t i = 0; i < sizeof(mask) / sizeof(mask[0]); ++i) {
+    unsigned long value = mask[i];
+    while (value != 0) {
+      value &= value - 1;
+      ++count;
+    }
+  }
+  return count;
+#elif defined(__DAVECC_HAS_GUEST_THREADS__)
   long result = syscall(SYS_HARDWARE_CONCURRENCY);
   return result > 0 ? (unsigned int)result : 0;
 #else
@@ -150,7 +372,12 @@ unsigned int __davecc_hardware_concurrency(void) {
 }
 
 long long __davecc_monotonic_time_us(void) {
-#if defined(__DAVECC_HAS_HOST_CLOCK__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  struct timespec value;
+  if (syscall(SYS_clock_gettime, 1, &value) == 0)
+    return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
+  return (long long)clock();
+#elif defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
   if (syscall(SYS_MONOTONIC_TIME, &result) == 0) {
     return result;
@@ -163,7 +390,11 @@ long long __davecc_monotonic_time_us(void) {
 }
 
 long long __davecc_realtime_time_us(void) {
-#if defined(__DAVECC_HAS_HOST_CLOCK__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  struct timespec value;
+  if (syscall(SYS_clock_gettime, 0, &value) == 0)
+    return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
+#elif defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
   if (syscall(SYS_REALTIME_TIME, &result) == 0) {
     return result;
@@ -173,7 +404,9 @@ long long __davecc_realtime_time_us(void) {
 }
 
 void thrd_yield(void) {
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+  (void)syscall(SYS_sched_yield);
+#elif defined(__DAVECC_HAS_GUEST_THREADS__)
   (void)syscall(SYS_THREAD_YIELD);
 #endif
 }

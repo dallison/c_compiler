@@ -6,6 +6,7 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 #include <errno.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "linker_main.h"
@@ -622,6 +623,12 @@ String* Link(int argc, char** argv) {
   }
   int ok = LinkerWriteOutput(&linker, fp);
   fclose(fp);
+  if (ok && !linker.building_dso &&
+      chmod(linker.output_filename.value, 0755) != 0) {
+    fprintf(stderr, "Can't make output file executable %s: %s\n",
+            linker.output_filename.value, strerror(errno));
+    ok = 0;
+  }
   
   // We're done.
   LinkerDestruct(&linker);

@@ -353,8 +353,15 @@ static bool LoadModuleEntry(TranslationUnitImportState* state,
     return false;
   }
 
-  const char* target =
-      compiler->target_name != NULL ? compiler->target_name->value : "";
+  const char* target = compiler->target_triple.canonical.value;
+  if (compiler->target_triple.os == kTargetOSNone &&
+      strcmp(loaded->target_triple.value,
+             compiler->target_triple.architecture.value) == 0) {
+    // Accept archives produced before canonical triples were serialized for
+    // OS-neutral interpreter profiles. Native OS profiles always require
+    // their full canonical triple.
+    target = compiler->target_triple.architecture.value;
+  }
   char validate_err[256];
   if (!ModuleValidateLoadedForImport(
           module_name, target, loaded->module_name.value,

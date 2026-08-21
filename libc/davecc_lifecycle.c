@@ -21,7 +21,11 @@ extern DaveCCInitFiniFn __fini_array_start[];
 extern DaveCCInitFiniFn __fini_array_end[];
 
 #if !defined(__6502__)
+#if defined(__DAVECC_NATIVE_LINUX__)
+void __davecc_tls_thread_fini(void);
+#else
 void __davecc_tls_thread_fini(void) __attribute__((weak));
+#endif
 #endif
 void __cxa_finalize(void* dso);
 

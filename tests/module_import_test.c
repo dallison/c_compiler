@@ -105,6 +105,13 @@ int main(void) {
   CHECK(!ModuleValidateLoadedForImport("hello", "x86_64", "hello", "aarch64",
                                        validate_err, sizeof(validate_err)));
   CHECK(strstr(validate_err, "aarch64") != NULL);
+  CHECK(ModuleValidateLoadedForImport(
+      "hello", "aarch64-unknown-linux-davecc", "hello",
+      "aarch64-unknown-linux-davecc", validate_err, sizeof(validate_err)));
+  CHECK(!ModuleValidateLoadedForImport(
+      "hello", "aarch64-unknown-linux-davecc", "hello",
+      "aarch64-unknown-none-davecc", validate_err, sizeof(validate_err)));
+  CHECK(strstr(validate_err, "aarch64-unknown-none-davecc") != NULL);
 
   const char* dir = getenv("TEST_TMPDIR");
   if (dir == NULL || dir[0] == '\0') {
@@ -211,6 +218,18 @@ int main(void) {
   CHECK(FindGlobalSymbol(&name) == NULL);
   StringDestruct(&name);
   TranslationUnitImportStateDelete(state2);
+  CompilerDelete(compiler);
+  compiler = NULL;
+
+  // Explicit canonical OS-neutral targets retain compatibility with archives
+  // produced before module metadata used canonical target triples.
+  StringSet(&target->value.svalue, "x86_64-unknown-none-davecc");
+  NewCompiler(&import_options);
+  TranslationUnitImportState* state3 =
+      TranslationUnitImportStateCreate(&import_options);
+  CHECK(TranslationUnitImportStateImport(state3, "good"));
+  TranslationUnitImportStateRelease(state3);
+  TranslationUnitImportStateDelete(state3);
   CompilerDelete(compiler);
   compiler = NULL;
 

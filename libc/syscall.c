@@ -11,6 +11,32 @@
 #include <syscall.h>
 #include <time.h>
 
+#if defined(__DAVECC_NATIVE_LINUX__)
+typedef struct {
+  long tv_sec;
+  long tv_nsec;
+} DaveLinuxTimespec;
+
+time_t time(time_t* result) {
+  DaveLinuxTimespec value;
+  if (syscall(SYS_clock_gettime, 0, &value) < 0) {
+    return (time_t)-1;
+  }
+  if (result != NULL) {
+    *result = (time_t)value.tv_sec;
+  }
+  return (time_t)value.tv_sec;
+}
+
+clock_t clock(void) {
+  DaveLinuxTimespec value;
+  if (syscall(SYS_clock_gettime, 2, &value) < 0) {
+    return (clock_t)-1;
+  }
+  return (clock_t)(value.tv_sec * CLOCKS_PER_SEC +
+                   value.tv_nsec / (1000000000 / CLOCKS_PER_SEC));
+}
+#else
 time_t time(time_t* result) {
   time_t value = (time_t)syscall(SYS_TIME);
   if (result != NULL) {
@@ -22,8 +48,11 @@ time_t time(time_t* result) {
 clock_t clock(void) {
   return (clock_t)syscall(SYS_CLOCK);
 }
+#endif
 
-#if defined(__risc_v__)
+#if defined(__DAVECC_NATIVE_LINUX__)
+// Implemented in the architecture-specific Linux runtime.
+#elif defined(__risc_v__)
 // Args are:
 // a0: syscall number
 // a1...: args to syscall

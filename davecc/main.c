@@ -273,20 +273,33 @@ static void DriverResourcesInit(DriverResources* resources,
 
 typedef struct {
   const char* canonical_name;
+  TargetOS os;
   const char* archive_name;
   const char* bazel_target;
+  const char* startup_name;
+  const char* startup_target;
   bool use_main_entry;
   bool static_only;
 } TargetRuntime;
 
 static const TargetRuntime target_runtimes[] = {
-    {"pcode", "libcpcode.a", "//:libc_pcode", true, false},
-    {"riscv", "libcriscv.a", "//:libc_riscv", false, false},
-    {"aarch64", "libcaarch64.a", "//:libc_aarch64", true, false},
-    {"arm", "libcarm.a", "//:libc_arm", true, false},
-    {"x86_64", "libcx86_64.a", "//:libc_x86_64", true, false},
-    {"6502", "libc65c02.a", "//:libc_65c02", false, true},
-    {"65c02", "libc65c02.a", "//:libc_65c02", false, true},
+    {"pcode", kTargetOSNone, "libcpcode.a", "//:libc_pcode", NULL, NULL, true, false},
+    {"riscv", kTargetOSNone, "libcriscv.a", "//:libc_riscv", NULL, NULL, false, false},
+    {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL, true, false},
+    {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL, true, false},
+    {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
+    {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
+    {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
+    {"aarch64", kTargetOSLinux, "libcaarch64_linux.a",
+     "//:libc_aarch64_linux", "aarch64_linux_start.o",
+     "//:aarch64_linux_start", false, true},
+    {"x86_64", kTargetOSLinux, "libcx86_64_linux.a",
+     "//:libc_x86_64_linux", "x86_64_linux_start.o",
+     "//:x86_64_linux_start", false, true},
+    {"arm", kTargetOSLinux, "libcarm_linux.a", "//:libc_arm_linux",
+     "arm_linux_start.o", "//:arm_linux_start", false, true},
+    {"riscv", kTargetOSLinux, "libcriscv_linux.a", "//:libc_riscv_linux",
+     "riscv_linux_start.o", "//:riscv_linux_start", false, true},
 };
 
 static bool TargetNameMatches(const char* target, const char* canonical) {
@@ -320,13 +333,25 @@ static const TargetRuntime* FindTargetRuntime(const char* target) {
   if (target == NULL) {
     return NULL;
   }
+  CompilerTargetTriple triple;
+  CompilerTargetTripleInit(&triple);
+  char error[256];
+  if (!CompilerTargetTripleParse(&triple, target, error, sizeof(error))) {
+    CompilerTargetTripleDestruct(&triple);
+    return NULL;
+  }
+  const TargetRuntime* result = NULL;
   for (size_t i = 0;
        i < sizeof(target_runtimes) / sizeof(target_runtimes[0]); i++) {
-    if (TargetNameMatches(target, target_runtimes[i].canonical_name)) {
-      return &target_runtimes[i];
+    if (triple.os == target_runtimes[i].os &&
+        TargetNameMatches(triple.architecture.value,
+                          target_runtimes[i].canonical_name)) {
+      result = &target_runtimes[i];
+      break;
     }
   }
-  return NULL;
+  CompilerTargetTripleDestruct(&triple);
+  return result;
 }
 
 static bool VectorContainsCString(Vector* values, const char* value) {
@@ -377,7 +402,8 @@ static void AddDefaultSystemInclude(Vector* compiler_args,
   }
 }
 
-static const char* DriverTargetName(Vector* compiler_args) {
+static void DriverTargetName(Vector* compiler_args, char* out,
+                             size_t out_size) {
   const char* target = "x86_64";
   for (size_t i = 1; i < compiler_args->length; i++) {
     const char* arg = (const char*)VectorGet(compiler_args, i);
@@ -387,16 +413,17 @@ static const char* DriverTargetName(Vector* compiler_args) {
       target = arg + 8;
     }
   }
-  if (strcmp(target, "x86-64") == 0) {
-    return "x86_64";
+  CompilerTargetTriple triple;
+  CompilerTargetTripleInit(&triple);
+  char error[256];
+  if (!CompilerTargetTripleParse(&triple, target, error, sizeof(error))) {
+    snprintf(out, out_size, "%s", target);
+  } else if (strcmp(triple.architecture.value, "6502") == 0) {
+    snprintf(out, out_size, "65c02");
+  } else {
+    snprintf(out, out_size, "%s", triple.architecture.value);
   }
-  if (strcmp(target, "p-code") == 0) {
-    return "pcode";
-  }
-  if (strcmp(target, "6502") == 0) {
-    return "65c02";
-  }
-  return target;
+  CompilerTargetTripleDestruct(&triple);
 }
 
 static void AddDefaultStandardModulePath(Vector* compiler_args,
@@ -407,7 +434,8 @@ static void AddDefaultStandardModulePath(Vector* compiler_args,
       resources->module_root.length == 0) {
     return;
   }
-  const char* target = DriverTargetName(compiler_args);
+  char target[64];
+  DriverTargetName(compiler_args, target, sizeof(target));
   if (!TryResourceDirectory(&resources->module_dir,
                             resources->module_root.value, target)) {
     return;
@@ -440,11 +468,12 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
       !VectorContainsCString(linker_args, "-e")) {
     VectorAppend(linker_args, "-e");
     VectorAppend(linker_args, "main");
+  } else if (runtime->startup_name != NULL &&
+             !VectorContainsCString(linker_args, "-e")) {
+    VectorAppend(linker_args, "-e");
+    VectorAppend(linker_args, "_start");
   }
 
-  if (LinkerArgsContainArchive(linker_args, runtime->archive_name)) {
-    return;
-  }
   if (resources->lib_dir.length == 0) {
     fprintf(stderr,
             "unable to find DaveCC system libraries; set DAVECC_LIB_DIR "
@@ -452,6 +481,26 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     exit(1);
   }
 
+  if (runtime->startup_name != NULL &&
+      !LinkerArgsContainArchive(linker_args, runtime->startup_name)) {
+    String* startup = NewEmptyString();
+    StringPrintf(startup, "%s/%s", resources->lib_dir.value,
+                 runtime->startup_name);
+    if (!PathIsFile(startup->value)) {
+      fprintf(stderr,
+              "unable to find DaveCC startup object '%s'; build %s, set "
+              "DAVECC_LIB_DIR, or use -nostdlib\n",
+              startup->value, runtime->startup_target);
+      StringDelete(startup);
+      exit(1);
+    }
+    VectorAppend(owned_paths, startup);
+    VectorAppend(linker_args, startup->value);
+  }
+
+  if (LinkerArgsContainArchive(linker_args, runtime->archive_name)) {
+    return;
+  }
   String* archive = NewEmptyString();
   StringPrintf(archive, "%s/%s", resources->lib_dir.value,
                runtime->archive_name);
@@ -1118,8 +1167,7 @@ static bool EmitModule(const char* input, Vector* options, Vector* target_opts,
     }
     ModuleWriteRequest req = {
         .module_name = module_name.value,
-        .target_triple =
-            compiler->target_name != NULL ? compiler->target_name->value : "",
+        .target_triple = compiler->target_triple.canonical.value,
         .compiler_version = "davecc",
         .flags = header_unit
             ? kModuleArchiveHeaderUnit
@@ -1463,6 +1511,7 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "Failed to assemble\n");
         exit(1);
       }
+      StringSet(&target, compiler->target_name->value);
       // Create the global symbol tables.
       CreateGlobalSymbolTables();
       

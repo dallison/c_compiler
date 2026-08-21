@@ -27,8 +27,6 @@
 
 #define ARM_RESOLVER_LINKED 0x42000000u
 
-bool print_libraries_only = false;
-
 #define CPSR_N (1u << 31)
 #define CPSR_Z (1u << 30)
 #define CPSR_C (1u << 29)

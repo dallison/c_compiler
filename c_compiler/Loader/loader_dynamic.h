@@ -16,6 +16,8 @@
 struct LoadedDynamicLibrary;
 struct Loader;
 
+extern bool print_libraries_only;
+
 // A MappedSegment is a mapped region of memory that should be unmapped when
 // we are done.
 typedef struct {

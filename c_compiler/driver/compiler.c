@@ -263,6 +263,118 @@ static struct CompilerTargetDefinition* FindTarget(String* name) {
   return NULL;
 }
 
+void CompilerTargetTripleInit(CompilerTargetTriple* triple) {
+  StringInit(&triple->architecture, "");
+  StringInit(&triple->vendor, "");
+  StringInit(&triple->os_name, "");
+  StringInit(&triple->environment, "");
+  StringInit(&triple->canonical, "");
+  triple->os = kTargetOSNone;
+  triple->explicit_triple = false;
+}
+
+void CompilerTargetTripleDestruct(CompilerTargetTriple* triple) {
+  StringDestruct(&triple->architecture);
+  StringDestruct(&triple->vendor);
+  StringDestruct(&triple->os_name);
+  StringDestruct(&triple->environment);
+  StringDestruct(&triple->canonical);
+}
+
+static bool SetTargetTripleError(char* error, size_t error_size,
+                                 const char* format, const char* value) {
+  if (error != NULL && error_size != 0) {
+    snprintf(error, error_size, format, value);
+  }
+  return false;
+}
+
+bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
+                               char* error, size_t error_size) {
+  if (value == NULL || value[0] == '\0') {
+    return SetTargetTripleError(error, error_size, "empty target '%s'",
+                                value == NULL ? "" : value);
+  }
+
+  String whole;
+  StringInit(&whole, value);
+  struct CompilerTargetDefinition* definition = FindTarget(&whole);
+  if (definition != NULL) {
+    StringSet(&triple->architecture, definition->canonical_name);
+    StringSet(&triple->vendor, "unknown");
+    StringSet(&triple->os_name, "none");
+    StringSet(&triple->environment, "davecc");
+    triple->os = kTargetOSNone;
+    triple->explicit_triple = false;
+    StringClear(&triple->canonical);
+    StringPrintf(&triple->canonical, "%s-unknown-none-davecc",
+                 definition->canonical_name);
+    StringDestruct(&whole);
+    return true;
+  }
+  StringDestruct(&whole);
+
+  const char* first = strchr(value, '-');
+  const char* second = first == NULL ? NULL : strchr(first + 1, '-');
+  const char* third = second == NULL ? NULL : strchr(second + 1, '-');
+  if (first == NULL || second == NULL || third == NULL ||
+      strchr(third + 1, '-') != NULL || first == value ||
+      second == first + 1 || third == second + 1 || third[1] == '\0') {
+    return SetTargetTripleError(
+        error, error_size,
+        "target '%s' must be an architecture or arch-vendor-os-environment",
+        value);
+  }
+
+  String architecture;
+  StringInitFromSegment(&architecture, value, (size_t)(first - value));
+  definition = FindTarget(&architecture);
+  StringDestruct(&architecture);
+  if (definition == NULL) {
+    return SetTargetTripleError(error, error_size,
+                                "unknown target architecture in '%s'", value);
+  }
+
+  StringSet(&triple->architecture, definition->canonical_name);
+  StringClear(&triple->vendor);
+  StringAppendSegment(&triple->vendor, first + 1,
+                      (size_t)(second - first - 1));
+  StringClear(&triple->os_name);
+  StringAppendSegment(&triple->os_name, second + 1,
+                      (size_t)(third - second - 1));
+  StringSet(&triple->environment, third + 1);
+  triple->explicit_triple = true;
+  if (StringEqual(&triple->os_name, "linux")) {
+    triple->os = kTargetOSLinux;
+  } else if (StringEqual(&triple->os_name, "none")) {
+    triple->os = kTargetOSNone;
+  } else {
+    return SetTargetTripleError(error, error_size,
+                                "unsupported target OS in '%s'", value);
+  }
+  if (!StringEqual(&triple->environment, "davecc")) {
+    return SetTargetTripleError(error, error_size,
+                                "unsupported target environment in '%s'",
+                                value);
+  }
+  if (triple->os == kTargetOSLinux &&
+      (strcmp(definition->canonical_name, "pcode") == 0 ||
+       strcmp(definition->canonical_name, "6502") == 0 ||
+       strcmp(definition->canonical_name, "65c02") == 0)) {
+    return SetTargetTripleError(error, error_size,
+                                "Linux is not supported by target '%s'", value);
+  }
+  StringClear(&triple->canonical);
+  StringPrintf(&triple->canonical, "%s-%s-%s-%s",
+               definition->canonical_name, triple->vendor.value,
+               triple->os_name.value, triple->environment.value);
+  return true;
+}
+
+bool CompilerTargetTripleIsLinux(const CompilerTargetTriple* triple) {
+  return triple != NULL && triple->os == kTargetOSLinux;
+}
+
 void DeleteCompilerTarget(CompilerTarget* t){
   StringDestruct(&t->name);
   free(t);
@@ -2592,6 +2704,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
   // for command-line options (a leading '-') by later tools like the linker.
   StringInit(&compiler->infile, strcmp(filename, "-") == 0 ? "stdin" : filename);
+  CompilerTargetTripleInit(&compiler->target_triple);
   ModuleUnitInfoInit(&compiler->module_unit);
   VectorInit(&compiler->functions);
   VectorInit(&compiler->emitted_function_asm_names);
@@ -2828,6 +2941,14 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
     fprintf(stderr, "No target specified; please specify -target option\n");
     exit(1);
   }
+  char target_error[256];
+  if (!CompilerTargetTripleParse(&compiler->target_triple,
+                                 compiler->target_name->value, target_error,
+                                 sizeof(target_error))) {
+    fprintf(stderr, "Invalid -target: %s\n", target_error);
+    exit(1);
+  }
+  compiler->target_name = &compiler->target_triple.architecture;
   struct CompilerTargetDefinition* target = FindTarget(compiler->target_name);
   if (target == NULL) {
     fprintf(stderr, "Unknown -target architecture %s\n", compiler->target_name->value);
@@ -3196,6 +3317,7 @@ void CompilerDestruct(Compiler* compiler) {
   HashTableDestruct(&compiler->global_tag_table);
 
   StringDestruct(&compiler->infile);
+  CompilerTargetTripleDestruct(&compiler->target_triple);
   ModuleUnitInfoDestruct(&compiler->module_unit);
 
   if (compiler->target != NULL) {

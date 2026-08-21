@@ -12,9 +12,46 @@
 
 #include <syscall.h>
 
+#if defined(__DAVECC_NATIVE_LINUX__)
+#define EPERM 1
+#define ENOENT 2
+#define ESRCH 3
+#define EINTR 4
+#define EIO 5
+#define ENOEXEC 8
+#define EBADF 9
+#define EAGAIN 11
+#define ENOMEM 12
+#define EACCES 13
+#define EBUSY 16
+#define EEXIST 17
+#define EXDEV 18
+#define ENODEV 19
+#define ENOTDIR 20
+#define EISDIR 21
+#define EINVAL 22
+#define ENFILE 23
+#define EMFILE 24
+#define EFBIG 27
+#define ENOSPC 28
+#define ESPIPE 29
+#define EROFS 30
+#define EDOM 33
+#define ERANGE 34
+#define EDEADLK 35
+#define ENAMETOOLONG 36
+#define ENOSYS 38
+#define ENOTEMPTY 39
+#define ELOOP 40
+#define EOVERFLOW 75
+#define EILSEQ 84
+#define ENOTSUP 95
+#define EOPNOTSUPP ENOTSUP
+#define ETIMEDOUT 110
+#define EUNKNOWN 4095
+#else
 #define EDOM 200
 #define EILSEQ 201
-
 #define ENOENT          1       /* No such file or directory */
 #define ENOMEM          2       /* Out of memory */
 #define EACCES          3       /* Permission denied */
@@ -48,6 +85,7 @@
 #define EFBIG           30      /* File too large */
 #define ENFILE          31      /* Too many open files in system */
 #define EOVERFLOW       32      /* Value too large for defined data type */
+#endif
 
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6

@@ -13,6 +13,7 @@
 
 #include "loader.h"
 #include "risc_v_machine.h"
+#include "../libc/include/davecc_guest_syscalls.h"
 
 #define RISC_V_STACK_SIZE 8*1024*1024
 
@@ -79,6 +80,12 @@
 #define RISC_V_ECALL_TZDB_LEAP_INFO 59
 #define RISC_V_ECALL_RANDOM_BYTES 60
 #define RISC_V_ECALL_NESTED_RETURN 255
+
+#define RISC_V_VALIDATE_DAVE_SYSCALL(name)                              \
+  typedef char risc_v_dave_syscall_##name[                            \
+      RISC_V_ECALL_##name == DAVE_SYS_##name ? 1 : -1];
+DAVE_GUEST_SYSCALL_LIST(RISC_V_VALIDATE_DAVE_SYSCALL)
+#undef RISC_V_VALIDATE_DAVE_SYSCALL
 
 // Registers
 #define RISC_V_REG_x0 0

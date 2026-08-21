@@ -4,6 +4,32 @@
 #include <cstdlib>
 #include <syscall.h>
 
+#if defined(__DAVECC_NATIVE_LINUX__)
+extern "C" int64_t __davecc_linux_fs_service(int operation, intptr_t first,
+                                               intptr_t second,
+                                               intptr_t third);
+enum {
+  SYS_FS_STATUS = 1,
+  SYS_FS_OPEN_DIRECTORY,
+  SYS_FS_READ_DIRECTORY,
+  SYS_FS_CLOSE_DIRECTORY,
+  SYS_FS_CREATE_DIRECTORY,
+  SYS_FS_REMOVE,
+  SYS_FS_RENAME,
+  SYS_FS_CURRENT_PATH,
+  SYS_FS_SET_CURRENT_PATH,
+  SYS_FS_READ_SYMLINK,
+  SYS_FS_CREATE_SYMLINK,
+  SYS_FS_CREATE_HARD_LINK,
+  SYS_FS_SET_PERMISSIONS,
+  SYS_FS_RESIZE,
+  SYS_FS_SET_MODIFICATION_TIME,
+  SYS_FS_SPACE,
+  SYS_FS_COPY_FILE,
+  SYS_FS_CANONICAL,
+};
+#endif
+
 namespace std {
 namespace filesystem {
 namespace __filesystem_detail {
@@ -34,20 +60,43 @@ struct __wire_space {
 
 static int64_t __status_call(const char* value, bool follow,
                              __wire_status* result) {
+#if defined(__DAVECC_NATIVE_LINUX__)
+  return __davecc_linux_fs_service(
+      SYS_FS_STATUS, reinterpret_cast<intptr_t>(value), follow ? 1 : 0,
+      reinterpret_cast<intptr_t>(result));
+#else
   return syscall(SYS_FS_STATUS, value, follow ? 1 : 0, result);
+#endif
 }
 
 static int64_t __call1(int operation, const void* first) {
+#if defined(__DAVECC_NATIVE_LINUX__)
+  return __davecc_linux_fs_service(operation,
+                                    reinterpret_cast<intptr_t>(first), 0, 0);
+#else
   return syscall(operation, first);
+#endif
 }
 
 static int64_t __call2(int operation, const void* first, const void* second) {
+#if defined(__DAVECC_NATIVE_LINUX__)
+  return __davecc_linux_fs_service(
+      operation, reinterpret_cast<intptr_t>(first),
+      reinterpret_cast<intptr_t>(second), 0);
+#else
   return syscall(operation, first, second);
+#endif
 }
 
 static int64_t __call3(int operation, const void* first, const void* second,
                        const void* third) {
+#if defined(__DAVECC_NATIVE_LINUX__)
+  return __davecc_linux_fs_service(
+      operation, reinterpret_cast<intptr_t>(first),
+      reinterpret_cast<intptr_t>(second), reinterpret_cast<intptr_t>(third));
+#else
   return syscall(operation, first, second, third);
+#endif
 }
 
 static bool __error(error_code& error, int64_t result) {
@@ -126,7 +175,10 @@ class __directory_stream {
       return;
     }
     __wire_directory_entry entry;
-    int64_t result = syscall(SYS_FS_READ_DIRECTORY, __handle, &entry);
+    int64_t result = __filesystem_detail::__call2(
+        SYS_FS_READ_DIRECTORY,
+        reinterpret_cast<const void*>(static_cast<intptr_t>(__handle)),
+        &entry);
     if (__error(error, result)) {
       __close();
       return;
@@ -141,7 +193,9 @@ class __directory_stream {
  private:
   void __close() {
     if (__handle >= 0) {
-      syscall(SYS_FS_CLOSE_DIRECTORY, __handle);
+      __call1(SYS_FS_CLOSE_DIRECTORY,
+              reinterpret_cast<const void*>(
+                  static_cast<intptr_t>(__handle)));
       __handle = -1;
     }
   }
@@ -524,7 +578,9 @@ path current_path(error_code& error) {
   size_t capacity = 256;
   for (;;) {
     vector<char> buffer(capacity);
-    int64_t result = syscall(SYS_FS_CURRENT_PATH, buffer.data(), capacity);
+    int64_t result = __filesystem_detail::__call2(
+        SYS_FS_CURRENT_PATH, buffer.data(),
+        reinterpret_cast<const void*>(static_cast<intptr_t>(capacity)));
     if (result == -ERANGE) {
       capacity *= 2;
       continue;
@@ -569,8 +625,9 @@ path canonical(const path& value, error_code& error) {
   size_t capacity = 256;
   for (;;) {
     vector<char> buffer(capacity);
-    int64_t result =
-        syscall(SYS_FS_CANONICAL, value.c_str(), buffer.data(), capacity);
+    int64_t result = __filesystem_detail::__call3(
+        SYS_FS_CANONICAL, value.c_str(), buffer.data(),
+        reinterpret_cast<const void*>(static_cast<intptr_t>(capacity)));
     if (result == -ERANGE) {
       capacity *= 2;
       continue;
@@ -644,7 +701,9 @@ path proximate(const path& value, const path& base) {
 }
 
 bool create_directory(const path& value, error_code& error) noexcept {
-  int64_t result = syscall(SYS_FS_CREATE_DIRECTORY, value.c_str(), 0777);
+  int64_t result = __filesystem_detail::__call2(
+      SYS_FS_CREATE_DIRECTORY, value.c_str(),
+      reinterpret_cast<const void*>(static_cast<intptr_t>(0777)));
   if (result == -EEXIST) {
     bool result_is_directory = is_directory(value, error);
     return error ? false : !result_is_directory ? false : false;
@@ -746,8 +805,9 @@ path read_symlink(const path& value, error_code& error) {
   size_t capacity = 256;
   for (;;) {
     vector<char> buffer(capacity);
-    int64_t result =
-        syscall(SYS_FS_READ_SYMLINK, value.c_str(), buffer.data(), capacity);
+    int64_t result = __filesystem_detail::__call3(
+        SYS_FS_READ_SYMLINK, value.c_str(), buffer.data(),
+        reinterpret_cast<const void*>(static_cast<intptr_t>(capacity)));
     if (result == -ENAMETOOLONG) {
       capacity *= 2;
       continue;
@@ -784,8 +844,9 @@ bool copy_file(const path& source, const path& destination,
   if ((options & copy_options::overwrite_existing) != copy_options::none)
     mode |= 2;
   if ((options & copy_options::update_existing) != copy_options::none) mode |= 4;
-  int64_t result =
-      syscall(SYS_FS_COPY_FILE, source.c_str(), destination.c_str(), mode);
+  int64_t result = __filesystem_detail::__call3(
+      SYS_FS_COPY_FILE, source.c_str(), destination.c_str(),
+      reinterpret_cast<const void*>(static_cast<intptr_t>(mode)));
   if (__filesystem_detail::__error(error, result)) return false;
   return result == 0;
 }
@@ -871,7 +932,8 @@ void copy(const path& source, const path& destination) {
 }
 
 bool remove(const path& value, error_code& error) noexcept {
-  int64_t result = syscall(SYS_FS_REMOVE, value.c_str());
+  int64_t result =
+      __filesystem_detail::__call1(SYS_FS_REMOVE, value.c_str());
   if (result == -ENOENT) {
     error.clear();
     return false;
@@ -961,8 +1023,10 @@ void permissions(const path& value, perms permissions_value,
   }
   bool follow =
       (options & perm_options::nofollow) == static_cast<perm_options>(0);
-  int64_t result =
-      syscall(SYS_FS_SET_PERMISSIONS, value.c_str(), mode, follow ? 1 : 0);
+  int64_t result = __filesystem_detail::__call3(
+      SYS_FS_SET_PERMISSIONS, value.c_str(),
+      reinterpret_cast<const void*>(static_cast<intptr_t>(mode)),
+      reinterpret_cast<const void*>(static_cast<intptr_t>(follow ? 1 : 0)));
   __filesystem_detail::__error(error, result);
 }
 void permissions(const path& value, perms permissions_value,
@@ -974,7 +1038,8 @@ void permissions(const path& value, perms permissions_value,
 
 space_info space(const path& value, error_code& error) noexcept {
   __filesystem_detail::__wire_space wire;
-  int64_t result = syscall(SYS_FS_SPACE, value.c_str(), &wire);
+  int64_t result =
+      __filesystem_detail::__call2(SYS_FS_SPACE, value.c_str(), &wire);
   if (__filesystem_detail::__error(error, result)) {
     uintmax_t invalid = static_cast<uintmax_t>(-1);
     return {invalid, invalid, invalid};

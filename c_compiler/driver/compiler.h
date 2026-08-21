@@ -45,6 +45,27 @@ typedef enum {
 } TlsModel;
 
 typedef enum {
+  kTargetOSNone,
+  kTargetOSLinux,
+} TargetOS;
+
+typedef struct {
+  String architecture;
+  String vendor;
+  String os_name;
+  String environment;
+  String canonical;
+  TargetOS os;
+  bool explicit_triple;
+} CompilerTargetTriple;
+
+void CompilerTargetTripleInit(CompilerTargetTriple* triple);
+void CompilerTargetTripleDestruct(CompilerTargetTriple* triple);
+bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
+                               char* error, size_t error_size);
+bool CompilerTargetTripleIsLinux(const CompilerTargetTriple* triple);
+
+typedef enum {
   kLanguageStandardC89,
   kLanguageStandardC99,
   kLanguageStandardC11,
@@ -368,6 +389,7 @@ typedef struct {
   // Back-end, specific to a target.
   CompilerTarget* target;
   String* target_name;
+  CompilerTargetTriple target_triple;
 
   // Vector containing all the code for all functions.
   Vector functions;

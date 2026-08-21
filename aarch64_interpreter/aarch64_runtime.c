@@ -18,8 +18,6 @@
 #include <string.h>
 #include <unistd.h>
 
-bool print_libraries_only = false;
-
 static void InitSymbolResolverCode(uint32_t* code) {
   // mov x16, #AARCH64_SYSCALL_RESOLVE
   code[0] = 0xD2800000u | ((uint32_t)AARCH64_SYSCALL_RESOLVE << 5) |

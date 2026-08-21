@@ -91,6 +91,7 @@ static int BrokenDownTime(int64_t seconds, struct tm* result) {
   return 0;
 }
 
+#if defined(__DAVECC_HAS_HOST_TZDB__)
 static int ReadTimeZoneInfo(const char* zone_name, int64_t seconds,
                             TimeZoneSysInfo* info, char* abbreviation,
                             size_t abbreviation_capacity) {
@@ -104,6 +105,7 @@ static int ReadTimeZoneInfo(const char* zone_name, int64_t seconds,
   return (int)syscall(SYS_TZDB_SYS_INFO, zone_name, &request);
 #endif
 }
+#endif
 
 int timespec_get(struct timespec* result, int base) {
   if (base != TIME_UTC || result == NULL) {
@@ -111,7 +113,15 @@ int timespec_get(struct timespec* result, int base) {
   }
 
   int64_t microseconds = 0;
-#if defined(__DAVECC_HAS_HOST_CLOCK__)
+#if defined(__DAVECC_NATIVE_LINUX__)
+  struct timespec native_time;
+  if (syscall(SYS_clock_gettime, 0, &native_time) < 0) {
+    return 0;
+  }
+  result->tv_sec = native_time.tv_sec;
+  result->tv_nsec = native_time.tv_nsec;
+  return TIME_UTC;
+#elif defined(__DAVECC_HAS_HOST_CLOCK__)
   if (syscall(SYS_REALTIME_TIME, &microseconds) != 0) {
     return 0;
   }

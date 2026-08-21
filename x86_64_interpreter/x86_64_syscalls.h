@@ -7,6 +7,7 @@
 #define x86_64_syscalls_h
 
 #include <stdint.h>
+#include "../libc/include/davecc_guest_syscalls.h"
 
 #define X86_64_SYSCALL_HALT 1
 #define X86_64_SYSCALL_OPEN 2
@@ -68,6 +69,12 @@
 #define X86_64_SYSCALL_TZDB_LEAP_COUNT 58
 #define X86_64_SYSCALL_TZDB_LEAP_INFO 59
 #define X86_64_SYSCALL_RANDOM_BYTES 60
+
+#define X86_64_VALIDATE_DAVE_SYSCALL(name)                               \
+  typedef char x86_64_dave_syscall_##name[                              \
+      X86_64_SYSCALL_##name == DAVE_SYS_##name ? 1 : -1];
+DAVE_GUEST_SYSCALL_LIST(X86_64_VALIDATE_DAVE_SYSCALL)
+#undef X86_64_VALIDATE_DAVE_SYSCALL
 
 struct X86_64Interpreter;
 

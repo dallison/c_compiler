@@ -14,8 +14,12 @@
 void __davecc_tls_thread_init_impl(void);
 void __davecc_tls_thread_fini_impl(void);
 void __davecc_thread_exit_callbacks(void);
+#if defined(__DAVECC_HAS_HEAP_LOCK__)
+void __davecc_heap_thread_cleanup(void);
+#endif
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_GUEST_THREADS__) || \
+    defined(__DAVECC_HAS_NATIVE_THREADS__)
 typedef void (*DaveCCTlsBlockDtorFn)(void*);
 
 typedef struct DaveCCTlsBlockDtorEntry {
@@ -24,8 +28,8 @@ typedef struct DaveCCTlsBlockDtorEntry {
   struct DaveCCTlsBlockDtorEntry* next;
 } DaveCCTlsBlockDtorEntry;
 
-static __thread int __davecc_tls_lifetime_state;
-static __thread DaveCCTlsBlockDtorEntry* __davecc_tls_block_dtors;
+__thread int __davecc_tls_lifetime_state;
+__thread DaveCCTlsBlockDtorEntry* __davecc_tls_block_dtors;
 
 void __davecc_tls_register_block_dtor(void* fn, void* obj) {
   if (fn == NULL) {
@@ -41,7 +45,7 @@ void __davecc_tls_register_block_dtor(void* fn, void* obj) {
   __davecc_tls_block_dtors = entry;
 }
 
-static void RunBlockDestructors(void) {
+void __davecc_tls_run_block_destructors(void) {
   while (__davecc_tls_block_dtors != NULL) {
     DaveCCTlsBlockDtorEntry* entry = __davecc_tls_block_dtors;
     __davecc_tls_block_dtors = entry->next;
@@ -73,11 +77,16 @@ void __davecc_tls_thread_fini(void) {
     return;
   }
   __davecc_tls_lifetime_state = 2;
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
-  RunBlockDestructors();
+#if defined(__DAVECC_HAS_GUEST_THREADS__) || \
+    defined(__DAVECC_HAS_NATIVE_THREADS__)
+  __davecc_tls_run_block_destructors();
 #endif
   __davecc_tls_thread_fini_impl();
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_GUEST_THREADS__) || \
+    defined(__DAVECC_HAS_NATIVE_THREADS__)
   __davecc_thread_exit_callbacks();
+#endif
+#if defined(__DAVECC_HAS_HEAP_LOCK__)
+  __davecc_heap_thread_cleanup();
 #endif
 }

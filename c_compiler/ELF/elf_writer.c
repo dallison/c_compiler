@@ -319,6 +319,25 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
       } else {
         uint64_t aligned_address = AlignTo(next_section_data_offset,
                                            section->header.addralign);
+        // A loadable segment must have matching virtual-address and file-offset
+        // residues modulo p_align.  Add padding before the segment's first
+        // section so a native ELF loader maps the section at its linked
+        // address.
+        for (size_t segment_index = 0;
+             segment_index < elf->segments.length; segment_index++) {
+          ELFWriterSegment* segment = elf->segments.value.p[segment_index];
+          if (segment->header.type != PT(load) ||
+              segment->sections.length == 0 ||
+              segment->sections.value.p[0] != section ||
+              segment->header.align <= 1) {
+            continue;
+          }
+          uint64_t mask = segment->header.align - 1;
+          uint64_t address_residue = section->address & mask;
+          uint64_t offset_residue = aligned_address & mask;
+          aligned_address += (address_residue - offset_residue) & mask;
+          break;
+        }
         // Padding to get to next section.
         padding = aligned_address - next_section_data_offset;
         section->header.offset = aligned_address;
@@ -427,6 +446,16 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
         if (!start_address_assigned) {
           segment->header.offset = section->header.offset;
           segment->header.vaddr = section->address;
+          // Include the ELF and program headers in the executable code load.
+          // This makes PT_PHDR part of a PT_LOAD segment, as required by the
+          // native Linux ELF loader.
+          if (i == 0 && elf->header.type == ET(exec) &&
+              segment->header.type == PT(load) &&
+              section->address >= section->header.offset) {
+            segment->header.offset = 0;
+            segment->header.vaddr =
+                section->address - section->header.offset;
+          }
           segment->header.paddr = segment->header.vaddr;
           start_address_assigned = true;
         }
@@ -454,6 +483,51 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
       }
       
       elf->ops->WriteProgramHeader(&segment->header, fp);
+    }
+
+    // Native loaders require the PT_TLS initialization image to be backed by
+    // a PT_LOAD mapping. Keep TLS symbol values section-relative for local-exec
+    // relocations, but map the file image through the writable load segment
+    // and describe its mapped address in PT_TLS.
+    if (elf->header.type == ET(exec)) {
+      size_t data_index = (size_t)-1;
+      size_t tls_index = (size_t)-1;
+      for (size_t i = 0; i < elf->segments.length; i++) {
+        ELFWriterSegment* segment = elf->segments.value.p[i];
+        if (segment->header.type == PT(load) &&
+            (segment->header.flags & PF(w)) != 0) {
+          data_index = i;
+        } else if (segment->header.type == PT(tls)) {
+          tls_index = i;
+        }
+      }
+      if (data_index != (size_t)-1 && tls_index != (size_t)-1) {
+        ELFWriterSegment* data = elf->segments.value.p[data_index];
+        ELFWriterSegment* tls = elf->segments.value.p[tls_index];
+        if (tls->header.offset >= data->header.offset) {
+          uint64_t relative = tls->header.offset - data->header.offset;
+          tls->header.vaddr = data->header.vaddr + relative;
+          tls->header.paddr = tls->header.vaddr;
+          uint64_t required_filesz = relative + tls->header.filesz;
+          uint64_t required_memsz = relative + tls->header.memsz;
+          if (required_filesz > data->header.filesz) {
+            data->header.filesz = required_filesz;
+          }
+          if (required_memsz > data->header.memsz) {
+            data->header.memsz = required_memsz;
+          }
+          long data_position =
+              (long)(elf->header.phoff +
+                     (data_index + 1) * elf->ops->program_header_size);
+          long tls_position =
+              (long)(elf->header.phoff +
+                     (tls_index + 1) * elf->ops->program_header_size);
+          fseek(fp, data_position, SEEK_SET);
+          elf->ops->WriteProgramHeader(&data->header, fp);
+          fseek(fp, tls_position, SEEK_SET);
+          elf->ops->WriteProgramHeader(&tls->header, fp);
+        }
+      }
     }
   } else {
     // No segments, need to zero out the phoff

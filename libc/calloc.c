@@ -29,20 +29,28 @@ extern void Free(void* p);
 
 #if defined(__DAVECC_HAS_HEAP_LOCK__)
 void* calloc(size_t n, size_t m) {
-  void* p = malloc(n * m);
+  if (m != 0 && n > (size_t)-1 / m) {
+    return NULL;
+  }
+  size_t size = n * m;
+  void* p = malloc(size);
   if (p == NULL) {
     return NULL;
   }
-  memset(p, 0, n * m);
+  memset(p, 0, size);
   return p;
 }
 #else
 void* Calloc(size_t n, size_t m) {
-  void* p = Malloc(n * m);
+  if (m != 0 && n > (size_t)-1 / m) {
+    return NULL;
+  }
+  size_t size = n * m;
+  void* p = Malloc(size);
   if (p == NULL) {
     return NULL;
   }
-  memset(p, 0, n * m);
+  memset(p, 0, size);
   return p;
 }
 #endif

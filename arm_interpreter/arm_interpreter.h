@@ -13,6 +13,7 @@
 
 #include "arm_machine.h"
 #include "loader.h"
+#include "../libc/include/davecc_guest_syscalls.h"
 
 #define ARM_STACK_SIZE (8 * 1024 * 1024)
 // The fixed 32-bit guest map has sixteen non-overlapping 16 MiB stack windows
@@ -86,6 +87,12 @@
 #define ARM_SYSCALL_TZDB_LEAP_COUNT 58
 #define ARM_SYSCALL_TZDB_LEAP_INFO 59
 #define ARM_SYSCALL_RANDOM_BYTES 60
+
+#define ARM_VALIDATE_DAVE_SYSCALL(name)                                  \
+  typedef char arm_dave_syscall_##name[                                 \
+      ARM_SYSCALL_##name == DAVE_SYS_##name ? 1 : -1];
+DAVE_GUEST_SYSCALL_LIST(ARM_VALIDATE_DAVE_SYSCALL)
+#undef ARM_VALIDATE_DAVE_SYSCALL
 
 struct ARMProcessRuntime;
 struct ARMGuestThread;

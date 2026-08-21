@@ -2,6 +2,7 @@
 #define p_code_syscalls_h
 
 #include <stdint.h>
+#include "../libc/include/davecc_guest_syscalls.h"
 
 struct PCodeInterpreter;
 
@@ -49,6 +50,26 @@ enum {
   P_CODE_SYSCALL_TZDB_LEAP_INFO = 59,
   P_CODE_SYSCALL_RANDOM_BYTES = 60,
 };
+
+#define P_CODE_VALIDATE_DAVE_SYSCALL(name)                              \
+  typedef char p_code_dave_syscall_##name[                             \
+      P_CODE_SYSCALL_##name == DAVE_SYS_##name ? 1 : -1];
+#define P_CODE_VALIDATE_DAVE_BASE_SYSCALLS(X) \
+  X(OPEN)                                     \
+  X(CLOSE)                                    \
+  X(WRITE)                                    \
+  X(READ)                                     \
+  X(LSEEK)                                    \
+  X(ABORT)                                    \
+  X(EXIT)                                     \
+  X(TIME)                                     \
+  X(CLOCK)                                    \
+  X(EXIT_CLEAN)                               \
+  X(MONOTONIC_TIME)                           \
+  X(REALTIME_TIME)
+P_CODE_VALIDATE_DAVE_BASE_SYSCALLS(P_CODE_VALIDATE_DAVE_SYSCALL)
+#undef P_CODE_VALIDATE_DAVE_BASE_SYSCALLS
+#undef P_CODE_VALIDATE_DAVE_SYSCALL
 
 int64_t PCodeHandleSyscall(struct PCodeInterpreter* interpreter,
                            int64_t number, int64_t a0, int64_t a1, int64_t a2,

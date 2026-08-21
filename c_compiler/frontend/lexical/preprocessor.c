@@ -356,9 +356,6 @@ static void PredefineMacros(Preprocessor* p) {
   // Pretend to be llvm to get compatibility with code in standard header files.
   PreprocessorDefineMacro(p, "__llvm__", "1");
 
-  // Pretend to be on linux.
-  PreprocessorDefineMacro(p, "__linux__", "1");
-
   // GCC's atomic memory-order constants.  The frontend accepts these values
   // directly for __atomic_* operations on targets that provide atomics.
   PreprocessorDefineMacro(p, "__ATOMIC_RELAXED", "0");
@@ -483,6 +480,16 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__W65C02__", "1");
     PreprocessorDefineMacro(p, "__6502__", "1");
     PreprocessorDefineMacro(p, "__DAVECC_LEGACY_RTTI__", "1");
+  }
+
+  if (CompilerTargetTripleIsLinux(&compiler->target_triple)) {
+    PreprocessorDefineMacro(p, "__linux__", "1");
+    PreprocessorDefineMacro(p, "__linux", "1");
+    PreprocessorDefineMacro(p, "__unix__", "1");
+    PreprocessorDefineMacro(p, "__unix", "1");
+    PreprocessorDefineMacro(p, "__DAVECC_NATIVE_LINUX__", "1");
+  } else {
+    PreprocessorDefineMacro(p, "__DAVECC_INTERPRETER_ABI__", "1");
   }
 }
 

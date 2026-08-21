@@ -396,10 +396,6 @@ const time_zone* current_zone(tzdb& database) {
 
 namespace __chrono_tz_detail {
 
-[[noreturn]] static void __throw_runtime(const char* message) {
-  __DAVECC_THROW(runtime_error(message));
-}
-
 sys_info __time_zone_sys_info(const time_zone& zone, sys_seconds tp) {
   (void)zone;
   sys_info info;
@@ -487,7 +483,7 @@ const time_zone* current_zone(tzdb& database) {
       return &zone;
     }
   }
-  database.zones.emplace_back(string("UTC"));
+  database.zones.emplace_back("UTC");
   return &database.zones.back();
 }
 

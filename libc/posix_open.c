@@ -13,5 +13,9 @@ int open(const char* filename, int flags, ...) {
     mode = va_arg(ap, int);
   }
   va_end(ap);
+#if defined(__DAVECC_NATIVE_LINUX__)
+  return syscall(SYS_openat, -100, filename, flags, mode);
+#else
   return syscall(SYS_OPEN, filename, flags, mode);
+#endif
 }
