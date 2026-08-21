@@ -147,6 +147,10 @@ unsupported nontrivial case rather than introducing extra copy operations.
   mode.
 - [P3395R6: Formatting of
   `std::error_code`](https://wg21.link/p3395r6) is implemented in C++29 mode.
+- [P3793R2: Better shifting](https://wg21.link/p3793r2) is implemented for
+  scalar integer types in C++29 mode.
+- [P3104R6: Bit permutations](https://wg21.link/p3104r6) is implemented in
+  C++29 mode.
 
 `map`, `unordered_map`, and `flat_map` provide mutable, const, and transparent
 heterogeneous `lookup` overloads returning `optional<T&>` or
@@ -175,3 +179,11 @@ feature-test macro. C++26 and later constant evaluation routes constexpr
 constructors containing exception paths through the AST evaluator, so
 compile-time format-string validation remains available when exceptions are
 enabled.
+
+`<bit>` provides the safe, bidirectional `shl` and `shr` operations together
+with `bit_reverse`, `bit_repeat`, `bit_compress`, and `bit_expand`.
+`__cpp_lib_bitops` is `202607L` in C++29 mode and remains `201907L` in earlier
+modes. SIMD overloads are not exposed because DaveCC does not yet provide the
+C++26 `<simd>` library. The supporting compiler work preserves target-width
+`long` values in p-code calls and keeps calls visible while evaluating
+`noexcept` operands.

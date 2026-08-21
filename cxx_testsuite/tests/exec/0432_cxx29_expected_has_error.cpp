@@ -17,7 +17,8 @@ constexpr bool test_value_state() {
 }
 
 static_assert(test_value_state());
-static_assert(noexcept(std::expected<int, int>{}.has_error()));
+static_assert(noexcept(
+    std::declval<const std::expected<int, int>&>().has_error()));
 
 int main() {
   std::expected<int, int> error(std::unexpect, 7);

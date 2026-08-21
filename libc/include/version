@@ -16,7 +16,11 @@
 
 #if __cplusplus >= 202002L
 #define __cpp_lib_bit_cast 201806L
+#if __cplusplus >= 202700L
+#define __cpp_lib_bitops 202607L
+#else
 #define __cpp_lib_bitops 201907L
+#endif
 #define __cpp_lib_constexpr_dynamic_alloc 201907L
 #define __cpp_lib_endian 201907L
 #define __cpp_lib_format 201907L

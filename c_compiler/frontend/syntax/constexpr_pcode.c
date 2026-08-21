@@ -1356,7 +1356,10 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
       TypeIsCharFamily(type)) {
     return 4;
   }
-  if (TypeUsesFloat64Representation(type) || TypeIsLong(type) ||
+  if (TypeIsLong(type)) {
+    return type->size > 4 ? 8 : 4;
+  }
+  if (TypeUsesFloat64Representation(type) ||
       TypeIsLongLong(type) || TypeIsPointerOrArray(type) ||
       TypeIsFunction(type)) {
     return 8;

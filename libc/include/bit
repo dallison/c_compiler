@@ -12,11 +12,16 @@
 #include <type_traits>
 
 #define __cpp_lib_bit_cast 201806L
+#if __cplusplus >= 202700L
+#define __cpp_lib_bitops 202607L
+#else
 #define __cpp_lib_bitops 201907L
+#endif
 #define __cpp_lib_int_pow2 202002L
 #define __cpp_lib_endian 201907L
 
 extern "C" void* memcpy(void*, const void*, size_t);
+extern "C" [[noreturn]] void abort(void);
 
 namespace std {
 
@@ -57,7 +62,60 @@ inline constexpr bool __is_unsigned_integer_v =
     __is_unsigned_integer<T>::value;
 
 template <class T>
+struct __is_shift_integer : false_type {
+};
+
+#define __DAVECC_SHIFT_INTEGER(type)            \
+  template <>                                   \
+  struct __is_shift_integer<type> : true_type { \
+  }
+
+__DAVECC_SHIFT_INTEGER(signed char);
+__DAVECC_SHIFT_INTEGER(unsigned char);
+__DAVECC_SHIFT_INTEGER(short);
+__DAVECC_SHIFT_INTEGER(unsigned short);
+__DAVECC_SHIFT_INTEGER(int);
+__DAVECC_SHIFT_INTEGER(unsigned int);
+__DAVECC_SHIFT_INTEGER(long);
+__DAVECC_SHIFT_INTEGER(unsigned long);
+__DAVECC_SHIFT_INTEGER(long long);
+__DAVECC_SHIFT_INTEGER(unsigned long long);
+
+#undef __DAVECC_SHIFT_INTEGER
+
+template <class T>
+inline constexpr bool __is_shift_integer_v =
+    __is_shift_integer<T>::value;
+
+template <class T>
 inline constexpr int __digits = static_cast<int>(sizeof(T) * 8);
+
+#if __cplusplus >= 202700L
+template <class T, class S>
+constexpr T __shift_left_nonnegative(T x, S s) noexcept {
+  using U = make_unsigned_t<T>;
+  using US = make_unsigned_t<S>;
+  US amount = static_cast<US>(s);
+  if (amount >= static_cast<unsigned int>(__digits<T>)) {
+    return T(0);
+  }
+  return static_cast<T>(
+      static_cast<U>(x) << static_cast<unsigned int>(amount));
+}
+
+template <class T, class S>
+constexpr T __shift_right_nonnegative(T x, S s) noexcept {
+  using US = make_unsigned_t<S>;
+  US amount = static_cast<US>(s);
+  if (amount >= static_cast<unsigned int>(__digits<T>)) {
+    if constexpr (is_signed_v<T>) {
+      return x < 0 ? T(-1) : T(0);
+    }
+    return T(0);
+  }
+  return static_cast<T>(x >> static_cast<unsigned int>(amount));
+}
+#endif
 
 #define __DAVECC_BIT_COUNT_OVERLOAD(type, width)                            \
   constexpr int __countl_zero(type value) noexcept {                        \
@@ -88,6 +146,36 @@ constexpr To bit_cast(const From& from) noexcept {
   ::memcpy(&result, &from, sizeof(To));
   return result;
 }
+
+#if __cplusplus >= 202700L
+template <class T, class S>
+requires(__bit_detail::__is_shift_integer_v<T> &&
+         __bit_detail::__is_shift_integer_v<S>)
+constexpr T shl(T x, S s) noexcept {
+  if constexpr (is_signed_v<S>) {
+    if (s < 0) {
+      using US = make_unsigned_t<S>;
+      US amount = US(0) - static_cast<US>(s);
+      return __bit_detail::__shift_right_nonnegative(x, amount);
+    }
+  }
+  return __bit_detail::__shift_left_nonnegative(x, s);
+}
+
+template <class T, class S>
+requires(__bit_detail::__is_shift_integer_v<T> &&
+         __bit_detail::__is_shift_integer_v<S>)
+constexpr T shr(T x, S s) noexcept {
+  if constexpr (is_signed_v<S>) {
+    if (s < 0) {
+      using US = make_unsigned_t<S>;
+      US amount = US(0) - static_cast<US>(s);
+      return __bit_detail::__shift_left_nonnegative(x, amount);
+    }
+  }
+  return __bit_detail::__shift_right_nonnegative(x, s);
+}
+#endif
 
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>
@@ -130,6 +218,67 @@ requires __bit_detail::__is_unsigned_integer_v<T>
 constexpr int popcount(T x) noexcept {
   return __bit_detail::__popcount(x);
 }
+
+#if __cplusplus >= 202700L
+template <class T>
+requires __bit_detail::__is_unsigned_integer_v<T>
+constexpr T bit_reverse(T x) noexcept {
+  T result = 0;
+  for (int i = 0; i < __bit_detail::__digits<T>; ++i) {
+    result = static_cast<T>(
+        static_cast<T>(result << 1) | static_cast<T>(x & T(1)));
+    x = static_cast<T>(x >> 1);
+  }
+  return result;
+}
+
+template <class T>
+requires __bit_detail::__is_unsigned_integer_v<T>
+constexpr T bit_repeat(T x, int length) noexcept(false) {
+  if (length <= 0) {
+    ::abort();
+  }
+  T result = 0;
+  for (int i = 0; i < __bit_detail::__digits<T>; ++i) {
+    T bit = static_cast<T>((x >> (i % length)) & T(1));
+    result = static_cast<T>(result | static_cast<T>(bit << i));
+  }
+  return result;
+}
+
+template <class T>
+requires __bit_detail::__is_unsigned_integer_v<T>
+constexpr T bit_compress(T x, T mask) noexcept {
+  T result = 0;
+  int destination = 0;
+  for (int source = 0; source < __bit_detail::__digits<T>; ++source) {
+    if (((mask >> source) & T(1)) != 0) {
+      T bit = static_cast<T>((x >> source) & T(1));
+      result = static_cast<T>(
+          result | static_cast<T>(bit << destination));
+      ++destination;
+    }
+  }
+  return result;
+}
+
+template <class T>
+requires __bit_detail::__is_unsigned_integer_v<T>
+constexpr T bit_expand(T x, T mask) noexcept {
+  T result = 0;
+  int source = 0;
+  for (int destination = 0;
+       destination < __bit_detail::__digits<T>; ++destination) {
+    if (((mask >> destination) & T(1)) != 0) {
+      T bit = static_cast<T>((x >> source) & T(1));
+      result = static_cast<T>(
+          result | static_cast<T>(bit << destination));
+      ++source;
+    }
+  }
+  return result;
+}
+#endif
 
 template <class T>
 requires __bit_detail::__is_unsigned_integer_v<T>

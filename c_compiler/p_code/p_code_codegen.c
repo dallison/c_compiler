@@ -627,7 +627,6 @@ static struct {
     {TypeIsShort, P_OP(ldh)},
     {TypeIsChar8, P_OP(ldub)},
     {TypeIsChar, P_OP(ldb)},
-    {TypeIsLong, P_OP(ldx)},
     {TypeIsLongLong, P_OP(ldx)},
     {TypeIsUnsignedInt, P_OP(lduw)},
     {TypeIsUnsignedShort, P_OP(lduh)},
@@ -644,10 +643,16 @@ static COMPILER_UNUSED TargetInstruction* LoadVariableValue(PCodeGenerator* pcod
                                             TargetInstruction* addr,
                                             TargetInstruction* offset) {
   PCodeOpcode opcode = P_OP(ldw);
-  for (size_t i = 0; load_opcodes[i].type_func != NULL; i++) {
-    if (load_opcodes[i].type_func(node->type)) {
-      opcode = load_opcodes[i].load;
-      break;
+  if (TypeIsLong(node->type)) {
+    opcode = node->type->size > 4
+                 ? P_OP(ldx)
+                 : TypeIsUnsigned(node->type) ? P_OP(lduw) : P_OP(ldw);
+  } else {
+    for (size_t i = 0; load_opcodes[i].type_func != NULL; i++) {
+      if (load_opcodes[i].type_func(node->type)) {
+        opcode = load_opcodes[i].load;
+        break;
+      }
     }
   }
   assert(opcode != 0);
@@ -1483,7 +1488,7 @@ static PCodeOpcode AtomicLoadOpcode(PCodeGenerator* pcode, TypeRecord* type) {
   if (TypeIsPointerOrArray(type)) {
     return PCodeAddressLoadOpcode(pcode);
   }
-  if (TypeIsLongLong(type)) {
+  if (TypeIsLongLong(type) || (TypeIsLong(type) && type->size > 4)) {
     return P_OP(ldx);
   }
   if (TypeUsesFloat32Representation(type)) {
@@ -1505,7 +1510,7 @@ static PCodeOpcode AtomicStoreOpcode(PCodeGenerator* pcode, TypeRecord* type) {
   if (TypeIsPointerOrArray(type)) {
     return PCodeAddressStoreOpcode(pcode);
   }
-  if (TypeIsLongLong(type)) {
+  if (TypeIsLongLong(type) || (TypeIsLong(type) && type->size > 4)) {
     return P_OP(stx);
   }
   if (TypeUsesFloat32Representation(type)) {
@@ -1605,7 +1610,6 @@ static struct {
     {TypeIsBool, P_OP(push), 4},
     {TypeIsShort, P_OP(push), 4},
     {TypeIsCharFamily, P_OP(push), 4},
-    {TypeIsLong, P_OP(pushx), 8},
     {TypeIsLongLong, P_OP(pushx), 8},
     {TypeUsesFloat32Representation, P_OP(pushf), 4},
     {PCodeFpIsDoubleWidth, P_OP(pushd), 8},
@@ -1624,6 +1628,14 @@ static void PushArg(PCodeGenerator* pcode, IRNode* node,
     Emit(pcode, NewInstruction1(P_OP(push), inst));
   }
   if (TypeIsBitInt(node->type)) {
+    bool wide = node->type->size > 4;
+    if (size != NULL) {
+      *size += wide ? 8 : 4;
+    }
+    Emit(pcode, NewInstruction1(wide ? P_OP(pushx) : P_OP(push), inst));
+    return;
+  }
+  if (TypeIsLong(node->type)) {
     bool wide = node->type->size > 4;
     if (size != NULL) {
       *size += wide ? 8 : 4;

@@ -973,7 +973,9 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
 
 static void AnalyzeNoexceptExpression(UnaryASTNode* node) {
   if (node->sub != NULL) {
+    compiler->noexcept_operand_depth++;
     node->sub = AnalyzeExpression(node->sub);
+    compiler->noexcept_operand_depth--;
   }
   ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
 }
@@ -11903,7 +11905,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
   }
 
   // Attempt to fold a constant expression.
-  ASTNode* folded = FoldConstantExpression(node);
+  bool fold_unevaluated_operator =
+      node->op == AST_OP(noexcept_expr) || node->op == AST_OP(sizeof) ||
+      node->op == AST_OP(alignof);
+  ASTNode* folded =
+      compiler->noexcept_operand_depth == 0 || fold_unevaluated_operator
+          ? FoldConstantExpression(node)
+          : NULL;
   if (folded != NULL) {
     return folded;
   }

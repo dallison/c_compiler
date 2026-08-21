@@ -504,6 +504,11 @@ typedef struct {
   // runtime folding for context-sensitive constructs such as `if consteval`.
   int constant_evaluation_required_depth;
 
+  // Nonzero while analyzing the unevaluated operand of a noexcept-expression.
+  // Keep calls intact so exception-specification analysis sees the selected
+  // callee rather than a folded constant result.
+  int noexcept_operand_depth;
+
   // P3294 token-sequence injection frame stack (InjectionFrame*, owned).
   Vector injection_frames;
   // Parsed declaration roots produced by injection; drained at safe driver points.
