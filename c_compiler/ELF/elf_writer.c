@@ -417,22 +417,26 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     elf->header.phnum = num_segments;
     fseek(fp, elf->header.phoff, SEEK_SET);
     
-    // Add a PHDR segment as the first segment.
-    ELFProgramHeader phdr;
-    memset(&phdr, 0, sizeof(phdr));
-    phdr.offset = elf->header.phoff;
-    phdr.filesz = num_segments * elf->ops->program_header_size;
-    phdr.memsz = phdr.filesz;
-    phdr.align = 8;
-    phdr.flags = PF(r) | PF(x);
-    phdr.type = PT(phdr);
-    
-    ELFWriterSegment* code_segment = elf->segments.value.p[0];
-    ELFWriterSection* section0 = code_segment->sections.value.p[0];
-    phdr.vaddr = (section0->address & ~(code_segment->header.align - 1)) +
-              elf->header.phoff;
-    phdr.paddr = phdr.vaddr;
-    elf->ops->WriteProgramHeader(&phdr, fp);
+    // Executables expose the in-memory program header table through PT_PHDR.
+    // DSOs may omit this optional segment; doing so also avoids claiming a
+    // header mapping before the DSO's first PT_LOAD.
+    if (elf->header.type == ET(exec)) {
+      ELFProgramHeader phdr;
+      memset(&phdr, 0, sizeof(phdr));
+      phdr.offset = elf->header.phoff;
+      phdr.filesz = num_segments * elf->ops->program_header_size;
+      phdr.memsz = phdr.filesz;
+      phdr.align = 8;
+      phdr.flags = PF(r) | PF(x);
+      phdr.type = PT(phdr);
+
+      ELFWriterSegment* code_segment = elf->segments.value.p[0];
+      ELFWriterSection* section0 = code_segment->sections.value.p[0];
+      phdr.vaddr = (section0->address & ~(code_segment->header.align - 1)) +
+                   elf->header.phoff;
+      phdr.paddr = phdr.vaddr;
+      elf->ops->WriteProgramHeader(&phdr, fp);
+    }
     
     for (size_t i = 0; i < elf->segments.length; i++) {
       ELFWriterSegment* segment = elf->segments.value.p[i];
@@ -449,7 +453,9 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
           // Include the ELF and program headers in the executable code load.
           // This makes PT_PHDR part of a PT_LOAD segment, as required by the
           // native Linux ELF loader.
-          if (i == 0 && elf->header.type == ET(exec) &&
+          if (i == 0 &&
+              (elf->header.type == ET(exec) ||
+               elf->header.type == ET(dyn)) &&
               segment->header.type == PT(load) &&
               section->address >= section->header.offset) {
             segment->header.offset = 0;
@@ -565,10 +571,11 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   // Fixup all the section links.
   ELFWriterFixupSections(elf);
   
-  // We always add a PHDR segment as the first segment.  This covers the segment
-  // headers and is part of the code segment.  Only do this if there are actually
-  // segments in the file.
-  size_t num_segments = elf->segments.length == 0 ? 0 : elf->segments.length + 1;
+  // Executables carry a PT_PHDR entry. It is optional for DSOs.
+  size_t num_segments = elf->segments.length;
+  if (num_segments != 0 && elf->header.type == ET(exec)) {
+    num_segments++;
+  }
 
   elf->header.shoff = elf->ops->header_size +
       num_segments * elf->ops->program_header_size;

@@ -18,6 +18,7 @@ done
 : "${elfdump:?}"
 : "${sources:?}"
 sources=$(dirname "$sources")
+export DAVECC_INCLUDE_DIR="${DAVECC_INCLUDE_DIR:-$(dirname "$davecc")/libc/include}"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/davecc-init-fini-dso.XXXXXX")
 trap 'rm -rf "$work"' EXIT

@@ -10,14 +10,14 @@
 #include <stdbool.h>
 
 // Length of initial segment of s1 comprising chars NOT in s2.
-size_t strspn(const char* s1, const char* s2) {
+size_t strcspn(const char* s1, const char* s2) {
   size_t n = 0;
   while (*s1 != '\0') {
     // Is *s1 in the set of chars in s2?
-    bool absent = false;
+    bool absent = true;
     for (const char* p = s2; *p != '\0'; p++) {
-      if (*s1 != *p) {
-        absent = true;
+      if (*s1 == *p) {
+        absent = false;
         break;
       }
     }

@@ -4,7 +4,7 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:davecc/modules.bzl", "davecc_module")
-load("//:tools/linux_libc.bzl", "linux_libc_archive", "linux_start_object")
+load("//:tools/linux_libc.bzl", "linux_dynamic_runtime", "linux_libc_archive", "linux_start_object")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -379,6 +379,22 @@ LIBC_SRCS = [
 ]
 
 LIBC_CXX_SRCS = glob(["libc/*.cc"])
+
+LINUX_DYNAMIC_CRT_SRCS = [
+    "libc/cxx_tls.c",
+    "libc/davecc_lifecycle.c",
+    "libc/eh_cxa.c",
+    "libc/eh_throw.c",
+    "libc/errno.c",
+    "libc/exit.c",
+    "libc/guest_heap.c",
+    "libc/gxx_personality.c",
+    "libc/linux_tls.c",
+    "libc/strerror.c",
+    "libc/threads.c",
+    "libc/time.c",
+    "libc/unwind_api.c",
+]
 
 cc_library(
     name = "utils",
@@ -2053,6 +2069,28 @@ linux_libc_archive(
     libc_cxx_srcs = LIBC_CXX_SRCS,
 )
 
+linux_dynamic_runtime(
+    name = "x86_64_linux_dynamic_runtime",
+    architecture = "x86_64",
+    syscall_source = "x86_64 support/linux_syscall.s",
+    clone_source = "x86_64 support/linux_clone.s",
+    startup_source = "x86_64 support/linux_start.s",
+    support_sources = [
+        "x86_64 support/cxx_guard.s",
+        "x86_64 support/eh_transfer.s",
+        "x86_64 support/longjmp.s",
+        "x86_64 support/setjmp.s",
+    ],
+    dso_sources = [
+        src
+        for src in LIBC_SRCS
+        if src not in LINUX_DYNAMIC_CRT_SRCS and
+           src not in ["libc/cxx_guard.c", "libc/eh_arm.c"]
+    ] + ["libc/dynamic_libc_lifecycle.c"],
+    crt_sources = LINUX_DYNAMIC_CRT_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+)
+
 linux_libc_archive(
     name = "libc_arm_linux",
     architecture = "arm",
@@ -3031,6 +3069,7 @@ sh_test(
     data = [
         ":davecc",
         ":elfdump",
+        ":libc_headers",
         ":libc_x86_64",
         ":x86_64",
         "tests/init_fini_dso/dep.c",
@@ -3406,6 +3445,11 @@ filegroup(
     srcs = ["tests/native_linux_smoke.cpp"],
 )
 
+filegroup(
+    name = "native_linux_dynamic_minimal_source",
+    srcs = ["tests/native_linux_dynamic_minimal.c"],
+)
+
 sh_test(
     name = "native_linux_aarch64_smoke_test",
     srcs = ["tests/native_linux_aarch64_smoke_test.sh"],
@@ -3424,6 +3468,93 @@ sh_test(
     ],
     env_inherit = [
         "COLIMA_HOME",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_x86_64_smoke_test",
+    srcs = ["tests/native_linux_x86_64_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_x86_64_linux)",
+        "$(rootpath :x86_64_linux_start)",
+        "$(rootpath :native_linux_smoke_source)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64_linux",
+        ":native_linux_smoke_source",
+        ":x86_64_linux_start",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_x86_64_dynamic_minimal_test",
+    srcs = ["tests/native_linux_x86_64_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/libdavecc.so.1)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":davecc",
+        ":libc/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_dynamic_minimal_source",
+        ":x86_64_linux_dynamic_runtime",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_x86_64_dynamic_smoke_test",
+    srcs = ["tests/native_linux_x86_64_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/libdavecc.so.1)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":davecc",
+        ":libc/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_smoke_source",
+        ":x86_64_linux_dynamic_runtime",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
         "HOME",
         "PATH",
     ],

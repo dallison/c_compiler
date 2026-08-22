@@ -16,12 +16,12 @@ _start:
 	mvn r4, #0
 	mov r5, #0
 	mov r7, #192
-	.word 0xef000000
+	svc #0
 	mov r9, r0
 	mov r0, r9
 	movw r7, #5
 	movt r7, #15
-	.word 0xef000000
+	svc #0
 	mov r0, r9
 	mov r1, r8
 	bl __davecc_linux_tls_init

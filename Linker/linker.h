@@ -206,6 +206,8 @@ typedef struct Linker {
   const ELFFormatOps* ops;
   bool building_dso;          // True if building a shared object.
   bool fully_static;          // Generating fully static executable.
+  bool bind_now;              // Resolve all dynamic symbols before entry.
+  bool defer_program_init;    // Let the program entry run executable arrays.
   struct DynamicLinker* dynamic_linker;
   Vector needed_libraries;    // Vector of String*.
   int so_name;                // Index into dynstr or -1.

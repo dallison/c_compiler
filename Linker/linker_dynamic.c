@@ -110,7 +110,7 @@ static int GetDataGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
 // the data GOT entries.  We don't know how many data entries
 // there are yet, so the actual offset will need be calculated later.
 static int GetFunctionGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
-  if (symbol->got_index == -1) {
+  if (symbol->plt_index == -1) {
     // LinkerSymbol is not in Global Offset Table, add it.
     VectorAppend(&s->global_offset_table.function_entries, symbol);
     symbol->got_index = (int)s->global_offset_table.function_entries.length - 1 +
@@ -346,8 +346,12 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
     Relocation* reloc = dynamic->data_relocations.value.p[i];
     ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[index*sizeof(ELFRelocation)];
     int64_t offset = reloc->offset + reloc->section->address;
+    int64_t addend = reloc->addend;
+    if (reloc->symbol != NULL) {
+      addend += (int64_t)reloc->symbol->address;
+    }
     ELFWriterInitRelocation(elfreloc, offset,
-                            0, 0, reloc->type);
+                            0, addend, reloc->type);
     index++;
   }
 
@@ -614,8 +618,22 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
     WriteDynamicSectionEntryWithValue(buffer, DT(runpath), linker->dynamic_linker->rpath);
   }
   
-  if (linker->so_name != -1) {
+  if (linker->building_dso && linker->so_name != -1) {
     WriteDynamicSectionEntryWithValue(buffer, DT(soname), linker->so_name);
+  }
+
+  ELF_Xword dynamic_flags = 0;
+  // DaveCC unwind metadata currently carries base-relative fixups in an
+  // otherwise read-only load segment. Tell the native loader to make that
+  // segment writable only while applying relocations.
+  WriteDynamicSectionEntryWithValue(buffer, DT(textrel), 0);
+  dynamic_flags |= DF_TEXTREL;
+  if (linker->bind_now) {
+    WriteDynamicSectionEntryWithValue(buffer, DT(bind_now), 0);
+    dynamic_flags |= DF_BIND_NOW;
+  }
+  if (dynamic_flags != 0) {
+    WriteDynamicSectionEntryWithValue(buffer, DT(flags), dynamic_flags);
   }
   
   // Known entries.  If the value is not available until later we
@@ -636,22 +654,24 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   WriteDynamicSectionEntryWithValue(buffer, DT(pltrel), DT(rela));
   WriteDynamicSectionEntryWithValue(buffer, DT(jmprel), 0);
 
-  SectionGroup* preinit = LinkerFindSectionGroup(linker, ".preinit_array");
-  if (preinit != NULL && LinkerSectionGroupSize(preinit) > 0) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(preinit_array), 0);
-    WriteDynamicSectionEntryWithValue(buffer, DT(preinit_arraysz), 0);
-  }
+  if (!linker->defer_program_init) {
+    SectionGroup* preinit = LinkerFindSectionGroup(linker, ".preinit_array");
+    if (preinit != NULL && LinkerSectionGroupSize(preinit) > 0) {
+      WriteDynamicSectionEntryWithValue(buffer, DT(preinit_array), 0);
+      WriteDynamicSectionEntryWithValue(buffer, DT(preinit_arraysz), 0);
+    }
 
-  SectionGroup* init_array = LinkerFindSectionGroup(linker, ".init_array");
-  if (init_array != NULL && LinkerSectionGroupSize(init_array) > 0) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(init_array), 0);
-    WriteDynamicSectionEntryWithValue(buffer, DT(init_arraysz), 0);
-  }
+    SectionGroup* init_array = LinkerFindSectionGroup(linker, ".init_array");
+    if (init_array != NULL && LinkerSectionGroupSize(init_array) > 0) {
+      WriteDynamicSectionEntryWithValue(buffer, DT(init_array), 0);
+      WriteDynamicSectionEntryWithValue(buffer, DT(init_arraysz), 0);
+    }
 
-  SectionGroup* fini_array = LinkerFindSectionGroup(linker, ".fini_array");
-  if (fini_array != NULL && LinkerSectionGroupSize(fini_array) > 0) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(fini_array), 0);
-    WriteDynamicSectionEntryWithValue(buffer, DT(fini_arraysz), 0);
+    SectionGroup* fini_array = LinkerFindSectionGroup(linker, ".fini_array");
+    if (fini_array != NULL && LinkerSectionGroupSize(fini_array) > 0) {
+      WriteDynamicSectionEntryWithValue(buffer, DT(fini_array), 0);
+      WriteDynamicSectionEntryWithValue(buffer, DT(fini_arraysz), 0);
+    }
   }
 
   // TODO: STATIC_TLS flag
@@ -697,6 +717,8 @@ static void FixupArrayDynamicTags(ELFWriterFile* elf, Buffer* buffer,
 void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   ELFWriterSection* dynamic = ELFWriterFindSection(elf, ".dynamic");
   assert(dynamic != NULL);
+  DynamicLinker* dynamic_linker = dynamic->user_data;
+  assert(dynamic_linker != NULL);
   
   // Dynamic sections contents buffer.  At this point the section is an
   // output section with mutliple contents, however there is only
@@ -721,7 +743,7 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   FixupDynamicSectionEntryValue(buffer, DT(rela), rela->header.addr);
   FixupDynamicSectionEntryValue(buffer, DT(relasz), rela->header.size);
   FixupDynamicSectionEntryValue(buffer, DT(relacount),
-                                rela->header.size / sizeof(ELFRelocation));
+                                dynamic_linker->data_relocations.length);
   
   // GNU Hash.
   ELFWriterSection* hash = ELFWriterFindSection(elf, ".gnu_hash");
@@ -888,9 +910,11 @@ static void AddSymbolListToDynamicSymbolTable(void* entry, void* data) {
   DynamicSymbolTableInfo* info = data;
   for (size_t i = 0; i < bucket->length; i++) {
     LinkerSymbol* sym = bucket->value.p[i];
-    // Don't insert symbol if it has no name or it is invented by the
-    // linker, like _DYNAMIC_)
-    if (sym->name.length == 0 || sym->invented) {
+    // Export linker-defined boundaries, but keep internal anchors private.
+    if (sym->name.length == 0 ||
+        (sym->invented &&
+         (StringEqual(&sym->name, "_DYNAMIC_") ||
+          StringEqual(&sym->name, "_GLOBAL_OFFSET_TABLE_")))) {
       continue;
     }
     // Add symbol name to string table, getting offset.
@@ -1134,26 +1158,33 @@ static void InsertDynamicStrings(Linker* linker, ELFWriterSection* strtab,
     LoadedDynamicLibrary* lib = linker->dynamic_libraries.value.p[i];
     VectorAppend(&linker->dynamic_linker->needed_libraries,
                  (void*)strtab_contents->data.buffered.length);
-    // Add final leaf filename to the NEEDED libraries.
-     char* basename = Basename(&lib->libname);
-     BufferAppend(&strtab_contents->data.buffered, basename,
-                 strlen(basename) + 1);
+    // Prefer the DSO's ABI name over its link-time filename.
+    int64_t soname_offset =
+        DynamicLoaderFindDynamicSectionOffsetEntry(lib, DT(soname));
+    const char* needed_name =
+        soname_offset >= 0 ? lib->dynstr + soname_offset
+                           : Basename(&lib->libname);
+    BufferAppend(&strtab_contents->data.buffered, (char*)needed_name,
+                 strlen(needed_name) + 1);
   }
   
-  // Add rpath
-  String rpath;
-  StringInit(&rpath, NULL);
-  char* sep = "";
-  for (size_t i = 0; i < linker->rpath.length; i++) {
-    String* path = linker->rpath.value.p[i];
-    StringAppend(&rpath, sep);
-    StringAppend(&rpath, path->value);
-    sep = ":";
+  // Add rpath only when one was requested.
+  linker->dynamic_linker->rpath = 0;
+  if (linker->rpath.length != 0) {
+    String rpath;
+    StringInit(&rpath, NULL);
+    char* sep = "";
+    for (size_t i = 0; i < linker->rpath.length; i++) {
+      String* path = linker->rpath.value.p[i];
+      StringAppend(&rpath, sep);
+      StringAppend(&rpath, path->value);
+      sep = ":";
+    }
+    linker->dynamic_linker->rpath = strtab_contents->data.buffered.length;
+    BufferAppend(&strtab_contents->data.buffered, rpath.value,
+                 rpath.length + 1);
+    StringDestruct(&rpath);
   }
-  linker->dynamic_linker->rpath = strtab_contents->data.buffered.length;
-  BufferAppend(&strtab_contents->data.buffered, rpath.value,
-               rpath.length + 1);
-  StringDestruct(&rpath);
 }
 
 // Create the dynamic symbol and string tables.  Returns the

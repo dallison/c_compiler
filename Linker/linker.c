@@ -146,6 +146,8 @@ void LinkerInit(Linker* linker) {
   linker->building_dso = false;
   linker->so_name = -1;
   linker->fully_static = false;
+  linker->bind_now = false;
+  linker->defer_program_init = false;
   linker->origin = 0;
   linker->stacktrace_info = NULL;
   linker->num_errors = 0;
@@ -1199,6 +1201,10 @@ static LinkerSymbol* InventSymbol(Linker* linker, const char* name, int size, ui
     sym = LinkerInventSymbol(linker, name, size);
   }
   sym->defined = true;
+  // A DSO symbol must have a regular section index so ld.so treats its value
+  // as relative to the object's load bias. The precise section is immaterial
+  // for these linker-computed absolute-within-image boundary values.
+  sym->header->shndx = linker->building_dso ? 1 : SHN_ABS;
   sym->size = size;
   sym->address = address;
   return sym;
@@ -1404,6 +1410,26 @@ static void LinkerInventArrayBoundsSymbols(Linker* linker) {
     }
     InventSymbol(linker, kArrayBounds[i].start_symbol, 8, start);
     InventSymbol(linker, kArrayBounds[i].end_symbol, 8, end);
+  }
+  if (linker->building_dso) {
+    uint64_t empty_array_address = SegmentEndAddress(&linker->code_segment);
+    SectionGroup* init = LinkerFindSectionGroup(linker, ".init_array");
+    uint64_t init_start =
+        init != NULL ? init->address : empty_array_address;
+    uint64_t init_end =
+        init != NULL ? init_start + LinkerSectionGroupSize(init)
+                     : empty_array_address;
+    InventSymbol(linker, "__davecc_dso_init_array_start", 8, init_start);
+    InventSymbol(linker, "__davecc_dso_init_array_end", 8, init_end);
+
+    SectionGroup* fini = LinkerFindSectionGroup(linker, ".fini_array");
+    uint64_t fini_start =
+        fini != NULL ? fini->address : empty_array_address;
+    uint64_t fini_end =
+        fini != NULL ? fini_start + LinkerSectionGroupSize(fini)
+                     : empty_array_address;
+    InventSymbol(linker, "__davecc_dso_fini_array_start", 8, fini_start);
+    InventSymbol(linker, "__davecc_dso_fini_array_end", 8, fini_end);
   }
 }
 
@@ -1656,6 +1682,11 @@ void LinkerLinkAllFiles(Linker* linker) {
   }
   // Resolve all undefined symbols in libraries.
   ResolveUndefinedSymbols(linker);
+  if (!linker->fully_static) {
+    // Archive members are only materialized while resolving undefined
+    // symbols, so collect their GOT and PLT relocations afterward.
+    DynamicLinkerGatherDynamicRelocations(linker);
+  }
   
   // Find all PROGBITS sections and group by name.  These are sections
   // that have data associated with them in the ELF file.  This also
@@ -1683,13 +1714,34 @@ void LinkerLinkAllFiles(Linker* linker) {
   // However, not all the information is available at this point so we
   // put placeholders in the section contents.
   if (!linker->fully_static) {
+    // Make linker-defined boundary symbols visible while the dynamic symbol
+    // table is collected. Their addresses are refreshed after layout.
+    InventEHFrameBounds(linker);
+    InventGccExceptTableBounds(linker);
+    InventExceptionTableBounds(linker);
+    InventARMExidxBounds(linker);
+    LinkerInventArrayBoundsSymbols(linker);
     DynamicLinkerCreateDynamicLinkerGroups(linker);
   }
   
   // Assign addresses to all sections.
  
-  int num_program_headers = 5;
-  int num_sections = 18;
+  int num_program_headers = 2;  // Code and data PT_LOAD segments.
+  if (!linker->building_dso) {
+    num_program_headers++;  // PT_PHDR.
+  }
+  if (linker->tls_segment.sections.length != 0) {
+    num_program_headers++;
+  }
+  if (!linker->fully_static) {
+    num_program_headers++;  // PT_DYNAMIC.
+    if (!linker->building_dso) {
+      num_program_headers++;  // PT_INTERP.
+    }
+  }
+  // NULL, .bss, .symtab, .strtab, and .shstrtab are not represented by
+  // section groups.
+  int num_sections = (int)linker->section_groups.length + 5;
   
   uint64_t text_file_offset = linker->ops->header_size +
   linker->ops->program_header_size * num_program_headers +
@@ -1701,7 +1753,13 @@ void LinkerLinkAllFiles(Linker* linker) {
   uint64_t end_of_segments =  SegmentEndAddress(&linker->code_segment);
   if (!linker->fully_static) {
     // Assign addresses to the dynamic section.
-    AssignSegmentSectionAddresses(linker, &linker->dynamic_segment, end_of_segments, 0);
+    uint64_t dynamic_start = end_of_segments;
+    if (linker->building_dso) {
+      uint64_t alignment = linker->data_segment.config->alignment;
+      dynamic_start = (dynamic_start + alignment - 1) & ~(alignment - 1);
+    }
+    AssignSegmentSectionAddresses(linker, &linker->dynamic_segment,
+                                  dynamic_start, 0);
     end_of_segments = SegmentEndAddress(&linker->dynamic_segment);
   }
   
@@ -1719,9 +1777,15 @@ void LinkerLinkAllFiles(Linker* linker) {
   // last since it also needs to contain the .bss section.
   uint64_t data_file_offset = text_file_offset ;
 
-  AssignSegmentSectionAddresses(linker, &linker->data_segment,
-                                (end_of_segments + 7) & ~7ULL,
-                                data_file_offset);
+  // The dynamic and data section groups share one writable PT_LOAD. Keep
+  // their addresses contiguous with their file contents; page-aligning the
+  // data groups here would create an unmapped virtual/file offset gap inside
+  // that segment.
+  uint64_t data_alignment = 8;
+  AssignSegmentSectionAddresses(
+      linker, &linker->data_segment,
+      (end_of_segments + data_alignment - 1) & ~(data_alignment - 1),
+      data_file_offset);
 
   // The TLS segment starts at address 0 and doesn't increment the current
   // address.
@@ -2040,8 +2104,12 @@ static void InsertSegments(Linker* linker, ELFWriterFile* elf) {
     ELFWriterSection* section = elf->sections.value.p[i];
     if (section->header.type == SHT(dynamic)) {
       ELFWriterSegmentAddSection(dynamic_segment, section);
+      ELFWriterSegmentAddSection(linker->building_dso ? data_segment
+                                                       : code_segment,
+                                 section);
     } else if (StringEqual(&section->name, ".interp")) {
       ELFWriterSegmentAddSection(interpreter_segment, section);
+      ELFWriterSegmentAddSection(code_segment, section);
     } else if ((section->header.flags & SHF(tls)) != 0) {
       ELFWriterSegmentAddSection(tls_segment, section);
     } else if ((section->header.flags & SHF(write)) == 0) {

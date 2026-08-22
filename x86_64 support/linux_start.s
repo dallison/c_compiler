@@ -11,17 +11,17 @@ _start:
 	mov %rsp, %r12
 	mov $9, %rax
 	mov $0, %rdi
-	mov $65536, %rsi
+	mov $10000, %rsi
 	mov $3, %rdx
-	mov $34, %r10
+	mov $22, %r10
 	mov $-1, %r8
 	mov $0, %r9
-	.byte 0x0f, 0x05
+	syscall
 	mov %rax, %r13
 	mov %r13, %rsi
-	mov $4098, %rdi
-	mov $158, %rax
-	.byte 0x0f, 0x05
+	mov $1002, %rdi
+	mov $9e, %rax
+	syscall
 	mov %r13, %rdi
 	mov %r12, %rsi
 	call __davecc_linux_tls_init

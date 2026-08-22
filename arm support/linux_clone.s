@@ -16,7 +16,7 @@ __davecc_linux_clone:
 	mov r0, r1
 	mov r1, r6
 	mov r7, #120
-	.word 0xef000000
+	svc #0
 	cmp r0, #0
 	beq .Lclone_child
 	pop {r4, r5, r6, r7, r8, r9, lr}
@@ -27,4 +27,4 @@ __davecc_linux_clone:
 	ldr r9, [sp, #4]
 	blx r9
 	mov r7, #1
-	.word 0xef000000
+	svc #0

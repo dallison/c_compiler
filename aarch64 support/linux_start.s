@@ -20,7 +20,7 @@ _start:
 	movn x4, #0
 	mov x5, #0
 	mov x8, #222
-	.word 0xd4000001
+	svc #0
 	mov x20, x0
 	// msr tpidr_el0, x0
 	.word 0xd51bd040

@@ -1047,6 +1047,16 @@ static void Assemble_nop(ARMAssembler* assembler) {
   EmitInst(assembler, ARM_AL | 0x0320f000);  // mov r0, r0
 }
 
+static void Assemble_svc(ARMAssembler* assembler) {
+  LexMatch(&ASM.lex, TOK(hash));
+  int64_t immediate = AssemblerEvaluateExpression(&ASM);
+  if (immediate < 0 || immediate > 0xffffff) {
+    AssemblerError(&ASM, "SVC immediate must be in the range 0..16777215");
+    return;
+  }
+  EmitInst(assembler, ARM_AL | 0x0f000000u | (uint32_t)immediate);
+}
+
 static void Assemble_ret(ARMAssembler* assembler) {
   (void)assembler;
   EmitInst(assembler, EncodeBranchExchange(ARM_COND_AL, ARM_LR_REG, false));
@@ -1411,6 +1421,7 @@ DECLARE_INST_FUNC(ldmia);
 DECLARE_INST_FUNC(stmdb);
 DECLARE_INST_FUNC(ldmdb);
 DECLARE_INST_FUNC(nop);
+DECLARE_INST_FUNC(svc);
 DECLARE_INST_FUNC(ret);
 DECLARE_INST_FUNC(movw);
 DECLARE_INST_FUNC(movt);
@@ -1543,6 +1554,8 @@ static void InitializeInstructions(Map* instructions) {
   INST2("stmfd", stmdb);
   INST2("ldmfd", ldmia);
   INST(nop);
+  INST(svc);
+  INST2("swi", svc);
   INST(ret);
   INST(movw);
   INST(movt);

@@ -36,10 +36,11 @@ Relocation* NewLinkerSymbolRelocation(struct LinkerSymbol* symbol,
                                       int64_t offset,
                                       int32_t reloc_type,
                                       int64_t addend);
-Relocation* NewRelativeRelocation(int64_t offset,
-                                ELFReaderSection* target_section,
-                                int32_t reloc_type,
-                                int64_t addend);
+Relocation* NewRelativeRelocation(struct LinkerSymbol* symbol,
+                                  int64_t offset,
+                                  ELFReaderSection* target_section,
+                                  int32_t reloc_type,
+                                  int64_t addend);
 void RelocationDestruct(Relocation* reloc);
 void RelocationDelete(Relocation* reloc);
 

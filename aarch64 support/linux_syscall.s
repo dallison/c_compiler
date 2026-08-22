@@ -14,5 +14,5 @@ __davecc_linux_syscall6:
 	mov x3, x4
 	mov x4, x5
 	mov x5, x6
-	.word 0xd4000001
+	svc #0
 	ret

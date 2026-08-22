@@ -1344,7 +1344,8 @@ static TargetInstruction* LoadStaticVariableAddress(X86_64Generator* rv,
   IRVariable* var = (IRVariable*)node;
   TargetInstruction* inst = Emit(
       rv, NewInstruction1(X86_64_OP(lea_rip), GetLoweredNode(node)));
-  if (!var->symbol->flags.is_local && compiler->pic) {
+  if (!var->symbol->flags.is_local &&
+      !StorageIs(var->symbol->storage, STO(static)) && compiler->pic) {
     inst->flags |= X86_64_GOTPCREL_RELOC;
   }
   return inst;

@@ -20,5 +20,5 @@ syscall:
 	mov %rcx, %rdx
 	mov %r8, %r10
 	mov %r9, %r8
-	.byte 0x0f, 0x05
+	syscall
 	ret

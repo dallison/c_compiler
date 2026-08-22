@@ -25,10 +25,8 @@ fi
 # their handlers report "unimplemented" today: RISC-V fence/fence.i, CSR ops,
 # fmadd/fmsub/fnmsub/fnmadd, fsqrt, fclass, rcall, callf, rcallf. RISC-V
 # fmv.x.w/fmv.x.d are also skipped because the current assembler handlers parse
-# them as integer-to-integer forms. AArch64/ARM svc is covered by disassembler
-# smoke tests but not generated here because the standalone assemblers do not
-# register svc. 6502 tsb/trb/stz remain out of this sweep while the legacy W65C02
-# assembler/disassembler forms are validated separately.
+# them as integer-to-integer forms. 6502 tsb/trb/stz remain out of this sweep
+# while the legacy W65C02 assembler/disassembler forms are validated separately.
 
 fail() {
   echo "$*" >&2
@@ -103,7 +101,8 @@ run_6502_case() {
   local dis="$work/6502-$case_name.dis"
 
   "$asm6502" "$src" -o "$obj"
-  "$davecc" -target 6502 -static "$obj" -o "$exe"
+  "$davecc" -target 6502 -static -nostdlib -Wl,-e -Wl,_start \
+    "$obj" -o "$exe"
   "$dasm6502" "$exe" 0 256 >"$dis"
   for pattern in "$@"; do
     assert_has "6502" "$case_name" "$dis" "$pattern"
@@ -344,6 +343,8 @@ arm_done:
   bx lr
   blx r0
   nop
+  svc #0
+  swi #7
   ret
 .global arm_external
 .type arm_external, @function
@@ -360,7 +361,7 @@ run_shared_case arm full "$armasm" "$armdasm" "$work/arm.s" \
   'orrs ' 'eor ' 'bic ' 'cmp ' 'cmn ' 'tst ' 'teq ' 'mul ' 'ldr ' \
   'str ' 'ldrb ' 'strb ' 'ldrh ' 'strh ' 'stm' 'ldm' 'movw ' 'movt ' \
   'vmov' 'vldr ' 'vstr ' 'vadd.f32 ' 'vsub.f32 ' 'vmul.f64 ' 'vdiv.f64 ' \
-  'scvtf ' 'ucvtf ' 'fcvtns ' 'bl ' 'b ' 'bx ' 'blx '
+  'scvtf ' 'ucvtf ' 'fcvtns ' 'bl ' 'b ' 'bx ' 'blx ' 'svc'
 
 cat >"$work/aarch64.s" <<'EOF'
 .text
@@ -448,6 +449,7 @@ a64_entry:
 a64_done:
   br x30
   blr x30
+  svc #42
   ret
 .data
 a64_data:
@@ -463,7 +465,7 @@ run_shared_case aarch64 full "$aarch64asm" "$aarch64dasm" "$work/aarch64.s" \
   'strb ' 'ldrh ' 'strh ' 'ldur ' 'stur ' 'ldursw ' 'stp ' 'ldp ' \
   'ldpsw ' 'fadd ' 'fsub ' 'fmul ' 'fdiv ' 'fmov ' 'fneg ' 'fcmp ' \
   'scvtf ' 'ucvtf ' 'fcvtns ' 'fcvtnu ' 'cbz ' 'cbnz ' 'tbz ' 'tbnz ' \
-  'b.eq ' 'b.ne ' 'bl ' 'br ' 'blr ' ' ret$'
+  'b.eq ' 'b.ne ' 'bl ' 'br ' 'blr ' 'svc #42' ' ret$'
 
 cat >"$work/x86_64.s" <<'EOF'
 .text
@@ -554,6 +556,7 @@ x86_entry:
   fneg_sd %xmm1, %xmm1
 x86_target:
   nop
+  syscall
   leave
   ret
 .data
@@ -570,7 +573,7 @@ run_shared_case x86_64 full "$x86asm" "$x86_64dasm" "$work/x86_64.s" \
   'addss ' 'addsd ' 'subss ' 'subsd ' 'mulss ' 'mulsd ' 'divss ' \
   'divsd ' 'sqrtss ' 'sqrtsd ' 'ucomiss ' 'ucomisd ' 'cvtsi2ss ' \
   'cvtsi2sd ' 'cvttss2si ' 'cvttsd2si ' 'cvtss2sd ' 'cvtsd2ss ' \
-  'nop' 'leave' 'ret'
+  'nop' 'syscall' 'leave' 'ret'
 
 cat >"$work/6502.s" <<'EOF'
 .text

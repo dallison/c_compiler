@@ -89,7 +89,7 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       // This is used for a relocation to a local symbol.
       // Build a RELATIVE relocation and add it to the data_relocations
       // in the dynamic linker.
-      Relocation* rel_reloc = NewRelativeRelocation(reloc->offset,
+      Relocation* rel_reloc = NewRelativeRelocation(symbol, reloc->offset,
                                                     reloc->section,
                                                     R_PCODE_RELATIVE,
                                                     reloc->addend);

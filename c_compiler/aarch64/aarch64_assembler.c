@@ -225,6 +225,7 @@ DECLARE_INST_FUNC(fcmp);
 DECLARE_INST_FUNC(scvtf);
 DECLARE_INST_FUNC(ucvtf);
 DECLARE_INST_FUNC(fneg);
+DECLARE_INST_FUNC(svc);
 DECLARE_INST_FUNC(ret);
 
 #undef DECLARE_INST_FUNC
@@ -455,6 +456,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(scvtf);
   INST(ucvtf);
   INST(fneg);
+  INST(svc);
   INST(ret);
 }
 
@@ -2125,6 +2127,17 @@ static void Assemble_ret(AARCH64Assembler* assembler) {
                     (0x1f << 16) |
                     (0x5 << 26) |
                     (reg << 5));
+}
+
+static void Assemble_svc(AARCH64Assembler* assembler) {
+  LexMatch(&ASM.lex, TOK(hash));
+  int64_t immediate = AssemblerEvaluateExpression(&ASM);
+  if (immediate < 0 || immediate > 0xffff) {
+    AssemblerError(&ASM, "SVC immediate must be in the range 0..65535");
+    return;
+  }
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    0xd4000001u | ((uint32_t)immediate << 5));
 }
 
 

@@ -398,6 +398,12 @@ String* Link(int argc, char** argv) {
       if (strcmp(argv[i], "-shared") == 0) {
         linker.building_dso = true;
         option_ok = true;
+      } else if (strcmp(argv[i], "-bind-now") == 0) {
+        linker.bind_now = true;
+        option_ok = true;
+      } else if (strcmp(argv[i], "-defer-init") == 0) {
+        linker.defer_program_init = true;
+        option_ok = true;
       } else if (strcmp(argv[i], "-Xsymbol-tables") == 0) {
           linker.print_symbol_tables = true;
           option_ok = true;
@@ -409,6 +415,9 @@ String* Link(int argc, char** argv) {
               option_ok = true;
       } else if (strcmp(argv[i], "-static") == 0) {
         linker.fully_static = true;
+        option_ok = true;
+      } else if (strcmp(argv[i], "-dynamic") == 0) {
+        linker.fully_static = false;
         option_ok = true;
       } else if (strcmp(argv[i], "-rpath") == 0) {
         i++;
@@ -597,7 +606,6 @@ String* Link(int argc, char** argv) {
   }
   if (!linker.fully_static) {
     DynamicLinkerInventSymbols(&linker, linker.dynamic_linker);
-    DynamicLinkerGatherDynamicRelocations(&linker);
   }
   
   // Link all the files together.

@@ -16,7 +16,7 @@ __davecc_linux_clone:
 	mov x3, x4
 	mov x4, x5
 	mov x8, #220
-	.word 0xd4000001
+	svc #0
 	cmp x0, #0
 	b.eq .Lclone_child
 	ldp x19, x20, [sp], #16
@@ -27,4 +27,4 @@ __davecc_linux_clone:
 	ldr x20, [sp, #8]
 	blr x20
 	mov x8, #93
-	.word 0xd4000001
+	svc #0

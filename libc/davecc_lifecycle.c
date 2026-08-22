@@ -28,6 +28,10 @@ void __davecc_tls_thread_fini(void) __attribute__((weak));
 #endif
 #endif
 void __cxa_finalize(void* dso);
+#if defined(__DAVECC_DYNAMIC_LIBC__)
+void __davecc_shared_init(void) __attribute__((weak));
+void __davecc_shared_fini(void) __attribute__((weak));
+#endif
 
 static unsigned char __davecc_preinit_done;
 static unsigned char __davecc_init_done;
@@ -90,6 +94,11 @@ void __davecc_run_init(void) {
 }
 
 void __davecc_program_init(void) {
+#if defined(__DAVECC_DYNAMIC_LIBC__)
+  if (__davecc_shared_init != NULL) {
+    __davecc_shared_init();
+  }
+#endif
   __davecc_run_preinit();
   __davecc_run_init();
 }
@@ -106,6 +115,11 @@ void __davecc_run_fini(void) {
 #endif
   __cxa_finalize(NULL);
   WalkFiniArrayReverse(__fini_array_start, __fini_array_end);
+#if defined(__DAVECC_DYNAMIC_LIBC__)
+  if (__davecc_shared_fini != NULL) {
+    __davecc_shared_fini();
+  }
+#endif
   if (__davecc_stdio_fini_hook != NULL) {
     __davecc_stdio_fini_hook();
   }

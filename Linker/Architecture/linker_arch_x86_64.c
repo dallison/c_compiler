@@ -65,7 +65,8 @@ static void HandlePICRelocation(
 
     case R_X86_64_64: {
       Relocation* rel_reloc = NewRelativeRelocation(
-          reloc->offset, reloc->section, R_X86_64_RELATIVE, reloc->addend);
+          symbol, reloc->offset, reloc->section, R_X86_64_RELATIVE,
+          reloc->addend);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }
@@ -134,10 +135,14 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_X86_64_GOT32: {
       uint64_t addr = S + A;
       if (symbol != NULL && symbol->got_index >= 0 &&
-          linker->dynamic_linker != NULL &&
-          linker->dynamic_linker->got_plt_group != NULL) {
-        addr = linker->dynamic_linker->got_plt_group->address +
-               (uint64_t)symbol->got_index * 8 + (uint64_t)A;
+          linker->dynamic_linker != NULL) {
+        SectionGroup* got_group =
+            symbol->plt_index >= 0 ? linker->dynamic_linker->got_plt_group
+                                   : linker->dynamic_linker->got_group;
+        if (got_group != NULL) {
+          addr = got_group->address + (uint64_t)symbol->got_index * 8 +
+                 (uint64_t)A;
+        }
       }
       pc32 = (int32_t)(addr - P);
       *((int32_t*)target_address) = pc32;

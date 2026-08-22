@@ -45,16 +45,17 @@ Relocation* NewLinkerSymbolRelocation(LinkerSymbol* symbol, int64_t offset,
   return reloc;
 }
 
-Relocation* NewRelativeRelocation(int64_t offset,
+Relocation* NewRelativeRelocation(LinkerSymbol* symbol,
+                                  int64_t offset,
                                   ELFReaderSection* target_section,
                                   int32_t reloc_type,
                                   int64_t addend) {
   Relocation* reloc = malloc(sizeof(Relocation));
-   StringInit(&reloc->symbol_name, NULL);
-   reloc->symbol = NULL;
+   StringInit(&reloc->symbol_name, symbol != NULL ? symbol->name.value : NULL);
+   reloc->symbol = symbol;
    reloc->offset = offset;
    reloc->type = reloc_type;
-   reloc->addend = 0;
+   reloc->addend = addend;
    reloc->section = target_section;
    return reloc;
 }

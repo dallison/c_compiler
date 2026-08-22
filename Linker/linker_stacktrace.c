@@ -417,6 +417,7 @@ static void DefineBoundSymbol(Linker* linker, const char* name,
     symbol = LinkerInventSymbol(linker, name, (int)pointer_size);
   }
   symbol->defined = true;
+  symbol->header->shndx = linker->building_dso ? 1 : SHN_ABS;
   symbol->size = pointer_size;
   symbol->address = address;
 }
@@ -510,6 +511,10 @@ void LinkerStacktracePrepare(Linker* linker) {
   VectorAppend(&group->components, NewGroupedSection(info->section));
   VectorAppend(&linker->section_groups, group);
   linker->stacktrace_info = info;
+  DefineBoundSymbol(linker, "__davecc_stacktrace_start",
+                    info->pointer_size, 0);
+  DefineBoundSymbol(linker, "__davecc_stacktrace_end",
+                    info->pointer_size, 0);
 }
 
 static int CompareSymbolsByAddress(const void* left, const void* right) {

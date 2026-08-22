@@ -485,6 +485,8 @@ static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
     op->sym_value = op->sym->value;
     if (StringEqual(&suffix, "TPOFF")) {
       op->reloc_type = R_X86_64_TPOFF32;
+    } else if (StringEqual(&suffix, "GOTPCREL")) {
+      op->reloc_type = R_X86_64_GOTPCREL;
     } else if (suffix.length > 0) {
       AssemblerError(&ASM, "Unsupported symbol suffix '@%s'", suffix.value);
       StringDestruct(&symbol_name);
@@ -601,13 +603,15 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
     enc->disp_size = 4;
     int64_t next_ip = AssemblerCurrentAddress(base) + enc->num_prefixes +
                       (enc->rex >= 0 ? 1 : 0) + enc->len + 4 + enc->tail_bytes;
-    if (mem->sym != NULL && !mem->sym_known) {
+    if (mem->sym != NULL &&
+        (!mem->sym_known || mem->reloc_type != 0)) {
       for (int i = 0; i < 4; i++) {
         EncodeByte(enc, 0);
       }
-      int reloc_type = R_X86_64_PC32;
-      if (base->pic && (mem->sym->binding == SYM_BIND(global) ||
-                        mem->sym->binding == SYM_BIND(weak))) {
+      int reloc_type = mem->reloc_type != 0 ? mem->reloc_type : R_X86_64_PC32;
+      if (mem->reloc_type == 0 && base->pic &&
+          (mem->sym->binding == SYM_BIND(global) ||
+           mem->sym->binding == SYM_BIND(weak))) {
         reloc_type = R_X86_64_GOTPCREL;
       }
       // The relocation patches the 4-byte displacement field, which sits 4
@@ -1153,9 +1157,6 @@ static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
 
   if (!known && sym != NULL) {
     int reloc_type = is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
-    if (is_call && !ASM.pic) {
-      reloc_type = R_X86_64_PC32;
-    }
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         sym, reloc_type, ASM.current_section,
         (int32_t)(start + (enc.rex >= 0 ? 1 : 0) + enc.disp_pos), -4);
@@ -1967,6 +1968,12 @@ static void Assemble_nop(X86_64Assembler* assembler) {
   AssemblerEmitByte(&ASM, ASM.current_section, 0x90);
 }
 
+static void Assemble_syscall(X86_64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASM.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASM.current_section, 0x05);
+}
+
 static void Assemble_mfence(X86_64Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASM.current_section, 0x0f);
@@ -2089,6 +2096,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(jmp);
   INST(ret);
   INST(nop);
+  INST(syscall);
   INST(mfence);
   INST(je);
   INST(jz);

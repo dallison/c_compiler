@@ -444,6 +444,23 @@ static void AddDefaultStandardModulePath(Vector* compiler_args,
   VectorAppend(compiler_args, resources->module_dir.value);
 }
 
+static void AddRuntimeFile(Vector* linker_args, Vector* owned_paths,
+                           DriverResources* resources, const char* filename,
+                           const char* target) {
+  String* path = NewEmptyString();
+  StringPrintf(path, "%s/%s", resources->lib_dir.value, filename);
+  if (!PathIsFile(path->value)) {
+    fprintf(stderr,
+            "unable to find DaveCC runtime file '%s'; build %s, set "
+            "DAVECC_LIB_DIR, or use -nostdlib\n",
+            path->value, target);
+    StringDelete(path);
+    exit(1);
+  }
+  VectorAppend(owned_paths, path);
+  VectorAppend(linker_args, path->value);
+}
+
 static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
                               Vector* compiler_options,
                               DriverResources* resources) {
@@ -456,6 +473,42 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
   const TargetRuntime* runtime =
       FindTargetRuntime(target == NULL ? NULL : target->value);
   if (runtime == NULL) {
+    return;
+  }
+
+  bool dynamic = VectorContainsCString(linker_args, "-dynamic");
+  if (dynamic) {
+    if (VectorContainsCString(linker_args, "-static")) {
+      fprintf(stderr, "-dynamic and -static cannot be used together\n");
+      exit(1);
+    }
+    if (runtime->os != kTargetOSLinux ||
+        strcmp(runtime->canonical_name, "x86_64") != 0) {
+      fprintf(stderr,
+              "-dynamic is currently supported only for "
+              "x86_64-unknown-linux-davecc\n");
+      exit(1);
+    }
+    if (resources->lib_dir.length == 0) {
+      fprintf(stderr,
+              "unable to find DaveCC dynamic runtime; set DAVECC_LIB_DIR "
+              "or use -nostdlib\n");
+      exit(1);
+    }
+    VectorAppend(linker_args, "-e");
+    VectorAppend(linker_args, "_start");
+    VectorAppend(linker_args, "-I/lib64/ld-linux-x86-64.so.2");
+    VectorAppend(linker_args, "-bind-now");
+    VectorAppend(linker_args, "-defer-init");
+    VectorAppend(linker_args, "-rpath");
+    VectorAppend(linker_args, "$ORIGIN");
+    AddRuntimeFile(linker_args, owned_paths, resources,
+                   "x86_64_linux_dynamic_start.o",
+                   "//:x86_64_linux_dynamic_runtime");
+    AddRuntimeFile(linker_args, owned_paths, resources, "libdavecc_crt.a",
+                   "//:x86_64_linux_dynamic_runtime");
+    AddRuntimeFile(linker_args, owned_paths, resources, "libdavecc.so",
+                   "//:x86_64_linux_dynamic_runtime");
     return;
   }
 
@@ -640,8 +693,13 @@ static int ParseArg(int i, int argc, char** argv,
       i++;
     } else if (StringEqual(option, "-static")) {
       VectorAppend(linker_args, argv[i]);
+    } else if (StringEqual(option, "-dynamic")) {
+      VectorAppend(linker_args, argv[i]);
+      VectorAppend(compiler_args, "-fPIC");
+      VectorAppend(compiler_args, "-ftls-model=local-exec");
     } else if (StringEqual(option, "-shared")) {
       VectorAppend(linker_args, argv[i]);
+      VectorAppend(compiler_args, "-fPIC");
     } else if (StringStartsWith(option, "-l")) {
       VectorAppend(linker_args, argv[i]);
     } else if (StringStartsWith(option, "-L")) {

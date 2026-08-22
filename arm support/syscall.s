@@ -19,6 +19,6 @@ syscall:
 	mov r7, r0
 	ldr r4, [sp, #12]
 	ldr r5, [sp, #16]
-	.word 0xef000000	// swi #0
+	svc #0
 	pop {r4, r5, r7}
 	bx lr

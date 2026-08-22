@@ -12,6 +12,6 @@ __davecc_linux_syscall6:
 	ldr r3, [sp, #12]
 	ldr r4, [sp, #16]
 	ldr r5, [sp, #20]
-	.word 0xef000000
+	svc #0
 	pop {r4, r5, r7}
 	bx lr

@@ -587,6 +587,9 @@ typedef enum {
   DT(filter)      = 0x7fffffff,
 } ELFDynamicTag;
 
+#define DF_TEXTREL 0x4
+#define DF_BIND_NOW 0x8
+
 typedef struct {
   ELF_Xword tag;
   union {

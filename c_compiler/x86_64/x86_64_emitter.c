@@ -2680,7 +2680,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           inst->operand[1] == NULL) {
         break;
       }
-      fprintf(fp, "\tlea ");
+      fprintf(fp, (inst->flags & X86_64_GOTPCREL_RELOC) != 0
+                      ? "\tmov "
+                      : "\tlea ");
       if (((int)inst->operand[0]->opcode == (int)X86_64_OP(symbol))) {
         TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
         // Use TargetSymbolName so function-local statics get the same mangled
@@ -2690,6 +2692,8 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         const char* symname =
             TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         if ((inst->flags & X86_64_GOTPCREL_RELOC) != 0) {
+          // A GOTPCREL operand names a slot containing the symbol address, so
+          // load that slot rather than materializing the slot's own address.
           fprintf(fp, "%s@GOTPCREL(%%rip), ", symname);
         } else if (((int)inst->opcode == (int)X86_64_OP(lea_rip))) {
           fprintf(fp, "%s(%%rip), ", symname);

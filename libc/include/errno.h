@@ -90,6 +90,15 @@
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6
 #define errno (*(int*)ERRNO_ADDRESS)
+#elif defined(__DAVECC_DYNAMIC_LIBC__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+int* __davecc_errno_location(void);
+#ifdef __cplusplus
+}
+#endif
+#define errno (*__davecc_errno_location())
 #elif defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
 extern __thread int errno;
 #else
