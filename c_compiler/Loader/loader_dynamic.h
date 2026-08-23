@@ -90,9 +90,11 @@ typedef struct LoadedDynamicLibrary {
   // must not be freed.
   bool owns_decoded;
   // True when the dynamic section and dynamic symbol table were also decoded
-  // into heap memory (the ELF32 linker path, load_address == 0).  In the
-  // ELF32 runtime path they point into mapped segments and must not be freed.
+  // into heap memory.
   bool owns_dynamic_tables;
+  // Canonical relocation arrays decoded from ELF32 REL/RELA sections.
+  ELFRelocation* decoded_data_relocations;
+  ELFRelocation* decoded_plt_relocations;
   Vector mapped_segments;
 } LoadedDynamicLibrary;
 

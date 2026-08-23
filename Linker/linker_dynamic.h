@@ -90,6 +90,7 @@ typedef struct DynamicLinker {
   Vector plt_relocations;
   Vector data_relocations;      // Pointers to Relocation.
   Vector needed_libraries;      // Offsets into dynstr table.
+  Vector dynamic_symbol_fixups; // Private dynamic-symbol build records.
   ELF_Xword rpath;              // Offset into dynstr table.
   struct LinkerSymbol* global_offset_table_symbol;
   struct LinkerSymbol* dynamic_symbol;
@@ -121,7 +122,8 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker);
 void DynamicLinkerBuildPLTRelocations(struct Linker* linker);
 void DynamicLinkerGatherDynamicRelocations(struct Linker* linker);
 void DynamicLinkerCreateDynamicLinkerGroups(Linker* linker);
-void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
+void DynamicLinkerFixupDynamicSymbolTable(struct Linker* linker,
+                                          Buffer* dynsym,
                                           int32_t bss_section_index);
 void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf);
 void DynamicLinkerFixupPLT(Linker* linker);

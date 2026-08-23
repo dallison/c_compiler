@@ -1365,8 +1365,7 @@ static void Assemble_call(RVAssembler* assembler) {
   // Call relocation: this is a macro relocation that acts on two instructions
   // put the destination address in a register and use a jalr instruction to
   // jump to it, saving the return address.
-  // We use a PLT relocation if we are in PIC mode and the symbol is
-  // global.
+  // Use a PLT relocation for interposable PIC calls.
   int reloc_type = R_RISCV_CALL;
   if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
       assembler->base.pic) {

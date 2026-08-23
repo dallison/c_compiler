@@ -399,15 +399,19 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
   ELFRelocation* plt_relocations = NULL;
   
   int64_t reloc_type = DT(rela);
-  int64_t rela_size = 0;
-  int64_t rela_entsize = 0;
-  int64_t rela_count = 0;
+  int64_t relocation_size = 0;
+  int64_t relocation_entsize = 0;
+  int64_t relative_count = 0;
   int64_t plt_rel_size = 0;
   for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
     switch (section->entries[i].tag) {
       case DT(rela):
         data_relocations = (ELFRelocation*)
             DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(rela));
+        break;
+      case DT(rel):
+        data_relocations = (ELFRelocation*)
+            DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(rel));
         break;
       case DT(jmprel):
         plt_relocations = (ELFRelocation*)
@@ -417,13 +421,16 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
         reloc_type = section->entries[i].un.val;
         break;
       case DT(relasz):
-        rela_size = section->entries[i].un.val;
+      case DT(relsz):
+        relocation_size = section->entries[i].un.val;
         break;
       case DT(relacount):
-        rela_count= section->entries[i].un.val;
+      case DT(relcount):
+        relative_count = section->entries[i].un.val;
         break;
       case DT(relaent):
-        rela_entsize = section->entries[i].un.val;
+      case DT(relent):
+        relocation_entsize = section->entries[i].un.val;
         break;
       case DT(pltrelsz):
         plt_rel_size = section->entries[i].un.val;
@@ -448,10 +455,10 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
   // library.
   if (data_relocations != NULL) {
     int64_t num_relocations = 0;
-    if (rela_count > 0) {
-      num_relocations = rela_count;
-    } else if (rela_size > 0 && rela_entsize > 0) {
-      num_relocations = rela_size / rela_entsize;
+    if (relocation_size > 0 && relocation_entsize > 0) {
+      num_relocations = relocation_size / relocation_entsize;
+    } else if (relative_count > 0) {
+      num_relocations = relative_count;
     }
     
     for (int64_t i = 0; i < num_relocations; i++) {
@@ -484,13 +491,13 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
   // added to them since they already contain the offset of the
   // PLT entry, relative to the start of the library.
   if (plt_relocations != NULL && plt_rel_size != 0) {
-    // In this loader, the default relocation type is RELA, so if the DT(pltrel)
-    // (the relocation type) is not DT(rela) we subtract the addend size from
-    // the size of ELFRelocation.
-    int64_t num_relocations = plt_rel_size /
-        (reloc_type != DT(rela) ?
-            sizeof(ELFRelocation) - sizeof(ELF_Sxword) :
-            sizeof(ELFRelocation));
+    int64_t entry_size = relocation_entsize;
+    if (entry_size == 0) {
+      entry_size = reloc_type != DT(rela)
+                       ? sizeof(ELFRelocation) - sizeof(ELF_Sxword)
+                       : sizeof(ELFRelocation);
+    }
+    int64_t num_relocations = plt_rel_size / entry_size;
     
     for (int64_t i = 0; i < num_relocations; i++) {
       ELFRelocation* reloc = &plt_relocations[i];
@@ -938,27 +945,59 @@ static void DecodeELF32Headers(LoadedDynamicLibrary* lib) {
   lib->section_headers = shdrs;
 }
 
-// Count the dynamic symbols of an ELF32 library from its .dynsym section
-// header (size / entsize).  Used to drive the linear symbol search.
-static int64_t ELF32DynamicSymbolCount(LoadedDynamicLibrary* lib) {
-  for (int i = 0; i < lib->header->shnum; i++) {
-    const ELFSectionHeader* sec = &lib->section_headers[i];
-    if (sec->type == SHT(dynsym)) {
-      size_t entsize = sec->entsize != 0 ? sec->entsize : sizeof(ELF32Symbol);
-      return (int64_t)(sec->size / entsize);
+static ELFDynamicSectionEntry* FindDecodedDynamicEntry(
+    ELFDynamicSectionEntry* entries, size_t count, ELFDynamicTag tag) {
+  for (size_t i = 0; i < count; i++) {
+    if (entries[i].tag == tag) {
+      return &entries[i];
     }
   }
-  return 0;
+  return NULL;
+}
+
+static ELFRelocation* DecodeELF32RelocationSection(
+    const char* base, const ELFSectionHeader* section) {
+  size_t entsize = section->entsize;
+  if (entsize == 0) {
+    entsize = section->type == SHT(rel)
+                  ? 2 * sizeof(ELF32_Word)
+                  : sizeof(ELF32Relocation);
+  }
+  size_t count = section->size / entsize;
+  ELFRelocation* relocations =
+      calloc(count > 0 ? count : 1, sizeof(ELFRelocation));
+  const char* contents = base + section->offset;
+  for (size_t i = 0; i < count; i++) {
+    const ELF32_Word* in =
+        (const ELF32_Word*)(contents + i * entsize);
+    relocations[i].offset = in[0];
+    relocations[i].info =
+        ELF64_R_INFO(ELF32_R_SYM(in[1]), ELF32_R_TYPE(in[1]));
+    if (section->type == SHT(rela)) {
+      relocations[i].addend =
+          ((const ELF32Relocation*)(contents + i * entsize))->addend;
+    }
+  }
+  return relocations;
+}
+
+static bool TranslateELF32DynamicPointer(LoadedDynamicLibrary* lib,
+                                         ELFDynamicSectionEntry* entry) {
+  if (entry->un.val == 0) {
+    return true;
+  }
+  uint64_t runtime = 0;
+  if (!LoaderLinkedAddressToRuntime(lib->loader, lib, entry->un.val,
+                                    &runtime)) {
+    return false;
+  }
+  entry->un.val = runtime;
+  return true;
 }
 
 // Load an ELF32 dynamic object into a running address space (load_address != 0,
-// used by the runtime loader/interpreter).  This relies on the ARM loader's
-// ignore_vaddr mode: segments are mapped at OS-chosen addresses and the linked
-// addresses are translated to runtime addresses via the loader's regions.
-//
-// davecc emits the dynamic section, dynamic symbol table and relocations in the
-// wide (64-bit) layout even for ELF32 output, so once the headers are decoded
-// the existing segment-loading and relocation machinery handles the rest.
+// used by the runtime loader/interpreter). Decode all narrow on-disk tables
+// that the generic loader indexes as canonical wide structures.
 static bool SetupELF32RuntimeLibrary(LoadedDynamicLibrary* lib,
                                      uint64_t load_address,
                                      uint64_t* end_of_library) {
@@ -967,16 +1006,149 @@ static bool SetupELF32RuntimeLibrary(LoadedDynamicLibrary* lib,
   if (!LoadSegments(lib, load_address, end_of_library)) {
     return false;
   }
-  if (!FindDynamicSection(lib, load_address)) {
+
+  const char* base = (const char*)lib->addr;
+  const ELFHeader* header = lib->header;
+  const ELFSectionHeader* shdrs = lib->section_headers;
+  const ELFSectionHeader* dynamic_sec = NULL;
+  const ELFSectionHeader* dynsym_sec = NULL;
+  for (int i = 0; i < header->shnum; i++) {
+    if (shdrs[i].type == SHT(dynamic)) {
+      dynamic_sec = &shdrs[i];
+    } else if (shdrs[i].type == SHT(dynsym)) {
+      dynsym_sec = &shdrs[i];
+    }
+  }
+  if (dynamic_sec == NULL || dynsym_sec == NULL) {
+    LoaderError("Failed to load dynamic library %s: missing ELF32 tables",
+                lib->filename.value);
     return false;
   }
-  FindHashTable(lib);
 
-  // Force the slow (linear) symbol search.  The GNU hash table's bloom filter
-  // width is ambiguous for ELF32 output, so avoid relying on it.  We need the
-  // dynamic symbol count for the linear search.
+  size_t dynamic_entsize = dynamic_sec->entsize != 0
+                               ? dynamic_sec->entsize
+                               : sizeof(ELF32DynamicSectionEntry);
+  size_t dynamic_count = dynamic_sec->size / dynamic_entsize;
+  ELFDynamicSectionEntry* entries =
+      calloc(dynamic_count + 1, sizeof(ELFDynamicSectionEntry));
+  for (size_t i = 0; i < dynamic_count; i++) {
+    const ELF32DynamicSectionEntry* in =
+        (const ELF32DynamicSectionEntry*)(base + dynamic_sec->offset +
+                                          i * dynamic_entsize);
+    entries[i].tag = in->tag;
+    entries[i].un.val = in->un.val;
+  }
+  entries[dynamic_count].tag = DT(null);
+  lib->dynamic = (const DynamicSection*)entries;
+
+  size_t symbol_entsize = dynsym_sec->entsize != 0
+                              ? dynsym_sec->entsize
+                              : sizeof(ELF32Symbol);
+  size_t symbol_count = dynsym_sec->size / symbol_entsize;
+  ELFSymbol* symbols =
+      calloc(symbol_count > 0 ? symbol_count : 1, sizeof(ELFSymbol));
+  for (size_t i = 0; i < symbol_count; i++) {
+    const ELF32Symbol* in =
+        (const ELF32Symbol*)(base + dynsym_sec->offset +
+                             i * symbol_entsize);
+    symbols[i].name = in->name;
+    symbols[i].info = in->info;
+    symbols[i].other = in->other;
+    symbols[i].shndx = in->shndx;
+    symbols[i].value = in->value;
+    symbols[i].size = in->size;
+  }
+  lib->dynsym = symbols;
+  lib->num_dynamic_symbols = (int64_t)symbol_count;
+  const ELFSectionHeader* dynstr_sec = &shdrs[dynsym_sec->link];
+  lib->dynstr = base + dynstr_sec->offset;
+  lib->owns_dynamic_tables = true;
+
+  ELFDynamicSectionEntry* data_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count, DT(rel));
+  if (data_entry == NULL) {
+    data_entry = FindDecodedDynamicEntry(entries, dynamic_count, DT(rela));
+  }
+  ELFDynamicSectionEntry* plt_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count, DT(jmprel));
+  const ELFSectionHeader* shstr_sec = &shdrs[header->shstrndx];
+  const char* shstrtab = base + shstr_sec->offset;
+  for (int i = 0; i < header->shnum; i++) {
+    const ELFSectionHeader* section = &shdrs[i];
+    if (section->type != SHT(rel) && section->type != SHT(rela)) {
+      continue;
+    }
+    const char* section_name = shstrtab + section->name;
+    if (data_entry != NULL &&
+        (strcmp(section_name, ".rel.dyn") == 0 ||
+         strcmp(section_name, ".rela.dyn") == 0)) {
+      lib->decoded_data_relocations =
+          DecodeELF32RelocationSection(base, section);
+      data_entry->un.val =
+          (ELF_Xword)(uintptr_t)lib->decoded_data_relocations;
+    }
+    if (plt_entry != NULL &&
+        (strcmp(section_name, ".rel.plt") == 0 ||
+         strcmp(section_name, ".rela.plt") == 0)) {
+      lib->decoded_plt_relocations =
+          DecodeELF32RelocationSection(base, section);
+      plt_entry->un.val =
+          (ELF_Xword)(uintptr_t)lib->decoded_plt_relocations;
+    }
+  }
+
+  ELFDynamicSectionEntry* data_size_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count,
+                              data_entry != NULL && data_entry->tag == DT(rel)
+                                  ? DT(relsz)
+                                  : DT(relasz));
+  ELFDynamicSectionEntry* plt_size_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count, DT(pltrelsz));
+  if (data_entry != NULL && lib->decoded_data_relocations == NULL) {
+    if (data_size_entry != NULL && data_size_entry->un.val != 0) {
+      LoaderError("Cannot decode ELF32 dynamic relocations in %s",
+                  lib->filename.value);
+      return false;
+    }
+    data_entry->un.val = 0;
+  }
+  if (plt_entry != NULL && lib->decoded_plt_relocations == NULL) {
+    if (plt_size_entry != NULL && plt_size_entry->un.val != 0) {
+      LoaderError("Cannot decode ELF32 PLT relocations in %s",
+                  lib->filename.value);
+      return false;
+    }
+    plt_entry->un.val = 0;
+  }
+
+  ELFDynamicSectionEntry* symtab_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count, DT(symtab));
+  ELFDynamicSectionEntry* strtab_entry =
+      FindDecodedDynamicEntry(entries, dynamic_count, DT(strtab));
+  if (symtab_entry != NULL) {
+    symtab_entry->un.val = (ELF_Xword)(uintptr_t)symbols;
+  }
+  if (strtab_entry != NULL) {
+    strtab_entry->un.val = (ELF_Xword)(uintptr_t)lib->dynstr;
+  }
+  const ELFDynamicTag pointer_tags[] = {
+      DT(pltgot), DT(preinit_array), DT(init_array), DT(fini_array),
+  };
+  for (size_t i = 0; i < sizeof(pointer_tags) / sizeof(pointer_tags[0]); i++) {
+    ELFDynamicSectionEntry* entry =
+        FindDecodedDynamicEntry(entries, dynamic_count, pointer_tags[i]);
+    if (entry != NULL && !TranslateELF32DynamicPointer(lib, entry)) {
+      LoaderError("Cannot translate ELF32 dynamic pointer in %s",
+                  lib->filename.value);
+      return false;
+    }
+  }
+
+  lib->dynamic_section_relocated = true;
+
+  // Force the slow (linear) symbol search. The ELF32 GNU hash bloom filter
+  // uses 32-bit words, while the canonical loader hash code uses 64-bit words.
   lib->gnu_hash = NULL;
-  lib->num_dynamic_symbols = ELF32DynamicSymbolCount(lib);
   return true;
 }
 
@@ -1189,6 +1361,8 @@ LoadedDynamicLibrary* NewLoadedDynamicLibrary(const char* libname,
   lib->dynamic_section_relocated = false;
   lib->owns_decoded = false;
   lib->owns_dynamic_tables = false;
+  lib->decoded_data_relocations = NULL;
+  lib->decoded_plt_relocations = NULL;
   return lib;
 }
 
@@ -1207,6 +1381,8 @@ void LoadedDynamicLibraryDestruct(LoadedDynamicLibrary* lib) {
     free((void*)lib->dynamic);
     free((void*)lib->dynsym);
   }
+  free(lib->decoded_data_relocations);
+  free(lib->decoded_plt_relocations);
   if (lib->length > 0) {
     munmap((void*)lib->addr, lib->length);
   }

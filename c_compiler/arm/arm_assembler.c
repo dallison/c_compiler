@@ -1118,6 +1118,57 @@ static void Assemble_movt(ARMAssembler* assembler) {
                         (rd.num << 12) | (imm16 & 0xfff));
 }
 
+static void Assemble_adr32(ARMAssembler* assembler) {
+  ARMReg rd;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "expected register and symbol for adr32");
+    return;
+  }
+  String sym;
+  StringInit(&sym, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+  AssemblerSymbol* symbol = GetOrCreateSymbol(assembler, sym.value);
+  int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(symbol, R_ARM_MOVW_PREL_NC,
+                                   ASM.current_section, here, -16));
+  EmitInst(assembler, ARM_AL | (0x3 << 24) | (rd.num << 12));
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(symbol, R_ARM_MOVT_PREL,
+                                   ASM.current_section, here + 4, -12));
+  EmitInst(assembler,
+           ARM_AL | (0x3 << 24) | (1 << 22) | (rd.num << 12));
+  EmitInst(assembler, EncodeDataProcReg(ARM_COND_AL, 0x4, 0, rd.num,
+                                        rd.num, ARM_PC_REG, 0, 0));
+  StringDestruct(&sym);
+}
+
+static void Assemble_gotaddr(ARMAssembler* assembler) {
+  ARMReg rd;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "expected register and symbol for gotaddr");
+    return;
+  }
+  String sym;
+  StringInit(&sym, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+  AssemblerSymbol* symbol = GetOrCreateSymbol(assembler, sym.value);
+  int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
+  EmitInst(assembler, 0xe59f0008u | ((uint32_t)rd.num << 12));
+  EmitInst(assembler, EncodeDataProcReg(ARM_COND_AL, 0x4, 0, ARM_PC_REG,
+                                        rd.num, rd.num, 0, 0));
+  EmitInst(assembler, 0xe5900000u | ((uint32_t)rd.num << 16) |
+                          ((uint32_t)rd.num << 12));
+  EmitInst(assembler, EncodeBranch(ARM_COND_AL, 0, 0));
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(symbol, R_ARM_GOT_PREL,
+                                   ASM.current_section, here + 16, 4));
+  EmitInst(assembler, 0);
+  StringDestruct(&sym);
+}
+
 static bool IsDoubleReg(const ARMReg* r) { return r->type == kARMRegTypeFloatD; }
 
 // vmov.f32 sd, sm  -- single-precision register copy.
@@ -1425,6 +1476,8 @@ DECLARE_INST_FUNC(svc);
 DECLARE_INST_FUNC(ret);
 DECLARE_INST_FUNC(movw);
 DECLARE_INST_FUNC(movt);
+DECLARE_INST_FUNC(adr32);
+DECLARE_INST_FUNC(gotaddr);
 DECLARE_INST_FUNC(vmov_f32);
 DECLARE_INST_FUNC(vmov);
 DECLARE_INST_FUNC(vldr);
@@ -1559,6 +1612,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(ret);
   INST(movw);
   INST(movt);
+  INST(adr32);
+  INST(gotaddr);
   INST2("vmov.f32", vmov_f32);
   INST2("vmov.f64", vmov_f32);
   INST(vmov);

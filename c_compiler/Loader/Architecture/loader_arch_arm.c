@@ -198,8 +198,34 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
       break;
 
     case R_ARM_RELATIVE:
-      *(uint32_t*)target_address =
-          (uint32_t)(*(uint32_t*)target_address + (uint32_t)reloc->addend);
+      {
+        uint64_t value =
+            *(uint32_t*)target_address + (uint32_t)reloc->addend;
+        if (lib->loader->arch->ignore_vaddr) {
+          if (!LoaderLinkedAddressToRuntime(lib->loader, lib, value, &value)) {
+            LoaderError("Cannot translate relative relocation\n");
+            break;
+          }
+        } else {
+          value += lib->load_address;
+        }
+        *(uint32_t*)target_address = (uint32_t)value;
+      }
+      break;
+
+    case R_ARM_GLOB_DAT:
+      if (symbol == NULL) {
+        LoaderError("Relocation refers on undefined symbol '%s'\n",
+                    sym_name);
+      } else {
+        uint64_t value = symbol->value;
+        if (lib->loader->arch->ignore_vaddr &&
+            !LoaderLinkedAddressToRuntime(lib->loader, lib, value, &value)) {
+          LoaderError("Cannot translate symbol '%s'\n", sym_name);
+        } else {
+          *(uint32_t*)target_address = (uint32_t)value;
+        }
+      }
       break;
 
     default:
@@ -226,8 +252,14 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
             LoaderError("Relocation refers on undefined symbol '%s'\n",
                         sym_name);
           } else {
-            // Store the linked symbol address; the interpreter translates it.
-            *(uint32_t*)target_address = (uint32_t)symbol->value;
+            uint64_t value = symbol->value;
+            if (lib->loader->arch->ignore_vaddr &&
+                !LoaderLinkedAddressToRuntime(lib->loader, lib, value,
+                                              &value)) {
+              LoaderError("Cannot translate symbol '%s'\n", sym_name);
+            } else {
+              *(uint32_t*)target_address = (uint32_t)value;
+            }
           }
         }
       break;

@@ -99,29 +99,33 @@ def linux_dynamic_runtime(
         support_sources,
         dso_sources,
         crt_sources,
-        libc_cxx_srcs):
+        libc_cxx_srcs,
+        output_dir):
     support_commands = "\n".join([
         '"$$davecc" "$${dso_cflags[@]}" "%s" -o "$$work/dso_support_%d.o"' % (source, index)
         for index, source in enumerate(support_sources)
     ])
     native.genrule(
         name = name,
-        srcs = dso_sources + crt_sources + libc_cxx_srcs +
-               [":libc_headers", syscall_source, clone_source, startup_source,
-                "libc/linux_syscall.c", "libc/linux_syscall_result.c",
-                "libc/linux_fs.c", ":davecc", ":archivist"] + support_sources,
+        srcs = depset(direct =
+            dso_sources + crt_sources + libc_cxx_srcs +
+            [":libc_headers", syscall_source, clone_source, startup_source,
+             "libc/linux_syscall.c", "libc/linux_syscall_result.c",
+             "libc/linux_fs.c", ":davecc", ":archivist"] +
+            support_sources
+        ).to_list(),
         outs = [
-            "libc/libdavecc.so",
-            "libc/libdavecc.so.1",
-            "libc/libdavecc_crt.a",
-            "libc/x86_64_linux_dynamic_start.o",
+            output_dir + "/libdavecc.so",
+            output_dir + "/libdavecc.so.1",
+            output_dir + "/libdavecc_crt.a",
+            output_dir + "/" + architecture + "_linux_dynamic_start.o",
         ],
         cmd = """
 set -euo pipefail
-out_dir="$(@D)/libc"
+out_dir="$(@D)/%s"
 work="$(@D)/%s.build"
 rm -rf "$$work"
-mkdir -p "$$work"
+mkdir -p "$$work" "$$out_dir"
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
 dso_cflags=(-target %s-unknown-linux-davecc -O0 -c -fPIC \
@@ -157,7 +161,7 @@ for src in %s; do
 done
 
 "$$davecc" -target %s-unknown-linux-davecc -nostdinc -nostdlib -c -fPIC \
-  "$$startup_source" -o "$$out_dir/x86_64_linux_dynamic_start.o"
+  "$$startup_source" -o "$$out_dir/%s_linux_dynamic_start.o"
 
 for src in %s; do
   obj="$$work/crt_$$(basename "$${src%%.c}").o"
@@ -173,6 +177,7 @@ crt_archive="$$out_dir/libdavecc_crt.a"
 rm -f "$$crt_archive"
 "$$archivist" r "$$crt_archive" "$$work"/crt_*.o
 """ % (
+            output_dir,
             name,
             architecture,
             architecture,
@@ -180,9 +185,11 @@ rm -f "$$crt_archive"
             clone_source,
             startup_source,
             support_commands,
-            " ".join(dso_sources + libc_cxx_srcs),
+            " ".join(["'%s'" % source
+                      for source in dso_sources + libc_cxx_srcs]),
             architecture,
-            " ".join(crt_sources),
+            architecture,
+            " ".join(["'%s'" % source for source in crt_sources]),
             architecture,
         ),
     )

@@ -421,6 +421,7 @@ typedef struct  {
 #define R_ARM_MOVT_ABS 44
 #define R_ARM_MOVW_PREL_NC 45
 #define R_ARM_MOVT_PREL 46
+#define R_ARM_GOT_PREL 96
 #define R_ARM_COPY 20
 
 // x86-64 relocation types.

@@ -2089,6 +2089,57 @@ linux_dynamic_runtime(
     ] + ["libc/dynamic_libc_lifecycle.c"],
     crt_sources = LINUX_DYNAMIC_CRT_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
+    output_dir = "libc",
+)
+
+linux_dynamic_runtime(
+    name = "arm_linux_dynamic_runtime",
+    architecture = "arm",
+    syscall_source = "arm support/linux_syscall.s",
+    clone_source = "arm support/linux_clone.s",
+    startup_source = "arm support/linux_start.s",
+    support_sources = [
+        "arm support/cxx_guard.s",
+        "arm support/eh_transfer.s",
+        "arm support/eh_unwind.s",
+        "arm support/longjmp.s",
+        "arm support/setjmp.s",
+    ],
+    dso_sources = [
+        src
+        for src in LIBC_SRCS
+        if src not in LINUX_DYNAMIC_CRT_SRCS and
+           src != "libc/cxx_guard.c"
+    ] + ["libc/dynamic_libc_lifecycle.c"],
+    crt_sources = LINUX_DYNAMIC_CRT_SRCS + [
+        "arm support/eh_unwind.s",
+        "libc/eh_personality.c",
+    ],
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    output_dir = "libc/arm",
+)
+
+linux_dynamic_runtime(
+    name = "riscv_linux_dynamic_runtime",
+    architecture = "riscv",
+    syscall_source = "RISCV_support/linux_syscall.s",
+    clone_source = "RISCV_support/linux_clone.s",
+    startup_source = "RISCV_support/linux_start.s",
+    support_sources = [
+        "RISCV_support/cxx_guard.s",
+        "RISCV_support/eh_transfer.s",
+        "RISCV_support/longjmp.s",
+        "RISCV_support/setjmp.s",
+    ],
+    dso_sources = [
+        src
+        for src in LIBC_SRCS
+        if src not in LINUX_DYNAMIC_CRT_SRCS and
+           src not in ["libc/cxx_guard.c", "libc/eh_arm.c"]
+    ] + ["libc/dynamic_libc_lifecycle.c"],
+    crt_sources = LINUX_DYNAMIC_CRT_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    output_dir = "libc/riscv",
 )
 
 linux_libc_archive(
@@ -3468,6 +3519,242 @@ sh_test(
     ],
     env_inherit = [
         "COLIMA_HOME",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_arm_minimal_smoke_test",
+    srcs = ["tests/native_linux_arm_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_arm_linux)",
+        "$(rootpath :arm_linux_start)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":arm_linux_start",
+        ":davecc",
+        ":libc_arm_linux",
+        ":libc_headers",
+        ":native_linux_dynamic_minimal_source",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_arm_smoke_test",
+    srcs = ["tests/native_linux_arm_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_arm_linux)",
+        "$(rootpath :arm_linux_start)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":arm_linux_start",
+        ":davecc",
+        ":libc_arm_linux",
+        ":libc_headers",
+        ":native_linux_smoke_source",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_arm_dynamic_minimal_test",
+    srcs = ["tests/native_linux_arm_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/arm/libdavecc.so.1)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":arm_linux_dynamic_runtime",
+        ":davecc",
+        ":libc/arm/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_dynamic_minimal_source",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_arm_dynamic_smoke_test",
+    srcs = ["tests/native_linux_arm_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/arm/libdavecc.so.1)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":arm_linux_dynamic_runtime",
+        ":davecc",
+        ":libc/arm/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_smoke_source",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv_minimal_smoke_test",
+    srcs = ["tests/native_linux_riscv_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_riscv_linux)",
+        "$(rootpath :riscv_linux_start)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv_linux",
+        ":native_linux_dynamic_minimal_source",
+        ":riscv_linux_start",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv_smoke_test",
+    srcs = ["tests/native_linux_riscv_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_riscv_linux)",
+        "$(rootpath :riscv_linux_start)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv_linux",
+        ":native_linux_smoke_source",
+        ":riscv_linux_start",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv_dynamic_minimal_test",
+    srcs = ["tests/native_linux_riscv_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/riscv/libdavecc.so.1)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":davecc",
+        ":libc/riscv/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_dynamic_minimal_source",
+        ":riscv_linux_dynamic_runtime",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv_dynamic_smoke_test",
+    srcs = ["tests/native_linux_riscv_dynamic_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc/riscv/libdavecc.so.1)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":davecc",
+        ":libc/riscv/libdavecc.so.1",
+        ":libc_headers",
+        ":native_linux_smoke_source",
+        ":riscv_linux_dynamic_runtime",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
         "HOME",
         "PATH",
     ],

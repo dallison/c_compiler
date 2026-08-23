@@ -240,6 +240,8 @@ typedef enum {
   ARM_OP(movz),
   ARM_OP(movw),
   ARM_OP(movt),
+  ARM_OP(adr32),
+  ARM_OP(gotaddr),
   ARM_OP(mvn),
   ARM_OP(orn),
   ARM_OP(orr),
@@ -380,6 +382,8 @@ typedef enum {
 #define ARM_PCREL_HI_RELOC 0x4000
 #define ARM_PCREL_LO_RELOC 0x8000
 #define ARM_EXPORTED_LABEL 0x10000
+#define ARM_PIC_LOCAL_RELOC 0x20000
+#define ARM_GOT_RELOC 0x40000
 
 typedef struct {
   int reg_num;

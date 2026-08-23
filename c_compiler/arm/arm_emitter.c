@@ -976,7 +976,11 @@ static void PrintSymbolOperand(ARMEmitter* emitter, TargetInstruction* inst,
   char symbuf[256];
   const char* sym =
       TargetSymbolName(((TargetSymbol*)operand)->symbol, symbuf, sizeof(symbuf));
-  if ((inst->flags & ARM_HI_RELOC) != 0 ||
+  if ((inst->flags & ARM_GOT_RELOC) != 0) {
+    fprintf(fp, "\tgotaddr %s, %s\n", reg, sym);
+  } else if ((inst->flags & ARM_PIC_LOCAL_RELOC) != 0) {
+    fprintf(fp, "\tadr32 %s, %s\n", reg, sym);
+  } else if ((inst->flags & ARM_HI_RELOC) != 0 ||
       (inst->flags & ARM_PCREL_HI_RELOC) != 0) {
     fprintf(fp, "\tmovw %s, %s\n", reg, sym);
   } else if ((inst->flags & ARM_LO_RELOC) != 0 ||
@@ -1676,6 +1680,8 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
     case ARM_OP(br):
     case ARM_OP(movw):
     case ARM_OP(movt):
+    case ARM_OP(adr32):
+    case ARM_OP(gotaddr):
     case ARM_OP(cset):
     case ARM_OP(csetm):
     case ARM_OP(adr):
@@ -1894,6 +1900,25 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       } else {
         assert(false);
       }
+      break;
+    }
+
+    case ARM_OP(adr32):
+    case ARM_OP(gotaddr): {
+      TargetInstruction* sym = inst->operand[0];
+      char symbuf[256];
+      const char* name;
+      if ((ARMOpcode)sym->opcode == ARM_OP(symbol)) {
+        name = TargetSymbolName(((TargetSymbol*)sym)->symbol, symbuf,
+                                sizeof(symbuf));
+      } else {
+        assert((ARMOpcode)sym->opcode == ARM_OP(literal));
+        snprintf(symbuf, sizeof(symbuf), ".str.%d",
+                 ((TargetLiteral*)sym)->literal_id);
+        name = symbuf;
+      }
+      fprintf(fp, "\t%-12s%s, %s\n", ARMOpcodeName(inst->opcode),
+              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)), name);
       break;
     }
 

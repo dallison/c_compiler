@@ -444,11 +444,13 @@ static void AddDefaultStandardModulePath(Vector* compiler_args,
   VectorAppend(compiler_args, resources->module_dir.value);
 }
 
-static void AddRuntimeFile(Vector* linker_args, Vector* owned_paths,
-                           DriverResources* resources, const char* filename,
-                           const char* target) {
+static void AddRuntimeFileFromDirectory(Vector* linker_args,
+                                        Vector* owned_paths,
+                                        const char* directory,
+                                        const char* filename,
+                                        const char* target) {
   String* path = NewEmptyString();
-  StringPrintf(path, "%s/%s", resources->lib_dir.value, filename);
+  StringPrintf(path, "%s/%s", directory, filename);
   if (!PathIsFile(path->value)) {
     fprintf(stderr,
             "unable to find DaveCC runtime file '%s'; build %s, set "
@@ -482,11 +484,14 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
       fprintf(stderr, "-dynamic and -static cannot be used together\n");
       exit(1);
     }
+    bool is_x86_64 = strcmp(runtime->canonical_name, "x86_64") == 0;
+    bool is_arm = strcmp(runtime->canonical_name, "arm") == 0;
+    bool is_riscv = strcmp(runtime->canonical_name, "riscv") == 0;
     if (runtime->os != kTargetOSLinux ||
-        strcmp(runtime->canonical_name, "x86_64") != 0) {
+        (!is_x86_64 && !is_arm && !is_riscv)) {
       fprintf(stderr,
-              "-dynamic is currently supported only for "
-              "x86_64-unknown-linux-davecc\n");
+              "-dynamic is currently supported only for x86_64, ARM, and "
+              "RISC-V Linux targets\n");
       exit(1);
     }
     if (resources->lib_dir.length == 0) {
@@ -495,20 +500,47 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
               "or use -nostdlib\n");
       exit(1);
     }
+    const char* interpreter =
+        is_arm ? "-I/lib/ld-linux-armhf.so.3"
+               : is_riscv ? "-I/lib/ld-linux-riscv64-lp64d.so.1"
+                          : "-I/lib64/ld-linux-x86-64.so.2";
+    const char* startup =
+        is_arm ? "arm_linux_dynamic_start.o"
+               : is_riscv ? "riscv_linux_dynamic_start.o"
+                          : "x86_64_linux_dynamic_start.o";
+    const char* runtime_target =
+        is_arm ? "//:arm_linux_dynamic_runtime"
+               : is_riscv ? "//:riscv_linux_dynamic_runtime"
+                          : "//:x86_64_linux_dynamic_runtime";
+    String runtime_dir = {0};
+    StringInit(&runtime_dir, resources->lib_dir.value);
+    const char* architecture_dir =
+        is_arm ? "arm" : is_riscv ? "riscv" : NULL;
+    if (architecture_dir != NULL) {
+      String startup_path = {0};
+      StringPrintf(&startup_path, "%s/%s", runtime_dir.value, startup);
+      if (!PathIsFile(startup_path.value)) {
+        StringAppend(&runtime_dir, "/");
+        StringAppend(&runtime_dir, architecture_dir);
+      }
+      StringDestruct(&startup_path);
+    }
     VectorAppend(linker_args, "-e");
     VectorAppend(linker_args, "_start");
-    VectorAppend(linker_args, "-I/lib64/ld-linux-x86-64.so.2");
+    VectorAppend(linker_args, (void*)interpreter);
     VectorAppend(linker_args, "-bind-now");
     VectorAppend(linker_args, "-defer-init");
     VectorAppend(linker_args, "-rpath");
     VectorAppend(linker_args, "$ORIGIN");
-    AddRuntimeFile(linker_args, owned_paths, resources,
-                   "x86_64_linux_dynamic_start.o",
-                   "//:x86_64_linux_dynamic_runtime");
-    AddRuntimeFile(linker_args, owned_paths, resources, "libdavecc_crt.a",
-                   "//:x86_64_linux_dynamic_runtime");
-    AddRuntimeFile(linker_args, owned_paths, resources, "libdavecc.so",
-                   "//:x86_64_linux_dynamic_runtime");
+    AddRuntimeFileFromDirectory(linker_args, owned_paths, runtime_dir.value,
+                                startup, runtime_target);
+    VectorAppend(linker_args, "-whole-archive");
+    AddRuntimeFileFromDirectory(linker_args, owned_paths, runtime_dir.value,
+                                "libdavecc_crt.a", runtime_target);
+    VectorAppend(linker_args, "-no-whole-archive");
+    AddRuntimeFileFromDirectory(linker_args, owned_paths, runtime_dir.value,
+                                "libdavecc.so", runtime_target);
+    StringDestruct(&runtime_dir);
     return;
   }
 
@@ -1610,6 +1642,7 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "Unknown assembler architecture %s\n", target.value);
         exit(1);
       }
+      assembler->pic = compiler->pic;
       PreprocessorCopyOptions(&assembler->preprocessor, &compiler->preprocessor);
       AssemblerRun(assembler, asm_run);
       if (finalizer != NULL) {

@@ -383,12 +383,14 @@ String* Link(int argc, char** argv) {
   
   Vector object_files = {0};
   Vector static_library_names = {0};
+  Vector whole_static_library_names = {0};
   Vector dynamic_library_names = {0};
   Vector library_search_dirs = {0};
   Vector library_searches = {0};
   const char* config_file = NULL;     // -T config-file
   const char* layout_type_name = "program";  // -t layout-type
   bool delete_config = false;
+  bool whole_archive = false;
   
   // Process all input args and flags.
   for (int i = 1; i < argc; i++) {
@@ -418,6 +420,12 @@ String* Link(int argc, char** argv) {
         option_ok = true;
       } else if (strcmp(argv[i], "-dynamic") == 0) {
         linker.fully_static = false;
+        option_ok = true;
+      } else if (strcmp(argv[i], "-whole-archive") == 0) {
+        whole_archive = true;
+        option_ok = true;
+      } else if (strcmp(argv[i], "-no-whole-archive") == 0) {
+        whole_archive = false;
         option_ok = true;
       } else if (strcmp(argv[i], "-rpath") == 0) {
         i++;
@@ -498,7 +506,9 @@ String* Link(int argc, char** argv) {
       StringInit(&arg, argv[i]);
       // Static libraries end in ".a".
       if (StringEndsWith(&arg, ".a")) {
-        VectorAppend(&static_library_names, (void*)argv[i]);
+        VectorAppend(whole_archive ? &whole_static_library_names
+                                  : &static_library_names,
+                     (void*)argv[i]);
       } else if (StringEndsWith(&arg, ".o")) {
         // Object files end in ".o".
         String* filename = NewString(argv[i]);
@@ -588,6 +598,10 @@ String* Link(int argc, char** argv) {
   for (size_t i = 0; i < static_library_names.length; i++) {
     LinkerAddStaticLibrary(&linker, static_library_names.value.p[i]);
   }
+  for (size_t i = 0; i < whole_static_library_names.length; i++) {
+    LinkerAddWholeStaticLibrary(
+        &linker, whole_static_library_names.value.p[i]);
+  }
   for (size_t i = 0; i < dynamic_library_names.length; i++) {
     LinkerAddDynamicLibrary(&linker, dynamic_library_names.value.p[i]);
   }
@@ -595,6 +609,7 @@ String* Link(int argc, char** argv) {
   // Done with temporary vectors.
   VectorDestruct(&object_files);
   VectorDestruct(&static_library_names);
+  VectorDestruct(&whole_static_library_names);
   VectorDestruct(&dynamic_library_names);
   VectorDestruct(&library_search_dirs);
   VectorDestruct(&library_searches);

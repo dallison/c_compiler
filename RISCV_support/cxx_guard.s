@@ -1,5 +1,7 @@
 .text
 
+.global thrd_current
+
 .global __cxa_guard_acquire
 .type __cxa_guard_acquire, @function
 __cxa_guard_acquire:

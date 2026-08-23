@@ -168,6 +168,8 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(movz): return "movz";
   case ARM_OP(movw): return "movw";
   case ARM_OP(movt): return "movt";
+  case ARM_OP(adr32): return "adr32";
+  case ARM_OP(gotaddr): return "gotaddr";
   case ARM_OP(mvn): return "mvn";
   case ARM_OP(orn): return "orn";
   case ARM_OP(orr): return "orr";
@@ -1516,7 +1518,14 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
 // address into a register using movw/movt (ARM32 has no adrp).
 static TargetInstruction* EmitAddressOfSymbol(ARMGenerator* g,
                                               TargetInstruction* sym,
-                                              int size) {
+                                              int size,
+                                              bool externally_visible) {
+  if (compiler->pic) {
+    TargetInstruction* address =
+        NewInstruction1(externally_visible ? ARM_OP(gotaddr) : ARM_OP(adr32),
+                        sym);
+    return Emit(g, SetInstructionSize(address, size));
+  }
   TargetInstruction* movw =
       Emit(g, SetInstructionSize(NewInstruction1(ARM_OP(movw), sym), size));
   movw->flags |= ARM_LO_RELOC;
@@ -1537,7 +1546,10 @@ static TargetInstruction* LoadStaticVariableAddress(ARMGenerator* g,
                                                     IRNode* node) {
   IRVariable* variable = (IRVariable*)node;
   TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
-  return EmitAddressOfSymbol(g, symbol, kSize32Bit);
+  bool externally_visible =
+      !variable->symbol->flags.is_local &&
+      !StorageIs(variable->symbol->storage, STO(static));
+  return EmitAddressOfSymbol(g, symbol, kSize32Bit, externally_visible);
 }
 
 static struct {
@@ -3651,7 +3663,8 @@ static TargetInstruction* LowerLiteralReference(ARMGenerator* g, IRNode* node) {
   TargetInstruction* literal =
       Emit(g, SetInstructionSize(TargetNewLiteral((int)id_node->value.ivalue), kSize32Bit));
 
-  TargetInstruction* result = EmitAddressOfSymbol(g, literal, kSize32Bit);
+  TargetInstruction* result =
+      EmitAddressOfSymbol(g, literal, kSize32Bit, false);
 
   // Route the result into a destination tmp when this literalref is a ?: / && /
   // || branch (the "-> $n" annotation); otherwise the merge tmp is never

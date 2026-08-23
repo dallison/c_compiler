@@ -3878,29 +3878,21 @@ static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
 }
 
 // The first input is the address of the 'ap' variable.  The second is the
-// address of the last named function argument.  The varargs save area starts at
-// s0 with a1 in slot 0, so the first unnamed argument is last_arg_number slots
-// past s0.
+// address of the last named function argument. The prologue saves the first
+// unnamed integer argument at s0; when the argument registers are exhausted,
+// s0 is also the address of the first stack argument.
 static TargetInstruction* LowerBuiltinVaStart(RVGenerator* rv, IRNode* node) {
   TargetInstruction* s0 = Emit(rv, NewInstruction(RV_OP(fp)));
-  TargetInstruction* va_start = s0;
-  if (node->inputs.length > 1 && IRIsArgument(node->inputs.value.p[1])) {
-    IRVariable* last_arg = (IRVariable*)node->inputs.value.p[1];
-    int offset = (int)last_arg->symbol->value.arg_number * 8;
-    if (offset != 0) {
-      va_start = AddImmediate(rv, s0, offset);
-    }
-  }
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, node->inputs.value.p[0], &addr, &offset);
   if (!on_stack) {
-    TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv), va_start));
+    TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv), s0));
     mv->dest = addr;
     return SetLoweredNode(node, addr);
   }
   return SetLoweredNode(node,
-                        Emit(rv, NewInstruction3(RV_OP(sd), va_start, addr, offset)));
+                        Emit(rv, NewInstruction3(RV_OP(sd), s0, addr, offset)));
 }
 
 // The first input is &ap.  The 'ap' variable contains the address of the

@@ -384,7 +384,7 @@ static void ApplyRelocation(Linker* linker,
       // instruction that contains the offset relative to the current
       // PC.
       uint64_t got_address = linker->dynamic_linker->
-          got_plt_group->address;
+          got_group->address;
       // Each GOT entry is 8 bytes long.
       uint64_t addr = got_address + symbol->got_index * 8 + A;
       int32_t offset = (int32_t)(addr - P);

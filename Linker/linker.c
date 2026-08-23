@@ -983,6 +983,28 @@ bool LinkerReadObjectFileFromArchive(Linker* linker, ARArchive* archive,
   return true;
 }
 
+void LinkerAddWholeStaticLibrary(Linker* linker, const char* name) {
+  size_t old_length = linker->static_libraries.length;
+  LinkerAddStaticLibrary(linker, name);
+  if (linker->static_libraries.length == old_length) {
+    LinkerError(NULL, "Unable to read whole archive %s", name);
+    return;
+  }
+  ARArchive* archive =
+      linker->static_libraries.value.p[linker->static_libraries.length - 1];
+  for (size_t i = 0; i < archive->files.length; i++) {
+    ARFile* file = archive->files.value.p[i];
+    if (strcmp(file->filename.value, "/") == 0 ||
+        strcmp(file->filename.value, "//") == 0) {
+      continue;
+    }
+    if (!LinkerReadObjectFileFromArchive(linker, archive, file)) {
+      LinkerError(NULL, "Unable to read %s from whole archive %s",
+                  file->filename.value, name);
+    }
+  }
+}
+
 // Check if a symbol table bucket contains undefined symbola
 // and if so, look for them in the libraries and if found
 // link in the library file defining them.
@@ -1068,22 +1090,42 @@ static void BuildSectionGroup(MapKeyValue* kv, void* data) {
   Linker* linker = ((struct SectionGroupingData*)data)->linker;
   int32_t section_type = ((struct SectionGroupingData*)data)->section_type;
 
-  // Take the flags and alignment from the first section.
+  // Take the flags from the first section and preserve the strictest input
+  // alignment on the combined output section.
   ELFReaderSection* first_section = sections->value.p[0];
   int64_t section_flags = first_section->header->flags;
-  int64_t section_alignment = first_section->header->addralign;
+  int64_t section_alignment = 1;
+  for (size_t i = 0; i < sections->length; i++) {
+    ELFReaderSection* section = sections->value.p[i];
+    if (section->header->addralign > section_alignment) {
+      section_alignment = section->header->addralign;
+    }
+  }
 
   SectionGroup* group = NewSectionGroup(name, section_type, section_flags,
                                         section_alignment);
   VectorAppend(&linker->section_groups, group);
 
-  // Append all sections in the vector of ELFReaderSections to
-  // the components of the group.  Each element of the components
-  // vector is a GroupedSection object with source kGroupedSectionExisting.
+  // Each input section must start at its own sh_addralign boundary inside the
+  // combined output section. This is especially important for ARM atomics:
+  // an unaligned 32-bit object in .bss makes ldrex/strex fault with SIGBUS.
+  uint64_t group_offset = 0;
   for (size_t i = 0; i < sections->length; i++) {
     ELFReaderSection* s = sections->value.p[i];
+    uint64_t alignment =
+        s->header->addralign > 1 ? (uint64_t)s->header->addralign : 1;
+    uint64_t aligned_offset =
+        ((group_offset + alignment - 1) / alignment) * alignment;
+    if (aligned_offset != group_offset) {
+      ELFWriterSectionContents* padding =
+          NewELFWriterSectionContents(kSectionContentsPad);
+      padding->size = aligned_offset - group_offset;
+      VectorAppend(&group->components, NewGroupedSectionPadding(padding));
+      group_offset = aligned_offset;
+    }
     GroupedSection* gsection = NewExistingGroupedSection(s);
     VectorAppend(&group->components, gsection);
+    group_offset += s->header->size;
   }
 }
 
@@ -1550,9 +1592,12 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
             tls_addr += section->contents->size;
             break;
           }
-          case kGroupedSectionPadding:
-            abort();
+          case kGroupedSectionPadding: {
+            uint64_t size = gsect->section.padding->size;
+            offset += size;
+            tls_addr += size;
             break;
+          }
         }
       }
       continue;
@@ -1591,9 +1636,14 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
           addr = section->address + section->contents->size;
           break;
         }
-        case kGroupedSectionPadding:
-          abort();      // Can't have any of these here.
+        case kGroupedSectionPadding: {
+          uint64_t size = gsect->section.padding->size;
+          uint64_t padding_address =
+              RegionAllocateAddress(linker, group, size, addr);
+          offset += size;
+          addr = padding_address + size;
           break;
+        }
         
       }
     }
@@ -2057,13 +2107,23 @@ static void AssignSectionIndexes(Linker* linker, ELFWriterFile* elf) {
     }
     
     // Fixup the dynamic symbol table now that we know the symbol addresses.
-    DynamicLinkerFixupDynamicSymbolTable(FindDynamicSymbolTableBuffer(elf),
+    DynamicLinkerFixupDynamicSymbolTable(linker,
+                                         FindDynamicSymbolTableBuffer(elf),
                                          (int32_t)elf->sections.length - 1);
     
     ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".dynsym", ".dynstr");
-    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".rela.dyn", ".dynsym");
-    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".rela.plt", ".dynsym");
-    ELFWriterAddSectionFixupByName(elf, kFixupFieldInfo, ".rela.plt", ".plt");
+    const char* dyn_relocations =
+        linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ? ".rel.dyn"
+                                                         : ".rela.dyn";
+    const char* plt_relocations =
+        linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ? ".rel.plt"
+                                                         : ".rela.plt";
+    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, dyn_relocations,
+                                   ".dynsym");
+    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, plt_relocations,
+                                   ".dynsym");
+    ELFWriterAddSectionFixupByName(elf, kFixupFieldInfo, plt_relocations,
+                                   ".plt");
   }
   
   for (size_t i = 0; i < linker->data_segment.sections.length; i++) {

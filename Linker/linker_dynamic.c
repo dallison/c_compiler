@@ -24,6 +24,19 @@
 #include <unistd.h>
 #include <string.h>
 
+static int DynamicPointerSize(const Linker* linker) {
+  return linker->ops->is_64_bit ? 8 : 4;
+}
+
+static bool DynamicUsesRel(const Linker* linker) {
+  return linker->elf_machine_type == ELF_MACHINE_TYPE_ARM;
+}
+
+static size_t DynamicRelocationSize(const Linker* linker) {
+  return DynamicUsesRel(linker) ? 2 * sizeof(ELF32_Word)
+                                : linker->ops->relocation_size;
+}
+
 void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
   assert(linker->arch != NULL);
 
@@ -39,6 +52,7 @@ void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
   VectorInit(&s->plt_relocations);
   VectorInit(&s->data_relocations);
   VectorInit(&s->needed_libraries);
+  VectorInit(&s->dynamic_symbol_fixups);
   s->rpath = 0;
   s->plt_group = NULL;
   s->got_group = NULL;
@@ -63,7 +77,9 @@ void DynamicLinkerDestruct(DynamicLinker* s) {
   VectorDestruct(&s->got_relocations);
   VectorDestruct(&s->plt_relocations);
   VectorDestruct(&s->data_relocations);
-  VectorInit(&s->needed_libraries);
+  VectorDestruct(&s->needed_libraries);
+  VectorDestructWithContents(&s->dynamic_symbol_fixups, NULL,
+                             /*free_element=*/true);
   DynamicLibraryRegistryDestruct(&s->loaded_dynamic_libraries);
 }
 
@@ -79,7 +95,7 @@ void DynamicLinkerInventSymbols(Linker* linker, DynamicLinker* s) {
 
 void DynamicLinkerDefineSymbols(Linker* linker) {
   DynamicLinker* dynamic = linker->dynamic_linker;
-  
+
   // _GLOBAL_OFFSET_TABLE_
   dynamic->global_offset_table_symbol->address = dynamic->got_plt_group->address;
   dynamic->global_offset_table_symbol->defined = true;
@@ -142,7 +158,7 @@ static void BuildGlobalOffsetTableContents(struct Linker* linker,
                             ELFWriterSectionContents* got_contents,
                             ELFWriterSectionContents* got_plt_contents) {
   DynamicLinker* dynamic = linker->dynamic_linker;
-  
+
   // Add data entries.
   Vector* data_entries = &dynamic->global_offset_table.data_entries;
   for (size_t i = 0; i < data_entries->length; i++) {
@@ -312,7 +328,8 @@ static void AllocateDynamicRelocations(struct Linker* linker,
   
   // The .rela.dyn section contains both GOT and data reloacations.
   size_t length = (dynamic->got_relocations.length +
-                   dynamic->data_relocations.length) * sizeof(ELFRelocation);
+                   dynamic->data_relocations.length) *
+                  DynamicRelocationSize(linker);
   BufferAddSpace(&contents->data.buffered, length);
 }
 
@@ -323,7 +340,34 @@ static void AllocatePLTRelocations(struct Linker* linker,
                                        struct ELFWriterSectionContents* contents) {
   DynamicLinker* dynamic = linker->dynamic_linker;
   BufferAddSpace(&contents->data.buffered,
-                 dynamic->plt_relocations.length * sizeof(ELFRelocation));
+                 dynamic->plt_relocations.length *
+                     DynamicRelocationSize(linker));
+}
+
+static void StoreDynamicRelocation(Linker* linker, Buffer* buffer,
+                                   size_t index, int64_t offset,
+                                   int32_t symbol_index, int64_t addend,
+                                   int32_t type) {
+  ELFRelocation relocation;
+  ELFWriterInitRelocation(&relocation, offset, symbol_index, addend, type);
+  char* destination =
+      buffer->value + index * DynamicRelocationSize(linker);
+  if (DynamicUsesRel(linker)) {
+    ELF32_Word out[2] = {
+        (ELF32_Addr)relocation.offset,
+        ELF32_R_INFO((uint32_t)symbol_index, (uint32_t)type),
+    };
+    memcpy(destination, out, sizeof(out));
+  } else if (linker->ops->is_64_bit) {
+    memcpy(destination, &relocation, sizeof(ELF64Relocation));
+  } else {
+    ELF32Relocation out = {
+        .offset = (ELF32_Addr)relocation.offset,
+        .info = ELF32_R_INFO((uint32_t)symbol_index, (uint32_t)type),
+        .addend = (ELF32_Sword)relocation.addend,
+    };
+    memcpy(destination, &out, sizeof(out));
+  }
 }
 
 
@@ -344,21 +388,19 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
   int32_t index = 0;
   for (size_t i = 0; i < dynamic->data_relocations.length; i++) {
     Relocation* reloc = dynamic->data_relocations.value.p[i];
-    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[index*sizeof(ELFRelocation)];
     int64_t offset = reloc->offset + reloc->section->address;
     int64_t addend = reloc->addend;
     if (reloc->symbol != NULL) {
       addend += (int64_t)reloc->symbol->address;
     }
-    ELFWriterInitRelocation(elfreloc, offset,
-                            0, addend, reloc->type);
+    StoreDynamicRelocation(linker, contents, (size_t)index, offset, 0,
+                           addend, reloc->type);
     index++;
   }
 
   // Now GOT relocations.
   for (size_t i = 0; i < dynamic->got_relocations.length; i++) {
     Relocation* reloc = dynamic->got_relocations.value.p[i];
-    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[index*sizeof(ELFRelocation)];
     int symbol_index;
     if (reloc->symbol->dynamic_index == -1) {
       symbol_index = reloc->symbol->index;
@@ -366,8 +408,10 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
       symbol_index = reloc->symbol->dynamic_index;
     }
     assert(symbol_index != -1);
-    ELFWriterInitRelocation(elfreloc, reloc->offset + dynamic->got_group->address,
-                           symbol_index, 0, reloc->type);
+    StoreDynamicRelocation(
+        linker, contents, (size_t)index,
+        reloc->offset + dynamic->got_group->address, symbol_index, 0,
+        reloc->type);
     index++;
   }
 }
@@ -384,7 +428,6 @@ void DynamicLinkerBuildPLTRelocations(struct Linker* linker) {
   // entries in the table, overwriting the memory previously allocated.
   for (size_t i = 0; i < dynamic->plt_relocations.length; i++) {
     Relocation* reloc = dynamic->plt_relocations.value.p[i];
-    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[i*sizeof(ELFRelocation)];
     int symbol_index;
     if (reloc->symbol->dynamic_index == -1) {
       symbol_index = reloc->symbol->index;
@@ -392,9 +435,10 @@ void DynamicLinkerBuildPLTRelocations(struct Linker* linker) {
       symbol_index = reloc->symbol->dynamic_index;
     }
     // assert(symbol_index != -1);
-    ELFWriterInitRelocation(elfreloc,
-                            reloc->offset + dynamic->got_plt_group->address,
-                            symbol_index, 0, reloc->type);
+    StoreDynamicRelocation(
+        linker, contents, i,
+        reloc->offset + dynamic->got_plt_group->address, symbol_index, 0,
+        reloc->type);
   }
 }
 
@@ -516,11 +560,15 @@ static SectionGroup* AddProcedureLinkageTable(Linker* linker) {
 static SectionGroup* AddDynamicRelocationsSection(Linker* linker) {
   ELFWriterSectionContents* contents =
   NewELFWriterSectionContents(kSectionContentsBuffered);
-  ELFWriterSection* section = NewELFSection(".rela.dyn",
-                                            SHT(rela),
+  ELFWriterSection* section = NewELFSection(DynamicUsesRel(linker)
+                                                ? ".rel.dyn"
+                                                : ".rela.dyn",
+                                            DynamicUsesRel(linker)
+                                                ? SHT(rel)
+                                                : SHT(rela),
                                             SHF(alloc),
-                                            8, contents);
-  section->header.entsize = sizeof(ELFRelocation);
+                                            DynamicPointerSize(linker), contents);
+  section->header.entsize = DynamicRelocationSize(linker);
   
   // Allocate space for the relocations but we don't know the
   // contents yet.
@@ -536,11 +584,15 @@ static SectionGroup* AddDynamicRelocationsSection(Linker* linker) {
 static SectionGroup* AddPLTRelocationsSection(Linker* linker) {
   ELFWriterSectionContents* contents =
   NewELFWriterSectionContents(kSectionContentsBuffered);
-  ELFWriterSection* section = NewELFSection(".rela.plt",
-                                            SHT(rela),
+  ELFWriterSection* section = NewELFSection(DynamicUsesRel(linker)
+                                                ? ".rel.plt"
+                                                : ".rela.plt",
+                                            DynamicUsesRel(linker)
+                                                ? SHT(rel)
+                                                : SHT(rela),
                                             SHF(alloc),
-                                            8, contents);
-  section->header.entsize = sizeof(ELFRelocation);
+                                            DynamicPointerSize(linker), contents);
+  section->header.entsize = DynamicRelocationSize(linker);
   
   // Allocate space for the relocations but we don't know the
   // contents yet.
@@ -592,13 +644,22 @@ static SectionGroup* AddInterpreterSection(Linker* linker) {
 
 // Write a new ELFDynamicSectionEntry in the given buffer with the
 // given value.
-static void WriteDynamicSectionEntryWithValue(Buffer* buffer,
+static void WriteDynamicSectionEntryWithValue(Linker* linker, Buffer* buffer,
                                               ELF_Xword tag,
                                               ELF_Xword value) {
-  ELFDynamicSectionEntry entry;
-  entry.tag = tag;
-  entry.un.val = value;
-  BufferAppend(buffer, (char*)&entry, sizeof(entry));
+  if (linker->ops->is_64_bit) {
+    ELF64DynamicSectionEntry entry = {
+        .tag = tag,
+        .un.val = value,
+    };
+    BufferAppend(buffer, (char*)&entry, sizeof(entry));
+  } else {
+    ELF32DynamicSectionEntry entry = {
+        .tag = (ELF32_Sword)tag,
+        .un.val = (ELF32_Word)value,
+    };
+    BufferAppend(buffer, (char*)&entry, sizeof(entry));
+  }
 }
 
 // Create the .dynamic section contents for a shared object.  There's
@@ -610,67 +671,82 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   // Write out DT_NEEDED entries
   for (size_t i = 0; i < linker->dynamic_linker->needed_libraries.length; i++) {
     ELF_Word str_offset = (int)linker->dynamic_linker->needed_libraries.value.w[i];
-    WriteDynamicSectionEntryWithValue(buffer, DT(needed), str_offset);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(needed), str_offset);
   }
   
   // Write out DT_RUNPATH entry.
   if (linker->dynamic_linker->rpath != 0) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(runpath), linker->dynamic_linker->rpath);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(runpath),
+                                      linker->dynamic_linker->rpath);
   }
   
   if (linker->building_dso && linker->so_name != -1) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(soname), linker->so_name);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(soname),
+                                      linker->so_name);
   }
 
   ELF_Xword dynamic_flags = 0;
   // DaveCC unwind metadata currently carries base-relative fixups in an
   // otherwise read-only load segment. Tell the native loader to make that
   // segment writable only while applying relocations.
-  WriteDynamicSectionEntryWithValue(buffer, DT(textrel), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(textrel), 0);
   dynamic_flags |= DF_TEXTREL;
   if (linker->bind_now) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(bind_now), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(bind_now), 0);
     dynamic_flags |= DF_BIND_NOW;
   }
   if (dynamic_flags != 0) {
-    WriteDynamicSectionEntryWithValue(buffer, DT(flags), dynamic_flags);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(flags),
+                                      dynamic_flags);
   }
   
   // Known entries.  If the value is not available until later we
   // write a zero as the entry value here.  It will be overwritten
   // when we know the actual value to use.
-  WriteDynamicSectionEntryWithValue(buffer, DT(gnu_hash), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(strtab), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(strsz), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(symtab), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(syment), sizeof(ELFSymbol));
-  WriteDynamicSectionEntryWithValue(buffer, DT(rela), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(relasz), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(relacount), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(relaent), sizeof(ELFRelocation));
-  
-  WriteDynamicSectionEntryWithValue(buffer, DT(pltgot), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(pltrelsz), 0);
-  WriteDynamicSectionEntryWithValue(buffer, DT(pltrel), DT(rela));
-  WriteDynamicSectionEntryWithValue(buffer, DT(jmprel), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(gnu_hash), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(strtab), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(strsz), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(symtab), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(syment),
+                                    linker->ops->symbol_size);
+  if (DynamicUsesRel(linker)) {
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(rel), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relsz), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relcount), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relent),
+                                      DynamicRelocationSize(linker));
+  } else {
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(rela), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relasz), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relacount), 0);
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(relaent),
+                                      DynamicRelocationSize(linker));
+  }
+
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(pltgot), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(pltrelsz), 0);
+  WriteDynamicSectionEntryWithValue(
+      linker, buffer, DT(pltrel),
+      DynamicUsesRel(linker) ? DT(rel) : DT(rela));
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(jmprel), 0);
 
   if (!linker->defer_program_init) {
     SectionGroup* preinit = LinkerFindSectionGroup(linker, ".preinit_array");
     if (preinit != NULL && LinkerSectionGroupSize(preinit) > 0) {
-      WriteDynamicSectionEntryWithValue(buffer, DT(preinit_array), 0);
-      WriteDynamicSectionEntryWithValue(buffer, DT(preinit_arraysz), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(preinit_array), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(preinit_arraysz), 0);
     }
 
     SectionGroup* init_array = LinkerFindSectionGroup(linker, ".init_array");
     if (init_array != NULL && LinkerSectionGroupSize(init_array) > 0) {
-      WriteDynamicSectionEntryWithValue(buffer, DT(init_array), 0);
-      WriteDynamicSectionEntryWithValue(buffer, DT(init_arraysz), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(init_array), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(init_arraysz), 0);
     }
 
     SectionGroup* fini_array = LinkerFindSectionGroup(linker, ".fini_array");
     if (fini_array != NULL && LinkerSectionGroupSize(fini_array) > 0) {
-      WriteDynamicSectionEntryWithValue(buffer, DT(fini_array), 0);
-      WriteDynamicSectionEntryWithValue(buffer, DT(fini_arraysz), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(fini_array), 0);
+      WriteDynamicSectionEntryWithValue(linker, buffer, DT(fini_arraysz), 0);
     }
   }
 
@@ -678,25 +754,38 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   // TODO: text relocations flag.
   
   // Write out DT(null) to terminate section.
-  WriteDynamicSectionEntryWithValue(buffer, DT(null), 0);
+  WriteDynamicSectionEntryWithValue(linker, buffer, DT(null), 0);
 }
 
 // Given a dynamic section entry tag, replace its value in the buffer
 // with the new value.  Returns false if the tag is not present.
-static bool FixupDynamicSectionEntryValue(Buffer* buffer,
+static bool FixupDynamicSectionEntryValue(const ELFFormatOps* ops,
+                                          Buffer* buffer,
                                           ELF_Xword tag, ELF_Xword value) {
   size_t index = 0;
   while (index < buffer->length) {
-    ELFDynamicSectionEntry* entry =
-    (ELFDynamicSectionEntry*)&buffer->value[index];
-    if (entry->tag == DT(null)) {
+    ELF_Xword entry_tag;
+    if (ops->is_64_bit) {
+      ELF64DynamicSectionEntry* entry =
+          (ELF64DynamicSectionEntry*)&buffer->value[index];
+      entry_tag = entry->tag;
+      if (entry_tag == tag) {
+        entry->un.val = value;
+        return true;
+      }
+    } else {
+      ELF32DynamicSectionEntry* entry =
+          (ELF32DynamicSectionEntry*)&buffer->value[index];
+      entry_tag = (ELF_Xword)entry->tag;
+      if (entry_tag == tag) {
+        entry->un.val = (ELF32_Word)value;
+        return true;
+      }
+    }
+    if (entry_tag == DT(null)) {
       break;
     }
-    if (entry->tag == tag) {
-      entry->un.val = value;
-      return true;
-    }
-    index += sizeof(*entry);
+    index += ops->dynamic_entry_size;
   }
   return false;
 }
@@ -708,8 +797,10 @@ static void FixupArrayDynamicTags(ELFWriterFile* elf, Buffer* buffer,
   if (section == NULL || section->header.size == 0) {
     return;
   }
-  FixupDynamicSectionEntryValue(buffer, tag_addr, section->header.addr);
-  FixupDynamicSectionEntryValue(buffer, tag_size, section->header.size);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, tag_addr,
+                                section->header.addr);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, tag_size,
+                                section->header.size);
 }
 
 // Now that we have the offsets for all the sections we can set the values
@@ -729,44 +820,57 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   // String table.
   ELFWriterSection* strtab = ELFWriterFindSection(elf, ".dynstr");
   assert(strtab != NULL);
-  FixupDynamicSectionEntryValue(buffer, DT(strtab), strtab->header.addr);
-  FixupDynamicSectionEntryValue(buffer, DT(strsz), strtab->header.size);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(strtab),
+                                strtab->header.addr);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(strsz),
+                                strtab->header.size);
   
   // LinkerSymbol table.
   ELFWriterSection* symtab = ELFWriterFindSection(elf, ".dynsym");
   assert(symtab != NULL);
-  FixupDynamicSectionEntryValue(buffer, DT(symtab), symtab->header.addr);
-  
-  // Relocations.
-  ELFWriterSection* rela = ELFWriterFindSection(elf, ".rela.dyn");
-  assert(rela != NULL);
-  FixupDynamicSectionEntryValue(buffer, DT(rela), rela->header.addr);
-  FixupDynamicSectionEntryValue(buffer, DT(relasz), rela->header.size);
-  FixupDynamicSectionEntryValue(buffer, DT(relacount),
-                                dynamic_linker->data_relocations.length);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(symtab),
+                                symtab->header.addr);
+
+  // Relocations. ARM EABI uses REL; the other current dynamic targets use
+  // RELA.
+  bool uses_rel = elf->header.machine == ELF_MACHINE_TYPE_ARM;
+  ELFWriterSection* dynamic_relocations =
+      ELFWriterFindSection(elf, uses_rel ? ".rel.dyn" : ".rela.dyn");
+  assert(dynamic_relocations != NULL);
+  FixupDynamicSectionEntryValue(
+      elf->ops, buffer, uses_rel ? DT(rel) : DT(rela),
+      dynamic_relocations->header.addr);
+  FixupDynamicSectionEntryValue(
+      elf->ops, buffer, uses_rel ? DT(relsz) : DT(relasz),
+      dynamic_relocations->header.size);
+  FixupDynamicSectionEntryValue(
+      elf->ops, buffer, uses_rel ? DT(relcount) : DT(relacount),
+      dynamic_linker->data_relocations.length);
   
   // GNU Hash.
   ELFWriterSection* hash = ELFWriterFindSection(elf, ".gnu_hash");
   assert(hash != NULL);
-  FixupDynamicSectionEntryValue(buffer, DT(gnu_hash), hash->header.addr);
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(gnu_hash),
+                                hash->header.addr);
   
   // PLT part of the GOT.
   ELFWriterSection* got_plt = ELFWriterFindSection(elf, ".got.plt");
   assert(got_plt != NULL);
   
-  FixupDynamicSectionEntryValue(buffer, DT(pltgot),
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(pltgot),
                                 got_plt->header.addr);
   
    // Relocations for GOT PLT entries.
-  ELFWriterSection* jmp_rel = ELFWriterFindSection(elf, ".rela.plt");
+  ELFWriterSection* jmp_rel =
+      ELFWriterFindSection(elf, uses_rel ? ".rel.plt" : ".rela.plt");
   assert(jmp_rel != NULL);
   
   // Address of .rela.plt section.
-  FixupDynamicSectionEntryValue(buffer, DT(jmprel),
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(jmprel),
                                 jmp_rel->header.addr);
   
   // Size of .rela.plt section.
-  FixupDynamicSectionEntryValue(buffer, DT(pltrelsz),
+  FixupDynamicSectionEntryValue(elf->ops, buffer, DT(pltrelsz),
                                 jmp_rel->header.size);
 
   FixupArrayDynamicTags(elf, buffer, ".preinit_array",
@@ -783,11 +887,11 @@ static SectionGroup* AddDynamicSection(Linker* linker) {
   ELFWriterSection* dynamic = NewELFSection(".dynamic",
                                             SHT(dynamic),
                                             SHF(alloc),
-                                            8, contents);
+                                            DynamicPointerSize(linker), contents);
   // Set user data to the dynamic_linker info so we can find it
   // during fixup.
   dynamic->user_data = linker->dynamic_linker;
-  dynamic->header.entsize = sizeof(ELFDynamicSectionEntry);
+  dynamic->header.entsize = linker->ops->dynamic_entry_size;
   
   // Create the contents of the section.  This will contain values
   // to be fixed up when the information is known.
@@ -803,22 +907,17 @@ static SectionGroup* AddDynamicSection(Linker* linker) {
 typedef struct  {
   Buffer* dynsym;
   Buffer* dynstr;
+  Vector* fixups;
+  size_t symbol_size;
 } DynamicSymbolTableInfo;
 
-// Since we don't know the section index or value of the symbols
-// when they are added to the dynamic symbol table we need to keep
-// a reference to the LinkerSymbol inside the symbol table's memory.
-// This is so that we can traverse it and insert the actual values
-// when we know them.  The union must have a max of sizeof(ELFSymbol)
-// bytes.
-typedef union {
-  ELFSymbol sym;            // 24 bytes.
-  struct {
-    ELF_Word name_offset;   // 4 bytes.
-    uint32_t hash;          // 4 bytes.
-    LinkerSymbol* symbol;   // 8 bytes.
-  } fixup;                  // Total: 16 bytes.
-} SymbolFixup;
+// Build metadata is kept out of the on-disk .dynsym buffer because an ELF32
+// symbol is too small to temporarily hold a host pointer.
+typedef struct {
+  ELF_Word name_offset;
+  uint32_t hash;
+  LinkerSymbol* symbol;
+} DynamicSymbolFixup;
 
 
 
@@ -830,10 +929,12 @@ static int32_t num_gnu_buckets;
 // Compare SymbolFixup based on the hash value mod hash table size.
 // For GNU hash, the symbol table is sorted by hash bucket.
 static int CompareSymbolFixup(const void* a, const void* b) {
-  const SymbolFixup* f1 = (const SymbolFixup*)a;
-  const SymbolFixup* f2 = (const SymbolFixup*)b;
-  return (f1->fixup.hash % num_gnu_buckets) -
-           (f2->fixup.hash % num_gnu_buckets);
+  const DynamicSymbolFixup* f1 =
+      *(const DynamicSymbolFixup* const*)a;
+  const DynamicSymbolFixup* f2 =
+      *(const DynamicSymbolFixup* const*)b;
+  return (f1->hash % num_gnu_buckets) -
+         (f2->hash % num_gnu_buckets);
 }
 
 // Sort the dynamic symbol table by hash bucket.  Also, divide the
@@ -848,18 +949,19 @@ static int CompareSymbolFixup(const void* a, const void* b) {
 // chains in the hash table.  It also contains a symoffset
 // that tells it how many symbols are not to be searched.  These
 // are the undefined symbols.
-static size_t SortDynamicSymbolTable(Buffer* dynsym) {
+static size_t SortDynamicSymbolTable(Vector* fixups) {
   assert(num_gnu_buckets > 0);
-  size_t num_symbols = dynsym->length / sizeof(SymbolFixup);
-  SymbolFixup* symbols = (SymbolFixup*)dynsym->value;
+  size_t num_symbols = fixups->length;
+  DynamicSymbolFixup** symbols =
+      (DynamicSymbolFixup**)fixups->value.p;
   size_t def_index = -1;    // LinkerSymbol of first defined symbol.
   
   // Find the first defined symbol and set def_index to the
   // index of the first defined symbol.  We start at symbol index
   // 1 since 0 is always the NULL symbol.
   for (size_t i = 1; i < num_symbols; i++) {
-    SymbolFixup* symbol = &symbols[i];
-    if (symbol->fixup.symbol->header->shndx != 0) {
+    DynamicSymbolFixup* symbol = symbols[i];
+    if (symbol->symbol->header->shndx != 0) {
       def_index = i;
       break;
     }
@@ -876,12 +978,12 @@ static size_t SortDynamicSymbolTable(Buffer* dynsym) {
   // any symbols found to be undefined are swapped with the last_def
   // index and it is moved on to the next index.
   for (size_t i = def_index + 1; i < num_symbols; i++) {
-    SymbolFixup* symbol = &symbols[i];
-    if (symbol->fixup.symbol->header->shndx == 0) {
+    DynamicSymbolFixup* symbol = symbols[i];
+    if (symbol->symbol->header->shndx == 0) {
       // Swap undefined symbol with first defined symbol and
       // move the def_index on (since def_index now refers
       // to an undefined symbol).
-      SymbolFixup tmp;
+      DynamicSymbolFixup* tmp;
       tmp = symbols[i];
       symbols[i] = symbols[def_index];
       symbols[def_index] = tmp;
@@ -890,14 +992,14 @@ static size_t SortDynamicSymbolTable(Buffer* dynsym) {
   }
   
   // Sort only the defined symbols, which begin at def_index.
-  qsort(dynsym->value + def_index * sizeof(SymbolFixup),
-        dynsym->length / sizeof(SymbolFixup) - def_index,
-        sizeof(SymbolFixup),
+  qsort(symbols + def_index, num_symbols - def_index,
+        sizeof(*symbols),
         CompareSymbolFixup);
 #if 0
   for (size_t i = def_index; i < num_symbols; i++) {
-    SymbolFixup* symbol = &symbols[i];
-    printf("symbol %s %x is in bucket %d\n", symbol->fixup.symbol->name.value, symbol->fixup.hash, symbol->fixup.hash % num_gnu_buckets);
+    DynamicSymbolFixup* symbol = symbols[i];
+    printf("symbol %s %x is in bucket %d\n", symbol->symbol->name.value,
+           symbol->hash, symbol->hash % num_gnu_buckets);
   }
 #endif
   // Return the index of the first defined symbol.
@@ -921,14 +1023,12 @@ static void AddSymbolListToDynamicSymbolTable(void* entry, void* data) {
     ELF_Word name = (ELF_Word)info->dynstr->length;
     BufferAppend(info->dynstr, sym->name.value, sym->name.length+1);
     
-    // Create LinkerSymbol fixup.  This will be replaced by the real
-    // symbol when all the information is known. The SymbolFixup
-    // struct is the same size as and ELFSymbol.
-    SymbolFixup fixup;
-    fixup.fixup.name_offset = name;
-    fixup.fixup.symbol = sym;
-    fixup.fixup.hash = DynamicLoaderGNUHash(sym->name.value);
-    BufferAppend(info->dynsym, (char*)&fixup, sizeof(SymbolFixup));
+    DynamicSymbolFixup* fixup = malloc(sizeof(*fixup));
+    fixup->name_offset = name;
+    fixup->symbol = sym;
+    fixup->hash = DynamicLoaderGNUHash(sym->name.value);
+    VectorAppend(info->fixups, fixup);
+    BufferAddSpace(info->dynsym, info->symbol_size);
   }
 }
 
@@ -967,16 +1067,17 @@ static void DebugPrintHashTable(Buffer* hashtable, size_t num_symbols) {
 }
 #endif
 
-static DynamicLoaderGNUHashTableHeader WriteHeader(Buffer* dynsym,
-                                                   Buffer* hashtable,
-                                                   size_t first_def_index) {
+static DynamicLoaderGNUHashTableHeader WriteHeader(
+    Linker* linker, Vector* fixups, Buffer* hashtable,
+    size_t first_def_index) {
   DynamicLoaderGNUHashTableHeader header;
   header.num_buckets = num_gnu_buckets;
   header.symoffset = (int32_t)first_def_index;
-  size_t num_symbols = dynsym->length / sizeof(ELFSymbol);
+  size_t num_symbols = fixups->length;
   
   int64_t num_bits = (num_symbols - first_def_index) * 12;
-  header.bloom_size = (int32_t)NextPowerOf2(num_bits / 64);
+  int word_bits = linker->ops->is_64_bit ? 64 : 32;
+  header.bloom_size = (int32_t)NextPowerOf2(num_bits / word_bits);
   header.bloom_shift = 26;
   
   // Write header.
@@ -984,29 +1085,39 @@ static DynamicLoaderGNUHashTableHeader WriteHeader(Buffer* dynsym,
   return header;
 }
 
-static void WriteBloomFilter(Buffer* dynsym,
+static void WriteBloomFilter(Linker* linker,
+                             Vector* fixups,
                              Buffer* hashtable,
                              size_t first_def_index,
                              DynamicLoaderGNUHashTableHeader* header) {
   // Write Bloom filter.
   // Byte index into buffer value for start of bloom filter.
   size_t bloom_index = hashtable->length;
-  BufferAddSpace(hashtable, header->bloom_size * sizeof(uint64_t));
-  uint64_t* bloom_filter = (uint64_t*)&hashtable->value[bloom_index];
-  memset(bloom_filter, 0, header->bloom_size * sizeof(uint64_t));
+  size_t word_size = linker->ops->is_64_bit ? sizeof(uint64_t)
+                                             : sizeof(uint32_t);
+  BufferAddSpace(hashtable, header->bloom_size * word_size);
+  memset(&hashtable->value[bloom_index], 0,
+         header->bloom_size * word_size);
 
-  size_t num_symbols = dynsym->length / sizeof(ELFSymbol);
-  for (size_t i = first_def_index; i < num_symbols; i++) {
-    SymbolFixup* sym = &((SymbolFixup*)dynsym->value)[i];
-    int index = (sym->fixup.hash / 64) % header->bloom_size;
-    
-    // Get current bloom filter word and set the bits corresponding
-    // to bits 5:0 and bits 31:26 of the hash value.
-    bloom_filter[index] |= DynamicLoaderBloomBits64(sym->fixup.hash);
+  for (size_t i = first_def_index; i < fixups->length; i++) {
+    DynamicSymbolFixup* sym = fixups->value.p[i];
+    if (linker->ops->is_64_bit) {
+      uint64_t* bloom_filter =
+          (uint64_t*)&hashtable->value[bloom_index];
+      int index = (sym->hash / 64) % header->bloom_size;
+      bloom_filter[index] |= DynamicLoaderBloomBits64(sym->hash);
+    } else {
+      uint32_t* bloom_filter =
+          (uint32_t*)&hashtable->value[bloom_index];
+      int index = (sym->hash / 32) % header->bloom_size;
+      uint32_t bits = (1u << (sym->hash % 32)) |
+                      (1u << ((sym->hash >> 26) % 32));
+      bloom_filter[index] |= bits;
+    }
   }
 }
 
-static void WriteHashTable(Buffer* dynsym,
+static void WriteHashTable(Vector* fixups,
                            Buffer* hashtable,
                            size_t first_def_index,
                            DynamicLoaderGNUHashTableHeader* header) {
@@ -1014,7 +1125,7 @@ static void WriteHashTable(Buffer* dynsym,
   size_t bucket_index = hashtable->length;
   size_t chain_index = bucket_index + header->num_buckets * sizeof(uint32_t);
 
-  size_t num_symbols = dynsym->length / sizeof(ELFSymbol);
+  size_t num_symbols = fixups->length;
   size_t num_chains = num_symbols - first_def_index;
 
   // Allocate space for buckets and chain.  This will ensure that the
@@ -1034,21 +1145,21 @@ static void WriteHashTable(Buffer* dynsym,
   int last_chain = -1;
   
   for (size_t i = first_def_index; i < num_symbols; i++) {
-    SymbolFixup* sym = &((SymbolFixup*)dynsym->value)[i];
+    DynamicSymbolFixup* sym = fixups->value.p[i];
     // Value to insert into chain entry is the hash with the
     // bottom bit cleared.
-    uint32_t hash = sym->fixup.hash & ~1;
+    uint32_t hash = sym->hash & ~1;
 #if 0
     printf("adding %s to hash with value %x bucket %d\n",
-           sym->fixup.symbol->name.value, hash, curr_bucket);
+           sym->symbol->name.value, hash, curr_bucket);
 #endif
     // Moving to next bucket?
-    if ((sym->fixup.hash % num_gnu_buckets) != curr_bucket) {
+    if ((sym->hash % num_gnu_buckets) != curr_bucket) {
       if (last_chain != -1) {
         // Set bottom bit of last chain entry set.
         chains[last_chain] |= 1;
       }
-      curr_bucket = sym->fixup.hash % num_gnu_buckets;
+      curr_bucket = sym->hash % num_gnu_buckets;
       buckets[curr_bucket] = (uint32_t)i;
     }
     
@@ -1072,54 +1183,62 @@ static void WriteHashTable(Buffer* dynsym,
 // parts of the hash value are used to set the bits of a single bloom
 // filter word: bits 5:0 and bits 31:26.
 //
-// This for 64 bits only.
-//
-// This must be done before the fixups for the dynamic symbol
-// table are done as it relies on the 'fixup' member of the
-// union.
-static void CreateGNUHashTable(Buffer* dynsym,
+static void CreateGNUHashTable(Linker* linker,
+                               Vector* fixups,
                                Buffer* hashtable,
                                size_t first_def_index) {
   // Create hash table header and write it.
-  DynamicLoaderGNUHashTableHeader header = WriteHeader(
-                                                       dynsym,
-                                                       hashtable,
-                                                       first_def_index);
+  DynamicLoaderGNUHashTableHeader header =
+      WriteHeader(linker, fixups, hashtable, first_def_index);
   // Write Bloom filter.
-  WriteBloomFilter(dynsym, hashtable, first_def_index, &header);
+  WriteBloomFilter(linker, fixups, hashtable, first_def_index, &header);
   
   // Write the hash table buckets and chains.
-  WriteHashTable(dynsym, hashtable, first_def_index, &header);
+  WriteHashTable(fixups, hashtable, first_def_index, &header);
 
 #if 0
   DebugPrintHashTable(hashtable,
-                      dynsym->length / sizeof(ELFSymbol));
+                      fixups->length);
 #endif
 }
 
 // We know the address and section indexes for the symbols now, so go
 // through the dynamic symbol table and apply the information to the
 // ELFSymbols held therein.
-void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
-                                    int32_t bss_section_index) {
-  // Byte index into symbol table.
-  size_t index = sizeof(SymbolFixup);
-  while (index < dynsym->length){
-    SymbolFixup* fixup = (SymbolFixup*)&dynsym->value[index];
-    LinkerSymbol* sym = fixup->fixup.symbol;
-    ELFSymbol* elfsym = &fixup->sym;
+void DynamicLinkerFixupDynamicSymbolTable(Linker* linker, Buffer* dynsym,
+                                          int32_t bss_section_index) {
+  (void)bss_section_index;
+  Vector* fixups = &linker->dynamic_linker->dynamic_symbol_fixups;
+  memset(dynsym->value, 0, dynsym->length);
+  for (size_t index = 1; index < fixups->length; index++) {
+    DynamicSymbolFixup* fixup = fixups->value.p[index];
+    LinkerSymbol* sym = fixup->symbol;
+    ELFSymbol elfsym;
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
-    ELFSymbolInit(elfsym, fixup->fixup.name_offset,
+    ELFSymbolInit(&elfsym, fixup->name_offset,
                   sym->header->shndx,
                   type, binding, sym->header->size,
                   sym->address);
+    char* destination =
+        dynsym->value + index * linker->ops->symbol_size;
+    if (linker->ops->is_64_bit) {
+      memcpy(destination, &elfsym, sizeof(ELF64Symbol));
+    } else {
+      ELF32Symbol out = {
+          .name = elfsym.name,
+          .value = (ELF32_Addr)elfsym.value,
+          .size = (ELF32_Word)elfsym.size,
+          .info = elfsym.info,
+          .other = elfsym.other,
+          .shndx = elfsym.shndx,
+      };
+      memcpy(destination, &out, sizeof(out));
+    }
     
     // Set the index into the dynamic symbol table in the LinkerSymbol.
     // This is used by the dynamic relocations.
-    sym->dynamic_index = (int)index / sizeof(SymbolFixup);
-    
-    index += sizeof(SymbolFixup);
+    sym->dynamic_index = (int)index;
   }
 }
 
@@ -1196,7 +1315,8 @@ static void AddDynamicSymbolTable(Linker* linker) {
   ELFWriterSection* strtab = NewELFSection(".dynstr",
                                            SHT(strtab),
                                            SHF(alloc) | SHF(strings),
-                                           8, strtab_contents);
+                                           DynamicPointerSize(linker),
+                                           strtab_contents);
   // Write NULL symbol name as the first entry in dynstr.
   BufferAppend(&strtab_contents->data.buffered, "", 1);
   
@@ -1207,8 +1327,9 @@ static void AddDynamicSymbolTable(Linker* linker) {
   ELFWriterSection* symtab = NewELFSection(".dynsym",
                                            SHT(dynsym),
                                            SHF(alloc),
-                                           8, symtab_contents);
-  symtab->header.entsize = sizeof(ELFSymbol);
+                                           DynamicPointerSize(linker),
+                                           symtab_contents);
+  symtab->header.entsize = linker->ops->symbol_size;
   
   NewDynamicLinkerGroup(linker, symtab,
                         &linker->code_segment);
@@ -1218,12 +1339,14 @@ static void AddDynamicSymbolTable(Linker* linker) {
   DynamicSymbolTableInfo info = {
     .dynsym = &symtab_contents->data.buffered,
     .dynstr = &strtab_contents->data.buffered,
+    .fixups = &linker->dynamic_linker->dynamic_symbol_fixups,
+    .symbol_size = linker->ops->symbol_size,
   };
   
   // Add NULL symbol to the start of the dynamic symbol table.
-  SymbolFixup null_symbol;
-  memset(&null_symbol.sym, 0, sizeof(null_symbol));
-  BufferAppend(info.dynsym, (char*)&null_symbol, sizeof(SymbolFixup));
+  DynamicSymbolFixup* null_symbol = calloc(1, sizeof(*null_symbol));
+  VectorAppend(info.fixups, null_symbol);
+  BufferAddSpace(info.dynsym, info.symbol_size);
 
   HashTableTraverse(&linker->global_symbol_table,
                     AddSymbolListToDynamicSymbolTable, &info);
@@ -1240,7 +1363,8 @@ static void AddDynamicSymbolTable(Linker* linker) {
   ELFWriterSection* gnu_hashtable = NewELFSection(".gnu_hash",
                                            SHT(gnu_hash),
                                            SHF(alloc),
-                                           8, gnu_hash_contents);
+                                           DynamicPointerSize(linker),
+                                           gnu_hash_contents);
   
   NewDynamicLinkerGroup(linker, gnu_hashtable,
                         &linker->code_segment);
@@ -1254,15 +1378,16 @@ static void AddDynamicSymbolTable(Linker* linker) {
   }
   
   // Sort the symbol table by hash buckets.
-  size_t first_def_index = SortDynamicSymbolTable(info.dynsym);
+  size_t first_def_index = SortDynamicSymbolTable(info.fixups);
   
   // Create the GNU hash table section and group.
-  CreateGNUHashTable(info.dynsym, hashtable, first_def_index);
+  CreateGNUHashTable(linker, info.fixups, hashtable, first_def_index);
   
   // Align buffer sizes.
-  BufferAlignLength(info.dynsym, 8);
-  BufferAlignLength(info.dynstr, 8);
-  BufferAlignLength(hashtable, 8);
+  size_t alignment = (size_t)DynamicPointerSize(linker);
+  BufferAlignLength(info.dynsym, alignment);
+  BufferAlignLength(info.dynstr, alignment);
+  BufferAlignLength(hashtable, alignment);
 }
 
 

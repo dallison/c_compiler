@@ -165,20 +165,23 @@ static void HandlePICRelocation(
     int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
   switch (reloc->type) {
     case R_ARM_GOT_BREL:
+    case R_ARM_GOT_PREL:
       if (symbol != NULL) {
         symbol->got_index = append_data_to_got(dynamic, symbol);
       }
       break;
 
     case R_ARM_PLT32:
-      if (symbol != NULL) {
+      if (symbol != NULL &&
+          (!symbol->defined || symbol->section == NULL)) {
         symbol->got_index = append_func_to_got(dynamic, symbol);
         symbol->plt_index = append_to_plt(dynamic, symbol);
       }
       break;
 
     case R_ARM_CALL:
-      if (symbol != NULL && symbol->plt_index < 0) {
+      if (symbol != NULL && symbol->plt_index < 0 &&
+          (!symbol->defined || symbol->section == NULL)) {
         symbol->got_index = append_func_to_got(dynamic, symbol);
         symbol->plt_index = append_to_plt(dynamic, symbol);
       }
@@ -278,6 +281,13 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
     }
 
+    case R_ARM_GOT_PREL: {
+      uint64_t got_entry = GOTEntryAddress(linker, symbol);
+      *(int32_t*)target_address =
+          (int32_t)((int64_t)got_entry + A - (int64_t)P);
+      return;
+    }
+
     case R_ARM_PLT32: {
       uint64_t B = PLTEntryAddress(linker, symbol, A);
       if (B == 0) {
@@ -343,7 +353,7 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
       reloc_type = R_ARM_JUMP_SLOT;
       break;
     case kGOTRelocationVariable:
-      reloc_type = R_ARM_ABS32;
+      reloc_type = R_ARM_GLOB_DAT;
       break;
     case kGOTRelocationTLSOffset:
     case kGOTRelocationTLSModuleId:

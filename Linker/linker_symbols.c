@@ -186,6 +186,18 @@ void LinkerAssignCommonSymbolAddresses(Linker* linker, uint64_t* address) {
     ObjectFile* file = linker->files.value.p[i];
     for (size_t j = 0; j < file->common_symbols.length; j++) {
       LinkerSymbol* sym = file->common_symbols.value.p[j];
+      // ELF common symbols normally carry their required alignment in
+      // st_value. DaveCC's older object writers leave it as zero, so derive a
+      // conservative natural alignment from the object size. Over-aligning
+      // common storage is harmless and keeps ARM exclusive accesses aligned.
+      uint64_t alignment = sym->header->value;
+      if (alignment == 0) {
+        alignment = 1;
+        while (alignment < sym->size && alignment < 16) {
+          alignment <<= 1;
+        }
+      }
+      *address = ((*address + alignment - 1) / alignment) * alignment;
       sym->address = *address;
       *address += sym->size;
     }

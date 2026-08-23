@@ -529,6 +529,10 @@ static bool SectionAddressAndSize(LoadedDynamicLibrary* lib, const char* name,
 
 static bool ReadRelaPltEntry(LoadedDynamicLibrary* lib, int64_t index,
                              ELFRelocation* out) {
+  if (lib->decoded_plt_relocations != NULL) {
+    *out = lib->decoded_plt_relocations[index];
+    return true;
+  }
   if (lib->header == NULL || lib->section_headers == NULL || lib->fd < 0) {
     return false;
   }
@@ -547,6 +551,19 @@ static bool ReadRelaPltEntry(LoadedDynamicLibrary* lib, int64_t index,
            (ssize_t)sizeof(*out);
   }
   return false;
+}
+
+static int64_t PLTRelocationEntrySize(LoadedDynamicLibrary* lib) {
+  const DynamicSection* section = lib->dynamic;
+  if (section != NULL) {
+    for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
+      if (section->entries[i].tag == DT(relent) ||
+          section->entries[i].tag == DT(relaent)) {
+        return (int64_t)section->entries[i].un.val;
+      }
+    }
+  }
+  return (int64_t)sizeof(ELFRelocation);
 }
 
 static uint64_t BranchTarget(ARMInterpreter* interpreter, uint64_t target) {
@@ -621,7 +638,9 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
       }
     }
   }
-  int64_t num_relocations = plt_rel_size / (int64_t)sizeof(ELFRelocation);
+  int64_t entry_size = PLTRelocationEntrySize(lib);
+  int64_t num_relocations =
+      entry_size > 0 ? plt_rel_size / entry_size : 0;
 
   const ELFRelocation* reloc = NULL;
   ELFRelocation file_reloc;
@@ -2047,16 +2066,21 @@ static void MapGuestResolver(ARMInterpreter* interpreter) {
 
   uint64_t plt_linked = 0;
   uint64_t plt_size = 0;
-  uint64_t rela_linked = 0;
-  uint64_t rela_size = 0;
+  uint64_t reloc_linked = 0;
+  uint64_t reloc_size = 0;
+  bool found_relocations =
+      SectionAddressAndSize(main_lib, ".rel.plt", &reloc_linked,
+                            &reloc_size) ||
+      SectionAddressAndSize(main_lib, ".rela.plt", &reloc_linked,
+                            &reloc_size);
   if (!SectionAddressAndSize(main_lib, ".plt", &plt_linked, &plt_size) ||
-      !SectionAddressAndSize(main_lib, ".rela.plt", &rela_linked,
-                             &rela_size)) {
+      !found_relocations) {
     return;
   }
-  (void)rela_linked;
+  (void)reloc_linked;
+  int64_t entry_size = PLTRelocationEntrySize(main_lib);
   int64_t num_relocations =
-      (int64_t)(rela_size / (uint64_t)sizeof(ELFRelocation));
+      entry_size > 0 ? (int64_t)(reloc_size / (uint64_t)entry_size) : 0;
   for (int64_t i = 0; i < num_relocations; i++) {
     ELFRelocation reloc;
     if (!ReadRelaPltEntry(main_lib, i, &reloc) ||

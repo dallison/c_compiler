@@ -251,6 +251,7 @@ void LinkerInsertSymbol(HashTable* symbol_table,
 void LinkerAddLibrarySearchDir(Linker* linker, String* dir);
 bool LinkerAddLibrary(Linker* linker, const char* name);
 void LinkerAddStaticLibrary(Linker* linker, const char* name);
+void LinkerAddWholeStaticLibrary(Linker* linker, const char* name);
 void LinkerAddDynamicLibrary(Linker* linker, const char* name);
 bool LinkerFindSymbolInStaticLibraries(Linker* linker, const char* name,
                                  ARArchive** archive,
