@@ -340,8 +340,7 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
       CheckForVarDef(write, b->left);
       break;
     }
-    case AST_OP(dot):
-    case AST_OP(arrow): {
+    case AST_OP(dot): {
       BinaryASTNode* b = (BinaryASTNode*)node;
       if (b->right != NULL && b->right->op == AST_OP(structmember)) {
         StructMemberASTNode* member = (StructMemberASTNode*)b->right;
@@ -351,6 +350,18 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
         }
       }
       CheckForVarDef(write, b->left);
+      break;
+    }
+    case AST_OP(arrow): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      if (b->right != NULL && b->right->op == AST_OP(structmember)) {
+        StructMemberASTNode* member = (StructMemberASTNode*)b->right;
+        if (member->member->is_static) {
+          IRSetVarDef(write, member->member->symbol);
+        }
+      }
+      // Writing through a pointer mutates the pointee, not the pointer
+      // variable used to form the address.
       break;
     }
     case AST_OP(address): {
@@ -1222,12 +1233,12 @@ static void VisitBlockForResult(Generator* gen, BasicBlock* block, ReturnVisitor
     v->result_known = true;
     return;
   }
-  ReturnVisitor saved = {{0}, v->result_known, v->found_result};
-  BitSetCopy(&saved.visited, &v->visited);
   for (size_t i = 0; i < block->out_edges.length; i++) {
-    BitSetCopy(&v->visited, &saved.visited);
-    v->result_known = saved.result_known;
-    v->found_result = saved.found_result;
+    // Every block reached here is on a path that has not produced a result
+    // yet.  Keep one visited set for the whole search so converging branches
+    // and loops are traversed once rather than enumerating every simple path.
+    v->result_known = false;
+    v->found_result = false;
     BlockId child_id = block->out_edges.value.w[i];
     BasicBlock* child = VectorGet(&gen->basic_blocks, child_id);
     VisitBlockForResult(gen, child, v);
@@ -1235,7 +1246,6 @@ static void VisitBlockForResult(Generator* gen, BasicBlock* block, ReturnVisitor
       break;
     }
   }
-  BitSetDestruct(&saved.visited);
 }
 
 // Check that we can't reach the end block.

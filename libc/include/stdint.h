@@ -111,6 +111,12 @@ typedef uint64_t uint_fast64_t;
 #define INT16_MIN SHRT_MIN
 #define INT16_MAX SHRT_MAX
 #define UINT16_MAX USHRT_MAX
+#define INT8_C(value) value
+#define UINT8_C(value) value
+#define INT16_C(value) value
+#define UINT16_C(value) value
+#define INT32_C(value) value
+#define UINT32_C(value) value##U
 #if defined(__6502__)
 #define INT32_MIN LONG_MIN
 #define INT32_MAX LONG_MAX
@@ -119,6 +125,18 @@ typedef uint64_t uint_fast64_t;
 #define INT32_MIN INT_MIN
 #define INT32_MAX INT_MAX
 #define UINT32_MAX UINT_MAX
+#endif
+
+#if defined(__LP64__)
+#define INT64_C(value) value##L
+#define UINT64_C(value) value##UL
+#define INTMAX_C(value) value##L
+#define UINTMAX_C(value) value##UL
+#else
+#define INT64_C(value) value##LL
+#define UINT64_C(value) value##ULL
+#define INTMAX_C(value) value##LL
+#define UINTMAX_C(value) value##ULL
 #endif
 
 #ifndef SIZE_MAX

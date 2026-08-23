@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "checked_math.h"
 #include "loop_info.h"
 
 static bool TypeContainsVolatile(TypeRecord* type) {
@@ -158,8 +159,7 @@ static bool DecodeAddress(IRNode* address, Symbol** base,
         return false;
       }
       int64_t combined;
-      if (__builtin_add_overflow(*offset, IRIntConstValue(constant),
-                                 &combined)) {
+      if (Int64AddOverflow(*offset, IRIntConstValue(constant), &combined)) {
         return false;
       }
       *offset = combined;
@@ -232,8 +232,8 @@ IRAliasResult IRAliasClassify(const IRMemoryLocation* lhs,
   }
   int64_t lhs_end;
   int64_t rhs_end;
-  if (__builtin_add_overflow(lhs->offset, (int64_t)lhs->size, &lhs_end) ||
-      __builtin_add_overflow(rhs->offset, (int64_t)rhs->size, &rhs_end)) {
+  if (Int64AddOverflow(lhs->offset, (int64_t)lhs->size, &lhs_end) ||
+      Int64AddOverflow(rhs->offset, (int64_t)rhs->size, &rhs_end)) {
     return kIRMayAlias;
   }
   if (lhs_end <= rhs->offset || rhs_end <= lhs->offset) {

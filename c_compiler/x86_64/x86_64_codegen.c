@@ -913,23 +913,10 @@ static TargetInstruction* PagedOffsetFrom(X86_64Generator* rv, TargetInstruction
   } else {
     page = offset & ~0x7ff;
   }
-  TargetInstruction* page_inst = NULL;
-  for (size_t i = 0; i < rv->offsets.length; i++) {
-    Offset* f = rv->offsets.value.p[i];
-    if (f->page_offset == page) {
-      page_inst = f->inst;
-      break;
-    }
-  }
-  if (page_inst == NULL) {
-    // No page offset calculated, need to calculate one.
-    page_inst =
-        AddImmediate(rv, src, page);
-    Offset* f = malloc(sizeof(Offset));
-    f->inst = page_inst;
-    f->page_offset = page;
-    VectorAppend(&rv->offsets, f);
-  }
+  // Do not cache this instruction across the function.  Its result is a
+  // register value defined at the current point; reusing it from another basic
+  // block is invalid when that block does not dominate this one.
+  TargetInstruction* page_inst = AddImmediate(rv, src, page);
   *page_offset = offset - page;
   return page_inst;
 }

@@ -29,7 +29,7 @@
 // 4. AArch64:
 //    a: program - loadable program with code at 0x400000000 and data
 //                 at 0x410000000.
-const char default_config[] = {
+const char default_config[] =
 "  .set false 0\n"
 "  .set true 1\n"
 "  .set text 1\n"
@@ -373,7 +373,7 @@ const char default_config[] = {
 "      }\n"
 "    }\n"
 "  }\n"
-"\n"};
+"\n";
 
 String* Link(int argc, char** argv) {
   Linker linker;

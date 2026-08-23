@@ -3004,6 +3004,7 @@ static bool ParseEmbedRequest(Preprocessor* p, String* tokens,
       return false;
     }
   }
+  return true;
 }
 
 // Macro-expand an embed operand once, while protecting a directly written

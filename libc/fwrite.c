@@ -11,6 +11,9 @@
 #include <stdlib.h>
 
 size_t fwrite(const void*  ptr, size_t size, size_t n, FILE* stream) {
+  if (size == 0 || n == 0) {
+    return 0;
+  }
   char* p = ptr;
   size_t len = size * n;
   size_t numchars = 0;

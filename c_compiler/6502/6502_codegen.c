@@ -3057,59 +3057,62 @@ static TargetInstruction* CallArithmeticUnaryRuntime(W65C02Generator* g,
   return dest;
 }
 
-// These macros fill out the arithmetic_runtimes array.  The
-// preprocessor magic builds the name of a runtime function from
-// an arithmetic opcode, signedness and size.  The functions
-// are encoded as offsets into the W65C02Generator struct.
-#define ALUFUNC1(op, s, u)                                   \
-  {IR_OP(op), true, 1, offsetof(W65C02Generator, u##1)},      \
-      {IR_OP(op), false, 1, offsetof(W65C02Generator, s##1)}, \
-      {IR_OP(op), true, 2, offsetof(W65C02Generator, u##2)},  \
-      {IR_OP(op), false, 2, offsetof(W65C02Generator, s##2)}, \
-      {IR_OP(op), true, 4, offsetof(W65C02Generator, u##4)},  \
-      {IR_OP(op), false, 4, offsetof(W65C02Generator, s##4)}, \
-      {IR_OP(op), true, 8, offsetof(W65C02Generator, u##8)},  \
-      {IR_OP(op), false, 8, offsetof(W65C02Generator, s##8)},
-
-#define ALUFUNC2(op, s1, s2, u1, u2)                              \
-  {IR_OP(op), true, 1, offsetof(W65C02Generator, u1##1##u2)},      \
-      {IR_OP(op), false, 1, offsetof(W65C02Generator, s1##1##s2)}, \
-      {IR_OP(op), true, 2, offsetof(W65C02Generator, u1##2##u2)},  \
-      {IR_OP(op), false, 2, offsetof(W65C02Generator, s1##2##s2)}, \
-      {IR_OP(op), true, 4, offsetof(W65C02Generator, u1##4##u2)},  \
-      {IR_OP(op), false, 4, offsetof(W65C02Generator, s1##4##s2)}, \
-      {IR_OP(op), true, 8, offsetof(W65C02Generator, u1##8##u2)},  \
-      {IR_OP(op), false, 8, offsetof(W65C02Generator, s1##8##s2)},
-
-static struct {
-  IROpcode opcode;
-  bool is_unsigned;
-  int size;
-  int func_offset;
-} arithmetic_runtimes[] = {
-    ALUFUNC1(muli, smul, umul)  // muli -> umul[1,2,4,8] (size is inserted)
-    ALUFUNC1(divi, sdiv, udiv) ALUFUNC1(modi, smod, umod)
-        ALUFUNC2(i2f, i, tof, ui, tof)
-            ALUFUNC2(f2i, ftoi, , ftoui, )
-  ALUFUNC2(i2d, i, tof, ui, tof)
-      ALUFUNC2(d2i, ftoi, , ftoui, )
-  {IR_OP(nop)}};
-
-#undef ALUFUNC1
-#undef ALUFUNC2
-
 // Given an opcode, signedness and size, return a pointer to the symbol
 // to be used for the arithmetic operation.
 static Symbol* RuntimeFunction(W65C02Generator* g, IROpcode opcode,
                                bool is_unsigned, int size) {
-  for (int i = 0; arithmetic_runtimes[i].opcode != IR_OP(nop); i++) {
-    if (arithmetic_runtimes[i].opcode == opcode &&
-        arithmetic_runtimes[i].is_unsigned == is_unsigned &&
-        arithmetic_runtimes[i].size == size) {
-      char* symaddr = ((char*)g + arithmetic_runtimes[i].func_offset);
-      return *(Symbol**)symaddr;
-    }
+#define ALUFUNC1(op, signed_name, unsigned_name)             \
+  if (opcode == IR_OP(op)) {                                 \
+    switch (size) {                                          \
+      case 1:                                                \
+        return is_unsigned ? g->unsigned_name##1             \
+                           : g->signed_name##1;               \
+      case 2:                                                \
+        return is_unsigned ? g->unsigned_name##2             \
+                           : g->signed_name##2;               \
+      case 4:                                                \
+        return is_unsigned ? g->unsigned_name##4             \
+                           : g->signed_name##4;               \
+      case 8:                                                \
+        return is_unsigned ? g->unsigned_name##8             \
+                           : g->signed_name##8;               \
+    }                                                        \
   }
+
+#define ALUFUNC2(op, signed_prefix, signed_suffix, unsigned_prefix, \
+                 unsigned_suffix)                                 \
+  if (opcode == IR_OP(op)) {                                      \
+    switch (size) {                                               \
+      case 1:                                                     \
+        return is_unsigned                                        \
+                   ? g->unsigned_prefix##1##unsigned_suffix        \
+                   : g->signed_prefix##1##signed_suffix;           \
+      case 2:                                                     \
+        return is_unsigned                                        \
+                   ? g->unsigned_prefix##2##unsigned_suffix        \
+                   : g->signed_prefix##2##signed_suffix;           \
+      case 4:                                                     \
+        return is_unsigned                                        \
+                   ? g->unsigned_prefix##4##unsigned_suffix        \
+                   : g->signed_prefix##4##signed_suffix;           \
+      case 8:                                                     \
+        return is_unsigned                                        \
+                   ? g->unsigned_prefix##8##unsigned_suffix        \
+                   : g->signed_prefix##8##signed_suffix;           \
+    }                                                             \
+  }
+
+  ALUFUNC1(muli, smul, umul)
+  ALUFUNC1(divi, sdiv, udiv)
+  ALUFUNC1(modi, smod, umod)
+  ALUFUNC2(i2f, i, tof, ui, tof)
+  ALUFUNC2(f2i, ftoi, , ftoui, )
+  ALUFUNC2(i2d, i, tof, ui, tof)
+  ALUFUNC2(d2i, ftoi, , ftoui, )
+
+#undef ALUFUNC1
+#undef ALUFUNC2
+
   abort();
   return NULL;
 }

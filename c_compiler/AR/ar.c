@@ -680,7 +680,7 @@ static void WriteSymbolTable(ARArchiveBuilder* archive, FILE* fp) {
   AlignFileOffset(fp);
 }
   
-inline static off_t Align2(off_t offset) {
+static off_t Align2(off_t offset) {
   return (offset + 1) & ~1;
 }
 

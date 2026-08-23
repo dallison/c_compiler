@@ -229,7 +229,7 @@ typedef struct Linker {
 // File offset of the section header table: the ELF file header followed by the
 // program segment headers.  Uses the output format's on-disk sizes (ELF32 or
 // ELF64).
-static inline uint64_t LinkerSectionHeaderOffset(const Linker* linker) {
+static uint64_t LinkerSectionHeaderOffset(const Linker* linker) {
   return linker->ops->header_size +
          LINKER_NUM_SEGMENTS * linker->ops->program_header_size;
 }

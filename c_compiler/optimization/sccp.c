@@ -268,9 +268,11 @@ static bool ReadOperands(SCCPContext* context, IRNode* inst,
     return false;
   }
   *lhs = ValueOf(context, inst->inputs.value.p[0]);
-  *rhs = inst->inputs.length > 1
-             ? ValueOf(context, inst->inputs.value.p[1])
-             : UndefinedValue();
+  if (inst->inputs.length > 1) {
+    *rhs = ValueOf(context, inst->inputs.value.p[1]);
+  } else {
+    *rhs = UndefinedValue();
+  }
   return true;
 }
 
@@ -546,17 +548,23 @@ static void EvaluateDefinition(SCCPContext* context, IRNode* inst) {
 
 static void EvaluateInstruction(SCCPContext* context, IRNode* inst) {
   if (IRIsIntConst(inst)) {
-    UpdateValue(context, inst,
-                inst->value_state == kValueStateValid
-                    ? ConstantValue(IRIntConstValue(inst))
-                    : OverdefinedValue());
+    SCCPValue value;
+    if (inst->value_state == kValueStateValid) {
+      value = ConstantValue(IRIntConstValue(inst));
+    } else {
+      value = OverdefinedValue();
+    }
+    UpdateValue(context, inst, value);
     return;
   }
   if (inst->opcode == IR_OP(phi)) {
-    UpdateValue(context, inst,
-                inst->value_state == kValueStateValid
-                    ? EvaluatePhi(context, inst)
-                    : OverdefinedValue());
+    SCCPValue value;
+    if (inst->value_state == kValueStateValid) {
+      value = EvaluatePhi(context, inst);
+    } else {
+      value = OverdefinedValue();
+    }
+    UpdateValue(context, inst, value);
     return;
   }
   EvaluateDefinition(context, inst);

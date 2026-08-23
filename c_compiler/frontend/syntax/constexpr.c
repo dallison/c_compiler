@@ -3005,14 +3005,17 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     return true;
   }
 
-  ConstexprValue current = binding != NULL
-      ? (ConstexprValue){
-            .is_floating = binding->is_floating,
-            .state = binding->state,
-            .ivalue = binding->ivalue,
-            .fvalue = binding->fvalue,
-        }
-      : *slot;
+  ConstexprValue current;
+  if (binding != NULL) {
+    current = (ConstexprValue){
+        .is_floating = binding->is_floating,
+        .state = binding->state,
+        .ivalue = binding->ivalue,
+        .fvalue = binding->fvalue,
+    };
+  } else {
+    current = *slot;
+  }
 
   ConstexprValue next = current;
   if (left_type != NULL && TypeIsFloatingPoint(left_type)) {
@@ -3113,23 +3116,26 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
                                        false)) {
     return false;
   }
-  ConstexprValue old_value = binding != NULL
-      ? (ConstexprValue){
-            .is_object = binding->object != NULL,
-            .is_address = binding->is_address,
-            .is_floating = binding->is_floating,
-            .state = binding->state,
-            .ivalue = binding->ivalue,
-            .fvalue = binding->fvalue,
-            .object = binding->object,
-            .address_binding = binding->address_binding,
-            .address_slot = binding->address_slot,
-            .address_object = binding->address_object,
-            .address_index = binding->address_index,
-            .heap_block = binding->heap_block,
-            .heap_index = binding->heap_index,
-        }
-      : *slot;
+  ConstexprValue old_value;
+  if (binding != NULL) {
+    old_value = (ConstexprValue){
+        .is_object = binding->object != NULL,
+        .is_address = binding->is_address,
+        .is_floating = binding->is_floating,
+        .state = binding->state,
+        .ivalue = binding->ivalue,
+        .fvalue = binding->fvalue,
+        .object = binding->object,
+        .address_binding = binding->address_binding,
+        .address_slot = binding->address_slot,
+        .address_object = binding->address_object,
+        .address_index = binding->address_index,
+        .heap_block = binding->heap_block,
+        .heap_index = binding->heap_index,
+    };
+  } else {
+    old_value = *slot;
+  }
   ConstexprValue new_value = old_value;
   bool increment = node->base.op == AST_OP(preinc) ||
                    node->base.op == AST_OP(postinc);
@@ -3190,10 +3196,12 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
   if (!stored) {
     return false;
   }
-  *result = (node->base.op == AST_OP(postinc) ||
-             node->base.op == AST_OP(postdec))
-                ? old_value
-                : new_value;
+  if (node->base.op == AST_OP(postinc) ||
+      node->base.op == AST_OP(postdec)) {
+    *result = old_value;
+  } else {
+    *result = new_value;
+  }
   return true;
 }
 

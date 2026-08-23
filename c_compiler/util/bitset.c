@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 void BitSetInit(BitSet* set) {
   set->value = NULL;
@@ -44,6 +43,18 @@ void BitSetClear(BitSet* set) {
 static void CalculateIndexes(size_t index, size_t* word, size_t* bit) {
   *word = index / 64;
   *bit = index % 64;
+}
+
+static int FindFirstSet64(uint64_t value) {
+  if (value == 0) {
+    return 0;
+  }
+  int index = 1;
+  while ((value & 1) == 0) {
+    value >>= 1;
+    ++index;
+  }
+  return index;
 }
 
 // Make room for an index into the set.
@@ -90,8 +101,8 @@ bool BitSetContains(BitSet* set, size_t index) {
 
 size_t BitSetFindFirstSet(BitSet* set) {
   for (size_t word = 0; word < set->capacity; word++) {
-    int64_t w = set->value[word];
-    int index = ffsll(w);
+    uint64_t w = set->value[word];
+    int index = FindFirstSet64(w);
     if (index != 0) {
       return word * 64 + index - 1;
     }
@@ -101,8 +112,8 @@ size_t BitSetFindFirstSet(BitSet* set) {
 
 size_t BitSetFindFirstClear(BitSet* set) {
   for (size_t word = 0; word < set->capacity; word++) {
-    int64_t w = ~set->value[word];
-    int index = ffsll(w);
+    uint64_t w = ~set->value[word];
+    int index = FindFirstSet64(w);
     if (index != 0) {
       return word * 64 + index - 1;
     }

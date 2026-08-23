@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <syscall.h>
 #include <time.h>
@@ -202,4 +203,54 @@ struct tm* localtime_r(const time_t* time_point, struct tm* result) {
 #else
   return gmtime_r(time_point, result);
 #endif
+}
+
+static struct tm broken_down_time;
+static char formatted_time[26];
+
+struct tm* gmtime(const time_t* time_point) {
+  return gmtime_r(time_point, &broken_down_time);
+}
+
+struct tm* localtime(const time_t* time_point) {
+  return localtime_r(time_point, &broken_down_time);
+}
+
+char* asctime_r(const struct tm* value, char* buffer) {
+  static const char* const week_days[] = {
+      "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  static const char* const months[] = {
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  if (value == NULL || buffer == NULL || value->tm_wday < 0 ||
+      value->tm_wday >= 7 || value->tm_mon < 0 || value->tm_mon >= 12) {
+    errno = EINVAL;
+    return NULL;
+  }
+  int length =
+      snprintf(buffer, 26, "%s %s %2d %02d:%02d:%02d %d\n",
+               week_days[value->tm_wday], months[value->tm_mon],
+               value->tm_mday, value->tm_hour, value->tm_min, value->tm_sec,
+               value->tm_year + 1900);
+  if (length < 0 || length >= 26) {
+    errno = EOVERFLOW;
+    return NULL;
+  }
+  return buffer;
+}
+
+char* asctime(const struct tm* value) {
+  return asctime_r(value, formatted_time);
+}
+
+char* ctime_r(const time_t* time_point, char* buffer) {
+  struct tm value;
+  if (time_point == NULL || localtime_r(time_point, &value) == NULL) {
+    return NULL;
+  }
+  return asctime_r(&value, buffer);
+}
+
+char* ctime(const time_t* time_point) {
+  return ctime_r(time_point, formatted_time);
 }

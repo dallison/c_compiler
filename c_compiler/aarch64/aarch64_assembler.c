@@ -981,6 +981,32 @@ static bool AARCH64IsShiftedMask64(uint64_t v) {
   return v != 0 && AARCH64IsMask64((v - 1) | v);
 }
 
+static unsigned AARCH64CountTrailingZeros64(uint64_t value) {
+  unsigned count = 0;
+  while ((value & 1) == 0) {
+    ++count;
+    value >>= 1;
+  }
+  return count;
+}
+
+static unsigned AARCH64CountLeadingZeros64(uint64_t value) {
+  unsigned count = 0;
+  for (uint64_t bit = 1ULL << 63; (value & bit) == 0; bit >>= 1) {
+    ++count;
+  }
+  return count;
+}
+
+static unsigned AARCH64PopulationCount64(uint64_t value) {
+  unsigned count = 0;
+  while (value != 0) {
+    value &= value - 1;
+    ++count;
+  }
+  return count;
+}
+
 // Encode a logical (bitmask) immediate VALUE into the 13-bit N:immr:imms field
 // used by AND/ORR/EOR/ANDS immediate forms.  Returns false when the value is
 // not a representable bitmask immediate (e.g. zero or all-ones).  Follows the
@@ -1019,16 +1045,16 @@ static bool AARCH64EncodeLogicalImmediate(uint64_t imm, int sf,
   unsigned i;
   unsigned cto;
   if (AARCH64IsShiftedMask64(imm)) {
-    i = (unsigned)__builtin_ctzll(imm);
-    cto = (unsigned)__builtin_ctzll(~(imm >> i));
+    i = AARCH64CountTrailingZeros64(imm);
+    cto = AARCH64CountTrailingZeros64(~(imm >> i));
   } else {
     imm |= ~mask;
     if (!AARCH64IsShiftedMask64(~imm)) {
       return false;
     }
-    unsigned clo = (unsigned)__builtin_clzll(~imm);
+    unsigned clo = AARCH64CountLeadingZeros64(~imm);
     i = 64 - clo;
-    cto = size - (unsigned)__builtin_popcountll(~imm);
+    cto = size - AARCH64PopulationCount64(~imm);
   }
 
   unsigned immr = (size - i) & (size - 1);
@@ -2637,35 +2663,35 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
   }
 }
 
-void Assemble_ldrb(AARCH64Assembler* assembler) {
+static void Assemble_ldrb(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 0, 0, false);
 }
 
-void Assemble_ldrh(AARCH64Assembler* assembler) {
+static void Assemble_ldrh(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 1, 0, false);
 }
 
-void Assemble_ldrsb(AARCH64Assembler* assembler) {
+static void Assemble_ldrsb(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 0, 1, false);
 }
 
-void Assemble_ldrsh(AARCH64Assembler* assembler) {
+static void Assemble_ldrsh(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 1, 1, false);
 }
 
-void Assemble_strb(AARCH64Assembler* assembler) {
+static void Assemble_strb(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, 0, 0, false);
 }
 
-void Assemble_strh(AARCH64Assembler* assembler) {
+static void Assemble_strh(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, 1, 0, false);
 }
 
-void Assemble_ldr(AARCH64Assembler* assembler) {
+static void Assemble_ldr(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, -1, 0, false);
 }
 
-void Assemble_str(AARCH64Assembler* assembler) {
+static void Assemble_str(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, -1, 0, false);
 }
 
@@ -2850,11 +2876,11 @@ static void Assemble_mrs(AARCH64Assembler* assembler) {
                     0xd53bd040u | (uint32_t)rt.num);
 }
 
-void Assemble_ldp(AARCH64Assembler* assembler) {
+static void Assemble_ldp(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 0, 0, true);
 }
 
-void Assemble_stp(AARCH64Assembler* assembler) {
+static void Assemble_stp(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, 0, 0, true);
 }
 

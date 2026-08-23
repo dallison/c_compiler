@@ -9,7 +9,7 @@ typedef enum ValueState {
   kValueStateIndeterminate = 2,
 } ValueState;
 
-static inline ValueState ValueStateMerge(ValueState left, ValueState right) {
+static ValueState ValueStateMerge(ValueState left, ValueState right) {
   if (left == right) {
     return left;
   }

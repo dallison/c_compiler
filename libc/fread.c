@@ -11,6 +11,9 @@
 #include <stdlib.h>
 
 size_t fread(void * restrict ptr, size_t size, size_t n, FILE* stream) {
+  if (size == 0 || n == 0) {
+    return 0;
+  }
   size_t nbytes = size * n;
   int ch;
   size_t nread = 0;

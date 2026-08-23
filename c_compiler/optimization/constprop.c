@@ -12,6 +12,8 @@
 #include <limits.h>
 #include <stdint.h>
 
+#include "checked_math.h"
+
 // Constant propagation and folding.
 //
 // Process each basic block in dominator tree pre-order.  For each instruction
@@ -135,11 +137,11 @@ static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst
   int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
   int64_t new_value;
   if (src->opcode == IR_OP(addi)) {
-    if (__builtin_add_overflow(src_value, my_value, &new_value)) {
+    if (Int64AddOverflow(src_value, my_value, &new_value)) {
       return;
     }
   } else if (src->opcode == IR_OP(subi)) {
-    if (__builtin_sub_overflow(my_value, src_value, &new_value)) {
+    if (Int64SubOverflow(my_value, src_value, &new_value)) {
       return;
     }
   } else {
@@ -180,11 +182,11 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
   int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
   int64_t new_value;
   if (src->opcode == IR_OP(addi)) {
-    if (__builtin_sub_overflow(my_value, src_value, &new_value)) {
+    if (Int64SubOverflow(my_value, src_value, &new_value)) {
       return;
     }
   } else if (src->opcode == IR_OP(subi)) {
-    if (__builtin_add_overflow(my_value, src_value, &new_value)) {
+    if (Int64AddOverflow(my_value, src_value, &new_value)) {
       return;
     }
   } else {
@@ -246,7 +248,7 @@ static void PropagateDivConstant(Generator* gen, BasicBlock* block,
   int64_t my_value = IRIntConstValue(inst->inputs.value.p[1]);
   int64_t combined;
   if (src_value == 0 || my_value == 0 ||
-      __builtin_mul_overflow(src_value, my_value, &combined) ||
+      Int64MulOverflow(src_value, my_value, &combined) ||
       combined == 0) {
     return;
   }
@@ -276,7 +278,7 @@ static void PropagateShiftConstant(Generator* gen, BasicBlock* block,
   int64_t combined;
   int width = inst->type == NULL ? 0 : inst->type->size * 8;
   if (src_count < 0 || my_count < 0 ||
-      __builtin_add_overflow(src_count, my_count, &combined) ||
+      Int64AddOverflow(src_count, my_count, &combined) ||
       combined >= width) {
     return;
   }

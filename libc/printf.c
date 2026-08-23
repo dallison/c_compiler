@@ -935,12 +935,12 @@ int __sprintf_fp(char* s, const char* format, ...) {
   return v;
 }
 
-#if 0
 int vsprintf(char* restrict s, const char* restrict format, va_list arg) {
   StringData data = {s, -1};
-  return Printf(StringWriter, &data, format, arg);
+  int result = Printf(StringWriter, &data, format, arg);
+  *data.p = '\0';
+  return result;
 }
-#endif
 
 int snprintf(char* s, size_t len, const char* format, ...) {
   va_list ap;
@@ -966,13 +966,15 @@ int __snprintf_fp(char* s, size_t len, const char* format, ...) {
   return v;
 }
 
-#if 0
 int vsnprintf(char* restrict s, size_t n, const char* restrict format,
               va_list arg) {
   StringData data = {s, n};
-  return Printf(StringWriter, &data, format, arg);
+  int result = Printf(StringWriter, &data, format, arg);
+  if (n != 0) {
+    *data.p = '\0';
+  }
+  return result;
 }
-#endif
 
 #else
 
