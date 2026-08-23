@@ -67,6 +67,8 @@ char *strrchr(const char *s, int c);
 size_t strspn(const char *s1, const char *s2);
 char *strstr(const char *s1, const char *s2);
 char *strtok(char * restrict s1, const char * restrict s2);
+char *strtok_r(char * restrict s, const char * restrict delimiters,
+               char ** restrict save);
 void *memset(void *s, int c, size_t n);
 void *memset_explicit(void *s, int c, size_t n);
 char *strerror(int errnum);

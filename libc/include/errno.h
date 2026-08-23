@@ -32,6 +32,7 @@
 #define EINVAL 22
 #define ENFILE 23
 #define EMFILE 24
+#define ENOTTY 25
 #define EFBIG 27
 #define ENOSPC 28
 #define ESPIPE 29
@@ -85,6 +86,7 @@
 #define EFBIG           30      /* File too large */
 #define ENFILE          31      /* Too many open files in system */
 #define EOVERFLOW       32      /* Value too large for defined data type */
+#define ENOTTY          33      /* Inappropriate ioctl for device */
 #endif
 
 #if defined(__6502__)

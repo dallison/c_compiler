@@ -69,6 +69,8 @@
 #define X86_64_SYSCALL_TZDB_LEAP_COUNT 58
 #define X86_64_SYSCALL_TZDB_LEAP_INFO 59
 #define X86_64_SYSCALL_RANDOM_BYTES 60
+#define X86_64_SYSCALL_FS_DESCRIPTOR_STATUS 61
+#define X86_64_SYSCALL_ENVIRONMENT_VALUE 62
 
 #define X86_64_VALIDATE_DAVE_SYSCALL(name)                               \
   typedef char x86_64_dave_syscall_##name[                              \

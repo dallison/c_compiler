@@ -131,8 +131,14 @@ typedef long fpos_t;
 #define SEEK_END 2
 
 #include <unistd.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 int open(const char* filename, int mode, ...);
 int close(int fd);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* fcntl_h */

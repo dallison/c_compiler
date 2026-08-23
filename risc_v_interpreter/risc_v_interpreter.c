@@ -146,6 +146,32 @@ static void ResolveAndFixupSymbol(RISCVInterpreter* interpreter) {
 const bool kDumpRegsonEbreak = false;
 const bool kShowRegChanges = false;
 
+static int TranslateGuestOpenFlags(int guest_flags) {
+  enum {
+    kGuestAccmode = 00000003,
+    kGuestCreate = 00000100,
+    kGuestExclusive = 00000200,
+    kGuestNoTty = 00000400,
+    kGuestTruncate = 00001000,
+    kGuestAppend = 00002000,
+    kGuestNonblock = 00004000,
+    kGuestSync = 00010000,
+    kGuestDirectory = 00200000,
+    kGuestNoFollow = 00400000,
+  };
+  int host = guest_flags & kGuestAccmode;
+  if (guest_flags & kGuestCreate) host |= O_CREAT;
+  if (guest_flags & kGuestExclusive) host |= O_EXCL;
+  if (guest_flags & kGuestNoTty) host |= O_NOCTTY;
+  if (guest_flags & kGuestTruncate) host |= O_TRUNC;
+  if (guest_flags & kGuestAppend) host |= O_APPEND;
+  if (guest_flags & kGuestNonblock) host |= O_NONBLOCK;
+  if (guest_flags & kGuestSync) host |= O_SYNC;
+  if (guest_flags & kGuestDirectory) host |= O_DIRECTORY;
+  if (guest_flags & kGuestNoFollow) host |= O_NOFOLLOW;
+  return host;
+}
+
 static void HandleEcall(RISCVInterpreter* interpreter) {
   switch (interpreter->iregs[REG(t6)]) {
     case RISC_V_ECALL_HALT:
@@ -174,7 +200,8 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       break;
     case RISC_V_ECALL_OPEN: {
       const char* filename = (const char*)interpreter->iregs[REG(a1)];
-      int flags = (int)interpreter->iregs[REG(a2)];
+      int flags =
+          TranslateGuestOpenFlags((int)interpreter->iregs[REG(a2)]);
       mode_t create_mode = (mode_t)interpreter->iregs[REG(a3)];
       interpreter->iregs[REG(a0)] = open(filename, flags, create_mode);
       break;
@@ -477,6 +504,26 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
           interpreter, interpreter->iregs[REG(a2)], capacity);
       interpreter->iregs[REG(a0)] =
           (uint64_t)DaveHostFilesystemCanonical(path, buffer, capacity);
+      break;
+    }
+    case RISC_V_ECALL_FS_DESCRIPTOR_STATUS: {
+      DaveHostFilesystemStat* result =
+          (DaveHostFilesystemStat*)RISCVGuestAddressToHost(
+              interpreter, interpreter->iregs[REG(a2)],
+              sizeof(DaveHostFilesystemStat));
+      interpreter->iregs[REG(a0)] =
+          (uint64_t)DaveHostFilesystemGetDescriptorStatus(
+              (int)interpreter->iregs[REG(a1)], result);
+      break;
+    }
+    case RISC_V_ECALL_ENVIRONMENT_VALUE: {
+      const char* name = (const char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a1)], 1);
+      size_t capacity = (size_t)interpreter->iregs[REG(a3)];
+      char* buffer = (char*)RISCVGuestAddressToHost(
+          interpreter, interpreter->iregs[REG(a2)], capacity);
+      interpreter->iregs[REG(a0)] = (uint64_t)DaveHostEnvironmentValue(
+          name, buffer, capacity);
       break;
     }
     case RISC_V_ECALL_TZDB_VERSION:

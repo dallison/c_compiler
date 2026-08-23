@@ -55,3 +55,6 @@ echo "tests/single-exec/00235.c"
 echo "tests/single-exec/00237.c"
 
 # File I/O (fopen/fread/fgetc/fgets) not fully working in interpreter
+
+# POSIX filesystem, environment, and aligned-allocation APIs are not available.
+echo "tests/single-exec/00242.c"

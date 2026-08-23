@@ -61,3 +61,7 @@ void _Exit(int status) {
   syscall(SYS_EXIT, status);
 }
 #endif
+
+void _exit(int status) {
+  _Exit(status);
+}

@@ -37,6 +37,8 @@ static uintptr_t tls_template_address;
 static size_t tls_file_size;
 static size_t tls_memory_size;
 
+extern char** environ;
+
 #if defined(__arm__) || defined(__x86_64__)
 #define DAVE_TLS_TCB_SIZE 8
 #else
@@ -61,6 +63,7 @@ void __davecc_linux_tls_init(void* thread_pointer, void* initial_stack) {
   uintptr_t* cursor = (uintptr_t*)initial_stack;
   uintptr_t argument_count = *cursor++;
   cursor += argument_count + 1;
+  environ = (char**)cursor;
   while (*cursor++ != 0) {}
 
   uintptr_t program_headers = 0;

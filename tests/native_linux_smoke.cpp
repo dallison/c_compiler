@@ -4,8 +4,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <random>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #include <threads.h>
+#include <unistd.h>
 
 thread_local int native_tls_value = 17;
 static int global_constructor_ran;
@@ -84,6 +88,19 @@ int main(int argc, char** argv) {
   if (input == nullptr || fgets(buffer, sizeof(buffer), input) == nullptr ||
       fclose(input) != 0)
     return 20;
+
+  int descriptor = open(file_path, O_RDONLY);
+  char first = '\0';
+  if (descriptor < 0) return 34;
+  if (pread(descriptor, &first, 1, 0) != 1 || first != 'n') return 40;
+  if (pread(descriptor, &first, 1, 1) != 1) return 41;
+  if (first != 'a') return 43;
+  if (close(descriptor) != 0) return 42;
+  char cwd_buffer[4096];
+  if (getcwd(cwd_buffer, sizeof(cwd_buffer)) == nullptr ||
+      cwd_buffer[0] != '/' || getenv("PATH") == nullptr)
+    return 35;
+
   std::error_code remove_error;
   if (!std::filesystem::remove(file_path, remove_error) || remove_error)
     return 21;
@@ -91,6 +108,23 @@ int main(int argc, char** argv) {
   void* memory = malloc(8192);
   if (memory == nullptr) return 11;
   free(memory);
+
+  if (sysconf(_SC_PAGESIZE) != 4096) return 36;
+  void* mapping = mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapping == MAP_FAILED) return 37;
+  ((unsigned char*)mapping)[0] = 0x5a;
+  if (mprotect(mapping, 4096, PROT_READ) != 0 ||
+      ((unsigned char*)mapping)[0] != 0x5a ||
+      munmap(mapping, 4096) != 0)
+    return 38;
+
+  pid_t child = fork();
+  if (child == 0) _exit(42);
+  int child_status = 0;
+  if (child < 0 || waitpid(child, &child_status, 0) != child ||
+      !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 42)
+    return 39;
 
   void* allocations[4096]{};
   for (int index = 0; index < 4096; ++index) {

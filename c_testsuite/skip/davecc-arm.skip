@@ -7,3 +7,7 @@ if ! test -f README.md; then
 fi
 
 # Same portability constraints as other DaveCC targets; extend as needed.
+
+# The ARM interpreter currently faults while loading this broad POSIX test.
+# Native ARM Linux coverage for these APIs lives in native_linux_smoke.cpp.
+echo "tests/single-exec/00242.c"

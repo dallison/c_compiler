@@ -100,6 +100,8 @@ void free_aligned_sized(void *ptr, size_t alignment, size_t size);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
+int posix_memalign(void **result, size_t alignment, size_t size);
+int mkstemp(char *template_name);
 #ifdef __cplusplus
 [[noreturn]] void abort(void);
 #else
@@ -109,6 +111,8 @@ int atexit(void (*func)(void));
 void exit(int status);
 void _Exit(int status);
 char *getenv(const char *name);
+char *realpath(const char * restrict path, char * restrict resolved_path);
+extern char **environ;
 int system(const char *string);
 void *bsearch(const void *key, const void *base,
 size_t nmemb, size_t size,

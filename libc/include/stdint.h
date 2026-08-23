@@ -93,10 +93,40 @@ typedef uint64_t uint_fast64_t;
 #define INTPTR_MIN LONG_MIN
 #define INTPTR_MAX LONG_MAX
 #define UINTPTR_MAX ULONG_MAX
+#define INT64_MIN LONG_MIN
+#define INT64_MAX LONG_MAX
+#define UINT64_MAX ULONG_MAX
 #else
 #define INTPTR_MIN INT_MIN
 #define INTPTR_MAX INT_MAX
 #define UINTPTR_MAX UINT_MAX
+#define INT64_MIN LLONG_MIN
+#define INT64_MAX LLONG_MAX
+#define UINT64_MAX ULLONG_MAX
+#endif
+
+#define INT8_MIN SCHAR_MIN
+#define INT8_MAX SCHAR_MAX
+#define UINT8_MAX UCHAR_MAX
+#define INT16_MIN SHRT_MIN
+#define INT16_MAX SHRT_MAX
+#define UINT16_MAX USHRT_MAX
+#if defined(__6502__)
+#define INT32_MIN LONG_MIN
+#define INT32_MAX LONG_MAX
+#define UINT32_MAX ULONG_MAX
+#else
+#define INT32_MIN INT_MIN
+#define INT32_MAX INT_MAX
+#define UINT32_MAX UINT_MAX
+#endif
+
+#ifndef SIZE_MAX
+#if defined(__6502__)
+#define SIZE_MAX UINT_MAX
+#else
+#define SIZE_MAX ULONG_MAX
+#endif
 #endif
 
 #endif /* __DAVECC__ */

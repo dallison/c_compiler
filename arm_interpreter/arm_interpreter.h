@@ -87,6 +87,8 @@
 #define ARM_SYSCALL_TZDB_LEAP_COUNT 58
 #define ARM_SYSCALL_TZDB_LEAP_INFO 59
 #define ARM_SYSCALL_RANDOM_BYTES 60
+#define ARM_SYSCALL_FS_DESCRIPTOR_STATUS 61
+#define ARM_SYSCALL_ENVIRONMENT_VALUE 62
 
 #define ARM_VALIDATE_DAVE_SYSCALL(name)                                  \
   typedef char arm_dave_syscall_##name[                                 \

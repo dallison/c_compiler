@@ -154,6 +154,12 @@ int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
     case P_CODE_SYSCALL_FS_CANONICAL:
       return DaveHostFilesystemCanonical(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case P_CODE_SYSCALL_FS_DESCRIPTOR_STATUS:
+      return DaveHostFilesystemGetDescriptorStatus(
+          (int)a0, (DaveHostFilesystemStat*)(uintptr_t)a1);
+    case P_CODE_SYSCALL_ENVIRONMENT_VALUE:
+      return DaveHostEnvironmentValue(
+          (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
     case P_CODE_SYSCALL_TZDB_VERSION:
       return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
     case P_CODE_SYSCALL_TZDB_GENERATION:
@@ -283,11 +289,13 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
       a1 = ReadPackedLong(&cursor);
       break;
     case P_CODE_SYSCALL_FS_CURRENT_PATH:
+    case P_CODE_SYSCALL_FS_DESCRIPTOR_STATUS:
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       break;
     case P_CODE_SYSCALL_FS_READ_SYMLINK:
     case P_CODE_SYSCALL_FS_CANONICAL:
+    case P_CODE_SYSCALL_ENVIRONMENT_VALUE:
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       a2 = ReadPackedLong(&cursor);

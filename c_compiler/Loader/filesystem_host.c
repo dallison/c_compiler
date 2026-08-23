@@ -62,6 +62,31 @@ static int64_t DaveHostFilesystemTimespecNanoseconds(struct timespec value) {
   return (int64_t)value.tv_sec * 1000000000LL + (int64_t)value.tv_nsec;
 }
 
+static void DaveHostFilesystemCopyStatus(
+    const struct stat* value, DaveHostFilesystemStat* result) {
+  result->device = (uint64_t)value->st_dev;
+  result->inode = (uint64_t)value->st_ino;
+  result->size = value->st_size < 0 ? 0 : (uint64_t)value->st_size;
+  result->hard_link_count = (uint64_t)value->st_nlink;
+#if defined(__APPLE__)
+  result->access_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_atimespec);
+  result->modification_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_mtimespec);
+  result->status_change_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_ctimespec);
+#else
+  result->access_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_atim);
+  result->modification_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_mtim);
+  result->status_change_time_ns =
+      DaveHostFilesystemTimespecNanoseconds(value->st_ctim);
+#endif
+  result->mode = (uint32_t)value->st_mode;
+  result->reserved = 0;
+}
+
 int64_t DaveHostFilesystemGetStatus(const char* path, int follow,
                                     DaveHostFilesystemStat* result) {
   if (path == NULL || result == NULL) {
@@ -71,26 +96,16 @@ int64_t DaveHostFilesystemGetStatus(const char* path, int follow,
   if ((follow ? stat(path, &value) : lstat(path, &value)) != 0) {
     return DaveHostFilesystemError();
   }
-  result->device = (uint64_t)value.st_dev;
-  result->inode = (uint64_t)value.st_ino;
-  result->size = value.st_size < 0 ? 0 : (uint64_t)value.st_size;
-  result->hard_link_count = (uint64_t)value.st_nlink;
-#if defined(__APPLE__)
-  result->access_time_ns =
-      DaveHostFilesystemTimespecNanoseconds(value.st_atimespec);
-  result->modification_time_ns =
-      DaveHostFilesystemTimespecNanoseconds(value.st_mtimespec);
-  result->status_change_time_ns =
-      DaveHostFilesystemTimespecNanoseconds(value.st_ctimespec);
-#else
-  result->access_time_ns = DaveHostFilesystemTimespecNanoseconds(value.st_atim);
-  result->modification_time_ns =
-      DaveHostFilesystemTimespecNanoseconds(value.st_mtim);
-  result->status_change_time_ns =
-      DaveHostFilesystemTimespecNanoseconds(value.st_ctim);
-#endif
-  result->mode = (uint32_t)value.st_mode;
-  result->reserved = 0;
+  DaveHostFilesystemCopyStatus(&value, result);
+  return 0;
+}
+
+int64_t DaveHostFilesystemGetDescriptorStatus(
+    int fd, DaveHostFilesystemStat* result) {
+  if (result == NULL) return -DAVE_HOST_EINVAL;
+  struct stat value;
+  if (fstat(fd, &value) != 0) return DaveHostFilesystemError();
+  DaveHostFilesystemCopyStatus(&value, result);
   return 0;
 }
 
@@ -421,4 +436,17 @@ int64_t DaveHostFilesystemCanonical(const char* path, char* buffer,
   memcpy(buffer, resolved, length + 1);
   free(resolved);
   return 0;
+}
+
+int64_t DaveHostEnvironmentValue(const char* name, char* buffer,
+                                 size_t capacity) {
+  if (name == NULL || buffer == NULL || capacity == 0) {
+    return -DAVE_HOST_EINVAL;
+  }
+  const char* value = getenv(name);
+  if (value == NULL) return 0;
+  size_t length = strlen(value);
+  if (length >= capacity) return -DAVE_HOST_ERANGE;
+  memcpy(buffer, value, length + 1);
+  return (int64_t)length + 1;
 }

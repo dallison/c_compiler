@@ -67,8 +67,17 @@ struct stat {
 #define S_IWOTH 00002
 #define S_IXOTH 00001
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 extern int stat(const char* path, struct stat* buf);
 extern int fstat(int fd, struct stat* buf);
 extern int lstat(const char* path, struct stat* buf);
+extern int chmod(const char* path, uint32_t mode);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* stat_h */

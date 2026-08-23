@@ -698,6 +698,32 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
   }
 }
 
+static int TranslateGuestOpenFlags(int guest_flags) {
+  enum {
+    kGuestAccmode = 00000003,
+    kGuestCreate = 00000100,
+    kGuestExclusive = 00000200,
+    kGuestNoTty = 00000400,
+    kGuestTruncate = 00001000,
+    kGuestAppend = 00002000,
+    kGuestNonblock = 00004000,
+    kGuestSync = 00010000,
+    kGuestDirectory = 00200000,
+    kGuestNoFollow = 00400000,
+  };
+  int host = guest_flags & kGuestAccmode;
+  if (guest_flags & kGuestCreate) host |= O_CREAT;
+  if (guest_flags & kGuestExclusive) host |= O_EXCL;
+  if (guest_flags & kGuestNoTty) host |= O_NOCTTY;
+  if (guest_flags & kGuestTruncate) host |= O_TRUNC;
+  if (guest_flags & kGuestAppend) host |= O_APPEND;
+  if (guest_flags & kGuestNonblock) host |= O_NONBLOCK;
+  if (guest_flags & kGuestSync) host |= O_SYNC;
+  if (guest_flags & kGuestDirectory) host |= O_DIRECTORY;
+  if (guest_flags & kGuestNoFollow) host |= O_NOFOLLOW;
+  return host;
+}
+
 static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
                              int32_t a0, int32_t a1, int32_t a2, int32_t a3,
                              int32_t a4, int32_t a5, bool* pc_updated) {
@@ -724,7 +750,8 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       return 0;
     case ARM_SYSCALL_OPEN: {
       void* path = ResolveHostPtr(interpreter, (uint32_t)a1, 1);
-      return open((const char*)path, a2, (mode_t)a3);
+      return open((const char*)path, TranslateGuestOpenFlags(a2),
+                  (mode_t)a3);
     }
     case ARM_SYSCALL_CLOSE:
       return close(a1);
@@ -894,6 +921,18 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
           (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1),
           (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3),
           (size_t)a3);
+    case ARM_SYSCALL_FS_DESCRIPTOR_STATUS:
+      return (int32_t)DaveHostFilesystemGetDescriptorStatus(
+          a1, (DaveHostFilesystemStat*)ResolveHostPtr(
+                  interpreter, (uint32_t)a2,
+                  sizeof(DaveHostFilesystemStat)));
+    case ARM_SYSCALL_ENVIRONMENT_VALUE: {
+      const char* name =
+          (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1);
+      char* output =
+          (char*)ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3);
+      return (int32_t)DaveHostEnvironmentValue(name, output, (size_t)a3);
+    }
     case ARM_SYSCALL_TZDB_VERSION:
       return (int32_t)DaveHostChronoTzdbVersion(
           (char*)ResolveHostPtr(interpreter, (uint32_t)a1, (size_t)a2),

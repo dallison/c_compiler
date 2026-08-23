@@ -457,6 +457,12 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
     case AARCH64_SYSCALL_FS_CANONICAL:
       return DaveHostFilesystemCanonical(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case AARCH64_SYSCALL_FS_DESCRIPTOR_STATUS:
+      return DaveHostFilesystemGetDescriptorStatus(
+          (int)a0, (DaveHostFilesystemStat*)(uintptr_t)a1);
+    case AARCH64_SYSCALL_ENVIRONMENT_VALUE:
+      return DaveHostEnvironmentValue(
+          (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
     case AARCH64_SYSCALL_TZDB_VERSION:
       return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
     case AARCH64_SYSCALL_TZDB_GENERATION:

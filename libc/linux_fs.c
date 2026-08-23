@@ -5,6 +5,8 @@
 #include <sys/syscall.h>
 #include <syscall.h>
 
+#include "posix_fs.h"
+
 #define AT_FDCWD (-100)
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_REMOVEDIR 0x200
@@ -45,18 +47,6 @@ typedef struct {
   uint32_t dio_offset_alignment;
   uint64_t spare[12];
 } LinuxStatx;
-
-typedef struct {
-  uint64_t device;
-  uint64_t inode;
-  uint64_t size;
-  uint64_t hard_link_count;
-  int64_t access_time_ns;
-  int64_t modification_time_ns;
-  int64_t status_change_time_ns;
-  uint32_t mode;
-  uint32_t reserved;
-} DaveWireStatus;
 
 typedef struct {
   uint32_t type;
@@ -172,6 +162,24 @@ static int64_t CanonicalPath(const char* path, char* output, size_t capacity) {
   return length;
 }
 
+static void CopyStatx(DaveWireStatus* output, const LinuxStatx* value) {
+  output->device = ((uint64_t)value->device_major << 32) | value->device_minor;
+  output->inode = value->inode;
+  output->size = value->size;
+  output->hard_link_count = value->link_count;
+  output->access_time_ns =
+      value->access_time.seconds * 1000000000LL +
+      value->access_time.nanoseconds;
+  output->modification_time_ns =
+      value->modification_time.seconds * 1000000000LL +
+      value->modification_time.nanoseconds;
+  output->status_change_time_ns =
+      value->status_change_time.seconds * 1000000000LL +
+      value->status_change_time.nanoseconds;
+  output->mode = value->mode;
+  output->reserved = 0;
+}
+
 int64_t __davecc_linux_fs_service(int operation, intptr_t first,
                                   intptr_t second, intptr_t third) {
   switch (operation) {
@@ -181,23 +189,7 @@ int64_t __davecc_linux_fs_service(int operation, intptr_t first,
       long result = syscall(SYS_statx, AT_FDCWD, (const char*)first, flags,
                             STATX_BASIC_STATS, &statx_value);
       if (result == -1) return -(int64_t)errno;
-      DaveWireStatus* output = (DaveWireStatus*)third;
-      output->device =
-          ((uint64_t)statx_value.device_major << 32) | statx_value.device_minor;
-      output->inode = statx_value.inode;
-      output->size = statx_value.size;
-      output->hard_link_count = statx_value.link_count;
-      output->access_time_ns =
-          statx_value.access_time.seconds * 1000000000LL +
-          statx_value.access_time.nanoseconds;
-      output->modification_time_ns =
-          statx_value.modification_time.seconds * 1000000000LL +
-          statx_value.modification_time.nanoseconds;
-      output->status_change_time_ns =
-          statx_value.status_change_time.seconds * 1000000000LL +
-          statx_value.status_change_time.nanoseconds;
-      output->mode = statx_value.mode;
-      output->reserved = 0;
+      CopyStatx((DaveWireStatus*)third, &statx_value);
       return 0;
     }
     case 2:
@@ -287,6 +279,14 @@ int64_t __davecc_linux_fs_service(int operation, intptr_t first,
       return CopyFile((const char*)first, (const char*)second, (int)third);
     case 18:
       return CanonicalPath((const char*)first, (char*)second, third);
+    case 19: {
+      LinuxStatx statx_value;
+      long result = syscall(SYS_statx, (int)first, "", AT_EMPTY_PATH,
+                            STATX_BASIC_STATS, &statx_value);
+      if (result == -1) return -(int64_t)errno;
+      CopyStatx((DaveWireStatus*)second, &statx_value);
+      return 0;
+    }
     default:
       return -ENOSYS;
   }

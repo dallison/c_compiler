@@ -14,7 +14,7 @@
 
 #ifndef __OFF_T
 #define __OFF_T
-typedef unsigned long off_t;
+typedef long off_t;
 #endif
 
 #define PROT_READ       0x1             /* Page can be read.  */
@@ -34,6 +34,10 @@ typedef unsigned long off_t;
 #define MREMAP_MAYMOVE  1
 #define MREMAP_FIXED    2
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern void*  mmap(void *, size_t, int, int, int, off_t);
 extern int    munmap(void *, size_t);
 extern int    msync(const void *, size_t, int);
@@ -51,5 +55,8 @@ extern int    munlock(const void *addr, size_t len);
 
 extern int    mincore(void*  start, size_t  length, unsigned char*  vec);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* mman_h */

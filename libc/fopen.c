@@ -9,6 +9,43 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+static FILE* AllocateFile(int fd) {
+  FILE* fp = malloc(sizeof(FILE) + BUFSIZE);
+  if (fp == NULL) {
+    return NULL;
+  }
+  fp->buf = (char*)fp + sizeof(FILE);
+  fp->fd = fd;
+  fp->bufsize = BUFSIZE;
+  fp->windex = 0;
+  fp->rindex = 0;
+  fp->rlimit = 0;
+  fp->buffer_owned = 0;
+  fp->buffering_mode = _IOFBF;
+  fp->unget_index = 0;
+  fp->eof_flag = 0;
+  fp->error_flag = 0;
+  fp->next = NULL;
+  __last_file->next = fp;
+  fp->prev = __last_file;
+  __last_file = fp;
+  return fp;
+}
+
+static int ValidMode(const char* mode) {
+  char base = '\0';
+  for (const char* p = mode; *p != '\0'; p++) {
+    if (*p == 'r' || *p == 'w' || *p == 'a') {
+      if (base != '\0') return 0;
+      base = *p;
+    } else if (*p != '+' && *p != 'b') {
+      return 0;
+    }
+  }
+  return base != '\0';
+}
 
 FILE* fopen(const char* filename, const char* mode) {
   char base = '\0';
@@ -40,27 +77,17 @@ FILE* fopen(const char* filename, const char* mode) {
   if (fd == -1) {
     return NULL;
   }
-  // Allocate the FILE and buffer in one block.
-  FILE* fp = malloc(sizeof(FILE) + BUFSIZE);
+  FILE* fp = AllocateFile(fd);
   if (fp == NULL) {
+    close(fd);
     return NULL;
   }
-  fp->buf = (char*)fp + sizeof(FILE);
-  fp->fd = fd;
-  fp->bufsize = BUFSIZE;
-  fp->windex = 0;
-  fp->rindex = 0;
-  fp->rlimit = 0;
-  fp->buffer_owned = 0;       // Buffer doesn't need to be freed.
-  fp->buffering_mode = _IOFBF;    // Fully buffered.
-  fp->unget_index = 0;
-  fp->eof_flag = 0;
-  fp->error_flag = 0;
-  fp->next = NULL;
-  
-  // Link into global list of all files.
-  __last_file->next = fp;
-  fp->prev = __last_file;
-  __last_file = fp;
   return fp;
+}
+
+FILE* fdopen(int fd, const char* mode) {
+  if (fd < 0 || mode == NULL || !ValidMode(mode)) {
+    return NULL;
+  }
+  return AllocateFile(fd);
 }

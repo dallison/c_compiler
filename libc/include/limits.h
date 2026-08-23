@@ -81,6 +81,10 @@
 /* Maximum value an `unsigned long long int' can hold.  (Minimum is 0.)  */
 #   define ULLONG_MAX  18446744073709551615ULL
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #  define BOOL_WIDTH 1
 #  define CHAR_WIDTH CHAR_BIT

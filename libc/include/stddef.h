@@ -10,6 +10,8 @@
 #define stddef_h
 #ifdef __DAVECC__
 
+#include <limits.h>
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #define __STDC_VERSION_STDDEF_H__ 202311L
 #endif
@@ -54,6 +56,14 @@ typedef typeof(nullptr) nullptr_t;
 #endif
 
 #define offsetof(type, member) ((size_t)(&((type*)0)->member))
+
+#ifndef SIZE_MAX
+#if defined(__6502__)
+#define SIZE_MAX UINT_MAX
+#else
+#define SIZE_MAX ULONG_MAX
+#endif
+#endif
 #endif /* __DAVECC__ */
 
 #endif /* stddef_h */

@@ -13,6 +13,11 @@
 #define STDOUT_FILENO   1       /* Standard output.  */
 #define STDERR_FILENO   2       /* Standard error output.  */
 
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+
 #ifndef __pid_t
 #define __pid_t
 typedef int pid_t;
@@ -26,6 +31,11 @@ typedef int uid_t;
 #ifndef __gid_t
 #define __gid_t
 typedef int gid_t;
+#endif
+
+#ifndef __OFF_T
+#define __OFF_T
+typedef long off_t;
 #endif
 
 #ifndef __SIZE_T
@@ -517,6 +527,10 @@ enum __SC_NAMES
 #define __SC_NAMES
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern void    _exit(int status);
 extern int    access(const char *path, int mode);
 extern int    chdir(const char *path);
@@ -541,6 +555,7 @@ extern uid_t    getuid(void);
 extern int    isatty(int fd);
 extern long    lseek(int fd, long offset, int whence);
 extern int    pipe(int *fildes);
+extern ssize_t pread(int fd, void *buf, size_t size, off_t offset);
 extern int    read(int fd, char *buf, size_t size);
 extern int    setgid(gid_t group);
 extern int    setuid(uid_t user);
@@ -549,5 +564,10 @@ extern char *    ttyname(int fd);
 extern int    unlink(const char *path);
 extern int    write(int fd, const char *buf, size_t size);
 extern long   sysconf(int name);
+extern char **environ;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* unistd_h */

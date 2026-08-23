@@ -114,6 +114,7 @@ int fclose(FILE *stream);
 int fflush(FILE *stream);
 FILE *fopen(const char * restrict filename,
      const char * restrict mode);
+FILE *fdopen(int fd, const char *mode);
 FILE *freopen(const char * restrict filename,
      const char * restrict mode,
      FILE * restrict stream);

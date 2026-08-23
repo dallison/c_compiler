@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <errno.h>
 
 void* aligned_alloc(size_t alignment, size_t size) {
   if (alignment == 0 || (alignment & (alignment - 1)) != 0 ||
@@ -28,6 +29,27 @@ void* aligned_alloc(size_t alignment, size_t size) {
   ((size_t*)aligned)[-2] = (size_t)(uintptr_t)raw;
   ((size_t*)aligned)[-1] = 1;
   return (void*)aligned;
+}
+
+int posix_memalign(void** result, size_t alignment, size_t size) {
+  if (result == NULL || alignment < sizeof(void*) ||
+      alignment % sizeof(void*) != 0 ||
+      (alignment & (alignment - 1)) != 0) {
+    return EINVAL;
+  }
+  if (size > SIZE_MAX - (alignment - 1)) {
+    return ENOMEM;
+  }
+  size_t allocation_size = (size + alignment - 1) & ~(alignment - 1);
+  if (allocation_size == 0) {
+    allocation_size = alignment;
+  }
+  void* pointer = aligned_alloc(alignment, allocation_size);
+  if (pointer == NULL) {
+    return ENOMEM;
+  }
+  *result = pointer;
+  return 0;
 }
 
 void free_sized(void* pointer, size_t size) {

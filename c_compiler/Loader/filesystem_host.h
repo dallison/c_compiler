@@ -72,6 +72,8 @@ enum {
 
 int64_t DaveHostFilesystemGetStatus(const char* path, int follow,
                                     DaveHostFilesystemStat* result);
+int64_t DaveHostFilesystemGetDescriptorStatus(
+    int fd, DaveHostFilesystemStat* result);
 int64_t DaveHostFilesystemOpenDirectory(const char* path);
 int64_t DaveHostFilesystemReadDirectory(
     int handle, DaveHostFilesystemDirectoryEntry* result);
@@ -96,5 +98,7 @@ int64_t DaveHostFilesystemCopyFile(const char* source, const char* destination,
                                    int mode);
 int64_t DaveHostFilesystemCanonical(const char* path, char* buffer,
                                     size_t capacity);
+int64_t DaveHostEnvironmentValue(const char* name, char* buffer,
+                                 size_t capacity);
 
 #endif

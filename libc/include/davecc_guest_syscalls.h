@@ -64,6 +64,8 @@
 #define DAVE_SYS_TZDB_LEAP_COUNT 58
 #define DAVE_SYS_TZDB_LEAP_INFO 59
 #define DAVE_SYS_RANDOM_BYTES 60
+#define DAVE_SYS_FS_DESCRIPTOR_STATUS 61
+#define DAVE_SYS_ENVIRONMENT_VALUE 62
 
 #define DAVE_SYS_6502_EXIT 1
 #define DAVE_SYS_6502_ABORT 8
@@ -127,6 +129,8 @@
   X(TZDB_LOCAL_INFO)                \
   X(TZDB_LEAP_COUNT)                \
   X(TZDB_LEAP_INFO)                 \
-  X(RANDOM_BYTES)
+  X(RANDOM_BYTES)                   \
+  X(FS_DESCRIPTOR_STATUS)           \
+  X(ENVIRONMENT_VALUE)
 
 #endif

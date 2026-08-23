@@ -10,28 +10,31 @@
 #include <stdbool.h>
 
 
-char *strtok(char * restrict s1, const char * restrict s2) {
-  static char* saved;
-  // NULL call, start at 'saved'.
-  if (s1 == NULL) {
-    s1 = saved;
+char* strtok_r(char* restrict string, const char* restrict delimiters,
+               char** restrict save) {
+  if (string == NULL) {
+    string = *save;
+  }
+  if (string == NULL) {
+    return NULL;
   }
 
-  // Find first token by searching for first char not in s2.
-  size_t len = strlen(s1);
-  size_t n = strcspn(s1, s2);
-  if (n == len) {
-    return NULL;      // No tokens.
+  string += strspn(string, delimiters);
+  if (*string == '\0') {
+    *save = string;
+    return NULL;
   }
-  s1 += n;
-  len -= n;
-  // s1 points to the first non-s2 char.  Look forward until we find
-  // the next token.
-  n = strspn(s1, s2);
-  if (n == len) {
-    return s1;
+
+  char* token = string;
+  string += strcspn(string, delimiters);
+  if (*string != '\0') {
+    *string++ = '\0';
   }
-  s1[n] = '\0';
-  saved = s1+n+1;
-  return s1;
+  *save = string;
+  return token;
+}
+
+char* strtok(char* restrict string, const char* restrict delimiters) {
+  static char* saved;
+  return strtok_r(string, delimiters, &saved);
 }

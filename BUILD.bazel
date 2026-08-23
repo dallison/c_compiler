@@ -326,6 +326,9 @@ LIBC_SRCS = [
     "libc/errno.c",
     "libc/posix.c",
     "libc/posix_close.c",
+    "libc/posix_fs.c",
+    "libc/posix_fs.h",
+    "libc/posix_linux.c",
     "libc/posix_lseek.c",
     "libc/posix_open.c",
     "libc/posix_read.c",
@@ -1408,6 +1411,8 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
@@ -1582,6 +1587,8 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
@@ -1759,6 +1766,8 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
@@ -1932,6 +1941,8 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
@@ -2274,6 +2285,8 @@ libc_srcs=(
   "libc/errno.c"
   "libc/posix.c"
   "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
