@@ -13,8 +13,9 @@
 // after setjmp's original call.
 longjmp:
 	mov x2, x0
-	cbnz x1, .Llongjmp_value_ready
-	mov x1, #1
+	// value is an int; the upper half of x1 is not part of the argument.
+	cbnz w1, .Llongjmp_value_ready
+	mov w1, #1
 .Llongjmp_value_ready:
 	ldr x19, [x2, #0]
 	ldr x20, [x2, #8]
@@ -38,5 +39,5 @@ longjmp:
 	fldr d14, [x2, #152]
 	fldr d15, [x2, #160]
 	mov sp, x3
-	mov x0, x1
+	mov w0, w1
 	br x30

@@ -22,9 +22,18 @@
 #include "syntax.h"
 #include "type.h"
 
-static const char kItaniumVptrClass[] = "__davecc_itanium_vptr_class";
-static const char kItaniumVptrSiClass[] = "__davecc_itanium_vptr_si_class";
-static const char kItaniumVptrVmiClass[] = "__davecc_itanium_vptr_vmi_class";
+static const char kItaniumVptrClass[] =
+    "_ZTVN10__cxxabiv117__class_type_infoE+16";
+static const char kItaniumVptrSiClass[] =
+    "_ZTVN10__cxxabiv120__si_class_type_infoE+16";
+static const char kItaniumVptrVmiClass[] =
+    "_ZTVN10__cxxabiv121__vmi_class_type_infoE+16";
+static const char kItaniumVptrClass32[] =
+    "_ZTVN10__cxxabiv117__class_type_infoE_u2b16";
+static const char kItaniumVptrSiClass32[] =
+    "_ZTVN10__cxxabiv120__si_class_type_infoE_u2b16";
+static const char kItaniumVptrVmiClass32[] =
+    "_ZTVN10__cxxabiv121__vmi_class_type_infoE_u2b16";
 
 RttiABI RttiTargetABI(void) {
   if (compiler == NULL || compiler->target_name == NULL) {
@@ -150,6 +159,7 @@ static Symbol* GetItaniumVptrApSymbol(const char* name) {
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
   symbol = NewSymbol(name, void_ptr, STO(extern));
+  StringSet(&symbol->asm_name, name);
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   SyntaxAddSymbol(&compiler->syntax, symbol);
@@ -236,20 +246,24 @@ static Symbol* RttiGetTypeInfoSymbolItanium(TypeRecord* type, String* key) {
   }
 
   size_t object_size = (size_t)(2 * ptr_size);
-  const char* vptr_ap_name = kItaniumVptrClass;
+  const char* vptr_ap_name =
+      ptr_size == 4 ? kItaniumVptrClass32 : kItaniumVptrClass;
   switch (kind) {
     case kItaniumRttiClass:
       object_size = (size_t)(2 * ptr_size);
-      vptr_ap_name = kItaniumVptrClass;
+      vptr_ap_name =
+          ptr_size == 4 ? kItaniumVptrClass32 : kItaniumVptrClass;
       break;
     case kItaniumRttiSiClass:
       object_size = (size_t)(3 * ptr_size);
-      vptr_ap_name = kItaniumVptrSiClass;
+      vptr_ap_name =
+          ptr_size == 4 ? kItaniumVptrSiClass32 : kItaniumVptrSiClass;
       break;
     case kItaniumRttiVmiClass:
       object_size =
           (size_t)(2 * ptr_size + 8 + direct_bases.length * 2 * ptr_size);
-      vptr_ap_name = kItaniumVptrVmiClass;
+      vptr_ap_name =
+          ptr_size == 4 ? kItaniumVptrVmiClass32 : kItaniumVptrVmiClass;
       break;
   }
 

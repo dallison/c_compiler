@@ -780,58 +780,51 @@ static bool ExecuteTest(X86_64Interpreter* interpreter, size_t insn_len, REX rex
   return true;
 }
 
+static bool ConditionHolds(const X86_64Interpreter* interpreter, uint8_t cc) {
+  switch (cc) {
+    case 0x0:
+      return interpreter->of;
+    case 0x1:
+      return !interpreter->of;
+    case 0x2:
+      return interpreter->cf;
+    case 0x3:
+      return !interpreter->cf;
+    case 0x4:
+      return interpreter->zf;
+    case 0x5:
+      return !interpreter->zf;
+    case 0x6:
+      return interpreter->cf || interpreter->zf;
+    case 0x7:
+      return !interpreter->cf && !interpreter->zf;
+    case 0x8:
+      return interpreter->sf;
+    case 0x9:
+      return !interpreter->sf;
+    case 0xA:
+      return interpreter->pf;
+    case 0xB:
+      return !interpreter->pf;
+    case 0xC:
+      return interpreter->sf != interpreter->of;
+    case 0xD:
+      return interpreter->sf == interpreter->of;
+    case 0xE:
+      return interpreter->zf || (interpreter->sf != interpreter->of);
+    case 0xF:
+      return !interpreter->zf && (interpreter->sf == interpreter->of);
+    default:
+      return false;
+  }
+}
+
 static bool ExecuteSetcc(X86_64Interpreter* interpreter, uint8_t cc,
                          ModRM modrm) {
   if (modrm.mod != 3) {
     return false;
   }
-  bool set = false;
-  switch (cc) {
-    case 0x2:
-      set = interpreter->cf;
-      break;
-    case 0x3:
-      set = !interpreter->cf;
-      break;
-    case 0x4:
-      set = interpreter->zf;
-      break;
-    case 0x5:
-      set = !interpreter->zf;
-      break;
-    case 0x6:
-      set = interpreter->cf || interpreter->zf;
-      break;
-    case 0x7:
-      set = !interpreter->cf && !interpreter->zf;
-      break;
-    case 0x8:
-      set = interpreter->sf;
-      break;
-    case 0x9:
-      set = !interpreter->sf;
-      break;
-    case 0xA:
-      set = interpreter->pf;
-      break;
-    case 0xB:
-      set = !interpreter->pf;
-      break;
-    case 0xC:
-      set = interpreter->sf != interpreter->of;
-      break;
-    case 0xD:
-      set = interpreter->sf == interpreter->of;
-      break;
-    case 0xE:
-      set = interpreter->zf || (interpreter->sf != interpreter->of);
-      break;
-    case 0xF:
-      set = !interpreter->zf && (interpreter->sf == interpreter->of);
-      break;
-    default:
-      return false;
-  }
+  bool set = ConditionHolds(interpreter, cc);
   uint64_t reg = ReadReg(interpreter, modrm.rm);
   reg = (reg & ~0xffULL) | (set ? 1ULL : 0ULL);
   WriteReg(interpreter, modrm.rm, reg);
@@ -1287,53 +1280,7 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     if (b1 >= 0x80 && b1 <= 0x8F) {
       uint8_t cc = b1 & 0x0F;
       int32_t disp = (int32_t)Fetch32(interpreter, &pos);
-      bool take = false;
-      switch (cc) {
-        case 0x2:
-          take = interpreter->cf;
-          break;
-        case 0x3:
-          take = !interpreter->cf;
-          break;
-        case 0x4:
-          take = interpreter->zf;
-          break;
-        case 0x5:
-          take = !interpreter->zf;
-          break;
-        case 0x6:
-          take = interpreter->cf || interpreter->zf;
-          break;
-        case 0x7:
-          take = !interpreter->cf && !interpreter->zf;
-          break;
-        case 0x8:
-          take = interpreter->sf;
-          break;
-        case 0x9:
-          take = !interpreter->sf;
-          break;
-        case 0xA:
-          take = interpreter->pf;
-          break;
-        case 0xB:
-          take = !interpreter->pf;
-          break;
-        case 0xC:
-          take = interpreter->sf != interpreter->of;
-          break;
-        case 0xD:
-          take = interpreter->sf == interpreter->of;
-          break;
-        case 0xE:
-          take = interpreter->zf || (interpreter->sf != interpreter->of);
-          break;
-        case 0xF:
-          take = !interpreter->zf && (interpreter->sf == interpreter->of);
-          break;
-        default:
-          return false;
-      }
+      bool take = ConditionHolds(interpreter, cc);
       if (take) {
         interpreter->rip += pos + (uint64_t)(int64_t)disp;
         *rip_updated = true;
@@ -1552,6 +1499,16 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       return true;
     }
     return false;
+  }
+
+  if (b0 >= 0x70 && b0 <= 0x7f) {
+    int8_t disp = (int8_t)Fetch8(interpreter, &pos);
+    if (ConditionHolds(interpreter, b0 & 0x0f)) {
+      interpreter->rip += pos + (uint64_t)(int64_t)disp;
+      *rip_updated = true;
+    }
+    *insn_len = pos;
+    return true;
   }
 
   if (b0 >= 0xB8 && b0 <= 0xBF) {

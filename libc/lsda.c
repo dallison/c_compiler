@@ -5,9 +5,20 @@
 #include <string.h>
 
 #define DW_EH_PE_omit 0xff
+#define DW_EH_PE_absptr 0x00
 #define DW_EH_PE_uleb128 0x01
+#define DW_EH_PE_udata2 0x02
+#define DW_EH_PE_udata4 0x03
+#define DW_EH_PE_udata8 0x04
+#define DW_EH_PE_sleb128 0x09
+#define DW_EH_PE_sdata2 0x0a
 #define DW_EH_PE_pcrel 0x10
 #define DW_EH_PE_sdata4 0x0b
+#define DW_EH_PE_sdata8 0x0c
+#define DW_EH_PE_textrel 0x20
+#define DW_EH_PE_datarel 0x30
+#define DW_EH_PE_funcrel 0x40
+#define DW_EH_PE_indirect 0x80
 #define DW_EH_PE_pcrel_sdata4 0x1b
 
 typedef struct {
@@ -34,6 +45,7 @@ typedef struct {
 } DaveVmiClassTypeInfo;
 
 typedef struct {
+  uintptr_t lp_start;
   const uint8_t* ttype_table;
   uint8_t ttype_encoding;
   uint8_t call_site_encoding;
@@ -83,37 +95,119 @@ static const uint8_t* ReadSleb128(const uint8_t* p, const uint8_t* end,
   return NULL;
 }
 
+static size_t EncodedPointerSize(uint8_t encoding) {
+  switch (encoding & 0x0f) {
+    case DW_EH_PE_udata2:
+    case DW_EH_PE_sdata2:
+      return 2;
+    case DW_EH_PE_udata4:
+    case DW_EH_PE_sdata4:
+      return 4;
+    case DW_EH_PE_udata8:
+    case DW_EH_PE_sdata8:
+      return 8;
+    case DW_EH_PE_absptr:
+      return sizeof(uintptr_t);
+    default:
+      return 0;
+  }
+}
+
 static const uint8_t* ReadEncodedPointer(const uint8_t* p, const uint8_t* end,
-                                         uint8_t encoding, uintptr_t pc,
+                                         uint8_t encoding, uintptr_t text_base,
+                                         uintptr_t data_base,
+                                         uintptr_t func_base,
                                          uintptr_t* out) {
+  const uint8_t* field = p;
+  uintptr_t value;
   if (encoding == DW_EH_PE_omit) {
     *out = 0;
     return p;
   }
-  if (encoding == DW_EH_PE_uleb128) {
-    unsigned long long value = 0;
-    p = ReadUleb128(p, end, &value);
-    if (p == NULL) {
-      return NULL;
+  switch (encoding & 0x0f) {
+    case DW_EH_PE_uleb128: {
+      unsigned long long scalar = 0;
+      p = ReadUleb128(p, end, &scalar);
+      value = (uintptr_t)scalar;
+      break;
     }
-    *out = (uintptr_t)value;
+    case DW_EH_PE_sleb128: {
+      long long scalar = 0;
+      p = ReadSleb128(p, end, &scalar);
+      value = (uintptr_t)(intptr_t)scalar;
+      break;
+    }
+    case DW_EH_PE_udata2:
+      if (p + 2 > end) return NULL;
+      value = *(const uint16_t*)p;
+      p += 2;
+      break;
+    case DW_EH_PE_udata4:
+      if (p + 4 > end) return NULL;
+      value = *(const uint32_t*)p;
+      p += 4;
+      break;
+    case DW_EH_PE_udata8:
+      if (p + 8 > end) return NULL;
+      value = (uintptr_t)*(const uint64_t*)p;
+      p += 8;
+      break;
+    case DW_EH_PE_sdata2:
+      if (p + 2 > end) return NULL;
+      value = (uintptr_t)(intptr_t)*(const int16_t*)p;
+      p += 2;
+      break;
+    case DW_EH_PE_sdata4:
+      if (p + 4 > end) return NULL;
+      value = (uintptr_t)(intptr_t)*(const int32_t*)p;
+      p += 4;
+      break;
+    case DW_EH_PE_sdata8:
+      if (p + 8 > end) return NULL;
+      value = (uintptr_t)*(const int64_t*)p;
+      p += 8;
+      break;
+    case DW_EH_PE_absptr:
+      if (p + sizeof(uintptr_t) > end) return NULL;
+      value = *(const uintptr_t*)p;
+      p += sizeof(uintptr_t);
+      break;
+    default:
+      return NULL;
+  }
+  if (p == NULL) {
+    return NULL;
+  }
+  if (value == 0) {
+    *out = 0;
     return p;
   }
-  if ((encoding & 0x0f) == (DW_EH_PE_sdata4 & 0x0f)) {
-    if (p + 4 > end) {
-      return NULL;
-    }
-    int32_t value = *(const int32_t*)p;
-    uintptr_t field_address = (uintptr_t)p;
-    p += 4;
-    if (encoding & DW_EH_PE_pcrel) {
-      *out = field_address + (intptr_t)value;
-    } else {
-      *out = (uintptr_t)(intptr_t)value;
-    }
-    return p;
+  if (sizeof(uintptr_t) > 4 && (encoding & 0x70) == 0 &&
+      ((encoding & 0x0f) == DW_EH_PE_udata4 ||
+       (encoding & 0x0f) == DW_EH_PE_sdata4)) {
+    value = ((uintptr_t)field & ~(uintptr_t)0xffffffffu) | (uint32_t)value;
   }
-  return NULL;
+  switch (encoding & 0x70) {
+    case DW_EH_PE_pcrel:
+      value = (uintptr_t)field + value;
+      break;
+    case DW_EH_PE_textrel:
+      value += text_base;
+      break;
+    case DW_EH_PE_datarel:
+      value += data_base;
+      break;
+    case DW_EH_PE_funcrel:
+      value += func_base;
+      break;
+    default:
+      break;
+  }
+  if ((encoding & DW_EH_PE_indirect) != 0 && value != 0) {
+    value = *(const uintptr_t*)value;
+  }
+  *out = value;
+  return p;
 }
 
 static int ParseLSDAHeader(const uint8_t* lsda, const uint8_t* end,
@@ -123,16 +217,20 @@ static int ParseLSDAHeader(const uint8_t* lsda, const uint8_t* end,
   uint8_t lp_encoding;
 
   memset(header, 0, sizeof(*header));
+  header->lp_start = pc_for_enc;
 
   if (p >= end) {
     return 0;
   }
   lp_encoding = *p++;
   if (lp_encoding != DW_EH_PE_omit) {
-    p = ReadEncodedPointer(p, end, lp_encoding, pc_for_enc, &tmp);
+    uintptr_t lp_start = 0;
+    p = ReadEncodedPointer(p, end, lp_encoding, pc_for_enc,
+                           (uintptr_t)lsda, pc_for_enc, &lp_start);
     if (p == NULL) {
       return 0;
     }
+    header->lp_start = lp_start;
   }
 
   if (p >= end) {
@@ -269,17 +367,18 @@ static const DaveClassTypeInfo* ReadTypeTableEntry(const LSDAHeader* header,
                                                    uintptr_t lsda_base) {
   const uint8_t* entry;
   uintptr_t value = 0;
+  size_t entry_size;
   if (header->ttype_table == 0 || type_filter <= 0) {
     return 0;
   }
-  entry = header->ttype_table - (size_t)type_filter * 4;
-  if (header->ttype_encoding == DW_EH_PE_pcrel_sdata4) {
-    int32_t rel = *(const int32_t*)entry;
-    if (rel == 0) {
-      return 0;
-    }
-    value = (uintptr_t)entry + (intptr_t)rel;
-  } else {
+  entry_size = EncodedPointerSize(header->ttype_encoding);
+  if (entry_size == 0) {
+    return 0;
+  }
+  entry = header->ttype_table - (size_t)type_filter * entry_size;
+  if (ReadEncodedPointer(entry, entry + entry_size, header->ttype_encoding,
+                         lsda_base, lsda_base, header->lp_start,
+                         &value) == NULL) {
     return 0;
   }
   if (value == 0) {
@@ -324,6 +423,15 @@ static int ActionMatches(const LSDAHeader* header, long long type_filter,
   return 0;
 }
 
+static const uint8_t* ReadCallSiteValue(const uint8_t* p, const uint8_t* end,
+                                        uint8_t encoding,
+                                        unsigned long long* out) {
+  uintptr_t value = 0;
+  p = ReadEncodedPointer(p, end, encoding & 0x0f, 0, 0, 0, &value);
+  *out = (unsigned long long)value;
+  return p;
+}
+
 int DaveLSDAFindAction(const uint8_t* lsda, uintptr_t func_start,
                        const DaveLSDAQuery* query, DaveLSDAAction* out) {
   const DaveClassTypeInfo* thrown_info;
@@ -355,18 +463,18 @@ int DaveLSDAFindAction(const uint8_t* lsda, uintptr_t func_start,
     long long type_filter;
     long long next_action;
 
-    if (header.call_site_encoding != DW_EH_PE_uleb128) {
-      break;
-    }
-    call_sites = ReadUleb128(call_sites, header.call_sites_end, &start_off);
+    call_sites = ReadCallSiteValue(call_sites, header.call_sites_end,
+                                   header.call_site_encoding, &start_off);
     if (call_sites == 0) {
       break;
     }
-    call_sites = ReadUleb128(call_sites, header.call_sites_end, &length);
+    call_sites = ReadCallSiteValue(call_sites, header.call_sites_end,
+                                   header.call_site_encoding, &length);
     if (call_sites == 0) {
       break;
     }
-    call_sites = ReadUleb128(call_sites, header.call_sites_end, &landing_off);
+    call_sites = ReadCallSiteValue(call_sites, header.call_sites_end,
+                                   header.call_site_encoding, &landing_off);
     if (call_sites == 0) {
       break;
     }
@@ -378,8 +486,8 @@ int DaveLSDAFindAction(const uint8_t* lsda, uintptr_t func_start,
       continue;
     }
 
-    try_start = func_start + (uintptr_t)start_off;
-    try_end = func_start + (uintptr_t)(start_off + length);
+    try_start = header.lp_start + (uintptr_t)start_off;
+    try_end = header.lp_start + (uintptr_t)(start_off + length);
     if (!RangeEncloses(try_start, try_end, query->pc, query->scope_start,
                        query->scope_end)) {
       continue;
@@ -438,7 +546,7 @@ int DaveLSDAFindAction(const uint8_t* lsda, uintptr_t func_start,
         continue;
       }
 
-      candidate.landing_pad = func_start + (uintptr_t)landing_off;
+      candidate.landing_pad = header.lp_start + (uintptr_t)landing_off;
       candidate.try_start = try_start;
       candidate.try_end = try_end;
       candidate.is_catch = is_catch;

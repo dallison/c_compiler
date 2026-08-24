@@ -210,12 +210,16 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_ARM_ABS32:
     case R_ARM_TARGET1:
-    case R_ARM_TARGET2:
-      *(int32_t*)target_address = (int32_t)(S + A);
+    case R_ARM_TARGET2: {
+      int32_t implicit_addend = *(const int32_t*)target_address;
+      *(int32_t*)target_address = (int32_t)(S + A + implicit_addend);
       return;
+    }
 
     case R_ARM_PREL31: {
-      int64_t value = (int64_t)(S + A - P);
+      uint32_t encoded_addend = *(const uint32_t*)target_address;
+      int32_t implicit_addend = (int32_t)(encoded_addend << 1) >> 1;
+      int64_t value = (int64_t)(S + A + implicit_addend - P);
       if (value < -(1LL << 30) || value >= (1LL << 30)) {
         LinkerError(file, "R_ARM_PREL31 relocation out of range at offset 0x%x",
                     reloc->offset);
@@ -225,9 +229,11 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
     }
 
-    case R_ARM_REL32:
-      *(int32_t*)target_address = (int32_t)(S + A - P);
+    case R_ARM_REL32: {
+      int32_t implicit_addend = *(const int32_t*)target_address;
+      *(int32_t*)target_address = (int32_t)(S + A + implicit_addend - P);
       return;
+    }
 
     case R_ARM_TLS_LE32:
       *(uint32_t*)target_address =
@@ -250,7 +256,8 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
 
     case R_ARM_MOVT_ABS:
-      SetMovwMovtImm16(target_address, (uint32_t)((S + A) >> 16) & 0xffffu);
+      SetMovwMovtImm16(target_address,
+                       ((uint32_t)(S + A) >> 16) & 0xffffu);
       return;
 
     case R_ARM_MOVW_PREL_NC: {

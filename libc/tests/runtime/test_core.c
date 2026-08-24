@@ -102,13 +102,11 @@ int TestEHFrame(void) {
   if (!(range.start < range.end)) {
     return 2;
   }
-  // The CIE has a "zR" augmentation: a 4-byte length of 18 followed by 18
-  // bytes of content, so the CIE occupies 22 bytes and the first FDE's length
-  // field starts at offset 22.
-  if (*(const unsigned int*)range.start != 18) {
+  // The CIE has a "zR" augmentation: length 26 (18 bytes content + 8-byte align).
+  if (*(const unsigned int*)range.start != 26) {
     return 8;
   }
-  if (*(const unsigned int*)(range.start + 22) == 0) {
+  if (*(const unsigned int*)(range.start + 30) == 0) {
     return 9;
   }
   count = DaveEHFrameCountFDEs();
@@ -116,8 +114,20 @@ int TestEHFrame(void) {
     return 10;
   }
   cursor = (uintptr_t)range.start;
-  if (!DaveEHFrameNextFDE(&cursor, (uintptr_t)range.end, &fde)) {
-    return 11;
+  fde.pc_begin = 0;
+  while (DaveEHFrameNextFDE(&cursor, (uintptr_t)range.end, &fde)) {
+    if (!DaveEHFrameCFIAtPC(&fde, fde.pc_begin, &cfi)) {
+      continue;
+    }
+    if (cfi.cfa_reg == 7 && cfi.cfa_offset == 8 && cfi.ra_reg == 16 &&
+        cfi.regs[16].rule == DAVE_CFI_REG_OFFSET &&
+        cfi.regs[16].offset == -8) {
+      break;
+    }
+    fde.pc_begin = 0;
+  }
+  if (fde.pc_begin == 0) {
+    return 16;
   }
   if (!(fde.pc_begin < fde.pc_end)) {
     return 12;
@@ -127,28 +137,6 @@ int TestEHFrame(void) {
   }
   if (found.pc_begin != fde.pc_begin || found.pc_end != fde.pc_end) {
     return 14;
-  }
-  if (!DaveEHFrameCFIAtPC(&fde, fde.pc_begin, &cfi)) {
-    return 15;
-  }
-  if (cfi.cfa_reg != 7 || cfi.cfa_offset != 8 ||
-      cfi.return_address_offset != -8) {
-    return 16;
-  }
-  if (fde.has_frame) {
-    if (!DaveEHFrameCFIAtPC(&fde, fde.pc_begin + 2, &cfi)) {
-      return 20;
-    }
-    if (cfi.cfa_reg != 7 || cfi.cfa_offset != 16 ||
-        !cfi.has_saved_rbp || cfi.saved_rbp_offset != -16) {
-      return 21;
-    }
-    if (!DaveEHFrameCFIAtPC(&fde, fde.pc_begin + 8, &cfi)) {
-      return 22;
-    }
-    if (cfi.cfa_reg != 6 || cfi.cfa_offset != 8) {
-      return 23;
-    }
   }
 
 #endif

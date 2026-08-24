@@ -215,15 +215,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
 
     case R_AARCH64_PREL64:
-      *((int64_t*)target_address) = (int64_t)(S - P - A);
+      *((int64_t*)target_address) = (int64_t)(S + A - P);
       return;
 
     case R_AARCH64_PREL32:
-      *((int32_t*)target_address) = (int32_t)(S - P - A);
+      *((int32_t*)target_address) = (int32_t)(S + A - P);
       return;
 
     case R_AARCH64_PREL16:
-      *((int16_t*)target_address) = (int16_t)(S - P - A);
+      *((int16_t*)target_address) = (int16_t)(S + A - P);
       return;
 
     case R_AARCH64_TLSLE_MOVW_TPREL_G2:
@@ -348,7 +348,22 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_AARCH64_LDST8_ABS_LO12_NC:
-      break;
+    case R_AARCH64_LDST16_ABS_LO12_NC:
+    case R_AARCH64_LDST32_ABS_LO12_NC:
+    case R_AARCH64_LDST64_ABS_LO12_NC:
+    case R_AARCH64_LDST128_ABS_LO12_NC: {
+      unsigned scale = reloc->type == R_AARCH64_LDST128_ABS_LO12_NC ? 4
+                       : reloc->type == R_AARCH64_LDST64_ABS_LO12_NC ? 3
+                       : reloc->type == R_AARCH64_LDST32_ABS_LO12_NC ? 2
+                       : reloc->type == R_AARCH64_LDST16_ABS_LO12_NC ? 1
+                                                                    : 0;
+      uint32_t imm12 = (uint32_t)(((S + A) & 0xfff) >> scale);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~(0xfffu << 10);
+      instruction |= imm12 << 10;
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_TSTBR14:
       break;
@@ -385,15 +400,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
     }
 
-    case R_AARCH64_LDST16_ABS_LO12_NC:
-      break;
-
-    case R_AARCH64_LDST32_ABS_LO12_NC:
-      break;
-
-    case R_AARCH64_LDST64_ABS_LO12_NC:
-      break;
-
     case R_AARCH64_MOVW_PREL_G0:
       break;
 
@@ -413,9 +419,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_MOVW_PREL_G3:
-      break;
-
-    case R_AARCH64_LDST128_ABS_LO12_NC:
       break;
 
     case R_AARCH64_MOVW_GOTOFF_G0:

@@ -905,16 +905,26 @@ static void ReadELFContents(Linker* linker, ELFReaderFile* elf_file,
   // Also build the sections_by_type map.
   for (size_t i = 0; i < elf_file->sections.length; i++) {
     ELFReaderSection* section = elf_file->sections.value.p[i];
+    int64_t grouping_type = section->header->type;
     MapKeyValue kv;
     kv.key.p = &section->name;
     kv.value.p = section;
     MapInsert(&file->sections_by_name, kv);
     
-    Vector* type_list = MapFindInt64Key(&file->sections_by_type, section->header->type);
+    // Clang/GCC use the processor-specific SHT_X86_64_UNWIND type for
+    // .eh_frame. Treat it as PROGBITS for output grouping so it is merged with
+    // DaveCC and archive-provided frame records.
+    if (linker->elf_machine_type == ELF_MACHINE_TYPE_X86_64 &&
+        grouping_type == 0x70000001 &&
+        strcmp(section->name.value, ".eh_frame") == 0) {
+      grouping_type = SHT(progbits);
+    }
+    Vector* type_list =
+        MapFindInt64Key(&file->sections_by_type, grouping_type);
     if (type_list == NULL) {
       type_list = NewVector();
       MapKeyValue kv;
-      kv.key.w = section->header->type;
+      kv.key.w = grouping_type;
       kv.value.p = type_list;
       MapInsert(&file->sections_by_type, kv);
     }
@@ -1214,25 +1224,64 @@ static bool SegmentContainsSection(Segment* segment, String* section_name) {
   return false;
 }
 
+static SegmentMemoryRegion* SegmentRegionForSection(Segment* segment,
+                                                    const char* section_name) {
+  for (size_t i = 0; i < segment->regions.length; i++) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    for (size_t j = 0; j < region->sections.length; j++) {
+      if (StringEqual(region->sections.value.p[j], section_name)) {
+        return region;
+      }
+    }
+  }
+  return NULL;
+}
+
 // Now we have the sections grouped we can assign each section to its
 // appropriate segment.  TLS are always in the tls_segment but other sections
 // need to be assigned to a segment in the config file.
 static void AssignSectionGroupsToSegments(Linker* linker) {
+  SegmentMemoryRegion* code_default_region = NULL;
+  SegmentMemoryRegion* data_default_region = NULL;
   for (size_t i = 0; i < linker->section_groups.length; i++) {
     SectionGroup* group = linker->section_groups.value.p[i];
     Segment* segment = NULL;
+    bool use_default_region = false;
     if ((group->flags & SHF(tls)) != 0) {
       segment = &linker->tls_segment;
     } else if (SegmentContainsSection(&linker->code_segment, &group->name)) {
       segment = &linker->code_segment;
     } else if (SegmentContainsSection(&linker->data_segment, &group->name)) {
       segment = &linker->data_segment;
+    } else if ((group->flags & SHF(write)) != 0) {
+      // Foreign compilers commonly use mergeable subsections such as
+      // .data.DW.ref.* and .data.rel.ro.*.  Place otherwise-unconfigured
+      // writable sections in the data segment.
+      segment = &linker->data_segment;
+      use_default_region = true;
+    } else if ((group->flags & SHF(alloc)) != 0) {
+      // Likewise, read-only allocatable subsections belong with code/rodata.
+      segment = &linker->code_segment;
+      use_default_region = true;
     }
     if (segment == NULL) {
       LinkerError(NULL, "Cannot find segment for section %s", group->name.value);
       return;
     }
     group->segment = segment;
+    if (use_default_region) {
+      SegmentMemoryRegion** default_region =
+          segment == &linker->code_segment ? &code_default_region
+                                           : &data_default_region;
+      if (*default_region == NULL) {
+        *default_region = SegmentRegionForSection(
+            segment, segment == &linker->code_segment ? ".rodata" : ".data");
+        if (*default_region == NULL) {
+          *default_region = SegmentDefaultRegion(segment);
+        }
+      }
+      group->region = *default_region;
+    }
     VectorAppend(&segment->sections, group);
   }
 }
@@ -1357,6 +1406,7 @@ typedef struct {
   uint64_t function;
   uint64_t unwind;
   bool cant_unwind;
+  bool compact_inline;
 } ARMExidxRecord;
 
 static int CompareARMExidxRecord(const void* a, const void* b) {
@@ -1377,58 +1427,10 @@ static uint32_t EncodeARMPrel31(uint64_t place, uint64_t target) {
 }
 
 static void SortARMExidx(Linker* linker) {
-  if (linker->elf_machine_type != ELF_MACHINE_TYPE_ARM) {
-    return;
-  }
-  SectionGroup* group = FindSectionGroup(linker, ".ARM.exidx");
-  if (group == NULL) {
-    return;
-  }
-  size_t count = SectionGroupSize(group) / 8;
-  if (count < 2) {
-    return;
-  }
-  ARMExidxRecord* records = calloc(count, sizeof(*records));
-  size_t record = 0;
-  for (size_t i = 0; i < group->components.length; i++) {
-    GroupedSection* component = group->components.value.p[i];
-    if (component->source != kGroupedSectionExisting) {
-      continue;
-    }
-    ELFReaderSection* section = component->section.existing;
-    uint32_t* words = section->contents;
-    for (size_t offset = 0; offset + 8 <= section->header->size; offset += 8) {
-      uint64_t place = section->address + offset;
-      records[record].function = DecodeARMPrel31(place, words[offset / 4]);
-      records[record].cant_unwind = words[offset / 4 + 1] == 1;
-      if (!records[record].cant_unwind) {
-        records[record].unwind =
-            DecodeARMPrel31(place + 4, words[offset / 4 + 1]);
-      }
-      record++;
-    }
-  }
-  qsort(records, record, sizeof(*records), CompareARMExidxRecord);
-  record = 0;
-  for (size_t i = 0; i < group->components.length; i++) {
-    GroupedSection* component = group->components.value.p[i];
-    if (component->source != kGroupedSectionExisting) {
-      continue;
-    }
-    ELFReaderSection* section = component->section.existing;
-    uint32_t* words = section->contents;
-    for (size_t offset = 0; offset + 8 <= section->header->size; offset += 8) {
-      uint64_t place = section->address + offset;
-      words[offset / 4] =
-          EncodeARMPrel31(place, records[record].function);
-      words[offset / 4 + 1] =
-          records[record].cant_unwind
-              ? 1
-              : EncodeARMPrel31(place + 4, records[record].unwind);
-      record++;
-    }
-  }
-  free(records);
+  (void)linker;
+  /* Relocations already produce correct PREL31 exidx entries.  Re-encoding
+   * after qsort was scrambling compact-inline second words and mismapping
+   * sorted records back onto component order.  Lookup scans all entries. */
 }
 
 static void LinkerInventArrayBoundsSymbols(Linker* linker) {
@@ -1609,7 +1611,7 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
     }
     group->address = RegionNextAddress(group);
     if (group->address == 0) {
-      group->address = last_segment_end;
+      group->address = addr != 0 ? addr : last_segment_end;
     }
     // Concatenate all the component sections, assigning
     // consecutive addresses.

@@ -2,6 +2,7 @@
 #define DAVECC_EH_ARM_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef struct {
   const uint8_t* start;
@@ -14,23 +15,12 @@ typedef struct {
 } DaveARMExtabRange;
 
 typedef enum {
-  _URC_OK = 0,
-  _URC_FOREIGN_EXCEPTION_CAUGHT = 1,
-  _URC_FATAL_PHASE2_ERROR = 2,
-  _URC_FATAL_PHASE1_ERROR = 3,
-  _URC_NORMAL_STOP = 4,
-  _URC_END_OF_STACK = 5,
-  _URC_HANDLER_FOUND = 6,
-  _URC_INSTALL_CONTEXT = 7,
-  _URC_CONTINUE_UNWIND = 8,
-} _Unwind_Reason_Code;
-
-typedef enum {
-  _UA_SEARCH_PHASE = 1,
-  _UA_CLEANUP_PHASE = 2,
-  _UA_HANDLER_FRAME = 4,
-  _UA_FORCE_UNWIND = 8,
-} _Unwind_Action;
+  _US_VIRTUAL_UNWIND_FRAME = 0,
+  _US_UNWIND_FRAME_STARTING = 1,
+  _US_UNWIND_FRAME_RESUME = 2,
+  _US_ACTION_MASK = 3,
+  _US_FORCE_UNWIND = 8,
+} _Unwind_State;
 
 typedef enum {
   _UVRSC_CORE = 0,
@@ -47,12 +37,70 @@ typedef enum {
   _UVRSD_DOUBLE = 5,
 } _Unwind_VRS_DataRepresentation;
 
-#define UNWINDER_PRIVATE_DATA_SIZE 20
+typedef enum {
+  _UVRSR_OK = 0,
+  _UVRSR_NOT_IMPLEMENTED = 1,
+  _UVRSR_FAILED = 2,
+} _Unwind_VRS_Result;
+
+#define DAVE_ARM_R_IP 12
+#define DAVE_ARM_R_SP 13
+#define DAVE_ARM_R_LR 14
+#define DAVE_ARM_R_PC 15
+
+typedef struct _Unwind_Control_Block _Unwind_Exception;
+
+typedef struct _Unwind_Control_Block {
+  char exception_class[8];
+  void (*exception_cleanup)(int, struct _Unwind_Control_Block*);
+  struct {
+    unsigned long reserved1;
+    unsigned long reserved2;
+    unsigned long reserved3;
+    unsigned long reserved4;
+    unsigned long reserved5;
+  } unwinder_cache;
+  struct {
+    unsigned long reserved1;
+    unsigned long reserved2;
+  } barrier_cache;
+  struct {
+    unsigned long sp;
+    unsigned long bitpattern[5];
+  } cleanup_cache;
+  struct {
+    unsigned long fnstart;
+    const uint32_t* ehtp;
+    unsigned long additional;
+    unsigned long reserved1;
+  } pr_cache;
+} _Unwind_Control_Block;
+
+typedef struct _Unwind_Context _Unwind_Context;
+
+struct _Unwind_Context {
+  uint32_t vrs[16];
+  uint64_t vfp_d[16];
+  int installed_cleanup;
+  uintptr_t resume_scope_start;
+  uintptr_t resume_scope_end;
+  uintptr_t fnstart;
+  uintptr_t fnend;
+  const uint8_t* lsda;
+  void* personality;
+  const uint32_t* ehtp;
+  uint32_t eht_flags;
+};
 
 typedef struct {
-  uint32_t vrs[16];
-  uint32_t padding[UNWINDER_PRIVATE_DATA_SIZE - 16];
-} _Unwind_Context;
+  uintptr_t pc_begin;
+  uintptr_t pc_end;
+  void* personality;
+  const uint8_t* lsda;
+  const uint32_t* ehtp;
+  uint32_t eht_flags;
+  int is_compact_inline;
+} DaveARMUnwindInfo;
 
 int DaveARMExidxGetRange(DaveARMExidxRange* range);
 int DaveARMExtabGetRange(DaveARMExtabRange* range);
@@ -63,6 +111,14 @@ int DaveARMFindUnwindInfoInRange(uintptr_t pc, const uint8_t* exidx_start,
                                  const uint8_t* exidx_end,
                                  uintptr_t* pc_begin, uintptr_t* pc_end,
                                  const uint8_t** lsda);
+int DaveARMLookupUnwindInfo(uintptr_t pc, DaveARMUnwindInfo* out);
+
+#define DaveARMCanonicalGuestPC(pc)                                       \
+  (((pc) != 0 && ((uintptr_t)(pc) >> 28) == 0) ? ((uintptr_t)(pc) | 0x40000000u) \
+                                               : (uintptr_t)(pc))
+
+uint64_t DaveARMExceptionClass(const _Unwind_Exception* exc);
+void DaveARMSetExceptionClass(_Unwind_Exception* exc, uint64_t value);
 
 int _Unwind_VRS_Get(const _Unwind_Context* context,
                     _Unwind_VRS_RegClass regclass,
@@ -79,10 +135,26 @@ int _Unwind_VRS_Pop(_Unwind_Context* context,
                     uint32_t discriminator,
                     _Unwind_VRS_DataRepresentation representation);
 
-_Unwind_Reason_Code __davecc_arm_personality(int state,
-                                             _Unwind_Action action,
-                                             uint64_t exception_class,
-                                             void* exception_object,
-                                             _Unwind_Context* context);
+int _Unwind_VRS_Interpret(_Unwind_Context* context,
+                          const uint32_t* data,
+                          size_t offset, size_t len);
+
+int DaveARMUnwindStep(_Unwind_Context* context);
+
+void DaveARMInitContext(_Unwind_Context* context);
+void DaveARMInitContextFromHardware(_Unwind_Context* context);
+
+int DaveARMRaiseException(_Unwind_Exception* exc);
+void DaveARMResume(_Unwind_Exception* exc);
+
+typedef int (*DaveARMPersonalityFn)(int state, _Unwind_Exception* ucb,
+                                    _Unwind_Context* context);
+
+int __aeabi_unwind_cpp_pr0(int state, _Unwind_Exception* ucb,
+                           _Unwind_Context* context);
+int __aeabi_unwind_cpp_pr1(int state, _Unwind_Exception* ucb,
+                           _Unwind_Context* context);
+int __aeabi_unwind_cpp_pr2(int state, _Unwind_Exception* ucb,
+                           _Unwind_Context* context);
 
 #endif /* DAVECC_EH_ARM_H */

@@ -27,6 +27,15 @@ static size_t Sleb128Size(long long value) {
   return size;
 }
 
+static size_t Uleb128Size(unsigned long long value) {
+  size_t size = 1;
+  while (value >= 0x80) {
+    value >>= 7;
+    size++;
+  }
+  return size;
+}
+
 typedef struct {
   long long try_start_id;
   long long try_end_id;
@@ -228,6 +237,7 @@ static void DaveEHPrintExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info,
   }
 
   fprintf(fp, "\t.section \"%s\", \"a\", @progbits\n", section_name);
+  fprintf(fp, "\t.align 2\n");
   fprintf(fp, ".Leh_%s_lsda:\n", func);
 
   // @LPStart omitted: landing pad offsets are relative to function start.
@@ -285,6 +295,7 @@ static void DaveEHPrintExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info,
     fprintf(fp, ".Leh_%s_ttype_end:\n", func);
   }
 
+  fprintf(fp, "\t.align 2\n");
   fprintf(fp, "\t.text\n\n");
 }
 
@@ -296,72 +307,137 @@ void DaveEHPrintARMExtabLSDA(FILE* fp, const DaveEHFrameEmitInfo* info) {
   DaveEHPrintExceptTable(fp, info, ".ARM.extab");
 }
 
+static size_t EHFrameCIELength(const DaveEHFrameEmitInfo* info) {
+  bool with_eh = info->range_count > 0;
+  size_t initial_cfi_size =
+      1 + Uleb128Size(info->cie_cfa_reg) +
+      Uleb128Size(info->entry_cfa_offset);
+  if (info->saved_ra_offset != 0 &&
+      info->saved_ra_offset == -info->entry_cfa_offset) {
+    initial_cfi_size +=
+        1 + Uleb128Size((unsigned long long)(-info->saved_ra_offset / 8));
+  }
+  return 4 + 1 + (with_eh ? 5 : 3) + Uleb128Size(1) + Sleb128Size(-8) +
+         Uleb128Size(info->cie_ra_reg) + Uleb128Size(with_eh ? 7 : 1) +
+         (with_eh ? 7 : 1) + initial_cfi_size;
+}
+
 void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix) {
   const char* func = info->func_name;
   bool with_eh = info->range_count > 0;
+  size_t cie_length = EHFrameCIELength(info);
 
   fprintf(fp, "\t.section \".eh_frame\", \"a\", @progbits\n");
+  fprintf(fp, "\t.align 3\n");
   if (with_eh) {
     fprintf(fp, "\t.weak %s\n", DAVECC_EH_PERSONALITY);
   }
   fprintf(fp, ".Leh_%s_cie%s:\n", func, cie_label_suffix);
-  fprintf(fp, "\t.4byte %d\n", with_eh ? 26 : 18);
+  fprintf(fp, "\t.4byte %zu\n", cie_length);
   fprintf(fp, ".Leh_%s_cie_start%s:\n", func, cie_label_suffix);
   fprintf(fp, "\t.4byte 0\n");
   fprintf(fp, "\t.byte 1\n");
   fprintf(fp, with_eh ? "\t.asciz \"zPLR\"\n" : "\t.asciz \"zR\"\n");
-  fprintf(fp, "\t.byte 1\n");
-  fprintf(fp, "\t.byte 120\n");
-  fprintf(fp, "\t.byte %d\n", info->cie_ra_reg);
+  DaveEHPrintUleb128(fp, 1);
+  DaveEHPrintSleb128(fp, -8);
+  DaveEHPrintUleb128(fp, info->cie_ra_reg);
   if (with_eh) {
-    fprintf(fp, "\t.byte 7\n");
+    DaveEHPrintUleb128(fp, 7);
     fprintf(fp, "\t.byte 0x1b\n");
     fprintf(fp, ".Leh_%s_cie_pers_ref%s:\n", func, cie_label_suffix);
     fprintf(fp, "\t.4byte %s-.Leh_%s_cie_pers_ref%s\n",
             DAVECC_EH_PERSONALITY, func, cie_label_suffix);
     fprintf(fp, "\t.byte 0x1b\n");
-    fprintf(fp, "\t.byte 0x10\n");
+    fprintf(fp, "\t.byte 0x1b\n");
   } else {
-    fprintf(fp, "\t.byte 1\n");
-    fprintf(fp, "\t.byte 0\n");
+    DaveEHPrintUleb128(fp, 1);
+    fprintf(fp, "\t.byte 0x1b\n");
   }
-  fprintf(fp, "\t.byte 12, %d, 8\n", info->cie_cfa_reg);
-  fprintf(fp, "\t.byte 144, 1\n");
+  fprintf(fp, "\t.byte 12\n");
+  DaveEHPrintUleb128(fp, info->cie_cfa_reg);
+  DaveEHPrintUleb128(fp, info->entry_cfa_offset);
+  if (info->saved_ra_offset != 0 &&
+      info->saved_ra_offset == -info->entry_cfa_offset) {
+    fprintf(fp, "\t.byte 0x%x\n", 0x80 | info->cie_ra_reg);
+    DaveEHPrintUleb128(fp, -info->saved_ra_offset / 8);
+  }
   fprintf(fp, ".Leh_%s_cie_end%s:\n", func, cie_label_suffix);
 }
 
 void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix) {
   const char* func = info->func_name;
+  (void)cie_label_suffix;
   bool with_eh = info->range_count > 0;
   bool has_frame = info->has_frame;
+  size_t fde_length = 12 + Uleb128Size(with_eh ? 4 : 0) +
+                      (with_eh ? 4 : 0);
+  if (has_frame) {
+    fde_length += 5;
+    fde_length += 1 + Uleb128Size(info->frame_cfa_offset);
+    fde_length +=
+        1 + Uleb128Size((unsigned long long)(-info->saved_fp_offset / 8));
+    if (info->saved_ra_offset != 0 &&
+        info->saved_ra_offset != -info->entry_cfa_offset) {
+      fde_length +=
+          1 + Uleb128Size((unsigned long long)(-info->saved_ra_offset / 8));
+    }
+    fde_length += 5;
+    fde_length += 1 + Uleb128Size(info->cie_fp_reg) +
+                  Uleb128Size(info->fp_cfa_offset);
+    for (size_t i = 0; i < info->saved_reg_count; i++) {
+      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
+      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
+          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
+        fde_length +=
+            1 + Uleb128Size((unsigned long long)(-saved->cfa_offset / 8));
+      }
+    }
+  }
 
   fprintf(fp, ".Leh_%s_fde:\n", func);
-  fprintf(fp, "\t.4byte %d\n",
-          with_eh ? (has_frame ? 42 : 25) : (has_frame ? 38 : 21));
+  fprintf(fp, "\t.4byte %zu\n", fde_length);
   fprintf(fp, ".Leh_%s_fde_start:\n", func);
-  fprintf(fp, "\t.4byte .Leh_%s_fde_start-.Leh_%s_cie%s\n", func, func,
-          cie_label_suffix);
-  fprintf(fp, "\t.8byte %s\n", func);
-  fprintf(fp, "\t.8byte (.func_end_%s-%s)\n", func, func);
+  fprintf(fp, "\t.4byte %zu\n", EHFrameCIELength(info) + 8);
+  fprintf(fp, ".Leh_%s_fde_pc:\n", func);
+  fprintf(fp, "\t.4byte %s-.Leh_%s_fde_pc\n", func, func);
+  fprintf(fp, "\t.4byte (.func_end_%s-%s)\n", func, func);
   if (with_eh) {
-    fprintf(fp, "\t.byte 4\n");
+    DaveEHPrintUleb128(fp, 4);
     fprintf(fp, ".Leh_%s_fde_lsda_ref:\n", func);
     fprintf(fp, "\t.4byte .Leh_%s_lsda-.Leh_%s_fde_lsda_ref\n", func, func);
   } else {
-    fprintf(fp, "\t.byte 0\n");
+    DaveEHPrintUleb128(fp, 0);
   }
   if (has_frame) {
     fprintf(fp, "\t.byte 4\n");
     fprintf(fp, "\t.4byte (.Leh_%s_after_push-%s)\n", func, func);
-    fprintf(fp, "\t.byte 14, 16\n");
-    fprintf(fp, "\t.byte 134, 2\n");
+    fprintf(fp, "\t.byte 14\n");
+    DaveEHPrintUleb128(fp, info->frame_cfa_offset);
+    fprintf(fp, "\t.byte 0x%x\n", 0x80 | info->cie_fp_reg);
+    DaveEHPrintUleb128(fp, -info->saved_fp_offset / 8);
+    if (info->saved_ra_offset != 0 &&
+        info->saved_ra_offset != -info->entry_cfa_offset) {
+      fprintf(fp, "\t.byte 0x%x\n", 0x80 | info->cie_ra_reg);
+      DaveEHPrintUleb128(fp, -info->saved_ra_offset / 8);
+    }
     fprintf(fp, "\t.byte 4\n");
     fprintf(fp, "\t.4byte (.Leh_%s_after_leaq-.Leh_%s_after_push)\n", func,
             func);
-    fprintf(fp, "\t.byte 12, %d, 8\n", info->cie_fp_reg);
+    fprintf(fp, "\t.byte 12\n");
+    DaveEHPrintUleb128(fp, info->cie_fp_reg);
+    DaveEHPrintUleb128(fp, info->fp_cfa_offset);
+    for (size_t i = 0; i < info->saved_reg_count; i++) {
+      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
+      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
+          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
+        fprintf(fp, "\t.byte 0x%x\n", 0x80 | saved->dwarf_reg);
+        DaveEHPrintUleb128(fp, -saved->cfa_offset / 8);
+      }
+    }
   }
   fprintf(fp, ".Leh_%s_fde_end:\n", func);
+  fprintf(fp, "\t.align 3\n");
   fprintf(fp, "\t.text\n\n");
 }

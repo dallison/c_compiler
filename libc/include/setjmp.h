@@ -13,7 +13,13 @@
 struct __jmp_buf {
   long regs[32];
 };
-#elif defined(__pcode__)
+#elif defined(__p_code__)
+struct __jmp_buf {
+  long iregs[256];
+  float fregs[256];
+  double dregs[256];
+  long retaddr;
+};
 #elif defined(__6502__)
 struct __jmp_buf {
   char b[6];

@@ -1668,6 +1668,11 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
       .cie_ra_reg = 30,
       .cie_cfa_reg = 31,
       .cie_fp_reg = 29,
+      .entry_cfa_offset = 0,
+      .frame_cfa_offset = 16,
+      .fp_cfa_offset = 16,
+      .saved_fp_offset = -16,
+      .saved_ra_offset = -8,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
   DaveEHPrintEHFrameCIE(fp, &info, "");

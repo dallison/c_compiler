@@ -922,7 +922,12 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
 #define UNDEFINED_DIRECTIVE(spelling) \
   static void HandleDirective_##spelling(Assembler* assembler) {}
 
-UNDEFINED_DIRECTIVE(align);
+static void HandleDirective_p2align(Assembler* assembler);
+
+static void HandleDirective_align(Assembler* assembler) {
+  // GNU `as` treats `.align n` as 2^n-byte alignment on ARM.
+  HandleDirective_p2align(assembler);
+}
 
 static void SymbolDirective(Assembler* assembler,
                             AssemblerSymbolBinding binding) {
@@ -1208,11 +1213,18 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   // section offset would leave a bogus small value at run time.
   int additive_terms = 1;
   int subtractive_terms = 0;
+  int64_t constant_addend = 0;
 
   while (LexLookingAt(&assembler->lex, TOK(plus)) ||
          LexLookingAt(&assembler->lex, TOK(minus))) {
     Token tok = assembler->lex.current_token;
     LexNextToken(&assembler->lex);
+    if (LexLookingAt(&assembler->lex, TOK(number))) {
+      int64_t value = assembler->lex.number;
+      LexNextToken(&assembler->lex);
+      constant_addend += tok == TOK(plus) ? value : -value;
+      continue;
+    }
     AssemblerSymbol* right = ExpressionPrimary(assembler);
     if (right == NULL) {
       break;
@@ -1239,9 +1251,12 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     }
     VectorAppend(&relocations, reloc);
   }
-  int64_t value = 0;
-  if (known_values && additive_terms == subtractive_terms) {
-    value = left->value;
+  ((AssemblerRelocation*)relocations.value.p[0])->addend += constant_addend;
+  int64_t value = constant_addend;
+  if (known_values && additive_terms == subtractive_terms &&
+      !(bits == 32 && IsEhTableSection(assembler) &&
+        RelocTypeForWord(assembler) == R_ARM_PREL31)) {
+    value += left->value;
     for (size_t i = 1; i < relocations.length; i++) {
       AssemblerRelocation* reloc = relocations.value.p[i];
       if (reloc->type == assembler->reloc_types[kRelocAdd64] ||
@@ -1268,13 +1283,16 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
         (sub_is_dot ||
          (sub_reloc->symbol->is_label && sub_reloc->symbol->defined &&
           sub_reloc->symbol->section == assembler->current_section &&
-          sub_reloc->type == assembler->reloc_types[kRelocSub32] &&
-          sub_reloc->symbol->value ==
-              (uint64_t)AssemblerCurrentAddress(assembler)))) {
+          sub_reloc->type == assembler->reloc_types[kRelocSub32]))) {
+      int64_t addend = add_reloc->addend;
+      if (!sub_is_dot) {
+        addend += (int64_t)AssemblerCurrentAddress(assembler) -
+                  sub_reloc->symbol->value;
+      }
       AssemblerRelocation* merged = NewAssemblerRelocation(
           add_reloc->symbol, RelocTypeForWord(assembler),
           assembler->current_section,
-          (int32_t)AssemblerCurrentAddress(assembler), add_reloc->addend);
+          (int32_t)AssemblerCurrentAddress(assembler), addend);
       VectorDestructWithContents(
           &relocations, (VectorElementDestructor)AssemblerRelocationDestruct,
           /*free_element=*/true);

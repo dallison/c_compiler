@@ -2827,6 +2827,39 @@ static const char* LSDATypeInfoSymbol(EHTypeInfo* info) {
   return NULL;
 }
 
+static int X86_64DwarfRegister(int reg) {
+  static const int dwarf_regs[X86_64_NUM_INT_REGS] = {
+      0,  0,  7,  11, 10, 10, 11, 12, 6, 3,  5,  4,  1,  2,  8,  9,
+      10, 11, 12, 13, 14, 15, 12, 13, 14, 15, 10, 11, 8,  9,  10, 11,
+  };
+  if (reg >= 0 && reg < X86_64_NUM_INT_REGS) {
+    return dwarf_regs[reg];
+  }
+  return reg;
+}
+
+static size_t X86_64SavedCFIRegisters(
+    X86_64Emitter* emitter, DaveEHFrameSavedReg* saved_regs,
+    size_t capacity) {
+  BitSetIterator it;
+  size_t count = 0;
+  int offset = emitter->saved_reg_offset;
+  int stack_frame_size = StackFrameSize(emitter);
+
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    if (count < capacity) {
+      saved_regs[count].dwarf_reg = X86_64DwarfRegister(reg);
+      saved_regs[count].cfa_offset = offset - stack_frame_size - 8;
+      count++;
+    }
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  return count;
+}
+
 static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
                                const char* func_name) {
   if (emitter->rv->base.varargs) {
@@ -2834,7 +2867,11 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
   }
 
   DaveEHLSDARange lsda_ranges[64];
+  DaveEHFrameSavedReg saved_regs[16];
   size_t lsda_count = 0;
+  size_t saved_reg_count =
+      X86_64SavedCFIRegisters(emitter, saved_regs,
+                             sizeof(saved_regs) / sizeof(saved_regs[0]));
   for (size_t i = 0; i < emitter->rv->exception_ranges.length &&
                      lsda_count < sizeof(lsda_ranges) / sizeof(lsda_ranges[0]);
        i++) {
@@ -2857,6 +2894,13 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
       .cie_fp_reg = 6,
+      .entry_cfa_offset = 8,
+      .frame_cfa_offset = 16,
+      .fp_cfa_offset = 8,
+      .saved_fp_offset = -16,
+      .saved_ra_offset = -8,
+      .saved_regs = saved_regs,
+      .saved_reg_count = saved_reg_count,
   };
   DaveEHPrintEHFrameCIE(fp, &info, "");
   DaveEHPrintEHFrameFDE(fp, &info, "");
@@ -2887,6 +2931,11 @@ static void X86_64PrintGCCExceptTable(X86_64Emitter* emitter, FILE* fp,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
       .cie_fp_reg = 6,
+      .entry_cfa_offset = 8,
+      .frame_cfa_offset = 16,
+      .fp_cfa_offset = 8,
+      .saved_fp_offset = -16,
+      .saved_ra_offset = -8,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
 }

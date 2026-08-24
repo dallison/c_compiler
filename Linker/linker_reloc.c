@@ -26,6 +26,8 @@ Relocation* NewRelocation(const char* symbol_name,
   Relocation* reloc = malloc(sizeof(Relocation));
   StringInit(&reloc->symbol_name, symbol_name);
   reloc->symbol = NULL;
+  reloc->symbol_section = NULL;
+  reloc->symbol_value = 0;
   reloc->offset = offset;
   reloc->type = reloc_type;
   reloc->addend = addend;
@@ -38,6 +40,8 @@ Relocation* NewLinkerSymbolRelocation(LinkerSymbol* symbol, int64_t offset,
   Relocation* reloc = malloc(sizeof(Relocation));
   StringInit(&reloc->symbol_name, symbol->name.value);
   reloc->symbol = symbol;
+  reloc->symbol_section = NULL;
+  reloc->symbol_value = 0;
   reloc->offset = offset;
   reloc->type = reloc_type;
   reloc->addend = 0;
@@ -53,6 +57,8 @@ Relocation* NewRelativeRelocation(LinkerSymbol* symbol,
   Relocation* reloc = malloc(sizeof(Relocation));
    StringInit(&reloc->symbol_name, symbol != NULL ? symbol->name.value : NULL);
    reloc->symbol = symbol;
+   reloc->symbol_section = NULL;
+   reloc->symbol_value = 0;
    reloc->offset = offset;
    reloc->type = reloc_type;
    reloc->addend = addend;
@@ -116,6 +122,12 @@ void LinkerReadRelocation(Linker* linker,
   Relocation* linker_reloc =
     NewRelocation((const char*)strtab->contents + elf_sym->name,
                 target_section, reloc->offset, reloc_type, addend);
+  if (ELF_ST_TYPE(elf_sym->info) == STT(section) &&
+      elf_sym->shndx < elf_file->sections.length) {
+    linker_reloc->symbol_section =
+        elf_file->sections.value.p[elf_sym->shndx];
+    linker_reloc->symbol_value = elf_sym->value;
+  }
 
   // Add relocation to file relocations vector.
   VectorAppend(&file->relocations, linker_reloc);
@@ -134,8 +146,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   
   // Find the value of the symbol to use.  This looks in the local symbol
   // table first, then the global symbol table.
-  LinkerSymbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
-  if (symbol == NULL) {
+  LinkerSymbol* symbol = NULL;
+  uint64_t S;
+  if (reloc->symbol_section != NULL) {
+    S = reloc->symbol_section->address + reloc->symbol_value;
+  } else {
+    symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+    S = symbol != NULL ? symbol->address : 0;
+  }
+  if (symbol == NULL && reloc->symbol_section == NULL) {
     // Trying to apply relocation for undefined symbol
     LinkerError(file, "Undefined symbol %s used in relocation", reloc->symbol_name.value);
     return;
@@ -144,7 +163,6 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   // What address are we applying the relocation to.
   char* target_address = (char*)target_section->contents + reloc->offset;
   
-  uint64_t S = symbol->address;   // LinkerSymbol address.
   int64_t A = reloc->addend;      // Addend.
   
 
@@ -152,7 +170,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
     printf("Applying relocation type %d for symbol %s(0x%" PRIx64 ") to offset %" PRId64 "\n",
          reloc->type,
          reloc->symbol_name.value,
-         symbol->address, reloc->offset);
+         S, reloc->offset);
   }
   assert(linker->arch != NULL);
   linker->arch->apply_relocation(linker, file, reloc,

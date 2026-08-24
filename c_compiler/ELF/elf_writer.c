@@ -369,7 +369,11 @@ static void WriteSectionContents(ELFWriterFile* elf,
   for (size_t i = 0; i < elf->sections.length; i++) {
     ELFWriterSection* section = elf->sections.value.p[i];
     size_t data_length = 0;
-    if (section->contents != NULL) {
+    if (section->header.type == SHT(nobits)) {
+      // NOBITS contributes to the in-memory image only.  Its file offset and
+      // size are described by the section header, but no bytes may be emitted
+      // or every following section will be shifted.
+    } else if (section->contents != NULL) {
       ELFWriterSectionContentsWrite(section->contents, fp);
     } else {
       if (section == symtab) {

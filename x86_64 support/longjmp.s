@@ -11,10 +11,12 @@
 // void longjmp(jmp_buf buf, int value);
 // SysV: buf in %rdi, value in %rsi
 longjmp:
-	mov %rsi, %rax
-	test %rax, %rax
+	// value is an int.  Its upper argument-register bits are unspecified by
+	// the SysV ABI, so test and return the defined 32-bit value only.
+	mov %esi, %eax
+	test %eax, %eax
 	jnz Lj_skip_one
-	mov $1, %rax
+	mov $1, %eax
 Lj_skip_one:
 	// Restore the saved register file.  Skip slots that map to %rax (0, 1),
 	// because %rax holds the setjmp return value.  Do not restore %r11 here:

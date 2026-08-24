@@ -202,9 +202,9 @@ static void UnwindStep(uintptr_t pc, uintptr_t rsp, uintptr_t rbp, uintptr_t cs,
     if (!DaveEHFrameWalkFrame(&regs, &walk)) {
       break;
     }
-    pc = walk.caller_pc;
-    rsp = walk.caller_rsp;
-    rbp = walk.caller_rbp;
+    pc = walk.caller.pc;
+    rsp = walk.caller.rsp;
+    rbp = walk.caller.rbp;
     cs = pc;
     ce = pc;
   }

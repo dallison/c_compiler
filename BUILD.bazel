@@ -2111,6 +2111,7 @@ linux_dynamic_runtime(
     startup_source = "arm support/linux_start.s",
     support_sources = [
         "arm support/cxx_guard.s",
+        "arm support/cxx_rtti_vtables.s",
         "arm support/eh_transfer.s",
         "arm support/eh_unwind.s",
         "arm support/longjmp.s",
@@ -2160,6 +2161,7 @@ linux_libc_archive(
     clone_source = "arm support/linux_clone.s",
     support_sources = [
         "arm support/cxx_guard.s",
+        "arm support/cxx_rtti_vtables.s",
         "arm support/eh_transfer.s",
         "arm support/eh_unwind.s",
         "arm support/longjmp.s",
@@ -2211,6 +2213,7 @@ cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "arm support/cxx_guard.s"
+  "arm support/cxx_rtti_vtables.s"
   "arm support/eh_personality.s"
   "arm support/eh_unwind.s"
   "arm support/eh_transfer.s"
@@ -2982,6 +2985,23 @@ sh_test(
 )
 
 sh_test(
+    name = "eh_arm_runtime_test",
+    srcs = ["tests/eh_arm_runtime_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+    ],
+    data = [
+        ":arm",
+        ":davecc",
+        ":libc_arm",
+        ":libc_headers",
+        "tests/eh_lsda_runtime_test.sh",
+    ],
+)
+
+sh_test(
     name = "eh_archive_runtime_x86_64_test",
     srcs = ["tests/eh_archive_runtime_test.sh"],
     args = [
@@ -3512,6 +3532,215 @@ filegroup(
 filegroup(
     name = "native_linux_dynamic_minimal_source",
     srcs = ["tests/native_linux_dynamic_minimal.c"],
+)
+
+filegroup(
+    name = "foreign_eh_sources",
+    srcs = [
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+)
+
+sh_test(
+    name = "native_linux_foreign_eh_x86_64_test",
+    srcs = ["tests/native_linux_foreign_eh_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "x86_64",
+        "g++",
+        "x86",
+        "x86_64",
+    ],
+    data = [
+        ":davecc",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["COLIMA_HOME", "HOME", "PATH"],
+    tags = ["local", "manual"],
+)
+
+sh_test(
+    name = "native_linux_foreign_eh_aarch64_test",
+    srcs = ["tests/native_linux_foreign_eh_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "aarch64",
+        "g++",
+        "default",
+        "aarch64",
+    ],
+    data = [
+        ":davecc",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["COLIMA_HOME", "HOME", "PATH"],
+    tags = ["local", "manual"],
+)
+
+sh_test(
+    name = "native_linux_foreign_eh_arm_test",
+    srcs = ["tests/native_linux_foreign_eh_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "arm",
+        "arm-linux-gnueabihf-g++",
+        "default",
+        "aarch64",
+    ],
+    data = [
+        ":davecc",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["COLIMA_HOME", "HOME", "PATH"],
+    tags = ["local", "manual"],
+)
+
+sh_test(
+    name = "native_linux_foreign_eh_riscv_test",
+    srcs = ["tests/native_linux_foreign_eh_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "riscv",
+        "riscv64-linux-gnu-g++",
+        "default",
+        "aarch64",
+    ],
+    data = [
+        ":davecc",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["COLIMA_HOME", "HOME", "PATH"],
+    tags = ["local", "manual"],
+)
+
+sh_test(
+    name = "foreign_eh_object_x86_64_test",
+    srcs = ["tests/foreign_eh_object_gate_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "x86_64",
+        "x86_64-unknown-linux-gnu",
+        "-i",
+    ],
+    data = [
+        ":archivist",
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["PATH"],
+)
+
+sh_test(
+    name = "foreign_eh_object_aarch64_test",
+    srcs = ["tests/foreign_eh_object_gate_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :libc_aarch64)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "aarch64",
+        "aarch64-unknown-linux-gnu",
+        "-i",
+    ],
+    data = [
+        ":aarch64",
+        ":archivist",
+        ":davecc",
+        ":libc_aarch64",
+        ":libc_headers",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["PATH"],
+)
+
+sh_test(
+    name = "foreign_eh_object_arm_test",
+    srcs = ["tests/foreign_eh_object_gate_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "arm",
+        "armv7-unknown-linux-gnueabihf",
+        "-i",
+    ],
+    data = [
+        ":archivist",
+        ":arm",
+        ":davecc",
+        ":libc_arm",
+        ":libc_headers",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["PATH"],
+)
+
+sh_test(
+    name = "foreign_eh_object_riscv_test",
+    srcs = ["tests/foreign_eh_object_gate_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv)",
+        "$(rootpath tests/foreign_eh_davecc.cpp)",
+        "$(rootpath tests/foreign_eh_system.cpp)",
+        "riscv",
+        "riscv64-unknown-linux-gnu",
+    ],
+    data = [
+        ":archivist",
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv",
+        ":riscv",
+        "tests/foreign_eh_davecc.cpp",
+        "tests/foreign_eh_system.cpp",
+    ],
+    env_inherit = ["PATH"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "foreign_eh_dso_x86_64_test",
+    srcs = ["tests/foreign_eh_dso_gate_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+    ],
+    env_inherit = ["PATH"],
 )
 
 sh_test(

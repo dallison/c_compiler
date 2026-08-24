@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "eh_cxa_internal.h"
 
 #if defined(__DAVECC_LEGACY_RTTI__)
@@ -89,24 +90,9 @@ struct __class_type_info {
   const char* __type_name;
 };
 
-static void ItaniumClassTypeInfoMarker(void* self) {
-  (void)self;
-}
-
-static void ItaniumSiClassTypeInfoMarker(void* self) {
-  (void)self;
-}
-
-static void ItaniumVmiClassTypeInfoMarker(void* self) {
-  (void)self;
-}
-
-const void* __davecc_itanium_vptr_class =
-    (const void*)ItaniumClassTypeInfoMarker;
-const void* __davecc_itanium_vptr_si_class =
-    (const void*)ItaniumSiClassTypeInfoMarker;
-const void* __davecc_itanium_vptr_vmi_class =
-    (const void*)ItaniumVmiClassTypeInfoMarker;
+extern const void* __davecc_itanium_vptr_class;
+extern const void* __davecc_itanium_vptr_si_class;
+extern const void* __davecc_itanium_vptr_vmi_class;
 
 static const void* ItaniumResolveVptr(const void* vptr) {
   if (vptr == (const void*)&__davecc_itanium_vptr_class) {
@@ -130,7 +116,7 @@ static int ItaniumTypeInfoEqual(const __class_type_info* left,
       right->__type_name == 0) {
     return 0;
   }
-  return left->__type_name == right->__type_name;
+  return strcmp(left->__type_name, right->__type_name) == 0;
 }
 
 static void ItaniumRttiSearch(const __class_type_info* ti,

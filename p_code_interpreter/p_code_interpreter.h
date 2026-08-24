@@ -30,6 +30,8 @@
 // Start of user escape codes.
 #define P_CODE_ESC_USER_START  256
 #define P_CODE_ESC_PROGRAM_RETURN P_CODE_ESC_USER_START
+#define P_CODE_ESC_SETJMP_SAVE (P_CODE_ESC_USER_START + 1)
+#define P_CODE_ESC_LONGJMP_RESTORE (P_CODE_ESC_USER_START + 2)
 
 typedef struct PCodeInterpreter {
   Loader* loader;

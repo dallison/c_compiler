@@ -84,6 +84,49 @@ static void WriteDouble(void* p, double value) {
   memcpy(p, &value, sizeof(value));
 }
 
+// This must match struct __jmp_buf for __p_code__ in libc/include/setjmp.h.
+typedef struct PCodeJumpBuffer {
+  int64_t iregs[PCODE_NUM_INT_REGS];
+  float fregs[PCODE_NUM_FLOAT_REGS];
+  double dregs[PCODE_NUM_DOUBLE_REGS];
+  uint64_t retaddr;
+} PCodeJumpBuffer;
+
+static PCodeJumpBuffer* GetJumpBufferArgument(PCodeInterpreter* interpreter) {
+  uint64_t sp = (uint64_t)interpreter->iregs[PCODE_SP_REG];
+  return (PCodeJumpBuffer*)(uintptr_t)ReadU64((void*)(uintptr_t)(sp + 8));
+}
+
+static void SaveJumpBuffer(PCodeInterpreter* interpreter) {
+  PCodeJumpBuffer* buffer = GetJumpBufferArgument(interpreter);
+  uint64_t sp = (uint64_t)interpreter->iregs[PCODE_SP_REG];
+  memcpy(buffer->iregs, interpreter->iregs, sizeof(buffer->iregs));
+  memcpy(buffer->fregs, interpreter->fregs, sizeof(buffer->fregs));
+  memcpy(buffer->dregs, interpreter->dregs, sizeof(buffer->dregs));
+  buffer->retaddr = ReadU64((void*)(uintptr_t)sp);
+}
+
+static void RestoreJumpBuffer(PCodeInterpreter* interpreter) {
+  uint64_t sp = (uint64_t)interpreter->iregs[PCODE_SP_REG];
+  PCodeJumpBuffer* buffer = GetJumpBufferArgument(interpreter);
+  int value = (int)ReadU64((void*)(uintptr_t)(sp + 16));
+  if (value == 0) {
+    value = 1;
+  }
+
+  uint64_t saved_sp = (uint64_t)buffer->iregs[PCODE_SP_REG];
+  uint64_t retaddr = buffer->retaddr;
+  memcpy(interpreter->iregs, buffer->iregs, sizeof(buffer->iregs));
+  memcpy(interpreter->fregs, buffer->fregs, sizeof(buffer->fregs));
+  memcpy(interpreter->dregs, buffer->dregs, sizeof(buffer->dregs));
+
+  // Complete the return from the original setjmp call.  A normal ret consumes
+  // the saved return-address slot before control reaches the caller.
+  interpreter->iregs[0] = value;
+  interpreter->iregs[PCODE_SP_REG] = (int64_t)(saved_sp + 8);
+  interpreter->iregs[PCODE_PC_REG] = (int64_t)retaddr;
+}
+
 // Resolve a PLT symbol and fixup the GOT entry.
 // On entry:
 // t1 (r26): contains the index into the relocation table that
@@ -171,6 +214,14 @@ static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code){
     case P_CODE_ESC_PROGRAM_RETURN:
       interpreter->exit_code = (int)interpreter->iregs[0];
       interpreter->running = false;
+      break;
+
+    case P_CODE_ESC_SETJMP_SAVE:
+      SaveJumpBuffer(interpreter);
+      break;
+
+    case P_CODE_ESC_LONGJMP_RESTORE:
+      RestoreJumpBuffer(interpreter);
       break;
 
     case P_CODE_ESC_DEBUG:

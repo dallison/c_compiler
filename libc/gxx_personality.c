@@ -5,6 +5,8 @@
 
 #include "eh_cxa_internal.h"
 
+#if !defined(__arm__)
+
 extern void __davecc_eh_set_landing_pad_state(_Unwind_Exception* exc,
                                               long selector, long type_offset);
 
@@ -17,8 +19,14 @@ extern void __davecc_eh_set_landing_pad_state(_Unwind_Exception* exc,
 static DAVECC_PERSONALITY_TLS uintptr_t resume_scope_start;
 static DAVECC_PERSONALITY_TLS uintptr_t resume_scope_end;
 
-static const struct type_info* ThrownTypeInfo(_Unwind_Exception* exc) {
-  if (exc == 0) {
+static int IsCXXExceptionClass(_Unwind_Exception_Class exception_class) {
+  return exception_class == DAVECC_EH_EXCEPTION_CLASS_GNU ||
+         exception_class == DAVECC_EH_EXCEPTION_CLASS_CLANG;
+}
+
+static const struct type_info* ThrownTypeInfo(
+    _Unwind_Exception_Class exception_class, _Unwind_Exception* exc) {
+  if (exc == 0 || !IsCXXExceptionClass(exception_class)) {
     return 0;
   }
   struct __cxa_exception* header =
@@ -41,8 +49,6 @@ _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
   DaveLSDAQuery query;
 
   (void)version;
-  (void)exception_class;
-
   lsda = (const uint8_t*)_Unwind_GetLanguageSpecificData(ctx);
   func_start = _Unwind_GetRegionStart(ctx);
   pc = _Unwind_GetIP(ctx);
@@ -66,7 +72,7 @@ _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
   query.pc = pc;
   query.scope_start = scope_start;
   query.scope_end = scope_end;
-  query.thrown = ThrownTypeInfo(exc);
+  query.thrown = ThrownTypeInfo(exception_class, exc);
   query.search_phase = search_phase;
   query.handler_frame = handler_frame;
   if (!DaveLSDAFindAction(lsda, func_start, &query, &action)) {
@@ -87,7 +93,7 @@ _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
   if (actions & _UA_CLEANUP_PHASE) {
     if (action.is_cleanup || (action.is_catch && handler_frame)) {
       void* adjusted = exc;
-      if (action.is_catch) {
+      if (action.is_catch && IsCXXExceptionClass(exception_class)) {
         struct __cxa_exception* header =
             (struct __cxa_exception*)((char*)exc -
                                       DAVECC_CXA_UNWIND_OFFSET);
@@ -97,8 +103,9 @@ _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
         }
         header->adjustedPtr = adjusted;
       }
-      _Unwind_SetGR(ctx, 0, (_Unwind_Word)exc);
-      _Unwind_SetGR(ctx, 1, (_Unwind_Word)action.selector);
+      _Unwind_SetGR(ctx, DaveUnwindEHExceptionReg(), (_Unwind_Word)exc);
+      _Unwind_SetGR(ctx, DaveUnwindEHSelectorReg(),
+                    (_Unwind_Word)action.selector);
       _Unwind_SetIP(ctx, action.landing_pad);
       DaveUnwindSetInstalledCleanup(ctx, action.is_cleanup);
       if (action.is_cleanup) {
@@ -116,3 +123,12 @@ _Unwind_Reason_Code __gxx_personality_v0(int version, _Unwind_Action actions,
 
   return _URC_CONTINUE_UNWIND;
 }
+
+_Unwind_Reason_Code __gxx_personality_v1(int version, _Unwind_Action actions,
+                                        _Unwind_Exception_Class exception_class,
+                                        _Unwind_Exception* exc,
+                                        _Unwind_Context* ctx) {
+  return __gxx_personality_v0(version, actions, exception_class, exc, ctx);
+}
+
+#endif

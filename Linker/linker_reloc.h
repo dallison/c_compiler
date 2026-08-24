@@ -21,6 +21,8 @@ struct LinkerSymbol;
 typedef struct Relocation {
   String symbol_name;        // LinkerSymbol name.
   struct LinkerSymbol* symbol;     // Decoded symbol (might be NULL).
+  ELFReaderSection* symbol_section; // Target of an STT_SECTION relocation.
+  uint64_t symbol_value;      // Value relative to symbol_section.
   ELFReaderSection* section; // Target section.
   int type;                  // Relocation type.
   int64_t offset;            // Offset into section.

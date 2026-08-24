@@ -109,7 +109,11 @@ int TestEHCxaTerminateHooks(void) {
 int TestUnwindEndOfStack(void) {
   int failures = 0;
   _Unwind_Exception exception = {};
+#if defined(__arm__)
+  DaveARMSetExceptionClass(&exception, DAVECC_EH_EXCEPTION_CLASS);
+#else
   exception.exception_class = DAVECC_EH_EXCEPTION_CLASS;
+#endif
   CHECK_EQ((long)_Unwind_RaiseException(&exception),
            (long)_URC_END_OF_STACK, failures);
   return failures;

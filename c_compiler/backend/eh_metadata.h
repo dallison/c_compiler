@@ -20,6 +20,11 @@ typedef struct {
 } DaveEHLSDARange;
 
 typedef struct {
+  int dwarf_reg;
+  int cfa_offset;
+} DaveEHFrameSavedReg;
+
+typedef struct {
   const DaveEHLSDARange* ranges;
   size_t range_count;
   const char* func_name;
@@ -28,6 +33,13 @@ typedef struct {
   int cie_ra_reg;
   int cie_cfa_reg;
   int cie_fp_reg;
+  int entry_cfa_offset;
+  int frame_cfa_offset;
+  int fp_cfa_offset;
+  int saved_fp_offset;
+  int saved_ra_offset;
+  const DaveEHFrameSavedReg* saved_regs;
+  size_t saved_reg_count;
 } DaveEHFrameEmitInfo;
 
 void DaveEHPrintUleb128(FILE* fp, unsigned long long value);

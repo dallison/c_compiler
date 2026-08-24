@@ -224,7 +224,7 @@ void EHABIPrintARMExidxExtab(FILE* fp, const char* func_name,
   fprintf(fp, "\t.section \".ARM.exidx\", \"a\", @progbits\n");
   fprintf(fp, "\t.p2align 2\n");
   fprintf(fp, ".Leh_arm_exidx_%s:\n", func_name);
-  fprintf(fp, "\t.4byte %s\n", func_name);
+  fprintf(fp, "\t.4byte (%s - .Leh_arm_exidx_%s)\n", func_name, func_name);
   fprintf(fp, "\t.4byte (.Leh_arm_extab_%s - .Leh_arm_exidx_%s)\n", func_name,
           func_name);
   fprintf(fp, "\t.text\n\n");

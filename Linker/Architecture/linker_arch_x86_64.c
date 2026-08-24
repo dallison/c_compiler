@@ -8,6 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef R_X86_64_GOTPCRELX
+#define R_X86_64_GOTPCRELX 41
+#endif
+#ifndef R_X86_64_REX_GOTPCRELX
+#define R_X86_64_REX_GOTPCRELX 42
+#endif
+
 static int64_t CodeStartAddress(Linker* linker) {
   int64_t address;
   if (linker->building_dso) {
@@ -50,6 +57,8 @@ static void HandlePICRelocation(
     int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
   switch (reloc->type) {
     case R_X86_64_GOTPCREL:
+    case R_X86_64_GOTPCRELX:
+    case R_X86_64_REX_GOTPCRELX:
     case R_X86_64_GOT32:
       if (symbol != NULL) {
         symbol->got_index = append_data_to_got(dynamic, symbol);
@@ -132,6 +141,8 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_X86_64_GOTPCREL:
+    case R_X86_64_GOTPCRELX:
+    case R_X86_64_REX_GOTPCRELX:
     case R_X86_64_GOT32: {
       uint64_t addr = S + A;
       if (symbol != NULL && symbol->got_index >= 0 &&

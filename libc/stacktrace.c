@@ -284,16 +284,15 @@ static size_t CaptureNativeFrames(uintptr_t* frames, size_t capacity,
        walked < DAVECC_STACKTRACE_WALK_LIMIT && captured < max_depth;
        walked++) {
     DaveEHFrameWalkResult caller;
-    if (!DaveEHFrameWalkFrame(&regs, &caller) || caller.caller_pc == 0) {
+    if (!DaveEHFrameWalkFrame(&regs, &caller) || caller.caller.pc == 0) {
       break;
     }
-    if (caller.caller_pc == regs.pc && caller.caller_rbp == regs.rbp &&
-        caller.caller_rsp == regs.rsp) {
+    if (caller.caller.pc == regs.pc && caller.caller.rbp == regs.rbp &&
+        caller.caller.rsp == regs.rsp) {
       break;
     }
-    regs.pc = caller.caller_pc;
-    regs.rsp = caller.caller_rsp;
-    regs.rbp = caller.caller_rbp;
+    regs = caller.caller;
+    DaveEHFrameSyncCanonical(&regs);
 
     if (internal_skip != 0) {
       internal_skip--;

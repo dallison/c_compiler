@@ -5,11 +5,13 @@
 #include <unwind.h>
 
 #include <eh_frame.h>
+#if defined(__arm__)
+#include <eh_arm.h>
+#endif
 
 extern void __davecc_capture_regs(DaveEHFrameRegisters* regs);
-extern void DaveUnwindSetContext(uintptr_t pc, uintptr_t rsp, uintptr_t rbp);
 
-#if defined(__arm__) || defined(__risc_v__)
+#if defined(__risc_v__)
 #define DAVECC_EH_TLS __thread
 #else
 #define DAVECC_EH_TLS
@@ -68,19 +70,33 @@ void* __davecc_eh_object_from_header(struct __cxa_exception* header) {
   return (char*)header + sizeof(struct __cxa_exception);
 }
 
-static void DestroyHeaderIfNeeded(struct __cxa_exception* header) {
-  if (header == NULL || header->handlerSwitchValue != 0) {
+static void DaveCXXExceptionCleanup(_Unwind_Reason_Code reason,
+                                    _Unwind_Exception* unwind_header) {
+  (void)reason;
+  if (unwind_header == NULL) {
     return;
   }
+  struct __cxa_exception* header =
+      (struct __cxa_exception*)((char*)unwind_header -
+                               DAVECC_CXA_UNWIND_OFFSET);
   void* object = __davecc_eh_object_from_header(header);
   if (header->exceptionDestructor != NULL) {
     header->exceptionDestructor(object);
   }
+  free(header);
+}
+
+static void DestroyHeaderIfNeeded(struct __cxa_exception* header) {
+  if (header == NULL || header->handlerSwitchValue != 0) {
+    return;
+  }
   if (header->unwindHeader.exception_cleanup != NULL) {
     header->unwindHeader.exception_cleanup(_URC_FOREIGN_EXCEPTION_CAUGHT,
                                            &header->unwindHeader);
+    return;
   }
-  free(header);
+  DaveCXXExceptionCleanup(_URC_FOREIGN_EXCEPTION_CAUGHT,
+                          &header->unwindHeader);
 }
 
 static void PopCaughtException(struct __cxa_eh_globals* globals) {
@@ -211,13 +227,15 @@ static void DaveCCTerminateFromThrow(void) {
 
 static void BeginUnwindFromThrowSite(struct __cxa_exception* header) {
   _Unwind_Reason_Code reason;
-  DaveEHFrameRegisters regs;
 
   if (header == NULL) {
     abort();
   }
+#if !defined(__arm__)
+  DaveEHFrameRegisters regs;
   __davecc_capture_regs(&regs);
-  DaveUnwindSetContext(regs.pc, regs.rsp, regs.rbp);
+  DaveUnwindSetRegisters(&regs);
+#endif
   reason = _Unwind_RaiseException(&header->unwindHeader);
   if (reason == _URC_END_OF_STACK) {
     DaveCCTerminateFromThrow();
@@ -232,8 +250,6 @@ void __davecc_eh_unwind_from_throw(void) {
 void __cxa_throw(void* thrown_exception, struct type_info* tinfo,
                  void (*dest)(void*)) {
   _Unwind_Reason_Code reason;
-  DaveEHFrameRegisters throw_site_regs;
-  __davecc_capture_regs(&throw_site_regs);
 
   struct __cxa_exception* header =
       __davecc_eh_header_from_object(thrown_exception);
@@ -243,18 +259,28 @@ void __cxa_throw(void* thrown_exception, struct type_info* tinfo,
   header->handlerCount = 0;
   header->handlerSwitchValue = 0;
   header->nextException = NULL;
+#if defined(__arm__)
+  DaveARMSetExceptionClass(&header->unwindHeader, DAVECC_EH_EXCEPTION_CLASS);
+  header->unwindHeader.exception_cleanup =
+      (void (*)(int, _Unwind_Exception*))DaveCXXExceptionCleanup;
+#else
+  DaveEHFrameRegisters throw_site_regs;
+  __davecc_capture_regs(&throw_site_regs);
   header->unwindHeader.exception_class = DAVECC_EH_EXCEPTION_CLASS;
-  header->unwindHeader.exception_cleanup = NULL;
+  header->unwindHeader.exception_cleanup = DaveCXXExceptionCleanup;
   header->unwindHeader.private_1 = 0;
   header->unwindHeader.private_2 = 0;
+  __davecc_eh_install_active_exception(header, thrown_exception);
+  DaveUnwindSetRegisters(&throw_site_regs);
+#endif
 
   struct __cxa_eh_globals* globals = GetGlobalsSlow();
   header->unexpectedHandler = globals->unexpectedHandler;
   header->terminateHandler = globals->terminateHandler;
 
+#if defined(__arm__)
   __davecc_eh_install_active_exception(header, thrown_exception);
-  DaveUnwindSetContext(throw_site_regs.pc, throw_site_regs.rsp,
-                       throw_site_regs.rbp);
+#endif
   reason = _Unwind_RaiseException(&header->unwindHeader);
   if (reason == _URC_END_OF_STACK) {
     DaveCCTerminateFromThrow();
@@ -318,6 +344,17 @@ void __cxa_end_catch(void) {
   }
 }
 
+#if defined(__arm__)
+void __cxa_end_cleanup(void) {
+  _Unwind_Exception* exc = landing_pad_exc;
+  if (exc == NULL) {
+    abort();
+  }
+  _Unwind_Resume(exc);
+  abort();
+}
+#endif
+
 void __cxa_rethrow(void) {
   _Unwind_Reason_Code reason;
   DaveEHFrameRegisters throw_site_regs;
@@ -335,8 +372,7 @@ void __cxa_rethrow(void) {
   }
 
   __davecc_eh_install_active_exception(header, object);
-  DaveUnwindSetContext(throw_site_regs.pc, throw_site_regs.rsp,
-                       throw_site_regs.rbp);
+  DaveUnwindSetRegisters(&throw_site_regs);
   reason = _Unwind_RaiseException(&header->unwindHeader);
   if (reason == _URC_END_OF_STACK) {
     DaveCCTerminateFromThrow();
@@ -381,8 +417,7 @@ void __davecc_exception_ptr_rethrow(void* value) {
   }
   __davecc_eh_install_active_exception(
       header, __davecc_eh_object_from_header(header));
-  DaveUnwindSetContext(throw_site_regs.pc, throw_site_regs.rsp,
-                       throw_site_regs.rbp);
+  DaveUnwindSetRegisters(&throw_site_regs);
   reason = _Unwind_RaiseException(&header->unwindHeader);
   if (reason == _URC_END_OF_STACK) {
     DaveCCTerminateFromThrow();
@@ -392,15 +427,6 @@ void __davecc_exception_ptr_rethrow(void* value) {
 
 int __davecc_uncaught_exceptions(void) {
   return (int)__davecc_eh_uncaught_exceptions();
-}
-
-void _Unwind_DeleteException(_Unwind_Exception* exc) {
-  if (exc == NULL) {
-    return;
-  }
-  struct __cxa_exception* header =
-      (struct __cxa_exception*)((char*)exc - DAVECC_CXA_UNWIND_OFFSET);
-  DestroyHeaderIfNeeded(header);
 }
 
 void __davecc_eh_enter_catch_from_unwinder(long base_offset) {

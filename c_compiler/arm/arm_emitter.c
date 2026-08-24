@@ -2031,45 +2031,77 @@ static ARMUnwindKind ARMUnwindKindForFunction(ARMEmitter* emitter) {
   return kARMUnwindFramePointer;
 }
 
+static void ARMPrintFrameUnwindWords(ARMEmitter* emitter, FILE* fp) {
+  int regs[ARM_NUM_INT_REGS];
+  int count = CollectUsedIntRegisters(emitter, regs);
+  uint32_t mask = (1u << ARM_FP_REG) | (1u << ARM_LR_REG);
+  uint8_t ops[5];
+  size_t op_count = 0;
+
+  ops[op_count++] = 0x9b; /* vsp = r11 */
+  if (count > 0) {
+    ops[op_count++] = (uint8_t)(0x40u | ((unsigned)count - 1u));
+    for (int i = 0; i < count; i++) {
+      mask |= 1u << regs[i];
+    }
+  }
+  ops[op_count++] = (uint8_t)(0x80u | ((mask >> 12) & 0x0fu));
+  ops[op_count++] = (uint8_t)((mask >> 4) & 0xffu);
+  ops[op_count++] = 0xb0; /* finish */
+
+  uint32_t first = 0x01000000u;
+  uint32_t second = 0;
+  for (size_t i = 0; i < op_count && i < 3; i++) {
+    first |= (uint32_t)ops[i] << (16 - 8 * i);
+  }
+  for (size_t i = 3; i < op_count; i++) {
+    second |= (uint32_t)ops[i] << (24 - 8 * (i - 3));
+  }
+  fprintf(fp, "\t.word 0x%08x\n", first);
+  fprintf(fp, "\t.word 0x%08x\n", second);
+}
+
 static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
                           const char* func_name) {
   ARMUnwindKind kind = ARMUnwindKindForFunction(emitter);
   bool has_exceptions = emitter->g->exception_ranges.length > 0;
+  bool has_custom_frame =
+      kind == kARMUnwindFramePointer &&
+      BitSetCount(&emitter->regs->used_int_regs) > 0;
 
   fprintf(fp, "\t.section \".ARM.exidx\", \"aL\", @unwind\n");
   fprintf(fp, "\t.align 2\n");
   fprintf(fp, ".Lexidx_%s:\n", func_name);
-  fprintf(fp, "\t.word %s\n", func_name);
+  fprintf(fp, "\t.word %s - .Lexidx_%s\n", func_name, func_name);
   if (kind == kARMUnwindNone) {
     fprintf(fp, "\t.word %d\n", EXIDX_CANTUNWIND);
-  } else if (has_exceptions) {
-    fprintf(fp, "\t.word __davecc_extab_%s\n", func_name);
+  } else if (has_exceptions || has_custom_frame) {
+    fprintf(fp, "\t.word .Leh_extab_%s - .\n", func_name);
   } else if (kind == kARMUnwindLinkRegister) {
-    fprintf(fp, "\t.word __davecc_arm_unwind_lr\n");
+    fprintf(fp, "\t.word __davecc_arm_unwind_lr - .\n");
   } else {
-    fprintf(fp, "\t.word __davecc_arm_unwind_fp\n");
+    fprintf(fp, "\t.word __davecc_arm_unwind_fp - .\n");
   }
   fprintf(fp, "\t.text\n\n");
 
-  if (!has_exceptions || kind == kARMUnwindNone) {
+  if ((!has_exceptions && !has_custom_frame) || kind == kARMUnwindNone) {
     return;
   }
 
   fprintf(fp, "\t.section \".ARM.extab\", \"a\", @progbits\n");
   fprintf(fp, "\t.align 2\n");
-  // Inline and weak functions can be emitted in multiple translation units.
-  // Give their associated extab records matching weak linkage so those copies
-  // coalesce with the function instead of becoming duplicate strong symbols.
-  fprintf(fp, "\t.weak __davecc_extab_%s\n", func_name);
-  fprintf(fp, "\t.type __davecc_extab_%s, @object\n", func_name);
-  fprintf(fp, "__davecc_extab_%s:\n", func_name);
-  fprintf(fp, "\t.word __aeabi_unwind_cpp_pr1\n");
-  if (kind == kARMUnwindLinkRegister) {
-    fprintf(fp, "\t.byte 0x90, 0x0e, 0xb0, 0xb0\n");
+  fprintf(fp, ".Leh_extab_%s:\n", func_name);
+  if (has_exceptions) {
+    fprintf(fp, "\t.word __aeabi_unwind_cpp_pr1 - .Leh_extab_%s\n",
+            func_name);
   } else {
-    fprintf(fp, "\t.byte 0x90, 0x0b, 0x90, 0x0f\n");
+    fprintf(fp, "\t.word 0\n");
   }
-  fprintf(fp, "\t.word .Leh_%s_lsda\n", func_name);
+  if (kind == kARMUnwindLinkRegister) {
+    fprintf(fp, "\t.word 0x009eb000\n");
+  } else {
+    ARMPrintFrameUnwindWords(emitter, fp);
+  }
   fprintf(fp, "\t.text\n\n");
 }
 
@@ -2116,14 +2148,14 @@ void ARMPrintEHABISupport(FILE* fp) {
   fprintf(fp, "\t.type __davecc_arm_unwind_fp, @object\n");
   fprintf(fp, "__davecc_arm_unwind_fp:\n");
   fprintf(fp, "\t.word 0\n");
-  fprintf(fp, "\t.byte 0x90, 0x0b\n");
-  fprintf(fp, "\t.byte 0x90, 0x0f\n");
+  fprintf(fp, "\t.word 0x019b8480\n");
+  fprintf(fp, "\t.word 0xb0000000\n");
   fprintf(fp, "\t.align 2\n");
   fprintf(fp, "\t.weak __davecc_arm_unwind_lr\n");
   fprintf(fp, "\t.type __davecc_arm_unwind_lr, @object\n");
   fprintf(fp, "__davecc_arm_unwind_lr:\n");
   fprintf(fp, "\t.word 0\n");
-  fprintf(fp, "\t.byte 0x90, 0x0e\n");
+  fprintf(fp, "\t.word 0x009eb000\n");
   fprintf(fp, "\t.align 2\n");
   fprintf(fp, "\t.text\n\n");
 }
@@ -2147,8 +2179,8 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
-  ARMPrintGCCExceptTable(emitter, fp, func_name);
   ARMPrintExidx(emitter, fp, func_name);
+  ARMPrintGCCExceptTable(emitter, fp, func_name);
 }
 
 void ARMPrintCXXAdjustorThunks(FILE* fp) {

@@ -356,9 +356,6 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
         fprintf(fp, "\tsd ra, 8(sp)\n");
       }
       fprintf(fp, "\tsd s0, 0(sp)\n");
-      if (!varargs) {
-        fprintf(fp, ".Leh_%s_after_push:\n", emitter->rv->base.function_name.value);
-      }
       DecrementStackPointer(emitter, stack_frame_size - 16, fp);
     } else {
       DecrementStackPointer(emitter, stack_frame_size, fp);
@@ -369,9 +366,10 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
         fprintf(fp, "\tsd ra, %d(sp)\n", return_address_offset);
       }
       fprintf(fp, "\tsd s0, %d(sp)\n", frame_pointer_offset);
-      if (!varargs) {
-        fprintf(fp, ".Leh_%s_after_push:\n", emitter->rv->base.function_name.value);
-      }
+    }
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_push:\n",
+              emitter->rv->base.function_name.value);
     }
     
     // Set new frame pointer to original top of stack.
@@ -1557,6 +1555,11 @@ static void RVPrintEHMetadata(RVEmitter* emitter, FILE* fp,
       .cie_ra_reg = 1,
       .cie_cfa_reg = 2,
       .cie_fp_reg = 8,
+      .entry_cfa_offset = 0,
+      .frame_cfa_offset = StackFrameSize(emitter),
+      .fp_cfa_offset = 0,
+      .saved_fp_offset = -16,
+      .saved_ra_offset = -8,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
   DaveEHPrintEHFrameCIE(fp, &info, "");
