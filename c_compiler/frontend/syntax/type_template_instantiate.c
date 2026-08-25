@@ -368,6 +368,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           instantiated->is_member_function = member->is_member_function;
           instantiated->is_using_declaration = member->is_using_declaration;
           instantiated->bit_size = member->bit_size;
+          instantiated->is_bit_field = member->is_bit_field;
           instantiated->bit_offset = member->bit_offset;
           instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
           AlignNextOffsetForSymbol(str, member_symbol);
@@ -450,6 +451,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     instantiated->is_member_function = member->is_member_function;
     instantiated->is_using_declaration = member->is_using_declaration;
     instantiated->bit_size = member->bit_size;
+    instantiated->is_bit_field = member->is_bit_field;
     instantiated->bit_offset = member->bit_offset;
     instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
 
@@ -7036,6 +7038,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     instantiated->is_member_function = member->is_member_function;
     instantiated->is_using_declaration = member->is_using_declaration;
     instantiated->bit_size = member->bit_size;
+    instantiated->is_bit_field = member->is_bit_field;
     instantiated->bit_offset = member->bit_offset;
     instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
     if (!instantiated->is_static && !instantiated->is_using_declaration &&

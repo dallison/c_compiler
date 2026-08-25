@@ -301,10 +301,20 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
         if (printable_type != kTypeImplicit) {
           StringAppend(result, " ");
         }
-        AppendReadableTypeName(result, type->info.struct_info->tag_name);
+        if (type->info.struct_info != NULL &&
+            type->info.struct_info->tag_name != NULL) {
+          AppendReadableTypeName(result, type->info.struct_info->tag_name);
+        } else {
+          StringAppend(result, "<invalid>");
+        }
       } else if (TypeIsEnum(type)) {
         StringAppend(result, " ");
-        StringAppendString(result, type->info.enum_info->tag_name);
+        if (type->info.enum_info != NULL &&
+            type->info.enum_info->tag_name != NULL) {
+          StringAppendString(result, type->info.enum_info->tag_name);
+        } else {
+          StringAppend(result, "<invalid>");
+        }
       }
       break;
 

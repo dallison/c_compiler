@@ -9,6 +9,7 @@
 #include "compiler.h"
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -52,6 +53,8 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-target", kCompilerOptionString, kOptionTarget, false, "Specify one target architecture"},
     {"-c", kCompilerOptionBool, kOptionCompileOnly, false, "Compile only to object file"},
     {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false, "Generate assembly language"},
+    {"-fsyntax-only", kCompilerOptionBool, kOptionSyntaxOnly, false,
+     "Parse and semantically analyze only; do not generate code"},
     {"-o", kCompilerOptionString, kOptionOutputFile, false, "Output filename"},
     {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false, "Add system include path"},
     {"-I", kCompilerOptionString, kOptionIncludePath, true, "Add a user include path -Ipath"},
@@ -1957,7 +1960,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
       !decl->symbol->flags.invented && !decl->symbol->flags.is_c_linkage &&
       strcmp(decl->symbol->name.value, "main") != 0 &&
       strncmp(decl->symbol->name.value, "__", 2) != 0;
-  if (NumErrors() != 0 || dependent_function_body ||
+  if (compiler->syntax_only || NumErrors() != 0 || dependent_function_body ||
       uninstantiated_function_template ||
       unnamed_cxx_function ||
       (decl->base.type->info.function.is_inline &&
@@ -2019,6 +2022,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
         }
         VariableDeclarationASTNode* decl =
             (VariableDeclarationASTNode*)decl_node;
+        if (decl->symbol == NULL) {
+          continue;
+        }
 
         if (decl->symbol->flags.is_template) {
           continue;
@@ -2047,6 +2053,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           compiler->current_function = saved_current_function;
           compiler->current_class_access_context =
               saved_class_access_context;
+          if (decl->base.type == NULL || !TypeIsFunction(decl->base.type)) {
+            continue;
+          }
           if (!FunctionDefinitionIsODRDiscardable(decl->base.type)) {
             MarkFunctionsReferencedByBody(decl->base.type);
             CompileReferencedInlineFunctions(syntax);
@@ -2091,7 +2100,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 var->symbol = decl->symbol;
                 var->is_global = !StorageIs(decl->symbol->storage, STO(static));
                 var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                var->size = decl->symbol->type->size;
+                var->size = decl->symbol->type != NULL
+                                ? decl->symbol->type->size
+                                : 0;
                 var->alignment = SymbolEffectiveAlignment(decl->symbol);
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                 var->is_local = decl->symbol->flags.is_local;
@@ -2750,6 +2761,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;
+  compiler->syntax_only = false;
   compiler->constexpr_codegen_recover = false;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
@@ -2918,7 +2930,10 @@ static void ParseStandardOption(Compiler* compiler, Vector* options) {
 
 static void InitBasicOptionsOrDie(Compiler* compiler,
                                   Vector* options, Vector* target_opts) {
-  compiler->max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
+  int max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
+  // 0 means unlimited, matching Clang's -ferror-limit=0.
+  compiler->max_errors = max_errors <= 0 ? INT_MAX : max_errors;
+  compiler->syntax_only = OptionBoolValue(kOptionSyntaxOnly, options, false);
   compiler->enable_all_warnings = false;
   compiler->convert_warnings_to_errors = false;
   if (options != NULL) {
@@ -3712,11 +3727,15 @@ static String* Compile(Compiler* compiler, Vector* options) {
   CheckUnusedStaticFunctions();
   CheckUnusedGlobalVariables();
   CheckUnusedPrivateFields();
-  
+
   if (compiler->print_front_end) {
     HashTablePrintStats(&compiler->global_symbol_table, compiler->ast_output_file);
     HashTablePrintStats(&compiler->global_tag_table, compiler->ast_output_file);
     PreprocessorPrintStats(&compiler->preprocessor, compiler->ast_output_file);
+  }
+
+  if (compiler->syntax_only) {
+    return NumErrors() == 0 ? NewString("") : NULL;
   }
 
   // Abort if there are any errors.

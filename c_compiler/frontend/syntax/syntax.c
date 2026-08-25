@@ -1483,6 +1483,31 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
   } else if (ns == compiler->global_namespace) {
     symbol = ResolveGlobalTagCheckingAmbiguity(syntax, &last, NULL);
   }
+  // `Outer::Inner` names a nested class, not a namespace member.  Namespace
+  // lookup above misses it; resolve the prefix as a class and look up Inner
+  // among its nested types (stored as typedef members).
+  if (symbol == NULL && name->components.length >= 2) {
+    Symbol* owner = SyntaxFindQualifiedPrefixSymbolImpl(
+        syntax, name, name->components.length - 1,
+        /*allow_dependent_template_args=*/true);
+    if (owner != NULL && owner->type != NULL &&
+        TypeIsStructOrUnion(owner->type) &&
+        owner->type->info.struct_info != NULL) {
+      StructMember* member =
+          FindStructMember(owner->type->info.struct_info, &last);
+      if (member != NULL && member->symbol != NULL &&
+          member->symbol->type != NULL) {
+        TypeRecord* nested = member->symbol->type;
+        if (TypeIsStructOrUnion(nested) && nested->info.struct_info != NULL &&
+            nested->info.struct_info->tag_symbol != NULL) {
+          symbol = nested->info.struct_info->tag_symbol;
+        } else if (TypeIsEnum(nested) && nested->info.enum_info != NULL &&
+                   nested->info.enum_info->tag_symbol != NULL) {
+          symbol = nested->info.enum_info->tag_symbol;
+        }
+      }
+    }
+  }
   StringDestruct(&last);
   return FollowAlias(symbol);
 }
@@ -1509,6 +1534,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_friend_type_specifier = false;
   syntax->parsing_lambda_body_depth = 0;
   syntax->parsing_consteval_block_depth = 0;
+  syntax->parsing_enum_specifier_depth = 0;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
@@ -1569,6 +1595,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->parsing_template_specialization = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_consteval_block_depth = 0;
+  syntax->parsing_enum_specifier_depth = 0;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   ConstraintExprDelete(syntax->current_template_requires_clause);
@@ -7650,8 +7677,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           // This is the first declaration of this symbol, add to the symbol
           // table.
           bool inserted = InsertFileScopeSymbol(syntax, sym);
-          assert(inserted);
-          (void)inserted;
+          if (!inserted) {
+            SyntaxError(syntax, "Duplicate symbol %s",
+                        sym->name.value);
+          }
         }
         if (IsDefinition(parser, sym, storage)) {
           sym->flags.is_defined = true;
@@ -10718,7 +10747,9 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
   if (!CompilerIsCXX() || sym == NULL) {
     return NULL;
   }
-  if (!TypeIsStructOrUnion(sym->type)) {
+  if (!TypeIsStructOrUnion(sym->type) ||
+      (!TypeIsClassTemplatePlaceholder(sym->type) &&
+       (sym->type == NULL || sym->type->info.struct_info == NULL))) {
     if (!LexMatch(syntax->lex, TOK(lparen))) {
       return NULL;
     }
@@ -12263,16 +12294,20 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             sym = link;
           } else {
             bool added = SyntaxAddSymbol(syntax, sym);
-            assert(added);
-            (void)added;
+            if (!added) {
+              SyntaxError(syntax, "Duplicate symbol %s",
+                          sym->name.value);
+            }
           }
         } else {
           // This is the first declaration of this symbol, add to the symbol
           // table.
           CheckLocalVariableShadow(syntax, sym);
           bool added = SyntaxAddSymbol(syntax, sym);
-          assert(added);
-          (void)added;
+          if (!added) {
+            SyntaxError(syntax, "Duplicate symbol %s",
+                        sym->name.value);
+          }
         }
       }
     }
@@ -12685,7 +12720,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       return CompilerIsCXX();
     case TOK(typeof):
     case TOK(typeof_unqual):
-      return CompilerCAtLeast(kLanguageStandardC23);
+      return true;
     case TOK(typename):
       return CompilerIsCXX();
     case TOK(identifier): {
@@ -13160,6 +13195,9 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(volatile):
     case TOK(wchar_t):
     case TOK(struct):
+    case TOK(typeof):
+    case TOK(typeof_unqual):
+    case TOK(decltype):
       return TC(type) | TC(stmt) | TC(decl);
 
     case TOK(colon):

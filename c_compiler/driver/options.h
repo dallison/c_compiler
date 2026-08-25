@@ -20,6 +20,7 @@ typedef enum {
   kOptionTarget,             // Target architecture.
   kOptionCompileOnly,        // Compile only, don't link.
   kOptionAssemblyOutput,     // Output asembly only, dont assemble.
+  kOptionSyntaxOnly,         // Parse and analyze only; skip code generation.
   kOptionOutputFile,         // Output file name.
   kOptionIncludePath,        // Add to user include search path.
   kOptionSystemIncludePath,  // Add to system include search path.

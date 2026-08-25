@@ -50,13 +50,23 @@ static bool CXXExpressionNamesNonTypeTemplateParameter(ASTNode* node,
 
 void CheckTagType(TypeParser* parser, Symbol* old,
                          bool is_union, bool is_enum) {
+  if (old == NULL) {
+    return;
+  }
+  // Using-directive aliases occupy the tag table but are not themselves a
+  // class/enum definition.  The caller reclaims them; do not dereference a
+  // NULL type here.
+  TypeRecord* type = old->type;
+  if (type == NULL) {
+    return;
+  }
   bool error = false;
-  if (TypeIsEnum(old->type)) {
+  if (TypeIsEnum(type)) {
     error = !is_enum;
+  } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    error = type->info.struct_info->is_union != is_union;
   } else {
-    // Tag is a struct or union.
-    Struct* str = old->type->info.struct_info;
-    error = str->is_union != is_union;
+    error = true;
   }
   if (error) {
     SyntaxError(parser->syntax,
@@ -335,7 +345,7 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
   } type_selection = kUnsignedInt;
   bool next_value_overflow = false;
   
-  while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+  while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
     if (LexLookingAt(parser->lex, TOK(identifier))) {
       String const_name;
       StringInit(&const_name, parser->lex->spelling.value);
@@ -344,8 +354,12 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       int64_t assigned_value = e->next_value;
       EnumValueAssignStatus assign_status = kEnumValueAssignOk;
       if (LexMatch(parser->lex, TOK(equal))) {
-        ASTNode* value =
-            SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
+        // Followers must include ',' / '}' / ')' so recovery from a nested
+        // type definition in the initializer does not skip the enumerator
+        // list's closing brace (that skip left ParseStructMembers spinning).
+        ASTNode* value = SyntaxParseSingleExpression(
+            parser->syntax, TC(semicolon) | TC(exprsep) | TC(closebrace) |
+                                TC(closebra));
         value = AnalyzeExpression(value);
         int64_t next_value = e->next_value;
         if (!EvaluateIntegerExpression(value, &next_value)) {
@@ -471,22 +485,34 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     SyntaxFakeTagName(parser->syntax, tag_name);
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
-  bool was_previously_declared = tag != NULL;
-  if (tag != NULL) {
+  if (tag != NULL && (tag->flags.is_using_alias || tag->type == NULL)) {
+    // A using-directive made this name visible; an enum definition in this
+    // scope still introduces a distinct enumeration.
+    tag->flags.is_using_alias = false;
+    tag->alias_target = NULL;
+    tag->type = NULL;
+    tag->flags.is_forward_declared = true;
+    tag->flags.is_defined = false;
+  }
+  bool was_previously_declared =
+      tag != NULL && tag->type != NULL && TypeIsEnum(tag->type);
+  if (tag != NULL && tag->type != NULL && TypeIsEnum(tag->type) &&
+      tag->type->info.enum_info != NULL) {
     if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of enum %s",
                   tag_name->value);
     } else {
       CheckTagType(parser, tag, false, true);
-      if (tag->type->info.enum_info != NULL &&
-          tag->type->info.enum_info->is_scoped != is_scoped) {
+      if (tag->type->info.enum_info->is_scoped != is_scoped) {
         SyntaxError(parser->syntax, "Enum %s redeclared with different scopedness",
                     tag->name.value);
       }
     }
     e = tag->type->info.enum_info;
-  } else {
-    // Tag doesn't exist, create one.
+  } else if (tag != NULL && tag->type != NULL) {
+    CheckTagType(parser, tag, false, true);
+    // Keep parsing the body on a fresh enumeration so a mismatched tag
+    // cannot crash recovery.
     e = NewEnum();
     TypeRecord* type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
     type->info.enum_info = e;
@@ -494,11 +520,29 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     e->tag_name = &tag->name;
     e->tag_symbol = tag;
     e->is_scoped = is_scoped;
-    if (empty_tag_name) {
-      tag->flags.invented = true;
+    tag->flags.invented = true;
+  } else {
+    // Tag doesn't exist, or a using-directive alias was reclaimed above.
+    e = NewEnum();
+    TypeRecord* type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
+    type->info.enum_info = e;
+    if (tag == NULL) {
+      tag = NewSymbol(tag_name->value, type, STO(implicit));
+      if (empty_tag_name) {
+        tag->flags.invented = true;
+      }
+      SyntaxAddTag(parser->syntax, tag);
+    } else {
+      tag->type = type;
     }
-    SyntaxAddTag(parser->syntax, tag);
+    e->tag_name = &tag->name;
+    e->tag_symbol = tag;
+    e->is_scoped = is_scoped;
     AddInjectedEnumName(parser, tag);
+  }
+  if (e == NULL || tag == NULL || tag->type == NULL) {
+    SyntaxRecover(parser->syntax, TC(closebra) | TC(semicolon));
+    return tag;
   }
   ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
                           is_scoped, was_previously_declared);
@@ -518,7 +562,9 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     // enclosing scope.
     SyntaxOpenScope(parser->syntax);
   }
+  parser->syntax->parsing_enum_specifier_depth++;
   Type t = ParseEnumConstants(parser, e, tag->type);
+  parser->syntax->parsing_enum_specifier_depth--;
   if (is_scoped) {
     SyntaxCloseScope(parser->syntax);
   }
@@ -532,7 +578,8 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     }
   }
   
-  SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(expr));
+  SyntaxNeedBracket(parser->syntax, TOK(rbrace),
+                    TC(expr) | TC(closebrace) | TC(semicolon));
   return tag;
 }
 
@@ -585,6 +632,28 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   SyntaxParseCXXAttributes(parser->syntax, &attributes);
   explicit_underlying = ParseEnumUnderlyingType(parser);
   if (LexMatch(parser->lex, TOK(lbrace))) {
+    if (parser->syntax->parsing_enum_specifier_depth > 0 &&
+        CompilerIsCXX()) {
+      SyntaxError(parser->syntax, "Type cannot be defined in an enumeration");
+      int depth = 1;
+      while (!LexEof(parser->lex) && depth > 0) {
+        if (LexLookingAt(parser->lex, TOK(lbrace))) {
+          depth++;
+        } else if (LexLookingAt(parser->lex, TOK(rbrace))) {
+          depth--;
+        }
+        LexNextToken(parser->lex);
+      }
+      Enum* dummy_enum = NewEnum();
+      TypeRecord* dummy_type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
+      dummy_type->info.enum_info = dummy_enum;
+      tag = NewSymbol(SyntaxFakeName(parser->syntax), dummy_type, STO(implicit));
+      tag->flags.invented = true;
+      dummy_enum->tag_name = &tag->name;
+      dummy_enum->tag_symbol = tag;
+      SyntaxAddTag(parser->syntax, tag);
+      goto done;
+    }
     if (has_qualified_tag) {
       SyntaxError(parser->syntax, "Cannot define qualified enum tag %s",
                   qualified_tag.spelling.value);
@@ -621,16 +690,17 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, false, true);
-      if (tag->type->info.enum_info != NULL) {
+      if (tag->type != NULL && TypeIsEnum(tag->type) &&
+          tag->type->info.enum_info != NULL) {
         tag->type->info.enum_info->tag_symbol = tag;
+        if (tag->type->info.enum_info->is_scoped != is_scoped) {
+          SyntaxError(parser->syntax,
+                      "Enum %s redeclared with different scopedness",
+                      tag->name.value);
+        }
+        ApplyEnumUnderlyingType(parser->syntax, tag->type->info.enum_info,
+                                tag->type, explicit_underlying, is_scoped, true);
       }
-      if (tag->type->info.enum_info != NULL &&
-          tag->type->info.enum_info->is_scoped != is_scoped) {
-        SyntaxError(parser->syntax, "Enum %s redeclared with different scopedness",
-                    tag->name.value);
-      }
-      ApplyEnumUnderlyingType(parser->syntax, tag->type->info.enum_info,
-                              tag->type, explicit_underlying, is_scoped, true);
     }
   }
 

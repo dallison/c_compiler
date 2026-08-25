@@ -155,6 +155,93 @@ static bool LanguageSupportsVaOpt(void) {
          CompilerCXXAtLeast(kLanguageStandardCXX20);
 }
 
+static void DefineMaxMacro(Preprocessor* p, const char* name, int size_bytes,
+                           bool is_unsigned, const char* suffix) {
+  String value = {0};
+  int bits = size_bytes * 8;
+  if (bits < 8) {
+    bits = 8;
+  }
+  if (is_unsigned) {
+    if (bits >= 64) {
+      StringPrintf(&value, "18446744073709551615%s", suffix);
+    } else {
+      StringPrintf(&value, "%llu%s", (1ULL << bits) - 1ULL, suffix);
+    }
+  } else if (bits >= 64) {
+    StringPrintf(&value, "9223372036854775807%s", suffix);
+  } else {
+    StringPrintf(&value, "%llu%s", (1ULL << (bits - 1)) - 1ULL, suffix);
+  }
+  PreprocessorDefineMacro(p, name, value.value);
+  StringDestruct(&value);
+}
+
+static void DefineSizeofMacro(Preprocessor* p, const char* name, int size) {
+  String value = {0};
+  StringPrintf(&value, "%d", size);
+  PreprocessorDefineMacro(p, name, value.value);
+  StringDestruct(&value);
+}
+
+static int TargetSizeOr(int size, int fallback) {
+  return size > 0 ? size : fallback;
+}
+
+// GCC/Clang predefined type-limit and sizeof macros.  Used by tests and
+// headers that query widths without including <limits.h> / <stdint.h>.
+static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
+  int int_size = TargetSizeOr(compiler->int_size, 4);
+  int short_size = TargetSizeOr(compiler->short_size, 2);
+  int long_size = TargetSizeOr(compiler->long_size, 8);
+  int long_long_size = TargetSizeOr(compiler->long_long_size, 8);
+  int pointer_size = TargetSizeOr(compiler->pointer_size, 8);
+  int wchar_size = TargetSizeOr(compiler->wchar_size, 4);
+  int float_size = TargetSizeOr(compiler->float_size, 4);
+  int double_size = TargetSizeOr(compiler->double_size, 8);
+
+  PreprocessorDefineMacro(p, "__CHAR_BIT__", "8");
+  DefineMaxMacro(p, "__SCHAR_MAX__", 1, false, "");
+  DefineMaxMacro(p, "__SHRT_MAX__", short_size, false, "");
+  DefineMaxMacro(p, "__INT_MAX__", int_size, false, "");
+  DefineMaxMacro(p, "__LONG_MAX__", long_size, false, "L");
+  DefineMaxMacro(p, "__LONG_LONG_MAX__", long_long_size, false, "LL");
+  DefineMaxMacro(p, "__WCHAR_MAX__", wchar_size, false, "");
+
+  const char* size_suffix =
+      pointer_size == long_size ? "UL" : (pointer_size == int_size ? "U" : "ULL");
+  const char* ptrdiff_suffix =
+      pointer_size == long_size ? "L" : (pointer_size == int_size ? "" : "LL");
+  DefineMaxMacro(p, "__SIZE_MAX__", pointer_size, true, size_suffix);
+  DefineMaxMacro(p, "__PTRDIFF_MAX__", pointer_size, false, ptrdiff_suffix);
+
+  DefineMaxMacro(p, "__INT8_MAX__", 1, false, "");
+  DefineMaxMacro(p, "__INT16_MAX__", 2, false, "");
+  DefineMaxMacro(p, "__INT32_MAX__", 4, false, "");
+  DefineMaxMacro(p, "__INT64_MAX__", 8, false, "LL");
+  DefineMaxMacro(p, "__UINT8_MAX__", 1, true, "");
+  DefineMaxMacro(p, "__UINT16_MAX__", 2, true, "");
+  DefineMaxMacro(p, "__UINT32_MAX__", 4, true, "U");
+  DefineMaxMacro(p, "__UINT64_MAX__", 8, true, "ULL");
+
+  DefineSizeofMacro(p, "__SIZEOF_SHORT__", short_size);
+  DefineSizeofMacro(p, "__SIZEOF_INT__", int_size);
+  DefineSizeofMacro(p, "__SIZEOF_LONG__", long_size);
+  DefineSizeofMacro(p, "__SIZEOF_LONG_LONG__", long_long_size);
+  DefineSizeofMacro(p, "__SIZEOF_POINTER__", pointer_size);
+  DefineSizeofMacro(p, "__SIZEOF_FLOAT__", float_size);
+  DefineSizeofMacro(p, "__SIZEOF_DOUBLE__", double_size);
+  DefineSizeofMacro(p, "__SIZEOF_SIZE_T__", pointer_size);
+  DefineSizeofMacro(p, "__SIZEOF_PTRDIFF_T__", pointer_size);
+  DefineSizeofMacro(p, "__SIZEOF_WCHAR_T__", wchar_size);
+
+  PreprocessorDefineMacro(p, "__ORDER_LITTLE_ENDIAN__", "1234");
+  PreprocessorDefineMacro(p, "__ORDER_BIG_ENDIAN__", "4321");
+  PreprocessorDefineMacro(p, "__ORDER_PDP_ENDIAN__", "3412");
+  PreprocessorDefineMacro(p, "__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+  PreprocessorDefineMacro(p, "__FLOAT_WORD_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+}
+
 static void PredefineMacros(Preprocessor* p) {
   // Define the macros defined by the standard.
   PreprocessorDefineMacro(p, "__STDC__", "1");
@@ -436,6 +523,14 @@ static void PredefineMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "long long");
     PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
     PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
+  }
+
+  PredefineGCCTypeLimitMacros(p);
+
+  // GNU no-op used to mark extension constructs; expand to nothing.
+  PreprocessorDefineMacro(p, "__extension__", "");
+  if (CompilerIsCXX()) {
+    PreprocessorDefineMacro(p, "__null", "0");
   }
 }
 

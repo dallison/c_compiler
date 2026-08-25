@@ -623,7 +623,8 @@ static int ParseArg(int i, int argc, char** argv,
     if (StringStartsWith(option, "-Wl,")) {
       // Arg passed through to linker.
       VectorAppend(linker_args, argv[i]+4);
-    } else if (StringEqual(option, "-c") || StringEqual(option, "-S")) {
+    } else if (StringEqual(option, "-c") || StringEqual(option, "-S") ||
+               StringEqual(option, "-fsyntax-only")) {
       // Compile only flag.
       *compile_only = true;
       VectorAppend(compiler_args, argv[i]);
@@ -697,6 +698,14 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(linker_args, argv[i]);
       // Get next arg into linker_args too.
       VectorAppend(linker_args, argv[i+1]);
+      i++;
+    } else if (StringEqual(option, "-error-limit")) {
+      if (i == argc-1) {
+        fprintf(stderr, "-error-limit needs an integer\n");
+        exit(1);
+      }
+      VectorAppend(compiler_args, argv[i]);
+      VectorAppend(compiler_args, argv[i+1]);
       i++;
     } else if (StringEqual(option, "-chdir")) {
       // -chdir option is followed by an include dir
@@ -1553,7 +1562,9 @@ int main(int argc, char * argv[]) {
         if (object_file != NULL) {
           VectorAppend(&linker_args, object_file->value);
         } else {
-          fprintf(stderr, "Failed to compile\n");
+          if (!OptionBoolValue(kOptionSyntaxOnly, &compiler_options, false)) {
+            fprintf(stderr, "Failed to compile\n");
+          }
           exit(1);
         }
       }

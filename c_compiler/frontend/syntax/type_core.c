@@ -337,12 +337,16 @@ void TypeRecordDelete(TypeRecord* record) {
       // Struct infos are not freed here: they can form reference cycles, so
       // they are all freed in one pass by StructRegistryRelease at end of
       // compilation.  Keep the count balanced for any code that reads it.
-      record->info.struct_info->refs--;
+      if (record->info.struct_info != NULL) {
+        record->info.struct_info->refs--;
+      }
     } else if (TypeIsEnum(record)) {
       // Enum infos are freed in bulk by StructRegistryRelease (alongside
       // structs) so that decrements during the bulk teardown never touch an
       // already-freed info.  Keep the count balanced for any reader.
-      record->info.enum_info->refs--;
+      if (record->info.enum_info != NULL) {
+        record->info.enum_info->refs--;
+      }
     } else if (TypeIsFunction(record)) {
       TypeRecordDelete(record->info.function.coroutine_promise_type);
       record->info.function.coroutine_promise_type = NULL;
@@ -1011,6 +1015,9 @@ void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
 }
 
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
+  if (record == NULL) {
+    return NULL;
+  }
   TypeRecord* r = TypeArenaAlloc();
   memcpy(r, record, sizeof(TypeRecord));
   r->id = next_type_id;
@@ -1075,9 +1082,13 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   }
   // Increment ref counts for type-specific objects.
   if (TypeIsStructOrUnion(record)) {
-    record->info.struct_info->refs++;
+    if (record->info.struct_info != NULL) {
+      record->info.struct_info->refs++;
+    }
   } else if (TypeIsEnum(record)) {
-    record->info.enum_info->refs++;
+    if (record->info.enum_info != NULL) {
+      record->info.enum_info->refs++;
+    }
   } else if (TypeIsVLA(record)) {
     // Copy the expression AST.
     r->info.array.size.vla.size =
@@ -1383,6 +1394,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->byte_offset = 0;
   mem->bit_offset = 0;
   mem->bit_size = 0;
+  mem->is_bit_field = false;
   mem->cxx_vcall_offset = 0;
   mem->is_anon = false;
   mem->is_static = false;
@@ -1552,7 +1564,7 @@ void StructMemberDelete(StructMember* member) {
 }
 
 bool StructMemberIsBitField(StructMember* member) {
-  return member->bit_size > 0;
+  return member != NULL && (member->is_bit_field || member->bit_size > 0);
 }
 
 bool TypeIsCompleteClass(TypeRecord* type) {

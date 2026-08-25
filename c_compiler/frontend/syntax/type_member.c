@@ -579,6 +579,7 @@ static StructMember* CloneCXXMemberUsingMember(StructMember* member,
   clone->byte_offset = byte_offset;
   clone->bit_offset = member->bit_offset;
   clone->bit_size = member->bit_size;
+  clone->is_bit_field = member->is_bit_field;
   clone->index = member->index;
   clone->cxx_vcall_offset = member->cxx_vcall_offset;
   clone->is_anon = member->is_anon;
@@ -777,23 +778,35 @@ void ApplyCXXMemberUsingDeclarations(TypeParser* parser, Struct* owner,
   }
 }
 
-StructMember* FindStructMember(Struct* str, String* name) {
+static StructMember* FindStructMemberRec(Struct* str, String* name, int depth) {
+  if (str == NULL || name == NULL || depth > 64) {
+    return NULL;
+  }
   StructMember* member = MapFindPointerKey(&str->symbol_table, name);
   if (member != NULL) {
     return member;
   }
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
-    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL &&
-        !TypeContainsTemplateParameter(base->type)) {
-      member = FindStructMember(base->type->info.struct_info, name);
-      if (member != NULL) {
-        return member;
-      }
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL ||
+        TypeContainsTemplateParameter(base->type)) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == str) {
+      continue;
+    }
+    member = FindStructMemberRec(base_struct, name, depth + 1);
+    if (member != NULL) {
+      return member;
     }
   }
   return NULL;
+}
+
+StructMember* FindStructMember(Struct* str, String* name) {
+  return FindStructMemberRec(str, name, 0);
 }
 
 // A conversion operator is a member function whose synthesized name matches the
@@ -831,7 +844,8 @@ void CollectConversionOperators(Struct* str, Vector* out) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL) {
+        base->type->info.struct_info != NULL &&
+        base->type->info.struct_info != str) {
       CollectConversionOperators(base->type->info.struct_info, out);
     }
   }
@@ -845,8 +859,9 @@ static StructMember* FindDirectStructMemberByName(Struct* str,
   return MapFindPointerKey(&str->symbol_name_table, (void*)name);
 }
 
-StructMember* FindStructMemberByName(Struct* str, const char* name) {
-  if (str == NULL || name == NULL) {
+static StructMember* FindStructMemberByNameRec(Struct* str, const char* name,
+                                               int depth) {
+  if (str == NULL || name == NULL || depth > 64) {
     return NULL;
   }
   StructMember* member = FindDirectStructMemberByName(str, name);
@@ -855,15 +870,24 @@ StructMember* FindStructMemberByName(Struct* str, const char* name) {
   }
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
-    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL) {
-      member = FindStructMemberByName(base->type->info.struct_info, name);
-      if (member != NULL) {
-        return member;
-      }
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == str) {
+      continue;
+    }
+    member = FindStructMemberByNameRec(base_struct, name, depth + 1);
+    if (member != NULL) {
+      return member;
     }
   }
   return NULL;
+}
+
+StructMember* FindStructMemberByName(Struct* str, const char* name) {
+  return FindStructMemberByNameRec(str, name, 0);
 }
 
 static CXXAccess CombineInheritedAccess(CXXAccess base_access,
@@ -1030,8 +1054,11 @@ StructMember* FindStructMemberWithAccessAndOffsetByName(
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
+    if (overload->symbol == NULL || overload->symbol->type == NULL) {
+      continue;
+    }
     bool overload_is_template =
-        overload->symbol != NULL && overload->symbol->flags.is_template;
+        overload->symbol->flags.is_template;
     bool type_is_template =
         TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
     if (overload_is_template != type_is_template) {
@@ -2130,6 +2157,7 @@ void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
       StructMember* dest_member = NewStructMember(symbol);
       dest_member->bit_offset = member->bit_offset;
       dest_member->bit_size = member->bit_size;
+      dest_member->is_bit_field = member->is_bit_field;
       dest_member->index = member->index;
       dest_member->is_anon = member->is_anon;
       dest_member->byte_offset = base_offset + member->byte_offset;
@@ -2261,7 +2289,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   Vector* saved_deferred_noexcept_specifiers =
       parser->deferred_noexcept_specifiers;
   parser->deferred_noexcept_specifiers = &deferred_noexcept_specifiers;
-  while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+  while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
     if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
         LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
@@ -2317,6 +2345,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
 
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(using))) {
       SourceLocation using_location = parser->lex->current_token_location;
+      if (LexMatch(parser->lex, TOK(namespace))) {
+        SyntaxError(parser->syntax,
+                    "'using namespace' is not allowed in classes");
+        SyntaxRecover(parser->syntax, TC(semicolon));
+        LexMatch(parser->lex, TOK(semicolon));
+        AttributeListDestruct(&member_attributes);
+        continue;
+      }
       if (LexMatch(parser->lex, TOK(enum))) {
         ParseCXXMemberUsingEnumDeclaration(parser, str, current_access,
                                            using_location);
@@ -2913,6 +2949,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           if (!member->is_static && !member->is_member_function) {
             member->default_initializer =
                 SyntaxParseCXXDefaultMemberInitializer(parser->syntax);
+            if (member->default_initializer != NULL &&
+                member_symbol->flags.invented) {
+              SyntaxError(parser->syntax,
+                          "anonymous bit-field cannot have a default member "
+                          "initializer");
+              ASTNodeDelete(member->default_initializer);
+              member->default_initializer = NULL;
+            }
           }
         } else if (member->is_static || member->is_member_function) {
           if (member->is_member_function &&

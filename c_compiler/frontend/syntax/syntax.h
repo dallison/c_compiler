@@ -53,6 +53,10 @@ typedef struct Syntax {
   bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
   int parsing_lambda_body_depth;
   int parsing_consteval_block_depth;
+  // Nesting depth of enum-specifiers whose enumerator-list is being parsed.
+  // Used to reject (and recover from) nested type definitions in enumerator
+  // initializers, which previously skipped the enclosing '}' and looped.
+  int parsing_enum_specifier_depth;
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.

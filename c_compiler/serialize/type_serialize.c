@@ -314,6 +314,7 @@ enum {
   kMem_is_using_declaration = 12,
   kMem_access = 13,
   kMem_overload_next = 14,
+  kMem_is_bit_field = 15,
 };
 
 static const WireFieldDesc kMemberFields[] = {
@@ -331,6 +332,7 @@ static const WireFieldDesc kMemberFields[] = {
     {kMem_is_using_declaration, "is_using_declaration"},
     {kMem_access, "access"},
     {kMem_overload_next, "overload_next"},
+    {kMem_is_bit_field, "is_bit_field"},
 };
 
 //
@@ -2157,6 +2159,7 @@ static bool WriteMember(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteBool(buf, kMem_is_member_function, m->is_member_function);
   WireWriteBool(buf, kMem_is_using_declaration, m->is_using_declaration);
   WireWriteInt32(buf, kMem_access, (int32_t)m->access);
+  WireWriteBool(buf, kMem_is_bit_field, m->is_bit_field);
   SWriteRef(ctx, buf, kMem_overload_next, kSerialKindStructMember,
             m->overload_next);
   return !WireBufferHasError(buf);
@@ -2227,6 +2230,9 @@ static bool ReadMember(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kMem_overload_next:
         m->overload_next =
             (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        break;
+      case kMem_is_bit_field:
+        WireReadBool(buf, &m->is_bit_field);
         break;
       default:
         WireSkip(buf, wt);

@@ -337,6 +337,7 @@ typedef struct StructMember {
   int byte_offset;  // Byte offset into struct.                    // @wire 3
   int bit_offset;   // Bit offset into word.                       // @wire 4
   int bit_size;     // Bitfield size in bits.                      // @wire 5
+  bool is_bit_field;  // True for bit-fields, including width 0.   // @wire 15
   size_t index;     // Index into members vector.                  // @wire 6
   int cxx_vcall_offset;  // Subobject offset owning this vslot.     // @wire 7
   bool is_anon;     // This is an anonymous member.                // @wire 8

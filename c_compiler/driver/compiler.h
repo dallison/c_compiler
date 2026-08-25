@@ -481,6 +481,7 @@ typedef struct {
   bool optimize;
   bool optimize_for_size;
   bool pic;
+  bool syntax_only;  // -fsyntax-only: frontend only, no code generation.
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool printf_specialize;    // Rewrite constant printf-family calls by profile.
   bool module_header;        // Compiling the object half of a header unit.

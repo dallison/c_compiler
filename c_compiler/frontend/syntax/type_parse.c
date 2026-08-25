@@ -1042,9 +1042,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       quals |= kQualVolatile;
     } else if (LexMatch(lex, TOK(restrict))) {
       quals |= kQualRestrict;
-    } else if (CompilerCAtLeast(kLanguageStandardC23) &&
-               (LexLookingAt(lex, TOK(typeof)) ||
-                LexLookingAt(lex, TOK(typeof_unqual)))) {
+    } else if (LexLookingAt(lex, TOK(typeof)) ||
+               LexLookingAt(lex, TOK(typeof_unqual))) {
       bool unqualified = LexLookingAt(lex, TOK(typeof_unqual));
       type_record = ParseCTypeofSpecifier(parser, unqualified);
       type |= type_record->type;

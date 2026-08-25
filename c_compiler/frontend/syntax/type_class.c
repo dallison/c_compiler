@@ -438,6 +438,26 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   }
 }
 
+// Attach a fresh class/union type to an existing tag symbol.  Used when a
+// using-directive alias occupies the name, or when a prior symbol has no type:
+// a local class definition still has to parse its base-clause and body.
+static Struct* AttachNewStructToTag(Symbol* tag, bool is_union, bool is_class) {
+  Struct* str = NewStruct(is_union);
+  str->is_class = is_class;
+  TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
+                                    kQualPlain);
+  type->info.struct_info = str;
+  tag->type = type;
+  tag->storage = STO(implicit);
+  tag->flags.is_using_alias = false;
+  tag->alias_target = NULL;
+  tag->flags.is_forward_declared = true;
+  tag->flags.is_defined = false;
+  str->tag_name = &tag->name;
+  str->tag_symbol = tag;
+  return str;
+}
+
 static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
                                                   String* tag_name,
                                                   bool is_union,
@@ -446,11 +466,17 @@ static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
     return NULL;
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  if (tag != NULL && (tag->flags.is_using_alias || tag->type == NULL)) {
+    AttachNewStructToTag(tag, is_union, is_class);
+    return tag;
+  }
   if (tag != NULL) {
     CheckTagType(parser, tag, is_union, false);
     if (tag->type != NULL && TypeIsStructOrUnion(tag->type) &&
         tag->type->info.struct_info != NULL) {
       tag->type->info.struct_info->is_class = is_class;
+    } else {
+      AttachNewStructToTag(tag, is_union, is_class);
     }
     return tag;
   }
@@ -481,7 +507,11 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   Symbol* tag = qualified_definition_tag != NULL
                     ? qualified_definition_tag
                     : SyntaxFindTopScopeTag(parser->syntax, tag_name);
-  if (tag != NULL) {
+  if (tag != NULL && (tag->flags.is_using_alias || tag->type == NULL)) {
+    str = AttachNewStructToTag(tag, is_union, is_class);
+  } else if (tag != NULL && tag->type != NULL &&
+             TypeIsStructOrUnion(tag->type) &&
+             tag->type->info.struct_info != NULL) {
     if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of struct/union %s",
                    tag_name->value);
@@ -503,6 +533,19 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
         tag->type->type |= is_union ? kTypeUnion : kTypeStruct;
       }
     }
+  } else if (tag != NULL) {
+    CheckTagType(parser, tag, is_union, false);
+    // Mismatched tag kind (for example an enum).  Parse the class body on a
+    // detached tag so recovery can continue.
+    str = NewStruct(is_union);
+    str->is_class = is_class;
+    TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
+                                      kQualPlain);
+    type->info.struct_info = str;
+    tag = NewSymbol(tag_name->value, type, STO(implicit));
+    str->tag_name = &tag->name;
+    str->tag_symbol = tag;
+    tag->flags.invented = true;
   } else {
     // Tag doesn't exist in the, create one.
     str = NewStruct(is_union);
@@ -524,6 +567,9 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // forward declared.
   tag->flags.is_forward_declared = false;
   tag->flags.is_defined = true;
+  if (str == NULL) {
+    return tag;
+  }
 
   // Record how many template parameters are in scope as the body begins (this
   // class's own template head plus any enclosing templates).  The class's
@@ -870,6 +916,8 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       str->tag_symbol = tag;
       SyntaxAddTag(parser->syntax, tag);
       AddInjectedClassName(parser, tag);
+    } else if (tag->flags.is_using_alias || tag->type == NULL) {
+      AttachNewStructToTag(tag, is_union, is_class);
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, is_union, false);

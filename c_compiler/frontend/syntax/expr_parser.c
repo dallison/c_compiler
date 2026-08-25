@@ -6300,8 +6300,7 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     return ParseSizeof(syntax, followers);
   }
 
-  if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
-      LexMatch(syntax->lex, TOK(alignof))) {
+  if (LexMatch(syntax->lex, TOK(alignof))) {
     return ParseAlignof(syntax, followers);
   }
 
@@ -6497,6 +6496,47 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
 //    ( type-name ) cast-expression
 //
 // This also handles compound literals, which are actually postfix expressions.
+
+// True when the current token starts a class/enum/union *definition*
+// (`enum {`, `struct S {`, ...), as opposed to a mere type-name (`enum E`).
+static bool LookingAtDefiningTagSpecifier(Syntax* syntax) {
+  Token tok = syntax->lex->current_token;
+  if (tok != TOK(enum) && tok != TOK(struct) && tok != TOK(class) &&
+      tok != TOK(union)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  int paren_depth = 0;
+  bool found_brace = false;
+  LexNextToken(syntax->lex);
+  while (!LexEof(syntax->lex)) {
+    if (paren_depth == 0 && LexLookingAt(syntax->lex, TOK(lbrace))) {
+      found_brace = true;
+      break;
+    }
+    if (paren_depth == 0 &&
+        (LexLookingAt(syntax->lex, TOK(rparen)) ||
+         LexLookingAt(syntax->lex, TOK(semicolon)) ||
+         LexLookingAt(syntax->lex, TOK(rbrace)))) {
+      break;
+    }
+    if (LexMatch(syntax->lex, TOK(lparen))) {
+      paren_depth++;
+      continue;
+    }
+    if (paren_depth > 0 && LexLookingAt(syntax->lex, TOK(rparen))) {
+      paren_depth--;
+      LexNextToken(syntax->lex);
+      continue;
+    }
+    LexNextToken(syntax->lex);
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return found_brace;
+}
+
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
   if (CompilerIsCXX() && TokenIsCXXNamedCast(syntax->lex->current_token)) {
     return ParseCXXNamedCastExpression(syntax, followers);
@@ -6508,6 +6548,20 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
     if (SyntaxLookingAtType(syntax) ||
         LexLookingAt(syntax->lex, TOK(attribute)) ||
         SyntaxLookingAtCXXAttribute(syntax)) {
+      // Nested type definitions in enumerator initializers are ill-formed.
+      // Diagnose before the speculative `(type-name)` parse so the error is
+      // not swallowed by abort_on_error, and recover without skipping the
+      // enclosing enumerator-list `}`.
+      if (CompilerIsCXX() && syntax->parsing_enum_specifier_depth > 0 &&
+          LookingAtDefiningTagSpecifier(syntax)) {
+        SourceLocation location = syntax->lex->current_token_location;
+        SyntaxError(syntax, "Type cannot be defined in an enumeration");
+        SyntaxRecover(syntax, TC(closebrace) | TC(closebra) | TC(semicolon));
+        LexMatch(syntax->lex, TOK(rbrace));
+        LexMatch(syntax->lex, TOK(rparen));
+        return NewIntConstantASTNode(
+            0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+      }
       // The leading '(' is followed by something that begins a type, so this is
       // potentially a cast or compound literal `( type-name ) ...`.  It can,
       // however, also be a parenthesized functional-cast expression such as
@@ -6931,6 +6985,11 @@ ASTNode* SyntaxParseExpression(Syntax* syntax, TokenClass followers) {
 
 ASTNode* SyntaxParseSingleExpression(Syntax* syntax, TokenClass followers) {
   return ParseAssignmentExpression(syntax, followers);
+}
+
+ASTNode* SyntaxParseConditionalExpression(Syntax* syntax,
+                                          TokenClass followers) {
+  return ParseConditionalExpression(syntax, followers);
 }
 
 ASTNode* SyntaxParseConstraintExpression(Syntax* syntax,

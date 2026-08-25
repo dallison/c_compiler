@@ -78,8 +78,20 @@ static ReservedWord reserved_words[] = {
   {"_Bool", TOK(bool)},
   {"_Complex", TOK(complex)},
   {"_Imaginary", TOK(imaginary)},
+  {"__alignof", TOK(alignof)},
+  {"__alignof__", TOK(alignof)},
   {"__attribute__", TOK(attribute)},
+  {"__const", TOK(const)},
+  {"__const__", TOK(const)},
+  {"__inline", TOK(inline)},
+  {"__inline__", TOK(inline)},
+  {"__signed", TOK(signed)},
+  {"__signed__", TOK(signed)},
   {"__thread", TOK(thread)},
+  {"__typeof", TOK(typeof)},
+  {"__typeof__", TOK(typeof)},
+  {"__volatile", TOK(volatile)},
+  {"__volatile__", TOK(volatile)},
   {"asm", TOK(asm)},
   {"auto", TOK(auto)},
   {"break", TOK(break)},
@@ -143,13 +155,26 @@ static CReservedWord c_reserved_words[] = {
 // C++ reserved words and alternative operator spellings.  This table is sorted
 // alphabetically by spelling and is only used when a C++ -std= mode is active.
 static CXXReservedWord cxx_reserved_words[] = {
-  // `restrict` is not a C++ keyword, but GCC and Clang accept it (and the
-  // `__restrict`/`__restrict__` spellings) as an extension so that C headers
-  // using it can be included from C++.  These sort before "alignas" because
+  // GNU keyword aliases.  `__restrict` is not a C++ keyword, but GCC and Clang
+  // accept it (and the other `__foo__` spellings) as extensions so that C
+  // headers can be included from C++.  These sort before "alignas" because
   // '_' precedes 'a'.
+  {"__alignof", TOK(alignof), kLanguageStandardCXX98},
+  {"__alignof__", TOK(alignof), kLanguageStandardCXX98},
+  {"__attribute__", TOK(attribute), kLanguageStandardCXX98},
+  {"__const", TOK(const), kLanguageStandardCXX98},
+  {"__const__", TOK(const), kLanguageStandardCXX98},
+  {"__inline", TOK(inline), kLanguageStandardCXX98},
+  {"__inline__", TOK(inline), kLanguageStandardCXX98},
   {"__restrict", TOK(restrict), kLanguageStandardCXX98},
   {"__restrict__", TOK(restrict), kLanguageStandardCXX98},
+  {"__signed", TOK(signed), kLanguageStandardCXX98},
+  {"__signed__", TOK(signed), kLanguageStandardCXX98},
   {"__thread", TOK(thread), kLanguageStandardCXX98},
+  {"__typeof", TOK(typeof), kLanguageStandardCXX98},
+  {"__typeof__", TOK(typeof), kLanguageStandardCXX98},
+  {"__volatile", TOK(volatile), kLanguageStandardCXX98},
+  {"__volatile__", TOK(volatile), kLanguageStandardCXX98},
   {"alignas", TOK(alignas), kLanguageStandardCXX11},
   {"alignof", TOK(alignof), kLanguageStandardCXX11},
   {"and", TOK(ampamp), kLanguageStandardCXX98},
@@ -238,6 +263,7 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"typedef", TOK(typedef), kLanguageStandardCXX98},
   {"typeid", TOK(typeid), kLanguageStandardCXX98},
   {"typename", TOK(typename), kLanguageStandardCXX98},
+  {"typeof", TOK(typeof), kLanguageStandardCXX98},
   {"union", TOK(union), kLanguageStandardCXX98},
   {"unsigned", TOK(unsigned), kLanguageStandardCXX98},
   {"using", TOK(using), kLanguageStandardCXX98},

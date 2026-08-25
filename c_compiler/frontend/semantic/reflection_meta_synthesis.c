@@ -1063,6 +1063,7 @@ static bool MetaSynthesisApplyDataMemberSpec(Struct* str,
                    STO(implicit), compiler->syntax.context);
     ParseBitField(&parser, str->is_union, str, member_symbol, member);
     member->bit_size = (int)spec->bit_width;
+    member->is_bit_field = true;
     TypeParserDestruct(&parser);
   } else {
     StructAddSyntheticMember(str, member);

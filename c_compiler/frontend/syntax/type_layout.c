@@ -101,7 +101,7 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
                           Symbol* member_symbol, StructMember* member) {
   char error[256];
   ASTNode* width_node =
-      SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
+      SyntaxParseConditionalExpression(parser->syntax, TC(semicolon));
   if (width_node == NULL) {
     snprintf(error, sizeof(error), "constant expression needed");
     goto error;
@@ -121,7 +121,22 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
   int word_width = TypeIsBitInt(member_symbol->type)
                        ? member_symbol->type->bit_width
                        : member_symbol->type->size * 8;
-  if (bit_width <= 0 || bit_width > word_width) {
+  bool unnamed = member_symbol->flags.invented;
+  if (bit_width == 0) {
+    if (!unnamed) {
+      snprintf(error, sizeof(error), "named bit-field has zero width");
+      goto error;
+    }
+    // Unnamed zero-width bit-fields are padding: the next bit-field starts at
+    // a fresh allocation unit.  They are not an error.
+    member->is_bit_field = true;
+    member->bit_size = 0;
+    member->bit_offset = 0;
+    member->byte_offset = str->current_offset;
+    str->next_bit_pos = word_width;
+    return;
+  }
+  if (bit_width < 0 || bit_width > word_width) {
     snprintf(error, sizeof(error),
              "width of %" PRId64 " is out of bounds for type of size %d bits",
              bit_width, word_width);
@@ -149,6 +164,7 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
     // There is room in the current word for the bitfield.
     member->byte_offset = str->current_offset;
   }
+  member->is_bit_field = true;
   member->bit_size = width;
   member->bit_offset = str->next_bit_pos;
   if (!is_union) {
@@ -157,8 +173,13 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
   return;
 
 error:
-  // If we get here we have an error.
+  // Diagnose and recover: keep the member as a zero-width bit-field so later
+  // layout and member parsing do not dereference an incomplete field.
   SyntaxError(parser->syntax, "Invalid bitfield; %s", error);
+  member->is_bit_field = true;
+  member->bit_size = 0;
+  member->bit_offset = 0;
+  member->byte_offset = str->current_offset;
 }
 
 void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union) {
@@ -283,10 +304,22 @@ bool RelayoutStruct(Struct* str) {
         StructMemberIsNestedType(m)) {
       continue;
     }
-    TypeRecord* type = m->symbol->type;
-    if (m->bit_size > 0) {
+    TypeRecord* type = m->symbol != NULL ? m->symbol->type : NULL;
+    if (type == NULL) {
+      continue;
+    }
+    if (StructMemberIsBitField(m)) {
+      int word_width = TypeIsBitInt(type) ? type->bit_width : type->size * 8;
+      if (word_width <= 0) {
+        continue;
+      }
+      if (m->bit_size <= 0) {
+        // Zero-width padding (or a recovered invalid bit-field): the next
+        // bit-field starts a new allocation unit.
+        str->next_bit_pos = word_width;
+        continue;
+      }
       // Bitfield: replicate ParseBitField's placement using the stored width.
-      int word_width = type->size * 8;
       if (str->next_bit_pos + m->bit_size > word_width) {
         AlignNextOffsetForSymbol(str, m->symbol);
         m->byte_offset = str->next_offset;

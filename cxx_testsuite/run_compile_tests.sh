@@ -102,7 +102,27 @@ run_compile() {
   if [ -n "${DAVECC_CONSTEXPR_EVAL:-}" ]; then
     args+=("-fconstexpr-eval=${DAVECC_CONSTEXPR_EVAL}")
   fi
-  "$DAVECC" "${args[@]}" "$src" -o "$out" >"$log" 2>&1
+  python3 -c '
+import os, signal, subprocess, sys
+cmd = sys.argv[1:]
+proc = subprocess.Popen(
+    cmd,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+try:
+    out, _ = proc.communicate(timeout=30)
+    sys.stdout.buffer.write(out or b"")
+    raise SystemExit(proc.returncode or 0)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+    sys.stdout.write("TIMEOUT\n")
+    raise SystemExit(124)
+' "$DAVECC" "${args[@]}" "$src" -o "$out" >"$log" 2>&1
   return $?
 }
 

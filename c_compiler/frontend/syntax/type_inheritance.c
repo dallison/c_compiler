@@ -191,6 +191,15 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       TypeRecordDelete(base_type);
       continue;
     }
+    Struct* base_struct = base_type->info.struct_info;
+    if (!is_template_parameter_base &&
+        !TypeContainsTemplateParameter(base_type) &&
+        (base_struct == parser->syntax->cxx_class_head ||
+         base_struct == parser->cxx_member_owner)) {
+      SyntaxError(parser->syntax, "recursive base class");
+      TypeRecordDelete(base_type);
+      continue;
+    }
     if (!is_template_parameter_base && base_type->info.struct_info->is_final) {
       const char* base_name =
           base_type->info.struct_info->tag_name != NULL

@@ -1,0 +1,27 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Clang C/C++ -verify tests live outside this repo. Run with:
+#   CLANG_TEST_ROOT=/path/to/llvm-project/clang/test \
+#     python3 clang_testsuite/run_verify_tests.py --davecc bazel-bin/davecc
+#
+# Or:
+#   bazel test //clang_testsuite:verify --test_env=CLANG_TEST_ROOT=... --test_tag_filters=manual
+sh_test(
+    name = "verify",
+    srcs = ["run_verify_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+    ],
+    data = [
+        "run_verify_tests.py",
+        "//:davecc",
+    ],
+    tags = [
+        "manual",
+        "local",
+        "external",
+    ],
+)
