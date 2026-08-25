@@ -3233,6 +3233,9 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
   node->statements = statements;
   for (size_t i = 0; i < node->statements->length; i++) {
     ASTNode* stmt = (ASTNode*)node->statements->value.p[i];
+    if (stmt == NULL) {
+      continue;
+    }
     stmt->parent = (ASTNode*)node;
     stmt->child_id = (int)i;
   }

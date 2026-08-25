@@ -3237,6 +3237,16 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       ASTNodeSetType(&node->base, rebound->symbol->type);
     }
   }
+  if (member == NULL || member->base.op != AST_OP(structmember) ||
+      member->member == NULL || member->member->symbol == NULL) {
+    // Unresolved or ill-formed member access (e.g. an undeclared name rewritten
+    // as a closure-member lookup).  Speculative constexpr lowering must not
+    // crash; fail the fold instead.
+    if (compiler->constexpr_codegen_recover) {
+      longjmp(compiler->constexpr_codegen_abort, 1);
+    }
+    return GeneratorGetIntConstant(gen, node->base.type, 0);
+  }
   if (!gen->for_constant_evaluation && member->member->is_member_function) {
     CompilerMarkFunctionReferenced(member->member->symbol);
   }

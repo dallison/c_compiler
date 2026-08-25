@@ -1055,7 +1055,9 @@ static ASTNode* NewRangeForIteratorLoop(Syntax* syntax,
   }
   AppendRangeForBindingDeclarations(syntax, binding, current, body_statements,
                                     location);
-  VectorAppend(body_statements, stmt);
+  if (stmt != NULL) {
+    VectorAppend(body_statements, stmt);
+  }
   ASTNode* body = NewCompoundStatementASTNode(body_statements, location);
 
   ASTNode* cond =
@@ -1270,15 +1272,44 @@ static bool TryParseRangeForStructuredBinding(Syntax* syntax,
   return true;
 }
 
+static bool LookingAtCXXRangeForAfterInit(Syntax* syntax);
+
+// Recovery for an ill-formed range declaration such as
+// `for (a operator== : range)`.  An unknown identifier normally does not look
+// like a type, but the following operator-name and top-level colon make the
+// intended range-for unambiguous.
+static bool LookingAtInvalidRangeForUnknownType(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = LexLookingAt(syntax->lex, TOK(operator)) &&
+                LookingAtCXXRangeForAfterInit(syntax);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
 static bool TryParseRangeForBinding(Syntax* syntax,
                                     RangeForBinding* binding) {
-  if (!SyntaxLookingAtType(syntax)) {
+  bool unknown_type = !SyntaxLookingAtType(syntax);
+  if (unknown_type && !LookingAtInvalidRangeForUnknownType(syntax)) {
     return false;
   }
 
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
-  TypeRecord* type = TypeParserParseType(&parser, true);
+  TypeRecord* type;
+  if (unknown_type) {
+    SyntaxError(syntax, "Unknown type name %s",
+                syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+    type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  } else {
+    type = TypeParserParseType(&parser, true);
+  }
   if (type == NULL) {
     TypeParserDestruct(&parser);
     return false;
@@ -1311,6 +1342,23 @@ static bool TryParseRangeForBinding(Syntax* syntax,
   LexCheckpointDestruct(&structured_checkpoint);
 
   binding->loop_var = TypeParserParseDeclarator(&parser, type);
+  const char* loop_var_name =
+      binding->loop_var != NULL ? binding->loop_var->name.value : NULL;
+  char operator_suffix = loop_var_name != NULL &&
+                                 strncmp(loop_var_name, "operator", 8) == 0
+                             ? loop_var_name[8]
+                             : '\0';
+  bool is_operator_name =
+      operator_suffix != '\0' &&
+      !((operator_suffix >= 'a' && operator_suffix <= 'z') ||
+        (operator_suffix >= 'A' && operator_suffix <= 'Z') ||
+        (operator_suffix >= '0' && operator_suffix <= '9') ||
+        operator_suffix == '_');
+  if (is_operator_name) {
+    SyntaxError(syntax,
+                "'%s' cannot be the name of a variable or data member",
+                binding->loop_var->name.value);
+  }
   TypeRecordDelete(type);
   TypeParserDestruct(&parser);
   return binding->loop_var != NULL;
@@ -1389,7 +1437,14 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
 
   location = syntax->lex->current_token_location;
   syntax->loop_count++;
-  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  ASTNode* stmt = NULL;
+  if (LexLookingAt(syntax->lex, TOK(rbrace))) {
+    // Keep the enclosing function or compound statement's closing brace for
+    // its caller when the range-for body is missing.
+    SyntaxError(syntax, "Expected statement");
+  } else {
+    stmt = SyntaxParseStatement(syntax, followers);
+  }
   syntax->loop_count--;
   ASTNode* loop = NULL;
   if (range_type != NULL && TypeIsArray(range_type) &&
@@ -2095,6 +2150,12 @@ struct StatementParser {
 ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
   followers |= TC(stmt);
   Lex* lex = syntax->lex;
+  Source* start_source = lex->source;
+  SourceLocation start_location = lex->current_token_location;
+  Token start_token = lex->current_token;
+  size_t start_pos = lex->pos;
+  bool start_replay_active = lex->replay_active;
+  size_t start_replay_index = lex->replay_index;
   ASTNode* stmt = NULL;
   bool need_semicolon = true;
   SourceLocation location = syntax->lex->current_token_location;
@@ -2200,6 +2261,21 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
   if (stmt != NULL) {
     // This is the start of a statement.
     stmt->flags |= kASTStatementStart;
+  }
+  // Recovery followers can include tokens that also start statements.  In
+  // particular, a stray ':' is both an expression separator and a statement
+  // follower, so expression and semicolon recovery can both stop without
+  // consuming it.  Guarantee progress before a surrounding statement loop
+  // invokes us again on the same token.
+  bool made_progress =
+      lex->source != start_source ||
+      lex->current_token_location != start_location ||
+      lex->current_token != start_token || lex->pos != start_pos ||
+      lex->replay_active != start_replay_active ||
+      lex->replay_index != start_replay_index;
+  if (!made_progress && !LexEof(lex) &&
+      !LexLookingAt(lex, TOK(rbrace))) {
+    LexNextToken(lex);
   }
   return stmt;
 }
