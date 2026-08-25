@@ -6883,12 +6883,26 @@ static ASTNode* ParseConditionalExpression(Syntax* syntax,
     ASTNode* right = NULL;
     if (LexMatch(syntax->lex, TOK(colon))) {
       right = ParseConditionalExpression(syntax, followers);
-      right =
-          NewBinaryASTNode(AST_OP(colon), NULL,
-                           syntax->lex->current_token_location, left, right);
     } else {
+      // `cond ? a :: b` is a common typo for `cond ? a : b`.  Consume `::` as
+      // `:` when it is still in the token stream; otherwise parse a leftover
+      // literal-like expression as the false arm so the `?:` tree stays
+      // well-formed.  Identifiers are also statements, so they are left for
+      // declaration/statement recovery rather than swallowed as an arm.
       SyntaxError(syntax, "Missing : in conditional expression");
+      if (LexMatch(syntax->lex, TOK(coloncolon))) {
+        right = ParseConditionalExpression(syntax, followers);
+      } else {
+        TokenClass classes = ClassifyToken(syntax->lex->current_token);
+        if ((classes & TC(expr)) != 0 &&
+            (classes & (TC(stmt) | TC(decl) | TC(type))) == 0) {
+          right = ParseConditionalExpression(syntax, followers);
+        }
+      }
     }
+    right =
+        NewBinaryASTNode(AST_OP(colon), NULL,
+                         syntax->lex->current_token_location, left, right);
     result =
         NewBinaryASTNode(AST_OP(question), NULL,
                          syntax->lex->current_token_location, result, right);

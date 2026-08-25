@@ -381,6 +381,9 @@ void TypeRecordDelete(TypeRecord* record) {
 }
 
 int TypeRecordAlignment(TypeRecord* record) {
+  if (record == NULL) {
+    return 1;
+  }
   if (compiler->alignment == 1) {
     // No alignment necessary for this target.
     return 1;
@@ -398,6 +401,9 @@ int TypeRecordAlignment(TypeRecord* record) {
       return SizeofPointer();
     case kDeclPrimitive:
       if (TypeIsStructOrUnion(record)) {
+        if (record->info.struct_info == NULL) {
+          return 1;
+        }
         int a = record->info.struct_info->alignment;
         return a > 0 ? a : 1;
       }
@@ -406,6 +412,7 @@ int TypeRecordAlignment(TypeRecord* record) {
       }
       return SizeofType(record->type);
   }
+  return 1;
 }
 
 void TypeRecordIncRef(TypeRecord* record) {

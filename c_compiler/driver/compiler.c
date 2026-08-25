@@ -749,6 +749,9 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
 // Returns the alignment to use for a variable, honoring an explicit
 // __attribute__((aligned(N))) override that raises the natural alignment.
 static int SymbolEffectiveAlignment(Symbol* sym) {
+  if (sym == NULL || sym->type == NULL) {
+    return 1;
+  }
   int natural = TypeRecordAlignment(sym->type);
   return sym->alignment > natural ? sym->alignment : natural;
 }

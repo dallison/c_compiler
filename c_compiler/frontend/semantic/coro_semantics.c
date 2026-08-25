@@ -2325,6 +2325,9 @@ static TypeRecord* CoroutineShortCircuitTemporaryType(ASTNode* expr) {
   if (expr->op == AST_OP(question)) {
     BinaryASTNode* question = (BinaryASTNode*)expr;
     BinaryASTNode* colon = (BinaryASTNode*)question->right;
+    if (colon == NULL || colon->base.op != AST_OP(colon)) {
+      return expr->type;
+    }
     TypeRecord* true_type = CoroutineExpressionTemporaryType(colon->left);
     TypeRecord* false_type = CoroutineExpressionTemporaryType(colon->right);
     if (true_type != NULL && false_type != NULL &&
@@ -2455,8 +2458,11 @@ static ASTNode* NewCoroutineShortCircuitLowering(Symbol* result,
   }
 
   if (expr->op == AST_OP(question)) {
-    ASTNode* cond = TakeCoroutineBinaryChild(binary, false);
     BinaryASTNode* colon = (BinaryASTNode*)binary->right;
+    if (colon == NULL || colon->base.op != AST_OP(colon)) {
+      return NULL;
+    }
+    ASTNode* cond = TakeCoroutineBinaryChild(binary, false);
     ASTNode* true_arm = TakeCoroutineBinaryChild(colon, false);
     ASTNode* false_arm = TakeCoroutineBinaryChild(colon, true);
     binary->right = NULL;

@@ -522,9 +522,13 @@ static bool NodeIsZero(ASTNode* node) {
       }
     case AST_OP(question): {      // Conditional expression:
       node = ((BinaryASTNode*)node)->right;     // Colon.
+      if (node == NULL || node->op != AST_OP(colon)) {
+        return false;
+      }
       ASTNode* left = ((BinaryASTNode*)node)->left;
       ASTNode* right = ((BinaryASTNode*)node)->right;
-      return NodeIsZero(left) && NodeIsZero(right);
+      return left != NULL && right != NULL &&
+             NodeIsZero(left) && NodeIsZero(right);
     }
     case AST_OP(cast): {      // cast
       CastASTNode* c = (CastASTNode*)node;

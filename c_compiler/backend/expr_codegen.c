@@ -3502,7 +3502,12 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
 static IRNode* GenerateConditionalExpression(Generator* gen,
                                              BinaryASTNode* node) {
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
-  
+  if (node->left == NULL || colon == NULL ||
+      colon->base.op != AST_OP(colon) || colon->left == NULL ||
+      colon->right == NULL) {
+    return GeneratorGetIntConstant(gen, node->base.type, 0);
+  }
+
   if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
     // Condition is constant  Just return the left or right.
     ConstantASTNode* c = (ConstantASTNode*)node->left;

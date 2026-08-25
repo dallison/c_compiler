@@ -847,9 +847,13 @@ static bool IsNullPointer(ASTNode* node) {
       }
     case AST_OP(question): {      // Conditional expression:
       node = ((BinaryASTNode*)node)->right;     // Colon.
+      if (node == NULL || node->op != AST_OP(colon)) {
+        return false;
+      }
       ASTNode* left = ((BinaryASTNode*)node)->left;
       ASTNode* right = ((BinaryASTNode*)node)->right;
-      return IsNullPointer(left) && IsNullPointer(right);
+      return left != NULL && right != NULL &&
+             IsNullPointer(left) && IsNullPointer(right);
     }
     case AST_OP(cast): {      // cast
       CastASTNode* c = (CastASTNode*)node;
@@ -2750,6 +2754,10 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
 
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
+  if (node->left == NULL) {
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
   SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   if (!TypeIsScalar(node->left->type)) {
@@ -2758,8 +2766,30 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
+  if (colon == NULL || colon->base.op != AST_OP(colon)) {
+    ASTNodeSetType((ASTNode*)node, node->left->type);
+    return;
+  }
   colon->left = AnalyzeExpression(colon->left);
   colon->right = AnalyzeExpression(colon->right);
+  if (colon->left == NULL || colon->right == NULL) {
+    ASTNode* arm = colon->left != NULL ? colon->left : colon->right;
+    TypeRecord* type = NULL;
+    if (arm != NULL && arm->type != NULL) {
+      type = arm->type;
+    } else if (node->left->type != NULL) {
+      type = node->left->type;
+    } else {
+      type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+      ASTNodeSetType((ASTNode*)colon, type);
+      ASTNodeSetType((ASTNode*)node, type);
+      TypeRecordDelete(type);
+      return;
+    }
+    ASTNodeSetType((ASTNode*)colon, type);
+    ASTNodeSetType((ASTNode*)node, type);
+    return;
+  }
   if (colon->left->op == AST_OP(throw) && colon->right->op == AST_OP(throw)) {
     ASTNodeSetType((ASTNode*)colon, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
     ASTNodeSetType((ASTNode*)node, colon->base.type);

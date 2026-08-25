@@ -705,6 +705,10 @@ case AST_OP(ast_op): \
       break;
 
     case AST_OP(question):
+      if (binary_node->right == NULL ||
+          binary_node->right->op != AST_OP(colon)) {
+        break;
+      }
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
@@ -714,7 +718,8 @@ case AST_OP(ast_op): \
         } else {
           node = ((BinaryASTNode*)binary_node->right)->right;
         }
-        if (EvaluateIntegerExpressionInContext(ctx, node, &left)) {
+        if (node != NULL &&
+            EvaluateIntegerExpressionInContext(ctx, node, &left)) {
           *result = left;
           return true;
         }
@@ -1053,6 +1058,10 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
       break;
 
     case AST_OP(question):
+      if (binary_node->right == NULL ||
+          binary_node->right->op != AST_OP(colon)) {
+        break;
+      }
       if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
@@ -1062,7 +1071,8 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
         } else {
           node = ((BinaryASTNode*)binary_node->right)->right;
         }
-        if (EvaluateFloatingPointExpressionInContext(ctx, node, &left)) {
+        if (node != NULL &&
+            EvaluateFloatingPointExpressionInContext(ctx, node, &left)) {
           *result = left;
           return true;
         }
