@@ -3046,6 +3046,7 @@ static bool IsKnownAttribute(const char* name) {
     "designated_init", "fallthrough", "warning", "error", "alloc_size",
     "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
     "weakref", "dllimport", "dllexport", "common", "nocommon", "tls_model",
+    "selectany", "novtable", "uuid", "property", "allocate", "noalias",
     "aligned_alloc", "assume_aligned", "likely", "unlikely",
     "no_unique_address", "reproducible", "unsequenced",
   };
@@ -3183,6 +3184,101 @@ static void AppendCXXAttributeArgToken(Lex* lex, String* arg) {
       StringAppend(arg, TokenName(lex->current_token));
       break;
   }
+}
+
+// Parse `__declspec(name)` or `__declspec(name(args))`.  MSVC allows one
+// attribute per `__declspec`; stack them for several.  `align(N)` is accepted
+// as GNU `aligned(N)` so existing layout code applies.
+static void SyntaxParseDeclspec(Syntax* syntax, Vector* attrs) {
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    SyntaxError(syntax, "Expected ( after __declspec");
+    return;
+  }
+  String name = {0};
+  if (!LexMatchIdentifier(syntax->lex, &name)) {
+    SyntaxError(syntax, "Expected identifier in __declspec");
+    int depth = 1;
+    while (!LexEof(syntax->lex) && depth > 0) {
+      if (LexMatch(syntax->lex, TOK(lparen))) {
+        depth++;
+      } else if (LexMatch(syntax->lex, TOK(rparen))) {
+        depth--;
+      } else {
+        LexNextToken(syntax->lex);
+      }
+    }
+    StringDestruct(&name);
+    return;
+  }
+  const char* mapped = name.value;
+  if (strcmp(mapped, "align") == 0) {
+    mapped = "aligned";
+  }
+  Attribute* attr = NewAttribute(mapped);
+  if (LexMatch(syntax->lex, TOK(lparen))) {
+    int depth = 1;
+    String arg = {0};
+    StringInit(&arg, NULL);
+    while (!LexEof(syntax->lex) && depth > 0) {
+      if (LexLookingAt(syntax->lex, TOK(rparen))) {
+        depth--;
+        if (depth == 0) {
+          AttributeAppendArg(attr, arg.value,
+                             arg.value != NULL ? arg.value + arg.length
+                                               : arg.value);
+          break;
+        }
+      }
+      if (depth == 1 && LexLookingAt(syntax->lex, TOK(comma))) {
+        AttributeAppendArg(attr, arg.value,
+                           arg.value != NULL ? arg.value + arg.length
+                                             : arg.value);
+        StringDestruct(&arg);
+        StringInit(&arg, NULL);
+        LexNextToken(syntax->lex);
+        continue;
+      }
+      if (LexLookingAt(syntax->lex, TOK(lparen))) {
+        depth++;
+      }
+      AppendCXXAttributeArgToken(syntax->lex, &arg);
+      LexNextToken(syntax->lex);
+    }
+    SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra) | TC(semicolon));
+    StringDestruct(&arg);
+  }
+  VectorAppend(attrs, attr);
+  if (IsUnsupportedTypeAttribute(attr->name.value)) {
+    SyntaxError(syntax, "'%s' type attribute is not supported",
+                attr->name.value);
+  } else if (!IsKnownAttribute(attr->name.value)) {
+    SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
+                  attr->name.value);
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra) | TC(semicolon));
+  StringDestruct(&name);
+}
+
+bool SyntaxLookingAtAnyAttribute(Syntax* syntax) {
+  return LexLookingAt(syntax->lex, TOK(attribute)) ||
+         LexLookingAt(syntax->lex, TOK(declspec)) ||
+         SyntaxLookingAtCXXAttribute(syntax);
+}
+
+bool SyntaxParseAnyAttribute(Syntax* syntax, Vector* attrs) {
+  if (LexMatch(syntax->lex, TOK(attribute))) {
+    SyntaxParseAttribute(syntax, attrs);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(declspec))) {
+    SyntaxParseDeclspec(syntax, attrs);
+    return true;
+  }
+  if (SyntaxLookingAtCXXAttribute(syntax)) {
+    SyntaxParseCXXAttributes(syntax, attrs);
+    return true;
+  }
+  return false;
 }
 
 static void ParseCXXAttributeArguments(Syntax* syntax, Attribute* attr,
@@ -6908,13 +7004,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       }
     } else if (SyntaxParseCXXAlignas(syntax, attributes)) {
       continue;
-    } else if (LexLookingAt(syntax->lex, TOK(attribute)) ||
-               SyntaxLookingAtCXXAttribute(syntax)) {
-      if (LexMatch(syntax->lex, TOK(attribute))) {
-        SyntaxParseAttribute(syntax, attributes);
-      } else {
-        SyntaxParseCXXAttributes(syntax, attributes);
-      }
+    } else if (SyntaxParseAnyAttribute(syntax, attributes)) {
+      continue;
     } else {
       if (type_specifier.type == kTypeImplicit &&
           type_specifier.type_record == NULL) {
@@ -7700,18 +7791,15 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       continue;
     }
 
-    // Parse common __attribute__ / C++ attribute syntax.
+    // Parse common __attribute__ / __declspec / C++ attribute syntax.
     while (true) {
       if (SyntaxParseCXXAlignas(syntax, attributes)) {
         continue;
       }
-      if (LexMatch(syntax->lex, TOK(attribute))) {
-        SyntaxParseAttribute(syntax, attributes);
-      } else if (SyntaxLookingAtCXXAttribute(syntax)) {
-        SyntaxParseCXXAttributes(syntax, attributes);
-      } else {
-        break;
+      if (SyntaxParseAnyAttribute(syntax, attributes)) {
+        continue;
       }
+      break;
     }
     
     VectorAppendVector(&sym->attributes, attributes);
@@ -10311,14 +10399,8 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   Vector* declarations = NewVector();
   Vector attributes = {0};
   
-  // Parse common __attribute__ / C++ attribute syntax.
-  while (LexLookingAt(syntax->lex, TOK(attribute)) ||
-         SyntaxLookingAtCXXAttribute(syntax)) {
-    if (LexMatch(syntax->lex, TOK(attribute))) {
-      SyntaxParseAttribute(syntax, &attributes);
-    } else {
-      SyntaxParseCXXAttributes(syntax, &attributes);
-    }
+  // Parse common __attribute__ / __declspec / C++ attribute syntax.
+  while (SyntaxParseAnyAttribute(syntax, &attributes)) {
   }
 
   Storage storage = STO(implicit);
@@ -10348,14 +10430,8 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     storage = STO(implicit);
   }
 
-  // Parse common __attribute__ / C++ attribute syntax.
-  while (LexLookingAt(syntax->lex, TOK(attribute)) ||
-         SyntaxLookingAtCXXAttribute(syntax)) {
-    if (LexMatch(syntax->lex, TOK(attribute))) {
-      SyntaxParseAttribute(syntax, &attributes);
-    } else {
-      SyntaxParseCXXAttributes(syntax, &attributes);
-    }
+  // Parse common __attribute__ / __declspec / C++ attribute syntax.
+  while (SyntaxParseAnyAttribute(syntax, &attributes)) {
   }
 
   // Create a type parser for the declarators.
@@ -12322,14 +12398,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       continue;
     }
 
-    // Parse trailing __attribute__ / C++ attribute syntax.
-    while (LexLookingAt(syntax->lex, TOK(attribute)) ||
-           SyntaxLookingAtCXXAttribute(syntax)) {
-      if (LexMatch(syntax->lex, TOK(attribute))) {
-        SyntaxParseAttribute(syntax, attributes);
-      } else {
-        SyntaxParseCXXAttributes(syntax, attributes);
-      }
+    // Parse trailing __attribute__ / __declspec / C++ attribute syntax.
+    while (SyntaxParseAnyAttribute(syntax, attributes)) {
     }
 
     // Symbol takes ownerhip of attribute strings.
@@ -12995,12 +13065,12 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
       return false;
     }
   }
-  if (SyntaxLookingAtCXXAttribute(syntax)) {
+  if (SyntaxLookingAtAnyAttribute(syntax)) {
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);
     Vector attrs = {0};
     VectorInit(&attrs);
-    SyntaxParseCXXAttributes(syntax, &attrs);
+    SyntaxParseAnyAttribute(syntax, &attrs);
     AttributeListDestruct(&attrs);
     bool result = SyntaxLookingAtDeclaration(syntax);
     LexCheckpointRestore(syntax->lex, &checkpoint);
@@ -13155,6 +13225,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(while):
     case TOK(asm):
     case TOK(attribute):
+    case TOK(declspec):
     case TOK(hash):
       return TC(stmt);
 

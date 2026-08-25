@@ -2339,7 +2339,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     Vector member_attributes = {0};
     VectorInit(&member_attributes);
     while (SyntaxParseCXXAlignas(parser->syntax, &member_attributes) ||
-           SyntaxParseCXXAttributes(parser->syntax, &member_attributes)) {
+           SyntaxParseAnyAttribute(parser->syntax, &member_attributes)) {
     }
     parser->cxx_member_owner = str;
 
@@ -2685,7 +2685,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         SyntaxError(parser->syntax, "Invalid type for struct member");
       } else {
         while (SyntaxParseCXXAlignas(parser->syntax, &member_attributes) ||
-               SyntaxParseCXXAttributes(parser->syntax, &member_attributes)) {
+               SyntaxParseAnyAttribute(parser->syntax, &member_attributes)) {
         }
         VectorAppendVector(&member_symbol->attributes, &member_attributes);
         VectorClear(&member_attributes);

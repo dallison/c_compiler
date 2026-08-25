@@ -706,13 +706,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     if (SyntaxParseCXXAlignas(parser->syntax, &attributes)) {
       continue;
     }
-    if (LexMatch(parser->lex, TOK(attribute))) {
-      SyntaxParseAttribute(parser->syntax, &attributes);
-    } else if (SyntaxLookingAtCXXAttribute(parser->syntax)) {
-      SyntaxParseCXXAttributes(parser->syntax, &attributes);
-    } else {
-      break;
+    if (SyntaxParseAnyAttribute(parser->syntax, &attributes)) {
+      continue;
     }
+    break;
   }
 
   String tag_name = {0};

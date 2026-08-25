@@ -326,6 +326,8 @@ const char* TokenName(Token tok) {
       return "__asm";
     case TOK(attribute):
       return "__attribute";
+    case TOK(declspec):
+      return "__declspec";
     case TOK(hash):
       return "#";
     default:

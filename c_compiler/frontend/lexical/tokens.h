@@ -184,6 +184,7 @@ typedef enum {
   // Non-standard common extensions.
   TOK(asm),
   TOK(attribute),
+  TOK(declspec),
 
   // Assembler tokens.
   TOK(hash),

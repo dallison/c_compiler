@@ -2125,15 +2125,10 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
 // seen.
 bool TypeParserSkipAttributes(TypeParser* parser) {
   bool any = false;
-  while (LexLookingAt(parser->lex, TOK(attribute)) ||
-         SyntaxLookingAtCXXAttribute(parser->syntax)) {
+  while (SyntaxLookingAtAnyAttribute(parser->syntax)) {
     Vector attrs = {0};
     VectorInit(&attrs);
-    if (LexMatch(parser->lex, TOK(attribute))) {
-      SyntaxParseAttribute(parser->syntax, &attrs);
-    } else {
-      SyntaxParseCXXAttributes(parser->syntax, &attrs);
-    }
+    SyntaxParseAnyAttribute(parser->syntax, &attrs);
     for (size_t i = 0; i < attrs.length; i++) {
       VectorAppend(&parser->pending_declaration_attributes, attrs.value.p[i]);
     }
@@ -2163,8 +2158,7 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
     } else if (LexMatch(parser->lex, TOK(atomic))) {
       num_atomics++;
       quals |= kQualAtomic;
-    } else if (LexLookingAt(parser->lex, TOK(attribute)) ||
-               SyntaxLookingAtCXXAttribute(parser->syntax)) {
+    } else if (SyntaxLookingAtAnyAttribute(parser->syntax)) {
       TypeParserSkipAttributes(parser);
     } else {
       break;

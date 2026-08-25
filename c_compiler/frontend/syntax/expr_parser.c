@@ -6546,8 +6546,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
     // A leading __attribute__ (GCC extension) only appears in type names, so
     // treat "( __attribute__((...)) type-name )" as a cast / compound literal.
     if (SyntaxLookingAtType(syntax) ||
-        LexLookingAt(syntax->lex, TOK(attribute)) ||
-        SyntaxLookingAtCXXAttribute(syntax)) {
+        SyntaxLookingAtAnyAttribute(syntax)) {
       // Nested type definitions in enumerator initializers are ill-formed.
       // Diagnose before the speculative `(type-name)` parse so the error is
       // not swallowed by abort_on_error, and recover without skipping the

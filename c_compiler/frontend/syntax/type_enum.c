@@ -587,13 +587,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
 Symbol* TypeParserParseEnum(TypeParser* parser) {
   // Parse common __attribute__ syntax.
   Vector attributes = {0};
-  while (LexLookingAt(parser->lex, TOK(attribute)) ||
-         SyntaxLookingAtCXXAttribute(parser->syntax)) {
-    if (LexMatch(parser->lex, TOK(attribute))) {
-      SyntaxParseAttribute(parser->syntax, &attributes);
-    } else {
-      SyntaxParseCXXAttributes(parser->syntax, &attributes);
-    }
+  while (SyntaxParseAnyAttribute(parser->syntax, &attributes)) {
   }
 
   String tag_name = {0};
