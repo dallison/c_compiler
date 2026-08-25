@@ -3448,6 +3448,13 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     }
   }
   init = AnalyzeExpression(init);
+  if (init == NULL) {
+    // Syntax recovery can leave an initialization node without an initializer
+    // (for example, when `int []b` is parsed as a malformed structured
+    // binding).  Preserve the parser diagnostic and discard the empty
+    // initialization instead of dereferencing it below.
+    return NULL;
+  }
   Symbol* symbol = target != NULL && target->op == AST_OP(identifier)
                        ? ((IdentifierASTNode*)target)->symbol
                        : NULL;
@@ -11932,6 +11939,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     default:
       break;
+  }
+
+  if (node == NULL) {
+    return NULL;
   }
 
   // Attempt to fold a constant expression.

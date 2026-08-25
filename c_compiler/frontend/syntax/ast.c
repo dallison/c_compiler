@@ -2962,8 +2962,10 @@ ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
   cond->parent = (ASTNode*)node;
   cond->child_id = 0;
   node->if_part = if_part;
-  if_part->parent = (ASTNode*)node;
-  if_part->child_id = 1;
+  if (if_part != NULL) {
+    if_part->parent = (ASTNode*)node;
+    if_part->child_id = 1;
+  }
   node->else_part = else_part;
   if (else_part != NULL) {
     else_part->parent = (ASTNode*)node;
@@ -4237,8 +4239,10 @@ ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
   expr->child_id = 0;
 
   node->stmt = stmt;
-  stmt->parent = (ASTNode*)node;
-  stmt->child_id = 1;
+  if (stmt != NULL) {
+    stmt->parent = (ASTNode*)node;
+    stmt->child_id = 1;
+  }
 
   VectorInit(&node->cases);
   node->default_node = NULL;
