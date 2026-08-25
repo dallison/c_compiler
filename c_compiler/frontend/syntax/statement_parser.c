@@ -194,13 +194,13 @@ void SyntaxAppendCXXBlockScopeDestructors(Vector* statements) {
 
   for (size_t i = statements->length; i > 0; i--) {
     ASTNode* stmt = statements->value.p[i - 1];
-    if (stmt->op != AST_OP(decl_list)) {
+    if (stmt == NULL || stmt->op != AST_OP(decl_list)) {
       continue;
     }
     DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
     for (size_t j = decls->declarations->length; j > 0; j--) {
       ASTNode* decl_node = decls->declarations->value.p[j - 1];
-      if (decl_node->op != AST_OP(vardecl)) {
+      if (decl_node == NULL || decl_node->op != AST_OP(vardecl)) {
         continue;
       }
       VariableDeclarationASTNode* decl =
@@ -374,7 +374,9 @@ static bool ConditionStartsWithType(Syntax* syntax) {
 // declaration) from "if (T(x))" or "if (T(x).f())" (functional-cast
 // expressions).  Speculatively parses a type and declarator behind a lex
 // checkpoint and an error trap, then rolls back.
-static bool LooksLikeConditionDeclaration(Syntax* syntax) {
+static bool LooksLikeConditionDeclaration(Syntax* syntax,
+                                          bool* missing_initializer) {
+  *missing_initializer = false;
   if (!CompilerIsCXX() || !ConditionStartsWithType(syntax)) {
     return false;
   }
@@ -398,10 +400,14 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax) {
     if (after_type == TOK(identifier) || after_type == TOK(star) ||
         after_type == TOK(amp) || after_type == TOK(ampamp)) {
       Symbol* sym = TypeParserParseDeclarator(&parser, type);
-      if (sym != NULL && sym->name.length > 0 &&
-          (LexLookingAt(syntax->lex, TOK(equal)) ||
-           LexLookingAt(syntax->lex, TOK(lbrace)))) {
-        is_declaration = true;
+      if (sym != NULL && sym->name.length > 0) {
+        if (LexLookingAt(syntax->lex, TOK(equal)) ||
+            LexLookingAt(syntax->lex, TOK(lbrace))) {
+          is_declaration = true;
+        } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+          is_declaration = true;
+          *missing_initializer = true;
+        }
       }
       if (sym != NULL) {
         SymbolDelete(sym);
@@ -421,6 +427,10 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax) {
           depth == 0 &&
           (LexLookingAt(syntax->lex, TOK(equal)) ||
            LexLookingAt(syntax->lex, TOK(lbrace)));
+      if (depth == 0 && LexLookingAt(syntax->lex, TOK(rparen))) {
+        is_declaration = true;
+        *missing_initializer = true;
+      }
     }
     TypeRecordDelete(type);
   }
@@ -433,6 +443,7 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax) {
   // treat it as an expression instead.
   if (DiagnosticErrorTrapped()) {
     is_declaration = false;
+    *missing_initializer = false;
   }
 
   DiagnosticErrorTrapEnd(trap);
@@ -452,9 +463,15 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax) {
 static ASTNode* ParseControllingCondition(Syntax* syntax, TokenClass followers,
                                           ASTNode** out_decl) {
   *out_decl = NULL;
-  if (LooksLikeConditionDeclaration(syntax)) {
+  bool missing_initializer = false;
+  if (LooksLikeConditionDeclaration(syntax, &missing_initializer)) {
     SyntaxOpenScope(syntax);
     ASTNode* decl = SyntaxParseConditionDeclaration(syntax);
+    if (missing_initializer) {
+      SyntaxError(
+          syntax,
+          "variable declaration in condition must have an initializer");
+    }
     Symbol* sym = ConditionDeclaredSymbol(decl);
     if (sym == NULL && decl != NULL && decl->op == AST_OP(decl_list)) {
       DeclarationListASTNode* declarations = (DeclarationListASTNode*)decl;

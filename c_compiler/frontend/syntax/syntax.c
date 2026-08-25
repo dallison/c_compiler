@@ -1496,6 +1496,7 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
       StructMember* member =
           FindStructMember(owner->type->info.struct_info, &last);
       if (member != NULL && member->symbol != NULL &&
+          StorageIs(member->symbol->storage, STO(typedef)) &&
           member->symbol->type != NULL) {
         TypeRecord* nested = member->symbol->type;
         if (TypeIsStructOrUnion(nested) && nested->info.struct_info != NULL &&
