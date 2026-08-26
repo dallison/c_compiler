@@ -82,22 +82,38 @@ Fixed so far, each with a regression in this repository:
   wait.  The regressions are `c_testsuite/tests/single-exec/00250.c` and a case
   in `tests/c_error_recovery_test.sh`.
 
+- `gcc.c-torture/compile/limits-exprparen.c`, 10,000 nested parentheses.  Every
+  operand that is itself an expression is parsed by recursive descent, and the
+  parser cannot see how much stack is left, so nesting was only ever limited by
+  the process running out of it.  Two changes: the eleven binary-precedence
+  functions, each of which called the next tighter one and so cost eleven frames
+  per level before an operand was even looked at, became one precedence-climbing
+  loop; and the nesting depth is now counted and capped at 512, above both what
+  the standards require (63 levels in C, 256 in C++) and what real programs
+  contain.  Past the cap the expression is skipped in one bracket-balanced pass
+  rather than left for each enclosing level to report and rescan, which is what
+  the deep input costs today: one diagnostic, and time linear in its length.
+  The regressions are in `tests/c_error_recovery_test.sh`.
+
+  This does not make the test compile, since GCC accepts the nesting; it turns a
+  crash into a diagnostic.  Accepting it needs the expression parser to stop
+  holding a C frame per level, which is a much larger change.
+
 ## Remaining crashes and hangs
 
 `gcc.dg` and `c-c++-common` are clean (`--jobs 8 --timeout 10`): 14,053 and
-2,842 pass with no crashes or hangs.  `gcc.c-torture` has 1,996 passing and 4
+2,842 pass with no crashes or hangs.  `gcc.c-torture` has 1,996 passing and 3
 left, all in the `limits-*` family:
 
 ```text
-gcc.c-torture/compile/limits-exprparen.c   rc=-11 (deep parenthesis nesting)
 gcc.c-torture/compile/limits-structnest.c  rc=-11 (deep struct nesting)
 gcc.c-torture/compile/limits-externdecl.c  timeout
 gcc.c-torture/compile/limits-fndefn.c      timeout
 ```
 
-The two signals are recursive descent running out of stack, like the `else if`
-chain in `23a4558`; they want the same treatment, not a larger stack.  The
-`g++.dg` sweep has not been re-run since these fixes.
+The signal is recursive descent running out of stack, like the `else if` chain
+in `23a4558`; it wants the same treatment, not a larger stack.  The `g++.dg`
+sweep has not been re-run since these fixes.
 
 Weaknesses noticed while fixing the above and deliberately left alone, since
 none is a crash or a hang and no test in the sweep covers them:
@@ -110,6 +126,15 @@ none is a crash or a hang and no test in the sweep covers them:
 - A function-like macro is not expanded when a comment or a newline separates
   its name from the `(`, so `f /**/ (0)` is left as a call to `f`.  This is what
   `funlike-4.c` tests once it no longer hangs.
+- A long flat operator chain crashes even though nothing about it is nested:
+  `1+1+1...` with 100,000 terms builds a left-leaning tree that
+  `BinaryASTNodeVisit` then walks recursively.  Capping expression *nesting* does
+  not help here, because the parser builds this tree without recursing; the tree
+  walkers are what need bounding.
+- Compiling the same source twice does not always produce the same output.  23
+  of the 648 sources in `cxx_testsuite/tests/exec` and
+  `c_testsuite/tests/single-exec` hash differently from one run to the next,
+  which makes byte comparison of the output useless for exactly those files.
 
 Unrelated failures seen while validating, each reproducible with a compiler
 built before this work and so not caused by it:

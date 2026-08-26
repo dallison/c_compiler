@@ -3663,7 +3663,8 @@ static ASTNode* ParseTokenSequenceLiteral(Syntax* syntax, TokenClass followers,
   return NewTokenSequenceLiteralASTNode(value, location);
 }
 
-static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
+static ASTNode* ParseNestedPrimaryExpression(Syntax* syntax,
+                                             TokenClass followers) {
   Lex* lex = syntax->lex;
 
   if (LexLookingAt(lex, TOK(splice_open))) {
@@ -3968,6 +3969,68 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   return (ASTNode*)NewIntConstantASTNode(0, type,
                                          syntax->lex->current_token_location);
+}
+
+// Every operand that is itself an expression -- the body of a parenthesized
+// subexpression, an argument, a subscript -- is parsed by recursive descent, so
+// each level of nesting costs stack whose amount the parser cannot observe.
+// Bound the nesting instead: the limit is far above both what the language
+// requires (63 levels in C, 256 in C++) and what any real program contains, and
+// past it the input is rejected rather than the compiler crashing.
+#define kMaxExpressionNesting 512
+
+// Discard the expression that is nested too deeply to parse, keeping the
+// brackets balanced.  Ordinary recovery would leave the rest of it in front of
+// the levels already on the stack, and each would report and rescan the same
+// input, so the cost of refusing one expression grew with the square of its
+// length.  Stopping before a closing bracket this scan did not open, or before a
+// separator that cannot appear inside an operand, hands each enclosing level the
+// token it was waiting for instead.
+static void SkipOverdeepExpression(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  int depth = 0;
+  while (!LexEof(lex)) {
+    switch (lex->current_token) {
+      case TOK(lparen):
+      case TOK(lsquare):
+      case TOK(lbrace):
+        depth++;
+        break;
+      case TOK(rparen):
+      case TOK(rsquare):
+      case TOK(rbrace):
+        if (depth == 0) {
+          return;
+        }
+        depth--;
+        break;
+      case TOK(comma):
+      case TOK(semicolon):
+      case TOK(colon):
+        if (depth == 0) {
+          return;
+        }
+        break;
+      default:
+        break;
+    }
+    LexNextToken(lex);
+  }
+}
+
+static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
+  if (syntax->expression_nesting_depth >= kMaxExpressionNesting) {
+    SyntaxError(syntax, "Expression nests more than %d levels deep",
+                kMaxExpressionNesting);
+    SkipOverdeepExpression(syntax);
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain),
+        syntax->lex->current_token_location);
+  }
+  syntax->expression_nesting_depth++;
+  ASTNode* result = ParseNestedPrimaryExpression(syntax, followers);
+  syntax->expression_nesting_depth--;
+  return result;
 }
 
 // Check if we have a varargs intrinsic.
@@ -6590,6 +6653,9 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       // which would otherwise clobber our jmp_buf.
       jmp_buf saved_abort_state;
       memcpy(saved_abort_state, error_abort_state, sizeof(error_abort_state));
+      // A longjmp out of the trial parse skips the bookkeeping of every
+      // expression level it entered, so restore the nesting depth by hand.
+      int saved_nesting_depth = syntax->expression_nesting_depth;
       abort_on_error = true;
       if (setjmp(error_abort_state) == 0) {
         TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
@@ -6617,6 +6683,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       }
       abort_on_error = prev_abort_on_error;
       memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
+      syntax->expression_nesting_depth = saved_nesting_depth;
       bool trapped = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(saved_trap);
       if (!parse_completed || trapped || !is_type_name) {
@@ -6673,210 +6740,131 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
   }
 }
 
-static ASTNode* ParseMultiplicativeExpression(Syntax* syntax,
-                                              TokenClass followers) {
+// Binary operator precedences, loosest first.  Each of these was a function
+// that called the next tighter one, so an expression entered eleven frames deep
+// before it looked at its first operand -- and a parenthesized subexpression
+// paid that again for every level of nesting.
+typedef enum {
+  kBinaryPrecedenceNone = 0,
+  kBinaryPrecedenceLogicalOr,
+  kBinaryPrecedenceLogicalAnd,
+  kBinaryPrecedenceInclusiveOr,
+  kBinaryPrecedenceExclusiveOr,
+  kBinaryPrecedenceAnd,
+  kBinaryPrecedenceEquality,
+  kBinaryPrecedenceRelational,
+  kBinaryPrecedenceCompare,
+  kBinaryPrecedenceShift,
+  kBinaryPrecedenceAdditive,
+  kBinaryPrecedenceMultiplicative,
+} BinaryPrecedence;
+
+// The operator a token introduces, or none if it introduces no binary operator
+// here.  Inside a template-argument list a top-level '>' closes the list and
+// '>>' closes two nested ones, so neither is an operator there; one that is
+// genuinely wanted has to be parenthesized, which clears the flag (see
+// SyntaxNeedTemplateClose).  '>>=' is never a binary operator, so the same
+// handoff happens for it without a case of its own.
+static BinaryPrecedence BinaryOperatorPrecedence(Syntax* syntax, Token token,
+                                                 ASTOpcode* op) {
+  switch (token) {
+    case TOK(star):
+      *op = AST_OP(mult);
+      return kBinaryPrecedenceMultiplicative;
+    case TOK(slash):
+      *op = AST_OP(div);
+      return kBinaryPrecedenceMultiplicative;
+    case TOK(percent):
+      *op = AST_OP(mod);
+      return kBinaryPrecedenceMultiplicative;
+    case TOK(plus):
+      *op = AST_OP(plus);
+      return kBinaryPrecedenceAdditive;
+    case TOK(minus):
+      *op = AST_OP(minus);
+      return kBinaryPrecedenceAdditive;
+    case TOK(lessless):
+      *op = AST_OP(lshift);
+      return kBinaryPrecedenceShift;
+    case TOK(greatergreater):
+      if (syntax->parsing_template_argument) {
+        return kBinaryPrecedenceNone;
+      }
+      *op = AST_OP(rshift);
+      return kBinaryPrecedenceShift;
+    // C++20 three-way comparison binds tighter than the relational operators
+    // and looser than the shift operators.
+    case TOK(spaceship):
+      *op = AST_OP(spaceship);
+      return kBinaryPrecedenceCompare;
+    case TOK(less):
+      *op = AST_OP(less);
+      return kBinaryPrecedenceRelational;
+    case TOK(lesseq):
+      *op = AST_OP(lesseq);
+      return kBinaryPrecedenceRelational;
+    case TOK(greater):
+      if (syntax->parsing_template_argument) {
+        return kBinaryPrecedenceNone;
+      }
+      *op = AST_OP(greater);
+      return kBinaryPrecedenceRelational;
+    case TOK(greatereq):
+      *op = AST_OP(greatereq);
+      return kBinaryPrecedenceRelational;
+    case TOK(equalequal):
+      *op = AST_OP(equal);
+      return kBinaryPrecedenceEquality;
+    case TOK(bangeq):
+      *op = AST_OP(noteq);
+      return kBinaryPrecedenceEquality;
+    case TOK(amp):
+      *op = AST_OP(and);
+      return kBinaryPrecedenceAnd;
+    case TOK(caret):
+      *op = AST_OP(exor);
+      return kBinaryPrecedenceExclusiveOr;
+    case TOK(bar):
+      *op = AST_OP(bitor);
+      return kBinaryPrecedenceInclusiveOr;
+    case TOK(ampamp):
+      *op = AST_OP(logand);
+      return kBinaryPrecedenceLogicalAnd;
+    case TOK(barbar):
+      *op = AST_OP(logor);
+      return kBinaryPrecedenceLogicalOr;
+    default:
+      return kBinaryPrecedenceNone;
+  }
+}
+
+// Parse an expression made of binary operators binding at least as tightly as
+// `min_precedence`.  Every one of them is left associative, so the right
+// operand takes only the operators that bind more tightly, and the recursion
+// that collects them is bounded by the number of precedence levels rather than
+// by the length or nesting of the expression.
+static ASTNode* ParseBinaryExpression(Syntax* syntax, TokenClass followers,
+                                      BinaryPrecedence min_precedence) {
   ASTNode* result = ParseCastExpression(syntax, followers);
   for (;;) {
-    if (LexMatch(syntax->lex, TOK(star))) {
-      ASTNode* right = ParseCastExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(mult), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(slash))) {
-      ASTNode* right = ParseCastExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(div), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(percent))) {
-      ASTNode* right = ParseCastExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(mod), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else {
-      break;
+    ASTOpcode op = 0;
+    BinaryPrecedence precedence =
+        BinaryOperatorPrecedence(syntax, syntax->lex->current_token, &op);
+    if (precedence == kBinaryPrecedenceNone || precedence < min_precedence) {
+      return result;
     }
+    LexNextToken(syntax->lex);
+    ASTNode* right =
+        ParseBinaryExpression(syntax, followers, precedence + 1);
+    result = NewBinaryASTNode(op, NULL, syntax->lex->current_token_location,
+                              result, right);
   }
-  return result;
-}
-
-static ASTNode* ParseAdditiveExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseMultiplicativeExpression(syntax, followers);
-  for (;;) {
-    if (LexMatch(syntax->lex, TOK(plus))) {
-      ASTNode* right = ParseMultiplicativeExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(plus), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(minus))) {
-      ASTNode* right = ParseMultiplicativeExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(minus), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else {
-      break;
-    }
-  }
-  return result;
-}
-
-static ASTNode* ParseShiftExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseAdditiveExpression(syntax, followers);
-  for (;;) {
-    if (LexMatch(syntax->lex, TOK(lessless))) {
-      ASTNode* right = ParseAdditiveExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(lshift), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (!syntax->parsing_template_argument &&
-               LexMatch(syntax->lex, TOK(greatergreater))) {
-      // Inside a template-argument list a top-level `>>` closes two nested
-      // template-ids rather than acting as a right-shift; leave it for the
-      // list's closer (see SyntaxNeedTemplateClose).  A `>>` that is genuinely
-      // a shift must be parenthesized, which resets parsing_template_argument.
-      ASTNode* right = ParseAdditiveExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(rshift), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else {
-      break;
-    }
-  }
-  return result;
-}
-
-// C++20 three-way comparison binds tighter than the relational operators and
-// looser than the shift operators.
-static ASTNode* ParseCompareExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseShiftExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(spaceship))) {
-    ASTNode* right = ParseShiftExpression(syntax, followers);
-    result =
-        NewBinaryASTNode(AST_OP(spaceship), NULL,
-                         syntax->lex->current_token_location, result, right);
-  }
-  return result;
-}
-
-static ASTNode* ParseRelationalExpression(Syntax* syntax,
-                                          TokenClass followers) {
-  ASTNode* result = ParseCompareExpression(syntax, followers);
-  for (;;) {
-    if (LexMatch(syntax->lex, TOK(less))) {
-      ASTNode* right = ParseCompareExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(less), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(lesseq))) {
-      ASTNode* right = ParseCompareExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(lesseq), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (syntax->parsing_template_argument &&
-               (LexLookingAt(syntax->lex, TOK(greater)) ||
-                LexLookingAt(syntax->lex, TOK(greatergreater)) ||
-                LexLookingAt(syntax->lex, TOK(greatergreatereq)))) {
-      // A top-level '>' (possibly merged into >> or >>=) ends the current
-      // template argument; hand it back to the list's closer.  A genuine `>=`
-      // remains a relational operator; `>=` produced by splitting `>>=` is
-      // only observed by the enclosing template-list parser.
-      break;
-    } else if (LexMatch(syntax->lex, TOK(greater))) {
-      ASTNode* right = ParseCompareExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(greater), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(greatereq))) {
-      ASTNode* right = ParseCompareExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(greatereq), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else {
-      break;
-    }
-  }
-  return result;
-}
-
-static ASTNode* ParseEqualityExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseRelationalExpression(syntax, followers);
-  for (;;) {
-    if (LexMatch(syntax->lex, TOK(equalequal))) {
-      ASTNode* right = ParseRelationalExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(equal), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(bangeq))) {
-      ASTNode* right = ParseRelationalExpression(syntax, followers);
-      result =
-          NewBinaryASTNode(AST_OP(noteq), NULL,
-                           syntax->lex->current_token_location, result, right);
-    } else {
-      break;
-    }
-  }
-  return result;
-}
-
-static ASTNode* ParseAndExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseEqualityExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(amp))) {
-    ASTNode* right = ParseEqualityExpression(syntax, followers);
-    result = NewBinaryASTNode(
-        AST_OP(and), NULL, syntax->lex->current_token_location, result, right);
-  }
-  return result;
-}
-
-static ASTNode* ParseExclusiveOrExpression(Syntax* syntax,
-                                           TokenClass followers) {
-  ASTNode* result = ParseAndExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(caret))) {
-    ASTNode* right = ParseAndExpression(syntax, followers);
-    result =
-        NewBinaryASTNode(AST_OP(exor), NULL,
-                         syntax->lex->current_token_location, result, right);
-  }
-  return result;
-}
-
-static ASTNode* ParseInclusiveOrExpression(Syntax* syntax,
-                                           TokenClass followers) {
-  ASTNode* result = ParseExclusiveOrExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(bar))) {
-    ASTNode* right = ParseExclusiveOrExpression(syntax, followers);
-    result =
-        NewBinaryASTNode(AST_OP(bitor), NULL,
-                         syntax->lex->current_token_location, result, right);
-  }
-  return result;
-}
-
-static ASTNode* ParseLogicalAndExpression(Syntax* syntax,
-                                          TokenClass followers) {
-  ASTNode* result = ParseInclusiveOrExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(ampamp))) {
-    ASTNode* right = ParseInclusiveOrExpression(syntax, followers);
-    result =
-        NewBinaryASTNode(AST_OP(logand), NULL,
-                         syntax->lex->current_token_location, result, right);
-  }
-  return result;
-}
-
-static ASTNode* ParseLogicalOrExpression(Syntax* syntax, TokenClass followers) {
-  ASTNode* result = ParseLogicalAndExpression(syntax, followers);
-  while (LexMatch(syntax->lex, TOK(barbar))) {
-    ASTNode* right = ParseLogicalAndExpression(syntax, followers);
-    result =
-        NewBinaryASTNode(AST_OP(logor), NULL,
-                         syntax->lex->current_token_location, result, right);
-  }
-  return result;
 }
 
 static ASTNode* ParseConditionalExpression(Syntax* syntax,
                                            TokenClass followers) {
-  ASTNode* result = ParseLogicalOrExpression(syntax, followers);
+  ASTNode* result =
+      ParseBinaryExpression(syntax, followers, kBinaryPrecedenceLogicalOr);
   if (LexMatch(syntax->lex, TOK(question))) {
     ASTNode* left = SyntaxParseExpression(syntax, followers);
     ASTNode* right = NULL;
@@ -7007,5 +6995,5 @@ ASTNode* SyntaxParseConditionalExpression(Syntax* syntax,
 
 ASTNode* SyntaxParseConstraintExpression(Syntax* syntax,
                                          TokenClass followers) {
-  return ParseLogicalOrExpression(syntax, followers);
+  return ParseBinaryExpression(syntax, followers, kBinaryPrecedenceLogicalOr);
 }

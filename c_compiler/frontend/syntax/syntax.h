@@ -57,6 +57,11 @@ typedef struct Syntax {
   // Used to reject (and recover from) nested type definitions in enumerator
   // initializers, which previously skipped the enclosing '}' and looped.
   int parsing_enum_specifier_depth;
+  // Nesting depth of the expression parser: one level per operand that is
+  // itself an expression, so a parenthesized subexpression, a call argument
+  // list and a subscript each add one.  Recursive descent spends stack on every
+  // level, so the depth is bounded (see ParsePrimaryExpression).
+  int expression_nesting_depth;
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.

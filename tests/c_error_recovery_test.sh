@@ -155,6 +155,18 @@ expect_diagnosed array_designator_bound_unrepresentable \
   'static char *name[] = { [0x7ffffff0] = "bar" };' \
   'larger than this compiler can lay out'
 
+# An operand that is itself an expression is parsed by recursive descent, and
+# the parser cannot tell how much stack is left, so beyond a fixed nesting depth
+# the input is rejected.  These nest far past that depth and used to exhaust the
+# stack.  The second one never closes its parentheses, so the depth is reached
+# while the parser is already recovering.
+expect_diagnosed expression_paren_nesting_limit \
+  "$(python3 -c 'print("int x = " + "(" * 10000 + "1" + ")" * 10000 + ";")')" \
+  'nests more than'
+
+expect_terminates expression_paren_nesting_limit_unclosed \
+  "$(python3 -c 'print("int x = " + "(" * 10000 + "1;")')"
+
 # A comment that no line closes.  Looking for the close read past the end of
 # the input, where waiting for the lexer to report end of file could not
 # succeed: the lexer had not yet consumed the line being tokenized.
