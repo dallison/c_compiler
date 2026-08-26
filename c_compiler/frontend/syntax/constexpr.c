@@ -214,6 +214,17 @@ static bool ConstexprContextOwnsObject(ConstEvalContext* ctx,
   return false;
 }
 
+// Owner to allocate a subobject materialized into one of `parent`'s slots with.
+// The slot keeps the pointer, so the subobject has to live at least as long as
+// the object holding it: the value of a constexpr symbol outlives every
+// evaluation context, and allocating in `ctx` would leave that slot dangling
+// once the context is destroyed.  An object owned by neither is treated as
+// long-lived, which leaks rather than dangles.
+static ConstEvalContext* ConstexprSubobjectOwner(ConstEvalContext* ctx,
+                                                 ConstexprObject* parent) {
+  return ConstexprContextOwnsObject(ctx, parent) ? ctx : NULL;
+}
+
 static bool ConstexprContextOwnsSlot(ConstEvalContext* ctx,
                                      ConstexprValue* requested) {
   if (ctx == NULL || requested == NULL) {
@@ -231,6 +242,12 @@ static bool ConstexprContextOwnsSlot(ConstEvalContext* ctx,
     }
   }
   return false;
+}
+
+// ConstexprSubobjectOwner for a slot whose containing object is not at hand.
+static ConstEvalContext* ConstexprSubobjectOwnerForSlot(ConstEvalContext* ctx,
+                                                       ConstexprValue* slot) {
+  return ConstexprContextOwnsSlot(ctx, slot) ? ctx : NULL;
 }
 
 static ConstexprValue* ConstexprSlotOwningObject(ConstEvalContext* ctx,
@@ -4349,6 +4366,10 @@ static ConstexprObject* ConstexprVirtualMemberRootObject(
 bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           ConstexprValue* result) {
+  // Leave a defined value on every path out of here: a caller that keeps
+  // reading after a false return, to follow an address chain for instance,
+  // would otherwise see whatever it declared the value with.
+  *result = (ConstexprValue){0};
   if (node == NULL) {
     return false;
   }
@@ -4713,7 +4734,8 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       slot->is_object = true;
       slot->is_address = false;
       slot->object = NewConstexprObject(
-          ctx, member_type, ConstexprObjectSlotCount(member_type));
+          ConstexprSubobjectOwner(ctx, object_value.object), member_type,
+          ConstexprObjectSlotCount(member_type));
     }
     *result = *slot;
     return true;
@@ -4884,7 +4906,8 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
       (*slot)->is_object = true;
       (*slot)->is_address = false;
       (*slot)->object = NewConstexprObject(
-          ctx, member_type, ConstexprObjectSlotCount(member_type));
+          ConstexprSubobjectOwner(ctx, object_value.object), member_type,
+          ConstexprObjectSlotCount(member_type));
     }
     return *slot != NULL && (allow_object || !(*slot)->is_object);
   }
@@ -5719,7 +5742,7 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
         slot->ivalue = 0;
         slot->fvalue = 0;
         slot->object = NewConstexprObject(
-            ctx, address->sub->type,
+            ConstexprSubobjectOwnerForSlot(ctx, slot), address->sub->type,
             ConstexprObjectSlotCount(address->sub->type));
       }
       *object = slot->object;

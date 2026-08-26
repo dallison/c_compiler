@@ -1,10 +1,9 @@
 #!/bin/bash
-# Error recovery has to terminate.  Each source below contains a construct the C
-# parser cannot accept, and each once made the compiler report the same
-# diagnostics forever because the rejecting parser consumed no input.  The cases
-# use constructs davecc does not implement; if one becomes supported, replace it
-# with another unsupported construct in the same position rather than dropping
-# the case.
+# Error recovery has to terminate normally.  Each source below contains a
+# construct the compiler rejects, and each once made it spin or crash after the
+# diagnostic.  The cases use constructs davecc does not implement; if one becomes
+# supported, replace it with another unsupported construct in the same position
+# rather than dropping the case.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -24,12 +23,13 @@ trap 'rm -rf "$WORK"' EXIT
 run_davecc() {
   local src="$1"
   local log="$2"
+  local std="$3"
   python3 -c '
 import os, signal, subprocess, sys
-davecc, src, log = sys.argv[1:4]
+davecc, src, log, std = sys.argv[1:5]
 with open(log, "wb") as output:
     proc = subprocess.Popen(
-        [davecc, "-target", "pcode", "-std=c17", "-fsyntax-only",
+        [davecc, "-target", "pcode", "-std=" + std, "-fsyntax-only",
          "-error-limit=0", src],
         stdout=output,
         stderr=subprocess.STDOUT,
@@ -41,18 +41,21 @@ with open(log, "wb") as output:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
         raise SystemExit(124)
-' "$DAVECC" "$src" "$log"
+' "$DAVECC" "$src" "$log" "$std"
 }
 
-expect_diagnosed() {
+# Compile and require an ordinary exit: no hang, no signal.  A rejected
+# construct leaves the compiler holding partly built state, so what follows it
+# must still be processed without crashing.
+expect_terminates() {
   local name="$1"
   local source="$2"
-  local pattern="${3:-error:}"
+  local std="${3:-c17}"
   local src="$WORK/$name.c"
   local log="$WORK/$name.out"
   printf '%s\n' "$source" >"$src"
   local status=0
-  run_davecc "$src" "$log" || status=$?
+  run_davecc "$src" "$log" "$std" || status=$?
   if [[ "$status" -eq 124 ]]; then
     echo "$name: compiler did not terminate" >&2
     head -5 "$log" | sed 's/^/  /' >&2
@@ -63,9 +66,17 @@ expect_diagnosed() {
     head -5 "$log" | sed 's/^/  /' >&2
     exit 1
   fi
-  if ! grep -Fq "$pattern" "$log"; then
+}
+
+expect_diagnosed() {
+  local name="$1"
+  local source="$2"
+  local pattern="${3:-error:}"
+  local std="${4:-c17}"
+  expect_terminates "$name" "$source" "$std"
+  if ! grep -Fq "$pattern" "$WORK/$name.out"; then
     echo "$name: expected diagnostic not found: $pattern" >&2
-    head -5 "$log" | sed 's/^/  /' >&2
+    head -5 "$WORK/$name.out" | sed 's/^/  /' >&2
     exit 1
   fi
 }
@@ -102,5 +113,20 @@ expect_diagnosed gnu_complex_declaration_specifier \
 expect_diagnosed old_style_arguments_at_end_of_input \
   'int old(a)
 int a;'
+
+# Reading a member of an aggregate constexpr object materializes the subobject
+# for that member and stores it in the containing object's slot.  The containing
+# object here belongs to the symbol and outlives the evaluation, so a subobject
+# owned by the evaluation context left the slot dangling and the second read
+# followed it.  Two reads are needed: the first frees the subobject, the second
+# reuses the slot.  Whether the initializer is accepted does not matter, only
+# that the reads do not crash.
+expect_terminates constexpr_subobject_read_twice \
+  'struct inner { void *p; };
+struct outer { struct inner x; };
+constexpr struct outer v = { };
+static_assert (v.x.p == 0);
+static_assert (v.x.p == 0);' \
+  c23
 
 echo "c error recovery ok"
