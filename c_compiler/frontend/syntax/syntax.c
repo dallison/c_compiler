@@ -4873,7 +4873,7 @@ static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
 
 static TypeRecord* NewCXXStructType(Struct* str) {
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   TypeRecordCalculateSize(type);
   return type;
 }

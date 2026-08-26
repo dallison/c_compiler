@@ -2054,7 +2054,8 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       }
       case kType_struct_info:
-        t->info.struct_info = (Struct*)SReadRef(ctx, buf, kSerialKindStruct);
+        TypeRecordSetStructInfo(
+            t, (Struct*)SReadRef(ctx, buf, kSerialKindStruct));
         break;
       case kType_enum_info:
         t->info.enum_info = (Enum*)SReadRef(ctx, buf, kSerialKindEnum);

@@ -446,7 +446,7 @@ static Struct* AttachNewStructToTag(Symbol* tag, bool is_union, bool is_class) {
   str->is_class = is_class;
   TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                     kQualPlain);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   tag->type = type;
   tag->storage = STO(implicit);
   tag->flags.is_using_alias = false;
@@ -484,7 +484,7 @@ static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
   str->is_class = is_class;
   TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                     kQualPlain);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   tag = NewSymbol(tag_name->value, type, STO(implicit));
   tag->flags.is_forward_declared = true;
   str->tag_name = &tag->name;
@@ -541,7 +541,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     str->is_class = is_class;
     TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                       kQualPlain);
-    type->info.struct_info = str;
+    TypeRecordSetStructInfo(type, str);
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     str->tag_name = &tag->name;
     str->tag_symbol = tag;
@@ -552,7 +552,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     str->is_class = is_class;
     TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                       kQualPlain);
-    type->info.struct_info = str;
+    TypeRecordSetStructInfo(type, str);
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     str->tag_name = &tag->name;
     str->tag_symbol = tag;
@@ -906,7 +906,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       }
       TypeRecord* type =
           NewTypeRecord(is_union ? kTypeUnion : kTypeStruct, kQualPlain);
-      type->info.struct_info = str;
+      TypeRecordSetStructInfo(type, str);
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;

@@ -272,7 +272,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   for (size_t i = 0; i < from->friend_functions.length; i++) {
     StructAddFriendFunction(str, from->friend_functions.value.p[i]);
   }
-  copy->info.struct_info = str;
+  TypeRecordSetStructInfo(copy, str);
   copy->size = 0;
 
   Struct* saved_substitution_source = parser->template_substitution_source;
@@ -6815,7 +6815,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   TypeRecord* type = NewTypeRecord(source_struct->is_union ? kTypeUnion
                                                            : kTypeStruct,
                                   kQualPlain);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   type->template_origin = templ;
   type->template_arguments = TemplateArgumentVectorCopy(completed_args);
   Symbol* tag = NewSymbol(instantiated_name.value, type, STO(implicit));
@@ -7460,7 +7460,8 @@ void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias,
   }
   type->template_arguments = TemplateArgumentVectorCopy(alias->type->template_arguments);
   type->template_origin = alias;
-  type->info.struct_info = alias->type->template_origin->type->info.struct_info;
+  TypeRecordSetStructInfo(
+      type, alias->type->template_origin->type->info.struct_info);
 }
 
 /* True if an alias template argument is a pack expansion (`Ts...`), reporting

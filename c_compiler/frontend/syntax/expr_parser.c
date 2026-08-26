@@ -1626,7 +1626,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecord* owner_type = NewTypeRecord(
           functional_constructor_owner->is_union ? kTypeUnion : kTypeStruct,
           kQualPlain);
-      owner_type->info.struct_info = functional_constructor_owner;
+      TypeRecordSetStructInfo(owner_type, functional_constructor_owner);
       TypeRecordCalculateSize(owner_type);
       ASTNodeSetType(node, owner_type);
       TypeRecordDelete(owner_type);
@@ -2933,7 +2933,7 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
   Struct* closure = NewStruct(false);
   closure->is_class = true;
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
-  type->info.struct_info = closure;
+  TypeRecordSetStructInfo(type, closure);
   Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));
   tag->flags.invented = true;
   tag->flags.is_defined = true;

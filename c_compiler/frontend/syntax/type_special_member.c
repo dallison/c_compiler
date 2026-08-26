@@ -808,7 +808,7 @@ static TypeRecord* CXXDefaultedPostfixObjectType(Symbol* symbol) {
     TypeRecord* object = NewTypeRecord(
         owner->is_union ? kTypeUnion : kTypeStruct,
         func->info.function.is_volatile_member ? kQualVolatile : kQualPlain);
-    object->info.struct_info = owner;
+    TypeRecordSetStructInfo(object, owner);
     return object;
   }
   if (func->info.function.prototype.length == 0) {
@@ -1666,7 +1666,7 @@ static TypeRecord* NewCXXClassTypeForStruct(Struct* str, Qualifiers quals) {
   TypeRecord* type = NewTypeRecordWithSize(str->is_union ? kTypeUnion
                                                          : kTypeStruct,
                                            quals);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   TypeRecordCalculateSize(type);
   return type;
 }

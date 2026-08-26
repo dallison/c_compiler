@@ -5960,7 +5960,7 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
 
 static TypeRecord* NewStructTypeForAdjustment(Struct* str) {
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
-  type->info.struct_info = str;
+  TypeRecordSetStructInfo(type, str);
   TypeRecordCalculateSize(type);
   return type;
 }
@@ -9842,10 +9842,10 @@ static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
       NewTypeRecord(receiver_type->info.struct_info->is_union ? kTypeUnion
                                                                 : kTypeStruct,
                     kQualPlain);
-  receiver_class_type->info.struct_info = receiver_type->info.struct_info;
+  TypeRecordSetStructInfo(receiver_class_type, receiver_type->info.struct_info);
   TypeRecord* pm_class_type =
       NewTypeRecord(pm_class->is_union ? kTypeUnion : kTypeStruct, kQualPlain);
-  pm_class_type->info.struct_info = pm_class;
+  TypeRecordSetStructInfo(pm_class_type, pm_class);
   CXXBaseAdjustment member_base_adjustment;
   bool compatible_class =
       TypeEqual(receiver_class_type, pm_class_type) ||

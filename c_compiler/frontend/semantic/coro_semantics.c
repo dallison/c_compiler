@@ -4072,7 +4072,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
                                         SourceLocation location) {
   TypeRecord* frame_type = NewTypeRecord(kTypeStruct, kQualPlain);
   Struct* str = NewStruct(false);
-  frame_type->info.struct_info = str;
+  TypeRecordSetStructInfo(frame_type, str);
 
   CoroutineFrame frame = {0};
   VectorInit(&frame.owned_symbols);

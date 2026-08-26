@@ -597,7 +597,7 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
       TypeRecord* class_type =
           NewTypeRecord(class_info->is_union ? kTypeUnion : kTypeStruct,
                         kQualPlain);
-      class_type->info.struct_info = class_info;
+      TypeRecordSetStructInfo(class_type, class_info);
       die = NewPtrToMemberDIE(builder, NewTypeRecordDIE(builder, type->next),
                               NewTypeRecordDIE(builder, class_type),
                               MemberPointerSize(type));

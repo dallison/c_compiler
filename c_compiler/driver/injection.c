@@ -16,6 +16,7 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "type_class_internal.h"
+#include "type_core.h"
 #include "type_enum.h"
 #include "type_parse.h"
 
@@ -135,6 +136,7 @@ static void InjectionClassLayoutRestore(
   str->alignment = snapshot->alignment;
   str->next_bit_pos = snapshot->next_bit_pos;
   str->current_offset = snapshot->current_offset;
+  TypeRecordSyncStructSizes(str);
 }
 
 static void InjectionQueuedSequenceDelete(InjectionQueuedSequence* entry) {

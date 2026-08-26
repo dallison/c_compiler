@@ -741,7 +741,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
   VectorAppend(&var->initializers, ott);
   // Header entry 1: pointer to the complete object's type_info.
   TypeRecord* complete_type = NewTypeRecord(kTypeStruct, kQualPlain);
-  complete_type->info.struct_info = complete;
+  TypeRecordSetStructInfo(complete_type, complete);
   TypeRecordCalculateSize(complete_type);
   Symbol* type_info = RttiGetTypeInfoSymbol(complete_type);
   Initializer* ti = malloc(sizeof(Initializer));

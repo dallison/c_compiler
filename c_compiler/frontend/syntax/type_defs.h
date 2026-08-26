@@ -373,8 +373,10 @@ struct Struct {
   Vector vbtable_symbols;  // @wire - (recomputed)
   Map symbol_table;  // @wire - (rebuilt from members)
   Map symbol_name_table;  // @wire - (rebuilt from members)
+  Vector type_records;  // TypeRecord* users of this layout; non-owning. @wire -
   int next_offset;   // Byte offset of next member.               // @wire 5
   int size;          // Size of struct in bytes.                  // @wire 6
+  int synced_type_record_size;  // Last size propagated to TypeRecords. @wire -
   int non_virtual_size;  // Size excluding virtual base subobjs.   // @wire 7
   int alignment;     // Alignment (max member alignment).         // @wire 8
   bool is_union;     // True if this is a union.                  // @wire 9
@@ -482,6 +484,9 @@ typedef struct TypeRecord {
   // C++26 dependent type splice `typename[: r :]`.  Retained until template
   // substitution makes the reflection value concrete.
   struct ASTNode* dependent_splice_expr;                             // @wire 20
+  // Struct whose non-owning size-update list most recently registered this
+  // arena-backed record. Stale older-list entries are filtered during sync.
+  Struct* size_sync_owner;                                           // @wire -
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
     ArrayInfo array;             // @wire 11 (kDeclArray)

@@ -255,6 +255,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->pack_index_expr = NULL;
   record->pack_index_pack = NULL;
   record->dependent_splice_expr = NULL;
+  record->size_sync_owner = NULL;
   record->refs = 0;
   record->next = NULL;
   record->declarator = kDeclPrimitive;
@@ -284,6 +285,31 @@ TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
   record->bit_width = bit_width;
   record->size = BitIntStorageSize(bit_width);
   return record;
+}
+
+static bool TypeRecordUsesStructSize(TypeRecord* record) {
+  return record != NULL && record->declarator == kDeclPrimitive &&
+         TypeIsStructOrUnion(record) && record->info.struct_info != NULL;
+}
+
+static void TypeRecordRegisterStructSizeUser(TypeRecord* record) {
+  if (!TypeRecordUsesStructSize(record)) {
+    return;
+  }
+  record->size = record->info.struct_info->size;
+  if (record->size_sync_owner == record->info.struct_info) {
+    return;
+  }
+  VectorAppend(&record->info.struct_info->type_records, record);
+  record->size_sync_owner = record->info.struct_info;
+}
+
+void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
+  if (record == NULL) {
+    return;
+  }
+  record->info.struct_info = str;
+  TypeRecordRegisterStructSizeUser(record);
 }
 
 // Deletes a TypeRecord with regard to the reference count.  The
@@ -491,21 +517,17 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
 }
 
 void TypeRecordSyncStructSizes(Struct* str) {
-  if (str == NULL) {
+  if (str == NULL || str->synced_type_record_size == str->size) {
     return;
   }
-  size_t stride = (sizeof(TypeRecord) + 15) & ~(size_t)15;
-  for (TypeArenaBlock* block = type_arena; block != NULL;
-       block = block->next) {
-    for (size_t offset = 0; offset + sizeof(TypeRecord) <= block->used;
-         offset += stride) {
-      TypeRecord* record = (TypeRecord*)(block->data + offset);
-      if (record->declarator == kDeclPrimitive &&
-          TypeIsStructOrUnion(record) && record->info.struct_info == str) {
-        record->size = str->size;
-      }
+  for (size_t i = 0; i < str->type_records.length; i++) {
+    TypeRecord* record = VectorGet(&str->type_records, i);
+    if (TypeRecordUsesStructSize(record) &&
+        record->info.struct_info == str) {
+      record->size = str->size;
     }
   }
+  str->synced_type_record_size = str->size;
 }
 
 static uint64_t TypeIdentityHashBytes(uint64_t hash, const char* value) {
@@ -1029,6 +1051,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   memcpy(r, record, sizeof(TypeRecord));
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
+  r->size_sync_owner = NULL;
   r->template_parameter_name = record->template_parameter_name != NULL
       ? NewString(record->template_parameter_name->value)
       : NULL;
@@ -1101,6 +1124,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
     r->info.array.size.vla.size =
       ASTNodeClone(record->info.array.size.vla.size, CloneVLAExpr, NULL, NULL);
   }
+  TypeRecordRegisterStructSizeUser(r);
   return r;
 }
 
@@ -1132,7 +1156,7 @@ TypeRecord* NewPointerTypeRecord(Qualifiers quals) {
 TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals) {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
   t->declarator = kDeclMemberPointer;
-  t->info.struct_info = class_info;
+  TypeRecordSetStructInfo(t, class_info);
   return t;
 }
 
@@ -1216,7 +1240,7 @@ Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
   TypeRecord* class_type =
       NewTypeRecord(owner != NULL && owner->is_union ? kTypeUnion : kTypeStruct,
                     object_qualifiers);
-  class_type->info.struct_info = owner;
+  TypeRecordSetStructInfo(class_type, owner);
   TypeRecord* this_type = NewPointerTo(kQualPlain, class_type);
   Symbol* this_symbol = NewSymbol("this", this_type, STO(implicit));
   this_symbol->flags.is_argument = true;
@@ -1613,6 +1637,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->vbtable_symbols);
   MapInit(&s->symbol_table, CompareStructMember);
   MapInitForCharPointerKeys(&s->symbol_name_table);
+  VectorInit(&s->type_records);
   s->is_union = is_union;
   s->is_class = false;
   s->is_final = false;
@@ -1625,6 +1650,7 @@ Struct* NewStruct(bool is_union) {
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;
+  s->synced_type_record_size = -1;
   s->non_virtual_size = 0;
   s->alignment = 1;
   s->packed = false;
@@ -1684,6 +1710,7 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->deduction_guides,
                              (VectorElementDestructor)SymbolDestruct,
                              /*free_element=*/true);
+  VectorDestruct(&s->type_records);
   MapDestruct(&s->symbol_table);
   MapDestruct(&s->symbol_name_table);
 }

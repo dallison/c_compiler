@@ -127,7 +127,7 @@ static TypeRecord* MemberPointerClassTypeRecord(Struct* class_info) {
   }
   TypeRecord* type =
       NewTypeRecord(class_info->is_union ? kTypeUnion : kTypeStruct, kQualPlain);
-  type->info.struct_info = class_info;
+  TypeRecordSetStructInfo(type, class_info);
   return type;
 }
 

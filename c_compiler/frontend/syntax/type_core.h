@@ -25,6 +25,9 @@ void TypeRecordArenaRelease(void);
 void StructRegistryRelease(void);
 TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
 uint64_t TypeRecordSemanticIdentityHash(TypeRecord* record);
+// Bind a type node to a class layout and register it for late size updates.
+// This does not alter Struct reference counts.
+void TypeRecordSetStructInfo(TypeRecord* record, Struct* str);
 void TypeRecordSyncStructSizes(Struct* str);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);

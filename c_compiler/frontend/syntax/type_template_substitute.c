@@ -830,7 +830,7 @@ static TypeRecord* SubstituteTemplateSelfReference(TypeRecord* type,
     return NULL;
   }
   TypeRecord* subst = TypeRecordCopy(type);
-  subst->info.struct_info = target;
+  TypeRecordSetStructInfo(subst, target);
   if (target->tag_symbol != NULL && target->tag_symbol->type != NULL) {
     if (subst->template_arguments != NULL) {
       VectorDeleteWithContents(subst->template_arguments,
@@ -1593,7 +1593,7 @@ static void SubstituteMemberPointerClass(TypeRecord* copy, Vector* args) {
       argument->type->info.struct_info == NULL) {
     return;
   }
-  copy->info.struct_info = argument->type->info.struct_info;
+  TypeRecordSetStructInfo(copy, argument->type->info.struct_info);
   copy->template_parameter_index = -1;
   copy->type &= ~kTypeUnknown;
   copy->size = MemberPointerSize(copy);
