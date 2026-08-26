@@ -2742,13 +2742,13 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
                      left_pointee);
   pointee->qualifiers =
       (left_pointee->qualifiers | right_pointee->qualifiers) & cv_mask;
+  // The pointer owns the pointee from here on, so only the pointer is released.
   TypeRecord* result = NewPointerTo(kQualPlain, pointee);
   ASTNodeSetType((ASTNode*)colon, result);
   ASTNodeSetType((ASTNode*)node, result);
   colon->base.value_category = kValueCategoryPrvalue;
   node->base.value_category = kValueCategoryPrvalue;
   TypeRecordDelete(result);
-  TypeRecordDelete(pointee);
   return true;
 }
 
