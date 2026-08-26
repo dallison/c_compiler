@@ -688,63 +688,107 @@ static bool ParseIfConstevalPrefix(Syntax* syntax, bool* negated) {
   return false;
 }
 
+typedef struct {
+  ASTNode* cond;
+  ASTNode* if_part;
+  ASTNode* decl;
+  ASTNode* init;
+  SourceLocation location;
+  bool init_scope;
+  bool is_constexpr;
+  bool is_consteval;
+  bool consteval_negated;
+} PendingIfStatement;
+
+static ASTNode* FinishPendingIfStatement(Syntax* syntax,
+                                         PendingIfStatement* pending,
+                                         ASTNode* else_part) {
+  ASTNode* stmt = NewIfStatementASTNode(
+      pending->cond, pending->if_part, else_part, pending->is_constexpr,
+      pending->location);
+  if (pending->is_consteval) {
+    IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
+    if_stmt->is_consteval = true;
+    if_stmt->consteval_negated = pending->consteval_negated;
+    return stmt;
+  }
+  ASTNode* inner =
+      FinishConditionScope(syntax, pending->decl, stmt, pending->location);
+  return FinishInitScope(syntax, pending->init, pending->init_scope, inner,
+                         pending->location);
+}
+
 static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
                                  SourceLocation location) {
-  bool is_constexpr = false;
-  if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
-    is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
-  }
-  bool consteval_negated = false;
-  bool is_consteval =
-      !is_constexpr && CompilerIsCXX() &&
-      ParseIfConstevalPrefix(syntax, &consteval_negated);
-  if (is_consteval) {
-    if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
-      SyntaxError(syntax, "'if consteval' requires C++23");
+  Vector pending;
+  VectorInit(&pending);
+  ASTNode* final_else = NULL;
+
+  for (;;) {
+    PendingIfStatement* current = calloc(1, sizeof(*current));
+    VectorAppend(&pending, current);
+    current->location = location;
+
+    if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+      current->is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
     }
-    if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
-      SyntaxError(
-          syntax,
-          "'if consteval' substatements must be compound statements");
-    }
-    ASTNode* if_part = SyntaxParseStatement(syntax, followers);
-    ASTNode* else_part = NULL;
-    if (LexMatch(syntax->lex, TOK(else))) {
+    current->is_consteval =
+        !current->is_constexpr && CompilerIsCXX() &&
+        ParseIfConstevalPrefix(syntax, &current->consteval_negated);
+    if (current->is_consteval) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+        SyntaxError(syntax, "'if consteval' requires C++23");
+      }
       if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
         SyntaxError(
             syntax,
             "'if consteval' substatements must be compound statements");
       }
-      else_part = SyntaxParseStatement(syntax, followers);
+      current->if_part = SyntaxParseStatement(syntax, followers);
+      current->cond = NewIntConstantASTNode(
+          1, NewTypeRecordWithSize(kTypeBool, kQualPlain), location);
+    } else {
+      SyntaxNeedBracket(syntax, TOK(lparen), followers);
+      current->cond = ParseSelectionCondition(
+          syntax, followers, &current->decl, &current->init,
+          &current->init_scope);
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      current->location = syntax->lex->current_token_location;
+      current->if_part = SyntaxParseStatement(syntax, followers);
     }
-    ASTNode* cond = NewIntConstantASTNode(
-        1, NewTypeRecordWithSize(kTypeBool, kQualPlain), location);
-    ASTNode* stmt =
-        NewIfStatementASTNode(cond, if_part, else_part, false, location);
-    IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
-    if_stmt->is_consteval = true;
-    if_stmt->consteval_negated = consteval_negated;
-    return stmt;
-  }
-  SyntaxNeedBracket(syntax, TOK(lparen), followers);
-  ASTNode* decl = NULL;
-  ASTNode* init = NULL;
-  bool init_scope = false;
-  ASTNode* cond =
-      ParseSelectionCondition(syntax, followers, &decl, &init, &init_scope);
-  SyntaxNeedBracket(syntax, TOK(rparen), followers);
-  Lex* lex = syntax->lex;
 
-  location = lex->current_token_location;
-  ASTNode* if_part = SyntaxParseStatement(syntax, followers);
-  ASTNode* else_part = NULL;
-  if (LexMatch(lex, TOK(else))) {
-    else_part = SyntaxParseStatement(syntax, followers);
+    if (!LexMatch(syntax->lex, TOK(else))) {
+      break;
+    }
+    if (current->is_consteval &&
+        !LexLookingAt(syntax->lex, TOK(lbrace))) {
+      SyntaxError(
+          syntax,
+          "'if consteval' substatements must be compound statements");
+    }
+    if (!LexLookingAt(syntax->lex, TOK(if))) {
+      final_else = SyntaxParseStatement(syntax, followers);
+      break;
+    }
+
+    location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
   }
-  ASTNode* if_stmt =
-      NewIfStatementASTNode(cond, if_part, else_part, is_constexpr, location);
-  ASTNode* inner = FinishConditionScope(syntax, decl, if_stmt, location);
-  return FinishInitScope(syntax, init, init_scope, inner, location);
+
+  ASTNode* result = final_else;
+  while (pending.length > 0) {
+    PendingIfStatement* current = VectorLast(&pending);
+    VectorPop(&pending);
+    result = FinishPendingIfStatement(syntax, current, result);
+    free(current);
+    if (pending.length > 0) {
+      // SyntaxParseStatement used to parse each recursive else-if and marked
+      // the returned root as a statement start.  Preserve that AST metadata.
+      result->flags |= kASTStatementStart;
+    }
+  }
+  VectorDestruct(&pending);
+  return result;
 }
 
 // A while statement.
