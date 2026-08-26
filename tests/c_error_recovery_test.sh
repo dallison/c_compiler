@@ -1,9 +1,9 @@
 #!/bin/bash
-# Error recovery has to terminate normally.  Each source below contains a
-# construct the compiler rejects, and each once made it spin or crash after the
-# diagnostic.  The cases use constructs davecc does not implement; if one becomes
-# supported, replace it with another unsupported construct in the same position
-# rather than dropping the case.
+# Compilation has to terminate normally.  Each source below once made the
+# compiler spin or crash, in most cases while recovering from a construct it
+# rejects.  The cases that rely on a construct davecc does not implement should,
+# if it becomes supported, be replaced with another unsupported construct in the
+# same position rather than dropped.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -154,5 +154,12 @@ expect_diagnosed array_designator_index_negative \
 expect_diagnosed array_designator_bound_unrepresentable \
   'static char *name[] = { [0x7ffffff0] = "bar" };' \
   'larger than this compiler can lay out'
+
+# A comment that no line closes.  Looking for the close read past the end of
+# the input, where waiting for the lexer to report end of file could not
+# succeed: the lexer had not yet consumed the line being tokenized.
+expect_terminates unterminated_comment \
+  'int main(void) { return 0; }
+/* the input ends inside this comment'
 
 echo "c error recovery ok"

@@ -72,21 +72,44 @@ Fixed so far, each with a regression in this repository:
   an array too large to lay out is diagnosed before its elements are built.  The
   regressions are in `tests/c_error_recovery_test.sh`.
 
-## Remaining gcc.dg crashes and hangs
+- `gcc.dg/cpp/tr-paste.c`, `gcc.dg/cpp/trad/paste.c` and
+  `gcc.dg/cpp/trad/funlike-4.c`, an empty comment.  A comment closes with the
+  two characters right after `/*`, but the preprocessor's comment scan advanced
+  before looking at the first of them, so `/**/` sent it looking for a close
+  that had already gone by; it then consumed the rest of the input and waited
+  for an end of file that the lexer could not report while the line being
+  tokenized was still unconsumed.  An unterminated comment hung in the same
+  wait.  The regressions are `c_testsuite/tests/single-exec/00250.c` and a case
+  in `tests/c_error_recovery_test.sh`.
 
-From a full `gcc.dg` sweep (`--jobs 8 --timeout 10`): 14,050 pass, 3 fail.  No
-crashes remain; all three are hangs in traditional-mode token pasting.
+## Remaining crashes and hangs
+
+`gcc.dg` and `c-c++-common` are clean (`--jobs 8 --timeout 10`): 14,053 and
+2,842 pass with no crashes or hangs.  `gcc.c-torture` has 1,996 passing and 4
+left, all in the `limits-*` family:
 
 ```text
-gcc.dg/cpp/tr-paste.c         timeout
-gcc.dg/cpp/trad/funlike-4.c   timeout
-gcc.dg/cpp/trad/paste.c       timeout
+gcc.c-torture/compile/limits-exprparen.c   rc=-11 (deep parenthesis nesting)
+gcc.c-torture/compile/limits-structnest.c  rc=-11 (deep struct nesting)
+gcc.c-torture/compile/limits-externdecl.c  timeout
+gcc.c-torture/compile/limits-fndefn.c      timeout
 ```
 
-Two nearby weaknesses were left alone, since neither is a hang and no test in
-the sweep covers them: an explicit array bound whose byte size overflows the
-`int` that holds it is accepted silently (`static char *a[0x80000000];`), and a
-range designator (`[0 ... 0x7ffffff0]`) still builds one initializer per index.
+The two signals are recursive descent running out of stack, like the `else if`
+chain in `23a4558`; they want the same treatment, not a larger stack.  The
+`g++.dg` sweep has not been re-run since these fixes.
+
+Weaknesses noticed while fixing the above and deliberately left alone, since
+none is a crash or a hang and no test in the sweep covers them:
+
+- An explicit array bound whose byte size overflows the `int` that holds it is
+  accepted silently (`static char *a[0x80000000];`).
+- A range designator (`[0 ... 0x7ffffff0]`) builds one initializer per index.
+- An unterminated comment is accepted without a diagnostic; GCC and Clang both
+  reject it.
+- A function-like macro is not expanded when a comment or a newline separates
+  its name from the `(`, so `f /**/ (0)` is left as a call to `f`.  This is what
+  `funlike-4.c` tests once it no longer hangs.
 
 Unrelated failures seen while validating, each reproducible with a compiler
 built before this work and so not caused by it:
@@ -97,7 +120,8 @@ built before this work and so not caused by it:
 - `//c_testsuite:warning_diagnostics` fails: the script runs davecc with
   `-Werror=unused-value` under `set -e` and expects it to succeed, but promoting
   a warning to an error makes davecc exit nonzero.
-- `//:libc_x86_64_test` and `//:c23_numeric_headers_test` fail.
+- `//:libc_x86_64_test`, `//:c23_numeric_headers_test` and
+  `//:davecc_driver_defaults_test` fail.
 - `//cxx_testsuite:exec_x86_64` fails three tests whose guest programs exceed
   the harness's 30 second run timeout on this machine (35 s, 37 s and 75 s);
   all three exit 0 when run without it.

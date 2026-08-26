@@ -1393,9 +1393,15 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
 }
 
 // Get next char in a multi-line comment, reading new lines and appending
-// them to the current line as necessary.
+// them to the current line as necessary.  Returns '\0' when the input ends
+// before the comment does.
 static char GetNextCommentChar(Preprocessor* p, String* line, size_t* pos) {
   while (!LexEof(p->lex) && *pos >= line->length - 1) {
+    if (SourceEof(p->lex->source)) {
+      // Nothing is left to read.  LexEof stays false until the lexer consumes
+      // the line being tokenized here, so it cannot end this wait.
+      return '\0';
+    }
     SourceReadLine(p->lex->source, line);
   }
   if (LexEof(p->lex)) {
@@ -1420,28 +1426,30 @@ static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* out
       } else if (pos < line->length - 1 &&
                  line->value[pos + 1] == '*') {
         size_t start = pos;
-        // Multi-line comment.  Read until we find the */ at the end or
-        // end of line.
-        pos += 2;  // Skip /*.
+        // Multi-line comment.  Read until we find the */ at the end,
+        // reading further lines as we go.  The comment can close with the two
+        // characters right after "/*", as an empty comment does, so leave the
+        // position on the '*' of the opener: each read advances before it
+        // returns a character, and skipping the first one here would read past
+        // the closing '*' and consume the rest of the input.
+        pos += 1;
         bool nested_comment_warned = false;
         char prev = '\0';
-        do {
-          do {
-            ch = GetNextCommentChar(p, line, &pos);
-            if (!nested_comment_warned && prev == '/' && ch == '*') {
-              PreprocessorWarning(p, "comment",
-                                  "'/*' within block comment");
-              nested_comment_warned = true;
-            }
-            prev = ch;
-          } while (!LexEof(p->lex) && ch != '*');
-           ch = GetNextCommentChar(p, line, &pos);
+        for (;;) {
+          ch = GetNextCommentChar(p, line, &pos);
+          if (ch == '\0') {
+            // The input ended inside the comment.
+            break;
+          }
           if (!nested_comment_warned && prev == '/' && ch == '*') {
             PreprocessorWarning(p, "comment", "'/*' within block comment");
             nested_comment_warned = true;
           }
+          if (prev == '*' && ch == '/') {
+            break;
+          }
           prev = ch;
-        } while (!LexEof(p->lex) && ch != '/');
+        }
         
         // Append comment token with comment as spelling.
         StringAppendChar(output, PPTOK(comment));
