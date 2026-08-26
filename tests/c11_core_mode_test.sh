@@ -198,6 +198,53 @@ int _Noreturn;
 int test(void) { return 0; }' \
   -std=c99
 
+# A variable bound is an expression, so the two declarations below hold different
+# expressions for the same parameter type and are still the same declaration.  The
+# bound must not be compared as a number: it shares storage with the pointer to
+# that expression, which would make the comparison read pointer bits and reject
+# these, and would put those bits in the diagnostic.
+expect_compile vla_parameter_redeclared x86_64 \
+  'int outer(int n, char m[1][n]);
+int outer(int n, char m[1][n]) { return n + (m != 0); }
+void inner(int n, int m[n][n]);
+void inner(int n, int m[n][n]) { (void)m; }
+void mixed(int n, int m[3][n]);
+void mixed(int n, int m[4][n]) { (void)m; }
+int test(void) { return 0; }'
+
+# The element type still has to agree, and a bound that is a constant on both
+# sides still has to match.
+expect_fail vla_parameter_element_mismatch x86_64 \
+  "redeclared with different type" \
+  'int f(int n, char m[1][n]);
+int f(int n, short m[1][n]) { return 0; }'
+
+expect_fail array_bound_mismatch x86_64 \
+  "redeclared with different type" \
+  'extern int a[5];
+extern int a[6];'
+
+# A variable bound has no number to report, so the diagnostic spells it "[*]"
+# rather than printing whatever the bound expression's pointer happens to be.
+vla_msg_src="$WORK/vla_bound_spelling.c"
+printf '%s\n' 'int f(int n, char m[1][n]);
+int f(int n, short m[1][n]) { return 0; }' > "$vla_msg_src"
+set +e
+"$ROOT/$DAVECC" -target x86_64 -std=c11 -S "$vla_msg_src" \
+    -o "$WORK/vla_bound_spelling.s" >"$WORK/vla_bound_spelling.out" 2>&1
+set -e
+vla_msg="$(<"$WORK/vla_bound_spelling.out")"
+if [[ "$vla_msg" != *"char[*]"* ]]; then
+  echo "vla_bound_spelling: variable bound not reported as [*]" >&2
+  sed 's/^/  /' "$WORK/vla_bound_spelling.out" >&2
+  exit 1
+fi
+if [[ "$vla_msg" =~ char\[[0-9-]+\] ]]; then
+  echo "vla_bound_spelling: variable bound reported as a number" >&2
+  sed 's/^/  /' "$WORK/vla_bound_spelling.out" >&2
+  exit 1
+fi
+
 c23_src="$WORK/c23_noreturn.c"
 printf '%s\n' '_Noreturn void stop(void) { for (;;) {} }' > "$c23_src"
 "$ROOT/$DAVECC" -target x86_64 -std=c23 -Wdeprecated-declarations -S \

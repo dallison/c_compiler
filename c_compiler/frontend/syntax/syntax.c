@@ -423,15 +423,7 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
   }
   switch (left->declarator) {
     case kDeclArray:
-      if (left->info.array.is_dependent_bound ||
-          right->info.array.is_dependent_bound) {
-        return left->info.array.is_dependent_bound ==
-                   right->info.array.is_dependent_bound &&
-               left->info.array.size.vla.size ==
-                   right->info.array.size.vla.size &&
-               OverloadTypesEqual(left->next, right->next);
-      }
-      return left->info.array.size.fixed == right->info.array.size.fixed &&
+      return TypeArrayBoundsEqual(&left->info.array, &right->info.array) &&
              OverloadTypesEqual(left->next, right->next);
     case kDeclPointer:
     case kDeclReference:

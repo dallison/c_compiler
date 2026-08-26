@@ -371,6 +371,11 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
       TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       if (type->info.array.is_dependent_bound) {
         StringAppend(result, "[$dependent]");
+      } else if (type->info.array.is_vla) {
+        // The bound of a variable length array is an expression, and the pointer
+        // to it shares storage with the fixed size, so there is no number to
+        // print here.  "[*]" is how C spells such a bound in a prototype.
+        StringAppend(result, "[*]");
       } else {
         StringPrintf(result, "[%d]", type->info.array.size.fixed);
       }
@@ -817,6 +822,8 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
       TypeRecordToTemplateKeyString(type->next, result);
       if (type->info.array.is_dependent_bound) {
         StringAppend(result, "[$dependent]");
+      } else if (type->info.array.is_vla) {
+        StringAppend(result, "[*]");
       } else {
         StringPrintf(result, "[%d]", type->info.array.size.fixed);
       }

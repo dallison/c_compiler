@@ -422,6 +422,17 @@ static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
   }
 }
 
+bool TypeArrayBoundsEqual(ArrayInfo* a, ArrayInfo* b) {
+  if (a->is_dependent_bound || b->is_dependent_bound) {
+    return a->is_dependent_bound == b->is_dependent_bound &&
+           a->size.vla.size == b->size.vla.size;
+  }
+  if (a->is_vla || b->is_vla) {
+    return true;
+  }
+  return a->size.fixed == b->size.fixed;
+}
+
 /* Equality of two type *patterns* (types that may still mention template
  * parameters), comparing parameter indices structurally rather than resolving
  * them. Used to compare partial-specialization / template signatures. */
@@ -479,7 +490,7 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
       }
       if (left->info.array.template_parameter_index < 0 &&
           !left->info.array.is_dependent_bound &&
-          left->info.array.size.fixed != right->info.array.size.fixed) {
+          !TypeArrayBoundsEqual(&left->info.array, &right->info.array)) {
         return false;
       }
       return TemplateTypePatternEqual(left->next, right->next);
@@ -1011,14 +1022,7 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      if (t1->info.array.is_dependent_bound ||
-          t2->info.array.is_dependent_bound) {
-        return t1->info.array.is_dependent_bound ==
-                   t2->info.array.is_dependent_bound &&
-               t1->info.array.size.vla.size ==
-                   t2->info.array.size.vla.size;
-      }
-      return t1->info.array.size.fixed == t2->info.array.size.fixed;
+      return TypeArrayBoundsEqual(&t1->info.array, &t2->info.array);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -1505,14 +1509,7 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      if (t1->info.array.is_dependent_bound ||
-          t2->info.array.is_dependent_bound) {
-        return t1->info.array.is_dependent_bound ==
-                   t2->info.array.is_dependent_bound &&
-               t1->info.array.size.vla.size ==
-                   t2->info.array.size.vla.size;
-      }
-      return t1->info.array.size.fixed == t2->info.array.size.fixed;
+      return TypeArrayBoundsEqual(&t1->info.array, &t2->info.array);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:

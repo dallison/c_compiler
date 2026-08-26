@@ -141,6 +141,14 @@ inline bool TypeIsVLA(TypeRecord* type) {
       type->info.array.is_vla;
 }
 
+// Do two array declarators have the same bound?  A dependent or variable bound is
+// an expression rather than a value, and the pointer to that expression shares
+// storage with the fixed size, so neither can be read as a number.  Two variable
+// bounds leave the arrays compatible: C requires only that the element types
+// match and makes bounds that turn out to differ undefined at run time rather
+// than a constraint violation.
+bool TypeArrayBoundsEqual(ArrayInfo* a, ArrayInfo* b);
+
 inline bool TypeIsIntegral(TypeRecord* type) {
   return TypeIsPrimitive(type) &&
          (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeChar8 |
