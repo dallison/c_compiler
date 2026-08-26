@@ -58,6 +58,10 @@ DROP_FLAGS = {
     "-pedantic-errors",
     "-save-temps",
     "-ftime-report",
+    # davecc does not accept this flag, and it only relaxes what GCC rejects, so
+    # passing it turned every test that uses it into a failure to parse the
+    # command line rather than a statement about the source.
+    "-fpermissive",
 }
 DROP_VALUE_FLAGS = {
     "-dumpbase",
@@ -74,7 +78,6 @@ KEEP_EXACT_FLAGS = {
     "-fno-concepts",
     "-fno-exceptions",
     "-fno-rtti",
-    "-fpermissive",
     "-frtti",
     "-pedantic",
     "-pthread",
@@ -398,9 +401,13 @@ def translate_options(options: list[str], testdir: Path) -> list[str]:
     return translated
 
 
-def path_skip_reason(path: Path, root: Path) -> str | None:
+def path_skip_reason(
+    path: Path, root: Path, include_unsupported_dirs: bool = False
+) -> str | None:
     rel = path.relative_to(root)
-    if any(part in SKIP_PATH_PARTS for part in rel.parts[:-1]):
+    if not include_unsupported_dirs and any(
+        part in SKIP_PATH_PARTS for part in rel.parts[:-1]
+    ):
         return "unsupported-directory"
     return None
 
@@ -508,6 +515,12 @@ def compile_and_check(
 ) -> tuple[str, str, str, int, str]:
     with tempfile.TemporaryDirectory(prefix="davecc-gcc-dg-") as work:
         source = prepare_source(job, Path(work))
+        # DejaGNU compiles each test from its own directory, so a test that
+        # includes a sibling ("chk.h") or a helper below it ("lib/chk.c") needs
+        # that directory and its suite root on the include path.  Without them
+        # the test fails to open its include and the outcome says nothing about
+        # the compiler.
+        original = Path(job.src).resolve()
         command = [
             davecc,
             "-target",
@@ -515,6 +528,9 @@ def compile_and_check(
             "-fsyntax-only",
             "-error-limit=0",
             default_std(job.language),
+            # davecc only honors the joined spelling; it ignores "-I dir".
+            "-I" + str(original.parent),
+            "-I" + str(original.parent.parent),
             *job.options,
             str(source),
         ]
@@ -586,6 +602,14 @@ def main() -> int:
         help="seconds per davecc invocation; the process group is SIGKILL'd",
     )
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--include-unsupported-dirs",
+        action="store_true",
+        help="also run the directories whose feature davecc does not implement "
+        "(OpenMP, sanitizers, LTO, vectorization, ...).  Their expectations are "
+        "meaningless here, but the sources are still valid input that must not "
+        "crash or hang the compiler, so this is useful with --mode crashes",
+    )
     parser.add_argument("--match", default="", help="substring filter for test paths")
     parser.add_argument("--print-fails", type=int, default=50)
     args = parser.parse_args()
@@ -620,7 +644,7 @@ def main() -> int:
     skips: Counter[str] = Counter()
     jobs: list[Job] = []
     for suite, source in tests:
-        path_skip = path_skip_reason(source, root)
+        path_skip = path_skip_reason(source, root, args.include_unsupported_dirs)
         if path_skip:
             skips[path_skip] += 1
             continue

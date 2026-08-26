@@ -108,12 +108,66 @@ Fixed so far, each with a regression in this repository:
 
 ## Remaining crashes and hangs
 
-The sweeps are clean apart from one slow test.  `g++.dg` passes 16,711 with no
-crashes or hangs; `gcc.dg` passes 14,053 and `c-c++-common` 2,842, both clean;
-`gcc.c-torture` passes 1,999 of 2,000, leaving only
-`gcc.c-torture/compile/limits-externdecl.c`, which still times out at 30s.
-`limits-caselabels.c`, `limits-externalid.c` and `limits-fndefn.c` pass but take
-long enough to time out at 10s under an eight-way parallel sweep.
+The crash sweep is exhausted: every C and C++ test in the GCC testsuite has been
+run and one fails.
+
+Two things were left out of the earlier sweeps and have since been added.  The
+runner skipped fifteen directories whose feature davecc does not implement
+(OpenMP, the sanitizers, LTO, vectorization, the analyzer, C++ modules, atomics,
+decimal float, precompiled headers).  Their expectations say nothing here, but
+the sources are still valid input that must not crash the compiler, so
+`--include-unsupported-dirs` now runs them: 8,980 more tests, no crashes.  The
+sparse checkout also only had `gcc.c-torture/compile`; adding `g++.old-deja`,
+`gcc.c-torture/execute`, `gcc.misc-tests` and the remaining torture directories
+contributed 5,198 more tests, also with no crashes.
+
+```text
+suite                    tests   crashes/hangs
+g++.dg                  19,175              0
+gcc.dg                  16,546              0
+c-c++-common             6,520              0
+g++.old-deja             3,195              0
+gcc.c-torture/compile    1,999              1
+gcc.c-torture/execute    1,914              0
+gcc.misc-tests              81              0
+gcc.c-torture/{compat,unsorted}  8           0
+```
+
+The one failure is `gcc.c-torture/compile/limits-externdecl.c`, which still times
+out at 30s.  `limits-caselabels.c`, `limits-externalid.c` and `limits-fndefn.c`
+pass but take long enough to time out at 10s under a parallel sweep.
+
+## What the outcome mode says
+
+`--mode crashes` only asks whether the compiler survives.  `--mode outcome`
+compares accept/reject against what GCC expects, and on the three suites where
+every test is expected to compile (`gcc.c-torture/compile`, `.../execute`,
+`gcc.misc-tests`) it reports 674 failures out of 3,994 -- each one a valid C
+program davecc rejects.  Two harness defects accounted for 116 of them and are
+fixed: `-fpermissive` was passed through to a compiler that does not accept it,
+and a test that includes a sibling header or a helper below it had neither its
+own directory nor its suite root on the include path.
+
+What is left is dominated by unimplemented extensions rather than latent bugs.
+The largest groups, with the count of tests each accounts for:
+
+```text
+112  type attributes, mostly `mode`
+ 75  a warning promoted to an error by the test's own options
+ 74  _Complex / _Imaginary
+ 72  label values: `&&label`, `goto *p`, `__label__`
+ 39  empty initializer `{}` before C23, which GCC accepts as an extension
+ 32  nested function definitions
+ 24  "Expression is not a compile-time constant"
+ 18  a VLA outside a function
+ 17  P-CODE asm constraints (an artifact of sweeping with -target pcode)
+ 10  "Illegal static initializer: need address of variable"
+```
+
+The `_Complex`, label-value, nested-function and empty-initializer groups are
+each one missing feature behind many tests.  The 24 constant-expression failures
+and the 10 static-initializer ones are the likeliest place to find real defects,
+since neither names a feature davecc is missing.
 
 ## Deep nesting outside the constructs already capped
 
@@ -159,6 +213,10 @@ none is a crash or a hang and no test in the sweep covers them:
   of the 648 sources in `cxx_testsuite/tests/exec` and
   `c_testsuite/tests/single-exec` hash differently from one run to the next,
   which makes byte comparison of the output useless for exactly those files.
+- `-I dir` written as two arguments is ignored without a diagnostic; only the
+  joined `-Idir` is honored.  GCC and Clang accept both, and silently dropping an
+  include path turns into a confusing failure to open a header far away from the
+  command line that caused it.
 
 Unrelated failures seen while validating, each reproducible with a compiler
 built before this work and so not caused by it:
