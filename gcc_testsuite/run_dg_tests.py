@@ -528,7 +528,6 @@ def compile_and_check(
             "-fsyntax-only",
             "-error-limit=0",
             default_std(job.language),
-            # davecc only honors the joined spelling; it ignores "-I dir".
             "-I" + str(original.parent),
             "-I" + str(original.parent.parent),
             *job.options,

@@ -668,6 +668,20 @@ static int ParseArg(int i, int argc, char** argv,
       // Get next arg into compiler_args too.
       VectorAppend(compiler_args, argv[i+1]);
         i++;
+    } else if (StringEqual(option, "-I") || StringEqual(option, "-D") ||
+               StringEqual(option, "-U")) {
+      // GCC and Clang take the value of these either joined to the flag or as
+      // the following argument, so "-I dir" is as good as "-Idir".  Route both
+      // to the compiler: passed on alone the flag would carry an empty value,
+      // and the directory or macro, having no source extension, would fall
+      // through to the linker as an input file and be lost with no diagnostic.
+      if (i == argc-1) {
+        fprintf(stderr, "%s needs a value\n", option->value);
+        exit(1);
+      }
+      VectorAppend(compiler_args, argv[i]);
+      VectorAppend(compiler_args, argv[i+1]);
+      i++;
     } else if (StringEqual(option, "-Xemit-module") ||
                StringEqual(option, "-Xload-module") ||
                StringEqual(option, "-fprebuilt-module-path") ||

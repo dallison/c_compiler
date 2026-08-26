@@ -33,6 +33,18 @@ void CompilerOptionStringDelete(CompilerOptionString* c) {
   free(c);
 }
 
+// Does a prefix option written bare take its value from the following argument?
+// GCC and Clang accept both spellings for these ("-Idir" and "-I dir").  Read as
+// an ordinary prefix option a bare one carries an empty value and the argument
+// after it is taken for an input file, so the path or macro is dropped without a
+// diagnostic.  The other prefix options are excluded because a bare spelling is
+// itself meaningful for them, "-O" selecting a default optimization level, and so
+// must not consume whatever follows it.
+static bool PrefixOptionTakesNextArgument(CompilerOption opt) {
+  return opt == kOptionIncludePath || opt == kOptionDefineMacro ||
+         opt == kOptionUndefineMacro;
+}
+
 // Parse the option in strings[*index] into options.  Returns true if option
 // is valid.
 static bool ParseOption(CompilerOptionDefinition* compiler_options,
@@ -43,9 +55,24 @@ static bool ParseOption(CompilerOptionDefinition* compiler_options,
   for (size_t opt = 0; compiler_options[opt].name != NULL; opt++) {
     if (compiler_options[opt].is_prefix &&
         s->name.value[1] == compiler_options[opt].name[1]) {
-      // Prefix option takes name from index 2 onwards.
       CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
       o->opt = compiler_options[opt].opt;
+      if (s->name.length == 2 && s->value.length == 0 &&
+          PrefixOptionTakesNextArgument(o->opt)) {
+        i++;
+        if (i >= strings->length) {
+          fprintf(stderr, "Missing value for %s\n", s->name.value);
+          exit(1);
+        }
+        // A separated value keeps any '=' it contains: ParseOptions only splits
+        // arguments that begin with '-', so "-D" "foo=bar" arrives whole.
+        CompilerOptionString* vs = strings->value.p[i];
+        StringInit(&o->value.svalue, vs->name.value);
+        VectorAppend(options, o);
+        found = true;
+        break;
+      }
+      // Prefix option takes name from index 2 onwards.
       // Prefixed options are always a string.
       StringInit(&o->value.svalue, &s->name.value[2]);
       // ParseOptions splits "-Xfoo=bar" into name "-Xfoo" and value "bar"; for a
