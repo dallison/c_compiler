@@ -105,6 +105,13 @@ static_assert(_Generic(7uWB, unsigned _BitInt(3): 1, default: 0));
 static_assert((_BitInt(5))16 == -16);
 int main(void) { return 0; }'
 
+expect_compile static_initializers c23 \
+  'static _BitInt(2) value2 = -1wb - 1wb;
+static _BitInt(6) value6 = 31wb;
+static _BitInt(32) value32 = 2147483647wb;
+static _BitInt(64) value64 = 9223372036854775807wb;
+int main(void) { return 0; }'
+
 expect_compile standard_type_rank c23 \
   'static_assert(_Generic((_BitInt(7))1 + 1, int: 1, default: 0) == 1);'
 expect_compile wider_bitint_rank c23 \

@@ -428,7 +428,30 @@ static void InitInteger(ASTNode* expr,
   int64_t value = 0;
   TypeRecord* type = expr->type;
   if (EvaluateIntegerExpression(expr, &value)) {
-    if (TypeIsCharFamily(type) || TypeIsBool(type)) {
+    if (TypeIsBitInt(type)) {
+      switch (type->size) {
+        case 1:
+          init_out->type = kInitTypeByte;
+          init_out->value.byte = (uint8_t)value;
+          break;
+        case 2:
+          init_out->type = kInitTypeHalf;
+          init_out->value.half = (uint16_t)value;
+          break;
+        case 4:
+          init_out->type = kInitTypeWord;
+          init_out->value.word = (uint32_t)value;
+          break;
+        case 8:
+          init_out->type = kInitTypeLong;
+          init_out->value._long = (uint64_t)value;
+          break;
+        default:
+          SemanticError(expr, "Unsupported _BitInt storage size");
+          free(init_out);
+          return;
+      }
+    } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
       init_out->type = kInitTypeByte;
       init_out->value.byte = (uint8_t)value;
     } else if (TypeIsShort(type)) {
