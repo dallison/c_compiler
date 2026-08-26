@@ -1,0 +1,28 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# GCC sources remain outside this repository. Run with:
+#   GCC_TEST_ROOT=/path/to/gcc/gcc/testsuite \
+#     python3 gcc_testsuite/run_dg_tests.py --davecc bazel-bin/davecc
+#
+# Or:
+#   bazel test //gcc_testsuite:dg --test_env=GCC_TEST_ROOT=... \
+#     --test_tag_filters=manual
+sh_test(
+    name = "dg",
+    srcs = ["run_dg_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+    ],
+    data = [
+        "run_dg_tests.py",
+        "//:davecc",
+    ],
+    tags = [
+        "manual",
+        "local",
+        "external",
+    ],
+)
