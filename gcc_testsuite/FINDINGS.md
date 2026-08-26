@@ -169,6 +169,75 @@ each one missing feature behind many tests.  The 24 constant-expression failures
 and the 10 static-initializer ones are the likeliest place to find real defects,
 since neither names a feature davecc is missing.
 
+### Which of those extensions Clang implements
+
+Worth knowing before deciding what to support, because Clang's choices are a
+better guide to what a C compiler is expected to accept than GCC's are.  Checked
+against the host Clang, and the answers do not change between `-std=c17` and
+`-std=gnu17`:
+
+```text
+accepted by Clang          &&label, goto *p, __label__, mode attribute,
+                           _Complex, empty initializer {} before C23
+rejected by Clang, as here nested function definitions, _Imaginary
+```
+
+Two of the groups are therefore not extensions at all from davecc's point of
+view.  `_Complex` is required by C99, so those tests are a conformance gap rather
+than a missing extension, and Clang's message for `_Imaginary` ("imaginary types
+are not supported") says davecc's present stance already matches the state of the
+art.  Nested functions are the one group worth leaving alone: Clang has never
+implemented them, so rejecting them keeps company with Clang rather than
+diverging from it.
+
+### The `-I dir` spelling (fixed)
+
+Both this harness and the clang one pass the value of `-I`, `-D` and `-U` as a
+separate argument when a test's own options ask for it, which is the spelling
+davecc did not understand: the driver forwarded the bare flag and let the value
+fall through to the linker as an input file, and the compiler read the flag as
+carrying an empty value.  The path was dropped with no diagnostic.  Both layers
+now consume the following argument, and a flag left with no value is reported;
+`tests/davecc_option_forms_test.sh` covers both spellings of each flag.
+
+### Real defects found among the non-extension failures
+
+Confirmed by reducing each to a few lines and comparing against Clang.
+
+- **Fixed.** A variable array bound was compared and printed as a number even
+  though the pointer to its bound expression shares storage with the fixed size.
+  Declaring the same VLA parameter twice (`int f(int n, char m[1][n])`, which
+  Clang accepts) was rejected as a redeclaration with a different type, and the
+  diagnostic reported bounds like `char[1245987464]` that changed from run to
+  run.  Since the template key string is built by the same printer, this was also
+  a source of the nondeterministic output recorded above.
+- A compound literal is a modifiable lvalue in C99, but `((struct A){0}).i += 1`
+  is rejected with "Cannot assign to this expression"
+  (`gcc.c-torture/compile/compound-literal-1.c`).
+- Address constants are not folded far enough.  `&"Foobar"[1] - &"Foobar"[0]`
+  reports "Cannot take the address of this expression", and
+  `(char *)&x[18] - 8` and `&((&(v.p))->y)` are rejected as non-constant
+  (`20001116-1.c`, `20010113-1.c`).  This is most of the constant-expression and
+  static-initializer groups above.
+- `m[i] = m[i - 1] + b` on a `double **` draws "Array dimension required after
+  first dimension", a message that belongs to declaration parsing, in a file that
+  declares no multidimensional array at all (`20011219-1.c`).
+- The check on `main`'s second parameter rejects an old-style definition whose
+  parameters have no declared type, which `-std=gnu89` allows (`call.c`).
+
+### Bugs found outside the sweep while working on the above
+
+- `unsigned short << n` has the type of the unpromoted left operand.  C99 6.5.7
+  makes the result the type of the *promoted* left operand, so it must be `int`.
+  `c_testsuite` test 00200 fails on this and has been failing for some time; it is
+  a wrong-code bug, not a diagnostic one.
+- A hosted C++ program no longer starts on aarch64: the interpreter rejects an
+  init-array entry with "Function array entry 0x800005250 is not executable".
+  Bisected to `4f4fcb0 Add x86_64 native dynamic runtime`, which added the
+  `__davecc_shared_init` hook and `libc/dynamic_libc_lifecycle.c`.  This is what
+  makes `davecc_driver_defaults_test` fail, and it fails at that test's very first
+  hosted link, so everything after it in that script is currently unexercised.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now
