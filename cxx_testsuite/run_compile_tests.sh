@@ -114,7 +114,11 @@ proc = subprocess.Popen(
 try:
     out, _ = proc.communicate(timeout=30)
     sys.stdout.buffer.write(out or b"")
-    raise SystemExit(proc.returncode or 0)
+    rc = proc.returncode or 0
+    if rc < 0:
+        sys.stdout.write("CRASH: compiler terminated by signal %d\n" % -rc)
+        raise SystemExit(125)
+    raise SystemExit(rc)
 except subprocess.TimeoutExpired:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -124,6 +128,13 @@ except subprocess.TimeoutExpired:
     raise SystemExit(124)
 ' "$DAVECC" "${args[@]}" "$src" -o "$out" >"$log" 2>&1
   return $?
+}
+
+# The compiler must terminate normally even on invalid input, so a crash or a
+# hang is a failure in both directories.  Tests under fail/ only look for
+# expected diagnostics, which a crash can emit before dying.
+compiler_aborted() {
+  [ "$1" -eq 124 ] || [ "$1" -eq 125 ]
 }
 
 pass=0
@@ -162,6 +173,14 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/fail/*.cpp; do
   out="$work/$base.s"
   status=0
   run_compile "$src" "$log" "$out" || status=$?
+  if compiler_aborted "$status"; then
+    echo "FAIL fail/$base (compiler did not exit normally)"
+    compile_fail=$((compile_fail + 1))
+    fail=$((fail + 1))
+    sed 's/^/  /' "$log" | head -20
+    if $TERMINATE; then exit 1; fi
+    continue
+  fi
   if [ "$status" -eq 0 ] && ! grep -q "error:" "$log"; then
     echo "FAIL fail/$base (expected diagnostic)"
     diagnostic_fail=$((diagnostic_fail + 1))

@@ -7757,12 +7757,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           }
           sym->flags.is_defined = true;
         }
-        if (TypeIsFunction(sym->type) && sym->type->info.function.is_constexpr) {
-          old_sym->type->info.function.is_constexpr = true;
-        }
-        if (TypeIsFunction(sym->type) && sym->type->info.function.is_consteval) {
-          old_sym->type->info.function.is_consteval = true;
-          old_sym->type->info.function.is_constexpr = true;
+        // A mismatched redeclaration is diagnosed above and still reaches here,
+        // so the previous symbol is not necessarily a function.
+        if (TypeIsFunction(old_sym->type) && TypeIsFunction(sym->type)) {
+          if (sym->type->info.function.is_constexpr) {
+            old_sym->type->info.function.is_constexpr = true;
+          }
+          if (sym->type->info.function.is_consteval) {
+            old_sym->type->info.function.is_consteval = true;
+            old_sym->type->info.function.is_constexpr = true;
+          }
         }
       } else {
         if (!overload_was_appended) {
@@ -12335,6 +12339,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
            int lineno, start, end;
            DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
            ReportNote(filename, lineno, "Previously declared here");
+           // Keep the declarator we just parsed.  The previous symbol has an
+           // incompatible type, and for a name introduced by a using-declaration
+           // or using-directive it has no type at all, which the rest of the
+           // declaration processing cannot work with.
+           ok = false;
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
           MergeCXXContractAssertions(syntax, old_sym, sym);

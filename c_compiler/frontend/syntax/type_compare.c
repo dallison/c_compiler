@@ -1583,37 +1583,46 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
   int lineno;
   int start, end;
   DecodeSourceLocation(location, &filename, &lineno, &start, &end);
-    
-  if (t1->declarator != t2->declarator) {
+
+  // Either side can be absent: a symbol that names an entity rather than an
+  // object carries no type of its own (a using-alias for a class, for example),
+  // and recovery paths reach here with an incomplete declarator chain.
+  if (t1 == NULL || t2 == NULL) {
+    ReportNote(filename, lineno, "Types '%s' and '%s' are different",
+               error1.value, error2.value);
+  } else if (t1->declarator != t2->declarator) {
     ReportNote(filename, lineno, "Declarators '%s' and '%s' are different",
                error1.value, error2.value);
-    return;
-  }
-  switch (t1->declarator) {
-    case kDeclArray:
-    case kDeclPointer:
-    case kDeclReference:
-    case kDeclRValueReference:
-    case kDeclMemberPointer:
-      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
-                 error1.value, error2.value);
-      TypeErrorDetails(location, t1->next, t2->next);
-      break;
-
-    case kDeclFunction:
-      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
-                 error1.value, error2.value);
-      TypeErrorDetails(location, t1->next, t2->next);
-      return FunctionPrototypesDetails(location, &t1->info.function, &t2->info.function);
-      
-    case kDeclPrimitive:
-      if (CanonicalPrimitiveType(t1->type) !=
-              CanonicalPrimitiveType(t2->type) ||
-          t1->qualifiers != t2->qualifiers) {
-        ReportNote(filename, lineno, "Types '%s' and '%s' are different",
+  } else {
+    switch (t1->declarator) {
+      case kDeclArray:
+      case kDeclPointer:
+      case kDeclReference:
+      case kDeclRValueReference:
+      case kDeclMemberPointer:
+        ReportNote(filename, lineno,
+                   "Declaration of '%s' and '%s' are different",
                    error1.value, error2.value);
+        TypeErrorDetails(location, t1->next, t2->next);
+        break;
 
-      }
+      case kDeclFunction:
+        ReportNote(filename, lineno,
+                   "Declaration of '%s' and '%s' are different",
+                   error1.value, error2.value);
+        TypeErrorDetails(location, t1->next, t2->next);
+        FunctionPrototypesDetails(location, &t1->info.function,
+                                  &t2->info.function);
+        break;
+
+      case kDeclPrimitive:
+        if (CanonicalPrimitiveType(t1->type) !=
+                CanonicalPrimitiveType(t2->type) ||
+            t1->qualifiers != t2->qualifiers) {
+          ReportNote(filename, lineno, "Types '%s' and '%s' are different",
+                     error1.value, error2.value);
+        }
+    }
   }
   StringDestruct(&error1);
   StringDestruct(&error2);
