@@ -1535,6 +1535,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
   syntax->expression_nesting_depth = 0;
+  syntax->struct_definition_depth = 0;
   syntax->parsing_lambda_body_depth = 0;
   syntax->parsing_consteval_block_depth = 0;
   syntax->parsing_enum_specifier_depth = 0;

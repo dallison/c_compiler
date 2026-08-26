@@ -99,21 +99,45 @@ Fixed so far, each with a regression in this repository:
   crash into a diagnostic.  Accepting it needs the expression parser to stop
   holding a C frame per level, which is a much larger change.
 
+- `gcc.c-torture/compile/limits-structnest.c`, 10,000 nested struct definitions.
+  A member declaration can define another class, so member lists nest, and the
+  depth was bounded only by the stack; the recursion cycle is five frames and
+  about 5.5KB per level, so it faulted somewhere past 1,000.  Capped at 512 like
+  the expression nesting above, with the over-deep member list skipped up to the
+  brace that closes it.
+
 ## Remaining crashes and hangs
 
-`gcc.dg` and `c-c++-common` are clean (`--jobs 8 --timeout 10`): 14,053 and
-2,842 pass with no crashes or hangs.  `gcc.c-torture` has 1,996 passing and 3
-left, all in the `limits-*` family:
+The sweeps are clean apart from one slow test.  `g++.dg` passes 16,711 with no
+crashes or hangs; `gcc.dg` passes 14,053 and `c-c++-common` 2,842, both clean;
+`gcc.c-torture` passes 1,999 of 2,000, leaving only
+`gcc.c-torture/compile/limits-externdecl.c`, which still times out at 30s.
+`limits-caselabels.c`, `limits-externalid.c` and `limits-fndefn.c` pass but take
+long enough to time out at 10s under an eight-way parallel sweep.
+
+## Deep nesting outside the constructs already capped
+
+The suites cover parenthesized expressions and struct nesting, and both are now
+bounded, but the same unbounded recursion is reachable from many other
+constructs.  None is covered by a test in the sweep; all were found by probing
+with 20,000 levels, and each faults:
 
 ```text
-gcc.c-torture/compile/limits-structnest.c  rc=-11 (deep struct nesting)
-gcc.c-torture/compile/limits-externdecl.c  timeout
-gcc.c-torture/compile/limits-fndefn.c      timeout
+{{{ ... }}}                 nested compound statements
+while(x)while(x)...         nested loop bodies (same for `for`)
+f(f(f( ... )))              nested call arguments
+a[a[a[ ... ]]]              nested subscripts
+(int)(int) ... 0            nested casts
+!!! ... 0                   nested unary operators (same for `*`, `sizeof`)
+namespace a { namespace ... nested namespaces (C++)
+S<S<S< ... >>>              nested template-ids (C++; hangs rather than faults)
 ```
 
-The signal is recursive descent running out of stack, like the `else if` chain
-in `23a4558`; it wants the same treatment, not a larger stack.  The `g++.dg`
-sweep has not been re-run since these fixes.
+The expression cap counts levels at `ParsePrimaryExpression`, which a chain of
+prefix operators or casts never reaches until its end, so those slip past it;
+statements, namespaces and template-ids are not counted at all.  Bounding these
+wants one shared parser-depth counter checked at each recursive entry point
+rather than a counter per construct.
 
 Weaknesses noticed while fixing the above and deliberately left alone, since
 none is a crash or a hang and no test in the sweep covers them:

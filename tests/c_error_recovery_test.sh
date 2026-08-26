@@ -167,6 +167,20 @@ expect_diagnosed expression_paren_nesting_limit \
 expect_terminates expression_paren_nesting_limit_unclosed \
   "$(python3 -c 'print("int x = " + "(" * 10000 + "1;")')"
 
+# A member declaration can define another struct, and each definition's member
+# list costs stack for the same reason, so the depth is capped there too.  The
+# second one closes none of its definitions, so the cap is reached with every
+# enclosing member list still open.
+expect_diagnosed struct_definition_nesting_limit \
+  "$(python3 -c '
+n = 10000
+print("".join("struct s%d {" % i for i in range(n)) + " int x;" + "} x;" * n)')" \
+  'nest more than'
+
+expect_terminates struct_definition_nesting_limit_unclosed \
+  "$(python3 -c '
+print("".join("struct s%d {" % i for i in range(10000)) + " int x;")')"
+
 # A comment that no line closes.  Looking for the close read past the end of
 # the input, where waiting for the lexer to report end of file could not
 # succeed: the lexer had not yet consumed the line being tokenized.

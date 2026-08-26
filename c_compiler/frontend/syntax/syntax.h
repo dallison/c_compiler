@@ -62,6 +62,10 @@ typedef struct Syntax {
   // list and a subscript each add one.  Recursive descent spends stack on every
   // level, so the depth is bounded (see ParsePrimaryExpression).
   int expression_nesting_depth;
+  // Nesting depth of class, struct and union definitions whose member list is
+  // being parsed.  Bounded for the same reason as expression_nesting_depth (see
+  // ParseStructBody).
+  int struct_definition_depth;
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.

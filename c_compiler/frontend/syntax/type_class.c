@@ -493,6 +493,49 @@ static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
   return tag;
 }
 
+// A member declaration can define another class, and its member list is parsed
+// by recursive descent, so nesting cost stack that the parser cannot measure and
+// was bounded only by the process running out of it.  Bound the depth instead:
+// the limit is far above what the standards ask for (63 nested definitions in C,
+// 256 in C++) and past it the definition is rejected rather than the compiler
+// crashing.
+#define kMaxStructDefinitionNesting 512
+
+// Discard the member list that is nested too deeply to parse, stopping on the
+// '}' that closes it so the caller consumes that brace as it would normally.
+// Braces are the only nesting to track here: every construct a member list can
+// contain that holds a '}' -- an initializer, a function body, a lambda --
+// opens one.
+static void SkipOverdeepStructMembers(TypeParser* parser) {
+  int depth = 0;
+  while (!LexEof(parser->lex)) {
+    if (LexLookingAt(parser->lex, TOK(lbrace))) {
+      depth++;
+    } else if (LexLookingAt(parser->lex, TOK(rbrace))) {
+      if (depth == 0) {
+        return;
+      }
+      depth--;
+    }
+    LexNextToken(parser->lex);
+  }
+}
+
+static void ParseStructMemberList(TypeParser* parser, Struct* str,
+                                  bool is_union, String* tag_name) {
+  if (parser->syntax->struct_definition_depth >= kMaxStructDefinitionNesting) {
+    SyntaxError(parser->syntax,
+                "Class, struct and union definitions nest more than %d levels "
+                "deep",
+                kMaxStructDefinitionNesting);
+    SkipOverdeepStructMembers(parser);
+    return;
+  }
+  parser->syntax->struct_definition_depth++;
+  ParseStructMembers(parser, str, is_union, tag_name);
+  parser->syntax->struct_definition_depth--;
+}
+
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases,
@@ -631,7 +674,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   }
   parser->cxx_member_owner = str;
   parser->syntax->cxx_class_head = str;
-  ParseStructMembers(parser, str, is_union, tag_name);
+  ParseStructMemberList(parser, str, is_union, tag_name);
   parser->cxx_member_owner = saved_member_owner;
   parser->syntax->cxx_class_head = saved_class_head;
   if (class_symbol_scope != NULL) {

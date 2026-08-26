@@ -6653,9 +6653,11 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       // which would otherwise clobber our jmp_buf.
       jmp_buf saved_abort_state;
       memcpy(saved_abort_state, error_abort_state, sizeof(error_abort_state));
-      // A longjmp out of the trial parse skips the bookkeeping of every
-      // expression level it entered, so restore the nesting depth by hand.
+      // A longjmp out of the trial parse skips the bookkeeping of every level
+      // it entered, so restore the nesting depths by hand.  A type-name can
+      // define a class (`(struct { int x; }){0}`), so both counters are at risk.
       int saved_nesting_depth = syntax->expression_nesting_depth;
+      int saved_struct_depth = syntax->struct_definition_depth;
       abort_on_error = true;
       if (setjmp(error_abort_state) == 0) {
         TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
@@ -6684,6 +6686,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       abort_on_error = prev_abort_on_error;
       memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
       syntax->expression_nesting_depth = saved_nesting_depth;
+      syntax->struct_definition_depth = saved_struct_depth;
       bool trapped = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(saved_trap);
       if (!parse_completed || trapped || !is_type_name) {
