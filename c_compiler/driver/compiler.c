@@ -2555,8 +2555,20 @@ static void CompileDeclaration(Syntax* syntax) {
   // analysis and codegen (which emit deferred warnings) and then restore the
   // post-parse state for the next declaration.
   void* diag_state = DiagnosticSnapshotState();
+  int errors_before = NumErrors();
+  Token token_before = syntax->lex->current_token;
+  SourceLocation location_before = syntax->lex->current_token_location;
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
   DiagnosticSwapState(diag_state);
+  // A construct that the declaration parser rejects without consuming anything
+  // would be offered to it again by the translation-unit loop, reporting the
+  // same error forever.  Drop the token to guarantee progress.  Requiring a new
+  // error keeps this from discarding a token of a valid declaration.
+  if (NumErrors() != errors_before && !LexEof(syntax->lex) &&
+      syntax->lex->current_token == token_before &&
+      syntax->lex->current_token_location == location_before) {
+    LexNextToken(syntax->lex);
+  }
   CompileDeclarationNode(syntax, node);
   CompilePendingTemplateInstantiations(syntax);
   CompilerDrainPendingInjectedDeclarations(syntax);

@@ -6082,7 +6082,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     // Old style functions have the types of their formal
     // arguments specified before the open brace for their
     // body.
-    while (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    // Stop at end of input as well: the recovery below cannot move past it, so
+    // an unparsable argument declaration would repeat forever.
+    while (!LexLookingAt(syntax->lex, TOK(lbrace)) && !LexEof(syntax->lex)) {
       TypeParser arg_parser;
       TypeParserInit(&arg_parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
       TypeRecord* arg_type = TypeParserParseType(&arg_parser, true);

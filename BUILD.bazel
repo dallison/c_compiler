@@ -3343,6 +3343,18 @@ sh_test(
 )
 
 sh_test(
+    name = "c_error_recovery_test",
+    srcs = ["tests/c_error_recovery_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
     name = "c11_core_mode_test",
     srcs = ["tests/c11_core_mode_test.sh"],
     args = [
