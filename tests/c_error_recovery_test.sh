@@ -47,6 +47,7 @@ with open(log, "wb") as output:
 expect_diagnosed() {
   local name="$1"
   local source="$2"
+  local pattern="${3:-error:}"
   local src="$WORK/$name.c"
   local log="$WORK/$name.out"
   printf '%s\n' "$source" >"$src"
@@ -62,29 +63,42 @@ expect_diagnosed() {
     head -5 "$log" | sed 's/^/  /' >&2
     exit 1
   fi
-  if ! grep -q "error:" "$log"; then
-    echo "$name: expected an error diagnostic" >&2
+  if ! grep -Fq "$pattern" "$log"; then
+    echo "$name: expected diagnostic not found: $pattern" >&2
     head -5 "$log" | sed 's/^/  /' >&2
     exit 1
   fi
 }
 
-# A declaration specifier the parser rejects, which the translation-unit loop
-# then offered to it again.
-expect_diagnosed complex_specifier \
+# _Complex and _Imaginary are classified as type tokens but name no implemented
+# type.  Unless the type parser consumes them, recovery that stops at a type
+# token cannot move past one, and the enclosing parse repeats forever.  The
+# positions below spun in the translation-unit loop, the struct member loop and
+# the old-style argument declaration list respectively.
+complex_unsupported="'_Complex' types are not supported"
+expect_diagnosed complex_declaration_specifier \
   'double _Complex f(void);
-int main(void) { return 0; }'
+int main(void) { return 0; }' \
+  "$complex_unsupported"
 
-# The same in the return type of an old-style definition, which leaves the
-# parser in the old-style argument declaration list.
-expect_diagnosed complex_old_style_definition \
+expect_diagnosed complex_struct_member \
+  'struct S { _Complex float d; };' \
+  "$complex_unsupported"
+
+expect_diagnosed imaginary_declaration_specifier \
+  '_Imaginary double x;' \
+  "'_Imaginary' types are not supported"
+
+# The GNU spelling of the same specifier.
+expect_diagnosed gnu_complex_declaration_specifier \
   '__complex__ double foo (__complex__ double x, __complex__ double y)
 {
   return x / y;
-}'
+}' \
+  "$complex_unsupported"
 
 # An old-style argument declaration list that reaches end of input before the
-# function body.
+# function body: that loop only stopped at the '{' of the body.
 expect_diagnosed old_style_arguments_at_end_of_input \
   'int old(a)
 int a;'

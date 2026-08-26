@@ -909,6 +909,17 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
   Token tok = lex->current_token;
   bool found = false;
 
+  // Complex and imaginary types are not implemented.  Consume the specifier and
+  // carry on with the real type beside it: these keywords are classified as type
+  // tokens, so leaving one in place stalls every recovery point that stops at a
+  // type token, and the enclosing parse then repeats forever.
+  if (tok == TOK(complex) || tok == TOK(imaginary)) {
+    SyntaxError(parser->syntax, "'%s' types are not supported",
+                TokenName(tok));
+    LexNextToken(lex);
+    tok = lex->current_token;
+  }
+
   if (tok == TOK(bitint)) {
     type_record = ParseCBitIntTypeSpecifier(parser);
     type |= type_record->type;

@@ -12771,6 +12771,11 @@ bool SyntaxLookingAtType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(atomic):
     case TOK(bitint):
+    // Complex and imaginary types are not implemented, but the specifier still
+    // starts a type: the type parser diagnoses it and consumes it, which no
+    // other parser does.
+    case TOK(complex):
+    case TOK(imaginary):
     case TOK(char):
     case TOK(char8_t):
     case TOK(char16_t):

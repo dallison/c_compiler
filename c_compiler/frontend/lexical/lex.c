@@ -81,6 +81,8 @@ static ReservedWord reserved_words[] = {
   {"__alignof", TOK(alignof)},
   {"__alignof__", TOK(alignof)},
   {"__attribute__", TOK(attribute)},
+  {"__complex", TOK(complex)},
+  {"__complex__", TOK(complex)},
   {"__const", TOK(const)},
   {"__const__", TOK(const)},
   {"__declspec", TOK(declspec)},
