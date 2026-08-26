@@ -421,12 +421,15 @@ Vector* ParseOptions(int argc, char** argv, Vector* options) {
 
 
 
+// The initializer occupies the storage of the object being initialized, so its
+// encoding follows the declared type rather than the type of the expression;
+// after a diagnostic the two need not even be in the same family.
 static void InitInteger(ASTNode* expr,
+                        TypeRecord* type,
                         Initializer* init_out,
                         int offset,
                         Vector* initializers) {
   int64_t value = 0;
-  TypeRecord* type = expr->type;
   if (EvaluateIntegerExpression(expr, &value)) {
     if (TypeIsBitInt(type)) {
       switch (type->size) {
@@ -477,7 +480,9 @@ static void InitInteger(ASTNode* expr,
       init_out->type = kInitTypeLong;
       init_out->value._long = (uint64_t)value;
     } else {
-      assert(false);
+      SemanticError(expr, "Unsupported type for static initialization");
+      free(init_out);
+      return;
     }
     init_out->offset = offset;
     VectorAppend(initializers, init_out);
@@ -489,11 +494,11 @@ static void InitInteger(ASTNode* expr,
 }
 
 static void InitFloatingPoint(ASTNode* expr,
+                              TypeRecord* type,
                               Initializer* init_out,
                               int offset,
                               Vector* initializers) {
   double value = 0;
-  TypeRecord* type = expr->type;
   if (EvaluateFloatingPointExpression(expr, &value)) {
     if (TypeUsesFloat32Representation(type)) {
       init_out->type = kInitTypeWord;
@@ -509,7 +514,9 @@ static void InitFloatingPoint(ASTNode* expr,
         init_out->value._long = *((int64_t*)&value);
       }
     } else {
-      assert(false);
+      SemanticError(expr, "Unsupported type for static initialization");
+      free(init_out);
+      return;
     }
     init_out->offset = offset;
     VectorAppend(initializers, init_out);
@@ -664,10 +671,11 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
   TypeRecordCalculateSize(expr->type);
   Initializer* init_out = malloc(sizeof(Initializer));
   TypeRecord* type = subinit->type;
+  TypeRecordCalculateSize(type);
   if (TypeIsIntegral(type)) {
-    InitInteger(expr, init_out, offset, initializers);
+    InitInteger(expr, type, init_out, offset, initializers);
   } else if (TypeIsFloatingPoint(type)) {
-    InitFloatingPoint(expr, init_out, offset, initializers);
+    InitFloatingPoint(expr, type, init_out, offset, initializers);
 #if 0
     
   } else if (TypeIsArray(type)) {

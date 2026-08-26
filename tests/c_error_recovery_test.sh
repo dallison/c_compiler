@@ -129,4 +129,12 @@ static_assert (v.x.p == 0);
 static_assert (v.x.p == 0);' \
   c23
 
+# A file-scope assignment is parsed as an implicit-int declaration, which here
+# redeclares an object of a different type.  The initializer is encoded for the
+# storage of the object being initialized, and the invalid expression beside it
+# has an unrelated type, which used to fail an assertion in the encoder.
+expect_diagnosed static_initializer_after_type_mismatch \
+  'double res;
+res = .;'
+
 echo "c error recovery ok"
