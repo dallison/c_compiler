@@ -137,4 +137,22 @@ expect_diagnosed static_initializer_after_type_mismatch \
   'double res;
 res = .;'
 
+# An array whose bound comes from its initializer gets an element for every
+# index up to the largest designated one.  These indices ask for more elements
+# than the compiler can lay out, and each one used to build elements until it
+# ran out of memory or time: the first is truncated into a negative index and
+# then used unsigned, the second is negative in the source, and the third is
+# representable but still names an array of about 16GB.
+expect_diagnosed array_designator_index_above_int \
+  'static char *name[] = { [0x80000000] = "bar" };' \
+  'out of range'
+
+expect_diagnosed array_designator_index_negative \
+  'static char *name[] = { [-2147483648] = "bar" };' \
+  'outside bounds'
+
+expect_diagnosed array_designator_bound_unrepresentable \
+  'static char *name[] = { [0x7ffffff0] = "bar" };' \
+  'larger than this compiler can lay out'
+
 echo "c error recovery ok"

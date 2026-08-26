@@ -6,6 +6,7 @@
 //  Copyright © 2017 David Allison. All rights reserved.
 //
 #include <assert.h>
+#include <limits.h>
 
 #include "init_semantics.h"
 #include <stdlib.h>
@@ -539,6 +540,23 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
   }
 }
 
+// An array whose bound comes from its initializer gets one element for every
+// index up to the largest designated one, so a designator sets the size of the
+// object as well as the amount of work to build it.  The size is held in an
+// int, so an index whose array would not fit is rejected before its elements
+// are materialized.
+static bool ArrayDesignatorBoundFits(INode* inode, int index) {
+  if (!inode->type->info.array.is_flexible) {
+    // The bound is already known; an index outside it is reported as out of
+    // bounds by the caller, and no elements beyond it are built.
+    return true;
+  }
+  TypeRecord* element = inode->type->next;
+  TypeRecordCalculateSize(element);
+  int element_size = element != NULL && element->size > 0 ? element->size : 1;
+  return (int64_t)index + 1 <= (int64_t)INT_MAX / element_size;
+}
+
 // Get an inode child given its index, or NULL if index is invalid.
 static INode* GetChildAtIndex(INode* inode, size_t index, bool is_base) {
   for (size_t i = 0; i < inode->children.length; i++) {
@@ -559,6 +577,21 @@ static INode* FindDesignator(INode* inode,
     case kDesignatorArray: {
       if (inode->kind != kIArray) {
         SemanticError(ast_node, "Use of array designator on a non-array");
+        return NULL;
+      }
+      if (designator->value.array_index < 0) {
+        // The index is used unsigned below, where a negative one would ask for
+        // an array of nearly the whole address space.
+        SemanticError(ast_node,
+                      "Array designator [%d] is outside bounds of the array",
+                      designator->value.array_index);
+        return NULL;
+      }
+      if (!ArrayDesignatorBoundFits(inode, designator->value.array_index)) {
+        SemanticError(ast_node,
+                      "Array designator [%d] needs an array larger than this "
+                      "compiler can lay out",
+                      designator->value.array_index);
         return NULL;
       }
       if (designator->value.array_index >= inode->children.length) {

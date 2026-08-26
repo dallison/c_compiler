@@ -64,22 +64,29 @@ Fixed so far, each with a regression in this repository:
   that had failed to parse reached an `assert(false)`.  The regression is in
   `tests/c_error_recovery_test.sh`.
 
+- `gcc.dg/large-size-array-2.c` and `-4.c`, an unbounded array bound.  An array
+  designator index is held in an `int`, and `[0x80000000]` was truncated into a
+  negative one and then used as an unsigned element count, so deducing the
+  bound of the array from it built elements until the machine gave up.  The
+  index is now range-checked where it is parsed, and an index that would deduce
+  an array too large to lay out is diagnosed before its elements are built.  The
+  regressions are in `tests/c_error_recovery_test.sh`.
+
 ## Remaining gcc.dg crashes and hangs
 
-From a full `gcc.dg` sweep (`--jobs 8 --timeout 10`): 14,048 pass, 5 fail.  No
-crashes remain; all five are hangs.
+From a full `gcc.dg` sweep (`--jobs 8 --timeout 10`): 14,050 pass, 3 fail.  No
+crashes remain; all three are hangs in traditional-mode token pasting.
 
 ```text
 gcc.dg/cpp/tr-paste.c         timeout
 gcc.dg/cpp/trad/funlike-4.c   timeout
 gcc.dg/cpp/trad/paste.c       timeout
-gcc.dg/large-size-array-2.c   timeout
-gcc.dg/large-size-array-4.c   timeout
 ```
 
-The three preprocessor timeouts are traditional-mode token pasting; the two
-array timeouts declare objects near `SIZE_MAX` and may be doing work
-proportional to the declared size.
+Two nearby weaknesses were left alone, since neither is a hang and no test in
+the sweep covers them: an explicit array bound whose byte size overflows the
+`int` that holds it is accepted silently (`static char *a[0x80000000];`), and a
+range designator (`[0 ... 0x7ffffff0]`) still builds one initializer per index.
 
 Unrelated failures seen while validating, each reproducible with a compiler
 built before this work and so not caused by it:

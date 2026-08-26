@@ -10,6 +10,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include "concepts.h"
@@ -2642,6 +2643,19 @@ static void MergeCXXContractAssertions(Syntax* syntax, Symbol* old_sym,
   }
 }
 
+// A designator index is kept in an int, and the size of the array it
+// designates is an int as well.  A value that does not fit would be truncated
+// into an unrelated index, so it is rejected here and the initializer it
+// carries is attached to element zero to keep parsing.
+static int DesignatorArrayIndex(Syntax* syntax, int64_t value) {
+  if (value < INT_MIN || value > INT_MAX) {
+    SyntaxError(syntax, "Array designator index %lld is out of range",
+                (long long)value);
+    return 0;
+  }
+  return (int)value;
+}
+
 // Clone a designator list, substituting a single array index at position
 // range_pos (used to expand a [start ... end] range designator).
 static Vector* CloneDesignators(Vector* src, int range_pos, int index_value) {
@@ -2693,8 +2707,10 @@ static void ParseDesignatedInitializer(Syntax* syntax,
         }
       }
       SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
-      Designator* d = NewArrayDesignator(NULL, (int)value);
-      d->array_index_end = (int)end_value;
+      int index = DesignatorArrayIndex(syntax, value);
+      Designator* d = NewArrayDesignator(NULL, index);
+      d->array_index_end =
+          end_value == value ? index : DesignatorArrayIndex(syntax, end_value);
       VectorAppend(designators, d);
     } else if (LexMatch(syntax->lex, TOK(dot))) {
       // Struct designator.  The dot is followed by a struct member name.
