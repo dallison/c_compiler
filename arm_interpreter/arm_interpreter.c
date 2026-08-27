@@ -32,9 +32,20 @@
 #define CPSR_C (1u << 29)
 #define CPSR_V (1u << 28)
 
+static uint64_t RuntimeToLinked(ARMInterpreter* interpreter, uint64_t runtime);
+
 static uint64_t ReadReg(ARMInterpreter* interpreter, int reg) {
   if (reg == ARM_PC_REG) {
-    return interpreter->pc + 8;
+    // Hand out the *linked* PC.  Reading PC is how the guest names another
+    // address: it adds a link-time displacement to it ('ldr rX, [pc, #n]',
+    // and in position-independent code 'add rX, pc, rX').  The interpreter's
+    // own pc is a host address, and for an ignore_vaddr target the segments are
+    // mapped independently and above 4GB, so a host PC plus a link-time
+    // displacement neither addresses the right place once the sum leaves the
+    // PC's own segment nor survives being narrowed to a 32-bit register.
+    // Every such sum is exact in the linked address space, and the memory and
+    // branch paths already translate a linked address when it is used.
+    return RuntimeToLinked(interpreter, interpreter->pc) + 8;
   }
   return interpreter->regs[reg];
 }
@@ -652,15 +663,13 @@ static void ResolveAndFixupSymbol(ARMInterpreter* interpreter, bool* pc_updated)
     if (ELF_R_TYPE(file_reloc.info) != R_ARM_JUMP_SLOT) {
       continue;
     }
-    uint64_t got_slot = 0;
-    if (!LoaderLinkedAddressToRuntime(loader, lib, file_reloc.offset,
-                                      &got_slot)) {
-      continue;
-    }
     // The PLT trampoline leaves r12/ip pointing at the GOT slot it used.
     // This identifies the exact relocation even though every unresolved GOT
-    // slot initially points at the same resolver stub.
-    if (got_slot == invoked_got_slot) {
+    // slot initially points at the same resolver stub.  The trampoline reaches
+    // the slot from the PC, which the guest sees as a linked address, so the
+    // comparison is against the relocation's offset rather than its runtime
+    // translation.
+    if (file_reloc.offset == invoked_got_slot) {
       reloc = &file_reloc;
       break;
     }

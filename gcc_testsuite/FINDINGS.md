@@ -101,9 +101,14 @@ thread-free reproducer for the AArch64 one was not found.
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
 
-- Chase the three remaining dynamic-linking defects the loader relocation fix
-  made reachable, listed with that fix below.  The fourth, a p-code fault on the
-  first `malloc` of any dynamic program, is fixed.
+- Chase the two remaining dynamic-linking defects the loader relocation fix made
+  reachable, listed with that fix below.  The other two, a p-code fault on the
+  first `malloc` of any dynamic program and an ARM `-fpic` fault on any reference
+  to the program's own globals, are fixed.
+
+- Two defects found while fixing the ARM one and recorded with it: an ARM
+  `-fpic -static` link produces no `.got`, and `elfdump -r` misreads every ELF32
+  `SHT_REL` entry.
 
 ## Status
 
@@ -368,16 +373,10 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   equally broken and nothing exercised them.
 
   Getting past the doubling exposed four further dynamic-linking defects, each
-  previously masked and none of them a regression from this fix.  The p-code one
-  is the entry after this; these three are open:
+  previously masked and none of them a regression from this fix.  The p-code and
+  ARM `-fpic` ones are the two entries after this; these two are open:
   - A data slot initialized to the address of a function imported from a DSO is
     left as 0 on aarch64, RISC-V and x86_64, so calling through it faults.
-  - A `-fpic` program with a global pointer into its own `.data` faults on ARM
-    with `Load32 outside mapped memory`, at an address whose top byte has been
-    cut off: the loader stores a host pointer into the 32-bit slot.  This is the
-    same truncation as the `R_ARM_RELATIVE` bug above, so a `R_ARM_ABS32` or
-    `R_ARM_GLOB_DAT` handler likely needs the same treatment.  Verified failing
-    at `4ce2088~1`.
   - In a freestanding `-nostdlib` dynamic program on ARM and p-code the init
     arrays never run.
 - **Fixed.** Any dynamically linked p-code program faulted on its first `malloc`,
@@ -403,6 +402,51 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   sections, so it stops short of anything already mapped: a MAP_FIXED mapping
   over a section would replace it with zeroed pages.  Advancing the next free
   address past the reserve keeps the libraries loaded afterwards out of the heap.
+- **Fixed.** Any `-fpic` ARM program faulted as soon as it named one of its own
+  globals, and eager PLT binding (`LD_BIND_NOW`) never worked on ARM at all.
+  Neither is a regression; both were reachable before any of this work.
+
+  The interpreter was handing the guest a *host* PC.  Reading PC is how ARM code
+  names an address -- it adds a link-time displacement to it, as `ldr rX,
+  [pc, #n]` for a literal and `add rX, pc, rX` for the GOT in
+  position-independent code -- and for an ignore_vaddr target that sum is wrong
+  twice over.  The loader maps each segment with its own `mmap`, so the segments
+  do not sit their link-time distance apart and a displacement that leaves
+  `.text` lands nowhere; and the host addresses are above 4GB, so the sum does
+  not survive being narrowed to a 32-bit register.  Both showed up in one
+  three-instruction sequence, the first as an unmapped GOT address and the
+  second, once that was resolved, as a `.rodata` address with its top byte gone.
+
+  `ReadReg` now hands out the linked PC.  Every link-time displacement is then
+  exact, no 32-bit register has to hold a host address, and the memory and
+  branch paths already translate a linked address when it is used -- the branch
+  helpers accept either, and the link register was *already* being stored as a
+  linked address, so PC was the one register that disagreed.  Three things
+  computed in the wrong space fell out of that and are fixed with it: the PLT's
+  own displacements (`FixupResolverPLTEntry`, `FixupPLTTrampoline`) were runtime
+  differences and are now link-time ones, which is the same value on a target
+  that does keep its layout; the lazy resolver identified the invoked GOT slot by
+  comparing against a translated relocation offset and now compares the offset
+  itself; and `R_ARM_GLOB_DAT` stored a truncated runtime address where, like
+  `R_ARM_RELATIVE`, it has to leave the linked one.
+
+  `R_ARM_JUMP_SLOT` had the same truncation on the eager path, which is why
+  `LD_BIND_NOW` died in `Fetch32` on a host address with its top byte cut off
+  while lazy binding was fine.  It now binds to the linked address, the value the
+  lazy resolver was already storing.  `//:dynamic_interpreters_test` runs each
+  target both ways so the eager path stops being untested, and
+  `//:davecc_driver_defaults_test` gained an ARM `-fpic` program that reads its
+  own global through the GOT.
+
+  Two related defects are open, both verified failing at `4ce2088~1`:
+  - An ARM `-fpic -static` link is broken in the linker rather than the loader:
+    the writable segment holds no `.got` at all and the displacement the code
+    adds to the PC resolves to 0, so it faults before any of the above matters.
+  - `elfdump -r` prints every ELF32 `SHT_REL` entry as `R_ARM_NONE` with offset
+    0.  The section contents are fine -- a hex dump of `.rel.dyn` shows the real
+    `R_ARM_RELATIVE` and `R_ARM_GLOB_DAT` entries -- so this is the tool
+    misreading the narrower `Elf32_Rel`, and it is actively misleading when
+    diagnosing an ARM relocation bug.
 - **Fixed.** Throwing an exception cost time proportional to the size of the whole
   `.eh_frame`, so exceptions were around a thousand times more expensive than the
   work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully

@@ -30,16 +30,23 @@ run_one() {
     -Wl,-e -Wl,main -rpath "$WORK" \
     "$MAIN_SOURCE" "$library" -o "$executable"
 
-  local rc=0
-  if [[ "$interpret_flag" == yes ]]; then
-    "$interpreter" -i "$executable" || rc=$?
-  else
-    "$interpreter" "$executable" || rc=$?
-  fi
-  if [[ "$rc" -ne 99 ]]; then
-    echo "$target dynamic execution returned $rc; expected 99" >&2
-    exit 1
-  fi
+  # LD_BIND_NOW makes the loader resolve every PLT slot up front instead of
+  # leaving the lazy resolver to do it on the first call.  That is a separate
+  # body of code writing the same slots, so run both ways.
+  local bind_now
+  for bind_now in "" 1; do
+    local rc=0
+    if [[ "$interpret_flag" == yes ]]; then
+      LD_BIND_NOW="$bind_now" "$interpreter" -i "$executable" || rc=$?
+    else
+      LD_BIND_NOW="$bind_now" "$interpreter" "$executable" || rc=$?
+    fi
+    if [[ "$rc" -ne 99 ]]; then
+      echo "$target dynamic execution returned $rc; expected 99" \
+        "(LD_BIND_NOW='$bind_now')" >&2
+      exit 1
+    fi
+  done
 }
 
 run_one aarch64 "$AARCH64" yes

@@ -69,15 +69,23 @@ static bool SectionLinkedAddress(LoadedDynamicLibrary* lib, const char* name,
   return false;
 }
 
-static void FixupResolverPLTEntry(uint64_t plt_runtime, uint64_t got_runtime) {
+// The PLT entries below reach their GOT slot by adding a displacement stored in
+// the entry to the PC, so the displacement has to be expressed in the address
+// space the guest sees the PC in, which is the linked one.  The runtime
+// difference is not usable: an ignore_vaddr target maps each segment at an
+// unrelated host address, so .plt and .got.plt do not stay their link-time
+// distance apart.  Only the address written to is a runtime one.
+static void FixupResolverPLTEntry(uint64_t plt_runtime, uint64_t plt_linked,
+                                  uint64_t got_linked) {
   uint32_t* p = (uint32_t*)(uintptr_t)plt_runtime;
-  p[6] = (uint32_t)(got_runtime - (plt_runtime + 16));
+  p[6] = (uint32_t)(got_linked - (plt_linked + 16));
 }
 
 static void FixupPLTTrampoline(uint64_t trampoline_runtime,
-                               uint64_t got_slot_runtime) {
+                               uint64_t trampoline_linked,
+                               uint64_t got_slot_linked) {
   uint32_t* p = (uint32_t*)(uintptr_t)trampoline_runtime;
-  p[3] = (uint32_t)(got_slot_runtime - (trampoline_runtime + 12));
+  p[3] = (uint32_t)(got_slot_linked - (trampoline_linked + 12));
 }
 
 static COMPILER_UNUSED void RedirectCallsToPlt(Loader* loader,
@@ -144,8 +152,12 @@ static void FixupPLTAfterLoad(Loader* loader, LoadedDynamicLibrary* lib,
   if (pltgot == NULL) {
     return;
   }
-  uint64_t got_runtime = (uint64_t)(uintptr_t)pltgot;
-  FixupResolverPLTEntry(plt_runtime, got_runtime);
+  uint64_t got_linked = 0;
+  if (!LoaderRuntimeAddressToLinked(loader, (uint64_t)(uintptr_t)pltgot,
+                                    &got_linked)) {
+    return;
+  }
+  FixupResolverPLTEntry(plt_runtime, plt_linked, got_linked);
 
   for (int64_t i = 0; i < num_relocations; i++) {
     const ELFRelocation* reloc = &plt_relocations[i];
@@ -153,9 +165,10 @@ static void FixupPLTAfterLoad(Loader* loader, LoadedDynamicLibrary* lib,
     if (got_slot == NULL) {
       continue;
     }
-    uint64_t got_slot_runtime = (uint64_t)(uintptr_t)got_slot;
     uint64_t trampoline_runtime = plt_runtime + (2 + (uint64_t)i) * 16;
-    FixupPLTTrampoline(trampoline_runtime, got_slot_runtime);
+    uint64_t trampoline_linked = plt_linked + (2 + (uint64_t)i) * 16;
+    // A relocation's offset is the linked address of the slot it patches.
+    FixupPLTTrampoline(trampoline_runtime, trampoline_linked, reloc->offset);
     if (!lazy) {
       BindPltEager(loader, lib, trampoline_runtime,
                    *(uint32_t*)got_slot);
@@ -219,14 +232,14 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
       if (symbol == NULL) {
         LoaderError("Relocation refers on undefined symbol '%s'\n",
                     sym_name);
+      } else if (lib->loader->arch->ignore_vaddr) {
+        // As for R_ARM_RELATIVE: the runtime address of the symbol needs more
+        // than the 32 bits this GOT slot has, and the interpreter translates a
+        // linked address on every access, so leave the linked value here.
+        *(uint32_t*)target_address = (uint32_t)symbol->value;
       } else {
-        uint64_t value = symbol->value;
-        if (lib->loader->arch->ignore_vaddr &&
-            !LoaderLinkedAddressToRuntime(lib->loader, lib, value, &value)) {
-          LoaderError("Cannot translate symbol '%s'\n", sym_name);
-        } else {
-          *(uint32_t*)target_address = (uint32_t)value;
-        }
+        *(uint32_t*)target_address =
+            (uint32_t)(lib->load_address + symbol->value);
       }
       break;
 
@@ -249,21 +262,18 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
         // Keep the link-time GOT contents (PLT entry linked address).
         (void)lib;
         (void)target_address;
-        } else {
-          if (symbol == NULL) {
-            LoaderError("Relocation refers on undefined symbol '%s'\n",
-                        sym_name);
-          } else {
-            uint64_t value = symbol->value;
-            if (lib->loader->arch->ignore_vaddr &&
-                !LoaderLinkedAddressToRuntime(lib->loader, lib, value,
-                                              &value)) {
-              LoaderError("Cannot translate symbol '%s'\n", sym_name);
-            } else {
-              *(uint32_t*)target_address = (uint32_t)value;
-            }
-          }
-        }
+      } else if (symbol == NULL) {
+        LoaderError("Relocation refers on undefined symbol '%s'\n", sym_name);
+      } else if (lib->loader->arch->ignore_vaddr) {
+        // Bind to the linked address, the same value the lazy resolver stores.
+        // The runtime address of the function does not fit in this 32-bit slot,
+        // and the PLT loads the slot straight into pc, which resolves a linked
+        // branch target anyway.
+        *(uint32_t*)target_address = (uint32_t)symbol->value;
+      } else {
+        *(uint32_t*)target_address =
+            (uint32_t)(lib->load_address + symbol->value);
+      }
       break;
 
     default:

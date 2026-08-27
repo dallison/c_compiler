@@ -40,6 +40,28 @@ if [[ "$output" != "driver-defaults-ok" ]]; then
   exit 1
 fi
 
+# Position-independent ARM code names an address by adding a link-time
+# displacement to the PC, and reaches a global through a GOT slot.  Neither
+# works on a host address, because the segments are mapped independently and
+# above 4GB, so a -fpic link that reads its own data through the GOT is the case
+# that catches it.
+cat > pic.cc <<'SRC'
+#include <iostream>
+
+int pic_value = 7;
+int* pic_pointer = &pic_value;
+
+int main() {
+  std::cout << "pic-ok " << *pic_pointer << "\n";
+}
+SRC
+"$DAVECC" -target arm -fpic pic.cc -o pic.arm
+output="$("$ARM_INTERPRETER" pic.arm)"
+if [[ "$output" != "pic-ok 7" ]]; then
+  echo "unexpected ARM -fpic program output: $output" >&2
+  exit 1
+fi
+
 # Every dynamic target resolves its own relocations, and a hosted C++ program is
 # the case that needs the pointer-valued ones: its .init_array holds pointers to
 # the static initializers that have to run before main.
