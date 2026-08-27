@@ -887,13 +887,68 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
   TargetBuildBasicBlockInputsAndOutputs(gen);
 }
 
+// The dominator tree walk records a value as live in a block only if the block
+// is on the dominator chain between the definition and the use.  A value that
+// is live on entry to a join block is however also live along every other CFG
+// path that reaches the join, and those paths need not dominate it (the sibling
+// arm of an if/else is the common case).  The register allocator reserves a
+// register only for the values a block records as live, so a gap in the middle
+// of a live range lets an unrelated value claim the same register and clobber
+// it.  Close the gaps by propagating each block's live-in set backwards over
+// the CFG edges until the defining block is reached.
+static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
+  Vector work;
+  VectorInit(&work);
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    VectorAppend(&work, gen->basic_blocks.value.p[i]);
+  }
+  while (work.length > 0) {
+    TargetBasicBlock* block = VectorLast(&work);
+    VectorPop(&work);
+    for (size_t i = 0; i < block->in_edges.length; i++) {
+      TargetBasicBlock* pred =
+          VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
+      bool changed = false;
+      for (size_t j = 0; j < block->inputs.length; j++) {
+        TargetInstruction* inst = block->inputs.value.p[j];
+        if (inst->block == NULL || inst->block == block) {
+          continue;
+        }
+        // Only values that are already defined when the predecessor runs are
+        // live there.  The upward propagation also records values in blocks
+        // that precede their definition; those must not spread any further.
+        if (inst->block != pred &&
+            !BitSetContains(&pred->dominators, inst->block->block_id)) {
+          continue;
+        }
+        if (!BitSetContains(&pred->output_ids, inst->id)) {
+          VectorAppend(&pred->outputs, inst);
+          BitSetInsert(&pred->output_ids, inst->id);
+          changed = true;
+        }
+        if (inst->block != pred &&
+            !BitSetContains(&pred->input_ids, inst->id)) {
+          VectorAppend(&pred->inputs, inst);
+          BitSetInsert(&pred->input_ids, inst->id);
+          changed = true;
+        }
+      }
+      if (changed) {
+        VectorAppend(&work, pred);
+      }
+    }
+  }
+  VectorDestruct(&work);
+}
+
 // Calculate the inputs and outputs for all basic blocks.  This
 // information tells the register allocator the lifespan of
 // registers.
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
    ResetAllInstructionUses(gen);
    BuildInputsAndOutputs(gen, gen->entry_block);
-   
+   PropagateLiveInToPredecessors(gen);
+
    // Reset the uses count for all instructions.
    ResetAllInstructionUses(gen);
 }

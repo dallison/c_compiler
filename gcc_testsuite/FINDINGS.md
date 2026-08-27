@@ -523,6 +523,22 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   malformed member and left the entire run in its original order, where
   `mv a1,t1` preceded the `mv a0,a1` that still needed the old `a1`.
 
+- Fixed: a hole in the backend's block live-in sets that left two live values
+  sharing one register, which faulted
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` at `-O2` on AArch64 with
+  `Store8 outside mapped memory`.  A test that reproduces it without threads has
+  not been found; the shape needs three values interacting, and the two thread
+  tests that do reproduce it hang on ARM at every optimization level.
+
+  Live-in sets are built by walking the dominator tree, so a value is recorded
+  as live only in the blocks that dominate its uses.  A join block's live-in
+  values are also live along its other incoming paths, and those paths need not
+  dominate it: the sibling arm of an `if` is the common case.  The register
+  allocator reserves a register only where a block records the value as live, so
+  the gap in the middle of the range let an unrelated value take the same
+  register.  The two then travelled together until one of them was spilled,
+  which released the register while the other was still live in it.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now
