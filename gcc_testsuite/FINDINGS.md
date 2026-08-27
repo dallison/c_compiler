@@ -253,12 +253,12 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   `__davecc_shared_init` hook and `libc/dynamic_libc_lifecycle.c`.  This is what
   makes `davecc_driver_defaults_test` fail, and it fails at that test's very first
   hosted link, so everything after it in that script is currently unexercised.
-- Throwing an exception costs time proportional to the size of the whole
-  `.eh_frame`, so exceptions are around a thousand times more expensive than the
+- **Fixed.** Throwing an exception cost time proportional to the size of the whole
+  `.eh_frame`, so exceptions were around a thousand times more expensive than the
   work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully
   parses every entry in the table on every frame lookup, and does not stop at the
   first match: it keeps scanning so that it can pick a "best" candidate among all
-  the FDEs that contain the pc.  A lookup is therefore O(entries) and a throw is
+  the FDEs that contain the pc.  A lookup was therefore O(entries) and a throw
   O(frames x entries), with no index or cache in front of it.
 
   Measured on x86_64, where the interpreter runs about 5M guest instructions a
@@ -270,23 +270,31 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   Independently, throwing through 1, 4 and 16 frames costs 2.59s, 4.51s and
   12.69s.
 
-  This is what makes `cxx_testsuite:exec_x86_64` fail.  Its two failing tests,
+  This is what made `cxx_testsuite:exec_x86_64` fail.  Its two failing tests,
   `0115_standard_vector_exception_safety.cpp` and
   `0124_standard_vector_range_exception_safety.cpp`, do four throws each from
-  inside `std::vector`, which is 36s against the harness's 30s per-test limit in
-  `cxx_testsuite/run_exec_tests.sh`.  They are not stuck: truncating `main` to run
-  0 to 4 of the four subtests gives 0.1s, 10.8s, 17.0s, 25.7s and 34.9s.  Raising
-  bazel's `--test_timeout` does not help, because the limit that kills them is the
-  harness script's own `TIMEOUT=30`.
+  inside `std::vector`, which was 36s against the harness's 30s per-test limit in
+  `cxx_testsuite/run_exec_tests.sh`.  They were never stuck: truncating `main` to
+  run 0 to 4 of the four subtests gave 0.1s, 10.8s, 17.0s, 25.7s and 34.9s.
+  Raising bazel's `--test_timeout` does not help either, because the limit that
+  kills them is the harness script's own `TIMEOUT=30`.
 
-  The fix is an index rather than a scan: build a lazily-initialized array of
-  (pc_begin, pc_end) per module, sorted by pc_begin, and binary search it,
-  keeping the existing "best candidate" tie-break for the overlapping entries the
-  current code is careful about.  Tracking the largest span in the index bounds
-  how far back the search has to look, so the usual non-overlapping table costs
-  one or two probes.  Note that allocating during a throw is its own hazard, so a
-  fixed-capacity index that falls back to today's scan for very large tables is
-  worth preferring over one that calls malloc while unwinding.
+  The fix indexes the table instead of scanning it.  The program's own
+  `.eh_frame` is delimited by linker symbols and so never changes, which lets an
+  array of (pc_begin, pc_end, entry) sorted by pc_begin be built once, on the
+  first lookup, and never invalidated; module and foreign ranges come and go
+  through `__register_frame` and hold few entries each, so those keep walking.
+  Tracking the widest span in the index bounds how far below the pc a covering
+  entry can start, so a search over the usual non-overlapping table costs one or
+  two probes, and the existing "best candidate" tie-break still runs over
+  whatever entries do overlap.  If the allocation fails the old scan is used, so
+  the table is never left unsearchable.
+
+  One throw now costs 0.34s rather than 1.97s, and eight cost 0.76s rather than
+  14.30s -- a marginal cost of about 50ms a throw instead of 1.8s.  Unwinding 16
+  frames went from 12.69s to 0.77s, and the 800 never-called functions that used
+  to add 4.6s to a single throw now add 0.47s, paid once when the index is built.
+  `exec_x86_64` passes, and the suite as a whole runs in 160s rather than 475s.
 
 ## Deep nesting outside the constructs already capped
 

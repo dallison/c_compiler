@@ -1,4 +1,5 @@
 #include <eh_frame.h>
+#include <stdlib.h>
 #if defined(__arm__)
 #include <unwind.h>
 #endif
@@ -822,6 +823,16 @@ static void AdjustFDEPCForLookup(DaveEHFDE* fde, uintptr_t pc) {
     fde->pc_end += DAVE_EH_GUEST_ALT_TEXT_BIAS;
   }
 }
+
+// The address an entry would be recorded under, for a pc that may name the
+// aliased text mapping.  Entries hold unbiased addresses, so searching for such a
+// pc has to look for the unbiased spelling as well as the literal one.
+static uintptr_t UnbiasedLookupPC(uintptr_t pc) {
+  if (pc >= DAVE_EH_GUEST_ALT_TEXT_BASE && pc < 0x500000000ULL) {
+    return pc - DAVE_EH_GUEST_ALT_TEXT_BIAS;
+  }
+  return pc;
+}
 #else
 static int FDEContainsPC(const DaveEHFDE* fde, uintptr_t pc) {
   uintptr_t span;
@@ -839,7 +850,32 @@ static void AdjustFDEPCForLookup(DaveEHFDE* fde, uintptr_t pc) {
   (void)fde;
   (void)pc;
 }
+
+static uintptr_t UnbiasedLookupPC(uintptr_t pc) {
+  return pc;
+}
 #endif
+
+// Of two FDEs that both cover the pc, which one should be used?  A table can
+// describe the same address more than once, so prefer the entry that carries the
+// most information: one with a personality routine over one without, then one
+// with a language-specific data area, then the tightest range.
+static int BetterFDE(const DaveEHFDE* best, const DaveEHFDE* candidate) {
+  if (best->personality == 0 && candidate->personality != 0) {
+    return 1;
+  }
+  if (best->personality != 0 && candidate->personality == 0) {
+    return 0;
+  }
+  if (!best->has_lsda && candidate->has_lsda) {
+    return 1;
+  }
+  if (best->has_lsda && !candidate->has_lsda) {
+    return 0;
+  }
+  return (candidate->pc_end - candidate->pc_begin) <
+         (best->pc_end - best->pc_begin);
+}
 
 static int FindFDEInRange(uintptr_t pc, const uint8_t* start, const uint8_t* end,
                           DaveEHFDE* out) {
@@ -855,28 +891,231 @@ static int FindFDEInRange(uintptr_t pc, const uint8_t* start, const uint8_t* end
     if (!FDEContainsPC(&fde, pc)) {
       continue;
     }
-    if (!have_best) {
+    if (!have_best || BetterFDE(&best, &fde)) {
       best = fde;
       have_best = 1;
+    }
+  }
+  if (have_best && out != 0) {
+    AdjustFDEPCForLookup(&best, pc);
+    *out = best;
+  }
+  return have_best;
+}
+
+// An index over the program's own .eh_frame, so that a frame lookup costs a
+// binary search rather than a walk of the whole table.  Without it, unwinding one
+// frame parses every entry -- FindFDEInRange cannot stop at the first match
+// because a later entry may describe the address better -- which made a throw
+// cost time proportional to the size of the table times the number of frames.
+//
+// Only this one range is indexed.  It is delimited by linker symbols and so never
+// changes, which is what lets the index be built once and never invalidated;
+// module and foreign ranges come and go through __register_frame and hold few
+// entries each, so they keep walking.
+typedef struct {
+  uintptr_t pc_begin;
+  uintptr_t pc_end;
+  const uint8_t* fde_start;
+} DaveEHIndexEntry;
+
+typedef struct {
+  DaveEHIndexEntry* entries;
+  size_t count;
+  // The widest range any entry covers, which bounds how far below the pc a
+  // covering entry can start and so how far the search has to walk back.
+  uintptr_t max_span;
+} DaveEHIndex;
+
+// Published as a single pointer store once fully built, so a reader either sees
+// no index or a complete one.  A thread that loses the race to build it frees its
+// own copy.
+static DaveEHIndex* volatile g_primary_index;
+static volatile int g_primary_index_unavailable;
+
+// Insert the entry keeping the array ascending by pc_begin.  A linker emits
+// .eh_frame in address order, so this almost always appends.
+static void InsertIndexEntry(DaveEHIndexEntry* entries, size_t count,
+                             const DaveEHIndexEntry* entry) {
+  size_t i = count;
+  while (i > 0 && entries[i - 1].pc_begin > entry->pc_begin) {
+    entries[i] = entries[i - 1];
+    i--;
+  }
+  entries[i] = *entry;
+}
+
+static DaveEHIndex* BuildPrimaryIndex(const uint8_t* start, const uint8_t* end) {
+  DaveEHIndex* index;
+  DaveEHIndexEntry* entries;
+  uintptr_t cursor;
+  DaveEHFDE fde;
+  // Grown as the table is walked rather than sized by a counting pass, because
+  // parsing the table is the expensive part and this is on the path of the first
+  // throw.
+  size_t capacity = 256;
+  size_t count = 0;
+
+  index = (DaveEHIndex*)malloc(sizeof(*index));
+  if (index == 0) {
+    return 0;
+  }
+  entries = (DaveEHIndexEntry*)malloc(capacity * sizeof(*entries));
+  if (entries == 0) {
+    free(index);
+    return 0;
+  }
+
+  index->max_span = 0;
+  cursor = (uintptr_t)start;
+  while (DaveEHFrameNextFDE(&cursor, (uintptr_t)end, &fde)) {
+    DaveEHIndexEntry entry;
+    uintptr_t span;
+    // Leave out what a lookup could never match anyway (see FDEContainsPC).
+    // Keeping an implausibly wide entry would also raise max_span, and with it
+    // the number of entries every later search has to walk back over.
+    if (fde.pc_begin == 0 || fde.pc_end <= fde.pc_begin ||
+        fde.pc_end - fde.pc_begin > 0x100000) {
       continue;
     }
-    if (best.personality == 0 && fde.personality != 0) {
-      best = fde;
+    if (count == capacity) {
+      DaveEHIndexEntry* grown;
+      size_t larger = capacity * 2;
+      grown = (DaveEHIndexEntry*)realloc(entries, larger * sizeof(*entries));
+      if (grown == 0) {
+        free(entries);
+        free(index);
+        return 0;
+      }
+      entries = grown;
+      capacity = larger;
+    }
+    entry.pc_begin = fde.pc_begin;
+    entry.pc_end = fde.pc_end;
+    entry.fde_start = fde.fde_start;
+    InsertIndexEntry(entries, count, &entry);
+    count++;
+    span = fde.pc_end - fde.pc_begin;
+    if (span > index->max_span) {
+      index->max_span = span;
+    }
+  }
+  if (count == 0) {
+    free(entries);
+    free(index);
+    return 0;
+  }
+  index->entries = entries;
+  index->count = count;
+  return index;
+}
+
+static const DaveEHIndex* PrimaryIndex(const uint8_t* start,
+                                       const uint8_t* end) {
+  DaveEHIndex* index = g_primary_index;
+  DaveEHIndex* published;
+  if (index != 0) {
+    return index;
+  }
+  if (g_primary_index_unavailable) {
+    return 0;
+  }
+  index = BuildPrimaryIndex(start, end);
+  if (index == 0) {
+    // Nothing to index, or no memory to index it with.  Remember that, so every
+    // later lookup does not pay for another walk of the table before falling
+    // back to walking it.
+    g_primary_index_unavailable = 1;
+    return 0;
+  }
+  published = g_primary_index;
+  if (published != 0) {
+    free(index->entries);
+    free(index);
+    return published;
+  }
+  // Kept for the life of the process: it describes a range that cannot change,
+  // and an unwind is the wrong place to be rebuilding it.
+  g_primary_index = index;
+  return index;
+}
+
+// Re-read the entry the index points at, to recover the fields the index does not
+// store.  This runs for the handful of entries that can cover one address, not
+// for the whole table.
+static int ParseIndexedFDE(const DaveEHIndexEntry* entry, const uint8_t* end,
+                           DaveEHFDE* out) {
+  uintptr_t cursor = (uintptr_t)entry->fde_start;
+  return DaveEHFrameNextFDE(&cursor, (uintptr_t)end, out) &&
+         out->pc_begin == entry->pc_begin && out->pc_end == entry->pc_end;
+}
+
+// Index of the first entry that starts after key, i.e. one past the last entry
+// that could possibly cover it.
+static size_t UpperBoundByPCBegin(const DaveEHIndex* index, uintptr_t key) {
+  size_t low = 0;
+  size_t high = index->count;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    if (index->entries[mid].pc_begin <= key) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
+// Consider every entry that starts at or below key and is still close enough to
+// reach the pc, keeping the best one.  'pc' is the address being looked up and
+// 'key' the value being searched for, which differ when the pc has to be
+// un-biased first.
+static void SearchIndexForKey(const DaveEHIndex* index, const uint8_t* end,
+                              uintptr_t pc, uintptr_t key, DaveEHFDE* best,
+                              int* have_best) {
+  size_t i = UpperBoundByPCBegin(index, key);
+  while (i > 0) {
+    const DaveEHIndexEntry* entry = &index->entries[--i];
+    DaveEHFDE fde;
+    if (key - entry->pc_begin >= index->max_span) {
+      // Entries below this one start even earlier, so none can reach the pc.
+      break;
+    }
+    if (pc < entry->pc_begin || pc >= entry->pc_end) {
+      if (key < entry->pc_begin || key >= entry->pc_end) {
+        continue;
+      }
+    }
+    if (!ParseIndexedFDE(entry, end, &fde) || !FDEContainsPC(&fde, pc)) {
       continue;
     }
-    if (best.personality != 0 && fde.personality == 0) {
-      continue;
+    if (!*have_best || BetterFDE(best, &fde)) {
+      *best = fde;
+      *have_best = 1;
     }
-    if (!best.has_lsda && fde.has_lsda) {
-      best = fde;
-      continue;
-    }
-    if (best.has_lsda && !fde.has_lsda) {
-      continue;
-    }
-    if ((fde.pc_end - fde.pc_begin) < (best.pc_end - best.pc_begin)) {
-      best = fde;
-    }
+  }
+}
+
+static int FindFDEInPrimaryRange(uintptr_t pc, const uint8_t* start,
+                                 const uint8_t* end, DaveEHFDE* out) {
+  const DaveEHIndex* index;
+  DaveEHFDE best;
+  int have_best = 0;
+  uintptr_t key;
+
+  if (start == 0 || end <= start) {
+    return 0;
+  }
+  index = PrimaryIndex(start, end);
+  if (index == 0) {
+    return FindFDEInRange(pc, start, end, out);
+  }
+  SearchIndexForKey(index, end, pc, pc, &best, &have_best);
+  // An address in the aliased text mapping matches an entry through the bias, so
+  // it has to be searched for under that spelling too (see FDEContainsPC).
+  key = UnbiasedLookupPC(pc);
+  if (key != pc) {
+    SearchIndexForKey(index, end, pc, key, &best, &have_best);
   }
   if (have_best && out != 0) {
     AdjustFDEPCForLookup(&best, pc);
@@ -909,7 +1148,7 @@ int DaveEHFrameFindFDE(uintptr_t pc, DaveEHFDE* out) {
   DaveEHFrameRange range;
   size_t i;
   if (DaveEHFrameGetRange(&range) &&
-      FindFDEInRange(pc, range.start, range.end, out)) {
+      FindFDEInPrimaryRange(pc, range.start, range.end, out)) {
     return 1;
   }
   if (__davecc_eh_module_count > DAVECC_EH_MAX_MODULES) {
