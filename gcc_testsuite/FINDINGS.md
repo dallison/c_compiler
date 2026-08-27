@@ -502,6 +502,27 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   such call was inlined as a direct call to whichever member the type record
   came from.  A call may now only be inlined when its callee names the function.
 
+- Fixed: two RISC-V register allocator defects that between them left
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` faulting at `-O2`, and are
+  covered by `cxx_testsuite/tests/exec/0443_arguments_live_across_calls.cpp`
+  (both fixes are needed to make it pass).
+
+  A value that has to survive a call needs a callee-saved register, and when
+  none was free the allocator evicted whichever value was cheapest to spill,
+  wherever it sat, then took that register.  A victim holding a caller-saved
+  temp handed over a register the call clobbers.  The victim search now honours
+  the same constraint the allocation does, and falls back to a register variable
+  when nothing else in the callee-saved range can be freed -- which a non-leaf
+  function needs, since register variables reserve all of `s2`..`s11` and only
+  `s1` is left to hand out.
+
+  A call's arguments are placed by a parallel copy, ordered so that no move
+  overwrites a register a later one still reads.  A move whose source had been
+  spilled becomes a reload, which is not a register-to-register move at all, and
+  it kept the tag marking it part of the copy.  The resolver read it as a
+  malformed member and left the entire run in its original order, where
+  `mv a1,t1` preceded the `mv a0,a1` that still needed the old `a1`.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now

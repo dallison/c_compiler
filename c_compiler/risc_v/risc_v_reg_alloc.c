@@ -343,25 +343,50 @@ static bool InstructionHasExternalDefs(RVRegisterAllocator* allocator,
   return false;
 }
 
+// Find the cheapest value to evict so that its register can be reused.  When
+// `can_use_temp` is false the value asking for the register has to survive a
+// call, so only a callee-saved register will do for it: a victim holding a
+// caller-saved temp is no use here, because handing that temp over would leave
+// the new value to be clobbered by the very call it has to live across.
+//
+// Register variables are considered only when nothing else can be freed.  On a
+// non-leaf function they own the whole of the second callee-saved range, so
+// without them there is often no callee-saved register to reclaim at all.
 static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
-                                   RVRegisterType type) {
+                                   RVRegisterType type, bool can_use_temp) {
   RVRegister* regs =
       type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
+  int min_var_cost = INT_MAX;
+  TargetInstruction* var_victim = NULL;
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
+      if (!can_use_temp && register_ranges[i].temp) {
+        continue;
+      }
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
-#if 0
-          if (((int)owner->opcode == (int)RV_OP(spill)) || ((int)owner->opcode == (int)RV_OP(reload))) {
-            // Not spill or reload instruction.
+          if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
+              ((int)owner->opcode == (int)RV_OP(spill))) {
+            // Already in memory, so it is not holding this register any more.
+            regs[j].base.owner = NULL;
             continue;
           }
-#endif
-          assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          if (RVIsVarRegister(owner)) {
+            if (owner->users.length == 0) {
+              regs[j].base.owner = NULL;
+              continue;
+            }
+            int cost = SpillCost(owner);
+            if (cost < min_var_cost) {
+              min_var_cost = cost;
+              var_victim = owner;
+            }
+            continue;
+          }
           int cost = SpillCost(owner);
           if (cost < min_cost) {
             min_cost = cost;
@@ -372,8 +397,7 @@ static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
     }
   }
   if (victim == NULL) {
-    DumpRegisters(allocator);
-    abort();
+    victim = var_victim;
   }
   return victim;
 }
@@ -526,10 +550,18 @@ static RVRegister* AllocateRegisterWithType(RVRegisterAllocator* allocator,
   RVRegister* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim = FindSpillVictim(allocator, type);
-    reg = SpillInstruction(allocator, victim);
+    TargetInstruction* victim = FindSpillVictim(allocator, type, can_use_temp);
+    // FindSpillVictim releases the registers of any values it finds already
+    // spilled, so a free one may have appeared.
+    reg = FindFreeRegister(allocator, type, can_use_temp);
+    if (reg == NULL && victim != NULL) {
+      reg = SpillInstruction(allocator, victim);
+    }
   }
-  assert(reg != NULL);
+  if (reg == NULL) {
+    DumpRegisters(allocator);
+    abort();
+  }
 
   if (reg->base.reserved) {
     return reg;
@@ -676,6 +708,13 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
     inst->opcode = (TargetOpcode)RV_OP(reload);
     inst->operand[0] = src;
     inst->operand[1] = NULL;
+    // It is no longer a register-to-register move, so it is no longer part of
+    // the parallel copy that places the call's arguments.  Leaving the tag on
+    // makes it look like a malformed member of that copy, and the resolver
+    // gives up on the whole run -- emitting the remaining moves in their
+    // original order, where an earlier one can overwrite an argument register
+    // a later one still has to read.
+    inst->flags &= ~RV_INST_ARG_MOVE;
     TrapReload(inst);
   } else {
     if (RVIsVarRegister(src) && src->reg == NULL) {
