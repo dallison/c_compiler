@@ -295,6 +295,45 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   frames went from 12.69s to 0.77s, and the 800 never-called functions that used
   to add 4.6s to a single throw now add 0.47s, paid once when the index is built.
   `exec_x86_64` passes, and the suite as a whole runs in 160s rather than 475s.
+- **Fixed.** Catching an exception corrupted the *caller's* callee-saved
+  registers, on x86_64 and on riscv, for two unrelated reasons.  A caller that
+  keeps a value in such a register across a call sees it change, so this is a
+  wrong-code bug in any program that catches, not just in the coroutine tests
+  that exposed it.  `cxx_testsuite/tests/exec/0436_exceptions_preserve_callee_saved.cpp`
+  covers both.
+  - On x86_64 the landing pad ran with the stack pointer the throwing call site
+    left it at.  The unwinder hands a frame back at the stack pointer its CFI
+    describes, which is the value at the call instruction -- and on x86_64 the
+    outgoing arguments have been pushed by then, so it is below the bottom of the
+    frame.  The rest of the function assumes the stack pointer is at the bottom:
+    the exit sequence reads the callee-saved registers at fixed offsets from it,
+    so it handed the caller the outgoing arguments of the call that threw.
+    `throw 8` inside a coroutine left the caller's `%rbx` holding `&_ZTIi`, the
+    second argument of `__cxa_throw`.  The landing pad now puts the stack pointer
+    back from the frame pointer, which is the one register the unwinder does
+    restore.  aarch64, arm and riscv already did exactly this, so x86_64 was the
+    only target missing it; the new code follows theirs.
+
+    This is what made `cxx_testsuite:exec_coroutines_x86_64` fail
+    (`0007_cxx23_range_for_lifetime.cpp`).  It is not coroutine-specific: a
+    coroutine's resume function is simply big enough that the optimizer parks a
+    constant in a callee-saved register across the resume, and the test compares
+    against that constant on both sides.
+  - On riscv the CFI did not say where the callee-saved registers had been
+    spilled.  The prologue stores them, but the FDE only described `s0` and `ra`,
+    so unwinding through a frame could not recover them and the unwinder passed
+    the throwing code's values through to the handler, whose transfer stub then
+    installed them over the caller's.  It was masked for any register the
+    handler's own function also saves, because its exit sequence reloads those
+    from its frame; a register only it uses -- `s4` here, holding the caller's
+    third live value -- came out of `__cxa_throw` as 40 instead of 33.  The
+    backend now emits the `DW_CFA_offset` rules, as the x86_64 backend already
+    did.
+
+    aarch64 and arm have the same missing rules.  No case where it is observable
+    was found there (up to twelve live values across a catching call), because
+    their landing pads reload every saved register from the frame, so they are
+    left alone rather than changed on the strength of an argument.
 
 ## Deep nesting outside the constructs already capped
 

@@ -1889,6 +1889,8 @@ static void PrintAtomicFetchAddSub(TargetInstruction* inst, FILE* fp) {
   fprintf(fp, ")\n");
 }
 
+static void RestoreStackPointerAtLandingPad(X86_64Emitter* emitter, FILE* fp);
+
 static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
                                                    FILE* fp);
 
@@ -1910,6 +1912,7 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     }
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      RestoreStackPointerAtLandingPad(emitter, fp);
       ReloadStructReturnRegisterAtLandingPad(emitter, fp);
     }
     return;
@@ -2938,6 +2941,27 @@ static void X86_64PrintGCCExceptTable(X86_64Emitter* emitter, FILE* fp,
       .saved_ra_offset = -8,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
+}
+
+// The unwinder resumes a frame at its landing pad with the stack pointer the
+// throwing call site left it at.  Outgoing arguments are pushed, so that is
+// below the bottom of the frame, whereas the rest of the function assumes the
+// stack pointer is at the bottom: the exit sequence in particular reads the
+// callee-saved registers at fixed offsets from it, and would hand the caller
+// the outgoing arguments of the call that threw instead of its own registers.
+// The frame pointer is restored by the unwinder from the CFI, so put the stack
+// pointer back from that.  This is the inverse of the prologue, which lowers
+// rsp to rbp + space_above_frame_pointer - stack_frame_size.
+static void RestoreStackPointerAtLandingPad(X86_64Emitter* emitter, FILE* fp) {
+  if (EmptyStackFrame(emitter)) {
+    // No frame and so no frame pointer to recover the stack pointer from.
+    // Nothing is stored relative to rsp either, so there is nothing to fix.
+    return;
+  }
+  int space_above_frame_pointer =
+      emitter->rv->base.varargs ? X86_64_VARARG_SAVE_AREA_SIZE : 0;
+  fprintf(fp, "\tleaq %d(%%rbp), %%rsp\n",
+          space_above_frame_pointer - StackFrameSize(emitter));
 }
 
 static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,

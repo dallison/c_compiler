@@ -1538,13 +1538,47 @@ static void RVFillLSDAInfo(RVEmitter* emitter, DaveEHLSDARange* lsda_ranges,
   }
 }
 
+// Describe where the prologue put the callee-saved registers, so that unwinding
+// through this frame recovers the caller's values.  Without these rules the
+// unwinder passes whatever the throwing code left in those registers on to the
+// handler, which then installs them over the caller's own.  The registers are
+// listed in the order SaveRegisters stores them, and are addressed from sp,
+// which the prologue leaves stack_frame_size below the CFA (= s0).  RISC-V
+// numbers its DWARF integer registers exactly as the architecture does, which is
+// also what the register allocator uses, so no translation is needed.
+static size_t RVSavedCFIRegisters(RVEmitter* emitter,
+                                  DaveEHFrameSavedReg* saved_regs,
+                                  size_t capacity) {
+  BitSetIterator it;
+  size_t count = 0;
+  int offset = emitter->saved_reg_offset;
+  int stack_frame_size = StackFrameSize(emitter);
+
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    if (count < capacity) {
+      saved_regs[count].dwarf_reg = reg;
+      saved_regs[count].cfa_offset = offset - stack_frame_size;
+      count++;
+    }
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  return count;
+}
+
 static void RVPrintEHMetadata(RVEmitter* emitter, FILE* fp,
                               const char* func_name) {
   if (emitter->rv->base.varargs) {
     return;
   }
   DaveEHLSDARange lsda_ranges[64];
+  DaveEHFrameSavedReg saved_regs[RV_NUM_INT_REGS];
   size_t lsda_count = 0;
+  size_t saved_reg_count =
+      RVSavedCFIRegisters(emitter, saved_regs,
+                          sizeof(saved_regs) / sizeof(saved_regs[0]));
   RVFillLSDAInfo(emitter, lsda_ranges, &lsda_count);
   DaveEHFrameEmitInfo info = {
       .ranges = lsda_ranges,
@@ -1560,6 +1594,8 @@ static void RVPrintEHMetadata(RVEmitter* emitter, FILE* fp,
       .fp_cfa_offset = 0,
       .saved_fp_offset = -16,
       .saved_ra_offset = -8,
+      .saved_regs = saved_regs,
+      .saved_reg_count = saved_reg_count,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
   DaveEHPrintEHFrameCIE(fp, &info, "");
