@@ -66,11 +66,31 @@ single_exec_x86_64  pass=242 fail=1   00200
 single_exec_65c02   pass=234 fail=3   00200, 00219, 00246
 ```
 
-Also pre-existing and unrelated: `//c_testsuite:warning_diagnostics`,
-`//cxx_testsuite:modules_{x86_64,aarch64,arm}`,
-`//cxx_testsuite:exec_stacktrace_65c02`, and a
-`//cxx_testsuite:bazel_hello_module` build failure that needs `--keep_going` to
-get past.
+A full `bazel test //... --keep_going` fails 16 more targets than the nine suites
+above, all of them long-standing: they were verified failing at `4e13f01`, before
+any of the work recorded here.  The list is worth having in full, because a run
+that only knows about the first four names below looks alarming:
+
+```text
+//c_testsuite:warning_diagnostics
+//cxx_testsuite:modules_{x86_64,aarch64,arm}
+//cxx_testsuite:exec_stacktrace_65c02
+//:6502_codegen_cleanup_test
+//:6502_single_byte_copy_test
+//:6502_tail_call_test
+//:65c02_cxx_test
+//:c23_numeric_headers_test
+//:ir_optimizer_regression_test
+//:libc_x86_64_test
+//:multiarch_inline_asm_test
+//:mutex_65c02_test
+```
+
+`//:libc_arm_test` fails intermittently and belongs to neither list; see the note
+with the ARM fixes below.  Several genrules (`//:hello_{aarch64,arm,x86_64}_exe`,
+`//:hello_{aarch64,arm}_libfunc_so`) and `//cxx_testsuite:bazel_hello_module`
+fail to *build* because they do not depend on `:libc_headers`, so `--keep_going`
+is needed to get a complete run.
 
 Note that a thread test cannot be used as the `-O2` regression for the three
 register allocator and liveness fixes below: every `std::thread` program still
@@ -82,7 +102,9 @@ thread-free reproducer for the AArch64 one was not found.
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
 
-- Report the AArch64 hosted C++ loader regression bisected to `4f4fcb0`.
+- Chase the dynamic-linking defects the loader relocation fix made reachable,
+  listed with that fix below.  `//:ir_optimizer_regression_test` now fails on the
+  first of them instead of on the relocation bug.
 
 ## Status
 
@@ -304,12 +326,65 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   makes the result the type of the *promoted* left operand, so it must be `int`.
   `c_testsuite` test 00200 fails on this and has been failing for some time; it is
   a wrong-code bug, not a diagnostic one.
-- A hosted C++ program no longer starts on aarch64: the interpreter rejects an
-  init-array entry with "Function array entry 0x800005250 is not executable".
-  Bisected to `4f4fcb0 Add x86_64 native dynamic runtime`, which added the
-  `__davecc_shared_init` hook and `libc/dynamic_libc_lifecycle.c`.  This is what
-  makes `davecc_driver_defaults_test` fail, and it fails at that test's very first
-  hosted link, so everything after it in that script is currently unexercised.
+- **Fixed.** A hosted C++ program did not start on any dynamic target.  The
+  reported symptom was aarch64 rejecting an init-array entry with "Function array
+  entry 0x800005250 is not executable", and 0x800005250 is exactly twice the
+  correct 0x400002928: every address the loader relocated came out doubled.
+  x86_64 and RISC-V failed identically, and ARM failed for a separate reason
+  described below, so all four were broken.
+
+  A `.rela.dyn` `R_*_RELATIVE` entry carries the whole link-time value in its
+  addend, and the place contributes nothing.  The linker writes that value into
+  the place as well, so that this loader and a native `ld.so`, which assigns
+  `base + addend`, agree on the result; a check over the hosted binaries confirms
+  addend and place are equal for all 77 entries on each of aarch64, x86_64 and
+  RISC-V.  The loader was computing `base + place + addend` and so summing two
+  copies of the same address.  Only `.init_array` failed loudly, because the
+  lifecycle validates those entries before calling them; the 75 relocated `.data`
+  pointers were equally wrong and would have failed later.
+
+  Bisected to `4f4fcb0 Add x86_64 native dynamic runtime`, which is what
+  populated the addend -- it previously wrote a literal `0`, which made the
+  loader's `place + addend` correct by accident.  Since populating it is what a
+  native `ld.so` needs, the fix is on the loader side: aarch64, x86_64, RISC-V and
+  p-code now assign `base + addend` and ignore the place.
+
+  ARM is the one target whose dynamic relocations are `SHT_REL`, where the linker
+  drops the addend and the place is authoritative, so the doubling could not
+  happen there.  Its bug was the mirror image: the handler translated the linked
+  value to a runtime address, but the interpreter maps the image at a host
+  address above 4GB and the slot is 32 bits wide, so the result was truncated.
+  The interpreter already resolves a linked address on every guest access
+  precisely because it maps wherever it likes, so the handler now leaves the
+  linked value in place.  The `.init_array` entry then translates the way it
+  always did for a static image, and no ARM guest slot has to hold a host
+  address it cannot represent.
+
+  This is what made `davecc_driver_defaults_test` fail, at that test's very first
+  hosted link, so everything after it in the script had gone unexercised since
+  `4f4fcb0`; it all passes now.  It was also the real cause of the
+  `//:ir_optimizer_regression_test` failure, whose dynamically linked coroutine
+  cases hit the same error on RISC-V.  The test's hosted coverage now spans
+  RISC-V and x86_64 as well as aarch64 and ARM, since those two loaders were
+  equally broken and nothing exercised them.
+
+  Getting past the doubling exposed four further dynamic-linking defects, each
+  previously masked and none of them a regression from this fix:
+  - A p-code dynamically linked C++ coroutine program segfaults the interpreter
+    inside `memmove`, writing to 0x410105380, a guest data address that is not
+    mapped.  The same program is fine when linked `-static`, and a simpler
+    dynamic C++ program with a static initializer is fine, so it is specific to
+    the dynamic path.  This is what `//:ir_optimizer_regression_test` fails on
+    now.
+  - A data slot initialized to the address of a function imported from a DSO is
+    left as 0 on aarch64, RISC-V and x86_64, so calling through it faults.
+  - The p-code linker asserts `symbol_index != -1` in
+    `DynamicLinkerBuildDynamicRelocations` when a `-fpic` program has a global
+    pointer into its own `.data`.
+  - In a freestanding `-nostdlib` dynamic program on ARM and p-code the init
+    arrays never run, and on ARM `R_ARM_GLOB_DAT` truncates a host address into
+    a 32-bit GOT slot the same way `R_ARM_RELATIVE` did.  Both fail identically
+    with and without this fix.
 - **Fixed.** Throwing an exception cost time proportional to the size of the whole
   `.eh_frame`, so exceptions were around a thousand times more expensive than the
   work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully

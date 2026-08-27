@@ -6,6 +6,8 @@ DAVECC="$ROOT/$1"
 INTERPRETER="$ROOT/$2"
 LIBC="$ROOT/$3"
 ARM_INTERPRETER="$ROOT/$4"
+RISCV_INTERPRETER="$ROOT/$5"
+X86_64_INTERPRETER="$ROOT/$6"
 
 WORK="$(mktemp -d "${TEST_TMPDIR:-/tmp}/davecc-defaults.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -35,6 +37,23 @@ fi
 output="$("$ARM_INTERPRETER" hello.arm)"
 if [[ "$output" != "driver-defaults-ok" ]]; then
   echo "unexpected ARM dynamic program output: $output" >&2
+  exit 1
+fi
+
+# Every dynamic target resolves its own relocations, and a hosted C++ program is
+# the case that needs the pointer-valued ones: its .init_array holds pointers to
+# the static initializers that have to run before main.
+"$DAVECC" -target riscv hello.cc -o hello.riscv
+output="$("$RISCV_INTERPRETER" hello.riscv)"
+if [[ "$output" != "driver-defaults-ok" ]]; then
+  echo "unexpected RISC-V dynamic program output: $output" >&2
+  exit 1
+fi
+
+"$DAVECC" -target x86_64 hello.cc -o hello.x86_64
+output="$("$X86_64_INTERPRETER" -i hello.x86_64)"
+if [[ "$output" != "driver-defaults-ok" ]]; then
+  echo "unexpected x86-64 dynamic program output: $output" >&2
   exit 1
 fi
 

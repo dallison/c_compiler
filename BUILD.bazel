@@ -3492,6 +3492,8 @@ sh_test(
         "$(rootpath :aarch64)",
         "$(rootpath :libc_aarch64)",
         "$(rootpath :arm)",
+        "$(rootpath :riscv)",
+        "$(rootpath :x86_64)",
     ],
     data = [
         ":aarch64",
@@ -3500,6 +3502,10 @@ sh_test(
         ":libc_aarch64",
         ":libc_arm",
         ":libc_headers",
+        ":libc_riscv",
+        ":libc_x86_64",
+        ":riscv",
+        ":x86_64",
     ],
 )
 

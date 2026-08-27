@@ -199,17 +199,19 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
 
     case R_ARM_RELATIVE:
       {
-        uint64_t value =
+        // The place holds the linked address: ARM uses SHT_REL, so the addend
+        // stays in the place, and the linker leaves the resolved value there.
+        uint32_t linked =
             *(uint32_t*)target_address + (uint32_t)reloc->addend;
         if (lib->loader->arch->ignore_vaddr) {
-          if (!LoaderLinkedAddressToRuntime(lib->loader, lib, value, &value)) {
-            LoaderError("Cannot translate relative relocation\n");
-            break;
-          }
+          // The image is mapped wherever the host pleases, so its runtime
+          // address needs more than the 32 bits this slot has and cannot be
+          // stored here.  The interpreter resolves a linked address on every
+          // access for exactly this reason, so leave the linked value alone.
+          *(uint32_t*)target_address = linked;
         } else {
-          value += lib->load_address;
+          *(uint32_t*)target_address = linked + (uint32_t)lib->load_address;
         }
-        *(uint32_t*)target_address = (uint32_t)value;
       }
       break;
 

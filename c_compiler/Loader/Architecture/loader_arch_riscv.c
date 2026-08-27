@@ -45,10 +45,12 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
       break;
       
     case R_RISCV_RELATIVE:
-      // Relative to the library load address with no symbol.
-      *(uint64_t*)target_address = *(uint64_t*)target_address +
-                                   lib->load_address +
-                                   reloc->addend;
+      // Relative to the library load address with no symbol.  These come from
+      // SHT_RELA, where the addend alone is the link-time value; the place
+      // contributes nothing.  The linker also leaves that value in the place so
+      // a native ld.so and this loader agree, so adding the two would double
+      // the address.
+      *(uint64_t*)target_address = lib->load_address + reloc->addend;
       break;
       
   default:
