@@ -453,6 +453,28 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   parameter, from an inlined function, bound to a reference, from a member
   function, const-qualified, and a pointer to data member alongside, which is
   one word and still comes back in a register.
+- Fixed: reading a member back out of a local that was initialized to a constant
+  produced a load from the constant at `-O2`.  `receiver zero_initialized{0}; if
+  (zero_initialized.value != 0)` loaded from address zero, which asserted in the
+  ARM, AArch64 and RISC-V emitters (a load whose base operand never got a
+  register) and quietly read the wrong stack slot on x86-64.  It is what
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` hit at `-O2` once the
+  member-pointer return was fixed.
+
+  The SSA name of a variable stands for its storage.  The conditional constant
+  propagator gives that name the value a whole-variable store put there, which is
+  what a load straight through the name reads, and `EvaluateIntegerExpression`
+  then treated the same name as a plain number when it appeared in an expression.
+  Reaching a member builds `adda(ssavar, offset)`, which consumes the storage, so
+  folding the contents in produced the initializer plus the offset as an address.
+  An expression with a variable node as an operand is now overdefined.
+
+  Only locals whose address is never taken are affected, since
+  `IsSafeSSASymbol` already declines to track the rest, which is why a zero
+  initializer -- address zero -- was the visible case.
+  `cxx_testsuite/tests/exec/0441_member_of_initialized_local.cpp` covers a
+  single-member class, a member mutated after initialization, a member past the
+  first, and a nested class.
 
 ## Deep nesting outside the constructs already capped
 

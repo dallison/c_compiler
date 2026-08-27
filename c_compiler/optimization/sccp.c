@@ -276,11 +276,28 @@ static bool ReadOperands(SCCPContext* context, IRNode* inst,
   return true;
 }
 
+// A variable node's lattice value is the variable's *contents*, which is what a
+// load through it reads.  An expression that takes such a node as an operand is
+// consuming the variable's storage instead -- `adda(ssavar, offset)` addresses a
+// member of it -- so the contents say nothing about the result.
+static bool HasVariableOperand(IRNode* inst) {
+  for (size_t i = 0; i < inst->inputs.length; i++) {
+    IRNode* input = inst->inputs.value.p[i];
+    if (input != NULL && IRIsVariable(input)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
                                            IRNode* inst) {
   SCCPValue lhs;
   SCCPValue rhs;
   if (!ReadOperands(context, inst, &lhs, &rhs)) {
+    return OverdefinedValue();
+  }
+  if (HasVariableOperand(inst)) {
     return OverdefinedValue();
   }
 
