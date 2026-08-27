@@ -118,6 +118,15 @@ void DynamicLinkerDelete(DynamicLinker* s);
 void DynamicLinkerInventSymbols(struct Linker* linker, DynamicLinker* s);
 void DynamicLinkerDefineSymbols(Linker* linker);
 
+// The dynamic relocation for a data word holding the address of 'symbol'.  Each
+// architecture supplies its own pair of relocation types: one the loader
+// resolves by looking the symbol up, for a symbol that comes from a shared
+// object, and one it merely rebases, for everything defined in this link.
+struct Relocation* NewDataAddressRelocation(struct LinkerSymbol* symbol,
+                                            struct Relocation* reloc,
+                                            int32_t relative_type,
+                                            int32_t symbol_type);
+
 void DynamicLinkerBuildDynamicRelocations(struct Linker* linker);
 void DynamicLinkerBuildPLTRelocations(struct Linker* linker);
 void DynamicLinkerGatherDynamicRelocations(struct Linker* linker);

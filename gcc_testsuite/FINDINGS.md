@@ -101,14 +101,23 @@ thread-free reproducer for the AArch64 one was not found.
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
 
-- Chase the two remaining dynamic-linking defects the loader relocation fix made
-  reachable, listed with that fix below.  The other two, a p-code fault on the
-  first `malloc` of any dynamic program and an ARM `-fpic` fault on any reference
-  to the program's own globals, are fixed.
+- All four dynamic-linking defects the loader relocation fix made reachable are
+  fixed, as are the two found while fixing the ARM one, a static `-fpic` link
+  with no `.got` and `elfdump -r` misreading ELF32 relocations.  See the entries
+  below.
 
-- The two defects found while fixing the ARM one, a static `-fpic` link with no
-  `.got` and `elfdump -r` misreading ELF32 relocations, are both fixed; see the
-  entry with them below.
+- Three defects found while fixing the last two of those are open, in rough
+  order of reach.  They are recorded in full with the entry on the imported
+  symbol fix below.
+  - On aarch64, `-fpic` code reaches an `extern` data object with `adrp`/`add`
+    instead of through the GOT, so one that lives in a shared object resolves to
+    the wrong address and reads as 0.  This is a code generation defect rather
+    than a linker or loader one, and it is the widest of the three: it needs no
+    more than a hosted program reading a global out of a library.
+  - On ARM, a program linked against two shared objects faults in the loader
+    before `main`.  One is fine, which is why nothing has hit this.
+  - On aarch64 in interpreted mode with lazy binding, the first call through a
+    PLT slot loses its first argument register.
 
 ## Status
 
@@ -373,12 +382,67 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   equally broken and nothing exercised them.
 
   Getting past the doubling exposed four further dynamic-linking defects, each
-  previously masked and none of them a regression from this fix.  The p-code and
-  ARM `-fpic` ones are the two entries after this; these two are open:
-  - A data slot initialized to the address of a function imported from a DSO is
-    left as 0 on aarch64, RISC-V and x86_64, so calling through it faults.
-  - In a freestanding `-nostdlib` dynamic program on ARM and p-code the init
-    arrays never run.
+  previously masked and none of them a regression from this fix.  All four are
+  now fixed: the p-code and ARM `-fpic` ones are the two entries after this, and
+  the remaining two, a data slot holding the address of an imported symbol and a
+  shared object's init array, are the entry immediately below.  Both turned out
+  to affect every target rather than the three and the two recorded here, and
+  the second was a crash rather than a silent skip.
+- **Fixed.** Neither of the two ways a dynamic program reaches something in a
+  shared object worked, on any target, while a direct call through the PLT did,
+  which is all `//:dynamic_interpreters_test` covered.
+
+  A data word initialized to the address of an imported symbol was left holding
+  the load address, which is 0 for a fixed-address executable.  `-fpic` code
+  gets such a word a dynamic relocation, and `HandlePICRelocation` always chose
+  the relative form: the loader adds the load address to the addend, which is
+  right for a symbol defined in this link, where the addend is the whole
+  link-time value, and useless for one whose address only the loader knows,
+  where the addend is 0.  It now emits a symbol-based relocation for a symbol
+  satisfied by a shared object -- `GLOB_DAT` on aarch64 and x86_64, `R_RISCV_64`
+  and `R_PCODE_GOT_DATA` where there is no `GLOB_DAT`, and `R_ARM_ABS32` on ARM,
+  whose `GLOB_DAT` is defined as the symbol alone and would lose the addend of
+  something like `&imported_array[2]`.  Relative entries are emitted before
+  symbol ones so `DT_RELACOUNT`, which counts a leading run, stays true.
+
+  Telling the two cases apart needs a new `LinkerSymbol` flag: a symbol resolved
+  from a shared object is marked `defined` and has no section, and so is
+  indistinguishable from a COMMON symbol, which does get an address.  Two loader
+  handlers reachable for the first time also double-counted the addend, the same
+  way the relative ones did before the fix above: `R_RISCV_64` added the place to
+  a `SHT_RELA` addend, and `R_PCODE_GOT_DATA` dropped the addend entirely.
+
+  A shared object with a constructor crashed the loader before `main` on every
+  target but ARM.  `RelocateDynamicSection` adds the load address to the dynamic
+  tags whose values are addresses, and then `dynamic_section_relocated` tells the
+  accessor that the whole section holds runtime addresses -- so a tag missing
+  from that list is handed back with its link-time value and used as a pointer.
+  `DT_INIT_ARRAY`, `DT_FINI_ARRAY`, `DT_PREINIT_ARRAY` and `DT_REL` were all
+  missing, which is every remaining tag the loader reads as an address.  ARM
+  escaped because ELF32 images take a different path, `DecodeELF32DynamicTables`,
+  which translates the lifecycle arrays already.
+
+  `//:dynamic_dso_data_test` links a program against a shared object holding
+  data, an array, two functions and a constructor, and reaches all of them: five
+  data words holding addresses, interleaved so the emit order matters, a call
+  through a function pointer, one through an array of them, and a direct call.
+  It runs eagerly and lazily, as `//:dynamic_interpreters_test` does.
+
+  Three unrelated defects turned up while testing this, all confirmed present
+  before these fixes and all open:
+  - On aarch64, `-fpic` code reads a `extern` data object with `adrp`/`add`
+    rather than through the GOT, so an object imported from a shared object
+    resolves to the wrong address: the program sees 0 and no GOT slot is
+    allocated for it at all.  Reaching the same object through a pointer works,
+    which is why this did not show up above.
+  - On aarch64 in interpreted mode (`-i`) with lazy binding, the first call
+    through a PLT slot loses its first argument register: `Imported(98)` arrives
+    as `Imported(0)`.  Eager binding is fine, as is the compiled engine.
+    `//:dynamic_interpreters_test` misses it because its imported function takes
+    no arguments.
+  - On ARM, a program linked against two shared objects faults in the loader
+    before `main`, loading a pointer whose value is an instruction word.  One
+    shared object is fine.
 - **Fixed.** Any dynamically linked p-code program faulted on its first `malloc`,
   which made every p-code C++ program that allocates unusable.  This is what
   `//:ir_optimizer_regression_test` failed on once the relocation doubling above
@@ -458,9 +522,18 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   The ARM relocation names were also filled in, since the table stopped at the
   seven types an object file uses and left every dynamic one as "unknown".
 
+  `-d` had both faults as well, found while using it to check what the loader was
+  reading: an ELF32 dynamic entry is half the width of the canonical one, so
+  striding by the wide size read each tag out of the middle of its neighbours,
+  and every ARM dynamic section printed as nonsense such as `TEXTREL
+  17179869214`.  It now strides by `ops->dynamic_entry_size` and decodes, and
+  takes the string table from the `.dynstr` section rather than by applying
+  `DT_STRTAB`, a virtual address, to the decoded header.
+
   `//:elfdump_relocations_test` dumps an ARM object and an ARM executable, which
   cover `SHT_RELA` and the narrower addend-less `SHT_REL`, and an aarch64 object
-  to hold the shared ELF64 path.
+  to hold the shared ELF64 path.  It also dumps an ARM and an aarch64 shared
+  object's dynamic section for `-d`.
 - **Fixed.** A `-fpic -static` link was broken on every target, not just ARM:
   aarch64, RISC-V and p-code crashed the linker outright, while ARM and x86_64
   silently produced an executable that faulted on its first global.

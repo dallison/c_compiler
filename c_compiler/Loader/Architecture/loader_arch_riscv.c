@@ -37,10 +37,12 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
         LoaderError("Relocation refers on undefined symbol '%s'\n",
                     sym_name);
       } else {
-        *(uint64_t*)target_address = *(uint64_t*)target_address +
-              lib->load_address +
-              symbol->value +
-              reloc->addend;
+        // As for R_RISCV_RELATIVE below, this comes from SHT_RELA and the
+        // addend in the entry is the whole contribution; the place holds the
+        // link-time value so that a native ld.so agrees, and adding it here
+        // would count the addend twice.
+        *(uint64_t*)target_address =
+            lib->load_address + symbol->value + reloc->addend;
       }
       break;
       

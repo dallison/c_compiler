@@ -92,13 +92,11 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       break;
       
     case R_RISCV_64: {
-      // This is used for a relocation to a local symbol.
-      // Build a RELATIVE relocation and add it to the data_relocations
-      // in the dynamic linker.
-      Relocation* rel_reloc = NewRelativeRelocation(symbol, reloc->offset,
-                                                    reloc->section,
-                                                    R_RISCV_RELATIVE,
-                                                    reloc->addend);
+      // A data word holding an address.  RISC-V has no GLOB_DAT, so a symbol
+      // the loader has to resolve keeps this same type and is told apart by
+      // carrying a dynamic symbol index.
+      Relocation* rel_reloc = NewDataAddressRelocation(
+          symbol, reloc, R_RISCV_RELATIVE, R_RISCV_64);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }

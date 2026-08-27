@@ -757,14 +757,19 @@ enum Command {
   kLast,
 };
 
-static uint64_t FindDynamicSectionEntryValue(ELFDynamicSectionEntry* entry, int tag) {
-  while (entry->tag != DT(null)) {
-    if (entry->tag == tag) {
-      return entry->un.val;
-    }
-    entry++;
+// Decode the dynamic section entry at 'p' into the canonical (ELF64) form.  An
+// ELF32 entry is half the width, so it can neither be read in place nor strided
+// over with sizeof.
+static void ReadDynamicEntry(ELFReaderFile* elf, const char* p,
+                             ELFDynamicSectionEntry* out) {
+  if (elf->ops->is_64_bit) {
+    memcpy(out, p, sizeof(ELF64DynamicSectionEntry));
+    return;
   }
-  return 0;
+  ELF32DynamicSectionEntry in;
+  memcpy(&in, p, sizeof(in));
+  out->tag = in.tag;
+  out->un.val = in.un.val;
 }
 
 // DT tag number to name.
@@ -957,21 +962,21 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
   
   for (size_t i = 0; i < dynamic_sections.length; i++) {
     ELFReaderSection* dynamic_section = dynamic_sections.value.p[i];
-    ELFDynamicSectionEntry* entries = (ELFDynamicSectionEntry*)dynamic_section->contents;
-    uint64_t strtab_offset = FindDynamicSectionEntryValue(entries, DT(strtab));
 
-    if (elf->header->type == ET(exec)) {
-      strtab_offset &= 0xffffffff;      // in bottom 4GB.
-    }
-    char* strtab_addr = (char*)elf->header + strtab_offset;
-    
-    uint64_t length = dynamic_section->header->size;
-    char* start = (char*)entries;
-    char* end = start + length;
-    
-    char* p = start;
-    while (p < end) {
-      ELFDynamicSectionEntry* entry = (ELFDynamicSectionEntry*)p;
+    // DT_STRTAB is a virtual address, and turning one back into a position in
+    // the file needs the section table anyway, so just use the section.
+    ELFReaderSection* dynstr = ELFReaderFileFindSection(elf, ".dynstr");
+    const char* strtab_addr = dynstr != NULL ? dynstr->contents : NULL;
+
+    size_t entry_size = elf->ops->dynamic_entry_size;
+    const char* start = dynamic_section->contents;
+    const char* end = start + dynamic_section->header->size;
+
+    const char* p = start;
+    while (p + entry_size <= end) {
+      ELFDynamicSectionEntry storage;
+      ReadDynamicEntry(elf, p, &storage);
+      ELFDynamicSectionEntry* entry = &storage;
       printf("  %-16s", EntryTagName(entry));
       switch (entry->tag) {
         case DT(null):
@@ -982,7 +987,11 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
         case DT(soname):
         case DT(rpath):
         case DT(runpath):
-          printf("%s\n", strtab_addr + entry->un.val);
+          if (strtab_addr == NULL) {
+            printf("0x%" PRIx64 " (no .dynstr)\n", entry->un.val);
+          } else {
+            printf("%s\n", strtab_addr + entry->un.val);
+          }
           break;
         default:
           // Integers
@@ -1005,7 +1014,7 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
           printf("0x%" PRIx64 "\n", entry->un.ptr);
           break;
       }
-      p += sizeof(*entry);
+      p += entry_size;
     }
   }
   

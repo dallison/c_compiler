@@ -349,12 +349,23 @@ static void RelocateDynamicSection(LoadedDynamicLibrary* lib) {
   }
   for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
     switch (section->entries[i].tag) {
+      // Every tag the loader goes on to read as an address has to be here:
+      // dynamic_section_relocated then tells the accessor that the whole
+      // section holds runtime addresses, so a tag left out of this list is
+      // handed back with its link-time value and used as a pointer.  The
+      // lifecycle arrays were missing, which pointed a shared object's
+      // constructors at unmapped memory.  The ELF32 path in
+      // DecodeELF32DynamicTables translates the same set.
       case DT(symtab):
       case DT(strtab):
+      case DT(rel):
       case DT(rela):
       case DT(jmprel):
       case DT(pltgot):
       case DT(gnu_hash):
+      case DT(preinit_array):
+      case DT(init_array):
+      case DT(fini_array):
         section->entries[i].un.val += lib->load_address;
         break;
       default:

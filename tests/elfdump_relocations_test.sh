@@ -72,3 +72,19 @@ expect_absent "ARM executable" executable.dump "R_ARM_NONE"
 "$ELFDUMP" -r reloc-aarch64.o > object64.dump
 expect_contains "aarch64 object" object64.dump "pic_value"
 expect_contains "aarch64 object" object64.dump "printf"
+
+# -d had the same two faults as -r: an ELF32 dynamic entry is half the width of
+# the canonical one, so striding by the wide size read tags out of the middle of
+# their neighbours and printed sizes as addresses and vice versa.
+"$DAVECC" -target arm -fpic -shared reloc.c -o reloc-arm.so
+"$ELFDUMP" -d reloc-arm.so > dynamic32.dump
+expect_contains "ARM shared object" dynamic32.dump "SONAME *reloc-arm.so"
+expect_contains "ARM shared object" dynamic32.dump "STRTAB"
+expect_contains "ARM shared object" dynamic32.dump "SYMENT *16"
+# A tag misread as its neighbour's value shows up as an absurd size.
+expect_absent "ARM shared object" dynamic32.dump "TEXTREL *[0-9][0-9][0-9][0-9]"
+
+"$DAVECC" -target aarch64 -fpic -shared reloc.c -o reloc-aarch64.so
+"$ELFDUMP" -d reloc-aarch64.so > dynamic64.dump
+expect_contains "aarch64 shared object" dynamic64.dump "SONAME *reloc-aarch64.so"
+expect_contains "aarch64 shared object" dynamic64.dump "SYMENT *24"

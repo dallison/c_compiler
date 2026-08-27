@@ -21,6 +21,11 @@ typedef struct LinkerSymbol {
   ELFSymbol* header;
   String name;
   bool defined;         // LinkerSymbol is defined.
+  // Satisfied by a shared object rather than by anything in this link, so its
+  // address is not known until the loader resolves it.  This is not the same as
+  // having no section: a COMMON symbol has none either, but the linker does give
+  // it an address.
+  bool from_dynamic_library;
   bool invented;
   ELFReaderSection* section;    // Section containing symbol (or NULL for COM)
   struct ObjectFile* file;

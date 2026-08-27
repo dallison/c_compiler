@@ -37,7 +37,8 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
         LoaderError("Relocation refers on undefined symbol '%s'\n",
                     sym_name);
       } else {
-        *(uint64_t*)target_address = lib->load_address + symbol->value;
+        *(uint64_t*)target_address =
+            lib->load_address + symbol->value + reloc->addend;
       }
       break;
     case R_PCODE_GOT_FUNC:

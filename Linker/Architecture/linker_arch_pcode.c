@@ -86,13 +86,9 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       break;
       
     case R_PCODE_DATA64: {
-      // This is used for a relocation to a local symbol.
-      // Build a RELATIVE relocation and add it to the data_relocations
-      // in the dynamic linker.
-      Relocation* rel_reloc = NewRelativeRelocation(symbol, reloc->offset,
-                                                    reloc->section,
-                                                    R_PCODE_RELATIVE,
-                                                    reloc->addend);
+      // A data word holding an address.
+      Relocation* rel_reloc = NewDataAddressRelocation(
+          symbol, reloc, R_PCODE_RELATIVE, R_PCODE_GOT_DATA);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }

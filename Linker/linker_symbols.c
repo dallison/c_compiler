@@ -19,6 +19,7 @@ LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
   symbol->header = elf_sym;
   StringInit(&symbol->name, "");    // Name will be set later.
   symbol->defined = false;
+  symbol->from_dynamic_library = false;
   symbol->invented = false;
   symbol->section = NULL;
   symbol->file = file;

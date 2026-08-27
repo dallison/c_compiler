@@ -204,9 +204,18 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
         LoaderError("Relocation refers on undefined symbol '%s'\n",
                     sym_name);
       } else {
-        *(uint32_t*)target_address =
-            (uint32_t)(*(uint32_t*)target_address + symbol->value +
-                       (uint32_t)reloc->addend);
+        // ARM uses SHT_REL, so the addend is in the place rather than in the
+        // entry, and this is the type that adds it to the symbol.
+        uint32_t linked = *(uint32_t*)target_address +
+                          (uint32_t)reloc->addend + (uint32_t)symbol->value;
+        if (lib->loader->arch->ignore_vaddr) {
+          // As for R_ARM_RELATIVE: the runtime address needs more than the 32
+          // bits this word has, and the interpreter translates a linked address
+          // on every access, so leave the linked value here.
+          *(uint32_t*)target_address = linked;
+        } else {
+          *(uint32_t*)target_address = linked + (uint32_t)lib->load_address;
+        }
       }
       break;
 

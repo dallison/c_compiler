@@ -188,9 +188,13 @@ static void HandlePICRelocation(
       break;
 
     case R_ARM_ABS32: {
-      Relocation* rel_reloc = NewRelativeRelocation(
-          symbol, reloc->offset, reloc->section, R_ARM_RELATIVE,
-          reloc->addend);
+      // R_ARM_GLOB_DAT would be wrong for the symbol case: it is defined as the
+      // symbol alone, which suits a GOT slot but loses the addend of something
+      // like &imported_array[2].  ARM relocations are SHT_REL, so that addend
+      // is in the word being relocated, and R_ARM_ABS32 is the type that adds
+      // it.
+      Relocation* rel_reloc = NewDataAddressRelocation(
+          symbol, reloc, R_ARM_RELATIVE, R_ARM_ABS32);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }

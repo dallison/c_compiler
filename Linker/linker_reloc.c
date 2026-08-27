@@ -32,6 +32,7 @@ Relocation* NewRelocation(const char* symbol_name,
   reloc->type = reloc_type;
   reloc->addend = addend;
   reloc->addend_in_place = false;
+  reloc->resolve_by_symbol = false;
   reloc->section = target_section;
   return reloc;
 }
@@ -47,6 +48,7 @@ Relocation* NewLinkerSymbolRelocation(LinkerSymbol* symbol, int64_t offset,
   reloc->type = reloc_type;
   reloc->addend = 0;
   reloc->addend_in_place = false;
+  reloc->resolve_by_symbol = false;
   reloc->section = NULL;
   return reloc;
 }
@@ -65,6 +67,7 @@ Relocation* NewRelativeRelocation(LinkerSymbol* symbol,
    reloc->type = reloc_type;
    reloc->addend = addend;
    reloc->addend_in_place = false;
+   reloc->resolve_by_symbol = false;
    reloc->section = target_section;
    return reloc;
 }

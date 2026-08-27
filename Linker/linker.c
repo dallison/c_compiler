@@ -1048,6 +1048,7 @@ static void ResolveUndefined(void* entry, void* data) {
                                         &found_lib);
       if (ok) {
         symbol->defined = true;
+        symbol->from_dynamic_library = true;
       }
     }
   }

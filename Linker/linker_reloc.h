@@ -35,6 +35,11 @@ typedef struct Relocation {
   // the addend in the entry, and then the bytes being relocated hold nothing to
   // add: reading them anyway would count the addend twice.
   bool addend_in_place;
+  // A dynamic relocation the loader has to resolve by looking the symbol up,
+  // because its address is not known at link time.  The alternative, and the
+  // only kind this linker used to emit for data, is a relative one: the whole
+  // link-time value goes in the entry and the loader just rebases it.
+  bool resolve_by_symbol;
 } Relocation;
 
 Relocation* NewRelocation(const char* symbol_name,

@@ -73,9 +73,8 @@ static void HandlePICRelocation(
       break;
 
     case R_X86_64_64: {
-      Relocation* rel_reloc = NewRelativeRelocation(
-          symbol, reloc->offset, reloc->section, R_X86_64_RELATIVE,
-          reloc->addend);
+      Relocation* rel_reloc = NewDataAddressRelocation(
+          symbol, reloc, R_X86_64_RELATIVE, R_X86_64_GLOB_DAT);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }

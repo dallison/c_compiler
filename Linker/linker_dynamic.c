@@ -296,6 +296,25 @@ void DynamicLinkerFixupPLT(Linker* linker) {
   }
 }
 
+// Build the dynamic relocation for a data word that holds the address of
+// 'symbol', as an initialized pointer does.  A symbol satisfied by a shared
+// object has no address until the loader resolves it, so the entry has to name
+// it; anything defined in this link has its whole value known, and a relative
+// entry the loader only rebases is cheaper and needs no dynamic symbol.
+//
+// Getting this wrong is silent: a relative entry for an imported symbol carries
+// an addend of 0, and the loader dutifully writes the load base into the slot.
+Relocation* NewDataAddressRelocation(LinkerSymbol* symbol, Relocation* reloc,
+                                     int32_t relative_type,
+                                     int32_t symbol_type) {
+  bool by_symbol = symbol != NULL && symbol->from_dynamic_library;
+  Relocation* dyn_reloc = NewRelativeRelocation(
+      symbol, reloc->offset, reloc->section,
+      by_symbol ? symbol_type : relative_type, reloc->addend);
+  dyn_reloc->resolve_by_symbol = by_symbol;
+  return dyn_reloc;
+}
+
 // A fully static link has no runtime resolver, so there is nothing for a PLT
 // entry or a function GOT slot to indirect through.  Passing this in place of
 // the two PLT appenders leaves got_index and plt_index unset, which every
@@ -465,18 +484,41 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
   // Since we now know the symbol indexes we can create the relocation
   // entries in the table, overwriting the memory previously allocated.
   
-  // Data relocations come first.
+  // Data relocations come first, and within them the relative ones, because
+  // DT_RELACOUNT says how many entries from the start of the table are relative
+  // and a native ld.so relocates exactly that many without consulting a symbol.
   int32_t index = 0;
-  for (size_t i = 0; i < dynamic->data_relocations.length; i++) {
-    Relocation* reloc = dynamic->data_relocations.value.p[i];
-    int64_t offset = reloc->offset + reloc->section->address;
-    int64_t addend = reloc->addend;
-    if (reloc->symbol != NULL) {
-      addend += (int64_t)reloc->symbol->address;
+  for (int pass = 0; pass < 2; pass++) {
+    bool want_by_symbol = pass == 1;
+    for (size_t i = 0; i < dynamic->data_relocations.length; i++) {
+      Relocation* reloc = dynamic->data_relocations.value.p[i];
+      if (reloc->resolve_by_symbol != want_by_symbol) {
+        continue;
+      }
+      int64_t offset = reloc->offset + reloc->section->address;
+      if (want_by_symbol) {
+        // The loader supplies the address, so the entry names the symbol and
+        // the addend stays whatever the source relocation asked for.
+        // NewDataAddressRelocation only sets resolve_by_symbol when there is a
+        // symbol to name.
+        assert(reloc->symbol != NULL);
+        int symbol_index = reloc->symbol->dynamic_index != -1
+                               ? reloc->symbol->dynamic_index
+                               : reloc->symbol->index;
+        assert(symbol_index != -1);
+        StoreDynamicRelocation(linker, contents, (size_t)index, offset,
+                               symbol_index, reloc->addend, reloc->type);
+      } else {
+        // The whole link-time value goes in the entry for the loader to rebase.
+        int64_t addend = reloc->addend;
+        if (reloc->symbol != NULL) {
+          addend += (int64_t)reloc->symbol->address;
+        }
+        StoreDynamicRelocation(linker, contents, (size_t)index, offset, 0,
+                               addend, reloc->type);
+      }
+      index++;
     }
-    StoreDynamicRelocation(linker, contents, (size_t)index, offset, 0,
-                           addend, reloc->type);
-    index++;
   }
 
   // Now GOT relocations.
@@ -924,9 +966,19 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   FixupDynamicSectionEntryValue(
       elf->ops, buffer, uses_rel ? DT(relsz) : DT(relasz),
       dynamic_relocations->header.size);
+  // DT_RELACOUNT counts only the leading run of relative entries, which is why
+  // DynamicLinkerBuildDynamicRelocations emits those before the ones naming a
+  // symbol.
+  int64_t relative_count = 0;
+  for (size_t i = 0; i < dynamic_linker->data_relocations.length; i++) {
+    Relocation* reloc = dynamic_linker->data_relocations.value.p[i];
+    if (!reloc->resolve_by_symbol) {
+      relative_count++;
+    }
+  }
   FixupDynamicSectionEntryValue(
       elf->ops, buffer, uses_rel ? DT(relcount) : DT(relacount),
-      dynamic_linker->data_relocations.length);
+      relative_count);
   
   // GNU Hash.
   ELFWriterSection* hash = ELFWriterFindSection(elf, ".gnu_hash");
