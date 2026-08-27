@@ -1090,10 +1090,22 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
   // already assigned to one before allocating this block: the approximate
   // live-in sets can omit a variable in the middle of a switch chain even
   // though a loop backedge needs it again.
+  //
+  // A spilled variable is the exception.  Its value lives in its spill slot and
+  // every use reloads into a fresh register, so it no longer needs the register
+  // it was assigned before the spill -- `inst->reg` merely still names it.
+  // Reclaiming it squats on a register the variable will never read, and the
+  // squatting is not harmless: the live-in loop below refuses to reserve a
+  // register that another value already owns, so the value genuinely holding it
+  // across this block loses its reservation.  The victim search then finds the
+  // register owned by a spilled instruction, clears that stale ownership as it
+  // is entitled to, and hands the register to the next value needing one while
+  // the real owner is still live in it.
   for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
     RegisterVariable* var = allocator->g->var_regs.value.p[i];
     TargetInstruction* inst = var != NULL ? var->inst : NULL;
-    if (inst != NULL && inst->reg != NULL && !inst->reg->reserved) {
+    if (inst != NULL && inst->reg != NULL && !inst->reg->reserved &&
+        (inst->flags & TARGET_INST_SPILLED) == 0) {
       assert(inst->reg->owner == NULL || inst->reg->owner == inst);
       inst->reg->owner = inst;
     }

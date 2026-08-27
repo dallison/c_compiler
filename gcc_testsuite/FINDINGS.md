@@ -46,18 +46,18 @@ Then compare `rg -n "^FAIL|pass=" <testlog>` for each.  Remember to rebuild
 `bazel-bin/davecc`, so a stale binary silently measures the wrong compiler.
 
 The failing names below have not changed since `28c946e`.  The pass counts are
-current as of the `PT_TLS` fix; each C++ exec suite gained two tests since
-`28c946e` (`0444` and `0445`), so an older reading of this table is two low
-there and otherwise identical:
+current as of the spilled-variable-register fix; each C++ exec suite gained three
+tests since `28c946e` (`0444`, `0445` and `0446`), so an older reading of this
+table is low by that many there and otherwise identical:
 
 ```text
-exec_aarch64        pass=408 fail=0
-exec_arm            pass=405 fail=3   0158_standard_variant_constexpr (compile),
+exec_aarch64        pass=409 fail=0
+exec_arm            pass=406 fail=3   0158_standard_variant_constexpr (compile),
                                       0305_standard_expected (compile),
                                       0401_standard_stacktrace
-exec_riscv          pass=406 fail=2   0276_standard_string_conversions,
+exec_riscv          pass=407 fail=2   0276_standard_string_conversions,
                                       0327_standard_filesystem
-exec_x86_64         pass=408 fail=0
+exec_x86_64         pass=409 fail=0
 single_exec_aarch64 pass=248 fail=3   00200, 00216, 00219
 single_exec_arm     pass=247 fail=3   00200, 00216, 00219
 single_exec_riscv   pass=243 fail=8   00078, 00186, 00187, 00189, 00200,
@@ -78,41 +78,6 @@ returned 137 under the ARM interpreter until the `.bss` fix landed, and a
 thread-free reproducer for the AArch64 one was not found.
 
 ## Next in the queue
-
-- A chained `||` over 64-bit globals reads back a value that was just written as
-  though the write had not happened, on ARM at `-O2` only.  Every other target
-  passes, `-O0` passes, and splitting the condition into three separate `if`s
-  makes it pass on ARM too, so the comparisons themselves are fine and it is the
-  chain that goes wrong.  Pre-existing: identical before and after the `PT_TLS`
-  fix, and no TLS is involved.
-
-```cpp
-#include <stdint.h>
-int64_t g_wide = 0x1122334455667788LL;
-int64_t g_narrow = 0x0a0b0c0dLL;
-int g_zero;
-static unsigned char bss_bytes[4];
-int main() {
-  for (int i = 0; i < 4; i++) if (bss_bytes[i] != 0) return 6;
-  if (g_wide != 0x1122334455667788LL) return 7;
-  if (g_narrow != 0x0a0b0c0dLL) return 8;
-  if (g_zero != 0) return 9;
-  g_wide = 1;
-  g_narrow = 2;
-  g_zero = 3;
-  if (g_wide != 1 || g_narrow != 2 || g_zero != 3) return 10;   // returns 10
-  return 0;
-}
-```
-
-  It does not reduce further, which is the interesting part.  Dropping the loop,
-  dropping the three reads before the writes, or dropping `g_zero` so the chain
-  has two terms instead of three all make it pass, and none of those pieces
-  feeds the chain.  That combination of an unrelated loop plus a spread of live
-  values points at register pressure around the chain rather than at the
-  comparison lowering, so start by diffing `-O2` ARM output for this against the
-  three-separate-`if`s version.  The three ARM register allocator and liveness
-  fixes below are the nearest precedent.
 
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
@@ -746,6 +711,46 @@ int main() {
   those two directly flagged 12 of 16 target/shape combinations before the fix
   and none after.
 
+- Fixed: a chained `||` read back a value that had just been written as though
+  the write had not happened, on ARM at `-O2`.  Every other target passed, `-O0`
+  passed, and splitting the condition into separate `if`s passed on ARM too, so
+  the comparisons were fine and the chain was where it went wrong.
+  `cxx_testsuite/tests/exec/0446_spilled_var_reg_keeps_no_register.cpp` covers
+  it and returns 7 on ARM at `-O2` before the fix.
+
+  `InitializeBasicBlockRegisters` in `c_compiler/arm/arm_reg_alloc.c` reclaims a
+  promoted variable's register at every block entry, because the approximate
+  live-in sets can omit a variable that a loop back edge needs again.  It did so
+  for a variable that had since been spilled as well.  A spilled value lives in
+  its slot and every use reloads into a fresh register, so it has no claim on the
+  register it held before the spill -- `inst->reg` merely still names it, since
+  `SpillInstruction` clears the ownership but not the field.
+
+  The squatting is not harmless, and the failure needs all three steps.  The
+  live-in loop right below refuses to reserve a register another value already
+  owns, so the value genuinely holding it across the block silently lost its
+  reservation.  The spill-victim search then found a register owned by a spilled
+  instruction and cleared that stale ownership, as it is entitled to.  The
+  register now looked free, so the next value needing one took it while the real
+  owner was still live in it.  One line fixes it: skip a spilled variable in the
+  reclaim loop, which is the check the live-in loop already makes.
+
+  In the reproducer the spilled variable is the pointer walking a `.bss` array
+  and the value it displaced is the constant 3, materialized once for `g_zero = 3`
+  and reused as the third term's comparison operand two blocks later.  The middle
+  term's block took the register, so the chain compared `g_zero` against a
+  boolean.
+
+  It resisted reduction, which is worth knowing for the next one of these:
+  removing the loop, the reads before the writes, or one term of the chain all
+  make it pass, and none of those feeds the chain.  They only change which value
+  lands in the squatted register.  Reading the `-O2` assembly is what actually
+  found it -- `cmp r8, r5` where the working version had `cmp r7, #3` -- and
+  tracing `r5` backwards through the block order.  The other three backends do
+  not have this defect: x86-64 and RISC-V mark variable registers `reserved` for
+  the whole function so they never enter the dynamic pool, and AArch64 has no
+  block-entry reclaim loop at all.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now
@@ -810,10 +815,14 @@ built before this work and so not caused by it:
 - `//cxx_testsuite:exec_x86_64` fails three tests whose guest programs exceed
   the harness's 30 second run timeout on this machine (35 s, 37 s and 75 s);
   all three exit 0 when run without it.
-- `//:libc_arm_test` is flaky.  It failed once in a `bazel test //...` run and
-  then passed on its own and in two later full runs with the same compiler, so
-  treat a single failure there as noise and re-run it before believing it.  Its
-  thread cases (mutex, condition, addr_wait) are the likely source.
+- `//:libc_arm_test` is flaky, and only under the parallel load of a full
+  `bazel test //...`; on its own it does not fail.  Measured while validating the
+  spilled-variable-register fix: it failed one full run (`thread_condition`),
+  passed the next, and passed 6 of 6 runs on its own with that fix and 10 of 10
+  with it stashed.  Treat a single failure there as noise, but confirm it the
+  same way rather than assuming -- a change to the ARM backend is exactly the
+  kind that could make it real.  Its thread cases (mutex, condition, addr_wait)
+  are the source.
 
 A full `bazel test //... --keep_going` is worth running for a change that
 touches a backend, since the nine suites above do not cover the 6502, the
