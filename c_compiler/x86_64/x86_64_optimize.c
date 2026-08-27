@@ -57,6 +57,27 @@ struct OptimizerData {
   X86_64Generator* rv;
 };
 
+// An atomic read-modify-write updates memory as well as producing a value, so
+// it must survive even when nobody reads the value it returns.  The fence is
+// carried on a nop, which is otherwise an ordinary expression.  An atomic store
+// lowers to a plain store, which is already not an expression.  An atomic load
+// lowers to a plain load and so cannot be distinguished here; unlike the other
+// backends, where the load pseudo carries its own barrier, x86-64 needs no
+// barrier around it.
+static bool X86_64HasImplicitEffect(TargetInstruction* inst) {
+  switch ((X86_64Opcode)inst->opcode) {
+    case X86_64_OP(atomic_fetch_add_sub):
+    case X86_64_OP(atomic_compare_exchange_bool):
+    case X86_64_OP(atomic_compare_exchange_val):
+    case X86_64_OP(atomic_compare_exchange_n):
+      return true;
+    case X86_64_OP(nop):
+      return (inst->flags & X86_64_MFENCE) != 0;
+    default:
+      return false;
+  }
+}
+
 // Some moves (mv/fmv_*) store into operand[0] when dest is NULL.
 static TargetInstruction* InstructionResult(TargetInstruction* inst) {
   if (inst->dest != NULL) {
@@ -93,7 +114,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     X86_64Opcode opcode = (X86_64Opcode)inst->opcode;
-    if (!inst->observable_checkpoint &&
+    if (!inst->observable_checkpoint && !X86_64HasImplicitEffect(inst) &&
         X86_64IsExpression(inst) &&
         !X86_64IsSymbol(inst) && !X86_64IsConst(inst) && opcode != X86_64_OP(tmp) &&
         opcode != X86_64_OP(sp)) {

@@ -324,6 +324,8 @@ bool ARMIsExpression(TargetInstruction* inst) {
     case ARM_OP(sturb):
     case ARM_OP(sturh):
     case ARM_OP(fstr):
+    case ARM_OP(atomic_store):
+    case ARM_OP(atomic_fence):
     case ARM_OP(loc):
     case ARM_OP(named_label):
     case ARM_OP(regarg):

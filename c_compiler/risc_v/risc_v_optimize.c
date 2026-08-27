@@ -60,6 +60,26 @@ struct OptimizerData {
   RVGenerator* rv;
 };
 
+// An atomic read-modify-write updates memory as well as producing a value, and
+// an atomic load carries the `fence` its ordering needs, so both must survive
+// even when nobody reads the value they return.  The plain atomic store and the
+// standalone fence are already not expressions; these are.
+static bool RVHasImplicitEffect(TargetInstruction* inst) {
+  switch ((RVOpcode)inst->opcode) {
+    case RV_OP(atomic_load):
+    case RV_OP(atomic_fetch_add):
+    case RV_OP(atomic_fetch_sub):
+    case RV_OP(atomic_add_fetch):
+    case RV_OP(atomic_sub_fetch):
+    case RV_OP(atomic_compare_exchange_bool):
+    case RV_OP(atomic_compare_exchange_val):
+    case RV_OP(atomic_compare_exchange_n):
+      return true;
+    default:
+      return false;
+  }
+}
+
 
 // Remove unused instructions from the basic block.
 // The algorithm uses a filter to determine if the result
@@ -85,7 +105,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     RVOpcode opcode = (RVOpcode)inst->opcode;
-    if (!inst->observable_checkpoint &&
+    if (!inst->observable_checkpoint && !RVHasImplicitEffect(inst) &&
         RVIsExpression(inst) &&
         !RVIsSymbol(inst) && !RVIsConst(inst) && opcode != RV_OP(tmp) &&
         opcode != RV_OP(sp)) {

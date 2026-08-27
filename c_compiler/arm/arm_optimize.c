@@ -60,6 +60,26 @@ struct OptimizerData {
   ARMGenerator* rv;
 };
 
+// An atomic read-modify-write updates memory as well as producing a value, and
+// an atomic load carries the `dmb ish` its ordering needs, so both must survive
+// even when nobody reads the value they return.  The plain atomic store and the
+// standalone fence are already not expressions; these are.
+static bool ARMHasImplicitEffect(TargetInstruction* inst) {
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(atomic_load):
+    case ARM_OP(atomic_fetch_add):
+    case ARM_OP(atomic_fetch_sub):
+    case ARM_OP(atomic_add_fetch):
+    case ARM_OP(atomic_sub_fetch):
+    case ARM_OP(atomic_compare_exchange_bool):
+    case ARM_OP(atomic_compare_exchange_val):
+    case ARM_OP(atomic_compare_exchange_n):
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Comparison instructions produce condition flags rather than a register
 // result.  The flags are consumed by a following conditional branch / csel,
 // but that dependency is not modelled as an operand, so dead-code elimination
@@ -116,7 +136,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     ARMOpcode opcode = (ARMOpcode)inst->opcode;
-    if (!inst->observable_checkpoint &&
+    if (!inst->observable_checkpoint && !ARMHasImplicitEffect(inst) &&
         ARMIsExpression(inst) && !ARMSetsConditionFlags(inst) &&
         !ARMIsSymbol(inst) && !ARMIsConst(inst) && opcode != ARM_OP(tmp) &&
         opcode != ARM_OP(sp)) {

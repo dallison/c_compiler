@@ -27,6 +27,84 @@ Build before reproducing:
 bazel build //:davecc
 ```
 
+### Validating a codegen fix against a baseline
+
+A suite-wide pass count hides which tests moved, so run the four exec suites and
+the five single-exec suites twice -- once with the change stashed -- and compare
+the two lists of failures rather than the two totals.
+
+```sh
+bazel test //cxx_testsuite:exec_x86_64 //cxx_testsuite:exec_aarch64 \
+  //cxx_testsuite:exec_arm //cxx_testsuite:exec_riscv \
+  //c_testsuite:single_exec_aarch64 //c_testsuite:single_exec_arm \
+  //c_testsuite:single_exec_riscv //c_testsuite:single_exec_x86_64 \
+  //c_testsuite:single_exec_65c02 --test_output=summary --keep_going
+```
+
+Then compare `rg -n "^FAIL|pass=" <testlog>` for each.  Remember to rebuild
+`//:davecc` after stashing or unstashing; the interpreters read
+`bazel-bin/davecc`, so a stale binary silently measures the wrong compiler.
+
+Measured at `28c946e`, which is the baseline the atomics fix below was compared
+against:
+
+```text
+exec_aarch64        pass=406 fail=0
+exec_arm            pass=403 fail=3   0158_standard_variant_constexpr (compile),
+                                      0305_standard_expected (compile),
+                                      0401_standard_stacktrace
+exec_riscv          pass=404 fail=2   0276_standard_string_conversions,
+                                      0327_standard_filesystem
+exec_x86_64         pass=406 fail=0
+single_exec_aarch64 pass=248 fail=3   00200, 00216, 00219
+single_exec_arm     pass=247 fail=3   00200, 00216, 00219
+single_exec_riscv   pass=243 fail=8   00078, 00186, 00187, 00189, 00200,
+                                      00216, 00219, 00244
+single_exec_x86_64  pass=242 fail=1   00200
+single_exec_65c02   pass=234 fail=3   00200, 00219, 00246
+```
+
+Also pre-existing and unrelated: `//c_testsuite:warning_diagnostics`,
+`//cxx_testsuite:modules_{x86_64,aarch64,arm}`,
+`//cxx_testsuite:exec_stacktrace_65c02`, and a
+`//cxx_testsuite:bazel_hello_module` build failure that needs `--keep_going` to
+get past.
+
+Note that a thread test cannot be used as the `-O2` regression for the three
+register allocator and liveness fixes below: every `std::thread` program still
+returned 137 under the ARM interpreter until the `.bss` fix landed, and a
+thread-free reproducer for the AArch64 one was not found.
+
+## Next in the queue
+
+- A `PT_TLS` image with file content is mapped at an address inside `.bss`, so a
+  program with a `thread_local int x = 5;` and a `.bss` array reads the TLS image
+  out of the array's first bytes.  Returns 5 on x86-64 and AArch64, passes on
+  ARM, pre-existing:
+
+```cpp
+thread_local int tls_value = 5;
+static unsigned char bss_first;
+static int bss_ints[64];
+int main() {
+  if (bss_first != 0) return 4;
+  for (int i = 0; i < 64; i++) if (bss_ints[i] != 0) return 5;
+  return tls_value == 5 ? 0 : 6;
+}
+```
+
+  The mapping is set up in `WriteProgramHeaders` in
+  `c_compiler/ELF/elf_writer.c`, which points `PT_TLS` at
+  `data vaddr + (tls offset - data offset)`.  Nothing reserves address space for
+  the image, so it lands wherever `.bss` starts.  A fix has to give the image its
+  own address range inside the writable segment while leaving TLS symbol values
+  section-relative for local-exec relocations.
+
+- Triage the remaining non-extension outcome failures from the runner into real
+  defects.
+
+- Report the AArch64 hosted C++ loader regression bisected to `4f4fcb0`.
+
 ## Status
 
 Fixed so far, each with a regression in this repository:
@@ -554,6 +632,64 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   the array's first bytes holding the TLS image on x86-64 and AArch64.  That is
   the same defect from the other side and is not fixed yet.
 
+- Fixed: an atomic operation whose returned value nobody reads was deleted at
+  `-O2` on ARM, x86-64 and RISC-V, while the memory it was supposed to update
+  kept its old value.  The target-instruction dead-code pass decides what to
+  keep from an instruction's register result alone, and an atomic has an effect
+  that its result does not describe.  AArch64 was the only backend that already
+  asked separately, through `AARCH64HasImplicitEffect`.
+  `cxx_testsuite/tests/exec/0444_atomics_survive_unused_result.cpp` covers all
+  of it, and it fails on each of the three targets before the fix and passes on
+  AArch64.
+
+  ARM lost the store.  `ARMIsExpression` did not list `ARM_OP(atomic_store)` or
+  `ARM_OP(atomic_fence)` next to the plain stores, so a store -- which has no
+  register result at all -- looked like an expression nobody read.
+  `value.store(...)` compiled to a prologue and an epilogue with nothing in
+  between.  This is what remained of
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` returning 5 on ARM at
+  `-O2`, and it needs no threads to show:
+
+```cpp
+#include <atomic>
+
+int main() {
+  std::atomic<unsigned long> value{0};
+  value.store(0x12abcdefUL);
+  return value.load() == 0x12abcdefUL ? 0 : 5;
+}
+```
+
+  Note `unsigned long` is 32 bits on ARM, so keep any literal inside 32 bits or
+  the comparison fails for its own reasons.  RISC-V already listed both opcodes
+  and x86-64 lowers an atomic store to a plain store, so neither needed this
+  half.
+
+  ARM, x86-64 and RISC-V all lost the read-modify-writes -- `fetch_add`,
+  `fetch_sub`, `add_fetch`, `sub_fetch` and the three compare-exchange forms.
+  Those cannot be fixed the same way, because they do produce a value and are
+  genuinely expressions when someone reads it; the pass has to ask separately
+  whether the instruction has an effect beyond its result.  Each of the three
+  backends now has a `HasImplicitEffect` predicate listing those opcodes,
+  consulted in `RemoveBlockUnusedExpressions` alongside the existing
+  `observable_checkpoint` check, which is the shape AArch64 already had.
+
+  Three barriers were being dropped along with the instruction that carried
+  them, and the predicate now keeps all three.  x86-64 carries
+  `atomic_thread_fence` on a `nop` flagged `X86_64_MFENCE`, so a seq_cst fence
+  emitted no `mfence` at all at `-O2`.  On ARM and RISC-V the `atomic_load`
+  pseudo emits its own `dmb ish` / `fence` around the load, so discarding the
+  loaded value discarded the ordering with it; AArch64 already kept
+  `atomic_load`, and needs no separate barrier because it uses `ldar`.  x86-64
+  is the one target where an atomic load cannot be protected -- it lowers to an
+  ordinary load, indistinguishable from any other -- and is also the one that
+  needs no barrier around it.
+
+  None of the three barriers has a check in the regression, because a missing
+  fence is not observable under a single-threaded interpreter.  They were
+  confirmed by counting `mfence`, `dmb ish` and `fence` in `-S` output for a
+  program whose only atomic is one whose result is discarded.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now
@@ -606,8 +742,9 @@ none is a crash or a hang and no test in the sweep covers them:
 Unrelated failures seen while validating, each reproducible with a compiler
 built before this work and so not caused by it:
 
-- `//:c23_bitint_test` fails: an `unsigned _BitInt(5)` bitfield read gives the
-  wrong value at `-O2` but not at `-O0`.
+- `//:c23_bitint_test` used to fail: an `unsigned _BitInt(5)` bitfield read gave
+  the wrong value at `-O2` but not at `-O0`.  It passes as of `28c946e`, so one
+  of the intervening `-O2` fixes covered it.
 - `//c_testsuite:single_exec_x86_64` fails `00200.c`.
 - `//c_testsuite:warning_diagnostics` fails: the script runs davecc with
   `-Werror=unused-value` under `set -e` and expects it to succeed, but promoting
@@ -617,6 +754,33 @@ built before this work and so not caused by it:
 - `//cxx_testsuite:exec_x86_64` fails three tests whose guest programs exceed
   the harness's 30 second run timeout on this machine (35 s, 37 s and 75 s);
   all three exit 0 when run without it.
+- `//:libc_arm_test` is flaky.  It failed once in a `bazel test //...` run and
+  then passed on its own and in two later full runs with the same compiler, so
+  treat a single failure there as noise and re-run it before believing it.  Its
+  thread cases (mutex, condition, addr_wait) are the likely source.
+
+A full `bazel test //... --keep_going` is worth running for a change that
+touches a backend, since the nine suites above do not cover the 6502, the
+modules tests or the libc tests.  It runs 122 targets and the two sets barely
+overlap: the five `//c_testsuite:single_exec_*` targets are tagged `manual`, so
+`//...` does not include them at all, and must be asked for by name.
+
+At `28c946e` a full run leaves these 17 failing, and a change that adds no name
+to this list has not regressed anything the repository can detect:
+
+```text
+//:6502_codegen_cleanup_test      //:multiarch_inline_asm_test
+//:6502_single_byte_copy_test     //:mutex_65c02_test
+//:6502_tail_call_test            //c_testsuite:warning_diagnostics
+//:65c02_cxx_test                 //cxx_testsuite:exec_arm
+//:c23_numeric_headers_test       //cxx_testsuite:exec_riscv
+//:davecc_driver_defaults_test    //cxx_testsuite:exec_stacktrace_65c02
+//:ir_optimizer_regression_test   //cxx_testsuite:modules_aarch64
+//:libc_x86_64_test               //cxx_testsuite:modules_arm
+                                  //cxx_testsuite:modules_x86_64
+```
+
+`//:c23_bitint_test` is no longer among them; it passes now.
 
 ## Priority 1: deeply nested `else if` stack overflow
 
