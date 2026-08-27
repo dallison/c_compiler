@@ -253,6 +253,40 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   `__davecc_shared_init` hook and `libc/dynamic_libc_lifecycle.c`.  This is what
   makes `davecc_driver_defaults_test` fail, and it fails at that test's very first
   hosted link, so everything after it in that script is currently unexercised.
+- Throwing an exception costs time proportional to the size of the whole
+  `.eh_frame`, so exceptions are around a thousand times more expensive than the
+  work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully
+  parses every entry in the table on every frame lookup, and does not stop at the
+  first match: it keeps scanning so that it can pick a "best" candidate among all
+  the FDEs that contain the pc.  A lookup is therefore O(entries) and a throw is
+  O(frames x entries), with no index or cache in front of it.
+
+  Measured on x86_64, where the interpreter runs about 5M guest instructions a
+  second, one throw/catch takes 1.8s -- roughly 9M instructions to unwind two
+  frames.  Both factors are visible directly.  Adding 800 functions that are
+  never called grows `.eh_frame` from 21KB to 79KB and takes a single throw from
+  1.93s to 6.53s, about 80us per byte of table per throw; in the 21KB binary
+  about 88% of a throw is spent on FDEs for functions unrelated to it.
+  Independently, throwing through 1, 4 and 16 frames costs 2.59s, 4.51s and
+  12.69s.
+
+  This is what makes `cxx_testsuite:exec_x86_64` fail.  Its two failing tests,
+  `0115_standard_vector_exception_safety.cpp` and
+  `0124_standard_vector_range_exception_safety.cpp`, do four throws each from
+  inside `std::vector`, which is 36s against the harness's 30s per-test limit in
+  `cxx_testsuite/run_exec_tests.sh`.  They are not stuck: truncating `main` to run
+  0 to 4 of the four subtests gives 0.1s, 10.8s, 17.0s, 25.7s and 34.9s.  Raising
+  bazel's `--test_timeout` does not help, because the limit that kills them is the
+  harness script's own `TIMEOUT=30`.
+
+  The fix is an index rather than a scan: build a lazily-initialized array of
+  (pc_begin, pc_end) per module, sorted by pc_begin, and binary search it,
+  keeping the existing "best candidate" tie-break for the overlapping entries the
+  current code is careful about.  Tracking the largest span in the index bounds
+  how far back the search has to look, so the usual non-overlapping table costs
+  one or two probes.  Note that allocating during a throw is its own hazard, so a
+  fixed-capacity index that falls back to today's scan for very large tables is
+  worth preferring over one that calls malloc while unwinding.
 
 ## Deep nesting outside the constructs already capped
 
