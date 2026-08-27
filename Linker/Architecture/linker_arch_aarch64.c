@@ -390,8 +390,18 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_AARCH64_CALL_PLT: {
-      uint64_t plt_address = linker->dynamic_linker->plt_group->address;
-      uint64_t addr = plt_address + (uint64_t)symbol->plt_index * 16 + (uint64_t)A;
+      // A fully static link builds no PLT because there is no runtime resolver
+      // for a trampoline to reach; the callee's address is final, so the call
+      // goes straight to it.
+      uint64_t addr;
+      if (linker->dynamic_linker == NULL || symbol == NULL ||
+          symbol->plt_index < 0 ||
+          linker->dynamic_linker->plt_group == NULL) {
+        addr = S + (uint64_t)A;
+      } else {
+        addr = linker->dynamic_linker->plt_group->address +
+               (uint64_t)symbol->plt_index * 16 + (uint64_t)A;
+      }
       int64_t offset = (int64_t)(addr - P);
       uint32_t instruction = *(uint32_t*)target_address;
       instruction &= ~0x03ffffffu;
@@ -455,6 +465,10 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_ADR_GOT_PAGE: {
+      if (linker->dynamic_linker->got_plt_group == NULL) {
+        LinkerError(file, "GOT relocation in a link with no GOT");
+        return;
+      }
       uint64_t got_address = linker->dynamic_linker->got_plt_group->address;
       uint64_t addr = got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
       uint32_t instruction = EncodeAdrp(0, P, addr);
@@ -468,6 +482,10 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       if (page_reloc == NULL ||
           page_reloc->type != R_AARCH64_ADR_GOT_PAGE) {
         LinkerError(file, "Missing ADR_GOT_PAGE for LD64_GOT_LO12_NC");
+        return;
+      }
+      if (linker->dynamic_linker->got_plt_group == NULL) {
+        LinkerError(file, "GOT relocation in a link with no GOT");
         return;
       }
       LinkerSymbol* got_symbol =

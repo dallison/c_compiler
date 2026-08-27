@@ -367,11 +367,20 @@ static void ApplyRelocation(Linker* linker,
       // PLT.  The instruction will be an call
       // instruction that contains the offset relative to the current
       // PC.
-      uint64_t plt_address = linker->dynamic_linker->
-          plt_group->address;
-      
-      // Each PLT entry is 16 bytes long.
-      uint64_t addr = plt_address + symbol->plt_index * 16 + A;
+      //
+      // A fully static link builds no PLT because there is no runtime resolver
+      // for a trampoline to reach; the callee's address is final, so the call
+      // goes straight to it.
+      uint64_t addr;
+      if (linker->dynamic_linker == NULL || symbol == NULL ||
+          symbol->plt_index < 0 ||
+          linker->dynamic_linker->plt_group == NULL) {
+        addr = S + (uint64_t)A;
+      } else {
+        // Each PLT entry is 16 bytes long.
+        addr = linker->dynamic_linker->plt_group->address +
+               (uint64_t)symbol->plt_index * 16 + (uint64_t)A;
+      }
       int32_t offset = (int32_t)(addr - P);
       SplitValue(offset, &hi20, &lo12);
       SetBitField32(target_address, 12, 20, hi20);

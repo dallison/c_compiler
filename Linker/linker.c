@@ -1770,11 +1770,12 @@ void LinkerLinkAllFiles(Linker* linker) {
   }
   // Resolve all undefined symbols in libraries.
   ResolveUndefinedSymbols(linker);
-  if (!linker->fully_static) {
-    // Archive members are only materialized while resolving undefined
-    // symbols, so collect their GOT and PLT relocations afterward.
-    DynamicLinkerGatherDynamicRelocations(linker);
-  }
+  // Archive members are only materialized while resolving undefined
+  // symbols, so collect their GOT and PLT relocations afterward.  A static
+  // link needs this too: position-independent code reads variable addresses
+  // out of the GOT whether or not there is a loader to relocate them.
+  DynamicLinkerGatherDynamicRelocations(linker);
+  bool static_got = DynamicLinkerNeedsStaticGOT(linker);
   
   // Find all PROGBITS sections and group by name.  These are sections
   // that have data associated with them in the ELF file.  This also
@@ -1810,6 +1811,8 @@ void LinkerLinkAllFiles(Linker* linker) {
     InventARMExidxBounds(linker);
     LinkerInventArrayBoundsSymbols(linker);
     DynamicLinkerCreateDynamicLinkerGroups(linker);
+  } else if (static_got) {
+    DynamicLinkerCreateStaticGOTGroups(linker);
   }
   
   // Assign addresses to all sections.
@@ -1941,6 +1944,10 @@ void LinkerLinkAllFiles(Linker* linker) {
     // Fixup the GOT and PLT now that we have all the addresses.
     DynamicLinkerFixupGOT(linker);
     DynamicLinkerFixupPLT(linker);
+  } else if (static_got) {
+    // No loader will relocate these slots, so give them their final values.
+    DynamicLinkerDefineStaticGOTSymbol(linker);
+    DynamicLinkerResolveStaticGOT(linker);
   }
   
   if (linker->print_symbol_tables) {

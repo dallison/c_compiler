@@ -57,6 +57,10 @@ void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
   s->plt_group = NULL;
   s->got_group = NULL;
   s->got_plt_group = NULL;
+  // Only a dynamic link invents these up front, so a static link has to see
+  // them as absent rather than as uninitialized.
+  s->global_offset_table_symbol = NULL;
+  s->dynamic_symbol = NULL;
 
   DynamicLibraryRegistryInit(&s->loaded_dynamic_libraries);
 }
@@ -292,6 +296,18 @@ void DynamicLinkerFixupPLT(Linker* linker) {
   }
 }
 
+// A fully static link has no runtime resolver, so there is nothing for a PLT
+// entry or a function GOT slot to indirect through.  Passing this in place of
+// the two PLT appenders leaves got_index and plt_index unset, which every
+// architecture's relocation code reads as "the address is final, use it
+// directly".  Variable entries are still collected, because that is what
+// position-independent code reads out of the GOT.
+static int NoGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
+  (void)s;
+  (void)symbol;
+  return -1;
+}
+
 // Look at a relocation and see if it's a PIC relocation,
 // that references a GOT or PLT entry.  Use the information
 // to build the GOT and PLT.  The symbol is given two
@@ -302,19 +318,84 @@ static void ProcessPossibleDynamicRelocation(struct Linker* linker,
                                              struct ObjectFile* file,
                                              Relocation* reloc) {
   LinkerSymbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+  bool no_resolver = linker->fully_static;
   linker->arch->handle_pic_relocation(linker->dynamic_linker,
                                         symbol,
                                         reloc,
                                         GetDataGOTOffset,
-                                        GetFunctionGOTOffset,
-                                        GetPLTOffset);
+                                        no_resolver ? NoGOTOffset
+                                                    : GetFunctionGOTOffset,
+                                        no_resolver ? NoGOTOffset
+                                                    : GetPLTOffset);
 }
 
+// This also runs for a static link, which needs the variable GOT entries.  The
+// relative relocations the architectures record alongside them are left unused:
+// only .rel.dyn and the .dynamic entries sized from it read that vector, and a
+// static executable has neither.
 void DynamicLinkerGatherDynamicRelocations(Linker* linker) {
   for (size_t file_index = 0; file_index < linker->files.length; file_index++) {
     ObjectFile* file = linker->files.value.p[file_index];
     for (size_t reloc_index = 0; reloc_index < file->relocations.length; reloc_index++) {
       ProcessPossibleDynamicRelocation(linker, file, file->relocations.value.p[reloc_index]);
+    }
+  }
+}
+
+// True when position-independent code in a fully static link loaded a variable
+// address out of the GOT.  A static link has no loader to fill those slots, so
+// the table has to be built and resolved here; when no relocation asked for one
+// the link is left exactly as it was before, without an empty .got.
+bool DynamicLinkerNeedsStaticGOT(Linker* linker) {
+  return linker->fully_static &&
+         linker->dynamic_linker != NULL &&
+         linker->dynamic_linker->global_offset_table.data_entries.length != 0;
+}
+
+// Point _GLOBAL_OFFSET_TABLE_ at .got.  A dynamic link aims it at .got.plt
+// because that is the table the resolver walks, but in a static link .got.plt
+// is empty and .got holds every entry, so GOT-relative addressing has to be
+// based there.
+void DynamicLinkerDefineStaticGOTSymbol(Linker* linker) {
+  DynamicLinker* dynamic = linker->dynamic_linker;
+  if (dynamic->global_offset_table_symbol == NULL) {
+    // A static link does not invent the dynamic-linking symbols up front, so
+    // the one that describes the table we just built is created here.
+    dynamic->global_offset_table_symbol =
+        LinkerInventSymbol(linker, "_GLOBAL_OFFSET_TABLE_", 8);
+  }
+  dynamic->global_offset_table_symbol->address = dynamic->got_group->address;
+  dynamic->global_offset_table_symbol->defined = true;
+  dynamic->global_offset_table_symbol->invented = true;
+}
+
+// Fill in the GOT slots of a static position-independent link.  Every address
+// is known once layout is done, so each slot gets its final value here instead
+// of a relocation for a loader to apply.
+//
+// Each slot holds an absolute address.  The GOT-based TLS models put an offset
+// or a module id in a slot instead, and two of the architectures allocate those
+// out of this same vector, but they need __tls_get_addr and a loaded module list
+// and so are rejected outright for a static executable; local-exec, the model a
+// static link does get, needs no GOT entry at all.
+void DynamicLinkerResolveStaticGOT(Linker* linker) {
+  DynamicLinker* dynamic = linker->dynamic_linker;
+  Buffer* got = GetSectionContentsBuffer(dynamic->got_group);
+  size_t entry_size = (size_t)dynamic->global_offset_table.entry_size;
+  Vector* data_entries = &dynamic->global_offset_table.data_entries;
+  for (size_t i = 0; i < data_entries->length; i++) {
+    size_t offset = i * entry_size;
+    if (offset + entry_size > got->length) {
+      // The entries were emitted from this vector, so the table always covers
+      // them; stop rather than write past it if that ever stops holding.
+      break;
+    }
+    // AddGOTEntry emitted the slot as a zeroed little-endian word.
+    LinkerSymbol* symbol = data_entries->value.p[i];
+    uint64_t value = symbol->address;
+    for (size_t byte = 0; byte < entry_size; byte++) {
+      got->value[offset + byte] = (char)(value & 0xff);
+      value >>= 8;
     }
   }
 }
@@ -1422,4 +1503,12 @@ void DynamicLinkerCreateDynamicLinkerGroups(Linker* linker) {
   if (!linker->building_dso) {
     dynamic->interpreter_group = AddInterpreterSection(linker);
   }
+}
+
+// Create just the GOT for a static position-independent link.  None of the
+// other dynamic-linking sections (.dynsym, .dynamic, .rel.dyn, .plt, .interp)
+// have any meaning without a runtime loader.
+void DynamicLinkerCreateStaticGOTGroups(Linker* linker) {
+  DynamicLinker* dynamic = linker->dynamic_linker;
+  AddGlobalOffsetTable(linker, &dynamic->got_group, &dynamic->got_plt_group);
 }

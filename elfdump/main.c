@@ -546,6 +546,48 @@ static const char* ARMRelocType(int32_t reloc_type) {
       return "R_ARM_CALL";
     case R_ARM_JUMP24:
       return "R_ARM_JUMP24";
+    case R_ARM_PC24:
+      return "R_ARM_PC24";
+    case R_ARM_LDR_PC_G0:
+      return "R_ARM_LDR_PC_G0";
+    case R_ARM_ADD32:
+      return "R_ARM_ADD32";
+    case R_ARM_SUB32:
+      return "R_ARM_SUB32";
+    case R_ARM_TLS_DTPMOD32:
+      return "R_ARM_TLS_DTPMOD32";
+    case R_ARM_TLS_DTPREL32:
+      return "R_ARM_TLS_DTPREL32";
+    case R_ARM_TLS_TPOFF32:
+      return "R_ARM_TLS_TPOFF32";
+    case R_ARM_COPY:
+      return "R_ARM_COPY";
+    case R_ARM_GLOB_DAT:
+      return "R_ARM_GLOB_DAT";
+    case R_ARM_JUMP_SLOT:
+      return "R_ARM_JUMP_SLOT";
+    case R_ARM_RELATIVE:
+      return "R_ARM_RELATIVE";
+    case R_ARM_GOT_BREL:
+      return "R_ARM_GOT_BREL";
+    case R_ARM_PLT32:
+      return "R_ARM_PLT32";
+    case R_ARM_TARGET1:
+      return "R_ARM_TARGET1";
+    case R_ARM_V4BX:
+      return "R_ARM_V4BX";
+    case R_ARM_MOVW_ABS_NC:
+      return "R_ARM_MOVW_ABS_NC";
+    case R_ARM_MOVT_ABS:
+      return "R_ARM_MOVT_ABS";
+    case R_ARM_MOVW_PREL_NC:
+      return "R_ARM_MOVW_PREL_NC";
+    case R_ARM_MOVT_PREL:
+      return "R_ARM_MOVT_PREL";
+    case R_ARM_GOT_PREL:
+      return "R_ARM_GOT_PREL";
+    case R_ARM_TLS_LE32:
+      return "R_ARM_TLS_LE32";
     default:
       return "unknown";
   }
@@ -565,17 +607,28 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
   int32_t reloc_type = ELF_R_TYPE(reloc->info);
   int64_t addend = reloc_section->header->type == SHT(rela) ? reloc->addend : 0;
   
-  ELFSymbol* elf_sym = bad_symbol ? NULL :
-      (ELFSymbol*)(symbol_table_address +
-                   symbol_index * symtab->header->entsize);
+  // Decode the referenced symbol from the on-disk symbol table.  For ELF32 the
+  // on-disk symbol is narrower than the canonical struct, so it has to go
+  // through the format ops rather than being cast in place.
+  ELFSymbol sym_storage;
+  ELFSymbol* elf_sym = NULL;
+  if (!bad_symbol) {
+    const char* sym_addr =
+        symbol_table_address + symbol_index * symtab->header->entsize;
+    if (elf->ops->is_64_bit) {
+      elf_sym = (ELFSymbol*)sym_addr;
+    } else {
+      elf->ops->ReadSymbol(&sym_storage, sym_addr);
+      elf_sym = &sym_storage;
+    }
+  }
 
   // Get the target section index from the info field in the section header.
   int target_section_index = reloc_section->header->info;
   if (target_section_index < 0 || target_section_index >= elf->sections.length) {
     return;
   }
-  const char* string_table_address = (const char*)elf->header +
-       strtab->header->offset;
+  const char* string_table_address = (const char*)strtab->contents;
 
   String type = {0};
   switch (elf->header->machine) {
@@ -656,17 +709,25 @@ static void PrintRelocations(ELFReaderFile* elf) {
       continue;
     }
     ELFReaderSection* strtab = elf->sections.value.p[symtab->header->link];
-    const char* symbol_table_address = (const char*)elf->header +
-        symtab->header->offset;
+    // elf->header is a canonical wide structure, which is only the start of the
+    // mapping for ELF64; file offsets have to be taken from elf->base.
+    const char* symbol_table_address = elf->base + symtab->header->offset;
 
     int64_t num_relocations = reloc_section->header->size /
       reloc_section->header->entsize;
     
-    const char* reloc_addr = (const char*)elf->header +
-      reloc_section->header->offset;
+    const char* reloc_addr = elf->base + reloc_section->header->offset;
+    ELFRelocation reloc_storage;
     for (int64_t ri = 0; ri < num_relocations; ri++) {
-      ELFRelocation* reloc = (ELFRelocation*)reloc_addr;
-      
+      // An ELF32 relocation is narrower on disk than the canonical structure,
+      // so decode it rather than casting it in place.
+      ELFRelocation* reloc;
+      if (elf->ops->is_64_bit) {
+        reloc = (ELFRelocation*)reloc_addr;
+      } else {
+        elf->ops->ReadRelocation(&reloc_storage, reloc_addr);
+        reloc = &reloc_storage;
+      }
       PrintRelocation(elf, ri, reloc, symbol_table_address,
                      reloc_section, symtab, strtab);
       reloc_addr += reloc_section->header->entsize;

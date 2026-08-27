@@ -129,5 +129,15 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf);
 void DynamicLinkerFixupPLT(Linker* linker);
 void DynamicLinkerFixupGOT(Linker* linker);
 
+// Position-independent code in a fully static executable still reads variable
+// addresses out of the GOT, but there is no loader to fill the slots in.  When
+// DynamicLinkerNeedsStaticGOT reports that such a link collected GOT entries,
+// the table is created and named like any other section group and then given
+// its final contents once every address is known.
+bool DynamicLinkerNeedsStaticGOT(Linker* linker);
+void DynamicLinkerCreateStaticGOTGroups(Linker* linker);
+void DynamicLinkerDefineStaticGOTSymbol(Linker* linker);
+void DynamicLinkerResolveStaticGOT(Linker* linker);
+
 
 #endif /* linker_dynamic_h */

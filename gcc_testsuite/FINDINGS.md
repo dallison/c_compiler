@@ -106,9 +106,9 @@ thread-free reproducer for the AArch64 one was not found.
   first `malloc` of any dynamic program and an ARM `-fpic` fault on any reference
   to the program's own globals, are fixed.
 
-- Two defects found while fixing the ARM one and recorded with it: an ARM
-  `-fpic -static` link produces no `.got`, and `elfdump -r` misreads every ELF32
-  `SHT_REL` entry.
+- The two defects found while fixing the ARM one, a static `-fpic` link with no
+  `.got` and `elfdump -r` misreading ELF32 relocations, are both fixed; see the
+  entry with them below.
 
 ## Status
 
@@ -438,15 +438,55 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   `//:davecc_driver_defaults_test` gained an ARM `-fpic` program that reads its
   own global through the GOT.
 
-  Two related defects are open, both verified failing at `4ce2088~1`:
-  - An ARM `-fpic -static` link is broken in the linker rather than the loader:
-    the writable segment holds no `.got` at all and the displacement the code
-    adds to the PC resolves to 0, so it faults before any of the above matters.
-  - `elfdump -r` prints every ELF32 `SHT_REL` entry as `R_ARM_NONE` with offset
-    0.  The section contents are fine -- a hex dump of `.rel.dyn` shows the real
-    `R_ARM_RELATIVE` and `R_ARM_GLOB_DAT` entries -- so this is the tool
-    misreading the narrower `Elf32_Rel`, and it is actively misleading when
-    diagnosing an ARM relocation bug.
+  Two related defects were found with it, both verified failing at `4ce2088~1`
+  and now fixed; they are the entries immediately below.
+- **Fixed.** `elfdump -r` printed every relocation in an ELF32 file as
+  `R_ARM_NONE` with offset 0 and no symbol name, in objects as well as
+  executables.  This is worth recording ahead of the linker defect below because
+  it is what made that one hard to see: while diagnosing an ARM relocation bug
+  the tool reports that the file has no relocations in it.
+
+  Two things were wrong, both from `PrintRelocations` never being updated when
+  ELF32 support landed.  It took its file base from `elf->header`, which is only
+  the start of the mapping for ELF64 -- for ELF32 the header is decoded into an
+  owned wide structure, so every file offset was applied to an unrelated heap
+  allocation.  And it cast the bytes at that offset straight to the canonical
+  (ELF64) `ELFRelocation` and `ELFSymbol`, which are wider than their on-disk
+  ELF32 forms.  The linker's own `ReadRelocations` is the same loop written
+  correctly, so this now does what that does: offsets from `elf->base`, and
+  `elf->ops->ReadRelocation` / `ReadSymbol` to decode when the file is ELF32.
+  The ARM relocation names were also filled in, since the table stopped at the
+  seven types an object file uses and left every dynamic one as "unknown".
+
+  `//:elfdump_relocations_test` dumps an ARM object and an ARM executable, which
+  cover `SHT_RELA` and the narrower addend-less `SHT_REL`, and an aarch64 object
+  to hold the shared ELF64 path.
+- **Fixed.** A `-fpic -static` link was broken on every target, not just ARM:
+  aarch64, RISC-V and p-code crashed the linker outright, while ARM and x86_64
+  silently produced an executable that faulted on its first global.
+
+  Position-independent code reads a variable's address out of the GOT.  Nothing
+  built a GOT for a static link -- `DynamicLinkerGatherDynamicRelocations` was
+  skipped, so no slot was ever allocated, no `.got` section was created, and the
+  displacement the code adds to the PC to reach its slot resolved to 0.  The
+  crashes are the same absence reached from the other direction: the relocation
+  code for a call through the PLT dereferenced `plt_group` without checking it,
+  and a static link has no PLT.
+
+  A static link now collects GOT entries like any other, creates just the GOT
+  (none of `.dynsym`, `.dynamic`, `.rel.dyn`, `.plt` or `.interp` mean anything
+  without a loader), and writes each slot's final value itself, since there is no
+  loader to relocate them.  It is limited to the variable entries, which are the
+  only ones position-independent code asks for here: the PLT appenders are
+  replaced by ones that allocate nothing, so a call resolves straight to its
+  target, which is what `R_ARM_PLT32` and `R_X86_64_PLT32` already did and what
+  `R_AARCH64_CALL_PLT`, `R_RISCV_CALL_PLT` and `R_PCODE_CALL_PLT` now do instead
+  of faulting.  `_GLOBAL_OFFSET_TABLE_` points at `.got` rather than the empty
+  `.got.plt`, and is invented at that point rather than up front, so a static
+  link that asked for no GOT entries is left exactly as it was -- no table, no
+  symbol.  `//:static_pic_test` links and runs a C and a hosted C++ program
+  `-fpic -static` on all five targets, and the same C program `-static` alone to
+  hold that containment.
 - **Fixed.** Throwing an exception cost time proportional to the size of the whole
   `.eh_frame`, so exceptions were around a thousand times more expensive than the
   work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully
