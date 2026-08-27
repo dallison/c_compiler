@@ -5415,9 +5415,9 @@ static void LowerVariables(AARCH64Generator* g, Generator* gen) {
 void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
   
-  // If the function returns a struct, allocate the struct result
+  // If the function returns in memory, allocate the struct result
   // register now.
-  if (TypeIsStructOrUnion(gen->func->next)) {
+  if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
     g->struct_return_reg = g->num_int_reg_vars++;
     g->struct_return_spill_offset = -24;
     // The hidden x8 result pointer is copied into its dedicated variable

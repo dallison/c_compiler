@@ -17,6 +17,7 @@
 #include "errors.h"
 #include "gvn.h"
 #include "list.h"
+#include "member_pointer.h"
 #include "optimizer.h"
 #include "rtti.h"
 #include "sccp.h"
@@ -1433,6 +1434,10 @@ static void ResetASTIRLabel(ASTNode* node, void* data, int child_id,
   }
 }
 
+bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type);
+}
+
 void* GenerateFunction(Generator* gen) {
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)gen->func->info.function.body;
   // Template and inline ASTs can be emitted more than once. IR label nodes are
@@ -1446,8 +1451,8 @@ void* GenerateFunction(Generator* gen) {
   } else {
     GeneratorEmit(gen, NewIR(IR_OP(enter)));
 
-    // If the return value is a struct or union generate a holder.
-    if (TypeIsStructOrUnion(gen->func->next)) {
+    // If the return value comes back in memory generate a holder.
+    if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
       gen->struct_return_value = GeneratorEmit(gen, NewIR(IR_OP(structreturn)));
       IRSetType(gen->struct_return_value,
                 NewPointerTo(kQualPlain, TypeRecordCopy(gen->func->next)));

@@ -2099,7 +2099,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   }
   bool returns_reference = TypeIsFunction(callee_type) &&
                            TypeIsReference(callee_type->next);
-  bool returns_struct = TypeIsStructOrUnion(node->base.type) &&
+  bool returns_struct = TypeReturnedThroughHiddenPointer(node->base.type) &&
                         !returns_reference;
   bool cxx_constructor_call = TypeIsFunction(callee_type) &&
                               callee_type->info.function.is_constructor;
@@ -2990,7 +2990,7 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
   extern void GenerateStatement(Generator* gen, ASTNode* node);
   IRNode* destination = NULL;
   if (gen->current_struct_address != NULL &&
-      TypeIsStructOrUnion(node->base.type)) {
+      TypeReturnedThroughHiddenPointer(node->base.type)) {
     destination = gen->current_struct_address;
     // The inlined body owns its own return temporary. Do not let calls or
     // compound literals inside it mistake the enclosing initializer's
@@ -3018,6 +3018,7 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
       (node->base.flags & kASTNeedAddress) == 0 &&
       !TypeIsStructOrUnion(node->base.type) &&
       !TypeIsArray(node->base.type) &&
+      !TypeIsMemberPointerAggregate(node->base.type) &&
       !TypeIsFunction(node->base.type)) {
     IROpcode load = GetLoadOpcodeForType(node->base.type);
     return IRSetType(GeneratorEmit(gen, NewIR1(load, result)),

@@ -131,6 +131,12 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
                                           double value);
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym);
 
+// True for a return type the caller receives through the hidden pointer that
+// IR_OP(structreturn) holds, rather than in a result register.  Besides classes
+// and unions this covers a pointer to member function, whose pair layout is too
+// wide for one register and which is already passed by address as an argument.
+bool TypeReturnedThroughHiddenPointer(TypeRecord* type);
+
 void* GenerateFunction(Generator* gen);
 
 int GeneratorNumCalls(Generator* gen);

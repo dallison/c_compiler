@@ -4461,7 +4461,8 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   bool callee_varargs = CalleeVariadicNamedCount(node, &named_count);
   TypeRecord* callee_type = CalleeFunctionType(node);
   bool callee_has_struct_return =
-      callee_type != NULL && TypeIsStructOrUnion(callee_type->next);
+      callee_type != NULL &&
+      TypeReturnedThroughHiddenPointer(callee_type->next);
   // Argument ordinal among the real (source) arguments, ignoring a leading
   // hidden struct-return pointer.
   int arg_ordinal = 0;
@@ -5763,7 +5764,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       var->symbol != NULL && var->symbol->type != NULL ? var->symbol->type
                                                        : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
-  bool is_struct_return = TypeIsStructOrUnion(
+  bool is_struct_return = TypeReturnedThroughHiddenPointer(
       compiler->current_function->info.function.symbol->type->next);
   int int_reg = ARM_INT_ARG_START;
   if (is_struct_return) {
@@ -6354,9 +6355,9 @@ static void ResolveExceptionRanges(ARMGenerator* g, Generator* gen) {
 void ARMLower(ARMGenerator* g, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
   
-  // If the function returns a struct, allocate the struct result
+  // If the function returns in memory, allocate the struct result
   // register now.
-  if (TypeIsStructOrUnion(gen->func->next)) {
+  if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
     g->struct_return_reg = g->num_int_reg_vars++;
   }
   

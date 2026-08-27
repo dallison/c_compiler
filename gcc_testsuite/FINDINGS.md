@@ -423,6 +423,36 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   scribbling.  `cxx_testsuite/tests/exec/0439_inlined_default_arguments.cpp`
   covers inlined calls with one and two trailing defaults, supplied and omitted,
   as a free function and as a member.
+- Fixed: a function returning a pointer to member function by value returned
+  garbage on every target.  A pointer to member function is a pair of words, and
+  the backend already knew to pass one by address, but on the way out it was
+  classified as a scalar: the callee left the caller's destination untouched and
+  put the address of its own copy in the result register, so the caller called
+  through uninitialized stack.  It surfaced as
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` faulting at `-O2`, where
+  `std::thread` passes a member function through `__decay_copy`.
+
+  `TypeReturnedThroughHiddenPointer` in `c_compiler/backend/codegen.h` now names
+  the classification -- a class, a union, or a member-pointer pair -- and the
+  places that decide whether a result travels through `IR_OP(structreturn)` ask
+  it instead of `TypeIsStructOrUnion`: allocating the hidden pointer, the return
+  statement, ordinary and inlined calls, and each target's argument-slot
+  assignment.
+
+  On RISC-V that exposed a second bug in the frame layout of a leaf function.
+  Local variables and the argument-home area are placed below a fixed 16-byte
+  header, but a leaf has no return address to save, and the prologue reclaimed
+  the freed word by moving the callee-saved register area up eight bytes.  The
+  freed word is at the top of the header, not the bottom, so the first saved
+  register landed on the lowest local -- harmless while a leaf had no homed
+  arguments, but a leaf returning a pair through a hidden pointer homes two of
+  them, and the saved register overwrote the first word of the result.
+
+  `cxx_testsuite/tests/exec/0440_member_function_pointer_return.cpp` covers a
+  pointer to member function returned from a reference parameter, from a value
+  parameter, from an inlined function, bound to a reference, from a member
+  function, const-qualified, and a pointer to data member alongside, which is
+  one word and still comes back in a register.
 
 ## Deep nesting outside the constructs already capped
 

@@ -339,10 +339,14 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
                           space_above_frame_pointer -
                           emitter->spill_region_size;  // First saved register.
 
-  // A leaf procedure doesn't save the return address.
+  // A leaf procedure doesn't save the return address, so the frame pointer
+  // moves up into its slot.  The saved-register area stays where it is: the
+  // freed word is at the *top* of the header, and the local variable and
+  // argument-home offsets are all measured from a full-size header, so
+  // shifting the saved registers up would put the first of them on top of the
+  // lowest local.
   if (is_leaf) {
     frame_pointer_offset += 8;
-    saved_reg_offset += 8;
   }
 
   if (EmptyStackFrame(emitter)) {

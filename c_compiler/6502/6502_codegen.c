@@ -7680,7 +7680,8 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
                                      : W65C02_OP(enter),
                            kAddrModeImplied);
         if (!TypeIsVoid(compiler->current_function->next) &&
-            !TypeIsStructOrUnion(compiler->current_function->next)) {
+            !TypeReturnedThroughHiddenPointer(
+                compiler->current_function->next)) {
           enter_inst->flags |= k6502EnterStoresResult;
         }
         Emit(g, enter_inst);

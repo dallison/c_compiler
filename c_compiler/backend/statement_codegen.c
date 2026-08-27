@@ -490,7 +490,7 @@ static void BindPostconditionResults(Generator* gen, IRNode* scalar_result) {
     if (assertion->kind != kContractPostcondition || binding == NULL) {
       continue;
     }
-    if (TypeIsStructOrUnion(gen->func->next)) {
+    if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
       IRNode* destination = GeneratorGetVariable(gen, binding);
       IRNode* store = GeneratorEmit(
           gen, NewIR2(IR_OP(storea), destination, gen->struct_return_value));
@@ -2313,7 +2313,7 @@ static void GenerateReturnStatement(Generator* gen,
         }
         deferred_result_op = IR_OP(resulta);
         have_deferred_result = true;
-      } else if (TypeIsStructOrUnion(node->cond->type)) {
+      } else if (TypeReturnedThroughHiddenPointer(node->cond->type)) {
         if ((node->cond->flags & kASTRvoCall) != 0) {
           // An RVO call is passed the structresult directly from the
           // current function so there's no need to copy the result.

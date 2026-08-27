@@ -4015,7 +4015,7 @@ static TargetInstruction* LowerBuiltinVaStart(X86_64Generator* rv, IRNode* node)
   int space_above_frame_pointer = X86_64_VARARG_SAVE_AREA_SIZE;
   int named_stack_bytes = 0;
   {
-    bool is_struct_return = TypeIsStructOrUnion(
+    bool is_struct_return = TypeReturnedThroughHiddenPointer(
         compiler->current_function->info.function.symbol->type->next);
     int int_reg = X86_64_INT_ARG_START + (is_struct_return ? 1 : 0);
     int fp_reg = X86_64_FP_ARG_START;
@@ -4621,7 +4621,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
   IRVariable* var = (IRVariable*)arg->pooled;
   size_t arg_num = var->symbol->value.arg_number;
   bool is_struct_return =
-      func != NULL && TypeIsStructOrUnion(func->next);
+      func != NULL && TypeReturnedThroughHiddenPointer(func->next);
   int int_reg = X86_64_INT_ARG_START;
   if (is_struct_return) {
     int_reg +=
@@ -5126,9 +5126,9 @@ static void LowerVariables(X86_64Generator* rv, Generator* gen) {
 void X86_64Lower(X86_64Generator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
   
-  // If the function returns a struct, allocate the struct result
+  // If the function returns in memory, allocate the struct result
   // register now.
-  if (TypeIsStructOrUnion(gen->func->next)) {
+  if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
     rv->struct_return_reg = rv->num_int_reg_vars++;
     rv->struct_return_spill_offset =
         -16 - rv->saved_arg_area_size - 8;

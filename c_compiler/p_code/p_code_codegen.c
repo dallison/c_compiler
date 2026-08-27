@@ -2679,8 +2679,8 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
   // Variables are allocated below the frame, arguments are above.
   int32_t var_offset = 0;
   int32_t arg_offset = 16;  // Leave room for return address and saved ap.
-  if (TypeIsStructOrUnion(compiler->current_function->next)) {
-    // Struct/union returns use an invisible first argument at ap + 16.
+  if (TypeReturnedThroughHiddenPointer(compiler->current_function->next)) {
+    // Memory returns use an invisible first argument at ap + 16.
     arg_offset += 8;
   }
   

@@ -4529,7 +4529,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   TypeRecord* arg_type =
       var->symbol != NULL ? var->symbol->type : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
-  bool is_struct_return = TypeIsStructOrUnion(
+  bool is_struct_return = TypeReturnedThroughHiddenPointer(
       compiler->current_function->info.function.symbol->type->next);
   int int_reg = RV_INT_ARG_START;
   if (is_struct_return) {
@@ -5045,9 +5045,9 @@ static void LowerVariables(RVGenerator* rv, Generator* gen) {
 void RVLower(RVGenerator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
   
-  // If the function returns a struct, allocate the struct result
+  // If the function returns in memory, allocate the struct result
   // register now.
-  if (TypeIsStructOrUnion(gen->func->next)) {
+  if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
     rv->struct_return_reg = rv->num_int_reg_vars++;
   }
   
