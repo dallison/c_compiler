@@ -873,32 +873,22 @@ static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
                       ARM_STACK_FRAME_HEADER_SIZE,
                   "restore exception landing sp", fp);
 
-  int offset = emitter->saved_reg_offset;
-  char buf[8];
-  BitSetIterator it;
+  // The callee-saved registers are deliberately left as the unwinder delivered
+  // them.  Their frame slots hold the *caller's* values, stored on entry, but a
+  // handler needs the values this function itself had at the call that threw,
+  // and reloading the slots would overwrite exactly those.  The unwinder
+  // installs them from its virtual register set instead.  Skip their slots to
+  // reach the hidden result pointer, which is this function's own.
   int int_regs[ARM_NUM_INT_REGS];
   int num_int = CollectUsedIntRegisters(emitter, int_regs);
-  if (num_int > 0) {
-    AddSubImmediate(emitter, "ip", "fp", /*add=*/false, num_int * 4, NULL, fp);
-    EmitIntRegBlock(fp, "ldmia", "ip", int_regs, num_int);
-  }
-  offset -= 4 * num_int;
+  int offset = emitter->saved_reg_offset - 4 * num_int;
   if (num_int > 0) {
     offset -= 4;
   }
-
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tvldr %s, [sp, #%d]\n",
-            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize64Bit, buf,
-                                   sizeof(buf)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
+  offset -= 8 * BitSetCount(&emitter->regs->used_float_regs);
   int struct_return_phys = StructReturnPhysicalRegister(emitter);
   if (struct_return_phys >= 0) {
+    char buf[8];
     assert(offset >= 0);
     fprintf(fp, "\tldr %s, [sp, #%d]\t// hidden result pointer\n",
             ARMRegisterNameFromNum(struct_return_phys, kARMRegTypeInt,

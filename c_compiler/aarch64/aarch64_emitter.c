@@ -622,30 +622,15 @@ static void RestoreExceptionLandingState(AARCH64Emitter* emitter, FILE* fp) {
     fprintf(fp, "\tsub sp, x29, x9\n");
   }
 
-  int offset = emitter->saved_reg_offset;
-  char buf[8];
-  BitSetIterator it;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tldr %s, [sp, #%d]\n",
-            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeInt, kSize64Bit,
-                                      buf, sizeof(buf)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tfldr %s, [sp, #%d]\n",
-            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeFloat, kSize64Bit,
-                                      buf, sizeof(buf)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
+  // The callee-saved registers are deliberately left as the unwinder delivered
+  // them.  Their frame slots hold the *caller's* values, stored on entry, but a
+  // handler needs the values this function itself had at the call that threw,
+  // and reloading the slots would overwrite exactly those.  The unwinder
+  // reconstructs them from the CFI of the frames it pops, which is why the FDE
+  // has to describe where the prologue put them.  The hidden result pointer is
+  // this function's own, so that one is reloaded.
   if (emitter->g->struct_return_reg >= 0) {
+    char buf[8];
     bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
                    !emitter->g->not_leaf;
     int reg_num = (is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
@@ -1651,13 +1636,49 @@ static void AARCH64FillLSDAInfo(AARCH64Emitter* emitter, const char* func_name,
   }
 }
 
+// Describe where the prologue put the callee-saved registers, so that unwinding
+// through this frame recovers the caller's values instead of passing on
+// whatever the throwing code left behind.  The registers are listed in the
+// order SaveRegisters stores them, at ascending offsets from sp, which the
+// prologue leaves stack_frame_size below x29 + 16 (= the CFA).  AArch64 numbers
+// its DWARF integer registers as the architecture does, which is also what the
+// register allocator uses, so no translation is needed.  Only the integer
+// registers are described: the unwind context has no room for the
+// floating-point ones.
+static size_t AARCH64SavedCFIRegisters(AARCH64Emitter* emitter,
+                                       DaveEHFrameSavedReg* saved_regs,
+                                       size_t capacity) {
+  BitSetIterator it;
+  size_t count = 0;
+  int offset = emitter->saved_reg_offset;
+  int stack_frame_size = StackFrameSize(emitter);
+
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    if (count < capacity) {
+      saved_regs[count].dwarf_reg = reg;
+      saved_regs[count].cfa_offset =
+          offset - stack_frame_size - AARCH64_STACK_FRAME_HEADER_SIZE;
+      count++;
+    }
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  return count;
+}
+
 static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
                                    const char* func_name) {
   if (emitter->g->base.varargs) {
     return;
   }
   DaveEHLSDARange lsda_ranges[64];
+  DaveEHFrameSavedReg saved_regs[AARCH64_NUM_INT_REGS];
   size_t lsda_count = 0;
+  size_t saved_reg_count =
+      AARCH64SavedCFIRegisters(emitter, saved_regs,
+                               sizeof(saved_regs) / sizeof(saved_regs[0]));
   AARCH64FillLSDAInfo(emitter, func_name, lsda_ranges, &lsda_count);
   DaveEHFrameEmitInfo info = {
       .ranges = lsda_ranges,
@@ -1673,6 +1694,8 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
       .fp_cfa_offset = 16,
       .saved_fp_offset = -16,
       .saved_ra_offset = -8,
+      .saved_regs = saved_regs,
+      .saved_reg_count = saved_reg_count,
   };
   DaveEHPrintGCCExceptTable(fp, &info);
   DaveEHPrintEHFrameCIE(fp, &info, "");

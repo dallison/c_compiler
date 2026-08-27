@@ -561,30 +561,18 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
         (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR) +
         emitter->rv->struct_return_reg;
   }
-  int offset = emitter->saved_reg_offset;
-  char buf[8];
-  BitSetIterator it;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    if (reg != struct_return_phys) {
-      fprintf(fp, "\tld %s, %d(sp)\n",
-              RVRegisterNameFromNum(reg, kRVRegTypeInt, buf, sizeof(buf)),
-              offset);
-    }
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tfld %s, %d(sp)\n",
-            RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf, sizeof(buf)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
+  // The callee-saved registers are deliberately left as the unwinder delivered
+  // them.  Their frame slots hold the *caller's* values, stored on entry, but a
+  // handler needs the values this function itself had at the call that threw,
+  // and reloading the slots would overwrite exactly those.  The unwinder
+  // reconstructs them from the CFI of the frames it pops, which is why the FDE
+  // has to describe where the prologue put them.  Skip their slots to reach the
+  // hidden result pointer, which is this function's own.
+  int offset = emitter->saved_reg_offset -
+               8 * BitSetCount(&emitter->regs->used_int_regs) -
+               8 * BitSetCount(&emitter->regs->used_float_regs);
   if (struct_return_phys >= 0 && HasExceptionStructReturn(emitter)) {
+    char buf[8];
     fprintf(fp, "\tld %s, %d(sp)\t// hidden result pointer\n",
             RVRegisterNameFromNum(struct_return_phys, kRVRegTypeInt, buf,
                                   sizeof(buf)),

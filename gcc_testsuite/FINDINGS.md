@@ -333,7 +333,53 @@ Confirmed by reducing each to a few lines and comparing against Clang.
     aarch64 and arm have the same missing rules.  No case where it is observable
     was found there (up to twelve live values across a catching call), because
     their landing pads reload every saved register from the frame, so they are
-    left alone rather than changed on the strength of an argument.
+    left alone rather than changed on the strength of an argument.  That reload
+    turned out to be a bug of its own; see the next entry, which is what makes
+    the aarch64 rules observable and adds them.
+- **Fixed.** A landing pad on aarch64, arm and riscv began by reloading the
+  callee-saved registers from its own frame.  Those slots hold the values the
+  *caller* passed in, stored by the prologue, whereas a handler needs the values
+  the function itself had at the call that threw -- so the reload destroyed
+  exactly the registers it was meant to recover, and it destroyed them at every
+  catch, not just an unusual one.  The unwinder already delivers the right
+  values, recovered from the CFI of the frames it pops (aarch64, riscv) or from
+  its virtual register set (arm), so the landing pads now only put the stack
+  pointer back and reload the hidden result pointer, which is genuinely their
+  own.  aarch64 also needed the `DW_CFA_offset` rules from the previous entry,
+  without which the unwinder had nothing to recover the registers from.
+
+  The visible damage depended on what was in the register.  A coroutine's resume
+  function keeps the coroutine frame pointer in one across the whole body, so
+  after the frame's `catch` ran `unhandled_exception`, the following
+  `frame->state = 0` store went through the *caller's* value instead: the
+  coroutine handle in `main` was overwritten, and `handle.destroy()` then called
+  through a function pointer read out of `main`'s stack.  This is what made
+  `0006_lifetime_matrix.cpp` and `0007_cxx23_range_for_lifetime.cpp` fail on all
+  three targets -- riscv died on the wild call, aarch64 and arm on the load
+  through the wrecked handle.  `cxx_testsuite/tests/exec/0437_catch_keeps_own_registers.cpp`
+  covers it without coroutines: eight values and a pointer live across a
+  `try`/`catch`, with a store through the pointer afterwards.  Before the fix
+  aarch64 read back the wrong sum, arm the wrong caught value, and riscv
+  segfaulted.
+
+  Floating-point registers are left alone now too, though nothing recovers them:
+  the unwind context has room for 64 integer registers only, so the aarch64/arm
+  capture and install stubs do not carry `d8`-`d15` at all.  Leaving them is
+  still an improvement, since a value untouched by the unwind path now survives
+  where before it was always replaced by the caller's.
+- A local written in a `catch` block reads back as its value before the `try`,
+  on every target, at `-O2` but not at `-O0`.  Found while writing the test for
+  the entry above:
+
+  ```c++
+  int caught = 0;
+  try { Thrower(9); } catch (int value) { caught = value; }
+  return caught;    // 0
+  ```
+
+  The handler is reached only through the unwind metadata, so it looks like the
+  optimizer does not treat the landing pad as a predecessor of the code after
+  the `try` and propagates the pre-`try` value across it.  Next to look at.
 
 ## Deep nesting outside the constructs already capped
 
