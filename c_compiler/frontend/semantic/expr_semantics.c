@@ -2938,8 +2938,14 @@ static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   TypeRecord* temporary_type =
       TypeRecordCopy(expr->type != NULL ? expr->type : type);
   temporary_type->qualifiers = kQualPlain;
+  // TypeRecordCopy hands back an unreferenced node, so the symbol below holds the
+  // only reference: releasing one here would drop it to zero and tear down the
+  // declarator spine, leaving a pointer temporary pointing at nothing.
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temporary_type);
-  TypeRecordDelete(temporary_type);
+  // A materialized temporary exists to be reached through its address -- that is
+  // what the reference binding to it holds.  A register-allocated variable has no
+  // address to name, so this object has to stay in memory.
+  temp->flags.address_taken = true;
   ASTNode* temp_id = NewIdentifierASTNode(temp, location);
   temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
   ASTNode* initializer = NewExpressionInitializerASTNode(expr, location);
@@ -4151,8 +4157,9 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
   }
   if (node->op == AST_OP(return)) {
     CombinedStatementASTNode* ret_node = (CombinedStatementASTNode*)node;
+    SourceLocation return_location = ret_node->base.location;
     Vector* new_ret = NewVector();
-    if (inliner->return_value != NULL && ret_node->cond != NULL) {
+    if (ret_node->cond != NULL) {
       ASTNode* value = ASTNodeMove(ret_node->cond);
       // The cloned expression is no longer a return from the original
       // function: it initializes the inliner's local result temporary. An RVO
@@ -4160,27 +4167,36 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
       // nested aggregate-returning call to the caller's hidden struct-return
       // slot, which may not exist (for example when inlining into main).
       value->flags &= ~kASTRvoCall;
-      if (inliner->return_is_reference) {
-        value = NewUnaryASTNode(AST_OP(address), inliner->return_value->type,
-                                value->location, value);
+      ASTNode* statement;
+      if (inliner->return_value != NULL) {
+        if (inliner->return_is_reference) {
+          value = NewUnaryASTNode(AST_OP(address), inliner->return_value->type,
+                                  value->location, value);
+        }
+        ASTNode* ret_value =
+            NewIdentifierASTNode(inliner->return_value, return_location);
+        ASTNode* ret_assign = NewBinaryASTNode(AST_OP(assign),
+                                               value->type,
+                                               value->location,
+                                               ret_value,
+                                               value);
+        statement =
+            NewExpressionStatementASTNode(ret_assign, ret_assign->location);
+      } else {
+        // `return expression;` in a function returning void -- which a wrapper
+        // forwarding to another void call is written as -- has no result to
+        // store, but the expression is still evaluated for its side effects.
+        statement = NewExpressionStatementASTNode(value, value->location);
       }
-      ASTNode* ret_value =
-          NewIdentifierASTNode(inliner->return_value, ret_node->base.location);
-      ASTNode* ret_assign = NewBinaryASTNode(AST_OP(assign),
-                                             value->type,
-                                             value->location,
-                                             ret_value,
-                                             value);
-      ASTNode* assign_expr = NewExpressionStatementASTNode(ret_assign, ret_assign->location);
-      AnalyzeStatement(assign_expr);
-      VectorAppend(new_ret, assign_expr);
+      AnalyzeStatement(statement);
+      VectorAppend(new_ret, statement);
     }
     // Now make a goto node to the end_label.
     LabelASTNode* end_label = (LabelASTNode*)inliner->end_label;
     GotoStatementASTNode* goto_node = (GotoStatementASTNode*)
                     NewGotoStatementASTNode(
                                   NewString(end_label->name.value),
-                                  ret_node->base.location);
+                                  return_location);
     goto_node->label = inliner->end_label;
     goto_node->lca = inliner->top_stmt;
     VectorAppend(new_ret, goto_node);
@@ -4190,7 +4206,7 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
     
     // Build a new Compound statement containing the assignment to the
     // return value (if necessary) and the goto.
-    return NewCompoundStatementASTNode(new_ret, ret_node->base.location);
+    return NewCompoundStatementASTNode(new_ret, return_location);
   }
   
   // After cloning a switch statement we have lost the analysis of
@@ -4619,6 +4635,22 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
       }
     }
   }
+}
+
+// Does the callee expression name the function it is typed as, rather than hold
+// a value that merely has that function type?  A function type record carries
+// the body of the function it was declared for, and the lowering of a
+// pointer-to-member-function call dereferences the loaded pointer using the
+// member function's own type record.  What that call reaches is whatever the
+// pointer holds, so inlining the body found on the type would call the wrong
+// member.  Calls through a plain function pointer or a vtable slot never get
+// here: their callee expression has pointer type.
+static bool CalleeNamesItsFunction(ASTNode* callee) {
+  if (callee == NULL || callee->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
+  return symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type);
 }
 
 // We can only inline a function if:
@@ -9723,7 +9755,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
 
   // Inline function call if possible.  Only possible if we are calling
   // a function (not a function pointer) and it was tagged as inline.
-  if (call_ok && TypeIsFunction(node->left->type)) {
+  if (call_ok && TypeIsFunction(node->left->type) &&
+      CalleeNamesItsFunction(node->left)) {
     FunctionInfo* func = &node->left->type->info.function;
     if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by

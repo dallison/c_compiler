@@ -476,6 +476,32 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   single-member class, a member mutated after initialization, a member past the
   first, and a nested class.
 
+- Fixed: three defects in the `-O2` inliner, which `std::invoke` walks straight
+  into and which together kept
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` from reaching its member
+  function at `-O2`.  `cxx_testsuite/tests/exec/0442_inlined_forwarding_wrapper.cpp`
+  covers all three, and each one alone makes it fail.
+
+  A wrapper forwarding to a void callee is written `return callee(...);`.  The
+  inliner replaced a return statement with a jump to the epilogue label and kept
+  its operand only when there was a result temporary to store it in -- correct
+  for a value, but for a void call the operand was the whole point of the
+  statement, and it was discarded.
+
+  A reference parameter bound to a prvalue argument gets a materialized
+  temporary, and the reference holds that temporary's address.  Nothing marked
+  the temporary address-taken, so a scalar one could be register-allocated;
+  reading through the reference then loaded from the value instead of from the
+  object.  Materializing it also released the only reference to the copied type
+  record, which tore down the declarator spine and left a pointer temporary
+  typed `<invalid>*`.
+
+  A pointer-to-member-function call lowers to a dereference of the loaded
+  pointer, typed with the member function's own type record -- which carries
+  that member's body.  Inlining decided from the callee's type alone, so every
+  such call was inlined as a direct call to whichever member the type record
+  came from.  A call may now only be inlined when its callee names the function.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now
