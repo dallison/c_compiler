@@ -1699,6 +1699,10 @@ static void VectorASTNodePrint(ASTNode* node, int indents, FILE* fp) {
 static void VectorASTNodeReplaceChild(ASTNode* parent, int child_id,
                                       ASTNode* child, bool delete_old_child) {
   VectorASTNode* node = (VectorASTNode*)parent;
+  // child_id indexes `children` directly; the callee in `left` is not reachable
+  // this way, so a visitor's child_id (which reserves 0 for it) must be mapped
+  // before it gets here.
+  assert(child_id >= 0 && (size_t)child_id < node->children->length);
   ASTNode* old = node->children->value.p[child_id];
   node->children->value.p[child_id] = child;
   SetParent(child, parent, child_id);

@@ -400,6 +400,29 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   covers the store in the handler, a value defined before the `try` and left
   alone by the handler, both paths defining the local, and a handler reading the
   local it overwrites.
+- Fixed: inlining a call that relied on a default argument wrote outside the
+  call's argument array, corrupting whatever heap block happened to follow.  It
+  showed up as the compiler segfaulting on
+  `cxx_testsuite/tests/exec/0297_standard_thread.cpp` at `-O2`, in a pass over
+  scope-exit destructors that found a NULL statement in a compound belonging to
+  a completely unrelated function.
+
+  A call node keeps the callee in `left` and the arguments in `children`, and an
+  argument's stored `child_id` is its index in `children`.  Visitors number the
+  same children one higher so that the callee can be 0, and
+  `AppendDefaultCallArguments` was storing the visitor's number.  Inlining moves
+  each actual out of the call by that stored id, so moving a default argument
+  cleared the argument *after* it, and moving the last one -- the usual case,
+  since defaults are trailing -- wrote a NULL one slot past the end of the
+  array.  Which allocation that landed in decided whether anything went wrong,
+  which is why a large translation unit failed while the same code in isolation
+  did not.
+
+  `VectorASTNodeReplaceChild` in `c_compiler/frontend/syntax/ast.c` now asserts
+  the index is in range, so a future mismatch fails there instead of silently
+  scribbling.  `cxx_testsuite/tests/exec/0439_inlined_default_arguments.cpp`
+  covers inlined calls with one and two trailing defaults, supplied and omitted,
+  as a free function and as a member.
 
 ## Deep nesting outside the constructs already capped
 

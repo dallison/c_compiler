@@ -5260,7 +5260,9 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
     default_arg->location = call->base.location;
     default_arg = AnalyzeExpression(default_arg);
     default_arg->parent = (ASTNode*)call;
-    default_arg->child_id = (int)i + 1;
+    // A stored child_id on a call argument is its index in `children`, not the
+    // number visitors pass down (those reserve 0 for the callee in `left`).
+    default_arg->child_id = (int)i;
     VectorAppend(call->children, default_arg);
   }
   return true;
