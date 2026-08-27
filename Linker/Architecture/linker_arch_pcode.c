@@ -229,12 +229,21 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         GOTRelocation relocation_type) {
   int64_t offset = contents->data.buffered.length;
   int32_t reloc_type;
+  // A GOT slot only has to name its symbol when the loader is the one that
+  // knows the address; see NewDataAddressRelocation for the same choice on an
+  // ordinary data word.  A slot naming a symbol also needs that symbol in
+  // .dynsym, which a definition private to this image has no reason to be in.
+  bool by_symbol = true;
   switch (relocation_type) {
     case kGOTRelocationFunction:
       reloc_type = R_PCODE_GOT_FUNC;
       break;
     case kGOTRelocationVariable:
-      reloc_type = R_PCODE_GOT_DATA;
+      // A slot for one of the GOT-based TLS models holds an offset or a
+      // module id rather than an address, and some targets allocate those out
+      // of this same list, so they keep the form resolved by name.
+      by_symbol = symbol->from_dynamic_library || LinkerSymbolIsTLS(symbol);
+      reloc_type = by_symbol ? R_PCODE_GOT_DATA : R_PCODE_RELATIVE;
       break;
     case kGOTRelocationTLSOffset:
       reloc_type = R_PCODE_GOT_TLS_OFFSET;
@@ -248,6 +257,7 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
   // Add relocation.
   Relocation* reloc = NewLinkerSymbolRelocation(symbol,
                                           offset, reloc_type, 0);
+  reloc->resolve_by_symbol = by_symbol;
   VectorAppend(relocs, reloc);
 }
 

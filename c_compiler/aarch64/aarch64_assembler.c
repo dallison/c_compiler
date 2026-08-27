@@ -26,6 +26,7 @@ DECLARE_INST_FUNC(adcs);
 DECLARE_INST_FUNC(adds);
 DECLARE_INST_FUNC(adr);
 DECLARE_INST_FUNC(adrp);
+DECLARE_INST_FUNC(gotaddr);
 DECLARE_INST_FUNC(cmn);
 DECLARE_INST_FUNC(cmp);
 DECLARE_INST_FUNC(madd);
@@ -255,6 +256,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(adds);
   INST(adr);
   INST(adrp);
+  INST(gotaddr);
   INST(cmn);
   INST(cmp);
   INST(madd);
@@ -1247,6 +1249,48 @@ static void Assemble_adr(AARCH64Assembler* assembler) {
 
 static void Assemble_adrp(AARCH64Assembler* assembler) {
   AssembleADR(assembler, 1);
+}
+
+static void AssembleLoadStoreUnsignedImmediate(AARCH64Assembler* assembler,
+                                               Register* rt, Register* rn,
+                                               int size, int fp, int opc,
+                                               int v, int32_t offset);
+
+// gotaddr xd, symbol -- load the symbol's address out of the GOT.  This is the
+// adrp/ldr pair the AArch64 ABI uses, written as one instruction because the
+// ldr needs a :got_lo12: operand that the ordinary load syntax cannot express.
+static void Assemble_gotaddr(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected symbol for gotaddr");
+    return;
+  }
+  if (rd.width != kX) {
+    AssemblerError(&ASM, "gotaddr needs a 64 bit register");
+    return;
+  }
+  AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+
+  // adrp xd, :got:symbol -- the page the symbol's GOT slot is on.
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_AARCH64_ADR_GOT_PAGE,
+                                   ASM.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
+
+  // ldr xd, [xd, :got_lo12:symbol] -- the slot's offset within that page.  The
+  // linker fills in the offset, so the immediate is emitted as 0.
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_AARCH64_LD64_GOT_LO12_NC,
+                                   ASM.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssembleLoadStoreUnsignedImmediate(assembler, &rd, &rd, /*size=*/3, /*fp=*/0,
+                                     /*opc=*/1, /*v=*/0, /*offset=*/0);
 }
 
 static void AssembleDataProcessing3Source(AARCH64Assembler* assembler,

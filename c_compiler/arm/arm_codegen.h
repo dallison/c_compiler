@@ -425,6 +425,9 @@ typedef struct ARMGenerator {
 
   int num_int_arg_regs;   // Number of args in int regs.
   int num_fp_arg_regs;    // Number of args in floating point regs.
+  // Bytes of the caller's stack argument area covered by named parameters, for
+  // a variadic function whose parameters outnumbered the argument registers.
+  int named_stack_arg_end;
   int num_int_reg_vars;   // Number of int regs used for variables.
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;

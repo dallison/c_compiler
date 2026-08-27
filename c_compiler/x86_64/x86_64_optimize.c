@@ -73,6 +73,17 @@ static bool X86_64HasImplicitEffect(TargetInstruction* inst) {
       return true;
     case X86_64_OP(nop):
       return (inst->flags & X86_64_MFENCE) != 0;
+
+    // A comparison's result is the condition flags, which no operand names, so
+    // the branch that reads them is not a user and the instruction looks dead.
+    // Most branches here carry their two comparison operands and expand to the
+    // comparison and the jump together, so nothing usually reaches this, but
+    // one that branches on flags set separately must keep them.
+    case X86_64_OP(cmp):
+    case X86_64_OP(test):
+    case X86_64_OP(ucomiss):
+    case X86_64_OP(ucomisd):
+      return true;
     default:
       return false;
   }

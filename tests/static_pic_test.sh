@@ -25,6 +25,13 @@ cd "$WORK"
 
 # Several globals reached through pointers, plus a function pointer, so the GOT
 # holds more than one entry and a wrong entry size or ordering shows up.
+#
+# stdout is here because it is reached both ways in one program: this file is
+# position-independent and goes through the GOT, while the library that defines
+# it is not and computes its address from the PC.  On aarch64 the relocation for
+# the latter used to redirect to the GOT slot as soon as the symbol had one,
+# while the instruction completing the pair still named the object, so the two
+# halves disagreed and the address landed on neither.
 cat > pic.c <<'SRC'
 #include <stdio.h>
 int first = 1;
@@ -35,8 +42,8 @@ static int Twice(int value) { return value * 2; }
 int (*twice_pointer)(int) = Twice;
 const char* message = "static-pic-ok";
 int main(void) {
-  printf("%s %d\n", message,
-         *first_pointer + *second_pointer + twice_pointer(20));
+  fputs(message, stdout);
+  printf(" %d\n", *first_pointer + *second_pointer + twice_pointer(20));
   return 0;
 }
 SRC

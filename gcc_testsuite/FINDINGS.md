@@ -45,18 +45,17 @@ Then compare `rg -n "^FAIL|pass=" <testlog>` for each.  Remember to rebuild
 `//:davecc` after stashing or unstashing; the interpreters read
 `bazel-bin/davecc`, so a stale binary silently measures the wrong compiler.
 
-The failing names below have not changed since `28c946e`.  The pass counts are
-current as of the spilled-variable-register fix; each C++ exec suite gained three
-tests since `28c946e` (`0444`, `0445` and `0446`), so an older reading of this
-table is low by that many there and otherwise identical:
+The pass counts are current as of the variadic named argument fix, which is what
+took `exec_riscv` to zero failures; each C++ exec suite gained three tests since
+`28c946e` (`0444`, `0445` and `0446`), so an older reading of this table is low
+by that many there and otherwise identical:
 
 ```text
 exec_aarch64        pass=409 fail=0
 exec_arm            pass=406 fail=3   0158_standard_variant_constexpr (compile),
                                       0305_standard_expected (compile),
                                       0401_standard_stacktrace
-exec_riscv          pass=407 fail=2   0276_standard_string_conversions,
-                                      0327_standard_filesystem
+exec_riscv          pass=409 fail=0
 exec_x86_64         pass=409 fail=0
 single_exec_aarch64 pass=248 fail=3   00200, 00216, 00219
 single_exec_arm     pass=247 fail=3   00200, 00216, 00219
@@ -106,14 +105,12 @@ thread-free reproducer for the AArch64 one was not found.
   with no `.got` and `elfdump -r` misreading ELF32 relocations.  See the entries
   below.
 
-- Three defects found while fixing the last two of those are open, in rough
-  order of reach.  They are recorded in full with the entry on the imported
-  symbol fix below.
-  - On aarch64, `-fpic` code reaches an `extern` data object with `adrp`/`add`
-    instead of through the GOT, so one that lives in a shared object resolves to
-    the wrong address and reads as 0.  This is a code generation defect rather
-    than a linker or loader one, and it is the widest of the three: it needs no
-    more than a hosted program reading a global out of a library.
+- The widest of the three defects found while fixing the last two of those, the
+  aarch64 `-fpic` reference to an `extern` data object, is fixed; so are the
+  four further defects that fix turned up, in the linker, in the aarch64 `adrp`
+  relocation, in variadic argument passing on four targets and in x86_64 `-O2`
+  dead-code elimination.  See the entries below.  Two of the original three
+  remain open:
   - On ARM, a program linked against two shared objects faults in the loader
     before `main`.  One is fine, which is why nothing has hit this.
   - On aarch64 in interpreted mode with lazy binding, the first call through a
@@ -429,12 +426,9 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   It runs eagerly and lazily, as `//:dynamic_interpreters_test` does.
 
   Three unrelated defects turned up while testing this, all confirmed present
-  before these fixes and all open:
-  - On aarch64, `-fpic` code reads a `extern` data object with `adrp`/`add`
-    rather than through the GOT, so an object imported from a shared object
-    resolves to the wrong address: the program sees 0 and no GOT slot is
-    allocated for it at all.  Reaching the same object through a pointer works,
-    which is why this did not show up above.
+  before these fixes.  The first is the entry below; the other two are open:
+  - On aarch64, `-fpic` code read an `extern` data object with `adrp`/`add`
+    rather than through the GOT.
   - On aarch64 in interpreted mode (`-i`) with lazy binding, the first call
     through a PLT slot loses its first argument register: `Imported(98)` arrives
     as `Imported(0)`.  Eager binding is fine, as is the compiled engine.
@@ -443,6 +437,92 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   - On ARM, a program linked against two shared objects faults in the loader
     before `main`, loading a pointer whose value is an instruction word.  One
     shared object is fine.
+- **Fixed.** On aarch64, `-fpic` code named an `extern` data object with
+  `adrp`/`add`, which can only reach what this image reserved for the name, so
+  an object defined in a shared object read as 0 and got no GOT slot at all.
+  Reaching it through a pointer worked, which is why the entry above did not
+  catch it.  x86_64, ARM and RISC-V already went through the GOT for a symbol
+  that is not local and not `static`; aarch64 now does too, via a `gotaddr`
+  pseudo-instruction the assembler expands to the `adrp`/`ldr` pair, because the
+  `ldr` needs a `:got_lo12:` operand the ordinary load path cannot express.
+
+  Three linker defects were in the way, none of them reachable until something
+  emitted these relocations:
+
+  - `R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` computed the slot
+    address from `.got.plt`, which holds the lazy resolver's entries and the
+    function slots, rather than from `.got`, where `append_data_to_got` puts a
+    data slot.  RISC-V's equivalent already used the right one.
+  - `R_AARCH64_LD64_GOT_LO12_NC` wrote the byte offset into the `ldr`
+    immediate, which a 64-bit load scales by 8, so the slot it read was eight
+    times too far: `ldr x10, [x10, #12480]` for offset 1560.
+  - `R_AARCH64_ADR_PREL_PG_HI21` redirected to the symbol's GOT slot whenever
+    the symbol had one, while the `R_AARCH64_ADD_ABS_LO12_NC` completing the
+    pair had no such case.  The two halves named different things, so the
+    address came out as the page of the GOT with the low bits of the symbol.
+    Nothing had a GOT slot and a PC-relative reference at once before, so this
+    only did harm once aarch64 started using the GOT: the non-PIC libc, which
+    names `std::cout` with `adrp`/`add`, then constructed it 1MB away from where
+    the `-fpic` translation unit read it.  This is what `//:static_pic_test`
+    caught, and it now names `stdout` in both ways deliberately.
+
+  A GOT data slot for a symbol this image defines now gets a relative
+  relocation, with the link-time address written into the slot and folded into
+  the addend, instead of one naming the symbol.  That is the same distinction
+  the entry above draws for an ordinary data word, and it is also the fix for a
+  p-code `-fpic` link asserting `symbol_index != -1`: the slot named a symbol
+  that had no reason to be in `.dynsym`.  The two tables are emitted together
+  now so the relative entries still lead, and `DT_RELACOUNT` counts both.  The
+  GOT-based TLS models keep the symbol form, because RISC-V and p-code allocate
+  their slots out of the same list and they hold an offset or a module id rather
+  than an address.
+- **Fixed.** A variadic function with more than one named parameter passed the
+  wrong arguments on four of the five targets.  On riscv this made libc's
+  `fprintf` print its format string as the first conversion's argument, which is
+  what `//cxx_testsuite:exec_riscv`'s two remaining failures were.
+
+  aarch64 and riscv reserve a save area for the argument registers the named
+  parameters did not use, and both the prologue that fills it and the `va_list`
+  `va_start` builds locate it by the count of named parameters in registers.
+  That count was only raised for a named parameter that ended up on the stack.
+  When optimizing, a named parameter stays in a register unless something takes
+  its address, and the only one whose address is taken is the last, the one
+  `va_start` names -- so the count came out as 1 however many there were, the
+  save area landed on top of the earlier named argument registers, and the first
+  `va_arg` returned a named argument.  `-O0` was correct because no argument
+  stays in a register there, and one named parameter was correct because the
+  count is then right by accident.  x86_64 already counted both cases.
+
+  ARM has its own two, both at every optimization level and both needing more
+  named parameters than argument registers.  Its variadic prologue always saves
+  r0-r3 between the frame record and the caller's arguments, and the offset for
+  an incoming stack argument allowed only for the record, so the last named
+  parameter read as the first.  `va_start` skipped only the register save area
+  and not the named parameters that had spilled past it, so it started at the
+  last named parameter rather than after it.
+
+  `//:varargs_named_args_test` covers one to eight named parameters, integer and
+  floating-point, at every level.
+- **Fixed.** Found while writing that test.  On x86_64 at `-O2`, a variadic
+  function with four or more named parameters took the wrong arm of `va_arg`'s
+  test of whether the next argument is still in the register save area, so a
+  `printf` with three or more conversions would have misread its arguments.  It
+  was only latent because x86_64's libc is built `-O1`.
+
+  `va_arg` compared the save area offset against its cap and branched on the
+  resulting condition flags.  No operand names the flags, so the branch was not
+  a user of the comparison, and dead-code elimination -- which runs only at `-O2`
+  and decides by register results -- deleted it, leaving the branch to go
+  whichever way the last instruction to touch the flags implied.  Fewer named
+  parameters survived by accident: the offset was then held in a register
+  variable, which the pass reads as the comparison's result and finds live.
+
+  aarch64 and ARM already treated a flag-setting instruction as having an effect
+  their operands do not describe, and x86_64 now does too.  Beyond that, the
+  comparison and the branch no longer stand apart: every other branch in this
+  backend carries both comparison operands and expands to the comparison and the
+  jump together, and `va_arg` was the one place that did not, which is also what
+  left the two vulnerable to anything landing between them.
 - **Fixed.** Any dynamically linked p-code program faulted on its first `malloc`,
   which made every p-code C++ program that allocates unusable.  This is what
   `//:ir_optimizer_regression_test` failed on once the relocation doubling above
@@ -1079,26 +1159,25 @@ modules tests or the libc tests.  It runs 122 targets and the two sets barely
 overlap: the five `//c_testsuite:single_exec_*` targets are tagged `manual`, so
 `//...` does not include them at all, and must be asked for by name.
 
-A full run leaves these 15 failing, and a change that adds no name to this list
+A full run leaves these 14 failing, and a change that adds no name to this list
 has not regressed anything the repository can detect:
 
 ```text
-//:6502_codegen_cleanup_test      //:multiarch_inline_asm_test
-//:6502_single_byte_copy_test     //:mutex_65c02_test
-//:6502_tail_call_test            //c_testsuite:warning_diagnostics
-//:65c02_cxx_test                 //cxx_testsuite:exec_arm
-//:c23_numeric_headers_test       //cxx_testsuite:exec_riscv
-//:libc_x86_64_test               //cxx_testsuite:exec_stacktrace_65c02
-                                  //cxx_testsuite:modules_aarch64
-                                  //cxx_testsuite:modules_arm
-                                  //cxx_testsuite:modules_x86_64
+//:6502_codegen_cleanup_test      //:mutex_65c02_test
+//:6502_single_byte_copy_test     //c_testsuite:warning_diagnostics
+//:6502_tail_call_test            //cxx_testsuite:exec_arm
+//:65c02_cxx_test                 //cxx_testsuite:exec_stacktrace_65c02
+//:c23_numeric_headers_test       //cxx_testsuite:modules_aarch64
+//:libc_x86_64_test               //cxx_testsuite:modules_arm
+//:multiarch_inline_asm_test      //cxx_testsuite:modules_x86_64
 ```
 
 `//:libc_arm_test` shows up on top of those in some runs; it is the flaky one
 described above.  The list was 17 names from `28c946e` through the `PT_TLS` fix:
 `//:c23_bitint_test` passes as of `28c946e`, `//:davecc_driver_defaults_test` as
-of the loader relocation fix, and `//:ir_optimizer_regression_test` as of the
-p-code heap reserve fix.
+of the loader relocation fix, `//:ir_optimizer_regression_test` as of the p-code
+heap reserve fix, and `//cxx_testsuite:exec_riscv` as of the variadic named
+argument fix, which repaired the `fprintf` its two remaining failures used.
 
 ## Priority 1: deeply nested `else if` stack overflow
 

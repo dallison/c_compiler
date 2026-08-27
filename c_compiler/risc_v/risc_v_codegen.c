@@ -4790,6 +4790,10 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
+        if (location.type == kArgLocationRegister) {
+          // See the integer case below for why this is counted here too.
+          rv->num_fp_arg_regs++;
+        }
       }
     } else {
       if (is_arg) {
@@ -4951,6 +4955,17 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         ArgLocation location = ArgumentLocation(entry, args);
         LoadIntArgumentIntoRegisterVariable(rv,
                                             reg, location, entry->pooled);
+        if (location.type == kArgLocationRegister) {
+          // A named argument arriving in a register counts whether or not it
+          // goes on to live in one.  The count is what divides the named
+          // argument registers from the variadic save area the prologue writes
+          // and va_start describes, and when optimizing, only the last named
+          // argument fails UseRegisterForVariable, because va_start takes its
+          // address.  Counting just that one put the save area on top of the
+          // earlier named registers, so the first va_arg returned a named
+          // argument.
+          rv->num_int_arg_regs++;
+        }
       }
     } else {
       if (is_arg) {

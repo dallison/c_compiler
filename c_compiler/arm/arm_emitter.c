@@ -422,12 +422,25 @@ static int FrameStorageOffsetDelta(ARMEmitter* emitter) {
   return ARM_STACK_FRAME_HEADER_SIZE - CanonicalIntSaveBytes(emitter);
 }
 
+// Code generation gives an incoming stack argument the offset the caller
+// measured from the incoming sp.  The AAPCS frame record sits eight bytes below
+// that point, and in a variadic function the r0-r3 save area sits below the
+// record as well, between it and the caller's arguments, so a named parameter
+// that did not fit in a register is that much further from the frame pointer.
+static int IncomingFrameOffsetDelta(ARMEmitter* emitter) {
+  int delta = ARM_STACK_FRAME_HEADER_SIZE;
+  if (emitter->g->base.varargs) {
+    delta += ARM_NUM_INT_ARGS * 4;
+  }
+  return delta;
+}
+
 static int AdjustFrameOffset(ARMEmitter* emitter, int offset) {
   if (!HasCanonicalFrameRecord(emitter)) {
     return offset;
   }
   return offset < 0 ? offset + FrameStorageOffsetDelta(emitter)
-                    : offset + ARM_STACK_FRAME_HEADER_SIZE;
+                    : offset + IncomingFrameOffsetDelta(emitter);
 }
 
 static int AdjustInstructionFrameOffset(ARMEmitter* emitter,
@@ -440,7 +453,7 @@ static int AdjustInstructionFrameOffset(ARMEmitter* emitter,
   }
   if ((inst->flags & kARMIncomingFrameOffset) != 0) {
     return HasCanonicalFrameRecord(emitter)
-               ? offset + ARM_STACK_FRAME_HEADER_SIZE
+               ? offset + IncomingFrameOffsetDelta(emitter)
                : offset;
   }
   return offset;

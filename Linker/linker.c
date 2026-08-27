@@ -1944,11 +1944,12 @@ void LinkerLinkAllFiles(Linker* linker) {
     
     // Fixup the GOT and PLT now that we have all the addresses.
     DynamicLinkerFixupGOT(linker);
+    DynamicLinkerResolveDataGOT(linker);
     DynamicLinkerFixupPLT(linker);
   } else if (static_got) {
     // No loader will relocate these slots, so give them their final values.
     DynamicLinkerDefineStaticGOTSymbol(linker);
-    DynamicLinkerResolveStaticGOT(linker);
+    DynamicLinkerResolveDataGOT(linker);
   }
   
   if (linker->print_symbol_tables) {

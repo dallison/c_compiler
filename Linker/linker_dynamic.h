@@ -146,7 +146,7 @@ void DynamicLinkerFixupGOT(Linker* linker);
 bool DynamicLinkerNeedsStaticGOT(Linker* linker);
 void DynamicLinkerCreateStaticGOTGroups(Linker* linker);
 void DynamicLinkerDefineStaticGOTSymbol(Linker* linker);
-void DynamicLinkerResolveStaticGOT(Linker* linker);
+void DynamicLinkerResolveDataGOT(Linker* linker);
 
 
 #endif /* linker_dynamic_h */

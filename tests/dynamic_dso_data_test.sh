@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Two ways a dynamic program reaches something in a shared object, both of which
-# were broken on every target while a direct call through the PLT worked, so
-# nothing noticed.
+# Ways a dynamic program reaches something in a shared object, all of which were
+# broken while a direct call through the PLT worked, so nothing noticed.
 #
 #  - A data word initialized to the address of an imported symbol.  The linker
 #    emitted a relative relocation, which carries the whole link-time value and
@@ -14,6 +13,11 @@
 #    tags it reads as addresses, and DT_INIT_ARRAY was not in the ELF64 list, so
 #    the init array was read from its link-time address and the program died in
 #    the loader before reaching main.  ELF32, and so ARM, translated it already.
+#
+#  - Code naming an imported object directly rather than through a pointer.  On
+#    aarch64 that computed the address from the PC, which reaches only what this
+#    image reserved for the name, so an imported object read as 0.  The address
+#    has to come from the GOT, the only place the loader can write it.
 set -euo pipefail
 
 if [[ $# -ne 6 ]]; then
@@ -75,6 +79,14 @@ int main(void) {
   if (function_pointer(20) != 21) return 4;
   if (function_table[1](30) != 32) return 5;
   if (Imported(10) != 11) return 6;
+  // Named directly, so the address comes from the code rather than from a word
+  // the loader relocated.  A local definition is here too because it takes the
+  // other path through the same code and must keep working.
+  if (imported_value != 40) return 7;
+  if (imported_array[3] != 40) return 8;
+  if (local_value != 7) return 9;
+  imported_value = 41;
+  if (imported_value != 41) return 10;
   // 39 from this image's constructor and 60 from the shared object's.
   return constructed + *library_constructed_pointer;
 }
@@ -104,6 +116,7 @@ run_one() {
     if [[ "$rc" -ne 99 ]]; then
       echo "$target returned $rc; expected 99 (LD_BIND_NOW='$bind_now')." \
         "1-3 is a data word holding an address, 4-6 a call," \
+        "7-10 an object named directly," \
         "60 means this image's constructor did not run and 39 the library's" >&2
       exit 1
     fi

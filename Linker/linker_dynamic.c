@@ -388,17 +388,25 @@ void DynamicLinkerDefineStaticGOTSymbol(Linker* linker) {
   dynamic->global_offset_table_symbol->invented = true;
 }
 
-// Fill in the GOT slots of a static position-independent link.  Every address
-// is known once layout is done, so each slot gets its final value here instead
-// of a relocation for a loader to apply.
+// Give each data GOT slot the link-time address of the symbol it holds.  Every
+// address is known once layout is done, and the value is needed in the slot
+// whether or not a loader is involved: a static link has nothing to relocate it
+// later, and a relative dynamic relocation on an architecture whose entries
+// carry no addend rebases whatever it finds there.
 //
-// Each slot holds an absolute address.  The GOT-based TLS models put an offset
-// or a module id in a slot instead, and two of the architectures allocate those
-// out of this same vector, but they need __tls_get_addr and a loaded module list
-// and so are rejected outright for a static executable; local-exec, the model a
-// static link does get, needs no GOT entry at all.
-void DynamicLinkerResolveStaticGOT(Linker* linker) {
+// A slot the loader resolves by name is skipped.  The loader supplies the whole
+// address for those, and several of the relocation types add the slot's existing
+// contents to it, which would double the address.  That covers both a symbol
+// another image defines and the GOT-based TLS models, whose slots hold an offset
+// or a module id rather than an address.  A static link has neither: it can have
+// no shared objects, and those TLS models need __tls_get_addr and a loaded module
+// list so are rejected outright, leaving local-exec, which needs no GOT slot.
+void DynamicLinkerResolveDataGOT(Linker* linker) {
   DynamicLinker* dynamic = linker->dynamic_linker;
+  if (dynamic->got_group == NULL) {
+    // Nothing asked for a GOT, so there are no slots to fill.
+    return;
+  }
   Buffer* got = GetSectionContentsBuffer(dynamic->got_group);
   size_t entry_size = (size_t)dynamic->global_offset_table.entry_size;
   Vector* data_entries = &dynamic->global_offset_table.data_entries;
@@ -409,8 +417,11 @@ void DynamicLinkerResolveStaticGOT(Linker* linker) {
       // them; stop rather than write past it if that ever stops holding.
       break;
     }
-    // AddGOTEntry emitted the slot as a zeroed little-endian word.
     LinkerSymbol* symbol = data_entries->value.p[i];
+    if (symbol->from_dynamic_library || LinkerSymbolIsTLS(symbol)) {
+      // AddGOTEntry left the slot zeroed, which is what these need.
+      continue;
+    }
     uint64_t value = symbol->address;
     for (size_t byte = 0; byte < entry_size; byte++) {
       got->value[offset + byte] = (char)(value & 0xff);
@@ -471,6 +482,34 @@ static void StoreDynamicRelocation(Linker* linker, Buffer* buffer,
 }
 
 
+// Write one entry for a word that holds an address, either a data word or a GOT
+// slot.  Which of the two forms it takes was decided when the relocation was
+// created; see NewDataAddressRelocation.
+static void StoreAddressRelocation(Linker* linker, Buffer* contents,
+                                   size_t index, int64_t offset,
+                                   Relocation* reloc) {
+  if (reloc->resolve_by_symbol) {
+    // The loader supplies the address, so the entry names the symbol and the
+    // addend stays whatever the source relocation asked for.  Nothing sets
+    // resolve_by_symbol without a symbol to name.
+    assert(reloc->symbol != NULL);
+    int symbol_index = reloc->symbol->dynamic_index != -1
+                           ? reloc->symbol->dynamic_index
+                           : reloc->symbol->index;
+    assert(symbol_index != -1);
+    StoreDynamicRelocation(linker, contents, index, offset, symbol_index,
+                           reloc->addend, reloc->type);
+    return;
+  }
+  // The whole link-time value goes in the entry for the loader to rebase.
+  int64_t addend = reloc->addend;
+  if (reloc->symbol != NULL) {
+    addend += (int64_t)reloc->symbol->address;
+  }
+  StoreDynamicRelocation(linker, contents, index, offset, 0, addend,
+                         reloc->type);
+}
+
 // Build the dynamic relocation section contents now that we know all
 // the information for the relocations.
 // The relocations have an offset from the start of the library, not
@@ -484,9 +523,10 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
   // Since we now know the symbol indexes we can create the relocation
   // entries in the table, overwriting the memory previously allocated.
   
-  // Data relocations come first, and within them the relative ones, because
-  // DT_RELACOUNT says how many entries from the start of the table are relative
-  // and a native ld.so relocates exactly that many without consulting a symbol.
+  // The relative entries come first, from both tables, because DT_RELACOUNT
+  // says how many entries from the start are relative and a native ld.so
+  // relocates exactly that many without consulting a symbol.  Anything naming a
+  // symbol appearing before the end of that run would be handled as relative.
   int32_t index = 0;
   for (int pass = 0; pass < 2; pass++) {
     bool want_by_symbol = pass == 1;
@@ -495,47 +535,22 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
       if (reloc->resolve_by_symbol != want_by_symbol) {
         continue;
       }
-      int64_t offset = reloc->offset + reloc->section->address;
-      if (want_by_symbol) {
-        // The loader supplies the address, so the entry names the symbol and
-        // the addend stays whatever the source relocation asked for.
-        // NewDataAddressRelocation only sets resolve_by_symbol when there is a
-        // symbol to name.
-        assert(reloc->symbol != NULL);
-        int symbol_index = reloc->symbol->dynamic_index != -1
-                               ? reloc->symbol->dynamic_index
-                               : reloc->symbol->index;
-        assert(symbol_index != -1);
-        StoreDynamicRelocation(linker, contents, (size_t)index, offset,
-                               symbol_index, reloc->addend, reloc->type);
-      } else {
-        // The whole link-time value goes in the entry for the loader to rebase.
-        int64_t addend = reloc->addend;
-        if (reloc->symbol != NULL) {
-          addend += (int64_t)reloc->symbol->address;
-        }
-        StoreDynamicRelocation(linker, contents, (size_t)index, offset, 0,
-                               addend, reloc->type);
-      }
+      StoreAddressRelocation(linker, contents, (size_t)index,
+                             reloc->offset + reloc->section->address, reloc);
       index++;
     }
-  }
-
-  // Now GOT relocations.
-  for (size_t i = 0; i < dynamic->got_relocations.length; i++) {
-    Relocation* reloc = dynamic->got_relocations.value.p[i];
-    int symbol_index;
-    if (reloc->symbol->dynamic_index == -1) {
-      symbol_index = reloc->symbol->index;
-    } else {
-      symbol_index = reloc->symbol->dynamic_index;
+    // GOT slots are the same kind of word, just in a section whose address the
+    // relocation's offset is measured from.
+    for (size_t i = 0; i < dynamic->got_relocations.length; i++) {
+      Relocation* reloc = dynamic->got_relocations.value.p[i];
+      if (reloc->resolve_by_symbol != want_by_symbol) {
+        continue;
+      }
+      StoreAddressRelocation(linker, contents, (size_t)index,
+                             reloc->offset + dynamic->got_group->address,
+                             reloc);
+      index++;
     }
-    assert(symbol_index != -1);
-    StoreDynamicRelocation(
-        linker, contents, (size_t)index,
-        reloc->offset + dynamic->got_group->address, symbol_index, 0,
-        reloc->type);
-    index++;
   }
 }
 
@@ -970,10 +985,15 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   // DynamicLinkerBuildDynamicRelocations emits those before the ones naming a
   // symbol.
   int64_t relative_count = 0;
-  for (size_t i = 0; i < dynamic_linker->data_relocations.length; i++) {
-    Relocation* reloc = dynamic_linker->data_relocations.value.p[i];
-    if (!reloc->resolve_by_symbol) {
-      relative_count++;
+  Vector* address_tables[] = {&dynamic_linker->data_relocations,
+                              &dynamic_linker->got_relocations};
+  for (size_t t = 0; t < sizeof(address_tables) / sizeof(address_tables[0]);
+       t++) {
+    for (size_t i = 0; i < address_tables[t]->length; i++) {
+      Relocation* reloc = address_tables[t]->value.p[i];
+      if (!reloc->resolve_by_symbol) {
+        relative_count++;
+      }
     }
   }
   FixupDynamicSectionEntryValue(

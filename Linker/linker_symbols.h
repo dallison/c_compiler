@@ -41,6 +41,7 @@ LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, struct ObjectFile* file);
 void LinkerSymbolDelete(LinkerSymbol* sym);
 bool LinkerSymbolIsWeak(LinkerSymbol* sym);
 bool LinkerSymbolIsUndefinedWeak(LinkerSymbol* sym);
+bool LinkerSymbolIsTLS(LinkerSymbol* sym);
 
 size_t LinkerSymbolHash(void* value, HashTable* table, HashMode mode);
 bool LinkerSymbolInsertInHashTable(void* entry, void* value, void** parent);

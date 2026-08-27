@@ -319,14 +319,13 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_AARCH64_ADR_PREL_PG_HI21: {
-      uint64_t got_address = 0;
+      // The page of the symbol itself, never of its GOT slot.  This used to
+      // redirect to the slot whenever the symbol happened to have one, but the
+      // R_AARCH64_ADD_ABS_LO12_NC that completes the pair has no such case, so
+      // the two halves named different things and the address came out as the
+      // page of the GOT with the low bits of the symbol.  Code that wants the
+      // slot asks for it with R_AARCH64_ADR_GOT_PAGE.
       uint64_t addr = S + A;
-      if (symbol != NULL && symbol->got_index >= 0 &&
-          linker->dynamic_linker != NULL &&
-          linker->dynamic_linker->got_plt_group != NULL) {
-        got_address = linker->dynamic_linker->got_plt_group->address;
-        addr = got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
-      }
       uint32_t instruction = EncodeAdrp(0, P, addr);
       instruction = (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
       *(uint32_t*)target_address = instruction;
@@ -464,11 +463,13 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_ADR_GOT_PAGE: {
-      if (linker->dynamic_linker->got_plt_group == NULL) {
+      // append_data_to_got puts the slot in .got, not .got.plt, which holds the
+      // lazy resolver's entries and the function slots it writes.
+      if (linker->dynamic_linker->got_group == NULL) {
         LinkerError(file, "GOT relocation in a link with no GOT");
         return;
       }
-      uint64_t got_address = linker->dynamic_linker->got_plt_group->address;
+      uint64_t got_address = linker->dynamic_linker->got_group->address;
       uint64_t addr = got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
       uint32_t instruction = EncodeAdrp(0, P, addr);
       instruction = (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
@@ -483,18 +484,31 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
         LinkerError(file, "Missing ADR_GOT_PAGE for LD64_GOT_LO12_NC");
         return;
       }
-      if (linker->dynamic_linker->got_plt_group == NULL) {
+      if (linker->dynamic_linker->got_group == NULL) {
         LinkerError(file, "GOT relocation in a link with no GOT");
         return;
       }
       LinkerSymbol* got_symbol =
           ObjectFileFindSymbol(file, page_reloc->symbol_name.value);
-      uint64_t got_address = linker->dynamic_linker->got_plt_group->address;
+      if (got_symbol == NULL) {
+        LinkerError(file, "No symbol '%s' for LD64_GOT_LO12_NC",
+                    page_reloc->symbol_name.value);
+        return;
+      }
+      uint64_t got_address = linker->dynamic_linker->got_group->address;
       uint64_t addr = got_address + (uint64_t)got_symbol->got_index * 8 +
                       (uint64_t)page_reloc->addend;
+      // A load's unsigned immediate is scaled by the access size, so a 64 bit
+      // ldr encodes the byte offset divided by 8.  Writing the byte offset
+      // straight into the field multiplies the offset by 8.
+      uint64_t lo12 = addr & 0xfff;
+      if ((lo12 & 7) != 0) {
+        LinkerError(file, "Misaligned GOT slot for LD64_GOT_LO12_NC");
+        return;
+      }
       uint32_t instruction = *(uint32_t*)target_address;
       instruction &= ~0x003ffc00u;
-      instruction |= (uint32_t)((addr & 0xfff) << 10);
+      instruction |= (uint32_t)((lo12 >> 3) << 10);
       *(uint32_t*)target_address = instruction;
       return;
     }
@@ -678,12 +692,21 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         GOTRelocation relocation_type) {
   int64_t offset = contents->data.buffered.length;
   int32_t reloc_type;
+  // A GOT slot only has to name its symbol when the loader is the one that
+  // knows the address; see NewDataAddressRelocation for the same choice on an
+  // ordinary data word.  A slot naming a symbol also needs that symbol in
+  // .dynsym, which a definition private to this image has no reason to be in.
+  bool by_symbol = true;
   switch (relocation_type) {
     case kGOTRelocationFunction:
       reloc_type = R_AARCH64_JUMP_SLOT;
       break;
     case kGOTRelocationVariable:
-      reloc_type = R_AARCH64_ABS64;
+      // A slot for one of the GOT-based TLS models holds an offset or a
+      // module id rather than an address, and some targets allocate those out
+      // of this same list, so they keep the form resolved by name.
+      by_symbol = symbol->from_dynamic_library || LinkerSymbolIsTLS(symbol);
+      reloc_type = by_symbol ? R_AARCH64_ABS64 : R_AARCH64_RELATIVE;
       break;
     case kGOTRelocationTLSOffset:
       reloc_type = R_AARCH64_TLS_DTPREL;
@@ -696,6 +719,7 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
 
   // Add relocation.
   Relocation* reloc = NewLinkerSymbolRelocation(symbol, offset, reloc_type, 0);
+  reloc->resolve_by_symbol = by_symbol;
   VectorAppend(relocs, reloc);
 }
 

@@ -86,6 +86,7 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(adds): return "adds";
   case AARCH64_OP(adr): return "adr";
   case AARCH64_OP(adrp): return "adrp";
+  case AARCH64_OP(gotaddr): return "gotaddr";
   case AARCH64_OP(cmn): return "cmn";
   case AARCH64_OP(cmp): return "cmp";
   case AARCH64_OP(madd): return "madd";
@@ -1527,15 +1528,28 @@ static bool UseRegisterForVariable(AARCH64Generator* g, IRNode* var_node) {
 static TargetInstruction* LoadStaticVariableAddress(AARCH64Generator* g,
                                                     IRNode* node) {
   IRVariable* var = (IRVariable*)node;
-  // The address of a static/global symbol is materialized with an adrp/add
-  // pair.  The linker places the code and data segments far apart (well beyond
-  // adr's +/-1MB range), so a single PC-relative adr cannot reach data symbols.
-  // adrp computes the 4KB page (R_AARCH64_ADR_PREL_PG_HI21, +/-4GB range) and
-  // the add fills in the low 12 bits (R_AARCH64_ADD_ABS_LO12_NC).
   // Do not reuse node->data.ptr here. A static variable can also flow through
   // argument lowering, which may redirect that lowered value to an argument
   // register. The relocation must always name the variable's symbol.
   TargetInstruction* sym = GetSymbol(g, NULL, var->symbol);
+
+  // A symbol that another image can define has no address the code can compute:
+  // position-independent code has to read it out of the GOT, which is the only
+  // place the loader can write it.  Computing it from the PC instead resolves to
+  // whatever this image reserved for the name, which for an imported object is
+  // nothing at all, and the program reads 0.
+  bool externally_visible = !var->symbol->flags.is_local &&
+                            !StorageIs(var->symbol->storage, STO(static));
+  if (compiler->pic && externally_visible) {
+    return Emit(g, SetInstructionSize(
+                       NewInstruction1(AARCH64_OP(gotaddr), sym), kSize64Bit));
+  }
+
+  // Otherwise the address is materialized with an adrp/add pair.  The linker
+  // places the code and data segments far apart (well beyond adr's +/-1MB
+  // range), so a single PC-relative adr cannot reach data symbols.  adrp
+  // computes the 4KB page (R_AARCH64_ADR_PREL_PG_HI21, +/-4GB range) and the
+  // add fills in the low 12 bits (R_AARCH64_ADD_ABS_LO12_NC).
   TargetInstruction* page =
       Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), sym),
                                  kSize64Bit));
@@ -5173,6 +5187,10 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
+        if (location.type == kArgLocationRegister) {
+          // See the integer case below for why this is counted here too.
+          g->num_fp_arg_regs++;
+        }
       }
     } else {
       if (is_arg) {
@@ -5317,6 +5335,17 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
         ArgLocation location = ArgumentLocation(entry, args);
         LoadIntArgumentIntoRegisterVariable(g,
                                             reg, location, entry->pooled);
+        if (location.type == kArgLocationRegister) {
+          // A named argument arriving in a register counts whether or not it
+          // goes on to live in one.  The count is what divides the named
+          // argument registers from the variadic save area the prologue writes
+          // and va_start describes, and when optimizing, only the last named
+          // argument fails UseRegisterForVariable, because va_start takes its
+          // address.  Counting just that one put the save area on top of the
+          // earlier named registers, so the first va_arg returned a named
+          // argument.
+          g->num_int_arg_regs++;
+        }
       }
     } else {
       if (is_arg) {

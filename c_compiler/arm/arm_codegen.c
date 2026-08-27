@@ -677,6 +677,7 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
 
   g->num_int_arg_regs = 0;
   g->num_fp_arg_regs = 0;
+  g->named_stack_arg_end = 0;
   g->num_int_reg_vars = 0;
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
@@ -5028,7 +5029,8 @@ static TargetInstruction* LowerBuiltinVaStart(ARMGenerator* g, IRNode* node) {
   // the variadic register save area. Skip the record and the named integer
   // arguments so ap points at the first variadic slot.
   TargetInstruction* ap_value = s0;
-  int named_offset = ARM_STACK_FRAME_HEADER_SIZE + g->num_int_arg_regs * 4;
+  int named_offset = ARM_STACK_FRAME_HEADER_SIZE + g->num_int_arg_regs * 4 +
+                     g->named_stack_arg_end;
   if (named_offset != 0) {
     ap_value = AddImmediate(g, s0, named_offset);
   }
@@ -5975,28 +5977,53 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(ARMGenerator* g,
   return NULL;
 }
 
-static void NoteNamedIntArgumentRegisters(ARMGenerator* g,
-                                          const ArgLocation* location,
-                                          TypeRecord* type) {
-  int end = 0;
+// How far the named parameters reach, so that va_start can start after them.
+// They occupy the argument registers first and then the caller's stack area,
+// and both ends are needed: the register save area the prologue writes covers
+// only the registers the named parameters left over, and any named parameter
+// that did not fit in a register sits at the front of the stack area right
+// after that save area.  Tracking only the registers left va_start pointing at
+// the last named parameter whenever the parameters outnumbered the registers.
+static void NoteNamedArgumentExtent(ARMGenerator* g,
+                                    const ArgLocation* location,
+                                    TypeRecord* type) {
+  int reg_end = 0;
+  int stack_end = 0;
   switch (location->type) {
     case kArgLocationRegister:
       if (!TypeIsFloatingPoint(type)) {
-        end = (int)location->location.offset + 1;
+        reg_end = (int)location->location.offset + 1;
       }
       break;
     case kArgLocationIntPair:
-      end = (int)location->location.offset + 2;
+      reg_end = (int)location->location.offset + 2;
+      break;
+    case kArgLocationPassedByReferenceInRegister:
+      reg_end = (int)location->location.offset + 1;
       break;
     case kArgLocationIntPairSplit:
-    case kArgLocationPassedByReferenceInRegister:
-      end = (int)location->location.offset + 1;
+      // Low word in the last core register, high word in the first stack slot.
+      reg_end = ARM_NUM_INT_ARGS;
+      stack_end = (int)location->second_offset + 4;
+      break;
+    case kArgLocationPushed:
+      stack_end = (int)location->location.offset + (int)ArgStackSize(type);
+      break;
+    case kArgLocationPushedWide:
+      stack_end = (int)location->location.offset + 8;
+      break;
+    case kArgLocationPassedByReferenceOnStack:
+      // A pointer to the caller's copy.
+      stack_end = (int)location->location.offset + 4;
       break;
     default:
       break;
   }
-  if (end > g->num_int_arg_regs) {
-    g->num_int_arg_regs = end;
+  if (reg_end > g->num_int_arg_regs) {
+    g->num_int_arg_regs = reg_end;
+  }
+  if (stack_end > g->named_stack_arg_end) {
+    g->named_stack_arg_end = stack_end;
   }
 }
 
@@ -6043,7 +6070,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   // so the function must set one up (see EmptyStackFrame / OmitFramePointer).
   if (is_arg) {
     ArgLocation loc = ArgumentLocation(entry, args);
-    NoteNamedIntArgumentRegisters(g, &loc, effective_type);
+    NoteNamedArgumentExtent(g, &loc, effective_type);
     if (loc.type == kArgLocationPushed ||
         loc.type == kArgLocationPassedByReferenceOnStack ||
         loc.type == kArgLocationIntPairSplit) {

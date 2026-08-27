@@ -4106,9 +4106,17 @@ static TargetInstruction* LowerBuiltinVaArg(X86_64Generator* rv, IRNode* node) {
   // rather than dead code.
   TargetInstruction* addr = Emit(rv, NewInstruction1(X86_64_OP(mv), reg_save));
 
-  Emit(rv, NewInstruction2(X86_64_OP(cmp), gp_offset,
-                           GetIntConstant(rv, NULL, kTargetType32Bit, offset_cap)));
-  Emit(rv, NewInstruction1(X86_64_OP(jge), overflow_label));
+  // Take the overflow arm once the offset reaches the end of its part of the
+  // save area.  This is the same two-operand branch the rest of the backend
+  // uses, which the emitter expands into the comparison and the jump together.
+  // Emitting the comparison separately left it with no user, since its result
+  // is the condition flags and no operand names those, and made the pair
+  // vulnerable to anything that comes between them.
+  TargetInstruction* branch = Emit(
+      rv, NewInstruction2(X86_64_OP(jge), gp_offset,
+                          GetIntConstant(rv, NULL, kTargetType32Bit,
+                                         offset_cap)));
+  branch->operand[2] = overflow_label;
 
   // Register-save arm: addr = reg_save + gp_offset; advance gp_offset.
   TargetInstruction* reg_addr =

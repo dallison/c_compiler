@@ -123,6 +123,10 @@ typedef enum {
   AARCH64_OP(adds),
   AARCH64_OP(adr),
   AARCH64_OP(adrp),
+  // Pseudo instruction: loads a symbol's address out of the GOT.  The assembler
+  // produces the adrp/ldr pair, since ldr here needs a :got_lo12: operand that
+  // the ordinary load path cannot express.
+  AARCH64_OP(gotaddr),
   AARCH64_OP(cmn),
   AARCH64_OP(cmp),
   AARCH64_OP(madd),

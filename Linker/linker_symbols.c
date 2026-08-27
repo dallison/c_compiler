@@ -46,6 +46,14 @@ bool LinkerSymbolIsUndefinedWeak(LinkerSymbol* sym) {
   return sym != NULL && !sym->defined && LinkerSymbolIsWeak(sym);
 }
 
+// A thread-local symbol.  Its value is an offset within a thread's block rather
+// than an address, so anything that treats a symbol's value as an address has to
+// leave it alone.
+bool LinkerSymbolIsTLS(LinkerSymbol* sym) {
+  return sym != NULL && sym->header != NULL &&
+         ELF_ST_TYPE(sym->header->info) == STT(tls);
+}
+
 //
 // LinkerSymbol table.  This is a hash table of Vectors.  The Vectors
 // contain LinkerSymbol pointers.

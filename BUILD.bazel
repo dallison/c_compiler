@@ -4190,6 +4190,27 @@ sh_test(
 )
 
 sh_test(
+    name = "varargs_named_args_test",
+    srcs = ["tests/varargs_named_args_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :arm)",
+        "$(rootpath :riscv)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :pcode)",
+    ],
+    data = [
+        ":aarch64",
+        ":arm",
+        ":davecc",
+        ":pcode",
+        ":riscv",
+        ":x86_64",
+    ],
+)
+
+sh_test(
     name = "dynamic_dso_data_test",
     srcs = ["tests/dynamic_dso_data_test.sh"],
     args = [
