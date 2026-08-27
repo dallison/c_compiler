@@ -134,8 +134,9 @@ gcc.c-torture/{compat,unsorted}  8           0
 ```
 
 The one failure is `gcc.c-torture/compile/limits-externdecl.c`, which still times
-out at 30s.  `limits-caselabels.c`, `limits-externalid.c` and `limits-fndefn.c`
-pass but take long enough to time out at 10s under a parallel sweep.
+out at 30s.  `limits-caselabels.c` is the same: it does not finish in 120s
+either.  `limits-externalid.c`, `limits-fndefn.c` and `limits-blockid.c` do
+finish, but take long enough to time out at 10s under a parallel sweep.
 
 ## What the outcome mode says
 
@@ -214,11 +215,26 @@ Confirmed by reducing each to a few lines and comparing against Clang.
 - A compound literal is a modifiable lvalue in C99, but `((struct A){0}).i += 1`
   is rejected with "Cannot assign to this expression"
   (`gcc.c-torture/compile/compound-literal-1.c`).
-- Address constants are not folded far enough.  `&"Foobar"[1] - &"Foobar"[0]`
-  reports "Cannot take the address of this expression", and
-  `(char *)&x[18] - 8` and `&((&(v.p))->y)` are rejected as non-constant
-  (`20001116-1.c`, `20010113-1.c`).  This is most of the constant-expression and
-  static-initializer groups above.
+- **Fixed.** Address constants were not folded far enough.  `(char *)&x[18] - 8`
+  and `&((&(v.p))->y)` were rejected as non-constant (`20001116-1.c`,
+  `20010113-1.c`), which was most of the constant-expression and
+  static-initializer groups above.  A symbol initializer now carries a byte
+  addend, and an address expression is folded to (symbol, offset) through `&`,
+  subscript, member selection, `*`, a pointer cast and pointer `+`/`-`.  Two
+  further bugs surfaced while doing it, both fixed here:
+  - The addend was applied twice on arm.  `R_ARM_ABS32` added the value already
+    in the bytes being relocated on top of the addend in the relocation entry,
+    which is what a `SHT_REL` object needs but wrong for the `SHT_RELA` objects
+    davecc emits, so `&x[1]` came out as `x+8`.  It was latent only because
+    nothing produced a nonzero addend before.  The two conventions are now
+    distinguished by a flag on the relocation rather than guessed at, so a
+    foreign `SHT_REL` object (`clang --target=armv7-*`, which is what
+    `foreign_eh_object_arm_test` links) still gets its in-place addend.
+  - `static int *p = &local[2];` in a function silently emitted a relocation
+    against the *stack* object, and even defined a bogus symbol for it; Clang
+    rejects all such initializers.  Only a symbol that has an address at link
+    time is accepted now, so these are diagnosed.  The plain `static int *r =
+    local;` form had the same silent wrong code and is fixed with it.
 - `m[i] = m[i - 1] + b` on a `double **` draws "Array dimension required after
   first dimension", a message that belongs to declaration parsing, in a file that
   declares no multidimensional array at all (`20011219-1.c`).

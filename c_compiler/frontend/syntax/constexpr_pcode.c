@@ -1049,6 +1049,8 @@ static bool StoreDirectConstexprPCodeInitializer(
           object, image, target_name, &address_ok);
       if (!address_ok) {
         address = 0;
+      } else {
+        address += (uint64_t)init->symbol_addend;
       }
       size_t pointer_size = (size_t)SizeofPointer();
       if (available < pointer_size) return false;

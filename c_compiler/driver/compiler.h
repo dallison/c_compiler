@@ -109,6 +109,12 @@ typedef enum {
 typedef struct {
   InitializerType type;
   int32_t offset;
+  // For kInitTypeSymbol, the byte offset into the symbol that the address
+  // designates: an address constant may be reached by selecting a member,
+  // subscripting or pointer arithmetic, and each of those only shifts the
+  // address, so "&x[18]" is the symbol x with an addend of 72.  Zero for every
+  // other initializer type.  Set it through NewSymbolInitializer.
+  int64_t symbol_addend;
   union {
     uint8_t byte;
     uint16_t half;
@@ -121,6 +127,11 @@ typedef struct {
 } Initializer;
 
 void InitializerDelete(Initializer* init);
+
+// An initializer holding the address of symbol + addend, placed at offset within
+// the object being initialized.
+Initializer* NewSymbolInitializer(int32_t offset, Symbol* symbol,
+                                  int64_t addend);
 
 // An initialized static variable.  The values of these are set at compile
 // time from the initializer supplied by the user.

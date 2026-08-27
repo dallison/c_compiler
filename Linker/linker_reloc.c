@@ -31,6 +31,7 @@ Relocation* NewRelocation(const char* symbol_name,
   reloc->offset = offset;
   reloc->type = reloc_type;
   reloc->addend = addend;
+  reloc->addend_in_place = false;
   reloc->section = target_section;
   return reloc;
 }
@@ -45,6 +46,7 @@ Relocation* NewLinkerSymbolRelocation(LinkerSymbol* symbol, int64_t offset,
   reloc->offset = offset;
   reloc->type = reloc_type;
   reloc->addend = 0;
+  reloc->addend_in_place = false;
   reloc->section = NULL;
   return reloc;
 }
@@ -62,6 +64,7 @@ Relocation* NewRelativeRelocation(LinkerSymbol* symbol,
    reloc->offset = offset;
    reloc->type = reloc_type;
    reloc->addend = addend;
+   reloc->addend_in_place = false;
    reloc->section = target_section;
    return reloc;
 }
@@ -91,7 +94,8 @@ void LinkerReadRelocation(Linker* linker,
                            ELFReaderSection* strtab) {
   int32_t symbol_index = ELF_R_SYM(reloc->info);
   int32_t reloc_type = ELF_R_TYPE(reloc->info);
-  int64_t addend = reloc_section->header->type == SHT(rela) ? reloc->addend : 0;
+  bool is_rela = reloc_section->header->type == SHT(rela);
+  int64_t addend = is_rela ? reloc->addend : 0;
   
   // Decode the referenced symbol from the on-disk symbol table.  For ELF32 the
   // on-disk symbol is narrower than the canonical struct, so decode it via the
@@ -122,6 +126,7 @@ void LinkerReadRelocation(Linker* linker,
   Relocation* linker_reloc =
     NewRelocation((const char*)strtab->contents + elf_sym->name,
                 target_section, reloc->offset, reloc_type, addend);
+  linker_reloc->addend_in_place = !is_rela;
   if (ELF_ST_TYPE(elf_sym->info) == STT(section) &&
       elf_sym->shndx < elf_file->sections.length) {
     linker_reloc->symbol_section =

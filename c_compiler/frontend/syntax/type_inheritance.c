@@ -722,7 +722,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
   int ptr_size = SizeofPointer();
   // Header entry 0: offset_to_top -- the byte distance from this subobject's
   // vptr back to the most-derived object (0 for the primary table).
-  Initializer* ott = malloc(sizeof(Initializer));
+  Initializer* ott = calloc(1, sizeof(Initializer));
   ott->offset = 0;
   switch (ptr_size) {
     case 8:
@@ -744,7 +744,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
   TypeRecordSetStructInfo(complete_type, complete);
   TypeRecordCalculateSize(complete_type);
   Symbol* type_info = RttiGetTypeInfoSymbol(complete_type);
-  Initializer* ti = malloc(sizeof(Initializer));
+  Initializer* ti = calloc(1, sizeof(Initializer));
   ti->offset = (int32_t)ptr_size;
   if (type_info != NULL) {
     ti->type = kInitTypeSymbol;
@@ -761,7 +761,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
     if (member == NULL || member->symbol == NULL) {
       continue;
     }
-    Initializer* init = malloc(sizeof(Initializer));
+    Initializer* init = calloc(1, sizeof(Initializer));
     init->offset = (int32_t)((i + 2) * SizeofPointer());
     if (member->symbol->type->info.function.is_pure_virtual) {
       if (SizeofPointer() == 8) {
@@ -874,7 +874,7 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
     int offset = complete_base != NULL
                      ? complete_base->byte_offset - source_offset
                      : source_base->byte_offset;
-    Initializer* init = malloc(sizeof(Initializer));
+    Initializer* init = calloc(1, sizeof(Initializer));
     init->offset = (int32_t)(i * (size_t)SizeofType(kTypeInt));
     init->type = kInitTypeWord;
     init->value.word = (uint32_t)offset;

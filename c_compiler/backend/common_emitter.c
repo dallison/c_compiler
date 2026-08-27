@@ -124,9 +124,15 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         } else {
           fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
         }
-        fprintf(fp, "\t%s    %s\t\t// offset %d\n", ptr_asm,
-                TargetSymbolName(init->value.symbol, buf, sizeof(buf)),
-                next_offset);
+        if (init->symbol_addend != 0) {
+          fprintf(fp, "\t%s    %s%+" PRId64 "\t\t// offset %d\n", ptr_asm,
+                  TargetSymbolName(init->value.symbol, buf, sizeof(buf)),
+                  init->symbol_addend, next_offset);
+        } else {
+          fprintf(fp, "\t%s    %s\t\t// offset %d\n", ptr_asm,
+                  TargetSymbolName(init->value.symbol, buf, sizeof(buf)),
+                  next_offset);
+        }
         next_offset += compiler->pointer_size;
         break;
       case kInitTypeString:

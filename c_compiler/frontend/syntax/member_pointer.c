@@ -468,8 +468,7 @@ bool MemberPointerTryEvaluateConstant(struct ASTNode* node, TypeRecord* type,
 
 static void MemberPointerAppendWordInitializer(Vector* initializers, int offset,
                                                int64_t value) {
-  Initializer* init = malloc(sizeof(Initializer));
-  memset(init, 0, sizeof(*init));
+  Initializer* init = calloc(1, sizeof(Initializer));
   init->offset = offset;
   int word = compiler->pointer_size;
   if (word == 8) {
@@ -490,12 +489,7 @@ static void MemberPointerAppendWordInitializer(Vector* initializers, int offset,
 
 static void MemberPointerAppendSymbolInitializer(Vector* initializers,
                                                    int offset, Symbol* symbol) {
-  Initializer* init = malloc(sizeof(Initializer));
-  memset(init, 0, sizeof(*init));
-  init->offset = offset;
-  init->type = kInitTypeSymbol;
-  init->value.symbol = symbol;
-  VectorAppend(initializers, init);
+  VectorAppend(initializers, NewSymbolInitializer(offset, symbol, 0));
 }
 
 void MemberPointerEmitStaticInitializers(TypeRecord* type,

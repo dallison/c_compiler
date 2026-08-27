@@ -540,36 +540,197 @@ static int StringLiteralElementSize(ASTNode* expr) {
              : 1;
 }
 
-static Symbol* InitPointerAddressTarget(ASTNode* expr) {
+// The address of a static object shifted by a byte offset, which is what an
+// address constant is: C reaches one by selecting a member, subscripting or
+// adding an integer to a pointer, and each of those only moves the offset.
+typedef struct {
+  Symbol* symbol;
+  int64_t addend;
+} AddressConstant;
+
+// Size of the object a pointer or array expression addresses, for scaling the
+// integer in pointer arithmetic.  Zero when it cannot be determined, which makes
+// the caller give up rather than scale by a guess.
+static int64_t InitAddressedSize(TypeRecord* type) {
+  if (type == NULL || type->next == NULL) {
+    return 0;
+  }
+  TypeRecordCalculateSize(type->next);
+  return type->next->size;
+}
+
+// Does the symbol live at an address the linker can name?  An object with
+// automatic storage does not: it has no address until its frame exists, so
+// "&local" and everything reached from it is not an address constant even though
+// it is spelled like one.
+static bool SymbolHasLinkTimeAddress(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  if (TypeIsFunction(symbol->type) ||
+      StorageIs(symbol->storage, STO(static) | STO(extern)) ||
+      CompilerSymbolIsMetaPromotedStatic(symbol)) {
+    return true;
+  }
+  return !symbol->flags.is_block_scope && !symbol->flags.is_argument;
+}
+
+// Evaluate expr, whose value is an address, as an address constant.
+static bool InitAddressConstant(ASTNode* expr, AddressConstant* out);
+
+// Evaluate the object expr designates, for an expr that is an lvalue rather than
+// a value: the operand of '&', or the base of a member selection.
+static bool InitDesignatedObject(ASTNode* expr, AddressConstant* out) {
   if (expr == NULL) {
-    return NULL;
+    return false;
   }
-  if (expr->op == AST_OP(cast)) {
-    return InitPointerAddressTarget(((CastASTNode*)expr)->expr);
-  }
-  if (expr->op == AST_OP(identifier)) {
-    Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
-    if (symbol != NULL &&
-        (TypeIsFunction(symbol->type) ||
-         StorageIs(symbol->storage, STO(static) | STO(extern)) ||
-         CompilerSymbolIsMetaPromotedStatic(symbol))) {
-      return symbol;
+  switch (expr->op) {
+    case AST_OP(identifier): {
+      Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+      if (!SymbolHasLinkTimeAddress(symbol)) {
+        return false;
+      }
+      out->symbol = symbol;
+      out->addend = 0;
+      return true;
     }
-    return NULL;
-  }
-  if (expr->op == AST_OP(structmember)) {
-    StructMember* member = ((StructMemberASTNode*)expr)->member;
-    if (member != NULL && member->symbol != NULL &&
-        (member->is_static || member->is_member_function)) {
-      return member->symbol;
+    case AST_OP(structmember): {
+      // A static data member or a member function stands for a symbol of its
+      // own rather than a place inside an enclosing object.
+      StructMember* member = ((StructMemberASTNode*)expr)->member;
+      if (member == NULL || member->symbol == NULL ||
+          !(member->is_static || member->is_member_function)) {
+        return false;
+      }
+      out->symbol = member->symbol;
+      out->addend = 0;
+      return true;
     }
-    return NULL;
+    case AST_OP(dot):
+    case AST_OP(arrow): {
+      if (ASTNodeGetShape(expr) != kASTShapeBinary) {
+        return false;
+      }
+      BinaryASTNode* access = (BinaryASTNode*)expr;
+      if (access->right == NULL ||
+          access->right->op != AST_OP(structmember)) {
+        return false;
+      }
+      StructMemberASTNode* member = (StructMemberASTNode*)access->right;
+      if (member->member != NULL && member->member->is_bit_field) {
+        // A bitfield has no address of its own.
+        return false;
+      }
+      // The left of a '.' designates an object; the left of a '->' is a pointer
+      // value, so it is an address constant in its own right.
+      bool ok = expr->op == AST_OP(dot)
+                    ? InitDesignatedObject(access->left, out)
+                    : InitAddressConstant(access->left, out);
+      if (!ok) {
+        return false;
+      }
+      out->addend += member->byte_offset;
+      return true;
+    }
+    case AST_OP(subscript): {
+      if (ASTNodeGetShape(expr) != kASTShapeBinary) {
+        return false;
+      }
+      BinaryASTNode* subscript = (BinaryASTNode*)expr;
+      int64_t index;
+      if (subscript->left == NULL ||
+          !EvaluateIntegerExpression(subscript->right, &index)) {
+        return false;
+      }
+      int64_t element_size = InitAddressedSize(subscript->left->type);
+      if (element_size == 0 ||
+          index < INT32_MIN / element_size || index > INT32_MAX / element_size) {
+        // An offset that does not fit an address is either a bad subscript or an
+        // overflow in the multiplication below.
+        return false;
+      }
+      // Subscripting an array designates a place inside it; subscripting a
+      // pointer starts from the address that pointer holds.
+      bool ok = TypeIsArray(subscript->left->type)
+                    ? InitDesignatedObject(subscript->left, out)
+                    : InitAddressConstant(subscript->left, out);
+      if (!ok) {
+        return false;
+      }
+      out->addend += index * element_size;
+      return true;
+    }
+    case AST_OP(contents):
+      // *p designates whatever p addresses.
+      if (ASTNodeGetShape(expr) != kASTShapeUnary) {
+        return false;
+      }
+      return InitAddressConstant(((UnaryASTNode*)expr)->sub, out);
+    default:
+      return false;
   }
-  if (expr->op == AST_OP(subscript) &&
-      ASTNodeGetShape(expr) == kASTShapeBinary) {
-    return InitPointerAddressTarget(((BinaryASTNode*)expr)->left);
+}
+
+static bool InitAddressConstant(ASTNode* expr, AddressConstant* out) {
+  if (expr == NULL) {
+    return false;
   }
-  return NULL;
+  switch (expr->op) {
+    case AST_OP(cast):
+      // A cast between pointer types keeps the address; one that converts to or
+      // from something else is not an address constant we can encode.
+      if (!TypeIsPointer(expr->type) && !TypeIsArray(expr->type)) {
+        return false;
+      }
+      return InitAddressConstant(((CastASTNode*)expr)->expr, out);
+    case AST_OP(address):
+      if (ASTNodeGetShape(expr) != kASTShapeUnary) {
+        return false;
+      }
+      return InitDesignatedObject(((UnaryASTNode*)expr)->sub, out);
+    case AST_OP(identifier):
+      // An array or function name used as a value is the address of the object
+      // itself.
+      return InitDesignatedObject(expr, out);
+    case AST_OP(structmember):
+      return InitDesignatedObject(expr, out);
+    case AST_OP(plus):
+    case AST_OP(minus): {
+      if (ASTNodeGetShape(expr) != kASTShapeBinary) {
+        return false;
+      }
+      BinaryASTNode* arithmetic = (BinaryASTNode*)expr;
+      ASTNode* base = arithmetic->left;
+      ASTNode* count = arithmetic->right;
+      if (base == NULL || count == NULL) {
+        return false;
+      }
+      if (!TypeIsPointer(base->type) && !TypeIsArray(base->type)) {
+        // "n + p" is the same address as "p + n", but subtracting from an
+        // integer is not an address at all.
+        if (expr->op == AST_OP(minus)) {
+          return false;
+        }
+        ASTNode* swap = base;
+        base = count;
+        count = swap;
+      }
+      // Semantic analysis has already multiplied the operand by the size of the
+      // pointed-to type (see AnalyzePlusOperator), so it is a count of bytes and
+      // is added as it stands.
+      int64_t byte_offset;
+      if (!EvaluateIntegerExpression(count, &byte_offset) ||
+          byte_offset < INT32_MIN || byte_offset > INT32_MAX ||
+          !InitAddressConstant(base, out)) {
+        return false;
+      }
+      out->addend +=
+          expr->op == AST_OP(minus) ? -byte_offset : byte_offset;
+      return true;
+    }
+    default:
+      return false;
+  }
 }
 
 static void InitPointer(ASTNode* expr,
@@ -619,6 +780,16 @@ static void InitPointer(ASTNode* expr,
     VectorAppend(initializers, init_out);
     return;
   }
+  AddressConstant address;
+  if (InitAddressConstant(expr, &address)) {
+    init_out->type = kInitTypeSymbol;
+    init_out->value.symbol = address.symbol;
+    init_out->symbol_addend = address.addend;
+    init_out->offset = offset;
+    VectorAppend(initializers, init_out);
+    return;
+  }
+
   ASTNode* var_node;
   if (expr->op == AST_OP(address)) {
     UnaryASTNode* addr_node = (UnaryASTNode*)expr;
@@ -627,33 +798,18 @@ static void InitPointer(ASTNode* expr,
     var_node = expr;
   }
 
-  // Allow cast to pointer.
+  // A cast of something that is not an address, such as an integer used as a
+  // pointer.
   if (var_node->op == AST_OP(cast)) {
     CastASTNode* c = (CastASTNode*)var_node;
     InitScalar(c->expr, subinit, offset, initializers);
-    return;
-  }
-  Symbol* address_target = InitPointerAddressTarget(var_node);
-  if (address_target != NULL) {
-    init_out->type = kInitTypeSymbol;
-    init_out->value.symbol = address_target;
-    init_out->offset = offset;
-    VectorAppend(initializers, init_out);
-    return;
-  }
-  if (var_node->op == AST_OP(identifier)) {
-    IdentifierASTNode* id_node = (IdentifierASTNode*)var_node;
-    init_out->type = kInitTypeSymbol;
-    init_out->value.symbol = id_node->symbol;
-    init_out->offset = offset;
-    VectorAppend(initializers, init_out);
     return;
   }
   if (var_node->op == AST_OP(compound_literal)) {
     // &(foo){..}
     // The CompoundLiteralASTNode contains a symbol.  We take its address.
     InitCompoundLiteral(var_node);
-    
+
     CompoundLiteralASTNode* c = (CompoundLiteralASTNode*)var_node;
     IdentifierASTNode* id_node = (IdentifierASTNode*)c->sym;
     init_out->type = kInitTypeSymbol;
@@ -669,7 +825,7 @@ static void InitPointer(ASTNode* expr,
 static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
                        Vector* initializers) {
   TypeRecordCalculateSize(expr->type);
-  Initializer* init_out = malloc(sizeof(Initializer));
+  Initializer* init_out = calloc(1, sizeof(Initializer));
   TypeRecord* type = subinit->type;
   TypeRecordCalculateSize(type);
   if (TypeIsIntegral(type)) {
@@ -746,7 +902,7 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
 static void InitArray(ASTNode* expr, ASTNode* subinit, int offset,
                       Vector* initializers) {
   TypeRecordCalculateSize(expr->type);
-  Initializer* init_out = malloc(sizeof(Initializer));
+  Initializer* init_out = calloc(1, sizeof(Initializer));
   ConstantASTNode* string_node = (ConstantASTNode*)expr;
   init_out->type = kInitTypeMemory;
   init_out->offset = offset;
@@ -1015,6 +1171,16 @@ void InitializerDelete(Initializer* init) {
     BufferDestruct(&init->value.memory);
   }
   free(init);
+}
+
+Initializer* NewSymbolInitializer(int32_t offset, Symbol* symbol,
+                                  int64_t addend) {
+  Initializer* init = calloc(1, sizeof(Initializer));
+  init->type = kInitTypeSymbol;
+  init->offset = offset;
+  init->value.symbol = symbol;
+  init->symbol_addend = addend;
+  return init;
 }
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var) {

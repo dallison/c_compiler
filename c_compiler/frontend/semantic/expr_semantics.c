@@ -2138,11 +2138,13 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
       ASTNodeSetType((ASTNode*)node,
                      PointerArithmeticResultType(node->left->type));
       // Scale right side by size of left.
-      // If the right node is a constant we can do the multiplication now.
+      // If the right node is a constant we can do the multiplication now.  The
+      // scaled operand is a count of bytes, so it keeps the integer type it had
+      // rather than taking the pointer's, as in binary plus above.
       if (ASTNodeIsIntConstant(node->right)) {
         int64_t size = node->left->type->next->size;
         int64_t value = ASTNodeConstantValue(node->right);
-        ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
+        ASTNode* scale = NewIntConstantASTNode(value * size, node->right->type,
                                                node->base.location);
         node->right = scale;
       } else {

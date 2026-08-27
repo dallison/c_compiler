@@ -72,7 +72,7 @@ static void RttiLegacyMangledKey(TypeRecord* type, String* out) {
 }
 
 static Initializer* NewIntPtrInitializer(int32_t offset, int64_t value) {
-  Initializer* init = malloc(sizeof(Initializer));
+  Initializer* init = calloc(1, sizeof(Initializer));
   init->offset = offset;
   switch (SizeofPointer()) {
     case 8:
@@ -92,18 +92,10 @@ static Initializer* NewIntPtrInitializer(int32_t offset, int64_t value) {
 }
 
 static Initializer* NewWordInitializer(int32_t offset, uint32_t value) {
-  Initializer* init = malloc(sizeof(Initializer));
+  Initializer* init = calloc(1, sizeof(Initializer));
   init->offset = offset;
   init->type = kInitTypeWord;
   init->value.word = value;
-  return init;
-}
-
-static Initializer* NewSymbolInitializer(int32_t offset, Symbol* symbol) {
-  Initializer* init = malloc(sizeof(Initializer));
-  init->offset = offset;
-  init->type = kInitTypeSymbol;
-  init->value.symbol = symbol;
   return init;
 }
 
@@ -199,7 +191,7 @@ static Symbol* EmitItaniumTypeNameString(const String* mangled) {
   size_t len = mangled->length + 1;
   Vector inits;
   VectorInit(&inits);
-  Initializer* init = malloc(sizeof(Initializer));
+  Initializer* init = calloc(1, sizeof(Initializer));
   init->type = kInitTypeMemory;
   init->offset = 0;
   BufferInit(&init->value.memory);
@@ -290,8 +282,8 @@ static Symbol* RttiGetTypeInfoSymbolItanium(TypeRecord* type, String* key) {
 
   Vector ti_inits;
   VectorInit(&ti_inits);
-  VectorAppend(&ti_inits, NewSymbolInitializer(0, vptr_ap));
-  VectorAppend(&ti_inits, NewSymbolInitializer(ptr_size, name_symbol));
+  VectorAppend(&ti_inits, NewSymbolInitializer(0, vptr_ap, 0));
+  VectorAppend(&ti_inits, NewSymbolInitializer(ptr_size, name_symbol, 0));
 
   switch (kind) {
     case kItaniumRttiClass:
@@ -299,7 +291,7 @@ static Symbol* RttiGetTypeInfoSymbolItanium(TypeRecord* type, String* key) {
     case kItaniumRttiSiClass: {
       ItaniumDirectBase* base = direct_bases.value.p[0];
       VectorAppend(&ti_inits,
-                   NewSymbolInitializer(2 * ptr_size, base->base_ti));
+                   NewSymbolInitializer(2 * ptr_size, base->base_ti, 0));
       break;
     }
     case kItaniumRttiVmiClass:
@@ -310,7 +302,7 @@ static Symbol* RttiGetTypeInfoSymbolItanium(TypeRecord* type, String* key) {
       for (size_t i = 0; i < direct_bases.length; i++) {
         ItaniumDirectBase* base = direct_bases.value.p[i];
         int32_t entry = (int32_t)(2 * ptr_size + 8 + i * 2 * ptr_size);
-        VectorAppend(&ti_inits, NewSymbolInitializer(entry, base->base_ti));
+        VectorAppend(&ti_inits, NewSymbolInitializer(entry, base->base_ti, 0));
         long offset_flags = ((long)base->byte_offset << 8);
         if (base->is_public) {
           offset_flags |= 2;
@@ -345,7 +337,7 @@ static Symbol* EmitLegacyTypeNameString(const char* key) {
   size_t len = strlen(key) + 1;
   Vector inits;
   VectorInit(&inits);
-  Initializer* init = malloc(sizeof(Initializer));
+  Initializer* init = calloc(1, sizeof(Initializer));
   init->type = kInitTypeMemory;
   init->offset = 0;
   BufferInit(&init->value.memory);
@@ -398,7 +390,7 @@ static Symbol* RttiGetTypeInfoSymbolLegacy(TypeRecord* type, String* key) {
         continue;
       }
       int32_t entry = (int32_t)(base_count * 2 * ptr_size);
-      VectorAppend(&base_inits, NewSymbolInitializer(entry, base_ti));
+      VectorAppend(&base_inits, NewSymbolInitializer(entry, base_ti, 0));
       VectorAppend(&base_inits,
                    NewIntPtrInitializer(entry + ptr_size, base->byte_offset));
       base_count++;
@@ -416,9 +408,9 @@ static Symbol* RttiGetTypeInfoSymbolLegacy(TypeRecord* type, String* key) {
 
   Vector ti_inits;
   VectorInit(&ti_inits);
-  VectorAppend(&ti_inits, NewSymbolInitializer(0, name_symbol));
+  VectorAppend(&ti_inits, NewSymbolInitializer(0, name_symbol, 0));
   if (base_info_symbol != NULL) {
-    VectorAppend(&ti_inits, NewSymbolInitializer(ptr_size, base_info_symbol));
+    VectorAppend(&ti_inits, NewSymbolInitializer(ptr_size, base_info_symbol, 0));
   } else {
     VectorAppend(&ti_inits, NewIntPtrInitializer(ptr_size, 0));
   }

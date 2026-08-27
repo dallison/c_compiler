@@ -211,13 +211,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_ARM_ABS32:
     case R_ARM_TARGET1:
     case R_ARM_TARGET2: {
-      int32_t implicit_addend = *(const int32_t*)target_address;
+      int32_t implicit_addend =
+          reloc->addend_in_place ? *(const int32_t*)target_address : 0;
       *(int32_t*)target_address = (int32_t)(S + A + implicit_addend);
       return;
     }
 
     case R_ARM_PREL31: {
-      uint32_t encoded_addend = *(const uint32_t*)target_address;
+      uint32_t encoded_addend =
+          reloc->addend_in_place ? *(const uint32_t*)target_address : 0;
       int32_t implicit_addend = (int32_t)(encoded_addend << 1) >> 1;
       int64_t value = (int64_t)(S + A + implicit_addend - P);
       if (value < -(1LL << 30) || value >= (1LL << 30)) {
@@ -230,7 +232,8 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_ARM_REL32: {
-      int32_t implicit_addend = *(const int32_t*)target_address;
+      int32_t implicit_addend =
+          reloc->addend_in_place ? *(const int32_t*)target_address : 0;
       *(int32_t*)target_address = (int32_t)(S + A + implicit_addend - P);
       return;
     }

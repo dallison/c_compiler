@@ -390,6 +390,9 @@ static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only
 }
 
 static bool HasStaticAddress(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
   if (TypeIsArray(expr->type) || TypeIsFunction(expr->type)) {
     return true;
   }
@@ -405,6 +408,20 @@ static bool HasStaticAddress(ASTNode* expr) {
         CompilerMetaPromotedPointerTarget(symbol) != NULL) {
       return true;
     }
+  }
+  // An address stays an address through a cast between pointer types, and
+  // through adding a constant to it or subtracting one from it.  The encoding of
+  // such an initializer (see NewSymbolInitializer) is what decides whether the
+  // result really is a link-time constant; this only has to avoid rejecting the
+  // expression before it gets that far.
+  if (expr->op == AST_OP(cast) && TypeIsPointer(expr->type)) {
+    return HasStaticAddress(((CastASTNode*)expr)->expr);
+  }
+  if ((expr->op == AST_OP(plus) || expr->op == AST_OP(minus)) &&
+      ASTNodeGetShape(expr) == kASTShapeBinary && TypeIsPointer(expr->type)) {
+    BinaryASTNode* arithmetic = (BinaryASTNode*)expr;
+    return HasStaticAddress(arithmetic->left) ||
+           (expr->op == AST_OP(plus) && HasStaticAddress(arithmetic->right));
   }
   return false;
 }

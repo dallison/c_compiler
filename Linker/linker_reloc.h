@@ -11,6 +11,7 @@
 
 #include "dstring.h"
 #include "elf_reader.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 struct Linker;
@@ -27,6 +28,13 @@ typedef struct Relocation {
   int type;                  // Relocation type.
   int64_t offset;            // Offset into section.
   int64_t addend;            // Value to add to end.
+  // Where the addend came from.  A SHT_REL section has no room for one, so the
+  // producer leaves it in the bytes being relocated and 'addend' above is zero;
+  // an architecture that supports such objects has to read it back out, in
+  // whatever form that relocation type encodes it.  A SHT_RELA section carries
+  // the addend in the entry, and then the bytes being relocated hold nothing to
+  // add: reading them anyway would count the addend twice.
+  bool addend_in_place;
 } Relocation;
 
 Relocation* NewRelocation(const char* symbol_name,
