@@ -66,7 +66,7 @@ single_exec_x86_64  pass=242 fail=1   00200
 single_exec_65c02   pass=234 fail=3   00200, 00219, 00246
 ```
 
-A full `bazel test //... --keep_going` fails 16 more targets than the nine suites
+A full `bazel test //... --keep_going` fails 13 more targets than the nine suites
 above, all of them long-standing: they were verified failing at `4e13f01`, before
 any of the work recorded here.  The list is worth having in full, because a run
 that only knows about the first four names below looks alarming:
@@ -80,7 +80,6 @@ that only knows about the first four names below looks alarming:
 //:6502_tail_call_test
 //:65c02_cxx_test
 //:c23_numeric_headers_test
-//:ir_optimizer_regression_test
 //:libc_x86_64_test
 //:multiarch_inline_asm_test
 //:mutex_65c02_test
@@ -102,9 +101,9 @@ thread-free reproducer for the AArch64 one was not found.
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
 
-- Chase the dynamic-linking defects the loader relocation fix made reachable,
-  listed with that fix below.  `//:ir_optimizer_regression_test` now fails on the
-  first of them instead of on the relocation bug.
+- Chase the three remaining dynamic-linking defects the loader relocation fix
+  made reachable, listed with that fix below.  The fourth, a p-code fault on the
+  first `malloc` of any dynamic program, is fixed.
 
 ## Status
 
@@ -369,22 +368,41 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   equally broken and nothing exercised them.
 
   Getting past the doubling exposed four further dynamic-linking defects, each
-  previously masked and none of them a regression from this fix:
-  - A p-code dynamically linked C++ coroutine program segfaults the interpreter
-    inside `memmove`, writing to 0x410105380, a guest data address that is not
-    mapped.  The same program is fine when linked `-static`, and a simpler
-    dynamic C++ program with a static initializer is fine, so it is specific to
-    the dynamic path.  This is what `//:ir_optimizer_regression_test` fails on
-    now.
+  previously masked and none of them a regression from this fix.  The p-code one
+  is the entry after this; these three are open:
   - A data slot initialized to the address of a function imported from a DSO is
     left as 0 on aarch64, RISC-V and x86_64, so calling through it faults.
-  - The p-code linker asserts `symbol_index != -1` in
-    `DynamicLinkerBuildDynamicRelocations` when a `-fpic` program has a global
-    pointer into its own `.data`.
+  - A `-fpic` program with a global pointer into its own `.data` faults on ARM
+    with `Load32 outside mapped memory`, at an address whose top byte has been
+    cut off: the loader stores a host pointer into the 32-bit slot.  This is the
+    same truncation as the `R_ARM_RELATIVE` bug above, so a `R_ARM_ABS32` or
+    `R_ARM_GLOB_DAT` handler likely needs the same treatment.  Verified failing
+    at `4ce2088~1`.
   - In a freestanding `-nostdlib` dynamic program on ARM and p-code the init
-    arrays never run, and on ARM `R_ARM_GLOB_DAT` truncates a host address into
-    a 32-bit GOT slot the same way `R_ARM_RELATIVE` did.  Both fail identically
-    with and without this fix.
+    arrays never run.
+- **Fixed.** Any dynamically linked p-code program faulted on its first `malloc`,
+  which made every p-code C++ program that allocates unusable.  This is what
+  `//:ir_optimizer_regression_test` failed on once the relocation doubling above
+  was out of the way, and it reproduces with a five-line C program that mallocs
+  64 bytes.  It is not a regression: the dynamic path had never reserved the
+  heap.
+
+  p-code is excluded from the guest thread syscalls, so it does not get
+  `__DAVECC_HAS_HEAP_LOCK__` and is the only target whose `malloc` still takes
+  its heap from the linker-defined `_end` rather than from a 1MB `.bss` array.
+  Nothing ever calls brk or mmap for that heap, so the loader has to map it, and
+  only `LoadStaticSegments` did -- by enlarging the highest writable segment's
+  memsz before mapping it.  The dynamic path maps sections one at a time, so
+  there is no segment mapping to extend and the reserve was simply absent: the
+  4MB above `_end` was unmapped, and the very first `RegisterRegion` writes the
+  region's end sentinel one megabyte up, straight past the last mapped page.
+
+  `LoadFixedAddressSections` now maps the same `LOADER_HEAP_RESERVE` itself,
+  above the highest writable allocated section and only for the program, since
+  a DSO's `_end` is not the one `malloc` uses.  The reserve is mapped after the
+  sections, so it stops short of anything already mapped: a MAP_FIXED mapping
+  over a section would replace it with zeroed pages.  Advancing the next free
+  address past the reserve keeps the libraries loaded afterwards out of the heap.
 - **Fixed.** Throwing an exception cost time proportional to the size of the whole
   `.eh_frame`, so exceptions were around a thousand times more expensive than the
   work they interrupt.  `FindFDEInRange` in `libc/eh_frame.c` walks and fully
@@ -885,8 +903,7 @@ built before this work and so not caused by it:
 - `//c_testsuite:warning_diagnostics` fails: the script runs davecc with
   `-Werror=unused-value` under `set -e` and expects it to succeed, but promoting
   a warning to an error makes davecc exit nonzero.
-- `//:libc_x86_64_test`, `//:c23_numeric_headers_test` and
-  `//:davecc_driver_defaults_test` fail.
+- `//:libc_x86_64_test` and `//:c23_numeric_headers_test` fail.
 - `//cxx_testsuite:exec_x86_64` fails three tests whose guest programs exceed
   the harness's 30 second run timeout on this machine (35 s, 37 s and 75 s);
   all three exit 0 when run without it.
@@ -905,9 +922,8 @@ modules tests or the libc tests.  It runs 122 targets and the two sets barely
 overlap: the five `//c_testsuite:single_exec_*` targets are tagged `manual`, so
 `//...` does not include them at all, and must be asked for by name.
 
-A full run leaves these 17 failing, unchanged from `28c946e` through the
-`PT_TLS` fix, and a change that adds no name to this list has not regressed
-anything the repository can detect:
+A full run leaves these 15 failing, and a change that adds no name to this list
+has not regressed anything the repository can detect:
 
 ```text
 //:6502_codegen_cleanup_test      //:multiarch_inline_asm_test
@@ -915,13 +931,17 @@ anything the repository can detect:
 //:6502_tail_call_test            //c_testsuite:warning_diagnostics
 //:65c02_cxx_test                 //cxx_testsuite:exec_arm
 //:c23_numeric_headers_test       //cxx_testsuite:exec_riscv
-//:davecc_driver_defaults_test    //cxx_testsuite:exec_stacktrace_65c02
-//:ir_optimizer_regression_test   //cxx_testsuite:modules_aarch64
-//:libc_x86_64_test               //cxx_testsuite:modules_arm
+//:libc_x86_64_test               //cxx_testsuite:exec_stacktrace_65c02
+                                  //cxx_testsuite:modules_aarch64
+                                  //cxx_testsuite:modules_arm
                                   //cxx_testsuite:modules_x86_64
 ```
 
-`//:c23_bitint_test` is no longer among them; it passes now.
+`//:libc_arm_test` shows up on top of those in some runs; it is the flaky one
+described above.  The list was 17 names from `28c946e` through the `PT_TLS` fix:
+`//:c23_bitint_test` passes as of `28c946e`, `//:davecc_driver_defaults_test` as
+of the loader relocation fix, and `//:ir_optimizer_regression_test` as of the
+p-code heap reserve fix.
 
 ## Priority 1: deeply nested `else if` stack overflow
 

@@ -450,14 +450,6 @@ static bool LoaderMapIgnoreVaddrSegment(int elf_fd, ELFProgramHeader* segment,
   return true;
 }
 
-// The runtime heap (used by malloc) lives immediately above the program's
-// last writable segment, starting at the linker-defined '_end' symbol.  The
-// libc malloc for these targets assumes a contiguous block of memory there
-// without ever calling brk/mmap to obtain it, so the loader must reserve and
-// map that space.  Without it the very first malloc writes just past the
-// segment and faults ("outside mapped memory").
-#define LOADER_HEAP_RESERVE (4 * 1024 * 1024)
-
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
   int page_size = (int)sysconf(_SC_PAGESIZE);

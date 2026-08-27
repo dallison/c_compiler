@@ -45,6 +45,14 @@ typedef struct {
   const char* name;
 } SymbolScope;
 
+// The runtime heap (used by malloc) lives immediately above the program's last
+// writable section, starting at the linker-defined '_end' symbol.  The libc
+// malloc for targets without a heap-lock syscall (p-code, 6502) assumes a
+// contiguous block of memory there without ever calling brk/mmap to obtain it,
+// so the loader must reserve and map that space.  Without it the very first
+// malloc writes just past the last mapped page and faults.
+#define LOADER_HEAP_RESERVE (4 * 1024 * 1024)
+
 // Loader flags.
 #define LOADER_MAP_SYMTAB 1      // Load symbol table.
 #define LOADER_LAZY_RESOLVE 2    // Use lazy PLT resolution.

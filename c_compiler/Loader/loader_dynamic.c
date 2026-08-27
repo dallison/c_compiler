@@ -1605,10 +1605,53 @@ static bool MapFixedAddressSection(LoadedDynamicLibrary* lib,
   return true;
 }
 
+// Map the malloc heap that lives above '_end'.  The static loader gets this by
+// enlarging the highest writable segment's memsz before mapping it, but here
+// the sections are mapped one at a time and there is no segment mapping to
+// extend, so the reserve needs a mapping of its own.  'writable_end' is '_end',
+// whose own page the sections already cover, so the reserve starts at the page
+// above it.
+static bool ReserveFixedAddressHeap(LoadedDynamicLibrary* lib,
+                                    uint64_t writable_end,
+                                    uint64_t* next_available_address) {
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  uint64_t reserve_start = AlignUp(writable_end, page_size);
+  // The sections are already mapped, so a MAP_FIXED reserve reaching one of
+  // them would replace it with fresh zeroed pages.  A section above '_end'
+  // would break the heap's contiguity anyway, so stop short of it and let the
+  // first allocation that runs out of room report the failure.
+  uint64_t reserve_end = reserve_start + LOADER_HEAP_RESERVE;
+  for (uint64_t page = reserve_start; page < reserve_end; page += page_size) {
+    if (FindMappedSegmentContaining(lib, page, (uint64_t)page_size) != NULL) {
+      reserve_end = page;
+      break;
+    }
+  }
+  if (reserve_end == reserve_start) {
+    return true;
+  }
+
+  size_t length = (size_t)(reserve_end - reserve_start);
+  void* mapped = mmap((void*)reserve_start, length, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
+  if (mapped == MAP_FAILED) {
+    LoaderError("Failed to reserve heap at address %p: %s\n",
+                (void*)reserve_start, strerror(errno));
+    return false;
+  }
+  VectorAppend(&lib->mapped_segments, NewMappedSegment(mapped, length));
+  // Keep the libraries loaded after this one out of the heap.
+  if (reserve_end > *next_available_address) {
+    *next_available_address = reserve_end;
+  }
+  return true;
+}
+
 static uint64_t LoadFixedAddressSections(
     LoadedDynamicLibrary* lib, uint64_t load_address,
     uint64_t* next_available_address) {
   uint64_t first_address = 0;
+  uint64_t writable_end = 0;
   *next_available_address = 0;
 
   for (int i = 0; i < lib->header->shnum; i++) {
@@ -1631,6 +1674,18 @@ static uint64_t LoadFixedAddressSections(
     if (section_end > *next_available_address) {
       *next_available_address = section_end;
     }
+    if ((section->flags & SHF(write)) != 0 && section_end > writable_end) {
+      writable_end = section_end;
+    }
+  }
+
+  // Only the program owns a heap: malloc uses the executable's '_end', and
+  // reserving above every library as well would carve holes out of the address
+  // space the remaining libraries are loaded into.
+  if (writable_end != 0 && lib->loader != NULL &&
+      lib->loader->dynamic_lib == lib &&
+      !ReserveFixedAddressHeap(lib, writable_end, next_available_address)) {
+    return 0;
   }
 
   for (int i = 0; i < lib->header->phnum; i++) {
