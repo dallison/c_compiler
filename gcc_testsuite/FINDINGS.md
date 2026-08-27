@@ -539,6 +539,21 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   register.  The two then travelled together until one of them was spilled,
   which released the register while the other was still live in it.
 
+- Fixed: an ARM program that reached any `__cxa_atexit` registration spun
+  forever in `__davecc_atexit_lock`, which took out every `std::thread` and
+  `std::error_code` program on that target -- `std::make_error_code` alone was
+  enough.  The lock byte is the first object in `.bss`, and the writable
+  `PT_LOAD` claimed four file bytes more than the initialized sections hold, so
+  the loader copied the padding that follows `.init_array` over the lock and it
+  read as held.  The extra bytes came from stretching the load segment to back
+  the `PT_TLS` file image, which a block built only from `.tbss` does not have.
+  The ARM cxx suite lost five failures.
+
+  A `PT_TLS` image that is not empty is still mapped at an address inside
+  `.bss`, so a program with a `thread_local int x = 5;` and a `.bss` array finds
+  the array's first bytes holding the TLS image on x86-64 and AArch64.  That is
+  the same defect from the other side and is not fixed yet.
+
 ## Deep nesting outside the constructs already capped
 
 The suites cover parenthesized expressions and struct nesting, and both are now

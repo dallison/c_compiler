@@ -518,10 +518,17 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
           uint64_t relative = tls->header.offset - data->header.offset;
           tls->header.vaddr = data->header.vaddr + relative;
           tls->header.paddr = tls->header.vaddr;
-          uint64_t required_filesz = relative + tls->header.filesz;
           uint64_t required_memsz = relative + tls->header.memsz;
-          if (required_filesz > data->header.filesz) {
-            data->header.filesz = required_filesz;
+          // Only an image with file content needs the load segment to reach
+          // it.  A TLS block built from .tbss alone has none, and stretching
+          // the segment to the image offset would make the loader copy the
+          // alignment padding that follows the initialized sections over the
+          // start of .bss, which shares those addresses.
+          if (tls->header.filesz > 0) {
+            uint64_t required_filesz = relative + tls->header.filesz;
+            if (required_filesz > data->header.filesz) {
+              data->header.filesz = required_filesz;
+            }
           }
           if (required_memsz > data->header.memsz) {
             data->header.memsz = required_memsz;
