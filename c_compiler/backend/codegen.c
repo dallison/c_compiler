@@ -753,6 +753,40 @@ static void BuildBasicBlockGraph(Generator* gen,
   }
 }
 
+// Link each protected region to its landing pad.  Without this edge the pad has
+// no predecessor, so it stays out of the dominator tree and the values it
+// defines are invisible to SSA construction and to every dataflow pass: a local
+// assigned in a catch block reads back as its pre-try value.
+//
+// The edge starts at the block holding the region's start label rather than at
+// the individual calls inside the region.  That keeps definitions made before
+// the region dominating the pad (handlers and cleanups only ever name objects
+// declared outside the region) while definitions made inside it correctly do
+// not, since the throw may happen before they run.
+static void AddExceptionHandlerEdges(Generator* gen) {
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (range->try_start == NULL || range->catch_label == NULL) {
+      continue;
+    }
+    BasicBlock* region = range->try_start->block;
+    BasicBlock* pad = range->catch_label->block;
+    if (region == NULL || pad == NULL || region == pad) {
+      continue;
+    }
+    // Several ranges can share one pad (a try with more than one handler, or
+    // a handler naming several types), and a duplicate edge would be counted
+    // twice when phis line their operands up with predecessors.
+    bool linked = false;
+    for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
+      linked = region->out_edges.value.w[j] == (int64_t)pad->block_id;
+    }
+    if (!linked) {
+      BasicBlockAddEdge(region, pad);
+    }
+  }
+}
+
 // All blocks with no output edges link to exit block.  Also blocks
 // that do not end in a branch or return fall through to next block.
 static void AddMissingLinks(Generator* gen) {
@@ -997,6 +1031,11 @@ static void BuildBasicBlocks(Generator* gen) {
   
   // Straighten graph, coalescing blocks that just link to each other.
   StraightenGraph(gen);
+
+  // Protected regions reach their landing pads without any branch.  This runs
+  // after straightening because coalescing assumes a block that does not end in
+  // a branch has exactly one successor, which an unwind edge would break.
+  AddExceptionHandlerEdges(gen);
 
   // Build dominators and persistent natural-loop information.  Dedicated
   // preheaders are inserted before SSA conversion, so no phi repair is needed.

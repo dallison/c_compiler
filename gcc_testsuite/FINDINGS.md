@@ -367,9 +367,9 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   capture and install stubs do not carry `d8`-`d15` at all.  Leaving them is
   still an improvement, since a value untouched by the unwind path now survives
   where before it was always replaced by the caller's.
-- A local written in a `catch` block reads back as its value before the `try`,
-  on every target, at `-O2` but not at `-O0`.  Found while writing the test for
-  the entry above:
+- Fixed: a local written in a `catch` block read back as its value before the
+  `try`, on every target, at `-O2` but not at `-O0`.  Found while writing the
+  test for the entry above:
 
   ```c++
   int caught = 0;
@@ -377,9 +377,29 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   return caught;    // 0
   ```
 
-  The handler is reached only through the unwind metadata, so it looks like the
-  optimizer does not treat the landing pad as a predecessor of the code after
-  the `try` and propagates the pre-`try` value across it.  Next to look at.
+  A landing pad is entered from the unwinder rather than from a branch, so no
+  block listed it as a successor and it had no predecessor in the CFG.  With no
+  predecessor it never got an immediate dominator, which kept it out of the
+  dominator tree; SSA construction walks that tree, so the store to `caught` was
+  never given a name, contributed nothing to a dominance frontier, and no phi
+  appeared where the handler rejoins the code after the `try`.  The read there
+  then resolved to the only definition that reached it, the pre-`try` one, and
+  constant propagation folded it.
+
+  `AddExceptionHandlerEdges` in `c_compiler/backend/codegen.c` now links the
+  block holding each protected region's start label to that region's pad.
+  Starting the edge at the region's start, rather than at each call inside it,
+  keeps definitions made before the region dominating the pad -- handlers and
+  cleanups only name objects declared outside the region, so they need those --
+  while definitions inside it correctly do not, since the throw may precede
+  them.  Any call that can throw ends its block, so a definition sharing the
+  start block always precedes the region's first throw point and dominating the
+  pad is accurate for it.  The edges are added after `StraightenGraph`, whose
+  coalescing assumes a block that does not end in a branch has exactly one
+  successor.  `cxx_testsuite/tests/exec/0438_catch_local_reaches_join.cpp`
+  covers the store in the handler, a value defined before the `try` and left
+  alone by the handler, both paths defining the local, and a handler reading the
+  local it overwrites.
 
 ## Deep nesting outside the constructs already capped
 
