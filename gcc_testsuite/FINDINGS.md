@@ -45,17 +45,19 @@ Then compare `rg -n "^FAIL|pass=" <testlog>` for each.  Remember to rebuild
 `//:davecc` after stashing or unstashing; the interpreters read
 `bazel-bin/davecc`, so a stale binary silently measures the wrong compiler.
 
-Measured at `28c946e`, which is the baseline the atomics fix below was compared
-against:
+The failing names below have not changed since `28c946e`.  The pass counts are
+current as of the `PT_TLS` fix; each C++ exec suite gained two tests since
+`28c946e` (`0444` and `0445`), so an older reading of this table is two low
+there and otherwise identical:
 
 ```text
-exec_aarch64        pass=406 fail=0
-exec_arm            pass=403 fail=3   0158_standard_variant_constexpr (compile),
+exec_aarch64        pass=408 fail=0
+exec_arm            pass=405 fail=3   0158_standard_variant_constexpr (compile),
                                       0305_standard_expected (compile),
                                       0401_standard_stacktrace
-exec_riscv          pass=404 fail=2   0276_standard_string_conversions,
+exec_riscv          pass=406 fail=2   0276_standard_string_conversions,
                                       0327_standard_filesystem
-exec_x86_64         pass=406 fail=0
+exec_x86_64         pass=408 fail=0
 single_exec_aarch64 pass=248 fail=3   00200, 00216, 00219
 single_exec_arm     pass=247 fail=3   00200, 00216, 00219
 single_exec_riscv   pass=243 fail=8   00078, 00186, 00187, 00189, 00200,
@@ -77,28 +79,40 @@ thread-free reproducer for the AArch64 one was not found.
 
 ## Next in the queue
 
-- A `PT_TLS` image with file content is mapped at an address inside `.bss`, so a
-  program with a `thread_local int x = 5;` and a `.bss` array reads the TLS image
-  out of the array's first bytes.  Returns 5 on x86-64 and AArch64, passes on
-  ARM, pre-existing:
+- A chained `||` over 64-bit globals reads back a value that was just written as
+  though the write had not happened, on ARM at `-O2` only.  Every other target
+  passes, `-O0` passes, and splitting the condition into three separate `if`s
+  makes it pass on ARM too, so the comparisons themselves are fine and it is the
+  chain that goes wrong.  Pre-existing: identical before and after the `PT_TLS`
+  fix, and no TLS is involved.
 
 ```cpp
-thread_local int tls_value = 5;
-static unsigned char bss_first;
-static int bss_ints[64];
+#include <stdint.h>
+int64_t g_wide = 0x1122334455667788LL;
+int64_t g_narrow = 0x0a0b0c0dLL;
+int g_zero;
+static unsigned char bss_bytes[4];
 int main() {
-  if (bss_first != 0) return 4;
-  for (int i = 0; i < 64; i++) if (bss_ints[i] != 0) return 5;
-  return tls_value == 5 ? 0 : 6;
+  for (int i = 0; i < 4; i++) if (bss_bytes[i] != 0) return 6;
+  if (g_wide != 0x1122334455667788LL) return 7;
+  if (g_narrow != 0x0a0b0c0dLL) return 8;
+  if (g_zero != 0) return 9;
+  g_wide = 1;
+  g_narrow = 2;
+  g_zero = 3;
+  if (g_wide != 1 || g_narrow != 2 || g_zero != 3) return 10;   // returns 10
+  return 0;
 }
 ```
 
-  The mapping is set up in `WriteProgramHeaders` in
-  `c_compiler/ELF/elf_writer.c`, which points `PT_TLS` at
-  `data vaddr + (tls offset - data offset)`.  Nothing reserves address space for
-  the image, so it lands wherever `.bss` starts.  A fix has to give the image its
-  own address range inside the writable segment while leaving TLS symbol values
-  section-relative for local-exec relocations.
+  It does not reduce further, which is the interesting part.  Dropping the loop,
+  dropping the three reads before the writes, or dropping `g_zero` so the chain
+  has two terms instead of three all make it pass, and none of those pieces
+  feeds the chain.  That combination of an unrelated loop plus a spread of live
+  values points at register pressure around the chain rather than at the
+  comparison lowering, so start by diffing `-O2` ARM output for this against the
+  three-separate-`if`s version.  The three ARM register allocator and liveness
+  fixes below are the nearest precedent.
 
 - Triage the remaining non-extension outcome failures from the runner into real
   defects.
@@ -627,10 +641,8 @@ Confirmed by reducing each to a few lines and comparing against Clang.
   the `PT_TLS` file image, which a block built only from `.tbss` does not have.
   The ARM cxx suite lost five failures.
 
-  A `PT_TLS` image that is not empty is still mapped at an address inside
-  `.bss`, so a program with a `thread_local int x = 5;` and a `.bss` array finds
-  the array's first bytes holding the TLS image on x86-64 and AArch64.  That is
-  the same defect from the other side and is not fixed yet.
+  A `PT_TLS` image that is not empty was still mapped at an address inside
+  `.bss`; that is the same defect from the other side and is the entry below.
 
 - Fixed: an atomic operation whose returned value nobody reads was deleted at
   `-O2` on ARM, x86-64 and RISC-V, while the memory it was supposed to update
@@ -689,6 +701,50 @@ int main() {
   fence is not observable under a single-threaded interpreter.  They were
   confirmed by counting `mfence`, `dmb ish` and `fence` in `-S` output for a
   program whose only atomic is one whose result is discarded.
+
+- Fixed: loading a program wrote its TLS initialization image over the first
+  bytes of `.bss`, on all four targets, at `-O0` as much as `-O2`.  A
+  `thread_local` with an initializer plus a `.bss` array was enough, and the
+  array came up holding the image.
+  `cxx_testsuite/tests/exec/0445_tls_image_clear_of_bss.cpp` covers it and
+  returns 6 on x86-64, AArch64, ARM and RISC-V before the fix.
+
+  A TLS symbol's value is its offset within the thread's block, which is what a
+  local-exec relocation needs, so the TLS sections cannot also carry a load
+  address and `AssignSegmentSectionAddresses` skips them when it hands addresses
+  out.  Their file content is still written immediately after the initialized
+  data, and `WriteProgramHeaders` stretches the writable `PT_LOAD` over it so a
+  native loader can reach the image, pointing `PT_TLS` at
+  `data vaddr + (tls offset - data offset)`.  That address was never reserved,
+  and `.bss` began exactly there, so the loader's copy landed on it.
+
+  The linker now advances the data segment's end past the image before `.bss` is
+  placed, in `LinkerTLSImageSpan`.  Reserving the image's size alone is not
+  enough: the writer aligns each section's file offset by that section's own
+  alignment, so an image needing 8-byte alignment behind an odd-sized `.data`
+  gets file padding in front of it, and the reservation has to cover the padding
+  too or the image's tail still overhangs `.bss`.  The span is computed by
+  walking the TLS sections and aligning as the writer will, which is exact
+  because a load segment's address and file offset are given the same residue
+  modulo the segment alignment -- so the same walk over addresses reproduces the
+  file layout.
+
+  Only file-backed sections count, which is what keeps this off the `.tbss`-only
+  case fixed in `28c946e`: that block has no image, `PT_TLS` has `filesz` 0, the
+  writer leaves the load segment's file size alone, and reserving room would
+  reintroduce exactly the ARM `__davecc_atexit_lock` hang that commit removed.
+  A DSO is skipped for the same reason -- only an executable relocates `PT_TLS`
+  into the writable segment.
+
+  Worth knowing for the next one: the runtime symptom is a poor detector here.
+  The original reproducer passed on ARM purely because of which `.bss` object
+  the image happened to land on, and an intermediate version of this fix left a
+  4-byte overhang on ARM that no test noticed.  What found both was comparing
+  `elfdump -l` against `elfdump -S`: the writable `PT_LOAD`'s
+  `vaddr + filesz` must not reach past the start of `.bss`, and `PT_TLS`'s
+  `vaddr` must equal what its file offset maps to under that segment.  Checking
+  those two directly flagged 12 of 16 target/shape combinations before the fix
+  and none after.
 
 ## Deep nesting outside the constructs already capped
 
@@ -765,8 +821,9 @@ modules tests or the libc tests.  It runs 122 targets and the two sets barely
 overlap: the five `//c_testsuite:single_exec_*` targets are tagged `manual`, so
 `//...` does not include them at all, and must be asked for by name.
 
-At `28c946e` a full run leaves these 17 failing, and a change that adds no name
-to this list has not regressed anything the repository can detect:
+A full run leaves these 17 failing, unchanged from `28c946e` through the
+`PT_TLS` fix, and a change that adds no name to this list has not regressed
+anything the repository can detect:
 
 ```text
 //:6502_codegen_cleanup_test      //:multiarch_inline_asm_test

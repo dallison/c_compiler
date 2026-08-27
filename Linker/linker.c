@@ -1338,6 +1338,42 @@ uint64_t LinkerSectionGroupSize(SectionGroup* group) {
   return size;
 }
 
+// The span of address space the TLS initialization image occupies inside the
+// writable segment, measured from the end of the initialized data.
+//
+// Only the part of the TLS block that has file content counts.  The writer
+// aligns each output section's file offset by that section's own alignment and
+// gives a load segment's address and file offset the same residue modulo the
+// segment alignment, so walking the TLS sections in address space reproduces
+// the gaps the file layout will have.  A nobits section takes the current
+// offset without advancing it, so it contributes nothing.  A block built from
+// .tbss alone has no image at all, and gets no room: the writer leaves the load
+// segment's file size alone in that case, which is what keeps it from copying
+// the padding after the initialized sections over the start of .bss.
+static uint64_t LinkerTLSImageSpan(Linker* linker, uint64_t data_end) {
+  uint64_t file_backed = 0;
+  for (size_t i = 0; i < linker->tls_segment.sections.length; i++) {
+    SectionGroup* group = linker->tls_segment.sections.value.p[i];
+    if (group->type != SHT(nobits)) {
+      file_backed += LinkerSectionGroupSize(group);
+    }
+  }
+  if (file_backed == 0) {
+    return 0;
+  }
+  uint64_t addr = data_end;
+  for (size_t i = 0; i < linker->tls_segment.sections.length; i++) {
+    SectionGroup* group = linker->tls_segment.sections.value.p[i];
+    if (group->type == SHT(nobits)) {
+      continue;
+    }
+    uint64_t alignment = group->alignment > 1 ? (uint64_t)group->alignment : 1;
+    addr = (addr + alignment - 1) & ~(alignment - 1);
+    addr += LinkerSectionGroupSize(group);
+  }
+  return addr - data_end;
+}
+
 static void InventEHFrameBounds(Linker* linker) {
   SectionGroup* eh_frame = FindSectionGroup(linker, ".eh_frame");
   uint64_t start = 0;
@@ -1845,6 +1881,25 @@ void LinkerLinkAllFiles(Linker* linker) {
  
   // Define the '_edata' symbol for the last assigned address.
   InventSymbol(linker, "_edata", 8, SegmentEndAddress(&linker->data_segment));
+
+  // A TLS symbol's value is its offset within the TLS block, which is what a
+  // local-exec relocation needs, so the TLS sections cannot also carry a load
+  // address and are skipped when addresses are handed out.  Their file content
+  // is still written immediately after the initialized data, and an executable
+  // stretches the writable PT_LOAD to cover it so a native loader can reach the
+  // image, so the loader copies the image to whatever address that file offset
+  // maps to.  Nothing claimed that address, and .bss started there, so the
+  // image landed on the first bytes of .bss.  Reserve the image its own range
+  // here, before .bss is placed.  Only an executable remaps PT_TLS this way; a
+  // DSO leaves its PT_TLS address alone and never stretches the load segment
+  // over the image, so it needs no room.
+  if (!linker->building_dso) {
+    uint64_t data_end = SegmentEndAddress(&linker->data_segment);
+    uint64_t tls_image_span = LinkerTLSImageSpan(linker, data_end);
+    if (tls_image_span != 0) {
+      SetSegmentEndAddress(&linker->data_segment, data_end + tls_image_span);
+    }
+  }
 
   // Now that we know the addresses of the sections we can work
   // out the values of the symbols within those sections.
