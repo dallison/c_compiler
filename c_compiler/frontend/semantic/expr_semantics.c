@@ -4629,6 +4629,15 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
       ((BinaryASTNode*)node)->right->op != AST_OP(braced_init)) {
     finder->found_unresolved = true;
   }
+  // An analyzed braced initializer carries the type it initializes and holds a
+  // designator per entry.  One with no type at all has not been analyzed, which
+  // happens to a body reached from a caller that is analyzed first, and its
+  // entries are still the plain expressions the parser left: code generation
+  // has nowhere to place them.  The analysis that follows lowers the body the
+  // function keeps and never sees a copy taken now.
+  if (node->op == AST_OP(braced_init) && node->type == NULL) {
+    finder->found_unresolved = true;
+  }
   if (node->op == AST_OP(call)) {
     ASTNode* callee = ((VectorASTNode*)node)->left;
     if (callee != NULL && callee->op == AST_OP(identifier)) {
