@@ -20,6 +20,7 @@ static void* GenerateCode(Generator* gen) {
   Wasm32Lower(wasm, gen);
   Wasm32Optimize(wasm);
   Wasm32Stackify(wasm);
+  Wasm32OptimizeStackified(wasm);
   Wasm32AllocateLocals(wasm);
   return wasm;
 }
