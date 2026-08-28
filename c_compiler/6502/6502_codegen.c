@@ -4294,9 +4294,14 @@ static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRN
   // JSR __var_value[b] (or arg_value[b])
   W65C02Opcode op;
   AddressingMode mode = kAddrModeZeroPage;
+  // The address of an aggregate is the address of its storage, so a load of one
+  // takes the slot's address.  A reference is different: its slot holds a
+  // pointer to a referent that lives elsewhere, so the load has to read that
+  // pointer out even though the loaded type is the aggregate it refers to.
+  bool holds_reference = var->type != NULL && TypeIsReference(var->type);
   if (is_arg) {
     // Argument.
-    if (TypeIsStructOrUnion(load->type)) {
+    if (TypeIsStructOrUnion(load->type) && !holds_reference) {
       // Address.
       op = offset >= 256 ? W65C02_OP(arg_addrb) : W65C02_OP(arg_addr);
     } else {
@@ -4304,7 +4309,8 @@ static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRN
     }
   } else {
     // Variable.
-    if (TypeIsStructOrUnion(load->type) || TypeIsArray(load->type)) {
+    if ((TypeIsStructOrUnion(load->type) || TypeIsArray(load->type)) &&
+        !holds_reference) {
       // Address.
       op = offset >= 256 ? W65C02_OP(var_addrb) : W65C02_OP(var_addr);
       mode = kAddrModeIndirect;

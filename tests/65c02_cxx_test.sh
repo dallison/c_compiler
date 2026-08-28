@@ -128,6 +128,48 @@ SRC
   -o "$WORK/aggregate_reference_frame.exe"
 "$INTERPRETER" -rom "$ROM" "$WORK/aggregate_reference_frame.exe"
 
+cat >"$WORK/aggregate_reference_load.cpp" <<'SRC'
+#include <vector>
+
+// Points into itself, so a relocation that reads the wrong source shows up as
+// a wrong payload rather than as a wrong pointer.
+struct Holder {
+  char buf[8];
+  char* data;
+  unsigned size;
+  Holder(char c) { data = buf; buf[0] = c; size = 1; }
+  Holder(Holder&& other) {
+    data = buf;
+    size = other.size;
+    buf[0] = other.buf[0];
+  }
+  Holder(const Holder& other) {
+    data = buf;
+    size = other.size;
+    buf[0] = other.buf[0];
+  }
+  Holder& operator=(const Holder&) = default;
+};
+
+int main() {
+  std::vector<Holder> values;
+  values.push_back(Holder('x'));
+  values.push_back(Holder('y'));  // Reallocates, relocating the first element.
+  if (values.size() != 2) return 1;
+  if (values[0].data != values[0].buf) return 2;
+  if (values[0].size != 1 || values[0].buf[0] != 'x') return 3;
+  if (values[1].size != 1 || values[1].buf[0] != 'y') return 4;
+  return 0;
+}
+SRC
+
+# Reading a reference whose referent is an aggregate must load the pointer the
+# reference holds.  Taking the address of the reference's own slot instead fed
+# vector's relocation a stack cell as the element to move from.
+"$DAVECC" -target 65c02 -O2 "$WORK/aggregate_reference_load.cpp" \
+  -o "$WORK/aggregate_reference_load.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/aggregate_reference_load.exe"
+
 cat >"$WORK/transform_pipe_return.cpp" <<'SRC'
 #include <map>
 #include <ranges>
