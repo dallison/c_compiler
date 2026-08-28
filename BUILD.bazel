@@ -380,6 +380,8 @@ LIBC_SRCS = [
     "libc/threads.c",
     "libc/tan.c",
     "libc/ungetc.c",
+    "libc/wasi_start.c",
+    "libc/wasi_syscall.c",
 ]
 
 LIBC_CXX_SRCS = glob(["libc/*.cc"])
@@ -470,6 +472,23 @@ cc_library(
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",
+        ":utils",
+    ],
+)
+
+# The wasm object format on its own, because the archiver needs to read a
+# member's symbol table without pulling in the whole compiler.
+cc_library(
+    name = "wasm32_object",
+    srcs = [
+        "c_compiler/wasm32/wasm32_object.c",
+    ],
+    hdrs = [
+        "c_compiler/wasm32/wasm32_object.h",
+    ],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
         ":utils",
     ],
 )
@@ -731,6 +750,7 @@ cc_library(
         "c_compiler/wasm32/wasm32_codegen.c",
         "c_compiler/wasm32/wasm32_data.c",
         "c_compiler/wasm32/wasm32_emitter.c",
+        "c_compiler/wasm32/wasm32_link.c",
         "c_compiler/wasm32/wasm32_module.c",
         "c_compiler/wasm32/wasm32_optimize.c",
         "c_compiler/wasm32/wasm32_reg_alloc.c",
@@ -787,6 +807,7 @@ cc_library(
     deps = [
         ":elf",
         ":utils",
+        ":wasm32_object",
     ],
 )
 
@@ -1124,6 +1145,7 @@ cc_binary(
         ":loader",
         ":risc_v_lib",
         ":utils",
+        ":wasm32_object",
     ],
 )
 
@@ -2424,6 +2446,55 @@ for src in libc/*.cc; do
 done
 
 "$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}" "$${cxx_objs[@]}"
+""",
+)
+
+genrule(
+    name = "libc_wasm32",
+    srcs = LIBC_SRCS + [":libc_headers"] + glob([
+        "libc/include/**/*.h",
+    ]) + [
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcwasm32.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcwasm32.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target wasm32 -O1 -c -isystem libc/include -Ilibc)
+
+# There is no assembler runtime: wasm has no instructions to write one in,
+# so what other targets put in .s files is either in C here or not yet
+# supported at all.  The Linux sources speak to a kernel that is not there,
+# and unwinding needs the frame walk wasm does not allow.
+for src in libc/*.c; do
+  case "$$(basename "$$src")" in
+    libc_test.c|eh_frame.c|eh_frame_pointer.c|linux_fs.c|linux_tls.c)
+      continue
+      ;;
+    linux_syscall.c|linux_syscall_result.c|posix_linux.c)
+      continue
+      ;;
+  esac
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$work/$$(basename "$${src%.c}").o"
+done
+
+# Members are named from the working directory, because a name holding a
+# slash does not survive the archive's long-name table.
+out_file="$$out"
+case "$$out_file" in
+  /*) ;;
+  *) out_file="$$(pwd)/$$out_file" ;;
+esac
+cd "$$work"
+"$$archivist" r "$$out_file" *.o
 """,
 )
 

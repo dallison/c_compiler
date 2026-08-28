@@ -27,4 +27,10 @@ void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitTlsVariable(InitializedStaticVariable* var, FILE* fp);
 void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
 
+// The recorded init or fini functions, in the order they have to run.  A
+// backend that writes no assembly gets the ordering from here instead of
+// from the priority-suffixed section names the assembler would sort.
+void CollectInitFiniArrayFunctions(Vector* functions, bool is_fini,
+                                   Vector* out);
+
 #endif /* common_emitter_h */

@@ -13,7 +13,7 @@
 #include <string.h>
 #include <syscall.h>
 
-#if defined(__6502__) || defined(__p_code__)
+#if defined(__6502__) || defined(__p_code__) || defined(__wasm32__)
 
 // Rename functions to libc names.
 #define Malloc malloc

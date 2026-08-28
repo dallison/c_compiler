@@ -11,103 +11,36 @@
 #include <string.h>
 
 #include "compiler.h"
+#include "wasm32_data.h"
 #include "wasm32_reg_alloc.h"
 
-#define WASM_SECTION_TYPE 1
-#define WASM_SECTION_IMPORT 2
-#define WASM_SECTION_FUNCTION 3
-#define WASM_SECTION_TABLE 4
-#define WASM_SECTION_MEMORY 5
-#define WASM_SECTION_GLOBAL 6
-#define WASM_SECTION_EXPORT 7
-#define WASM_SECTION_START 8
-#define WASM_SECTION_ELEMENT 9
-#define WASM_SECTION_CODE 10
-#define WASM_SECTION_DATA 11
+// The object under construction.  There is one translation unit in flight at
+// a time, so a single object serves the whole run and is torn down once it
+// has been written.
+static Wasm32ObjectFile current_object;
+static bool current_object_ready;
 
-#define WASM_EXTERN_FUNC 0
-#define WASM_EXTERN_TABLE 1
-#define WASM_EXTERN_MEMORY 2
-#define WASM_EXTERN_GLOBAL 3
-
-#define WASM_FUNCTYPE 0x60
-
-void WasmWriteULEB128(Buffer* buf, uint64_t value) {
-  do {
-    uint8_t byte = value & 0x7F;
-    value >>= 7;
-    if (value != 0) {
-      byte |= 0x80;
-    }
-    BufferAppendByte(buf, (char)byte);
-  } while (value != 0);
+Wasm32ObjectFile* Wasm32CurrentObject(void) {
+  if (!current_object_ready) {
+    Wasm32ObjectFileInit(&current_object, "");
+    current_object_ready = true;
+  }
+  return &current_object;
 }
 
-void WasmWriteSLEB128(Buffer* buf, int64_t value) {
-  bool more = true;
-  while (more) {
-    uint8_t byte = value & 0x7F;
-    value >>= 7;  // Arithmetic shift keeps the sign.
-    bool sign_bit_set = (byte & 0x40) != 0;
-    if ((value == 0 && !sign_bit_set) || (value == -1 && sign_bit_set)) {
-      more = false;
-    } else {
-      byte |= 0x80;
-    }
-    BufferAppendByte(buf, (char)byte);
+void Wasm32ResetCurrentObject(void) {
+  if (current_object_ready) {
+    Wasm32ObjectFileDestruct(&current_object);
+    current_object_ready = false;
   }
 }
 
-void WasmWritePaddedU32(Buffer* buf, uint32_t value) {
-  for (int i = 0; i < 5; i++) {
-    uint8_t byte = value & 0x7F;
-    value >>= 7;
-    if (i < 4) {
-      byte |= 0x80;
-    }
-    BufferAppendByte(buf, (char)byte);
-  }
-}
-
-void WasmPatchPaddedU32(Buffer* buf, size_t offset, uint32_t value) {
-  assert(offset + 5 <= buf->length);
-  for (int i = 0; i < 5; i++) {
-    uint8_t byte = value & 0x7F;
-    value >>= 7;
-    if (i < 4) {
-      byte |= 0x80;
-    }
-    buf->value[offset + i] = (char)byte;
-  }
-}
-
-static void WriteName(Buffer* buf, const char* name) {
-  size_t length = strlen(name);
-  WasmWriteULEB128(buf, length);
-  BufferAppend(buf, (char*)name, length);
-}
-
-static void WriteF32(Buffer* buf, float value) {
-  uint32_t bits;
-  memcpy(&bits, &value, sizeof(bits));
-  BufferAppendWordLE(buf, bits);
-}
-
-static void WriteF64(Buffer* buf, double value) {
-  uint64_t bits;
-  memcpy(&bits, &value, sizeof(bits));
-  BufferAppendLongLE(buf, bits);
-}
-
-// Append 'body' to 'out' as a section with the given id.
-static void WriteSection(Buffer* out, int id, Buffer* body) {
-  if (body->length == 0) {
-    return;
-  }
-  BufferAppendByte(out, (char)id);
-  WasmWriteULEB128(out, body->length);
-  BufferAppend(out, body->value, body->length);
-}
+// What one function body's encoding needs to reach: the object, for the
+// symbols it names, and the list its relocations go on.
+typedef struct {
+  Wasm32ObjectFile* object;
+  Vector* relocs;
+} Wasm32Encoder;
 
 // Instruction encoding.
 
@@ -130,6 +63,18 @@ static double ConstantFloatValue(TargetInstruction* inst) {
   return ((TargetConstant*)inst)->value.dvalue;
 }
 
+static void WriteF32(Buffer* buf, float value) {
+  uint32_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  BufferAppendWordLE(buf, bits);
+}
+
+static void WriteF64(Buffer* buf, double value) {
+  uint64_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  BufferAppendLongLE(buf, bits);
+}
+
 static void WriteLocalGet(Buffer* buf, int index) {
   WriteOpcode(buf, W_OP(local_get));
   WasmWriteULEB128(buf, (uint64_t)index);
@@ -138,6 +83,23 @@ static void WriteLocalGet(Buffer* buf, int index) {
 static void WriteLocalSet(Buffer* buf, int index) {
   WriteOpcode(buf, W_OP(local_set));
   WasmWriteULEB128(buf, (uint64_t)index);
+}
+
+// Reserve five bytes for a value only the linker knows and record what
+// belongs there.  The placeholder is a valid encoding of whatever is written
+// now, so the object still validates before it is linked.
+static void WritePlaceholder(Wasm32Encoder* encoder, Buffer* buf, uint8_t type,
+                             uint32_t symbol_index, int32_t addend,
+                             uint32_t provisional) {
+  VectorAppend(encoder->relocs, Wasm32NewReloc(type, (uint32_t)buf->length,
+                                               symbol_index, addend));
+  WasmWritePaddedU32(buf, provisional);
+}
+
+static uint32_t SymbolIndex(Wasm32Encoder* encoder, uint8_t kind,
+                            const char* name) {
+  Wasm32Symbol* symbol = Wasm32ObjectSymbol(encoder->object, kind, name);
+  return (uint32_t)Wasm32ObjectSymbolIndex(encoder->object, symbol);
 }
 
 // The local an instruction's value ends up in.  An instruction with a 'dest'
@@ -252,8 +214,8 @@ static void WriteMemoryArgument(Buffer* buf, TargetInstruction* inst,
                    offset == NULL ? 0 : (uint64_t)ConstantIntValue(offset));
 }
 
-static void WriteInstruction(Wasm32Generator* wasm, Wasm32DataLayout* layout,
-                             Buffer* buf, TargetInstruction* inst) {
+static void WriteInstruction(Wasm32Encoder* encoder, Buffer* buf,
+                             TargetInstruction* inst) {
   Wasm32Opcode opcode = (Wasm32Opcode)inst->opcode;
 
   // A move has no wasm instruction of its own; it copies one local to
@@ -291,40 +253,41 @@ static void WriteInstruction(Wasm32Generator* wasm, Wasm32DataLayout* layout,
       break;
     case W_OP(literal_address): {
       TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-      WasmWriteSLEB128(
-          buf, (int32_t)Wasm32LiteralAddress(layout, literal->literal_id));
+      char name[256];
+      WritePlaceholder(
+          encoder, buf, R_WASM_MEMORY_ADDR_SLEB,
+          SymbolIndex(encoder, WASM_SYMBOL_DATA,
+                      Wasm32LiteralSymbolName(literal->literal_id, name,
+                                              sizeof(name))),
+          0, 0);
       break;
     }
     case W_OP(symbol_address): {
       TargetSymbol* symbol = (TargetSymbol*)inst->operand[0];
-      char name[256];
-      WasmWriteSLEB128(
-          buf, (int32_t)Wasm32SymbolAddress(
-                   layout, TargetSymbolName(symbol->symbol, name,
-                                            sizeof(name))));
+      char buffer[256];
+      const char* name =
+          TargetSymbolName(symbol->symbol, buffer, sizeof(buffer));
+      WritePlaceholder(encoder, buf, R_WASM_MEMORY_ADDR_SLEB,
+                       SymbolIndex(encoder, WASM_SYMBOL_DATA, name), 0, 0);
       break;
     }
     case W_OP(function_index): {
       TargetSymbol* symbol = (TargetSymbol*)inst->operand[0];
-      char name[256];
-      const char* callee = TargetSymbolName(symbol->symbol, name,
-                                            sizeof(name));
-      int index = Wasm32FunctionIndex(callee);
-      if (index < 0) {
-        fprintf(stderr,
-                "wasm32: '%s' has no table slot, because this translation "
-                "unit does not define it.  Taking the address of a function "
-                "from another object needs the wasm linker.\n",
-                callee);
-        layout->failed = true;
-        index = -1;
+      char buffer[256];
+      const char* name =
+          TargetSymbolName(symbol->symbol, buffer, sizeof(buffer));
+      uint32_t index = SymbolIndex(encoder, WASM_SYMBOL_FUNCTION, name);
+      Wasm32Symbol* function = encoder->object->symbols.value.p[index];
+      if ((function->flags & WASM_SYM_UNDEFINED) != 0 && inst->addr >= 0 &&
+          function->type_index == WASM32_NO_TYPE) {
+        function->type_index = (uint32_t)inst->addr;
       }
-      // Slot 0 is the null slot, so a function's slot is one past its index.
-      WasmWriteSLEB128(buf, index + 1);
+      WritePlaceholder(encoder, buf, R_WASM_TABLE_INDEX_SLEB, index, 0, 0);
       break;
     }
     case W_OP(call_indirect):
-      WasmWriteULEB128(buf, (uint64_t)inst->addr);
+      WritePlaceholder(encoder, buf, R_WASM_TYPE_INDEX_LEB,
+                       (uint32_t)inst->addr, 0, (uint32_t)inst->addr);
       WasmWriteULEB128(buf, 0);  // Table 0.
       break;
     case W_OP(br):
@@ -338,7 +301,12 @@ static void WriteInstruction(Wasm32Generator* wasm, Wasm32DataLayout* layout,
       break;
     case W_OP(global_get):
     case W_OP(global_set):
-      WasmWriteULEB128(buf, (uint64_t)ConstantIntValue(inst->operand[1]));
+      // The only global is the shadow stack pointer, which the linker
+      // supplies; the object imports it as global 0.
+      WritePlaceholder(
+          encoder, buf, R_WASM_GLOBAL_INDEX_LEB,
+          SymbolIndex(encoder, WASM_SYMBOL_GLOBAL, WASM32_STACK_POINTER), 0,
+          (uint32_t)ConstantIntValue(inst->operand[1]));
       break;
     case W_OP(local_set):
     case W_OP(local_tee):
@@ -351,15 +319,17 @@ static void WriteInstruction(Wasm32Generator* wasm, Wasm32DataLayout* layout,
       // only used when the symbol has not been named yet.
       const char* name =
           TargetSymbolName(symbol->symbol, buffer, sizeof(buffer));
-      int index = Wasm32FunctionIndex(name);
-      if (index < 0) {
-        fprintf(stderr,
-                "wasm32: call to '%s', which this translation unit does not "
-                "define.  Calls across objects need the wasm linker.\n",
-                name);
-        index = 0;
+      Wasm32Symbol* callee =
+          Wasm32ObjectSymbol(encoder->object, WASM_SYMBOL_FUNCTION, name);
+      // The import standing in for a callee defined elsewhere is declared
+      // with the signature this call expects, which is what lets the object
+      // validate on its own.
+      if ((callee->flags & WASM_SYM_UNDEFINED) != 0 && inst->addr >= 0) {
+        callee->type_index = (uint32_t)inst->addr;
       }
-      WasmWriteULEB128(buf, (uint64_t)index);
+      WritePlaceholder(
+          encoder, buf, R_WASM_FUNCTION_INDEX_LEB,
+          (uint32_t)Wasm32ObjectSymbolIndex(encoder->object, callee), 0, 0);
       break;
     }
     case W_OP(memory_fill):
@@ -392,8 +362,10 @@ static void WriteInstruction(Wasm32Generator* wasm, Wasm32DataLayout* layout,
   }
 }
 
-void Wasm32EncodeFunctionBody(Wasm32Generator* wasm, Wasm32DataLayout* layout,
-                              Buffer* out) {
+void Wasm32EncodeFunctionBody(Wasm32Generator* wasm, Wasm32ObjectFile* object,
+                              Buffer* out, Vector* relocs) {
+  Wasm32Encoder encoder = {object, relocs};
+
   // Local declarations, grouped by type in the order the indices assume.
   static const WasmValueType kTypeOrder[4] = {kWasmTypeI32, kWasmTypeI64,
                                               kWasmTypeF32, kWasmTypeF64};
@@ -414,7 +386,7 @@ void Wasm32EncodeFunctionBody(Wasm32Generator* wasm, Wasm32DataLayout* layout,
   TargetInstruction* inst = TargetFirstInstruction(&wasm->base);
   while (inst != NULL) {
     if (!IsSkipped(inst)) {
-      WriteInstruction(wasm, layout, out, inst);
+      WriteInstruction(&encoder, out, inst);
     }
     inst = TargetNext(inst);
   }
@@ -429,14 +401,7 @@ void Wasm32EncodeFunctionBody(Wasm32Generator* wasm, Wasm32DataLayout* layout,
 }
 
 // Signature interning.  Two functions share a type index when their encoded
-// functype bytes match.  The table is module-wide and outlives any single
-// function because lowering interns the signature of every indirect call
-// before the writer gets to the functions themselves; indices handed out
-// then have to still mean the same thing at encode time, so the table only
-// ever grows until the module is written.
-
-static Vector module_types;  // Buffer* for each distinct functype.
-static bool module_types_ready;
+// functype bytes match.
 
 static void EncodeSignature(Wasm32Signature* signature, Buffer* out) {
   BufferAppendByte(out, (char)WASM_FUNCTYPE);
@@ -454,225 +419,128 @@ static void EncodeSignature(Wasm32Signature* signature, Buffer* out) {
 }
 
 int Wasm32InternSignature(Wasm32Signature* signature) {
-  if (!module_types_ready) {
-    VectorInit(&module_types);
-    module_types_ready = true;
-  }
-  Buffer* encoding = NewBuffer();
-  EncodeSignature(signature, encoding);
-  for (size_t i = 0; i < module_types.length; i++) {
-    Buffer* existing = module_types.value.p[i];
-    if (BufferCompare(existing, encoding) == 0) {
-      BufferDelete(encoding);
-      return (int)i;
+  Buffer encoding;
+  BufferInit(&encoding);
+  EncodeSignature(signature, &encoding);
+  int index = Wasm32ObjectInternType(Wasm32CurrentObject(), &encoding);
+  BufferDestruct(&encoding);
+  return index;
+}
+
+// Object assembly.
+
+// Assign the index space positions the object's own encoding refers to:
+// imported functions first, then the ones defined here.
+static void AssignFunctionIndices(Wasm32ObjectFile* object) {
+  uint32_t next = 0;
+  for (size_t i = 0; i < object->symbols.length; i++) {
+    Wasm32Symbol* symbol = object->symbols.value.p[i];
+    if (symbol->kind == WASM_SYMBOL_FUNCTION &&
+        (symbol->flags & WASM_SYM_UNDEFINED) != 0) {
+      symbol->index = next++;
+      VectorAppend(&object->imported_functions, symbol);
     }
   }
-  VectorAppend(&module_types, encoding);
-  return (int)(module_types.length - 1);
+  for (size_t i = 0; i < object->functions.length; i++) {
+    Wasm32Function* function = object->functions.value.p[i];
+    function->symbol->index = next++;
+  }
 }
 
-static void ResetTypeTable(void) {
-  if (!module_types_ready) {
-    return;
+// Fill in the placeholders whose values this object already knows, so that
+// it is a module that validates and that wasm-objdump can make sense of.
+// The rest stay zero until the linker gets to them.
+static void PatchLocalIndices(Wasm32ObjectFile* object) {
+  for (size_t i = 0; i < object->functions.length; i++) {
+    Wasm32Function* function = object->functions.value.p[i];
+    for (size_t j = 0; j < function->relocs.length; j++) {
+      Wasm32Reloc* reloc = function->relocs.value.p[j];
+      if (reloc->type != R_WASM_FUNCTION_INDEX_LEB) {
+        continue;
+      }
+      Wasm32Symbol* symbol = object->symbols.value.p[reloc->index];
+      WasmPatchPaddedU32(&function->body, reloc->offset, symbol->index);
+    }
   }
-  for (size_t i = 0; i < module_types.length; i++) {
-    BufferDelete(module_types.value.p[i]);
-  }
-  VectorDestruct(&module_types);
-  module_types_ready = false;
 }
 
-bool Wasm32WriteModule(String* filename) {
+// A call site gives the import it reaches a signature.  One that is only
+// ever named as an address has no call site to learn from, and since a table
+// slot says nothing about the shape of what sits in it, any signature will
+// do; the linker replaces the import with the definition either way.
+static void GiveImportsSignatures(Wasm32ObjectFile* object) {
+  int fallback = -1;
+  for (size_t i = 0; i < object->imported_functions.length; i++) {
+    Wasm32Symbol* symbol = object->imported_functions.value.p[i];
+    if (symbol->type_index != WASM32_NO_TYPE) {
+      continue;
+    }
+    if (fallback < 0) {
+      Buffer encoding;
+      BufferInit(&encoding);
+      BufferAppendByte(&encoding, (char)WASM_FUNCTYPE);
+      WasmWriteULEB128(&encoding, 0);
+      WasmWriteULEB128(&encoding, 0);
+      fallback = Wasm32ObjectInternType(object, &encoding);
+      BufferDestruct(&encoding);
+    }
+    symbol->type_index = (uint32_t)fallback;
+  }
+}
+
+bool Wasm32WriteObject(String* filename) {
+  Wasm32ObjectFile* object = Wasm32CurrentObject();
+  bool ok = true;
+
   for (size_t i = 0; i < compiler->functions.length; i++) {
     Wasm32Generator* wasm = compiler->functions.value.p[i];
     if (wasm->failed) {
       // Lowering already explained what it could not translate.  Writing the
-      // module anyway would produce something that fails validation with a
-      // far less useful message.
-      ResetTypeTable();
+      // object anyway would produce something that fails far less usefully.
+      Wasm32ResetCurrentObject();
       return false;
     }
   }
 
-  // Addresses have to be settled before any body is encoded, because a body
-  // that takes the address of a literal or a static encodes it as an
-  // immediate.
-  Wasm32DataLayout layout;
-  if (!Wasm32BuildDataLayout(&layout)) {
-    Wasm32DataLayoutDestruct(&layout);
-    ResetTypeTable();
-    return false;
+  // Define every function before encoding any of them, so that a call to one
+  // that appears later still lands on the symbol it will define.
+  for (size_t i = 0; i < compiler->functions.length; i++) {
+    Wasm32Generator* wasm = compiler->functions.value.p[i];
+    const char* name = wasm->base.function_name.value;
+    Wasm32Symbol* symbol =
+        Wasm32ObjectSymbol(object, WASM_SYMBOL_FUNCTION, name);
+    symbol->flags = wasm->base.is_global ? 0 : WASM_SYM_BINDING_LOCAL;
+
+    Wasm32Function* function = malloc(sizeof(Wasm32Function));
+    function->name = strdup(name);
+    function->type_index = (uint32_t)Wasm32InternSignature(&wasm->signature);
+    function->symbol = symbol;
+    BufferInit(&function->body);
+    VectorInit(&function->relocs);
+    VectorAppend(&object->functions, function);
   }
 
-  Vector type_indices;
-  VectorInit(&type_indices);
-
-  Buffer code_section;
-  BufferInit(&code_section);
-  WasmWriteULEB128(&code_section, compiler->functions.length);
+  if (!Wasm32BuildDataSegments(object)) {
+    ok = false;
+  }
 
   for (size_t i = 0; i < compiler->functions.length; i++) {
     Wasm32Generator* wasm = compiler->functions.value.p[i];
-    int type_index = Wasm32InternSignature(&wasm->signature);
-    VectorAppend(&type_indices, (void*)(intptr_t)type_index);
-
-    Buffer body;
-    BufferInit(&body);
-    Wasm32EncodeFunctionBody(wasm, &layout, &body);
-    WasmWriteULEB128(&code_section, body.length);
-    BufferAppend(&code_section, body.value, body.length);
-    BufferDestruct(&body);
+    Wasm32Function* function = object->functions.value.p[i];
+    Wasm32EncodeFunctionBody(wasm, object, &function->body, &function->relocs);
   }
 
-  // Encoding a body can discover a reference to something this translation
-  // unit does not define, which the layout could not have caught earlier.
-  if (layout.failed) {
-    Wasm32DataLayoutDestruct(&layout);
-    BufferDestruct(&code_section);
-    VectorDestruct(&type_indices);
-    ResetTypeTable();
-    return false;
-  }
+  // The stack pointer is a global every object shares.
+  Wasm32Symbol* stack_pointer =
+      Wasm32ObjectSymbol(object, WASM_SYMBOL_GLOBAL, WASM32_STACK_POINTER);
+  stack_pointer->flags = WASM_SYM_UNDEFINED;
+  stack_pointer->index = 0;  // The only global an object imports.
 
-  Buffer module;
-  BufferInit(&module);
-  BufferAppendByte(&module, 0x00);
-  BufferAppendByte(&module, 0x61);
-  BufferAppendByte(&module, 0x73);
-  BufferAppendByte(&module, 0x6D);
-  BufferAppendWordLE(&module, 1);
+  AssignFunctionIndices(object);
+  GiveImportsSignatures(object);
+  PatchLocalIndices(object);
 
-  // Type section.
-  Buffer section;
-  BufferInit(&section);
-  WasmWriteULEB128(&section, module_types.length);
-  for (size_t i = 0; i < module_types.length; i++) {
-    Buffer* encoding = module_types.value.p[i];
-    BufferAppend(&section, encoding->value, encoding->length);
-  }
-  WriteSection(&module, WASM_SECTION_TYPE, &section);
-
-  // Function section.
-  BufferClear(&section);
-  WasmWriteULEB128(&section, type_indices.length);
-  for (size_t i = 0; i < type_indices.length; i++) {
-    WasmWriteULEB128(&section, (uint64_t)(intptr_t)type_indices.value.p[i]);
-  }
-  WriteSection(&module, WASM_SECTION_FUNCTION, &section);
-
-  // Table section: one funcref table holding every function, so that any of
-  // them can be reached through a pointer.  Slot 0 is left empty and never
-  // filled, which is what makes a null function pointer trap rather than
-  // call whichever function happened to be first.
-  BufferClear(&section);
-  WasmWriteULEB128(&section, 1);
-  BufferAppendByte(&section, (char)kWasmTypeFuncRef);
-  BufferAppendByte(&section, 0x01);  // Both a minimum and a maximum.
-  WasmWriteULEB128(&section, compiler->functions.length + 1);
-  WasmWriteULEB128(&section, compiler->functions.length + 1);
-  WriteSection(&module, WASM_SECTION_TABLE, &section);
-
-  // Memory section: one memory with no maximum, holding the data and the
-  // shadow stack with room above them for a heap.  Counting the heap pages
-  // on top of what is already spoken for matters once the static data is
-  // large enough on its own to reach the default size.
-  BufferClear(&section);
-  uint32_t pages = (layout.heap_start + 0xFFFF) / 0x10000 +
-                   WASM32_DEFAULT_HEAP_PAGES;
-  if (pages < WASM32_DEFAULT_MEMORY_PAGES) {
-    pages = WASM32_DEFAULT_MEMORY_PAGES;
-  }
-  WasmWriteULEB128(&section, 1);
-  BufferAppendByte(&section, 0x00);
-  WasmWriteULEB128(&section, pages);
-  WriteSection(&module, WASM_SECTION_MEMORY, &section);
-
-  // Global section: the shadow stack pointer, initialized to the top of the
-  // reserved stack region.
-  BufferClear(&section);
-  WasmWriteULEB128(&section, 1);
-  BufferAppendByte(&section, (char)kWasmTypeI32);
-  BufferAppendByte(&section, 0x01);  // Mutable.
-  WriteOpcode(&section, W_OP(i32_const));
-  WasmWriteSLEB128(&section, layout.stack_top);
-  WriteOpcode(&section, W_OP(end));
-  WriteSection(&module, WASM_SECTION_GLOBAL, &section);
-
-  // Export section: the memory plus every function with external linkage.
-  BufferClear(&section);
-  size_t num_exports = 1;
-  for (size_t i = 0; i < compiler->functions.length; i++) {
-    Wasm32Generator* wasm = compiler->functions.value.p[i];
-    if (wasm->base.is_global) {
-      num_exports++;
-    }
-  }
-  WasmWriteULEB128(&section, num_exports);
-  WriteName(&section, "memory");
-  BufferAppendByte(&section, WASM_EXTERN_MEMORY);
-  WasmWriteULEB128(&section, 0);
-  for (size_t i = 0; i < compiler->functions.length; i++) {
-    Wasm32Generator* wasm = compiler->functions.value.p[i];
-    if (!wasm->base.is_global) {
-      continue;
-    }
-    WriteName(&section, wasm->base.function_name.value);
-    BufferAppendByte(&section, WASM_EXTERN_FUNC);
-    WasmWriteULEB128(&section, i);
-  }
-  WriteSection(&module, WASM_SECTION_EXPORT, &section);
-
-  // Element section: fill the table from slot 1 on, so that a function's
-  // table index is its function index plus one.
-  if (compiler->functions.length > 0) {
-    BufferClear(&section);
-    WasmWriteULEB128(&section, 1);
-    WasmWriteULEB128(&section, 0);  // Table 0, active.
-    WriteOpcode(&section, W_OP(i32_const));
-    WasmWriteSLEB128(&section, 1);
-    WriteOpcode(&section, W_OP(end));
-    WasmWriteULEB128(&section, compiler->functions.length);
-    for (size_t i = 0; i < compiler->functions.length; i++) {
-      WasmWriteULEB128(&section, i);
-    }
-    WriteSection(&module, WASM_SECTION_ELEMENT, &section);
-  }
-
-  WriteSection(&module, WASM_SECTION_CODE, &code_section);
-
-  // Data section: one active segment holding every literal and initialized
-  // static.  Uninitialized ones sit above it and need no bytes, since linear
-  // memory starts out zeroed.
-  if (layout.bytes.length > 0) {
-    BufferClear(&section);
-    WasmWriteULEB128(&section, 1);
-    WasmWriteULEB128(&section, 0);  // Memory 0, active.
-    WriteOpcode(&section, W_OP(i32_const));
-    WasmWriteSLEB128(&section, layout.start);
-    WriteOpcode(&section, W_OP(end));
-    WasmWriteULEB128(&section, layout.bytes.length);
-    BufferAppend(&section, layout.bytes.value, layout.bytes.length);
-    WriteSection(&module, WASM_SECTION_DATA, &section);
-  }
-
-  bool ok = false;
-  FILE* fp = fopen(filename->value, "wb");
-  if (fp == NULL) {
-    fprintf(stderr, "wasm32: cannot open %s for writing\n", filename->value);
-  } else {
-    size_t written = fwrite(module.value, 1, module.length, fp);
-    ok = fclose(fp) == 0 && written == module.length;
-    if (!ok) {
-      fprintf(stderr, "wasm32: cannot write %s\n", filename->value);
-    }
-  }
-
-  Wasm32DataLayoutDestruct(&layout);
-  BufferDestruct(&section);
-  BufferDestruct(&module);
-  BufferDestruct(&code_section);
-  VectorDestruct(&type_indices);
-  ResetTypeTable();
-
+  ok = ok && Wasm32WriteObjectFile(object, filename);
+  Wasm32ResetCurrentObject();
   return ok;
 }

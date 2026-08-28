@@ -389,6 +389,15 @@ static TargetInstruction* GetIntConstant(Wasm32Generator* wasm, IRNode* node,
 
 static TargetInstruction* SetLoweredNode(IRNode* node,
                                          TargetInstruction* inst) {
+  // Some values are stashed in a temporary as they are produced, and every
+  // later read goes to the temporary rather than back to the node that made
+  // it, so both names have to reach the same instruction.  On a machine with
+  // registers the stash is a real move; here the value already lives in a
+  // local, and naming it twice is the whole of the work.
+  if (node != NULL && node->dest != NULL &&
+      node->dest->opcode == IR_OP(tmp)) {
+    TargetSetLoweredNode(node->dest, inst);
+  }
   return TargetSetLoweredNode(node, inst);
 }
 
@@ -1047,6 +1056,9 @@ static TargetInstruction* EmitDataAddress(Wasm32Generator* wasm, IRNode* node,
   return result;
 }
 
+static bool BuildSignatureForType(TypeRecord* type, Wasm32Signature* signature);
+static void Wasm32SignatureDestruct(Wasm32Signature* signature);
+
 static TargetInstruction* MaterializeStaticAddress(Wasm32Generator* wasm,
                                                    IRNode* node) {
   if (IRIsThreadVariable(node)) {
@@ -1054,11 +1066,24 @@ static TargetInstruction* MaterializeStaticAddress(Wasm32Generator* wasm,
     return NULL;
   }
   Symbol* symbol = ((IRVariable*)node)->symbol;
+  if (!TypeIsFunction(symbol->type)) {
+    return EmitDataAddress(wasm, node, W_OP(symbol_address),
+                           NewTargetSymbol(symbol));
+  }
+
   // A function has no address in linear memory, so a pointer to one is its
   // slot in the module's function table instead.
-  Wasm32Opcode opcode =
-      TypeIsFunction(symbol->type) ? W_OP(function_index) : W_OP(symbol_address);
-  return EmitDataAddress(wasm, node, opcode, NewTargetSymbol(symbol));
+  TargetInstruction* address = EmitDataAddress(wasm, node, W_OP(function_index),
+                                               NewTargetSymbol(symbol));
+  // Taking an address is the only mention some functions get, and an import
+  // standing in for one still has to be declared with a signature.  A host
+  // call keeps that signature to the end, so it had better be the real one.
+  Wasm32Signature signature;
+  if (address != NULL && BuildSignatureForType(symbol->type, &signature)) {
+    address->addr = Wasm32InternSignature(&signature);
+  }
+  Wasm32SignatureDestruct(&signature);
+  return address;
 }
 
 static TargetInstruction* LowerLiteralReference(Wasm32Generator* wasm,
@@ -1070,8 +1095,29 @@ static TargetInstruction* LowerLiteralReference(Wasm32Generator* wasm,
 
 // Resolve an address IR node into a base value plus a static byte offset,
 // which is exactly the shape of a wasm memarg.
+// A variable the return value optimization named: it was never given a slot,
+// because it is the caller's result buffer under a local's name, and the
+// hidden first parameter is where that buffer is.
+static TargetInstruction* NrvoAddress(Wasm32Generator* wasm, IRNode* node) {
+  if (!wasm->returns_struct || wasm->params.length == 0) {
+    Fail(wasm, "a return-value-optimized variable in a function that returns "
+               "no struct");
+    return NULL;
+  }
+  return wasm->params.value.p[0];
+}
+
+static bool IsNrvoVariable(IRNode* node) {
+  return (node->flags & kIRNrvoMarker) != 0;
+}
+
 static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
                                 TargetInstruction** base, int32_t* offset) {
+  if (IsNrvoVariable(address_node)) {
+    *base = NrvoAddress(wasm, address_node);
+    *offset = 0;
+    return *base != NULL;
+  }
   if (IRIsAutoVariable(address_node) || IRIsArgument(address_node)) {
     if (IRIsVLAVariable(address_node)) {
       *base = VLAAddress(wasm, address_node);
@@ -1108,6 +1154,13 @@ static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
 // that decayed to a pointer, or the base of a member or element access.
 static TargetInstruction* MaterializeVariableAddress(Wasm32Generator* wasm,
                                                      IRNode* node) {
+  if (IsNrvoVariable(node)) {
+    TargetInstruction* result = NrvoAddress(wasm, node);
+    if (result != NULL) {
+      SetLoweredNode(node, result);
+    }
+    return result;
+  }
   if (IRIsVLAVariable(node)) {
     return VLAAddress(wasm, node);
   }
@@ -1565,6 +1618,15 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
   if (direct) {
     callee = TargetGetSymbol(&wasm->base, callee_node,
                              ((IRVariable*)callee_node)->symbol);
+    // A direct call does not name a signature, but if the callee turns out
+    // to live in another object the import standing in for it needs one, and
+    // the call site is the only place that knows what it should be.
+    Wasm32Signature signature;
+    if (BuildSignatureForType(((IRVariable*)callee_node)->symbol->type,
+                              &signature)) {
+      type_index = Wasm32InternSignature(&signature);
+    }
+    Wasm32SignatureDestruct(&signature);
   } else {
     Wasm32Signature signature;
     if (!BuildSignatureForType(callee_node->type, &signature)) {
@@ -2283,6 +2345,18 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
   if (wasm->is_varargs) {
     VectorAppend(&wasm->signature.param_types, (void*)(intptr_t)kWasmTypeI32);
   }
+
+  // C lets main be written with none of its arguments, or two, or three, and
+  // leaves the caller free to pass all three regardless.  Elsewhere the
+  // surplus sits in registers nobody reads, but a wasm call has to agree
+  // with the callee's signature exactly, so main is given the full one and
+  // the arguments it did not ask for go unread.
+  if (strcmp(wasm->base.function_name.value, "main") == 0 &&
+      !wasm->is_varargs && !wasm->returns_struct) {
+    while (wasm->signature.param_types.length < 3) {
+      VectorAppend(&wasm->signature.param_types, (void*)(intptr_t)kWasmTypeI32);
+    }
+  }
   wasm->num_params = (int)wasm->signature.param_types.length;
 
   for (int i = 0; i < wasm->num_params; i++) {
@@ -2361,10 +2435,12 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
     }
     size_t fixed = NumFixedArguments(callee);
     size_t passed = call->inputs.length - 1;
-    if (passed <= fixed) {
-      continue;
-    }
-    int32_t bytes = (int32_t)((passed - fixed) * WASM32_VARARG_SLOT);
+    size_t extra = passed > fixed ? passed - fixed : 0;
+    // A call that passes nothing variadic still hands over the buffer's
+    // address, because that is what the signature says and what the callee's
+    // va_start will take, so it too needs somewhere real to point.
+    int32_t bytes =
+        (int32_t)((extra == 0 ? 1 : extra) * WASM32_VARARG_SLOT);
     if (bytes > vararg_bytes) {
       vararg_bytes = bytes;
     }

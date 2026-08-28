@@ -34,6 +34,7 @@
 #include "preprocessor.h"
 #include "source.h"
 #include "symbol_table.h"
+#include "wasm32_link.h"
 
 Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(Assembler* assembler);
@@ -290,6 +291,11 @@ static const TargetRuntime target_runtimes[] = {
     {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
     {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
     {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
+    // A wasm module is linked whole every time, and its startup lives in the
+    // archive rather than in an object of its own, so there is nothing to
+    // name here beyond the library itself.
+    {"wasm32", kTargetOSNone, "libcwasm32.a", "//:libc_wasm32", NULL, NULL,
+     false, true},
     {"aarch64", kTargetOSLinux, "libcaarch64_linux.a",
      "//:libc_aarch64_linux", "aarch64_linux_start.o",
      "//:aarch64_linux_start", false, true},
@@ -325,6 +331,9 @@ static bool TargetNameMatches(const char* target, const char* canonical) {
   }
   if (strcmp(canonical, "65c02") == 0) {
     return strcmp(target, "65C02") == 0;
+  }
+  if (strcmp(canonical, "wasm32") == 0) {
+    return strcmp(target, "wasm") == 0;
   }
   return false;
 }
@@ -1689,7 +1698,14 @@ int main(int argc, char * argv[]) {
   if (!compile_only) {
     AddDefaultRuntime(&linker_args, &object_files, &compiler_options,
                       &resources);
-    String* output = Link((int)linker_args.length, (char**)linker_args.value.p);
+    // Wasm objects are modules rather than ELF, so they need their own
+    // linker; the argument surface is the same one the driver already built.
+    String* target_option = OptionStringValue(kOptionTarget, &compiler_options);
+    String* output =
+        Wasm32IsTargetName(target_option == NULL ? NULL : target_option->value)
+            ? Wasm32Link((int)linker_args.length,
+                         (char**)linker_args.value.p)
+            : Link((int)linker_args.length, (char**)linker_args.value.p);
     if (output == NULL) {
       status = 1;
     } else {

@@ -38,11 +38,11 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
 }
 
 // The wasm binary format is not a text assembly language, so there is
-// nothing to assemble: the module is serialized straight from the lowered
+// nothing to assemble: the object is serialized straight from the lowered
 // functions the compiler is still holding.  The listing file written by
 // EmitFunctionAssembly is a debugging aid only.
 static bool Assemble(String* asm_filename, String* object_filename) {
-  return Wasm32WriteModule(object_filename);
+  return Wasm32WriteObject(object_filename);
 }
 
 static void Wasm32EmitDataStart(FILE* fp) { fprintf(fp, ";; data\n"); }

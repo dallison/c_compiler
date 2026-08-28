@@ -90,7 +90,9 @@ void* Malloc(size_t size) {
 #include <sys/mman.h>
 #endif
 
-#if defined(__p_code__)
+// With no heap lock there is no wrapper to serialize the allocator, so it
+// answers to the library's own names rather than being hidden behind one.
+#if defined(__p_code__) || defined(__wasm32__)
 #define Malloc malloc
 #define Free free
 #define Realloc realloc
@@ -486,6 +488,12 @@ static int InitializeHeap(void) {
                                   sizeof(unsigned long long)];
   return RegisterRegion(__davecc_guest_heap_storage,
                         sizeof(__davecc_guest_heap_storage));
+#elif defined(__wasm32__)
+  // Linear memory says nothing about its own shape, so the linker marks out
+  // what is left above the shadow stack and the heap is exactly that.
+  extern char __heap_base[];
+  extern char __heap_end[];
+  return RegisterRegion(__heap_base, (size_t)(__heap_end - __heap_base));
 #elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
     defined(__risc_v__) || defined(__p_code__)
   extern char _end[];

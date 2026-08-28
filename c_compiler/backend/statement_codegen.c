@@ -2140,10 +2140,13 @@ static void GenerateSwitchStatement(Generator* gen,
   //
   // The x86_64 back-end does not yet implement the computed-branch jump table
   // (its instructions are variable length, so the fixed-stride inline jump
-  // table used by the RISC-V/AArch64 back-ends does not apply).  Always use a
-  // sparse comparison search there instead.
+  // table used by the RISC-V/AArch64 back-ends does not apply).  Nor does
+  // wasm32, where a branch names an enclosing block rather than an address,
+  // so a table of them cannot be indexed at all.  Always use a sparse
+  // comparison search on both instead.
   bool target_has_jump_table =
-      !StringEqual(&compiler->target->name, "x86-64");
+      !StringEqual(&compiler->target->name, "x86-64") &&
+      !StringEqual(&compiler->target->name, "wasm32");
   if (target_has_jump_table && node->cases.length > min_dense_cases &&
       node->density > 0.5) {
     GenerateDenseSwitch(gen, node);

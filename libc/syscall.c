@@ -80,6 +80,9 @@ long syscall(int n, ...) {
 // Implemented in arm support/syscall.s
 #elif defined(__6502__)
 // Implemented in 6502runtime.s
+#elif defined(__wasm32__)
+// Implemented in wasi_syscall.c, since a wasm call out of the module is an
+// ordinary call rather than anything that could be written here.
 #else
 #error "Unknown architecture"
 #endif

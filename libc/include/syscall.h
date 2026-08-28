@@ -40,7 +40,10 @@
 #define SYS_MONOTONIC_TIME DAVE_SYS_MONOTONIC_TIME
 #define SYS_REALTIME_TIME DAVE_SYS_REALTIME_TIME
 
-#if !defined(__p_code__) && !defined(__6502__)
+// Wasm has no thread of its own to lend and no host heap to borrow: its
+// memory is the module's own, so it is left out along with the targets that
+// never had either.
+#if !defined(__p_code__) && !defined(__6502__) && !defined(__wasm32__)
 #define SYS_MALLOC DAVE_SYS_MALLOC
 #define SYS_FREE DAVE_SYS_FREE
 #define SYS_REALLOC DAVE_SYS_REALLOC
@@ -160,6 +163,12 @@ extern "C" long syscall(int n, ...);
 extern long syscall(int n, ...);
 #endif
 #elif defined(__6502__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
+extern long syscall(int n, ...);
+#endif
+#elif defined(__wasm32__)
 #ifdef __cplusplus
 extern "C" long syscall(int n, ...);
 #else

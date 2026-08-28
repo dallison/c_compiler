@@ -366,6 +366,25 @@ static void EmitInitFiniSectionStart(int priority, bool is_fini, FILE* fp) {
   EmitP2Align(compiler->pointer_size, fp);
 }
 
+void CollectInitFiniArrayFunctions(Vector* functions, bool is_fini,
+                                   Vector* out) {
+  if (functions == NULL || functions->length == 0) {
+    return;
+  }
+  Symbol** sorted = malloc(functions->length * sizeof(Symbol*));
+  if (sorted == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < functions->length; i++) {
+    sorted[i] = functions->value.p[i];
+  }
+  StableSortInitFiniFunctions(sorted, functions->length, is_fini);
+  for (size_t i = 0; i < functions->length; i++) {
+    VectorAppend(out, sorted[i]);
+  }
+  free(sorted);
+}
+
 void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp) {
   if (functions == NULL || functions->length == 0) {
     return;

@@ -7,12 +7,13 @@
 //
 
 // An ar-like command line utility.  Not exactly the same as ar.
-// Only allows ELF files in archives.  That's all they are used for
-// these days anyway.
+// Members are ELF objects, or wasm objects for the wasm32 target, which are
+// modules rather than ELF and so carry their symbols somewhere else.
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "ar.h"
@@ -20,6 +21,7 @@
 #include "vector.h"
 #include "dstring.h"
 #include "set.h"
+#include "wasm32_object.h"
 
 typedef enum  {
   kNone = 0,
@@ -136,12 +138,40 @@ static void AddELFSymbols(ARArchiveBuilder* builder, ELFReaderFile* elf, ARFile*
   VectorDestruct(&symbol_tables);
 }
 
-static void ReplaceFile(ARArchiveBuilder* builder, ELFReaderFile* elf, Command command) {
+// One file on its way into the archive.  Reading it is what decides whether
+// it is ELF or wasm, and the two differ only in where the names it defines
+// are written down.
+typedef struct {
+  String filename;
+  struct stat file_stat;
+  void* bytes;
+  size_t size;
+  ELFReaderFile* elf;        // Set for an ELF member.
+  Wasm32ObjectFile* object;  // Set for a wasm member.
+} ArchiveInput;
+
+// A wasm object's symbol table lives in its 'linking' section, so the names
+// worth indexing are the defined ones that are not file-local, exactly as
+// for ELF.
+static void AddWasmSymbols(ARArchiveBuilder* builder, Wasm32ObjectFile* object,
+                           ARFile* file) {
+  for (size_t i = 0; i < object->symbols.length; i++) {
+    Wasm32Symbol* symbol = object->symbols.value.p[i];
+    bool is_local = (symbol->flags & WASM_SYM_BINDING_LOCAL) != 0;
+    bool is_defined = (symbol->flags & WASM_SYM_UNDEFINED) == 0;
+    if (!is_local && is_defined && symbol->name[0] != '\0') {
+      ARArchiveBuilderAddSymbol(builder, file, symbol->name);
+    }
+  }
+}
+
+static void ReplaceFile(ARArchiveBuilder* builder, ArchiveInput* input,
+                        Command command) {
   // See if the file exists in the archive.
   ARFile* file = NULL;
   for (size_t i = 0; i < builder->files.length; i++) {
     ARFile* f = builder->files.value.p[i];
-    if (StringEqualString(&elf->filename, &f->filename)) {
+    if (StringEqualString(&input->filename, &f->filename)) {
       file = f;
       break;
     }
@@ -149,16 +179,16 @@ static void ReplaceFile(ARArchiveBuilder* builder, ELFReaderFile* elf, Command c
   // File timestamp is in seconds since epoch.  On Mac OS the timestamps
   // in the file are in nanoseconds using struct timespec.
 #if defined(__APPLE__)
-  int64_t elf_timestamp = elf->file_stat.st_mtimespec.tv_sec;
+  int64_t timestamp = input->file_stat.st_mtimespec.tv_sec;
 #elif defined(__linux__)
-  int64_t elf_timestamp = elf->file_stat.st_mtime;
+  int64_t timestamp = input->file_stat.st_mtime;
 #else
 #error "Unknown OS"
 #endif
   if (file != NULL) {
     // File exists in archive, check if we need to replace it.
     if ((command & kUpdate) != 0) {
-      if (elf_timestamp < file->timestamp) {
+      if (timestamp < file->timestamp) {
         // New file is older, don't replace.
         return;
       }
@@ -166,23 +196,71 @@ static void ReplaceFile(ARArchiveBuilder* builder, ELFReaderFile* elf, Command c
     file->deleted = true;
   }
   if ((command & kVerbose) != 0) {
-    printf("r - %s\n", elf->filename.value);
+    printf("r - %s\n", input->filename.value);
   }
-  file = ARArchiveBuilderAddFile(builder, elf->filename.value,
-                          elf->file_stat.st_size,
-                          elf->file_stat.st_uid, elf->file_stat.st_gid,
-                          elf->file_stat.st_mode,
-                          elf_timestamp, (void*)elf->base);
-  AddELFSymbols(builder, elf, file);
+  file = ARArchiveBuilderAddFile(builder, input->filename.value, input->size,
+                                 input->file_stat.st_uid,
+                                 input->file_stat.st_gid,
+                                 input->file_stat.st_mode, timestamp,
+                                 input->bytes);
+  if (input->elf != NULL) {
+    AddELFSymbols(builder, input->elf, file);
+  } else {
+    AddWasmSymbols(builder, input->object, file);
+  }
+}
+
+// Try the file as a wasm object.  The bytes have to stay alive as long as
+// the archive builder holds them, so they are handed over rather than freed.
+static bool ReadWasmInput(ArchiveInput* input) {
+  FILE* fp = fopen(input->filename.value, "rb");
+  if (fp == NULL) {
+    return false;
+  }
+  if (fstat(fileno(fp), &input->file_stat) != 0) {
+    fclose(fp);
+    return false;
+  }
+  size_t size = (size_t)input->file_stat.st_size;
+  uint8_t* bytes = malloc(size == 0 ? 1 : size);
+  bool ok = fread(bytes, 1, size, fp) == size;
+  fclose(fp);
+  if (!ok || size < 8 || memcmp(bytes, "\0asm", 4) != 0) {
+    free(bytes);
+    return false;
+  }
+  input->object = malloc(sizeof(Wasm32ObjectFile));
+  if (!Wasm32ReadObjectFile(input->object, input->filename.value, bytes,
+                            size)) {
+    Wasm32ObjectFileDestruct(input->object);
+    free(input->object);
+    input->object = NULL;
+    free(bytes);
+    return false;
+  }
+  input->bytes = bytes;
+  input->size = size;
+  return true;
+}
+
+static void ArchiveInputDelete(ArchiveInput* input) {
+  StringDestruct(&input->filename);
+  if (input->elf != NULL) {
+    ELFReaderFileDestruct(input->elf);
+    free(input->elf);
+  }
+  if (input->object != NULL) {
+    Wasm32ObjectFileDestruct(input->object);
+    free(input->object);
+    free(input->bytes);
+  }
+  free(input);
 }
 
 static void ReplaceFiles(String* archive_name, Vector* filenames, Command command) {
-  // Read all the ELF files.
-  Vector elf_files = {0};
+  Vector inputs = {0};
   Vector known_files = {0};
   for (size_t i = 0; i < filenames->length; i++) {
-    String filename;
-    StringInit(&filename, filenames->value.p[i]);
     // Remove duplicate file.
     bool dup = false;
     for (size_t j = 0; j < known_files.length; j++) {
@@ -195,15 +273,29 @@ static void ReplaceFiles(String* archive_name, Vector* filenames, Command comman
       continue;
     }
     VectorAppend(&known_files, filenames->value.p[i]);
-    
-    // Check that the file is not already in the list.
-    ELFReaderFile* elf = NewELFReaderFile(&filename);
-    StringDestruct(&filename);
-    if (!ELFReaderFileRead(elf, 0, 0)) {
-      fprintf(stderr, "Failed to read ELF file %s\n", (const char*)filenames->value.p[i]);
+
+    ArchiveInput* input = calloc(1, sizeof(ArchiveInput));
+    StringInit(&input->filename, filenames->value.p[i]);
+
+    ELFReaderFile* elf = NewELFReaderFile(&input->filename);
+    if (ELFReaderFileRead(elf, 0, 0)) {
+      input->elf = elf;
+      input->file_stat = elf->file_stat;
+      input->bytes = (void*)elf->base;
+      input->size = (size_t)elf->file_stat.st_size;
+      VectorAppend(&inputs, input);
       continue;
     }
-    VectorAppend(&elf_files, elf);
+    ELFReaderFileDestruct(elf);
+    free(elf);
+
+    if (ReadWasmInput(input)) {
+      VectorAppend(&inputs, input);
+      continue;
+    }
+    fprintf(stderr, "%s is neither an ELF file nor a wasm object\n",
+            (const char*)filenames->value.p[i]);
+    ArchiveInputDelete(input);
   }
   VectorDestruct(&known_files);
   
@@ -232,9 +324,8 @@ static void ReplaceFiles(String* archive_name, Vector* filenames, Command comman
     ARArchiveBuilderInit(&builder, archive_name->value);
   }
   
-  for (size_t i = 0; i < elf_files.length; i++) {
-    ELFReaderFile* elf = elf_files.value.p[i];
-    ReplaceFile(&builder, elf, command);
+  for (size_t i = 0; i < inputs.length; i++) {
+    ReplaceFile(&builder, inputs.value.p[i], command);
   }
   
   ARArchiveBuilderWrite(&builder);
@@ -246,7 +337,10 @@ static void ReplaceFiles(String* archive_name, Vector* filenames, Command comman
     rename(temp_name.value, archive_name->value);
     StringDestruct(&temp_name);
   }
-  VectorDestructWithContents(&elf_files, (VectorElementDestructor)ELFReaderFileDestruct, true);
+  for (size_t i = 0; i < inputs.length; i++) {
+    ArchiveInputDelete(inputs.value.p[i]);
+  }
+  VectorDestruct(&inputs);
 }
 
 // rw-rw-r-- 1000/1000   1904 Jan 27 08:58 2018 long_file_name_program.o

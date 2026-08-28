@@ -9,39 +9,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common_emitter.h"
 #include "compiler.h"
 #include "target_generator.h"
 #include "type_compare.h"
-#include "wasm32_codegen.h"
 #include "wasm32_machine.h"
 
-// One placed object.  Literals are keyed by id and variables by name; only
-// one of the two fields is meaningful for any given entry.
-typedef struct {
-  int literal_id;
-  char* name;
-  uint32_t address;
-} Wasm32DataAddress;
-
-static Wasm32DataAddress* NewAddress(int literal_id, const char* name,
-                                     uint32_t address) {
-  Wasm32DataAddress* entry = malloc(sizeof(Wasm32DataAddress));
-  entry->literal_id = literal_id;
-  entry->name = name == NULL ? NULL : strdup(name);
-  entry->address = address;
-  return entry;
+const char* Wasm32LiteralSymbolName(int literal_id, char* buf, size_t size) {
+  snprintf(buf, size, ".L.str.%d", literal_id);
+  return buf;
 }
 
-static uint32_t AlignUp(uint32_t value, uint32_t alignment) {
-  if (alignment < 1) {
-    alignment = 1;
+static uint32_t AlignmentLog2(uint32_t alignment) {
+  uint32_t log = 0;
+  while ((1u << log) < alignment && log < 31) {
+    log++;
   }
-  return (value + alignment - 1) & ~(alignment - 1);
+  return log;
 }
 
-// Extend the segment with zeros so that byte 'length' exists.  Anything not
-// written by an initializer stays zero, which is what both .bss and the gaps
-// between initializers need.
+// Extend the segment with zeros so that byte 'length' exists.  Anything an
+// initializer does not write stays zero, which is what both .bss and the
+// gaps between initializers need.
 static void Reserve(Buffer* bytes, size_t length) {
   while (bytes->length < length) {
     BufferAppendByte(bytes, 0);
@@ -93,227 +82,249 @@ static uint32_t LiteralAlignment(Literal* literal) {
   return 1;
 }
 
+// Add a segment and the one data symbol that owns it.  'prefix' names the
+// kind of data, which is what tells the linker where to place it and, for
+// .bss, that its bytes need not reach the output.
+static Wasm32Segment* AddSegment(Wasm32ObjectFile* object, const char* prefix,
+                                 const char* name, uint32_t alignment,
+                                 uint32_t size, bool is_global, bool is_weak,
+                                 Wasm32Symbol** out_symbol) {
+  Wasm32Segment* segment = malloc(sizeof(Wasm32Segment));
+  size_t length = strlen(prefix) + strlen(name) + 2;
+  segment->name = malloc(length);
+  snprintf(segment->name, length, "%s.%s", prefix, name);
+  segment->alignment = AlignmentLog2(alignment);
+  segment->flags = 0;
+  segment->size = size;
+  segment->address = 0;
+  BufferInit(&segment->bytes);
+  VectorInit(&segment->relocs);
+  VectorAppend(&object->segments, segment);
+
+  Wasm32Symbol* symbol = Wasm32ObjectSymbol(object, WASM_SYMBOL_DATA, name);
+  symbol->flags = 0;
+  if (is_weak) {
+    symbol->flags |= WASM_SYM_BINDING_WEAK;
+  } else if (!is_global) {
+    symbol->flags |= WASM_SYM_BINDING_LOCAL;
+  }
+  symbol->segment = (uint32_t)(object->segments.length - 1);
+  symbol->offset = 0;
+  symbol->size = size;
+  *out_symbol = symbol;
+  return segment;
+}
+
 static const char* VariableName(Symbol* symbol, char* buf, size_t length) {
   return TargetSymbolName(symbol, buf, length);
 }
 
-uint32_t Wasm32LiteralAddress(Wasm32DataLayout* layout, int literal_id) {
-  for (size_t i = 0; i < layout->literals.length; i++) {
-    Wasm32DataAddress* entry = layout->literals.value.p[i];
-    if (entry->literal_id == literal_id) {
-      return entry->address;
-    }
-  }
-  fprintf(stderr, "wasm32: string literal %d has no address.\n", literal_id);
-  layout->failed = true;
-  return 0;
-}
-
-int Wasm32FunctionIndex(const char* name) {
-  for (size_t i = 0; i < compiler->functions.length; i++) {
-    Wasm32Generator* wasm = compiler->functions.value.p[i];
-    if (strcmp(wasm->base.function_name.value, name) == 0) {
-      return (int)i;
-    }
-  }
-  return -1;
-}
-
-uint32_t Wasm32SymbolAddress(Wasm32DataLayout* layout, const char* name) {
-  for (size_t i = 0; i < layout->symbols.length; i++) {
-    Wasm32DataAddress* entry = layout->symbols.value.p[i];
-    if (strcmp(entry->name, name) == 0) {
-      return entry->address;
-    }
-  }
-  fprintf(stderr,
-          "wasm32: '%s' is not defined in this translation unit.  Data "
-          "shared between objects needs the wasm linker.\n",
-          name);
-  layout->failed = true;
-  return 0;
-}
-
-// Pass one: give every literal and variable an address, so that pass two can
-// resolve initializers that point at any of them regardless of order.
-static void AssignAddresses(Wasm32DataLayout* layout, uint32_t* next) {
-  char buf[256];
-
-  for (size_t i = 0; i < compiler->literals.length; i++) {
-    Literal* literal = compiler->literals.value.p[i];
-    if (literal->disabled) {
-      continue;
-    }
-    *next = AlignUp(*next, LiteralAlignment(literal));
-    VectorAppend(&layout->literals, NewAddress(literal->id, NULL, *next));
-    *next += (uint32_t)LiteralSize(literal);
-  }
-
-  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
-    InitializedStaticVariable* var =
-        compiler->initialized_static_variables.value.p[i];
-    if (var->is_tls) {
-      fprintf(stderr,
-              "wasm32: thread-local '%s' is not supported.\n",
-              VariableName(var->symbol, buf, sizeof(buf)));
-      layout->failed = true;
-      continue;
-    }
-    *next = AlignUp(*next, (uint32_t)var->alignment);
-    VectorAppend(&layout->symbols,
-                 NewAddress(-1, VariableName(var->symbol, buf, sizeof(buf)),
-                            *next));
-    *next += (uint32_t)var->size;
-  }
-
-  // Uninitialized variables go last so that the data segment written below
-  // ends at the last byte anything actually initializes.  Linear memory
-  // starts out zeroed, so reserving the space is all these need.
-  for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
-       i++) {
-    UninitializedStaticVariable* var =
-        compiler->uninitialized_static_variables.value.p[i];
-    if (var->is_tls) {
-      fprintf(stderr, "wasm32: thread-local '%s' is not supported.\n",
-              VariableName(var->symbol, buf, sizeof(buf)));
-      layout->failed = true;
-      continue;
-    }
-    *next = AlignUp(*next, (uint32_t)var->alignment);
-    VectorAppend(&layout->symbols,
-                 NewAddress(-1, VariableName(var->symbol, buf, sizeof(buf)),
-                            *next));
-    *next += (uint32_t)var->size;
-  }
-}
-
-static void WriteLiteralBytes(Wasm32DataLayout* layout, Literal* literal) {
-  size_t offset = Wasm32LiteralAddress(layout, literal->id) - layout->start;
+static void WriteLiteralBytes(Literal* literal, Wasm32Segment* segment) {
   switch (literal->type) {
     case kLiteralString:
     case kLiteralWideString: {
       StringLiteral* string = (StringLiteral*)literal;
-      PutBytes(&layout->bytes, offset, string->value.value,
-               string->value.length);
+      PutBytes(&segment->bytes, 0, string->value.value, string->value.length);
       // The terminator is already zero; just make sure the space exists.
-      Reserve(&layout->bytes, offset + LiteralSize(literal));
+      Reserve(&segment->bytes, LiteralSize(literal));
       break;
     }
     case kLiteralBuffer: {
       BufferLiteral* buffer = (BufferLiteral*)literal;
-      PutBytes(&layout->bytes, offset, buffer->value.value,
-               buffer->value.length);
+      PutBytes(&segment->bytes, 0, buffer->value.value, buffer->value.length);
       break;
     }
   }
 }
 
-static void WriteVariableBytes(Wasm32DataLayout* layout,
-                               InitializedStaticVariable* var) {
+// A word in the data that names something rather than holding a value.  The
+// bytes stay zero and a relocation says what belongs there; the addend
+// carries any offset from the symbol, because a relocation names a symbol
+// and nothing finer.
+static void AddDataReloc(Wasm32ObjectFile* object, Wasm32Segment* segment,
+                         size_t offset, uint8_t type, Wasm32Symbol* symbol,
+                         int32_t addend) {
+  Reserve(&segment->bytes, offset + 4);
+  VectorAppend(&segment->relocs,
+               Wasm32NewReloc(type, (uint32_t)offset,
+                              (uint32_t)Wasm32ObjectSymbolIndex(object, symbol),
+                              addend));
+}
+
+static void WriteVariableBytes(Wasm32ObjectFile* object,
+                               InitializedStaticVariable* var,
+                               Wasm32Segment* segment) {
   char buf[256];
-  size_t base =
-      Wasm32SymbolAddress(layout, VariableName(var->symbol, buf, sizeof(buf))) -
-      layout->start;
 
   for (size_t i = 0; i < var->initializers.length; i++) {
     Initializer* init = var->initializers.value.p[i];
-    size_t at = base + (size_t)init->offset;
+    size_t at = (size_t)init->offset;
     switch (init->type) {
       case kInitTypeByte:
-        PutInteger(&layout->bytes, at, init->value.byte, 1);
+        PutInteger(&segment->bytes, at, init->value.byte, 1);
         break;
       case kInitTypeHalf:
-        PutInteger(&layout->bytes, at, init->value.half, 2);
+        PutInteger(&segment->bytes, at, init->value.half, 2);
         break;
       case kInitTypeWord:
-        PutInteger(&layout->bytes, at, init->value.word, 4);
+        PutInteger(&segment->bytes, at, init->value.word, 4);
         break;
       case kInitTypeLong:
-        PutInteger(&layout->bytes, at, init->value._long, 8);
+        PutInteger(&segment->bytes, at, init->value._long, 8);
         break;
       case kInitTypeSymbol: {
         const char* name =
             TargetSymbolName(init->value.symbol, buf, sizeof(buf));
-        int64_t value;
         if (TypeIsFunction(init->value.symbol->type)) {
-          // A function pointer is a slot in the function table, not an
-          // address, and offsetting one is meaningless.
-          int index = Wasm32FunctionIndex(name);
-          if (index < 0) {
-            fprintf(stderr,
-                    "wasm32: '%s' has no table slot, because this "
-                    "translation unit does not define it.\n",
-                    name);
-            layout->failed = true;
-          }
-          value = index + 1;
+          // A function pointer is a slot in the table, not an address, and
+          // offsetting one is meaningless.
+          Wasm32Symbol* target =
+              Wasm32ObjectSymbol(object, WASM_SYMBOL_FUNCTION, name);
+          AddDataReloc(object, segment, at, R_WASM_TABLE_INDEX_I32, target, 0);
         } else {
-          value = (int64_t)Wasm32SymbolAddress(layout, name) +
-                  init->symbol_addend;
+          Wasm32Symbol* target =
+              Wasm32ObjectSymbol(object, WASM_SYMBOL_DATA, name);
+          AddDataReloc(object, segment, at, R_WASM_MEMORY_ADDR_I32, target,
+                       (int32_t)init->symbol_addend);
         }
-        PutInteger(&layout->bytes, at, (uint64_t)value, 4);
         break;
       }
-      case kInitTypeString:
-        PutInteger(&layout->bytes, at,
-                   Wasm32LiteralAddress(layout, init->value.literal_id), 4);
+      case kInitTypeString: {
+        Wasm32Symbol* target = Wasm32ObjectSymbol(
+            object, WASM_SYMBOL_DATA,
+            Wasm32LiteralSymbolName(init->value.literal_id, buf, sizeof(buf)));
+        AddDataReloc(object, segment, at, R_WASM_MEMORY_ADDR_I32, target, 0);
         break;
+      }
       case kInitTypeMemory:
-        PutBytes(&layout->bytes, at, init->value.memory.value,
+        PutBytes(&segment->bytes, at, init->value.memory.value,
                  init->value.memory.length);
         break;
     }
   }
 
   // The initializers may stop short of the object's size; the rest is zero
-  // but still has to be part of the segment if anything follows it.
-  Reserve(&layout->bytes, base + var->size);
+  // but still belongs to the segment.
+  Reserve(&segment->bytes, var->size);
 }
 
-bool Wasm32BuildDataLayout(Wasm32DataLayout* layout) {
-  BufferInit(&layout->bytes);
-  VectorInit(&layout->literals);
-  VectorInit(&layout->symbols);
-  layout->start = WASM32_DATA_START;
-  layout->failed = false;
+// The constructors and destructors this translation unit contributes, as an
+// array of function pointers for libc to walk.  A wasm function pointer is a
+// table slot rather than an address, so each entry is a relocation the
+// linker fills in once it has assigned the slots.
+static void BuildInitFiniArray(Wasm32ObjectFile* object, Vector* functions,
+                               const char* section, bool is_fini) {
+  Vector ordered;
+  VectorInit(&ordered);
+  CollectInitFiniArrayFunctions(functions, is_fini, &ordered);
+  if (ordered.length == 0) {
+    VectorDestruct(&ordered);
+    return;
+  }
 
-  uint32_t next = layout->start;
-  AssignAddresses(layout, &next);
+  char buf[256];
+  Wasm32Symbol* owner;
+  Wasm32Segment* segment =
+      AddSegment(object, section, "entries", 4,
+                 (uint32_t)(ordered.length * 4), /*is_global=*/false,
+                 /*is_weak=*/false, &owner);
+  for (size_t i = 0; i < ordered.length; i++) {
+    Symbol* function = ordered.value.p[i];
+    Wasm32Symbol* target = Wasm32ObjectSymbol(
+        object, WASM_SYMBOL_FUNCTION,
+        TargetSymbolName(function, buf, sizeof(buf)));
+    AddDataReloc(object, segment, i * 4, R_WASM_TABLE_INDEX_I32, target, 0);
+  }
+  Reserve(&segment->bytes, ordered.length * 4);
+  VectorDestruct(&ordered);
+}
 
+bool Wasm32BuildDataSegments(Wasm32ObjectFile* object) {
+  char buf[256];
+  bool ok = true;
+
+  // Every symbol has to exist before any initializer is written, so that an
+  // initializer naming a static declared later still finds one symbol.
   for (size_t i = 0; i < compiler->literals.length; i++) {
     Literal* literal = compiler->literals.value.p[i];
-    if (!literal->disabled) {
-      WriteLiteralBytes(layout, literal);
+    if (literal->disabled) {
+      continue;
     }
+    Wasm32Symbol* symbol;
+    Wasm32Segment* segment = AddSegment(
+        object, ".rodata",
+        Wasm32LiteralSymbolName(literal->id, buf, sizeof(buf)),
+        LiteralAlignment(literal), (uint32_t)LiteralSize(literal),
+        /*is_global=*/false, /*is_weak=*/false, &symbol);
+    WriteLiteralBytes(literal, segment);
   }
+
+  // One entry per initialized static, in step with the compiler's list, so
+  // that the second pass can find the segment a variable was given.
+  Vector variable_segments;
+  VectorInit(&variable_segments);
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
     InitializedStaticVariable* var =
         compiler->initialized_static_variables.value.p[i];
-    if (!var->is_tls) {
-      WriteVariableBytes(layout, var);
+    if (var->is_tls) {
+      fprintf(stderr, "wasm32: thread-local '%s' is not supported.\n",
+              VariableName(var->symbol, buf, sizeof(buf)));
+      ok = false;
+      VectorAppend(&variable_segments, NULL);
+      continue;
+    }
+    Wasm32Symbol* symbol;
+    Wasm32Segment* segment =
+        AddSegment(object, ".data", VariableName(var->symbol, buf, sizeof(buf)),
+                   (uint32_t)var->alignment, (uint32_t)var->size,
+                   var->is_global, var->is_weak, &symbol);
+    VectorAppend(&variable_segments, segment);
+  }
+
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+    UninitializedStaticVariable* var =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (var->is_tls) {
+      fprintf(stderr, "wasm32: thread-local '%s' is not supported.\n",
+              VariableName(var->symbol, buf, sizeof(buf)));
+      ok = false;
+      continue;
+    }
+    // A tentative definition is only a definition if nothing else in the
+    // translation unit gives the variable a value, and the compiler lists it
+    // here either way.  Taking it now would put the name on a run of zeroes
+    // and lose the initializer written above.
+    const char* name = VariableName(var->symbol, buf, sizeof(buf));
+    Wasm32Symbol* existing =
+        Wasm32ObjectFindSymbol(object, WASM_SYMBOL_DATA, name);
+    if (existing != NULL && (existing->flags & WASM_SYM_UNDEFINED) == 0) {
+      continue;
+    }
+    Wasm32Symbol* symbol;
+    Wasm32Segment* segment =
+        AddSegment(object, ".bss", name, (uint32_t)var->alignment,
+                   (uint32_t)var->size, var->is_global, var->is_weak, &symbol);
+    // The bytes are all zero, and the linker leaves them out of the module
+    // because linear memory starts out zeroed; they are here so that the
+    // object stays a self-consistent module.
+    Reserve(&segment->bytes, var->size);
+  }
+
+  BuildInitFiniArray(object, CXXInitArrayFunctionsVector(), ".init_array",
+                     /*is_fini=*/false);
+  BuildInitFiniArray(object, CXXFiniArrayFunctionsVector(), ".fini_array",
+                     /*is_fini=*/true);
+
+  // Second pass, now that every data symbol exists.
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    Wasm32Segment* segment = variable_segments.value.p[i];
+    if (segment != NULL) {
+      WriteVariableBytes(object, var, segment);
     }
   }
 
-  // The shadow stack sits above the data, and the heap above that.  Both are
-  // 16-byte aligned because the stack allocator assumes it can hand out
-  // maximally aligned frames.
-  layout->stack_top = AlignUp(next, 16) + WASM32_STACK_SIZE;
-  layout->heap_start = layout->stack_top;
-  return !layout->failed;
-}
-
-void Wasm32DataLayoutDestruct(Wasm32DataLayout* layout) {
-  for (size_t i = 0; i < layout->literals.length; i++) {
-    Wasm32DataAddress* entry = layout->literals.value.p[i];
-    free(entry->name);
-    free(entry);
-  }
-  for (size_t i = 0; i < layout->symbols.length; i++) {
-    Wasm32DataAddress* entry = layout->symbols.value.p[i];
-    free(entry->name);
-    free(entry);
-  }
-  VectorDestruct(&layout->literals);
-  VectorDestruct(&layout->symbols);
-  BufferDestruct(&layout->bytes);
+  VectorDestruct(&variable_segments);
+  return ok;
 }
