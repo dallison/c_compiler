@@ -2202,6 +2202,25 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
   return &node->base;
 }
 
+// Integer-promote one operand of a shift in place.  A type narrower than int
+// becomes int and not merely a wider version of itself, because int can hold
+// every one of its values; the exception is an unsigned type int is no wider
+// than, which promotes to unsigned int instead (C11 6.3.1.1p2).  Getting this
+// wrong leaves `(unsigned short)x << 1` unsigned, and the whole point of
+// 6.5.7p3 giving the result the promoted left type is that it is signed.
+static void PromoteShiftOperand(ASTNode* operand) {
+  int rank = GetRank(operand->type);
+  if (TypeIsBitInt(operand->type) || rank <= 0 || rank >= IntRank()) {
+    return;
+  }
+  Type promoted = kTypeInt;
+  if (TypeIsUnsigned(operand->type) &&
+      operand->type->size >= SizeofType(kTypeInt)) {
+    promoted |= kTypeUnsigned;
+  }
+  NormalConversion(operand, NewTypeRecordWithSize(promoted, kQualPlain));
+}
+
 // Both sides of a shift operator needs to be an integral type.
 static ASTNode* AnalyzeShift(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
@@ -2221,24 +2240,8 @@ static ASTNode* AnalyzeShift(BinaryASTNode* node) {
   // the result is the promoted type of the LEFT operand (C11 6.5.7p3).  The
   // usual arithmetic conversions are NOT applied, so the right operand's type
   // (e.g. a `long long` shift count) must not widen the result.
-  int left_rank = GetRank(node->left->type);
-  if (!TypeIsBitInt(node->left->type) && left_rank > 0 &&
-      left_rank < IntRank()) {
-    Type t = kTypeInt;
-    if (TypeIsUnsigned(node->left->type)) {
-      t |= kTypeUnsigned;
-    }
-    NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
-  }
-  int right_rank = GetRank(node->right->type);
-  if (!TypeIsBitInt(node->right->type) && right_rank > 0 &&
-      right_rank < IntRank()) {
-    Type t = kTypeInt;
-    if (TypeIsUnsigned(node->right->type)) {
-      t |= kTypeUnsigned;
-    }
-    NormalConversion(node->right, NewTypeRecordWithSize(t, kQualPlain));
-  }
+  PromoteShiftOperand(node->left);
+  PromoteShiftOperand(node->right);
   ASTNodeSetType((ASTNode*)node, node->left->type);
 
   // Convert node opcode to correct shift type.   An unsigned type uses a

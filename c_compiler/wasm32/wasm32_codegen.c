@@ -1119,6 +1119,18 @@ static bool IsNrvoVariable(IRNode* node) {
   return (node->flags & kIRNrvoMarker) != 0;
 }
 
+// A variable whose type is a function is not storage at all: it is the
+// function itself, named by a declaration written inside a block.  It needs
+// no frame slot, and reaching it means its table slot rather than an address.
+static bool IsFunctionReference(IRNode* node) {
+  if (!IRIsAutoVariable(node) && !IRIsArgument(node) &&
+      !IRIsStaticVariable(node)) {
+    return false;
+  }
+  Symbol* symbol = ((IRVariable*)node)->symbol;
+  return symbol != NULL && TypeIsFunction(symbol->type);
+}
+
 // A variable that was kept in a wasm local instead of the shadow frame.  It
 // has no address at all: reading it is a local.get and writing it a local.set,
 // and anything that would need to point at it kept it out of a local in the
@@ -1211,6 +1223,11 @@ static TargetInstruction* EmitLocalVariableGet(Wasm32Generator* wasm,
 
 static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
                                 TargetInstruction** base, int32_t* offset) {
+  if (IsFunctionReference(address_node)) {
+    *base = MaterializeStaticAddress(wasm, address_node);
+    *offset = 0;
+    return *base != NULL;
+  }
   if (IsLocalVariable(address_node)) {
     Fail(wasm, "the address of a variable that has no address");
     return false;
@@ -1256,6 +1273,9 @@ static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
 // that decayed to a pointer, or the base of a member or element access.
 static TargetInstruction* MaterializeVariableAddress(Wasm32Generator* wasm,
                                                      IRNode* node) {
+  if (IsFunctionReference(node)) {
+    return MaterializeStaticAddress(wasm, node);
+  }
   if (IsLocalVariable(node)) {
     Fail(wasm, "the address of a variable that has no address");
     return NULL;
@@ -1716,6 +1736,32 @@ static void Wasm32SignatureDestruct(Wasm32Signature* signature) {
   VectorDestruct(&signature->param_types);
 }
 
+// The signature a particular call needs.  A function type written without a
+// prototype describes no parameters at all, but the call still passes them,
+// and wasm insists the signature account for everything on the stack.  The
+// arguments are then the only description of the callee there is, which is
+// also what the definition's own signature will have been built from.
+static bool BuildSignatureForCall(TypeRecord* type, TargetInstruction** values,
+                                  size_t num_arguments,
+                                  Wasm32Signature* signature) {
+  if (!BuildSignatureForType(type, signature)) {
+    return false;
+  }
+  while (type != NULL && TypeIsPointer(type)) {
+    type = type->next;
+  }
+  if (type->info.function.varargs) {
+    // The extra arguments travel in a buffer, so the signature already
+    // accounts for every value the call leaves on the stack.
+    return true;
+  }
+  for (size_t i = signature->param_types.length; i < num_arguments; i++) {
+    VectorAppend(&signature->param_types,
+                 (void*)(intptr_t)Wasm32InstructionType(values[i]));
+  }
+  return true;
+}
+
 static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t num_arguments = node->inputs.length - 1;
@@ -1746,8 +1792,7 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
   // holding a table slot, which only call_indirect can reach, and that has
   // to state the signature it expects.
   IRNode* callee_node = node->inputs.value.p[0];
-  bool direct = IRIsStaticVariable(callee_node) &&
-                TypeIsFunction(((IRVariable*)callee_node)->symbol->type);
+  bool direct = IsFunctionReference(callee_node);
   TargetInstruction* callee;
   int type_index = -1;
   if (direct) {
@@ -1757,14 +1802,15 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
     // to live in another object the import standing in for it needs one, and
     // the call site is the only place that knows what it should be.
     Wasm32Signature signature;
-    if (BuildSignatureForType(((IRVariable*)callee_node)->symbol->type,
-                              &signature)) {
+    if (BuildSignatureForCall(((IRVariable*)callee_node)->symbol->type, values,
+                              num_arguments, &signature)) {
       type_index = Wasm32InternSignature(&signature);
     }
     Wasm32SignatureDestruct(&signature);
   } else {
     Wasm32Signature signature;
-    if (!BuildSignatureForType(callee_node->type, &signature)) {
+    if (!BuildSignatureForCall(callee_node->type, values, num_arguments,
+                               &signature)) {
       Wasm32SignatureDestruct(&signature);
       Fail(wasm, "a call through a pointer with no usable prototype");
       free(values);
@@ -1959,35 +2005,58 @@ static TargetInstruction* LowerConditionalBranch(Wasm32Generator* wasm,
   return inst;
 }
 
+// The one local this function's return value is parked in.  Every result
+// node writes it and every return reads it, so it cannot belong to whichever
+// of the two happens to be lowered first: which that is depends on how the
+// blocks ended up ordered, and a return reached first would otherwise hand
+// back nothing at all.
+static TargetInstruction* ResultValue(Wasm32Generator* wasm) {
+  if (wasm->result_value == NULL && wasm->signature.has_result) {
+    TargetInstruction* slot = NewInstruction(W_OP(slot));
+    Wasm32SetInstructionType(slot, wasm->signature.result_type);
+    wasm->result_value = Emit(wasm, slot);
+  }
+  return wasm->result_value;
+}
+
 static TargetInstruction* LowerResult(Wasm32Generator* wasm, IRNode* node) {
   assert(node->inputs.length == 1);
   TargetInstruction* value = Materialize(wasm, node->inputs.value.p[0]);
   if (value == NULL) {
     return NULL;
   }
-  // The value has to survive until the function's return, which may be
-  // several blocks away, so park it in the dedicated result local.
-  TargetInstruction* mov = NewInstruction1(W_OP(mov), value);
-  Wasm32SetInstructionType(mov, Wasm32InstructionType(value));
-  TargetUpdateOperandUsers(mov);
-  TargetInstruction* result = Emit(wasm, mov);
-  if (wasm->result_value == NULL) {
-    // The first result node owns the local; later ones write into it.
-    wasm->result_value = result;
-  } else {
-    result->dest = wasm->result_value;
+  if (!wasm->signature.has_result) {
+    // A function whose declared type promised no result but that returns one
+    // regardless.  Its callers read the same declared type, so this is the
+    // one place the shape of the signature can still be learned.
+    wasm->signature.has_result = true;
+    wasm->signature.result_type = Wasm32InstructionType(value);
   }
-  SetLoweredNode(node, result);
-  wasm->signature.has_result = true;
-  wasm->signature.result_type = Wasm32InstructionType(value);
-  return result;
+  TargetInstruction* slot = ResultValue(wasm);
+  TypeRecord* return_type = compiler->current_function->next;
+  value = Coerce(wasm, value, Wasm32InstructionType(slot),
+                 return_type != NULL && TypeIsUnsigned(return_type));
+  if (value == NULL) {
+    return NULL;
+  }
+
+  // The value has to survive until the function's return, which may be
+  // several blocks away.
+  TargetInstruction* mov = NewInstruction1(W_OP(mov), value);
+  Wasm32SetInstructionType(mov, Wasm32InstructionType(slot));
+  mov->dest = slot;
+  TargetUpdateOperandUsers(mov);
+  Emit(wasm, mov);
+  SetLoweredNode(node, slot);
+  return slot;
 }
 
 static TargetInstruction* LowerReturn(Wasm32Generator* wasm, IRNode* node) {
   TargetInstruction* inst = NewInstruction(W_OP(return));
   inst->flags |= WASM32_FLAG_NO_RESULT;
-  if (wasm->signature.has_result && wasm->result_value != NULL) {
-    inst->operand[0] = wasm->result_value;
+  TargetInstruction* result = ResultValue(wasm);
+  if (result != NULL) {
+    inst->operand[0] = result;
     TargetUpdateOperandUsers(inst);
   }
   return Emit(wasm, inst);
@@ -2728,6 +2797,11 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
     if (entry->pooled->opcode == IR_OP(localvar) ||
         entry->pooled->opcode == IR_OP(tempvar)) {
       if ((entry->pooled->flags & kIRNrvoMarker) != 0) {
+        continue;
+      }
+      if (IsFunctionReference(entry->pooled)) {
+        // A function declared inside a block.  It is a name for code, not
+        // storage, so there is nothing to make room for.
         continue;
       }
       TypeRecord* type = entry->value.symbol->type;

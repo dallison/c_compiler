@@ -1,0 +1,31 @@
+#! /bin/sh
+# Tests skipped for davecc -target wasm32.
+
+if ! test -f README.md; then
+    echo "run from the c_testsuite directory." >&2
+    exit 1
+fi
+
+# Reading a struct out of a va_list, which the backend does not lower yet.
+echo "tests/single-exec/00204.c"
+
+# Thread-local storage.  Wasm has no equivalent without the threads proposal,
+# so a __thread variable has nowhere to live.
+echo "tests/single-exec/00238.c"
+
+# setjmp/longjmp.  Unwinding to an earlier frame needs either the exception
+# handling proposal or an Asyncify-style transform, and libc/include/setjmp.h
+# has no wasm32 definition of jmp_buf at all.
+echo "tests/single-exec/00247.c"
+
+# Real file IO.  The WASI syscall layer serves the standard streams and can
+# seek, but nothing implements open, so a test that names a path of its own
+# cannot get a descriptor for it.
+echo "tests/single-exec/00187.c"
+echo "tests/single-exec/00242.c"
+echo "tests/single-exec/00246.c"
+
+# Skipped for every target, not just this one.
+echo "tests/single-exec/00216.c"
+echo "tests/single-exec/00219.c"
+echo "tests/single-exec/00220.c"
