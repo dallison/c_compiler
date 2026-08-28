@@ -16,6 +16,10 @@
 # well as what it returns.  Everything else is freestanding and is reached
 # by calling main directly.
 #
+# Every test runs at each optimization level, because the two are not the
+# same code: at -O0 a variable is a slot in the shadow frame and at -O1 one
+# that is never pointed at becomes a wasm local instead.
+#
 # Usage: run_exec_tests.sh [davecc] [test.c|test_dir ...]
 
 set -u
@@ -44,34 +48,35 @@ pass=0
 fail=0
 
 for source in "$@"; do
+ for opt in -O0 -O1; do
   case "$source" in
     */hosted/*)
       name=$(basename "$source" .c)
       if ! clang -w -o "$work/$name.native" "$source" -lm 2>/dev/null; then
-        echo "SKIP $name: the host compiler rejected it"
+        echo "SKIP $name $opt: the host compiler rejected it"
         continue
       fi
       want_output=$("$work/$name.native")
       want=$?
 
-      if ! error=$("$DAVECC" -target wasm32 "$source" -o "$work/$name.wasm" \
-                     2>&1); then
-        echo "FAIL $name: $(echo "$error" | head -1)"
+      if ! error=$("$DAVECC" -target wasm32 "$opt" "$source" \
+                     -o "$work/$name.wasm" 2>&1); then
+        echo "FAIL $name $opt: $(echo "$error" | head -1)"
         fail=$((fail + 1))
         continue
       fi
       if ! error=$(wasm-validate "$work/$name.wasm" 2>&1); then
-        echo "FAIL $name: invalid module: $(echo "$error" | head -1)"
+        echo "FAIL $name $opt: invalid module: $(echo "$error" | head -1)"
         fail=$((fail + 1))
         continue
       fi
       got_output=$(wasmtime run "$work/$name.wasm" 2>/dev/null)
       got=$?
       if [ "$got" != "$want" ]; then
-        echo "FAIL $name: exit want $want, got $got"
+        echo "FAIL $name $opt: exit want $want, got $got"
         fail=$((fail + 1))
       elif [ "$got_output" != "$want_output" ]; then
-        echo "FAIL $name: output differs"
+        echo "FAIL $name $opt: output differs"
         diff <(echo "$want_output") <(echo "$got_output") | head -8
         fail=$((fail + 1))
       else
@@ -104,8 +109,8 @@ for source in "$@"; do
     for unit in "${library[@]}"; do
       object="$work/$name.native.$(basename "$unit" .c).o"
       if ! clang -w -c -o "$object" "$unit" 2>/dev/null; then
-        echo "SKIP $name: the host compiler rejected it"
-        continue 2
+        echo "SKIP $name $opt: the host compiler rejected it"
+        continue 3
       fi
       native_members+=("$object")
     done
@@ -118,7 +123,7 @@ for source in "$@"; do
   # an unbound variable, which the bash that ships with macOS still needs.
   if ! clang -w -o "$work/$name.native" "${sources[@]}" \
          ${native_library[@]+"${native_library[@]}"} 2>/dev/null; then
-    echo "SKIP $name: the host compiler rejected it"
+    echo "SKIP $name $opt: the host compiler rejected it"
     continue
   fi
   "$work/$name.native"
@@ -128,15 +133,16 @@ for source in "$@"; do
   broken=""
   for unit in "${sources[@]}"; do
     object="$work/$name.$(basename "$unit" .c).o"
-    if ! error=$("$DAVECC" -target wasm32 -c "$unit" -o "$object" 2>&1); then
-      echo "FAIL $name: $(echo "$error" | head -1)"
+    if ! error=$("$DAVECC" -target wasm32 "$opt" -c "$unit" -o "$object" \
+                   2>&1); then
+      echo "FAIL $name $opt: $(echo "$error" | head -1)"
       broken=yes
       break
     fi
     # An object is itself a valid module, so checking it separates a bad
     # encoding from a bad link.
     if ! error=$(wasm-validate "$object" 2>&1); then
-      echo "FAIL $name: invalid object: $(echo "$error" | head -1)"
+      echo "FAIL $name $opt: invalid object: $(echo "$error" | head -1)"
       broken=yes
       break
     fi
@@ -147,8 +153,9 @@ for source in "$@"; do
     members=()
     for unit in "${library[@]}"; do
       object="$work/$name.lib.$(basename "$unit" .c).o"
-      if ! error=$("$DAVECC" -target wasm32 -c "$unit" -o "$object" 2>&1); then
-        echo "FAIL $name: $(echo "$error" | head -1)"
+      if ! error=$("$DAVECC" -target wasm32 "$opt" -c "$unit" -o "$object" \
+                     2>&1); then
+        echo "FAIL $name $opt: $(echo "$error" | head -1)"
         broken=yes
         break
       fi
@@ -157,7 +164,7 @@ for source in "$@"; do
     rm -f "$work/lib$name.a"
     if [ -z "$broken" ] &&
        ! error=$("$ARCHIVIST" rc "$work/lib$name.a" "${members[@]}" 2>&1); then
-      echo "FAIL $name: archive: $(echo "$error" | head -1)"
+      echo "FAIL $name $opt: archive: $(echo "$error" | head -1)"
       broken=yes
     fi
     archive=("$work/lib$name.a")
@@ -169,13 +176,13 @@ for source in "$@"; do
 
   if ! error=$("$DAVECC" -target wasm32 "${objects[@]}" \
                  ${archive[@]+"${archive[@]}"} -o "$work/$name.wasm" 2>&1); then
-    echo "FAIL $name: link: $(echo "$error" | head -1)"
+    echo "FAIL $name $opt: link: $(echo "$error" | head -1)"
     fail=$((fail + 1))
     continue
   fi
 
   if ! error=$(wasm-validate "$work/$name.wasm" 2>&1); then
-    echo "FAIL $name: invalid module: $(echo "$error" | head -1)"
+    echo "FAIL $name $opt: invalid module: $(echo "$error" | head -1)"
     fail=$((fail + 1))
     continue
   fi
@@ -190,9 +197,10 @@ for source in "$@"; do
   if [ "$((got & 255))" = "$want" ]; then
     pass=$((pass + 1))
   else
-    echo "FAIL $name: want $want, got $got"
+    echo "FAIL $name $opt: want $want, got $got"
     fail=$((fail + 1))
   fi
+ done
 done
 
 echo "wasm32 exec tests: $pass passed, $fail failed"

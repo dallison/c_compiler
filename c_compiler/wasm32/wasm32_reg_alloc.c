@@ -25,9 +25,11 @@ void Wasm32AllocateLocals(Wasm32Generator* wasm) {
 
   TargetInstruction* inst = TargetFirstInstruction(&wasm->base);
   while (inst != NULL) {
-    // Parameters already own locals 0..num_params-1.
-    bool needs_local = inst->opcode == (TargetOpcode)W_OP(slot) ||
-                       (Wasm32ProducesValue(inst) && inst->dest == NULL);
+    // Parameters already own locals 0..num_params-1, and an instruction the
+    // optimizer removed has no value left for anything to read.
+    bool needs_local = (inst->flags & TARGET_INST_DEAD) == 0 &&
+                       (inst->opcode == (TargetOpcode)W_OP(slot) ||
+                        (Wasm32ProducesValue(inst) && inst->dest == NULL));
     if (needs_local) {
       int type = Wasm32TypeIndex(Wasm32InstructionType(inst));
       TargetRegister* reg = malloc(sizeof(TargetRegister));

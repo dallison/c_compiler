@@ -115,6 +115,11 @@ WasmValueType Wasm32TypeForCType(TypeRecord* type) {
   return type->size > 4 ? kWasmTypeI64 : kWasmTypeI32;
 }
 
+// How many bytes of a value a wasm local of this type holds.
+static int WasmTypeSize(WasmValueType type) {
+  return (type == kWasmTypeI64 || type == kWasmTypeF64) ? 8 : 4;
+}
+
 bool Wasm32IsPseudo(TargetInstruction* inst) {
   switch ((Wasm32Opcode)inst->opcode) {
     case W_OP(const8):
@@ -333,6 +338,7 @@ void Wasm32GeneratorInit(Wasm32Generator* wasm, Generator* gen) {
   wasm->result_value = NULL;
   VectorInit(&wasm->params);
   VectorInit(&wasm->local_values);
+  VectorInit(&wasm->local_variables);
   wasm->failed = false;
 }
 
@@ -347,6 +353,7 @@ void Wasm32GeneratorDestruct(Wasm32Generator* wasm) {
   VectorDestruct(&wasm->signature.param_types);
   VectorDestruct(&wasm->params);
   VectorDestruct(&wasm->local_values);
+  VectorDestruct(&wasm->local_variables);
 }
 
 void Wasm32GeneratorDelete(Wasm32Generator* wasm) {
@@ -966,13 +973,14 @@ static void LowerEnter(Wasm32Generator* wasm) {
   // Parameters arrive in wasm locals but the IR reads them out of memory, so
   // copy each one into its frame slot on entry.  The hidden struct-result
   // pointer is not one of them: it is read where the result is written, not
-  // through a frame slot.
+  // through a frame slot.  Nor is a parameter that kept its local, which was
+  // given no frame slot to be copied into.
   size_t first = wasm->returns_struct ? 1 : 0;
   Vector* prototype = &compiler->current_function->info.function.prototype;
   for (size_t i = 0; i + first < wasm->params.length && i < prototype->length;
        i++) {
     Symbol* arg = prototype->value.p[i];
-    if (arg == NULL || arg->type == NULL) {
+    if (arg == NULL || arg->type == NULL || arg->stack_offset < 0) {
       continue;
     }
     TargetInstruction* param = wasm->params.value.p[i + first];
@@ -1111,8 +1119,102 @@ static bool IsNrvoVariable(IRNode* node) {
   return (node->flags & kIRNrvoMarker) != 0;
 }
 
+// A variable that was kept in a wasm local instead of the shadow frame.  It
+// has no address at all: reading it is a local.get and writing it a local.set,
+// and anything that would need to point at it kept it out of a local in the
+// first place.
+static bool IsLocalVariable(IRNode* node) {
+  return (IRIsAutoVariable(node) || IRIsArgument(node)) &&
+         (node->data.ivalue & WASM32_LOCAL_VAR) != 0;
+}
+
+static TargetInstruction* LocalVariableSlot(Wasm32Generator* wasm,
+                                            IRNode* node) {
+  size_t index = (size_t)(node->data.ivalue & ~WASM32_LOCAL_VAR);
+  assert(index < wasm->local_variables.length);
+  return wasm->local_variables.value.p[index];
+}
+
+// Drop the bits a store of this width would not have kept and restore the
+// sign the matching load would have put back.  A local is as wide as its
+// value type, so without this a variable narrower than that would remember
+// bits the frame slot it replaced would have thrown away.
+static TargetInstruction* NarrowToVariableWidth(Wasm32Generator* wasm,
+                                                TargetInstruction* value,
+                                                TypeRecord* type) {
+  WasmValueType have = Wasm32InstructionType(value);
+  if (TypeIsFloatingPoint(type) || type->size >= WasmTypeSize(have)) {
+    return value;
+  }
+  bool wide = have == kWasmTypeI64;
+  TargetInstruction* narrowed;
+  if (TypeIsUnsigned(type)) {
+    uint64_t mask = (UINT64_C(1) << (type->size * 8)) - 1;
+    TargetInstruction* mask_value = Emit(
+        wasm, NewInstruction1(wide ? W_OP(i64_const) : W_OP(i32_const),
+                              GetIntConstant(wasm, NULL,
+                                             wide ? kTargetType64Bit
+                                                  : kTargetType32Bit,
+                                             (int64_t)mask)));
+    Wasm32SetInstructionType(mask_value, have);
+    narrowed = NewInstruction2(wide ? W_OP(i64_and) : W_OP(i32_and), value,
+                               mask_value);
+  } else {
+    // A local is four bytes or eight and holds a value of its own width, so
+    // the only widths narrower than one are a byte and a halfword.
+    assert(type->size == 1 || type->size == 2);
+    Wasm32Opcode extend;
+    if (type->size == 1) {
+      extend = wide ? W_OP(i64_extend8_s) : W_OP(i32_extend8_s);
+    } else {
+      extend = wide ? W_OP(i64_extend16_s) : W_OP(i32_extend16_s);
+    }
+    narrowed = NewInstruction1(extend, value);
+  }
+  Wasm32SetInstructionType(narrowed, have);
+  TargetUpdateOperandUsers(narrowed);
+  return Emit(wasm, narrowed);
+}
+
+// Write a value into the local standing in for a variable.
+static TargetInstruction* EmitLocalVariableSet(Wasm32Generator* wasm,
+                                               IRNode* node,
+                                               TargetInstruction* value) {
+  TargetInstruction* slot = LocalVariableSlot(wasm, node);
+  TypeRecord* type = ((IRVariable*)node)->symbol->type;
+  value = Coerce(wasm, value, Wasm32InstructionType(slot),
+                 TypeIsUnsigned(type));
+  if (value == NULL) {
+    return NULL;
+  }
+  value = NarrowToVariableWidth(wasm, value, type);
+
+  TargetInstruction* set = NewInstruction1(W_OP(local_set), value);
+  set->dest = slot;
+  set->flags |= WASM32_FLAG_NO_RESULT;
+  TargetUpdateOperandUsers(set);
+  return Emit(wasm, set);
+}
+
+// Read the local standing in for a variable.  The copy is what pins the read
+// to this point in the stream: handing the slot itself to whatever consumes
+// the value would instead read it wherever that consumer ends up, which is
+// the wrong value if the variable is assigned in between.
+static TargetInstruction* EmitLocalVariableGet(Wasm32Generator* wasm,
+                                               IRNode* node) {
+  TargetInstruction* slot = LocalVariableSlot(wasm, node);
+  TargetInstruction* copy = NewInstruction1(W_OP(mov), slot);
+  Wasm32SetInstructionType(copy, Wasm32InstructionType(slot));
+  TargetUpdateOperandUsers(copy);
+  return Emit(wasm, copy);
+}
+
 static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
                                 TargetInstruction** base, int32_t* offset) {
+  if (IsLocalVariable(address_node)) {
+    Fail(wasm, "the address of a variable that has no address");
+    return false;
+  }
   if (IsNrvoVariable(address_node)) {
     *base = NrvoAddress(wasm, address_node);
     *offset = 0;
@@ -1154,6 +1256,10 @@ static bool GetAddressAndOffset(Wasm32Generator* wasm, IRNode* address_node,
 // that decayed to a pointer, or the base of a member or element access.
 static TargetInstruction* MaterializeVariableAddress(Wasm32Generator* wasm,
                                                      IRNode* node) {
+  if (IsLocalVariable(node)) {
+    Fail(wasm, "the address of a variable that has no address");
+    return NULL;
+  }
   if (IsNrvoVariable(node)) {
     TargetInstruction* result = NrvoAddress(wasm, node);
     if (result != NULL) {
@@ -1175,9 +1281,17 @@ static TargetInstruction* MaterializeVariableAddress(Wasm32Generator* wasm,
 }
 
 static TargetInstruction* LowerLoad(Wasm32Generator* wasm, IRNode* node) {
+  IRNode* address_node = node->inputs.value.p[0];
+  if (IsLocalVariable(address_node)) {
+    // The local already holds what a reload of the slot would have produced,
+    // so the widening the load opcode names has nothing left to do.
+    TargetInstruction* result = EmitLocalVariableGet(wasm, address_node);
+    SetLoweredNode(node, result);
+    return result;
+  }
   TargetInstruction* base;
   int32_t offset;
-  if (!GetAddressAndOffset(wasm, node->inputs.value.p[0], &base, &offset)) {
+  if (!GetAddressAndOffset(wasm, address_node, &base, &offset)) {
     return NULL;
   }
   Wasm32Opcode opcode;
@@ -1222,9 +1336,23 @@ static TargetInstruction* LowerLoad(Wasm32Generator* wasm, IRNode* node) {
 }
 
 static TargetInstruction* LowerStore(Wasm32Generator* wasm, IRNode* node) {
+  IRNode* address_node = node->inputs.value.p[0];
+  if (IsLocalVariable(address_node)) {
+    TargetInstruction* value = Materialize(wasm, node->inputs.value.p[1]);
+    if (value == NULL) {
+      return NULL;
+    }
+    TargetInstruction* result =
+        EmitLocalVariableSet(wasm, address_node, value);
+    if (result == NULL) {
+      return NULL;
+    }
+    SetLoweredNode(node, result);
+    return result;
+  }
   TargetInstruction* base;
   int32_t offset;
-  if (!GetAddressAndOffset(wasm, node->inputs.value.p[0], &base, &offset)) {
+  if (!GetAddressAndOffset(wasm, address_node, &base, &offset)) {
     return NULL;
   }
   TargetInstruction* value = Materialize(wasm, node->inputs.value.p[1]);
@@ -1344,12 +1472,18 @@ static TargetInstruction* LowerIncrement(Wasm32Generator* wasm, IRNode* node,
   }
 
   IRNode* address_node = node->inputs.value.p[0];
-  TargetInstruction* base;
-  int32_t offset;
-  if (!GetAddressAndOffset(wasm, address_node, &base, &offset)) {
-    return NULL;
+  bool in_local = IsLocalVariable(address_node);
+  TargetInstruction* base = NULL;
+  int32_t offset = 0;
+  TargetInstruction* old;
+  if (in_local) {
+    old = EmitLocalVariableGet(wasm, address_node);
+  } else {
+    if (!GetAddressAndOffset(wasm, address_node, &base, &offset)) {
+      return NULL;
+    }
+    old = EmitLoad(wasm, load, base, offset, type);
   }
-  TargetInstruction* old = EmitLoad(wasm, load, base, offset, type);
 
   TargetInstruction* amount = Materialize(wasm, node->inputs.value.p[1]);
   amount = Coerce(wasm, amount, type, /*is_unsigned=*/false);
@@ -1377,13 +1511,14 @@ static TargetInstruction* LowerIncrement(Wasm32Generator* wasm, IRNode* node,
   TargetUpdateOperandUsers(updated);
   updated = Emit(wasm, updated);
 
-  EmitStore(wasm, StoreOpcodeForType(type, store_size), base, updated, offset);
+  if (in_local) {
+    EmitLocalVariableSet(wasm, address_node, updated);
+  } else {
+    EmitStore(wasm, StoreOpcodeForType(type, store_size), base, updated,
+              offset);
+  }
   SetLoweredNode(node, updated);
   return updated;
-}
-
-static int WasmTypeSize(WasmValueType type) {
-  return (type == kWasmTypeI64 || type == kWasmTypeF64) ? 8 : 4;
 }
 
 // Narrow a value to 'keep_bytes' significant bits with zeroes above them,
@@ -2305,12 +2440,194 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
   }
 }
 
+// The uses that read or write the whole of a variable and so want no address
+// for it.  Everything else - a member or element access, an argument passed
+// by reference, a pointer taken - has to name real storage.
+static bool UseAccessesWholeVariable(IRNode* use) {
+  switch (use->opcode) {
+    case IR_OP(load8):
+    case IR_OP(loadu8):
+    case IR_OP(load16):
+    case IR_OP(loadu16):
+    case IR_OP(load32):
+    case IR_OP(loadu32):
+    case IR_OP(load64):
+    case IR_OP(loada):
+    case IR_OP(loadf):
+    case IR_OP(loadd):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store32):
+    case IR_OP(store64):
+    case IR_OP(storea):
+    case IR_OP(storef):
+    case IR_OP(stored):
+    case IR_OP(inc8):
+    case IR_OP(uinc8):
+    case IR_OP(inc16):
+    case IR_OP(uinc16):
+    case IR_OP(inc32):
+    case IR_OP(uinc32):
+    case IR_OP(inc64):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
+    case IR_OP(dec8):
+    case IR_OP(udec8):
+    case IR_OP(dec16):
+    case IR_OP(udec16):
+    case IR_OP(dec32):
+    case IR_OP(udec32):
+    case IR_OP(dec64):
+    case IR_OP(udec64):
+    case IR_OP(deca):
+    case IR_OP(decf):
+    case IR_OP(decd):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// True when a wasm local can stand in for the variable's storage: the value
+// fits in one, and nothing in the function ever needs somewhere to point.
+static bool CanKeepVariableInLocal(IRNode* node) {
+  if (OptLevel0()) {
+    // Keeping everything in the frame at -O0 leaves each variable somewhere a
+    // debugger can find it, and keeps the plain path exercised.
+    return false;
+  }
+  if (node->opcode != IR_OP(localvar) && node->opcode != IR_OP(tempvar) &&
+      node->opcode != IR_OP(argument)) {
+    return false;
+  }
+  if ((node->flags & kIRNrvoMarker) != 0) {
+    // The caller's result buffer under a local's name, so it is memory by
+    // definition.
+    return false;
+  }
+  Symbol* symbol = ((IRVariable*)node)->symbol;
+  if (symbol == NULL || symbol->type == NULL || symbol->flags.address_taken) {
+    return false;
+  }
+  TypeRecord* type = symbol->type;
+  if (!TypeIsPointer(type) && !TypeIsIntegral(type) &&
+      !TypeIsFloatingPoint(type)) {
+    return false;
+  }
+  if (TypeIsVolatile(type) || TypeIsAtomic(type) || TypeIsReference(type)) {
+    return false;
+  }
+  if (type->size == 0) {
+    TypeRecordCalculateSize(type);
+  }
+  if (type->size != 1 && type->size != 2 && type->size != 4 &&
+      type->size != 8) {
+    return false;
+  }
+  for (size_t i = 0; i < node->outputs.length; i++) {
+    IRNode* use = node->outputs.value.p[i];
+    if (!UseAccessesWholeVariable(use)) {
+      return false;
+    }
+    // Only the first input of such a use is the thing being accessed; the
+    // variable anywhere else is a value, which for a variable means its
+    // address.
+    if (use->inputs.length == 0 || use->inputs.value.p[0] != node) {
+      return false;
+    }
+    for (size_t j = 1; j < use->inputs.length; j++) {
+      if (use->inputs.value.p[j] == node) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// The wasm parameter a declared argument arrives in, or NULL when the symbol
+// is not one of this function's parameters.
+static TargetInstruction* ParameterFor(Wasm32Generator* wasm, Symbol* symbol) {
+  Vector* prototype = &compiler->current_function->info.function.prototype;
+  size_t first = wasm->returns_struct ? 1 : 0;
+  for (size_t i = 0; i < prototype->length; i++) {
+    if (prototype->value.p[i] != symbol) {
+      continue;
+    }
+    return i + first < wasm->params.length ? wasm->params.value.p[i + first]
+                                           : NULL;
+  }
+  return NULL;
+}
+
+// The local a promoted variable lives in.
+static TargetInstruction* MakeVariableSlot(Wasm32Generator* wasm,
+                                           IRNode* node) {
+  Symbol* symbol = ((IRVariable*)node)->symbol;
+  WasmValueType type = Wasm32TypeForCType(symbol->type);
+  TargetInstruction* param = ParameterFor(wasm, symbol);
+  if (param == NULL && node->opcode == IR_OP(argument)) {
+    // Nothing would ever write the local, so the argument would read as zero.
+    Fail(wasm, "an argument with no wasm parameter to arrive in");
+  }
+  if (param != NULL && symbol->type->size >= WasmTypeSize(type)) {
+    // The argument already arrived in a local holding exactly what the
+    // variable should hold, so the parameter is the variable.
+    return param;
+  }
+
+  TargetInstruction* slot = NewInstruction(W_OP(slot));
+  Wasm32SetInstructionType(slot, type);
+  Emit(wasm, slot);
+  if (param != NULL) {
+    // A parameter narrower than its local arrives with whatever the caller
+    // left in the spare bits.  Trimming it once on entry is what lets every
+    // later read take the local exactly as it stands.
+    TargetInstruction* set = NewInstruction1(
+        W_OP(local_set), NarrowToVariableWidth(wasm, param, symbol->type));
+    set->dest = slot;
+    set->flags |= WASM32_FLAG_NO_RESULT;
+    TargetUpdateOperandUsers(set);
+    Emit(wasm, set);
+  }
+  return slot;
+}
+
+static bool VectorHolds(Vector* vector, void* value) {
+  for (size_t i = 0; i < vector->length; i++) {
+    if (vector->value.p[i] == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
   // Build the wasm signature from the C prototype.  A struct is too big to
   // be a wasm value, so both a struct parameter and a struct result travel
   // as an i32 pointer into linear memory.
   TypeRecord* return_type = compiler->current_function->next;
   wasm->returns_struct = TypeReturnedThroughHiddenPointer(return_type);
+
+  // Settle which variables can live in a wasm local before laying out the
+  // frame, because a parameter among them wants neither frame space nor the
+  // copy into it that every other parameter gets on entry.
+  Vector arguments_in_locals;
+  VectorInit(&arguments_in_locals);
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
+    if (!CanKeepVariableInLocal(entry->pooled)) {
+      continue;
+    }
+    // Which local it is cannot be settled until the parameters exist, so for
+    // now the tag alone marks the variable.
+    entry->pooled->data.ivalue = WASM32_LOCAL_VAR;
+    if (entry->pooled->opcode == IR_OP(argument)) {
+      VectorAppend(&arguments_in_locals, ((IRVariable*)entry->pooled)->symbol);
+    }
+  }
+
   if (wasm->returns_struct) {
     // The hidden destination pointer comes first and is also what the
     // function hands back, so a caller can use the call's value directly.
@@ -2329,7 +2646,14 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
                  (void*)(intptr_t)(by_reference ? kWasmTypeI32
                                                 : Wasm32TypeForCType(arg->type)));
 
-    // Every parameter also gets a frame slot, because the IR reads
+    if (VectorHolds(&arguments_in_locals, arg)) {
+      // The parameter stays in a wasm local, so it wants no frame slot and
+      // nothing copied into one.
+      arg->stack_offset = -1;
+      continue;
+    }
+
+    // Every other parameter gets a frame slot, because the IR reads
     // parameters through the same loads and stores it uses for locals.  A
     // struct's slot holds the whole struct, not the pointer to it.
     int32_t alignment = TypeRecordAlignment(arg->type);
@@ -2382,10 +2706,25 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
     wasm->signature.result_type = Wasm32TypeForCType(return_type);
   }
 
-  // Give every local a shadow-stack slot.  Promoting locals that are never
-  // address-taken into wasm locals is a later optimization.
+  // The parameters exist now, so each variable that is staying out of the
+  // frame can be given the local it lives in.
   for (size_t i = 0; i < gen->variable_pool.length; i++) {
     PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
+    if (!IsLocalVariable(entry->pooled)) {
+      continue;
+    }
+    entry->pooled->data.ivalue =
+        WASM32_LOCAL_VAR | (int32_t)wasm->local_variables.length;
+    VectorAppend(&wasm->local_variables, MakeVariableSlot(wasm, entry->pooled));
+  }
+  VectorDestruct(&arguments_in_locals);
+
+  // Give every variable that is left a shadow-stack slot.
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
+    if (IsLocalVariable(entry->pooled)) {
+      continue;
+    }
     if (entry->pooled->opcode == IR_OP(localvar) ||
         entry->pooled->opcode == IR_OP(tempvar)) {
       if ((entry->pooled->flags & kIRNrvoMarker) != 0) {

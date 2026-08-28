@@ -35,6 +35,13 @@
 // TargetInstruction::addr carries the resolved relative branch depth after
 // the stackifier has run.  The shared layer only ever prints that field.
 
+// A variable's IR node normally records its byte offset in the shadow frame.
+// With this bit set it records instead an index into the generator's
+// local_variables: the variable was never given frame space and lives in a
+// wasm local.  A frame offset is a small positive number, so the two encodings
+// cannot be confused.
+#define WASM32_LOCAL_VAR 0x40000000
+
 // One wasm value type slot in a function signature.
 typedef struct {
   Vector param_types;  // WasmValueType values, boxed as intptr_t.
@@ -77,6 +84,10 @@ typedef struct Wasm32Generator {
 
   // Instructions that were assigned a local, in allocation order.
   Vector local_values;
+
+  // The instruction naming the wasm local of each variable that was kept out
+  // of the shadow frame, indexed by the variable's WASM32_LOCAL_VAR tag.
+  Vector local_variables;
 
   // Set when lowering hit something it cannot yet translate.  The target
   // reports this as a compile error rather than emitting a bad module.
