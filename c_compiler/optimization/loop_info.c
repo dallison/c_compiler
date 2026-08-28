@@ -259,13 +259,27 @@ static void RedirectExplicitEdge(BasicBlock* from, BasicBlock* header,
   }
 }
 
+// The instruction the preheader's code goes in front of.  A loop whose test
+// sits at the bottom keeps its header below its body, and code placed in front
+// of the header would then sit inside the loop: the body would fall into it on
+// every iteration, and the lowering, which walks the instruction list in order,
+// would meet the body's uses of the hoisted values before their definitions.
+// Going in front of the loop's first instruction instead puts the preheader
+// ahead of every block it feeds.
+static IRNode* PreheaderAnchor(Generator* gen, LoopInfo* loop) {
+  for (IRNode* scan = GeneratorFirstInstruction(gen); scan != NULL;
+       scan = IRNext(scan)) {
+    if (scan->block != NULL && LoopInfoContainsBlock(loop, scan->block)) {
+      return scan;
+    }
+  }
+  return loop->header->code;
+}
+
 static BasicBlock* NewPreheaderBlock(Generator* gen, LoopInfo* loop,
                                      BitSet* outside_predecessors) {
-  BasicBlock* preheader = NewBasicBlock(gen->basic_blocks.length);
-  VectorAppend(&gen->basic_blocks, preheader);
-
-  // Record fallthroughs before inserting code in front of the header: the
-  // insertion itself changes IRNext(predecessor->end_code).
+  // Record fallthroughs before inserting any code: the insertion itself changes
+  // IRNext(predecessor->end_code).
   BitSet fallthrough_predecessors;
   BitSetInit(&fallthrough_predecessors);
   BitSetIterator it;
@@ -281,10 +295,22 @@ static BasicBlock* NewPreheaderBlock(Generator* gen, LoopInfo* loop,
 
   IRNode* header_label = loop->header->code;
   assert(header_label != NULL && header_label->opcode == IR_OP(label));
-  IRNode* label =
-      GeneratorEmitBefore(gen, NewIR(IR_OP(label)), header_label);
+  IRNode* anchor = PreheaderAnchor(gen, loop);
+  // A predecessor that reaches the header by falling into it only keeps that
+  // edge if the preheader takes the header's place in the instruction list.
+  // Leave such a loop alone rather than move the code out from under the edge.
+  if (anchor != header_label && BitSetCount(&fallthrough_predecessors) > 0) {
+    BitSetDestruct(&fallthrough_predecessors);
+    return NULL;
+  }
+
+  BasicBlock* preheader = NewBasicBlock(gen->basic_blocks.length);
+  VectorAppend(&gen->basic_blocks, preheader);
+
+  // The branch goes to the header wherever the code itself lands.
+  IRNode* label = GeneratorEmitBefore(gen, NewIR(IR_OP(label)), anchor);
   IRNode* branch =
-      GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), header_label), header_label);
+      GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), header_label), anchor);
   label->block = preheader;
   branch->block = preheader;
   preheader->code = label;
@@ -335,8 +361,8 @@ bool LoopInfoCreatePreheaders(Generator* gen) {
         can_redirect = false;
       }
     }
-    if (BitSetCount(&outside) > 0 && can_redirect) {
-      NewPreheaderBlock(gen, loop, &outside);
+    if (BitSetCount(&outside) > 0 && can_redirect &&
+        NewPreheaderBlock(gen, loop, &outside) != NULL) {
       BitSetDestruct(&outside);
       return true;
     }
