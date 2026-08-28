@@ -4642,7 +4642,11 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
     ASTNode* callee = ((VectorASTNode*)node)->left;
     if (callee != NULL && callee->op == AST_OP(identifier)) {
       Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
-      if (symbol != NULL && symbol->flags.is_template_type_parameter) {
+      // A callee still naming the template itself has not been resolved to the
+      // specialization the call reaches.  Copying it emits a call to the
+      // template's own name, which nothing defines.
+      if (symbol != NULL && (symbol->flags.is_template_type_parameter ||
+                             symbol->flags.is_template)) {
         finder->found_unresolved = true;
       }
     }
