@@ -95,6 +95,7 @@ int TestEHFrame(void) {
   DaveEHFDE found;
   DaveEHFrameCFI cfi;
   int count;
+  unsigned int cie_length;
 
   if (!DaveEHFrameGetRange(&range)) {
     return 1;
@@ -102,12 +103,27 @@ int TestEHFrame(void) {
   if (!(range.start < range.end)) {
     return 2;
   }
-  // The CIE has a "zR" augmentation: length 26 (18 bytes content + 8-byte align).
-  if (*(const unsigned int*)range.start != 26) {
+  // The section opens with a CIE, distinguished from an FDE by an id of zero,
+  // and an entry follows it.  This checks that shape rather than the CIE's
+  // length, which the encodings of the augmentation and of the initial
+  // instructions decide and so moves for reasons that are not defects.
+  // The fields read below occupy the first eight bytes of the content.
+  cie_length = *(const unsigned int*)range.start;
+  if (cie_length < 8 ||
+      range.start + 4 + cie_length + 4 > range.end) {
     return 8;
   }
-  if (*(const unsigned int*)(range.start + 30) == 0) {
+  if (*(const unsigned int*)(range.start + 4) != 0) {
     return 9;
+  }
+  // Version 1, then the augmentation string.  "zR" says the augmentation
+  // carries its own length and gives the encoding of the FDEs' addresses.
+  if (range.start[8] != 1 || range.start[9] != 'z' ||
+      range.start[10] != 'R' || range.start[11] != 0) {
+    return 17;
+  }
+  if (*(const unsigned int*)(range.start + 4 + cie_length) == 0) {
+    return 18;
   }
   count = DaveEHFrameCountFDEs();
   if (count == 0) {
