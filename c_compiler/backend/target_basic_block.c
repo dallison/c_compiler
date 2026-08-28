@@ -773,15 +773,46 @@ static void ResetAllInstructionUses(TargetGenerator* gen) {
   }
 }
 
+// A block holding an instruction we must keep (an exception table label, for
+// example) survives even when it is unreachable from the entry block.  Such a
+// block is still emitted, so everything it can branch to has to survive as
+// well, otherwise the surviving branch refers to a deleted label.
 static void RemoveUnreachableBlocks(TargetGenerator* gen) {
+  BitSet keep;
+  BitSetInit(&keep);
+  Vector work;
+  VectorInit(&work);
+
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (!TargetBasicBlockIsUnreachable(gen, b) ||
+        TargetBasicBlockHasKeptInstruction(b)) {
+      BitSetInsert(&keep, b->block_id);
+      VectorAppend(&work, b);
+    }
+  }
 
-    if (TargetBasicBlockIsUnreachable(gen, b) &&
-        !TargetBasicBlockHasKeptInstruction(b)) {
+  while (work.length > 0) {
+    TargetBasicBlock* b = VectorLast(&work);
+    VectorPop(&work);
+    for (size_t i = 0; i < b->out_edges.length; i++) {
+      TargetBasicBlock* out =
+          VectorGet(&gen->basic_blocks, b->out_edges.value.w[i]);
+      if (out != NULL && !BitSetContains(&keep, out->block_id)) {
+        BitSetInsert(&keep, out->block_id);
+        VectorAppend(&work, out);
+      }
+    }
+  }
+  VectorDestruct(&work);
+
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (!BitSetContains(&keep, b->block_id)) {
       TargetBasicBlockClear(gen, b);
     }
   }
+  BitSetDestruct(&keep);
 }
 
 // Detect natural loops from latch -> header back edges.  Build the union of

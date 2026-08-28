@@ -10,7 +10,6 @@
 
 0015_rvalue_reference_materialization.cpp
 0032_constexpr.cpp
-0065_coroutines.cpp
 0068_variadic_sizeof_pack.cpp
 0074_standard_memory_unique_ptr.cpp
 0098_template_id_functional_cast.cpp
