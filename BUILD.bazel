@@ -4569,7 +4569,11 @@ set -euo pipefail
 
 genrule(
     name = "hello_aarch64_exe",
-    srcs = ["hello_aarch64/main.c"],
+    srcs = [
+        ":libc_headers",
+        ":libc_aarch64",
+        "hello_aarch64/main.c",
+    ],
     outs = ["hello_aarch64/hello.exe"],
     cmd = """
 set -euo pipefail
@@ -4577,9 +4581,12 @@ set -euo pipefail
 "$(location :davecc)" \
   -target aarch64 \
   -static \
+  -nostdlib \
+  -isystem libc/include \
   -Wl,-e \
   -Wl,main \
   hello_aarch64/main.c \
+  "$(execpath :libc_aarch64)" \
   -o "$@"
 """,
     tools = [":davecc"],
@@ -4587,7 +4594,11 @@ set -euo pipefail
 
 genrule(
     name = "hello_x86_64_exe",
-    srcs = ["hello_x86_64/main.c"],
+    srcs = [
+        ":libc_headers",
+        ":libc_x86_64",
+        "hello_x86_64/main.c",
+    ],
     outs = ["hello_x86_64/hello.exe"],
     cmd = """
 set -euo pipefail
@@ -4595,9 +4606,12 @@ set -euo pipefail
 "$(location :davecc)" \
   -target x86_64 \
   -static \
+  -nostdlib \
+  -isystem libc/include \
   -Wl,-e \
   -Wl,main \
   hello_x86_64/main.c \
+  "$(execpath :libc_x86_64)" \
   -o "$@"
 """,
     tools = [":davecc"],
@@ -4605,7 +4619,10 @@ set -euo pipefail
 
 genrule(
     name = "hello_aarch64_libfunc_so",
-    srcs = ["hello_aarch64/libfunc.c"],
+    srcs = [
+        ":libc_headers",
+        "hello_aarch64/libfunc.c",
+    ],
     outs = ["hello_aarch64/libfunc.so"],
     cmd = """
 set -euo pipefail
@@ -4614,6 +4631,7 @@ set -euo pipefail
   -target aarch64 \
   -fpic \
   -shared \
+  -isystem libc/include \
   hello_aarch64/libfunc.c \
   -o "$@"
 """,
@@ -4623,6 +4641,8 @@ set -euo pipefail
 genrule(
     name = "hello_aarch64_dynamic_exe",
     srcs = [
+        ":libc_headers",
+        ":libc_aarch64",
         "hello_aarch64/main_dynamic.c",
         ":hello_aarch64_libfunc_so",
     ],
@@ -4633,11 +4653,14 @@ set -euo pipefail
 "$(location :davecc)" \
   -target aarch64 \
   -fpic \
+  -nostdlib \
+  -isystem libc/include \
   -Wl,-e \
   -Wl,main \
   -rpath '$$ORIGIN' \
   hello_aarch64/main_dynamic.c \
   "$(location :hello_aarch64_libfunc_so)" \
+  "$(execpath :libc_aarch64)" \
   -o "$@"
 """,
     tools = [":davecc"],
@@ -4670,7 +4693,11 @@ touch "$@"
 
 genrule(
     name = "hello_arm_exe",
-    srcs = ["hello_arm/main.c"],
+    srcs = [
+        ":libc_headers",
+        ":libc_arm",
+        "hello_arm/main.c",
+    ],
     outs = ["hello_arm/hello.exe"],
     cmd = """
 set -euo pipefail
@@ -4678,9 +4705,12 @@ set -euo pipefail
 "$(location :davecc)" \
   -target arm \
   -static \
+  -nostdlib \
+  -isystem libc/include \
   -Wl,-e \
   -Wl,main \
   hello_arm/main.c \
+  "$(execpath :libc_arm)" \
   -o "$@"
 """,
     tools = [":davecc"],
@@ -4688,7 +4718,10 @@ set -euo pipefail
 
 genrule(
     name = "hello_arm_libfunc_so",
-    srcs = ["hello_arm/libfunc.c"],
+    srcs = [
+        ":libc_headers",
+        "hello_arm/libfunc.c",
+    ],
     outs = ["hello_arm/libfunc.so"],
     cmd = """
 set -euo pipefail
@@ -4697,6 +4730,7 @@ set -euo pipefail
   -target arm \
   -fpic \
   -shared \
+  -isystem libc/include \
   hello_arm/libfunc.c \
   -o "$@"
 """,
@@ -4706,6 +4740,8 @@ set -euo pipefail
 genrule(
     name = "hello_arm_dynamic_exe",
     srcs = [
+        ":libc_headers",
+        ":libc_arm",
         "hello_arm/main_dynamic.c",
         ":hello_arm_libfunc_so",
     ],
@@ -4716,11 +4752,14 @@ set -euo pipefail
 "$(location :davecc)" \
   -target arm \
   -fpic \
+  -nostdlib \
+  -isystem libc/include \
   -Wl,-e \
   -Wl,main \
   -rpath '$$ORIGIN' \
   hello_arm/main_dynamic.c \
   "$(location :hello_arm_libfunc_so)" \
+  "$(execpath :libc_arm)" \
   -o "$@"
 """,
     tools = [":davecc"],

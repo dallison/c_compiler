@@ -12,6 +12,20 @@ DaveccModuleInfo = provider(
     },
 )
 
+_SYSTEM_INCLUDE_MARKER = "libc/include"
+
+def _system_include_dir(files):
+    """The execroot-relative standard header directory.
+
+    The driver otherwise probes the working directory and its own location for
+    this tree, neither of which exists inside an action sandbox.
+    """
+    for f in files:
+        index = f.path.find(_SYSTEM_INCLUDE_MARKER)
+        if index != -1:
+            return f.path[:index + len(_SYSTEM_INCLUDE_MARKER)]
+    fail("no %s directory among the standard headers" % _SYSTEM_INCLUDE_MARKER)
+
 def _module_args(ctx, args):
     args.add("-target", ctx.attr.target)
     args.add("-std=" + ctx.attr.standard)
@@ -21,6 +35,7 @@ def _module_args(ctx, args):
     ).to_list()
     for mapping in sorted(all_mappings):
         args.add("-fmodule-file", mapping)
+    args.add("-isystem", _system_include_dir(ctx.files._system_headers))
     args.add_all(ctx.attr.copts)
 
 def _davecc_module_impl(ctx):
@@ -50,7 +65,10 @@ def _davecc_module_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._davecc,
         arguments = [args],
-        inputs = depset([src] + ctx.files.inputs, transitive = [input_bmis]),
+        inputs = depset(
+            [src] + ctx.files.inputs + ctx.files._system_headers,
+            transitive = [input_bmis],
+        ),
         outputs = [bmi, obj],
         mnemonic = "DaveccModule",
         progress_message = "Compiling DaveCC module %s" % ctx.attr.module_name,
@@ -94,6 +112,10 @@ davecc_module = rule(
             executable = True,
             cfg = "exec",
         ),
+        "_system_headers": attr.label(
+            default = Label("//:libc_headers"),
+            allow_files = True,
+        ),
     },
     doc = "Builds coordinated DaveCC .dcm and object artifacts.",
 )
@@ -114,13 +136,17 @@ def _davecc_binary_impl(ctx):
     compile_args.add("-c")
     for mapping in sorted(mappings.to_list()):
         compile_args.add("-fmodule-file", mapping)
+    compile_args.add("-isystem", _system_include_dir(ctx.files._system_headers))
     compile_args.add_all(ctx.attr.copts)
     compile_args.add(src.path)
     compile_args.add("-o", obj.path)
     ctx.actions.run(
         executable = ctx.executable._davecc,
         arguments = [compile_args],
-        inputs = depset([src], transitive = module_bmis),
+        inputs = depset(
+            [src] + ctx.files._system_headers,
+            transitive = module_bmis,
+        ),
         outputs = [obj],
         mnemonic = "DaveccCompile",
         progress_message = "Compiling DaveCC source %s" % src.short_path,
@@ -132,6 +158,10 @@ def _davecc_binary_impl(ctx):
     )
     link_args = ctx.actions.args()
     link_args.add("-target", ctx.attr.target)
+    # The runtime comes from link_inputs, so the driver must not go looking for
+    # a startup object and an archive in a library directory that no action
+    # sandbox contains.
+    link_args.add("-nostdlib")
     if ctx.attr.static:
         link_args.add("-static")
     link_args.add_all(link_inputs)
@@ -166,7 +196,15 @@ davecc_binary = rule(
             executable = True,
             cfg = "exec",
         ),
+        "_system_headers": attr.label(
+            default = Label("//:libc_headers"),
+            allow_files = True,
+        ),
     },
     executable = True,
-    doc = "Compiles and links one DaveCC source with module dependencies.",
+    doc = """Compiles and links one DaveCC source with module dependencies.
+
+The link is freestanding: pass the startup object and C runtime the program
+needs through link_inputs.
+""",
 )
