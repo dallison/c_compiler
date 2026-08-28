@@ -1,0 +1,83 @@
+# Execution tests that do not pass at -O2 on x86-64.
+#
+# The suite runs every test at -O2.  A failure outside this list is a
+# regression, and a test in the list that passes fails the suite too, so
+# that fixing one forces its entry to go and the list cannot drift out of
+# date.  A test marked "flaky" may do either, for one that does not reach
+# the same result twice running; keep that marker rare.
+#
+# Nothing here is expected to stay: each entry is an -O2 bug to fix.
+
+0015_rvalue_reference_materialization.cpp
+0032_constexpr.cpp
+0065_coroutines.cpp
+0068_variadic_sizeof_pack.cpp
+0074_standard_memory_unique_ptr.cpp
+0098_template_id_functional_cast.cpp
+0115_standard_vector_exception_safety.cpp
+0116_standard_vector_assignment_insert.cpp
+0117_standard_vector_insert_range.cpp
+0120_standard_vector_allocator_propagation.cpp
+0122_standard_vector_input_iterators.cpp
+0124_standard_vector_range_exception_safety.cpp
+0134_standard_optional.cpp
+0138_initializer_list_member_template_resolution.cpp
+0139_standard_variant_foundations.cpp
+0140_standard_variant_core.cpp
+0146_user_source_location_not_builtin.cpp
+0150_standard_variant_visit_cvref.cpp
+0151_standard_variant_exact_construction.cpp
+0153_standard_variant_valueless_by_exception.cpp
+0155_standard_variant_visit_return_type.cpp
+0168_map_lookup_erase_compare.cpp
+0173_map_node_handles.cpp
+0195_cxx_local_static_arrays.cpp
+0248_standard_function.cpp
+0252_functional_std_function.cpp
+0253_standard_any.cpp
+0255_ranges_subrange.cpp
+0262_standard_set.cpp
+0263_c_library_headers.cpp
+0264_standard_algorithm.cpp
+0265_standard_list.cpp
+0267_standard_unordered_map.cpp
+0268_standard_unordered_set.cpp
+0271_standard_deque.cpp
+0272_exception_propagation_destructors.cpp
+0273_partial_construction_destructors.cpp
+0273_standard_queue.cpp
+0274_virtual_base_partial_construction.cpp
+0275_standard_streams.cpp
+0293_standard_counted_iterator.cpp
+0294_standard_common_iterator.cpp
+0296_standard_atomic_ref_wait.cpp
+0298_standard_blocking_sync.cpp
+0301_standard_mdspan_extents.cpp
+0302_standard_mdspan_layouts.cpp
+0303_standard_mdspan_view.cpp
+0305_standard_expected.cpp
+0308_cxx23_range_for_lifetime.cpp
+0320_standard_syncstream.cpp
+0321_standard_flat_containers.cpp
+0324_standard_move_only_function.cpp
+0335_standard_locale.cpp
+0340_standard_random_engines.cpp
+0343_standard_random_streams.cpp
+0357_expansion_iterating_std_array.cpp
+0358_expansion_iterating_custom_range.cpp
+0368_reflection_basic.cpp
+0396_expansion_integer_sequence.cpp
+0397_expansion_index_sequence.cpp
+0402_standard_inplace_vector.cpp
+0403_standard_hive.cpp
+0416_constexpr_structured_bindings.cpp
+0418_contract_reflection_constification.cpp
+0424_standard_construct_destroy_at.cpp
+0429_cxx29_virtual_function_contracts.cpp
+0433_cxx29_view_interface_at.cpp
+0435_cxx29_bit_operations.cpp
+
+# Both pass every run at -O0 and come out differently from one run to the next
+# at -O2, so -O2 is doing something to them that a single run cannot pin down.
+flaky 0163_map_dependency_primitives.cpp
+flaky 0309_standard_memory_shared_ptr_threads.cpp

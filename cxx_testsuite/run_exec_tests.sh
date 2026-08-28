@@ -10,11 +10,12 @@ ROM=""
 TESTS_DIR="tests/exec"
 SUITE_ROOT=""
 TIMEOUT=30
+EXPECT_FAIL_FILE=""
 declare -a INTERP_ARGS=()
 declare -a COMPILE_ARGS=()
 
 usage() {
-  echo "usage: $0 --davecc PATH --target NAME --libc PATH --interpreter PATH [--rom PATH] [--tests-dir PATH]" >&2
+  echo "usage: $0 --davecc PATH --target NAME --libc PATH --interpreter PATH [--rom PATH] [--tests-dir PATH] [--expected-fail PATH]" >&2
   exit 2
 }
 
@@ -30,6 +31,7 @@ while [ "$#" -gt 0 ]; do
     --timeout) TIMEOUT=$2; shift 2 ;;
     --interp-arg) INTERP_ARGS+=("$2"); shift 2 ;;
     --compile-arg) COMPILE_ARGS+=("$2"); shift 2 ;;
+    --expected-fail) EXPECT_FAIL_FILE=$2; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
@@ -57,6 +59,9 @@ LIBC=$(resolve_runfile "$LIBC")
 INTERPRETER=$(resolve_runfile "$INTERPRETER")
 if [ -n "$ROM" ]; then
   ROM=$(resolve_runfile "$ROM")
+fi
+if [ -n "$EXPECT_FAIL_FILE" ]; then
+  EXPECT_FAIL_FILE=$(resolve_runfile "$EXPECT_FAIL_FILE")
 fi
 if [ -n "$SUITE_ROOT" ]; then
   SUITE_ROOT=$(resolve_runfile "$SUITE_ROOT")
@@ -109,7 +114,91 @@ fi
 
 pass=0
 fail=0
+known_fail=0
+unexpected_pass=0
+flaky_seen=0
 declare -a TEST_COMPILE_ARGS=()
+
+# Tests named in the expected-fail file are allowed to fail; ones named there as
+# "flaky NAME" are allowed either outcome, for a test that does not reach the
+# same result twice running.  Both lists are held as one delimited string
+# because the bash macOS ships has no associative arrays.
+EXPECTED_FAILS="|"
+FLAKY_TESTS="|"
+if [ -n "$EXPECT_FAIL_FILE" ]; then
+  if [ ! -f "$EXPECT_FAIL_FILE" ]; then
+    echo "expected-fail file not found: $EXPECT_FAIL_FILE" >&2
+    exit 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    # Trim surrounding whitespace, keeping the separator between the optional
+    # marker and the name.
+    line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$line" in
+      "")
+        ;;
+      flaky[[:space:]]*)
+        name=$(echo "${line#flaky}" | sed 's/^[[:space:]]*//')
+        FLAKY_TESTS="${FLAKY_TESTS}${name}|"
+        ;;
+      *)
+        EXPECTED_FAILS="${EXPECTED_FAILS}${line}|"
+        ;;
+    esac
+  done < "$EXPECT_FAIL_FILE"
+fi
+
+is_expected_fail() {
+  case "$EXPECTED_FAILS" in
+    *"|$1|"*) return 0 ;;
+  esac
+  return 1
+}
+
+is_flaky() {
+  case "$FLAKY_TESTS" in
+    *"|$1|"*) return 0 ;;
+  esac
+  return 1
+}
+
+# The single place a test's outcome is reconciled with the expected-fail list.
+# A test that fails when it was expected to is reported and forgiven; one that
+# passes when it was expected to fail fails the suite, so that fixing a test
+# forces its entry to be removed and the list cannot quietly go stale.
+record_result() {
+  local base=$1 outcome=$2 detail=$3 log=$4 log_lines=$5
+  if is_flaky "$base"; then
+    if [ "$outcome" = ok ]; then
+      echo "flaky-ok $base"
+    else
+      echo "flaky-fail $base ($detail)"
+    fi
+    flaky_seen=$((flaky_seen + 1))
+    return
+  fi
+  if [ "$outcome" = ok ]; then
+    if is_expected_fail "$base"; then
+      echo "UNEXPECTED PASS $base (now passes: remove it from the expected-fail list)"
+      unexpected_pass=$((unexpected_pass + 1))
+    else
+      echo "ok $base"
+      pass=$((pass + 1))
+    fi
+    return
+  fi
+  if is_expected_fail "$base"; then
+    echo "known-fail $base ($detail)"
+    known_fail=$((known_fail + 1))
+    return
+  fi
+  echo "FAIL $base ($detail)"
+  if [ -n "$log" ] && [ -f "$log" ]; then
+    sed 's/^/  /' "$log" | head -"$log_lines"
+  fi
+  fail=$((fail + 1))
+}
 
 read_test_directives() {
   local file=$1
@@ -173,9 +262,7 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
                 "$src" "$LIBC" -o "$bin")
   if ! "${TIMEOUT_CMD[@]}" "${compile_cmd[@]}" \
       >"$work/compile.log" 2>&1; then
-    echo "FAIL $base (compile)"
-    sed 's/^/  /' "$work/compile.log" | head -20
-    fail=$((fail + 1))
+    record_result "$base" fail "compile" "$work/compile.log" 20
     continue
   fi
 
@@ -188,41 +275,37 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   run_status=$?
   if [ -n "$EXPECT_EXIT" ]; then
     if ! exit_status_matches "$EXPECT_EXIT" "$run_status"; then
-      echo "FAIL $base (run exit $run_status, expected $EXPECT_EXIT)"
-      sed 's/^/  /' "$work/run.err" | head -20
-      fail=$((fail + 1))
+      record_result "$base" fail \
+          "run exit $run_status, expected $EXPECT_EXIT" "$work/run.err" 20
       continue
     fi
     if [ -f "$exp" ] && ! diff -u "$exp" "$out" >"$work/diff"; then
-      echo "FAIL $base (output)"
-      sed 's/^/  /' "$work/diff" | head -40
-      fail=$((fail + 1))
+      record_result "$base" fail "output" "$work/diff" 40
       continue
     fi
-    echo "ok $base"
-    pass=$((pass + 1))
+    record_result "$base" ok
     continue
   fi
   if [ "$run_status" -ne 0 ]; then
-    echo "FAIL $base (run exit $run_status)"
-    sed 's/^/  /' "$work/run.err" | head -20
-    fail=$((fail + 1))
+    record_result "$base" fail "run exit $run_status" "$work/run.err" 20
     continue
   fi
   if [ -f "$exp" ] && ! diff -u "$exp" "$out" >"$work/diff"; then
-    echo "FAIL $base (output)"
-    sed 's/^/  /' "$work/diff" | head -40
-    fail=$((fail + 1))
+    record_result "$base" fail "output" "$work/diff" 40
     continue
   fi
-  echo "ok $base"
-  pass=$((pass + 1))
+  record_result "$base" ok
 done
 
 echo
 echo "=== summary cxx_testsuite exec ==="
-echo "pass=$pass fail=$fail"
+if [ -n "$EXPECT_FAIL_FILE" ]; then
+  echo "pass=$pass fail=$fail known-fail=$known_fail" \
+       "unexpected-pass=$unexpected_pass flaky=$flaky_seen"
+else
+  echo "pass=$pass fail=$fail"
+fi
 
-if [ "$fail" -ne 0 ]; then
+if [ "$fail" -ne 0 ] || [ "$unexpected_pass" -ne 0 ]; then
   exit 1
 fi

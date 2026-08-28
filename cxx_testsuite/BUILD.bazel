@@ -319,6 +319,137 @@ sh_test(
     ],
 )
 
+# The same execution tests at -O2.  Optimization is where the backends diverge
+# most from one another, and running the suite only at the default level let a
+# defect that stopped every vector of a destructible type from compiling sit
+# undetected.  Each target carries the set it does not yet pass, so a new
+# failure is a regression and a fixed one has to be struck from the list.
+sh_test(
+    name = "exec_x86_64_O2",
+    size = "large",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "x86_64",
+        "--libc",
+        "$(rootpath //:libc_x86_64)",
+        "--interpreter",
+        "$(rootpath //:x86_64)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--compile-arg",
+        "-O2",
+        "--interp-arg",
+        "-i",
+        "--expected-fail",
+        "$(rootpath expected_fail/exec_x86_64_O2.txt)",
+    ],
+    data = CXX_TEST_DATA + [
+        "expected_fail/exec_x86_64_O2.txt",
+        "//:davecc",
+        "//:libc_headers",
+        "//:libc_x86_64",
+        "//:x86_64",
+    ],
+)
+
+sh_test(
+    name = "exec_aarch64_O2",
+    size = "large",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--compile-arg",
+        "-O2",
+        "--interp-arg",
+        "-i",
+        "--expected-fail",
+        "$(rootpath expected_fail/exec_aarch64_O2.txt)",
+    ],
+    data = CXX_TEST_DATA + [
+        "expected_fail/exec_aarch64_O2.txt",
+        "//:aarch64",
+        "//:davecc",
+        "//:libc_aarch64",
+        "//:libc_headers",
+    ],
+)
+
+sh_test(
+    name = "exec_arm_O2",
+    size = "large",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "arm",
+        "--libc",
+        "$(rootpath //:libc_arm)",
+        "--interpreter",
+        "$(rootpath //:arm)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--compile-arg",
+        "-O2",
+        "--interp-arg",
+        "-i",
+        "--expected-fail",
+        "$(rootpath expected_fail/exec_arm_O2.txt)",
+    ],
+    data = CXX_TEST_DATA + [
+        "expected_fail/exec_arm_O2.txt",
+        "//:arm",
+        "//:davecc",
+        "//:libc_arm",
+        "//:libc_headers",
+    ],
+)
+
+sh_test(
+    name = "exec_riscv_O2",
+    size = "large",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "riscv",
+        "--libc",
+        "$(rootpath //:libc_riscv)",
+        "--interpreter",
+        "$(rootpath //:riscv)",
+        "--compile-arg",
+        "-O2",
+        "--expected-fail",
+        "$(rootpath expected_fail/exec_riscv_O2.txt)",
+    ],
+    data = CXX_TEST_DATA + [
+        "expected_fail/exec_riscv_O2.txt",
+        "//:davecc",
+        "//:libc_headers",
+        "//:libc_riscv",
+        "//:riscv",
+    ],
+)
+
 sh_test(
     name = "exec_coroutines_x86_64",
     srcs = ["run_exec_tests.sh"],
