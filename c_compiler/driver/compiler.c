@@ -37,6 +37,7 @@
 #include "aarch64_target.h"
 #include "arm_target.h"
 #include "x86_64_target.h"
+#include "wasm32_target.h"
 
 void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
 
@@ -248,6 +249,7 @@ static struct CompilerTargetDefinition{
   {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0},
   {"6502", {"6502"}, New6502Target, true, 2},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2},
+  {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0},
 };
 
 #define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))

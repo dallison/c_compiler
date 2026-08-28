@@ -681,7 +681,9 @@ TargetInstruction* TargetNewFloatingPointConstant(IRNode* node, TargetType type,
   c->type = type;
   c->value.dvalue = value;
   c->literal_id = -1;
-  TargetSetLoweredNode(node, (TargetInstruction*)c);
+  if (node != NULL) {
+    TargetSetLoweredNode(node, (TargetInstruction*)c);
+  }
   return (TargetInstruction*)c;
 }
 
