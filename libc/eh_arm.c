@@ -22,7 +22,7 @@ extern char __exidx_end[];
 extern char __extab_start[];
 extern char __extab_end[];
 
-extern void __davecc_capture_regs(uint32_t* vrs);
+extern void __davecc_arm_capture_vrs(uint32_t* vrs);
 extern void __davecc_arm_install_from_vrs(uint32_t* vrs, uint32_t sp, uint32_t fp,
                                           uint32_t landing_pad);
 
@@ -668,7 +668,7 @@ void DaveARMInitContextFromHardware(_Unwind_Context* context) {
     return;
   }
   DaveARMInitContext(context);
-  __davecc_capture_regs(context->vrs);
+  __davecc_arm_capture_vrs(context->vrs);
   if (context->vrs[DAVE_ARM_R_LR] >= 4) {
     context->vrs[DAVE_ARM_R_PC] = context->vrs[DAVE_ARM_R_LR] - 4;
   }

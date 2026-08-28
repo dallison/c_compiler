@@ -17,9 +17,13 @@ __davecc_itanium_vptr_vmi_class:
 g_davecc_arm_transfer_vrs:
 	.space 64
 
-.global __davecc_capture_regs
-.type __davecc_capture_regs, @function
-__davecc_capture_regs:
+// Fills the ARM EH ABI virtual register set: a flat r0..r15, four bytes each,
+// with the pc slot holding the return address.  Only the ARM personality
+// routines speak this layout; see __davecc_capture_regs for the one the
+// target-independent unwinder expects.
+.global __davecc_arm_capture_vrs
+.type __davecc_arm_capture_vrs, @function
+__davecc_arm_capture_vrs:
 	mov r12, r0
 	str r1, [r12, #4]
 	str r2, [r12, #8]
@@ -37,6 +41,24 @@ __davecc_capture_regs:
 	str lr, [r12, #60]
 	mov r0, #0
 	str r0, [r12, #0]
+	bx lr
+
+// Fills a DaveEHFrameRegisters: pc at 0, rsp at 4, rbp at 8, then gr[] indexed
+// by DWARF register number, so gr[n] sits at 12 + 4n.
+.global __davecc_capture_regs
+.type __davecc_capture_regs, @function
+__davecc_capture_regs:
+	mov r12, r0
+	str lr, [r12, #0]
+	str sp, [r12, #4]
+	str fp, [r12, #8]
+	str r4, [r12, #28]
+	str r5, [r12, #32]
+	str r6, [r12, #36]
+	str r7, [r12, #40]
+	str r8, [r12, #44]
+	str r9, [r12, #48]
+	str r10, [r12, #52]
 	bx lr
 
 .global __davecc_jump_to_landing_pad

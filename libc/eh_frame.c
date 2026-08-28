@@ -76,6 +76,10 @@ typedef struct {
 #define DAVE_EH_DREG_PC 1
 #define DAVE_EH_DREG_SP 2
 #define DAVE_EH_DREG_FP 8
+#elif defined(__arm__)
+#define DAVE_EH_DREG_PC 15
+#define DAVE_EH_DREG_SP 13
+#define DAVE_EH_DREG_FP 11
 #else
 #define DAVE_EH_DREG_PC 0
 #define DAVE_EH_DREG_SP 0
