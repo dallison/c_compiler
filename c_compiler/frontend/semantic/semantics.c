@@ -1706,7 +1706,18 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
         ((ExpressionInitializerASTNode*)node->initializer)->expr->op ==
             AST_OP(call)));
   if (!object_initializer) {
+    // A constexpr or constinit variable's initializer is interpreted from its
+    // semantic AST, and inlining a call replaces the call with a body the
+    // interpreter does not accept, so hold inlining off over the analysis.
+    bool must_be_constant = node->symbol->flags.is_constexpr ||
+                            node->symbol->flags.is_constinit;
+    if (must_be_constant) {
+      compiler->constant_evaluation_required_depth++;
+    }
     node->initializer = AnalyzeExpression(node->initializer);
+    if (must_be_constant) {
+      compiler->constant_evaluation_required_depth--;
+    }
     if (node->initializer != NULL &&
         node->initializer->op == AST_OP(call)) {
       VectorASTNode* call = (VectorASTNode*)node->initializer;

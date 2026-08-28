@@ -1691,12 +1691,18 @@ static void AnalyzeExpansionStatement(ExpansionStatementASTNode* node) {
   if (node->init_stmt != NULL) {
     AnalyzeStatement(node->init_stmt);
   }
+  // The range is expanded at compile time, so what the expansion reads has to
+  // stay interpretable: inlining a call within it leaves behind a body the
+  // constant evaluator rejects.  The loop body analyzed further down is
+  // ordinary run-time code and keeps its inlining.
+  compiler->constant_evaluation_required_depth++;
   if (node->initializer != NULL) {
     node->initializer = AnalyzeExpression(node->initializer);
   }
   int errors_before_materialization = NumErrors();
   ASTNode* materialized =
       SemanticMaterializeExpansionStatement(node, NULL, NULL);
+  compiler->constant_evaluation_required_depth--;
   if (materialized != (ASTNode*)node) {
     if (node->base.parent != NULL) {
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, materialized,

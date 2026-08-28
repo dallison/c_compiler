@@ -11,6 +11,9 @@
 0015_rvalue_reference_materialization.cpp
 0020_class_template_instantiation.cpp
 0032_constexpr.cpp
+0015_rvalue_reference_materialization.cpp
+0020_class_template_instantiation.cpp
+0032_constexpr.cpp
 0065_coroutines.cpp
 0068_variadic_sizeof_pack.cpp
 0075_standard_utility_move_traits.cpp
@@ -23,7 +26,6 @@
 0138_initializer_list_member_template_resolution.cpp
 0139_standard_variant_foundations.cpp
 0140_standard_variant_core.cpp
-0146_user_source_location_not_builtin.cpp
 0147_standard_variant_multi_visit.cpp
 0148_standard_variant_multi_visit_four.cpp
 0149_standard_variant_multi_visit_five.cpp
@@ -69,11 +71,7 @@
 0340_standard_random_engines.cpp
 0341_standard_random_distributions.cpp
 0343_standard_random_streams.cpp
-0357_expansion_iterating_std_array.cpp
-0358_expansion_iterating_custom_range.cpp
 0370_contracts_basic.cpp
-0396_expansion_integer_sequence.cpp
-0397_expansion_index_sequence.cpp
 0401_standard_stacktrace.cpp
 0402_standard_inplace_vector.cpp
 0403_standard_hive.cpp
@@ -84,7 +82,4 @@
 0429_cxx29_virtual_function_contracts.cpp
 0433_cxx29_view_interface_at.cpp
 0435_cxx29_bit_operations.cpp
-
-# Passes consistently at -O0 but races at -O2, with more than one
-# failing exit status across runs.
 flaky 0309_standard_memory_shared_ptr_threads.cpp

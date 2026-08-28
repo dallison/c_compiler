@@ -24,7 +24,6 @@
 0138_initializer_list_member_template_resolution.cpp
 0139_standard_variant_foundations.cpp
 0140_standard_variant_core.cpp
-0146_user_source_location_not_builtin.cpp
 0150_standard_variant_visit_cvref.cpp
 0151_standard_variant_exact_construction.cpp
 0153_standard_variant_valueless_by_exception.cpp
@@ -52,9 +51,6 @@
 0294_standard_common_iterator.cpp
 0296_standard_atomic_ref_wait.cpp
 0298_standard_blocking_sync.cpp
-0301_standard_mdspan_extents.cpp
-0302_standard_mdspan_layouts.cpp
-0303_standard_mdspan_view.cpp
 0305_standard_expected.cpp
 0308_cxx23_range_for_lifetime.cpp
 0320_standard_syncstream.cpp
@@ -63,11 +59,7 @@
 0335_standard_locale.cpp
 0340_standard_random_engines.cpp
 0343_standard_random_streams.cpp
-0357_expansion_iterating_std_array.cpp
-0358_expansion_iterating_custom_range.cpp
 0368_reflection_basic.cpp
-0396_expansion_integer_sequence.cpp
-0397_expansion_index_sequence.cpp
 0402_standard_inplace_vector.cpp
 0403_standard_hive.cpp
 0416_constexpr_structured_bindings.cpp

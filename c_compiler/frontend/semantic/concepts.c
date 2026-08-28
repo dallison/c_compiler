@@ -684,7 +684,12 @@ static AtomicConstraintResult EvaluateAtomicConstraint(ASTNode* expr,
   }
   ASTNodeVisit(evaluated, ClearRequirementExpressionAnalysis, 0, NULL);
   DiagnosticSuppressBegin();
+  // The constraint is interpreted below, so a call inside it has to keep its
+  // call boundary: inlining leaves a body the interpreter rejects, which would
+  // read as an unsatisfied constraint rather than as the miscompile it is.
+  compiler->constant_evaluation_required_depth++;
   evaluated = AnalyzeExpression(evaluated);
+  compiler->constant_evaluation_required_depth--;
   bool trapped = evaluated == NULL || DiagnosticErrorTrapped();
   DiagnosticSuppressEnd();
   if (trapped) {
@@ -917,7 +922,10 @@ static bool EvaluateCompoundNoexceptCondition(Requirement* requirement,
   }
   ASTNodeVisit(condition, ClearRequirementExpressionAnalysis, 0, NULL);
   DiagnosticSuppressBegin();
+  // Interpreted below, so the call boundaries within it have to survive.
+  compiler->constant_evaluation_required_depth++;
   condition = AnalyzeExpression(condition);
+  compiler->constant_evaluation_required_depth--;
   bool failed = condition == NULL || DiagnosticErrorTrapped();
   DiagnosticSuppressEnd();
   if (failed) {
