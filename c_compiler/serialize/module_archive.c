@@ -539,6 +539,11 @@ static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
     Struct* st = (Struct*)VectorGet(struct_pool, i);
     if (st != NULL) {
       StructRebuildMemberLookupTables(st);
+      // A type record that named this class was read before the class itself
+      // and so took a size of zero from it.  Nothing lays out an imported
+      // class, which is where a parsed one propagates its finished size, so
+      // push it out here now that the whole graph is in.
+      TypeRecordSyncStructSizes(st);
       if (st->is_template) {
         RepairImportedStructTemplateParameters(st);
       }
