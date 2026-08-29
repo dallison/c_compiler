@@ -10,7 +10,6 @@
 
 0059_defaulted_special_members.cpp
 0115_standard_vector_exception_safety.cpp
-0120_standard_vector_allocator_propagation.cpp
 0124_standard_vector_range_exception_safety.cpp
 0252_functional_std_function.cpp
 0253_standard_any.cpp

@@ -462,6 +462,11 @@ static void CombineShiftedAddsInBlock(TargetBasicBlock* block, void* data) {
     }
 
     TargetInstruction* base = inst->operand[1 - shift_index];
+    // The shifted form of add names two registers, so it has nowhere to put
+    // the immediate that the plain form would have taken.
+    if (base == NULL || AARCH64IsIntConst(base)) {
+      continue;
+    }
     TargetInstruction* value = shift->operand[0];
     TargetInstruction* amount_inst = shift->operand[1];
     TargetReplaceOperand(inst, 0, base);

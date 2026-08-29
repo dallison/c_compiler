@@ -1353,20 +1353,23 @@ static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
 
 static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
                             TargetInstruction* inst, char* buf1, char* buf2) {
-  if (inst->operand[0] != NULL) {
-    fprintf(fp, "\tmovq ");
-    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
-    fprintf(fp, ", %%rax\n");
-  }
-  bool divisor_is_rdx = false;
+  // The divide reads its dividend from rax and rdx, both of which are written
+  // below before it runs.  A divisor sitting in either is therefore gone by the
+  // time the divide wants it, so move it aside first, while it is still there.
+  bool divisor_moved = false;
   if (inst->operand[1] != NULL && inst->operand[1]->reg != NULL) {
     char div_reg[32];
     X86_64RegisterName((X86_64Register*)inst->operand[1]->reg, div_reg,
                        sizeof(div_reg));
-    divisor_is_rdx = strcmp(div_reg, "rdx") == 0;
+    if (strcmp(div_reg, "rax") == 0 || strcmp(div_reg, "rdx") == 0) {
+      fprintf(fp, "\tmovq %%%s, %%r11\n", div_reg);
+      divisor_moved = true;
+    }
   }
-  if (divisor_is_rdx) {
-    fprintf(fp, "\tmovq %%rdx, %%r11\n");
+  if (inst->operand[0] != NULL) {
+    fprintf(fp, "\tmovq ");
+    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+    fprintf(fp, ", %%rax\n");
   }
   if ((X86_64Opcode)opcode == X86_64_OP(div) ||
       ((X86_64Opcode)opcode == X86_64_OP(mod) &&
@@ -1381,7 +1384,7 @@ static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
     div_mnemonic = "divq";
   }
   fprintf(fp, "\t%s ", div_mnemonic);
-  if (divisor_is_rdx) {
+  if (divisor_moved) {
     fprintf(fp, "%%r11");
   } else {
     PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
@@ -1389,7 +1392,7 @@ static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
   fprintf(fp, "\n");
   if (inst->reg != NULL) {
     const char* result =
-        (X86_64Opcode)opcode == X86_64_OP(mod) ? "%%rdx" : "%%rax";
+        (X86_64Opcode)opcode == X86_64_OP(mod) ? "%rdx" : "%rax";
     fprintf(fp, "\tmovq %s, ", result);
     PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
     fprintf(fp, "\n");
