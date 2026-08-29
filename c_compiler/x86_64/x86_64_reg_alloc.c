@@ -91,6 +91,7 @@ void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* allocator, X86_64Gener
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
   MapInitForPointerKeys(&allocator->varreg_spills);
+  allocator->spill_after_definition = false;
 }
 
 X86_64RegisterAllocator* NewX86_64RegisterAllocator(X86_64Generator* pcode) {
@@ -358,10 +359,16 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
   return false;
 }
 
+// Returns the cheapest value whose register can be taken without breaking a
+// read that has already been handed that register, or NULL when there is none.
+// |unsafe|, when not NULL, receives the cheapest value that could be taken if
+// there were no such reads, for a caller that has no way to proceed without
+// taking a register from something.
 static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
                                            X86_64RegisterType type,
                                            bool can_use_temp,
-                                           TargetBasicBlock* block) {
+                                           TargetBasicBlock* block,
+                                           TargetInstruction** unsafe) {
   X86_64Register* regs =
       type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
   BitSet reentered;
@@ -409,14 +416,17 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
     }
   }
   BitSetDestruct(&reentered);
-  if (victim == NULL) {
-    victim = fallback_victim;
-  }
-  if (victim == NULL) {
+  if (victim == NULL && fallback_victim == NULL) {
     DumpRegisters(allocator);
     abort();
   }
-  return victim;
+  if (unsafe != NULL) {
+    *unsafe = fallback_victim;
+    return victim;
+  }
+  // The caller cannot deal with there being nothing safe to take, so give it
+  // the cheapest unsafe candidate as this always did.
+  return victim != NULL ? victim : fallback_victim;
 }
 
 static bool NotProcessed(TargetInstruction* inst, void* data) {
@@ -666,6 +676,39 @@ static void SyncSpilledVarReg(X86_64RegisterAllocator* allocator,
                             def_inst);
 }
 
+// r11, which the allocator never hands out and the emitter borrows for the odd
+// job that needs a register of its own, such as addressing a spill slot.  A
+// value put here has to be consumed or stored before the next instruction.
+// There is no counterpart in the xmm file: xmm15 is the emitter's scratch there
+// but it is not marked reserved, so handing it out would put it in reach of the
+// spill victim search.
+static X86_64Register* ScratchRegister(X86_64RegisterAllocator* allocator,
+                                       X86_64RegisterType type) {
+  return type == kX86_64RegTypeInt ? &allocator->int_regs[X86_64_SPILL_ADDR]
+                                   : NULL;
+}
+
+// A value whose register a read has already been handed cannot be spilled: that
+// read keeps naming the register, and once control comes back round a loop the
+// register's next owner is what it finds there.  When every register holds such
+// a value there is no victim to take, and the way out is to spill the value
+// being defined here instead: it is computed into the scratch register and
+// written straight to a slot, and every read of it is still ahead of us and so
+// gets redirected to that slot.  A value written by other instructions than
+// itself takes the same route: the node carries nothing at its own position, so
+// the slot is only registered here and each definition stores into it as it is
+// reached.
+//
+// A variable register is the one thing this cannot do, because its slot is
+// initialized at its first use rather than at the node itself, which sits in
+// the entry block; likewise a value bound to a fixed register, which its
+// consumer reads by name.
+static bool CanSpillAfterDefinition(TargetInstruction* inst) {
+  return inst != NULL && inst->uses > 0 && inst->block != NULL &&
+         !X86_64IsVarRegister(inst) && !X86_64IsFixedRegister(inst) &&
+         (inst->dest == NULL || !X86_64IsVarRegister(inst->dest));
+}
+
 static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocator,
                                             TargetBasicBlock* block,
                                             TargetInstruction* inst,
@@ -674,8 +717,15 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
   X86_64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim =
-        FindSpillVictim(allocator, type, can_use_temp, block);
+    X86_64Register* scratch = ScratchRegister(allocator, type);
+    TargetInstruction* unsafe = NULL;
+    TargetInstruction* victim = FindSpillVictim(
+        allocator, type, can_use_temp, block,
+        scratch != NULL && CanSpillAfterDefinition(inst) ? &unsafe : NULL);
+    if (victim == NULL && unsafe != NULL) {
+      allocator->spill_after_definition = true;
+      return scratch;
+    }
     reg = SpillInstruction(allocator, victim);
   }
   assert(reg != NULL);
@@ -905,6 +955,10 @@ static COMPILER_UNUSED void AllocateForRmov(X86_64RegisterAllocator* allocator,
 
 static void ReloadSpills(X86_64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
+  // The scratch register is only free for the gap between the reload and the
+  // instruction that consumes it, so at most one of this instruction's operands
+  // can come from there.
+  bool scratch_taken = false;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     TargetInstruction* spill = NULL;
@@ -925,7 +979,7 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
           RegisterTypeFromInstruction(spilled_value);
       X86_64Register* reg = FindFreeRegister(
           allocator, reg_type, CanUseTemp(allocator, reload));
-      if (reg == NULL && X86_64IsStore(inst) && i == 1 &&
+      if (reg == NULL && !scratch_taken && X86_64IsStore(inst) && i == 1 &&
           reg_type == kX86_64RegTypeInt) {
         // A store needs its value and address simultaneously.  Under high
         // pressure, allocating the address reload can otherwise spill the
@@ -934,12 +988,25 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
         // the value.  r11 is reserved as the spill-address scratch register,
         // so it is safe to use for this final address reload immediately before
         // the store.
-        reg = &allocator->int_regs[X86_64_SPILL_ADDR];
+        reg = ScratchRegister(allocator, reg_type);
+        scratch_taken = true;
       }
       if (reg == NULL) {
+        X86_64Register* scratch =
+            scratch_taken ? NULL : ScratchRegister(allocator, reg_type);
+        TargetInstruction* unsafe = NULL;
         TargetInstruction* victim = FindSpillVictim(
-            allocator, reg_type, CanUseTemp(allocator, reload), inst->block);
-        reg = SpillInstruction(allocator, victim);
+            allocator, reg_type, CanUseTemp(allocator, reload), inst->block,
+            scratch != NULL ? &unsafe : NULL);
+        if (victim == NULL && unsafe != NULL) {
+          // Nothing can give up its register without breaking a read that
+          // already has one.  This reload dies at the instruction it feeds, so
+          // the scratch register carries it across that one gap.
+          reg = scratch;
+          scratch_taken = true;
+        } else {
+          reg = SpillInstruction(allocator, victim);
+        }
       }
       AssignRegister(reg, reload);
       // ReloadSpills bypasses AllocateRegisterWithType, so record a saved
@@ -1226,6 +1293,14 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
   }
 
   AssignRegister(reg, inst);
+
+  if (allocator->spill_after_definition) {
+    // No register could be freed, so this value went into the scratch register
+    // and has to leave it again before the next instruction.
+    allocator->spill_after_definition = false;
+    SpillInstruction(allocator, inst);
+    return;
+  }
 
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.

@@ -60,6 +60,11 @@ typedef struct {
   // reassigned (e.g. a loop induction variable), so each redefinition must
   // store the new value back into this slot to keep later reloads correct.
   Map varreg_spills;
+
+  // Set when no register could be freed for the value being allocated, so it
+  // was given the scratch register instead and has to be written to a spill
+  // slot as soon as it is computed.  See AllocateRegisterWithType.
+  bool spill_after_definition;
 } X86_64RegisterAllocator;
 
 void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* alloc,

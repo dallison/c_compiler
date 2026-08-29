@@ -9,21 +9,12 @@
 # Nothing here is expected to stay: each entry is an -O2 bug to fix.
 
 
-# Both pass every run at -O0 and come out differently from one run to the next
-# at -O2, so -O2 is doing something to them that a single run cannot pin down.
-
 0115_standard_vector_exception_safety.cpp
-0116_standard_vector_assignment_insert.cpp
-0117_standard_vector_insert_range.cpp
-0120_standard_vector_allocator_propagation.cpp
-0122_standard_vector_input_iterators.cpp
 0124_standard_vector_range_exception_safety.cpp
 flaky 0163_map_dependency_primitives.cpp
-0168_map_lookup_erase_compare.cpp
 0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
-0271_standard_deque.cpp
 0273_standard_queue.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp

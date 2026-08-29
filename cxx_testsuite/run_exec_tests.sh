@@ -101,6 +101,12 @@ fi
 work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-exec.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
+# Give the tests under test their own temporary directory.  A test that names a
+# file under the system one picks the same name in every suite, and the suites
+# for the different targets and optimization levels run at the same time.
+mkdir -p "$work/tmp"
+export TMPDIR="$work/tmp"
+
 # Time-zone execution tests use a generated database so symlink aliases behave
 # identically in a source checkout and Bazel's runfiles tree.
 if [ -z "${DAVE_TZDIR:-}" ]; then
