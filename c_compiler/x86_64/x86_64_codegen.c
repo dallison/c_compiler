@@ -2636,6 +2636,14 @@ static struct BranchInfo {
 #define NUM_BRANCH_COMPARES \
   (sizeof(branch_compare_ops) / sizeof(branch_compare_ops[0]))
 
+// Operands the compare-and-branch emitter spells out as an immediate rather
+// than reading from a register.  x0 belongs here because x86-64 has no
+// hardware zero register.
+static bool IsImmediateOperand(TargetInstruction* inst) {
+  return inst != NULL && (TargetIsConst(inst) ||
+                          (X86_64Opcode)inst->opcode == X86_64_OP(x0));
+}
+
 static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
                                                  IRNode* node) {
   // CFG cleanup can detach the target from a branch in an unreachable block
@@ -2738,7 +2746,18 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
     }
 
     TargetInstruction* lhs = Materialize(rv, op1);
-    TargetInstruction* rhs = Materialize(rv, op2);
+    // cmp takes its source as an immediate, so a small constant on the right
+    // needs no register.  Materializing it instead costs one, and PoolConstants
+    // then shares that one `mov` with every other comparison against the same
+    // value in the dominator subtree, stretching a live range across whole loop
+    // nests for a value the instruction could have spelled out.
+    TargetInstruction* rhs = NULL;
+    if (IRIsIntConst(op2) && !IsImmediateOperand(lhs) &&
+        X86_64IsPossibleImmediate(IRIntConstValue(op2))) {
+      rhs = GetIntConstant(rv, NULL, kTargetType64Bit, IRIntConstValue(op2));
+    } else {
+      rhs = Materialize(rv, op2);
+    }
     if ((expr->opcode == IR_OP(cmpeqi) || expr->opcode == IR_OP(cmpnei)) &&
         op1->type != NULL && op1->type->size == 4 && IRIsConst(op2)) {
       int64_t c = IRIntConstValue(op2);

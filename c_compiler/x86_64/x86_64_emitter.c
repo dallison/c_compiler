@@ -406,10 +406,12 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
                           space_above_frame_pointer -
                           emitter->spill_region_size;  // First saved register.
 
-  // A leaf procedure doesn't save the return address.
-  if (is_leaf) {
-    saved_reg_offset += 8;
-  }
+  // On the architectures this backend was ported from, a leaf procedure keeps
+  // the return address in a register and its frame needs no slot for it, so the
+  // save area could start 8 bytes higher.  x86-64 has no link register: `call`
+  // pushes the return address, so the two header words above rbp are there
+  // whatever the function does, and moving the save area up puts the first
+  // saved register on top of the last local variable.
 
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame, no need to store frame pointer.

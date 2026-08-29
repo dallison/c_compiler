@@ -1035,6 +1035,16 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
   FreeRegisters(allocator, inst);
   inst->flags |= TARGET_INST_PROCESSED;
 
+  // The result now lives in the destination's register, so this instruction is
+  // what keeps that register occupied.  FreeRegisters goes by the
+  // destination's own use count, which this instruction has just brought to
+  // zero, and would otherwise offer the register to the next value while reads
+  // of this result still expect to find it there.
+  if (inst->uses > 0 && inst->reg != NULL && !inst->reg->reserved &&
+      inst->reg->owner == NULL) {
+    inst->reg->owner = inst;
+  }
+
   // If this instruction redefines a spilled variable register, write the new
   // value back to its stack slot.
   SyncSpilledVarReg(allocator, inst, inst->dest);
