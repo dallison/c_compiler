@@ -24,14 +24,10 @@
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
 0271_standard_deque.cpp
-0272_exception_propagation_destructors.cpp
-0273_partial_construction_destructors.cpp
-0274_virtual_base_partial_construction.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
 0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
-0308_cxx23_range_for_lifetime.cpp
 0319_standard_bit_numbers.cpp
 0324_standard_move_only_function.cpp
 0335_standard_locale.cpp

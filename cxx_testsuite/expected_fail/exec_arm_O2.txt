@@ -30,15 +30,10 @@
 0195_cxx_local_static_arrays.cpp
 0248_standard_function.cpp
 0252_functional_std_function.cpp
-0253_standard_any.cpp
 0262_standard_set.cpp
 0264_standard_algorithm.cpp
 0267_standard_unordered_map.cpp
 0268_standard_unordered_set.cpp
-0272_exception_propagation_destructors.cpp
-0273_partial_construction_destructors.cpp
-0274_virtual_base_partial_construction.cpp
-0282_standard_mutex.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
 0298_standard_blocking_sync.cpp
@@ -46,7 +41,6 @@
 0302_standard_mdspan_layouts.cpp
 0303_standard_mdspan_view.cpp
 0305_standard_expected.cpp
-0308_cxx23_range_for_lifetime.cpp
 flaky 0309_standard_memory_shared_ptr_threads.cpp
 0317_standard_memory_resource.cpp
 0318_standard_vector_map_string_workload.cpp
