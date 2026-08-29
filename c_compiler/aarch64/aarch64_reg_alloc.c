@@ -948,36 +948,51 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
      reg->base.owner = NULL;
   }
     
-  // Now allocate the registers to the inputs.
-  for (size_t i = 0; i < block->inputs.length; i++) {
-    TargetInstruction* inst = block->inputs.value.p[i];
-    // Target liveness conservatively places variable-register pseudos in many
-    // blocks. A proven block-local variable is defined and consumed entirely
-    // within one block, so it must not be re-owned on unrelated block entries.
-    if (IsShortLivedVarReg(allocator, inst)) {
-      continue;
+  // Now allocate the registers to the inputs.  Values with reads still ahead of
+  // them are claimed first: liveness is conservative, so the live-in set can
+  // name several values that were handed the same physical register at
+  // different points in the function, and whichever claims it last is the one
+  // the block treats as holding it.  A value with a read left in this block
+  // will actually load from that register, while one with no reads left is
+  // claiming it only to stop an unrelated value taking it, so the read wins.
+  for (int pass = 0; pass < 2; pass++) {
+    bool want_used = pass == 0;
+    for (size_t i = 0; i < block->inputs.length; i++) {
+      TargetInstruction* inst = block->inputs.value.p[i];
+      // Target liveness conservatively places variable-register pseudos in many
+      // blocks. A proven block-local variable is defined and consumed entirely
+      // within one block, so it must not be re-owned on unrelated block entries.
+      if (IsShortLivedVarReg(allocator, inst)) {
+        continue;
+      }
+      if (inst->reg == NULL) {
+        continue;
+      }
+      if (((int)inst->opcode == (int)AARCH64_OP(spill)) ||
+          (inst->flags & TARGET_INST_SPILLED) != 0) {
+        continue;
+      }
+      if ((inst->uses > 0) != want_used) {
+        continue;
+      }
+      // An input with no remaining uses inside this block is normally dead and
+      // its physical register is free for reuse.  However, if the value is also
+      // live-out of the block (it appears in the block's output set, e.g. a
+      // read-only loop-invariant that is consumed again on a later loop
+      // iteration), its register must stay reserved for the whole block.  The
+      // static use count cannot model dynamic loop iterations, so without this
+      // the register would be handed to an unrelated value and clobber the
+      // loop-carried one.
+      if (inst->uses == 0 &&
+          !BitSetContains(&block->output_ids, inst->id)) {
+        continue;
+      }
+      // Only the first pass may take a register from another live-in value.
+      if (!want_used && inst->reg->owner != NULL) {
+        continue;
+      }
+      inst->reg->owner = inst;
     }
-    if (inst->reg == NULL) {
-      continue;
-    }
-    if (((int)inst->opcode == (int)AARCH64_OP(spill)) ||
-        (inst->flags & TARGET_INST_SPILLED) != 0) {
-      continue;
-    }
-    // An input with no remaining uses inside this block is normally dead and
-    // its physical register is free for reuse.  However, if the value is also
-    // live-out of the block (it appears in the block's output set, e.g. a
-    // read-only loop-invariant that is consumed again on a later loop
-    // iteration), its register must stay reserved for the whole block.  The
-    // static use count cannot model dynamic loop iterations, so without this
-    // the register would be handed to an unrelated value and clobber the
-    // loop-carried one.
-    if (inst->uses == 0 &&
-        !BitSetContains(&block->output_ids, inst->id)) {
-      continue;
-    }
-    assert(inst->reg != NULL);
-    inst->reg->owner = inst;
   }
 }
 
