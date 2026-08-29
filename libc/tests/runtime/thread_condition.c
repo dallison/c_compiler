@@ -78,7 +78,13 @@ int main(void) {
     return 6;
   }
 
+  // Take the two clocks together.  The deadline below is 2ms past this
+  // realtime reading, so elapsed only measures the same interval if it starts
+  // here, and the work in between is not free: the 64-bit division is a libc
+  // call on a 32-bit target and every instruction of it is interpreted, which
+  // has taken more than half the wait on its own.
   long long deadline_us = __davecc_realtime_time_us() + 2000;
+  long long before = __davecc_monotonic_time_us();
   if (deadline_us < 0) {
     return 23;
   }
@@ -99,7 +105,6 @@ int main(void) {
       future.tv_nsec >= 1000000000) {
     return 20;
   }
-  long long before = __davecc_monotonic_time_us();
   mtx_lock(&mutex);
   timeout_result = cnd_timedwait(&condition, &mutex, &future);
   int unlock_result = mtx_unlock(&mutex);

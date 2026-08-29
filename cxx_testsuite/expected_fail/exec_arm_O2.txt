@@ -33,7 +33,7 @@
 0301_standard_mdspan_extents.cpp
 flaky 0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
-flaky 0309_standard_memory_shared_ptr_threads.cpp
+0309_standard_memory_shared_ptr_threads.cpp
 0317_standard_memory_resource.cpp
 0318_standard_vector_map_string_workload.cpp
 0321_standard_flat_containers.cpp
