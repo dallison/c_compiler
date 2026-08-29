@@ -16,6 +16,11 @@
 #include <type_traits>
 #include <utility>
 
+// polymorphic_allocator defaults its element type to std::byte, which only
+// exists from C++17.  The header stays includable below that so the containers
+// pulling it in transitively still compile.
+#if __cplusplus >= 201703L
+
 #define __cpp_lib_memory_resource 201603L
 
 namespace std {
@@ -238,5 +243,7 @@ inline bool operator!=(const polymorphic_allocator<T>& left,
 
 }  // namespace pmr
 }  // namespace std
+
+#endif /* __cplusplus >= 201703L */
 
 #endif

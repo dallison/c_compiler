@@ -226,15 +226,28 @@ The mechanical patterns are:
 - `if constexpr` in a pre-C++17 header becomes tag dispatch on
   `integral_constant<bool, ...>`, as already done in `<exception>` and
   `<memory>`.
-- A `requires` clause in a pre-C++20 header becomes `enable_if` SFINAE.
+- A `requires` clause in a pre-C++20 header becomes `enable_if` SFINAE — but
+  see §3.6 for which spelling to use, because the obvious one does not work.
 - A header from a later standard that is pulled in transitively gets its body
   wrapped in `#if __cplusplus >= <its standard>` so that it stays includable
-  but empty, as already done in `<concepts>`.
+  but empty, as already done in `<concepts>` and `<memory_resource>`.
 
-Fixed so far: `<exception>`, `<memory>`, `<concepts>`. The remaining blockers
-at the time of writing are `<optional>` (uses `requires` even at C++17, where
-it is mandated), `<memory_resource>` (uses `std::byte` below C++17), `<tuple>`,
-`<functional>`, `<bit>`, and `<any>`.
+Fixed so far: `<exception>`, `<memory>`, `<concepts>`, `<memory_resource>`.
+
+Remaining blockers, in the order the harness reports them:
+
+| Blocker | Nature |
+| --- | --- |
+| `<iterator>` concept definitions | C++20 API in a C++98 header; guard on C++20 |
+| `<functional>` `requires` clauses | 8 outside the C++23 block; needs §3.6 |
+| `<bit>` `requires` clauses | `<limits>` pulls `<bit>` in below C++20 |
+| `<any>` `requires` clauses | C++17 header, so must not use `requires` |
+| `<optional>` `requires` clauses | C++17 header, so must not use `requires` |
+| `<tuple>` `if constexpr` | C++11 header; needs an explicit return type, not `auto&` |
+
+`<tuple>` is the one that is not mechanical: `__get<I>()` returns `auto&` and
+selects the member with `if constexpr`, so a pre-C++14 version needs the return
+type spelled through `tuple_element` rather than deduced.
 
 ## 3. Compiler defects
 
@@ -302,16 +315,84 @@ compiler prerequisite in the plan and is why `complex.h`/`tgmath.h` are staged
 last. Sequence it as: type-system representation → constant folding and
 arithmetic lowering → per-target ABI (return-in-registers vs. sret) → library.
 
-### 3.6 `__CHAR16_TYPE__` / `__CHAR32_TYPE__` / `__WCHAR_TYPE__` not predefined
+### 3.6 SFINAE is ignored on a defaulted non-type template parameter (open)
+
+This one gates all of Phase 6, so read it before converting any `requires`
+clause.
+
+Two problems, one fixed and one open. Both concern the standard pre-C++20
+constraint idiom:
+
+```cpp
+template <class T, typename enable_if<is_integral<T>::value, int>::type = 0>
+int f(T);
+```
+
+**Parsing (fixed.)** `ParseTemplateParameter` treated any leading `typename` as
+the type-parameter keyword, so the parameter above was read as declaring a type
+parameter and the rest of its type produced `Missing >`. `typename` has two
+roles in a template parameter list — the type-parameter keyword
+(`typename T`, `typename ...Ts`, `typename T = int`) and the disambiguator in a
+non-type parameter's type (`typename Dep<U>::type N`) — and only the first is
+followed directly by the end of the parameter. `TypenameOpensTypeParameter`
+now looks past the keyword and the optional name to tell them apart.
+Regression: `cxx_testsuite/tests/exec/0462_dependent_nontype_template_parameter.cpp`.
+
+**Substitution failure (open.)** The parameter now parses, but it does not
+participate in SFINAE: the two overloads below collapse into
+`error: Duplicate definition of symbol which`, because the defaulted non-type
+parameter is dropped from the signature and its condition is never evaluated.
+
+```cpp
+template <class T, typename enable_if<is_integral<T>::value, int>::type = 0>
+int which(T) { return 1; }
+template <class T, typename enable_if<!is_integral<T>::value, int>::type = 0>
+int which(T) { return 2; }
+```
+
+Beware that this fails *silently* when there is only one overload: the
+constraint is simply ignored, the header still compiles, and the harness still
+reports a pass. Any conversion to this spelling must be checked by running two
+overloads that only `enable_if` distinguishes, not by checking that the header
+compiles.
+
+Until it is fixed, use one of the spellings that were verified to work
+correctly (each was checked by running the two-overload discrimination test
+above, not merely compiling it):
+
+- `enable_if` in the **return type** — works. Preferred for free functions.
+- `enable_if` as a **defaulted function parameter** — works. The only option
+  for constructors, which have no return type.
+- **Tag dispatch** through an overloaded helper on `integral_constant` — works.
+  Preferred where the condition selects between two implementations rather
+  than removing an overload.
+
+Note that dependent `enable_if` is fine everywhere else: as a nested typedef,
+in a static member initializer, and with a non-dependent condition in a
+template parameter list. It is specifically the combination of a dependent
+condition with a defaulted non-type template parameter that is dropped.
+
+### 3.7 `is_class`-style traits in a function parameter type (open)
+
+```cpp
+template <class U>
+int f(U, typename enable_if<is_integral<U>::value, int>::type = 0);
+```
+
+compiles, but the same with a builtin-backed trait reports
+`Class template instantiation is not supported yet` from `<type_traits>`.
+Worth pinning down alongside §3.6 since both block the same conversions.
+
+### 3.8 `__CHAR16_TYPE__` / `__CHAR32_TYPE__` / `__WCHAR_TYPE__` not predefined
 
 `uchar.h` and a correct `wchar.h` need to typedef these consistently between C
 and C++ without guessing. Add the predefined macros alongside the existing
 `__INT*` set rather than hard-coding `unsigned short` in the headers.
 
-### 3.7 No `-dM -E` support
+### 3.9 No `-dM -E` support
 
 `davecc -dM -E` does not dump predefined macros, which makes auditing the
-preprocessor surface awkward. Worth adding while doing §3.6.
+preprocessor surface awkward. Worth adding while doing §3.8.
 
 ## 4. Integration checklist per header
 

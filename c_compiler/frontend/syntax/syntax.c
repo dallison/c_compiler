@@ -9177,6 +9177,29 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
   return true;
 }
 
+// `typename` opens a template parameter in two different roles: as the
+// type-parameter keyword (`typename T`, `typename ...Ts`, `typename T = int`),
+// or as the disambiguator in the type of a non-type parameter
+// (`typename Dep<U>::type N`, the usual enable_if idiom).  Only the first is
+// followed directly by the end of the parameter, so look past the keyword and
+// the optional name to tell them apart.
+static bool TypenameOpensTypeParameter(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  LexNextToken(lex);
+  LexMatch(lex, TOK(ellipsis));
+  if (LexLookingAt(lex, TOK(identifier))) {
+    LexNextToken(lex);
+  }
+  bool opens_type_parameter = LexLookingAt(lex, TOK(comma)) ||
+                              LexLookingAt(lex, TOK(equal)) ||
+                              LexLookingAtClosingAngle(lex);
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return opens_type_parameter;
+}
+
 static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
   int index = base + (int)params->length;
@@ -9186,7 +9209,9 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   if (ParseConstrainedTemplateTypeParameter(syntax, params, base)) {
     return true;
   }
-  if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
+  if ((LexLookingAt(lex, TOK(typename)) && TypenameOpensTypeParameter(syntax) &&
+       LexMatch(lex, TOK(typename))) ||
+      LexMatch(lex, TOK(class))) {
     bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
     String param_name;
     StringInit(&param_name, "");
