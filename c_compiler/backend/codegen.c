@@ -1404,6 +1404,26 @@ static void DetectInvalidValueReads(Generator* gen) {
   }
 }
 
+// Binding a reference, or handing a variable's storage to anything that wants
+// an address rather than the value in it, makes the variable's address escape.
+// The front end only records that for the forms it can see as address-of, so
+// look at the finished IR instead: every variable has exactly one node in the
+// pool, and its users say how it was used.  Alias analysis, the constant
+// propagators and the register-variable choice in each backend all read the
+// symbol flag, so it has to be right before any of them run.
+static void MarkVariablesWhoseAddressEscapes(Generator* gen) {
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = gen->variable_pool.value.p[i];
+    Symbol* sym = entry->value.symbol;
+    if (sym == NULL || sym->flags.address_taken) {
+      continue;
+    }
+    if (IRVariableAddressEscapes(entry->pooled)) {
+      sym->flags.address_taken = true;
+    }
+  }
+}
+
 // A VLA as an argument may be used in the funtion and the size of
 // all dimensions will need to be known.  We generate a code sequence
 // to calculate the size of each dimension and emit the code.  It needs
@@ -1497,6 +1517,8 @@ void* GenerateFunction(Generator* gen) {
     GenerateCleanupLandingPads(gen);
     GenerateNoexceptGuardTerminate(gen, &noexcept_guard);
   }
+
+  MarkVariablesWhoseAddressEscapes(gen);
 
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {
     GeneratorPrintIR(gen, compiler->ir_output_file);

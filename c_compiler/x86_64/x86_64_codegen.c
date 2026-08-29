@@ -1240,6 +1240,9 @@ static bool UseRegisterForVariable(X86_64Generator* rv, IRNode* var_node) {
   if (var->symbol->flags.address_taken) {
     return false;
   }
+  if (IRVariableAddressEscapes(var_node)) {
+    return false;
+  }
 
   // No references?  No point in putting it in a register.
   if (var->base.outputs.length == 0) {

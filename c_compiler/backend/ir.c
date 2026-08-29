@@ -1180,6 +1180,31 @@ bool IRIsLoadOnly(IRNode* node) {
       return false;
   }
 }
+// A variable node stands for the variable's storage, so an instruction that
+// reads or writes through it as its base address is just a read or write of the
+// variable and is satisfied equally well by a register.  Anywhere else the node
+// appears, its value -- the address of the storage -- is what is wanted, and a
+// register variable has no address to give.  Binding a reference is the usual
+// case: `int& r = a` stores the address of `a` into `r`, and nothing in the
+// front end records that as taking a's address.
+bool IRVariableAddressEscapes(IRNode* var_node) {
+  for (size_t i = 0; i < var_node->outputs.length; i++) {
+    IRNode* user = var_node->outputs.value.p[i];
+    if (!IRIsLoadOnly(user) && !IRIsStoreOnly(user) && !IRIsIncDec(user)) {
+      return true;
+    }
+    // A store's value is input 1 and a load has only the base, so the base is
+    // input 0 throughout.  Appearing anywhere else means the address is the
+    // operand rather than the location.
+    for (size_t j = 1; j < user->inputs.length; j++) {
+      if (user->inputs.value.p[j] == var_node) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool IRIsResult(IRNode* node) {
   switch (node->opcode) {
     case IR_OP(resulti):

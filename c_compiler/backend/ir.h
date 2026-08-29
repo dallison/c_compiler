@@ -414,6 +414,8 @@ bool IRIsLoad(IRNode* node);
 bool IRIsLoadOnly(IRNode* node);
 bool IRIsIncDec(IRNode* node);
 
+bool IRVariableAddressEscapes(IRNode* var_node);
+
 bool IRIsResult(IRNode* node);
 bool IRHasSideEffects(IRNode* node);
 bool IRIsObservableCheckpoint(IRNode* node);
