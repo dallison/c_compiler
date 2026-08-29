@@ -14,13 +14,11 @@
 0148_standard_variant_multi_visit_four.cpp
 0149_standard_variant_multi_visit_five.cpp
 0155_standard_variant_visit_return_type.cpp
-0195_cxx_local_static_arrays.cpp
 0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
-0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
 0319_standard_bit_numbers.cpp
 0335_standard_locale.cpp

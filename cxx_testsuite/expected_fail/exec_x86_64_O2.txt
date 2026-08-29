@@ -20,7 +20,6 @@
 0124_standard_vector_range_exception_safety.cpp
 flaky 0163_map_dependency_primitives.cpp
 0168_map_lookup_erase_compare.cpp
-0195_cxx_local_static_arrays.cpp
 0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
@@ -29,7 +28,6 @@ flaky 0163_map_dependency_primitives.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
 flaky 0296_standard_atomic_ref_wait.cpp
-0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
 flaky 0309_standard_memory_shared_ptr_threads.cpp
 0340_standard_random_engines.cpp

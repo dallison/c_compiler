@@ -25,17 +25,14 @@
 0158_standard_variant_constexpr.cpp
 0166_map_construct_insert_apis.cpp
 0168_map_lookup_erase_compare.cpp
-0195_cxx_local_static_arrays.cpp
 0262_standard_set.cpp
 0264_standard_algorithm.cpp
 0267_standard_unordered_map.cpp
 0268_standard_unordered_set.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
-0298_standard_blocking_sync.cpp
 0301_standard_mdspan_extents.cpp
-0302_standard_mdspan_layouts.cpp
-0303_standard_mdspan_view.cpp
+flaky 0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
 flaky 0309_standard_memory_shared_ptr_threads.cpp
 0317_standard_memory_resource.cpp

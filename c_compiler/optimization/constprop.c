@@ -38,10 +38,21 @@ static bool IsVariableReference(IRNode* inst) {
     // SSA names and phis can be updated across loop iterations.
     case IR_OP(localvar):
     case IR_OP(argument):
-      return true;
+      break;
     default:
       return false;
   }
+  Symbol* symbol = ((IRVariable*)inst)->symbol;
+  if (symbol == NULL) {
+    return false;
+  }
+  // Once the address is out, anything holding it can store through it, and this
+  // pass carries a cached value straight across the call that hands the address
+  // over: it has no notion of a memory clobber beyond inline assembly.  An array
+  // is the same problem in miniature, since a store to element zero and a store
+  // to the variable are the same instruction here and later elements are not
+  // tracked at all.
+  return !symbol->flags.address_taken && !TypeIsArray(symbol->type);
 }
 
 static IRNode* SignExtendedConstant(Generator* gen, IRConstant* con, int bits) {

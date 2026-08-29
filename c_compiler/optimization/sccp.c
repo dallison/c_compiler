@@ -47,23 +47,17 @@ static Symbol* VariableSymbol(IRNode* node) {
   }
 }
 
-static bool HasResidualVariableUse(SCCPContext* context, Symbol* symbol) {
-  for (IRNode* inst = GeneratorFirstInstruction(context->gen); inst != NULL;
-       inst = IRNext(inst)) {
-    if ((inst->opcode == IR_OP(localvar) ||
-         inst->opcode == IR_OP(argument) ||
-         inst->opcode == IR_OP(tempvar)) &&
-        VariableSymbol(inst) == symbol && inst->outputs.length != 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool IsSafeSSASymbol(SCCPContext* context, Symbol* symbol) {
+// SSA versions of a variable are only distinct values if every access to the
+// variable goes through one of them.  Once the address is out, a write through
+// it belongs to no version, so the version the address was taken from and the
+// version the next assignment creates are the same storage and this pass may not
+// give them separate values.  Whether the renaming happened to consume all the
+// direct references says nothing about that: a lambda capturing a local by
+// reference leaves no direct reference behind, and reading the local after a
+// worker thread has written it still has to load memory.
+static bool IsSafeSSASymbol(Symbol* symbol) {
   return symbol != NULL && !TypeIsArray(symbol->type) &&
-         (!symbol->flags.address_taken ||
-          !HasResidualVariableUse(context, symbol)) &&
+         !symbol->flags.address_taken &&
          (symbol->flags.is_argument || symbol->flags.is_temp ||
           (symbol->flags.is_local &&
            !StorageIs(symbol->storage, STO(static))));
@@ -554,7 +548,7 @@ static void EvaluateDefinition(SCCPContext* context, IRNode* inst) {
       defined->opcode != IR_OP(ssavar)) {
     return;
   }
-  if (IsSafeSSASymbol(context, inst->var.def) && IsIntegerStore(inst) &&
+  if (IsSafeSSASymbol(inst->var.def) && IsIntegerStore(inst) &&
       inst->inputs.length > 1 && inst->value_state == kValueStateValid) {
     UpdateValue(context, defined,
                 ValueOf(context, inst->inputs.value.p[1]));
@@ -614,7 +608,7 @@ static void EvaluateInstruction(SCCPContext* context, IRNode* inst) {
     Symbol* symbol = inst->inputs.length == 0
                          ? NULL
                          : VariableSymbol(inst->inputs.value.p[0]);
-    if (!IsSafeSSASymbol(context, symbol)) {
+    if (!IsSafeSSASymbol(symbol)) {
       UpdateValue(context, inst, OverdefinedValue());
       return;
     }

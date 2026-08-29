@@ -754,36 +754,70 @@ static void BuildBasicBlockGraph(Generator* gen,
   }
 }
 
-// Link each protected region to its landing pad.  Without this edge the pad has
-// no predecessor, so it stays out of the dominator tree and the values it
+static void LinkToLandingPadOnce(BasicBlock* from, BasicBlock* pad) {
+  if (from == NULL || pad == NULL || from == pad) {
+    return;
+  }
+  // Several ranges can share one pad (a try with more than one handler, or a
+  // handler naming several types), and a duplicate edge would be counted twice
+  // when phis line their operands up with predecessors.
+  for (size_t i = 0; i < from->out_edges.length; i++) {
+    if (from->out_edges.value.w[i] == (int64_t)pad->block_id) {
+      return;
+    }
+  }
+  BasicBlockAddEdge(from, pad);
+}
+
+// Link each protected region to its landing pad.  Without these edges the pad
+// has no predecessor, so it stays out of the dominator tree and the values it
 // defines are invisible to SSA construction and to every dataflow pass: a local
 // assigned in a catch block reads back as its pre-try value.
 //
-// The edge starts at the block holding the region's start label rather than at
-// the individual calls inside the region.  That keeps definitions made before
-// the region dominating the pad (handlers and cleanups only ever name objects
-// declared outside the region) while definitions made inside it correctly do
-// not, since the throw may happen before they run.
+// Every call in the region gets its own edge, because a call is where control
+// leaves for the pad and the values reaching the pad are the ones live at that
+// call.  Linking only the region's start label instead would tell SSA the pad
+// sees exactly the state before the region ran, and a cleanup that reads a
+// counter the region maintains -- how many elements of an array are constructed
+// so far, say -- would read the counter's initial value.  Constant propagation
+// then folds the cleanup away and the constructed elements are never destroyed.
+//
+// The start label is linked as well.  If it is not itself a call block the value
+// its edge carries was already defined inside the region, so the pad's phi ends
+// up with an operand no throw can actually deliver.  That only costs precision:
+// a phi with more operands cannot fold to a constant that a narrower one would
+// not, whereas a missing operand is a wrong answer.
 static void AddExceptionHandlerEdges(Generator* gen) {
   for (size_t i = 0; i < gen->exception_ranges.length; i++) {
     ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
     if (range->try_start == NULL || range->catch_label == NULL) {
       continue;
     }
-    BasicBlock* region = range->try_start->block;
     BasicBlock* pad = range->catch_label->block;
-    if (region == NULL || pad == NULL || region == pad) {
+    if (pad == NULL) {
       continue;
     }
-    // Several ranges can share one pad (a try with more than one handler, or
-    // a handler naming several types), and a duplicate edge would be counted
-    // twice when phis line their operands up with predecessors.
-    bool linked = false;
-    for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
-      linked = region->out_edges.value.w[j] == (int64_t)pad->block_id;
+    LinkToLandingPadOnce(range->try_start->block, pad);
+    // Find the end of the region before linking anything inside it.  Walking
+    // straight to |try_end| would run to the end of the function if the label is
+    // missing or sits before the start, and the pad would gain a predecessor
+    // that follows it -- a back edge, which every loop pass would then believe
+    // in.
+    bool bounded = false;
+    for (IRNode* inst = range->try_start; inst != NULL; inst = IRNext(inst)) {
+      if (inst == range->try_end) {
+        bounded = true;
+        break;
+      }
     }
-    if (!linked) {
-      BasicBlockAddEdge(region, pad);
+    if (!bounded) {
+      continue;
+    }
+    for (IRNode* inst = range->try_start; inst != range->try_end;
+         inst = IRNext(inst)) {
+      if (IRIsCall(inst)) {
+        LinkToLandingPadOnce(inst->block, pad);
+      }
     }
   }
 }
