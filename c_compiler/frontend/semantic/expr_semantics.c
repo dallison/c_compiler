@@ -4731,6 +4731,14 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   if (func->is_constructor) {
     return false;
   }
+  // Exception cleanup ranges are built by recognizing the compiler-inserted
+  // `receiver.~T()` statements at the end of a block and pairing them with the
+  // declarations above (see statement_codegen.c).  Turning such a call into an
+  // inline_call hides that shape, so the block gets no cleanup range at all and
+  // an exception unwinding through it destroys nothing.
+  if (func->is_destructor) {
+    return false;
+  }
   // __attribute__((always_inline)) forces inlining even without the 'inline'
   // keyword (and bypasses the size heuristic below).
   bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
