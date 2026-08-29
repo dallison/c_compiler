@@ -309,6 +309,22 @@ void TargetBasicBlockEmitAfter(struct TargetGenerator* gen, TargetBasicBlock* bl
   }
 }
 
+// True if the unwinder can enter this block directly.  No branch in the
+// function targets an exception landing pad, so its only entry is from outside
+// the function's own control flow.
+static bool TargetBasicBlockIsExceptionLanding(TargetBasicBlock* b) {
+  for (TargetInstruction* inst = b->code; inst != NULL;
+       inst = TargetNext(inst)) {
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      return true;
+    }
+    if (inst == b->end_code) {
+      break;
+    }
+  }
+  return false;
+}
+
 bool TargetBasicBlockIsUnreachable(struct TargetGenerator* gen, TargetBasicBlock* b) {
   if (b == gen->entry_block) {
     return false;
@@ -317,6 +333,13 @@ bool TargetBasicBlockIsUnreachable(struct TargetGenerator* gen, TargetBasicBlock
     return b->is_unreachable;
   }
   b->reachability_known = true;
+  // A landing pad has no in edge because control reaches it from the unwinder.
+  // Calling it unreachable would leave it, and everything it branches to, out
+  // of register allocation while the emitter still emits it.
+  if (TargetBasicBlockIsExceptionLanding(b)) {
+    b->is_unreachable = false;
+    return false;
+  }
   // Check if all the in edges are unreachable.
   for (size_t i = 0; i < b->in_edges.length; i++) {
     BlockId id = b->in_edges.value.w[i];
@@ -773,46 +796,47 @@ static void ResetAllInstructionUses(TargetGenerator* gen) {
   }
 }
 
-// A block holding an instruction we must keep (an exception table label, for
-// example) survives even when it is unreachable from the entry block.  Such a
-// block is still emitted, so everything it can branch to has to survive as
-// well, otherwise the surviving branch refers to a deleted label.
-static void RemoveUnreachableBlocks(TargetGenerator* gen) {
-  BitSet keep;
-  BitSetInit(&keep);
-  Vector work;
-  VectorInit(&work);
-
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    if (!TargetBasicBlockIsUnreachable(gen, b) ||
-        TargetBasicBlockHasKeptInstruction(b)) {
-      BitSetInsert(&keep, b->block_id);
-      VectorAppend(&work, b);
-    }
+// An unreachable block may still hold a label the exception tables name, such
+// as the bound of a try range that turned out to be dead.  Keep those labels so
+// the tables still resolve and drop the rest of the block: the code is dead,
+// and the passes that follow walk the dominator tree, which an unreachable
+// block is not part of, so anything left here never gets a register assigned
+// even though the emitter would still emit it.
+static void ClearUnreachableBlockExceptKeptLabels(TargetGenerator* gen,
+                                                  TargetBasicBlock* b) {
+  if (b->code == NULL) {
+    return;
   }
-
-  while (work.length > 0) {
-    TargetBasicBlock* b = VectorLast(&work);
-    VectorPop(&work);
-    for (size_t i = 0; i < b->out_edges.length; i++) {
-      TargetBasicBlock* out =
-          VectorGet(&gen->basic_blocks, b->out_edges.value.w[i]);
-      if (out != NULL && !BitSetContains(&keep, out->block_id)) {
-        BitSetInsert(&keep, out->block_id);
-        VectorAppend(&work, out);
+  TargetInstruction* first = NULL;
+  TargetInstruction* last = NULL;
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = b->code; inst != NULL; inst = next) {
+    next = inst == b->end_code ? NULL : TargetNext(inst);
+    if ((inst->flags & TARGET_INST_KEEP_UNREACHABLE) != 0) {
+      if (first == NULL) {
+        first = inst;
       }
+      last = inst;
+      continue;
     }
+    TargetDeleteInstruction(gen, inst);
   }
-  VectorDestruct(&work);
+  b->code = first;
+  b->end_code = last;
+}
 
+static void RemoveUnreachableBlocks(TargetGenerator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    if (!BitSetContains(&keep, b->block_id)) {
+    if (!TargetBasicBlockIsUnreachable(gen, b)) {
+      continue;
+    }
+    if (TargetBasicBlockHasKeptInstruction(b)) {
+      ClearUnreachableBlockExceptKeptLabels(gen, b);
+    } else {
       TargetBasicBlockClear(gen, b);
     }
   }
-  BitSetDestruct(&keep);
 }
 
 // Detect natural loops from latch -> header back edges.  Build the union of

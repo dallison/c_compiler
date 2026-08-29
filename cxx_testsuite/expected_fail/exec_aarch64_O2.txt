@@ -11,7 +11,6 @@
 0015_rvalue_reference_materialization.cpp
 0031_lambdas.cpp
 0059_defaulted_special_members.cpp
-0065_coroutines.cpp
 0068_variadic_sizeof_pack.cpp
 0115_standard_vector_exception_safety.cpp
 0118_standard_vector_capacity_move_swap.cpp
@@ -61,4 +60,3 @@
 0418_contract_reflection_constification.cpp
 0429_cxx29_virtual_function_contracts.cpp
 0433_cxx29_view_interface_at.cpp
-0450_coroutine_try_catch_reachable_label.cpp
