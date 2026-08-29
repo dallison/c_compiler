@@ -124,6 +124,7 @@ static Instruction inst_64[] = {
   {"bnz", 'r', 'i', 'x'},
   {"bra", 'i', 'x', 'x'},
   {"addc", 'r', 'r', 'i'},
+  {"lda", 'r', 'r', 'i'},
 };
 
 static Instruction inst_96[] = {
@@ -165,7 +166,7 @@ static void Print64(int32_t inst, int32_t value, FILE* fp) {
   int opcode = (inst >> 24) & 0x3f;
   fprintf(fp, "%-8s", inst_64[opcode].name);
   const char* sep = "";
-  if (opcode < PCODE_OP(movc)) {
+  if (opcode < PCODE_OP(movc) || opcode == PCODE_OP(lda)) {
     // Load/Store instruction.
     PrintOperand(DEST(inst), inst_64[opcode].dest_type, "", fp);
     fprintf(fp, ", [r%d, #%d]", SRC1(inst), value);

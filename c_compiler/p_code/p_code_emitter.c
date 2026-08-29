@@ -327,6 +327,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
     case P_OP(lduw):
     case P_OP(ldub):
     case P_OP(lduh):
+    case P_OP(lda):
     case P_OP(ldf):
     case P_OP(ldx):
     case P_OP(ldd):

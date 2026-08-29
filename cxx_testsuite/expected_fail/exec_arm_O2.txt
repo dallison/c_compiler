@@ -22,7 +22,6 @@
 0149_standard_variant_multi_visit_five.cpp
 0150_standard_variant_visit_cvref.cpp
 0155_standard_variant_visit_return_type.cpp
-0158_standard_variant_constexpr.cpp
 0166_map_construct_insert_apis.cpp
 0168_map_lookup_erase_compare.cpp
 0262_standard_set.cpp

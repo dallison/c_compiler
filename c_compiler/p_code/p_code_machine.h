@@ -119,6 +119,7 @@ typedef enum {
   PCODE_OP(bnz) = 18,
   PCODE_OP(bra) = 19,
   PCODE_OP(addc) = 20,
+  PCODE_OP(lda) = 21,
 
   // 96 bit instructions.
   PCODE_OP(movdc) = 0,

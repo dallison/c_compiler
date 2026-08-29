@@ -99,6 +99,10 @@ typedef enum {
   P_OP(ldx),      // Load 64 bit word.
   P_OP(ldf),      // Load single precision float.
   P_OP(ldd),      // Load double precision float.
+  // Load a pointer that the target stores in fewer bytes than the interpreter's
+  // own addresses need, restoring the bits the store dropped so that the value
+  // still names the object it pointed at.
+  P_OP(lda),
 
   // Stores: st r,[d, #c]
   P_OP(stw),      // Store 32 bit.

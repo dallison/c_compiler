@@ -614,6 +614,11 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(lduw):
+        // Here an address is the machine's own, so there are no bits missing
+        // from a stored pointer for this to put back.  The compiler only
+        // reaches for it when evaluating constants for a target with narrower
+        // pointers than the ones this runs on.
+        case PCODE_OP(lda):
           iregs[DEST(inst)] = ReadU32((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;

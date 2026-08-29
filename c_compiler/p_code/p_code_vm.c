@@ -166,6 +166,22 @@ static bool NormalizeCheckedAddress(PCodeVM* vm, uint64_t raw, size_t size,
   return false;
 }
 
+// A target whose pointers are narrower than the interpreter's addresses keeps
+// only the low bits of one when it stores it, so a pointer read back out of
+// memory no longer names the object it pointed at and no longer equals a
+// freshly taken address of that object.  Put the missing bits back, which is
+// possible whenever the low bits still identify one piece of the interpreter's
+// memory.  A value that identifies none is left alone: it may be a null
+// pointer, or a pointer the program only ever compares and never follows.
+static uint64_t WidenAddress(PCodeVM* vm, uint32_t narrow) {
+  uint64_t wide = 0;
+  if (narrow == 0 ||
+      !NormalizeCheckedAddress(vm, narrow, 0, false, &wide)) {
+    return narrow;
+  }
+  return wide;
+}
+
 static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
                            bool write) {
   uint64_t normalized = address;
@@ -893,6 +909,18 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
           return vm->status;
         }
         iregs[DEST(inst)] = value;
+        iregs[PCODE_PC_REG] += 4;
+        break;
+      }
+      case PCODE_OP(lda): {
+        uint32_t offset;
+        uint32_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU32(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = WidenAddress(vm, value);
         iregs[PCODE_PC_REG] += 4;
         break;
       }

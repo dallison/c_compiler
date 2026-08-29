@@ -240,6 +240,7 @@ static int MachineOpcode(PCodeOpcode opcode) {
     MAP_OPCODE(lduw);
     MAP_OPCODE(ldub);
     MAP_OPCODE(lduh);
+    MAP_OPCODE(lda);
     MAP_OPCODE(ldx);
     MAP_OPCODE(ldf);
     MAP_OPCODE(ldd);
@@ -619,6 +620,7 @@ static bool EmitInstruction(PCodeObject* object, PCodeGenerator* pcode,
     case P_OP(lduw):
     case P_OP(ldub):
     case P_OP(lduh):
+    case P_OP(lda):
     case P_OP(ldx):
     case P_OP(ldf):
     case P_OP(ldd):

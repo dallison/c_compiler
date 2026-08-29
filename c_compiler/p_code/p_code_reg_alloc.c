@@ -170,6 +170,7 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(lduw):
     case P_OP(ldub):
     case P_OP(lduh):
+    case P_OP(lda):
     case P_OP(ldx):
     case P_OP(stw):
     case P_OP(sth):

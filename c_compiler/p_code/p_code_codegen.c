@@ -55,6 +55,8 @@ const char* PCodeOpcodeName(int op) {
       return "ldub";
     case P_OP(lduh):
       return "lduh";
+    case P_OP(lda):
+      return "lda";
     case P_OP(ldf):
       return "ldf";
     case P_OP(ldd):
@@ -613,7 +615,7 @@ static bool PCodeFpIsDoubleWidth(TypeRecord* type) {
 }
 
 static PCodeOpcode PCodeAddressLoadOpcode(PCodeGenerator* pcode) {
-  return pcode->source_pointer_size <= 4 ? P_OP(lduw) : P_OP(ldx);
+  return pcode->source_pointer_size <= 4 ? P_OP(lda) : P_OP(ldx);
 }
 
 static PCodeOpcode PCodeAddressStoreOpcode(PCodeGenerator* pcode) {

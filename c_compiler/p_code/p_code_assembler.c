@@ -54,6 +54,7 @@ DECLARE_INST_FUNC(ldb);
 DECLARE_INST_FUNC(lduw);
 DECLARE_INST_FUNC(ldub);
 DECLARE_INST_FUNC(lduh);
+DECLARE_INST_FUNC(lda);
 DECLARE_INST_FUNC(ldx);
 DECLARE_INST_FUNC(ldf);
 DECLARE_INST_FUNC(ldd);
@@ -176,6 +177,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(lduw);
   INST(ldub);
   INST(lduh);
+  INST(lda);
   INST(ldx);
   INST(ldf);
   INST(ldd);
@@ -742,6 +744,7 @@ ASSEMBLE_INT_LOAD_STORE(ldw)
 ASSEMBLE_INT_LOAD_STORE(ldub)
 ASSEMBLE_INT_LOAD_STORE(lduh)
 ASSEMBLE_INT_LOAD_STORE(lduw)
+ASSEMBLE_INT_LOAD_STORE(lda)
 ASSEMBLE_INT_LOAD_STORE(ldx)
 
 static void Assemble_ldf(PCodeAssembler* assembler) {
