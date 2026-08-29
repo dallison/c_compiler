@@ -92,6 +92,8 @@ void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* allocator, X86_64Gener
   BitSetInit(&allocator->preserved_instructions);
   MapInitForPointerKeys(&allocator->varreg_spills);
   allocator->spill_after_definition = false;
+  allocator->pinned_int_phys = 0;
+  allocator->pinned_float_phys = 0;
 }
 
 X86_64RegisterAllocator* NewX86_64RegisterAllocator(X86_64Generator* pcode) {
@@ -211,6 +213,16 @@ static bool X86_64PhysicalAvailable(X86_64RegisterAllocator* allocator,
   int phys = type == kX86_64RegTypeInt ? X86_64IntPhysical(slot)
                                        : X86_64FloatPhysical(slot);
   if (X86_64PhysicalReserved(type, phys)) {
+    return false;
+  }
+  unsigned pinned = type == kX86_64RegTypeInt ? allocator->pinned_int_phys
+                                              : allocator->pinned_float_phys;
+  if ((pinned & (1u << phys)) != 0 && !regs[slot].base.reserved) {
+    // A register variable holds this physical register for the whole function
+    // through the slot pinned to it.  Reaching it through any other slot hands
+    // the same register to a second value: the register variable's slot looks
+    // untouched, so nothing stops the variable being assigned over the top of
+    // a value that is still live, or the other way about.
     return false;
   }
   for (int k = 0; k < num_regs; k++) {
@@ -1543,8 +1555,10 @@ static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
     }
     if (var->is_fp) {
       allocator->float_regs[slot].base.reserved = true;
+      allocator->pinned_float_phys |= 1u << X86_64FloatPhysical(slot);
     } else {
       allocator->int_regs[slot].base.reserved = true;
+      allocator->pinned_int_phys |= 1u << X86_64IntPhysical(slot);
     }
   }
 }

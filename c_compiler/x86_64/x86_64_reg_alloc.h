@@ -65,6 +65,12 @@ typedef struct {
   // was given the scratch register instead and has to be written to a spill
   // slot as soon as it is computed.  See AllocateRegisterWithType.
   bool spill_after_definition;
+
+  // The physical registers pinned to a register variable for the length of the
+  // function, by ReserveVariableRegisters.  Reserving the logical slot is not
+  // enough on its own, because several slots name the same physical register.
+  unsigned pinned_int_phys;
+  unsigned pinned_float_phys;
 } X86_64RegisterAllocator;
 
 void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* alloc,
