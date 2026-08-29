@@ -704,7 +704,7 @@ static X86_64Register* ScratchRegister(X86_64RegisterAllocator* allocator,
 // the entry block; likewise a value bound to a fixed register, which its
 // consumer reads by name.
 static bool CanSpillAfterDefinition(TargetInstruction* inst) {
-  return inst != NULL && inst->uses > 0 && inst->block != NULL &&
+  return inst != NULL && inst->users.length > 0 && inst->block != NULL &&
          !X86_64IsVarRegister(inst) && !X86_64IsFixedRegister(inst) &&
          (inst->dest == NULL || !X86_64IsVarRegister(inst->dest));
 }
@@ -1095,6 +1095,18 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
     inst->dest->flags &= ~TARGET_INST_SPILLED;
     MapRemove(&allocator->varreg_spills, (MapKeyType){.p = inst->dest});
     inst->dest->reg->owner = inst->dest;
+  }
+  if ((inst->dest->flags & TARGET_INST_SPILLED) != 0 &&
+      inst->reg->owner != NULL && inst->reg->owner != inst->dest) {
+    // The destination is in a spill slot and the register it used to hold has
+    // since been handed to another value, so writing it here would clobber that
+    // value.  Route this assignment through the scratch register; the store-back
+    // below writes the slot from there.
+    X86_64Register* scratch = ScratchRegister(
+        allocator, RegisterTypeFromInstruction(inst->dest));
+    if (scratch != NULL) {
+      inst->reg = &scratch->base;
+    }
   }
   if (inst->operand[0] != NULL) {
     inst->operand[0]->uses++;

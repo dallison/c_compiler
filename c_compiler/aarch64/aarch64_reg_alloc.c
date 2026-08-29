@@ -71,6 +71,10 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   allocator->int_regs[AARCH64_FP_REG].base.reserved = true;
   allocator->int_regs[AARCH64_LR_REG].base.reserved = true;
   allocator->int_regs[AARCH64_SPILL_ADDR].base.reserved = true;
+  // The second intra-procedure-call register, which a value on its way to a
+  // spill slot passes through.  A spill store addresses the slot through x16,
+  // so the value cannot go there.
+  allocator->int_regs[AARCH64_IP2_REG].base.reserved = true;
   allocator->int_regs[AARCH64_INT_ZERO_REG].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
@@ -81,6 +85,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   BitSetInit(&allocator->preserved_instructions);
   BitSetInit(&allocator->short_lived_varregs);
   MapInitForPointerKeys(&allocator->reassignable_spills);
+  allocator->spill_after_definition = false;
 }
 
 AARCH64RegisterAllocator* NewAARCH64RegisterAllocator(struct AARCH64Generator* g) {
@@ -301,11 +306,40 @@ static bool IsUnspillableFixedReg(TargetInstruction* inst) {
   }
 }
 
+// Spilling leaves already-processed reads of the value pointing at the physical
+// register rather than the slot, which only works while every such read happens
+// before the register is handed to something else.  Down a straight line it
+// does, because the allocator processes blocks in dominator order; around a
+// loop it does not, so a read in any block control can come back to is a read
+// of whatever the new owner left there.  |reentered| holds those blocks.
+static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
+  for (size_t i = 0; i < owner->users.length; i++) {
+    TargetInstruction* user = owner->users.value.p[i];
+    if ((user->flags & TARGET_INST_PROCESSED) != 0 && user->block != NULL &&
+        BitSetContains(reentered, user->block->block_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Returns the cheapest value whose register can be taken without breaking a
+// read that has already been handed that register, or NULL when there is none.
+// |unsafe|, when not NULL, receives the cheapest value that could be taken if
+// there were no such reads, for a caller that has no way to proceed without
+// taking a register from something.
 static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
                                           AARCH64RegisterType type,
-                                          bool can_use_temp) {
+                                          bool can_use_temp,
+                                          TargetBasicBlock* block,
+                                          TargetInstruction** unsafe) {
   AARCH64Register* regs =
       type == kAARCH64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  BitSet reentered;
+  BitSetInit(&reentered);
+  TargetBasicBlockReachableAfter(&allocator->g->base, block, &reentered);
+  int unsafe_cost = INT_MAX;
+  TargetInstruction* unsafe_victim = NULL;
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
   int min_var_cost = INT_MAX;
@@ -328,21 +362,27 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
           if (IsUnspillableFixedReg(owner)) {
             continue;
           }
-          if (AARCH64IsVarRegister(owner)) {
-            if (owner->users.length == 0) {
-              // A write-only variable has no valid first-use spill site and no
-              // future read that requires its physical register.
-              regs[j].base.owner = NULL;
-              continue;
+          if (AARCH64IsVarRegister(owner) && owner->users.length == 0) {
+            // A write-only variable has no valid first-use spill site and no
+            // future read that requires its physical register.
+            regs[j].base.owner = NULL;
+            continue;
+          }
+          int cost = SpillCost(owner);
+          if (IsUnsafeSpillVictim(owner, &reentered)) {
+            if (cost < unsafe_cost) {
+              unsafe_cost = cost;
+              unsafe_victim = owner;
             }
-            int cost = SpillCost(owner);
+            continue;
+          }
+          if (AARCH64IsVarRegister(owner)) {
             if (cost < min_var_cost) {
               min_var_cost = cost;
               var_victim = owner;
             }
             continue;
           }
-          int cost = SpillCost(owner);
           if (cost < min_cost) {
             min_cost = cost;
             victim = owner;
@@ -351,10 +391,17 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
       }
     }
   }
+  BitSetDestruct(&reentered);
   if (victim == NULL) {
     victim = var_victim;
   }
-  return victim;
+  if (unsafe != NULL) {
+    *unsafe = unsafe_victim;
+    return victim;
+  }
+  // The caller cannot deal with there being nothing safe to take, so give it
+  // the cheapest unsafe candidate as this always did.
+  return victim != NULL ? victim : unsafe_victim;
 }
 
 static bool NotProcessed(TargetInstruction* inst, void* data) {
@@ -475,18 +522,59 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
   return reg;
 }
 
+// x17, which the allocator never hands out, for a value that is stored to its
+// spill slot by the following instruction.  It cannot be x16: a spill store
+// computes the slot's address into that.  There is no counterpart in the
+// floating point file.
+static AARCH64Register* ScratchRegister(AARCH64RegisterAllocator* allocator,
+                                        AARCH64RegisterType type) {
+  return type == kAARCH64RegTypeInt ? &allocator->int_regs[AARCH64_IP2_REG]
+                                    : NULL;
+}
+
+// A value whose register a read has already been handed cannot be spilled: that
+// read keeps naming the register, and once control comes back round a loop the
+// register's next owner is what it finds there.  When every register holds such
+// a value there is no victim to take, and the way out is to spill the value
+// being defined here instead: it is computed into the scratch register and
+// written straight to a slot, and every read of it is still ahead of us and so
+// gets redirected to that slot.  A value written by other instructions than
+// itself takes the same route: the node carries nothing at its own position, so
+// the slot is only registered here and each definition stores into it as it is
+// reached.
+//
+// A variable register is the one thing this cannot do, because its slot is
+// written after every real assignment rather than at the node itself, which
+// sits in the entry block; likewise a value bound to a fixed register, which
+// its consumer reads by name.
+static bool CanSpillAfterDefinition(TargetInstruction* inst) {
+  return inst != NULL && inst->users.length > 0 && inst->block != NULL &&
+         !AARCH64IsVarRegister(inst) && !IsUnspillableFixedReg(inst) &&
+         (inst->dest == NULL || !AARCH64IsVarRegister(inst->dest));
+}
+
 static AARCH64Register* AllocateRegisterWithType(AARCH64RegisterAllocator* allocator,
                                             TargetBasicBlock* block,
                                             TargetInstruction* inst,
                                             AARCH64RegisterType type,
-                                            bool can_use_temp) {
+                                            bool can_use_temp,
+                                            bool may_spill_after_def) {
   AARCH64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    TargetInstruction* victim =
-        FindSpillVictim(allocator, type, can_use_temp);
+    AARCH64Register* scratch = ScratchRegister(allocator, type);
+    TargetInstruction* unsafe = NULL;
+    TargetInstruction* victim = FindSpillVictim(
+        allocator, type, can_use_temp, block,
+        may_spill_after_def && scratch != NULL && CanSpillAfterDefinition(inst)
+            ? &unsafe
+            : NULL);
     // FindSpillVictim can release a stale/dead owner while scanning.
     reg = FindFreeRegister(allocator, type, can_use_temp);
+    if (reg == NULL && victim == NULL && unsafe != NULL) {
+      allocator->spill_after_definition = true;
+      return scratch;
+    }
     if (reg == NULL && victim != NULL) {
       reg = SpillInstruction(allocator, victim);
     }
@@ -599,7 +687,7 @@ static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
   }
   if (reg == NULL) {
     reg = AllocateRegisterWithType(allocator, inst->block, inst, reg_type,
-                                   CanUseTemp(allocator, inst));
+                                   CanUseTemp(allocator, inst), false);
   }
   AssignRegister(reg, inst);
 }
@@ -656,8 +744,9 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
       assert(op->operand[0] != NULL);
       AARCH64RegisterType reg_type =
           RegisterTypeFromInstruction(op->operand[0]);
-      AARCH64Register *reg = AllocateRegisterWithType(allocator, reload->block, reload,
-                                     reg_type, CanUseTemp(allocator, reload));
+      AARCH64Register *reg = AllocateRegisterWithType(
+          allocator, reload->block, reload, reg_type,
+          CanUseTemp(allocator, reload), false);
       AssignRegister(reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
@@ -735,9 +824,12 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
        opcode == AARCH64_OP(atomic_compare_exchange_bool) ||
        opcode == AARCH64_OP(atomic_compare_exchange_val) ||
        opcode == AARCH64_OP(atomic_compare_exchange_n))) {
+    // An atomic pseudo expands into several instructions once allocation is
+    // done, and that expansion needs the scratch register itself, so this
+    // result has to have a register of its own.
     reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                    kAARCH64RegTypeInt,
-                                   CanUseTemp(allocator, inst));
+                                   CanUseTemp(allocator, inst), false);
     AssignRegister(reg, inst);
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
@@ -757,7 +849,19 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
       return;
     }
     reg = (AARCH64Register*)inst->dest->reg;
-    inst->reg = inst->dest->reg;
+    if ((inst->dest->flags & TARGET_INST_SPILLED) != 0 &&
+        reg->base.owner != NULL && reg->base.owner != inst->dest) {
+      // The destination is in a spill slot and the register it used to hold has
+      // since been handed to another value, so writing it here would clobber
+      // that value.  Route this assignment through the scratch register; the
+      // store-back below writes the slot from there.
+      AARCH64Register* scratch =
+          ScratchRegister(allocator, RegisterTypeFromInstruction(inst->dest));
+      if (scratch != NULL) {
+        reg = scratch;
+      }
+    }
+    inst->reg = &reg->base;
     // A fixed argument-register pseudo (r0..r7 / d0..d7) is allocated once in
     // the symbol pre-pass, but InitializeBasicBlockRegisters clears every
     // physical register's owner at each block boundary.  Because the pseudo
@@ -918,11 +1022,20 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     default: {
       AARCH64RegisterType reg_type = RegisterTypeFromInstruction(inst);
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                     reg_type, CanUseTemp(allocator, inst));
+                                     reg_type, CanUseTemp(allocator, inst),
+                                     true);
     }
   }
 
   AssignRegister(reg, inst);
+
+  if (allocator->spill_after_definition) {
+    // No register could be freed, so this value went into the scratch register
+    // and has to leave it again before the next instruction.
+    allocator->spill_after_definition = false;
+    SpillInstruction(allocator, inst);
+    return;
+  }
 
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.

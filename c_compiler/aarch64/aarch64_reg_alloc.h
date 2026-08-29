@@ -54,6 +54,11 @@ typedef struct {
   BitSet preserved_instructions;    // Instructions needing preseAARCH64ed regs.
   BitSet short_lived_varregs;
   Map reassignable_spills;
+
+  // Set when no register could be freed for the value being allocated, so it
+  // was given the scratch register instead and has to be written to a spill
+  // slot as soon as it is computed.  See AllocateRegisterWithType.
+  bool spill_after_definition;
 } AARCH64RegisterAllocator;
 
 void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* alloc,

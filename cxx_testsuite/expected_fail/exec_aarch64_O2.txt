@@ -21,7 +21,6 @@
 0268_standard_unordered_set.cpp
 0272_standard_stack.cpp
 0273_standard_queue.cpp
-0275_standard_streams.cpp
 0287_standard_generator.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
