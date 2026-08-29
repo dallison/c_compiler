@@ -288,6 +288,66 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
   return key;
 }
 
+// Where each block sits in the instruction list, indexed by block id.  Code is
+// lowered in a single forward walk of that list, so a definition has to appear
+// ahead of every use of it.  Dominance alone does not give that: a rotated loop
+// lays its body out ahead of the condition block that dominates the body, so
+// reusing a value the condition computed would leave the use ahead of its
+// definition.
+typedef struct {
+  int* block_position;
+  size_t num_blocks;
+} BlockLayout;
+
+static void BlockLayoutInit(BlockLayout* layout, Generator* gen) {
+  layout->num_blocks = gen->basic_blocks.length;
+  layout->block_position = malloc(layout->num_blocks * sizeof(int));
+  for (size_t i = 0; i < layout->num_blocks; i++) {
+    layout->block_position[i] = -1;
+  }
+  int next_position = 0;
+  for (ListElement* element = gen->code.first; element != NULL;
+       element = element->next) {
+    IRNode* inst = (IRNode*)element;
+    if (inst->block == NULL) {
+      continue;
+    }
+    size_t id = (size_t)inst->block->block_id;
+    if (id < layout->num_blocks && layout->block_position[id] < 0) {
+      layout->block_position[id] = next_position++;
+    }
+  }
+}
+
+static void BlockLayoutDestruct(BlockLayout* layout) {
+  free(layout->block_position);
+  layout->block_position = NULL;
+}
+
+// True if using 'definition' in place of 'use' keeps the definition ahead of
+// the use in the instruction list.  Within one block the caller scans forward,
+// so the definition it found is already ahead.
+static bool DefinitionPrecedesUse(BlockLayout* layout, IRNode* definition,
+                                  IRNode* use) {
+  if (definition->block == NULL || use->block == NULL) {
+    return false;
+  }
+  if (definition->block == use->block) {
+    return true;
+  }
+  size_t definition_id = (size_t)definition->block->block_id;
+  size_t use_id = (size_t)use->block->block_id;
+  if (definition_id >= layout->num_blocks || use_id >= layout->num_blocks) {
+    return false;
+  }
+  int definition_position = layout->block_position[definition_id];
+  int use_position = layout->block_position[use_id];
+  if (definition_position < 0 || use_position < 0) {
+    return false;
+  }
+  return definition_position < use_position;
+}
+
 // Given an instruction use its calculated value to look up the
 // table of known values.  It is found, meaning that there is
 // another instruction with exactly the same value then we know
@@ -343,8 +403,8 @@ static COMPILER_UNUSED void PrintValueSet(ValueSet* set) {
 // the current instruction by the one we found.  Replacing the instruction
 // means all references to it are moved to the other instruction and the
 // instruction is removed from the code.
-static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
-                                  BasicBlock* block) {
+static void DoLocalValueNumbering(Generator* gen, BlockLayout* layout,
+                                  ValueSet* set, BasicBlock* block) {
   IRNode* next = NULL;
   for (IRNode* inst = block->code; inst != NULL && block->end_code != NULL &&
        IRPrev(inst) != block->end_code; inst = next) {
@@ -358,7 +418,7 @@ static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
     }
     if (IRIsExpression(inst)) {
       IRNode* prev_inst = LookupInstruction(set, inst);
-      if (prev_inst != inst) {
+      if (prev_inst != inst && DefinitionPrecedesUse(layout, prev_inst, inst)) {
         GeneratorReplaceInstruction(gen, inst, prev_inst);
         BasicBlockRemoveInstruction(gen, block, inst);
       }
@@ -376,7 +436,8 @@ static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
 //
 // It then does the same to all blocks dominated by this block.  It copies
 // the value set from the dominator to the current block.
-static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
+static void DoGlobalValueNumbering(Generator* gen, BlockLayout* layout,
+                                   BasicBlock* block) {
   ValueSet* dominator_value_set = NULL;
   // TODO: check this and fix it.
   bool can_pool_from_dominator = true; // CanPoolFromDominator(gen, block);
@@ -411,7 +472,7 @@ static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
   }
   
   // Apply local value numbering algorithm on the block.
-  DoLocalValueNumbering(gen, set, block);
+  DoLocalValueNumbering(gen, layout, set, block);
 
   // printf("Value set for block %d\n", block->block_id);
   // PrintValueSet(set);
@@ -421,12 +482,15 @@ static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
   for (size_t i = 0; i < block->dominatees.length; i++) {
     BlockId id = (BlockId)block->dominatees.value.p[i];
     BasicBlock* b = VectorGet(&gen->basic_blocks, id);
-    DoGlobalValueNumbering(gen, b);
+    DoGlobalValueNumbering(gen, layout, b);
   }
 }
 
 void GlobalValueNumberingOptimization(Generator* gen) {
-  DoGlobalValueNumbering(gen, gen->entry_block);
+  BlockLayout layout;
+  BlockLayoutInit(&layout, gen);
+  DoGlobalValueNumbering(gen, &layout, gen->entry_block);
+  BlockLayoutDestruct(&layout);
 
   // Done with all the value sets, delete them from every block.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
