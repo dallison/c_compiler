@@ -1441,8 +1441,14 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
     // When not optimizing, all variables are on the stack.
     return false;
   }
-  // Can't use a register if its address has been taken.
+  // A volatile object has to be read and written where the source says it is,
+  // so it needs storage to be read from and written to.
   IRVariable* var = (IRVariable*)var_node;
+  if (TypeIsVolatile(var->symbol->type)) {
+    return false;
+  }
+
+  // Can't use a register if its address has been taken.
   if (var->symbol->flags.address_taken) {
     return false;
   }

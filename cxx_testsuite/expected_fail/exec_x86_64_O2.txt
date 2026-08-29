@@ -11,7 +11,6 @@
 
 0115_standard_vector_exception_safety.cpp
 0124_standard_vector_range_exception_safety.cpp
-0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
 0273_standard_queue.cpp

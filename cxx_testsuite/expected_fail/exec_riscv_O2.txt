@@ -14,7 +14,6 @@
 0148_standard_variant_multi_visit_four.cpp
 0149_standard_variant_multi_visit_five.cpp
 0155_standard_variant_visit_return_type.cpp
-0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
 0293_standard_counted_iterator.cpp
