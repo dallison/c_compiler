@@ -211,7 +211,10 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0) {
+          // An add whose result also goes to a variable register still has to
+          // run: folding it into this load's offset removes the only user of
+          // its value, but a later block reads the variable it writes.
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
@@ -243,7 +246,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0) {
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
