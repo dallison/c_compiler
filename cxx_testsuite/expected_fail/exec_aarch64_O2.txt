@@ -20,8 +20,6 @@
 0124_standard_vector_range_exception_safety.cpp
 0141_standard_variant_comparison.cpp
 0155_standard_variant_visit_return_type.cpp
-0168_map_lookup_erase_compare.cpp
-0173_map_node_handles.cpp
 0195_cxx_local_static_arrays.cpp
 0246_lambda_closure_special_members.cpp
 0248_standard_function.cpp
@@ -63,3 +61,4 @@
 0418_contract_reflection_constification.cpp
 0429_cxx29_virtual_function_contracts.cpp
 0433_cxx29_view_interface_at.cpp
+0450_coroutine_try_catch_reachable_label.cpp

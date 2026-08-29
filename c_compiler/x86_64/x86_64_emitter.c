@@ -2493,6 +2493,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         break;
       }
       bool src0_is_zero = (X86_64Opcode)src0->opcode == X86_64_OP(x0);
+      // The swap above may have moved the zero pseudo-register into src1, so
+      // ask again rather than reusing the answer from before the swap.  x0 has
+      // no physical register behind it; printing it as one names %rax.
+      src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
       if ((TargetIsConst(src0) || src0_is_zero) && dest_reg != NULL) {
         fprintf(fp, "\tmovq ");
         if (TargetIsConst(src0)) {

@@ -10,7 +10,6 @@
 
 #include "alias.h"
 #include "loop_info.h"
-#include "symbol.h"
 
 typedef struct {
   bool writes_memory;
@@ -56,44 +55,6 @@ static LoopMemoryEffects GetLoopMemoryEffects(Generator* gen,
   return effects;
 }
 
-static bool LoopDefinesSymbol(Generator* gen, const LoopInfo* loop,
-                              const Symbol* symbol) {
-  BitSetIterator it;
-  BitSetIteratorStart(&it, (BitSet*)&loop->blocks);
-  while (!BitSetIteratorDone(&it)) {
-    BasicBlock* block =
-        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
-    for (IRNode* inst = BasicBlockBegin(block);
-         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
-         inst = IRNext(inst)) {
-      if (IRIsVarDef(inst) && inst->var.def == symbol) {
-        return true;
-      }
-    }
-    BitSetIteratorNext(&it);
-  }
-  return false;
-}
-
-// SSA-backed, non-address-taken locals cannot alias an unrelated store.  This
-// lets a loop hoist invariant argument/local reads without pretending that an
-// arbitrary pointer load is safe across stores or calls.
-static bool IsSafeVariableLoad(Generator* gen, const LoopInfo* loop,
-                               IRNode* inst) {
-  if (!IRIsVarRef(inst) || inst->var.use == NULL ||
-      IRHasSideEffects(inst)) {
-    return false;
-  }
-  Symbol* symbol = inst->var.use;
-  if (symbol->flags.address_taken ||
-      (!symbol->flags.is_local && !symbol->flags.is_argument &&
-       !symbol->flags.is_temp) ||
-      LoopDefinesSymbol(gen, loop, symbol)) {
-    return false;
-  }
-  return true;
-}
-
 static bool IsLoopInvariant(const LoopInfo* loop, IRNode* inst) {
   for (size_t i = 0; i < inst->inputs.length; i++) {
     IRNode* input = inst->inputs.value.p[i];
@@ -115,8 +76,12 @@ static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
       !IsLoopInvariant(loop, inst)) {
     return false;
   }
-  if (IRIsLoadOnly(inst) && (effects.writes_memory || effects.calls) &&
-      !IsSafeVariableLoad(gen, loop, inst)) {
+  // A load is only invariant if nothing in the loop can write the location it
+  // reads.  Ask the alias analysis about the loaded location itself: the
+  // variable a load is annotated with describes where its address came from,
+  // not what it reads, so a dereference of an unmodified pointer variable still
+  // reads memory the loop may store to.
+  if (IRIsLoadOnly(inst) && (effects.writes_memory || effects.calls)) {
     IRMemoryLocation location;
     if (!IRAliasDecode(inst, &location) ||
         location.volatile_access || location.atomic_access ||

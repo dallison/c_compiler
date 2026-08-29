@@ -760,6 +760,34 @@ static IRNode* FindInvalidPCodeValueRead(Generator* gen) {
   return NULL;
 }
 
+// Code generation reads the pass selection from the compiler rather than from
+// compiler->target, so pointing the target at p-code is not enough: the p-code
+// lowering would still run whichever passes the real target asked for.  That
+// matters because p-code keeps its own selection, in particular leaving the
+// loop passes off since it depends on the loop and phi shape they rewrite.
+typedef struct {
+  CompilerTarget* target;
+  IROptimizations ir_optimizations;
+  bool keep_ssa;
+} SavedCodegenTarget;
+
+static SavedCodegenTarget EnterPCodeTarget(CompilerTarget* pcode_target) {
+  SavedCodegenTarget saved;
+  saved.target = compiler->target;
+  saved.ir_optimizations = compiler->ir_optimizations;
+  saved.keep_ssa = compiler->keep_ssa;
+  compiler->target = pcode_target;
+  compiler->ir_optimizations = pcode_target->ir_optimizations;
+  compiler->keep_ssa = pcode_target->keep_ssa;
+  return saved;
+}
+
+static void LeavePCodeTarget(SavedCodegenTarget saved) {
+  compiler->target = saved.target;
+  compiler->ir_optimizations = saved.ir_optimizations;
+  compiler->keep_ssa = saved.keep_ssa;
+}
+
 static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
                                          Vector* referenced,
                                          const char** reason) {
@@ -786,9 +814,8 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
   // only constructs like the noexcept terminate guard.
   gen.for_constant_evaluation = true;
 
-  CompilerTarget* saved_target = compiler->target;
   CompilerTarget* pcode_target = NewPCodeTarget();
-  compiler->target = pcode_target;
+  SavedCodegenTarget saved_target = EnterPCodeTarget(pcode_target);
   TypeRecord* saved_current_function = compiler->current_function;
   compiler->current_function = func;
 
@@ -812,7 +839,7 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
 
   if (pcode == NULL) {
     compiler->current_function = saved_current_function;
-    compiler->target = saved_target;
+    LeavePCodeTarget(saved_target);
     pcode_target->cleanup = NULL;
     free(pcode_target);
     GeneratorDestruct(&gen);
@@ -826,7 +853,7 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
             ? "erroneous value read in constexpr pcode"
             : "indeterminate value read in constexpr pcode";
     compiler->current_function = saved_current_function;
-    compiler->target = saved_target;
+    LeavePCodeTarget(saved_target);
     pcode_target->cleanup(pcode);
     pcode_target->cleanup = NULL;
     free(pcode_target);
@@ -839,7 +866,7 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
   bool built = PCodeObjectBuildFunction(object, pcode, reason);
 
   compiler->current_function = saved_current_function;
-  compiler->target = saved_target;
+  LeavePCodeTarget(saved_target);
   pcode_target->cleanup(pcode);
   pcode_target->cleanup = NULL;
   free(pcode_target);
