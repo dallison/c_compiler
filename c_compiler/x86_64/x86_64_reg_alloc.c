@@ -998,6 +998,15 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
   if (X86_64FixedArgDestType(inst->dest, &fixed_dest_type)) {
     EvictPhysicalRegister(allocator, fixed_dest_type, inst->dest->reg->num,
                           inst->dest);
+    // The argument-register pseudo-instruction is shared, so an earlier call's
+    // value in it may have been spilled (reserving rax/rdx for an idiv, for
+    // example).  That spill retargeted the reads still pending to the spill
+    // slot, and this instruction now puts a live value back in the register, so
+    // the value no longer lives only in memory.  Leaving the flag set would
+    // reload this call's argument from the previous call's slot, and would also
+    // offer the register up as a spill victim while it is live.
+    inst->dest->flags &= ~TARGET_INST_SPILLED;
+    MapRemove(&allocator->varreg_spills, (MapKeyType){.p = inst->dest});
     inst->dest->reg->owner = inst->dest;
   }
   if (inst->operand[0] != NULL) {
