@@ -333,21 +333,40 @@ static int SpillCost(TargetInstruction* inst) {
 // would not be updated on those writes, leaving back-edge reloads stale.  So
 // such values must be kept in a register and never chosen as a spill victim
 // unless there is no alternative.
-static bool IsUnsafeSpillVictim(TargetInstruction* owner) {
+//
+// Spilling also leaves already-processed reads of the value pointing at the
+// physical register rather than the slot, which only works while every such
+// read happens before the register is handed to something else.  Down a
+// straight line it does, because the allocator processes blocks in dominator
+// order; around a loop it does not, so a read in any block control can come
+// back to is a read of whatever the new owner left there.  |reentered| holds
+// those blocks.
+static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
   if (X86_64IsVarRegister(owner)) {
     return true;
   }
   if (owner->dest != NULL && X86_64IsVarRegister(owner->dest)) {
     return true;
   }
+  for (size_t i = 0; i < owner->users.length; i++) {
+    TargetInstruction* user = owner->users.value.p[i];
+    if ((user->flags & TARGET_INST_PROCESSED) != 0 && user->block != NULL &&
+        BitSetContains(reentered, user->block->block_id)) {
+      return true;
+    }
+  }
   return false;
 }
 
 static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
                                            X86_64RegisterType type,
-                                           bool can_use_temp) {
+                                           bool can_use_temp,
+                                           TargetBasicBlock* block) {
   X86_64Register* regs =
       type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  BitSet reentered;
+  BitSetInit(&reentered);
+  TargetBasicBlockReachableAfter(&allocator->rv->base, block, &reentered);
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
   TargetInstruction* fallback_victim = NULL;
@@ -374,7 +393,7 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
             continue;
           }
           int cost = SpillCost(owner);
-          if (IsUnsafeSpillVictim(owner)) {
+          if (IsUnsafeSpillVictim(owner, &reentered)) {
             if (cost < fallback_cost) {
               fallback_cost = cost;
               fallback_victim = owner;
@@ -389,6 +408,7 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
       }
     }
   }
+  BitSetDestruct(&reentered);
   if (victim == NULL) {
     victim = fallback_victim;
   }
@@ -655,7 +675,7 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
 
   if (reg == NULL) {
     TargetInstruction* victim =
-        FindSpillVictim(allocator, type, can_use_temp);
+        FindSpillVictim(allocator, type, can_use_temp, block);
     reg = SpillInstruction(allocator, victim);
   }
   assert(reg != NULL);
@@ -918,7 +938,7 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
       }
       if (reg == NULL) {
         TargetInstruction* victim = FindSpillVictim(
-            allocator, reg_type, CanUseTemp(allocator, reload));
+            allocator, reg_type, CanUseTemp(allocator, reload), inst->block);
         reg = SpillInstruction(allocator, victim);
       }
       AssignRegister(reg, reload);
@@ -1090,7 +1110,13 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
     case X86_64_OP(literal):
     case X86_64_OP(asm):
     case X86_64_OP(loc):
-      // These instructions do not have registers allocated to them.
+      // These instructions do not have registers allocated to them.  They are
+      // finished all the same: ReloadSpills above has already given them their
+      // final operands, so a later spill must not treat them as a read it can
+      // still redirect to a stack slot.  A compare against a value that is
+      // spilled afterwards is the case that matters -- it keeps reading the
+      // register, and only the flag says so.
+      inst->flags |= TARGET_INST_PROCESSED;
       return;
 
     case X86_64_OP(regarg):

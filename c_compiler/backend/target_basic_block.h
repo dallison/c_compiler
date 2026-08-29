@@ -116,4 +116,11 @@ bool TargetBasicBlockIsEmpty(TargetBasicBlock* b);
 // Is b dominated by dom (in its dominiator tree)?
 bool TargetBasicBlockDominatedBy(TargetGenerator* gen, TargetBasicBlock* dom, TargetBasicBlock* b);
 
+// The ids of every block control can reach after leaving |block|, which
+// includes |block| itself exactly when it is part of a loop.  |reachable| must
+// already be initialised; it is cleared first.
+void TargetBasicBlockReachableAfter(TargetGenerator* gen,
+                                    TargetBasicBlock* block,
+                                    BitSet* reachable);
+
 #endif /* risc_v_basic_block_h */

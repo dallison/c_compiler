@@ -1141,6 +1141,31 @@ bool TargetBasicBlockIsEmpty(TargetBasicBlock* b) {
   return b->code == NULL || b->end_code == NULL;
 }
 
+void TargetBasicBlockReachableAfter(TargetGenerator* gen,
+                                    TargetBasicBlock* block,
+                                    BitSet* reachable) {
+  BitSetClear(reachable);
+  if (block == NULL) {
+    return;
+  }
+  Vector work;
+  VectorInit(&work);
+  for (size_t i = 0; i < block->out_edges.length; i++) {
+    VectorAppend(&work, VectorGet(&gen->basic_blocks, block->out_edges.value.w[i]));
+  }
+  while (work.length > 0) {
+    TargetBasicBlock* b = work.value.p[--work.length];
+    if (b == NULL || BitSetContains(reachable, b->block_id)) {
+      continue;
+    }
+    BitSetInsert(reachable, b->block_id);
+    for (size_t i = 0; i < b->out_edges.length; i++) {
+      VectorAppend(&work, VectorGet(&gen->basic_blocks, b->out_edges.value.w[i]));
+    }
+  }
+  VectorDestruct(&work);
+}
+
 bool TargetBasicBlockDominatedBy(TargetGenerator* gen, TargetBasicBlock* dom, TargetBasicBlock* b) {
   for (size_t i = 0; i < dom->dominatees.length; i++) {
     TargetBlockId child_id = dom->dominatees.value.w[i];

@@ -32,7 +32,6 @@ flaky 0296_standard_atomic_ref_wait.cpp
 0298_standard_blocking_sync.cpp
 0305_standard_expected.cpp
 flaky 0309_standard_memory_shared_ptr_threads.cpp
-0321_standard_flat_containers.cpp
 0340_standard_random_engines.cpp
 0343_standard_random_streams.cpp
 0403_standard_hive.cpp
