@@ -1,0 +1,20 @@
+//
+//  cstdalign
+//  c_compiler
+//
+//  C++ counterpart of <stdalign.h>.  alignas and alignof are C++ keywords, so
+//  only the feature macros are defined.  Deprecated in C++17, removed in
+//  C++20.
+//
+
+#ifndef cstdalign_h
+#define cstdalign_h
+
+#if __cplusplus >= 202002L
+#error "<cstdalign> was removed in C++20; alignas and alignof are keywords"
+#endif
+
+#define __alignas_is_defined 1
+#define __alignof_is_defined 1
+
+#endif /* cstdalign_h */

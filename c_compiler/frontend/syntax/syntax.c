@@ -13109,6 +13109,10 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return false;
   }
   switch (syntax->lex->current_token) {
+    // No expression can begin with an alignment specifier, so it always
+    // introduces a declaration.
+    case TOK(alignas):
+      return true;
     case TOK(extern):
     case TOK(static):
     case TOK(auto):

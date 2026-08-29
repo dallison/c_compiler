@@ -4618,7 +4618,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
 }
 
 static void AlignOffset(PoolEntry* entry, int* offset) {
-  int alignment = TypeRecordAlignment(entry->pooled->type);
+  int alignment = PoolEntryStackAlignment(entry);
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 

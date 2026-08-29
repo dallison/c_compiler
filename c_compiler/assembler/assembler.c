@@ -628,6 +628,15 @@ static int32_t SymbolBindingToELFBinding(AssemblerSymbolBinding binding) {
   }
 }
 
+// For a common symbol ELF stores the required alignment in st_value rather
+// than an offset; the linker reads it back when it places the object in .bss.
+static int64_t SymbolELFValue(AssemblerSymbol* sym) {
+  if (sym->defined && sym->section == SHN_COM) {
+    return sym->alignment > 0 ? sym->alignment : 1;
+  }
+  return sym->value;
+}
+
 static void AddLocalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   ELFWriterFile* elf = data;
   AssemblerSymbol* sym = (AssemblerSymbol*)node;
@@ -642,7 +651,7 @@ static void AddLocalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
     ELFWriterAddSymbol(elf, &sym->name, section_index,
                        SymbolTypeToELFType(sym->type),
                        SymbolBindingToELFBinding(binding), sym->size,
-                       sym->value, &sym->index);
+                       SymbolELFValue(sym), &sym->index);
   }
 }
 
@@ -659,7 +668,7 @@ static void AddGlobalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
     ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
                        SymbolTypeToELFType(sym->type),
                        SymbolBindingToELFBinding(sym->binding), sym->size,
-                       sym->value, &sym->index);
+                       SymbolELFValue(sym), &sym->index);
   }
 }
 

@@ -131,6 +131,11 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
                                           double value);
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym);
 
+// Frame-slot alignment for a pooled variable.  An `alignas`/`aligned(N)`
+// specifier on the declaration raises the type's natural alignment, so the
+// symbol's requested alignment has to be consulted as well as the type's.
+int PoolEntryStackAlignment(PoolEntry* entry);
+
 // True for a return type the caller receives through the hidden pointer that
 // IR_OP(structreturn) holds, rather than in a result register.  Besides classes
 // and unions this covers a pointer to member function, whose pair layout is too

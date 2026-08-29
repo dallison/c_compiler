@@ -1,0 +1,18 @@
+//
+//  cstdbool
+//  c_compiler
+//
+//  C++ counterpart of <stdbool.h>.  bool, true and false are C++ keywords, so
+//  only the feature macro is defined.  Deprecated in C++17, removed in C++20.
+//
+
+#ifndef cstdbool_h
+#define cstdbool_h
+
+#if __cplusplus >= 202002L
+#error "<cstdbool> was removed in C++20; bool, true and false are keywords"
+#endif
+
+#define __bool_true_false_are_defined 1
+
+#endif /* cstdbool_h */

@@ -604,6 +604,15 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
   return entry->pooled;
 }
 
+int PoolEntryStackAlignment(PoolEntry* entry) {
+  int alignment = TypeRecordAlignment(entry->pooled->type);
+  Symbol* sym = entry->value.symbol;
+  if (sym != NULL && sym->alignment > alignment) {
+    alignment = sym->alignment;
+  }
+  return alignment > 0 ? alignment : 1;
+}
+
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {
   // Record symbols materialized by real target code so discardable C++ inline
   // functions and variables can remain parsed and checked without all being

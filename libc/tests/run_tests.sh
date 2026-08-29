@@ -64,6 +64,9 @@ run_step() {
 if [ "$do_compile_all" -eq 1 ]; then
   run_step "compile all libc sources" \
     bash libc/tests/compile_all.sh "$davecc" "$target"
+
+  run_step "standard header inventory" \
+    bash libc/tests/standard_headers.sh "$davecc" "$target"
 fi
 
 if [ "$do_compiler" -eq 1 ]; then
