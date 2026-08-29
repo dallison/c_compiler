@@ -12,21 +12,15 @@
 # Both pass every run at -O0 and come out differently from one run to the next
 # at -O2, so -O2 is doing something to them that a single run cannot pin down.
 
-0015_rvalue_reference_materialization.cpp
-0068_variadic_sizeof_pack.cpp
-0074_standard_memory_unique_ptr.cpp
 0115_standard_vector_exception_safety.cpp
 0116_standard_vector_assignment_insert.cpp
 0117_standard_vector_insert_range.cpp
 0120_standard_vector_allocator_propagation.cpp
 0122_standard_vector_input_iterators.cpp
 0124_standard_vector_range_exception_safety.cpp
-0155_standard_variant_visit_return_type.cpp
 flaky 0163_map_dependency_primitives.cpp
 0168_map_lookup_erase_compare.cpp
 0195_cxx_local_static_arrays.cpp
-0248_standard_function.cpp
-0252_functional_std_function.cpp
 0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
@@ -39,11 +33,9 @@ flaky 0296_standard_atomic_ref_wait.cpp
 0305_standard_expected.cpp
 flaky 0309_standard_memory_shared_ptr_threads.cpp
 0321_standard_flat_containers.cpp
-0324_standard_move_only_function.cpp
 0340_standard_random_engines.cpp
 0343_standard_random_streams.cpp
 0403_standard_hive.cpp
-0416_constexpr_structured_bindings.cpp
 0418_contract_reflection_constification.cpp
 0429_cxx29_virtual_function_contracts.cpp
 0433_cxx29_view_interface_at.cpp

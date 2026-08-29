@@ -8,10 +8,8 @@
 #
 # Nothing here is expected to stay: each entry is an -O2 bug to fix.
 
-0015_rvalue_reference_materialization.cpp
 0020_class_template_instantiation.cpp
 0065_coroutines.cpp
-0068_variadic_sizeof_pack.cpp
 0075_standard_utility_move_traits.cpp
 0115_standard_vector_exception_safety.cpp
 0122_standard_vector_input_iterators.cpp
@@ -28,8 +26,6 @@
 0166_map_construct_insert_apis.cpp
 0168_map_lookup_erase_compare.cpp
 0195_cxx_local_static_arrays.cpp
-0248_standard_function.cpp
-0252_functional_std_function.cpp
 0262_standard_set.cpp
 0264_standard_algorithm.cpp
 0267_standard_unordered_map.cpp
@@ -46,7 +42,6 @@ flaky 0309_standard_memory_shared_ptr_threads.cpp
 0318_standard_vector_map_string_workload.cpp
 0321_standard_flat_containers.cpp
 0323_standard_invoke_r_bind_back.cpp
-0324_standard_move_only_function.cpp
 0337_standard_print_unicode.cpp
 0340_standard_random_engines.cpp
 0341_standard_random_distributions.cpp
@@ -55,7 +50,6 @@ flaky 0309_standard_memory_shared_ptr_threads.cpp
 0401_standard_stacktrace.cpp
 0403_standard_hive.cpp
 0411_array_member_partial_construction.cpp
-0416_constexpr_structured_bindings.cpp
 0418_contract_reflection_constification.cpp
 0429_cxx29_virtual_function_contracts.cpp
 0433_cxx29_view_interface_at.cpp
