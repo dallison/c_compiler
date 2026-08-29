@@ -309,22 +309,6 @@ void TargetBasicBlockEmitAfter(struct TargetGenerator* gen, TargetBasicBlock* bl
   }
 }
 
-// True if the unwinder can enter this block directly.  No branch in the
-// function targets an exception landing pad, so its only entry is from outside
-// the function's own control flow.
-static bool TargetBasicBlockIsExceptionLanding(TargetBasicBlock* b) {
-  for (TargetInstruction* inst = b->code; inst != NULL;
-       inst = TargetNext(inst)) {
-    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
-      return true;
-    }
-    if (inst == b->end_code) {
-      break;
-    }
-  }
-  return false;
-}
-
 bool TargetBasicBlockIsUnreachable(struct TargetGenerator* gen, TargetBasicBlock* b) {
   if (b == gen->entry_block) {
     return false;
@@ -333,13 +317,11 @@ bool TargetBasicBlockIsUnreachable(struct TargetGenerator* gen, TargetBasicBlock
     return b->is_unreachable;
   }
   b->reachability_known = true;
-  // A landing pad has no in edge because control reaches it from the unwinder.
-  // Calling it unreachable would leave it, and everything it branches to, out
-  // of register allocation while the emitter still emits it.
-  if (TargetBasicBlockIsExceptionLanding(b)) {
-    b->is_unreachable = false;
-    return false;
-  }
+  // A landing pad is reached from the protected region rather than by a branch,
+  // and AddExceptionHandlerEdges gives it that in edge.  So a pad with no live
+  // in edge belongs to a region that is itself dead, and answering anything but
+  // "unreachable" here would keep it out of the dominator tree the register
+  // allocator walks while the emitter still emits it.
   // Check if all the in edges are unreachable.
   for (size_t i = 0; i < b->in_edges.length; i++) {
     BlockId id = b->in_edges.value.w[i];
@@ -528,6 +510,38 @@ static void AddMissingLinks(TargetGenerator* gen) {
     }
     if (b->out_edges.length == 0) {
       TargetBasicBlockAddEdge(b, gen->exit_block);
+    }
+  }
+}
+
+// Link each protected region to its landing pad, the same edge the IR-level CFG
+// builds (see AddExceptionHandlerEdges in codegen.c).  The pad has no branch
+// into it, and the fallback below would give it the function entry as its only
+// predecessor.  That makes every block downstream of the handler dominated by
+// the entry alone, so a value defined inside the try and read after the handler
+// joins back is no longer dominated by its own definition.  Liveness is derived
+// from the dominator tree, so it stops carrying that value partway through and
+// the register allocator hands its register to something else.
+//
+// The edge starts at the block holding the region's start label rather than at
+// the individual calls inside it, so definitions made before the region still
+// dominate the pad while definitions made inside it correctly do not.
+static void AddExceptionHandlerEdges(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->exception_edges.length; i++) {
+    TargetExceptionEdge* edge = gen->exception_edges.value.p[i];
+    TargetBasicBlock* region = edge->try_start->block;
+    TargetBasicBlock* pad = edge->catch_label->block;
+    if (region == NULL || pad == NULL || region == pad) {
+      continue;
+    }
+    // A try with several handlers, or a handler naming several types, produces
+    // one range per handler over the same region; the edge is wanted once.
+    bool linked = false;
+    for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
+      linked = region->out_edges.value.w[j] == (int64_t)pad->block_id;
+    }
+    if (!linked) {
+      TargetBasicBlockAddEdge(region, pad);
     }
   }
 }
@@ -796,6 +810,24 @@ static void ResetAllInstructionUses(TargetGenerator* gen) {
   }
 }
 
+// Liveness is built once when the CFG is created and again after the target
+// optimizer has rewritten instructions, so the second run has to start from
+// nothing.  Clearing each block as the dominator tree walk reaches it is not
+// enough: a block reads the live-in set of its successors, which the walk in
+// general has not visited yet, and a block outside the dominator tree is never
+// visited at all.  Either way the earlier run's set would be read as if it
+// described the rewritten code, which spreads values whose defining
+// instruction the optimizer has already deleted.
+static void ResetAllBlockLiveness(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    VectorClear(&b->inputs);
+    VectorClear(&b->outputs);
+    BitSetClear(&b->input_ids);
+    BitSetClear(&b->output_ids);
+  }
+}
+
 // An unreachable block may still hold a label the exception tables name, such
 // as the bound of a try range that turned out to be dead.  Keep those labels so
 // the tables still resolve and drop the rest of the block: the code is dead,
@@ -909,6 +941,7 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
   // Phase 3: all blocks with no output edges link to exit block.  Also blocks
   // that do not end in a branch or return fall through to next block.
   AddMissingLinks(gen);
+  AddExceptionHandlerEdges(gen);
   AddKeptBlockLinks(gen);
   
   // RVPrintBasicBlocks(gen, stdout);
@@ -1000,6 +1033,7 @@ static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
 // information tells the register allocator the lifespan of
 // registers.
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
+   ResetAllBlockLiveness(gen);
    ResetAllInstructionUses(gen);
    BuildInputsAndOutputs(gen, gen->entry_block);
    PropagateLiveInToPredecessors(gen);

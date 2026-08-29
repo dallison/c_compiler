@@ -473,6 +473,7 @@ static void ResolveExceptionRanges(PCodeGenerator* pcode, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |=
         TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    TargetRecordExceptionEdge(&pcode->base, try_start, catch_label);
     PCodeExceptionRange* range = malloc(sizeof(PCodeExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;

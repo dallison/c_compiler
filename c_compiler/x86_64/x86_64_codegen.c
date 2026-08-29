@@ -586,6 +586,7 @@ static void ResolveExceptionRanges(X86_64Generator* rv, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |= TARGET_INST_EXCEPTION_LANDING;
+    TargetRecordExceptionEdge(&rv->base, try_start, catch_label);
     X86_64ExceptionRange* range = malloc(sizeof(X86_64ExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;

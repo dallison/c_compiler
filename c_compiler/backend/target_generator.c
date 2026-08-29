@@ -209,6 +209,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->first_symbol = NULL;
   target->last_symbol = NULL;
   VectorInit(&target->fixups);
+  VectorInit(&target->exception_edges);
   target->frame_pointer = NULL;
   target->stack_pointer = NULL;
   target->thread_pointer = NULL;
@@ -274,6 +275,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
   // The fixups vector owns the heap-allocated TargetBranchFixup structs (flat,
   // no nested allocations); free them together with the vector backing.
   VectorDestructWithContents(&gen->fixups, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&gen->exception_edges, NULL, /*free_element=*/true);
 
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
@@ -281,6 +283,18 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     TargetBasicBlockDelete(block);
   }
   VectorDestruct(&gen->basic_blocks);
+}
+
+void TargetRecordExceptionEdge(TargetGenerator* gen,
+                               TargetInstruction* try_start,
+                               TargetInstruction* catch_label) {
+  if (try_start == NULL || catch_label == NULL) {
+    return;
+  }
+  TargetExceptionEdge* edge = malloc(sizeof(TargetExceptionEdge));
+  edge->try_start = try_start;
+  edge->catch_label = catch_label;
+  VectorAppend(&gen->exception_edges, edge);
 }
 
 TargetInstruction* TargetFirstInstruction(TargetGenerator* target) {

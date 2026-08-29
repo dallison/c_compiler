@@ -232,7 +232,23 @@ typedef struct TargetGenerator {
   Symbol* memset;
   
   Symbol* __tls_get_addr;   // Get address of TLS variable.
+
+  // TargetExceptionEdge* pairing each protected region with its landing pad, so
+  // the CFG can model the unwinder's entry into the pad.
+  Vector exception_edges;
 } TargetGenerator;
+
+// The unwinder reaches a landing pad from inside a protected region.  Recording
+// which region belongs to which pad lets the CFG give the pad a predecessor that
+// the region's own dominators reach, rather than the function entry.
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* catch_label;
+} TargetExceptionEdge;
+
+void TargetRecordExceptionEdge(TargetGenerator* gen,
+                               TargetInstruction* try_start,
+                               TargetInstruction* catch_label);
 
 void TargetGeneratorInit(TargetGenerator* Target, Generator* gen, TargetVirtuals* virtuals);
 TargetGenerator* NewTargetGenerator(Generator* gen);

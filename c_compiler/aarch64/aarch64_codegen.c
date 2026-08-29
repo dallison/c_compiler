@@ -795,6 +795,7 @@ static void ResolveExceptionRanges(AARCH64Generator* g, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |=
         TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    TargetRecordExceptionEdge(&g->base, try_start, catch_label);
     AARCH64ExceptionRange* range = malloc(sizeof(AARCH64ExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;
