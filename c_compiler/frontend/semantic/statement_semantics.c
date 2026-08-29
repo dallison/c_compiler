@@ -2320,11 +2320,22 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     }
   }
   
+  // A conversion above can wrap the returned expression in another node, so
+  // ask the statement what it returns rather than what it was handed.
+  if (return_value != NULL) {
+    return_value = node->cond;
+  }
+
   // Returns a struct.  If this is a call node it might be subject
   // to RVO.
   if (return_value != NULL && (cxx_return_elision || compiler->optimize)) {
     if (TypeIsStructOrUnion(compiler->current_function->next)) {
-      if (return_value->op == AST_OP(call)) {
+      // Only a call that produces the returned object itself can be built in
+      // the caller's return slot.  If its result still has to be converted,
+      // what the caller gets back is the conversion's output, and the call has
+      // to leave its own result somewhere the conversion can read it.
+      if (return_value->op == AST_OP(call) &&
+          TypeEqual(return_value->type, compiler->current_function->next)) {
         return_value->flags |= kASTRvoCall;
       } else if (return_value->op == AST_OP(identifier)) {
         // Named RVO places the returned variable directly in the caller's

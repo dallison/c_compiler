@@ -12,7 +12,6 @@
 0115_standard_vector_exception_safety.cpp
 0124_standard_vector_range_exception_safety.cpp
 0264_standard_algorithm.cpp
-0268_standard_unordered_set.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
 0305_standard_expected.cpp
