@@ -2477,6 +2477,77 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
   return FinishWithDest(rv, node, result, mov_opcode);
 }
 
+// The width in bytes that |opcode| writes, or 8 for a store that fills a whole
+// register.
+static int StoreWidth(RVOpcode opcode) {
+  switch (opcode) {
+    case RV_OP(sb):
+      return 1;
+    case RV_OP(sh):
+      return 2;
+    case RV_OP(sw):
+      return 4;
+    default:
+      return 8;
+  }
+}
+
+// The type of the object a store addresses.  A store to a variable names the
+// variable's IR node, whose own type does not always describe the object (a
+// parameter's does not), so ask its symbol.
+static TypeRecord* StoredObjectType(IRNode* addr_node) {
+  if (addr_node == NULL) {
+    return NULL;
+  }
+  if (IRIsVariable(addr_node)) {
+    Symbol* symbol = ((IRVariable*)addr_node)->symbol;
+    if (symbol != NULL && symbol->type != NULL) {
+      return symbol->type;
+    }
+  }
+  return addr_node->type;
+}
+
+// Narrow |value| to the low |width| bytes as |type| would be read back, for a
+// variable that lives in a register.  A store to memory drops the high bytes on
+// its own; a register has to be told to.  Reads cannot make up for it later:
+// reading such a variable is just naming its register, and only an explicit
+// conversion in the source would add a mask, so `f(c)` for `unsigned char c`
+// would hand the callee whatever the arithmetic left above bit 7.
+static TargetInstruction* NarrowToStoreWidth(RVGenerator* rv,
+                                             TargetInstruction* value,
+                                             TypeRecord* type, int width) {
+  if (width >= 8) {
+    return value;
+  }
+  // Signed unless the type says otherwise: `int` carries no explicit sign bit
+  // in its TypeRecord, and the IR reads such an object back with a signed load
+  // (lw rather than lwu), so the register has to hold the value the way that
+  // load would have produced it.
+  bool is_signed = type == NULL || !TypeIsUnsigned(type);
+  int bits = width * 8;
+  // A constant narrows here rather than at run time; shifting the zero
+  // register, which is not a real register, is not an option.
+  if (TargetIsConst(value)) {
+    int64_t original = TargetIntValue(value);
+    int64_t narrowed =
+        is_signed ? (int64_t)((uint64_t)original << (64 - bits)) >> (64 - bits)
+                  : (int64_t)((uint64_t)original & ((1ULL << bits) - 1));
+    if (narrowed == original) {
+      return value;
+    }
+    return Emit(rv, NewInstruction1(RV_OP(li),
+                                    GetIntConstant(rv, NULL, kTargetType64Bit,
+                                                   narrowed)));
+  }
+  TargetInstruction* shift =
+      GetIntConstant(rv, NULL, kTargetType32Bit, (int64_t)(64 - bits));
+  TargetInstruction* left =
+      Emit(rv, NewInstruction2(RV_OP(slli), value, shift));
+  return Emit(rv, NewInstruction2(is_signed ? RV_OP(srai) : RV_OP(srli), left,
+                                  shift));
+}
+
 static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstruction* src, RVOpcode opcode) {
   TargetInstruction* addr;
   TargetInstruction* offset;
@@ -2487,7 +2558,12 @@ static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstru
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    RVOpcode opcode = TypeIsFloatingPoint(addr_node->type) ? RV_OP(fmv_d) : RV_OP(mv);
+    bool is_fp = TypeIsFloatingPoint(addr_node->type);
+    if (!is_fp) {
+      src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
+                               StoreWidth(opcode));
+    }
+    RVOpcode opcode = is_fp ? RV_OP(fmv_d) : RV_OP(mv);
     TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
     return result;
   }
@@ -2537,10 +2613,13 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
   if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
-    // own, so hand on what was stored.  Left as the store instruction this
-    // picks up whatever register the allocator happened to give the store,
-    // which holds nothing in particular -- the address, as it turns out.
-    return SetLoweredNode(node, src);
+    // own, so hand on what was stored, narrowed the way reading the object back
+    // would give it.  Left as the store instruction this picks up whatever
+    // register the allocator happened to give the store, which holds nothing in
+    // particular -- the address, as it turns out.
+    return SetLoweredNode(
+        node, NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
+                                 StoreWidth(opcode)));
   }
   return SetLoweredNode(node, stored);
 }
