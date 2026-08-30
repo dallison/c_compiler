@@ -17,6 +17,7 @@
 
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst);
+static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst);
 
 static void Trap() {}
 
@@ -80,6 +81,7 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
   MapInitForPointerKeys(&allocator->reassignable_spills);
+  allocator->allocating_depth = 0;
 }
 
 RVRegisterAllocator* NewRVRegisterAllocator(RVGenerator* pcode) {
@@ -402,8 +404,97 @@ static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
   return victim;
 }
 
+// True if |inst|'s own allocation is in progress and its reload pass has been
+// and gone.  Pointing one of its operands at a spill slot now would do nothing
+// but leave the read naming the physical register the spill just gave away.
+static bool IsBeingAllocated(RVRegisterAllocator* allocator,
+                             TargetInstruction* inst) {
+  for (size_t d = 0; d < allocator->allocating_depth; d++) {
+    if (allocator->allocating[d] == inst) {
+      return allocator->allocating_reloaded[d];
+    }
+  }
+  return false;
+}
+
+// Record that reloads have been inserted for |inst|'s spilled operands, so that
+// any spill from here on has to repair its reads in place.
+static void NoteReloadsInserted(RVRegisterAllocator* allocator,
+                                TargetInstruction* inst) {
+  for (size_t d = 0; d < allocator->allocating_depth; d++) {
+    if (allocator->allocating[d] == inst) {
+      allocator->allocating_reloaded[d] = true;
+      return;
+    }
+  }
+}
+
 static bool NotProcessed(TargetInstruction* inst, void* data) {
-  return (inst->flags & TARGET_INST_PROCESSED) == 0;
+  RVRegisterAllocator* allocator = data;
+  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
+         !IsBeingAllocated(allocator, inst);
+}
+
+// A read that has already been allocated names the physical register the value
+// was in, and spilling hands that register to something else.  Stage the slot
+// through the dedicated scratch register immediately before the read instead.
+// Returns false when the read cannot be repaired, which leaves it as it was.
+static bool RepairProcessedRead(RVRegisterAllocator* allocator,
+                                TargetInstruction* user,
+                                TargetInstruction* value,
+                                TargetInstruction* spill) {
+  if (user->block == NULL || value->reg == NULL) {
+    return false;
+  }
+  if ((int)user->opcode == (int)RV_OP(spill) ||
+      (int)user->opcode == (int)RV_OP(reload)) {
+    // Spill stores and reloads name their slot's register directly rather than
+    // reading an operand's, so there is nothing to redirect.
+    return true;
+  }
+  bool reads_value = false;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      reads_value = true;
+    }
+  }
+  if (!reads_value) {
+    // A duplicate entry in the user list, already dealt with.
+    return true;
+  }
+  if (((RVRegister*)value->reg)->type != kRVRegTypeInt ||
+      RegisterTypeFromInstruction(user) != kRVRegTypeInt) {
+    // There is no scratch register in the floating point file, and the read has
+    // to want an integer register for the staged one to be usable.
+    return false;
+  }
+  // t0 is the code generator's staging temporary and is never handed out by the
+  // allocator, so it is free between the reload and the read that follows it.
+  RVRegister* scratch = &allocator->int_regs[RV_INT_TEMP_START_1];
+  // There is one scratch register, so a read that already stages something else
+  // through it cannot stage this slot too.
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = user->operand[i];
+    if (op != NULL && op != value && op->reg == &scratch->base) {
+      return false;
+    }
+  }
+  TargetInstruction* reload =
+      TargetNewInstruction1((TargetOpcode)RV_OP(reload), spill);
+  TrapReload(reload);
+  TargetBasicBlockEmitBefore(&allocator->rv->base, user->block, reload, user);
+  reload->reg = &scratch->base;
+  reload->flags |= TARGET_INST_PROCESSED;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      user->operand[i] = reload;
+    }
+  }
+  TargetAddUser(reload, user);
+  // This reload is for a single instruction, however many of its operands read
+  // it.
+  reload->uses = 1;
+  return true;
 }
 
 static void InsertReassignableStoreBacks(
@@ -485,6 +576,11 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
       }
     }
   }
+  // A reassignable spill is only a handle for its slot: the store happens after
+  // whatever real definitions the value has, and a pseudo with none (an
+  // incoming argument, say) never writes the slot at all.  A read of one of
+  // those cannot be staged through the slot, so leave it naming the register.
+  bool slot_always_written = true;
   if (RVIsVarRegister(inst)) {
     // A varreg pseudo has no executable definition of its own. Its users are
     // not guaranteed to be in instruction order, and the first user need not
@@ -494,6 +590,7 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
     MapKeyValue kv = {.key.p = inst, .value.p = spill};
     MapInsert(&allocator->reassignable_spills, kv);
     InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+    slot_always_written = false;
   } else if (InstructionHasExternalDefs(allocator, inst)) {
     // The declaration of a merge tmp has no value to store.  Keep the spill
     // instruction only as a handle for its slot and write the slot after each
@@ -502,6 +599,7 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
     MapKeyValue kv = {.key.p = inst, .value.p = spill};
     MapInsert(&allocator->reassignable_spills, kv);
     InsertReassignableStoreBacks(allocator, inst, spill, NULL);
+    slot_always_written = false;
   } else if (defined_before_save && save != NULL) {
     // ABI argument and symbol pseudos are defined before the prologue.  Their
     // spill slot is frame-pointer-relative, so the store must execute only
@@ -516,10 +614,18 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
   // the users of inst empty and its uses count 0.
-  TargetRetargetInstructionIf(inst, spill, NotProcessed, NULL);
+  TargetRetargetInstructionIf(inst, spill, NotProcessed, allocator);
   spill->uses = inst->uses;
   spill->operand[0] = inst;
   spill->reg = inst->reg;
+  // Whatever is left over reads the register directly and has already been
+  // allocated, so it has to be repaired in place.  The user list is left as it
+  // is; nothing consults it once the value is marked spilled.
+  if (slot_always_written) {
+    for (size_t i = 0; i < inst->users.length; i++) {
+      RepairProcessedRead(allocator, inst->users.value.p[i], inst, spill);
+    }
+  }
   reg->base.owner = NULL;
   inst->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -814,6 +920,7 @@ static void ReloadSpills(RVRegisterAllocator* allocator,
       reload->uses = 1;
     }
   }
+  NoteReloadsInserted(allocator, inst);
 }
 
 static void EnsureOperandsAllocated(RVRegisterAllocator* allocator,
@@ -840,8 +947,26 @@ static void EnsureOperandsAllocated(RVRegisterAllocator* allocator,
   }
 }
 
+static void AllocateRegisterOnce(RVRegisterAllocator* allocator,
+                                 TargetInstruction* inst);
+
+// Record that this instruction is mid-allocation while it runs, so that a spill
+// triggered from inside knows its reads have already been resolved.
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  bool pushed = allocator->allocating_depth < RV_MAX_ALLOCATION_DEPTH;
+  if (pushed) {
+    allocator->allocating_reloaded[allocator->allocating_depth] = false;
+    allocator->allocating[allocator->allocating_depth++] = inst;
+  }
+  AllocateRegisterOnce(allocator, inst);
+  if (pushed) {
+    allocator->allocating_depth--;
+  }
+}
+
+static void AllocateRegisterOnce(RVRegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
    bool is_leaf = allocator->rv->base.num_calls == 0 && OptLevel1() &&
       !allocator->rv->not_leaf;
 
@@ -911,7 +1036,11 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(loc):
     case RV_OP(atomic_store):
     case RV_OP(atomic_fence):
-      // These instructions do not have registers allocated to them.
+      // These instructions do not have registers allocated to them.  They still
+      // have to be marked processed: their reads have had reloads inserted by
+      // now, so a later spill of one of their operands must repair the read
+      // rather than point it at a slot nothing will load from.
+      inst->flags |= TARGET_INST_PROCESSED;
       return;
 
     case RV_OP(regarg):
@@ -1177,11 +1306,16 @@ static bool HasAtomicInstructions(const RVRegisterAllocator* allocator) {
 
 #define RV_MAX_ARG_MOVES 32
 
+// A copy whose source is a spill slot rather than a register.  It clobbers its
+// destination like any other copy but reads nothing, so it never blocks one.
+#define RV_ARG_MOVE_MEMORY (-1)
+
 typedef struct {
   int dst;                // Destination physical register number.
   int src;                // Source physical register number.
   RVRegisterType type;    // Register file (int or float).
   TargetOpcode opcode;    // Move opcode (mv / fmv.s / fmv.d).
+  TargetInstruction* spill;  // Slot to reload from, for a memory source.
   bool done;
 } RVArgMove;
 
@@ -1206,7 +1340,8 @@ static bool RVRegInMoves(RVArgMove* moves, int count, RVRegisterType type,
     if (moves[i].type != type) {
       continue;
     }
-    if (moves[i].dst == num || moves[i].src == num) {
+    if (moves[i].dst == num ||
+        (moves[i].src != RV_ARG_MOVE_MEMORY && moves[i].src == num)) {
       return true;
     }
   }
@@ -1237,11 +1372,23 @@ static int RVFindScratchTemp(RVArgMove* moves, int count, RVRegisterType type) {
 }
 
 static void RVEmitMove(RVRegisterAllocator* alloc, TargetBasicBlock* block,
-                       TargetInstruction* pos, int dst, int src,
-                       RVRegisterType type, TargetOpcode opcode) {
-  TargetInstruction* d = RVRegHolder(alloc, block, dst, type);
-  TargetInstruction* s = RVRegHolder(alloc, block, src, type);
-  TargetInstruction* move = TargetNewInstruction2(opcode, d, s);
+                       TargetInstruction* pos, const RVArgMove* move_desc) {
+  if (move_desc->src == RV_ARG_MOVE_MEMORY) {
+    TargetInstruction* reload = TargetNewInstruction1(
+        (TargetOpcode)RV_OP(reload), move_desc->spill);
+    RVRegister* regs = (move_desc->type == kRVRegTypeInt) ? alloc->int_regs
+                                                          : alloc->float_regs;
+    reload->reg = &regs[move_desc->dst].base;
+    reload->flags |= TARGET_INST_PROCESSED;
+    reload->uses = 1;
+    TargetBasicBlockEmitBefore(&alloc->rv->base, block, reload, pos);
+    return;
+  }
+  TargetInstruction* d =
+      RVRegHolder(alloc, block, move_desc->dst, move_desc->type);
+  TargetInstruction* s =
+      RVRegHolder(alloc, block, move_desc->src, move_desc->type);
+  TargetInstruction* move = TargetNewInstruction2(move_desc->opcode, d, s);
   TargetBasicBlockEmitBefore(&alloc->rv->base, block, move, pos);
 }
 
@@ -1272,7 +1419,9 @@ static void RVResolveParallelCopy(RVRegisterAllocator* alloc,
         if (moves[j].done || j == i) {
           continue;
         }
-        if (moves[j].type == moves[i].type && moves[j].src == moves[i].dst) {
+        if (moves[j].type == moves[i].type &&
+            moves[j].src != RV_ARG_MOVE_MEMORY &&
+            moves[j].src == moves[i].dst) {
           blocked = true;
           break;
         }
@@ -1280,8 +1429,7 @@ static void RVResolveParallelCopy(RVRegisterAllocator* alloc,
       if (blocked) {
         continue;
       }
-      RVEmitMove(alloc, block, pos, moves[i].dst, moves[i].src, moves[i].type,
-                 moves[i].opcode);
+      RVEmitMove(alloc, block, pos, &moves[i]);
       moves[i].done = true;
       remaining--;
       progressed = true;
@@ -1308,16 +1456,19 @@ static void RVResolveParallelCopy(RVRegisterAllocator* alloc,
         if (moves[i].done) {
           continue;
         }
-        RVEmitMove(alloc, block, pos, moves[i].dst, moves[i].src, moves[i].type,
-                   moves[i].opcode);
+        RVEmitMove(alloc, block, pos, &moves[i]);
         moves[i].done = true;
       }
       break;
     }
-    RVEmitMove(alloc, block, pos, scratch, moves[pick].dst, type,
-               moves[pick].opcode);
+    RVArgMove save = {.dst = scratch,
+                      .src = moves[pick].dst,
+                      .type = type,
+                      .opcode = moves[pick].opcode};
+    RVEmitMove(alloc, block, pos, &save);
     for (int j = 0; j < count; j++) {
       if (!moves[j].done && moves[j].type == type &&
+          moves[j].src != RV_ARG_MOVE_MEMORY &&
           moves[j].src == moves[pick].dst) {
         moves[j].src = scratch;
       }
@@ -1337,26 +1488,106 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
       continue;
     }
 
-    // Gather the maximal run of consecutive argument moves.
+    // Gather the maximal run of consecutive argument moves.  A reload for a
+    // spilled argument is part of the copy too: it was given the argument's
+    // register directly, so it clobbers that register and has to be ordered
+    // with the moves rather than splitting the run in two.
     TargetInstruction* run[RV_MAX_ARG_MOVES];
     int run_count = 0;
+    int last_move;
     bool well_formed = true;
     TargetInstruction* scan = inst;
     while (scan != end && scan != NULL &&
-           (scan->flags & RV_INST_ARG_MOVE) != 0) {
+           ((scan->flags & RV_INST_ARG_MOVE) != 0 ||
+            (int)scan->opcode == (int)RV_OP(reload))) {
       if (run_count >= RV_MAX_ARG_MOVES) {
         well_formed = false;
         break;
       }
-      if (scan->operand[0] == NULL || scan->operand[1] == NULL ||
-          scan->operand[0]->reg == NULL || scan->operand[1]->reg == NULL ||
-          scan->operand[1]->block == NULL) {
+      if ((int)scan->opcode == (int)RV_OP(reload)) {
+        if (scan->reg == NULL || scan->operand[0] == NULL ||
+            ((int)scan->operand[0]->opcode != (int)RV_OP(spill))) {
+          break;
+        }
+      } else if (scan->operand[0] == NULL || scan->operand[1] == NULL ||
+                 scan->operand[0]->reg == NULL ||
+                 scan->operand[1]->reg == NULL ||
+                 scan->operand[1]->block == NULL) {
         well_formed = false;
       }
       run[run_count++] = scan;
       scan = TargetNext(scan);
     }
+    // A reload that stages a spilled argument through a scratch register is
+    // folded into the move that reads it, which becomes a memory-sourced copy.
+    // That keeps the whole argument setup in one parallel copy.  A reload with
+    // several readers, or one used as a move destination, cannot be folded and
+    // has to stay ahead of the copy, so the run ends there.
+    for (int r = 0; r < run_count; r++) {
+      if ((int)run[r]->opcode != (int)RV_OP(reload)) {
+        continue;
+      }
+      int readers = 0;
+      bool as_destination = false;
+      for (int j = r + 1; j < run_count; j++) {
+        if ((int)run[j]->opcode == (int)RV_OP(reload)) {
+          continue;
+        }
+        if (run[j]->operand[0] == run[r]) {
+          as_destination = true;
+        }
+        if (run[j]->operand[1] == run[r]) {
+          readers++;
+        }
+      }
+      if (as_destination || readers > 1 ||
+          (readers == 1 && run[r]->uses != 1)) {
+        run_count = r;
+        scan = run[r];
+        break;
+      }
+    }
+    // Trailing reloads belong to whatever follows the run, not to the copy.
+    last_move = -1;
+    for (int i = 0; i < run_count; i++) {
+      if ((int)run[i]->opcode != (int)RV_OP(reload)) {
+        last_move = i;
+      }
+    }
+    while (run_count > last_move + 1) {
+      run_count--;
+      scan = run[run_count];
+    }
+    if (run_count == 0) {
+      // Nothing usable: step past the first move so the scan makes progress.
+      inst = TargetNext(inst);
+      continue;
+    }
     TargetInstruction* after_run = scan;
+
+    // Pair each foldable reload with the move that reads it.  The move takes
+    // over the reload's spill slot as its source and the reload contributes no
+    // copy of its own.
+    TargetInstruction* memory_source[RV_MAX_ARG_MOVES];
+    bool folded[RV_MAX_ARG_MOVES];
+    for (int i = 0; i < run_count; i++) {
+      memory_source[i] = NULL;
+      folded[i] = false;
+    }
+    for (int r = 0; r < run_count; r++) {
+      if ((int)run[r]->opcode != (int)RV_OP(reload)) {
+        continue;
+      }
+      for (int j = r + 1; j < run_count; j++) {
+        if ((int)run[j]->opcode == (int)RV_OP(reload) ||
+            run[j]->operand[1] != run[r]) {
+          continue;
+        }
+        memory_source[j] = run[r]->operand[0];
+        folded[r] = true;
+        break;
+      }
+    }
 
     // Build the parallel-copy move set.
     RVArgMove moves[RV_MAX_ARG_MOVES];
@@ -1364,21 +1595,44 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
     bool duplicate_dst = false;
     if (well_formed) {
       for (int i = 0; i < run_count; i++) {
-        RVRegister* dreg = (RVRegister*)run[i]->operand[0]->reg;
-        RVRegister* sreg = (RVRegister*)run[i]->operand[1]->reg;
-        RVRegisterType type = (dreg->type == kRVRegTypeFloat ||
-                               sreg->type == kRVRegTypeFloat)
-                                  ? kRVRegTypeFloat
-                                  : kRVRegTypeInt;
+        RVRegisterType type;
+        int dst;
+        if (folded[i]) {
+          continue;
+        }
+        if ((int)run[i]->opcode == (int)RV_OP(reload)) {
+          RVRegister* reg = (RVRegister*)run[i]->reg;
+          type = reg->type;
+          dst = reg->base.num;
+          moves[count].src = RV_ARG_MOVE_MEMORY;
+          moves[count].spill = run[i]->operand[0];
+        } else if (memory_source[i] != NULL) {
+          RVRegister* dreg = (RVRegister*)run[i]->operand[0]->reg;
+          type = dreg->type;
+          dst = dreg->base.num;
+          moves[count].src = RV_ARG_MOVE_MEMORY;
+          moves[count].spill = memory_source[i];
+        } else {
+          RVRegister* dreg = (RVRegister*)run[i]->operand[0]->reg;
+          RVRegister* sreg = (RVRegister*)run[i]->operand[1]->reg;
+          type = (dreg->type == kRVRegTypeFloat || sreg->type == kRVRegTypeFloat)
+                     ? kRVRegTypeFloat
+                     : kRVRegTypeInt;
+          dst = dreg->base.num;
+          moves[count].src = sreg->base.num;
+          moves[count].spill = NULL;
+        }
         for (int j = 0; j < count; j++) {
-          if (moves[j].type == type && moves[j].dst == dreg->base.num) {
+          if (moves[j].type == type && moves[j].dst == dst) {
             duplicate_dst = true;
           }
         }
-        moves[count].dst = dreg->base.num;
-        moves[count].src = sreg->base.num;
+        moves[count].dst = dst;
         moves[count].type = type;
-        moves[count].opcode = run[i]->opcode;
+        moves[count].opcode = (TargetOpcode)RV_OP(mv);
+        if ((int)run[i]->opcode != (int)RV_OP(reload)) {
+          moves[count].opcode = run[i]->opcode;
+        }
         moves[count].done = false;
         count++;
       }
@@ -1387,11 +1641,20 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
     // Only rewrite when it is safe to do so; otherwise leave the run untouched.
     if (well_formed && !duplicate_dst) {
       RVResolveParallelCopy(alloc, block, run[0], moves, count);
-      // Neutralise the original moves rather than deleting them: the register
+      // Neutralise the originals rather than deleting them: the register
       // allocator has already consumed the use counts on their operands, so
       // deleting would underflow them.  Pointing both operands at the same
       // register makes the emitter skip them (it never emits `mv rx, rx`).
       for (int i = 0; i < run_count; i++) {
+        if ((int)run[i]->opcode == (int)RV_OP(reload)) {
+          TargetInstruction* holder = RVRegHolder(
+              alloc, block, ((RVRegister*)run[i]->reg)->base.num,
+              ((RVRegister*)run[i]->reg)->type);
+          run[i]->opcode = (TargetOpcode)RV_OP(mv);
+          run[i]->operand[0] = holder;
+          run[i]->operand[1] = holder;
+          continue;
+        }
         run[i]->operand[1] = run[i]->operand[0];
       }
     }

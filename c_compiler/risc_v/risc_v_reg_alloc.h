@@ -39,6 +39,7 @@ typedef struct RVRegister {
 #define RV_INT_RETURN_REG RV_INT_ARG_START  // Integer return value register.
 #define RV_FLOAT_RETURN_REG \
   RV_FP_ARG_START  // Float/Double return value register.
+#define RV_MAX_ALLOCATION_DEPTH 32
 
 typedef struct {
   struct RVGenerator* rv;
@@ -57,6 +58,14 @@ typedef struct {
   // Reassignable values (variable registers and merge temporaries) need their
   // spill slot refreshed after every target instruction that defines them.
   Map reassignable_spills;
+  // Instructions whose own allocation is in progress.  Allocating one can spill
+  // another value, and once the reload pass for an in-flight instruction has
+  // run, a read of that value has to be repaired rather than retargeted:
+  // pointing the operand at the spill slot then leaves it naming a register the
+  // spill has given away.
+  TargetInstruction* allocating[RV_MAX_ALLOCATION_DEPTH];
+  bool allocating_reloaded[RV_MAX_ALLOCATION_DEPTH];
+  size_t allocating_depth;
 } RVRegisterAllocator;
 
 void RVRegisterAllocatorInit(RVRegisterAllocator* alloc,

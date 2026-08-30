@@ -129,7 +129,13 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       bool is_candidate = true;
       
       // Check if destination is not in the output filter.
+      // An instruction writing sp adjusts the stack: the outgoing argument area
+      // is popped by `addi sp, sp, n`, whose value nothing reads.  Dropping it
+      // leaves sp low for the rest of the function, and the epilogue restores
+      // the callee-saved registers at sp-relative offsets before it recovers sp
+      // from fp, so it would reload them from the wrong place.
       if (dest != NULL && (((int)dest->opcode == (int)RV_OP(tmp)) ||
+          ((int)dest->opcode == (int)RV_OP(sp)) ||
           RVIsFixedRegister(dest) ||
           BitSetContains(&filter, dest->id) ||
           RVIsResult(dest))) {
