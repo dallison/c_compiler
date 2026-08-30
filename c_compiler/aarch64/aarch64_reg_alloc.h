@@ -31,6 +31,11 @@ typedef struct AARCH64Register {
   AARCH64RegisterType type;
 } AARCH64Register;
 
+// Allocating for one instruction recurses into its unallocated operands and its
+// destination register variable, so the nesting follows the depth of an operand
+// tree rather than being a fixed couple of levels.
+#define AARCH64_MAX_ALLOCATION_DEPTH 32
+
 
 // The RISC-V R32F and R32D instructions share floating point registers.
 
@@ -67,6 +72,14 @@ typedef struct {
   // was given the scratch register instead and has to be written to a spill
   // slot as soon as it is computed.  See AllocateRegisterWithType.
   bool spill_after_definition;
+
+  // The instructions currently being allocated for, outermost first.  Each has
+  // already had reloads inserted for whichever of its operands were spilled, so
+  // a spill from here on cannot redirect its reads to a slot by retargeting
+  // them.  Allocation nests through operands and destination variables, hence a
+  // stack rather than a single instruction.  See IsBeingAllocated.
+  TargetInstruction* allocating[AARCH64_MAX_ALLOCATION_DEPTH];
+  size_t allocating_depth;
 } AARCH64RegisterAllocator;
 
 void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* alloc,

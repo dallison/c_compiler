@@ -91,6 +91,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   MapInitForPointerKeys(&allocator->reassignable_spills);
   MapInitForPointerKeys(&allocator->varreg_values);
   allocator->spill_after_definition = false;
+  allocator->allocating_depth = 0;
 }
 
 AARCH64RegisterAllocator* NewAARCH64RegisterAllocator(struct AARCH64Generator* g) {
@@ -432,8 +433,24 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
   return victim != NULL ? victim : unsafe_victim;
 }
 
+// True if |inst|'s own allocation is in progress.  Its operands have already
+// had reloads inserted for any of them that were spilled, so pointing one of
+// them at a spill slot now would do nothing but leave it naming the physical
+// register: the reload pass for this instruction has been and gone.
+static bool IsBeingAllocated(AARCH64RegisterAllocator* allocator,
+                             TargetInstruction* inst) {
+  for (size_t d = 0; d < allocator->allocating_depth; d++) {
+    if (allocator->allocating[d] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool NotProcessed(TargetInstruction* inst, void* data) {
-  return (inst->flags & TARGET_INST_PROCESSED) == 0;
+  AARCH64RegisterAllocator* allocator = data;
+  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
+         !IsBeingAllocated(allocator, inst);
 }
 
 // A read that has already been allocated names the physical register the value
@@ -448,6 +465,12 @@ static bool RepairProcessedRead(AARCH64RegisterAllocator* allocator,
                                 TargetInstruction* spill) {
   if (user->block == NULL || value->reg == NULL) {
     return false;
+  }
+  if ((int)user->opcode == (int)AARCH64_OP(spill) ||
+      (int)user->opcode == (int)AARCH64_OP(reload)) {
+    // Spill stores and reloads name their slot's register directly rather than
+    // reading an operand's, so there is nothing to redirect.
+    return true;
   }
   bool reads_value = false;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
@@ -612,7 +635,7 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
   // the users of inst empty and its uses count 0.
-  TargetRetargetInstructionIf(inst, spill, NotProcessed, NULL);
+  TargetRetargetInstructionIf(inst, spill, NotProcessed, allocator);
   spill->uses = inst->uses;
   spill->operand[0] = inst;
   spill->reg = inst->reg;
@@ -885,13 +908,11 @@ static void EnsureOperandsAllocated(AARCH64RegisterAllocator* allocator,
   }
 }
 
+static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
+                                 TargetInstruction* inst);
+
 static void AllocateRegister(AARCH64RegisterAllocator* allocator,
                              TargetInstruction* inst) {
-   bool is_leaf = allocator->g->base.num_calls == 0 &&
-      compiler->optimize;
-
-  AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
-
   TrapInstruction(inst);
 
   // If we already have a register allocated (as can be the case
@@ -900,8 +921,7 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
   if (inst->reg != NULL) {
     return;
   }
-  
-  
+
   if (AARCH64IsVarRegister(inst)) {
     // Variable regsiter.  Delay allocation until it's assigned to.
     // It will be assigned to by an rmov or from a destination
@@ -911,6 +931,29 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
 
   // Reload any spilled expressions.
   ReloadSpills(allocator, inst);
+
+  // Every read of this instruction is now committed to a physical register, so
+  // a spill triggered by the rest of its allocation (finding a register for an
+  // operand, for its destination variable, or for the result) can no longer
+  // redirect those reads to the slot by retargeting: this instruction's reload
+  // pass has already run.  Record it as in flight so such a spill repairs the
+  // read in place instead.
+  bool pushed = allocator->allocating_depth < AARCH64_MAX_ALLOCATION_DEPTH;
+  if (pushed) {
+    allocator->allocating[allocator->allocating_depth++] = inst;
+  }
+  AllocateRegisterOnce(allocator, inst);
+  if (pushed) {
+    allocator->allocating_depth--;
+  }
+}
+
+static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
+   bool is_leaf = allocator->g->base.num_calls == 0 &&
+      compiler->optimize;
+
+  AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
 
   EnsureOperandsAllocated(allocator, inst);
 
@@ -1039,7 +1082,12 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     case   AARCH64_OP(oplsl):
     case AARCH64_OP(spill):
     case AARCH64_OP(reload):
-      // These instructions do not have registers allocated to them.
+      // These instructions do not have registers allocated to them.  They do
+      // read their operands out of registers, though, so they still have to
+      // count as processed: that is what tells a later spill that their reads
+      // are already committed to a physical register and need repairing rather
+      // than retargeting.
+      inst->flags |= TARGET_INST_PROCESSED;
       return;
 
     case AARCH64_OP(regarg):

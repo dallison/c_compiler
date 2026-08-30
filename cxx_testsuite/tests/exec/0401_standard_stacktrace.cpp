@@ -11,8 +11,15 @@
   return std::stacktrace::current();
 }
 
+// `noinline` keeps the call, but `return capture_leaf();` is still a tail call,
+// which leaves this function no frame of its own to appear in the trace.  A
+// side effect after the call is what makes the frame outlive it.
+static volatile int keep_frame_alive = 0;
+
 [[gnu::noinline]] static std::stacktrace capture_middle() {
-  return capture_leaf();
+  std::stacktrace captured = capture_leaf();
+  keep_frame_alive = keep_frame_alive + 1;
+  return captured;
 }
 
 [[gnu::noinline]] static std::stacktrace capture_limited() {
