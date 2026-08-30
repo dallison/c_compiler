@@ -252,6 +252,39 @@ static bool MemoryOffsetPossible(TargetInstruction* inst, int offset) {
   return ARMIsPossibleImmediate(offset);
 }
 
+// Code generation measures a frame-relative offset from the incoming stack
+// pointer and flags the instruction so that the emitter, which is the first to
+// know where the frame pointer ends up, biases the immediate by the distance
+// between the two.  Folding such an address calculation into the load or store
+// has to carry the flag across, or the memory access keeps the unbiased offset
+// and reads the frame record instead of the variable.
+#define kARMFrameOffsetFlags \
+  (kARMFrameStorageOffset | kARMIncomingFrameOffset)
+
+// The largest bias the emitter can apply: the frame record, the r0-r3 save area
+// of a variadic function, and the integer callee-save block, rounded up.
+#define ARM_MAX_FRAME_OFFSET_BIAS 128
+
+// The bias is not known yet, so a folded frame-relative offset has to stay
+// clear of the immediate field's limit by however much it could move.
+static bool FoldedOffsetPossible(TargetInstruction* inst, int offset,
+                                 uint32_t frame_flags) {
+  if (frame_flags == 0) {
+    return MemoryOffsetPossible(inst, offset);
+  }
+  return MemoryOffsetPossible(inst, offset - ARM_MAX_FRAME_OFFSET_BIAS) &&
+         MemoryOffsetPossible(inst, offset + ARM_MAX_FRAME_OFFSET_BIAS);
+}
+
+// The immediates of an address calculation and of the memory access that uses
+// it can be added together only if at most one of them is biased: the emitter
+// applies the bias once, to whatever offset the memory access ends up with.
+static bool FrameOffsetFoldable(TargetInstruction* memory,
+                                TargetInstruction* base) {
+  return (memory->flags & kARMFrameOffsetFlags) == 0 ||
+         (base->flags & kARMFrameOffsetFlags) == 0;
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   ARMGenerator* rv = opt_data->rv;
@@ -269,13 +302,16 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       // place, so its source operand has already been overwritten by the time
       // the load runs -- folding the add's immediate into the load would then
       // address the post-update value (e.g. the load in `*(++p)`).
-      if (IsAddWithImmediate(base) && base->dest == NULL) {
+      if (IsAddWithImmediate(base) && base->dest == NULL &&
+          FrameOffsetFoldable(inst, base)) {
         int offset = ARMIntValue(inst->operand[1]);
         int immed = ARMIntValue(base->operand[1]);
-        if (MemoryOffsetPossible(inst, offset + immed)) {
+        uint32_t frame_flags = base->flags & kARMFrameOffsetFlags;
+        if (FoldedOffsetPossible(inst, offset + immed, frame_flags)) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));
+          inst->flags |= frame_flags;
           // Only drop the address calculation if nothing else needs it.  A
           // dest means the add also assigns a (variable) register used
           // elsewhere, so it must be kept even with no remaining operand users.
@@ -288,13 +324,16 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
     } else if (ARMIsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
       // See the load case: only fold a pure address-calculation add.
-      if (IsAddWithImmediate(base) && base->dest == NULL) {
+      if (IsAddWithImmediate(base) && base->dest == NULL &&
+          FrameOffsetFoldable(inst, base)) {
         int offset = ARMIntValue(inst->operand[2]);
         int immed = ARMIntValue(base->operand[1]);
-        if (MemoryOffsetPossible(inst, offset + immed)) {
+        uint32_t frame_flags = base->flags & kARMFrameOffsetFlags;
+        if (FoldedOffsetPossible(inst, offset + immed, frame_flags)) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));
+          inst->flags |= frame_flags;
           // See the load case: keep the add if it also defines a dest register.
           if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
