@@ -53,6 +53,13 @@ typedef struct {
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preseARMed regs.
   Map reassignable_spills;
+  // Instructions whose own allocation is in progress.  Allocating one can spill
+  // another value, and if that value is one of these instructions' operands the
+  // read has to be repaired rather than retargeted: the reload pass for it has
+  // already run.
+#define ARM_MAX_ALLOCATION_DEPTH 32
+  TargetInstruction* allocating[ARM_MAX_ALLOCATION_DEPTH];
+  size_t allocating_depth;
 } ARMRegisterAllocator;
 
 void ARMRegisterAllocatorInit(ARMRegisterAllocator* alloc,

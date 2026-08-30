@@ -84,6 +84,7 @@ void ARMRegisterAllocatorInit(ARMRegisterAllocator* allocator,
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
   MapInitForPointerKeys(&allocator->reassignable_spills);
+  allocator->allocating_depth = 0;
 }
 
 ARMRegisterAllocator* NewARMRegisterAllocator(struct ARMGenerator* g) {
@@ -439,8 +440,82 @@ static bool InstructionHasExternalDefs(ARMRegisterAllocator* allocator,
   return false;
 }
 
+// True if |inst|'s own allocation is in progress.  Its operands have already
+// had reloads inserted for any of them that were spilled, so pointing one of
+// them at a spill slot now would do nothing but leave it naming the physical
+// register: the reload pass for this instruction has been and gone.
+static bool IsBeingAllocated(ARMRegisterAllocator* allocator,
+                             TargetInstruction* inst) {
+  for (size_t d = 0; d < allocator->allocating_depth; d++) {
+    if (allocator->allocating[d] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool NotProcessed(TargetInstruction* inst, void* data) {
-  return (inst->flags & TARGET_INST_PROCESSED) == 0;
+  ARMRegisterAllocator* allocator = data;
+  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
+         !IsBeingAllocated(allocator, inst);
+}
+
+// A read that has already been allocated names the physical register the value
+// was in, and spilling hands that register to something else.  Stage the slot
+// through the dedicated scratch register immediately before the read instead.
+// Returns false when the read cannot be repaired, which leaves it as it was.
+static bool RepairProcessedRead(ARMRegisterAllocator* allocator,
+                                TargetInstruction* user,
+                                TargetInstruction* value,
+                                TargetInstruction* spill) {
+  if (user->block == NULL || value->reg == NULL) {
+    return false;
+  }
+  if ((int)user->opcode == (int)ARM_OP(spill) ||
+      (int)user->opcode == (int)ARM_OP(reload)) {
+    // Spill stores and reloads name their slot's register directly rather than
+    // reading an operand's, so there is nothing to redirect.
+    return true;
+  }
+  bool reads_value = false;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      reads_value = true;
+    }
+  }
+  if (!reads_value) {
+    // A duplicate entry in the user list, already dealt with.
+    return true;
+  }
+  if (RegisterTypeFromInstruction(value) != kARMRegTypeInt) {
+    // There is no scratch register in the VFP file.
+    return false;
+  }
+  ARMRegister* scratch = &allocator->int_regs[ARM_TMP_REG];
+  // There is one scratch register, so a read that already stages something else
+  // through it cannot stage this slot too.
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = user->operand[i];
+    if (op != NULL && op != value && op->reg == &scratch->base) {
+      return false;
+    }
+  }
+  TargetInstruction* reload =
+      TargetNewInstruction1((TargetOpcode)ARM_OP(reload), spill);
+  TrapReload(reload);
+  TargetBasicBlockEmitBefore(&allocator->g->base, user->block, reload, user);
+  reload->reg = &scratch->base;
+  reload->flags |= TARGET_INST_PROCESSED;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      user->operand[i] = reload;
+    }
+  }
+  TargetAddUser(reload, user);
+  // This reload is for a single instruction, however many of its operands read
+  // it.
+  reload->uses = 1;
+  return true;
 }
 
 // Where the store back for a definition has to go.  Normally that is right
@@ -627,10 +702,16 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
   // the users of inst empty and its uses count 0.
-  TargetRetargetInstructionIf(inst, spill, NotProcessed, NULL);
+  TargetRetargetInstructionIf(inst, spill, NotProcessed, allocator);
   spill->uses = inst->uses;
   spill->operand[0] = inst;
   spill->reg = inst->reg;
+  // Whatever is left over reads the register directly and has already been
+  // allocated, so it has to be repaired in place.  The user list is left as it
+  // is; nothing consults it once the value is marked spilled.
+  for (size_t i = 0; i < inst->users.length; i++) {
+    RepairProcessedRead(allocator, inst->users.value.p[i], inst, spill);
+  }
   reg->base.owner = NULL;
   inst->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -822,8 +903,16 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
     TargetInstruction* spill = NULL;
     if (op != NULL && (int)op->opcode == (int)ARM_OP(spill)) {
       spill = op;
-    } else if (op != NULL && ARMIsVarRegister(op)) {
-      spill = MapFindPointerKey(&allocator->reassignable_spills, op);
+    } else if (op != NULL) {
+      // A pseudo that generates no code of its own -- a variable register, or a
+      // tmp staging an indirect call target -- is written by the instructions
+      // that target it, so a read can just as well name the writer as the
+      // pseudo.  Either way the value is in the pseudo's slot once it has been
+      // spilled, and the slot is what has to be read.
+      for (TargetInstruction* value = op; value != NULL && spill == NULL;
+           value = value->dest) {
+        spill = MapFindPointerKey(&allocator->reassignable_spills, value);
+      }
     }
     if (spill != NULL) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)ARM_OP(reload),
@@ -859,8 +948,25 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
   }
 }
 
+static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
+                                 TargetInstruction* inst);
+
+// Record that this instruction is mid-allocation while it runs, so that a spill
+// triggered from inside knows its reads have already been resolved.
 static void AllocateRegister(ARMRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  bool pushed = allocator->allocating_depth < ARM_MAX_ALLOCATION_DEPTH;
+  if (pushed) {
+    allocator->allocating[allocator->allocating_depth++] = inst;
+  }
+  AllocateRegisterOnce(allocator, inst);
+  if (pushed) {
+    allocator->allocating_depth--;
+  }
+}
+
+static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
    bool is_leaf = allocator->g->base.num_calls == 0 &&
       compiler->optimize;
 
