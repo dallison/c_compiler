@@ -202,6 +202,16 @@ static bool IsShortLivedVarReg(AARCH64RegisterAllocator* allocator,
 }
 
 
+// A value written straight into a variable register shares that register with
+// the variable, and the variable's live range is not what the use counter
+// tracks.  Handing the register on when the value's last read is done therefore
+// takes it away from the variable as well.
+static bool SharesRegisterWithVariable(AARCH64RegisterAllocator* allocator,
+                                       TargetInstruction* inst) {
+  return inst->dest != NULL && AARCH64IsVarRegister(inst->dest) &&
+         !IsShortLivedVarReg(allocator, inst->dest);
+}
+
 // Free up any registers that are no longer needed by the instruction.  This
 // frees up all now-unused operands and destination.
 static void FreeRegisters(AARCH64RegisterAllocator* allocator,
@@ -218,6 +228,9 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
       // counter, or it could be reassigned and clobber the variable.
       if (AARCH64IsVarRegister(op) &&
           !IsShortLivedVarReg(allocator, op)) {
+        continue;
+      }
+      if (SharesRegisterWithVariable(allocator, op)) {
         continue;
       }
       TargetRegister* reg = op->reg;
@@ -1049,7 +1062,8 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
 
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.
-  if (inst->uses == 0 && !reg->base.reserved) {
+  if (inst->uses == 0 && !reg->base.reserved &&
+      !SharesRegisterWithVariable(allocator, inst)) {
     FreeRegister(allocator, reg);
   }
 }
@@ -1313,6 +1327,17 @@ static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   }
   // Preserve all outputs.
   BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
+  // A value written into a variable register shares that register with it, and
+  // it is the variable that is asked whether a caller-saved register will do.
+  // The variable is often not read at all -- the readers name the value
+  // instead, which is how `delete p` reads the pointer twice around the
+  // destructor call -- so it has to be told about the value's live range.
+  for (size_t i = 0; i < block->outputs.length; i++) {
+    TargetInstruction* output = block->outputs.value.p[i];
+    if (output->dest != NULL) {
+      BitSetInsert(&allocator->preserved_instructions, output->dest->id);
+    }
+  }
 }
 
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {

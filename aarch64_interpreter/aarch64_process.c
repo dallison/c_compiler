@@ -20,7 +20,17 @@ static __thread int g_fallback_heap_lock_depth = 0;
 
 static void GuestThreadDestruct(AARCH64GuestThread* thread);
 
+// A range that runs off the end of the address space is in no region, and
+// saying so up front keeps the `addr + size` each region is compared against
+// from wrapping round and landing inside one.
+static bool RangeWraps(uint64_t addr, size_t size) {
+  return addr + (uint64_t)size < addr;
+}
+
 static bool GuestLoaderAddressOk(Loader* loader, uint64_t addr, size_t size) {
+  if (RangeWraps(addr, size)) {
+    return false;
+  }
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
     uint64_t start = (uint64_t)(uintptr_t)region->address;
@@ -45,6 +55,9 @@ static bool GuestMemoryReadable(AARCH64ProcessRuntime* process, uint64_t addr,
 
 static bool GuestMemoryContainsLocked(AARCH64ProcessRuntime* process,
                                       uint64_t addr, size_t size) {
+  if (RangeWraps(addr, size)) {
+    return false;
+  }
   for (size_t i = 0; i < process->memory_ranges.length; i++) {
     AARCH64GuestMemoryRange* range = process->memory_ranges.value.p[i];
     if (range != NULL && addr >= range->start && addr + size <= range->end) {
@@ -175,7 +188,7 @@ void AARCH64ProcessUnregisterGuestMemory(AARCH64ProcessRuntime* process,
 
 bool AARCH64ProcessGuestMemoryOk(AARCH64ProcessRuntime* process, uint64_t addr,
                                  size_t size) {
-  if (process == NULL || !process->initialized) {
+  if (process == NULL || !process->initialized || RangeWraps(addr, size)) {
     return false;
   }
   pthread_rwlock_rdlock(&process->memory_lock);

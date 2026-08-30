@@ -62,7 +62,17 @@ static void WriteS(AARCH64Interpreter* interpreter, int reg, float value) {
   interpreter->v[reg] = bits;  // Upper 32 bits cleared.
 }
 
+// A range that runs off the end of the address space is in no region, and
+// saying so up front keeps the `addr + size` each region is compared against
+// from wrapping round and landing inside one.
+static bool RangeWraps(uint64_t addr, size_t size) {
+  return addr + (uint64_t)size < addr;
+}
+
 static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
+  if (RangeWraps(addr, size)) {
+    return false;
+  }
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
     uint64_t start = (uint64_t)(uintptr_t)region->address;
@@ -84,6 +94,9 @@ static bool ProcessMemoryOk(AARCH64Interpreter* interpreter, uint64_t addr,
 
 static bool InterpreterAddressOk(AARCH64Interpreter* interpreter, uint64_t addr,
                                  size_t size) {
+  if (RangeWraps(addr, size)) {
+    return false;
+  }
   if (interpreter->tp_base != 0 && interpreter->tls_block_size > 0) {
     uint64_t tls_start = interpreter->tp_base;
     uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
@@ -142,11 +155,17 @@ static void GuestMemoryDidWrite(AARCH64Interpreter* interpreter) {
   interpreter->reservation_valid = false;
 }
 
+static void GuestMemoryFault(AARCH64Interpreter* interpreter, const char* op,
+                             uint64_t addr) {
+  fprintf(stderr, "%s outside mapped memory at 0x%" PRIx64 "\n", op, addr);
+  AARCH64InterpreterDumpRegisters(interpreter);
+  AARCH64InterpreterFail(interpreter, 1);
+}
+
 static void Store64(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint64_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
-    fprintf(stderr, "Store64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Store64", addr);
   }
   GuestMemoryLock(interpreter);
   *(uint64_t*)(uintptr_t)addr = value;
@@ -157,8 +176,7 @@ static void Store64(AARCH64Interpreter* interpreter, uint64_t addr,
 static void Store32(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint32_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
-    fprintf(stderr, "Store32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Store32", addr);
   }
   GuestMemoryLock(interpreter);
   *(uint32_t*)(uintptr_t)addr = value;
@@ -168,8 +186,7 @@ static void Store32(AARCH64Interpreter* interpreter, uint64_t addr,
 
 static uint64_t Load64(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
-    fprintf(stderr, "Load64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Load64", addr);
   }
   GuestMemoryLock(interpreter);
   uint64_t value = *(uint64_t*)(uintptr_t)addr;
@@ -179,8 +196,7 @@ static uint64_t Load64(AARCH64Interpreter* interpreter, uint64_t addr) {
 
 static uint32_t Load32(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
-    fprintf(stderr, "Load32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Load32", addr);
   }
   GuestMemoryLock(interpreter);
   uint32_t value = *(uint32_t*)(uintptr_t)addr;
@@ -191,8 +207,7 @@ static uint32_t Load32(AARCH64Interpreter* interpreter, uint64_t addr) {
 static void Store16(AARCH64Interpreter* interpreter, uint64_t addr,
                     uint16_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
-    fprintf(stderr, "Store16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Store16", addr);
   }
   GuestMemoryLock(interpreter);
   *(uint16_t*)(uintptr_t)addr = value;
@@ -203,8 +218,7 @@ static void Store16(AARCH64Interpreter* interpreter, uint64_t addr,
 static void Store8(AARCH64Interpreter* interpreter, uint64_t addr,
                    uint8_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
-    fprintf(stderr, "Store8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Store8", addr);
   }
   GuestMemoryLock(interpreter);
   *(uint8_t*)(uintptr_t)addr = value;
@@ -214,8 +228,7 @@ static void Store8(AARCH64Interpreter* interpreter, uint64_t addr,
 
 static uint16_t Load16(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
-    fprintf(stderr, "Load16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Load16", addr);
   }
   GuestMemoryLock(interpreter);
   uint16_t value = *(uint16_t*)(uintptr_t)addr;
@@ -225,8 +238,7 @@ static uint16_t Load16(AARCH64Interpreter* interpreter, uint64_t addr) {
 
 static uint8_t Load8(AARCH64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
-    fprintf(stderr, "Load8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    AARCH64InterpreterFail(interpreter, 1);
+    GuestMemoryFault(interpreter, "Load8", addr);
   }
   GuestMemoryLock(interpreter);
   uint8_t value = *(uint8_t*)(uintptr_t)addr;
