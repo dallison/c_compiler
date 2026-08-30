@@ -224,10 +224,10 @@ rest, and clearing it typically drops the failure count by dozens at a time.
 The mechanical patterns are:
 
 - `if constexpr` in a pre-C++17 header becomes tag dispatch on
-  `integral_constant<bool, ...>`, as already done in `<exception>` and
-  `<memory>`.
-- A `requires` clause in a pre-C++20 header becomes `enable_if` SFINAE — but
-  see §3.6 for which spelling to use, because the obvious one does not work.
+  `integral_constant<bool, ...>` — but only where the untaken branch would have
+  been well-formed anyway; see the warning at the end of §3.6.
+- A `requires` clause in a pre-C++20 header becomes `enable_if` SFINAE. All the
+  usual spellings now work, including the defaulted non-type parameter (§3.6).
 - A header from a later standard that is pulled in transitively gets its body
   wrapped in `#if __cplusplus >= <its standard>` so that it stays includable
   but empty, as already done in `<concepts>` and `<memory_resource>`.
@@ -378,13 +378,13 @@ compiler prerequisite in the plan and is why `complex.h`/`tgmath.h` are staged
 last. Sequence it as: type-system representation → constant folding and
 arithmetic lowering → per-target ABI (return-in-registers vs. sret) → library.
 
-### 3.6 SFINAE is ignored on a defaulted non-type template parameter (open)
+### 3.6 SFINAE is ignored on a defaulted non-type template parameter (fixed)
 
-This one gates all of Phase 6, so read it before converting any `requires`
-clause.
+This gated all of Phase 6. It is fixed; the idiom below now works in every
+mode from C++11 up. Regression:
+`cxx_testsuite/tests/exec/0463_enable_if_nontype_parameter_sfinae.cpp`.
 
-Two problems, one fixed and one open. Both concern the standard pre-C++20
-constraint idiom:
+Both problems concerned the standard pre-C++20 constraint idiom:
 
 ```cpp
 template <class T, typename enable_if<is_integral<T>::value, int>::type = 0>
@@ -401,10 +401,10 @@ followed directly by the end of the parameter. `TypenameOpensTypeParameter`
 now looks past the keyword and the optional name to tell them apart.
 Regression: `cxx_testsuite/tests/exec/0462_dependent_nontype_template_parameter.cpp`.
 
-**Substitution failure (open.)** The parameter now parses, but it does not
-participate in SFINAE: the two overloads below collapse into
+**Substitution failure (fixed.)** Once it parsed, the parameter still did not
+participate in SFINAE: the two overloads below collapsed into
 `error: Duplicate definition of symbol which`, because the defaulted non-type
-parameter is dropped from the signature and its condition is never evaluated.
+parameter was dropped from the signature and its condition was never evaluated.
 
 ```cpp
 template <class T, typename enable_if<is_integral<T>::value, int>::type = 0>
@@ -413,16 +413,13 @@ template <class T, typename enable_if<!is_integral<T>::value, int>::type = 0>
 int which(T) { return 2; }
 ```
 
-Beware that this fails *silently* when there is only one overload: the
-constraint is simply ignored, the header still compiles, and the harness still
-reports a pass. Any conversion to this spelling must be checked by running two
-overloads that only `enable_if` distinguishes, not by checking that the header
-compiles.
+It failed *silently* when there was only one overload: the constraint was
+simply ignored, the header still compiled, and the harness still reported a
+pass. That is worth remembering when adding coverage here — check the idiom by
+running two overloads that only `enable_if` distinguishes, not by checking that
+a header compiles.
 
-This was investigated down to three distinct layers, all of which have to be
-fixed together. A work-in-progress patch covering the first two lives outside
-the tree (it regresses `libc/chrono.cc`, see below); the notes here are what it
-established.
+There were four distinct layers, all of which had to be fixed together.
 
 *Layer 1 — the parameter's type is erased after parsing.* `ParseTemplateParameter`
 parsed `typename enable_if<C<T>, int>::type` into the correct representation
@@ -438,47 +435,60 @@ placeholder rather than crashing. A primitive parameter type is unaffected
 same hazard is already documented a few lines above for a type parameter's
 `default_type`.
 
-*Layer 2 — the type is never substituted.* `CompleteTemplateArguments`
-explicitly skips a non-type parameter whose type contains a template parameter,
-so nothing ever evaluates the condition; and on the declaration side, two
-function templates whose signatures match are treated as redeclarations of each
-other even when their template parameter lists differ, which is what produces
-the duplicate-definition error. `TryAppendSameSignatureConstrainedTemplateOverload`
-already has the right shape for the fix — it admits same-signature overloads
-that differ in their `requires` clause — but extending it to compare parameter
-lists is not enough on its own: doing so by `TypeEqual` on the parameter types
-made `libc/chrono.cc`'s `duration_cast` split into two overloads and fail with
-`Ambiguous overload` plus `Function template definition is required for
-instantiation`. A redeclaration and its definition must still compare equal,
-so the comparison needs to be narrower than structural type equality.
+*Layer 2 — the type is never substituted, and the overloads are merged.*
+`CompleteTemplateArguments` skipped a non-type parameter whose type contains a
+template parameter, so nothing evaluated the condition; and on the declaration
+side, two function templates whose signatures match were treated as
+redeclarations of each other even when their template parameter lists differ,
+which produced the duplicate-definition error.
+`SubstituteDependentNonTypeParameterTypes` now substitutes each such type
+against the completed argument vector and fails the candidate when the
+substitution does, and `TryAppendSameSignatureConstrainedTemplateOverload`
+admits same-signature overloads whose parameter lists differ.
 
-*Layer 3 — a value-dependent condition does not fold in this path.* With layers
-1 and 2 addressed, a dependent parameter type whose arguments are all types
-substitutes correctly (`typename box<T>::type N = 3` works and the default
-comes through). A parameter type whose argument is a value-dependent
-*expression* still fails: `my_is_int<T>::value` with `T = int` folds to the
-primary template's `false` instead of the explicit specialization's `true`, so
-`enable_if<false, int>` is instantiated, has no `type`, and the candidate is
-discarded in exactly the cases that should be kept. The identical expression in
-the same function's *return type* folds correctly, and warming the trait
-beforehand does not change either result, so this is a genuine difference
-between the two substitution paths rather than an instantiation-ordering
-artifact.
+The declaration-side comparison has one trap. At the point it runs, the new
+declaration's parameters have not reached its function type yet —
+`MoveCurrentTemplateParametersToFunction` hands them over later — so reading
+the type yields an empty list and *every* redeclaration of a function template
+looks like a new overload. That is what made `libc/chrono.cc`'s `duration_cast`
+split in two and fail with `Ambiguous overload` plus `Function template
+definition is required for instantiation`. The parameters are still in
+`syntax->current_template_parameters` at that moment, so
+`PendingTemplateParameterList` reads them from there.
 
-Until all three are fixed, use one of the spellings that were verified to work
-correctly (each was checked by running the two-overload discrimination test
-above, not merely compiling it):
+*Layer 3 — parameters were not in scope for their own list.* This was the real
+cause of the silent misbehaviour. `BuildDependentTemplateScopeValueName` treats
+a qualified name as dependent only when `current_template_parameter_count > 0`,
+and `ParseTemplateDeclaration` did not publish that count until the whole
+parameter list had been read. So while parsing `typename enable_if<C<T>,
+int>::type`, the compiler believed no template parameters were in scope,
+resolved `C<T>::value` against C's *primary* template, and folded the condition
+to a constant right there — every instantiation then saw the same answer and no
+candidate was ever discarded. Each parameter is now counted as soon as it is
+parsed, since a parameter is in scope for the ones that follow it, and
+`SyntaxParseTemplateArgumentList` asks that count as well as the
+declaration flag before deciding an argument is value-dependent.
 
-- `enable_if` in the **return type** — works. Preferred for free functions.
-- `enable_if` as a **defaulted function parameter** — works. The only option
-  for constructors, which have no return type.
-- **Tag dispatch** through an overloaded helper on `integral_constant` — works,
-  but see the warning below.
+*Layer 4 — an enclosing class's pack was not substituted into a member
+template's parameter type.* With the condition correctly deferred, a member
+template constrained on the enclosing class's parameters started failing with
+`template argument pack expansion requires a parameter pack` — which broke
+every `std::variant` test, since that is the shape of its converting
+constructor (`enable_if_t<__converting_candidate<T, Types...>::value, int>`).
+`CopyFunctionTemplateParameters` substituted the enclosing arguments into a
+parameter's *default* but only rebased its *type*, so `Types` kept an index
+that addresses one of the member's own parameters once the member is renumbered
+to a standalone 0-based template. The type now gets the same substitute-then-
+rebase treatment the default already had.
 
-Note that dependent `enable_if` is fine everywhere else: as a nested typedef,
-in a static member initializer, and with a non-dependent condition in a
-template parameter list. It is specifically the combination of a dependent
-condition with a defaulted non-type template parameter that is dropped.
+Dependent `enable_if` was always fine elsewhere: as a nested typedef, in a
+static member initializer, and with a non-dependent condition in a template
+parameter list. These other spellings also work and remain reasonable choices:
+
+- `enable_if` in the **return type**. Preferred for free functions.
+- `enable_if` as a **defaulted function parameter**.
+- **Tag dispatch** through an overloaded helper on `integral_constant`, but see
+  the warning below.
 
 **Converting a working `if constexpr` to tag dispatch is not behaviour-preserving.**
 `<exception>`'s `throw_with_nested` and `rethrow_if_nested`, and `<memory>`'s
@@ -487,13 +497,15 @@ condition with a defaulted non-type template parameter that is dropped.
 (`No matching overload for nested_error`, then a constexpr evaluator mismatch).
 An `if constexpr` branch that is not taken is never instantiated; a tag-dispatch
 overload set does not give that guarantee. Both conversions have been reverted.
-Making these headers work below C++17 is a compiler job — `if constexpr` support
-in older modes, or the SFINAE fix above — not a header-rewriting job.
+Making these headers work below C++17 is a compiler job — `if constexpr`
+support in older modes — not a header-rewriting job.
 
 ### 3.7 `enable_if` cannot hold certain types (open)
 
-Two types are rejected as the second argument of `enable_if`, which matters
-because §3.6 forces the constraint into the return type.
+Two types are rejected as the second argument of `enable_if`. This mattered a
+great deal while §3.6 forced every constraint into the return type; with the
+defaulted non-type parameter available it is now avoidable, but the underlying
+defects are still there.
 
 **The invoke-result builtin.**
 
@@ -519,8 +531,7 @@ a bisect to find out which declaration was at fault.
 **A deduction guide cannot be constrained below C++20 at all.** A guide has no
 return type, `enable_if` in its deduced type is rejected, SFINAE is not applied
 to the deduced type either (a guide whose deduced type is ill-formed still
-competes, giving `Ambiguous class template argument deduction`), and a
-dependent default on a `bool` template parameter is rejected by §3.6. Also
+competes, giving `Ambiguous class template argument deduction`). Also
 `decltype(&F::operator())` is not a substitution failure for a non-class `F`,
 so a guide cannot even filter itself: it deduced
 `__function_guide<int*>` for `F = int(*)(int)`. `<functional>`'s functor guide

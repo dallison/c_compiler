@@ -533,6 +533,21 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
     }
     TemplateParameter* param =
         TemplateParameterCopy(original);
+    // A non-type parameter's own type may name an enclosing-template parameter
+    // too, which is where the pre-C++20 constraint idiom puts its condition:
+    // `template <class T, enable_if_t<C<T, Types...>::value, int> = 0>` for a
+    // member of `template <class... Types> struct box`.  Substitute the
+    // enclosing arguments the same way, before rebasing, or `Types` keeps an
+    // index that addresses one of the member's own parameters instead.
+    if (param->type != NULL && subst_args != NULL && parser != NULL &&
+        TypeContainsTemplateParameter(param->type)) {
+      TypeRecord* substituted =
+          SubstituteTemplateParameters(parser, param->type, subst_args);
+      if (substituted != NULL) {
+        TypeRecordDelete(param->type);
+        param->type = substituted;
+      }
+    }
     RebaseTemplateParameterIndices(param->type, rebase_base);
     // A parameter default may name an enclosing-template parameter (indices
     // below `rebase_base`), e.g. `template <class R = D>` for a member of a
@@ -6125,6 +6140,53 @@ static const char* TemplateArgumentKindError(TemplateParameterKind kind) {
   return "Template non-type argument must be an integer constant expression";
 }
 
+/* A non-type parameter whose own type is dependent is where the pre-C++20
+ * constraint idiom puts its condition: in
+ * `template <class T, typename enable_if<C<T>, int>::type = 0> void f(T);`
+ * the enable_if has no member `type` when `C<T>` is false, and the candidate
+ * must then be discarded.  Substitute each such type against the now-complete
+ * argument vector and report whether all of them have a valid substitution.
+ * Substituting requires the full vector, because the condition may name any
+ * parameter, not only those declared before this one.  Without this the
+ * condition is never evaluated and every candidate is accepted. */
+static bool SubstituteDependentNonTypeParameterTypes(TypeParser* parser,
+                                                     Vector* template_parameters,
+                                                     Vector* completed) {
+  if (parser == NULL || template_parameters == NULL || completed == NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < template_parameters->length; i++) {
+    TemplateParameter* param = template_parameters->value.p[i];
+    if (param == NULL || param->kind != kTemplateParameterNonType ||
+        param->type == NULL || (param->type->type & kTypeAuto) != 0 ||
+        !TypeContainsTemplateParameter(param->type)) {
+      continue;
+    }
+    bool saved_substitution_failed = parser->template_substitution_failed;
+    parser->template_substitution_failed = false;
+    TypeRecord* substituted =
+        SubstituteTemplateParameters(parser, param->type, completed);
+    bool substitution_failed =
+        parser->template_substitution_failed || substituted == NULL;
+    parser->template_substitution_failed = saved_substitution_failed;
+    if (substitution_failed) {
+      TypeRecordDelete(substituted);
+      return false;
+    }
+    // Record the concrete parameter type on the argument so later stages see
+    // the substituted type rather than the dependent spelling.
+    TemplateArgument* arg =
+        i < completed->length ? completed->value.p[i] : NULL;
+    if (arg != NULL && arg->dependent_expr == NULL &&
+        !TypeContainsTemplateParameter(substituted)) {
+      TypeRecordDelete(arg->type);
+      arg->type = TypeRecordCopy(substituted);
+    }
+    TypeRecordDelete(substituted);
+  }
+  return true;
+}
+
 /* Produce a full template argument vector with one entry per declared
  * parameter: copy supplied `args`, substitute defaults (which may themselves
  * reference earlier parameters) for any omitted trailing parameters, and gather
@@ -6327,6 +6389,13 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
       arg->type = TypeRecordCopy(param->type);
     }
     VectorAppend(completed, arg);
+  }
+  if (!SubstituteDependentNonTypeParameterTypes(parser, template_parameters,
+                                                completed)) {
+    VectorDeleteWithContents(completed,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
   }
   return completed;
 }
