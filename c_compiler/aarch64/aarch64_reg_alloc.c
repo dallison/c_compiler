@@ -1224,6 +1224,18 @@ static bool HasShortBlockLocalLifetime(AARCH64RegisterAllocator* allocator,
     return false;
   }
 
+  // The definition writes the variable's register but is also a value in its
+  // own right, and reads of it are recorded against it rather than against the
+  // variable.  Counting only the variable's own reads then declares the
+  // register free while those reads are still ahead, and the next value handed
+  // the register clobbers what they were going to find there.  This is what a
+  // register variable holding an address the IR also uses directly looks like
+  // (`this` inside an inlined assignment operator, whose `&object` is the
+  // argument of the next call as well).
+  if (definition->users.length != 0) {
+    return false;
+  }
+
   for (size_t i = 0; i < value->users.length; i++) {
     TargetInstruction* user = value->users.value.p[i];
     if (user->block != definition_block) {
