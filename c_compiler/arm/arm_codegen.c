@@ -1203,6 +1203,37 @@ static bool HasEightBitMemoryOffset(ARMOpcode opcode) {
          opcode == ARM_OP(ldrsb) || opcode == ARM_OP(strh);
 }
 
+// The largest offset given to a frame-flagged add, leaving the emitter room to
+// bias it and still reach the immediate the add can take directly.
+#define ARM_MAX_FLAGGED_FRAME_OFFSET 0x700
+
+// An offset outside a memory instruction's immediate range has to move into the
+// address calculation.  When it is measured from the frame it takes the frame
+// bias with it: the bias belongs to whichever immediate the frame is measured
+// from, so leaving the flag on the access as well would count it twice (and
+// would bias an offset of zero).  A large offset is split so that the part
+// carrying the flag stays small enough for the bias to fit.
+static TargetInstruction* MoveOffsetIntoAddress(ARMGenerator* g,
+                                                TargetInstruction* addr,
+                                                int32_t offset,
+                                                uint32_t* frame_flag) {
+  if (*frame_flag == 0) {
+    return OffsetFrom(g, addr, offset);
+  }
+  int32_t flagged = offset;
+  if (flagged > ARM_MAX_FLAGGED_FRAME_OFFSET) {
+    flagged = ARM_MAX_FLAGGED_FRAME_OFFSET;
+  } else if (flagged < -ARM_MAX_FLAGGED_FRAME_OFFSET) {
+    flagged = -ARM_MAX_FLAGGED_FRAME_OFFSET;
+  }
+  addr = MarkFrameOffset(AddImmediate(g, addr, flagged), *frame_flag);
+  *frame_flag = 0;
+  if (flagged != offset) {
+    addr = OffsetFrom(g, addr, offset - flagged);
+  }
+  return addr;
+}
+
 static TargetInstruction* LoadImmediate(ARMGenerator* g, ARMOpcode opcode,
                                           TargetInstruction* base, int32_t offset) {
   if (HasEightBitMemoryOffset(opcode) && (offset < -255 || offset > 255)) {
@@ -2983,16 +3014,17 @@ static TargetInstruction* Load(ARMGenerator* g, IRNode* addr_node, ARMOpcode opc
   if (!on_stack) {
     return addr;
   }
+  uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
   if (HasEightBitMemoryOffset(opcode)) {
     int64_t value = TargetIntValue(offset);
     if (value < -255 || value > 255) {
-      addr = OffsetFrom(g, addr, (int32_t)value);
+      addr = MoveOffsetIntoAddress(g, addr, (int32_t)value, &frame_flag);
       offset = ZeroImm(g);
     }
   }
 
   TargetInstruction* result = Emit(g, SetInstructionSize(NewInstruction2(opcode, addr, offset), size));
-  result->flags |= FrameOffsetFlagForNode(addr_node);
+  result->flags |= frame_flag;
 
 #if 0
   TargetInstruction* result = NULL;
@@ -3137,10 +3169,11 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
   }
+  uint32_t frame_flag = FrameOffsetFlagForNode(addr_node);
   if (HasEightBitMemoryOffset(opcode)) {
     int64_t value = TargetIntValue(offset);
     if (value < -255 || value > 255) {
-      addr = OffsetFrom(g, addr, (int32_t)value);
+      addr = MoveOffsetIntoAddress(g, addr, (int32_t)value, &frame_flag);
       offset = ZeroImm(g);
     }
   }
@@ -3148,7 +3181,7 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
   TargetInstruction* result =
       Emit(g, SetInstructionSize(
                   NewInstruction4(opcode, src, addr, offset, scale), size));
-  result->flags |= FrameOffsetFlagForNode(addr_node);
+  result->flags |= frame_flag;
   return result;
 }
 
