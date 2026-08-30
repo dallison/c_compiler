@@ -1128,6 +1128,17 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
       if (!want_used && inst->reg->owner != NULL) {
         continue;
       }
+      // Two live-in values naming the same physical register is normally the
+      // value/variable pair that deliberately shares one -- either order works
+      // there, they hold the same thing.  Otherwise the register really can
+      // only hold one of them, and the one that claimed it while walking this
+      // block's dominators is the one whose definition is nearest, so leave it
+      // alone rather than pointing the register at a value that lost it.
+      TargetInstruction* claimed = inst->reg->owner;
+      if (claimed != NULL && claimed != inst && claimed->uses > 0 &&
+          claimed->dest != inst && inst->dest != claimed) {
+        continue;
+      }
       inst->reg->owner = inst;
     }
   }
