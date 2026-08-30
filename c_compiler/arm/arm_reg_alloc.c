@@ -1445,6 +1445,15 @@ void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
     // structreturn pseudo rather than ordinary SSA liveness, so reserve its
     // physical register from temporary allocation.
     allocator->int_regs[reg_num].base.reserved = true;
+    if (IsSavedReg(&allocator->int_regs[reg_num])) {
+      // Reserving it is also what stops AllocateRegisterWithType recording it
+      // as used, and the structreturn pseudo that would otherwise record it has
+      // no readers of its own, so the optimizer can delete it.  The function
+      // writes the register either way -- the prologue homes the pointer there
+      // and every call reloads it from that home -- so it has to be preserved
+      // for the caller.
+      BitSetInsert(&allocator->used_int_regs, reg_num);
+    }
   }
 
   TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
