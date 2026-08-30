@@ -53,6 +53,9 @@ typedef struct {
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preseAARCH64ed regs.
   BitSet short_lived_varregs;
+  // Variable registers written by pointing a value's destination at them, where
+  // that value is read in its own right as well.  See FindSpillVictim.
+  BitSet shared_varregs;
   Map reassignable_spills;
 
   // Set when no register could be freed for the value being allocated, so it

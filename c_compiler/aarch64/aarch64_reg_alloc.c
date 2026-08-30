@@ -84,6 +84,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   allocator->max_spilled_region_size = 0;
   BitSetInit(&allocator->preserved_instructions);
   BitSetInit(&allocator->short_lived_varregs);
+  BitSetInit(&allocator->shared_varregs);
   MapInitForPointerKeys(&allocator->reassignable_spills);
   allocator->spill_after_definition = false;
 }
@@ -99,6 +100,7 @@ void AARCH64RegisterAllocatorDestruct(AARCH64RegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_float_regs);
   BitSetDestruct(&allocator->preserved_instructions);
   BitSetDestruct(&allocator->short_lived_varregs);
+  BitSetDestruct(&allocator->shared_varregs);
   MapDestruct(&allocator->reassignable_spills);
 }
 
@@ -369,7 +371,15 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
             continue;
           }
           int cost = SpillCost(owner);
-          if (IsUnsafeSpillVictim(owner, &reentered)) {
+          // Writing a variable register costs nothing when the value being
+          // stored can simply be computed into it, but then the register holds
+          // two things at once as far as this is concerned: the variable, whose
+          // reads spilling redirects to the slot, and the value, whose reads
+          // name the register and stay behind.
+          bool shares_register_with_a_value =
+              BitSetContains(&allocator->shared_varregs, owner->id);
+          if (IsUnsafeSpillVictim(owner, &reentered) ||
+              shares_register_with_a_value) {
             if (cost < unsafe_cost) {
               unsafe_cost = cost;
               unsafe_victim = owner;
@@ -1280,6 +1290,10 @@ static void BuildShortLivedVarRegSet(AARCH64RegisterAllocator* allocator) {
       if (inst->dest != NULL &&
           HasShortBlockLocalLifetime(allocator, inst->dest)) {
         BitSetInsert(&allocator->short_lived_varregs, inst->dest->id);
+      }
+      if (inst->dest != NULL && AARCH64IsVarRegister(inst->dest) &&
+          inst->users.length != 0) {
+        BitSetInsert(&allocator->shared_varregs, inst->dest->id);
       }
       if (is_end) {
         break;
