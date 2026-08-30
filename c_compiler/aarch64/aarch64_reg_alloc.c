@@ -16,6 +16,9 @@
 
 static void AllocateRegister(AARCH64RegisterAllocator* allocator,
                              TargetInstruction* inst);
+static AARCH64Register* ScratchRegister(AARCH64RegisterAllocator* allocator,
+                                        AARCH64RegisterType type);
+static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst);
 
 static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type, int size,
                                     bool allow_no_size,
@@ -86,6 +89,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   BitSetInit(&allocator->short_lived_varregs);
   BitSetInit(&allocator->shared_varregs);
   MapInitForPointerKeys(&allocator->reassignable_spills);
+  MapInitForPointerKeys(&allocator->varreg_values);
   allocator->spill_after_definition = false;
 }
 
@@ -102,6 +106,7 @@ void AARCH64RegisterAllocatorDestruct(AARCH64RegisterAllocator* allocator) {
   BitSetDestruct(&allocator->short_lived_varregs);
   BitSetDestruct(&allocator->shared_varregs);
   MapDestruct(&allocator->reassignable_spills);
+  MapDestruct(&allocator->varreg_values);
 }
 
 void AARCH64RegisterAllocatorDelete(AARCH64RegisterAllocator* alloc) {
@@ -431,6 +436,60 @@ static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
+// A read that has already been allocated names the physical register the value
+// was in, and spilling hands that register to something else.  Where the read
+// runs before the handover that is fine, but the allocator walks blocks in
+// dominator order, not layout order, so it is not always so.  Stage the slot
+// through the scratch register immediately before the read instead.  Returns
+// false when the read cannot be repaired, which leaves it as it was.
+static bool RepairProcessedRead(AARCH64RegisterAllocator* allocator,
+                                TargetInstruction* user,
+                                TargetInstruction* value,
+                                TargetInstruction* spill) {
+  if (user->block == NULL || value->reg == NULL) {
+    return false;
+  }
+  bool reads_value = false;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      reads_value = true;
+    }
+  }
+  if (!reads_value) {
+    // A duplicate entry in the user list, already dealt with.
+    return true;
+  }
+  AARCH64Register* scratch = ScratchRegister(
+      allocator, RegisterTypeFromInstruction(value));
+  if (scratch == NULL) {
+    return false;
+  }
+  // There is one scratch register, so a read that already stages another slot
+  // through it cannot stage this one too.
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = user->operand[i];
+    if (op != NULL && op != value && op->reg == &scratch->base) {
+      return false;
+    }
+  }
+  TargetInstruction* reload =
+      TargetNewInstruction1((TargetOpcode)AARCH64_OP(reload), spill);
+  TrapReload(reload);
+  TargetBasicBlockEmitBefore(&allocator->g->base, user->block, reload, user);
+  reload->reg = &scratch->base;
+  reload->flags |= TARGET_INST_PROCESSED;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (user->operand[i] == value) {
+      user->operand[i] = reload;
+    }
+  }
+  TargetAddUser(reload, user);
+  // This reload is for a single instruction, however many of its operands read
+  // it.
+  reload->uses = 1;
+  return true;
+}
+
 static bool IsReassignableDefinition(TargetInstruction* inst,
                                      TargetInstruction* target) {
   return inst->dest == target;
@@ -501,6 +560,23 @@ static void SyncReassignableSpill(AARCH64RegisterAllocator* allocator,
 
 static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
   AARCH64Register* reg = (AARCH64Register*)inst->reg;    // Current register.
+
+  if (AARCH64IsVarRegister(inst)) {
+    // A value assigned into a variable is left sharing the variable's register
+    // rather than copied into it, so the register holds both.  The variable
+    // survives losing it -- every assignment writes the slot as well -- but the
+    // value's readers name the register directly, and they read it after the
+    // spill has handed it to something else.  Spill the value too so those
+    // readers reload it instead.
+    MapKeyType key = {.p = inst};
+    TargetInstruction* value = MapFind(&allocator->varreg_values, key);
+    MapRemove(&allocator->varreg_values, key);
+    if (value != NULL && value->reg == inst->reg && value->uses > 0 &&
+        (value->flags & TARGET_INST_SPILLED) == 0) {
+      SpillInstruction(allocator, value);
+    }
+  }
+
   
   // Generate a spill instruction with 2 operands:
   // 1. Instruction to spill (not set yet)
@@ -540,6 +616,12 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
   spill->uses = inst->uses;
   spill->operand[0] = inst;
   spill->reg = inst->reg;
+  // Whatever is left over reads the register directly and has already been
+  // allocated, so it has to be repaired in place.  The user list is left as it
+  // is; nothing consults it once the value is marked spilled.
+  for (size_t i = 0; i < inst->users.length; i++) {
+    RepairProcessedRead(allocator, inst->users.value.p[i], inst, spill);
+  }
   reg->base.owner = NULL;
   inst->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -885,6 +967,16 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
       }
     }
     inst->reg = &reg->base;
+    if (AARCH64IsVarRegister(inst->dest) && inst->users.length > 0) {
+      // The value and the variable now share one physical register.  Note the
+      // pairing so that taking the register away from the variable takes it
+      // away from the value too.
+      MapKeyValue kv = {.key.p = inst->dest, .value.p = inst};
+      MapInsert(&allocator->varreg_values, kv);
+    } else {
+      MapKeyType key = {.p = inst->dest};
+      MapRemove(&allocator->varreg_values, key);
+    }
     // A fixed argument-register pseudo (r0..r7 / d0..d7) is allocated once in
     // the symbol pre-pass, but InitializeBasicBlockRegisters clears every
     // physical register's owner at each block boundary.  Because the pseudo

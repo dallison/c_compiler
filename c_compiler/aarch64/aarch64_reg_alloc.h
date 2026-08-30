@@ -57,6 +57,11 @@ typedef struct {
   // that value is read in its own right as well.  See FindSpillVictim.
   BitSet shared_varregs;
   Map reassignable_spills;
+  // Maps a variable register to the value most recently written into it, for
+  // as long as that value is still read in its own right.  The two share one
+  // physical register, so taking it away from the variable takes it away from
+  // the value as well.  See SpillInstruction.
+  Map varreg_values;
 
   // Set when no register could be freed for the value being allocated, so it
   // was given the scratch register instead and has to be written to a spill
