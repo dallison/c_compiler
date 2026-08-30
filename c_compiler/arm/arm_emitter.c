@@ -713,7 +713,14 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
         off -= 4;
       }
     }
-    saved_reg_offset -= 4 * num_int;
+    if (!leaf_writeback_int_save) {
+      saved_reg_offset -= 4 * num_int;
+    }
+    // The block transfer's own writeback put the integers at the BOTTOM of the
+    // frame, below the rest of the saved-register area rather than at the top
+    // of it, so in that case the cursor stays where it is and only the slot
+    // size changes below.
+    //
     // Each saved register is written UP from its offset (str/vstr [sp,#off]
     // covers [off, off+size)).  Integer slots are 4 bytes, so after the int
     // region the cursor sits 4 bytes below the lowest int's offset -- but the
@@ -829,9 +836,13 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
               offset - 4 * i);
     }
   }
+  // Mirror SaveRegisters, except that a writeback restore has already popped
+  // the integer block, so sp now sits 4*num_int bytes higher than it did in the
+  // prologue: subtracting the int area from the cursor cancels that shift and
+  // reproduces the offsets the floats were saved at.
   offset -= 4 * num_int;
-  // Mirror SaveRegisters: skip the extra int slot so floats reload from the
-  // same offsets they were spilled to (see the comment there).
+  // Skip the extra int slot so floats reload from the same offsets they were
+  // spilled to (see the comment there).
   if (num_int > 0) {
     offset -= 4;
   }
