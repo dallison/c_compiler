@@ -160,6 +160,18 @@ static int StackFrameSize(X86_64Emitter* emitter) {
   
   stack_frame_size = (stack_frame_size + 15) & ~15;  // Aligned to 16 bytes.
 
+  // The prologue pushes the frame pointer and then subtracts
+  // `stack_frame_size - 8` (see SaveRegisters), so the body's %rsp sits
+  // `stack_frame_size` below the entry value.  The ABI puts %rsp at a multiple
+  // of 16 at each call, so entry %rsp is 8 past one (the call pushed a return
+  // address) and a frame that is a multiple of 16 leaves the body 8 past a
+  // multiple too -- which breaks the guarantee for every call this function
+  // makes, and flips it back and forth with call depth.  Adding 8 makes the
+  // prologue's subtraction a multiple of 16 instead, so the body is aligned and
+  // %rbp is reliably 8 past a multiple of 16.  Every %rsp-relative offset below
+  // is derived from this same value, so they all move together.
+  stack_frame_size += 8;
+
   return stack_frame_size;
 }
 

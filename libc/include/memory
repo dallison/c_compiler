@@ -86,20 +86,11 @@ struct allocator {
     new (ptr) U(std::forward<Args>(args)...);
   }
 
-  // Tag dispatch rather than `if constexpr` so the header also works below
-  // C++17.
-  template <class U>
-  constexpr void __destroy(U* ptr, false_type) {
-    ptr->~U();
-  }
-
-  template <class U>
-  constexpr void __destroy(U*, true_type) {}
-
   template <class U>
   constexpr void destroy(U* ptr) {
-    __destroy(ptr, integral_constant<bool,
-                                     is_trivially_destructible<U>::value>());
+    if constexpr (!is_trivially_destructible<U>::value) {
+      ptr->~U();
+    }
   }
 
   size_type max_size() const noexcept {

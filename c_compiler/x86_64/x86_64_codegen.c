@@ -4727,9 +4727,20 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
   return error;
 }
 
+// A local's address is `%rbp + var_offset - base.stack_frame_size - 16` (see
+// LocalVariableOffset).  Both subtrahends are multiples of 16, and %rbp holds
+// the entry %rsp, which the ABI leaves 8 past a multiple of 16 because the call
+// pushed a return address.  So the address is congruent to `var_offset + 8`,
+// and rounding var_offset itself to the requested alignment would place a
+// 16-byte request 8 bytes off.  Round so that the sum comes out aligned
+// instead.  Requests of 8 or less are unaffected, since 8 is a multiple of them.
+#define X86_64_FRAME_POINTER_RESIDUE 8
+
 static void AlignOffset(PoolEntry* entry, int* offset) {
   int alignment = PoolEntryStackAlignment(entry);
-  *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
+  int biased = *offset + X86_64_FRAME_POINTER_RESIDUE;
+  *offset = ((biased + (alignment - 1)) & ~(alignment - 1)) -
+            X86_64_FRAME_POINTER_RESIDUE;
 }
 
 static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {

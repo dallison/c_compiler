@@ -172,41 +172,23 @@ class __with_nested : public T, public nested_exception {
   constexpr explicit __with_nested(T&& value) : T(static_cast<T&&>(value)) {}
   constexpr explicit __with_nested(const T& value) : T(value) {}
 };
-
-// Selection is by tag dispatch rather than `if constexpr` so that the header
-// still works below C++17.
-template <class U, class T>
-[[noreturn]] constexpr void __throw_nested(T&& value, true_type) {
-  throw __with_nested<U>(static_cast<T&&>(value));
-}
-
-template <class U, class T>
-[[noreturn]] constexpr void __throw_nested(T&& value, false_type) {
-  throw static_cast<T&&>(value);
-}
-
-template <class T>
-constexpr void __rethrow_if_nested(const T& value, true_type) {
-  static_cast<const nested_exception&>(value).rethrow_nested();
-}
-
-template <class T>
-constexpr void __rethrow_if_nested(const T&, false_type) {}
 }  // namespace __exception_detail
 
 template <class T>
 [[noreturn]] constexpr void throw_with_nested(T&& value) {
-  typedef typename remove_cv<typename remove_reference<T>::type>::type U;
-  __exception_detail::__throw_nested<U>(
-      static_cast<T&&>(value),
-      integral_constant<bool, is_class<U>::value &&
-                                  !is_base_of<nested_exception, U>::value>());
+  using U = remove_cv_t<remove_reference_t<T>>;
+  if constexpr (is_class_v<U> && !is_base_of_v<nested_exception, U>) {
+    throw __exception_detail::__with_nested<U>(static_cast<T&&>(value));
+  } else {
+    throw static_cast<T&&>(value);
+  }
 }
 
 template <class T>
 constexpr void rethrow_if_nested(const T& value) {
-  __exception_detail::__rethrow_if_nested(
-      value, integral_constant<bool, is_base_of<nested_exception, T>::value>());
+  if constexpr (is_base_of_v<nested_exception, T>) {
+    static_cast<const nested_exception&>(value).rethrow_nested();
+  }
 }
 
 constexpr int uncaught_exceptions() noexcept {

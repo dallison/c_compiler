@@ -232,22 +232,23 @@ The mechanical patterns are:
   wrapped in `#if __cplusplus >= <its standard>` so that it stays includable
   but empty, as already done in `<concepts>` and `<memory_resource>`.
 
-Fixed so far: `<exception>`, `<memory>`, `<concepts>`, `<memory_resource>`.
+Fixed so far: `<exception>`, `<memory>`, `<concepts>`, `<memory_resource>`,
+`<iterator>`, `<optional>`, `<functional>`. C++17 now reaches `<algorithm>`,
+`<array>`, `<deque>`, `<iostream>`, `<iterator>`, `<list>`, `<map>`, `<memory>`,
+`<optional>`, `<set>`, `<string>`, `<tuple>` and `<vector>`.
 
 Remaining blockers, in the order the harness reports them:
 
 | Blocker | Nature |
 | --- | --- |
-| `<iterator>` concept definitions | C++20 API in a C++98 header; guard on C++20 |
-| `<functional>` `requires` clauses | 8 outside the C++23 block; needs §3.6 |
 | `<bit>` `requires` clauses | `<limits>` pulls `<bit>` in below C++20 |
 | `<any>` `requires` clauses | C++17 header, so must not use `requires` |
-| `<optional>` `requires` clauses | C++17 header, so must not use `requires` |
-| `<tuple>` `if constexpr` | C++11 header; needs an explicit return type, not `auto&` |
+| `<tuple>` `if constexpr` | blocks C++11/14 only; needs an explicit return type |
 
 `<tuple>` is the one that is not mechanical: `__get<I>()` returns `auto&` and
-selects the member with `if constexpr`, so a pre-C++14 version needs the return
-type spelled through `tuple_element` rather than deduced.
+selects the member with `if constexpr`, so a C++11 version needs the return
+type spelled through `tuple_element` rather than deduced. It is also the last
+blocker for C++11 and C++14, so it stays last.
 
 ## 3. Compiler defects
 
@@ -271,14 +272,75 @@ expression can begin with `alignas`, so the token now unconditionally selects
 the declaration path. Regression:
 `cxx_testsuite/tests/exec/0460_block_scope_alignas.cpp`.
 
-### 3.2 Frame slots ignored the requested alignment (fixed)
+### 3.2 Frame slots ignored the requested alignment (partly fixed, still open)
 
 With the parse fixed, `alignas` on an automatic variable still had no effect.
 Each backend's `AlignOffset` aligned the slot to `TypeRecordAlignment(type)`
 only, ignoring the `aligned` attribute that the frontend had already recorded
-in `Symbol::alignment`. Fixed with a shared `PoolEntryStackAlignment` in
-`c_compiler/backend/codegen.c`, used by the x86-64, AArch64, ARM, and RISC-V
-codegens.
+in `Symbol::alignment`. A shared `PoolEntryStackAlignment` in
+`c_compiler/backend/codegen.c` now supplies the requested alignment to the
+x86-64, AArch64, ARM, and RISC-V codegens.
+
+**That is necessary but not sufficient, and the committed change is incomplete.**
+`AlignOffset` rounds `var_offset`, which is a *relative* distance measured from
+the start of the local area and growing downward from zero, not the address the
+object ends up at. The emitted address is the frame pointer minus a base that
+depends on the total frame size and on the saved-argument and callee-saved
+register areas, so rounding the relative offset only aligns the object when that
+base happens to be a multiple of the requested alignment. It is therefore
+accidental, and two committed tests fail because of it:
+
+- `cxx_testsuite/tests/exec/0460_block_scope_alignas.cpp` passes at `-O0` on
+  x86-64 but returns 4 at `-O2`, where saving `rbx`/`r12`/`r13` into the frame
+  shifts the base. A reduced probe shows `alignas(16)` and a 16-byte-aligned
+  class landing at `address % 16 == 8` at `-O2` while every request of 8 or
+  less is satisfied.
+- `cxx_testsuite/tests/exec/0461_stdalign_iso646_headers.cpp` returns 1 on ARM,
+  where even `alignas(8)` is missed.
+
+Measuring the frame directly (reading `%rbp` with inline asm and printing its
+distance to each slot) shows the slot rounding is *not* the problem. At both
+`-O0` and `-O2` the offsets are identical and correctly aligned relative to the
+frame pointer — `%rbp - &a16 == 0x30`, `%rbp - &w == 0x20`. What differs is the
+frame pointer itself: `%rbp % 16` is 0 at `-O0` and **8** at `-O2`. So
+`AlignOffset` is right relative to `%rbp`, and `%rbp` is what is unreliable.
+
+The reason is an ABI bug in the prologue. With `E` as `%rsp` at the first
+instruction of the function, `pushq %rbp; leaq 8(%rsp), %rbp;
+subq $(stack_frame_size - 8), %rsp` (`SaveRegisters` in
+`c_compiler/x86_64/x86_64_emitter.c`, `int remaining = stack_frame_size - 8`)
+gives `%rbp == E` and `%rsp == E - stack_frame_size`. `StackFrameSize` rounds to
+a multiple of 16, and the ABI makes `E ≡ 8 (mod 16)` because the `call` pushed a
+return address, so the body runs with **`%rsp ≡ 8 (mod 16)` where the ABI
+requires `≡ 0` at every call**. (The emitted `subq $58` / `subq $78` are hex —
+see `PrintAsmImmediate` — i.e. 88 and 120, which cross-checks against the
+`// Local vars at offset -96(rbp)` / `-128` comments printed in decimal.)
+
+Every function therefore hands its callees a stack that is 8 off, and since
+`%rbp == E`, each callee's `%rbp` residue is decided by whether its caller
+happened to violate the guarantee an even or odd number of times up the chain.
+Over-aligned locals then work only when two errors cancel, which is exactly the
+observed behaviour: at `-O0` `main` leaves `%rsp ≡ 8` so `check` gets
+`%rbp ≡ 0` and the 16-aligned offsets come out right, while at `-O2` a different
+frame size flips the parity and every 16-byte request lands 8 bytes off.
+
+So the fix is two parts, and the first must come first:
+
+1. Make the prologue keep `%rsp` 16-byte aligned in the function body, so the
+   guarantee actually holds and `%rbp` is reliably `≡ 8 (mod 16)`. `remaining`
+   has to become a multiple of 16 rather than an odd multiple of 8, and the
+   `%rsp`-relative saved-register and spill offsets computed from
+   `stack_frame_size` have to move with it. This changes generated code for
+   every function on x86-64 and needs the same audit on ARM (where `alignas(8)`
+   already fails), AArch64, and RISC-V.
+2. Then bias the slot rounding by that known residue, so a request of `A` bytes
+   picks `var_offset ≡ 8 (mod A)` rather than `var_offset ≡ 0 (mod A)`. Only
+   requests above 8 are affected, which is why `alignas(8)` and below have
+   always appeared to work on x86-64.
+
+This is a correctness bug well beyond `alignas`: any callee that relies on the
+16-byte guarantee (aligned SSE spills, `movaps` on a stack temporary) is exposed
+to it today.
 
 ### 3.3 The assembler dropped `.comm` alignment (fixed)
 
@@ -294,12 +356,13 @@ symbols.
 
 ### 3.4 Over-aligned automatic storage beyond 16 bytes (open)
 
-After §3.2 and §3.3, `alignas` on a local is honored up to the alignment the
-frame itself guarantees — 16 bytes on x86-64. Beyond that (`alignas(32)`,
-`alignas(64)`) the object still lands wherever the frame happens to fall,
-because no backend performs dynamic stack realignment. Nothing in the standard
-headers needs it, so it is deferred, but it is a silent miscompile rather than
-a diagnostic and should either be implemented or diagnosed.
+Even once §3.2 computes slot addresses correctly, `alignas` on a local can only
+be honored up to the alignment the frame itself guarantees — 16 bytes on
+x86-64, 8 on ARM. Beyond that (`alignas(32)`, `alignas(64)`) the object still
+lands wherever the frame happens to fall, because no backend performs dynamic
+stack realignment. Nothing in the standard headers needs it, so it is deferred,
+but it is a silent miscompile rather than a diagnostic and should either be
+implemented or diagnosed.
 
 Note for test authors: the exec harness enters at `main` via `-Wl,-e -Wl,main`,
 so `main`'s own frame does not get the entry alignment the ABI would otherwise
@@ -356,43 +419,136 @@ reports a pass. Any conversion to this spelling must be checked by running two
 overloads that only `enable_if` distinguishes, not by checking that the header
 compiles.
 
-Until it is fixed, use one of the spellings that were verified to work
+This was investigated down to three distinct layers, all of which have to be
+fixed together. A work-in-progress patch covering the first two lives outside
+the tree (it regresses `libc/chrono.cc`, see below); the notes here are what it
+established.
+
+*Layer 1 — the parameter's type is erased after parsing.* `ParseTemplateParameter`
+parsed `typename enable_if<C<T>, int>::type` into the correct representation
+(origin `enable_if`, its two template arguments, member name `type`) and then
+released its own reference to that record with `TypeRecordDelete`. The
+declarator's symbol had already taken the only other reference, so the count
+fell back to zero and `TypeRecordDelete` destructed the record in place,
+freeing and nulling `dependent_member_name` and `template_arguments` while the
+symbol still pointed at it. TypeRecords are never returned to the arena, so the
+primitive bits survived and the type merely looked "collapsed" to an `int`
+placeholder rather than crashing. A primitive parameter type is unaffected
+(its bits live in the record itself), which is why this went unnoticed. The
+same hazard is already documented a few lines above for a type parameter's
+`default_type`.
+
+*Layer 2 — the type is never substituted.* `CompleteTemplateArguments`
+explicitly skips a non-type parameter whose type contains a template parameter,
+so nothing ever evaluates the condition; and on the declaration side, two
+function templates whose signatures match are treated as redeclarations of each
+other even when their template parameter lists differ, which is what produces
+the duplicate-definition error. `TryAppendSameSignatureConstrainedTemplateOverload`
+already has the right shape for the fix — it admits same-signature overloads
+that differ in their `requires` clause — but extending it to compare parameter
+lists is not enough on its own: doing so by `TypeEqual` on the parameter types
+made `libc/chrono.cc`'s `duration_cast` split into two overloads and fail with
+`Ambiguous overload` plus `Function template definition is required for
+instantiation`. A redeclaration and its definition must still compare equal,
+so the comparison needs to be narrower than structural type equality.
+
+*Layer 3 — a value-dependent condition does not fold in this path.* With layers
+1 and 2 addressed, a dependent parameter type whose arguments are all types
+substitutes correctly (`typename box<T>::type N = 3` works and the default
+comes through). A parameter type whose argument is a value-dependent
+*expression* still fails: `my_is_int<T>::value` with `T = int` folds to the
+primary template's `false` instead of the explicit specialization's `true`, so
+`enable_if<false, int>` is instantiated, has no `type`, and the candidate is
+discarded in exactly the cases that should be kept. The identical expression in
+the same function's *return type* folds correctly, and warming the trait
+beforehand does not change either result, so this is a genuine difference
+between the two substitution paths rather than an instantiation-ordering
+artifact.
+
+Until all three are fixed, use one of the spellings that were verified to work
 correctly (each was checked by running the two-overload discrimination test
 above, not merely compiling it):
 
 - `enable_if` in the **return type** — works. Preferred for free functions.
 - `enable_if` as a **defaulted function parameter** — works. The only option
   for constructors, which have no return type.
-- **Tag dispatch** through an overloaded helper on `integral_constant` — works.
-  Preferred where the condition selects between two implementations rather
-  than removing an overload.
+- **Tag dispatch** through an overloaded helper on `integral_constant` — works,
+  but see the warning below.
 
 Note that dependent `enable_if` is fine everywhere else: as a nested typedef,
 in a static member initializer, and with a non-dependent condition in a
 template parameter list. It is specifically the combination of a dependent
 condition with a defaulted non-type template parameter that is dropped.
 
-### 3.7 `is_class`-style traits in a function parameter type (open)
+**Converting a working `if constexpr` to tag dispatch is not behaviour-preserving.**
+`<exception>`'s `throw_with_nested` and `rethrow_if_nested`, and `<memory>`'s
+`destroy`, were converted this way and the `<exception>` conversion regressed
+`cxx_testsuite/tests/syntax/pass/0408_constexpr_exception_propagation.cpp`
+(`No matching overload for nested_error`, then a constexpr evaluator mismatch).
+An `if constexpr` branch that is not taken is never instantiated; a tag-dispatch
+overload set does not give that guarantee. Both conversions have been reverted.
+Making these headers work below C++17 is a compiler job — `if constexpr` support
+in older modes, or the SFINAE fix above — not a header-rewriting job.
+
+### 3.7 `enable_if` cannot hold certain types (open)
+
+Two types are rejected as the second argument of `enable_if`, which matters
+because §3.6 forces the constraint into the return type.
+
+**The invoke-result builtin.**
 
 ```cpp
-template <class U>
-int f(U, typename enable_if<is_integral<U>::value, int>::type = 0);
+typename enable_if<C, __davecc_invoke_result_t(F, Args...)>::type f(F&&, Args&&...);
 ```
 
-compiles, but the same with a builtin-backed trait reports
-`Class template instantiation is not supported yet` from `<type_traits>`.
-Worth pinning down alongside §3.6 since both block the same conversions.
+fails with `No matching overload`, though the same builtin works as a plain
+return type. Naming it through a typedef first is enough to work around, and
+that is what `__invoke_detail::__invoke_result_direct` in `<functional>` is for.
 
-### 3.8 `__CHAR16_TYPE__` / `__CHAR32_TYPE__` / `__WCHAR_TYPE__` not predefined
+**The injected class name of a partial specialization.**
+
+```cpp
+typename enable_if<C, function&>::type operator=(F&&);   // inside function<R(Args...)>
+```
+
+fails with `Template argument must name a type` at a bogus location one line
+past the end of the translation unit. Referring to the class through its own
+`__self` typedef works. The bogus location is worth fixing on its own: it cost
+a bisect to find out which declaration was at fault.
+
+**A deduction guide cannot be constrained below C++20 at all.** A guide has no
+return type, `enable_if` in its deduced type is rejected, SFINAE is not applied
+to the deduced type either (a guide whose deduced type is ill-formed still
+competes, giving `Ambiguous class template argument deduction`), and a
+dependent default on a `bool` template parameter is rejected by §3.6. Also
+`decltype(&F::operator())` is not a substitution failure for a non-class `F`,
+so a guide cannot even filter itself: it deduced
+`__function_guide<int*>` for `F = int(*)(int)`. `<functional>`'s functor guide
+is therefore compiled only from C++20, which costs deduction from a functor
+below that but keeps deduction from a function pointer unambiguous.
+
+### 3.8 `is_constructible` ignores a constructor's constraint (open, pre-existing)
+
+`is_constructible<function<int(int)>, F>` is false even for an `F` that
+`function` accepts, whether the constructor is constrained by a `requires`
+clause or by `enable_if`. The rejecting direction works, so a constraint that
+should exclude a type does; it is the accepting direction that is wrong.
+
+This predates the Phase 6 work — the committed `requires`-based `<functional>`
+fails the same assertions — but it means `is_constructible` cannot be used to
+check that a conversion preserved a constraint. Check the rejecting direction,
+which does discriminate.
+
+### 3.9 `__CHAR16_TYPE__` / `__CHAR32_TYPE__` / `__WCHAR_TYPE__` not predefined
 
 `uchar.h` and a correct `wchar.h` need to typedef these consistently between C
 and C++ without guessing. Add the predefined macros alongside the existing
 `__INT*` set rather than hard-coding `unsigned short` in the headers.
 
-### 3.9 No `-dM -E` support
+### 3.10 No `-dM -E` support
 
 `davecc -dM -E` does not dump predefined macros, which makes auditing the
-preprocessor surface awkward. Worth adding while doing §3.8.
+preprocessor surface awkward. Worth adding while doing §3.9.
 
 ## 4. Integration checklist per header
 
