@@ -443,6 +443,57 @@ static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
+// Where the store back for a definition has to go.  Normally that is right
+// after the definition itself, but ABI and symbol pseudos sit ahead of the
+// prologue: their spill slots are frame-pointer-relative, so a store there
+// writes through the caller's fp.  They also generate no code of their own --
+// the register is written by a later instruction targeting them.  Anchor after
+// that writer instead; if it has not been allocated yet, return NULL and let
+// SyncReassignableSpill store the slot when it is.
+static TargetInstruction* StoreBackAnchor(ARMRegisterAllocator* allocator,
+                                          TargetInstruction* definition) {
+  TargetBasicBlock* entry = allocator->g->base.entry_block;
+  if (definition->block != entry) {
+    return definition;
+  }
+  TargetInstruction* save = NULL;
+  bool before_save = false;
+  for (TargetInstruction* current = entry->code; current != NULL;
+       current = TargetNext(current)) {
+    if (current == definition) {
+      before_save = true;
+    }
+    if ((ARMOpcode)current->opcode == ARM_OP(save)) {
+      save = current;
+      break;
+    }
+    if (current == entry->end_code) {
+      break;
+    }
+  }
+  if (!before_save || save == NULL) {
+    return definition;
+  }
+  TargetInstruction* anchor = NULL;
+  bool has_writer = false;
+  for (TargetInstruction* current = TargetNext(save); current != NULL;
+       current = TargetNext(current)) {
+    if (current->dest == definition) {
+      has_writer = true;
+      if ((current->flags & TARGET_INST_PROCESSED) != 0) {
+        anchor = current;
+      }
+    }
+    if (current == entry->end_code) {
+      break;
+    }
+  }
+  if (anchor != NULL || has_writer) {
+    return anchor;
+  }
+  return save;
+}
+
 static void InsertReassignableStoreBacks(
     ARMRegisterAllocator* allocator, TargetInstruction* target,
     TargetInstruction* spill, TargetInstruction* initial_definition) {
@@ -456,12 +507,17 @@ static void InsertReassignableStoreBacks(
           (initial_definition == NULL || inst->id > initial_definition->id) &&
           (inst->flags & TARGET_INST_PROCESSED) != 0 && inst->reg != NULL &&
           IsReassignableDefinition(inst, target)) {
-        TargetInstruction* store = TargetNewInstruction2(
-            (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
-        store->reg = inst->reg;
-        store->flags |= TARGET_INST_PROCESSED;
-        TargetBasicBlockEmitAfter(gen, block, store, inst);
-        inst = store;
+        TargetInstruction* anchor = StoreBackAnchor(allocator, inst);
+        if (anchor != NULL) {
+          TargetInstruction* store = TargetNewInstruction2(
+              (TargetOpcode)ARM_OP(spill), target, spill->operand[1]);
+          store->reg = inst->reg;
+          store->flags |= TARGET_INST_PROCESSED;
+          TargetBasicBlockEmitAfter(gen, anchor->block, store, anchor);
+          if (anchor == inst) {
+            inst = store;
+          }
+        }
       }
       if (is_end) {
         break;
@@ -476,8 +532,18 @@ static void SyncReassignableSpill(ARMRegisterAllocator* allocator,
   if (target == NULL || definition->reg == NULL) {
     return;
   }
-  TargetInstruction* spill =
-      MapFindPointerKey(&allocator->reassignable_spills, target);
+  // A definition can write a pseudo that is itself routed into a register
+  // variable (structreturn -> ivarreg), so follow the chain of destinations
+  // looking for the value that owns the spill slot.
+  TargetInstruction* spill = NULL;
+  for (TargetInstruction* current = target; current != NULL;
+       current = current->dest) {
+    spill = MapFindPointerKey(&allocator->reassignable_spills, current);
+    if (spill != NULL) {
+      target = current;
+      break;
+    }
+  }
   if (spill == NULL) {
     return;
   }
