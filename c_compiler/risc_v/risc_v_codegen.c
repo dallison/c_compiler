@@ -4003,15 +4003,19 @@ static TargetInstruction* LowerStackPointerOps(RVGenerator* rv, IRNode* node) {
       return new_sp;
     }
     case IR_OP(savesp): {
-      // One operand, a temp to hold stack pointer.
+      // One operand, a temp to hold stack pointer.  The move has to reach the
+      // instruction stream: without it the temp keeps whatever the register
+      // happened to hold, which is where a variable-length array's base address
+      // was coming from.
       TargetInstruction* tmp = Materialize(rv, node->inputs.value.p[0]);
-      TargetInstruction* mv = NewInstruction1(RV_OP(mv), StackPointer(rv));
+      TargetInstruction* mv =
+          Emit(rv, NewInstruction1(RV_OP(mv), StackPointer(rv)));
       mv->dest = tmp;
       return tmp;
     }
     case IR_OP(restoresp): {
       TargetInstruction* tmp = Materialize(rv, node->inputs.value.p[0]);
-      TargetInstruction* mv = NewInstruction1(RV_OP(mv), tmp);
+      TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv), tmp));
       mv->dest = StackPointer(rv);
       return mv->dest;
     }

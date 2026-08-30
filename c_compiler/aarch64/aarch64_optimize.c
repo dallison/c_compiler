@@ -462,6 +462,13 @@ static void CombineShiftedAddsInBlock(TargetBasicBlock* block, void* data) {
     }
 
     TargetInstruction* base = inst->operand[1 - shift_index];
+    // The shifted form is `add Rd, Rn, Rm, lsl #k`, so what the shift is added
+    // to has to be a register.  Folding an immediate into Rn instead spells an
+    // instruction that does not exist -- `add w0, #15, w1, lsl #2` -- and the
+    // assembler rejects it.
+    if (base == NULL || AARCH64IsIntConst(base)) {
+      continue;
+    }
     TargetInstruction* value = shift->operand[0];
     TargetInstruction* amount_inst = shift->operand[1];
     TargetReplaceOperand(inst, 0, base);
