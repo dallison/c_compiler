@@ -526,22 +526,38 @@ static void AddMissingLinks(TargetGenerator* gen) {
 // The edge starts at the block holding the region's start label rather than at
 // the individual calls inside it, so definitions made before the region still
 // dominate the pad while definitions made inside it correctly do not.
+//
+// The region's *end* label needs the same edge.  It marks where the protected
+// range stops and normally falls through from the try body, but a try body that
+// returns or throws on every path leaves it with no predecessor at all.
+// AddKeptBlockLinks would then hang it off the function entry, and since it
+// falls through to the pad the pad would inherit that entry predecessor too --
+// which is exactly the claim this function exists to avoid.
 static void AddExceptionHandlerEdges(TargetGenerator* gen) {
   for (size_t i = 0; i < gen->exception_edges.length; i++) {
     TargetExceptionEdge* edge = gen->exception_edges.value.p[i];
     TargetBasicBlock* region = edge->try_start->block;
-    TargetBasicBlock* pad = edge->catch_label->block;
-    if (region == NULL || pad == NULL || region == pad) {
+    if (region == NULL) {
       continue;
     }
-    // A try with several handlers, or a handler naming several types, produces
-    // one range per handler over the same region; the edge is wanted once.
-    bool linked = false;
-    for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
-      linked = region->out_edges.value.w[j] == (int64_t)pad->block_id;
-    }
-    if (!linked) {
-      TargetBasicBlockAddEdge(region, pad);
+    TargetBasicBlock* targets[2] = {
+        edge->catch_label->block,
+        edge->try_end != NULL ? edge->try_end->block : NULL};
+    for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
+      TargetBasicBlock* to = targets[t];
+      if (to == NULL || to == region) {
+        continue;
+      }
+      // A try with several handlers, or a handler naming several types,
+      // produces one range per handler over the same region; the edge is
+      // wanted once.
+      bool linked = false;
+      for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
+        linked = region->out_edges.value.w[j] == (int64_t)to->block_id;
+      }
+      if (!linked) {
+        TargetBasicBlockAddEdge(region, to);
+      }
     }
   }
 }

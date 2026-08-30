@@ -202,8 +202,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     StringInit(&synthetic_name, NULL);
     const char* tag_name = from->tag_name != NULL ? from->tag_name->value : NULL;
     if (invented || tag_name == NULL) {
-      StringPrintf(&synthetic_name, "%s$S%p",
-                   tag_name != NULL ? tag_name : "<anon>", (void*)str);
+      StringPrintf(&synthetic_name, "%s$S%d",
+                   tag_name != NULL ? tag_name : "<anon>", str->serial);
       tag_name = synthetic_name.value;
     }
     Symbol* tag = NewSymbol(tag_name, copy, STO(implicit));

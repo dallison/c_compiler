@@ -3431,8 +3431,16 @@ static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(g, src_node);
-
-  return SetLoweredNode(node, Store(g, addr_node, src, opcode, size));
+  TargetInstruction* stored = Store(g, addr_node, src, opcode, size);
+  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+    // `return value += amount;` reads the assignment's value, which the IR
+    // spells as a use of the store.  A store to memory produces no value of its
+    // own, so hand on what was stored.  Left as the store instruction this
+    // picks up whatever register the allocator happened to give the store,
+    // which holds nothing in particular -- the address, as it turns out.
+    return SetLoweredNode(node, src);
+  }
+  return SetLoweredNode(node, stored);
 }
 
 // If the branch comes from a comparison node we combine the comparison
@@ -6364,7 +6372,7 @@ static void ResolveExceptionRanges(ARMGenerator* g, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |=
         TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
-    TargetRecordExceptionEdge(&g->base, try_start, catch_label);
+    TargetRecordExceptionEdge(&g->base, try_start, try_end, catch_label);
     ARMExceptionRange* range = malloc(sizeof(ARMExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;

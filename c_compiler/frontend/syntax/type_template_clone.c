@@ -6959,7 +6959,33 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     if (!nested_lambda_operator) {
       symbol->value.func_defn = template_definition;
       if (symbol->type->template_arguments == NULL) {
-        symbol->type->template_arguments = TemplateArgumentVectorCopy(args);
+        // The arguments recorded here are the ones the deferred body clone will
+        // substitute, so they have to be the arguments of the class this
+        // function is a member of -- not whatever template is being
+        // instantiated at the point the member happened to be named.  Those
+        // differ for a nested class template first used inside a member
+        // function template of the enclosing class: `Outer<int>::Inner<false>
+        // ::deref` reached from `Outer<int>::total<Compare>` would record
+        // `[Compare]`, and the body's `T` -- parameter 0 of `Outer` -- would
+        // later resolve to `Compare`'s argument.
+        // Only for a nested class: that is the shape where the two lists can
+        // differ.  For a namespace-scope class template the ambient list *is*
+        // the owner's, and it is the one grouped the way the body clone
+        // expects -- a variadic owner records its pack as one argument, so
+        // preferring the recorded list there would feed a pack expansion a
+        // single argument where it wants each element.
+        Struct* member_owner = symbol->type->info.function.cxx_member_owner;
+        Vector* owner_args =
+            member_owner != NULL && member_owner->lexical_parent != NULL &&
+                    member_owner->tag_symbol != NULL &&
+                    member_owner->tag_symbol->type != NULL &&
+                    member_owner->tag_symbol->type->template_arguments != NULL &&
+                    !TemplateArgumentVectorContainsTemplateParameter(
+                        member_owner->tag_symbol->type->template_arguments)
+                ? member_owner->tag_symbol->type->template_arguments
+                : NULL;
+        symbol->type->template_arguments = TemplateArgumentVectorCopy(
+            owner_args != NULL ? owner_args : args);
       }
       return;
     }

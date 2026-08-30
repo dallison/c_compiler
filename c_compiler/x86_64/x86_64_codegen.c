@@ -586,7 +586,7 @@ static void ResolveExceptionRanges(X86_64Generator* rv, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |= TARGET_INST_EXCEPTION_LANDING;
-    TargetRecordExceptionEdge(&rv->base, try_start, catch_label);
+    TargetRecordExceptionEdge(&rv->base, try_start, try_end, catch_label);
     X86_64ExceptionRange* range = malloc(sizeof(X86_64ExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;
@@ -2382,6 +2382,91 @@ static TargetInstruction* LowerLoad(X86_64Generator* rv, Generator* gen,
   return SetLoweredNode(node, result);
 }
 
+// The width in bytes that |opcode| writes, or 8 for a store that fills a whole
+// register.
+static int StoreWidth(X86_64Opcode opcode) {
+  switch (opcode) {
+    case X86_64_OP(storeb):
+      return 1;
+    case X86_64_OP(storew):
+      return 2;
+    case X86_64_OP(storel):
+      return 4;
+    default:
+      return 8;
+  }
+}
+
+// The type of the object a store addresses.  A store to a variable names the
+// variable's IR node, whose own type does not always describe the object (a
+// parameter's does not), so ask its symbol.
+static TypeRecord* StoredObjectType(IRNode* addr_node) {
+  if (addr_node == NULL) {
+    return NULL;
+  }
+  if (IRIsVariable(addr_node)) {
+    Symbol* symbol = ((IRVariable*)addr_node)->symbol;
+    if (symbol != NULL && symbol->type != NULL) {
+      return symbol->type;
+    }
+  }
+  return addr_node->type;
+}
+
+// Narrow |value| to the low |width| bytes as |type| would be read back, for a
+// variable that lives in a register.  A store to memory drops the high bytes on
+// its own; a register has to be told to.  Reads cannot make up for it later:
+// reading such a variable is just naming its register, and only an explicit
+// conversion in the source would add a mask, so `f(c)` for `unsigned char c`
+// would hand the callee whatever the arithmetic left above bit 7.
+static TargetInstruction* NarrowToStoreWidth(X86_64Generator* rv,
+                                             TargetInstruction* value,
+                                             TypeRecord* type, int width) {
+  if (width >= 8) {
+    return value;
+  }
+  bool is_signed = type == NULL || !TypeIsUnsigned(type);
+  // A constant narrows here rather than at run time.  It has to: the zero
+  // pseudo-register is not a real register, so it can only appear as an operand
+  // of the instructions the emitter knows to print `$0` for, and shl/sar/and
+  // are not among them -- they would print whatever register it was mapped to.
+  if (TargetIsConst(value) || (int)value->opcode == (int)X86_64_OP(x0)) {
+    int64_t original =
+        (int)value->opcode == (int)X86_64_OP(x0) ? 0 : TargetIntValue(value);
+    int bits = width * 8;
+    int64_t narrowed =
+        is_signed ? (int64_t)((uint64_t)original << (64 - bits)) >> (64 - bits)
+                  : (int64_t)((uint64_t)original & ((1ULL << bits) - 1));
+    if (narrowed == original) {
+      return value;
+    }
+    return Emit(rv, NewInstruction1(
+                        X86_64_OP(mov),
+                        GetIntConstant(rv, NULL, kTargetType64Bit, narrowed)));
+  }
+  // Signed unless the type says otherwise: `int` carries no explicit sign bit
+  // in its TypeRecord, and the IR reads such an object back with a signed load
+  // (load32 rather than loadu32), so the register has to hold the value the way
+  // that load would have produced it.
+  if (is_signed) {
+    TargetInstruction* shift =
+        GetIntConstant(rv, NULL, kTargetType32Bit, (int64_t)(64 - width * 8));
+    TargetInstruction* left =
+        Emit(rv, NewInstruction2(X86_64_OP(shl), value, shift));
+    return Emit(rv, NewInstruction2(X86_64_OP(sar), left, shift));
+  }
+  int64_t mask = (1LL << (width * 8)) - 1;
+  if (!X86_64IsPossibleImmediate(mask)) {
+    TargetInstruction* mask_reg = Emit(
+        rv, NewInstruction1(X86_64_OP(mov),
+                            GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
+    return Emit(rv, NewInstruction2(X86_64_OP(and), value, mask_reg));
+  }
+  return Emit(rv, NewInstruction2(
+                      X86_64_OP(and), value,
+                      GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
+}
+
 static TargetInstruction* Store(X86_64Generator* rv, IRNode* addr_node, TargetInstruction* src, X86_64Opcode opcode) {
   TargetInstruction* addr;
   TargetInstruction* offset;
@@ -2392,7 +2477,12 @@ static TargetInstruction* Store(X86_64Generator* rv, IRNode* addr_node, TargetIn
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    X86_64Opcode opcode = TypeIsFloatingPoint(addr_node->type) ? X86_64_OP(fmv_d) : X86_64_OP(mv);
+    bool is_fp = TypeIsFloatingPoint(addr_node->type);
+    if (!is_fp) {
+      src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
+                               StoreWidth(opcode));
+    }
+    X86_64Opcode opcode = is_fp ? X86_64_OP(fmv_d) : X86_64_OP(mv);
     TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
     return result;
   }
@@ -2438,8 +2528,19 @@ static TargetInstruction* LowerStore(X86_64Generator* rv, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(rv, src_node);
-
-  return SetLoweredNode(node, Store(rv, addr_node, src, opcode));
+  TargetInstruction* stored = Store(rv, addr_node, src, opcode);
+  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+    // `return value += amount;` reads the assignment's value, which the IR
+    // spells as a use of the store.  A store to memory produces no value of its
+    // own, so hand on what was stored, narrowed the way reading the object back
+    // would give it.  Left as the store instruction this picks up whatever
+    // register the allocator happened to give the store, which holds nothing in
+    // particular -- the address, as it turns out.
+    return SetLoweredNode(
+        node, NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
+                                 StoreWidth(opcode)));
+  }
+  return SetLoweredNode(node, stored);
 }
 
 static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {

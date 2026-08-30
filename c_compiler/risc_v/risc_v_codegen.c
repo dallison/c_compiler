@@ -874,7 +874,7 @@ static void ResolveExceptionRanges(RVGenerator* rv, Generator* gen) {
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |=
         TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
-    TargetRecordExceptionEdge(&rv->base, try_start, catch_label);
+    TargetRecordExceptionEdge(&rv->base, try_start, try_end, catch_label);
     RVExceptionRange* range = malloc(sizeof(RVExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;
@@ -2533,8 +2533,16 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(rv, src_node);
-
-  return SetLoweredNode(node, Store(rv, addr_node, src, opcode));
+  TargetInstruction* stored = Store(rv, addr_node, src, opcode);
+  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+    // `return value += amount;` reads the assignment's value, which the IR
+    // spells as a use of the store.  A store to memory produces no value of its
+    // own, so hand on what was stored.  Left as the store instruction this
+    // picks up whatever register the allocator happened to give the store,
+    // which holds nothing in particular -- the address, as it turns out.
+    return SetLoweredNode(node, src);
+  }
+  return SetLoweredNode(node, stored);
 }
 
 static struct BranchInfo {

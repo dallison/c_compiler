@@ -201,23 +201,27 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
                  X86_64IsIntConst(base->operand[1])) {
         // Load from an address calculated using an addi instruction.  See if we
-        // can combine them.
+        // can combine them.  Folding makes the load address the add's input
+        // rather than its result, which is the same address only while the
+        // input is still around.  So fold only when this load is the add's one
+        // user and the add goes with it.  An add that has to stay -- because
+        // something else reads its result, or it writes a variable register --
+        // may be given its input's register and done in place, and then the
+        // input the folded load wanted is already overwritten.  `*--p = ...`
+        // in a loop is the shape that reaches this: the decrement feeds both
+        // the store and the next iteration.
         int offset = X86_64IntValue(inst->operand[1]);
         int immed = X86_64IntValue(base->operand[1]);
-        if (X86_64IsPossibleImmediate(offset + immed)) {
+        if (base->users.length == 1 && base->dest == NULL &&
+            X86_64IsPossibleImmediate(offset + immed)) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
                                                              &rv->base,
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          // An add whose result also goes to a variable register still has to
-          // run: folding it into this load's offset removes the only user of
-          // its value, but a later block reads the variable it writes.
-          if (base->users.length == 0 && base->dest == NULL) {
-            TrapRemoveInstruction(base);
-           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
-          }
+          TrapRemoveInstruction(base);
+          TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
          }
       }
     } else if (X86_64IsStore(inst)) {
@@ -236,20 +240,20 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
                  X86_64IsIntConst(base->operand[1])) {
         // Store to an address calculated using an addi instruction.  See if we
-        // can combine them.
+        // can combine them.  Only when this store is the add's one user and
+        // the add goes with it; see the load above for why.
         int offset = X86_64IntValue(inst->operand[2]);
         int immed = X86_64IntValue(base->operand[1]);
-        if (X86_64IsPossibleImmediate(offset + immed)) {
+        if (base->users.length == 1 && base->dest == NULL &&
+            X86_64IsPossibleImmediate(offset + immed)) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
                                                              &rv->base,
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0 && base->dest == NULL) {
-            TrapRemoveInstruction(base);
-           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
-          }
+          TrapRemoveInstruction(base);
+          TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
         }
       }
     }
@@ -284,8 +288,13 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
       TargetInstruction* operand = inst->operand[i];
       if (operand != NULL) {
-        if (((int)operand->opcode == (int)X86_64_OP(mv)) && operand->users.length == 1) {
+        if (((int)operand->opcode == (int)X86_64_OP(mv)) &&
+            operand->users.length == 1 && operand->dest == NULL) {
           TargetInstruction* mv = operand;
+          // A move with a destination writes a named register -- an outgoing
+          // argument register, say.  Its user reads the register rather than
+          // this instruction's value, so folding the source into the user and
+          // dropping the move leaves that register never written.
           if (mv->operand[0]->opcode == (TargetOpcode)X86_64_OP(x0)) {
             // Found mv xx, x0.  Replace instruction operand with x0.
             TargetReplaceOperand(inst, i,  mv->operand[0]);

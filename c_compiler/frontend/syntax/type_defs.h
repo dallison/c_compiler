@@ -354,6 +354,11 @@ typedef struct StructMember {
 // vtable/vbtable info, using-declarations, partial specializations and
 struct Struct {
   int refs;          // @wire - (refcount, recomputed)
+  // Creation order, used to tell otherwise indistinguishable types apart in a
+  // template key (see TypeRecordToTemplateKeyString).  The address served for
+  // that too, but it leaks into mangled names and so made every build of the
+  // same source produce different symbols.
+  int serial;        // @wire - (assigned on creation)
   struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire 31
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2

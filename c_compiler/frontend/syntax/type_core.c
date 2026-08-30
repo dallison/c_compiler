@@ -1664,6 +1664,7 @@ Struct* NewStruct(bool is_union) {
     VectorInit(&struct_registry);
     struct_registry_initialized = true;
   }
+  s->serial = (int)struct_registry.length;
   VectorAppend(&struct_registry, s);
   return s;
 }

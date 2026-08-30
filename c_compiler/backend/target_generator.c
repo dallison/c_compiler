@@ -287,12 +287,14 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
 
 void TargetRecordExceptionEdge(TargetGenerator* gen,
                                TargetInstruction* try_start,
+                               TargetInstruction* try_end,
                                TargetInstruction* catch_label) {
   if (try_start == NULL || catch_label == NULL) {
     return;
   }
   TargetExceptionEdge* edge = malloc(sizeof(TargetExceptionEdge));
   edge->try_start = try_start;
+  edge->try_end = try_end;
   edge->catch_label = catch_label;
   VectorAppend(&gen->exception_edges, edge);
 }

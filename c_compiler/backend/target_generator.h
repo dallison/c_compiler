@@ -243,11 +243,13 @@ typedef struct TargetGenerator {
 // the region's own dominators reach, rather than the function entry.
 typedef struct {
   TargetInstruction* try_start;
+  TargetInstruction* try_end;
   TargetInstruction* catch_label;
 } TargetExceptionEdge;
 
 void TargetRecordExceptionEdge(TargetGenerator* gen,
                                TargetInstruction* try_start,
+                               TargetInstruction* try_end,
                                TargetInstruction* catch_label);
 
 void TargetGeneratorInit(TargetGenerator* Target, Generator* gen, TargetVirtuals* virtuals);

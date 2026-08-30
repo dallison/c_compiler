@@ -296,6 +296,9 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
 // definition.
 typedef struct {
   int* block_position;
+  // Block ids of the exception landing pads, so DoGlobalValueNumbering can
+  // refuse to hand one the values its dominator computed.
+  BitSet landing_pads;
   size_t num_blocks;
 } BlockLayout;
 
@@ -304,6 +307,14 @@ static void BlockLayoutInit(BlockLayout* layout, Generator* gen) {
   layout->block_position = malloc(layout->num_blocks * sizeof(int));
   for (size_t i = 0; i < layout->num_blocks; i++) {
     layout->block_position[i] = -1;
+  }
+  BitSetInit(&layout->landing_pads);
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (range->catch_label != NULL && range->catch_label->block != NULL) {
+      BitSetInsert(&layout->landing_pads,
+                   (size_t)range->catch_label->block->block_id);
+    }
   }
   int next_position = 0;
   for (ListElement* element = gen->code.first; element != NULL;
@@ -322,6 +333,7 @@ static void BlockLayoutInit(BlockLayout* layout, Generator* gen) {
 static void BlockLayoutDestruct(BlockLayout* layout) {
   free(layout->block_position);
   layout->block_position = NULL;
+  BitSetDestruct(&layout->landing_pads);
 }
 
 // True if using 'definition' in place of 'use' keeps the definition ahead of
@@ -334,6 +346,15 @@ static bool DefinitionPrecedesUse(BlockLayout* layout, IRNode* definition,
   }
   if (definition->block == use->block) {
     return true;
+  }
+  // Coming earlier in the layout is not enough: the use has to be reachable
+  // only through the definition.  An exception landing pad is entered from the
+  // middle of the block it protects, so code after the catch sits later in the
+  // layout than the try body without the try body ever having run.  Reusing a
+  // value from there hands the catch whatever the register happened to hold.
+  if (!BitSetContains(&use->block->dominators,
+                      definition->block->block_id)) {
+    return false;
   }
   size_t definition_id = (size_t)definition->block->block_id;
   size_t use_id = (size_t)use->block->block_id;
@@ -441,6 +462,16 @@ static void DoGlobalValueNumbering(Generator* gen, BlockLayout* layout,
   ValueSet* dominator_value_set = NULL;
   // TODO: check this and fix it.
   bool can_pool_from_dominator = true; // CanPoolFromDominator(gen, block);
+
+  // A landing pad is dominated by the block holding the protected region, but
+  // the unwinder enters it from the middle of that region: whatever the region
+  // computes after the call that threw never ran.  Inheriting the dominator's
+  // value set would offer those definitions to the handler, which then reads a
+  // register that was never written on the path it actually took.  Start the
+  // pad from nothing instead; handlers are cold, so nothing is lost by it.
+  if (BitSetContains(&layout->landing_pads, (size_t)block->block_id)) {
+    can_pool_from_dominator = false;
+  }
   
   ValueSet* set = NULL;
   if (can_pool_from_dominator) {

@@ -765,7 +765,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
               strchr(str->tag_name->value, '<') != NULL;
           if (is_invented || is_anonymous ||
               (!is_template_specialization && !has_stable_lexical_path)) {
-            StringPrintf(result, "$S%p", (void*)str);
+            StringPrintf(result, "$S%d", str->serial);
           }
         }
       } else if (TypeIsEnum(type)) {
@@ -800,7 +800,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         if (str->tag_name != NULL) {
           StringAppendString(result, str->tag_name);
         }
-        StringPrintf(result, "$S%p", (void*)str);
+        StringPrintf(result, "$S%d", str->serial);
       } else {
         StringAppend(result, "<class>");
       }

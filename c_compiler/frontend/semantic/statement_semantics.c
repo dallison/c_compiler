@@ -290,6 +290,12 @@ typedef struct {
   Vector temps;
   Vector elided;
   Vector parameter_temps;
+  // Temporaries the expression already destroys itself.  An inlined call brings
+  // the callee's body along, cleanups and all, so a temporary made inside the
+  // callee is seen here as if it belonged to the caller's full expression --
+  // and destroying it a second time, unconditionally, runs a destructor on
+  // storage that the caller's path may never have constructed.
+  Vector already_destroyed;
 } CXXTemporaryCollection;
 
 static bool CXXTemporaryIsFunctionParameterObject(ASTNode* node, Symbol* sym) {
@@ -309,6 +315,25 @@ static bool CXXNodeIsWithinTemporaryCleanup(ASTNode* node) {
     }
   }
   return false;
+}
+
+// Record the receiver of every destructor call the expression already makes, so
+// CollectCXXTemporarySymbols can leave those temporaries alone.
+static void CollectCXXDestroyedTemporarySymbols(ASTNode* node, void* data,
+                                                int child_id,
+                                                VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier) ||
+      !CXXNodeIsWithinTemporaryCleanup(node)) {
+    return;
+  }
+  CXXTemporaryCollection* collection = data;
+  Symbol* sym = ((IdentifierASTNode*)node)->symbol;
+  if (sym != NULL &&
+      !VectorContainsPointer(&collection->already_destroyed, sym)) {
+    VectorAppend(&collection->already_destroyed, sym);
+  }
 }
 
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
@@ -362,6 +387,9 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     return;
   }
   if (CXXTemporaryNeedsDestructor(sym)) {
+    if (VectorContainsPointer(&collection->already_destroyed, sym)) {
+      return;
+    }
     if (CXXTemporaryIsFunctionParameterObject(node, sym)) {
       if (!VectorContainsPointer(&collection->parameter_temps, sym)) {
         VectorAppend(&collection->parameter_temps, sym);
@@ -405,6 +433,8 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   VectorInit(&collection.temps);
   VectorInit(&collection.elided);
   VectorInit(&collection.parameter_temps);
+  VectorInit(&collection.already_destroyed);
+  ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
   for (size_t i = collection.temps.length; i > 0; i--) {
     Symbol* sym = collection.temps.value.p[i - 1];
@@ -420,6 +450,7 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   VectorDestruct(&collection.temps);
   VectorDestruct(&collection.elided);
   VectorDestruct(&collection.parameter_temps);
+  VectorDestruct(&collection.already_destroyed);
   return expr;
 }
 
@@ -435,11 +466,14 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
   VectorInit(&collection.temps);
   VectorInit(&collection.elided);
   VectorInit(&collection.parameter_temps);
+  VectorInit(&collection.already_destroyed);
+  ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
   if (collection.temps.length == 0) {
     VectorDestruct(&collection.temps);
     VectorDestruct(&collection.elided);
     VectorDestruct(&collection.parameter_temps);
+    VectorDestruct(&collection.already_destroyed);
     return expr;
   }
 
@@ -464,6 +498,7 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
   VectorDestruct(&collection.temps);
   VectorDestruct(&collection.elided);
   VectorDestruct(&collection.parameter_temps);
+  VectorDestruct(&collection.already_destroyed);
   return sequence;
 }
 
@@ -578,6 +613,9 @@ void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
   VectorInit(&collection.temps);
   VectorInit(&collection.elided);
   VectorInit(&collection.parameter_temps);
+  VectorInit(&collection.already_destroyed);
+  ASTNodeVisit(initializer, CollectCXXDestroyedTemporarySymbols, 0,
+               &collection);
   ASTNodeVisit(initializer, CollectCXXTemporarySymbols, 0, &collection);
   Symbol* direct = CXXTemporaryConstructionResultSymbol(initializer);
   for (size_t i = collection.temps.length; i > 0; i--) {
@@ -589,6 +627,7 @@ void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
   VectorDestruct(&collection.temps);
   VectorDestruct(&collection.elided);
   VectorDestruct(&collection.parameter_temps);
+  VectorDestruct(&collection.already_destroyed);
 }
 
 static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
@@ -597,6 +636,9 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
   VectorInit(&collection.temps);
   VectorInit(&collection.elided);
   VectorInit(&collection.parameter_temps);
+  VectorInit(&collection.already_destroyed);
+  ASTNodeVisit(initializer, CollectCXXDestroyedTemporarySymbols, 0,
+               &collection);
   ASTNodeVisit(initializer, CollectCXXTemporarySymbols, 0, &collection);
   Symbol* direct = CXXTemporaryConstructionResultSymbol(initializer);
   for (size_t i = collection.temps.length; i > 0; i--) {
@@ -631,6 +673,7 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
   VectorDestruct(&collection.temps);
   VectorDestruct(&collection.elided);
   VectorDestruct(&collection.parameter_temps);
+  VectorDestruct(&collection.already_destroyed);
   return initializer;
 }
 

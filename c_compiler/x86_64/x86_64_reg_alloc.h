@@ -33,6 +33,10 @@ typedef struct X86_64Register {
   X86_64RegisterType type;
 } X86_64Register;
 
+// Allocating for one instruction can recurse into its destination register
+// variable, and no further.
+#define X86_64_MAX_ALLOCATION_DEPTH 4
+
 
 // The x86-64 R32F and R32D instructions share floating point registers.
 
@@ -71,6 +75,14 @@ typedef struct {
   // enough on its own, because several slots name the same physical register.
   unsigned pinned_int_phys;
   unsigned pinned_float_phys;
+
+  // The instructions currently being allocated for, outermost first.  Every
+  // operand of each has to be readable where that instruction runs, so none of
+  // them can be chosen as a spill victim in the meantime.  Allocation nests
+  // when an instruction's destination is a register variable, hence a stack
+  // rather than a single instruction.  See FindSpillVictim.
+  TargetInstruction* allocating[X86_64_MAX_ALLOCATION_DEPTH];
+  size_t allocating_depth;
 } X86_64RegisterAllocator;
 
 void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* alloc,

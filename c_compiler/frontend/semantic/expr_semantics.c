@@ -4294,7 +4294,7 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
                CopyArguments(info, call, &inliner));
   ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
   inliner.top_stmt = inlined;
-  
+
   inliner.end_label = NewLabelASTNode(SyntaxFakeName(&compiler->syntax),
                                       NULL,
                                       false,
@@ -4318,7 +4318,7 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
                                    &inliner, NULL);
   VectorAppend(statements, new_body);
   VectorAppend(statements, inliner.end_label);
-  
+
   // Attach the new statements to the compound statement.
   for (size_t i = 0; i < statements->length; i++) {
     ASTNode* stmt = statements->value.p[i];
@@ -4706,11 +4706,62 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   if (func->symbol != NULL && func->symbol->flags.noinline) {
     return false;
   }
-  // A lazily instantiated function can temporarily share the primary
-  // template's body until its concrete body is cloned.  Inlining that shared
-  // body copies still-dependent expressions into the caller (for example
-  // `T(value)` inside a braced initializer) even though the call's signature is
-  // already concrete.
+  // The body being analyzed is itself still a template if any of its own
+  // parameters are unbound -- a member function template of a class template
+  // reaches this state, its class arguments substituted and its own left
+  // symbolic.  That body will be cloned again for each instantiation, and the
+  // clone substitutes the member's arguments into everything it copies.  An
+  // inlined body brought in here comes from a function of the *enclosing*
+  // class, so its parameter placeholders are numbered for the class's list;
+  // substituting the member's list into them binds them to the wrong
+  // arguments (`hive<int>::sort<less<int>>` turns `static_cast<T*>` inlined
+  // from the iterator's `operator*` into `static_cast<less<int>*>`, and the
+  // subscript that follows scales by the wrong element size).  Leave the call
+  // alone; the per-instantiation clone is analyzed too, and inlining there
+  // sees fully concrete types.
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      TypeContainsTemplateParameter(compiler->current_function)) {
+    return false;
+  }
+  // Inlining copies the body into the caller and generates code from the
+  // copy, so the body has to be finished: every expression typed and every
+  // overload resolved.  A template instantiation is not finished when it is
+  // created.  Its body is cloned from the primary at that point and analyzed
+  // later off the pending-instantiation queue, so in between it still holds
+  // expressions written in terms of the template parameters -- `pred(*first)`
+  // where `pred` is a closure object, say, whose `operator()` nothing has
+  // picked yet.  Copying one of those into the caller leaves it there
+  // untyped, with no later pass that would come back and resolve it.
+  if (func->body != NULL && (func->body->flags & kASTAnalyzed) == 0) {
+    return false;
+  }
+  // A function's preconditions and postconditions are generated around its
+  // body when the function itself is compiled, from the assertion list on its
+  // type -- they are not statements in the body.  A body copied into the caller
+  // therefore arrives without them, and inlining a checked function would stop
+  // checking it.  Putting the predicates back is not just a matter of cloning
+  // them either: a predicate may name the parameters through the const views
+  // contract analysis gave them, and may contain a lambda or a splice, none of
+  // which survives being re-analyzed in the caller.  Leave the call alone.
+  if (func->contract_assertions.length != 0) {
+    return false;
+  }
+  // Inside a contract predicate the names in scope are seen through the const
+  // views contract analysis gives them, and the inlined body is analyzed here,
+  // in that scope, rather than in the callee's.  A body that assigns to one of
+  // its own parameters -- which an immediately-invoked lambda in a predicate
+  // does as soon as it captures anything -- is then rejected for writing
+  // through a const view it never had.  Call it instead; the definition is
+  // compiled in its own scope where the types are the written ones.
+  if (compiler->contract_assertion_depth > 0) {
+    return false;
+  }
+  // A lazily instantiated function can also temporarily *share* the primary
+  // template's body, before its own concrete body is cloned.  That body may
+  // well have been analyzed -- as the template's own definition, where the
+  // expressions in it are dependent by design -- so the check above says
+  // nothing about it.
   if (func->template_origin != NULL &&
       func->template_origin->type != NULL &&
       TypeIsFunction(func->template_origin->type) &&

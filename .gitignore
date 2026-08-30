@@ -8,3 +8,7 @@
 # Compiled object and archive artifacts
 *.o
 *.a
+
+# Assembly the test suite drops next to a source when it is compiled in place
+/cxx_testsuite/tests/exec/*.s
+/cxx_testsuite/tests/compile/*.s

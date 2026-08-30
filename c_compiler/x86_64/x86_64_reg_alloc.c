@@ -94,6 +94,7 @@ void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* allocator, X86_64Gener
   allocator->spill_after_definition = false;
   allocator->pinned_int_phys = 0;
   allocator->pinned_float_phys = 0;
+  allocator->allocating_depth = 0;
 }
 
 X86_64RegisterAllocator* NewX86_64RegisterAllocator(X86_64Generator* pcode) {
@@ -371,6 +372,29 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
   return false;
 }
 
+// True if |value| is an operand or the destination of any instruction currently
+// being allocated for.  An operand has to keep its register until that
+// instruction has read it; a destination has to keep it because the instruction
+// is about to write it.
+static bool IsBeingAllocated(X86_64RegisterAllocator* allocator,
+                             TargetInstruction* value) {
+  for (size_t d = 0; d < allocator->allocating_depth; d++) {
+    TargetInstruction* user = allocator->allocating[d];
+    if (user == NULL) {
+      continue;
+    }
+    if (user->dest == value) {
+      return true;
+    }
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (user->operand[i] == value) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Returns the cheapest value whose register can be taken without breaking a
 // read that has already been handed that register, or NULL when there is none.
 // |unsafe|, when not NULL, receives the cheapest value that could be taken if
@@ -409,6 +433,15 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
           // temporary, so spilling a fixed register silently delivers the
           // argument/result in the wrong place.  Never choose one as a victim.
           if (X86_64IsFixedRegister(owner)) {
+            continue;
+          }
+          // The instruction being allocated reads all of its operands at once,
+          // so taking a register from one of them to give to another leaves
+          // both reads naming it: `addq %rdi, %rdi` for what should have been
+          // the sum of two different values.  Already-emitted reads of an
+          // operand cannot be redirected to a spill slot either, since the
+          // spill model rewrites reads only as they are processed.
+          if (IsBeingAllocated(allocator, owner)) {
             continue;
           }
           int cost = SpillCost(owner);
@@ -473,9 +506,13 @@ static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[b];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
-         inst = TargetNext(inst)) {
+    // block->end_code is the last instruction of the block rather than one past
+    // it, so walk up to and including it.  The successor is taken before the
+    // store below is inserted, both because inserting after the last
+    // instruction moves end_code and so the store is not walked into.
+    TargetInstruction* next = NULL;
+    for (TargetInstruction* inst = block->code; inst != NULL; inst = next) {
+      next = inst == block->end_code ? NULL : TargetNext(inst);
       if (inst == first_use) {
         continue;
       }
@@ -494,8 +531,6 @@ static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
       store->reg = inst->reg;
       store->flags |= TARGET_INST_PROCESSED;
       TargetBasicBlockEmitAfter(gen, block, store, inst);
-      // Skip past the store we just inserted.
-      inst = store;
     }
   }
 }
@@ -516,9 +551,12 @@ static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[b];
-    for (TargetInstruction* inst = block->code;
-         inst != NULL && inst != block->end_code;
-         inst = TargetNext(inst)) {
+    // block->end_code is the block's last instruction, not one past it, so it
+    // has to be visited too: a definition written by an instruction that ends
+    // its block (the `mv` that lands a call result in a temporary, say) is
+    // exactly the case this test exists for.
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
       if (inst == target) {
         continue;
       }
@@ -759,13 +797,81 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
   return reg;
 }
 
-static void ReserveIdivRegisters(X86_64RegisterAllocator* allocator) {
+// True when |owner| cannot give up its register at |block|, because reads of it
+// have already been emitted in blocks control can come back to.  Such a read
+// names the physical register and there is no way to point it at a stack slot
+// now, so the value has to stay where it is for the rest of the function.
+static bool MustKeepRegister(X86_64RegisterAllocator* allocator,
+                             TargetInstruction* owner,
+                             TargetBasicBlock* block) {
+  BitSet reentered;
+  BitSetInit(&reentered);
+  TargetBasicBlockReachableAfter(&allocator->rv->base, block, &reentered);
+  bool must_keep = IsUnsafeSpillVictim(owner, &reentered);
+  BitSetDestruct(&reentered);
+  return must_keep;
+}
+
+// Write |owner| out to a fresh slot before |inst| and read it straight back into
+// the same register afterwards, leaving |owner| the register's owner.  This is
+// how an instruction with a fixed-register requirement borrows a register from a
+// value that MustKeepRegister says cannot be spilled: |inst| gets the register
+// clobbered for the length of its own expansion, and every read of |owner| --
+// the ones already emitted as much as the ones still to come -- still finds the
+// value in the register it was allocated.
+static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
+                                 TargetInstruction* owner,
+                                 TargetInstruction* inst) {
+  allocator->rv->not_leaf = true;
+  TargetInstruction* offset = TargetGetIntConstant(
+      &allocator->rv->base, NULL, kTargetType32Bit,
+      allocator->current_spilled_region_size);
+  allocator->current_spilled_region_size += 8;
+  if (allocator->current_spilled_region_size >
+      allocator->max_spilled_region_size) {
+    allocator->max_spilled_region_size = allocator->current_spilled_region_size;
+  }
+  TargetInstruction* store = TargetNewInstruction2(
+      (TargetOpcode)X86_64_OP(spill), owner, offset);
+  store->reg = owner->reg;
+  store->flags |= TARGET_INST_PROCESSED;
+  TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, store, inst);
+
+  TargetInstruction* restore =
+      TargetNewInstruction1((TargetOpcode)X86_64_OP(reload), store);
+  restore->reg = owner->reg;
+  restore->flags |= TARGET_INST_PROCESSED;
+  TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, restore, inst);
+}
+
+// Free rax and rdx for a division, which reads and writes both by name.
+// ReserveDivisionRegisters keeps the general allocator out of them in any
+// function that divides, so what is left here is a value placed in one by name:
+// a call result, an outgoing argument, or a variable register.  Such a value is
+// normally spilled; one that cannot be is saved and restored around the
+// division instead.
+static void ReserveIdivRegisters(X86_64RegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
   static const int kIdivRegs[] = {X86_64_RET_REG, X86_64_INT_ARG_START + 2};
   for (size_t i = 0; i < sizeof(kIdivRegs) / sizeof(kIdivRegs[0]); i++) {
     X86_64Register* reg = &allocator->int_regs[kIdivRegs[i]];
-    if (reg->base.owner != NULL) {
-      SpillInstruction(allocator, reg->base.owner);
+    TargetInstruction* owner = reg->base.owner;
+    if (owner == NULL) {
+      continue;
     }
+    // A variable register, an argument register and the result register *are*
+    // registers: the value each stands for is defined to live there, and rax in
+    // particular is where the return value has to be sitting at the epilogue.
+    // Spilling one marks it permanently resident in memory, so every later
+    // write to it goes to the stack slot and never reaches the register the ABI
+    // reads.  The division only needs rax for its own length, so borrow it.
+    if (X86_64IsVarRegister(owner) || X86_64IsFixedRegister(owner) ||
+        X86_64IsResult(owner) ||
+        MustKeepRegister(allocator, owner, inst->block)) {
+      BorrowRegisterAround(allocator, owner, inst);
+      continue;
+    }
+    SpillInstruction(allocator, owner);
   }
 }
 
@@ -967,6 +1073,18 @@ static COMPILER_UNUSED void AllocateForRmov(X86_64RegisterAllocator* allocator,
 
 static void ReloadSpills(X86_64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
+  // Every operand of |inst| has to be in a register at the same time, so while
+  // finding registers for the spilled ones none of them may be chosen as the
+  // victim to make room for another.  Taking one leaves both reads naming the
+  // same register: `addq %rdi, %rdi` for what should have been the sum of two
+  // different values.  Redirecting the loser to its spill slot is not an
+  // option either, because the spill model rewrites a read only as it is
+  // processed and these have been processed already.
+  bool pushed = allocator->allocating_depth < X86_64_MAX_ALLOCATION_DEPTH;
+  if (pushed) {
+    allocator->allocating[allocator->allocating_depth++] = inst;
+  }
+
   // The scratch register is only free for the gap between the reload and the
   // instruction that consumes it, so at most one of this instruction's operands
   // can come from there.
@@ -1034,6 +1152,9 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
       // This reload is for a single instruction.
       reload->uses = 1;
     }
+  }
+  if (pushed) {
+    allocator->allocating_depth--;
   }
 }
 
@@ -1304,7 +1425,7 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
     case X86_64_OP(idiv):
     case X86_64_OP(div):
     case X86_64_OP(mod):
-      ReserveIdivRegisters(allocator);
+      ReserveIdivRegisters(allocator, inst);
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                      kX86_64RegTypeInt, CanUseTemp(allocator, inst));
       break;
@@ -1561,9 +1682,55 @@ static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
       allocator->pinned_int_phys |= 1u << X86_64IntPhysical(slot);
     }
   }
+  // The struct-return pointer is a register variable in all but name: it is
+  // picked out of the same fixed slot range (so that an NRVO result and the
+  // pointer land together) and it has to stay there until the epilogue.  Pin
+  // its slot too.  Left unpinned it loses ownership of the register at every
+  // block entry, and the allocator may spill it -- which is worse than useless
+  // for a value the pseudo-instruction does not itself define: the spill store
+  // is placed at the declaration point, saving whatever the register happened
+  // to hold on entry to the function, and later reads then reload that.
+  if (allocator->rv->struct_return_reg >= 0) {
+    int slot = (is_leaf ? X86_64_FIRST_LEAF_INT_REG_VAR
+                        : X86_64_FIRST_INT_REG_VAR) +
+               allocator->rv->struct_return_reg;
+    allocator->int_regs[slot].base.reserved = true;
+    allocator->pinned_int_phys |= 1u << X86_64IntPhysical(slot);
+  }
+}
+
+// A division reads and writes rax and rdx by name, wherever it lands.  A value
+// the allocator had put in either is therefore destroyed the first time control
+// reaches a division, and the allocator has no way to express that: it tracks
+// what occupies a register, not what a later instruction will do to it, and by
+// the time the division is reached the reads it invalidates may already have
+// been emitted naming the register.  Pre-colour instead: in a function that
+// divides at all, rax and rdx belong to the divisions and nothing else.
+static void ReserveDivisionRegisters(X86_64RegisterAllocator* allocator) {
+  TargetGenerator* gen = &allocator->rv->base;
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[b];
+    // Inclusive of block->end_code, which is the block's last instruction: a
+    // division immediately before a label ends its block, and missing it here
+    // would leave rax and rdx in the allocator's hands.
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      switch ((X86_64Opcode)inst->opcode) {
+        case X86_64_OP(idiv):
+        case X86_64_OP(div):
+        case X86_64_OP(mod):
+          allocator->int_regs[X86_64_RET_REG].base.reserved = true;
+          allocator->int_regs[X86_64_INT_ARG_START + 2].base.reserved = true;
+          return;
+        default:
+          break;
+      }
+    }
+  }
 }
 
 void X86_64AllocateRegisters(X86_64RegisterAllocator* allocator) {
+  ReserveDivisionRegisters(allocator);
   TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
   for (size_t i = 0; i < allocator->rv->base.basic_blocks.length; i++) {
