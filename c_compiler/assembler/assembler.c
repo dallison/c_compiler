@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <inttypes.h>
 #include "elf_writer.h"
 #include "asm_expr.h"
@@ -352,6 +353,23 @@ double AssemblerGetDoubleConst(Assembler* assembler) {
   } else if (LexLookingAt(&assembler->lex, TOK(number))) {
     v = (double)assembler->lex.number;
     LexNextToken(&assembler->lex);
+  } else if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    const char* name = assembler->lex.spelling.value;
+    union {
+      uint64_t bits;
+      double value;
+    } converted;
+    if (strcmp(name, "inf") == 0 || strcmp(name, "infinity") == 0) {
+      converted.bits = 0x7ff0000000000000ULL;
+      v = converted.value;
+      LexNextToken(&assembler->lex);
+    } else if (strcmp(name, "nan") == 0) {
+      converted.bits = 0x7ff8000000000000ULL;
+      v = converted.value;
+      LexNextToken(&assembler->lex);
+    } else {
+      AssemblerError(assembler, "Floating point constant expected");
+    }
   } else {
     AssemblerError(assembler, "Floating point constant expected");
   }

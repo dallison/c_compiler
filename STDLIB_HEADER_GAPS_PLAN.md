@@ -1,6 +1,7 @@
 # Standard-library header gaps: survey and implementation plan
 
-Branch: `feature/stdlib-header-gaps` (worktree `/Users/FZDSZZ/c_compiler-header-gaps`)
+The completed first tranche was merged into `master` at `78c1527`.
+Further `<charconv>` work continues on `master`.
 
 Scope: close the remaining gaps in the C and C++ standard header sets shipped
 from `libc/include`, including headers mandated by *old* standards (C89/C95/C99,
@@ -12,6 +13,25 @@ code to dodge it, do not add `#ifdef __davecc__` escape hatches, and do not mark
 the test `expected_fail`. Every such fix gets its own minimal regression test
 under `cxx_testsuite/tests/exec/` (or `c_testsuite/`) that is independent of the
 header that exposed it.
+
+## Immediate handoff
+
+- [x] Reverify the integer `<charconv>` implementation and its compiler fixes
+  on AArch64, ARM, RISC-V, wasm32, P-code, and 65C02 at `-O0` and `-O2`.
+  `0470_standard_charconv.cpp` passes on x86-64, AArch64, ARM, RISC-V, p-code,
+  and wasm32 at both optimization levels. wasm32 needs `-fno-exceptions`, matching
+  how `libc_wasm32` is built. 65C02 still mis-stores the `'0'` from integer
+  `to_chars` (returns a NUL); that remains a backend defect and is not a
+  blocker.
+- [x] Implement floating-point `std::to_chars` and `std::from_chars`, including
+  the `chars_format` and precision overloads, range/error behavior, and
+  round-trip tests. Covered by `0470_standard_charconv.cpp`. P-code needed the
+  assembler to accept `#inf`/`#nan` immediates (`0471_fp_inf_nan_constants.cpp`).
+  Remaining Phase 2 items: `<complex>`, `<scoped_allocator>`, `<valarray>`,
+  `<spanstream>`.
+
+Keep the ground rule above: preserve conforming tests and fix compiler defects
+at their source rather than adding library workarounds.
 
 ## 1. Survey
 
@@ -156,9 +176,12 @@ already exist.
 6. `<complex>` — `std::complex` is a class template and does **not** depend on
    the compiler's `_Complex`, so it is unblocked. Do it here, well before the C
    `complex.h`.
-7. `<charconv>` — `to_chars`/`from_chars` for integers first, then
-   floating-point. Nothing exists today; `libc/include/__itoa.h` and the
-   `string_to_string_*` translation units are prior art to reuse or supersede.
+7. `<charconv>` (done) — integer and floating-point overloads, including
+   `chars_format` and precision. Cross-target: x86-64, AArch64, ARM, RISC-V,
+   p-code, and wasm32 at `-O0` and `-O2`. 65C02 still fails integer `to_chars`
+   of 0 (backend store). `libc/include/__itoa.h` and the
+   `string_to_string_*` translation units are prior art that this header does
+   not currently call.
 8. `<scoped_allocator>` — mechanical over the existing allocator machinery.
 9. `<valarray>` — the expression-template slice/mask/indirect surface; the
    largest item in this phase.
@@ -177,9 +200,9 @@ by cleanup guards.
 `0467_standard_typeindex.cpp`; both pass at `-O0` and `-O2` on x86-64,
 AArch64, ARM, RISC-V, wasm32, p-code, and 65C02.
 
-The integer overloads of `<charconv>` are covered by
-`0470_standard_charconv.cpp` and pass the same cross-target matrix. Floating
-point `to_chars`/`from_chars` remain to be implemented.
+The integer and floating-point overloads of `<charconv>` are covered by
+`0470_standard_charconv.cpp`. They pass x86-64, AArch64, ARM, RISC-V, p-code,
+and wasm32 at `-O0` and `-O2`. 65C02 is still open (integer store of `'0'`).
 
 ### Phase 3 — C runtime headers
 

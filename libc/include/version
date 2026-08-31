@@ -9,6 +9,7 @@
 #define version_h
 
 #if __cplusplus >= 201703L
+#define __cpp_lib_to_chars 201611L
 #define __cpp_lib_filesystem 201703L
 #define __cpp_lib_memory_resource 201603L
 #define __cpp_lib_sample 201603L
@@ -57,6 +58,7 @@
 #define __cpp_lib_mdspan 202207L
 #define __cpp_lib_move_only_function 202110L
 #define __cpp_lib_print 202207L
+#define __cpp_lib_constexpr_charconv 202207L
 #define __cpp_lib_stacktrace 202011L
 #ifndef __cpp_lib_stdfloat
 #define __cpp_lib_stdfloat 202306L

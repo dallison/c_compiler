@@ -74,6 +74,827 @@ template <class T>
 using __enable_integer =
     enable_if_t<is_integral_v<T> && !is_same_v<remove_cv_t<T>, bool>, int>;
 
+template <class T>
+using __enable_floating = enable_if_t<is_floating_point_v<T>, int>;
+
+constexpr bool __format_has(chars_format fmt, chars_format bit) noexcept {
+  return (static_cast<int>(fmt) & static_cast<int>(bit)) != 0;
+}
+
+constexpr int __hex_digit_value(char ch) noexcept {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return ch - 'a' + 10;
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
+constexpr bool __ascii_ieq(char ch, char lower) noexcept {
+  if (ch == lower) {
+    return true;
+  }
+  if (lower >= 'a' && lower <= 'z' && ch == static_cast<char>(lower - 'a' + 'A')) {
+    return true;
+  }
+  return false;
+}
+
+constexpr bool __starts_with_ci(const char* first, const char* last,
+                                  const char* word, int n) noexcept {
+  if (last - first < n) {
+    return false;
+  }
+  for (int i = 0; i < n; ++i) {
+    if (!__ascii_ieq(first[i], word[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+constexpr to_chars_result __emit(char* first, char* last, const char* src,
+                                  int n) noexcept {
+  if (last - first < n) {
+    return {last, errc::value_too_large};
+  }
+  for (int i = 0; i < n; ++i) {
+    first[i] = src[i];
+  }
+  return {first + n, errc()};
+}
+
+constexpr double __mul_pow10(double value, int exponent) noexcept {
+  if (exponent == 0 || value == 0.0) {
+    return value;
+  }
+  if (exponent > 0) {
+    double base = 10.0;
+    unsigned int remaining = static_cast<unsigned int>(exponent);
+    while (remaining != 0) {
+      if ((remaining & 1u) != 0) {
+        value *= base;
+      }
+      base *= base;
+      remaining >>= 1;
+    }
+    return value;
+  }
+  return value / __mul_pow10(1.0, -exponent);
+}
+
+constexpr double __mul_pow2(double value, int exponent) noexcept {
+  if (exponent == 0 || value == 0.0) {
+    return value;
+  }
+  if (exponent > 0) {
+    while (exponent >= 30) {
+      value *= static_cast<double>(1u << 30);
+      exponent -= 30;
+    }
+    value *= static_cast<double>(1u << exponent);
+    return value;
+  }
+  while (exponent <= -30) {
+    value /= static_cast<double>(1u << 30);
+    exponent += 30;
+  }
+  value /= static_cast<double>(1u << -exponent);
+  return value;
+}
+
+template <class T, bool Is32 = sizeof(T) <= 4>
+struct __ieee;
+
+template <class T>
+struct __ieee<T, true> {
+  static constexpr int mantissa_bits = 23;
+  static constexpr int exponent_bias = 127;
+  static constexpr int max_biased_exponent = 255;
+  static constexpr uint64_t sign_mask = 0x80000000ull;
+  static constexpr uint64_t exponent_mask = 0x7f800000ull;
+  static constexpr uint64_t mantissa_mask = 0x7fffffull;
+};
+
+template <class T>
+struct __ieee<T, false> {
+  static constexpr int mantissa_bits = 52;
+  static constexpr int exponent_bias = 1023;
+  static constexpr int max_biased_exponent = 2047;
+  static constexpr uint64_t sign_mask = 0x8000000000000000ull;
+  static constexpr uint64_t exponent_mask = 0x7ff0000000000000ull;
+  static constexpr uint64_t mantissa_mask = 0xfffffffffffffull;
+};
+
+template <class T>
+constexpr uint64_t __fp_bits(T value) noexcept {
+  if constexpr (sizeof(T) <= 4) {
+    return bit_cast<uint32_t>(static_cast<float>(value));
+  } else {
+    return bit_cast<uint64_t>(static_cast<double>(value));
+  }
+}
+
+template <class T>
+constexpr T __fp_from_bits(uint64_t bits) noexcept {
+  if constexpr (sizeof(T) <= 4) {
+    return static_cast<T>(bit_cast<float>(static_cast<uint32_t>(bits)));
+  } else {
+    return static_cast<T>(bit_cast<double>(bits));
+  }
+}
+
+template <class T>
+constexpr T __fp_abs(T value) noexcept {
+  using L = __ieee<T>;
+  return __fp_from_bits<T>(__fp_bits(value) & ~L::sign_mask);
+}
+
+template <class T>
+constexpr bool __fp_sign(T value) noexcept {
+  return (__fp_bits(value) & __ieee<T>::sign_mask) != 0;
+}
+
+template <class T>
+constexpr int __fp_biased_exponent(T value) noexcept {
+  using L = __ieee<T>;
+  return static_cast<int>((__fp_bits(value) & L::exponent_mask) >>
+                          L::mantissa_bits);
+}
+
+template <class T>
+constexpr uint64_t __fp_mantissa(T value) noexcept {
+  return __fp_bits(value) & __ieee<T>::mantissa_mask;
+}
+
+template <class T>
+constexpr bool __fp_is_nan(T value) noexcept {
+  return __fp_biased_exponent(value) == __ieee<T>::max_biased_exponent &&
+         __fp_mantissa(value) != 0;
+}
+
+template <class T>
+constexpr bool __fp_is_inf(T value) noexcept {
+  return __fp_biased_exponent(value) == __ieee<T>::max_biased_exponent &&
+         __fp_mantissa(value) == 0;
+}
+
+struct __decimal {
+  char digits[24];
+  int ndigits;
+  int sci_exp;
+  bool negative;
+  bool nan;
+  bool inf;
+};
+
+template <class T>
+constexpr void __fill_decimal_digits(T value, int count, __decimal& out) {
+  double remaining = static_cast<double>(__fp_abs(value));
+  int biased = __fp_biased_exponent(value);
+  int exp2 = biased == 0 ? 1 - __ieee<T>::exponent_bias
+                         : biased - __ieee<T>::exponent_bias;
+  int sci = (exp2 * 30103) / 100000;
+  remaining = __mul_pow10(remaining, -sci);
+  while (remaining < 1.0) {
+    remaining *= 10.0;
+    --sci;
+  }
+  while (remaining >= 10.0) {
+    remaining /= 10.0;
+    ++sci;
+  }
+  if (count < 1) {
+    count = 1;
+  }
+  if (count > 18) {
+    count = 18;
+  }
+  for (int i = 0; i < count; ++i) {
+    int digit = static_cast<int>(remaining);
+    if (digit < 0) {
+      digit = 0;
+    }
+    if (digit > 9) {
+      digit = 9;
+    }
+    out.digits[i] = static_cast<char>('0' + digit);
+    remaining = (remaining - static_cast<double>(digit)) * 10.0;
+  }
+  if (remaining >= 5.0) {
+    int i = count - 1;
+    while (i >= 0) {
+      if (out.digits[i] != '9') {
+        ++out.digits[i];
+        break;
+      }
+      out.digits[i] = '0';
+      --i;
+    }
+    if (i < 0) {
+      out.digits[0] = '1';
+      for (int j = 1; j < count; ++j) {
+        out.digits[j] = '0';
+      }
+      ++sci;
+    }
+  }
+  out.ndigits = count;
+  out.sci_exp = sci;
+}
+
+template <class T>
+constexpr __decimal __classify_decimal(T value, int count) {
+  __decimal out = {};
+  out.negative = __fp_sign(value);
+  if (__fp_is_nan(value)) {
+    out.nan = true;
+    return out;
+  }
+  if (__fp_is_inf(value)) {
+    out.inf = true;
+    return out;
+  }
+  if (__fp_abs(value) == T(0)) {
+    out.digits[0] = '0';
+    out.ndigits = 1;
+    out.sci_exp = 0;
+    return out;
+  }
+  __fill_decimal_digits(value, count, out);
+  return out;
+}
+
+constexpr void __strip_trailing_zeros(__decimal& out) noexcept {
+  while (out.ndigits > 1 && out.digits[out.ndigits - 1] == '0') {
+    --out.ndigits;
+  }
+}
+
+constexpr to_chars_result __emit_special(char* first, char* last,
+                                          const __decimal& out) noexcept {
+  if (out.nan) {
+    return __emit(first, last, "nan", 3);
+  }
+  if (out.negative) {
+    return __emit(first, last, "-inf", 4);
+  }
+  return __emit(first, last, "inf", 3);
+}
+
+constexpr int __write_uint(char* dest, unsigned long long value) noexcept {
+  char tmp[24];
+  int n = 0;
+  do {
+    tmp[n++] = static_cast<char>('0' + (value % 10));
+    value /= 10;
+  } while (value != 0);
+  for (int i = 0; i < n; ++i) {
+    dest[i] = tmp[n - 1 - i];
+  }
+  return n;
+}
+
+constexpr int __format_scientific(char* dest, const __decimal& out,
+                                     int precision, bool keep_zeros) noexcept {
+  int n = 0;
+  if (out.negative) {
+    dest[n++] = '-';
+  }
+  dest[n++] = out.digits[0];
+  int frac = keep_zeros ? precision : out.ndigits - 1;
+  if (frac < 0) {
+    frac = 0;
+  }
+  if (frac > 0) {
+    dest[n++] = '.';
+    for (int i = 0; i < frac; ++i) {
+      dest[n++] = i + 1 < out.ndigits ? out.digits[i + 1] : '0';
+    }
+    if (!keep_zeros) {
+      while (n > 0 && dest[n - 1] == '0') {
+        --n;
+      }
+      if (n > 0 && dest[n - 1] == '.') {
+        --n;
+      }
+    }
+  }
+  dest[n++] = 'e';
+  int exponent = out.sci_exp;
+  if (exponent < 0) {
+    dest[n++] = '-';
+    exponent = -exponent;
+  } else {
+    dest[n++] = '+';
+  }
+  if (exponent < 10) {
+    dest[n++] = '0';
+  }
+  n += __write_uint(dest + n, static_cast<unsigned long long>(exponent));
+  return n;
+}
+
+constexpr int __format_fixed(char* dest, const __decimal& out, int precision,
+                              bool keep_zeros) noexcept {
+  int n = 0;
+  if (out.negative) {
+    dest[n++] = '-';
+  }
+  if (out.sci_exp >= 0) {
+    int whole = out.sci_exp + 1;
+    for (int i = 0; i < whole; ++i) {
+      dest[n++] = i < out.ndigits ? out.digits[i] : '0';
+    }
+  } else {
+    dest[n++] = '0';
+  }
+  int frac = precision;
+  if (!keep_zeros) {
+    frac = out.sci_exp >= 0 ? out.ndigits - (out.sci_exp + 1) : out.ndigits;
+    if (out.sci_exp < -1) {
+      frac += -out.sci_exp - 1;
+    }
+    if (frac < 0) {
+      frac = 0;
+    }
+  }
+  if (frac > 0) {
+    dest[n++] = '.';
+    if (out.sci_exp < 0) {
+      int leading = -out.sci_exp - 1;
+      for (int i = 0; i < leading && frac > 0; ++i, --frac) {
+        dest[n++] = '0';
+      }
+    }
+    int first_frac_index = out.sci_exp >= 0 ? out.sci_exp + 1 : 0;
+    int written = 0;
+    while (written < frac) {
+      int index = first_frac_index + written;
+      dest[n++] = index < out.ndigits ? out.digits[index] : '0';
+      ++written;
+    }
+    if (!keep_zeros) {
+      while (n > 0 && dest[n - 1] == '0') {
+        --n;
+      }
+      if (n > 0 && dest[n - 1] == '.') {
+        --n;
+      }
+    }
+  }
+  return n;
+}
+
+constexpr int __format_hex(char* dest, bool negative, int unbiased,
+                           unsigned long long significand, int mantissa_bits,
+                           int precision, bool shortest) noexcept {
+  int n = 0;
+  if (negative) {
+    dest[n++] = '-';
+  }
+  dest[n++] = significand == 0 ? '0' : '1';
+  unsigned long long frac =
+      significand & ((1ull << mantissa_bits) - 1);
+  char hex[16];
+  int hex_count = (mantissa_bits + 3) / 4;
+  unsigned long long padded = frac << ((4 - (mantissa_bits % 4)) % 4);
+  for (int i = 0; i < hex_count; ++i) {
+    int shift = 4 * (hex_count - 1 - i);
+    hex[i] = __digit_char(static_cast<unsigned int>((padded >> shift) & 0xf));
+  }
+  int used = hex_count;
+  if (shortest) {
+    while (used > 0 && hex[used - 1] == '0') {
+      --used;
+    }
+  } else if (precision >= 0) {
+    if (precision < used) {
+      if (precision >= 0 && precision < hex_count) {
+        unsigned int next =
+            static_cast<unsigned int>(__digit_value(hex[precision]));
+        used = precision;
+        if (next >= 8 && used > 0) {
+          int i = used - 1;
+          while (i >= 0) {
+            int value = __digit_value(hex[i]);
+            if (value < 15) {
+              hex[i] = __digit_char(static_cast<unsigned int>(value + 1));
+              break;
+            }
+            hex[i] = '0';
+            --i;
+          }
+          if (i < 0) {
+            dest[negative ? 1 : 0] = '1';
+            ++unbiased;
+            for (int j = 0; j < used; ++j) {
+              hex[j] = '0';
+            }
+          }
+        }
+      }
+    } else {
+      used = precision;
+      for (int i = hex_count; i < used && i < 16; ++i) {
+        hex[i] = '0';
+      }
+    }
+  }
+  if (used > 0) {
+    dest[n++] = '.';
+    for (int i = 0; i < used; ++i) {
+      dest[n++] = hex[i];
+    }
+  }
+  dest[n++] = 'p';
+  if (unbiased < 0) {
+    dest[n++] = '-';
+    unbiased = -unbiased;
+  } else {
+    dest[n++] = '+';
+  }
+  n += __write_uint(dest + n, static_cast<unsigned long long>(unbiased));
+  return n;
+}
+
+template <class T>
+constexpr to_chars_result __to_chars_hex(char* first, char* last, T value,
+                                          int precision, bool shortest) {
+  if (__fp_is_nan(value)) {
+    return __emit(first, last, "nan", 3);
+  }
+  if (__fp_is_inf(value)) {
+    return __fp_sign(value) ? __emit(first, last, "-inf", 4)
+                             : __emit(first, last, "inf", 3);
+  }
+  using L = __ieee<T>;
+  uint64_t bits = __fp_bits(value);
+  bool negative = (bits & L::sign_mask) != 0;
+  int biased = static_cast<int>((bits & L::exponent_mask) >> L::mantissa_bits);
+  uint64_t frac = bits & L::mantissa_mask;
+  int unbiased = 0;
+  unsigned long long significand = 0;
+  if (biased == 0) {
+    if (frac == 0) {
+      unbiased = 0;
+      significand = 0;
+    } else {
+      unbiased = 1 - L::exponent_bias;
+      significand = frac;
+      while (significand < (1ull << L::mantissa_bits)) {
+        significand <<= 1;
+        --unbiased;
+      }
+    }
+  } else {
+    unbiased = biased - L::exponent_bias;
+    significand = (1ull << L::mantissa_bits) | frac;
+  }
+  char buffer[64];
+  int n = __format_hex(buffer, negative, unbiased, significand,
+                        L::mantissa_bits, precision, shortest);
+  return __emit(first, last, buffer, n);
+}
+
+template <class T>
+constexpr to_chars_result __to_chars_float(char* first, char* last, T value,
+                                             chars_format fmt, int precision,
+                                             bool explicit_precision) {
+  if ((static_cast<int>(fmt) & static_cast<int>(chars_format::hex)) != 0 &&
+      fmt == chars_format::hex) {
+    return __to_chars_hex(first, last, value, precision, !explicit_precision);
+  }
+
+  int count = explicit_precision ? precision + 18 : numeric_limits<T>::max_digits10;
+  if (count < 1) {
+    count = 1;
+  }
+  __decimal out = __classify_decimal(value, count);
+  if (out.nan || out.inf) {
+    return __emit_special(first, last, out);
+  }
+  if (!explicit_precision) {
+    __strip_trailing_zeros(out);
+  }
+
+  char buffer[96];
+  int n = 0;
+  bool want_fixed = __format_has(fmt, chars_format::fixed);
+  bool want_sci = __format_has(fmt, chars_format::scientific);
+  if (fmt == chars_format::hex) {
+    return __to_chars_hex(first, last, value, precision, !explicit_precision);
+  }
+
+  if (explicit_precision && want_fixed && want_sci) {
+    int p = precision < 1 ? 1 : precision;
+    int x = out.sci_exp;
+    if (p > x && x >= -4) {
+      n = __format_fixed(buffer, out, p - (x + 1), true);
+    } else {
+      n = __format_scientific(buffer, out, p - 1, true);
+    }
+    while (n > 0 && buffer[n - 1] == '0') {
+      --n;
+    }
+    if (n > 0 && buffer[n - 1] == '.') {
+      --n;
+    }
+  } else if (explicit_precision && want_fixed) {
+    n = __format_fixed(buffer, out, precision, true);
+  } else if (explicit_precision && want_sci) {
+    n = __format_scientific(buffer, out, precision, true);
+  } else {
+    char fixed_buf[96];
+    char sci_buf[96];
+    int n_fixed = __format_fixed(fixed_buf, out, out.ndigits, false);
+    int n_sci = __format_scientific(sci_buf, out, out.ndigits - 1, false);
+    if (want_fixed && !want_sci) {
+      n = n_fixed;
+      for (int i = 0; i < n; ++i) {
+        buffer[i] = fixed_buf[i];
+      }
+    } else if (want_sci && !want_fixed) {
+      n = n_sci;
+      for (int i = 0; i < n; ++i) {
+        buffer[i] = sci_buf[i];
+      }
+    } else if (n_sci < n_fixed) {
+      n = n_sci;
+      for (int i = 0; i < n; ++i) {
+        buffer[i] = sci_buf[i];
+      }
+    } else {
+      n = n_fixed;
+      for (int i = 0; i < n; ++i) {
+        buffer[i] = fixed_buf[i];
+      }
+    }
+  }
+  return __emit(first, last, buffer, n);
+}
+
+constexpr const char* __parse_inf_nan(const char* first, const char* last,
+                                      bool& nan, bool& inf) noexcept {
+  nan = false;
+  inf = false;
+  if (__starts_with_ci(first, last, "nan", 3)) {
+    nan = true;
+    const char* current = first + 3;
+    if (current != last && *current == '(') {
+      ++current;
+      while (current != last && *current != ')') {
+        ++current;
+      }
+      if (current != last && *current == ')') {
+        ++current;
+      }
+    }
+    return current;
+  }
+  if (__starts_with_ci(first, last, "infinity", 8)) {
+    inf = true;
+    return first + 8;
+  }
+  if (__starts_with_ci(first, last, "inf", 3)) {
+    inf = true;
+    return first + 3;
+  }
+  return first;
+}
+
+template <class T>
+constexpr from_chars_result __from_chars_hex(const char* first, const char* last,
+                                              T& value) {
+  const char* current = first;
+  bool negative = false;
+  if (current != last && *current == '-') {
+    negative = true;
+    ++current;
+  }
+  bool nan = false;
+  bool inf = false;
+  const char* special = __parse_inf_nan(current, last, nan, inf);
+  if (nan || inf) {
+    if (nan) {
+      value = numeric_limits<T>::quiet_NaN();
+    } else {
+      value = negative ? -numeric_limits<T>::infinity()
+                       : numeric_limits<T>::infinity();
+    }
+    return {special, errc()};
+  }
+
+  unsigned long long significand = 0;
+  int digits = 0;
+  int frac_digits = 0;
+  bool saw_digit = false;
+  bool saw_point = false;
+  for (; current != last; ++current) {
+    if (*current == '.' && !saw_point) {
+      saw_point = true;
+      continue;
+    }
+    int digit = __hex_digit_value(*current);
+    if (digit < 0) {
+      break;
+    }
+    saw_digit = true;
+    if (digits < 16) {
+      significand = (significand << 4) | static_cast<unsigned long long>(digit);
+      ++digits;
+    }
+    if (saw_point) {
+      ++frac_digits;
+    }
+  }
+  if (!saw_digit) {
+    return {first, errc::invalid_argument};
+  }
+  if (current == last || (*current != 'p' && *current != 'P')) {
+    return {first, errc::invalid_argument};
+  }
+  ++current;
+  bool exp_negative = false;
+  if (current != last && (*current == '+' || *current == '-')) {
+    exp_negative = *current == '-';
+    ++current;
+  }
+  if (current == last || *current < '0' || *current > '9') {
+    return {first, errc::invalid_argument};
+  }
+  int exponent = 0;
+  bool exp_overflow = false;
+  for (; current != last; ++current) {
+    if (*current < '0' || *current > '9') {
+      break;
+    }
+    if (exponent > 1000000) {
+      exp_overflow = true;
+    } else {
+      exponent = exponent * 10 + (*current - '0');
+    }
+  }
+  if (exp_negative) {
+    exponent = -exponent;
+  }
+  int binary_exp = exponent - 4 * frac_digits;
+  double parsed = static_cast<double>(significand);
+  parsed = __mul_pow2(parsed, binary_exp);
+  if (negative) {
+    parsed = -parsed;
+  }
+  if (exp_overflow) {
+    value = negative ? -numeric_limits<T>::infinity()
+                     : numeric_limits<T>::infinity();
+    return {current, errc::result_out_of_range};
+  }
+  T converted = static_cast<T>(parsed);
+  if (__fp_is_inf(converted) && significand != 0) {
+    value = converted;
+    return {current, errc::result_out_of_range};
+  }
+  value = converted;
+  return {current, errc()};
+}
+
+template <class T>
+constexpr from_chars_result __from_chars_float(const char* first, const char* last,
+                                               T& value, chars_format fmt) {
+  if (fmt == chars_format::hex) {
+    return __from_chars_hex(first, last, value);
+  }
+  const char* current = first;
+  bool negative = false;
+  if (current != last && *current == '-') {
+    negative = true;
+    ++current;
+  }
+  bool nan = false;
+  bool inf = false;
+  const char* special = __parse_inf_nan(current, last, nan, inf);
+  if (nan || inf) {
+    if (nan) {
+      value = numeric_limits<T>::quiet_NaN();
+    } else {
+      value = negative ? -numeric_limits<T>::infinity()
+                       : numeric_limits<T>::infinity();
+    }
+    return {special, errc()};
+  }
+
+  unsigned long long significand = 0;
+  int stored = 0;
+  int frac_digits = 0;
+  int extra_integer = 0;
+  bool saw_digit = false;
+  bool saw_point = false;
+  for (; current != last; ++current) {
+    if (*current == '.' && !saw_point) {
+      saw_point = true;
+      continue;
+    }
+    if (*current < '0' || *current > '9') {
+      break;
+    }
+    saw_digit = true;
+    if (stored < 19 && significand <= (18446744073709551615ull - 9ull) / 10ull) {
+      significand = significand * 10ull + static_cast<unsigned int>(*current - '0');
+      ++stored;
+      if (saw_point) {
+        ++frac_digits;
+      }
+    } else if (!saw_point) {
+      ++extra_integer;
+    }
+  }
+  if (!saw_digit) {
+    return {first, errc::invalid_argument};
+  }
+
+  bool saw_exp = false;
+  int exponent = 0;
+  const char* before_exp = current;
+  if (current != last && (*current == 'e' || *current == 'E')) {
+    const char* exp_pos = current + 1;
+    bool exp_negative = false;
+    if (exp_pos != last && (*exp_pos == '+' || *exp_pos == '-')) {
+      exp_negative = *exp_pos == '-';
+      ++exp_pos;
+    }
+    if (exp_pos != last && *exp_pos >= '0' && *exp_pos <= '9') {
+      if (fmt == chars_format::fixed) {
+        return {first, errc::invalid_argument};
+      }
+      saw_exp = true;
+      current = exp_pos;
+      for (; current != last; ++current) {
+        if (*current < '0' || *current > '9') {
+          break;
+        }
+        if (exponent < 10000000) {
+          exponent = exponent * 10 + (*current - '0');
+        }
+      }
+      if (exp_negative) {
+        exponent = -exponent;
+      }
+    } else {
+      current = before_exp;
+    }
+  }
+  if (fmt == chars_format::scientific && !saw_exp) {
+    return {first, errc::invalid_argument};
+  }
+
+  int magnitude = exponent - frac_digits + extra_integer;
+  if (magnitude > numeric_limits<T>::max_exponent10) {
+    value = negative ? -numeric_limits<T>::infinity()
+                     : numeric_limits<T>::infinity();
+    return {current, errc::result_out_of_range};
+  }
+
+  double parsed = 0.0;
+  const char* p = first;
+  if (negative) {
+    ++p;
+  }
+  for (; p != current && *p != '.' && *p != 'e' && *p != 'E'; ++p) {
+    parsed = parsed * 10.0 + static_cast<double>(*p - '0');
+  }
+  if (p != current && *p == '.') {
+    ++p;
+    double denom = 10.0;
+    for (; p != current && *p != 'e' && *p != 'E'; ++p) {
+      parsed = parsed + static_cast<double>(*p - '0') / denom;
+      denom = denom * 10.0;
+    }
+  }
+  if (exponent > 0) {
+    for (int i = 0; i < exponent; ++i) {
+      parsed = parsed * 10.0;
+    }
+  } else if (exponent < 0) {
+    for (int i = 0; i < -exponent; ++i) {
+      parsed = parsed / 10.0;
+    }
+  }
+  if (negative) {
+    parsed = -parsed;
+  }
+  T converted = static_cast<T>(parsed);
+  if (__fp_is_inf(converted)) {
+    value = converted;
+    return {current, errc::result_out_of_range};
+  }
+  value = converted;
+  return {current, errc()};
+}
+
 }  // namespace __charconv_detail
 
 template <class T, __charconv_detail::__enable_integer<T> = 0>
@@ -175,6 +996,32 @@ constexpr from_chars_result from_chars(const char* first, const char* last,
     value = static_cast<T>(parsed);
   }
   return {current, errc()};
+}
+
+template <class T, __charconv_detail::__enable_floating<T> = 0>
+constexpr to_chars_result to_chars(char* first, char* last, T value) noexcept {
+  return __charconv_detail::__to_chars_float(first, last, value,
+                                               chars_format::general, 0, false);
+}
+
+template <class T, __charconv_detail::__enable_floating<T> = 0>
+constexpr to_chars_result to_chars(char* first, char* last, T value,
+                                   chars_format fmt) noexcept {
+  return __charconv_detail::__to_chars_float(first, last, value, fmt, 0, false);
+}
+
+template <class T, __charconv_detail::__enable_floating<T> = 0>
+constexpr to_chars_result to_chars(char* first, char* last, T value,
+                                   chars_format fmt, int precision) noexcept {
+  return __charconv_detail::__to_chars_float(first, last, value, fmt, precision,
+                                               true);
+}
+
+template <class T, __charconv_detail::__enable_floating<T> = 0>
+constexpr from_chars_result from_chars(const char* first, const char* last,
+                                        T& value,
+                                        chars_format fmt = chars_format::general) noexcept {
+  return __charconv_detail::__from_chars_float(first, last, value, fmt);
 }
 
 }  // namespace std
