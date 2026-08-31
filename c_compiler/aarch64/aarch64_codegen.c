@@ -1854,11 +1854,11 @@ static TargetInstruction* MultiplyByConstant(AARCH64Generator* g,
                                IRConstant* constant) {
   int64_t value = constant->value.ivalue;
   int numbits = PopulationCount(value);
-  // The register allocator may coalesce the first add's destination with the
-  // original input.  A later shifted term would then shift the partial sum
-  // instead of the multiplicand (for example, x * 15 became x * 63).  One
-  // shift-plus-add has no later use of the input and remains safe.
-  if (numbits > 2) {
+  // The register allocator may coalesce a shifted term with the original
+  // input. A second shifted term then has to reload that input and can clobber
+  // the first term before the add. Keep only powers of two and the safe
+  // input-plus-one-shift form; use mul when both set bits require shifts.
+  if (numbits > 2 || (numbits == 2 && (value & 1) == 0)) {
     return NULL;
   }
   int num_cycles = numbits * 2 - 1;

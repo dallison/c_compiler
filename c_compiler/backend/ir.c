@@ -1010,10 +1010,24 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(inc16):
     case IR_OP(inc32):
     case IR_OP(inc64):
+    case IR_OP(uinc8):
+    case IR_OP(uinc16):
+    case IR_OP(uinc32):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
     case IR_OP(dec8):
     case IR_OP(dec16):
     case IR_OP(dec32):
     case IR_OP(dec64):
+    case IR_OP(udec8):
+    case IR_OP(udec16):
+    case IR_OP(udec32):
+    case IR_OP(udec64):
+    case IR_OP(deca):
+    case IR_OP(decf):
+    case IR_OP(decd):
      return true;
     default:
       return false;
