@@ -668,7 +668,14 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
     IRSetType(result, bool_type);
     return GenerateZeroExtend(gen, &node->base, result);
   }
-  return IRSetType(result, node->base.type);
+  // Division and remainder signedness belongs to the converted operands. An
+  // enclosing cast can make the AST result type differ from that operation
+  // type; carrying the cast type here would select signed division for an
+  // unsigned quotient before the separate cast IR node is applied.
+  TypeRecord* result_type =
+      opcode == IR_OP(divi) || opcode == IR_OP(modi) ? left->type
+                                                     : node->base.type;
+  return IRSetType(result, result_type);
 }
 
 // Pick the cmp3way IR opcode for the (converted, common) operand type.
