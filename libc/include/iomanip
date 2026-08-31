@@ -1,0 +1,479 @@
+//
+//  iomanip
+//  c_compiler
+//
+//  Standard parameterized stream manipulators.
+//
+
+#ifndef __davecc_iomanip__
+#define __davecc_iomanip__
+
+#include <ios>
+#include <istream>
+#include <ostream>
+#include <string>
+#include <time.h>
+
+#if __cplusplus >= 201703L
+#include <string_view>
+#endif
+
+namespace std {
+
+struct __resetiosflags {
+  ios_base::fmtflags mask;
+};
+
+struct __setiosflags {
+  ios_base::fmtflags mask;
+};
+
+struct __setbase {
+  int base;
+};
+
+struct __setprecision {
+  int precision;
+};
+
+struct __setw {
+  int width;
+};
+
+template <class CharT>
+struct __setfill {
+  CharT value;
+};
+
+inline __resetiosflags resetiosflags(ios_base::fmtflags mask) {
+  return {mask};
+}
+
+inline __setiosflags setiosflags(ios_base::fmtflags mask) {
+  return {mask};
+}
+
+inline __setbase setbase(int base) {
+  return {base};
+}
+
+template <class CharT>
+inline __setfill<CharT> setfill(CharT value) {
+  return {value};
+}
+
+inline __setprecision setprecision(int precision) {
+  return {precision};
+}
+
+inline __setw setw(int width) {
+  return {width};
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __resetiosflags manip) {
+  stream.unsetf(manip.mask);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __resetiosflags manip) {
+  stream.unsetf(manip.mask);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __setiosflags manip) {
+  stream.setf(manip.mask);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __setiosflags manip) {
+  stream.setf(manip.mask);
+  return stream;
+}
+
+inline ios_base::fmtflags __base_flag(int base) {
+  return base == 8 ? ios_base::oct
+       : base == 10 ? ios_base::dec
+       : base == 16 ? ios_base::hex
+                    : static_cast<ios_base::fmtflags>(0);
+}
+
+template <class Stream>
+void __apply_setbase(Stream& stream, int base) {
+  ios_base::fmtflags flag = __base_flag(base);
+  if (flag == static_cast<ios_base::fmtflags>(0)) {
+    stream.unsetf(ios_base::basefield);
+  } else {
+    stream.setf(flag, ios_base::basefield);
+  }
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __setbase manip) {
+  __apply_setbase(stream, manip.base);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __setbase manip) {
+  __apply_setbase(stream, manip.base);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __setfill<CharT> manip) {
+  stream.fill(manip.value);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __setprecision manip) {
+  stream.precision(manip.precision);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __setprecision manip) {
+  stream.precision(manip.precision);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __setw manip) {
+  stream.width(manip.width);
+  return stream;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __setw manip) {
+  stream.width(manip.width);
+  return stream;
+}
+
+template <class CharT>
+struct __quoted_output {
+  const CharT* data;
+  size_t size;
+  CharT delimiter;
+  CharT escape;
+};
+
+template <class CharT, class Traits, class Allocator>
+struct __quoted_input {
+  basic_string<CharT, Traits, Allocator>* value;
+  CharT delimiter;
+  CharT escape;
+};
+
+template <class CharT>
+__quoted_output<CharT> quoted(
+    const CharT* value, CharT delimiter = CharT('"'),
+    CharT escape = CharT('\\')) {
+  return {value, char_traits<CharT>::length(value), delimiter, escape};
+}
+
+template <class CharT, class Traits, class Allocator>
+__quoted_output<CharT> quoted(
+    const basic_string<CharT, Traits, Allocator>& value,
+    CharT delimiter = CharT('"'), CharT escape = CharT('\\')) {
+  return {value.data(), value.size(), delimiter, escape};
+}
+
+template <class CharT, class Traits, class Allocator>
+__quoted_input<CharT, Traits, Allocator> quoted(
+    basic_string<CharT, Traits, Allocator>& value,
+    CharT delimiter = CharT('"'), CharT escape = CharT('\\')) {
+  return {&value, delimiter, escape};
+}
+
+#if __cplusplus >= 201703L
+template <class CharT, class Traits>
+__quoted_output<CharT> quoted(
+    basic_string_view<CharT, Traits> value,
+    CharT delimiter = CharT('"'), CharT escape = CharT('\\')) {
+  return {value.data(), value.size(), delimiter, escape};
+}
+#endif
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __quoted_output<CharT> value) {
+  basic_string<CharT, Traits> output;
+  output.push_back(value.delimiter);
+  for (size_t i = 0; i < value.size; ++i) {
+    if (value.data[i] == value.delimiter || value.data[i] == value.escape) {
+      output.push_back(value.escape);
+    }
+    output.push_back(value.data[i]);
+  }
+  output.push_back(value.delimiter);
+  return stream << output;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream,
+    __quoted_input<CharT, Traits, Allocator> value) {
+  typename basic_istream<CharT, Traits>::sentry sentry(stream);
+  if (!sentry) {
+    return stream;
+  }
+  typename Traits::int_type current = stream.rdbuf()->sgetc();
+  if (Traits::eq_int_type(current, Traits::eof()) ||
+      Traits::to_char_type(current) != value.delimiter) {
+    return stream >> *value.value;
+  }
+  stream.rdbuf()->snextc();
+  value.value->clear();
+  bool escaped = false;
+  for (;;) {
+    current = stream.rdbuf()->sgetc();
+    if (Traits::eq_int_type(current, Traits::eof())) {
+      stream.setstate(ios_base::eofbit | ios_base::failbit);
+      break;
+    }
+    CharT ch = Traits::to_char_type(current);
+    stream.rdbuf()->snextc();
+    if (escaped) {
+      value.value->push_back(ch);
+      escaped = false;
+    } else if (ch == value.escape) {
+      escaped = true;
+    } else if (ch == value.delimiter) {
+      break;
+    } else {
+      value.value->push_back(ch);
+    }
+  }
+  return stream;
+}
+
+struct __put_money_value {
+  long double value;
+  bool international;
+};
+
+struct __get_money_value {
+  long double* value;
+  bool international;
+};
+
+template <class CharT, class Traits, class Allocator>
+struct __put_money_string {
+  const basic_string<CharT, Traits, Allocator>* value;
+  bool international;
+};
+
+template <class CharT, class Traits, class Allocator>
+struct __get_money_string {
+  basic_string<CharT, Traits, Allocator>* value;
+  bool international;
+};
+
+inline __put_money_value put_money(long double value,
+                                   bool international = false) {
+  return {value, international};
+}
+
+inline __get_money_value get_money(long double& value,
+                                   bool international = false) {
+  return {&value, international};
+}
+
+template <class CharT, class Traits, class Allocator>
+__put_money_string<CharT, Traits, Allocator> put_money(
+    const basic_string<CharT, Traits, Allocator>& value,
+    bool international = false) {
+  return {&value, international};
+}
+
+template <class CharT, class Traits, class Allocator>
+__get_money_string<CharT, Traits, Allocator> get_money(
+    basic_string<CharT, Traits, Allocator>& value,
+    bool international = false) {
+  return {&value, international};
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __put_money_value value) {
+  (void)value.international;
+  return stream << value.value;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __get_money_value value) {
+  (void)value.international;
+  double parsed = 0;
+  stream >> parsed;
+  if (stream) {
+    *value.value = static_cast<long double>(parsed);
+  }
+  return stream;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream,
+    __put_money_string<CharT, Traits, Allocator> value) {
+  (void)value.international;
+  return stream << *value.value;
+}
+
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream,
+    __get_money_string<CharT, Traits, Allocator> value) {
+  (void)value.international;
+  return stream >> *value.value;
+}
+
+template <class CharT>
+struct __put_time {
+  const struct tm* value;
+  const CharT* format;
+};
+
+template <class CharT>
+struct __get_time {
+  struct tm* value;
+  const CharT* format;
+};
+
+template <class CharT>
+__put_time<CharT> put_time(const struct tm* value, const CharT* format) {
+  return {value, format};
+}
+
+template <class CharT>
+__get_time<CharT> get_time(struct tm* value, const CharT* format) {
+  return {value, format};
+}
+
+template <class CharT, class Traits>
+void __put_time_number(basic_ostream<CharT, Traits>& stream,
+                       int value, int width) {
+  CharT digits[12];
+  for (int i = width - 1; i >= 0; --i) {
+    digits[i] = static_cast<CharT>('0' + value % 10);
+    value /= 10;
+  }
+  for (int i = 0; i < width; ++i) {
+    stream.put(digits[i]);
+  }
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(
+    basic_ostream<CharT, Traits>& stream, __put_time<CharT> value) {
+  for (size_t i = 0; value.format[i] != CharT(); ++i) {
+    CharT ch = value.format[i];
+    if (ch != static_cast<CharT>('%')) {
+      stream.put(ch);
+      continue;
+    }
+    ch = value.format[++i];
+    switch (static_cast<char>(ch)) {
+      case '%': stream.put(static_cast<CharT>('%')); break;
+      case 'Y': __put_time_number(stream, value.value->tm_year + 1900, 4); break;
+      case 'y': __put_time_number(stream, (value.value->tm_year + 1900) % 100, 2); break;
+      case 'm': __put_time_number(stream, value.value->tm_mon + 1, 2); break;
+      case 'd': __put_time_number(stream, value.value->tm_mday, 2); break;
+      case 'H': __put_time_number(stream, value.value->tm_hour, 2); break;
+      case 'M': __put_time_number(stream, value.value->tm_min, 2); break;
+      case 'S': __put_time_number(stream, value.value->tm_sec, 2); break;
+      default:
+        stream.setstate(ios_base::failbit);
+        return stream;
+    }
+  }
+  return stream;
+}
+
+template <class CharT, class Traits>
+bool __get_time_number(basic_istream<CharT, Traits>& stream,
+                       int width, int& value) {
+  value = 0;
+  for (int i = 0; i < width; ++i) {
+    typename Traits::int_type current = stream.rdbuf()->sbumpc();
+    if (Traits::eq_int_type(current, Traits::eof())) {
+      stream.setstate(ios_base::eofbit | ios_base::failbit);
+      return false;
+    }
+    CharT ch = Traits::to_char_type(current);
+    if (ch < static_cast<CharT>('0') || ch > static_cast<CharT>('9')) {
+      stream.setstate(ios_base::failbit);
+      return false;
+    }
+    value = value * 10 + static_cast<int>(ch - static_cast<CharT>('0'));
+  }
+  return true;
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits>& operator>>(
+    basic_istream<CharT, Traits>& stream, __get_time<CharT> value) {
+  typename basic_istream<CharT, Traits>::sentry sentry(stream);
+  if (!sentry) {
+    return stream;
+  }
+  for (size_t i = 0; value.format[i] != CharT() && stream; ++i) {
+    CharT ch = value.format[i];
+    if (ch != static_cast<CharT>('%')) {
+      typename Traits::int_type current = stream.rdbuf()->sbumpc();
+      if (Traits::eq_int_type(current, Traits::eof())) {
+        stream.setstate(ios_base::eofbit | ios_base::failbit);
+      } else if (Traits::to_char_type(current) != ch) {
+        stream.setstate(ios_base::failbit);
+      }
+      continue;
+    }
+    ch = value.format[++i];
+    if (ch == static_cast<CharT>('%')) {
+      typename Traits::int_type current = stream.rdbuf()->sbumpc();
+      if (Traits::eq_int_type(current, Traits::eof())) {
+        stream.setstate(ios_base::eofbit | ios_base::failbit);
+      } else if (Traits::to_char_type(current) != ch) {
+        stream.setstate(ios_base::failbit);
+      }
+      continue;
+    }
+    int parsed = 0;
+    int width = ch == static_cast<CharT>('Y') ? 4 : 2;
+    if (!__get_time_number(stream, width, parsed)) {
+      break;
+    }
+    switch (static_cast<char>(ch)) {
+      case 'Y': value.value->tm_year = parsed - 1900; break;
+      case 'y': value.value->tm_year = parsed + (parsed < 69 ? 100 : 0); break;
+      case 'm': value.value->tm_mon = parsed - 1; break;
+      case 'd': value.value->tm_mday = parsed; break;
+      case 'H': value.value->tm_hour = parsed; break;
+      case 'M': value.value->tm_min = parsed; break;
+      case 'S': value.value->tm_sec = parsed; break;
+      default:
+        stream.setstate(ios_base::failbit);
+        break;
+    }
+  }
+  return stream;
+}
+
+}  // namespace std
+
+#endif

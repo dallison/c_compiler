@@ -571,6 +571,16 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
     fprintf(fp, "\t// Restored registers.\n");
   }
 
+  if (!EmptyStackFrame(emitter)) {
+    // A VLA or over-aligned local may have moved sp below the fixed frame.
+    // Reconstruct the frame bottom from x29 before reading saved registers or
+    // applying the ordinary fixed-size epilogue.
+    int frame_adjustment =
+        stack_frame_size - VarargsSaveAreaSize(emitter);
+    AddSubImmediate(emitter, "sp", "x29", /*add=*/false,
+                    frame_adjustment, NULL, fp);
+  }
+
   int offset = emitter->saved_reg_offset;
 
   BitSetIterator it;

@@ -54,9 +54,9 @@ cxx_removed_at_20="ciso646 cstdalign cstdbool"
 
 # Not yet implemented.  Remove entries here as the headers land.
 c_todo="complex.h fenv.h tgmath.h uchar.h wctype.h locale.h signal.h"
-cxx_todo="bitset complex iomanip numeric valarray clocale csignal cwctype
-          cfenv cuchar forward_list future regex scoped_allocator typeindex
-          shared_mutex charconv execution spanstream"
+cxx_todo="complex valarray clocale csignal cwctype
+          cfenv cuchar future regex scoped_allocator
+          shared_mutex execution spanstream"
 
 # The C++ headers were only ever exercised at C++20 and later and use C++17/20
 # syntax unconditionally, so most of them do not compile below C++20 yet.  Until

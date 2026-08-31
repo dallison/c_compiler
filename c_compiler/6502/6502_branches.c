@@ -110,10 +110,11 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
           (inst->flags & k6502SkipArgCleanup) == 0) {
         frame_size += (int)g->incoming_arg_size;
       }
+      int dynamic_restore_size = g->uses_dynamic_stack ? 13 : 0;
       if (frame_size >= 256) {
-        return 7;
+        return dynamic_restore_size + 7;
       }
-      return 5;
+      return dynamic_restore_size + 5;
     }
     case W65C02_OP(leave_leaf): {
       int frame_size = FrameSize(g, true) + 3;
@@ -121,10 +122,11 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
           (inst->flags & k6502SkipArgCleanup) == 0) {
         frame_size += (int)g->incoming_arg_size;
       }
+      int dynamic_restore_size = g->uses_dynamic_stack ? 13 : 0;
       if (frame_size >= 256) {
-        return 7;
+        return dynamic_restore_size + 7;
       }
-      return 5;
+      return dynamic_restore_size + 5;
     }
 
       case W65C02_OP(load_result): {

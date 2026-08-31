@@ -239,17 +239,19 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         // can combine them.
         int offset = X86_64IntValue(inst->operand[2]);
         int immed = X86_64IntValue(base->operand[1]);
-        if (X86_64IsPossibleImmediate(offset + immed)) {
+        // An in-place address update (base->dest != NULL) must remain visible
+        // to later users. Folding its increment into this store while keeping
+        // the add would apply the offset twice.
+        if (X86_64IsPossibleImmediate(offset + immed) &&
+            base->users.length == 0 && base->dest == NULL) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
                                                              &rv->base,
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0 && base->dest == NULL) {
-            TrapRemoveInstruction(base);
-           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
-          }
+          TrapRemoveInstruction(base);
+          TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
         }
       }
     }

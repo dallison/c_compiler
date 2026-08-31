@@ -789,6 +789,11 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
                         GetIntConstant(pcode, NULL, kTargetType32Bit, 16)));
   }
   if (IRIsAutoVariable(node)) {
+    IRVariable* var = (IRVariable*)node;
+    if (TypeIsVLA(node->type) && var->symbol != NULL &&
+        var->symbol->value.other != NULL) {
+      return GetLoweredNode(var->symbol->value.other);
+    }
     // Auto variables are in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
     TargetInstruction* addr = FramePointer(pcode);
@@ -1984,8 +1989,12 @@ static TargetInstruction* LowerAlign(PCodeGenerator* pcode, IRNode* node) {
 
   TargetInstruction* immed = GetIntConstant(pcode, NULL, kTargetType32Bit, align->value.ivalue - 1);
   TargetInstruction* inv_immed = GetIntConstant(pcode, NULL, kTargetType32Bit, ~(align->value.ivalue - 1));
-  TargetInstruction* add = Emit(pcode, NewInstruction2(P_OP(add), value, immed));
-  TargetInstruction* and = Emit(pcode, NewInstruction2(P_OP(and), add, inv_immed));
+  TargetInstruction* add =
+      Emit(pcode, NewInstruction2(P_OP(addc), value, immed));
+  TargetInstruction* mask =
+      Emit(pcode, NewInstruction1(P_OP(movxc), inv_immed));
+  TargetInstruction* and =
+      Emit(pcode, NewInstruction2(P_OP(and), add, mask));
 
   SetLoweredNode(node, and);
   return and;
@@ -2404,16 +2413,15 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     }
     case IR_OP(leave): {
       // Exit sequence:
-      // incsp #frame_size
+      // mov sp, fp
       // popx fp
       // restore (registers)
       // popx ap
-      if (pcode->base.stack_frame_size > 0) {
-        Emit(pcode,
-             NewInstruction1(P_OP(incsp),
-                             GetIntConstant(pcode, NULL, kTargetType32Bit,
-                                            pcode->base.stack_frame_size)));
-      }
+      // Reconstructing sp from fp also discards any VLA or over-aligned
+      // allocations made below the fixed frame.
+      TargetInstruction* restore_sp =
+          Emit(pcode, NewInstruction1(P_OP(mov), FramePointer(pcode)));
+      restore_sp->dest = StackPointer(pcode);
       Emit(pcode, NewInstruction1(P_OP(popx), FramePointer(pcode)));
       Emit(pcode, NewInstruction(P_OP(restore)));
       return Emit(pcode, NewInstruction1(P_OP(popx), ArgumentPointer(pcode)));
@@ -2708,11 +2716,14 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
         continue;
       }
       TypeRecord* type = entry->value.symbol->type;
+      if (TypeIsVLA(type)) {
+        continue;
+      }
       if (type->size == 0) {
         TypeRecordCalculateSize(type);
       }
       int32_t size = type->size;
-      int32_t alignment = TypeRecordAlignment(type);
+      int32_t alignment = PoolEntryStackAlignment(entry);
       assert(size > 0);
       assert(alignment > 0 && (alignment & (alignment - 1)) == 0);
       var_offset = (var_offset + alignment - 1) & ~(alignment - 1);

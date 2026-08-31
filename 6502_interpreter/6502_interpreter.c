@@ -1918,19 +1918,21 @@ SET_FLAGS(interpreter->reg = *(addr));
 
 #define ADD_WITH_CARRY(value) {\
   uint8_t tmp = value;\
-  uint16_t v = interpreter->a + tmp + interpreter->flags.bits.c; \
+  uint8_t lhs = interpreter->a;\
+  uint16_t v = lhs + tmp + interpreter->flags.bits.c; \
   SET_CARRY_VALUE(v > 255);\
+  SET_OVERFLOW(((~(lhs ^ tmp)) & (lhs ^ (uint8_t)v)) & 0x80);\
   SET_FLAGS(interpreter->a = v); \
-  SET_OVERFLOW_A(tmp, v);\
 }
 
 #define SUB_WITH_BORROW(value) {\
   uint8_t tmp = value;\
+  uint8_t lhs = interpreter->a;\
   uint8_t borrow = interpreter->flags.bits.c ^ 1;\
-  uint16_t v = interpreter->a - tmp - borrow; \
+  uint16_t v = lhs - tmp - borrow; \
   SET_BORROW_VALUE(v > 255); \
+  SET_OVERFLOW(((lhs ^ tmp) & (lhs ^ (uint8_t)v)) & 0x80);\
   SET_FLAGS(interpreter->a = v); \
-  SET_OVERFLOW_A(tmp, v);\
 }
 
 #define ALU_OP_INDEXED_INDIRECT_ZP(index, op) { \

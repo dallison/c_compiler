@@ -938,6 +938,26 @@ static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
 
 static IRNode* GenerateVariableReference(Generator* gen,
                                          IdentifierASTNode* node) {
+  if (TypeIsVLA(node->symbol->type) &&
+      node->symbol->value.other != NULL) {
+    IRNode* address_holder = node->symbol->value.other;
+    return GeneratorReloadSpilledValue(
+        gen, address_holder, address_holder->type->next);
+  }
+  if (SymbolNeedsDynamicStackAllocation(node->symbol) &&
+      node->symbol->value.other != NULL) {
+    IRNode* address_holder = node->symbol->value.other;
+    IRNode* address = GeneratorReloadSpilledValue(
+        gen, address_holder, address_holder->type->next);
+    if ((node->base.flags & kASTNeedAddress) != 0 ||
+        TypeIsArray(node->base.type) ||
+        TypeIsStructOrUnion(node->base.type) ||
+        TypeIsMemberPointerAggregate(node->base.type)) {
+      return address;
+    }
+    IRNode* result = EmitObjectLoad(gen, &node->base, address);
+    return result;
+  }
   IRNode* var_ref = GeneratorGetVariable(gen, node->symbol);
   if (TypeIsReference(node->symbol->type)) {
     if ((node->base.flags & kASTIsDeclaration) != 0 &&
@@ -1572,12 +1592,13 @@ static bool AssignmentResultIsOuterAssignmentLHS(ASTNode* node) {
 static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   bool result_address_needed =
       AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
-  IRNode* dest = GenerateExpression(gen, node->left);
+  IRNode* dest = NULL;
 
   IRNode* value;
   IRNode* assignment;
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
+    dest = GenerateExpression(gen, node->left);
     if (node->right->op == AST_OP(call) &&
         node->right->value_category == kValueCategoryPrvalue) {
       // Assignment from a by-value-returning call: it constructs its result
@@ -1604,18 +1625,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
                  GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
     }
   } else {
-    IRNode* dest_tmp_addr = NULL;
-    TypeRecord* dest_tmp_type = NULL;
-    bool dest_was_spilled = false;
-    bool dest_needs_spill =
-        compiler->call_return_fixed_reg &&
-        !IRIsVariable(dest) &&
-        (ContainsCall(node->left) || ContainsCall(node->right));
-    if (dest_needs_spill) {
-      dest_tmp_type = NewPointerTo(kQualPlain, node->left->type);
-      dest_tmp_addr =
-          GeneratorSpillValueToTemp(gen, dest, dest_tmp_type);
-    }
+    // Since C++17, the right operand of assignment is sequenced before the
+    // left operand. Besides observable side effects, evaluating the address
+    // first can leave it in caller-clobbered storage while the RHS runs.
     int right_flags = node->right->flags;
     bool right_returns_reference = ExpressionReturnsReference(node->right);
     if (right_returns_reference && !TypeIsReference(node->left->type)) {
@@ -1623,9 +1635,19 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     }
     value = GenerateExpression(gen, node->right);
     node->right->flags = right_flags;
-    if (dest_tmp_addr != NULL) {
-      dest = GeneratorReloadSpilledValue(gen, dest_tmp_addr, dest_tmp_type);
-      dest_was_spilled = true;
+
+    IRNode* value_tmp_addr = NULL;
+    TypeRecord* value_tmp_type = NULL;
+    if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+        !IRIsVariable(value)) {
+      value_tmp_type = value->type;
+      value_tmp_addr =
+          GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+    }
+    dest = GenerateExpression(gen, node->left);
+    if (value_tmp_addr != NULL) {
+      value =
+          GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
     }
     if (IsBitfieldReference(node->left)) {
       // Assigning to a bitfield.  The dest will be the address of the word
@@ -1634,9 +1656,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       IROpcode load_op = GetLoadOpcode(node->left);
       IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
 
-      if (!dest_was_spilled) {
-        CheckForVarUse(load, node->left);
-      }
+      CheckForVarUse(load, node->left);
 
       value = CalculateNewBitfieldValue(gen, load, value,
                                         (BinaryASTNode*)node->left);
@@ -1647,9 +1667,6 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     GenerateConstexprLifetimeMarker(
         gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
         node->base.location);
-    if (dest_was_spilled) {
-      return result_address_needed ? dest : value;
-    }
   }
 
   if (!TypeIsAtomic(node->left->type)) {
@@ -1682,7 +1699,19 @@ static struct {
 static IRNode* GenerateAtomicCompoundAssignment(Generator* gen,
                                                  BinaryASTNode* node) {
   IRNode* value = GenerateExpression(gen, node->right);
+  IRNode* value_tmp_addr = NULL;
+  TypeRecord* value_tmp_type = NULL;
+  if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+      !IRIsVariable(value)) {
+    value_tmp_type = value->type;
+    value_tmp_addr =
+        GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+  }
   IRNode* address = GenerateExpression(gen, node->left);
+  if (value_tmp_addr != NULL) {
+    value =
+        GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
+  }
   address = AtomicObjectAddress(gen, address, node->left->type);
   bool add = node->base.op == AST_OP(pluseq);
   IRNode* result = GeneratorEmit(
@@ -1705,9 +1734,21 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
       AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
   // Get value of operation.
   IRNode* value = GenerateExpression(gen, node->right);
+  IRNode* value_tmp_addr = NULL;
+  TypeRecord* value_tmp_type = NULL;
+  if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+      !IRIsVariable(value)) {
+    value_tmp_type = value->type;
+    value_tmp_addr =
+        GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+  }
 
   // Get destination/source.
   IRNode* dest = GenerateExpression(gen, node->left);
+  if (value_tmp_addr != NULL) {
+    value =
+        GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
+  }
 
   // Translate the assignment into an ALU operation.
   ASTOpcode alu_op = AST_OP(bad);
@@ -1781,7 +1822,10 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   if (result_address_needed) {
     return dest;
   }
-  return IRSetType(result, node->base.type);
+  // A store lowers to its destination address on several targets. The value
+  // of a compound-assignment expression is the value written, not that
+  // address.
+  return IRSetType(value, node->base.type);
 }
 
 static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
@@ -3046,6 +3090,13 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   if (sub_returns_reference || TypeIsReference(node->sub->type) ||
       (node->sub->op == AST_OP(identifier) &&
        TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type))) {
+    IRSetType(expr, node->base.type);
+    return expr;
+  }
+  if (node->sub->op == AST_OP(identifier) &&
+      (TypeIsVLA(((IdentifierASTNode*)node->sub)->symbol->type) ||
+       SymbolNeedsDynamicStackAllocation(
+           ((IdentifierASTNode*)node->sub)->symbol))) {
     IRSetType(expr, node->base.type);
     return expr;
   }

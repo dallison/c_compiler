@@ -11043,6 +11043,9 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
 
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym) {
+  if (sym == NULL || StorageIs(sym->storage, STO(typedef))) {
+    return NULL;
+  }
   if (TypeIsFixedArray(sym->type)) {
     unsigned long element_count = 0;
     TypeRecord* element_type =
@@ -11149,7 +11152,9 @@ static ASTNode* NewCXXDestructorCallOnReceiver(ASTNode* receiver,
 }
 
 static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+  if (!CompilerIsCXX() || sym == NULL ||
+      StorageIs(sym->storage, STO(typedef)) ||
+      !TypeIsStructOrUnion(sym->type) ||
       sym->type->info.struct_info == NULL ||
       sym->type->info.struct_info->tag_name == NULL) {
     return NULL;

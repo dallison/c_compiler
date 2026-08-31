@@ -135,6 +135,8 @@ IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym);
 // specifier on the declaration raises the type's natural alignment, so the
 // symbol's requested alignment has to be consulted as well as the type's.
 int PoolEntryStackAlignment(PoolEntry* entry);
+int SymbolStackAlignment(Symbol* symbol);
+bool SymbolNeedsDynamicStackAllocation(Symbol* symbol);
 
 // True for a return type the caller receives through the hidden pointer that
 // IR_OP(structreturn) holds, rather than in a result register.  Besides classes

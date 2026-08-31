@@ -2185,6 +2185,29 @@ static bool EvaluateConstexprMutationLValue(ConstEvalContext* ctx,
                                             bool allow_object) {
   *binding = NULL;
   *slot = NULL;
+  if (node != NULL && node->op == AST_OP(contents)) {
+    // A dereference may contain a side effect in its pointer expression
+    // (`*--p = value`). Resolve that expression exactly once; probing the
+    // scalar-lvalue, object-lvalue, and fallback paths independently would
+    // otherwise apply the mutation multiple times.
+    ConstexprValue address = {0};
+    if (!EvaluateConstexprAddressValue(
+            ctx, ((UnaryASTNode*)node)->sub, &address)) {
+      return false;
+    }
+    address = ConstexprResolveForwardedAddress(address);
+    if (address.address_binding != NULL) {
+      *binding = address.address_binding;
+      return true;
+    }
+    if (address.address_object != NULL) {
+      *slot =
+          ConstexprObjectSlot(address.address_object, address.address_index);
+    } else {
+      *slot = address.address_slot;
+    }
+    return *slot != NULL && (allow_object || !(*slot)->is_object);
+  }
   if (EvaluateConstexprLValue(ctx, node, binding) ||
       EvaluateConstexprObjectLValue(ctx, node, slot, allow_object)) {
     return true;
@@ -2967,23 +2990,47 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
       (node->left->op == AST_OP(contents) ||
        node->left->op == AST_OP(subscript))) {
     ConstexprValue address = {0};
+    ConstexprValue right = {0};
+    TypeRecord* left_type = node->left->type;
+    if (TypeIsReference(left_type)) {
+      left_type = left_type->next;
+    }
+    // Since C++17, the right operand of assignment is sequenced before the
+    // left operand, including side effects used to form the destination.
+    if (!EvaluateConstexprValue(ctx, node->right, left_type, &right)) {
+      return false;
+    }
     ASTNode* address_expr =
         node->left->op == AST_OP(contents)
             ? ((UnaryASTNode*)node->left)->sub : node->left;
-    if (EvaluateConstexprAddressValue(ctx, address_expr, &address) &&
-        ConstexprHasHeapBlock(ctx, address.heap_block)) {
-      ConstexprValue right = {0};
-      TypeRecord* left_type = node->left->type;
-      if (TypeIsReference(left_type)) {
-        left_type = left_type->next;
-      }
-      if (!EvaluateConstexprValue(ctx, node->right, left_type, &right) ||
-          !StoreConstexprHeapAddress(address, left_type, right)) {
-        return false;
+    if (EvaluateConstexprAddressValue(ctx, address_expr, &address)) {
+      if (ConstexprHasHeapBlock(ctx, address.heap_block)) {
+        if (!StoreConstexprHeapAddress(address, left_type, right)) {
+          return false;
+        }
+      } else {
+        address = ConstexprResolveForwardedAddress(address);
+        ConstexprValue* target_slot =
+            address.address_object != NULL
+                ? ConstexprObjectSlot(address.address_object,
+                                      address.address_index)
+                : address.address_slot;
+        bool stored =
+            address.address_binding != NULL
+                ? StoreConstexprBinding(ctx, address.address_binding,
+                                        left_type, right)
+                : StoreConstexprSlot(ctx, target_slot, left_type, right);
+        if (!stored) {
+          return false;
+        }
+        if (target_slot != NULL) {
+          target_slot->lifetime_ended = false;
+        }
       }
       *result = right;
       return true;
     }
+    return false;
   }
 
   ConstexprBinding* binding = NULL;
@@ -2998,13 +3045,12 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     left_type =
         left_type->next != NULL ? left_type->next : node->right->type;
   }
-  if (!EvaluateConstexprMutationLValue(ctx, node->left, &binding, &slot,
-                                       is_assignment)) {
-    return false;
-  }
-
   ConstexprValue right;
   if (!EvaluateConstexprValue(ctx, node->right, left_type, &right)) {
+    return false;
+  }
+  if (!EvaluateConstexprMutationLValue(ctx, node->left, &binding, &slot,
+                                       is_assignment)) {
     return false;
   }
 
@@ -4918,6 +4964,13 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result) {
   if (node == NULL) {
     return false;
+  }
+  if (node->op == AST_OP(preinc) || node->op == AST_OP(predec) ||
+      node->op == AST_OP(postinc) || node->op == AST_OP(postdec)) {
+    // Pointer increments are mutations whose result is still an address.
+    // They can appear directly inside an lvalue, as in `*--output = value`.
+    return EvaluateConstexprMutation(ctx, node, node->type, result) &&
+           result->is_address;
   }
   if (node->op == AST_OP(stmt_expr)) {
     return EvaluateConstexprStatementExpression(ctx, node, node->type,

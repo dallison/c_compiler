@@ -14,13 +14,10 @@
 0263_c_library_headers.cpp
 0264_standard_algorithm.cpp
 0268_standard_unordered_set.cpp
-0273_standard_queue.cpp
 0293_standard_counted_iterator.cpp
 0294_standard_common_iterator.cpp
-0305_standard_expected.cpp
 0340_standard_random_engines.cpp
 0343_standard_random_streams.cpp
 0403_standard_hive.cpp
 0418_contract_reflection_constification.cpp
 0429_cxx29_virtual_function_contracts.cpp
-0433_cxx29_view_interface_at.cpp

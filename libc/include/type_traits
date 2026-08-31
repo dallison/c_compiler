@@ -299,11 +299,126 @@ template <>
 struct __unsigned_of<8> {
   using type = unsigned long;
 };
+
+template <class T>
+struct __make_signed {
+  using type = typename __signed_of<sizeof(T)>::type;
+};
+
+template <>
+struct __make_signed<char> {
+  using type = signed char;
+};
+template <>
+struct __make_signed<signed char> {
+  using type = signed char;
+};
+template <>
+struct __make_signed<unsigned char> {
+  using type = signed char;
+};
+template <>
+struct __make_signed<short> {
+  using type = short;
+};
+template <>
+struct __make_signed<unsigned short> {
+  using type = short;
+};
+template <>
+struct __make_signed<int> {
+  using type = int;
+};
+template <>
+struct __make_signed<unsigned int> {
+  using type = int;
+};
+template <>
+struct __make_signed<long> {
+  using type = long;
+};
+template <>
+struct __make_signed<unsigned long> {
+  using type = long;
+};
+template <>
+struct __make_signed<long long> {
+  using type = long long;
+};
+template <>
+struct __make_signed<unsigned long long> {
+  using type = long long;
+};
+
+template <class T>
+struct __make_unsigned {
+  using type = typename __unsigned_of<sizeof(T)>::type;
+};
+
+template <>
+struct __make_unsigned<char> {
+  using type = unsigned char;
+};
+template <>
+struct __make_unsigned<signed char> {
+  using type = unsigned char;
+};
+template <>
+struct __make_unsigned<unsigned char> {
+  using type = unsigned char;
+};
+template <>
+struct __make_unsigned<short> {
+  using type = unsigned short;
+};
+template <>
+struct __make_unsigned<unsigned short> {
+  using type = unsigned short;
+};
+template <>
+struct __make_unsigned<int> {
+  using type = unsigned int;
+};
+template <>
+struct __make_unsigned<unsigned int> {
+  using type = unsigned int;
+};
+template <>
+struct __make_unsigned<long> {
+  using type = unsigned long;
+};
+template <>
+struct __make_unsigned<unsigned long> {
+  using type = unsigned long;
+};
+template <>
+struct __make_unsigned<long long> {
+  using type = unsigned long long;
+};
+template <>
+struct __make_unsigned<unsigned long long> {
+  using type = unsigned long long;
+};
 }  // namespace __detail
 
 template <class T>
 struct make_signed {
-  using type = typename __detail::__signed_of<sizeof(T)>::type;
+  using type = typename __detail::__make_signed<T>::type;
+};
+
+template <class T>
+struct make_signed<const T> {
+  using type = const typename make_signed<T>::type;
+};
+
+template <class T>
+struct make_signed<volatile T> {
+  using type = volatile typename make_signed<T>::type;
+};
+
+template <class T>
+struct make_signed<const volatile T> {
+  using type = const volatile typename make_signed<T>::type;
 };
 
 template <class T>
@@ -311,7 +426,22 @@ using make_signed_t = typename make_signed<T>::type;
 
 template <class T>
 struct make_unsigned {
-  using type = typename __detail::__unsigned_of<sizeof(T)>::type;
+  using type = typename __detail::__make_unsigned<T>::type;
+};
+
+template <class T>
+struct make_unsigned<const T> {
+  using type = const typename make_unsigned<T>::type;
+};
+
+template <class T>
+struct make_unsigned<volatile T> {
+  using type = volatile typename make_unsigned<T>::type;
+};
+
+template <class T>
+struct make_unsigned<const volatile T> {
+  using type = const volatile typename make_unsigned<T>::type;
 };
 
 template <class T>

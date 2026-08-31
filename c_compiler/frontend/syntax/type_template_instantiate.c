@@ -1469,14 +1469,10 @@ bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right) {
  * body has not been assigned yet at that point, so without this marker the
  * re-entry would clone the body again, recursing until the stack overflows.
  * Instantiation runs single-threaded, so a plain intrusive stack suffices. */
-typedef struct FunctionInstantiationInProgress {
-  Symbol* symbol;
-  struct FunctionInstantiationInProgress* next;
-} FunctionInstantiationInProgress;
 static FunctionInstantiationInProgress* g_function_instantiations_in_progress =
     NULL;
 
-static bool FunctionTemplateInstantiationInProgress(Symbol* symbol) {
+bool FunctionTemplateInstantiationInProgress(Symbol* symbol) {
   for (FunctionInstantiationInProgress* node =
            g_function_instantiations_in_progress;
        node != NULL; node = node->next) {
@@ -1487,14 +1483,14 @@ static bool FunctionTemplateInstantiationInProgress(Symbol* symbol) {
   return false;
 }
 
-static void PushFunctionInstantiationInProgress(
+void PushFunctionInstantiationInProgress(
     FunctionInstantiationInProgress* node, Symbol* symbol) {
   node->symbol = symbol;
   node->next = g_function_instantiations_in_progress;
   g_function_instantiations_in_progress = node;
 }
 
-static void PopFunctionInstantiationInProgress(
+void PopFunctionInstantiationInProgress(
     FunctionInstantiationInProgress* node) {
   g_function_instantiations_in_progress = node->next;
 }

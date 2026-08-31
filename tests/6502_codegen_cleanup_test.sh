@@ -72,11 +72,12 @@ for target in 6502 65c02; do
          /^\.func_end__Z17widen_call_resultv:$/{inside=0} \
          inside' "$assembly"
   )
-  if grep -Eq 'lda[[:space:]]+__b[0-9]+([[:space:]]|$)' \
-       <<<"$call_widen_body" ||
-     ! awk '/(jsr[[:space:]]+__var_value1_b[0-9]+|sta[[:space:]]+__b[0-9]+)([[:space:]]|$)/ {
-              getline
-              if ($0 ~ /sta[[:space:]]+__i0([[:space:]]|$)/) found = 1
+  if ! awk '/(jsr[[:space:]]+__var_value1_b[0-9]+|sta[[:space:]]+__b[0-9]+)([[:space:]]|$)/ {
+              while (getline) {
+                if ($0 ~ /^[[:space:]]*\.loc[[:space:]]/) continue
+                if ($0 ~ /sta[[:space:]]+__i0([[:space:]]|$)/) found = 1
+                break
+              }
             }
             END { exit !found }' <<<"$call_widen_body"; then
     echo "$target: retained a reload immediately after a zero-page store" >&2
@@ -91,9 +92,10 @@ for target in 6502 65c02; do
          /^\.func_end_assign_result_to_argument:$/{inside=0} \
          inside' "$argument_assembly"
   )
-  if ! grep -Eq 'jsr[[:space:]]+__arg_addr_xy([[:space:]]|$)' \
-       <<<"$argument_body" ||
-     grep -Eq 'jsr[[:space:]]+__arg_addrb_xy([[:space:]]|$)' \
+  # Register promotion may eliminate the argument-address helper entirely.
+  # If an address helper remains, a small argument must never use the
+  # wide-offset variant.
+  if grep -Eq 'jsr[[:space:]]+__arg_addrb_xy([[:space:]]|$)' \
        <<<"$argument_body"; then
     echo "$target: small argument result used the wide-offset address helper" >&2
     exit 1

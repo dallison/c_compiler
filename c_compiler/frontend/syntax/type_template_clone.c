@@ -6941,7 +6941,8 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
                                                       bool allow_lazy) {
   if (symbol == NULL || symbol->type == NULL ||
       template_definition == NULL || template_definition->type == NULL ||
-      template_definition->type->info.function.body == NULL) {
+      template_definition->type->info.function.body == NULL ||
+      FunctionTemplateInstantiationInProgress(symbol)) {
     return;
   }
   if (allow_lazy && !symbol->flags.is_template && args != NULL) {
@@ -6971,9 +6972,12 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     return;
   }
   if (allow_lazy && symbol->flags.is_template && args != NULL) {
+    FunctionInstantiationInProgress in_progress;
+    PushFunctionInstantiationInProgress(&in_progress, symbol);
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
+    PopFunctionInstantiationInProgress(&in_progress);
     // A member function TEMPLATE constructor with a *parameter pack* must not
     // have its member-initializer list inserted and analyzed now: with its own
     // parameters still unbound, a member pack such as an in-place variadic
@@ -7001,9 +7005,12 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     symbol->value.func_defn = symbol;
     return;
   }
+  FunctionInstantiationInProgress in_progress;
+  PushFunctionInstantiationInProgress(&in_progress, symbol);
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, args);
+  PopFunctionInstantiationInProgress(&in_progress);
   SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                 symbol, args);
   symbol->type->info.function.definition = true;

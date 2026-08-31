@@ -53,6 +53,20 @@ MoveOnlyBox return_implicit_move_from_parameter(MoveOnlyBox value) {
   return value;
 }
 
+struct CopyArgument {
+  int value;
+
+  explicit CopyArgument(int initial) : value(initial) {
+  }
+
+  CopyArgument(const CopyArgument& other) : value(other.value) {
+  }
+};
+
+int reference_after_copy_argument(CopyArgument copied, int&& value) {
+  return copied.value == 23 ? value : -1;
+}
+
 int main(void) {
   static_assert(std::is_same<std::remove_reference_t<int&>, int>::value,
                 "remove_reference_t<int&>");
@@ -117,6 +131,11 @@ int main(void) {
   MoveOnlyBox maybe_noexcept = std::move_if_noexcept(moved);
   if (moved.value != 0 || maybe_noexcept.value != 17) {
     return 7;
+  }
+
+  CopyArgument copied(23);
+  if (reference_after_copy_argument(copied, 29) != 29) {
+    return 13;
   }
 
   return 0;

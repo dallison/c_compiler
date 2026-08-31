@@ -472,18 +472,11 @@ pl8l:
 // X: offset into sp of int containing size to decrement by
 __decsp:
   SEC
-  LDA 0,X
-  STA __t0
-  LDA 1,X
-  STA __t1
-  
-  LDY #0
   LDA __sp
-  SBC (__t0),Y
+  SBC 0,X
   STA __sp
   LDA __sp+1
-  INY
-  SBC (__t0),Y
+  SBC 1,X
   STA __sp+1
   RTS
 

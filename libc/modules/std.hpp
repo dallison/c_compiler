@@ -5,6 +5,7 @@
 #include <atomic>
 #include <barrier>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <compare>
 #include <concepts>
@@ -17,11 +18,13 @@
 #include <flat_map>
 #include <flat_set>
 #include <format>
+#include <forward_list>
 #include <functional>
 #include <generator>
 #if __cplusplus >= 202600L
 #include <hive>
 #endif
+#include <iomanip>
 #include <initializer_list>
 #if __cplusplus >= 202600L
 #include <inplace_vector>

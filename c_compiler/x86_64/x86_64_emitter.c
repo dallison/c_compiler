@@ -1365,17 +1365,22 @@ static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
 
 static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
                             TargetInstruction* inst, char* buf1, char* buf2) {
-  if (inst->operand[0] != NULL) {
-    fprintf(fp, "\tmovq ");
-    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
-    fprintf(fp, ", %%rax\n");
-  }
+  bool divisor_is_rax = false;
   bool divisor_is_rdx = false;
   if (inst->operand[1] != NULL && inst->operand[1]->reg != NULL) {
     char div_reg[32];
     X86_64RegisterName((X86_64Register*)inst->operand[1]->reg, div_reg,
                        sizeof(div_reg));
+    divisor_is_rax = strcmp(div_reg, "rax") == 0;
     divisor_is_rdx = strcmp(div_reg, "rdx") == 0;
+  }
+  if (divisor_is_rax) {
+    fprintf(fp, "\tmovq %%rax, %%r11\n");
+  }
+  if (inst->operand[0] != NULL) {
+    fprintf(fp, "\tmovq ");
+    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+    fprintf(fp, ", %%rax\n");
   }
   if (divisor_is_rdx) {
     fprintf(fp, "\tmovq %%rdx, %%r11\n");
@@ -1393,7 +1398,7 @@ static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
     div_mnemonic = "divq";
   }
   fprintf(fp, "\t%s ", div_mnemonic);
-  if (divisor_is_rdx) {
+  if (divisor_is_rax || divisor_is_rdx) {
     fprintf(fp, "%%r11");
   } else {
     PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
@@ -2479,6 +2484,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
                                                           : inst->reg;
       TargetInstruction* src0 = inst->operand[0];
       TargetInstruction* src1 = inst->operand[1];
+      bool src0_is_zero =
+          (X86_64Opcode)src0->opcode == X86_64_OP(x0) ||
+          (TargetIsConst(src0) && TargetIntValue(src0) == 0);
       bool src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
       bool src1_in_dest = !TargetIsConst(src1) && !src1_is_zero &&
                           SamePhysicalReg(src1->reg, dest_reg) &&
@@ -2498,18 +2506,40 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "\tnegq ");
         PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
                                                sizeof(buf2)));
-        fprintf(fp, "\n\taddq ");
-        PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
-        fprintf(fp, ", ");
-        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
-                                               sizeof(buf2)));
+        if (!src0_is_zero) {
+          fprintf(fp, "\n\taddq ");
+          if (TargetIsConst(src0)) {
+            PrintAsmImmediate(fp, TargetIntValue(src0));
+          } else {
+            PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
+          }
+          fprintf(fp, ", ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+        }
+        if ((X86_64Opcode)inst->opcode == X86_64_OP(subl)) {
+          // The assembler currently has only a 64-bit unary negate. Preserve
+          // the zero-extension semantics that a 32-bit subtraction provides.
+          fprintf(fp, "\n\tmovl ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+          fprintf(fp, ", ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+        }
         fprintf(fp, "\n");
         break;
       }
-      bool src0_is_zero = (X86_64Opcode)src0->opcode == X86_64_OP(x0);
       // The swap above may have moved the zero pseudo-register into src1, so
-      // ask again rather than reusing the answer from before the swap.  x0 has
-      // no physical register behind it; printing it as one names %rax.
+      // ask again for both operands rather than reusing the answers from before
+      // the swap. x0 has no physical register behind it; printing it as one
+      // names %rax.
+      src0_is_zero =
+          (X86_64Opcode)src0->opcode == X86_64_OP(x0) ||
+          (TargetIsConst(src0) && TargetIntValue(src0) == 0);
       src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
       if ((TargetIsConst(src0) || src0_is_zero) && dest_reg != NULL) {
         fprintf(fp, "\tmovq ");

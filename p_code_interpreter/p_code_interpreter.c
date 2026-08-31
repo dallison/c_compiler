@@ -783,7 +783,11 @@ static bool CopyGuestArgv(PCodeInterpreter* interpreter, int argc, char** argv,
     return false;
   }
   size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
-  if (string_bytes + vector_bytes + 7 > P_CODE_STACK_SIZE) {
+  // Keep room below argv for the four-byte alignment bias, argc/argv, and the
+  // synthetic call's return address.
+  const size_t launch_frame_bytes = 4 + 4 + 8 + 8;
+  if (string_bytes + vector_bytes + 7 + launch_frame_bytes >
+      P_CODE_STACK_SIZE) {
     return false;
   }
 
@@ -832,6 +836,10 @@ int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader,
         ((uint64_t)(uintptr_t)(interpreter->stack + P_CODE_STACK_SIZE)) &
         ~0x7ULL;
   }
+  // argc is four bytes and argv is eight. Bias the argument block by four so
+  // those twelve bytes plus the call's eight-byte return address leave the
+  // entry stack pointer at the target's advertised eight-byte alignment.
+  argument_bottom -= 4;
   iregs[PCODE_SP_REG] = (int64_t)argument_bottom;
   iregs[PCODE_SP_REG] -= 8;
   WriteU64((void*)iregs[PCODE_SP_REG], guest_argv);

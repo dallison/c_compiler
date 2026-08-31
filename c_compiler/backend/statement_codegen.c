@@ -1096,8 +1096,15 @@ static ASTNode* FindEnclosingLoopOrSwitch(ASTNode* stmt) {
 
 static IRNode* ContainsVLA(DeclarationListASTNode* decl_list) {
   for (size_t j = 0; j < decl_list->declarations->length; j++) {
-     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[j];
-     if (TypeIsVLA(decl->base.type)) {
+     ASTNode* declaration = decl_list->declarations->value.p[j];
+     if (declaration == NULL || declaration->op != AST_OP(vardecl)) {
+       continue;
+     }
+     VariableDeclarationASTNode* decl =
+         (VariableDeclarationASTNode*)declaration;
+     if (decl->saved_sp != NULL &&
+         (TypeIsVLA(decl->symbol->type) ||
+          SymbolNeedsDynamicStackAllocation(decl->symbol))) {
        return decl->saved_sp;
      }
   }
@@ -1158,13 +1165,22 @@ static IRNode* GenerateVLADefinition(Generator* gen, TypeRecord* type,
   
   // Saved stack pointer.
   IRNode* saved_sp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-  IRSetType(saved_sp, NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
+  TypeRecord* saved_sp_type =
+      NewPointerTo(kQualPlain,
+                   NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  IRSetType(saved_sp, saved_sp_type);
   GeneratorEmit(gen, NewIR1(IR_OP(savesp), saved_sp));
-  decl->saved_sp = saved_sp;
+  // A dynamic allocation can outlive calls, loop back edges, and nested
+  // allocations. Keep the pre-allocation SP in an addressable frame slot
+  // rather than a temporary register.
+  decl->saved_sp =
+      GeneratorSpillValueToTemp(gen, saved_sp, saved_sp_type);
   
   // Address of VLA (current stack pointer after decrement).
   IRNode* array_addr = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-  IRSetType(array_addr, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  TypeRecord* array_addr_type =
+      NewPointerTo(kQualPlain, type);
+  IRSetType(array_addr, array_addr_type);
   
   // Make space for aligned array on stack.
   IRNode* aligned = GeneratorEmit(gen, NewIR2(IR_OP(aligni),
@@ -1174,24 +1190,93 @@ static IRNode* GenerateVLADefinition(Generator* gen, TypeRecord* type,
                                                                      compiler->target->stack_alignment)));
   GeneratorEmit(gen, NewIR1(IR_OP(decsp), aligned));
   GeneratorEmit(gen, NewIR1(IR_OP(savesp), array_addr));
-  return array_addr;
+  return GeneratorSpillValueToTemp(
+      gen, array_addr, array_addr_type);
+}
+
+static IRNode* GenerateOverAlignedDefinition(
+    Generator* gen, VariableDeclarationASTNode* decl) {
+  Symbol* symbol = decl->symbol;
+  int alignment = SymbolStackAlignment(symbol);
+  TypeRecord* void_pointer =
+      NewPointerTo(kQualPlain,
+                   NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+
+  IRNode* saved_sp = IRSetType(
+      GeneratorEmit(gen, NewIR(IR_OP(tmp))), void_pointer);
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), saved_sp));
+  decl->saved_sp =
+      GeneratorSpillValueToTemp(gen, saved_sp, void_pointer);
+
+  int64_t allocation_size =
+      (int64_t)symbol->type->size + alignment - 1;
+  IRNode* rounded_size = GeneratorEmit(
+      gen, NewIR2(IR_OP(aligni),
+                  GeneratorGetIntConstant(gen, NULL, allocation_size),
+                  GeneratorGetIntConstant(
+                      gen, NULL, compiler->target->stack_alignment)));
+  GeneratorEmit(gen, NewIR1(IR_OP(decsp), rounded_size));
+
+  IRNode* raw_address = IRSetType(
+      GeneratorEmit(gen, NewIR(IR_OP(tmp))), void_pointer);
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), raw_address));
+  IRNode* raw_integer = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(cast), raw_address)),
+      NewSizeTypeRecord());
+  IRNode* aligned_integer = IRSetType(
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(aligni), raw_integer,
+                      GeneratorGetIntConstant(gen, NULL, alignment))),
+      NewSizeTypeRecord());
+  TypeRecord* object_pointer =
+      NewPointerTo(kQualPlain, symbol->type);
+  IRNode* aligned_address = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(cast), aligned_integer)),
+      object_pointer);
+  return GeneratorSpillValueToTemp(
+      gen, aligned_address, object_pointer);
+}
+
+static void GenerateRestoreStackPointer(Generator* gen,
+                                        IRNode* saved_sp_holder) {
+  IRNode* saved_sp = GeneratorReloadSpilledValue(
+      gen, saved_sp_holder, saved_sp_holder->type->next);
+  GeneratorEmit(gen, NewIR1(IR_OP(restoresp), saved_sp));
 }
 
 static void GenerateVariableDeclaration(Generator* gen,
                                         VariableDeclarationASTNode* node) {
+  // Code generation can revisit cloned/template ASTs. Do not retain an IR
+  // holder from an earlier function-generation pass.
+  node->saved_sp = NULL;
+  if (StorageIs(node->symbol->storage, STO(typedef))) {
+    return;
+  }
   if (TypeIsVLA(node->symbol->type)) {
     // Variable Length Array.
     IRNode* addr = GenerateVLADefinition(gen, node->symbol->type, node);
     node->symbol->value.other = addr;
+  } else if (SymbolNeedsDynamicStackAllocation(node->symbol)) {
+    node->symbol->value.other =
+        GenerateOverAlignedDefinition(gen, node);
   }
   if (node->initializer != NULL) {
     ASTNode* elidable = CXXElidableStructReturnInitializer(
         node->initializer, node->symbol->type);
     if (elidable != NULL) {
       IRNode* old_struct_address = gen->current_struct_address;
-      IRNode* var = GeneratorGetVariable(gen, node->symbol);
-      IRNode* ref = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
-                              NewPointerTo(kQualPlain, node->symbol->type));
+      IRNode* ref = NULL;
+      if (SymbolNeedsDynamicStackAllocation(node->symbol) &&
+          node->symbol->value.other != NULL) {
+        IRNode* holder = node->symbol->value.other;
+        ref = GeneratorReloadSpilledValue(
+            gen, holder, holder->type->next);
+      } else {
+        IRNode* var = GeneratorGetVariable(gen, node->symbol);
+        ref =
+            IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
+                      NewPointerTo(kQualPlain, node->symbol->type));
+      }
       gen->current_struct_address = ref;
       GenerateExpression(gen, elidable);
       gen->current_struct_address = old_struct_address;
@@ -1482,7 +1567,7 @@ static void GenerateCompoundStatement(Generator* gen,
       DeclarationListASTNode* decl_list = (DeclarationListASTNode*)stmt;
       IRNode* vla = ContainsVLA(decl_list);
       if (vla != NULL) {
-        GeneratorEmit(gen, NewIR1(IR_OP(restoresp), vla));
+        GenerateRestoreStackPointer(gen, vla);
         break;
       }
     }
@@ -2433,7 +2518,7 @@ static void GenerateGotoStatement(Generator* gen,
   assert(node->lca != NULL);      // Need a Lowest Common Ancestor set.
   IRNode* top_vla = FindTopVLAForJump(&node->base, node->lca);
   if (top_vla != NULL) {
-    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
+    GenerateRestoreStackPointer(gen, top_vla);
   }
   GeneratorEmit(gen, NewIR1(IR_OP(bra), label_node->label));
 }
@@ -2461,7 +2546,7 @@ static void GenerateBreak(Generator* gen, ASTNode* node) {
   assert(loop_or_switch != NULL);
   IRNode* top_vla = FindTopVLAForJump(node, loop_or_switch);
   if (top_vla != NULL) {
-    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
+    GenerateRestoreStackPointer(gen, top_vla);
   }
   EmitConstexprCatchCleanupsUntil(gen, node, loop_or_switch);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->break_label));
@@ -2472,7 +2557,7 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
   assert(loop != NULL);
   IRNode* top_vla = FindTopVLAForJump(node, loop);
   if (top_vla != NULL) {
-    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
+    GenerateRestoreStackPointer(gen, top_vla);
   }
   EmitConstexprCatchCleanupsUntil(gen, node, loop);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));

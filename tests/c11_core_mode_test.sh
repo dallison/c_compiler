@@ -175,6 +175,9 @@ expect_compile unsupported_profile_macros pcode \
 #if __STDC_NO_THREADS__ != 1
 #error incomplete threads profile must be advertised
 #endif
+#if __STDC_NO_COMPLEX__ != 1
+#error unavailable complex arithmetic must be advertised
+#endif
 #ifdef __STDC_NO_VLA__
 #error VLA support must not be disabled
 #endif
@@ -187,13 +190,19 @@ expect_compile optional_macros x86_64 \
 #if __STDC_NO_THREADS__ != 1
 #error incomplete C11 threads profile must be advertised
 #endif
+#if __STDC_NO_COMPLEX__ != 1
+#error unavailable complex arithmetic must be advertised
+#endif
 #ifdef __STDC_NO_VLA__
 #error VLA support must not be disabled
 #endif
 int test(int n) { int values[n]; return sizeof(values) != 0; }'
 
 expect_compile pre_c11_identifiers x86_64 \
-  'int _Atomic;
+  '#ifdef __STDC_NO_COMPLEX__
+#error C99 has no optional-complex feature macro
+#endif
+int _Atomic;
 int _Noreturn;
 int test(void) { return 0; }' \
   -std=c99

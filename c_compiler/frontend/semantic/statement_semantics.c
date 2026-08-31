@@ -311,11 +311,21 @@ static bool CXXNodeIsWithinTemporaryCleanup(ASTNode* node) {
   return false;
 }
 
+static bool CXXNodeIsWithinInlineCall(ASTNode* node) {
+  for (ASTNode* current = node; current != NULL; current = current->parent) {
+    if (current->op == AST_OP(inline_call)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
-      CXXNodeIsWithinTemporaryCleanup(node)) {
+      CXXNodeIsWithinTemporaryCleanup(node) ||
+      CXXNodeIsWithinInlineCall(node)) {
     return;
   }
   CXXTemporaryCollection* collection = data;
@@ -514,7 +524,8 @@ static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
 static bool CXXLocalNeedsScopeExitDestructor(Symbol* sym) {
   if (sym == NULL || sym->flags.is_temp ||
       StorageIs(sym->storage, STO(static)) ||
-      StorageIs(sym->storage, STO(extern))) {
+      StorageIs(sym->storage, STO(extern)) ||
+      StorageIs(sym->storage, STO(typedef))) {
     return false;
   }
   return TypeHasNonTrivialDestructor(sym->type);

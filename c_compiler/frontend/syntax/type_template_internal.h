@@ -39,6 +39,17 @@ typedef struct {
   struct Struct* substitution_target;
 } TemplateFunctionBodyClone;
 
+typedef struct FunctionInstantiationInProgress {
+  Symbol* symbol;
+  struct FunctionInstantiationInProgress* next;
+} FunctionInstantiationInProgress;
+
+bool FunctionTemplateInstantiationInProgress(Symbol* symbol);
+void PushFunctionInstantiationInProgress(
+    FunctionInstantiationInProgress* node, Symbol* symbol);
+void PopFunctionInstantiationInProgress(
+    FunctionInstantiationInProgress* node);
+
 void RewriteTemplateBodyIdentifiers(struct ASTNode* node, Map* symbol_map);
 void DeleteMappedVector(MapKeyValue* kv);
 

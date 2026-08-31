@@ -55,8 +55,8 @@ Missing, grouped by the standard that introduced them:
 
 | Std | Missing headers |
 | --- | --- |
-| C++98 | `<bitset>` `<complex>` `<iomanip>` `<numeric>` `<valarray>` `<ciso646>` `<clocale>` `<csignal>` `<cwctype>` |
-| C++11 | `<forward_list>` `<future>` `<regex>` `<scoped_allocator>` `<typeindex>` `<cfenv>` `<cuchar>` + deprecated `<ccomplex>` `<cstdalign>` `<cstdbool>` `<ctgmath>` `<codecvt>` |
+| C++98 | `<complex>` `<valarray>` `<ciso646>` `<clocale>` `<csignal>` `<cwctype>` |
+| C++11 | `<future>` `<regex>` `<scoped_allocator>` `<cfenv>` `<cuchar>` + deprecated `<ccomplex>` `<cstdalign>` `<cstdbool>` `<ctgmath>` `<codecvt>` |
 | C++14 | `<shared_mutex>` |
 | C++17 | `<charconv>` `<execution>` |
 | C++23 | `<spanstream>` |
@@ -64,8 +64,7 @@ Missing, grouped by the standard that introduced them:
 
 The C++98 gaps are the notable finding: the library skipped forward past a
 chunk of its own foundation. These are not merely absent wrappers — the
-underlying facilities are absent too. `accumulate`, `iota` (outside
-`<ranges>`), `gcd`, `lcm`, `midpoint`, `to_chars`, and `from_chars` have no
+underlying facilities are absent too. `to_chars` and `from_chars` still have no
 definition anywhere in `libc/include`.
 
 ### 1.3 Compiler capability probes
@@ -80,7 +79,7 @@ Probed against a fresh `bazel build //:davecc //:libc_x86_64 //:x86_64`:
 | C++ `alignas` / `alignof` | work |
 | `char16_t` / `char32_t` / `wchar_t` + `u""` `U""` `L""` | work |
 | non-type template params, proxy references, template UDL `operator""` | work |
-| `_Complex` | **unsupported**, diagnosed outright (§3.2) |
+| `_Complex` | **unsupported**; C11+ advertises `__STDC_NO_COMPLEX__`, while hosted C99 remains nonconforming |
 | `__CHAR16_TYPE__` and friends | not predefined (§3.3) |
 | `<locale>`, `<ios>` width/precision/fill/flags | work |
 
@@ -144,14 +143,14 @@ treatment applies to `<ctgmath>` and `<ccomplex>` when they land.
 Highest value per unit of risk; all are pure headers over facilities that
 already exist.
 
-1. `<numeric>` — `accumulate`, `inner_product`, `partial_sum`,
+1. `<numeric>` (done) — `accumulate`, `inner_product`, `partial_sum`,
    `adjacent_difference`, `iota`, `gcd`, `lcm`, `midpoint`, `reduce`,
    `transform_reduce`, `inclusive_scan`, `exclusive_scan`, `saturate_cast`.
-2. `<bitset>` — including the `reference` proxy, stream insertion/extraction,
+2. `<bitset>` (done) — including the `reference` proxy, stream insertion/extraction,
    and `to_string`/`to_ulong`/`to_ullong`. Proxy references already work.
-3. `<typeindex>` — thin, needs `<typeinfo>` (present) and `std::hash`.
-4. `<forward_list>` — singly linked list; mirrors the existing `<list>`.
-5. `<iomanip>` — `setw`, `setprecision`, `setfill`, `setbase`, `quoted`,
+3. `<typeindex>` (done) — thin, needs `<typeinfo>` (present) and `std::hash`.
+4. `<forward_list>` (done) — singly linked list; mirrors the existing `<list>`.
+5. `<iomanip>` (done) — `setw`, `setprecision`, `setfill`, `setbase`, `quoted`,
    `get_money`/`put_money`, `get_time`/`put_time`. All `<ios>` state accessors
    it needs already work.
 6. `<complex>` — `std::complex` is a class template and does **not** depend on
@@ -164,6 +163,23 @@ already exist.
 9. `<valarray>` — the expression-template slice/mask/indirect surface; the
    largest item in this phase.
 10. `<spanstream>` — `<span>` and `<streambuf>` both exist.
+
+`<numeric>` is covered by `0465_standard_numeric.cpp` and passes at `-O0` and
+`-O2` on x86-64, AArch64, ARM, RISC-V, wasm32, p-code, and 65C02. Completing it
+also fixed three adjacent contracts: P-code constexpr transport now follows the
+target's actual floating width, `make_signed`/`make_unsigned` preserve integer
+rank and cv-qualification instead of selecting solely by size, and the 65C02
+interpreter now computes ADC/SBC overflow from the pre-operation accumulator.
+Wasm's C-only runtime supplies the compiler-generated terminate fallback used
+by cleanup guards.
+
+`<bitset>` is covered by `0466_standard_bitset.cpp`, and `<typeindex>` by
+`0467_standard_typeindex.cpp`; both pass at `-O0` and `-O2` on x86-64,
+AArch64, ARM, RISC-V, wasm32, p-code, and 65C02.
+
+The integer overloads of `<charconv>` are covered by
+`0470_standard_charconv.cpp` and pass the same cross-target matrix. Floating
+point `to_chars`/`from_chars` remain to be implemented.
 
 ### Phase 3 — C runtime headers
 
@@ -209,6 +225,8 @@ Gate on `__DAVECC_HAS_GUEST_THREADS__` the way `<thread>`, `<latch>`, and
 2. `<codecvt>` — deprecated in C++17, removed in C++26. Needed for C++11–17
    conformance; gate accordingly.
 3. `<complex.h>` + `<ccomplex>` + `<tgmath.h>` + `<ctgmath>` — blocked on §3.2.
+   Until implemented, C11 and later truthfully advertise the optional omission
+   with `__STDC_NO_COMPLEX__`; hosted C99 still requires the feature.
    `tgmath.h` can ship its real-typed half earlier if the complex half is
    staged behind the compiler work.
 4. C++26: `<debugging>`, `<text_encoding>`, `<hazard_pointer>`, `<rcu>`,
@@ -272,7 +290,7 @@ expression can begin with `alignas`, so the token now unconditionally selects
 the declaration path. Regression:
 `cxx_testsuite/tests/exec/0460_block_scope_alignas.cpp`.
 
-### 3.2 Frame slots ignored the requested alignment (partly fixed, still open)
+### 3.2 Frame slots ignored the requested alignment (fixed)
 
 With the parse fixed, `alignas` on an automatic variable still had no effect.
 Each backend's `AlignOffset` aligned the slot to `TypeRecordAlignment(type)`
@@ -324,23 +342,34 @@ observed behaviour: at `-O0` `main` leaves `%rsp ≡ 8` so `check` gets
 `%rbp ≡ 0` and the 16-aligned offsets come out right, while at `-O2` a different
 frame size flips the parity and every 16-byte request lands 8 bytes off.
 
-So the fix is two parts, and the first must come first:
+The fix was two parts on x86-64, and the first had to come first:
 
-1. Make the prologue keep `%rsp` 16-byte aligned in the function body, so the
-   guarantee actually holds and `%rbp` is reliably `≡ 8 (mod 16)`. `remaining`
-   has to become a multiple of 16 rather than an odd multiple of 8, and the
-   `%rsp`-relative saved-register and spill offsets computed from
-   `stack_frame_size` have to move with it. This changes generated code for
-   every function on x86-64 and needs the same audit on ARM (where `alignas(8)`
-   already fails), AArch64, and RISC-V.
-2. Then bias the slot rounding by that known residue, so a request of `A` bytes
-   picks `var_offset ≡ 8 (mod A)` rather than `var_offset ≡ 0 (mod A)`. Only
-   requests above 8 are affected, which is why `alignas(8)` and below have
-   always appeared to work on x86-64.
+1. `StackFrameSize` now adds 8 so the prologue's subtraction is a multiple of
+   16, which keeps `%rsp` 16-byte aligned in the function body and makes `%rbp`
+   reliably `≡ 8 (mod 16)`. Every `%rsp`-relative saved-register and spill
+   offset is derived from the same value, so they move together.
+2. `AlignOffset` then biases the slot rounding by that known residue, so a
+   request of `A` bytes picks `var_offset ≡ 8 (mod A)`. Only requests above 8
+   are affected, which is why `alignas(8)` and below always appeared to work.
 
-This is a correctness bug well beyond `alignas`: any callee that relies on the
-16-byte guarantee (aligned SSE spills, `movaps` on a stack temporary) is exposed
-to it today.
+That was a correctness bug well beyond `alignas`: every function handed its
+callees a stack that was 8 off, so anything relying on the 16-byte guarantee
+(aligned SSE spills, `movaps` on a stack temporary) was exposed to it.
+
+ARM had a second, unrelated cause. Code generation lays local storage out
+against the incoming `sp`, and the emitter addresses it through `fp` with the
+integer callee-save block subtracted out (`FrameStorageOffsetDelta`). That block
+holds four bytes per register, so an *odd* number of saved registers moved every
+local four bytes off its assigned offset — breaking even the eight-byte
+alignment AAPCS guarantees, and so any `alignas` as well. `CanonicalIntSavePadding`
+now reserves one more word in that case. The padding word belongs to the save
+block at the top of the frame, so the `sp`-relative float and struct-return
+saves at the bottom must not absorb it; leaving it in their cursor lifted them
+into the lowest spill slot and corrupted spilled values (caught as a crash in
+`0343_standard_random_streams.cpp`, which the ARM suite covers at `-O0`).
+
+Both targets' exec suites are green at `-O0` and `-O2` with these in place;
+requests beyond the fixed-frame guarantee are handled by §3.4.
 
 ### 3.3 The assembler dropped `.comm` alignment (fixed)
 
@@ -354,15 +383,63 @@ size-derived guess when it is 0. So a one-byte `alignas(16)` static was placed
 at alignment 1. Fixed by writing the alignment as `st_value` for `SHN_COM`
 symbols.
 
-### 3.4 Over-aligned automatic storage beyond 16 bytes (open)
+### 3.4 Over-aligned automatic storage beyond the ABI guarantee (fixed)
 
-Even once §3.2 computes slot addresses correctly, `alignas` on a local can only
-be honored up to the alignment the frame itself guarantees — 16 bytes on
-x86-64, 8 on ARM. Beyond that (`alignas(32)`, `alignas(64)`) the object still
-lands wherever the frame happens to fall, because no backend performs dynamic
-stack realignment. Nothing in the standard headers needs it, so it is deferred,
-but it is a silent miscompile rather than a diagnostic and should either be
-implemented or diagnosed.
+A frame slot cannot satisfy such a request at all, whatever the target: the
+distance from `fp` to a slot is only known modulo the stack alignment, because it
+depends on how many registers the allocator saves, and `fp` itself depends on
+every caller up the chain. So the address has to be computed at run time. The
+mechanism for that already exists, because a variable-length array is placed
+exactly that way — `savesp`, `decsp`, `savesp` in `GenerateVLADefinition`, with
+the address kept per-symbol and the stack pointer restored at scope exit, at
+`goto`, `break`, `continue`, and by the epilogue and the exception landing pads.
+An over-aligned object is then a VLA of constant size, carved with
+`size + A - guarantee` bytes so the base can be rounded up to `A` with the
+existing `aligni` operation. That is target-independent and needs no new
+instruction selection.
+
+The implementation now uses that sequence whenever `SymbolStackAlignment`
+exceeds the target's stack guarantee. The computed object address and every
+saved pre-allocation stack pointer live in invented pointer-sized frame slots,
+not temporary registers. Loads through those holders happen at each use. This
+keeps the address valid across calls, loop back edges, and multiple dynamic
+allocations, while scope exits, `goto`, `break`, and `continue` restore the
+matching saved pointer.
+
+Building it turned up several defects underneath:
+
+1. **VLAs did not work on any target.** Four backends built the `savesp` move
+   and never emitted it, so an array was based on whatever the register held.
+   The same investigation fixed an AArch64 shifted-add fold that spelled an
+   instruction with no encoding.
+
+2. **The base address is kept in a temp whose live range the allocator cannot
+   model.** The hidden pointer-slot representation fixes this and removes the
+   old per-backend VLA-address special cases.
+
+3. **Dynamic epilogues assumed `sp` still named the fixed frame.** x86-64,
+   AArch64, RISC-V, and p-code now reconstruct it from the stable frame pointer
+   before reloading saves; dynamic functions cannot take the old tail-call path.
+
+4. **Two interpreter/lowering contracts were wrong.** P-code advertised an
+   eight-byte stack guarantee but placed `argc`/`argv` at a four-byte residue,
+   and its leave node could be lowered before a later block revealed `decsp`.
+   The entry bias and the up-front dynamic-stack scan fix both. WASM and p-code
+   also now use the declaration's effective alignment, not only its type's
+   natural alignment, when assigning ordinary frame slots.
+
+5. **65C02's dynamic-stack helpers were internally inconsistent.** `__decsp`
+   dereferenced the requested byte count as though it were a pointer, so every
+   allocation reused the same software-stack address. Dynamic epilogues also
+   have to reconstruct `sp` below the callee-saved-register area, and their
+   extra 13 emitted bytes have to participate in long-branch relaxation.
+   Finally, a target with natural alignment 1 must still preserve explicit
+   alignment carried by an aggregate type. All three contracts are now fixed.
+
+`0460_block_scope_alignas.cpp` covers alignments 2 through 64, type-carried
+alignment, repeated scopes, and `goto`; `0464_variable_length_array_storage.cpp`
+covers multiple VLAs, calls, loops, nesting, `sizeof`, and array decay. Both pass
+at `-O0` and `-O2` on x86-64, AArch64, ARM, RISC-V, wasm32, p-code, and 65C02.
 
 Note for test authors: the exec harness enters at `main` via `-Wl,-e -Wl,main`,
 so `main`'s own frame does not get the entry alignment the ABI would otherwise

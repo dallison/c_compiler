@@ -56,6 +56,19 @@ static int FrameSize(W65C02Emitter* emitter, bool is_leaf) {
       (is_leaf ? 0 : 2);
 }
 
+static int RegisterSaveSize(W65C02Emitter* emitter) {
+  uint32_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
+  static const int widths[] = {5, 4, 4, 3, 3};
+  static const int masks[] = {31, 15, 15, 7, 7};
+  static const int register_sizes[] = {2, 1, 4, 8, 4};
+  int size = 0;
+  for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+    size += (int)(mask & masks[i]) * register_sizes[i];
+    mask >>= widths[i];
+  }
+  return size;
+}
+
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
 // instructions.
@@ -887,11 +900,23 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     }
     case W65C02_OP(leave):
     case W65C02_OP(leave_leaf): {
-      int frame_size = FrameSize(emitter, opcode == W65C02_OP(leave_leaf));
-      frame_size += 3;                  // Space for reg save mask.
+      int fixed_frame_size =
+          FrameSize(emitter, opcode == W65C02_OP(leave_leaf)) + 3;
+      int frame_size = fixed_frame_size;
       if (emitter->g->callee_pops_args &&
           (inst->flags & k6502SkipArgCleanup) == 0) {
         frame_size += (int)emitter->g->incoming_arg_size;
+      }
+      if (emitter->g->uses_dynamic_stack) {
+        int restore_offset = fixed_frame_size + RegisterSaveSize(emitter);
+        fprintf(fp, "\t%-12s\n", "sec");
+        fprintf(fp, "\t%-12s __fp\n", "lda");
+        fprintf(fp, "\t%-12s #%d\n", "sbc", restore_offset & 0xff);
+        fprintf(fp, "\t%-12s __sp\n", "sta");
+        fprintf(fp, "\t%-12s __fp+1\n", "lda");
+        fprintf(fp, "\t%-12s #%d\n", "sbc",
+                (restore_offset >> 8) & 0xff);
+        fprintf(fp, "\t%-12s __sp+1\n", "sta");
       }
       fprintf(fp, "\t%-12s #%d\n", "ldy", frame_size & 0xff);
       const char* suffix1 = "";

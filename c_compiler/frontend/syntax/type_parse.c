@@ -2941,6 +2941,16 @@ static void ParseFunctionDecl(TypeParser* parser) {
   TypeParserDestruct(&proto_parser);
 }
  
+static bool ArrayBoundNamesValueDependentConstexpr(ASTNode* expression) {
+  if (expression == NULL || expression->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)expression)->symbol;
+  return symbol != NULL && symbol->flags.is_constexpr &&
+         !symbol->flags.value_set &&
+         (TypeIsIntegral(symbol->type) || TypeIsEnum(symbol->type));
+}
+
 static void ParseArrayDecl(TypeParser* parser) {
   bool is_static = false;
   Qualifiers quals = kQualPlain;
@@ -3027,7 +3037,8 @@ static void ParseArrayDecl(TypeParser* parser) {
       goto parsed_bound;
     }
     if (parser->syntax->parsing_template_declaration &&
-        ExpressionIsTemplateDependent(size_expr)) {
+        (ExpressionIsTemplateDependent(size_expr) ||
+         ArrayBoundNamesValueDependentConstexpr(size_expr))) {
       if (size_expr->op == AST_OP(identifier)) {
         IdentifierASTNode* id = (IdentifierASTNode*)size_expr;
         if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
