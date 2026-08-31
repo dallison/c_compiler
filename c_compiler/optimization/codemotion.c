@@ -65,6 +65,30 @@ static bool IsLoopInvariant(const LoopInfo* loop, IRNode* inst) {
   return true;
 }
 
+static bool UsesVLAStorageImpl(IRNode* inst, Set* visited) {
+  if (inst == NULL || SetContains(visited, inst)) {
+    return false;
+  }
+  SetInsert(visited, inst);
+  if (IRIsAutoVariable(inst) && TypeIsVLA(inst->type)) {
+    return true;
+  }
+  for (size_t i = 0; i < inst->inputs.length; i++) {
+    if (UsesVLAStorageImpl(inst->inputs.value.p[i], visited)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool UsesVLAStorage(IRNode* inst) {
+  Set visited;
+  SetInitForPointers(&visited);
+  bool uses_vla = UsesVLAStorageImpl(inst, &visited);
+  SetDestruct(&visited);
+  return uses_vla;
+}
+
 static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
                              LoopMemoryEffects effects, Set* moved,
                              IRNode* inst) {
@@ -73,7 +97,7 @@ static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
       inst->opcode == IR_OP(literalref) ||
       SetContains(moved, inst) ||
       (!IRIsLoad(inst) && !IRIsExpression(inst)) ||
-      !IsLoopInvariant(loop, inst)) {
+      !IsLoopInvariant(loop, inst) || UsesVLAStorage(inst)) {
     return false;
   }
   // A load is only invariant if nothing in the loop can write the location it

@@ -504,6 +504,7 @@ static void InitRegVars(RegisterVariableSet* vars, int max, W65C02RegisterType t
 void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   TargetGeneratorInit(&g->base, gen, &virtuals);
   g->gen = gen;
+  g->uses_dynamic_stack = false;
 
   VectorInit(&g->runtime_symbols);
 
@@ -1924,6 +1925,13 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
   // If the node is an argument push, indirect to its expression.
   if (node->opcode == IR_OP(pusharg)) {
     node = node->inputs.value.p[0];
+  }
+  if (IRIsAutoVariable(node) && TypeIsVLA(node->type)) {
+    Symbol* symbol = ((IRVariable*)node)->symbol;
+    if (symbol != NULL && symbol->value.other != NULL) {
+      return Materialize(g, symbol->value.other, compiler->pointer_size,
+                         put_in_zero_page);
+    }
   }
   TargetInstruction* inst = GetLoweredNode(node);
   AddReloadPoint(g, inst);
@@ -6685,7 +6693,19 @@ static void LowerSignExtend(W65C02Generator* g, IRNode* node) {
 }
 
 static void LowerAlign(W65C02Generator* g, IRNode* node) {
-   SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+  TargetInstruction* value = GetAddress(g, node->inputs.value.p[0], true);
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  int64_t alignment = IRIntConstValue(node->inputs.value.p[1]);
+  TargetInstruction* add_mask =
+      GetIntConstant(g, NULL, kTargetType16Bit, alignment - 1);
+  TargetInstruction* keep_mask =
+      GetIntConstant(g, NULL, kTargetType16Bit, ~(alignment - 1));
+
+  AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, dest, value,
+                add_mask);
+  AndOp(g, node, 2, dest, dest, keep_mask);
+  SetLoweredNode(node, dest);
+  AddSpillPoint(g, dest);
 }
 
 static void LowerAsm(W65C02Generator* g, IRNode* node) {
@@ -7538,9 +7558,11 @@ static void LowerPhiNode(W65C02Generator* g, IRNode* node) {
 static void LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
   switch (node->opcode) {
     case IR_OP(decsp): {
+      g->uses_dynamic_stack = true;
       // ldx #reg
       // jsr __decsp
       TargetInstruction* size = Materialize(g, node->inputs.value.p[0], 2, true);
+      AddReloadPoint(g, size);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), size, kAddrModeImplied));
        SetLoweredNode(node, jsr(g, g->decsp));
       break;
@@ -7549,13 +7571,20 @@ static void LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
     case IR_OP(savesp): {
       // One operand, a temp to hold stack pointer.
       TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
+      AddReloadPoint(g, tmp);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
        SetLoweredNode(node, jsr(g, g->savesp));
       break;
     }
     case IR_OP(restoresp): {
-      TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
-      Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
+      // restoresp consumes the saved pointer value. Taking the address of that
+      // value passes the holder's location (and can leave a constant without
+      // an allocated register) instead of the stack pointer to restore.
+      TargetInstruction* saved_sp =
+          Materialize(g, node->inputs.value.p[0], 2, true);
+      AddReloadPoint(g, saved_sp);
+      Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), saved_sp,
+                              kAddrModeImplied));
        SetLoweredNode(node, jsr(g, g->restoresp));
       break;
     }
@@ -8034,6 +8063,9 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
   RegisterVariableSet* varset;
   if (entry->pooled->opcode == IR_OP(localvar) ||
       entry->pooled->opcode == IR_OP(tempvar)) {
+    if (TypeIsVLA(entry->value.symbol->type)) {
+      return;
+    }
     varset = MaybeUseRegister(g, entry);
     if (varset == NULL) {
       // Make space for variable on the stack.

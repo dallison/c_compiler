@@ -409,6 +409,7 @@ typedef struct W65C02Generator {
   TargetInstruction* argument_pointer;
   size_t incoming_arg_size;
   bool callee_pops_args;
+  bool uses_dynamic_stack;
   
   // Runtime helper functions.
   

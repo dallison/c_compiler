@@ -1,0 +1,17 @@
+//
+//  ciso646
+//  c_compiler
+//
+//  C++ counterpart of <iso646.h>.  The alternative operator spellings are
+//  keywords in C++, so this header has never had any content; it was
+//  deprecated in C++17 and removed in C++20.
+//
+
+#ifndef ciso646_h
+#define ciso646_h
+
+#if __cplusplus >= 202002L
+#error "<ciso646> was removed in C++20; the operator spellings are keywords"
+#endif
+
+#endif /* ciso646_h */

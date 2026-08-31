@@ -33,6 +33,14 @@ struct Callable {
   int operator()(int value) const { return value + 5; }
 };
 
+static_assert(std::is_same<std::make_unsigned<int>::type,
+                           unsigned int>::value);
+static_assert(std::is_same<std::make_signed<unsigned int>::type, int>::value);
+static_assert(std::is_same<std::make_unsigned<const int>::type,
+                           const unsigned int>::value);
+static_assert(std::is_same<std::make_signed<volatile unsigned short>::type,
+                           volatile short>::value);
+
 int main() {
   if (std::is_default_constructible<IntConstruct>::value) {
     return 1;

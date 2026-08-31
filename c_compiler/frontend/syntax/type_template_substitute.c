@@ -2421,6 +2421,13 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
       ASTNodeClone(expr, CloneDependentDecltypeNode, &clone, NULL);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
   MapDestruct(&clone.symbol_map);
+  if (cloned != NULL) {
+    // The definition-time expression was analyzed while its operands were
+    // still dependent.  Substitution can make those operands concrete, so the
+    // cloned tree must be reanalyzed rather than retaining stale dependent
+    // types on its parent nodes.
+    ASTNodeVisit(cloned, ClearDependentExpressionAnalysis, 0, NULL);
+  }
   return cloned;
 }
 

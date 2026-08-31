@@ -4322,15 +4322,19 @@ static TargetInstruction* LowerStackPointerOps(X86_64Generator* rv, IRNode* node
       return new_sp;
     }
     case IR_OP(savesp): {
-      // One operand, a temp to hold stack pointer.
+      // One operand, a temp to hold stack pointer.  The move has to reach the
+      // instruction stream: without it the temp keeps whatever the register
+      // happened to hold, which is where a variable-length array's base address
+      // was coming from.
       TargetInstruction* tmp = Materialize(rv, node->inputs.value.p[0]);
-      TargetInstruction* mv = NewInstruction1(X86_64_OP(mv), StackPointer(rv));
+      TargetInstruction* mv =
+          Emit(rv, NewInstruction1(X86_64_OP(mv), StackPointer(rv)));
       mv->dest = tmp;
       return tmp;
     }
     case IR_OP(restoresp): {
       TargetInstruction* tmp = Materialize(rv, node->inputs.value.p[0]);
-      TargetInstruction* mv = NewInstruction1(X86_64_OP(mv), tmp);
+      TargetInstruction* mv = Emit(rv, NewInstruction1(X86_64_OP(mv), tmp));
       mv->dest = StackPointer(rv);
       return mv->dest;
     }
@@ -4834,9 +4838,20 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
   return error;
 }
 
+// A local's address is `%rbp + var_offset - base.stack_frame_size - 16` (see
+// LocalVariableOffset).  Both subtrahends are multiples of 16, and %rbp holds
+// the entry %rsp, which the ABI leaves 8 past a multiple of 16 because the call
+// pushed a return address.  So the address is congruent to `var_offset + 8`,
+// and rounding var_offset itself to the requested alignment would place a
+// 16-byte request 8 bytes off.  Round so that the sum comes out aligned
+// instead.  Requests of 8 or less are unaffected, since 8 is a multiple of them.
+#define X86_64_FRAME_POINTER_RESIDUE 8
+
 static void AlignOffset(PoolEntry* entry, int* offset) {
-  int alignment = TypeRecordAlignment(entry->pooled->type);
-  *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
+  int alignment = PoolEntryStackAlignment(entry);
+  int biased = *offset + X86_64_FRAME_POINTER_RESIDUE;
+  *offset = ((biased + (alignment - 1)) & ~(alignment - 1)) -
+            X86_64_FRAME_POINTER_RESIDUE;
 }
 
 static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {

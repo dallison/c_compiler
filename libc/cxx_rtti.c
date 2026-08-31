@@ -90,9 +90,24 @@ struct __class_type_info {
   const char* __type_name;
 };
 
+#ifdef __wasm32__
+// Wasm has no assembler runtime to provide the ABI RTTI vtable address-point
+// symbols used by emitted type_info records.  RTTI only needs stable,
+// distinguishable addresses for these class-kind tags.
+const unsigned char _ZTVN10__cxxabiv117__class_type_infoE_u2b16;
+const unsigned char _ZTVN10__cxxabiv120__si_class_type_infoE_u2b16;
+const unsigned char _ZTVN10__cxxabiv121__vmi_class_type_infoE_u2b16;
+const void* __davecc_itanium_vptr_class =
+    &_ZTVN10__cxxabiv117__class_type_infoE_u2b16;
+const void* __davecc_itanium_vptr_si_class =
+    &_ZTVN10__cxxabiv120__si_class_type_infoE_u2b16;
+const void* __davecc_itanium_vptr_vmi_class =
+    &_ZTVN10__cxxabiv121__vmi_class_type_infoE_u2b16;
+#else
 extern const void* __davecc_itanium_vptr_class;
 extern const void* __davecc_itanium_vptr_si_class;
 extern const void* __davecc_itanium_vptr_vmi_class;
+#endif
 
 static const void* ItaniumResolveVptr(const void* vptr) {
   if (vptr == (const void*)&__davecc_itanium_vptr_class) {

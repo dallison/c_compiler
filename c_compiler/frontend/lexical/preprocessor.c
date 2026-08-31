@@ -188,6 +188,22 @@ static int TargetSizeOr(int size, int fallback) {
   return size > 0 ? size : fallback;
 }
 
+static const char* TargetIntegerTypeForSize(int size, bool is_unsigned) {
+  if (size == TargetSizeOr(compiler->long_size, 8)) {
+    return is_unsigned ? "unsigned long" : "long";
+  }
+  if (size == TargetSizeOr(compiler->int_size, 4)) {
+    return is_unsigned ? "unsigned int" : "int";
+  }
+  if (size == TargetSizeOr(compiler->long_long_size, 8)) {
+    return is_unsigned ? "unsigned long long" : "long long";
+  }
+  if (size == TargetSizeOr(compiler->short_size, 2)) {
+    return is_unsigned ? "unsigned short" : "short";
+  }
+  return is_unsigned ? "unsigned long long" : "long long";
+}
+
 // GCC/Clang predefined type-limit and sizeof macros.  Used by tests and
 // headers that query widths without including <limits.h> / <stdint.h>.
 static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
@@ -487,8 +503,6 @@ static void PredefineMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__UINT_FAST16_TYPE__", "short");
     PreprocessorDefineMacro(p, "__UINT_FAST32_TYPE__", "int");
     PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "long");
-    PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
-    PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
   } else {
     PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned int");
     PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned int");
@@ -521,9 +535,14 @@ static void PredefineMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__UINT_FAST16_TYPE__", "int");
     PreprocessorDefineMacro(p, "__UINT_FAST32_TYPE__", "long");
     PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "long long");
-    PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
-    PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
   }
+  int pointer_size = TargetSizeOr(compiler->pointer_size, 8);
+  PreprocessorDefineMacro(
+      p, "__INTPTR_TYPE__",
+      TargetIntegerTypeForSize(pointer_size, /*is_unsigned=*/false));
+  PreprocessorDefineMacro(
+      p, "__UINTPTR_TYPE__",
+      TargetIntegerTypeForSize(pointer_size, /*is_unsigned=*/true));
 
   PredefineGCCTypeLimitMacros(p);
 

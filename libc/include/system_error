@@ -48,10 +48,12 @@ enum class errc {
   not_a_directory = ENOTDIR,
   resource_unavailable_try_again = EAGAIN,
   invalid_argument = EINVAL,
+  result_out_of_range = ERANGE,
   resource_deadlock_would_occur = EDEADLK,
   too_many_files_open = EMFILE,
   too_many_files_open_in_system = ENFILE,
   too_many_symbolic_link_levels = ELOOP,
+  value_too_large = EOVERFLOW,
 };
 
 class error_code {

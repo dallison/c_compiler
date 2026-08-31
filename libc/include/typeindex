@@ -1,0 +1,59 @@
+#ifndef __davecc_typeindex__
+#define __davecc_typeindex__
+
+#include <cstddef>
+#include <functional>
+#include <typeinfo>
+
+namespace std {
+
+class type_index {
+ public:
+  type_index(const type_info& info) noexcept : __info(&info) {}
+
+  bool operator==(const type_index& other) const noexcept {
+    return *__info == *other.__info;
+  }
+
+  bool operator!=(const type_index& other) const noexcept {
+    return !(*this == other);
+  }
+
+  bool operator<(const type_index& other) const noexcept {
+    return __info->before(*other.__info);
+  }
+
+  bool operator<=(const type_index& other) const noexcept {
+    return !other.operator<(*this);
+  }
+
+  bool operator>(const type_index& other) const noexcept {
+    return other.operator<(*this);
+  }
+
+  bool operator>=(const type_index& other) const noexcept {
+    return !operator<(other);
+  }
+
+  size_t hash_code() const noexcept {
+    return static_cast<size_t>(__info->hash_code());
+  }
+
+  const char* name() const noexcept {
+    return __info->name();
+  }
+
+ private:
+  const type_info* __info;
+};
+
+template <>
+struct hash<type_index> {
+  size_t operator()(const type_index& value) const noexcept {
+    return value.hash_code();
+  }
+};
+
+}  // namespace std
+
+#endif

@@ -583,7 +583,7 @@ __var_value8b_x1:
 
 __var_value8_x2:
   LDA #__x2
-  BRA __var_value4
+  BRA __var_value8
 
 __var_value8b_x2:
   LDA #__x2
@@ -971,7 +971,7 @@ __arg_value8b_x1:
 
 __arg_value8_x2:
   LDA #__x2
-  BRA __arg_value4
+  BRA __arg_value8
 
 __arg_value8b_x2:
   LDA #__x2

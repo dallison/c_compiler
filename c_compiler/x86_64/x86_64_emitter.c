@@ -160,6 +160,18 @@ static int StackFrameSize(X86_64Emitter* emitter) {
   
   stack_frame_size = (stack_frame_size + 15) & ~15;  // Aligned to 16 bytes.
 
+  // The prologue pushes the frame pointer and then subtracts
+  // `stack_frame_size - 8` (see SaveRegisters), so the body's %rsp sits
+  // `stack_frame_size` below the entry value.  The ABI puts %rsp at a multiple
+  // of 16 at each call, so entry %rsp is 8 past one (the call pushed a return
+  // address) and a frame that is a multiple of 16 leaves the body 8 past a
+  // multiple too -- which breaks the guarantee for every call this function
+  // makes, and flips it back and forth with call depth.  Adding 8 makes the
+  // prologue's subtraction a multiple of 16 instead, so the body is aligned and
+  // %rbp is reliably 8 past a multiple of 16.  Every %rsp-relative offset below
+  // is derived from this same value, so they all move together.
+  stack_frame_size += 8;
+
   return stack_frame_size;
 }
 
@@ -596,6 +608,17 @@ static void RestoreRegisters(X86_64Emitter* emitter, FILE* fp) {
 
   if (!is_leaf) {
     fprintf(fp, "\t// Restored registers.\n");
+  }
+
+  if (!EmptyStackFrame(emitter)) {
+    // A VLA or over-aligned local can leave rsp below the fixed frame. Restore
+    // the frame bottom from rbp before reading rsp-relative saved registers.
+    // Varargs lowers rbp into its register-save area, so exclude that area
+    // from the distance back to the fixed-frame bottom.
+    int frame_adjustment =
+        StackFrameSize(emitter) - space_above_frame_pointer;
+    fprintf(fp, "\tmovq %%rbp, %%rsp\n");
+    DecrementStackPointer(emitter, frame_adjustment, fp);
   }
 
   int offset = emitter->saved_reg_offset;
@@ -2470,6 +2493,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
                                                           : inst->reg;
       TargetInstruction* src0 = inst->operand[0];
       TargetInstruction* src1 = inst->operand[1];
+      bool src0_is_zero =
+          (X86_64Opcode)src0->opcode == X86_64_OP(x0) ||
+          (TargetIsConst(src0) && TargetIntValue(src0) == 0);
       bool src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
       bool src1_in_dest = !TargetIsConst(src1) && !src1_is_zero &&
                           SamePhysicalReg(src1->reg, dest_reg) &&
@@ -2489,18 +2515,40 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "\tnegq ");
         PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
                                                sizeof(buf2)));
-        fprintf(fp, "\n\taddq ");
-        PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
-        fprintf(fp, ", ");
-        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
-                                               sizeof(buf2)));
+        if (!src0_is_zero) {
+          fprintf(fp, "\n\taddq ");
+          if (TargetIsConst(src0)) {
+            PrintAsmImmediate(fp, TargetIntValue(src0));
+          } else {
+            PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
+          }
+          fprintf(fp, ", ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+        }
+        if ((X86_64Opcode)inst->opcode == X86_64_OP(subl)) {
+          // The assembler currently has only a 64-bit unary negate. Preserve
+          // the zero-extension semantics that a 32-bit subtraction provides.
+          fprintf(fp, "\n\tmovl ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+          fprintf(fp, ", ");
+          PrintPercentReg(fp,
+                          X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                             sizeof(buf2)));
+        }
         fprintf(fp, "\n");
         break;
       }
-      bool src0_is_zero = (X86_64Opcode)src0->opcode == X86_64_OP(x0);
       // The swap above may have moved the zero pseudo-register into src1, so
-      // ask again rather than reusing the answer from before the swap.  x0 has
-      // no physical register behind it; printing it as one names %rax.
+      // ask again for both operands rather than reusing the answers from before
+      // the swap. x0 has no physical register behind it; printing it as one
+      // names %rax.
+      src0_is_zero =
+          (X86_64Opcode)src0->opcode == X86_64_OP(x0) ||
+          (TargetIsConst(src0) && TargetIntValue(src0) == 0);
       src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
       if ((TargetIsConst(src0) || src0_is_zero) && dest_reg != NULL) {
         fprintf(fp, "\tmovq ");

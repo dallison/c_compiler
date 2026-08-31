@@ -12,6 +12,10 @@
 #include <type_traits>
 #include <utility>
 
+// Older standards have no concept definitions.  The header stays includable so
+// that pre-C++20 headers pulling it in transitively still compile.
+#if __cplusplus >= 202002L
+
 namespace std {
 
 // [concepts.lang]
@@ -278,4 +282,5 @@ concept strict_weak_order = relation<R, T, U>;
 
 }  // namespace std
 
+#endif /* __cplusplus >= 202002L */
 #endif /* concepts_h */

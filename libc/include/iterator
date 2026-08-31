@@ -277,6 +277,8 @@ constexpr reverse_iterator<Iter> make_reverse_iterator(Iter it) {
   return reverse_iterator<Iter>(it);
 }
 
+#if __cplusplus >= 202002L
+
 // ------------------------------------------------------------------
 // C++20 iterator concepts ([iterator.concepts]).
 //
@@ -1289,6 +1291,8 @@ inline constexpr __next_fn next{};
 inline constexpr __prev_fn prev{};
 }
 }  // namespace ranges
+
+#endif /* __cplusplus >= 202002L */
 
 }  // namespace std
 

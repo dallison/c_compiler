@@ -24,6 +24,8 @@ filegroup(
         "libc/include/algorithm",
         "libc/include/barrier",
         "libc/include/bit",
+        "libc/include/bitset",
+        "libc/include/charconv",
         "libc/include/chrono",
         "libc/include/compare",
         "libc/include/concepts",
@@ -34,10 +36,13 @@ filegroup(
         "libc/include/cerrno",
         "libc/include/cfloat",
         "libc/include/cinttypes",
+        "libc/include/ciso646",
         "libc/include/climits",
         "libc/include/cmath",
         "libc/include/csetjmp",
+        "libc/include/cstdalign",
         "libc/include/cstdarg",
+        "libc/include/cstdbool",
         "libc/include/cstddef",
         "libc/include/cstdint",
         "libc/include/cstdio",
@@ -53,10 +58,12 @@ filegroup(
         "libc/include/flat_set",
         "libc/include/filesystem",
         "libc/include/format",
+        "libc/include/forward_list",
         "libc/include/fstream",
         "libc/include/functional",
         "libc/include/generator",
         "libc/include/hive",
+        "libc/include/iomanip",
         "libc/include/initializer_list",
         "libc/include/inplace_vector",
         "libc/include/ios",
@@ -78,6 +85,7 @@ filegroup(
         "libc/include/mutex",
         "libc/include/new",
         "libc/include/numbers",
+        "libc/include/numeric",
         "libc/include/optional",
         "libc/include/ostream",
         "libc/include/print",
@@ -103,6 +111,7 @@ filegroup(
         "libc/include/thread",
         "libc/include/tuple",
         "libc/include/type_traits",
+        "libc/include/typeindex",
         "libc/include/typeinfo",
         "libc/include/unordered_map",
         "libc/include/unordered_set",
@@ -2451,7 +2460,10 @@ done
 
 genrule(
     name = "libc_wasm32",
-    srcs = LIBC_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + [
+        "libc/cxx_new_overloads.cc",
+        ":libc_headers",
+    ] + glob([
         "libc/include/**/*.h",
     ]) + [
         ":davecc",
@@ -2485,6 +2497,8 @@ for src in libc/*.c; do
   esac
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$work/$$(basename "$${src%.c}").o"
 done
+"$$davecc" "$${cflags[@]}" -std=c++20 -fno-exceptions \
+  libc/cxx_new_overloads.cc -o "$$work/cxx_new_overloads.o"
 
 # Members are named from the working directory, because a name holding a
 # slash does not survive the archive's long-name table.

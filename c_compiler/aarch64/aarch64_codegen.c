@@ -4426,21 +4426,41 @@ static TargetInstruction* LowerStackPointerOps(AARCH64Generator* g, IRNode* node
         int64_t s = AARCH64IntValue(size);
         new_sp = AddImmediate(g, StackPointer(g), -s);
       } else {
-        new_sp = Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(sub), StackPointer(g), size), 0));
+        // AArch64's shifted-register add/sub encoding treats register 31 as
+        // XZR, not SP. Copy SP through a general register for a runtime-sized
+        // decrement, then write the result back with the SP-capable move
+        // encoding.
+        TargetInstruction* current_sp = Emit(
+            g, CopyInstructionSize(
+                   NewInstruction1(AARCH64_OP(mov), StackPointer(g)), 0));
+        new_sp = Emit(
+            g, CopyInstructionSize(
+                   NewInstruction2(AARCH64_OP(sub), current_sp, size), 0));
+        TargetInstruction* set_sp = Emit(
+            g, CopyInstructionSize(
+                   NewInstruction1(AARCH64_OP(mov), new_sp), 0));
+        set_sp->dest = StackPointer(g);
+        return set_sp;
       }
       new_sp->dest = StackPointer(g);
       return new_sp;
     }
     case IR_OP(savesp): {
-      // One operand, a temp to hold stack pointer.
+      // One operand, a temp to hold stack pointer.  The move has to reach the
+      // instruction stream: without it the temp keeps whatever the register
+      // happened to hold, which is where a variable-length array's base address
+      // was coming from.
       TargetInstruction* tmp = Materialize(g, node->inputs.value.p[0]);
-      TargetInstruction* mv = CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), StackPointer(g)), 0);
+      TargetInstruction* mv = Emit(
+          g, CopyInstructionSize(
+                 NewInstruction1(AARCH64_OP(mov), StackPointer(g)), 0));
       mv->dest = tmp;
       return tmp;
     }
     case IR_OP(restoresp): {
       TargetInstruction* tmp = Materialize(g, node->inputs.value.p[0]);
-      TargetInstruction* mv = CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), tmp), 0);
+      TargetInstruction* mv = Emit(
+          g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), tmp), 0));
       mv->dest = StackPointer(g);
       return mv->dest;
     }
@@ -5052,7 +5072,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
 }
 
 static void AlignOffset(PoolEntry* entry, int* offset) {
-  int alignment = TypeRecordAlignment(entry->pooled->type);
+  int alignment = PoolEntryStackAlignment(entry);
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 

@@ -298,7 +298,10 @@ void CheckForVarUse(IRNode* read, ASTNode* node) {
   switch (node->op) {
     case AST_OP(identifier): {
       IdentifierASTNode* id = (IdentifierASTNode*)node;
-      IRSetVarUse(read, id->symbol);
+      if (!TypeIsVLA(id->symbol->type) &&
+          !SymbolNeedsDynamicStackAllocation(id->symbol)) {
+        IRSetVarUse(read, id->symbol);
+      }
       break;
     }
     case AST_OP(dot):
@@ -332,7 +335,10 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
   switch (node->op) {
     case AST_OP(identifier): {
       IdentifierASTNode* id = (IdentifierASTNode*)node;
-      IRSetVarDef(write, id->symbol);
+      if (!TypeIsVLA(id->symbol->type) &&
+          !SymbolNeedsDynamicStackAllocation(id->symbol)) {
+        IRSetVarDef(write, id->symbol);
+      }
       break;
     }
     case AST_OP(init):
@@ -602,6 +608,34 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
       GeneratorEmitConstant(gen, NewFloatingPointIRConstant(type, value));
   VectorAppend(&gen->int_constant_pool, entry);
   return entry->pooled;
+}
+
+int PoolEntryStackAlignment(PoolEntry* entry) {
+  if (entry->value.symbol != NULL) {
+    return SymbolStackAlignment(entry->value.symbol);
+  }
+  int alignment = TypeRecordAlignment(entry->pooled->type);
+  return alignment > 0 ? alignment : 1;
+}
+
+int SymbolStackAlignment(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL) {
+    return 1;
+  }
+  int alignment = TypeRecordAlignment(symbol->type);
+  if (symbol->alignment > alignment) {
+    alignment = symbol->alignment;
+  }
+  return alignment > 0 ? alignment : 1;
+}
+
+bool SymbolNeedsDynamicStackAllocation(Symbol* symbol) {
+  return symbol != NULL && symbol->type != NULL &&
+         symbol->flags.is_local && !symbol->flags.is_argument &&
+         !TypeIsVLA(symbol->type) &&
+         !StorageIs(symbol->storage, STO(static) | STO(extern) | STO(thread)) &&
+         compiler->target != NULL &&
+         SymbolStackAlignment(symbol) > compiler->target->stack_alignment;
 }
 
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {

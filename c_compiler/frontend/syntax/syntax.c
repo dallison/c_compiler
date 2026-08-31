@@ -519,12 +519,68 @@ static bool SymbolLooksLikeFunctionTemplate(Symbol* symbol) {
           symbol->type->info.function.template_parameters.length > 0);
 }
 
+// Two function templates whose signatures are identical are still distinct
+// templates if their template parameter lists differ.  That is how the
+// pre-C++20 constraint idiom works: the condition lives in the type of a
+// defaulted non-type parameter, as in
+// `template <class T, typename enable_if<C<T>, int>::type = 0> void f(T);`,
+// so the two overloads differ only in that type.
+static bool TemplateParameterListsDiffer(Vector* left, Vector* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (left->length != right->length) {
+    return true;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    TemplateParameter* left_param = left->value.p[i];
+    TemplateParameter* right_param = right->value.p[i];
+    if (left_param == NULL || right_param == NULL) {
+      continue;
+    }
+    if (left_param->kind != right_param->kind ||
+        left_param->is_parameter_pack != right_param->is_parameter_pack) {
+      return true;
+    }
+    if (left_param->kind == kTemplateParameterNonType &&
+        !TypeEqual(left_param->type, right_param->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The parameters of the declaration being parsed have not reached its function
+// type yet: MoveCurrentTemplateParametersToFunction hands them over later, so
+// reading the type here yields an empty list and would make every redeclaration
+// of a function template look like a new overload.  Until then they live in
+// `syntax->current_template_parameters`.
+static Vector* PendingTemplateParameterList(Syntax* syntax, Symbol* symbol) {
+  if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type) &&
+      symbol->type->info.function.template_parameters.length > 0) {
+    return &symbol->type->info.function.template_parameters;
+  }
+  return syntax == NULL ? NULL : syntax->current_template_parameters;
+}
+
+static bool FunctionTemplateParameterListsDiffer(Symbol* candidate,
+                                                 Vector* overload_params) {
+  if (candidate == NULL || candidate->type == NULL ||
+      overload_params == NULL || overload_params->length == 0) {
+    return false;
+  }
+  return TemplateParameterListsDiffer(
+      &candidate->type->info.function.template_parameters, overload_params);
+}
+
 static bool TryAppendSameSignatureConstrainedTemplateOverload(
-    Symbol* first, Symbol* overload, ConstraintExpr* pending_constraint) {
+    Syntax* syntax, Symbol* first, Symbol* overload,
+    ConstraintExpr* pending_constraint) {
   if (first == NULL || overload == NULL ||
       !SymbolLooksLikeFunctionTemplate(overload)) {
     return false;
   }
+  Vector* overload_params = PendingTemplateParameterList(syntax, overload);
   ConstraintExpr* saved_constraint =
       overload->type->info.function.associated_constraint;
   if (saved_constraint == NULL && pending_constraint != NULL) {
@@ -540,8 +596,9 @@ static bool TryAppendSameSignatureConstrainedTemplateOverload(
         ConceptsFunctionTemplateHasAssociatedConstraint(candidate);
     bool overload_constrained =
         ConceptsFunctionTemplateHasAssociatedConstraint(overload);
-    if ((candidate_constrained || overload_constrained) &&
-        !ConceptsFunctionTemplateConstraintsEquivalent(candidate, overload)) {
+    if (((candidate_constrained || overload_constrained) &&
+         !ConceptsFunctionTemplateConstraintsEquivalent(candidate, overload)) ||
+        FunctionTemplateParameterListsDiffer(candidate, overload_params)) {
       overload->type->info.function.associated_constraint = saved_constraint;
       AppendOverload(first, overload);
       return true;
@@ -7673,7 +7730,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       if (parser->cxx_member_definition == NULL &&
           CanOverloadFunctions(old_sym, sym)) {
         if (TryAppendSameSignatureConstrainedTemplateOverload(
-                old_sym, sym, syntax->current_template_requires_clause)) {
+                syntax, old_sym, sym,
+                syntax->current_template_requires_clause)) {
           old_sym = NULL;
           overload_was_appended = true;
         } else {
@@ -9177,6 +9235,29 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
   return true;
 }
 
+// `typename` opens a template parameter in two different roles: as the
+// type-parameter keyword (`typename T`, `typename ...Ts`, `typename T = int`),
+// or as the disambiguator in the type of a non-type parameter
+// (`typename Dep<U>::type N`, the usual enable_if idiom).  Only the first is
+// followed directly by the end of the parameter, so look past the keyword and
+// the optional name to tell them apart.
+static bool TypenameOpensTypeParameter(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  LexNextToken(lex);
+  LexMatch(lex, TOK(ellipsis));
+  if (LexLookingAt(lex, TOK(identifier))) {
+    LexNextToken(lex);
+  }
+  bool opens_type_parameter = LexLookingAt(lex, TOK(comma)) ||
+                              LexLookingAt(lex, TOK(equal)) ||
+                              LexLookingAtClosingAngle(lex);
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return opens_type_parameter;
+}
+
 static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
   int index = base + (int)params->length;
@@ -9186,7 +9267,9 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   if (ParseConstrainedTemplateTypeParameter(syntax, params, base)) {
     return true;
   }
-  if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
+  if ((LexLookingAt(lex, TOK(typename)) && TypenameOpensTypeParameter(syntax) &&
+       LexMatch(lex, TOK(typename))) ||
+      LexMatch(lex, TOK(class))) {
     bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
     String param_name;
     StringInit(&param_name, "");
@@ -9245,8 +9328,16 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   TypeRecord* type = TypeParserParseType(&parser, true);
   Symbol* param = TypeParserParseDeclarator(&parser, type);
   TypeParserDestruct(&parser);
-  TypeRecordDelete(type);
+  // Release `type` only when no declarator took it.  On success the symbol
+  // holds the only reference, and `type` arrived here with a zero count, so
+  // releasing it would destruct the still-referenced record in place and free
+  // its dependent-member name and template arguments.  A primitive parameter
+  // type survives that -- its bits live in the record itself -- which is why
+  // this only showed up on a dependent one such as
+  // `typename enable_if<C<T>, int>::type`, whose enable_if arguments and `type`
+  // member name were silently erased.
   if (param == NULL) {
+    TypeRecordDelete(type);
     SyntaxError(syntax, "Expected template parameter name");
     SyntaxRecover(syntax, TC(closebra));
     return false;
@@ -9310,14 +9401,25 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
   // -- and wrongly -- resolved against the primary template (dropping the
   // `::type` member and yielding a bogus concrete type such as `int`).
   Vector* saved_template_parameters = syntax->current_template_parameters;
+  int saved_template_parameter_count = syntax->current_template_parameter_count;
   syntax->current_template_parameters = params;
+  syntax->current_template_parameter_count = base;
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     ParseTemplateParameter(syntax, params, base);
+    // Count the parameter now that it exists, so the next one's type sees a
+    // non-empty enclosing template.  A qualified name is only treated as
+    // dependent when parameters are in scope (see
+    // BuildDependentTemplateScopeValueName), and the enclosing code does not
+    // publish the count until the whole list has been read -- which left
+    // `typename enable_if<C<T>, int>::type` resolving `C<T>::type` against C's
+    // primary template right here, silently discarding the constraint.
+    syntax->current_template_parameter_count = base + (int)params->length;
     if (!LexMatch(lex, TOK(comma))) {
       break;
     }
   }
   syntax->current_template_parameters = saved_template_parameters;
+  syntax->current_template_parameter_count = saved_template_parameter_count;
   SyntaxNeedTemplateClose(syntax, TC(decl));
   return params;
 }
@@ -9662,13 +9764,20 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
         }
       }
       // A template argument can only be value-dependent when template parameters
-      // are in scope, i.e. while parsing a template declaration.  Outside one it
-      // must be a concrete constant expression, so it has to be folded now.  The
-      // dependence probe below inspects the still-unanalysed expression, where
-      // every interior node (a `+`, a call, ...) has a null/unknown type and so
-      // is spuriously reported as dependent; gating on the parse state avoids
-      // deferring -- and thus dropping to 0 -- such non-dependent arguments.
-      if (syntax->parsing_template_declaration && !is_direct_nttp &&
+      // are in scope.  Outside one it must be a concrete constant expression, so
+      // it has to be folded now.  The dependence probe below inspects the
+      // still-unanalysed expression, where every interior node (a `+`, a call,
+      // ...) has a null/unknown type and so is spuriously reported as dependent;
+      // gating on the parse state avoids deferring -- and thus dropping to 0 --
+      // such non-dependent arguments.  Parameters are also in scope for the rest
+      // of their own list, which is where the pre-C++20 constraint idiom writes
+      // its condition (`typename enable_if<C<T>, int>::type = 0`); the
+      // declaration flag is not set until the list has been read, so ask the
+      // parameter count as well.
+      bool template_parameters_in_scope =
+          syntax->parsing_template_declaration ||
+          syntax->current_template_parameter_count > 0;
+      if (template_parameters_in_scope && !is_direct_nttp &&
           ExpressionContainsDependentTemplateParameter(expr)) {
         // A value-dependent trait condition such as `!is_integral<It>::value`:
         // resolving it now would fold the primary template's value.  Keep the
@@ -9691,7 +9800,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           value_ok = TemplateArgumentSetFromExpression(arg, expr);
         }
         if (!value_ok) {
-          if (syntax->parsing_template_declaration &&
+          if (template_parameters_in_scope &&
               expr->op == AST_OP(identifier)) {
             IdentifierASTNode* id = (IdentifierASTNode*)expr;
             if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
@@ -9701,7 +9810,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
             }
           }
           if (arg->template_parameter_index < 0) {
-            if (syntax->parsing_template_declaration) {
+            if (template_parameters_in_scope) {
               arg->dependent_expr = expr;
               arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
               VectorAppend(args, arg);
@@ -10934,6 +11043,9 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
 
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym) {
+  if (sym == NULL || StorageIs(sym->storage, STO(typedef))) {
+    return NULL;
+  }
   if (TypeIsFixedArray(sym->type)) {
     unsigned long element_count = 0;
     TypeRecord* element_type =
@@ -11040,7 +11152,9 @@ static ASTNode* NewCXXDestructorCallOnReceiver(ASTNode* receiver,
 }
 
 static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+  if (!CompilerIsCXX() || sym == NULL ||
+      StorageIs(sym->storage, STO(typedef)) ||
+      !TypeIsStructOrUnion(sym->type) ||
       sym->type->info.struct_info == NULL ||
       sym->type->info.struct_info->tag_name == NULL) {
     return NULL;
@@ -13109,6 +13223,10 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return false;
   }
   switch (syntax->lex->current_token) {
+    // No expression can begin with an alignment specifier, so it always
+    // introduces a declaration.
+    case TOK(alignas):
+      return true;
     case TOK(extern):
     case TOK(static):
     case TOK(auto):

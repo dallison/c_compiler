@@ -256,6 +256,21 @@ static bool NeedsStructReturnHome(ARMEmitter* emitter) {
           emitter->g->exception_ranges.length > 0);
 }
 
+static bool HasCanonicalFrameRecord(ARMEmitter* emitter);
+
+// The integer callee-save block sits between the AAPCS frame record and local
+// storage and holds four bytes per register, so an odd number of saved
+// registers would place every local four bytes below where its offset was
+// computed and break the eight-byte stack alignment AAPCS guarantees.  Reserve
+// one more word in that case, so the distance from the frame record down to
+// local storage stays a multiple of eight.
+static int CanonicalIntSavePadding(ARMEmitter* emitter) {
+  if (!HasCanonicalFrameRecord(emitter)) {
+    return 0;
+  }
+  return (BitSetCount(&emitter->regs->used_int_regs) * 4) & 4;
+}
+
 static int StackFrameSize(ARMEmitter* emitter) {
   // Start off with local variable space.  This normally also includes 8 bytes
   // for the saved fp and lr, but a frame-pointer-less leaf saves neither.
@@ -278,6 +293,7 @@ static int StackFrameSize(ARMEmitter* emitter) {
   //}
 
   stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 4;
+  stack_frame_size += CanonicalIntSavePadding(emitter);
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
   if (NeedsStructReturnHome(emitter)) {
@@ -418,8 +434,10 @@ static int CanonicalIntSaveBytes(ARMEmitter* emitter) {
 static int FrameStorageOffsetDelta(ARMEmitter* emitter) {
   // Code generation assigns frame offsets relative to the incoming sp. The
   // AAPCS frame record is eight bytes below that point, and the integer
-  // callee-save block now sits between the record and local storage.
-  return ARM_STACK_FRAME_HEADER_SIZE - CanonicalIntSaveBytes(emitter);
+  // callee-save block (rounded up to a multiple of eight, see
+  // CanonicalIntSavePadding) now sits between the record and local storage.
+  return ARM_STACK_FRAME_HEADER_SIZE - CanonicalIntSaveBytes(emitter) -
+         CanonicalIntSavePadding(emitter);
 }
 
 // Code generation gives an incoming stack argument the offset the caller
@@ -574,10 +592,17 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   // Offset from sp of first saved register.  When the frame pointer is omitted
   // there is no saved fp/lr header above the callee-saved area.
   int header = OmitFramePointer(emitter) ? 0 : ARM_STACK_FRAME_HEADER_SIZE;
+  // The alignment word CanonicalIntSavePadding reserves belongs to the integer
+  // save block at the top of the frame, not to this area at the bottom.  Local
+  // storage and the spill region are addressed through fp and so move down with
+  // the block, but these saves are addressed through sp, so leaving the padding
+  // in this sum would raise them by that word instead -- straight into the
+  // lowest spill slot.
   int saved_reg_offset = stack_frame_size - header - 8 -
                           emitter->g->base.stack_frame_size -
                           space_above_frame_pointer -
-                          emitter->spill_region_size +
+                          emitter->spill_region_size -
+                          CanonicalIntSavePadding(emitter) +
                           (8 - first_saved_slot_size);  // First saved register.
   if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
     // Frame-pointer-less leaf: reserve the callee-saved register area only.

@@ -549,7 +549,8 @@ static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
 static bool CXXLocalNeedsScopeExitDestructor(Symbol* sym) {
   if (sym == NULL || sym->flags.is_temp ||
       StorageIs(sym->storage, STO(static)) ||
-      StorageIs(sym->storage, STO(extern))) {
+      StorageIs(sym->storage, STO(extern)) ||
+      StorageIs(sym->storage, STO(typedef))) {
     return false;
   }
   return TypeHasNonTrivialDestructor(sym->type);

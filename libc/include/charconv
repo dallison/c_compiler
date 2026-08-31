@@ -1,0 +1,182 @@
+//
+//  charconv
+//  libc
+//
+//  Locale-independent character conversions.
+//
+
+#ifndef __davecc_charconv__
+#define __davecc_charconv__
+
+#include <limits>
+#include <system_error>
+#include <type_traits>
+
+#define __cpp_lib_to_chars 201611L
+#if __cplusplus >= 202302L
+#define __cpp_lib_constexpr_charconv 202207L
+#endif
+
+namespace std {
+
+enum class chars_format {
+  scientific = 1,
+  fixed = 2,
+  hex = 4,
+  general = fixed | scientific,
+};
+
+struct to_chars_result {
+  char* ptr;
+  errc ec;
+
+#if __cplusplus >= 202002L
+  friend constexpr bool operator==(const to_chars_result& left,
+                                   const to_chars_result& right) {
+    return left.ptr == right.ptr && left.ec == right.ec;
+  }
+#endif
+};
+
+struct from_chars_result {
+  const char* ptr;
+  errc ec;
+
+#if __cplusplus >= 202002L
+  friend constexpr bool operator==(const from_chars_result& left,
+                                   const from_chars_result& right) {
+    return left.ptr == right.ptr && left.ec == right.ec;
+  }
+#endif
+};
+
+namespace __charconv_detail {
+
+constexpr int __digit_value(char ch) noexcept {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'z') {
+    return ch - 'a' + 10;
+  }
+  if (ch >= 'A' && ch <= 'Z') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
+constexpr char __digit_char(unsigned int value) noexcept {
+  return value < 10 ? static_cast<char>('0' + value)
+                    : static_cast<char>('a' + value - 10);
+}
+
+template <class T>
+using __enable_integer =
+    enable_if_t<is_integral_v<T> && !is_same_v<remove_cv_t<T>, bool>, int>;
+
+}  // namespace __charconv_detail
+
+template <class T, __charconv_detail::__enable_integer<T> = 0>
+constexpr to_chars_result to_chars(char* first, char* last, T value,
+                                   int base = 10) noexcept {
+  using U = make_unsigned_t<T>;
+  bool negative = false;
+  U magnitude = static_cast<U>(value);
+  if constexpr (is_signed_v<T>) {
+    if (value < 0) {
+      negative = true;
+      magnitude = U(0) - magnitude;
+    }
+  }
+
+  U divisor = static_cast<U>(base);
+  U remaining = magnitude;
+  int digits = 1;
+  while (remaining >= divisor) {
+    remaining /= divisor;
+    ++digits;
+  }
+
+  int total = digits + (negative ? 1 : 0);
+  if (last - first < total) {
+    return {last, errc::value_too_large};
+  }
+  char* output = first + total;
+  do {
+    U quotient = magnitude / divisor;
+    unsigned int digit =
+        static_cast<unsigned int>(magnitude - quotient * divisor);
+    *--output = __charconv_detail::__digit_char(digit);
+    magnitude = quotient;
+  } while (magnitude != 0);
+  if (negative) {
+    *first = '-';
+  }
+  return {first + total, errc()};
+}
+
+template <class T, __charconv_detail::__enable_integer<T> = 0>
+constexpr from_chars_result from_chars(const char* first, const char* last,
+                                       T& value, int base = 10) noexcept {
+  using U = make_unsigned_t<T>;
+  const char* current = first;
+  bool negative = false;
+  if constexpr (is_signed_v<T>) {
+    if (current != last && *current == '-') {
+      negative = true;
+      ++current;
+    }
+  }
+
+  U limit = static_cast<U>(numeric_limits<T>::max());
+  if constexpr (is_signed_v<T>) {
+    if (negative) {
+      limit += U(1);
+    }
+  }
+
+  U parsed = 0;
+  bool any = false;
+  bool overflow = false;
+  for (; current != last; ++current) {
+    int digit = __charconv_detail::__digit_value(*current);
+    if (digit < 0 || digit >= base) {
+      break;
+    }
+    any = true;
+    U unsigned_digit = static_cast<U>(digit);
+    if (!overflow) {
+      if (parsed > (limit - unsigned_digit) / static_cast<U>(base)) {
+        overflow = true;
+      } else {
+        parsed = parsed * static_cast<U>(base) + unsigned_digit;
+      }
+    }
+  }
+
+  if (!any) {
+    return {first, errc::invalid_argument};
+  }
+  if (overflow) {
+    return {current, errc::result_out_of_range};
+  }
+
+  if constexpr (is_signed_v<T>) {
+    if (negative) {
+      U minimum_magnitude =
+          static_cast<U>(numeric_limits<T>::max()) + U(1);
+      value = parsed == minimum_magnitude
+                  ? numeric_limits<T>::min()
+                  : static_cast<T>(-static_cast<T>(parsed));
+    } else {
+      value = static_cast<T>(parsed);
+    }
+  } else {
+    value = static_cast<T>(parsed);
+  }
+  return {current, errc()};
+}
+
+}  // namespace std
+
+#endif  // __davecc_charconv__
