@@ -188,9 +188,7 @@ void BasicBlockInitDominators(BasicBlock* b, bool is_start, size_t num_nodes) {
       // Block is unreachable.
       return;
     }
-    for (size_t i = 0; i < num_nodes; ++i) {
-      BitSetInsert(&b->dominators, i);
-    }
+    BitSetFill(&b->dominators, num_nodes);
   }
 }
 

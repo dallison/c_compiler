@@ -258,6 +258,8 @@ typedef struct {
   int template_parameter_base;  // Param index base for nesting.    // @wire 44
   Vector template_parameters;  // TemplateParameter* for defaults.  // @wire 45
   Vector template_instantiations;  // Symbol* cache, not overload candidates. // @wire 46
+  struct FunctionTemplateInstantiationCache*
+      template_instantiation_cache;  // Indexed transient view of cache. // @wire -
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
   bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49

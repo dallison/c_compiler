@@ -52,6 +52,8 @@ Symbol* FindFunctionTemplateInstantiation(Symbol* templ, TypeRecord* func,
 Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
                                                    const char* asm_name);
 void AppendFunctionTemplateInstantiation(Symbol* templ, Symbol* symbol);
+void FunctionTemplateInstantiationCacheDelete(
+    struct FunctionTemplateInstantiationCache* cache);
 bool DependentExpressionContainsTemplateParameter(struct ASTNode* expr);
 
 TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue);

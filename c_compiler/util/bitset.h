@@ -27,6 +27,7 @@ void BitSetCopy(BitSet* to, BitSet* from);
 size_t BitSetCount(BitSet* set);
 
 void BitSetClear(BitSet* set);
+void BitSetFill(BitSet* set, size_t bit_count);
 
 void BitSetInsert(BitSet* set, size_t index);
 bool BitSetContains(BitSet* set, size_t index);
@@ -55,17 +56,8 @@ typedef struct {
 void BitSetIteratorStart(BitSetIterator* it, BitSet* set);
 
 inline bool BitSetIteratorDone(BitSetIterator* it) {
-  if (it->set->value == NULL) {
-    return true;
-  }
-  if (it->word_offset >= it->set->capacity) {
-    return true;
-  }
-  if (it->word_offset < (it->set->capacity - 1)) {
-    return false;
-  }
-  int64_t mask = (1 << it->bit_offset) - 1;
-  return (it->set->value[it->word_offset] & ~mask) == 0;
+  return it->set->value == NULL ||
+         it->word_offset >= it->set->capacity;
 }
 
 void BitSetIteratorNext(BitSetIterator* it);

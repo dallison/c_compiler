@@ -388,6 +388,9 @@ void TypeRecordDelete(TypeRecord* record) {
       VectorDestructWithContents(&record->info.function.template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);
+      FunctionTemplateInstantiationCacheDelete(
+          record->info.function.template_instantiation_cache);
+      record->info.function.template_instantiation_cache = NULL;
       VectorDestructWithContents(&record->info.function.template_instantiations,
                                  (VectorElementDestructor)SymbolDelete,
                                  /*free_element=*/false);
@@ -1097,6 +1100,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
                        record->info.function.template_parameters.value.p[i]));
     }
     VectorInit(&r->info.function.template_instantiations);
+    r->info.function.template_instantiation_cache = NULL;
     VectorInit(&r->info.function.contract_assertions);
     TypeRecordCopyContractAssertions(r, record);
     r->info.function.associated_constraint =

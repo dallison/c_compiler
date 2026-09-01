@@ -1441,6 +1441,7 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
   VectorInit(&f->prototype);
   VectorInit(&f->template_parameters);
   VectorInit(&f->template_instantiations);
+  f->template_instantiation_cache = NULL;
   VectorInit(&f->contract_assertions);
   f->virtual_index = -1;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {

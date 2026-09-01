@@ -408,10 +408,14 @@ typedef struct {
   // Retained across draining template-instantiation queues to prevent emitting
   // the same specialization more than once.
   Vector emitted_function_asm_names;
+  struct CompilerStringIndex* emitted_function_name_index;
   // Assembly names referenced by real target code generation.  C++ inline
   // definitions are semantically checked when parsed but emitted only after a
   // reachable function or initializer actually materializes their address.
   Vector referenced_function_asm_names;
+  // Membership index for the vector above; the vector retains deterministic
+  // insertion order while this index avoids repeated linear string scans.
+  struct CompilerStringIndex* referenced_function_name_index;
   // Assembly names of namespace/static data referenced by reachable code.
   Vector referenced_variable_asm_names;
 
@@ -475,9 +479,17 @@ typedef struct {
   // Declaration ASTs synthesized while instantiating templates.  Drained by
   // the driver through the normal semantic/codegen path.
   Vector pending_template_instantiations;
-  // Owned asm-name keys for definitions in the queue above. The map avoids
-  // repeatedly scanning every queued declaration when suppressing duplicates.
-  Map pending_template_instantiation_names;
+  // Shared FIFO cursor and nesting depth. Compilation can recursively request
+  // another drain, so all active drains must advance the same cursor and only
+  // the outermost drain may clear the vector.
+  size_t pending_template_instantiation_head;
+  size_t pending_template_instantiation_drain_depth;
+  // Owned asm-name index for definitions in the queue above.
+  struct CompilerStringIndex* pending_template_instantiation_names;
+  // Non-owning ASTNode* entries containing a symbol that had no final asm name
+  // or definition body when queued. Late updates are recovered by scanning
+  // only this typically empty subset, rather than every pending declaration.
+  Vector unindexed_pending_template_instantiations;
 
   // Function-definition symbols (Symbol*) that are not stored in the global
   // symbol table because the function was previously declared.  Each owns a

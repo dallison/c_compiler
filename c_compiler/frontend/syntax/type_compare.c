@@ -571,6 +571,154 @@ bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right) {
   return true;
 }
 
+typedef struct FunctionTemplateInstantiationCacheEntry {
+  uint64_t argument_hash;
+  uint64_t asm_name_hash;
+  Symbol* symbol;
+  struct FunctionTemplateInstantiationCacheEntry* argument_next;
+  struct FunctionTemplateInstantiationCacheEntry* asm_name_next;
+} FunctionTemplateInstantiationCacheEntry;
+
+struct FunctionTemplateInstantiationCache {
+  size_t bucket_count;
+  size_t entry_count;
+  FunctionTemplateInstantiationCacheEntry** argument_buckets;
+  FunctionTemplateInstantiationCacheEntry** asm_name_buckets;
+};
+
+#define FUNCTION_TEMPLATE_CACHE_INITIAL_BUCKETS 16
+
+static uint64_t HashFunctionTemplateCacheString(const char* value) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+  const unsigned char* current = (const unsigned char*)value;
+  while (current != NULL && *current != '\0') {
+    hash ^= *current++;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static uint64_t HashFunctionTemplateArguments(Symbol* templ, Vector* args) {
+  String key;
+  StringInit(&key, NULL);
+  AppendTemplateInstantiationName(&key, templ, args);
+  uint64_t hash = HashFunctionTemplateCacheString(key.value);
+  StringDestruct(&key);
+  return hash;
+}
+
+static struct FunctionTemplateInstantiationCache*
+NewFunctionTemplateInstantiationCache(void) {
+  struct FunctionTemplateInstantiationCache* cache = malloc(sizeof(*cache));
+  cache->bucket_count = FUNCTION_TEMPLATE_CACHE_INITIAL_BUCKETS;
+  cache->entry_count = 0;
+  cache->argument_buckets =
+      calloc(cache->bucket_count, sizeof(*cache->argument_buckets));
+  cache->asm_name_buckets =
+      calloc(cache->bucket_count, sizeof(*cache->asm_name_buckets));
+  return cache;
+}
+
+void FunctionTemplateInstantiationCacheDelete(
+    struct FunctionTemplateInstantiationCache* cache) {
+  if (cache == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < cache->bucket_count; i++) {
+    FunctionTemplateInstantiationCacheEntry* entry =
+        cache->argument_buckets[i];
+    while (entry != NULL) {
+      FunctionTemplateInstantiationCacheEntry* next = entry->argument_next;
+      free(entry);
+      entry = next;
+    }
+  }
+  free(cache->argument_buckets);
+  free(cache->asm_name_buckets);
+  free(cache);
+}
+
+static void ResizeFunctionTemplateInstantiationCache(
+    struct FunctionTemplateInstantiationCache* cache) {
+  size_t new_bucket_count = cache->bucket_count * 2;
+  FunctionTemplateInstantiationCacheEntry** argument_buckets =
+      calloc(new_bucket_count, sizeof(*argument_buckets));
+  FunctionTemplateInstantiationCacheEntry** asm_name_buckets =
+      calloc(new_bucket_count, sizeof(*asm_name_buckets));
+  for (size_t i = 0; i < cache->bucket_count; i++) {
+    FunctionTemplateInstantiationCacheEntry* entry =
+        cache->argument_buckets[i];
+    while (entry != NULL) {
+      FunctionTemplateInstantiationCacheEntry* next = entry->argument_next;
+      size_t argument_bucket = entry->argument_hash % new_bucket_count;
+      entry->argument_next = argument_buckets[argument_bucket];
+      argument_buckets[argument_bucket] = entry;
+      if (entry->symbol->asm_name.value != NULL &&
+          *entry->symbol->asm_name.value != '\0') {
+        size_t asm_name_bucket = entry->asm_name_hash % new_bucket_count;
+        entry->asm_name_next = asm_name_buckets[asm_name_bucket];
+        asm_name_buckets[asm_name_bucket] = entry;
+      } else {
+        entry->asm_name_next = NULL;
+      }
+      entry = next;
+    }
+  }
+  free(cache->argument_buckets);
+  free(cache->asm_name_buckets);
+  cache->bucket_count = new_bucket_count;
+  cache->argument_buckets = argument_buckets;
+  cache->asm_name_buckets = asm_name_buckets;
+}
+
+static void IndexFunctionTemplateInstantiation(
+    struct FunctionTemplateInstantiationCache* cache, Symbol* templ,
+    Symbol* instantiated) {
+  if (instantiated == NULL || instantiated->type == NULL ||
+      !TypeIsFunction(instantiated->type) ||
+      instantiated->type->template_arguments == NULL) {
+    return;
+  }
+  if ((cache->entry_count + 1) * 4 > cache->bucket_count * 3) {
+    ResizeFunctionTemplateInstantiationCache(cache);
+  }
+  FunctionTemplateInstantiationCacheEntry* entry = malloc(sizeof(*entry));
+  entry->argument_hash = HashFunctionTemplateArguments(
+      templ, instantiated->type->template_arguments);
+  entry->symbol = instantiated;
+  size_t argument_bucket = entry->argument_hash % cache->bucket_count;
+  entry->argument_next = cache->argument_buckets[argument_bucket];
+  cache->argument_buckets[argument_bucket] = entry;
+
+  const char* asm_name = instantiated->asm_name.value;
+  if (asm_name != NULL && *asm_name != '\0') {
+    entry->asm_name_hash = HashFunctionTemplateCacheString(asm_name);
+    size_t asm_name_bucket = entry->asm_name_hash % cache->bucket_count;
+    entry->asm_name_next = cache->asm_name_buckets[asm_name_bucket];
+    cache->asm_name_buckets[asm_name_bucket] = entry;
+  } else {
+    entry->asm_name_hash = 0;
+    entry->asm_name_next = NULL;
+  }
+  cache->entry_count++;
+}
+
+static struct FunctionTemplateInstantiationCache*
+EnsureFunctionTemplateInstantiationCache(Symbol* templ) {
+  FunctionInfo* info = &templ->type->info.function;
+  if (info->template_instantiation_cache != NULL) {
+    return info->template_instantiation_cache;
+  }
+  info->template_instantiation_cache =
+      NewFunctionTemplateInstantiationCache();
+  for (size_t i = 0; i < info->template_instantiations.length; i++) {
+    IndexFunctionTemplateInstantiation(
+        info->template_instantiation_cache, templ,
+        info->template_instantiations.value.p[i]);
+  }
+  return info->template_instantiation_cache;
+}
+
 /* True when a cached instantiation `candidate` corresponds to the freshly
  * requested instantiation `type` with the same template `args`. The template
  * arguments already uniquely identify an instantiation, but the cheap identity
@@ -615,9 +763,17 @@ Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
       return candidate;
     }
   }
-  Vector* cache = &templ->type->info.function.template_instantiations;
-  for (size_t i = 0; i < cache->length; i++) {
-    Symbol* candidate = cache->value.p[i];
+  struct FunctionTemplateInstantiationCache* cache =
+      EnsureFunctionTemplateInstantiationCache(templ);
+  uint64_t argument_hash = HashFunctionTemplateArguments(templ, args);
+  size_t bucket = argument_hash % cache->bucket_count;
+  for (FunctionTemplateInstantiationCacheEntry* entry =
+           cache->argument_buckets[bucket];
+       entry != NULL; entry = entry->argument_next) {
+    Symbol* candidate = entry->symbol;
+    if (entry->argument_hash != argument_hash) {
+      continue;
+    }
     if (FunctionTemplateInstantiationMatches(candidate, type, args)) {
       return candidate;
     }
@@ -645,11 +801,15 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
   // that lost its template_origin metadata), so reuse the cached one to avoid
   // emitting a duplicate symbol.
   if (templ != NULL && templ->type != NULL && TypeIsFunction(templ->type)) {
-    Vector* cache = &templ->type->info.function.template_instantiations;
-    for (size_t i = 0; i < cache->length; i++) {
-      Symbol* candidate = cache->value.p[i];
-      if (candidate != NULL && !candidate->flags.is_template &&
-          candidate->asm_name.value != NULL &&
+    struct FunctionTemplateInstantiationCache* cache =
+        EnsureFunctionTemplateInstantiationCache(templ);
+    uint64_t asm_name_hash = HashFunctionTemplateCacheString(asm_name);
+    size_t bucket = asm_name_hash % cache->bucket_count;
+    for (FunctionTemplateInstantiationCacheEntry* entry =
+             cache->asm_name_buckets[bucket];
+         entry != NULL; entry = entry->asm_name_next) {
+      Symbol* candidate = entry->symbol;
+      if (entry->asm_name_hash == asm_name_hash &&
           strcmp(candidate->asm_name.value, asm_name) == 0) {
         return candidate;
       }
@@ -658,8 +818,7 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
   return NULL;
 }
 
-/* Append a newly created instantiation to the template's overload chain so it
- * can be found later (and marks both ends as overloaded). */
+/* Append a newly created instantiation to the template's cache. */
 void AppendFunctionTemplateInstantiation(Symbol* templ,
                                                 Symbol* instantiated) {
   if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type) ||
@@ -670,6 +829,11 @@ void AppendFunctionTemplateInstantiation(Symbol* templ,
   instantiated->flags.is_overloaded = false;
   VectorAppend(&templ->type->info.function.template_instantiations,
                instantiated);
+  if (templ->type->info.function.template_instantiation_cache != NULL) {
+    IndexFunctionTemplateInstantiation(
+        templ->type->info.function.template_instantiation_cache, templ,
+        instantiated);
+  }
 }
 
 bool TypeIsUninitializedFriendly(TypeRecord* type) {
