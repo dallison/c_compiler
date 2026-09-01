@@ -16,6 +16,7 @@
 #include <inttypes.h>
 
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 typedef enum {
   kARMRegTypeInt = 0,
@@ -136,7 +137,7 @@ static AssemblerSymbol* GetOrCreateSymbol(ARMAssembler* assembler,
                                           const char* name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, name);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(name, ASM.current_section, SYM_TYPE(none),
+    sym = NewAssemblerSymbol(name, ASMO.current_section, SYM_TYPE(none),
                              SYM_BIND(local),
                              0);
     AssemblerInsertSymbol(&ASM, sym);
@@ -145,7 +146,7 @@ static AssemblerSymbol* GetOrCreateSymbol(ARMAssembler* assembler,
 }
 
 static void EmitInst(ARMAssembler* assembler, uint32_t inst) {
-  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)inst);
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)inst);
 }
 
 // Scratch register used to materialize immediates that cannot be encoded
@@ -855,7 +856,7 @@ static void Assemble_tprel(ARMAssembler* assembler) {
   int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
   AssemblerRelocation* reloc =
       NewAssemblerRelocation(GetOrCreateSymbol(assembler, symbol.value),
-                             R_ARM_TLS_LE32, ASM.current_section, here, 0);
+                             R_ARM_TLS_LE32, ASMO.current_section, here, 0);
   AssemblerAddRelocation(&ASM, reloc);
   EmitInst(assembler, 0);
   StringDestruct(&symbol);
@@ -869,12 +870,12 @@ static void AssembleBranch(ARMAssembler* assembler, int cond, bool link) {
     int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerSymbol* symbol = GetOrCreateSymbol(assembler, sym.value);
     int reloc_type = link ? R_ARM_CALL : R_ARM_JUMP24;
-    if (ASM.pic && (symbol->binding == SYM_BIND(global) ||
+    if (ASMO.pic && (symbol->binding == SYM_BIND(global) ||
                     symbol->binding == SYM_BIND(weak))) {
       reloc_type = R_ARM_PLT32;
     }
     AssemblerRelocation* reloc = NewAssemblerRelocation(
-        symbol, reloc_type, ASM.current_section, here, 0);
+        symbol, reloc_type, ASMO.current_section, here, 0);
     AssemblerAddRelocation(&ASM, reloc);
     EmitInst(assembler, EncodeBranch(cond, link ? 1 : 0, 0));
     StringDestruct(&sym);
@@ -1075,7 +1076,7 @@ static void Assemble_movw(ARMAssembler* assembler) {
     int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerRelocation* reloc =
         NewAssemblerRelocation(GetOrCreateSymbol(assembler, sym.value),
-                               R_ARM_MOVW_ABS_NC, ASM.current_section, here, 0);
+                               R_ARM_MOVW_ABS_NC, ASMO.current_section, here, 0);
     AssemblerAddRelocation(&ASM, reloc);
     EmitInst(assembler, ARM_AL | (0x3 << 24) | (rd.num << 12) | (0 << 4));
     StringDestruct(&sym);
@@ -1101,7 +1102,7 @@ static void Assemble_movt(ARMAssembler* assembler) {
     int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerRelocation* reloc =
         NewAssemblerRelocation(GetOrCreateSymbol(assembler, sym.value),
-                               R_ARM_MOVT_ABS, ASM.current_section, here, 0);
+                               R_ARM_MOVT_ABS, ASMO.current_section, here, 0);
     AssemblerAddRelocation(&ASM, reloc);
     EmitInst(assembler, ARM_AL | (0x3 << 24) | (1 << 22) | (rd.num << 12) | (0 << 4));
     StringDestruct(&sym);
@@ -1132,11 +1133,11 @@ static void Assemble_adr32(ARMAssembler* assembler) {
   int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(symbol, R_ARM_MOVW_PREL_NC,
-                                   ASM.current_section, here, -16));
+                                   ASMO.current_section, here, -16));
   EmitInst(assembler, ARM_AL | (0x3 << 24) | (rd.num << 12));
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(symbol, R_ARM_MOVT_PREL,
-                                   ASM.current_section, here + 4, -12));
+                                   ASMO.current_section, here + 4, -12));
   EmitInst(assembler,
            ARM_AL | (0x3 << 24) | (1 << 22) | (rd.num << 12));
   EmitInst(assembler, EncodeDataProcReg(ARM_COND_AL, 0x4, 0, rd.num,
@@ -1164,7 +1165,7 @@ static void Assemble_gotaddr(ARMAssembler* assembler) {
   EmitInst(assembler, EncodeBranch(ARM_COND_AL, 0, 0));
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(symbol, R_ARM_GOT_PREL,
-                                   ASM.current_section, here + 16, 4));
+                                   ASMO.current_section, here + 16, 4));
   EmitInst(assembler, 0);
   StringDestruct(&sym);
 }

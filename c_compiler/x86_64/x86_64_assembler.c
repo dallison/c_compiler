@@ -87,7 +87,7 @@ static AssemblerSymbol* GetOrCreateSymbol(X86_64Assembler* assembler,
                                           const char* name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&assembler->base, name);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(name, assembler->base.current_section,
+    sym = NewAssemblerSymbol(name, assembler->base.object.current_section,
                              SYM_TYPE(none), SYM_BIND(local), 0);
     sym->is_forward_declared = true;
     AssemblerInsertSymbol(&assembler->base, sym);
@@ -213,13 +213,13 @@ static void EncodeImm(X86Encode* enc, int size, int64_t imm) {
 static void EncodeFinish(X86Encode* enc) {
   Assembler* base = &enc->assembler->base;
   for (size_t i = 0; i < enc->num_prefixes; i++) {
-    AssemblerEmitByte(base, base->current_section, enc->prefixes[i]);
+    AssemblerEmitByte(base, base->object.current_section, enc->prefixes[i]);
   }
   if (enc->rex >= 0) {
-    AssemblerEmitByte(base, base->current_section, (uint8_t)enc->rex);
+    AssemblerEmitByte(base, base->object.current_section, (uint8_t)enc->rex);
   }
   for (size_t i = 0; i < enc->len; i++) {
-    AssemblerEmitByte(base, base->current_section, enc->bytes[i]);
+    AssemblerEmitByte(base, base->object.current_section, enc->bytes[i]);
   }
 }
 
@@ -298,6 +298,7 @@ static bool ParseRegSuffix(const char* name, size_t len, X86Reg* reg) {
 }
 
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 static bool ParseRegister(X86_64Assembler* assembler, X86Reg* reg,
                           bool allow_rip, bool* is_rip) {
@@ -481,7 +482,7 @@ static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
     AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
     op->sym = GetOrCreateSymbol(assembler, symbol_name.value);
     op->sym_known =
-        op->sym->defined && op->sym->section == ASM.current_section;
+        op->sym->defined && op->sym->section == ASMO.current_section;
     op->sym_value = op->sym->value;
     if (StringEqual(&suffix, "TPOFF")) {
       op->reloc_type = R_X86_64_TPOFF32;
@@ -609,7 +610,7 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
         EncodeByte(enc, 0);
       }
       int reloc_type = mem->reloc_type != 0 ? mem->reloc_type : R_X86_64_PC32;
-      if (mem->reloc_type == 0 && base->pic &&
+      if (mem->reloc_type == 0 && base->object.pic &&
           (mem->sym->binding == SYM_BIND(global) ||
            mem->sym->binding == SYM_BIND(weak))) {
         reloc_type = R_X86_64_GOTPCREL;
@@ -620,7 +621,7 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
       // the CPU computes the effective address relative to next_ip = P + 4.
       int32_t disp_offset = (int32_t)(next_ip - 4);
       AssemblerRelocation* reloc = NewAssemblerRelocation(
-          mem->sym, reloc_type, base->current_section, disp_offset,
+          mem->sym, reloc_type, base->object.current_section, disp_offset,
           (int32_t)(mem->disp - 4));
       AssemblerAddRelocation(base, reloc);
     } else {
@@ -657,7 +658,7 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
                       (enc->rex >= 0 ? 1 : 0) + enc->len + enc->tail_bytes;
     int32_t disp_offset = (int32_t)(next_ip - 4);
     AssemblerRelocation* reloc = NewAssemblerRelocation(
-        mem->sym, mem->reloc_type, base->current_section, disp_offset,
+        mem->sym, mem->reloc_type, base->object.current_section, disp_offset,
         (int32_t)mem->disp);
     AssemblerAddRelocation(base, reloc);
     return;
@@ -838,7 +839,7 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
         AssemblerRelocation* reloc = NewAssemblerRelocation(
             src.sym,
             src.reloc_type != 0 ? src.reloc_type : R_X86_64_64,
-            ASM.current_section, offset, 0);
+            ASMO.current_section, offset, 0);
         AssemblerAddRelocation(&ASM, reloc);
         return;
       }
@@ -1132,7 +1133,7 @@ static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
     // Keep calls to weak definitions relocatable so the linker can select a
     // strong override. Strong definitions retain the toolchain's established
     // local-binding behavior.
-    known = sym->defined && sym->section == ASM.current_section &&
+    known = sym->defined && sym->section == ASMO.current_section &&
             sym->binding != SYM_BIND(weak);
     target = sym->value;
   } else {
@@ -1158,7 +1159,7 @@ static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
   if (!known && sym != NULL) {
     int reloc_type = is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
     AssemblerRelocation* reloc = NewAssemblerRelocation(
-        sym, reloc_type, ASM.current_section,
+        sym, reloc_type, ASMO.current_section,
         (int32_t)(start + (enc.rex >= 0 ? 1 : 0) + enc.disp_pos), -4);
     AssemblerAddRelocation(&ASM, reloc);
   }
@@ -1188,7 +1189,7 @@ static void EmitMovabs(X86_64Assembler* assembler) {
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         imm.sym,
         imm.reloc_type != 0 ? imm.reloc_type : R_X86_64_64,
-        ASM.current_section, offset, 0);
+        ASMO.current_section, offset, 0);
     AssemblerAddRelocation(&ASM, reloc);
     return;
   }
@@ -1957,28 +1958,28 @@ static void Assemble_jmp(X86_64Assembler* assembler) {
 }
 static void Assemble_ret(X86_64Assembler* assembler) {
   (void)assembler;
-  AssemblerEmitByte(&ASM, ASM.current_section, 0xc3);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0xc3);
 }
 static void Assemble_leave(X86_64Assembler* assembler) {
   (void)assembler;
-  AssemblerEmitByte(&ASM, ASM.current_section, 0xc9);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0xc9);
 }
 static void Assemble_nop(X86_64Assembler* assembler) {
   (void)assembler;
-  AssemblerEmitByte(&ASM, ASM.current_section, 0x90);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x90);
 }
 
 static void Assemble_syscall(X86_64Assembler* assembler) {
   (void)assembler;
-  AssemblerEmitByte(&ASM, ASM.current_section, 0x0f);
-  AssemblerEmitByte(&ASM, ASM.current_section, 0x05);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x05);
 }
 
 static void Assemble_mfence(X86_64Assembler* assembler) {
   (void)assembler;
-  AssemblerEmitByte(&ASM, ASM.current_section, 0x0f);
-  AssemblerEmitByte(&ASM, ASM.current_section, 0xae);
-  AssemblerEmitByte(&ASM, ASM.current_section, 0xf0);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0xae);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0xf0);
 }
 
 #define JCC(name, opcode)                                                    \

@@ -874,41 +874,170 @@ static void AddMissingLinks(Generator* gen) {
   }
 }
 
-// Calculate the dominators for all basic blocks.
-static void CalculateDominators(Generator* gen) {
+static bool HasForwardSinglePredecessorCFG(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value.p[i];
-    BasicBlockInitDominators(b, b == gen->entry_block,
-                             gen->basic_blocks.length);
-  }
-  
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-      BasicBlock* b = gen->basic_blocks.value.p[i];
-      changed |= BasicBlockCalculateDominators(gen, b, &gen->basic_blocks);
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block == gen->entry_block || block->in_edges.length == 0) {
+      continue;
+    }
+    if (block->in_edges.length != 1 ||
+        block->in_edges.value.w[0] >= block->block_id) {
+      return false;
     }
   }
-  
-  // Now check for isolated islands where the blocks form a loop
-  // that cannot be accessed from outside the loop.  This is denoted
-  // by the dominators of the block being all the blocks.
+  return true;
+}
+
+static void CalculateForwardSinglePredecessorDominators(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value.p[i];
-    if (BitSetCount(&b->dominators) == gen->basic_blocks.length) {
-      BitSetClear(&b->dominators);
-      b->is_unreachable = true;
-      b->reachability_known = true;
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    BitSetClear(&block->dominators);
+    block->idom = NULL;
+    block->num_dominators = 0;
+    block->reachability_known = true;
+    block->is_unreachable = block != gen->entry_block;
+    if (block != gen->entry_block && block->in_edges.length == 1) {
+      BasicBlock* predecessor =
+          VectorGet(&gen->basic_blocks, block->in_edges.value.w[0]);
+      if (!predecessor->is_unreachable) {
+        BitSetCopy(&block->dominators, &predecessor->dominators);
+        block->idom = predecessor;
+        block->is_unreachable = false;
+      }
+    }
+    if (!block->is_unreachable) {
+      BitSetInsert(&block->dominators, block->block_id);
+      block->num_dominators = BitSetCount(&block->dominators);
     }
   }
 }
 
-static void CalculateImmediateDominator(Generator* gen) {
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value.p[i];
-    BasicBlockCalculateImmediateDominator(b, &gen->basic_blocks);
+static void ComputeReversePostorder(Generator* gen, Vector* postorder,
+                                    BitSet* reachable) {
+  Vector work;
+  VectorInit(&work);
+  VectorAppend(&work, (void*)(gen->entry_block->block_id << 1));
+  while (work.length > 0) {
+    uintptr_t item = (uintptr_t)VectorLast(&work);
+    VectorPop(&work);
+    BlockId id = (BlockId)(item >> 1);
+    bool expanded = (item & 1) != 0;
+    if (expanded) {
+      VectorAppend(postorder, (void*)id);
+      continue;
+    }
+    if (BitSetContains(reachable, id)) {
+      continue;
+    }
+    BitSetInsert(reachable, id);
+    VectorAppend(&work, (void*)((id << 1) | 1));
+    BasicBlock* block = VectorGet(&gen->basic_blocks, id);
+    for (size_t i = block->out_edges.length; i > 0; i--) {
+      BlockId successor = block->out_edges.value.w[i - 1];
+      if (!BitSetContains(reachable, successor)) {
+        VectorAppend(&work, (void*)(successor << 1));
+      }
+    }
   }
+  VectorDestruct(&work);
+}
+
+static BasicBlock* IntersectImmediateDominators(BasicBlock* left,
+                                                BasicBlock* right,
+                                                BasicBlock** idoms,
+                                                const size_t* rpo_number) {
+  while (left != right) {
+    while (rpo_number[left->block_id] > rpo_number[right->block_id]) {
+      left = idoms[left->block_id];
+    }
+    while (rpo_number[right->block_id] > rpo_number[left->block_id]) {
+      right = idoms[right->block_id];
+    }
+  }
+  return left;
+}
+
+// Cooper-Harvey-Kennedy immediate dominators over reverse postorder.  The old
+// implementation repeatedly intersected full per-block bitsets to a fixed
+// point and then scanned each resulting set to recover the immediate
+// dominator.  Compute idoms directly, then materialize the full sets once for
+// the few clients that still query them.
+static void CalculateDominators(Generator* gen) {
+  if (HasForwardSinglePredecessorCFG(gen)) {
+    CalculateForwardSinglePredecessorDominators(gen);
+    return;
+  }
+
+  size_t num_blocks = gen->basic_blocks.length;
+  Vector postorder;
+  VectorInit(&postorder);
+  BitSet reachable;
+  BitSetInit(&reachable);
+  ComputeReversePostorder(gen, &postorder, &reachable);
+
+  size_t* rpo_number = malloc(num_blocks * sizeof(*rpo_number));
+  BasicBlock** idoms = calloc(num_blocks, sizeof(*idoms));
+  for (size_t i = 0; i < num_blocks; i++) {
+    rpo_number[i] = SIZE_MAX;
+  }
+  for (size_t i = 0; i < postorder.length; i++) {
+    BlockId id = postorder.value.w[postorder.length - i - 1];
+    rpo_number[id] = i;
+  }
+
+  BlockId entry_id = gen->entry_block->block_id;
+  idoms[entry_id] = gen->entry_block;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t i = 1; i < postorder.length; i++) {
+      BlockId id = postorder.value.w[postorder.length - i - 1];
+      BasicBlock* block = VectorGet(&gen->basic_blocks, id);
+      BasicBlock* new_idom = NULL;
+      for (size_t j = 0; j < block->in_edges.length; j++) {
+        BlockId predecessor_id = block->in_edges.value.w[j];
+        if (idoms[predecessor_id] == NULL) {
+          continue;
+        }
+        BasicBlock* predecessor =
+            VectorGet(&gen->basic_blocks, predecessor_id);
+        new_idom =
+            new_idom == NULL
+                ? predecessor
+                : IntersectImmediateDominators(new_idom, predecessor, idoms,
+                                               rpo_number);
+      }
+      if (new_idom != NULL && idoms[id] != new_idom) {
+        idoms[id] = new_idom;
+        changed = true;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < num_blocks; i++) {
+    BasicBlock* block = VectorGet(&gen->basic_blocks, i);
+    BitSetClear(&block->dominators);
+    block->idom = NULL;
+    block->num_dominators = 0;
+    block->reachability_known = true;
+    block->is_unreachable = !BitSetContains(&reachable, i);
+    if (block->is_unreachable) {
+      continue;
+    }
+    block->idom = i == entry_id ? NULL : idoms[i];
+    for (BasicBlock* dominator = block; dominator != NULL;
+         dominator = dominator->block_id == entry_id
+                         ? NULL
+                         : idoms[dominator->block_id]) {
+      BitSetInsert(&block->dominators, dominator->block_id);
+      block->num_dominators++;
+    }
+  }
+
+  free(idoms);
+  free(rpo_number);
+  BitSetDestruct(&reachable);
+  VectorDestruct(&postorder);
 }
 
 static void CalculateDominanceFrontier(Generator* gen) {
@@ -946,7 +1075,6 @@ static void ResetCFGAnalysis(Generator* gen) {
 static void AnalyzeCFG(Generator* gen) {
   ResetCFGAnalysis(gen);
   CalculateDominators(gen);
-  CalculateImmediateDominator(gen);
   CalculateDominanceFrontier(gen);
   BuildDominatorTree(gen);
   LoopInfoBuild(gen);
@@ -1123,120 +1251,79 @@ static void BuildBasicBlocks(Generator* gen) {
   VectorDestruct(&branches);
 }
 
-// Remove all unreachable basic blocks.  These will never be
-// executed.  The blocks aren't removed from the set of blocks
-// in the generator, we merely remove all the instructions from
-// them.
-static bool BasicBlockContainsInstruction(BasicBlock* block, IRNode* needle) {
-  if (block == NULL || needle == NULL || block->code == NULL) {
-    return false;
-  }
-  for (IRNode* inst = BasicBlockBegin(block);
-       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
-       inst = IRNext(inst)) {
-    if (inst == needle) {
-      return true;
+// Remove all unreachable basic blocks.  These will never be executed.  The
+// blocks aren't removed from the generator; only their instructions are
+// cleared.  Exception landing labels are implicit CFG roots, so retain their
+// forward-reachable blocks as well as every block named directly by exception
+// metadata.
+static void RemoveUnreachableBlocks(Generator* gen) {
+  if (gen->exception_ranges.length == 0 &&
+      gen->exception_keep_labels.length == 0) {
+    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+      BasicBlock* block = gen->basic_blocks.value.p[i];
+      if (BasicBlockIsUnreachable(gen, block)) {
+        BasicBlockClear(gen, block);
+      }
     }
+    return;
   }
-  return false;
-}
 
-static bool BasicBlockHasExceptionMetadata(Generator* gen, BasicBlock* block) {
+  BitSet exception_reachable;
+  BitSetInit(&exception_reachable);
+  BitSet traversal_visited;
+  BitSetInit(&traversal_visited);
+  Vector work;
+  VectorInit(&work);
+
   for (size_t i = 0; i < gen->exception_ranges.length; i++) {
     ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
-    if (BasicBlockContainsInstruction(block, range->try_start) ||
-        BasicBlockContainsInstruction(block, range->try_end) ||
-        BasicBlockContainsInstruction(block, range->catch_label)) {
-      return true;
+    IRNode* metadata[] = {range->try_start, range->try_end,
+                          range->catch_label};
+    for (size_t j = 0; j < sizeof(metadata) / sizeof(metadata[0]); j++) {
+      if (metadata[j] != NULL && metadata[j]->block != NULL) {
+        BitSetInsert(&exception_reachable, metadata[j]->block->block_id);
+      }
+    }
+    if (range->catch_label != NULL && range->catch_label->block != NULL) {
+      VectorAppend(&work, range->catch_label->block);
     }
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
-    if (BasicBlockContainsInstruction(block,
-                                      gen->exception_keep_labels.value.p[i])) {
-      return true;
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    if (label != NULL && label->block != NULL) {
+      BitSetInsert(&exception_reachable, label->block->block_id);
+      VectorAppend(&work, label->block);
     }
   }
-  return false;
-}
 
-static bool BasicBlockHasExceptionLandingMetadata(Generator* gen,
-                                                  BasicBlock* block) {
-  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
-    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
-    if (BasicBlockContainsInstruction(block, range->catch_label)) {
-      return true;
-    }
-  }
-  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
-    if (BasicBlockContainsInstruction(block,
-                                      gen->exception_keep_labels.value.p[i])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool BasicBlockIsExceptionReachable(Generator* gen, BasicBlock* block,
-                                           BitSet* visited) {
-  if (block == NULL) {
-    return false;
-  }
-  if (BasicBlockHasExceptionMetadata(gen, block)) {
-    return true;
-  }
-  if (BitSetContains(visited, block->block_id)) {
-    return false;
-  }
-  BitSetInsert(visited, block->block_id);
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* candidate = gen->basic_blocks.value.p[i];
-    if (!BasicBlockHasExceptionLandingMetadata(gen, candidate)) {
+  while (work.length > 0) {
+    BasicBlock* block = VectorLast(&work);
+    VectorPop(&work);
+    if (BitSetContains(&traversal_visited, block->block_id)) {
       continue;
     }
-    BitSet path_visited;
-    BitSetInit(&path_visited);
-    bool found = false;
-    Vector work;
-    VectorInit(&work);
-    VectorAppend(&work, candidate);
-    while (!found && work.length > 0) {
-      BasicBlock* current = VectorLast(&work);
-      VectorPop(&work);
-      if (current == block) {
-        found = true;
-        break;
+    BitSetInsert(&traversal_visited, block->block_id);
+    BitSetInsert(&exception_reachable, block->block_id);
+    for (size_t i = 0; i < block->out_edges.length; i++) {
+      BasicBlock* successor =
+          VectorGet(&gen->basic_blocks, block->out_edges.value.w[i]);
+      if (!BitSetContains(&traversal_visited, successor->block_id)) {
+        VectorAppend(&work, successor);
       }
-      if (BitSetContains(&path_visited, current->block_id)) {
-        continue;
-      }
-      BitSetInsert(&path_visited, current->block_id);
-      for (size_t j = 0; j < current->out_edges.length; j++) {
-        BasicBlock* out =
-            VectorGet(&gen->basic_blocks, current->out_edges.value.w[j]);
-        VectorAppend(&work, out);
-      }
-    }
-    VectorDestruct(&work);
-    BitSetDestruct(&path_visited);
-    if (found) {
-      return true;
     }
   }
-  return false;
-}
 
-static void RemoveUnreachableBlocks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value.p[i];
-
-    BitSet visited;
-    BitSetInit(&visited);
-    bool keep_for_exception = BasicBlockIsExceptionReachable(gen, b, &visited);
-    BitSetDestruct(&visited);
-    if (BasicBlockIsUnreachable(gen, b) && !keep_for_exception) {
+    if (BasicBlockIsUnreachable(gen, b) &&
+        !BitSetContains(&exception_reachable, b->block_id)) {
       BasicBlockClear(gen, b);
     }
   }
+
+  VectorDestruct(&work);
+  BitSetDestruct(&traversal_visited);
+  BitSetDestruct(&exception_reachable);
 }
 
 // Look in all the basic blocks for one that contains a call instruction.

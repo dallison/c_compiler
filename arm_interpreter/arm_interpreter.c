@@ -578,6 +578,9 @@ static int64_t PLTRelocationEntrySize(LoadedDynamicLibrary* lib) {
 }
 
 static uint64_t BranchTarget(ARMInterpreter* interpreter, uint64_t target) {
+  if (target == 0) {
+    return 0;
+  }
   if (GuestAddressOk(interpreter->loader, target, 4)) {
     return target;
   }
@@ -612,6 +615,9 @@ static uint64_t LinkedToRuntimePreferDSO(ARMInterpreter* interpreter,
 }
 
 static uint64_t BranchTargetPreferDSO(ARMInterpreter* interpreter, uint64_t target) {
+  if (target == 0) {
+    return 0;
+  }
   if (GuestAddressOk(interpreter->loader, target, 4)) {
     return target;
   }

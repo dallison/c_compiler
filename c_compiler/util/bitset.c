@@ -47,29 +47,48 @@ static int FindFirstSet64(uint64_t value) {
   return __builtin_ctzll(value) + 1;
 }
 
+static size_t GrowthCapacity(size_t current, size_t required) {
+  size_t capacity = current == 0 ? 1 : current;
+  while (capacity < required) {
+    if (capacity > SIZE_MAX / 2) {
+      return required;
+    }
+    capacity *= 2;
+  }
+  return capacity;
+}
+
 // Make room for an index into the set.
 static void MakeRoomFor(BitSet* set, size_t index) {
   size_t words_required = (index + 64) / 64;
+  size_t new_capacity = GrowthCapacity(set->capacity, words_required);
   if (set->value == NULL) {
-    set->value = calloc(words_required, sizeof(uint64_t));
-    set->capacity = words_required;
+    set->value = calloc(new_capacity, sizeof(uint64_t));
+    set->capacity = new_capacity;
   } else if (words_required > set->capacity) {
-    set->value = realloc(set->value, words_required * sizeof(uint64_t));
+    set->value = realloc(set->value, new_capacity * sizeof(uint64_t));
     // Clear new memory.
     memset(&set->value[set->capacity], 0,
-           (words_required - set->capacity) * sizeof(uint64_t));
-    set->capacity = words_required;
+           (new_capacity - set->capacity) * sizeof(uint64_t));
+    set->capacity = new_capacity;
   }
 }
 
 // Make room for a number of words.
 static void MakeRoom(BitSet* set, size_t words) {
+  if (words == 0) {
+    return;
+  }
+  size_t new_capacity = GrowthCapacity(set->capacity, words);
   if (set->value == NULL) {
-    set->value = calloc(words, sizeof(uint64_t));
-    set->capacity = words;
+    set->value = calloc(new_capacity, sizeof(uint64_t));
+    set->capacity = new_capacity;
   } else if (words > set->capacity) {
-    set->value = realloc(set->value, words * sizeof(uint64_t));
-    set->capacity = words;
+    size_t old_capacity = set->capacity;
+    set->value = realloc(set->value, new_capacity * sizeof(uint64_t));
+    memset(&set->value[old_capacity], 0,
+           (new_capacity - old_capacity) * sizeof(uint64_t));
+    set->capacity = new_capacity;
   }
 }
 
@@ -131,7 +150,7 @@ size_t BitSetFindFirstClear(BitSet* set) {
 void BitSetRemove(BitSet* set, size_t index) {
   size_t word = index / 64;
   if (word >= set->capacity) {
-    MakeRoomFor(set, index);
+    return;
   }
   set->value[word] &= ~(UINT64_C(1) << (index % 64));
 }
@@ -143,12 +162,16 @@ void BitSetIntersection(BitSet* set1, BitSet* set2, BitSet* result) {
   }
   // If the min size is zero then the result is an empty set.
   if (min == 0) {
+    BitSetClear(result);
     return;
   }
   MakeRoom(result, min);
-  memcpy(result->value, set1->value, min * sizeof(uint64_t));
-  for (size_t i = 0; i < min && i < set2->capacity; i++) {
-    result->value[i] &= set2->value[i];
+  for (size_t i = 0; i < min; i++) {
+    result->value[i] = set1->value[i] & set2->value[i];
+  }
+  if (result->capacity > min) {
+    memset(&result->value[min], 0,
+           (result->capacity - min) * sizeof(uint64_t));
   }
 }
 
@@ -158,9 +181,14 @@ void BitSetUnion(BitSet* set1, BitSet* set2, BitSet* result) {
     max = set2->capacity;
   }
   MakeRoom(result, max);
-  memcpy(result->value, set1->value, set1->capacity * sizeof(uint64_t));
-  for (size_t i = 0; i < set2->capacity; i++) {
-    result->value[i] |= set2->value[i];
+  for (size_t i = 0; i < max; i++) {
+    uint64_t left = i < set1->capacity ? set1->value[i] : 0;
+    uint64_t right = i < set2->capacity ? set2->value[i] : 0;
+    result->value[i] = left | right;
+  }
+  if (result->capacity > max) {
+    memset(&result->value[max], 0,
+           (result->capacity - max) * sizeof(uint64_t));
   }
 }
 
@@ -177,7 +205,13 @@ void BitSetUnionInPlace(BitSet* dest, BitSet* src) {
 
 void BitSetCopy(BitSet* to, BitSet* from) {
   MakeRoom(to, from->capacity);
-  memcpy(to->value, from->value, from->capacity * sizeof(uint64_t));
+  if (from->capacity > 0) {
+    memcpy(to->value, from->value, from->capacity * sizeof(uint64_t));
+  }
+  if (to->capacity > from->capacity) {
+    memset(&to->value[from->capacity], 0,
+           (to->capacity - from->capacity) * sizeof(uint64_t));
+  }
 }
 
 bool BitSetEqual(BitSet* set1, BitSet* set2) {
@@ -208,7 +242,7 @@ void BitSetExpand(BitSet* set, Vector* vec) {
   size_t index = 0;
   for (size_t word = 0; word < set->capacity; word++) {
     for (size_t bit = 0; bit < 64; bit++) {
-      if ((set->value[word] & (1LL << bit)) != 0) {
+      if ((set->value[word] & (UINT64_C(1) << bit)) != 0) {
         VectorAppend(vec, (void*)index);
       }
       index++;
@@ -230,7 +264,7 @@ void BitSetPrint(BitSet* set, FILE* fp) {
   size_t index = 0;
   for (size_t word = 0; word < set->capacity; word++) {
     for (size_t bit = 0; bit < 64; bit++) {
-      if ((set->value[word] & (1LL << bit)) != 0) {
+      if ((set->value[word] & (UINT64_C(1) << bit)) != 0) {
         fprintf(fp, "%s%zd", sep, index);
         sep = ", ";
       }
@@ -244,13 +278,14 @@ void BitSetIteratorStart(BitSetIterator* it, BitSet* set) {
   it->set = set;
   it->word_offset = 0;
   it->bit_offset = 0;
+  it->remaining = 0;
   while (it->word_offset < set->capacity &&
          set->value[it->word_offset] == 0) {
     it->word_offset++;
   }
   if (it->word_offset < set->capacity) {
-    it->bit_offset =
-        (size_t)__builtin_ctzll(set->value[it->word_offset]);
+    it->remaining = set->value[it->word_offset];
+    it->bit_offset = (size_t)__builtin_ctzll(it->remaining);
   }
 }
 
@@ -260,26 +295,22 @@ void BitSetIteratorNext(BitSetIterator* it) {
   if (BitSetIteratorDone(it)) {
     return;
   }
-  uint64_t remaining = 0;
-  if (it->bit_offset < 63) {
-    remaining =
-        it->set->value[it->word_offset] &
-        (UINT64_MAX << (it->bit_offset + 1));
-  }
-  if (remaining != 0) {
-    it->bit_offset = (size_t)__builtin_ctzll(remaining);
+  it->remaining &= it->remaining - 1;
+  if (it->remaining != 0) {
+    it->bit_offset = (size_t)__builtin_ctzll(it->remaining);
     return;
   }
   do {
     it->word_offset++;
     if (it->word_offset < it->set->capacity &&
         it->set->value[it->word_offset] != 0) {
-      it->bit_offset =
-          (size_t)__builtin_ctzll(it->set->value[it->word_offset]);
+      it->remaining = it->set->value[it->word_offset];
+      it->bit_offset = (size_t)__builtin_ctzll(it->remaining);
       return;
     }
   } while (it->word_offset < it->set->capacity);
   it->bit_offset = 0;
+  it->remaining = 0;
 }
 
 size_t BitSetIteratorValue(BitSetIterator* it);

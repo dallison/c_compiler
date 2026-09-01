@@ -8,7 +8,6 @@
 
 #include "aarch64_assembler.h"
 #include "aarch64_encode.h"
-#include "compiler.h"
 #include "map.h"
 #include <assert.h>
 #include <ctype.h>
@@ -17,13 +16,13 @@
 // Shortcut macro avoid typing assembler->base. everywhere we want to access
 // the base assembler.
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 #define DECLARE_INST_FUNC(mnemonic) \
   static void Assemble_##mnemonic(AARCH64Assembler*)
 
 
 DECLARE_INST_FUNC(adc);
-DECLARE_INST_FUNC(davefunc);
 DECLARE_INST_FUNC(add);
 DECLARE_INST_FUNC(adcs);
 DECLARE_INST_FUNC(adds);
@@ -253,7 +252,6 @@ MapInsert(instructions, kv);\
 // Add all instructions to the handler map.  This maps the instruction
 // spelling to a handler function.
 static void InitializeInstructions(Map* instructions) {
-  INST(davefunc);
   INST(adc);
   INST(add);
   INST(adcs);
@@ -473,83 +471,58 @@ static void InitializeInstructions(Map* instructions) {
     AssemblerError(&ASM, "Unimplemented instruction %s", #m); \
   }
 
-typedef enum {
-  kBAD,
-  kW,
-  kX,
-  kS,
-  kD,
-  kB,
-  kH,
-  kQ,
-} RegisterWidth;
+typedef AARCH64AsmRegKind RegisterWidth;
+#define kBAD AARCH64_ASM_REG_BAD
+#define kW AARCH64_ASM_REG_W
+#define kX AARCH64_ASM_REG_X
+#define kS AARCH64_ASM_REG_S
+#define kD AARCH64_ASM_REG_D
+#define kB AARCH64_ASM_REG_B
+#define kH AARCH64_ASM_REG_H
+#define kQ AARCH64_ASM_REG_Q
 
-typedef struct {
-  int num;
-  RegisterWidth width;
-  bool fp_or_simd;
-  bool is_sp;
-  int size;     // Size field for load/store.
-} Register;
+typedef AARCH64AsmRegister Register;
+typedef AARCH64AsmShiftKind ShiftType;
+#define kLSL AARCH64_ASM_SHIFT_LSL
+#define kLSR AARCH64_ASM_SHIFT_LSR
+#define kASR AARCH64_ASM_SHIFT_ASR
 
-typedef enum {
-  kLSL,
-  kLSR,
-  kASR,
-} ShiftType;
+typedef AARCH64AsmOperandKind OpType;
+#define kUnknown AARCH64_ASM_OPERAND_UNKNOWN
+#define kRegister AARCH64_ASM_OPERAND_REGISTER
+#define kIntImmediate AARCH64_ASM_OPERAND_INT_IMM
+#define kFloatImmediate AARCH64_ASM_OPERAND_FLOAT_IMM
 
-typedef enum {
-  kUnknown,
-  kRegister,
-  kIntImmediate,
-  kFloatImmediate,
-} OpType;
-
-typedef struct {
-  ShiftType type;
-  int amount;
-} Shift;
-
-typedef struct {
-  OpType type;
-  union {
-    Register reg;
-    int64_t i;
-    double f;
-  };
-  Shift shift;
-} Operand;
-
-// Conditions, matching AArch64 condition encoding.
-typedef enum {
-  kCond_eq = 0,
-  kCond_ne = 1,
-  kCond_cs = 2,
-  kCond_hs = kCond_cs,
-  kCond_cc = 3,
-  kCond_lo = kCond_cc,
-  kCond_mi = 4,
-  kCond_pl = 5,
-  kCond_vs = 6,
-  kCond_vc = 7,
-  kCond_hi = 8,
-  kCond_ls = 9,
-  kCond_ge = 10,
-  kCond_lt = 11,
-  kCond_gt = 12,
-  kCond_le = 13,
-  kCond_al = 14,
-} Condition;
+typedef AARCH64AsmShift Shift;
+typedef AARCH64AsmOperand Operand;
+typedef AARCH64AsmCondition Condition;
+#define kCond_eq AARCH64_ASM_COND_EQ
+#define kCond_ne AARCH64_ASM_COND_NE
+#define kCond_cs AARCH64_ASM_COND_CS
+#define kCond_hs AARCH64_ASM_COND_HS
+#define kCond_cc AARCH64_ASM_COND_CC
+#define kCond_lo AARCH64_ASM_COND_LO
+#define kCond_mi AARCH64_ASM_COND_MI
+#define kCond_pl AARCH64_ASM_COND_PL
+#define kCond_vs AARCH64_ASM_COND_VS
+#define kCond_vc AARCH64_ASM_COND_VC
+#define kCond_hi AARCH64_ASM_COND_HI
+#define kCond_ls AARCH64_ASM_COND_LS
+#define kCond_ge AARCH64_ASM_COND_GE
+#define kCond_lt AARCH64_ASM_COND_LT
+#define kCond_gt AARCH64_ASM_COND_GT
+#define kCond_le AARCH64_ASM_COND_LE
+#define kCond_al AARCH64_ASM_COND_AL
 
 static Register GetRegister(AARCH64Assembler* assembler) {
-  Register reg = {.width = kBAD};
+  Register reg = {.kind = kBAD};
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     AssemblerError(&ASM, "Expected register name");
     return reg;
   }
   if (StringEqualCaseBlind(&ASM.lex.spelling, "sp")) {
     LexNextToken(&ASM.lex);
-    reg.width = kX;
+    reg.kind = kX;
     // AArch64 encodes SP as register 31 in instruction words.
     reg.num = 31;
     reg.is_sp = true;
@@ -557,46 +530,46 @@ static Register GetRegister(AARCH64Assembler* assembler) {
   }
   if (StringEqualCaseBlind(&ASM.lex.spelling, "xzr") ||
       StringEqualCaseBlind(&ASM.lex.spelling, "wzr")) {
-    reg.width = toupper(ASM.lex.spelling.value[0]) == 'X' ? kX : kW;
+    reg.kind = toupper(ASM.lex.spelling.value[0]) == 'X' ? kX : kW;
     reg.num = 31;
-    reg.size = reg.width == kX ? 3 : 2;
+    reg.size = reg.kind == kX ? 3 : 2;
     LexNextToken(&ASM.lex);
     return reg;
   }
   char prefix = toupper(ASM.lex.spelling.value[0]);
   switch (prefix) {
     case 'W':
-      reg.width = kW;
+      reg.kind = kW;
       reg.fp_or_simd = false;
       reg.size = 2;
       break;
     case 'X':
-      reg.width = kX;
+      reg.kind = kX;
       reg.fp_or_simd = false;
       reg.size = 3;
       break;
     case 'S':
-      reg.width = kS;
+      reg.kind = kS;
       reg.fp_or_simd = true;
       reg.size = 2;
       break;
     case 'D':
-      reg.width = kD;
+      reg.kind = kD;
       reg.fp_or_simd = true;
       reg.size = 3;
       break;
     case 'B':
-      reg.width = kB;
+      reg.kind = kB;
       reg.fp_or_simd = true;
       reg.size = 0;
        break;
     case 'H':
-      reg.width = kH;
+      reg.kind = kH;
       reg.fp_or_simd = true;
       reg.size = 1;
       break;
     case 'Q':
-      reg.width = kQ;
+      reg.kind = kQ;
       reg.fp_or_simd = true;
       reg.size = 3;
       break;
@@ -626,7 +599,7 @@ static void CheckImmediateWidth(AARCH64Assembler* assembler, int immed, int num_
 }
 
 static char* RegisterName(Register* reg, char* buf, size_t buflen) {
-  switch (reg->width) {
+  switch (reg->kind) {
     case kX:
       buf[0] = 'x';
       break;
@@ -647,9 +620,8 @@ static char* RegisterName(Register* reg, char* buf, size_t buflen) {
   return buf;
 }
 
-static Register ZeroReg(int width) {
-  Register r = {.width = width, .num = 31};
-  return r;
+static Register ZeroReg(RegisterWidth width) {
+  return AARCH64AsmZeroRegister(width);
 }
 
 static Operand GetOperand(AARCH64Assembler* assembler) {
@@ -741,7 +713,7 @@ static AssemblerSymbol* GetOrCreateSymbol(AARCH64Assembler* assembler,
                                           const char* symbol_name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(symbol_name, ASM.current_section, SYM_TYPE(func),
+    sym = NewAssemblerSymbol(symbol_name, ASMO.current_section, SYM_TYPE(func),
                              SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -750,7 +722,7 @@ static AssemblerSymbol* GetOrCreateSymbol(AARCH64Assembler* assembler,
 
 
 static bool CheckRegWidths(AARCH64Assembler* assembler, Register* r1, Register* r2) {
-  if (r1->width != r2->width) {
+  if (r1->kind != r2->kind) {
     char buf1[16];
     char buf2[16];
     AssemblerError(&ASM, "Registers %s and %s mismatch in width",
@@ -795,35 +767,20 @@ static void AssembleAddSubImmediate(AARCH64Assembler* assembler,
                                     Register* rd, Register* rn,
                                     int immed, int sf, int op, int s,
                                     int shift) {
-  // The add/sub immediate field is an unsigned 12-bit value.  A negative
-  // immediate (common when computing the address of a stack local at a
-  // negative frame-pointer offset, e.g. "add x0, x29, #-384") must be encoded
-  // as the opposite operation with the negated immediate (here "sub x0, x29,
-  // #384").  This also applies to the flag-setting forms: "cmp Rn, #-k"
-  // (subs) becomes "cmn Rn, #k" (adds).  The flags are *identical* between the
-  // two forms - subs uses AddWithCarry(Rn, NOT(-k), 1) = AddWithCarry(Rn,
-  // k-1, 1) and adds uses AddWithCarry(Rn, k, 0); both yield the same
-  // unsigned and signed sums, so N/Z/C/V all match - so flipping is safe.
   if (immed < 0) {
     immed = -immed;
-    op ^= 1;  // ADD <-> SUB (bit 30 of the encoding).
+    op ^= 1;
   }
   CheckImmediateWidth(assembler, immed, 12);
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (op << 30) | (s << 29) | (0x22 << 23) |
-          (shift << 22) |
-          ((immed & 0xfff) << 10 | (rn->num << 5) | (rd->num)));
+  AARCH64EmitAddSubImmediate(&ASMO, rd, rn, immed, op != 0, s != 0, shift);
+  (void)sf;
 }
 
 static void AssembleAddSubShiftedRegister(AARCH64Assembler* assembler,
                                           Register* rd, Register* rn,
                                           Operand* op2, int sf, int op, int s) {
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (op << 30) | (s << 29) | (0xb << 24) |
-                    (op2->shift.type << 22) | (op2->reg.num << 16) |
-                    (op2->shift.amount << 10) | (rn->num << 5) | (rd->num));
+  (void)sf;
+  AARCH64EmitAddSubShiftedRegister(&ASMO, rd, rn, op2, op != 0, s != 0);
 }
 
 static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool one_operand) {
@@ -840,7 +797,7 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
     return;
   }
   if (one_operand) {
-    rd = ZeroReg(rn.width);
+    rd = ZeroReg(rn.kind);
   } else if (!CheckRegWidths(assembler, &rd, &rn)) {
     return;
   }
@@ -870,15 +827,15 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
     LexNextToken(&ASM.lex);
     int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerAddRelocationForSymbol(&ASM, sym, reloc_type,
-                                    ASM.current_section, instruction_offset, 0);
+                                    ASMO.current_section, instruction_offset, 0);
     if (shifted) {
-      AssemblerEmitWord(&ASM, ASM.current_section,
-                        ((uint32_t)(rd.width == kX) << 31) |
+      AssemblerEmitWord(&ASM, ASMO.current_section,
+                        ((uint32_t)(rd.kind == kX) << 31) |
                             ((uint32_t)opcode << 30) | ((uint32_t)s << 29) |
                             (0x22u << 23) | (1u << 22) |
                             ((uint32_t)rn.num << 5) | (uint32_t)rd.num);
     } else {
-      AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode,
+      AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.kind == kX, opcode,
                               s, 0);
     }
     return;
@@ -890,11 +847,11 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
         return;
       }
       if (LexMatch(&ASM.lex, TOK(comma))) {
-        if (!GetShift(assembler, &src2, rd.width == kX ? 63 : 31)) {
+        if (!GetShift(assembler, &src2, rd.kind == kX ? 63 : 31)) {
           return;
         }
       }
-      AssembleAddSubShiftedRegister(assembler, &rd, &rn, &src2, rd.width == kX, opcode, s);
+      AssembleAddSubShiftedRegister(assembler, &rd, &rn, &src2, rd.kind == kX, opcode, s);
       break;
     case kIntImmediate:
       {
@@ -911,7 +868,7 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
           shift = 1;
         }
         AssembleAddSubImmediate(assembler, &rd, &rn, src2.i,
-                                rd.width == kX, opcode, s, shift);
+                                rd.kind == kX, opcode, s, shift);
       }
       break;
    case kFloatImmediate:
@@ -954,7 +911,6 @@ static void AssembleAddSubWithCarry(AARCH64Assembler* assembler, int op, int s) 
   if (!NeedComma(assembler)) {
     return;
   }
-  
   Register rn = GetRegister(assembler);
   if (!NeedComma(assembler)) {
     return;
@@ -966,107 +922,7 @@ static void AssembleAddSubWithCarry(AARCH64Assembler* assembler, int op, int s) 
   if (!CheckRegWidths(assembler, &rd, &rm)) {
     return;
   }
-  
-  int sf = rd.width == kX;
-  
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (op << 30) | (s << 29) | (0xd0 << 21) |
-                    (rm.num << 16) | (rn.num << 5) | (rd.num));
-}
-
-// A value of the form 0...01...1 (a run of ones at the low end).
-static bool AARCH64IsMask64(uint64_t v) {
-  return v != 0 && ((v + 1) & v) == 0;
-}
-
-// A value of the form 0...01...10...0 (a single contiguous run of ones).
-static bool AARCH64IsShiftedMask64(uint64_t v) {
-  return v != 0 && AARCH64IsMask64((v - 1) | v);
-}
-
-static unsigned AARCH64CountTrailingZeros64(uint64_t value) {
-  unsigned count = 0;
-  while ((value & 1) == 0) {
-    ++count;
-    value >>= 1;
-  }
-  return count;
-}
-
-static unsigned AARCH64CountLeadingZeros64(uint64_t value) {
-  unsigned count = 0;
-  for (uint64_t bit = 1ULL << 63; (value & bit) == 0; bit >>= 1) {
-    ++count;
-  }
-  return count;
-}
-
-static unsigned AARCH64PopulationCount64(uint64_t value) {
-  unsigned count = 0;
-  while (value != 0) {
-    value &= value - 1;
-    ++count;
-  }
-  return count;
-}
-
-// Encode a logical (bitmask) immediate VALUE into the 13-bit N:immr:imms field
-// used by AND/ORR/EOR/ANDS immediate forms.  Returns false when the value is
-// not a representable bitmask immediate (e.g. zero or all-ones).  Follows the
-// standard AArch64 reference algorithm (cf. LLVM
-// AArch64_AM::processLogicalImmediate).
-static bool AARCH64EncodeLogicalImmediate(uint64_t imm, int sf,
-                                          unsigned* encoding) {
-  unsigned reg_size = sf ? 64 : 32;
-  if (reg_size != 64) {
-    if ((imm >> reg_size) != 0 && imm != (uint64_t)(int64_t)(int32_t)imm) {
-      // High bits set on a 32-bit operand that aren't a sign extension: not a
-      // valid 32-bit pattern.
-      return false;
-    }
-    imm &= 0xffffffffULL;
-  }
-  uint64_t all_ones = reg_size == 64 ? ~0ULL : 0xffffffffULL;
-  if (imm == 0 || imm == all_ones) {
-    return false;
-  }
-
-  // Determine the element size of the repeating pattern.
-  unsigned size = reg_size;
-  do {
-    size /= 2;
-    uint64_t mask = (1ULL << size) - 1;
-    if ((imm & mask) != ((imm >> size) & mask)) {
-      size *= 2;
-      break;
-    }
-  } while (size > 2);
-
-  uint64_t mask = (~0ULL) >> (64 - size);
-  imm &= mask;
-
-  unsigned i;
-  unsigned cto;
-  if (AARCH64IsShiftedMask64(imm)) {
-    i = AARCH64CountTrailingZeros64(imm);
-    cto = AARCH64CountTrailingZeros64(~(imm >> i));
-  } else {
-    imm |= ~mask;
-    if (!AARCH64IsShiftedMask64(~imm)) {
-      return false;
-    }
-    unsigned clo = AARCH64CountLeadingZeros64(~imm);
-    i = 64 - clo;
-    cto = size - AARCH64PopulationCount64(~imm);
-  }
-
-  unsigned immr = (size - i) & (size - 1);
-  unsigned nimms = (~(size - 1)) << 1;
-  nimms |= (cto - 1);
-  unsigned n = ((nimms >> 6) & 1) ^ 1;
-  *encoding = ((n & 1) << 12) | (immr << 6) | (nimms & 0x3f);
-  return true;
+  AARCH64EmitAddSubWithCarry(&ASMO, &rd, &rn, &rm, op != 0, s != 0);
 }
 
 static void AssembleLogicalImmediate(AARCH64Assembler* assembler,
@@ -1077,21 +933,17 @@ static void AssembleLogicalImmediate(AARCH64Assembler* assembler,
     AssemblerError(&ASM, "Invalid logical immediate");
     return;
   }
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (opc << 29) | (0x24 << 23) |
-                    (encoding << 10 | (rn->num << 5) | (rd->num)));
+  (void)encoding;
+  AARCH64EmitLogicalImmediate(&ASMO, rd, rn, immed, sf, opc);
 }
 
 
 static void AssembleLogicalShiftedRegister(AARCH64Assembler* assembler,
                                           Register* rd, Register* rn,
                                           Operand* op2, int sf, int opc, int n) {
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (opc << 29) | (0xa << 24) | (n << 21) |
-                    (op2->shift.type << 22) | (op2->reg.num << 16) |
-                    (op2->shift.amount << 10) | (rn->num << 5) | (rd->num));
+  (void)sf;
+  AARCH64EmitLogicalShiftedRegister(&ASMO, rd, rn, op2, AARCH64AsmRegSf(rd), opc,
+                                    n);
 }
 
 static void AssembleLogical(AARCH64Assembler* assembler, int opcode, int n, bool immed_ok, bool one_operand) {
@@ -1108,7 +960,7 @@ static void AssembleLogical(AARCH64Assembler* assembler, int opcode, int n, bool
     return;
   }
   if (one_operand) {
-    rd = ZeroReg(rn.width);
+    rd = ZeroReg(rn.kind);
   } else if (!CheckRegWidths(assembler, &rd, &rn)) {
     return;
   }
@@ -1119,17 +971,17 @@ static void AssembleLogical(AARCH64Assembler* assembler, int opcode, int n, bool
         return;
       }
       if (LexMatch(&ASM.lex, TOK(comma))) {
-        if (!GetShift(assembler, &src2, rd.width == kX ? 63 : 31)) {
+        if (!GetShift(assembler, &src2, rd.kind == kX ? 63 : 31)) {
           return;
         }
       }
-      AssembleLogicalShiftedRegister(assembler, &rd, &rn, &src2, rd.width == kX, opcode, n);
+      AssembleLogicalShiftedRegister(assembler, &rd, &rn, &src2, rd.kind == kX, opcode, n);
       break;
     case kIntImmediate:
       if (!immed_ok) {
         AssemblerError(&ASM, "Immediate operand not valid for this instruction");
       }
-      AssembleLogicalImmediate(assembler, &rd, &rn, src2.i, rd.width == kX, opcode);
+      AssembleLogicalImmediate(assembler, &rd, &rn, src2.i, rd.kind == kX, opcode);
       break;
    case kFloatImmediate:
       AssemblerError(&ASM, "Unexpected floating point immediate");
@@ -1205,7 +1057,7 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
     LexNextToken(&ASM.lex);
     // Keep calls to weak definitions relocatable so the linker can select a
     // strong override.
-    known = sym->defined && sym->section == ASM.current_section &&
+    known = sym->defined && sym->section == ASMO.current_section &&
             sym->binding != SYM_BIND(weak);
     addr = sym->value;
   } else {
@@ -1235,13 +1087,13 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
       AssemblerAddRelocationForSymbol(
           &ASM, sym,
           op == 0 ? R_AARCH64_ADR_PREL_LO21 : R_AARCH64_ADR_PREL_PG_HI21,
-          ASM.current_section, instruction_offset, 0);
+          ASMO.current_section, instruction_offset, 0);
     }
     immlo = 0;
     immhi = 0;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       (op << 31) | (immlo << 29) | (0x10 << 24) | (immhi << 5) | rd.num);
 }
 
@@ -1270,7 +1122,7 @@ static void Assemble_gotaddr(AARCH64Assembler* assembler) {
     AssemblerError(&ASM, "Expected symbol for gotaddr");
     return;
   }
-  if (rd.width != kX) {
+  if (rd.kind != kX) {
     AssemblerError(&ASM, "gotaddr needs a 64 bit register");
     return;
   }
@@ -1279,15 +1131,15 @@ static void Assemble_gotaddr(AARCH64Assembler* assembler) {
 
   // adrp xd, :got:symbol -- the page the symbol's GOT slot is on.
   AssemblerAddRelocationForSymbol(
-      &ASM, sym, R_AARCH64_ADR_GOT_PAGE, ASM.current_section,
+      &ASM, sym, R_AARCH64_ADR_GOT_PAGE, ASMO.current_section,
       (int32_t)AssemblerCurrentAddress(&ASM), 0);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
 
   // ldr xd, [xd, :got_lo12:symbol] -- the slot's offset within that page.  The
   // linker fills in the offset, so the immediate is emitted as 0.
   AssemblerAddRelocationForSymbol(
-      &ASM, sym, R_AARCH64_LD64_GOT_LO12_NC, ASM.current_section,
+      &ASM, sym, R_AARCH64_LD64_GOT_LO12_NC, ASMO.current_section,
       (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssembleLoadStoreUnsignedImmediate(assembler, &rd, &rd, /*size=*/3, /*fp=*/0,
                                      /*opc=*/1, /*v=*/0, /*offset=*/0);
@@ -1308,8 +1160,8 @@ static void AssembleDataProcessing3Source(AARCH64Assembler* assembler,
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0x1b << 24) | (op54 << 21) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0x1b << 24) | (op54 << 21) |
       (rm.num << 16) | (o0 << 15) | (ra.num << 10) |
       (rn.num << 5) | rd.num);
 }
@@ -1323,12 +1175,12 @@ static void AssembleDataProcessing3SourceLong(AARCH64Assembler* assembler,
   Register rm = GetRegister(assembler);
   NeedComma(assembler);
   Register ra = GetRegister(assembler);
-  if (rd.width != kX || ra.width != kX || rn.width != kW || rm.width != kW) {
+  if (rd.kind != kX || ra.kind != kX || rn.kind != kW || rm.kind != kW) {
     AssemblerError(&ASM, "Invalid widening multiply register widths");
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       (1 << 31) | (0x1b << 24) | (op54 << 21) | (op31 << 15) |
       (rm.num << 16) | (o0 << 15) | (ra.num << 10) |
       (rn.num << 5) | rd.num);
@@ -1352,10 +1204,10 @@ static void AssembleMulAlias(AARCH64Assembler* assembler, int negate) {
       !CheckRegWidths(assembler, &rd, &rm)) {
     return;
   }
-  Register zero = ZeroReg(rd.width);
+  Register zero = ZeroReg(rd.kind);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0x1b << 24) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0x1b << 24) |
       (rm.num << 16) | (negate << 15) | (zero.num << 10) |
       (rn.num << 5) | rd.num);
 }
@@ -1376,12 +1228,12 @@ static void AssembleNegAlias(AARCH64Assembler* assembler, int op, int set_flags)
     AssemblerError(&ASM, "Expected register");
     return;
   }
-  Register zero = ZeroReg(rd.width);
+  Register zero = ZeroReg(rd.kind);
   if (!CheckRegWidths(assembler, &rd, &src.reg)) {
     return;
   }
   AssembleAddSubShiftedRegister(
-      assembler, &rd, &zero, &src, rd.width == kX, op, set_flags);
+      assembler, &rd, &zero, &src, rd.kind == kX, op, set_flags);
 }
 
 static void Assemble_neg(AARCH64Assembler* assembler) {
@@ -1399,10 +1251,10 @@ static void AssembleNgcAlias(AARCH64Assembler* assembler, int set_flags) {
   if (!CheckRegWidths(assembler, &rd, &rm)) {
     return;
   }
-  Register zero = ZeroReg(rd.width);
+  Register zero = ZeroReg(rd.kind);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (1 << 30) | (set_flags << 29) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (1 << 30) | (set_flags << 29) |
       (0xd0 << 21) | (rm.num << 16) | (zero.num << 5) | rd.num);
 }
 
@@ -1425,8 +1277,8 @@ static void AssembleDivide(AARCH64Assembler* assembler, int unsigned_divide) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0xd6 << 21) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0xd6 << 21) |
       (rm.num << 16) | ((unsigned_divide ? 2 : 3) << 10) |
       (rn.num << 5) | rd.num);
 }
@@ -1442,8 +1294,8 @@ static void AssembleShiftVariable(AARCH64Assembler* assembler, int shift_op) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0xd6 << 21) | (rm.num << 16) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0xd6 << 21) | (rm.num << 16) |
       (shift_op << 10) | (rn.num << 5) | rd.num);
 }
 
@@ -1493,13 +1345,13 @@ static void AssembleLongMulAlias(AARCH64Assembler* assembler, int op54, int nega
   Register rn = GetRegister(assembler);
   NeedComma(assembler);
   Register rm = GetRegister(assembler);
-  if (rd.width != kX || rn.width != kW || rm.width != kW) {
+  if (rd.kind != kX || rn.kind != kW || rm.kind != kW) {
     AssemblerError(&ASM, "Invalid widening multiply register widths");
     return;
   }
   Register zero = ZeroReg(kX);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       (1 << 31) | (0x1b << 24) | (op54 << 21) |
       (rm.num << 16) | (negate << 15) | (zero.num << 10) |
       (rn.num << 5) | rd.num);
@@ -1527,12 +1379,12 @@ static void AssembleHighMul(AARCH64Assembler* assembler, int unsigned_mul) {
   Register rn = GetRegister(assembler);
   NeedComma(assembler);
   Register rm = GetRegister(assembler);
-  if (rd.width != kX || rn.width != kX || rm.width != kX) {
+  if (rd.kind != kX || rn.kind != kX || rm.kind != kX) {
     AssemblerError(&ASM, "High multiply requires 64-bit registers");
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       (1 << 31) | (0x1b << 24) | ((unsigned_mul ? 6 : 2) << 21) |
       (rm.num << 16) | (0x1f << 10) | (rn.num << 5) | rd.num);
 }
@@ -1549,7 +1401,7 @@ static void AssembleBitFieldMove(AARCH64Assembler* assembler, int opc,
                                  Register* rd, Register* rn,
                                  int sf, int n, int immr, int imms) {
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (sf << 31) | (opc << 29) | (0x26 << 23) | (n << 22) |
                     ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) |
                     (rn->num << 5) | (rd->num));
@@ -1562,7 +1414,7 @@ static void AssembleShiftRight(AARCH64Assembler* assembler, int opc) {
   CheckRegWidths(assembler, &rd, &rn);
   NeedComma(assembler);
   LexMatch(&ASM.lex, TOK(hash));
-  bool is_64bit = rd.width == kX;
+  bool is_64bit = rd.kind == kX;
   int64_t shift = AssemblerEvaluateExpression(&ASM);
   int64_t max_shift = is_64bit ? 63 : 31;
   if (shift < 0 || shift > max_shift) {
@@ -1582,7 +1434,7 @@ static void Assemble_lsl(AARCH64Assembler* assembler) {
   CheckRegWidths(assembler, &rd, &rn);
   NeedComma(assembler);
   LexMatch(&ASM.lex, TOK(hash));
-  bool is_64bit = rd.width == kX;
+  bool is_64bit = rd.kind == kX;
   int64_t shift = AssemblerEvaluateExpression(&ASM);
   int64_t max_shift = is_64bit ? 63 : 31;
   if (shift < 0 || shift > max_shift) {
@@ -1639,15 +1491,15 @@ static void AssembleBitfieldAlias(AARCH64Assembler* assembler, int opc,
   if (!GetLsbWidth(assembler, &lsb, &width)) {
     return;
   }
-  int64_t max = rd.width == kX ? 64 : 32;
+  int64_t max = rd.kind == kX ? 64 : 32;
   if (lsb < 0 || width <= 0 || lsb + width > max) {
     AssemblerError(&ASM, "Invalid bitfield range");
     return;
   }
   int immr = insert_at_lsb ? (int)((max - lsb) & (max - 1)) : (int)lsb;
   int imms = insert_at_lsb ? (int)(width - 1) : (int)(lsb + width - 1);
-  AssembleBitFieldMove(assembler, opc, &rd, &rn, rd.width == kX,
-                       rd.width == kX, immr, imms);
+  AssembleBitFieldMove(assembler, opc, &rd, &rn, rd.kind == kX,
+                       rd.kind == kX, immr, imms);
 }
 
 static void Assemble_bfi(AARCH64Assembler* assembler) {
@@ -1679,11 +1531,11 @@ static void AssembleExtendAlias(AARCH64Assembler* assembler, int opc,
   Register rd = GetRegister(assembler);
   NeedComma(assembler);
   Register rn = GetRegister(assembler);
-  if (wide_dest && rd.width != kX) {
+  if (wide_dest && rd.kind != kX) {
     AssemblerError(&ASM, "Expected 64-bit destination");
     return;
   }
-  int sf = rd.width == kX;
+  int sf = rd.kind == kX;
   int n = sf;
   AssembleBitFieldMove(assembler, opc, &rd, &rn, sf, n, 0, imms);
 }
@@ -1732,8 +1584,8 @@ static void AssembleDataProcessing1Source(AARCH64Assembler* assembler, int opcod
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0x2d6 << 21) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0x2d6 << 21) |
       (opcode << 10) | (rn.num << 5) | rd.num);
 }
 
@@ -1774,96 +1626,28 @@ static void Assemble_extr(AARCH64Assembler* assembler) {
       !CheckRegWidths(assembler, &rd, &rm)) {
     return;
   }
-  int max = rd.width == kX ? 63 : 31;
+  int max = rd.kind == kX ? 63 : 31;
   if (lsb < 0 || lsb > max) {
     AssemblerError(&ASM, "Invalid extract shift");
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0x13 << 24) |
-      (1 << 23) | ((rd.width == kX) << 22) | (rm.num << 16) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (0x13 << 24) |
+      (1 << 23) | ((rd.kind == kX) << 22) | (rm.num << 16) |
       ((int)lsb << 10) | (rn.num << 5) | rd.num);
 }
 
 static void AssembleMovInstruction(AARCH64Assembler* assembler, Register* rd,
                                    int sf, int opc, int imm16, int hw) {
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    (int32_t)(AARCH64EncodeMoveWide(
-                                  sf != 0, opc, (uint16_t)imm16, hw) |
-                              (uint32_t)rd->num));
+  (void)assembler;
+  AARCH64EmitMoveWide(&ASMO, rd, sf, opc, imm16, hw);
 }
 
-// Move an immediate value.
-// Instructions we can use;
-// MOVK - move a shifted 16 bit value and keep rest of bits untouched
-// MOVN - move a shifted 16 bit value with zero in the other bits then invert
-// MOVZ - move a shifted 16 bit value and zero out other bits.
-//
-// For 32-bit, shift can be 0 or 16.  For 64-bit, shift can be 0, 16, 32 or 48.
-static void AssembleMoveImmediate(AARCH64Assembler* assembler, Register* rd, int64_t immed) {
-  bool inverted = false;
-  if (immed < 0) {
-    // Negative can be encoded using a MOVN.
-    immed = ~immed;
-    inverted = true;
-  }
-  if (immed == 0) {
-    // Special handling for zero or -1.
-    if (inverted) {
-      // MOVN.
-      AssembleMovInstruction(assembler, rd, rd->width == kX, 0, 0, 0);
-    } else {
-      // MOVZ.
-      AssembleMovInstruction(assembler, rd, rd->width == kX, 2, 0, 0);
-    }
-    return;
-  }
-  int num_words = rd->width == kX ? 4 : 2;
-
-  if (inverted) {
-    // The original immed was negative so we have to invert it after moving
-    // into the register.  There is no MOVK equivalent that keeps the other
-    // bits intact, so all we have is MOVN, whicb moves a 16 bit value, zeroes
-    // out the other bits and inverts all the bits.  This means that we can
-    // only really MOVN one 16-bit value into the register.
-    
-    // Let's count the number of non-zero 16 bit words in the immed fie;d.
-    int num_non_zero_words = 0;
-    int n = 0;
-    for (int i = 0; i < num_words; i++) {
-      int imm16 = (immed >> i*16) & 0xffff;
-      if (imm16 != 0) {
-        num_non_zero_words++;
-        n = i;
-      }
-    }
-    if (num_non_zero_words == 1) {
-      // We can use a MOVN.
-      int imm16 = (immed >> n*16) & 0xffff;
-      AssembleMovInstruction(assembler, rd, rd->width == kX, 0, imm16, n);
-      return;
-    }
-    // We can't use a MOVN, so it's a MOVZ/MOVK sequence.
-    immed = ~immed;
-  }
-  
-  bool keep = false;
-  for (int i = 0; i < num_words; i++) {
-    int imm16 = (immed >> i*16) & 0xffff;
-    int opc;
-    // We've already checked for immed being 0 so at least one of these has
-    // to be true.
-    if (imm16 != 0) {
-      if (keep) {
-        opc = 3;      // MOVK
-      } else {
-        opc = 2;      // MOVZ
-      }
-      AssembleMovInstruction(assembler, rd, rd->width == kX, opc, imm16, i);
-      keep = true;
-    }
-  }
+static void AssembleMoveImmediate(AARCH64Assembler* assembler, Register* rd,
+                                  int64_t immed) {
+  (void)assembler;
+  AARCH64EmitMoveImmediate(&ASMO, rd, immed);
 }
 
 static void AssembleMove(AARCH64Assembler* assembler) {
@@ -1880,13 +1664,13 @@ static void AssembleMove(AARCH64Assembler* assembler) {
       // read zero or discard the result.
       if (rd.is_sp || op.reg.is_sp) {
         AssembleAddSubImmediate(assembler, &rd, &op.reg, 0,
-                                rd.width == kX, /*op=*/0, /*s=*/0,
+                                rd.kind == kX, /*op=*/0, /*s=*/0,
                                 /*shift=*/0);
         break;
       }
       // General-register MOV is the ORR alias with the zero register as Rn.
-      Register zero = ZeroReg(rd.width);
-      AssembleLogicalShiftedRegister(assembler, &rd, &zero, &op, rd.width == kX, 1, 0);
+      Register zero = ZeroReg(rd.kind);
+      AssembleLogicalShiftedRegister(assembler, &rd, &zero, &op, rd.kind == kX, 1, 0);
       break;
     case kIntImmediate:
       AssembleMoveImmediate(assembler, &rd, op.i);
@@ -1918,7 +1702,7 @@ static void AssembleMoveX(AARCH64Assembler* assembler, int opc) {
     LexNextToken(&ASM.lex);
     LexMatch(&ASM.lex, TOK(hash));      // Optional #.
     shift = AssemblerEvaluateExpression(&ASM);
-    if (rd.width == kX) {
+    if (rd.kind == kX) {
       switch (shift) {
         case 0:
         case 16:
@@ -1941,9 +1725,8 @@ static void AssembleMoveX(AARCH64Assembler* assembler, int opc) {
     }
   }
   CheckImmediateWidth(assembler, op.i, 16);
-  AssembleMovInstruction(assembler, &rd,
-                         rd.width == kX,
-                         opc, op.i, (int)shift / 16);
+  AARCH64EmitMoveWide(&ASMO, &rd, rd.kind == kX, opc, (int)op.i,
+                      (int)shift / 16);
 }
 
 static void Assemble_mov(AARCH64Assembler* assembler) {
@@ -1978,12 +1761,12 @@ static void Assemble_mvn(AARCH64Assembler* assembler) {
     AssemblerError(&ASM, "Expected register");
     return;
   }
-  Register zero = ZeroReg(rd.width);
+  Register zero = ZeroReg(rd.kind);
   if (!CheckRegWidths(assembler, &rd, &rm.reg)) {
     return;
   }
   AssembleLogicalShiftedRegister(
-      assembler, &rd, &zero, &rm, rd.width == kX, 1, 1);
+      assembler, &rd, &zero, &rm, rd.kind == kX, 1, 1);
 }
 
 static void Assemble_ror(AARCH64Assembler* assembler) {
@@ -1996,16 +1779,13 @@ static void Assemble_ror(AARCH64Assembler* assembler) {
   if (!CheckRegWidths(assembler, &rd, &rn)) {
     return;
   }
-  int max = rd.width == kX ? 63 : 31;
+  int max = rd.kind == kX ? 63 : 31;
   if (shift < 0 || shift > max) {
     AssemblerError(&ASM, "Invalid rotate amount");
     return;
   }
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (0x13 << 24) |
-      (1 << 23) | ((rd.width == kX) << 22) | (rn.num << 16) |
-      ((int)shift << 10) | (rn.num << 5) | rd.num);
+  AARCH64EmitInstruction(
+      &ASMO, AARCH64EncodeRotateRightImmediate(&rd, &rn, shift));
 }
 
 static bool GetCondition(AARCH64Assembler* assembler, Condition* cond) {
@@ -2050,11 +1830,9 @@ static Condition InvertCondition(Condition cond) {
 
 static void AssembleConditionalBranch(AARCH64Assembler* assembler,
                                       int cond, int consistent) {
+  (void)assembler;
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
-
-  // We have a 19 bit immediate which is a multiple of 4, so this give us
-  // 21 bits of range.
   int32_t off = offset < 0 ? -offset : offset;
   if (off > (1 << 21)) {
     AssemblerError(&ASM, "Branch offset out of range");
@@ -2064,12 +1842,8 @@ static void AssembleConditionalBranch(AARCH64Assembler* assembler,
     AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
     return;
   }
-  // imm19 is encoded as the top 19 bits of the offset.
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (0x2a << 25) |
-                    (((offset >> 2) & 0x7ffff) << 5) |    // imm19.
-                    (consistent << 4) | cond);
+  AARCH64EmitConditionalBranch(&ASMO, offset, (AARCH64AsmCondition)cond,
+                               consistent != 0);
 }
 
 #define COND_BRANCH(cond) \
@@ -2101,54 +1875,28 @@ COND_BRANCH(al);
 
 #undef COND_BRANCH
 
-static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, int l) {
-  int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
-  bool known = false;
-  int64_t addr = 0;
-  AssemblerSymbol* sym = NULL;
+static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler,
+                                                 int l) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
-    sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    AssemblerSymbol* sym =
+        GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
-    // A weak definition can be replaced by a strong definition from another
-    // object. Leave its branch relocatable so the linker can retarget it.
-    known = sym->defined && sym->section == ASM.current_section &&
-            sym->binding != SYM_BIND(weak);
-    addr = sym->value;
-  } else {
-    addr = AssemblerEvaluateKnownExpression(&ASM, &known);
-  }
-  int32_t offset = (int32_t)(addr - instruction_offset);
-
-  // We have a 26 bit immediate which is a multiple of 4, so this give us
-  // 28 bits of range.
-  int32_t off = offset < 0 ? -offset : offset;
-  if (off > (1 << 28)) {
-    AssemblerError(&ASM, "Branch offset out of range");
+    AARCH64EmitUnconditionalBranchToSymbol(&ASM, sym, l != 0,
+                                           assembler->base.object.pic);
     return;
   }
-  if ((off & 3) != 0) {
-    AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
-    return;
-  }
-  if (!known) {
-    if (sym != NULL) {
-      int reloc_type = l ? R_AARCH64_CALL26 : R_AARCH64_JUMP26;
-      if (l &&
-          (sym->binding == SYM_BIND(global) ||
-           sym->binding == SYM_BIND(weak)) &&
-          assembler->base.pic) {
-        reloc_type = R_AARCH64_CALL_PLT;
-      }
-      AssemblerAddRelocationForSymbol(
-          &ASM, sym, reloc_type, ASM.current_section, instruction_offset, 0);
+  bool known = false;
+  int64_t addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+  int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
+  int32_t offset = known ? (int32_t)(addr - instruction_offset) : 0;
+  if (known) {
+    int32_t off = offset < 0 ? -offset : offset;
+    if (off > (1 << 28) || (off & 3) != 0) {
+      AssemblerError(&ASM, "Branch offset out of range");
+      return;
     }
-    offset = 0;
   }
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (l << 31) |
-                    (0x5 << 26) |
-                    ((offset >> 2) & 0x3ffffff));    // imm26.
+  AARCH64EmitUnconditionalBranchImmediate(&ASMO, offset, l != 0);
 }
 
 static void Assemble_b(AARCH64Assembler* assembler) {
@@ -2159,10 +1907,11 @@ static void Assemble_bl(AARCH64Assembler* assembler) {
   AssembleUnconditionalBranchImmediate(assembler, 1);
 }
 
-static void AssembleUnconditionalBranchRegister(AARCH64Assembler* assembler, int opc, int op3) {
+static void AssembleUnconditionalBranchRegister(AARCH64Assembler* assembler,
+                                                int opc, int op3) {
   Register r = GetRegister(assembler);
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    (int32_t)AARCH64EncodeBranchRegister(opc, op3, r.num));
+  (void)assembler;
+  AARCH64EmitBranchRegister(&ASMO, opc, op3, r.num);
 }
         
 static void Assemble_blr(AARCH64Assembler* assembler) {
@@ -2181,19 +1930,18 @@ static void Assemble_ret(AARCH64Assembler* assembler) {
     reg = r.num;
   }
   
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    (int32_t)AARCH64EncodeReturn(reg));
+  AARCH64EmitReturn(&ASMO, reg);
 }
 
 static void Assemble_svc(AARCH64Assembler* assembler) {
+  (void)assembler;
   LexMatch(&ASM.lex, TOK(hash));
   int64_t immediate = AssemblerEvaluateExpression(&ASM);
   if (immediate < 0 || immediate > 0xffff) {
     AssemblerError(&ASM, "SVC immediate must be in the range 0..65535");
     return;
   }
-  AssemblerEmitWord(&ASM, ASM.current_section,
-                    0xd4000001u | ((uint32_t)immediate << 5));
+  AARCH64EmitInstruction(&ASMO, AARCH64EncodeSvc((uint16_t)immediate));
 }
 
 
@@ -2215,10 +1963,10 @@ static void AssembleCompareAndBranch(AARCH64Assembler* assembler, int op) {
     AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
     return;
   }
-  int sf = rt.width == kX;
+  int sf = rt.kind == kX;
   int imm19 = (offset >> 2) & 0x7ffff;
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (sf << 31) |
                     (0x1a << 25) |
                     (op << 24) |
@@ -2258,7 +2006,7 @@ static void AssembleTestAndBranch(AARCH64Assembler* assembler, int op) {
     return;
   }
   // Validate bit in imm.
-  int max_bit = rt.width == kX ? 63 : 31;
+  int max_bit = rt.kind == kX ? 63 : 31;
   if (imm < 0 || imm > max_bit) {
     AssemblerError(&ASM, "Invalid bit number, need 0..%d", max_bit);
     return;
@@ -2268,7 +2016,7 @@ static void AssembleTestAndBranch(AARCH64Assembler* assembler, int op) {
   
   int imm14 = (offset >> 2) & 0x3fff;
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (b5 << 31) |
                     (0x1b << 25) |
                     (op << 24) |
@@ -2307,8 +2055,8 @@ static void AssembleConditionalCompare(AARCH64Assembler* assembler, int op,
       return;
     }
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
-        ((rn.width == kX) << 31) | (op << 30) | (0x1d2 << 21) |
+        &ASM, ASMO.current_section,
+        ((rn.kind == kX) << 31) | (op << 30) | (0x1d2 << 21) |
         (op2.reg.num << 16) | (cond << 12) |
         (rn.num << 5) | (int)nzcv);
   } else if (op2.type == kIntImmediate) {
@@ -2317,8 +2065,8 @@ static void AssembleConditionalCompare(AARCH64Assembler* assembler, int op,
       return;
     }
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
-        ((rn.width == kX) << 31) | (op << 30) | (0x1d2 << 21) |
+        &ASM, ASMO.current_section,
+        ((rn.kind == kX) << 31) | (op << 30) | (0x1d2 << 21) |
         (1 << 11) | (op2.i << 16) | (cond << 12) |
         (rn.num << 5) | (int)nzcv);
   } else {
@@ -2350,8 +2098,8 @@ static void AssembleConditionalSelect(AARCH64Assembler* assembler, int op,
   Register rn;
   Register rm;
   if (alias_zero) {
-    rn = ZeroReg(rd.width);
-    rm = ZeroReg(rd.width);
+    rn = ZeroReg(rd.kind);
+    rm = ZeroReg(rd.kind);
   } else {
     rn = GetRegister(assembler);
     if (!alias_one_reg) {
@@ -2376,8 +2124,8 @@ static void AssembleConditionalSelect(AARCH64Assembler* assembler, int op,
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      ((rd.width == kX) << 31) | (op << 30) | (0xd4 << 21) |
+      &ASM, ASMO.current_section,
+      ((rd.kind == kX) << 31) | (op << 30) | (0xd4 << 21) |
       (rm.num << 16) | (cond << 12) | (op2 << 10) |
       (rn.num << 5) | rd.num);
 }
@@ -2424,7 +2172,7 @@ static void AssembleLoadLiteral(AARCH64Assembler* assembler, Register* rt,
   CheckImmediateWidth(assembler, imm19, 19);
 
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (opc << 30) |
                     (0x3 << 27) |
                     (v << 26) |
@@ -2438,7 +2186,7 @@ static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt
                                 int32_t imm9) {
   CheckImmediateWidth(assembler, imm9, 9);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (size << 30) |
                     (0x7 << 27) |
                     (fp << 26) |
@@ -2462,7 +2210,7 @@ static void AssembleLoadStoreUnsignedImmediate(AARCH64Assembler* assembler,
   int imm12 = offset / scale;
   CheckImmediateWidth(assembler, imm12, 12);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (size << 30) |
                     (0x39 << 24) |
                     (fp << 26) |
@@ -2480,7 +2228,7 @@ static void AssembleLoadStoreRegister(AARCH64Assembler* assembler, Register* rt,
                                 int opc, int v, int option,
                                 int s) {
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (size << 30) |
                     (0x7 << 27) |
                     (v << 26) |
@@ -2500,7 +2248,7 @@ static void AssembleLoadStorePair(AARCH64Assembler* assembler, Register* rt,
                                   int opc, int v, int l, int mode,
                                   int32_t imm7) {
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
                     (opc << 30) |
                     (0x28 << 24) |
                     (v << 26) |
@@ -2572,7 +2320,7 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         AssemblerError(&ASM, "LDP/STP require an immediate offset");
         return;
       }
-      int scale = rt.width == kX ? 8 : 4;
+      int scale = rt.kind == kX ? 8 : 4;
       if ((offset.i % scale) != 0) {
         AssemblerError(&ASM, "LDP/STP offset must be naturally aligned");
         return;
@@ -2585,7 +2333,7 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
       // bits[24:23]: 1 = post-index, 2 = signed offset, 3 = pre-index.
       int mode = post_indexed ? 1 : (writeback ? 3 : 2);
       AssembleLoadStorePair(assembler, &rt, &rt2, &rn,
-                            rt.width == kX ? 2 : 0, 0, is_load, mode, imm7);
+                            rt.kind == kX ? 2 : 0, 0, is_load, mode, imm7);
     } else {
       if (offset.type == kRegister) {
         // Register offset.
@@ -2616,13 +2364,13 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
               s = 0;
               break;
             case 2:
-              if (rt.width != kW) {
+              if (rt.kind != kW) {
                 AssemblerError(&ASM, "Invalid register shift amount");
                 return;
               }
               break;
             case 3:
-              if (rt.width != kX) {
+              if (rt.kind != kX) {
                 AssemblerError(&ASM, "Invalid register shift amount");
                 return;
               }
@@ -2632,7 +2380,7 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
               return;
           }
           int opc = is_load;
-          if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
+          if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
             size = rt.size;
           }
           // TODO: extended register variant.
@@ -2640,8 +2388,8 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         }
       } else if (offset.type == kIntImmediate){
         // Immediate offset.
-        int opc = is_signed && is_load ? (rt.width == kX ? 2 : 3) : is_load;
-        if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
+        int opc = is_signed && is_load ? (rt.kind == kX ? 2 : 3) : is_load;
+        if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
           size = rt.size;
         }
         int scale = 1 << (size < 0 ? 0 : size);
@@ -2678,14 +2426,14 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
      AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
 
     int reloc_type = R_AARCH64_CALL26;
-//    if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
+//    if (sym->binding == SYM_BIND(global) && assembler->base.object.pic) {
 //      reloc_type = R_AARCH64_CALL_PLT;
 //    }
     AssemblerAddRelocationForSymbol(
-        &ASM, sym, reloc_type, ASM.current_section,
+        &ASM, sym, reloc_type, ASMO.current_section,
         (int32_t)AssemblerCurrentAddress(&ASM), 0);
     
-    int opc = rt.width == kX;
+    int opc = rt.kind == kX;
     int v = 0;
     // TODO: floating point and ldrsw.
     AssembleLoadLiteral(assembler, &rt, opc, v, 0);
@@ -2725,13 +2473,13 @@ static void Assemble_str(AARCH64Assembler* assembler) {
 }
 
 static Register GetAtomicAddress(AARCH64Assembler* assembler) {
-  Register bad = {.width = kBAD};
+  Register bad = {.kind = kBAD};
   if (!LexMatch(&ASM.lex, TOK(lsquare))) {
     AssemblerError(&ASM, "Expected [");
     return bad;
   }
   Register rn = GetRegister(assembler);
-  if (rn.fp_or_simd || rn.width != kX) {
+  if (rn.fp_or_simd || rn.kind != kX) {
     AssemblerError(&ASM, "Atomic base must be an X register");
     return bad;
   }
@@ -2747,20 +2495,20 @@ static void AssembleLoadExclusive(AARCH64Assembler* assembler, bool acquire,
   Register rt = GetRegister(assembler);
   NeedComma(assembler);
   Register rn = GetAtomicAddress(assembler);
-  if (rt.fp_or_simd || (rt.width != kW && rt.width != kX) ||
-      rn.width == kBAD) {
+  if (rt.fp_or_simd || (rt.kind != kW && rt.kind != kX) ||
+      rn.kind == kBAD) {
     AssemblerError(&ASM, "Invalid exclusive load registers");
     return;
   }
-  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
-  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+  int size = forced_size >= 0 ? forced_size : (rt.kind == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.kind != kW) {
     AssemblerError(&ASM, "Byte/halfword exclusive load requires W register");
     return;
   }
   uint32_t word = ((uint32_t)size << 30) | 0x085f7c00u |
                   (acquire ? 0x00008000u : 0) |
                   ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
-  AssemblerEmitWord(&ASM, ASM.current_section, word);
+  AssemblerEmitWord(&ASM, ASMO.current_section, word);
 }
 
 static void AssembleStoreExclusive(AARCH64Assembler* assembler, bool release,
@@ -2770,13 +2518,13 @@ static void AssembleStoreExclusive(AARCH64Assembler* assembler, bool release,
   Register rt = GetRegister(assembler);
   NeedComma(assembler);
   Register rn = GetAtomicAddress(assembler);
-  if (rs.fp_or_simd || rs.width != kW || rt.fp_or_simd ||
-      (rt.width != kW && rt.width != kX) || rn.width == kBAD) {
+  if (rs.fp_or_simd || rs.kind != kW || rt.fp_or_simd ||
+      (rt.kind != kW && rt.kind != kX) || rn.kind == kBAD) {
     AssemblerError(&ASM, "Invalid exclusive store registers");
     return;
   }
-  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
-  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+  int size = forced_size >= 0 ? forced_size : (rt.kind == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.kind != kW) {
     AssemblerError(&ASM, "Byte/halfword exclusive store requires W register");
     return;
   }
@@ -2784,7 +2532,7 @@ static void AssembleStoreExclusive(AARCH64Assembler* assembler, bool release,
                   (release ? 0x00008000u : 0) |
                   ((uint32_t)rs.num << 16) |
                   ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
-  AssemblerEmitWord(&ASM, ASM.current_section, word);
+  AssemblerEmitWord(&ASM, ASMO.current_section, word);
 }
 
 static void AssembleAcquireRelease(AARCH64Assembler* assembler, bool load,
@@ -2792,20 +2540,20 @@ static void AssembleAcquireRelease(AARCH64Assembler* assembler, bool load,
   Register rt = GetRegister(assembler);
   NeedComma(assembler);
   Register rn = GetAtomicAddress(assembler);
-  if (rt.fp_or_simd || (rt.width != kW && rt.width != kX) ||
-      rn.width == kBAD) {
+  if (rt.fp_or_simd || (rt.kind != kW && rt.kind != kX) ||
+      rn.kind == kBAD) {
     AssemblerError(&ASM, "Invalid acquire/release registers");
     return;
   }
-  int size = forced_size >= 0 ? forced_size : (rt.width == kX ? 3 : 2);
-  if (forced_size >= 0 && forced_size < 2 && rt.width != kW) {
+  int size = forced_size >= 0 ? forced_size : (rt.kind == kX ? 3 : 2);
+  if (forced_size >= 0 && forced_size < 2 && rt.kind != kW) {
     AssemblerError(&ASM, "Byte/halfword acquire/release requires W register");
     return;
   }
   uint32_t base = load ? 0x08dffc00u : 0x089ffc00u;
   uint32_t word = ((uint32_t)size << 30) | base |
                   ((uint32_t)rn.num << 5) | (uint32_t)rt.num;
-  AssemblerEmitWord(&ASM, ASM.current_section, word);
+  AssemblerEmitWord(&ASM, ASMO.current_section, word);
 }
 
 static void Assemble_ldxr(AARCH64Assembler* assembler) {
@@ -2878,17 +2626,17 @@ static void Assemble_dmb(AARCH64Assembler* assembler) {
     }
     LexNextToken(&ASM.lex);
   }
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     0xd50330bfu | ((uint32_t)option << 8));
 }
 
 static void Assemble_clrex(AARCH64Assembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xd5033f5fu);
+  AssemblerEmitWord(&ASM, ASMO.current_section, 0xd5033f5fu);
 }
 
 static void Assemble_mrs(AARCH64Assembler* assembler) {
   Register rt = GetRegister(assembler);
-  if (rt.width != kX || rt.is_sp) {
+  if (rt.kind != kX || rt.is_sp) {
     AssemblerError(&ASM, "MRS destination must be an X register");
     return;
   }
@@ -2901,7 +2649,7 @@ static void Assemble_mrs(AARCH64Assembler* assembler) {
     return;
   }
   LexNextToken(&ASM.lex);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     0xd53bd040u | (uint32_t)rt.num);
 }
 
@@ -2939,7 +2687,7 @@ static void Assemble_ldpsw(AARCH64Assembler* assembler) {
   int imm7 = offset / 4;
   CheckImmediateWidth(assembler, imm7, 7);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       0x69400000 | ((imm7 & 0x7f) << 15) |
       (rt2.num << 10) | (rn.num << 5) | rt.num);
 }
@@ -2970,13 +2718,13 @@ static void AssembleUnscaledLoadStore(AARCH64Assembler* assembler, int is_load,
     AssemblerError(&ASM, "Expected ]");
     return;
   }
-  if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
+  if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
     size = rt.size;
   }
-  int opc = is_signed && is_load ? (rt.width == kX ? 2 : 3) : is_load;
+  int opc = is_signed && is_load ? (rt.kind == kX ? 2 : 3) : is_load;
   CheckImmediateWidth(assembler, imm9, 9);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       (size << 30) | (0x7 << 27) | (rt.fp_or_simd << 26) |
       (opc << 22) | ((imm9 & 0x1ff) << 12) |
       (rn.num << 5) | rt.num);
@@ -3032,7 +2780,7 @@ static void Assemble_prfm(AARCH64Assembler* assembler) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       0xf9800000 | (((offset / 8) & 0xfff) << 10) | (rn.num << 5));
 }
 
@@ -3070,9 +2818,9 @@ static void AssembleFPDataProcessing2(AARCH64Assembler* assembler, int opcode) {
       !CheckRegWidths(assembler, &rd, &rm)) {
     return;
   }
-  int ftype = rd.width == kD;
+  int ftype = rd.kind == kD;
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       0x1e200000 | (ftype << 22) | (opcode << 10) |
       (rm.num << 16) | (rn.num << 5) | rd.num);
 }
@@ -3103,8 +2851,8 @@ static void Assemble_fsqrt(AARCH64Assembler* assembler) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      0x1e21c000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
+      &ASM, ASMO.current_section,
+      0x1e21c000 | ((rd.kind == kD) << 22) | (rn.num << 5) | rd.num);
 }
 
 static void Assemble_fmin(AARCH64Assembler* assembler) {
@@ -3117,7 +2865,7 @@ static void Assemble_fmax(AARCH64Assembler* assembler) {
 
 static void AssembleFPIntBitcast(AARCH64Assembler* assembler, Register* rd,
                                  Register* rn) {
-  bool is_64bit = rd->width == kD || rd->width == kX;
+  bool is_64bit = rd->kind == kD || rd->kind == kX;
   uint32_t base;
   if (rd->fp_or_simd) {
     base = is_64bit ? 0x9e670000 : 0x1e270000;
@@ -3125,7 +2873,7 @@ static void AssembleFPIntBitcast(AARCH64Assembler* assembler, Register* rd,
     base = is_64bit ? 0x9e660000 : 0x1e260000;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       base | (rn->num << 5) | rd->num);
 }
 
@@ -3140,14 +2888,14 @@ static void AssembleFPConvertPrecision(AARCH64Assembler* assembler,
     return;
   }
   if (!rd.fp_or_simd || !rn.fp_or_simd ||
-      rd.width != dest_width || rn.width != src_width) {
+      rd.kind != dest_width || rn.kind != src_width) {
     AssemblerError(&ASM, "Invalid floating point conversion registers");
     return;
   }
   int ftype = src_width == kD;
   int opc = dest_width == kD ? 1 : 0;
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       0x1e224000 | (ftype << 22) | (opc << 15) |
       (rn.num << 5) | rd.num);
 }
@@ -3170,8 +2918,8 @@ static void AssembleFPToInt(AARCH64Assembler* assembler, uint32_t base,
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      base | ((rd.width == kX) << 31) | ((rn.width == kD) << 22) |
+      &ASM, ASMO.current_section,
+      base | ((rd.kind == kX) << 31) | ((rn.kind == kD) << 22) |
       (unsigned_convert << 16) | (rn.num << 5) | rd.num);
 }
 
@@ -3215,8 +2963,8 @@ static void Assemble_fmov(AARCH64Assembler* assembler) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      0x1e204000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
+      &ASM, ASMO.current_section,
+      0x1e204000 | ((rd.kind == kD) << 22) | (rn.num << 5) | rd.num);
 }
 
 static void Assemble_fcmp(AARCH64Assembler* assembler) {
@@ -3230,9 +2978,9 @@ static void Assemble_fcmp(AARCH64Assembler* assembler) {
   if (!CheckRegWidths(assembler, &rn, &rm)) {
     return;
   }
-  int ftype = rn.width == kD;
+  int ftype = rn.kind == kD;
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       0x1e202000 | (ftype << 22) | (rm.num << 16) | (rn.num << 5));
 }
 
@@ -3245,8 +2993,8 @@ static void AssembleIntToFP(AARCH64Assembler* assembler, int unsigned_convert) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      0x1e220000 | ((rn.width == kX) << 31) | ((rd.width == kD) << 22) |
+      &ASM, ASMO.current_section,
+      0x1e220000 | ((rn.kind == kX) << 31) | ((rd.kind == kD) << 22) |
       (unsigned_convert << 16) | (rn.num << 5) | rd.num);
 }
 
@@ -3268,32 +3016,8 @@ static void Assemble_fneg(AARCH64Assembler* assembler) {
     return;
   }
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
-      0x1e214000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
-}
-
-static void Assemble_davefunc(AARCH64Assembler* assembler) {
-  if (!ASM.lex.suppress_preprocessing ||
-      !LexLookingAt(&ASM.lex, TOK(number))) {
-    AssemblerError(&ASM, "davefunc is only valid for generated input");
-    return;
-  }
-  int64_t index_value = ASM.lex.number;
-  LexNextToken(&ASM.lex);
-  if (index_value < 0 || compiler == NULL ||
-      (uint64_t)index_value >= compiler->functions.length) {
-    AssemblerError(&ASM, "Invalid generated function index");
-    return;
-  }
-  AARCH64Generator* generator =
-      compiler->functions.value.p[(size_t)index_value];
-  if (generator == NULL ||
-      generator->emission_index != (size_t)index_value ||
-      !AARCH64CanDirectEncodeFunction(generator)) {
-    AssemblerError(&ASM, "Generated function is not directly encodable");
-    return;
-  }
-  AARCH64DirectEncodeFunction(generator, &ASM);
+      &ASM, ASMO.current_section,
+      0x1e214000 | ((rd.kind == kD) << 22) | (rn.num << 5) | rd.num);
 }
 
 #undef INST
@@ -3353,7 +3077,7 @@ bool AARCH64AssemblerInitGenerated(AARCH64Assembler* assembler, String* infile,
     return false;
   }
   assembler->base.lex.suppress_preprocessing = true;
-  assembler->base.allow_layout_pass_skip = true;
+  assembler->base.object.allow_layout_pass_skip = true;
   return true;
 }
 
@@ -3365,7 +3089,7 @@ bool AARCH64AssemblerInitFromGeneratedString(AARCH64Assembler* assembler,
     return false;
   }
   assembler->base.lex.suppress_preprocessing = true;
-  assembler->base.allow_layout_pass_skip = true;
+  assembler->base.object.allow_layout_pass_skip = true;
   AARCH64AssemblerInitSections(assembler);
   return true;
 }

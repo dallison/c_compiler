@@ -17,6 +17,7 @@
 #include "aarch64_assembler.h"
 #include "aarch64_encode.h"
 #include "aarch64_codegen.h"
+#include "aarch64_object.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
 
@@ -1227,14 +1228,35 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       StringLiteral* lit = CompilerFindStringLiteral(literal->literal_id);
       assert(lit != NULL);
 
-      // Output text directly into assembly output.
-      fprintf(fp, "\t");
-      if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
-        PrintExtendedAsm(fp, (AARCH64AsmInstruction*)inst, lit->value.value);
+      AARCH64ObjectModule* object_module = emitter->object_module;
+      if (object_module != NULL) {
+        if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
+          char* fragment_ptr = NULL;
+          size_t fragment_size = 0;
+          FILE* fragment_stream =
+              open_memstream(&fragment_ptr, &fragment_size);
+          if (fragment_stream == NULL) {
+            return;
+          }
+          PrintExtendedAsm(fragment_stream, (AARCH64AsmInstruction*)inst,
+                           lit->value.value);
+          fclose(fragment_stream);
+          AARCH64AssembleFragment(object_module, "extended_asm", fragment_ptr,
+                                  fragment_size);
+          free(fragment_ptr);
+        } else {
+          AARCH64AssembleFragment(object_module, "inline_asm", lit->value.value,
+                                  lit->value.length);
+        }
       } else {
-        fprintf(fp, "%s", lit->value.value);
+        fprintf(fp, "\t");
+        if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
+          PrintExtendedAsm(fp, (AARCH64AsmInstruction*)inst, lit->value.value);
+        } else {
+          fprintf(fp, "%s", lit->value.value);
+        }
+        fprintf(fp, "\n");
       }
-      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }
@@ -1603,6 +1625,7 @@ void AARCH64EmitterInit(AARCH64Emitter* emitter, AARCH64Generator* g) {
   emitter->spill_region_size = g->register_allocator.max_spilled_region_size;
   emitter->first_spill_offset = 0;
   emitter->current_block = NULL;
+  emitter->object_module = NULL;
 }
 
 AARCH64Emitter* NewAARCH64Emitter(AARCH64Generator* rv) {
@@ -1728,21 +1751,59 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
       strcmp(func_name, "main") != 0) {
     fprintf(fp, "\t.word 0xD503241F  // bti c\n");
   }
-  if (fp != stdout && compiler->direct_object_emission &&
-      emitter->g->emission_index != SIZE_MAX &&
-      AARCH64CanDirectEncodeFunction(emitter->g)) {
-    fprintf(fp, "\tdavefunc %zu\n", emitter->g->emission_index);
-  } else {
-    TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
-    while (inst != NULL) {
-      PrintInstruction(emitter, inst, func_name, fp);
-      inst = TargetNext(inst);
-    }
+  TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
+  while (inst != NULL) {
+    PrintInstruction(emitter, inst, func_name, fp);
+    inst = TargetNext(inst);
   }
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
   AARCH64PrintEHMetadata(emitter, fp, func_name);
+}
+
+void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out,
+                         AARCH64ObjectModule* object_module) {
+  emitter->object_module = object_module;
+  if (object_module == NULL || !AARCH64CanDirectEncodeFunction(emitter->g)) {
+    AARCH64PrintFunction(emitter, text_out);
+    if (object_module != NULL) {
+      AARCH64ObjectModuleEndFunction(object_module);
+    }
+    emitter->object_module = NULL;
+    return;
+  }
+
+  const char* func_name = emitter->g->base.function_name.value;
+  if (emitter->g->base.is_weak) {
+    fprintf(text_out, "\t.weak %s\n", func_name);
+  } else if (emitter->g->base.is_global) {
+    fprintf(text_out, "\t.global %s\n", func_name);
+  } else {
+    fprintf(text_out, "\t.local  %s\n", func_name);
+  }
+  fprintf(text_out, "\t.type %s, @function\n\n", func_name);
+  fprintf(text_out, "%s:\n", func_name);
+  if (compiler->pic && emitter->g->base.is_global &&
+      strcmp(func_name, "main") != 0) {
+    fprintf(text_out, "\t.word 0xD503241F  // bti c\n");
+  }
+  AARCH64ObjectModuleEndFunction(object_module);
+  if (!AARCH64ObjectModuleAppendFunction(object_module, emitter->g)) {
+    emitter->object_module = NULL;
+    return;
+  }
+
+  FILE* suffix = AARCH64ObjectModuleAssemblyStream(object_module);
+  if (suffix == NULL) {
+    emitter->object_module = NULL;
+    return;
+  }
+  fprintf(suffix, ".func_end_%s:\n", func_name);
+  fprintf(suffix, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
+          func_name);
+  AARCH64ObjectModuleEndFunction(object_module);
+  emitter->object_module = NULL;
 }
 
 void AARCH64PrintCXXAdjustorThunks(FILE* fp) {

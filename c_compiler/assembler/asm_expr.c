@@ -17,8 +17,8 @@ static ASTNode* ParseExpression(Assembler* assembler);
 
 static ASTNode* ParseIdentifier(Assembler* assembler) {
   Lex* lex = assembler->syntax.lex;
-  if (assembler->pass == 1 && assembler->parsing_layout_expression) {
-    assembler->requires_layout_pass = true;
+  if (assembler->object.pass == 1 && assembler->parsing_layout_expression) {
+    assembler->object.requires_layout_pass = true;
   }
 
   String name;
@@ -30,7 +30,7 @@ static ASTNode* ParseIdentifier(Assembler* assembler) {
   if (symbol == NULL) {
     // In assembler mode we have symbols but we pre-declare them
     // if they don't exist.
-    symbol = NewAssemblerSymbol(name.value, assembler->current_section,
+    symbol = NewAssemblerSymbol(name.value, assembler->object.current_section,
                                 SYM_TYPE(none), SYM_BIND(local),
                                 AssemblerCurrentAddress(assembler));
     symbol->is_forward_declared = true;

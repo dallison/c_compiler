@@ -13,6 +13,7 @@
 #include "aarch64_assembler.h"
 #include "aarch64_codegen.h"
 #include "aarch64_emitter.h"
+#include "aarch64_object.h"
 #include "aarch64_reg_alloc.h"
 #include "common_emitter.h"
 
@@ -25,12 +26,8 @@ static void* GenerateCode(Generator* gen) {
 static void EmitFunctionAssembly(void* code, FILE* asm_file) {
   AARCH64Emitter emitter;
   AARCH64EmitterInit(&emitter, (AARCH64Generator*)code);
-  AARCH64PrintFunction(&emitter, asm_file);
+  AARCH64EmitFunction(&emitter, asm_file, NULL);
   AARCH64EmitterDestruct(&emitter);
-}
-
-static void PrepareFunctionEmission(void* code, size_t index) {
-  ((AARCH64Generator*)code)->emission_index = index;
 }
 
 static COMPILER_UNUSED void FilePrinter(int index, File* file, void* data) {
@@ -134,13 +131,13 @@ CompilerTarget* NewAARCH64Target() {
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;
-  target->prepare_function_emission = PrepareFunctionEmission;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;
   target->cleanup = Cleanup;
   target->create_asm_file = CreateAssemblyFile;
   target->emit_assembly_preamble = EmitAssemblyPreambleToStream;
   target->assemble_string = AssembleString;
+  target->emit_object_file = AARCH64EmitObjectFile;
   target->emit_static_variable = EmitStaticVariable;
   target->emit_bss_space = EmitBSSVariable;
   target->emit_data_start = EmitDataStart;

@@ -691,6 +691,7 @@ cc_library(
         "c_compiler/aarch64/aarch64_codegen.c",
         "c_compiler/aarch64/aarch64_encode.c",
         "c_compiler/aarch64/aarch64_emitter.c",
+        "c_compiler/aarch64/aarch64_object.c",
         "c_compiler/aarch64/aarch64_optimize.c",
         "c_compiler/aarch64/aarch64_reg_alloc.c",
         "c_compiler/aarch64/aarch64_target.c",
@@ -701,6 +702,7 @@ cc_library(
         "c_compiler/arm/arm_reg_alloc.c",
         "c_compiler/arm/arm_target.c",
         "c_compiler/assembler/asm_expr.c",
+        "c_compiler/assembler/asm_object.c",
         "c_compiler/assembler/assembler.c",
         "c_compiler/frontend/syntax/ast.c",
         "c_compiler/backend/basic_block.c",
@@ -3309,8 +3311,10 @@ sh_test(
     args = [
         "$(rootpath :davecc)",
         "$(rootpath :aarch64asm)",
+        "$(rootpath :aarch64)",
     ],
     data = [
+        ":aarch64",
         ":aarch64asm",
         ":davecc",
     ],

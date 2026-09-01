@@ -228,7 +228,7 @@ bool W65C02AssemblerInit(W65C02Assembler* assembler, String* infile,
     return false;
   }
   // All symbols are absolute value.
-  assembler->base.absolute = true;
+  assembler->base.object.absolute = true;
 
   MapInitForCaseBlindCharPointerKeys(&assembler->instructions);
   MapInitForStringKeys(&assembler->labels);
@@ -307,12 +307,13 @@ void Assemble6502Instruction(Assembler* base, String* word) {
 // Shortcut macro avoid typing assembler->base. everywhere we want to access
 // the base assembler.
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 static AssemblerSymbol* GetOrCreateSymbol(W65C02Assembler* assembler,
                                           const char* symbol_name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(symbol_name, ASM.current_section, SYM_TYPE(func),
+    sym = NewAssemblerSymbol(symbol_name, ASMO.current_section, SYM_TYPE(func),
                              SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -417,7 +418,7 @@ static AssemblerSymbol* DefineLabel(Assembler* base_asm, String* spelling) {
 
   // In pass 2 we will have all the branches and labels resolved, so we
   // only need to do it in pass 1.
-  if (base_asm->pass == 1) {
+  if (base_asm->object.pass == 1) {
     FixupBranches(assembler, label);
   }
   return sym;
@@ -506,17 +507,17 @@ static void NeedCloseParenthesis(W65C02Assembler* assembler) {
 
 static void AssembleSingleByteInstruction(W65C02Assembler* assembler,
                                           int opcode) {
-  AssemblerEmitByte(&assembler->base, assembler->base.current_section, opcode);
+  AssemblerEmitByte(&assembler->base, assembler->base.object.current_section, opcode);
 }
 
 // Emit the binary for a branch,
 static void EmitBranchBinary(W65C02Assembler* assembler, Branch* branch) {
-  AssemblerEmitByte(&ASM, ASM.current_section, branch->opcode);
+  AssemblerEmitByte(&ASM, ASMO.current_section, branch->opcode);
   // NOTE: PC is incremented by 2 before being added to the offset.
   int64_t offset = branch->label == NULL
                        ? 0
                        : branch->label->symbol->value - (branch->address + 2);
-  AssemblerEmitByte(&ASM, ASM.current_section, (int8_t)offset);
+  AssemblerEmitByte(&ASM, ASMO.current_section, (int8_t)offset);
 }
 
 static void AssembleBranch(W65C02Assembler* assembler, int opcode) {
@@ -527,7 +528,7 @@ static void AssembleBranch(W65C02Assembler* assembler, int opcode) {
     String label_name;
     StringInit(&label_name, ASM.lex.spelling.value);
     branch = FindBranch(assembler, branch_address);
-    if (ASM.pass == 1) {
+    if (ASMO.pass == 1) {
       if (branch == NULL) {
         branch =
             NewBranch(opcode, label_name.value, ASM.lex.current_token_location);
@@ -571,13 +572,13 @@ static void AssembleJump(W65C02Assembler* assembler) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     // Allow expression for non-section-relative JSR.
     int64_t operand = (int)AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitByte(&ASM, ASM.current_section, opcode);
-    AssemblerEmitHalf(&ASM, ASM.current_section, operand);
+    AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, operand);
     return;
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -592,7 +593,7 @@ static void AssembleJump(W65C02Assembler* assembler) {
 
   if (!sym->is_constant) {
     AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, R_W65C02_JMP, ASM.current_section,
+      NewAssemblerRelocation(sym, R_W65C02_JMP, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), addend);
     AssemblerAddRelocation(&ASM, reloc);
   }
@@ -602,11 +603,11 @@ static void AssembleJump(W65C02Assembler* assembler) {
     NeedIndexReg(assembler, "X");
   }
 
-  AssemblerEmitByte(&ASM, ASM.current_section, opcode);
+  AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
   if (sym->is_constant) {
-    AssemblerEmitHalf(&ASM, ASM.current_section, sym->value);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, sym->value);
   } else {
-    AssemblerEmitHalf(&ASM, ASM.current_section, 0);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, 0);
   }
   if (opcode == W65C02_OPCODE(jmpr)) {
     if (!LexMatch(&ASM.lex, TOK(rparen))) {
@@ -667,7 +668,7 @@ static int AssembleAbsoluteAddress(W65C02Assembler* assembler, int offset) {
     addend = (int)AssemblerEvaluateExpression(&ASM);
   }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-      sym, reloc_type, ASM.current_section,
+      sym, reloc_type, ASMO.current_section,
       (int32_t)AssemblerCurrentAddress(&ASM) + offset, addend);
   AssemblerAddRelocation(&ASM, reloc);
 error:
@@ -680,7 +681,7 @@ static int AbsoluteSymbolOrExpression(W65C02Assembler* assembler, bool* is_symbo
   int value = 0;
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -707,7 +708,7 @@ static int AbsoluteSymbolOrExpression(W65C02Assembler* assembler, bool* is_symbo
   if (!sym->is_constant) {
     sym->exported = true;  // Needs to be exported so we can relocate to it.
     AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, R_W65C02_JMP, ASM.current_section,
+      NewAssemblerRelocation(sym, R_W65C02_JMP, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), expr_value);
     AssemblerAddRelocation(&ASM, reloc);
     *is_symbol = true;
@@ -969,7 +970,7 @@ static void AssembleMemoryInstruction(W65C02Assembler* assembler, int opcode) {
   if (!override_opcode) {
     opcode |= bbb << 2;
   }
-  AssemblerEmitByte(&ASM, ASM.current_section, opcode);
+  AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
   switch (operand_size) {
     default:
       assert(false);
@@ -978,12 +979,12 @@ static void AssembleMemoryInstruction(W65C02Assembler* assembler, int opcode) {
       break;
     case 2:
       // Emit low byte first.
-      AssemblerEmitByte(&ASM, ASM.current_section, operand);
+      AssemblerEmitByte(&ASM, ASMO.current_section, operand);
       // Move to high byte.
       operand >>= 8;
     // Fall through.
     case 1:
-      AssemblerEmitByte(&ASM, ASM.current_section, operand);
+      AssemblerEmitByte(&ASM, ASMO.current_section, operand);
       break;
   }
 }
@@ -1003,9 +1004,9 @@ static void Assemble_brk(W65C02Assembler* assembler) {
     value = AssemblerEvaluateExpression(&ASM);
     value_present = true;
   }
-  AssemblerEmitByte(&ASM, ASM.current_section, W65C02_OPCODE(brk));
+  AssemblerEmitByte(&ASM, ASMO.current_section, W65C02_OPCODE(brk));
   if (value_present) {
-    AssemblerEmitByte(&ASM, ASM.current_section, value);
+    AssemblerEmitByte(&ASM, ASMO.current_section, value);
   }
 }
 
@@ -1056,19 +1057,19 @@ static void Assemble_jsr(W65C02Assembler* assembler) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     // Allow expression for non-section-relative JSR.
     int64_t operand = (int)AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitByte(&ASM, ASM.current_section, opcode);
-    AssemblerEmitHalf(&ASM, ASM.current_section, operand);
+    AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, operand);
     return;
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
   if (sym->is_constant) {
-    AssemblerEmitByte(&ASM, ASM.current_section, opcode);
-    AssemblerEmitHalf(&ASM, ASM.current_section, sym->value);
+    AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, sym->value);
     return;
   }
   sym->exported = true;  // Needs to be exported so we can relocate to it.
@@ -1081,10 +1082,10 @@ static void Assemble_jsr(W65C02Assembler* assembler) {
   }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
       sym, R_W65C02_JSR,
-      ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), addend);
+      ASMO.current_section, (int32_t)AssemblerCurrentAddress(&ASM), addend);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitByte(&ASM, ASM.current_section, opcode);
-  AssemblerEmitHalf(&ASM, ASM.current_section, 0);
+  AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
+  AssemblerEmitHalf(&ASM, ASMO.current_section, 0);
 }
 
 // STZ has 4 addressing modes:
@@ -1133,11 +1134,11 @@ static void Assemble_stz(W65C02Assembler* assembler) {
       operand_size = 2;
     }
   }
-  AssemblerEmitByte(&ASM, ASM.current_section, opcode);
+  AssemblerEmitByte(&ASM, ASMO.current_section, opcode);
   if (operand_size == 1) {
-    AssemblerEmitByte(&ASM, ASM.current_section, operand);
+    AssemblerEmitByte(&ASM, ASMO.current_section, operand);
   } else {
-    AssemblerEmitHalf(&ASM, ASM.current_section, operand);
+    AssemblerEmitHalf(&ASM, ASMO.current_section, operand);
   }
 }
 

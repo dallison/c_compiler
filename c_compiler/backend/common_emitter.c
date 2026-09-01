@@ -10,6 +10,8 @@
 #include "compiler.h"
 #include "source.h"
 #include "symbol.h"
+#include "debug.h"
+#include "type_compare.h"
 #include <string.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -416,4 +418,84 @@ void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp) {
   }
   fprintf(fp, "\n");
   free(sorted);
+}
+
+bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file) {
+  if (compiler->target->emit_cxx_thunks != NULL) {
+    compiler->target->emit_cxx_thunks(asm_file);
+  }
+  compiler->target->emit_data_start(asm_file);
+
+  bool contains_tls_vars = false;
+
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (!var->is_tls) {
+      compiler->target->emit_static_variable(var, asm_file);
+    }
+    contains_tls_vars |= var->is_tls;
+  }
+
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+    UninitializedStaticVariable* var =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (!var->is_tls &&
+        (var->symbol->flags.is_tentative_decl || var->is_local ||
+         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
+      compiler->target->emit_bss_space(var, asm_file);
+    }
+    contains_tls_vars |= var->is_tls;
+  }
+
+  compiler->target->emit_literals_start(asm_file);
+
+  for (size_t i = 0; i < compiler->literals.length; i++) {
+    compiler->target->emit_literal(compiler->literals.value.p[i], asm_file);
+  }
+
+  if (contains_tls_vars) {
+    compiler->target->emit_tdata_start(asm_file);
+    for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+      InitializedStaticVariable* var =
+          compiler->initialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        compiler->target->emit_tls_variable(var, asm_file);
+      }
+    }
+
+    compiler->target->emit_tbss_start(asm_file);
+
+    for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
+         i++) {
+      UninitializedStaticVariable* var =
+          compiler->uninitialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        compiler->target->emit_tbss_space(var, asm_file);
+      }
+    }
+  }
+
+  compiler->target->emit_debug(asm_file);
+  if (compiler->debug_output) {
+    compiler->debug_builder.fp = asm_file;
+    DebugBuilderEmitDebugInfo(&compiler->debug_builder);
+    DebugBuilderEmitAbbreviations(&compiler->debug_builder);
+  }
+
+  EmitInitFiniArrayEntries(CXXInitArrayFunctionsVector(), false, asm_file);
+  EmitInitFiniArrayEntries(CXXFiniArrayFunctionsVector(), true, asm_file);
+  return true;
+}
+
+bool EmitTranslationUnitContents(struct Compiler* compiler, FILE* asm_file) {
+  for (size_t i = 0; i < compiler->functions.length; i++) {
+    if (compiler->print_back_end) {
+      compiler->target->emit_function_assembly(compiler->functions.value.p[i],
+                                               stdout);
+    }
+    compiler->target->emit_function_assembly(compiler->functions.value.p[i],
+                                             asm_file);
+  }
+  return EmitTranslationUnitRemainder(compiler, asm_file);
 }

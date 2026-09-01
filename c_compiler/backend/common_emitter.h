@@ -34,4 +34,7 @@ void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
 void CollectInitFiniArrayFunctions(Vector* functions, bool is_fini,
                                    Vector* out);
 
+bool EmitTranslationUnitContents(struct Compiler* compiler, FILE* asm_file);
+bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file);
+
 #endif /* common_emitter_h */

@@ -559,6 +559,7 @@ static int ExtractRegNumber(String* reg_name, size_t i) {
 // Shortcut macro avoid typing assembler->base. everywhere we want to access
 // the base assembler.
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 static bool RegNumber(String* reg_name, int* reg_num,
                       RVRegisterType* reg_type) {
@@ -716,7 +717,7 @@ static void AssembleAtomic(RVAssembler* assembler, int funct5, int width,
   }
   int funct7 = (funct5 << 2) | (aq ? 2 : 0) | (rl ? 1 : 0);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       RTypeInstruction(RV_OPCODE(amo), rd, rs1, rs2, width, funct7));
 }
 
@@ -792,7 +793,7 @@ static AssemblerSymbol* GetOrCreateSymbol(RVAssembler* assembler,
                                           const char* symbol_name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(symbol_name, ASM.current_section, SYM_TYPE(func),
+    sym = NewAssemblerSymbol(symbol_name, ASMO.current_section, SYM_TYPE(func),
                              SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -847,16 +848,16 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
   // printf("LoadImmediate %" PRId64 ", bit width: %d\n", immed, bit_width);
   if (bit_width < 12) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, 0, RV_F3(addi), (int)immed));
 
   } else if ((immed >= 0 && bit_width < 31) ||
              (immed < 0 && bit_width <= 32)) {
     int64_t hi20 = (immed + 0x800) >> 12;
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       UTypeInstruction(RV_OPCODE(lui), reg, (int)hi20));
     if ((immed & 0xfff) != 0) {
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                         ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi),
                                        (int)immed & 0xfff));
     }
@@ -866,16 +867,16 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
       top_group--;
     }
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, 0, RV_F3(addi),
                          (int)((value >> (top_group * 11)) & 0x7ff)));
     for (int group = top_group - 1; group >= 0; group--) {
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(slli), 11));
       int chunk = (int)((value >> (group * 11)) & 0x7ff);
       if (chunk != 0) {
-        AssemblerEmitWord(&ASM, ASM.current_section,
+        AssemblerEmitWord(&ASM, ASMO.current_section,
                           ITypeInstruction(RV_OPCODE(op_imm), reg, reg,
                                            RV_F3(ori), chunk));
       }
@@ -916,13 +917,13 @@ static COMPILER_UNUSED bool AssemblerFunction(RVAssembler* assembler, String* fu
 static void AssembleALUReg(RVAssembler* assembler, int opcode, int funct3,
                            int funct7, int* regs) {
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       RTypeInstruction(opcode, regs[0], regs[1], regs[2], funct3, funct7));
 }
 
 static void AssembleALUImm(RVAssembler* assembler, int opcode, int funct3,
                            int immed, int* regs) {
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     ITypeInstruction(opcode, regs[0], regs[1], funct3, immed));
 }
 
@@ -946,11 +947,11 @@ static void AssembleLoadStore(RVAssembler* assembler, bool isload, int funct3,
   CheckLoadStoreOffset(assembler, offset);
   if (isload) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(load), regs[0], regs[1], funct3, offset));
   } else {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         STypeInstruction(RV_OPCODE(store), regs[1], regs[0], funct3, offset));
   }
 }
@@ -972,17 +973,17 @@ static void AssembleLoadStoreSymbolOp(RVAssembler* assembler, bool isload,
     reloc_type = pcrel ? R_RISCV_PCREL_LO12_S : R_RISCV_LO12_S;
   }
   AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
+      NewAssemblerRelocation(sym, reloc_type, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   if (isload) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(load_opcode, regs[0], regs[1], funct3, 0));
   } else {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         STypeInstruction(store_opcode, regs[1], regs[0], funct3, 0));
   }
 }
@@ -1150,7 +1151,7 @@ static void Assemble_fmv_d(RVAssembler* assembler) {
 }
 
 static void Assemble_ret(RVAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     ITypeInstruction(RV_OPCODE(jalr), 0, 1, RV_F3(jalr), 0));
 }
 
@@ -1159,11 +1160,11 @@ static void AssembleJType(RVAssembler* assembler, int opcode, int reg,
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name->value);
 
   AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
+      NewAssemblerRelocation(sym, reloc_type, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     JTypeInstruction(opcode, reg, 0));
 }
 
@@ -1172,16 +1173,16 @@ static void AssembleUType(RVAssembler* assembler, int opcode, int reg,
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name->value);
 
   int reloc_type = rel_reloc_type;
-  if (assembler->base.pic &&
+  if (assembler->base.object.pic &&
       (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
     reloc_type = pic_reloc_type;
   }
   AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
+      NewAssemblerRelocation(sym, reloc_type, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     UTypeInstruction(opcode, reg, 0));
 }
 
@@ -1218,7 +1219,7 @@ static void Assemble_lui(RVAssembler* assembler) {
   } else {
     // Expression.
     int64_t value = AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       UTypeInstruction(RV_OPCODE(lui), reg, (int32_t)value));
   }
 }
@@ -1255,7 +1256,7 @@ static void Assemble_auipc(RVAssembler* assembler) {
     } else {
       int64_t value = AssemblerEvaluateExpression(&ASM);
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           UTypeInstruction(RV_OPCODE(auipc), reg, (int32_t)value));
       return;
     }
@@ -1304,7 +1305,7 @@ static void Assemble_j(RVAssembler* assembler) {
     // j offset   -> jal x0, offset
     int64_t addr = sym->value;
     int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       JTypeInstruction(RV_OPCODE(jal), 0, offset));
   } else {
     // j symbol.
@@ -1313,12 +1314,12 @@ static void Assemble_j(RVAssembler* assembler) {
     // R_RISCV_JAL relocation.
     int reloc_type = R_RISCV_JAL;
     if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
-        assembler->base.pic) {
+        assembler->base.object.pic) {
       reloc_type = R_RISCV_CALL_PLT;
     }
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         sym, reloc_type,
-        ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
+        ASMO.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     if (reloc_type == R_RISCV_CALL_PLT) {
       // The general instruction sequence for a jump is:
@@ -1328,14 +1329,14 @@ static void Assemble_j(RVAssembler* assembler) {
       // But if the address is within range of a jal instruction immediate
       // the linker can relax the instrucitons to a jal and a nop:
       // jal t0, addr
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                         UTypeInstruction(RV_OPCODE(auipc), RV_INT_TEMP_START_1, 0));
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                         ITypeInstruction(RV_OPCODE(jalr), 0, RV_INT_TEMP_START_1,
                                          RV_F3(jalr), 0));
     } else {
       // Non-PIC.
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                       JTypeInstruction(RV_OPCODE(jal), 0, 0));
     }
   }
@@ -1344,7 +1345,7 @@ static void Assemble_j(RVAssembler* assembler) {
 
 static void Assemble_jr(RVAssembler* assembler) {
   int reg = Register(assembler,  kRVRegTypeInt, "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     ITypeInstruction(RV_OPCODE(jalr), 0, reg,
                                      RV_F3(jalr), 0));
 }
@@ -1368,18 +1369,18 @@ static void Assemble_call(RVAssembler* assembler) {
   // Use a PLT relocation for interposable PIC calls.
   int reloc_type = R_RISCV_CALL;
   if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
-      assembler->base.pic) {
+      assembler->base.object.pic) {
     reloc_type = R_RISCV_CALL_PLT;
   }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
       sym, reloc_type,
-      ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
+      ASMO.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   // Call is followed by R_RISC_V_RELAX relocation to allow the linker to
   // relax the call instruction sequence to a jal instruction if the
   // address is within range.
-  reloc = NewAssemblerRelocation(sym, R_RISCV_RELAX, ASM.current_section,
+  reloc = NewAssemblerRelocation(sym, R_RISCV_RELAX, ASMO.current_section,
                                  (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
@@ -1390,9 +1391,9 @@ static void Assemble_call(RVAssembler* assembler) {
   // But if the address is within range of a jal instruction immediate
   // the linker can relax the instrucitons to a jal and a nop:
   // jal ra, addr
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     UTypeInstruction(RV_OPCODE(auipc), RV_RET_REG, 0));
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     ITypeInstruction(RV_OPCODE(jalr), RV_RET_REG, RV_RET_REG,
                                      RV_F3(jalr), 0));
   StringDestruct(&symbol_name);
@@ -1406,7 +1407,7 @@ static void Assemble_jalr(RVAssembler* assembler) {
       return;
     }
     int64_t immed = AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       ITypeInstruction(RV_OPCODE(jalr), regs[0], regs[1],
                                        RV_F3(jalr), (int32_t)immed));
   }
@@ -1423,19 +1424,19 @@ static void AssembleConditionalBranch(RVAssembler* assembler, int funct3) {
     int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
     if (offset >= -4096 && offset <= 4094) {
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           BTypeInstruction(RV_OPCODE(branch), regs[0], regs[1], funct3,
                            offset));
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           ITypeInstruction(RV_OPCODE(op_imm), 0, 0, RV_F3(addi), 0));
     } else {
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           BTypeInstruction(RV_OPCODE(branch), regs[0], regs[1], funct3 ^ 1,
                            8));
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           JTypeInstruction(RV_OPCODE(jal), 0, offset - 4));
     }
   }
@@ -1487,19 +1488,19 @@ ASSEMBLE_INT_ALU_REG(or);
 ASSEMBLE_INT_ALU_REG(and);
 
 static void Assemble_fence(RVAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, 0x0ff0000f);
+  AssemblerEmitWord(&ASM, ASMO.current_section, 0x0ff0000f);
 }
 
 static void Assemble_fence_i(RVAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, 0x0000100f);
+  AssemblerEmitWord(&ASM, ASMO.current_section, 0x0000100f);
 }
 
 static void Assemble_ecall(RVAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, RV_OPCODE(system));
+  AssemblerEmitWord(&ASM, ASMO.current_section, RV_OPCODE(system));
 }
 
 static void Assemble_ebreak(RVAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, RV_OPCODE(system) | (1 << 20));
+  AssemblerEmitWord(&ASM, ASMO.current_section, RV_OPCODE(system) | (1 << 20));
 }
 
 UNDEFINED_INST(csrrw);
@@ -1544,10 +1545,10 @@ static void AssembleFpLoadStore(RVAssembler* assembler, bool isload, int funct3,
                                 int offset, int* regs) {
   if (isload) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(load_fp), regs[0], regs[1], funct3, offset));
   } else {
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       STypeInstruction(RV_OPCODE(store_fp), regs[1], regs[0],
                                        funct3, offset));
   }
@@ -1866,11 +1867,11 @@ static void Assemble_li(RVAssembler* assembler) {
     //   Output relocation R_RISCV_LO12_I
     //     addi reg, reg, 0
     AssemblerRelocation* reloc =
-        NewAssemblerRelocation(sym, R_RISCV_LO12_I, ASM.current_section,
+        NewAssemblerRelocation(sym, R_RISCV_LO12_I, ASMO.current_section,
                                (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi), 0));
 
     StringDestruct(&symbol_name);
@@ -1910,27 +1911,27 @@ static void Assemble_la(RVAssembler* assembler) {
 
     AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
 
-    if (assembler->base.pic &&
+    if (assembler->base.object.pic &&
         (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
       // Position independent, Load the address from the GOT.
       //   Output relocation R_RISCV_PCREL_LO12_I
       //     ld reg, 0(reg)
       AssemblerRelocation* reloc = NewAssemblerRelocation(
-          label, R_RISCV_PCREL_LO12_I, ASM.current_section,
+          label, R_RISCV_PCREL_LO12_I, ASMO.current_section,
           (int32_t)AssemblerCurrentAddress(&ASM), 0);
       AssemblerAddRelocation(&ASM, reloc);
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           ITypeInstruction(RV_OPCODE(load), reg, reg, RV_F3(ld), 0));
     } else {
       //   Output relocation R_RISCV_PCREL_LO12_I
       //     addi reg, reg, 0
       AssemblerRelocation* reloc = NewAssemblerRelocation(
-          label, R_RISCV_PCREL_LO12_I, ASM.current_section,
+          label, R_RISCV_PCREL_LO12_I, ASMO.current_section,
           (int32_t)AssemblerCurrentAddress(&ASM), 0);
       AssemblerAddRelocation(&ASM, reloc);
       AssemblerEmitWord(
-          &ASM, ASM.current_section,
+          &ASM, ASMO.current_section,
           ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi), 0));
     }
 
@@ -1971,11 +1972,11 @@ static void Assemble_lla(RVAssembler* assembler) {
     //   Output relocation R_RISCV_PCREL_LO12_I
     //     addi reg, reg, 0
     AssemblerRelocation* reloc = NewAssemblerRelocation(
-        label, R_RISCV_PCREL_LO12_I, ASM.current_section,
+        label, R_RISCV_PCREL_LO12_I, ASMO.current_section,
         (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi), 0));
     
     StringDestruct(&symbol_name);
@@ -2001,25 +2002,25 @@ static void Assemble_tprel(RVAssembler* assembler) {
 
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_HI20,
-                                   ASM.current_section,
+                                   ASMO.current_section,
                                    (int32_t)AssemblerCurrentAddress(&ASM), 0));
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     UTypeInstruction(RV_OPCODE(lui), rd, 0));
 
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_ADD,
-                                   ASM.current_section,
+                                   ASMO.current_section,
                                    (int32_t)AssemblerCurrentAddress(&ASM), 0));
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       RTypeInstruction(RV_OPCODE(op), rd, rd, 4, RV_F3(add), RV_F7(add)));
 
   AssemblerAddRelocation(
       &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_LO12_I,
-                                   ASM.current_section,
+                                   ASMO.current_section,
                                    (int32_t)AssemblerCurrentAddress(&ASM), 0));
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       ITypeInstruction(RV_OPCODE(op_imm), rd, rd, RV_F3(addi), 0));
   StringDestruct(&symbol_name);
 }
@@ -2079,17 +2080,17 @@ static void AssembleConditionalBranchZero(RVAssembler* assembler, int funct3) {
   int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
   if (offset >= -4096 && offset <= 4094) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         BTypeInstruction(RV_OPCODE(branch), reg, 0, funct3, offset));
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), 0, 0, RV_F3(addi), 0));
   } else {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         BTypeInstruction(RV_OPCODE(branch), reg, 0, funct3 ^ 1, 8));
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         JTypeInstruction(RV_OPCODE(jal), 0, offset - 4));
   }
 }

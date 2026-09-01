@@ -51,6 +51,7 @@ typedef struct {
   BitSet* set;
   size_t word_offset;
   size_t bit_offset;
+  uint64_t remaining;
 } BitSetIterator;
 
 void BitSetIteratorStart(BitSetIterator* it, BitSet* set);

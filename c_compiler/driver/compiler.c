@@ -41,6 +41,7 @@
 #include "risc_v_target.h"
 #include "aarch64_target.h"
 #include "arm_target.h"
+#include "common_emitter.h"
 #include "x86_64_target.h"
 #include "wasm32_target.h"
 
@@ -3354,7 +3355,6 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   StringSet(compiler->target_name, target->canonical_name);
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
-  compiler->direct_object_emission = false;
   ParseStandardOption(compiler, options);
   compiler->constexpr_eval_mode = kConstexprEvalAuto;
   String* constexpr_eval = OptionStringValue(kOptionConstexprEval, options);
@@ -3827,8 +3827,8 @@ bool CompilerInitForAssembler(const char* filename, Vector* options) {
 
 // Emit the assembly language into the filename given, returning true
 // if it worked.
-static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename,
-                             String* generated_output) {
+static bool EmitCompilerAssemblyFile(Compiler* compiler, String* asm_filename,
+                                     String* generated_output) {
   char* generated_buffer = NULL;
   size_t generated_size = 0;
   FILE* asm_file;
@@ -3841,99 +3841,19 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename,
     asm_file =
         compiler->target->create_asm_file(&compiler->infile, asm_filename);
   }
-  
+
   if (asm_file == NULL) {
     fprintf(stderr, "Unable to open assembler file %s\n",
             asm_filename->value);
     return false;
   }
-  for (size_t i = 0; i < compiler->functions.length; i++) {
-    if (compiler->target->prepare_function_emission != NULL) {
-      compiler->target->prepare_function_emission(
-          compiler->functions.value.p[i], i);
+
+  if (!EmitTranslationUnitContents(compiler, asm_file)) {
+    if (asm_file != stdout) {
+      fclose(asm_file);
     }
-    // Debug, print to stdout.
-    if (compiler->print_back_end) {
-      compiler->target->emit_function_assembly(compiler->functions.value.p[i],
-                                               stdout);
-    }
-
-    compiler->target->emit_function_assembly(compiler->functions.value.p[i],
-                                             asm_file);
+    return false;
   }
-  if (compiler->target->emit_cxx_thunks != NULL) {
-    compiler->target->emit_cxx_thunks(asm_file);
-  }
-  // Now emit the data to the assembly file.
-  compiler->target->emit_data_start(asm_file);
-
-  bool contains_tls_vars = false;
-
-  // Initialized variables.
-  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
-    InitializedStaticVariable* var =
-        compiler->initialized_static_variables.value.p[i];
-    if (!var->is_tls) {
-      compiler->target->emit_static_variable(var, asm_file);
-    }
-    contains_tls_vars |= var->is_tls;
-  }
-
-  // Uninitialized variables.
-  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
-    UninitializedStaticVariable* var =
-        compiler->uninitialized_static_variables.value.p[i];
-    if (!var->is_tls &&
-        (var->symbol->flags.is_tentative_decl || var->is_local ||
-         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
-      compiler->target->emit_bss_space(var, asm_file);
-    }
-    contains_tls_vars |= var->is_tls;
-  }
-
-  // Emit string literals start.
-  compiler->target->emit_literals_start(asm_file);
-
-  // Now the string literals.
-  for (size_t i = 0; i < compiler->literals.length; i++) {
-    compiler->target->emit_literal(compiler->literals.value.p[i],
-                                          asm_file);
-  }
-
-  // Emit TLS sections if there is any TLS data.
-  if (contains_tls_vars) {
-    // .tdata section.
-    compiler->target->emit_tdata_start(asm_file);
-    for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
-      InitializedStaticVariable* var =
-          compiler->initialized_static_variables.value.p[i];
-      if (var->is_tls) {
-        compiler->target->emit_tls_variable(var, asm_file);
-      }
-    }
-
-    // .tbss section.
-    compiler->target->emit_tbss_start(asm_file);
-
-    for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
-         i++) {
-      UninitializedStaticVariable* var =
-          compiler->uninitialized_static_variables.value.p[i];
-      if (var->is_tls) {
-        compiler->target->emit_tbss_space(var, asm_file);
-      }
-    }
-  }
-
-  compiler->target->emit_debug(asm_file);
-  if (compiler->debug_output) {
-    compiler->debug_builder.fp = asm_file;
-    DebugBuilderEmitDebugInfo(&compiler->debug_builder);
-    DebugBuilderEmitAbbreviations(&compiler->debug_builder);
-  }
-
-  EmitInitFiniArrayEntries(CXXInitArrayFunctionsVector(), false, asm_file);
-  EmitInitFiniArrayEntries(CXXFiniArrayFunctionsVector(), true, asm_file);
 
   if (asm_file != stdout) {
     fclose(asm_file);
@@ -4186,8 +4106,12 @@ static String* Compile(Compiler* compiler, Vector* options) {
   }
   PruneUnreferencedCXXMetadata();
   PruneUnreferencedInlineVariables();
-  // Emit the assembly language into a file ending in .s.
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);
+  if (!output_asm_only && !compiler->keep_asm_file &&
+      compiler->target->emit_object_file != NULL) {
+    return compiler->target->emit_object_file(compiler, options);
+  }
+
   String asm_filename = {0};
   String* output_filename = OptionStringValue(kOptionOutputFile, options);
   if (output_asm_only && output_filename != NULL) {
@@ -4200,10 +4124,8 @@ static String* Compile(Compiler* compiler, Vector* options) {
       !output_asm_only && !compiler->keep_asm_file &&
       compiler->target->emit_assembly_preamble != NULL &&
       compiler->target->assemble_string != NULL;
-  compiler->direct_object_emission =
-      use_in_memory_assembly && !compiler->debug_output;
   String generated_assembly = {0};
-  bool ok = EmitAssemblyFile(
+  bool ok = EmitCompilerAssemblyFile(
       compiler, &asm_filename,
       use_in_memory_assembly ? &generated_assembly : NULL);
   if (!ok) {

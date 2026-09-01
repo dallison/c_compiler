@@ -14,6 +14,8 @@
 #include "aarch64_reg_alloc.h"
 #include "map.h"
 
+typedef struct AARCH64ObjectModule AARCH64ObjectModule;
+
 typedef struct {
   AARCH64Generator* g;
   AARCH64RegisterAllocator* regs;
@@ -21,6 +23,7 @@ typedef struct {
   int spill_region_size;
   int first_spill_offset;
   void* current_block;
+  AARCH64ObjectModule* object_module;
 } AARCH64Emitter;
 
 void AARCH64EmitterInit(AARCH64Emitter* emitter, AARCH64Generator* AARCH64);
@@ -29,6 +32,8 @@ void AARCH64EmitterDestruct(AARCH64Emitter* emitter);
 void AARCH64EmitterDelete(AARCH64Emitter* emitter);
 
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp);
+void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out,
+                         AARCH64ObjectModule* object_module);
 void AARCH64PrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* aarch64_emitter_h */

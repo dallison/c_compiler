@@ -17,142 +17,51 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include "asm_object.h"
 #include "buffer.h"
 #include "dstring.h"
-#include "dwarf.h"
-#include "elf.h"
-#include "elf_writer.h"
 #include "hashtable.h"
 #include "lex.h"
 #include "map.h"
 #include "preprocessor.h"
 #include "syntax.h"
 #include "binary_tree.h"
-
-typedef struct {
-  int32_t inst_address;
-  void* label;
-} AssemblerFixup;
-
-#define SYM_TYPE(type) kAssemblerSymbolType_##type
-typedef enum {
-  SYM_TYPE(none),
-  SYM_TYPE(func),
-  SYM_TYPE(object),
-  SYM_TYPE(common),
-  SYM_TYPE(tls),
-} AssemblerSymbolType;
-
-#define SYM_BIND(b) kAssemblerSymbolBinding_##b
-typedef enum {
-  SYM_BIND(global),
-  SYM_BIND(local),
-  SYM_BIND(weak),
-} AssemblerSymbolBinding;
-
-typedef struct AssemblerSymbol {
-  BinaryTreeNode header;
-  String name;
-  AssemblerSymbolType type;
-  AssemblerSymbolBinding binding;
-  int64_t value;
-  int32_t size;
-  bool defined;
-  int32_t section;  // Section number.
-  int32_t index;    // Symbol index.
-  bool exported;    // Symbol is to be exported to object file.
-  bool is_label;    // Is a section-local label.
-  bool is_forward_declared;
-  int32_t alignment;
-  bool is_constant;   // Not subject to relocation.
-} AssemblerSymbol;
-
-AssemblerSymbol* NewAssemblerSymbol(const char* name, int32_t section,
-                                    AssemblerSymbolType type,
-                                    AssemblerSymbolBinding binding,
-                                    int64_t value);
-void AssemblerSymbolDelete(AssemblerSymbol* sym);
-
-// A section is a named data buffer.  The code and data are in separate
-// sections.
-typedef struct AssemblerSection {
-  String* name;
-  ELFWriterSectionContents contents;
-  uint64_t address;
-  int32_t flags;
-  int32_t type;
-  int32_t alignment;  // Alignment for section (power of 2).
-} AssemblerSection;
-
-// This takes ownership of the name string.
-AssemblerSection* NewAssemblerSection(String* name, int32_t type, int32_t flags,
-                                      int32_t alignment);
-void AssemblerSectionDestruct(AssemblerSection* section);
-void AssemblerSectionDelete(AssemblerSection* section);
-void AssemblerSectionAlign(AssemblerSection* section, int alignment);
-
-typedef struct AssemblerRelocation {
-  AssemblerSymbol* symbol;  // Symbol to use to relocate.
-  int32_t type;             // Relocation type.
-  int32_t section;          // Section index that it is applied to.
-  int32_t offset;           // Offset into section.
-  int32_t addend;           // Value to add to symbol.
-} AssemblerRelocation;
-
-AssemblerRelocation* NewAssemblerRelocation(AssemblerSymbol* sym, int32_t type,
-                                            int32_t section, int32_t offset, int32_t addend);
-void AssemblerRelocationDestruct(AssemblerRelocation* reloc);
-void AssemblerRelocationDelete(AssemblerRelocation* reloc);
-
-// Types for relocations set by the target architecture.  They are used
-// as indexes into an array of integers containing the actual relocation
-// values, set by the architecture.
-typedef enum {
-  kRelocSet16,
-  kRelocSet32,
-  kRelocSet64,
-  kRelocAdd16,
-  kRelocAdd32,
-  kRelocAdd64,
-  kRelocSub16,
-  kRelocSub32,
-  kRelocSub64,
-  kNumRelocTypes,
-} RelocationType;
+#include "vector.h"
 
 typedef struct Assembler {
+  AsmObject object;
   Preprocessor preprocessor;
-  Lex lex;                    // Lexical analyzer.
-  Syntax syntax;              // Syntax analyzer.
-  String filename;            // Input filename.
-  FILE* out;                  // Output file (open for write).
-  Map directives;             // Assembler directives.
-  Vector sections;            // Vector of AssemblerSection*.
-  Vector relocations;         // Vector of AssemberRelocation*
-  HashTable symbol_table;     // Symbol table.
-  // Symbols that are created but not owned by the symbol table (pass-2 inserts,
-  // which the table rejects, and forward-declared symbols referenced in
-  // expressions).  Tracked here so they are freed at destruct rather than
-  // leaked.
-  Vector orphan_symbols;
-  int pass;                   // Pass number (1 or 2).
-  int num_errors;             // Number of errors.
-  bool allow_layout_pass_skip;
-  bool requires_layout_pass;
+  Lex lex;
+  Syntax syntax;
+  FILE* out;
+  Map directives;
+  int num_errors;
   bool parsing_layout_expression;
-  int32_t current_section;    // Current section index.
-  uint16_t elf_machine_type;  // ELF machine.
-  uint16_t elf_flags;         // ELF flags.
-  bool is_64_bit;             // 64-bit (ELF64) vs 32-bit (ELF32) output.
-  bool is_little_endian;      // Little vs big endian output.
-  int* reloc_types;           // Relocation types.
-  bool pic;                   // Position Independent Code.
-  Dwarf dwarf;                // Debugging information.
-  bool absolute;              // All symbols are absolute.
-  // Function to define a label.  This can be overridden by architecture
-  // specific assemblers to handle branches and labels.
   AssemblerSymbol* (*define_label)(struct Assembler*, String*);
 } Assembler;
+
+typedef void (*AssemblerRecordedEmitter)(Assembler* assembler, void* context);
+
+typedef enum {
+  kAssemblerRecordedText,
+  kAssemblerRecordedEmitter,
+} AssemblerRecordedInputKind;
+
+typedef struct {
+  AssemblerRecordedInputKind kind;
+  const char* name;
+  union {
+    String* text;
+    struct {
+      AssemblerRecordedEmitter emit;
+      void* context;
+    } emitter;
+  } value;
+} AssemblerRecordedInput;
+
+static inline AsmObject* AssemblerGetObject(Assembler* assembler) {
+  return &assembler->object;
+}
 
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
                    uint16_t elf_flags, int* reloc_types, String* infile,
@@ -164,9 +73,6 @@ bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
 void AssemblerDestruct(Assembler* assembler);
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name);
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym);
-
-// Track a symbol that is not owned by the symbol table so it is freed at
-// destruct (e.g. forward-declared symbols referenced only in expressions).
 void AssemblerTrackOrphanSymbol(Assembler* assembler, AssemblerSymbol* sym);
 void AssemblerReset(Assembler* assembler, bool clear_symbols);
 void AssemblerClearSymbols(Assembler* assembler);
@@ -183,6 +89,10 @@ void AssemblerAddRelocationForSymbol(Assembler* assembler,
                                      int32_t addend);
 
 void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*));
+void AssemblerAssembleInput(Assembler* assembler, const char* name, String* input,
+                            void (*run_func)(Assembler*, String*));
+void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
+                                    void (*run_func)(Assembler*, String*));
 
 void AssemblerEmitWord(Assembler* assembler, int section, int32_t word);
 void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte);
@@ -193,7 +103,8 @@ int64_t AssemblerEvaluateExpression(Assembler* assembler);
 double AssemblerGetDoubleConst(Assembler* assembler);
 
 void AssemblerError(Assembler* assembler, const char* format, ...);
-void AssemblerErrorAtLocation(Assembler* assembler, SourceLocation location, const char* format, ...);
+void AssemblerErrorAtLocation(Assembler* assembler, SourceLocation location,
+                              const char* format, ...);
 void AssemblerWarning(Assembler* assembler, const char* warn,
                       const char* format, ...);
 

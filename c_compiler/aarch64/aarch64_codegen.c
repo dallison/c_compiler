@@ -737,7 +737,6 @@ static TargetVirtuals virtuals = {
 void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {
   TargetGeneratorInit(&g->base, gen, &virtuals);
 
-  g->emission_index = SIZE_MAX;
   g->num_int_arg_regs = 0;
   g->num_fp_arg_regs = 0;
   g->num_int_reg_vars = 0;

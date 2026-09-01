@@ -425,7 +425,6 @@ typedef struct {
 
 typedef struct AARCH64Generator {
   TargetGenerator base;
-  size_t emission_index;
 
   int num_int_arg_regs;   // Number of args in int regs.
   int num_fp_arg_regs;    // Number of args in floating point regs.

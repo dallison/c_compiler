@@ -329,6 +329,7 @@ void PCodeAssemblerDelete(PCodeAssembler* assembler) {
 // Shortcut macro avoid typing assembler->base. everywhere we want to access
 // the base assembler.
 #define ASM assembler->base
+#define ASMO (assembler->base.object)
 
 // Main assembly function.  This is called by the assembler driver.  It will be
 // called twice, one for each pass.
@@ -490,7 +491,7 @@ static bool ParseRegisterPair(PCodeAssembler* assembler, char type_needed,
 static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   uint32_t inst =
       PCodeEncodeRegisters32(opcode, regs[0], regs[1], regs[2]);
-  AssemblerEmitWord(&assembler->base, assembler->base.current_section, inst);
+  AssemblerEmitWord(&assembler->base, assembler->base.object.current_section, inst);
 }
 
 #define ASSEMBLE_INT_ALU(inst)                                  \
@@ -629,7 +630,7 @@ static void AssembleConversion(PCodeAssembler* assembler, int opcode,
   }
   regs[1] = Register(assembler, from_type, from_type_name);
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       PCodeEncodeRegisters32(opcode, regs[0], regs[1], 0));
 }
 
@@ -677,7 +678,7 @@ static void Assemble_decsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         PCodeEncodeImmediate24(PCODE_OP(decsp), value));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
@@ -688,7 +689,7 @@ static void Assemble_incsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         PCodeEncodeImmediate24(PCODE_OP(incsp), value));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
@@ -728,9 +729,9 @@ static void AssembleLoadStore(PCodeAssembler* assembler, int opcode,
   // These are 64 bit instructions with the first word containing the
   // two registers and the second containing the offset.
   AssemblerEmitWord(
-      &ASM, ASM.current_section,
+      &ASM, ASMO.current_section,
       PCodeEncodeRegisters64(opcode, regs[0], regs[1]));
-  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)offset);
 }
 
 #define ASSEMBLE_INT_LOAD_STORE(inst)                       \
@@ -796,26 +797,26 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
     
     AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
     if (sym == NULL) {
-      sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
+      sym = NewAssemblerSymbol(symbol_name.value, ASMO.current_section,
                                SYM_TYPE(object), SYM_BIND(local), 0);
       AssemblerInsertSymbol(&ASM, sym);
     }
     LexNextToken(&ASM.lex);
     int reloc_type;
     if (StringEqual(&suffix, "tls")) {
-      reloc_type = assembler->base.pic ? R_PCODE_GOT_TLS_IE : R_PCODE_TLS_TP_OFF;
+      reloc_type = assembler->base.object.pic ? R_PCODE_GOT_TLS_IE : R_PCODE_TLS_TP_OFF;
     } else {
-      reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+      reloc_type = assembler->base.object.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
     }
     AssemblerRelocation* reloc =
       NewAssemblerRelocation(sym,
                            reloc_type,
-                           ASM.current_section,
+                           ASMO.current_section,
                                (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       PCodeEncodeRegister96(opcode, reg));
-    AssemblerEmitLong(&ASM, ASM.current_section, 0);
+    AssemblerEmitLong(&ASM, ASMO.current_section, 0);
     StringDestruct(&symbol_name);
     StringDestruct(&suffix);
     return;
@@ -828,30 +829,30 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
       int64_t value = AssemblerEvaluateExpression(&ASM);
 
       if (opcode == PCODE_OP(movxc)) {
-        AssemblerEmitWord(&ASM, ASM.current_section,
+        AssemblerEmitWord(&ASM, ASMO.current_section,
                           PCodeEncodeRegister96(opcode, reg));
-        AssemblerEmitLong(&ASM, ASM.current_section, value);
+        AssemblerEmitLong(&ASM, ASMO.current_section, value);
       } else {
-        AssemblerEmitWord(&ASM, ASM.current_section,
+        AssemblerEmitWord(&ASM, ASMO.current_section,
                           PCodeEncodeRegister64(opcode, reg));
-        AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
+        AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)value);
       }
       break;
     }
     case 'f': {
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                         PCodeEncodeRegister64(opcode, reg));
       float f = AssemblerGetDoubleConst(&ASM);
       uint32_t* p = (uint32_t*)&f;
-      AssemblerEmitWord(&ASM, ASM.current_section, *p);
+      AssemblerEmitWord(&ASM, ASMO.current_section, *p);
       break;
     }
     case 'd': {
       double f = AssemblerGetDoubleConst(&ASM);
       uint64_t* p = (uint64_t*)&f;
-      AssemblerEmitWord(&ASM, ASM.current_section,
+      AssemblerEmitWord(&ASM, ASMO.current_section,
                         PCodeEncodeRegister96(opcode, reg));
-      AssemblerEmitLong(&ASM, ASM.current_section, *p);
+      AssemblerEmitLong(&ASM, ASMO.current_section, *p);
       break;
     }
     default:
@@ -879,7 +880,7 @@ static void AssembleMove(PCodeAssembler* assembler, int opcode,
   int regs[3];
   if (ParseRegisterPair(assembler, type_needed, type_name, regs)) {
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         PCodeEncodeRegisters32(opcode, regs[0], regs[1], 0));
   }
 }
@@ -898,7 +899,7 @@ ASSEMBLE_MOV(movd, 'd', "double");
 static void AssemblePushPPCODE_OP(PCodeAssembler* assembler, int opcode,
                             char type_needed, const char* type_name) {
   int reg = Register(assembler, type_needed, type_name);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister32(opcode, reg));
 }
 
@@ -917,7 +918,7 @@ ASSEMBLE_PUSH_PPCODE_OP(popd, 'd', "double");
 ASSEMBLE_PUSH_PPCODE_OP(popx, 'i', "integer");
 
 static void Assemble_ret(PCodeAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeOpcode32(PCODE_OP(ret)));
 }
 
@@ -929,9 +930,9 @@ static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
   }
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister64(opcode, reg));
-  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)offset);
 }
 
 static void Assemble_bz(PCodeAssembler* assembler) {
@@ -945,9 +946,9 @@ static void Assemble_bnz(PCodeAssembler* assembler) {
 static void Assemble_bra(PCodeAssembler* assembler) {
   int64_t addr = AssemblerEvaluateExpression(&ASM);
   int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeOpcode64(PCODE_OP(bra)));
-  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)offset);
 }
 
 static void Assemble_addc(PCodeAssembler* assembler) {
@@ -962,21 +963,21 @@ static void Assemble_addc(PCodeAssembler* assembler) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
 
     AssemblerEmitWord(
-        &ASM, ASM.current_section,
+        &ASM, ASMO.current_section,
         PCodeEncodeRegisters64(PCODE_OP(addc), regs[0], regs[1]));
-    AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
+    AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)value);
   }
 }
 
 static void Assemble_cbra(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister32(PCODE_OP(cbra), reg));
 }
 
 static void Assemble_rcall(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister32(PCODE_OP(rcall), reg));
 }
 
@@ -987,20 +988,20 @@ static void Assemble_call(PCodeAssembler* assembler) {
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
-  NewAssemblerRelocation(sym, assembler->base.pic ?
+  NewAssemblerRelocation(sym, assembler->base.object.pic ?
                          R_PCODE_CALL_PLT : R_PCODE_CALL,
-                         ASM.current_section,
+                         ASMO.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeOpcode96(PCODE_OP(call)));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
 }
 
 static void Assemble_jmp(PCodeAssembler* assembler) {
@@ -1010,18 +1011,18 @@ static void Assemble_jmp(PCodeAssembler* assembler) {
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
+      NewAssemblerRelocation(sym, R_PCODE_JMP, ASMO.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeOpcode96(PCODE_OP(jmp)));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
 }
 
 static void Assemble_cjmp(PCodeAssembler* assembler) {
@@ -1031,18 +1032,18 @@ static void Assemble_cjmp(PCodeAssembler* assembler) {
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(object), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
-  NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
+  NewAssemblerRelocation(sym, R_PCODE_JMP, ASMO.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeOpcode96(PCODE_OP(cjmp)));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
 }
 
 static void Assemble_adr(PCodeAssembler* assembler) {
@@ -1062,7 +1063,7 @@ static void Assemble_adr(PCodeAssembler* assembler) {
   AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
+    sym = NewAssemblerSymbol(symbol_name.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -1071,16 +1072,16 @@ static void Assemble_adr(PCodeAssembler* assembler) {
   if (StringEqual(&suffix, "tls")) {
     reloc_type = R_PCODE_GOT_TLS_GD;
   } else {
-    reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+    reloc_type = assembler->base.object.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
   }
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, reloc_type,
-                         ASM.current_section,
+                         ASMO.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister96(PCODE_OP(adr), reg));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
   StringDestruct(&symbol_name);
   StringDestruct(&suffix);
 }
@@ -1097,19 +1098,19 @@ static void Assemble_adrs(PCodeAssembler* assembler) {
   }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, R_PCODE_PCREL,
-                         ASM.current_section,
+                         ASMO.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister96(PCODE_OP(adr), reg));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
   
 }
 
@@ -1131,7 +1132,7 @@ static void Assemble_adrtls(PCodeAssembler* assembler) {
   AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
   if (sym == NULL) {
-    sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
+    sym = NewAssemblerSymbol(symbol_name.value, ASMO.current_section,
                              SYM_TYPE(func), SYM_BIND(local), 0);
     AssemblerInsertSymbol(&ASM, sym);
   }
@@ -1140,16 +1141,16 @@ static void Assemble_adrtls(PCodeAssembler* assembler) {
   if (StringEqual(&suffix, "tls")) {
     reloc_type = R_PCODE_GOT_TLS_IE;
   } else {
-    reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+    reloc_type = assembler->base.object.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
   }
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, reloc_type,
-                         ASM.current_section,
+                         ASMO.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section,
+  AssemblerEmitWord(&ASM, ASMO.current_section,
                     PCodeEncodeRegister96(PCODE_OP(adr), reg));
-  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  AssemblerEmitLong(&ASM, ASMO.current_section, 0);
   StringDestruct(&symbol_name);
   StringDestruct(&suffix);
 }
@@ -1157,7 +1158,7 @@ static void Assemble_adrtls(PCodeAssembler* assembler) {
 static void Assemble_esc(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
-    AssemblerEmitWord(&ASM, ASM.current_section,
+    AssemblerEmitWord(&ASM, ASMO.current_section,
                       PCodeEncodeImmediate24(PCODE_OP(esc), value));
   } else {
     AssemblerError(&ASM, "Missing #value for esc instruction");

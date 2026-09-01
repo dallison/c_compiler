@@ -8,6 +8,7 @@
 
 #include "target_basic_block.h"
 #include "compiler.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <assert.h>
 
@@ -604,16 +605,69 @@ static void CalculateForwardSinglePredecessorDominators(
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
     BitSetClear(&block->dominators);
+    block->idom = NULL;
+    block->num_dominators = 0;
+    block->reachability_known = true;
+    block->is_unreachable = block != gen->entry_block;
     if (block != gen->entry_block && block->in_edges.length == 1) {
       TargetBasicBlock* predecessor =
           VectorGet(&gen->basic_blocks, block->in_edges.value.w[0]);
-      if (!TargetBasicBlockIsUnreachable(gen, predecessor)) {
+      if (!predecessor->is_unreachable) {
         BitSetCopy(&block->dominators, &predecessor->dominators);
+        block->idom = predecessor;
+        block->is_unreachable = false;
       }
     }
-    BitSetInsert(&block->dominators, block->block_id);
-    block->num_dominators = BitSetCount(&block->dominators);
+    if (!block->is_unreachable) {
+      BitSetInsert(&block->dominators, block->block_id);
+      block->num_dominators = BitSetCount(&block->dominators);
+    }
   }
+}
+
+static void TargetComputeReversePostorder(TargetGenerator* gen,
+                                          Vector* postorder,
+                                          BitSet* reachable) {
+  Vector work;
+  VectorInit(&work);
+  VectorAppend(&work, (void*)(gen->entry_block->block_id << 1));
+  while (work.length > 0) {
+    uintptr_t item = (uintptr_t)VectorLast(&work);
+    VectorPop(&work);
+    TargetBlockId id = (TargetBlockId)(item >> 1);
+    bool expanded = (item & 1) != 0;
+    if (expanded) {
+      VectorAppend(postorder, (void*)id);
+      continue;
+    }
+    if (BitSetContains(reachable, id)) {
+      continue;
+    }
+    BitSetInsert(reachable, id);
+    VectorAppend(&work, (void*)((id << 1) | 1));
+    TargetBasicBlock* block = VectorGet(&gen->basic_blocks, id);
+    for (size_t i = block->out_edges.length; i > 0; i--) {
+      TargetBlockId successor = block->out_edges.value.w[i - 1];
+      if (!BitSetContains(reachable, successor)) {
+        VectorAppend(&work, (void*)(successor << 1));
+      }
+    }
+  }
+  VectorDestruct(&work);
+}
+
+static TargetBasicBlock* TargetIntersectImmediateDominators(
+    TargetBasicBlock* left, TargetBasicBlock* right, TargetBasicBlock** idoms,
+    const size_t* rpo_number) {
+  while (left != right) {
+    while (rpo_number[left->block_id] > rpo_number[right->block_id]) {
+      left = idoms[left->block_id];
+    }
+    while (rpo_number[right->block_id] > rpo_number[left->block_id]) {
+      right = idoms[right->block_id];
+    }
+  }
+  return left;
 }
 
 // Calculate the dominators for all basic blocks.
@@ -623,39 +677,76 @@ static void CalculateDominators(TargetGenerator* gen) {
     return;
   }
 
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    TargetBasicBlockInitDominators(b, b == gen->entry_block,
-                             gen->basic_blocks.length);
+  size_t num_blocks = gen->basic_blocks.length;
+  Vector postorder;
+  VectorInit(&postorder);
+  BitSet reachable;
+  BitSetInit(&reachable);
+  TargetComputeReversePostorder(gen, &postorder, &reachable);
+
+  size_t* rpo_number = malloc(num_blocks * sizeof(*rpo_number));
+  TargetBasicBlock** idoms = calloc(num_blocks, sizeof(*idoms));
+  for (size_t i = 0; i < num_blocks; i++) {
+    rpo_number[i] = SIZE_MAX;
   }
-  
+  for (size_t i = 0; i < postorder.length; i++) {
+    TargetBlockId id = postorder.value.w[postorder.length - i - 1];
+    rpo_number[id] = i;
+  }
+
+  TargetBlockId entry_id = gen->entry_block->block_id;
+  idoms[entry_id] = gen->entry_block;
   bool changed = true;
   while (changed) {
     changed = false;
-    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-      TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-      changed |= TargetBasicBlockCalculateDominators(gen, b, &gen->basic_blocks);
+    for (size_t i = 1; i < postorder.length; i++) {
+      TargetBlockId id = postorder.value.w[postorder.length - i - 1];
+      TargetBasicBlock* block = VectorGet(&gen->basic_blocks, id);
+      TargetBasicBlock* new_idom = NULL;
+      for (size_t j = 0; j < block->in_edges.length; j++) {
+        TargetBlockId predecessor_id = block->in_edges.value.w[j];
+        if (idoms[predecessor_id] == NULL) {
+          continue;
+        }
+        TargetBasicBlock* predecessor =
+            VectorGet(&gen->basic_blocks, predecessor_id);
+        new_idom =
+            new_idom == NULL
+                ? predecessor
+                : TargetIntersectImmediateDominators(
+                      new_idom, predecessor, idoms, rpo_number);
+      }
+      if (new_idom != NULL && idoms[id] != new_idom) {
+        idoms[id] = new_idom;
+        changed = true;
+      }
     }
   }
-  
-  // Now check for isolated islands where the blocks form a loop
-  // that cannot be accessed from outside the loop.  This is denoted
-  // by the dominators of the block being all the blocks.
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    if (BitSetCount(&b->dominators) == gen->basic_blocks.length) {
-      BitSetClear(&b->dominators);
-      b->is_unreachable = true;
-      b->reachability_known = true;
-    }
-  }
-}
 
-static void CalculateImmediateDominator(TargetGenerator* gen) {
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    TargetBasicBlockCalculateImmediateDominator(b, &gen->basic_blocks);
+  for (size_t i = 0; i < num_blocks; i++) {
+    TargetBasicBlock* block = VectorGet(&gen->basic_blocks, i);
+    BitSetClear(&block->dominators);
+    block->idom = NULL;
+    block->num_dominators = 0;
+    block->reachability_known = true;
+    block->is_unreachable = !BitSetContains(&reachable, i);
+    if (block->is_unreachable) {
+      continue;
+    }
+    block->idom = i == entry_id ? NULL : idoms[i];
+    for (TargetBasicBlock* dominator = block; dominator != NULL;
+         dominator = dominator->block_id == entry_id
+                         ? NULL
+                         : idoms[dominator->block_id]) {
+      BitSetInsert(&block->dominators, dominator->block_id);
+      block->num_dominators++;
+    }
   }
+
+  free(idoms);
+  free(rpo_number);
+  BitSetDestruct(&reachable);
+  VectorDestruct(&postorder);
 }
 
 
@@ -1030,10 +1121,7 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
  
   // TargetPrintBasicBlocks(gen, stdout);
   
-  // Phase 4b: immediate dominator.
-  CalculateImmediateDominator(gen);
- 
-  // Phase 4c: dominance frontier.
+  // Phase 4b: dominance frontier.
   //CalculateDominanceFrontier(gen);
   
   // Phase 5: build dominator tree.

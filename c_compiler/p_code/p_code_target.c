@@ -96,7 +96,7 @@ CompilerTarget* NewPCodeTarget() {
   target->alignment = 8;
   target->stack_alignment = 8;
   target->codegen = GenerateCode;
-  target->prepare_function_emission = NULL;
+  target->emit_object_file = NULL;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;
   target->cleanup = Cleanup;

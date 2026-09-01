@@ -27,6 +27,7 @@ struct ASTNode;
 struct Syntax;
 struct Struct;
 struct ReflectionValue;
+struct Compiler;
 
 typedef enum {
   kInjectionTargetNamespace,
@@ -268,10 +269,10 @@ typedef struct {
   void (*emit_assembly_preamble)(String* src_file, FILE* asm_file);
   bool (*assemble_string)(const char* name, String* input,
                           String* object_filename);
+  String* (*emit_object_file)(struct Compiler* compiler, Vector* options);
 
   // Assembly language emitter.  The 'code' parameter is the return value from
   // the 'codegen' functions.
-  void (*prepare_function_emission)(void* code, size_t index);
   // The 'asm_file' parameter is an open file to write to.
   void (*emit_function_assembly)(void* code, FILE* asm_file);
 
@@ -326,7 +327,7 @@ typedef struct MetaPromotedStaticEntry {
   Symbol* symbol;
 } MetaPromotedStaticEntry;
 
-typedef struct {
+typedef struct Compiler {
   String infile;
 
   // Front end.
@@ -506,7 +507,6 @@ typedef struct {
   
   // Flags.
   bool debug_output;
-  bool direct_object_emission;
   bool optimize;
   bool optimize_for_size;
   bool pic;

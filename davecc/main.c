@@ -1676,7 +1676,7 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "Unknown assembler architecture %s\n", target.value);
         exit(1);
       }
-      assembler->pic = compiler->pic;
+      assembler->object.pic = compiler->pic;
       PreprocessorCopyOptions(&assembler->preprocessor, &compiler->preprocessor);
       AssemblerRun(assembler, asm_run);
       if (finalizer != NULL) {
