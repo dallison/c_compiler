@@ -235,6 +235,8 @@ enum {
   kFn_is_decltype_auto_return_deduced = 51,
   kFn_deleted_reason = 52,
   kFn_contract_assertions = 53,
+  kFn_has_coroutine_syntax = 54,
+  kFn_has_constexpr_if = 55,
 };
 
 //
@@ -1415,6 +1417,8 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
                                &f->contract_assertions);
   WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
   WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
+  WireWriteBool(out, kFn_has_coroutine_syntax, f->has_coroutine_syntax);
+  WireWriteBool(out, kFn_has_constexpr_if, f->has_constexpr_if);
   SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
             f->coroutine_promise_type);
   SWriteRef(ctx, out, kFn_coroutine_frame_type, kSerialKindType,
@@ -1582,6 +1586,12 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_is_coroutine:
         WireReadBool(in, &f->is_coroutine);
+        break;
+      case kFn_has_coroutine_syntax:
+        WireReadBool(in, &f->has_coroutine_syntax);
+        break;
+      case kFn_has_constexpr_if:
+        WireReadBool(in, &f->has_constexpr_if);
         break;
       case kFn_coroutine_promise_type:
         f->coroutine_promise_type =

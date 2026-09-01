@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stddef.h>
 
 #include <assert.h>
 #include "ast.h"
@@ -1051,10 +1052,29 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
     return NULL;
   }
   TypeRecord* r = TypeArenaAlloc();
-  memcpy(r, record, sizeof(TypeRecord));
+  memcpy(r, record, offsetof(TypeRecord, info));
+  if (TypeIsFunction(record)) {
+    memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
+  } else if (record->declarator == kDeclArray) {
+    memcpy(&r->info.array, &record->info.array, sizeof(ArrayInfo));
+  } else if (TypeIsStructOrUnion(record) ||
+             record->declarator == kDeclMemberPointer) {
+    r->info.struct_info = record->info.struct_info;
+  } else if (TypeIsEnum(record)) {
+    r->info.enum_info = record->info.enum_info;
+  }
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
   r->size_sync_owner = NULL;
+  if (r->next == NULL && r->template_parameter_name == NULL &&
+      r->dependent_member_name == NULL && r->template_arguments == NULL &&
+      r->dependent_member_template_arguments == NULL &&
+      r->pack_index_expr == NULL && r->pack_index_pack == NULL &&
+      r->dependent_splice_expr == NULL && !TypeIsFunction(record) &&
+      !TypeIsStructOrUnion(record) && !TypeIsEnum(record) &&
+      !TypeIsVLA(record)) {
+    return r;
+  }
   r->template_parameter_name = record->template_parameter_name != NULL
       ? NewString(record->template_parameter_name->value)
       : NULL;
@@ -1388,6 +1408,9 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.deleted_reason = NULL;
   t->info.function.is_deduction_guide = false;
   t->info.function.is_coroutine = false;
+  t->info.function.has_coroutine_syntax = false;
+  t->info.function.has_constexpr_if = false;
+  t->info.function.constexpr_if_checked = false;
   t->info.function.coroutine_promise_type = NULL;
   t->info.function.coroutine_frame_type = NULL;
   t->info.function.coroutine_suspend_count = 0;

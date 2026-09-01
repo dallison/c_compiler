@@ -5833,6 +5833,12 @@ static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
   return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
 }
 
+static bool IsConstexprIfNode(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL && node->op == AST_OP(if) &&
+         ((IfStatementASTNode*)node)->is_constexpr;
+}
+
 static ASTNode* PruneConstexprIfBeforeBodyClone(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)action;
@@ -6759,13 +6765,25 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                       result_binding, &attrs,
                                       source->location));
   }
-  ASTNode* clone_source =
-      ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
-  clone_source = ASTNodeVisitAndTransform(
-      clone_source, PruneConstexprIfBeforeBodyClone, &clone);
-  ASTNode* body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
-                               &clone, NULL);
-  ASTNodeDelete(clone_source);
+  if (!from->info.function.has_constexpr_if &&
+      !from->info.function.constexpr_if_checked) {
+    from->info.function.has_constexpr_if =
+        ASTNodeAny(from->info.function.body, IsConstexprIfNode, NULL);
+    from->info.function.constexpr_if_checked = true;
+  }
+  ASTNode* body;
+  if (from->info.function.has_constexpr_if) {
+    ASTNode* clone_source =
+        ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
+    clone_source = ASTNodeVisitAndTransform(
+        clone_source, PruneConstexprIfBeforeBodyClone, &clone);
+    body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
+                        &clone, NULL);
+    ASTNodeDelete(clone_source);
+  } else {
+    body = ASTNodeClone(from->info.function.body, CloneTemplateFunctionBodyNode,
+                        &clone, NULL);
+  }
   ASTNodeVisit(body, RebindClonedLocalIdentifierVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedLoweredDependentMemberCallVisitor, 0, NULL);

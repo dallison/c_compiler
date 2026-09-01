@@ -6932,6 +6932,12 @@ static ASTNode* RecoverInvalidCoroutineExpression(ASTNode* node, void* data,
  * recount suspensions, and runs the full frame/state-machine lowering. On an
  * invalid promise it performs error recovery instead. */
 void SemanticAnalyzeCoroutineFunction(ASTNode* node) {
+  if (node == NULL || node->type == NULL || !TypeIsFunction(node->type) ||
+      node->type->info.function.body == NULL ||
+      (!node->type->info.function.has_coroutine_syntax &&
+       !node->type->info.function.is_coroutine)) {
+    return;
+  }
   CoroutineScan coroutine_scan = MarkAndValidateCoroutineFunction(node);
   if (coroutine_scan.is_coroutine && node != NULL && node->type != NULL &&
       TypeIsFunction(node->type) &&

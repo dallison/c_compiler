@@ -6245,6 +6245,10 @@ static ASTNode* ParseCXXThrowExpression(Syntax* syntax, TokenClass followers) {
 
 static ASTNode* ParseCXXCoAwaitExpression(Syntax* syntax,
                                           TokenClass followers) {
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    compiler->current_function->info.function.has_coroutine_syntax = true;
+  }
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // co_await
   ASTNode* expr = ParseCastExpression(syntax, followers);
@@ -6253,6 +6257,10 @@ static ASTNode* ParseCXXCoAwaitExpression(Syntax* syntax,
 
 static ASTNode* ParseCXXCoYieldExpression(Syntax* syntax,
                                           TokenClass followers) {
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    compiler->current_function->info.function.has_coroutine_syntax = true;
+  }
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // co_yield
   ASTNode* expr = NULL;
