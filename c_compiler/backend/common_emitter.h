@@ -14,6 +14,7 @@
 #include "compiler.h"
 
 FILE* EmitAssemblyFile(String* src_file, String* asm_file);
+void EmitAssemblyPreamble(String* src_file, FILE* fp);
 void EmitDataStart(FILE* fp);
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp);
 void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp);

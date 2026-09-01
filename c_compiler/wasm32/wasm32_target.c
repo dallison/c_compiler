@@ -110,10 +110,13 @@ CompilerTarget* NewWasm32Target(void) {
   target->stack_alignment = 16;
 
   target->codegen = GenerateCode;
+  target->prepare_function_emission = NULL;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;
   target->cleanup = Cleanup;
   target->create_asm_file = CreateAssemblyFile;
+  target->emit_assembly_preamble = NULL;
+  target->assemble_string = NULL;
   target->emit_static_variable = Wasm32EmitStaticVariable;
   target->emit_bss_space = Wasm32EmitBSSVariable;
   target->emit_data_start = Wasm32EmitDataStart;

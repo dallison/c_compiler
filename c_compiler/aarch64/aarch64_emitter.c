@@ -15,6 +15,7 @@
 #include "compiler.h"
 #include "eh_metadata.h"
 #include "aarch64_assembler.h"
+#include "aarch64_encode.h"
 #include "aarch64_codegen.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
@@ -1727,10 +1728,16 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
       strcmp(func_name, "main") != 0) {
     fprintf(fp, "\t.word 0xD503241F  // bti c\n");
   }
-  TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
-  while (inst != NULL) {
-    PrintInstruction(emitter, inst, func_name, fp);
-    inst = TargetNext(inst);
+  if (fp != stdout && compiler->direct_object_emission &&
+      emitter->g->emission_index != SIZE_MAX &&
+      AARCH64CanDirectEncodeFunction(emitter->g)) {
+    fprintf(fp, "\tdavefunc %zu\n", emitter->g->emission_index);
+  } else {
+    TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
+    while (inst != NULL) {
+      PrintInstruction(emitter, inst, func_name, fp);
+      inst = TargetNext(inst);
+    }
   }
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,

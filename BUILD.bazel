@@ -689,6 +689,7 @@ cc_library(
         "c_compiler/6502/6502_target.c",
         "c_compiler/aarch64/aarch64_assembler.c",
         "c_compiler/aarch64/aarch64_codegen.c",
+        "c_compiler/aarch64/aarch64_encode.c",
         "c_compiler/aarch64/aarch64_emitter.c",
         "c_compiler/aarch64/aarch64_optimize.c",
         "c_compiler/aarch64/aarch64_reg_alloc.c",
@@ -3298,6 +3299,19 @@ sh_test(
     ],
     data = [
         ":aarch64",
+        ":davecc",
+    ],
+)
+
+sh_test(
+    name = "aarch64_direct_object_test",
+    srcs = ["tests/aarch64_direct_object_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64asm)",
+    ],
+    data = [
+        ":aarch64asm",
         ":davecc",
     ],
 )

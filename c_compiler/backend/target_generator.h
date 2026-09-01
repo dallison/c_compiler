@@ -102,6 +102,7 @@ typedef struct TargetInstruction {
   struct TargetRegister* reg;  // Register assigned by register allocator.
   struct TargetInstruction* operand[TARGET_MAX_OPERANDS];
   Vector users;                // Instructions using this instruction's value.
+  Vector* user_index;          // Lazy ID-sorted index for high-fanout values.
   int uses;                    // Current number of uses.
   struct TargetBasicBlock* block;                 // Target basic block.
   int addr;                    // Calculated address for instruction.
@@ -212,6 +213,9 @@ typedef struct TargetGenerator {
   TargetInstruction* last_constant;  // Last constant.
   TargetInstruction* first_symbol;   // First symbol.
   TargetInstruction* last_symbol;    // Last symbol.
+  struct TargetSymbolIndexEntry* symbol_index;
+  size_t symbol_index_capacity;
+  size_t symbol_index_count;
   
   TargetInstruction* frame_pointer;  // Frame pointer.
   TargetInstruction* stack_pointer;  // Stack pointer.

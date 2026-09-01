@@ -184,6 +184,117 @@ const char* TargetOpcodeName(int op) {
   }
 }
 
+typedef struct TargetSymbolIndexEntry {
+  Symbol* symbol;
+  TargetInstruction* inst;
+} TargetSymbolIndexEntry;
+
+static size_t HashTargetSymbol(Symbol* symbol) {
+  uintptr_t value = (uintptr_t)symbol;
+#if UINTPTR_MAX > UINT32_MAX
+  value ^= value >> 33;
+  value *= UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33;
+  value *= UINT64_C(0xc4ceb9fe1a85ec53);
+  value ^= value >> 33;
+#else
+  value ^= value >> 16;
+  value *= UINT32_C(0x7feb352d);
+  value ^= value >> 15;
+  value *= UINT32_C(0x846ca68b);
+  value ^= value >> 16;
+#endif
+  return (size_t)value;
+}
+
+static void TargetSymbolIndexInsertWithoutGrowing(TargetGenerator* target,
+                                                  Symbol* symbol,
+                                                  TargetInstruction* inst) {
+  size_t index =
+      HashTargetSymbol(symbol) & (target->symbol_index_capacity - 1);
+  while (target->symbol_index[index].symbol != NULL) {
+    if (target->symbol_index[index].symbol == symbol) {
+      target->symbol_index[index].inst = inst;
+      return;
+    }
+    index = (index + 1) & (target->symbol_index_capacity - 1);
+  }
+  target->symbol_index[index].symbol = symbol;
+  target->symbol_index[index].inst = inst;
+  target->symbol_index_count++;
+}
+
+static void TargetSymbolIndexGrow(TargetGenerator* target) {
+  TargetSymbolIndexEntry* old_index = target->symbol_index;
+  size_t old_capacity = target->symbol_index_capacity;
+  target->symbol_index_capacity =
+      old_capacity == 0 ? 16 : old_capacity * 2;
+  target->symbol_index =
+      calloc(target->symbol_index_capacity, sizeof(*target->symbol_index));
+  target->symbol_index_count = 0;
+  for (size_t i = 0; i < old_capacity; i++) {
+    if (old_index[i].symbol != NULL) {
+      TargetSymbolIndexInsertWithoutGrowing(
+          target, old_index[i].symbol, old_index[i].inst);
+    }
+  }
+  free(old_index);
+}
+
+static void TargetSymbolIndexInsert(TargetGenerator* target, Symbol* symbol,
+                                    TargetInstruction* inst) {
+  if (target->symbol_index_capacity == 0 ||
+      target->symbol_index_count + 1 >
+          target->symbol_index_capacity * 3 / 4) {
+    TargetSymbolIndexGrow(target);
+  }
+  TargetSymbolIndexInsertWithoutGrowing(target, symbol, inst);
+}
+
+static TargetInstruction* TargetSymbolIndexFind(TargetGenerator* target,
+                                                Symbol* symbol) {
+  if (target->symbol_index_capacity == 0) {
+    return NULL;
+  }
+  size_t index =
+      HashTargetSymbol(symbol) & (target->symbol_index_capacity - 1);
+  while (target->symbol_index[index].symbol != NULL) {
+    if (target->symbol_index[index].symbol == symbol) {
+      return target->symbol_index[index].inst;
+    }
+    index = (index + 1) & (target->symbol_index_capacity - 1);
+  }
+  return NULL;
+}
+
+static void TargetSymbolIndexRemove(TargetGenerator* target, Symbol* symbol,
+                                    TargetInstruction* inst) {
+  if (target->symbol_index_capacity == 0) {
+    return;
+  }
+  size_t mask = target->symbol_index_capacity - 1;
+  size_t index = HashTargetSymbol(symbol) & mask;
+  while (target->symbol_index[index].symbol != NULL) {
+    if (target->symbol_index[index].symbol == symbol &&
+        target->symbol_index[index].inst == inst) {
+      target->symbol_index[index].symbol = NULL;
+      target->symbol_index[index].inst = NULL;
+      target->symbol_index_count--;
+      size_t next = (index + 1) & mask;
+      while (target->symbol_index[next].symbol != NULL) {
+        TargetSymbolIndexEntry entry = target->symbol_index[next];
+        target->symbol_index[next].symbol = NULL;
+        target->symbol_index[next].inst = NULL;
+        target->symbol_index_count--;
+        TargetSymbolIndexInsertWithoutGrowing(target, entry.symbol, entry.inst);
+        next = (next + 1) & mask;
+      }
+      return;
+    }
+    index = (index + 1) & mask;
+  }
+}
+
 
 void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals* virtuals) {
   target->virtuals = virtuals;
@@ -208,6 +319,9 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->last_constant = NULL;
   target->first_symbol = NULL;
   target->last_symbol = NULL;
+  target->symbol_index = NULL;
+  target->symbol_index_capacity = 0;
+  target->symbol_index_count = 0;
   VectorInit(&target->fixups);
   VectorInit(&target->exception_edges);
   target->frame_pointer = NULL;
@@ -237,12 +351,31 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->__tls_get_addr = NewSymbol("__tls_get_addr", tls_func, STO(extern));
 }
 
+static void TargetDestructInstructionUsers(TargetInstruction* inst) {
+  VectorDestruct(&inst->users);
+  if (inst->user_index != NULL) {
+    VectorDelete(inst->user_index);
+    inst->user_index = NULL;
+  }
+}
+
+static void TargetClearInstructionUsers(TargetInstruction* inst) {
+  VectorClear(&inst->users);
+  if (inst->user_index != NULL) {
+    VectorClear(inst->user_index);
+  }
+}
+
 void TargetGeneratorDestruct(TargetGenerator* gen) {
+  free(gen->symbol_index);
+  gen->symbol_index = NULL;
+  gen->symbol_index_capacity = 0;
+  gen->symbol_index_count = 0;
   // ListDestruct frees the instruction structs (header is the first member)
-  // but not the per-instruction "users" vector, so destruct those first.
+  // but not the per-instruction user storage, so destruct that first.
   for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
        inst = TargetNext(inst)) {
-    VectorDestruct(&inst->users);
+    TargetDestructInstructionUsers(inst);
   }
   ListDestruct(&gen->code);
   // Instructions parked off the code list are freed here: ones removed during
@@ -262,7 +395,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     kv.key.p = inst;
     kv.value.p = inst;
     MapInsert(&freed_instructions, kv);
-    VectorDestruct(&inst->users);
+    TargetDestructInstructionUsers(inst);
     free(inst);
   }
   MapDestruct(&freed_instructions);
@@ -329,6 +462,20 @@ TargetInstruction* TargetPrev(TargetInstruction* inst) {
 
 
 void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst) {
+  if (inst->opcode == TARGET_OP(symbol)) {
+    TargetSymbolIndexRemove(target, ((TargetSymbol*)inst)->symbol, inst);
+  }
+  if (target->first_symbol == inst && target->last_symbol == inst) {
+    target->first_symbol = NULL;
+    target->last_symbol = NULL;
+  } else {
+    if (target->first_symbol == inst) {
+      target->first_symbol = TargetNext(inst);
+    }
+    if (target->last_symbol == inst) {
+      target->last_symbol = TargetPrev(inst);
+    }
+  }
   // Decrement the reference count for all operands.
   for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
@@ -336,7 +483,7 @@ void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst) {
       TargetRemoveUser(op, inst);
     }
   }
-  VectorDestruct(&inst->users);
+  TargetDestructInstructionUsers(inst);
   ListDeleteElement(&target->code, &inst->header);
   // Removed from the code list, so TargetGeneratorDestruct's ListDestruct will
   // not free it.  We cannot free it now either: branches/fixups and the
@@ -353,30 +500,100 @@ void TargetTrackOrphanInstruction(TargetGenerator* target,
   VectorAppend(&target->deleted_instructions, inst);
 }
 
-void TargetAddUser(TargetInstruction* inst, TargetInstruction* user) {
-  for (size_t i = 0; i < inst->users.length; i++) {
-    TargetInstruction* op = inst->users.value.p[i];
-    if (op == user) {
-      return;
+static size_t TargetUserLowerBound(Vector* users, int user_id, bool* found) {
+  size_t low = 0;
+  size_t high = users->length;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    TargetInstruction* candidate = users->value.p[mid];
+    if (candidate->id < user_id) {
+      low = mid + 1;
+    } else {
+      high = mid;
     }
   }
+  *found = low < users->length &&
+           ((TargetInstruction*)users->value.p[low])->id == user_id;
+  return low;
+}
+
+#define TARGET_USER_INDEX_THRESHOLD 8
+
+static int CompareTargetUsersById(const void* lhs, const void* rhs) {
+  int lhs_id = (*(TargetInstruction* const*)lhs)->id;
+  int rhs_id = (*(TargetInstruction* const*)rhs)->id;
+  return lhs_id == rhs_id ? 0 : (lhs_id < rhs_id ? -1 : 1);
+}
+
+static void TargetBuildUserIndex(TargetInstruction* inst) {
+  inst->user_index = NewVector();
+  VectorCopy(inst->user_index, &inst->users);
+  VectorSortPointers(inst->user_index, CompareTargetUsersById);
+}
+
+void TargetAddUser(TargetInstruction* inst, TargetInstruction* user) {
+  if (inst->user_index == NULL) {
+    for (size_t i = 0; i < inst->users.length; i++) {
+      if (inst->users.value.p[i] == user) {
+        return;
+      }
+    }
+    VectorAppend(&inst->users, user);
+    inst->uses++;
+    if (inst->users.length == TARGET_USER_INDEX_THRESHOLD) {
+      TargetBuildUserIndex(inst);
+    }
+    return;
+  }
+
+  bool found;
+  size_t index = TargetUserLowerBound(inst->user_index, user->id, &found);
+  if (found) {
+    return;
+  }
   VectorAppend(&inst->users, user);
+  if (index == inst->user_index->length) {
+    VectorAppend(inst->user_index, user);
+  } else {
+    VectorInsertBefore(inst->user_index, index, user);
+  }
   inst->uses++;
 }
 
 void TargetRemoveUser(TargetInstruction* inst, TargetInstruction* user) {
-  for (size_t i = 0; i < inst->users.length; i++) {
-    TargetInstruction* op = inst->users.value.p[i];
-    if (op == user) {
-      VectorDeleteElement(&inst->users, i);
-      inst->uses--;
-      if (inst->uses < 0) {
-        printf("inst: %d, user: %d\n", inst->id, user->id);
+  if (inst->user_index == NULL) {
+    for (size_t i = 0; i < inst->users.length; i++) {
+      if (inst->users.value.p[i] == user) {
+        VectorDeleteElement(&inst->users, i);
+        inst->uses--;
+        assert(inst->uses >= 0);
+        return;
       }
-      assert(inst->uses >= 0);
-      return;
     }
+    return;
   }
+
+  bool found;
+  size_t index = TargetUserLowerBound(inst->user_index, user->id, &found);
+  if (!found) {
+    return;
+  }
+  size_t primary_index = 0;
+  while (primary_index < inst->users.length &&
+         inst->users.value.p[primary_index] != user) {
+    primary_index++;
+  }
+  if (primary_index == inst->users.length) {
+    assert(false);
+    return;
+  }
+  VectorDeleteElement(inst->user_index, index);
+  VectorDeleteElement(&inst->users, primary_index);
+  inst->uses--;
+  if (inst->uses < 0) {
+    printf("inst: %d, user: %d\n", inst->id, user->id);
+  }
+  assert(inst->uses >= 0);
 }
 
 // Move all references from old to new.
@@ -393,7 +610,7 @@ void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new) {
       }
     }
   }
-  VectorClear(&old->users);
+  TargetClearInstructionUsers(old);
   old->uses = 0;
 }
 
@@ -412,7 +629,7 @@ void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
   }
   old->uses = (int)(old->users.length - num_retargeted);
   if (old->uses == 0) {
-    VectorClear(&old->users);
+    TargetClearInstructionUsers(old);
   }
  
 }
@@ -482,6 +699,7 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
     inst->operand[i] = NULL;
   }
   VectorInit(&inst->users);
+  inst->user_index = NULL;
   inst->block = NULL;
   inst->flags = 0;
   inst->observable_checkpoint = false;
@@ -764,20 +982,16 @@ TargetInstruction* NewTargetSymbol(Symbol* symbol) {
 
 TargetInstruction* TargetGetSymbol(TargetGenerator* target, IRNode* node,
                                    Symbol* symbol) {
-  TargetInstruction* inst = TargetFirstSymbol(target);
-  while (inst != NULL && TargetPrev(inst) != TargetLastSymbol(target)) {
-    TargetSymbol* s = (TargetSymbol*)inst;
-    if (inst->opcode == TARGET_OP(symbol)) {
-      if (s->symbol == symbol) {
-        if (node != NULL && node->data.ptr == NULL) {
-          TargetSetLoweredNode(node, inst);
-        }
-        return inst;
-      }
+  TargetInstruction* inst = TargetSymbolIndexFind(target, symbol);
+  if (inst != NULL) {
+    if (node != NULL && node->data.ptr == NULL) {
+      TargetSetLoweredNode(node, inst);
     }
-    inst = TargetNext(inst);
+    return inst;
   }
-  return TargetEmitSymbol(target, NewTargetSymbol(symbol));
+  inst = TargetEmitSymbol(target, NewTargetSymbol(symbol));
+  TargetSymbolIndexInsert(target, symbol, inst);
+  return inst;
 }
 
 TargetBranchFixup* NewBranchFixup(TargetInstruction* inst, IRNode* target,

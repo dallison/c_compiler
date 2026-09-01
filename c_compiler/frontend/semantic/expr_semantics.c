@@ -7484,12 +7484,6 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
       return NULL;
     }
   }
-  FunctionTemplateCandidateStatus candidate_status =
-      TypeClassifyFunctionTemplateCandidate(
-          &compiler->syntax, candidate, explicit_args, node->children, 0);
-  if (candidate_status != kFunctionTemplateCandidateViable) {
-    return NULL;
-  }
   bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
   Symbol* instantiated = TypeCreateFunctionTemplateCandidate(

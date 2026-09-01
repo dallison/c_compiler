@@ -731,6 +731,10 @@ static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
 
     if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
       current->is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
+      if (current->is_constexpr && compiler->current_function != NULL &&
+          TypeIsFunction(compiler->current_function)) {
+        compiler->current_function->info.function.has_constexpr_if = true;
+      }
     }
     current->is_consteval =
         !current->is_constexpr && CompilerIsCXX() &&
@@ -2083,6 +2087,10 @@ static ASTNode* ParseReturnStatement(Syntax* syntax, TokenClass followers,
 
 static ASTNode* ParseCoReturnStatement(Syntax* syntax, TokenClass followers,
                                        SourceLocation location) {
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    compiler->current_function->info.function.has_coroutine_syntax = true;
+  }
   ASTNode* expr = NULL;
   if (!LexLookingAt(syntax->lex, TOK(semicolon))) {
     expr = SyntaxParseExpression(syntax, followers);

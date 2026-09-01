@@ -44,18 +44,32 @@ typedef struct {
   size_t action_count;
 } LSDACallSiteGroup;
 
-void DaveEHPrintUleb128(FILE* fp, unsigned long long value) {
+static void PrintByteDirective(FILE* fp, const unsigned char* bytes,
+                               size_t count) {
+  if (count == 0) {
+    return;
+  }
+  fprintf(fp, "\t.byte ");
+  for (size_t i = 0; i < count; i++) {
+    fprintf(fp, i == 0 ? "0x%02x" : ",0x%02x", bytes[i]);
+  }
+  fprintf(fp, "\n");
+}
+
+static void AppendUleb128(unsigned char* bytes, size_t* count,
+                          unsigned long long value) {
   do {
     unsigned char byte = (unsigned char)(value & 0x7f);
     value >>= 7;
     if (value != 0) {
       byte |= 0x80;
     }
-    fprintf(fp, "\t.byte 0x%02x\n", byte);
+    bytes[(*count)++] = byte;
   } while (value != 0);
 }
 
-void DaveEHPrintSleb128(FILE* fp, long long value) {
+static void AppendSleb128(unsigned char* bytes, size_t* count,
+                          long long value) {
   int more = 1;
   while (more) {
     unsigned char byte = (unsigned char)(value & 0x7f);
@@ -66,8 +80,22 @@ void DaveEHPrintSleb128(FILE* fp, long long value) {
     } else {
       byte |= 0x80;
     }
-    fprintf(fp, "\t.byte 0x%02x\n", byte);
+    bytes[(*count)++] = byte;
   }
+}
+
+void DaveEHPrintUleb128(FILE* fp, unsigned long long value) {
+  unsigned char bytes[10];
+  size_t count = 0;
+  AppendUleb128(bytes, &count, value);
+  PrintByteDirective(fp, bytes, count);
+}
+
+void DaveEHPrintSleb128(FILE* fp, long long value) {
+  unsigned char bytes[10];
+  size_t count = 0;
+  AppendSleb128(bytes, &count, value);
+  PrintByteDirective(fp, bytes, count);
 }
 
 static void PrintInsnLabel(FILE* fp, const char* func_name, long long label_id) {
@@ -339,29 +367,34 @@ void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
   fprintf(fp, "\t.4byte 0\n");
   fprintf(fp, "\t.byte 1\n");
   fprintf(fp, with_eh ? "\t.asciz \"zPLR\"\n" : "\t.asciz \"zR\"\n");
-  DaveEHPrintUleb128(fp, 1);
-  DaveEHPrintSleb128(fp, -8);
-  DaveEHPrintUleb128(fp, info->cie_ra_reg);
+  unsigned char bytes[64];
+  size_t byte_count = 0;
+  AppendUleb128(bytes, &byte_count, 1);
+  AppendSleb128(bytes, &byte_count, -8);
+  AppendUleb128(bytes, &byte_count, info->cie_ra_reg);
   if (with_eh) {
-    DaveEHPrintUleb128(fp, 7);
-    fprintf(fp, "\t.byte 0x1b\n");
+    AppendUleb128(bytes, &byte_count, 7);
+    bytes[byte_count++] = 0x1b;
+    PrintByteDirective(fp, bytes, byte_count);
+    byte_count = 0;
     fprintf(fp, ".Leh_%s_cie_pers_ref%s:\n", func, cie_label_suffix);
     fprintf(fp, "\t.4byte %s-.Leh_%s_cie_pers_ref%s\n",
             DAVECC_EH_PERSONALITY, func, cie_label_suffix);
-    fprintf(fp, "\t.byte 0x1b\n");
-    fprintf(fp, "\t.byte 0x1b\n");
+    bytes[byte_count++] = 0x1b;
+    bytes[byte_count++] = 0x1b;
   } else {
-    DaveEHPrintUleb128(fp, 1);
-    fprintf(fp, "\t.byte 0x1b\n");
+    AppendUleb128(bytes, &byte_count, 1);
+    bytes[byte_count++] = 0x1b;
   }
-  fprintf(fp, "\t.byte 12\n");
-  DaveEHPrintUleb128(fp, info->cie_cfa_reg);
-  DaveEHPrintUleb128(fp, info->entry_cfa_offset);
+  bytes[byte_count++] = 12;
+  AppendUleb128(bytes, &byte_count, info->cie_cfa_reg);
+  AppendUleb128(bytes, &byte_count, info->entry_cfa_offset);
   if (info->saved_ra_offset != 0 &&
       info->saved_ra_offset == -info->entry_cfa_offset) {
-    fprintf(fp, "\t.byte 0x%x\n", 0x80 | info->cie_ra_reg);
-    DaveEHPrintUleb128(fp, -info->saved_ra_offset / 8);
+    bytes[byte_count++] = (unsigned char)(0x80 | info->cie_ra_reg);
+    AppendUleb128(bytes, &byte_count, -info->saved_ra_offset / 8);
   }
+  PrintByteDirective(fp, bytes, byte_count);
   fprintf(fp, ".Leh_%s_cie_end%s:\n", func, cie_label_suffix);
 }
 

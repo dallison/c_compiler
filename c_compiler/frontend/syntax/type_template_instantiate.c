@@ -909,6 +909,10 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_decltype_auto_return_deduced =
       from->info.function.is_decltype_auto_return_deduced;
   func->info.function.is_coroutine = from->info.function.is_coroutine;
+  func->info.function.has_coroutine_syntax =
+      from->info.function.has_coroutine_syntax;
+  func->info.function.has_constexpr_if =
+      from->info.function.has_constexpr_if;
   func->info.function.coroutine_promise_type =
       from->info.function.coroutine_promise_type != NULL
           ? TypeRecordCopy(from->info.function.coroutine_promise_type)
@@ -1385,6 +1389,10 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_deduction_guide =
       from->info.function.is_deduction_guide;
   func->info.function.is_coroutine = from->info.function.is_coroutine;
+  func->info.function.has_coroutine_syntax =
+      from->info.function.has_coroutine_syntax;
+  func->info.function.has_constexpr_if =
+      from->info.function.has_constexpr_if;
   func->info.function.coroutine_promise_type =
       from->info.function.coroutine_promise_type != NULL
           ? TypeRecordCopy(from->info.function.coroutine_promise_type)

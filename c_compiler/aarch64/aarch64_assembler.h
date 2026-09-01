@@ -21,6 +21,11 @@ typedef struct {
 } AARCH64Assembler;
 
 bool AARCH64AssemblerInit(AARCH64Assembler* assembler, String* infile, String* outfile);
+bool AARCH64AssemblerInitGenerated(AARCH64Assembler* assembler, String* infile,
+                                   String* outfile);
+bool AARCH64AssemblerInitFromGeneratedString(AARCH64Assembler* assembler,
+                                             const char* name, String* input,
+                                             String* outfile);
 AARCH64Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(AARCH64Assembler* assembler);
 void AARCH64AssemblerDelete(AARCH64Assembler* assembler);

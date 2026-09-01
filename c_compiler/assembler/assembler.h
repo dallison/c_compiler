@@ -137,6 +137,9 @@ typedef struct Assembler {
   Vector orphan_symbols;
   int pass;                   // Pass number (1 or 2).
   int num_errors;             // Number of errors.
+  bool allow_layout_pass_skip;
+  bool requires_layout_pass;
+  bool parsing_layout_expression;
   int32_t current_section;    // Current section index.
   uint16_t elf_machine_type;  // ELF machine.
   uint16_t elf_flags;         // ELF flags.
@@ -174,6 +177,10 @@ int AssemblerFindSection(Assembler* assembler, String* name);
 void AssemblerSetSectionSize(Assembler* assembler, size_t index, size_t size);
 
 void AssemblerAddRelocation(Assembler* assembler, AssemblerRelocation* reloc);
+void AssemblerAddRelocationForSymbol(Assembler* assembler,
+                                     AssemblerSymbol* symbol, int32_t type,
+                                     int32_t section, int32_t offset,
+                                     int32_t addend);
 
 void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*));
 

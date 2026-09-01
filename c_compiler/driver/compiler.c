@@ -6,10 +6,15 @@
 //  Copyright © 2017 David Allison. All rights reserved.
 //
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "compiler.h"
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -46,6 +51,11 @@ Compiler* compiler;
 
 static Vector cxx_init_array_functions;
 static Vector cxx_fini_array_functions;
+
+static bool CompilerStringIndexContains(struct CompilerStringIndex* index,
+                                        const char* key);
+static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
+                                      const char* key, void* value);
 
 static CompilerOptionDefinition compiler_options[] = {
     {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info"},
@@ -1864,7 +1874,8 @@ static bool AsmNameInVector(Vector* names, const char* asm_name) {
 }
 
 static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
-  return AsmNameInVector(&compiler->emitted_function_asm_names, asm_name);
+  return CompilerStringIndexContains(
+      compiler->emitted_function_name_index, asm_name);
 }
 
 static void CompileReferencedInlineFunctions(Syntax* syntax);
@@ -1882,7 +1893,8 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
                              ? symbol->asm_name.value
                              : symbol->name.value;
   bool first_reference =
-      !AsmNameInVector(&compiler->referenced_function_asm_names, asm_name);
+      !CompilerStringIndexContains(
+          compiler->referenced_function_name_index, asm_name);
   if (first_reference && symbol->is_imported_module_symbol &&
       StorageIs(symbol->storage, STO(static)) &&
       symbol->type->info.function.template_origin != NULL &&
@@ -1897,7 +1909,9 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
     CompilerQueuePendingTemplateInstantiation(
         NewDeclarationListASTNode(declarations, symbol->location));
   }
-  if (first_reference) {
+  if (first_reference &&
+      CompilerStringIndexInsert(compiler->referenced_function_name_index,
+                                asm_name, symbol)) {
     VectorAppend(&compiler->referenced_function_asm_names,
                  NewString(asm_name));
   }
@@ -1940,8 +1954,9 @@ static const char* SymbolReferenceName(Symbol* symbol) {
 
 static bool FunctionSymbolIsReferenced(Symbol* symbol) {
   return symbol != NULL &&
-         AsmNameInVector(&compiler->referenced_function_asm_names,
-                         SymbolReferenceName(symbol));
+         CompilerStringIndexContains(
+             compiler->referenced_function_name_index,
+             SymbolReferenceName(symbol));
 }
 
 static bool VariableSymbolIsReferenced(Symbol* symbol) {
@@ -2027,7 +2042,8 @@ static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
                              : symbol->name.value;
-  return AsmNameInVector(&compiler->referenced_function_asm_names, asm_name);
+  return CompilerStringIndexContains(
+      compiler->referenced_function_name_index, asm_name);
 }
 
 static bool VariableDefinitionIsODRDiscardable(Symbol* symbol) {
@@ -2189,6 +2205,8 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   VectorAppend(&compiler->functions, code);
   VectorAppend(&compiler->emitted_function_asm_names,
                NewString(decl->symbol->asm_name.value));
+  CompilerStringIndexInsert(compiler->emitted_function_name_index,
+                            decl->symbol->asm_name.value, decl->symbol);
 
   if (compiler->debug_output) {
     BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
@@ -2458,12 +2476,31 @@ void CompilerCompileQueuedDeclaration(Syntax* syntax, ASTNode* node) {
   (void)syntax;
 }
 
+static void ForgetUnindexedPendingTemplateInstantiation(ASTNode* node) {
+  Vector* unindexed =
+      &compiler->unindexed_pending_template_instantiations;
+  for (size_t i = 0; i < unindexed->length; i++) {
+    if (unindexed->value.p[i] == node) {
+      VectorDeleteElement(unindexed, i);
+      return;
+    }
+  }
+}
+
 static void CompilePendingTemplateInstantiations(Syntax* syntax) {
-  while (compiler->pending_template_instantiations.length != 0) {
-    ASTNode* node = compiler->pending_template_instantiations.value.p[0];
-    VectorDeleteElement(&compiler->pending_template_instantiations, 0);
+  Vector* pending = &compiler->pending_template_instantiations;
+  compiler->pending_template_instantiation_drain_depth++;
+  while (compiler->pending_template_instantiation_head < pending->length) {
+    ASTNode* node =
+        pending->value.p[compiler->pending_template_instantiation_head++];
+    ForgetUnindexedPendingTemplateInstantiation(node);
     SyntaxResetForNewDeclaration(syntax);
     CompileDeclarationNode(syntax, node);
+  }
+  compiler->pending_template_instantiation_drain_depth--;
+  if (compiler->pending_template_instantiation_drain_depth == 0) {
+    VectorClear(pending);
+    compiler->pending_template_instantiation_head = 0;
   }
 }
 
@@ -2658,6 +2695,8 @@ static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name
   void* code = GenerateFunction(&codegen);
   VectorAppend(&compiler->functions, code);
   VectorAppend(&compiler->emitted_function_asm_names, NewString(name));
+  CompilerStringIndexInsert(
+      compiler->emitted_function_name_index, name, sym);
   GeneratorDestruct(&codegen);
   compiler->current_function = NULL;
   return sym;
@@ -2841,6 +2880,128 @@ TlsModel ParseTlsModelName(String* tls_model) {
   return TLS(bad);
 }
 
+typedef struct CompilerStringIndexEntry {
+  char* key;
+  void* value;
+  struct CompilerStringIndexEntry* next;
+} CompilerStringIndexEntry;
+
+struct CompilerStringIndex {
+  size_t bucket_count;
+  size_t entry_count;
+  CompilerStringIndexEntry** buckets;
+};
+
+#define COMPILER_STRING_INDEX_INITIAL_BUCKETS 16
+
+static uint64_t HashCompilerStringIndexKey(const char* key) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+  const unsigned char* current = (const unsigned char*)key;
+  while (*current != '\0') {
+    hash ^= *current++;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static struct CompilerStringIndex* NewCompilerStringIndex(void) {
+  struct CompilerStringIndex* index =
+      malloc(sizeof(*index));
+  index->bucket_count = COMPILER_STRING_INDEX_INITIAL_BUCKETS;
+  index->entry_count = 0;
+  index->buckets = calloc(index->bucket_count, sizeof(*index->buckets));
+  return index;
+}
+
+static void CompilerStringIndexDelete(struct CompilerStringIndex* index) {
+  if (index == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < index->bucket_count; i++) {
+    CompilerStringIndexEntry* entry = index->buckets[i];
+    while (entry != NULL) {
+      CompilerStringIndexEntry* next = entry->next;
+      free(entry->key);
+      free(entry);
+      entry = next;
+    }
+  }
+  free(index->buckets);
+  free(index);
+}
+
+static CompilerStringIndexEntry* CompilerStringIndexFindEntry(
+    struct CompilerStringIndex* index, const char* key) {
+  uint64_t hash = HashCompilerStringIndexKey(key);
+  size_t bucket = hash % index->bucket_count;
+  for (CompilerStringIndexEntry* entry = index->buckets[bucket];
+       entry != NULL; entry = entry->next) {
+    if (strcmp(entry->key, key) == 0) {
+      return entry;
+    }
+  }
+  return NULL;
+}
+
+static void* CompilerStringIndexFind(struct CompilerStringIndex* index,
+                                     const char* key) {
+  if (index == NULL || key == NULL || *key == '\0') {
+    return NULL;
+  }
+  CompilerStringIndexEntry* entry = CompilerStringIndexFindEntry(index, key);
+  return entry != NULL ? entry->value : NULL;
+}
+
+static bool CompilerStringIndexContains(struct CompilerStringIndex* index,
+                                        const char* key) {
+  if (index == NULL || key == NULL || *key == '\0') {
+    return false;
+  }
+  return CompilerStringIndexFindEntry(index, key) != NULL;
+}
+
+static void ResizeCompilerStringIndex(struct CompilerStringIndex* index) {
+  size_t new_bucket_count = index->bucket_count * 2;
+  CompilerStringIndexEntry** buckets =
+      calloc(new_bucket_count, sizeof(*buckets));
+  for (size_t i = 0; i < index->bucket_count; i++) {
+    CompilerStringIndexEntry* entry = index->buckets[i];
+    while (entry != NULL) {
+      CompilerStringIndexEntry* next = entry->next;
+      uint64_t hash = HashCompilerStringIndexKey(entry->key);
+      size_t bucket = hash % new_bucket_count;
+      entry->next = buckets[bucket];
+      buckets[bucket] = entry;
+      entry = next;
+    }
+  }
+  free(index->buckets);
+  index->bucket_count = new_bucket_count;
+  index->buckets = buckets;
+}
+
+static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
+                                      const char* key, void* value) {
+  if (index == NULL || key == NULL || *key == '\0') {
+    return false;
+  }
+  if (CompilerStringIndexContains(index, key)) {
+    return false;
+  }
+  if ((index->entry_count + 1) * 4 > index->bucket_count * 3) {
+    ResizeCompilerStringIndex(index);
+  }
+  uint64_t hash = HashCompilerStringIndexKey(key);
+  size_t bucket = hash % index->bucket_count;
+  CompilerStringIndexEntry* entry = malloc(sizeof(*entry));
+  entry->key = strdup(key);
+  entry->value = value;
+  entry->next = index->buckets[bucket];
+  index->buckets[bucket] = entry;
+  index->entry_count++;
+  return true;
+}
+
 static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
   if (symbol == NULL || symbol->type == NULL || asm_name == NULL ||
       symbol->asm_name.value == NULL ||
@@ -2852,10 +3013,22 @@ static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
           symbol->type->info.function.body != NULL);
 }
 
-static void IndexPendingTemplateInstantiation(ASTNode* declaration) {
-  if (declaration == NULL || declaration->op != AST_OP(decl_list)) {
-    return;
+static bool IndexPendingTemplateInstantiationSymbol(Symbol* symbol) {
+  const char* asm_name = symbol != NULL ? symbol->asm_name.value : NULL;
+  if (asm_name == NULL || *asm_name == '\0' ||
+      !PendingSymbolIsDefinition(symbol, asm_name)) {
+    return false;
   }
+  CompilerStringIndexInsert(
+      compiler->pending_template_instantiation_names, asm_name, symbol);
+  return true;
+}
+
+static bool IndexPendingTemplateInstantiation(ASTNode* declaration) {
+  if (declaration == NULL || declaration->op != AST_OP(decl_list)) {
+    return true;
+  }
+  bool fully_indexed = true;
   DeclarationListASTNode* declarations =
       (DeclarationListASTNode*)declaration;
   for (size_t i = 0; declarations->declarations != NULL &&
@@ -2863,23 +3036,12 @@ static void IndexPendingTemplateInstantiation(ASTNode* declaration) {
     VariableDeclarationASTNode* decl =
         declarations->declarations->value.p[i];
     Symbol* symbol = decl != NULL ? decl->symbol : NULL;
-    const char* asm_name =
-        symbol != NULL ? symbol->asm_name.value : NULL;
-    if (asm_name == NULL || *asm_name == '\0' ||
-        !PendingSymbolIsDefinition(symbol, asm_name)) {
-      continue;
+    if (symbol != NULL &&
+        !IndexPendingTemplateInstantiationSymbol(symbol)) {
+      fully_indexed = false;
     }
-    MapKeyType lookup_key;
-    lookup_key.p = (void*)asm_name;
-    if (MapFind(&compiler->pending_template_instantiation_names,
-                lookup_key) != NULL) {
-      continue;
-    }
-    MapKeyValue entry;
-    entry.key.p = strdup(asm_name);
-    entry.value.p = symbol;
-    MapInsert(&compiler->pending_template_instantiation_names, entry);
   }
+  return fully_indexed;
 }
 
 void CompilerQueuePendingTemplateInstantiation(ASTNode* declaration) {
@@ -2887,38 +3049,38 @@ void CompilerQueuePendingTemplateInstantiation(ASTNode* declaration) {
     return;
   }
   VectorAppend(&compiler->pending_template_instantiations, declaration);
-  IndexPendingTemplateInstantiation(declaration);
+  if (!IndexPendingTemplateInstantiation(declaration)) {
+    VectorAppend(&compiler->unindexed_pending_template_instantiations,
+                 declaration);
+  }
 }
 
 bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name) {
   if (compiler == NULL || asm_name == NULL || *asm_name == '\0') {
     return false;
   }
-  MapKeyType key;
-  key.p = (void*)asm_name;
   Symbol* indexed =
-      MapFind(&compiler->pending_template_instantiation_names, key);
+      CompilerStringIndexFind(
+          compiler->pending_template_instantiation_names, asm_name);
   if (PendingSymbolIsDefinition(indexed, asm_name)) {
     return true;
   }
   // A symbol can receive its final mangled name or definition body after it is
-  // queued. Preserve the old scan's behavior for those uncommon late updates;
-  // stable queued definitions take the indexed fast path above.
-  for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
-    DeclarationListASTNode* declarations =
-        compiler->pending_template_instantiations.value.p[i];
-    if (declarations == NULL ||
-        declarations->base.op != AST_OP(decl_list) ||
-        declarations->declarations == NULL) {
-      continue;
+  // queued. Preserve that behavior by revisiting only declarations that could
+  // not be fully indexed at queue time.
+  Vector* unindexed =
+      &compiler->unindexed_pending_template_instantiations;
+  for (size_t i = 0; i < unindexed->length;) {
+    ASTNode* declaration = unindexed->value.p[i];
+    if (!IndexPendingTemplateInstantiation(declaration)) {
+      i++;
+    } else {
+      VectorDeleteElement(unindexed, i);
     }
-    for (size_t j = 0; j < declarations->declarations->length; j++) {
-      VariableDeclarationASTNode* decl =
-          declarations->declarations->value.p[j];
-      if (decl != NULL &&
-          PendingSymbolIsDefinition(decl->symbol, asm_name)) {
-        return true;
-      }
+    indexed = CompilerStringIndexFind(
+        compiler->pending_template_instantiation_names, asm_name);
+    if (PendingSymbolIsDefinition(indexed, asm_name)) {
+      return true;
     }
   }
   return false;
@@ -2933,7 +3095,9 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   ModuleUnitInfoInit(&compiler->module_unit);
   VectorInit(&compiler->functions);
   VectorInit(&compiler->emitted_function_asm_names);
+  compiler->emitted_function_name_index = NewCompilerStringIndex();
   VectorInit(&compiler->referenced_function_asm_names);
+  compiler->referenced_function_name_index = NewCompilerStringIndex();
   VectorInit(&compiler->referenced_variable_asm_names);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
@@ -2958,8 +3122,11 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&cxx_init_array_functions);
   VectorInit(&cxx_fini_array_functions);
   VectorInit(&compiler->pending_template_instantiations);
-  MapInitForCharPointerKeys(
-      &compiler->pending_template_instantiation_names);
+  compiler->pending_template_instantiation_head = 0;
+  compiler->pending_template_instantiation_drain_depth = 0;
+  compiler->pending_template_instantiation_names =
+      NewCompilerStringIndex();
+  VectorInit(&compiler->unindexed_pending_template_instantiations);
   VectorInit(&compiler->injection_frames);
   VectorInit(&compiler->pending_injected_declarations);
   VectorInit(&compiler->orphan_function_symbols);
@@ -3187,6 +3354,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   StringSet(compiler->target_name, target->canonical_name);
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
+  compiler->direct_object_emission = false;
   ParseStandardOption(compiler, options);
   compiler->constexpr_eval_mode = kConstexprEvalAuto;
   String* constexpr_eval = OptionStringValue(kOptionConstexprEval, options);
@@ -3456,10 +3624,6 @@ static void FreeRttiTypeInfoKey(MapKeyValue* kv) {
   StringDelete((String*)kv->key.p);
 }
 
-static void FreePendingTemplateInstantiationKey(MapKeyValue* kv) {
-  free(kv->key.p);
-}
-
 void CompilerDestruct(Compiler* compiler) {
   ConstexprPCodeClearImageCache();
 
@@ -3474,13 +3638,16 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->declaration_asts);
   VectorDestruct(&compiler->cxx_defined_classes);
   VectorDestruct(&compiler->functions_being_analyzed);
-  for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
+  for (size_t i = compiler->pending_template_instantiation_head;
+       i < compiler->pending_template_instantiations.length; i++) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
   }
   VectorDestruct(&compiler->pending_template_instantiations);
-  MapDestructWithContents(
-      &compiler->pending_template_instantiation_names,
-      FreePendingTemplateInstantiationKey);
+  CompilerStringIndexDelete(
+      compiler->pending_template_instantiation_names);
+  compiler->pending_template_instantiation_names = NULL;
+  VectorDestruct(
+      &compiler->unindexed_pending_template_instantiations);
   CompilerInjectionFramesTeardown();
 
   // Free function-definition symbols that were superseded by an earlier
@@ -3506,9 +3673,13 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(
       &compiler->emitted_function_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+  CompilerStringIndexDelete(compiler->emitted_function_name_index);
+  compiler->emitted_function_name_index = NULL;
   VectorDestructWithContents(
       &compiler->referenced_function_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+  CompilerStringIndexDelete(compiler->referenced_function_name_index);
+  compiler->referenced_function_name_index = NULL;
   VectorDestructWithContents(
       &compiler->referenced_variable_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
@@ -3656,8 +3827,20 @@ bool CompilerInitForAssembler(const char* filename, Vector* options) {
 
 // Emit the assembly language into the filename given, returning true
 // if it worked.
-static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
-  FILE* asm_file = compiler->target->create_asm_file(&compiler->infile, asm_filename);
+static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename,
+                             String* generated_output) {
+  char* generated_buffer = NULL;
+  size_t generated_size = 0;
+  FILE* asm_file;
+  if (generated_output != NULL) {
+    asm_file = open_memstream(&generated_buffer, &generated_size);
+    if (asm_file != NULL) {
+      compiler->target->emit_assembly_preamble(&compiler->infile, asm_file);
+    }
+  } else {
+    asm_file =
+        compiler->target->create_asm_file(&compiler->infile, asm_filename);
+  }
   
   if (asm_file == NULL) {
     fprintf(stderr, "Unable to open assembler file %s\n",
@@ -3665,6 +3848,10 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     return false;
   }
   for (size_t i = 0; i < compiler->functions.length; i++) {
+    if (compiler->target->prepare_function_emission != NULL) {
+      compiler->target->prepare_function_emission(
+          compiler->functions.value.p[i], i);
+    }
     // Debug, print to stdout.
     if (compiler->print_back_end) {
       compiler->target->emit_function_assembly(compiler->functions.value.p[i],
@@ -3751,6 +3938,10 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
   if (asm_file != stdout) {
     fclose(asm_file);
   }
+  if (generated_output != NULL) {
+    StringAppendSegment(generated_output, generated_buffer, generated_size);
+    free(generated_buffer);
+  }
   return true;
 }
 
@@ -3771,6 +3962,25 @@ static String* Assemble(Compiler* compiler, String* asm_filename, Vector* option
   // Assemble using target-specific assembler.
   bool ok = compiler->target->assemble(asm_filename, object_filename);
   if (!ok) {
+    StringDelete(object_filename);
+    return NULL;
+  }
+  return object_filename;
+}
+
+static String* AssembleGeneratedString(Compiler* compiler, String* input,
+                                       Vector* options) {
+  String* output_filename = OptionStringValue(kOptionOutputFile, options);
+  String* object_filename;
+  if (output_filename != NULL) {
+    object_filename = NewString(output_filename->value);
+  } else {
+    object_filename = NewString(compiler->infile.value);
+    ReplaceSourceExtension(object_filename, ".o");
+  }
+
+  if (!compiler->target->assemble_string(compiler->infile.value, input,
+                                         object_filename)) {
     StringDelete(object_filename);
     return NULL;
   }
@@ -3986,7 +4196,16 @@ static String* Compile(Compiler* compiler, Vector* options) {
     StringInit(&asm_filename, compiler->infile.value);
     ReplaceSourceExtension(&asm_filename, ".s");
   }
-  bool ok = EmitAssemblyFile(compiler, &asm_filename);
+  bool use_in_memory_assembly =
+      !output_asm_only && !compiler->keep_asm_file &&
+      compiler->target->emit_assembly_preamble != NULL &&
+      compiler->target->assemble_string != NULL;
+  compiler->direct_object_emission =
+      use_in_memory_assembly && !compiler->debug_output;
+  String generated_assembly = {0};
+  bool ok = EmitAssemblyFile(
+      compiler, &asm_filename,
+      use_in_memory_assembly ? &generated_assembly : NULL);
   if (!ok) {
     StringDestruct(&asm_filename);
     return NULL;
@@ -4005,7 +4224,11 @@ static String* Compile(Compiler* compiler, Vector* options) {
 
   // Run the assembler to assemble into the object file.  Return the
   // name of rhe object file or NULL if something went wrong.
-  String* object_filename = Assemble(compiler, &asm_filename, options);
+  String* object_filename =
+      use_in_memory_assembly
+          ? AssembleGeneratedString(compiler, &generated_assembly, options)
+          : Assemble(compiler, &asm_filename, options);
+  StringDestruct(&generated_assembly);
   
   // Remove .s file unless told not to.
   if (!compiler->keep_asm_file) {

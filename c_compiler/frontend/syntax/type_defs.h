@@ -248,6 +248,9 @@ typedef struct {
   bool is_auto_return_deduced;  // C++ auto return deduced.         // @wire 34
   bool is_deduction_guide;  // C++ class template deduction guide.  // @wire 35
   bool is_coroutine;  // C++ coroutine function.                    // @wire 36
+  bool has_coroutine_syntax;  // Body contains co_await/return/yield. // @wire 54
+  bool has_constexpr_if;  // Body contains an if constexpr.         // @wire 55
+  bool constexpr_if_checked;  // Transient summary cache.           // @wire -
   struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
   struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
   int coroutine_suspend_count;  // Suspension points in body.       // @wire 39
@@ -258,6 +261,8 @@ typedef struct {
   int template_parameter_base;  // Param index base for nesting.    // @wire 44
   Vector template_parameters;  // TemplateParameter* for defaults.  // @wire 45
   Vector template_instantiations;  // Symbol* cache, not overload candidates. // @wire 46
+  struct FunctionTemplateInstantiationCache*
+      template_instantiation_cache;  // Indexed transient view of cache. // @wire -
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
   bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49

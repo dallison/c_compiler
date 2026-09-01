@@ -112,6 +112,16 @@ bool TargetBasicBlockCalculateDominators(TargetGenerator* gen, TargetBasicBlock*
 }
 
 void TargetBasicBlockCalculateImmediateDominator(TargetBasicBlock* b, Vector* blocks) {
+  if (b->in_edges.length == 1) {
+    TargetBasicBlock* predecessor =
+        VectorGet(blocks, b->in_edges.value.w[0]);
+    if (predecessor != b &&
+        BitSetContains(&b->dominators, predecessor->block_id)) {
+      b->idom = predecessor;
+      return;
+    }
+  }
+
   size_t maxndoms = 0;
 
   BitSetIterator it;
@@ -151,9 +161,7 @@ void TargetBasicBlockInitDominators(TargetBasicBlock* b, bool is_start, size_t n
       // Block is unreachable.
       return;
     }
-    for (size_t i = 0; i < num_nodes; ++i) {
-      BitSetInsert(&b->dominators, i);
-    }
+    BitSetFill(&b->dominators, num_nodes);
   }
 }
 
@@ -262,6 +270,9 @@ void TargetBasicBlockRemoveInstruction(TargetGenerator* gen, TargetBasicBlock* b
      }
    }
   VectorClear(&inst->users);
+  if (inst->user_index != NULL) {
+    VectorClear(inst->user_index);
+  }
   TargetDeleteInstruction(gen, inst);
 }
 
@@ -574,8 +585,44 @@ static void AddKeptBlockLinks(TargetGenerator* gen) {
   }
 }
 
+static bool HasForwardSinglePredecessorCFG(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block == gen->entry_block || block->in_edges.length == 0) {
+      continue;
+    }
+    if (block->in_edges.length != 1 ||
+        block->in_edges.value.w[0] >= block->block_id) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void CalculateForwardSinglePredecessorDominators(
+    TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    BitSetClear(&block->dominators);
+    if (block != gen->entry_block && block->in_edges.length == 1) {
+      TargetBasicBlock* predecessor =
+          VectorGet(&gen->basic_blocks, block->in_edges.value.w[0]);
+      if (!TargetBasicBlockIsUnreachable(gen, predecessor)) {
+        BitSetCopy(&block->dominators, &predecessor->dominators);
+      }
+    }
+    BitSetInsert(&block->dominators, block->block_id);
+    block->num_dominators = BitSetCount(&block->dominators);
+  }
+}
+
 // Calculate the dominators for all basic blocks.
 static void CalculateDominators(TargetGenerator* gen) {
+  if (HasForwardSinglePredecessorCFG(gen)) {
+    CalculateForwardSinglePredecessorDominators(gen);
+    return;
+  }
+
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[i];
     TargetBasicBlockInitDominators(b, b == gen->entry_block,
@@ -703,7 +750,9 @@ static void DecrementOperandUses(TargetInstruction* inst) {
   }
 }
 
-static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block, TargetInstruction* inst, bool is_input) {
+static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block,
+                      TargetInstruction* inst, bool is_input,
+                      bool preserve_dead_call_inputs) {
   if (inst == NULL) {
     return;
   }
@@ -715,10 +764,11 @@ static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block, TargetInstr
       return;
     }
   }
-  // Unless this is an input inside a call block, check for
-  // use count.  This allows all inputs to be propagated to the
-  // output in a call block.
-  if (!(is_input && block->contains_call)) {
+  // On CFGs with joins or backedges, retain the conservative rule that every
+  // input to a call block is also an output.  On a dominator-tree-only CFG the
+  // use count is path-exact, so dropping a dead input avoids carrying an
+  // ever-growing live set through a long sequence of calls.
+  if (!(preserve_dead_call_inputs && is_input && block->contains_call)) {
     assert(inst->uses >= 0);
     if (inst->uses == 0) {
       return;
@@ -751,7 +801,8 @@ static void PropagateNewOutputUpwards(TargetGenerator* gen,
   }
 }
 
-static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
+static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block,
+                              bool preserve_dead_call_inputs) {
   // For each instruction, decrement the uses count for all its operands.
   for (TargetInstruction* inst = block->code; inst != NULL &&
        inst != block->end_code; inst = TargetNext(inst)) {
@@ -768,11 +819,12 @@ static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
   // to outputs
   for (TargetInstruction* inst = block->code; inst != NULL &&
        inst != block->end_code; inst = TargetNext(inst)) {
-    AddOutput(gen, block, inst, false);
+    AddOutput(gen, block, inst, false, preserve_dead_call_inputs);
   }
-  AddOutput(gen, block, block->end_code, false);
+  AddOutput(gen, block, block->end_code, false, preserve_dead_call_inputs);
   for (size_t i = 0; i < block->inputs.length; i++) {
-    AddOutput(gen, block, block->inputs.value.p[i], true);
+    AddOutput(gen, block, block->inputs.value.p[i], true,
+              preserve_dead_call_inputs);
   }
   
   // Now look at the block's out edges and add the inputs of those to
@@ -801,21 +853,33 @@ static void BuildBlockInputs(TargetBasicBlock* block) {
 
 // Traverse the dominator tree building the inputs and outputs.
 // Returns true if there are any changes.
-static void BuildInputsAndOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
-  if (block == NULL) {
+static void BuildInputsAndOutputs(TargetGenerator* gen, TargetBasicBlock* block,
+                                  bool preserve_dead_call_inputs) {
+  while (block != NULL) {
+    BuildBlockInputs(block);
+    BuildBlockOutputs(gen, block, preserve_dead_call_inputs);
+
+    // A single-child dominator path needs neither recursion nor a uses
+    // snapshot: no sibling observes the mutations made by the child subtree.
+    if (block->dominatees.length == 1) {
+      TargetBlockId child_id = block->dominatees.value.w[0];
+      block = gen->basic_blocks.value.p[child_id];
+      continue;
+    }
+
+    if (block->dominatees.length > 1) {
+      Vector saved_uses = {0};
+      SaveInstructionUses(block, &saved_uses);
+      for (size_t i = 0; i < block->dominatees.length; i++) {
+        TargetBlockId child_id = block->dominatees.value.w[i];
+        TargetBasicBlock* child = gen->basic_blocks.value.p[child_id];
+        BuildInputsAndOutputs(gen, child, preserve_dead_call_inputs);
+        RestoreInstructionUses(block, &saved_uses);
+      }
+      VectorDestruct(&saved_uses);
+    }
     return;
   }
-  BuildBlockInputs(block);
-  BuildBlockOutputs(gen, block);
-  Vector saved_uses = {0};
-  SaveInstructionUses(block, &saved_uses);
-  for (size_t i = 0; i < block->dominatees.length; i++) {
-    TargetBlockId child_id = block->dominatees.value.w[i];
-    TargetBasicBlock* child = gen->basic_blocks.value.p[child_id];
-    BuildInputsAndOutputs(gen, child);
-    RestoreInstructionUses(block, &saved_uses);
-  }
-  VectorDestruct(&saved_uses);
 }
 
 
@@ -893,16 +957,14 @@ static void RemoveUnreachableBlocks(TargetGenerator* gen) {
 static void DetectLoops(TargetGenerator* gen) {
   for (size_t header_id = 0; header_id < gen->basic_blocks.length;
        header_id++) {
+    TargetBasicBlock* header = gen->basic_blocks.value.p[header_id];
     Vector work;
     VectorInit(&work);
-    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-      TargetBasicBlock* latch = gen->basic_blocks.value.p[i];
-      for (size_t j = 0; j < latch->out_edges.length; j++) {
-        TargetBlockId out_id = latch->out_edges.value.w[j];
-        if (out_id == header_id &&
-            BitSetContains(&latch->dominators, header_id)) {
-          VectorAppend(&work, latch);
-        }
+    for (size_t i = 0; i < header->in_edges.length; i++) {
+      TargetBasicBlock* latch =
+          gen->basic_blocks.value.p[header->in_edges.value.w[i]];
+      if (BitSetContains(&latch->dominators, header_id)) {
+        VectorAppend(&work, latch);
       }
     }
 
@@ -1003,17 +1065,32 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
 static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
   Vector work;
   VectorInit(&work);
+  size_t* propagated_inputs =
+      calloc(gen->basic_blocks.length, sizeof(*propagated_inputs));
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     VectorAppend(&work, gen->basic_blocks.value.p[i]);
   }
   while (work.length > 0) {
     TargetBasicBlock* block = VectorLast(&work);
     VectorPop(&work);
+    // Requeued blocks normally only need to propagate the inputs appended
+    // since their previous visit.  A self-edge can grow this same vector while
+    // it is being scanned, so retain the original full-rescan behavior there.
+    bool has_self_edge = false;
+    for (size_t i = 0; i < block->in_edges.length; i++) {
+      if (block->in_edges.value.w[i] == block->block_id) {
+        has_self_edge = true;
+        break;
+      }
+    }
+    size_t first_input =
+        has_self_edge ? 0 : propagated_inputs[block->block_id];
+    size_t input_count = block->inputs.length;
     for (size_t i = 0; i < block->in_edges.length; i++) {
       TargetBasicBlock* pred =
           VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
       bool changed = false;
-      for (size_t j = 0; j < block->inputs.length; j++) {
+      for (size_t j = first_input; j < input_count; j++) {
         TargetInstruction* inst = block->inputs.value.p[j];
         if (inst->block == NULL || inst->block == block) {
           continue;
@@ -1041,18 +1118,46 @@ static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
         VectorAppend(&work, pred);
       }
     }
+    if (!has_self_edge) {
+      propagated_inputs[block->block_id] = input_count;
+    }
   }
+  free(propagated_inputs);
   VectorDestruct(&work);
+}
+
+static bool HasNonDominatorTreeEdge(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block->is_unreachable) {
+      continue;
+    }
+    for (size_t j = 0; j < block->out_edges.length; j++) {
+      TargetBasicBlock* successor =
+          VectorGet(&gen->basic_blocks, block->out_edges.value.w[j]);
+      if (successor->is_unreachable) {
+        continue;
+      }
+      if (successor->idom != block) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Calculate the inputs and outputs for all basic blocks.  This
 // information tells the register allocator the lifespan of
 // registers.
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
+   bool has_non_dominator_tree_edge = HasNonDominatorTreeEdge(gen);
    ResetAllBlockLiveness(gen);
    ResetAllInstructionUses(gen);
-   BuildInputsAndOutputs(gen, gen->entry_block);
-   PropagateLiveInToPredecessors(gen);
+   BuildInputsAndOutputs(gen, gen->entry_block,
+                         has_non_dominator_tree_edge);
+   if (has_non_dominator_tree_edge) {
+     PropagateLiveInToPredecessors(gen);
+   }
 
    // Reset the uses count for all instructions.
    ResetAllInstructionUses(gen);
@@ -1106,7 +1211,7 @@ bool TargetBasicBlockOutputs(TargetBasicBlock* block, TargetInstruction* inst) {
 
 void TargetBasicBlockPropagateExpression(TargetGenerator* gen, TargetInstruction* inst, TargetBasicBlock* to) {
   TargetBasicBlock* from = inst->block;
-  AddOutput(gen, from, inst, false);
+  AddOutput(gen, from, inst, false, false);
   // Mark the value as input to the using block.
   if (!BitSetContains(&to->input_ids, inst->id)) {
     VectorAppend(&to->inputs, inst);

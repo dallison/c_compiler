@@ -415,6 +415,9 @@ static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
   VectorInit(&assembler->orphan_symbols);
   assembler->pass = 0;
   assembler->num_errors = 0;
+  assembler->allow_layout_pass_skip = false;
+  assembler->requires_layout_pass = false;
+  assembler->parsing_layout_expression = false;
   HashTableInit(&assembler->symbol_table, "assembler_symbols", 1009, HashSymbol,
                 InsertSymbolIntoHashTable, FindSymbolInHashTable);
   assembler->elf_machine_type = elf_machine_type;
@@ -561,6 +564,18 @@ void AssemblerAddRelocation(Assembler* assembler, AssemblerRelocation* reloc) {
   // symbol table.
   reloc->symbol->exported = true;
   VectorAppend(&assembler->relocations, reloc);
+}
+
+void AssemblerAddRelocationForSymbol(Assembler* assembler,
+                                     AssemblerSymbol* symbol, int32_t type,
+                                     int32_t section, int32_t offset,
+                                     int32_t addend) {
+  if (assembler->pass != ASSEMBLER_FINAL_PASS) {
+    return;
+  }
+  AssemblerAddRelocation(
+      assembler,
+      NewAssemblerRelocation(symbol, type, section, offset, addend));
 }
 
 int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
@@ -870,7 +885,12 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   while (assembler->num_errors == 0 &&
          assembler->pass <= ASSEMBLER_FINAL_PASS) {
     Assemble(assembler, run_func);  // Run the assembly pass.
-    assembler->pass++;
+    if (assembler->pass == 1 && assembler->allow_layout_pass_skip &&
+        !assembler->requires_layout_pass) {
+      assembler->pass = ASSEMBLER_FINAL_PASS;
+    } else {
+      assembler->pass++;
+    }
     if (assembler->pass <= ASSEMBLER_FINAL_PASS) {
       AssemblerReset(assembler, false);
     }
@@ -1122,6 +1142,9 @@ static void HandleDirective_size(Assembler* assembler) {
 
 static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    if (assembler->pass == 1 && assembler->parsing_layout_expression) {
+      assembler->requires_layout_pass = true;
+    }
     String spelling = assembler->lex.spelling;
     AssemblerSymbol* sym = AssemblerFindSymbol(assembler, spelling.value);
     LexNextToken(&assembler->lex);
@@ -1198,6 +1221,18 @@ static int RelocTypeForWord(Assembler* assembler) {
 static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   AssemblerSymbol* left = ExpressionPrimary(assembler);
   if (left == NULL) {
+    return 0;
+  }
+  if (assembler->pass != ASSEMBLER_FINAL_PASS) {
+    while (LexLookingAt(&assembler->lex, TOK(plus)) ||
+           LexLookingAt(&assembler->lex, TOK(minus))) {
+      LexNextToken(&assembler->lex);
+      if (LexLookingAt(&assembler->lex, TOK(number))) {
+        LexNextToken(&assembler->lex);
+      } else if (ExpressionPrimary(assembler) == NULL) {
+        break;
+      }
+    }
     return 0;
   }
   int reloc_index = kRelocSet32;
@@ -1361,9 +1396,18 @@ static void HandleDirective_p2align(Assembler* assembler) {
   }
 }
 
+static int64_t EvaluateDataDirectiveValue(Assembler* assembler) {
+  if (LexLookingAt(&assembler->lex, TOK(number))) {
+    int64_t value = assembler->lex.number;
+    LexNextToken(&assembler->lex);
+    return value;
+  }
+  return AssemblerEvaluateExpression(assembler);
+}
+
 static void HandleDataDirective(Assembler* assembler, int bits) {
   while (!LexEof(&assembler->lex)) {
-    int64_t value = AssemblerEvaluateExpression(assembler);
+    int64_t value = EvaluateDataDirectiveValue(assembler);
     switch (bits) {
       case 8:
         AssemblerEmitByte(assembler, assembler->current_section,
@@ -1391,7 +1435,9 @@ static void HandleDataDirective(Assembler* assembler, int bits) {
 }
 
 static void HandleDirective_space(Assembler* assembler) {
+  assembler->parsing_layout_expression = true;
   int64_t num_bytes = AssemblerEvaluateExpression(assembler);
+  assembler->parsing_layout_expression = false;
   if (num_bytes < 0) {
     AssemblerError(assembler, "Invalid .space size %" PRId64 "", num_bytes);
     return;
@@ -1460,7 +1506,9 @@ static void AssemblerEmitSleb128(Assembler* assembler, int64_t value) {
 }
 
 static void HandleDirective_uleb128(Assembler* assembler) {
+  assembler->parsing_layout_expression = true;
   int64_t value = AssemblerEvaluateExpression(assembler);
+  assembler->parsing_layout_expression = false;
   if (value < 0) {
     AssemblerError(assembler, "Invalid .uleb128 value %" PRId64 "", value);
     return;
@@ -1469,7 +1517,9 @@ static void HandleDirective_uleb128(Assembler* assembler) {
 }
 
 static void HandleDirective_sleb128(Assembler* assembler) {
+  assembler->parsing_layout_expression = true;
   int64_t value = AssemblerEvaluateExpression(assembler);
+  assembler->parsing_layout_expression = false;
   AssemblerEmitSleb128(assembler, value);
 }
 
@@ -1491,7 +1541,7 @@ static void HandleDirective_hword(Assembler* assembler) {
       int16_t value = (int16_t)SimpleSymbolExpression(assembler, 16);
       AssemblerEmitHalf(assembler, assembler->current_section, value);
     } else {
-      int16_t value = (int16_t)AssemblerEvaluateExpression(assembler);
+      int16_t value = (int16_t)EvaluateDataDirectiveValue(assembler);
       AssemblerEmitHalf(assembler, assembler->current_section, value);
     }
     if (!LexMatch(&assembler->lex, TOK(comma))) {
@@ -1521,7 +1571,7 @@ static void HandleDirective_word(Assembler* assembler) {
         reloc->offset = field_offset;
       }
     } else {
-      int32_t value = (int32_t)AssemblerEvaluateExpression(assembler);
+      int32_t value = (int32_t)EvaluateDataDirectiveValue(assembler);
       AssemblerEmitWord(assembler, assembler->current_section, value);
     }
     if (!LexMatch(&assembler->lex, TOK(comma))) {
@@ -1548,7 +1598,7 @@ static void HandleDirective_long(Assembler* assembler) {
       int64_t value = SimpleSymbolExpression(assembler, 64);
       AssemblerEmitLong(assembler, assembler->current_section, value);
     } else {
-      int64_t value = AssemblerEvaluateExpression(assembler);
+      int64_t value = EvaluateDataDirectiveValue(assembler);
       AssemblerEmitLong(assembler, assembler->current_section, value);
     }
     if (!LexMatch(&assembler->lex, TOK(comma))) {

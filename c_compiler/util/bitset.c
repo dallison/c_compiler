@@ -40,21 +40,11 @@ void BitSetClear(BitSet* set) {
   memset(set->value, 0, set->capacity * sizeof(uint64_t));
 }
 
-static void CalculateIndexes(size_t index, size_t* word, size_t* bit) {
-  *word = index / 64;
-  *bit = index % 64;
-}
-
 static int FindFirstSet64(uint64_t value) {
   if (value == 0) {
     return 0;
   }
-  int index = 1;
-  while ((value & 1) == 0) {
-    value >>= 1;
-    ++index;
-  }
-  return index;
+  return __builtin_ctzll(value) + 1;
 }
 
 // Make room for an index into the set.
@@ -83,20 +73,37 @@ static void MakeRoom(BitSet* set, size_t words) {
   }
 }
 
+void BitSetFill(BitSet* set, size_t bit_count) {
+  size_t words = (bit_count + 63) / 64;
+  if (words != 0) {
+    MakeRoom(set, words);
+    memset(set->value, 0xff, words * sizeof(uint64_t));
+    size_t final_word_bits = bit_count % 64;
+    if (final_word_bits != 0) {
+      set->value[words - 1] =
+          (UINT64_C(1) << final_word_bits) - UINT64_C(1);
+    }
+  }
+  if (set->capacity > words) {
+    memset(&set->value[words], 0,
+           (set->capacity - words) * sizeof(uint64_t));
+  }
+}
+
 void BitSetInsert(BitSet* set, size_t index) {
-  MakeRoomFor(set, index);
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
-  set->value[word] |= 1LL << bit;
+  size_t word = index / 64;
+  if (word >= set->capacity) {
+    MakeRoomFor(set, index);
+  }
+  set->value[word] |= UINT64_C(1) << (index % 64);
 }
 
 bool BitSetContains(BitSet* set, size_t index) {
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
+  size_t word = index / 64;
   if (word >= set->capacity) {
     return false;
   }
-  return (set->value[word] & (1LL << bit)) != 0;
+  return (set->value[word] & (UINT64_C(1) << (index % 64))) != 0;
 }
 
 size_t BitSetFindFirstSet(BitSet* set) {
@@ -122,10 +129,11 @@ size_t BitSetFindFirstClear(BitSet* set) {
 }
 
 void BitSetRemove(BitSet* set, size_t index) {
-  MakeRoomFor(set, index);
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
-  set->value[word] &= ~(1LL << bit);
+  size_t word = index / 64;
+  if (word >= set->capacity) {
+    MakeRoomFor(set, index);
+  }
+  set->value[word] &= ~(UINT64_C(1) << (index % 64));
 }
 
 void BitSetIntersection(BitSet* set1, BitSet* set2, BitSet* result) {
@@ -211,11 +219,7 @@ void BitSetExpand(BitSet* set, Vector* vec) {
 size_t BitSetCount(BitSet* set) {
   size_t count = 0;
   for (size_t word = 0; word < set->capacity; word++) {
-    for (size_t bit = 0; bit < 64; bit++) {
-      if ((set->value[word] & (1LL << bit)) != 0) {
-        count++;
-      }
-    }
+    count += (size_t)__builtin_popcountll(set->value[word]);
   }
   return count;
 }
@@ -240,33 +244,42 @@ void BitSetIteratorStart(BitSetIterator* it, BitSet* set) {
   it->set = set;
   it->word_offset = 0;
   it->bit_offset = 0;
-  // Find first bit with value 1.
-  for (size_t word = 0; word < set->capacity; word++) {
-    for (size_t bit = 0; bit < 64; bit++) {
-      if ((set->value[word] & (1LL << bit)) != 0) {
-        it->word_offset = word;
-        it->bit_offset = bit;
-        return;
-      }
-    }
+  while (it->word_offset < set->capacity &&
+         set->value[it->word_offset] == 0) {
+    it->word_offset++;
+  }
+  if (it->word_offset < set->capacity) {
+    it->bit_offset =
+        (size_t)__builtin_ctzll(set->value[it->word_offset]);
   }
 }
 
 bool BitSetIteratorDone(BitSetIterator* it);
 
 void BitSetIteratorNext(BitSetIterator* it) {
-  it->bit_offset++;
-  while (it->word_offset < it->set->capacity) {
-    while (it->bit_offset < 64 &&
-           (it->set->value[it->word_offset] & (1LL << it->bit_offset)) == 0) {
-      it->bit_offset++;
-    }
-    if (it->bit_offset < 64) {
+  if (BitSetIteratorDone(it)) {
+    return;
+  }
+  uint64_t remaining = 0;
+  if (it->bit_offset < 63) {
+    remaining =
+        it->set->value[it->word_offset] &
+        (UINT64_MAX << (it->bit_offset + 1));
+  }
+  if (remaining != 0) {
+    it->bit_offset = (size_t)__builtin_ctzll(remaining);
+    return;
+  }
+  do {
+    it->word_offset++;
+    if (it->word_offset < it->set->capacity &&
+        it->set->value[it->word_offset] != 0) {
+      it->bit_offset =
+          (size_t)__builtin_ctzll(it->set->value[it->word_offset]);
       return;
     }
-    it->bit_offset = 0;
-    it->word_offset++;
-  }
+  } while (it->word_offset < it->set->capacity);
+  it->bit_offset = 0;
 }
 
 size_t BitSetIteratorValue(BitSetIterator* it);
