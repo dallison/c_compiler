@@ -109,11 +109,9 @@ void BitSetFill(BitSet* set, size_t bit_count) {
   }
 }
 
-void BitSetInsert(BitSet* set, size_t index) {
+void BitSetInsertGrow(BitSet* set, size_t index) {
   size_t word = index / 64;
-  if (word >= set->capacity) {
-    MakeRoomFor(set, index);
-  }
+  MakeRoomFor(set, index);
   set->value[word] |= UINT64_C(1) << (index % 64);
 }
 

@@ -29,7 +29,15 @@ size_t BitSetCount(BitSet* set);
 void BitSetClear(BitSet* set);
 void BitSetFill(BitSet* set, size_t bit_count);
 
-void BitSetInsert(BitSet* set, size_t index);
+void BitSetInsertGrow(BitSet* set, size_t index);
+static inline void BitSetInsert(BitSet* set, size_t index) {
+  size_t word = index / 64;
+  if (word >= set->capacity) {
+    BitSetInsertGrow(set, index);
+    return;
+  }
+  set->value[word] |= UINT64_C(1) << (index % 64);
+}
 bool BitSetContains(BitSet* set, size_t index);
 void BitSetRemove(BitSet* set, size_t index);
 

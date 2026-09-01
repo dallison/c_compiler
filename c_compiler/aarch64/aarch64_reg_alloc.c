@@ -1355,49 +1355,35 @@ static void ProcessBasicBlock(AARCH64RegisterAllocator* allocator,
                           kTraversePreOrder, allocator);
 }
 
-static bool IsListedUser(TargetInstruction* value,
-                         TargetInstruction* candidate) {
-  for (size_t i = 0; i < value->users.length; i++) {
-    if (value->users.value.p[i] == candidate) {
-      return true;
-    }
-  }
-  return false;
-}
+typedef struct {
+  TargetInstruction* definition;
+  size_t position;
+  size_t next_call_position;
+  uint8_t definitions;
+} ShortLifetimeInfo;
 
 // Variable-register liveness is intentionally conservative because a C
 // variable can be reassigned or carried around a loop. Some lowering-created
 // pseudos, however, have exactly one definition and are consumed linearly in
 // that same block before any call. They are ordinary temporaries in all but
 // name and can safely use a caller-saved register.
-static bool HasShortBlockLocalLifetime(AARCH64RegisterAllocator* allocator,
+static bool HasShortBlockLocalLifetime(const ShortLifetimeInfo* info,
+                                       size_t info_count,
                                        TargetInstruction* value) {
   if (!AARCH64IsVarRegister(value) || value->users.length == 0) {
     return false;
   }
-
-  TargetInstruction* definition = NULL;
-  TargetBasicBlock* definition_block = NULL;
-  int definitions = 0;
-  TargetGenerator* gen = &allocator->g->base;
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code; inst != NULL;
-         inst = TargetNext(inst)) {
-      bool is_end = inst == block->end_code;
-      if (inst->dest == value) {
-        definition = inst;
-        definition_block = block;
-        definitions++;
-      }
-      if (is_end) {
-        break;
-      }
-    }
-  }
-  if (definitions != 1 || definition == NULL) {
+  if ((size_t)value->id >= info_count) {
     return false;
   }
+  const ShortLifetimeInfo* value_info = &info[value->id];
+  TargetInstruction* definition = value_info->definition;
+  if (value_info->definitions != 1 || definition == NULL ||
+      (size_t)definition->id >= info_count) {
+    return false;
+  }
+  TargetBasicBlock* definition_block = definition->block;
+  const ShortLifetimeInfo* definition_info = &info[definition->id];
 
   // The definition writes the variable's register but is also a value in its
   // own right, and reads of it are recorded against it rather than against the
@@ -1411,60 +1397,102 @@ static bool HasShortBlockLocalLifetime(AARCH64RegisterAllocator* allocator,
     return false;
   }
 
+  size_t last_user_position = 0;
   for (size_t i = 0; i < value->users.length; i++) {
     TargetInstruction* user = value->users.value.p[i];
-    if (user->block != definition_block) {
+    if (user->block != definition_block || (size_t)user->id >= info_count) {
       return false;
     }
-  }
-
-  size_t remaining_users = value->users.length;
-  bool saw_definition = false;
-  for (TargetInstruction* inst = definition_block->code; inst != NULL;
-       inst = TargetNext(inst)) {
-    bool is_end = inst == definition_block->end_code;
-    if (inst == definition) {
-      saw_definition = true;
-    }
-    if (IsListedUser(value, inst)) {
-      if (!saw_definition) {
-        return false;
-      }
-      remaining_users--;
-      if (remaining_users == 0) {
-        return true;
-      }
-    }
-    if (saw_definition && AARCH64IsCall(inst)) {
+    size_t user_position = info[user->id].position;
+    if (user_position <= definition_info->position) {
       return false;
     }
-    if (is_end) {
-      break;
+    if (user_position > last_user_position) {
+      last_user_position = user_position;
     }
   }
-  return false;
+  return definition_info->next_call_position == 0 ||
+         definition_info->next_call_position >= last_user_position;
 }
 
 static void BuildShortLivedVarRegSet(AARCH64RegisterAllocator* allocator) {
   TargetGenerator* gen = &allocator->g->base;
+  size_t max_id = 0;
+  bool has_var_destination = false;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
     for (TargetInstruction* inst = block->code; inst != NULL;
          inst = TargetNext(inst)) {
       bool is_end = inst == block->end_code;
-      if (inst->dest != NULL &&
-          HasShortBlockLocalLifetime(allocator, inst->dest)) {
-        BitSetInsert(&allocator->short_lived_varregs, inst->dest->id);
+      if ((size_t)inst->id > max_id) {
+        max_id = inst->id;
       }
-      if (inst->dest != NULL && AARCH64IsVarRegister(inst->dest) &&
-          inst->users.length != 0) {
-        BitSetInsert(&allocator->shared_varregs, inst->dest->id);
+      if (inst->dest != NULL && (size_t)inst->dest->id > max_id) {
+        max_id = inst->dest->id;
+      }
+      has_var_destination |=
+          inst->dest != NULL && AARCH64IsVarRegister(inst->dest);
+      if (is_end) {
+        break;
+      }
+    }
+  }
+  if (!has_var_destination) {
+    return;
+  }
+
+  size_t info_count = max_id + 1;
+  ShortLifetimeInfo* info = calloc(info_count, sizeof(*info));
+  Vector candidates;
+  VectorInit(&candidates);
+  size_t position = 0;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = TargetNext(inst)) {
+      bool is_end = inst == block->end_code;
+      info[inst->id].position = ++position;
+      if (inst->dest != NULL && AARCH64IsVarRegister(inst->dest)) {
+        ShortLifetimeInfo* value_info = &info[inst->dest->id];
+        if (value_info->definitions == 0) {
+          value_info->definition = inst;
+          VectorAppend(&candidates, inst->dest);
+        }
+        if (value_info->definitions < 2) {
+          value_info->definitions++;
+        }
       }
       if (is_end) {
         break;
       }
     }
   }
+
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    size_t next_call_position = 0;
+    for (TargetInstruction* inst = TargetBasicBlockRBegin(block);
+         !TargetBasicBlockIsEmpty(block) &&
+         inst != TargetBasicBlockREnd(block);
+         inst = TargetPrev(inst)) {
+      if (AARCH64IsCall(inst)) {
+        next_call_position = info[inst->id].position;
+      }
+      info[inst->id].next_call_position = next_call_position;
+    }
+  }
+
+  for (size_t i = 0; i < candidates.length; i++) {
+    TargetInstruction* value = candidates.value.p[i];
+    if (HasShortBlockLocalLifetime(info, info_count, value)) {
+      BitSetInsert(&allocator->short_lived_varregs, value->id);
+    }
+    if (value->users.length != 0) {
+      BitSetInsert(&allocator->shared_varregs, value->id);
+    }
+  }
+  VectorDestruct(&candidates);
+  free(info);
 }
 
 
