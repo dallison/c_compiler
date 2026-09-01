@@ -131,6 +131,16 @@ bool BasicBlockCalculateDominators(Generator* gen, BasicBlock* b, Vector* blocks
 }
 
 void BasicBlockCalculateImmediateDominator(BasicBlock* b, Vector* blocks) {
+  if (b->in_edges.length == 1) {
+    BasicBlock* predecessor =
+        VectorGet(blocks, (BlockId)b->in_edges.value.p[0]);
+    if (predecessor != b &&
+        BitSetContains(&b->dominators, predecessor->block_id)) {
+      b->idom = predecessor;
+      return;
+    }
+  }
+
   size_t maxndoms = 0;
 
   BitSetIterator it;

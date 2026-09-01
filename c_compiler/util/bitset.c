@@ -40,11 +40,6 @@ void BitSetClear(BitSet* set) {
   memset(set->value, 0, set->capacity * sizeof(uint64_t));
 }
 
-static void CalculateIndexes(size_t index, size_t* word, size_t* bit) {
-  *word = index / 64;
-  *bit = index % 64;
-}
-
 static int FindFirstSet64(uint64_t value) {
   if (value == 0) {
     return 0;
@@ -96,19 +91,19 @@ void BitSetFill(BitSet* set, size_t bit_count) {
 }
 
 void BitSetInsert(BitSet* set, size_t index) {
-  MakeRoomFor(set, index);
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
-  set->value[word] |= 1LL << bit;
+  size_t word = index / 64;
+  if (word >= set->capacity) {
+    MakeRoomFor(set, index);
+  }
+  set->value[word] |= UINT64_C(1) << (index % 64);
 }
 
 bool BitSetContains(BitSet* set, size_t index) {
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
+  size_t word = index / 64;
   if (word >= set->capacity) {
     return false;
   }
-  return (set->value[word] & (1LL << bit)) != 0;
+  return (set->value[word] & (UINT64_C(1) << (index % 64))) != 0;
 }
 
 size_t BitSetFindFirstSet(BitSet* set) {
@@ -134,10 +129,11 @@ size_t BitSetFindFirstClear(BitSet* set) {
 }
 
 void BitSetRemove(BitSet* set, size_t index) {
-  MakeRoomFor(set, index);
-  size_t word, bit;
-  CalculateIndexes(index, &word, &bit);
-  set->value[word] &= ~(1LL << bit);
+  size_t word = index / 64;
+  if (word >= set->capacity) {
+    MakeRoomFor(set, index);
+  }
+  set->value[word] &= ~(UINT64_C(1) << (index % 64));
 }
 
 void BitSetIntersection(BitSet* set1, BitSet* set2, BitSet* result) {
