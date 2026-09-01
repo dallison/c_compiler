@@ -425,6 +425,7 @@ typedef struct {
 
 typedef struct AARCH64Generator {
   TargetGenerator base;
+  size_t emission_index;
 
   int num_int_arg_regs;   // Number of args in int regs.
   int num_fp_arg_regs;    // Number of args in floating point regs.
@@ -486,6 +487,7 @@ bool AARCH64IsLabel(TargetInstruction* inst);
 bool AARCH64IsArgRegister(TargetInstruction* inst);
 bool AARCH64IsVarRegister(TargetInstruction* inst);
 bool AARCH64IsJumpTableEntry(TargetInstruction* inst);
+int GetRegisterSize(TargetInstruction* inst);
 
 TargetInstruction* AARCH64GetBranchTarget(TargetInstruction* inst);
 

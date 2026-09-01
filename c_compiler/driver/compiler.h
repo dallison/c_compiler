@@ -264,9 +264,14 @@ typedef struct {
 
   // Function to create the assembler file.
   FILE* (*create_asm_file)(String* src_file, String* asm_file);
+  // Optional generated-input path that avoids a temporary assembly file.
+  void (*emit_assembly_preamble)(String* src_file, FILE* asm_file);
+  bool (*assemble_string)(const char* name, String* input,
+                          String* object_filename);
 
   // Assembly language emitter.  The 'code' parameter is the return value from
   // the 'codegen' functions.
+  void (*prepare_function_emission)(void* code, size_t index);
   // The 'asm_file' parameter is an open file to write to.
   void (*emit_function_assembly)(void* code, FILE* asm_file);
 
@@ -501,6 +506,7 @@ typedef struct {
   
   // Flags.
   bool debug_output;
+  bool direct_object_emission;
   bool optimize;
   bool optimize_for_size;
   bool pic;

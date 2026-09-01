@@ -25,17 +25,7 @@ static COMPILER_UNUSED void FilePrinter(int index, File* file, void* data) {
 }
 
 
-FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
-  FILE* fp;
-  if (StringEqual(asm_file, "-")) {
-    fp = stdout;
-  } else {
-    fp = fopen(asm_file->value, "w");
-  }
-  if (fp == NULL) {
-    return NULL;
-  }
-
+void EmitAssemblyPreamble(String* src_file, FILE* fp) {
   // Emit a .file directive without the file index.  This tells the
   // assembler the name of the current file.
   fprintf(fp, "\t.file   \"%s\"\n", src_file->value);
@@ -47,6 +37,19 @@ FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
   if (compiler->pic) {
     fprintf(fp, "\t.option pic\n");
   }
+}
+
+FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
+  FILE* fp;
+  if (StringEqual(asm_file, "-")) {
+    fp = stdout;
+  } else {
+    fp = fopen(asm_file->value, "w");
+  }
+  if (fp == NULL) {
+    return NULL;
+  }
+  EmitAssemblyPreamble(src_file, fp);
   return fp;
 }
 

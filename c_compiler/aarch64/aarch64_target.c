@@ -29,6 +29,10 @@ static void EmitFunctionAssembly(void* code, FILE* asm_file) {
   AARCH64EmitterDestruct(&emitter);
 }
 
+static void PrepareFunctionEmission(void* code, size_t index) {
+  ((AARCH64Generator*)code)->emission_index = index;
+}
+
 static COMPILER_UNUSED void FilePrinter(int index, File* file, void* data) {
   FILE* fp = data;
   if (index == 0) {
@@ -48,9 +52,31 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
   return fp;
 }
 
+static void EmitAssemblyPreambleToStream(String* src_file, FILE* asm_file) {
+  EmitAssemblyPreamble(src_file, asm_file);
+  fprintf(asm_file, ".PCbegin:\n");
+}
+
 static bool Assemble(String* asm_filename, String* object_filename) {
   AARCH64Assembler assembler;
-  AARCH64AssemblerInit(&assembler, asm_filename, object_filename);
+  if (!AARCH64AssemblerInitGenerated(&assembler, asm_filename,
+                                     object_filename)) {
+    return false;
+  }
+  AssemblerRun(&assembler.base, AssembleAARCH64Instruction);
+
+  int num_errors = assembler.base.num_errors;
+  AARCH64AssemblerDestruct(&assembler);
+  return num_errors == 0;
+}
+
+static bool AssembleString(const char* name, String* input,
+                           String* object_filename) {
+  AARCH64Assembler assembler;
+  if (!AARCH64AssemblerInitFromGeneratedString(&assembler, name, input,
+                                               object_filename)) {
+    return false;
+  }
   AssemblerRun(&assembler.base, AssembleAARCH64Instruction);
 
   int num_errors = assembler.base.num_errors;
@@ -108,10 +134,13 @@ CompilerTarget* NewAARCH64Target() {
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;
+  target->prepare_function_emission = PrepareFunctionEmission;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;
   target->cleanup = Cleanup;
   target->create_asm_file = CreateAssemblyFile;
+  target->emit_assembly_preamble = EmitAssemblyPreambleToStream;
+  target->assemble_string = AssembleString;
   target->emit_static_variable = EmitStaticVariable;
   target->emit_bss_space = EmitBSSVariable;
   target->emit_data_start = EmitDataStart;

@@ -36,6 +36,7 @@ RISC_V_OBJS = \
 AARCH64_OBJS = \
     aarch64/aarch64_reg_alloc.o \
     aarch64/aarch64_codegen.o \
+    aarch64/aarch64_encode.o \
     aarch64/aarch64_emitter.o \
     aarch64/aarch64_assembler.o \
     aarch64/aarch64_target.o \

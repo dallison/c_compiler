@@ -7,6 +7,8 @@
 //
 
 #include "aarch64_assembler.h"
+#include "aarch64_encode.h"
+#include "compiler.h"
 #include "map.h"
 #include <assert.h>
 #include <ctype.h>
@@ -21,6 +23,7 @@
 
 
 DECLARE_INST_FUNC(adc);
+DECLARE_INST_FUNC(davefunc);
 DECLARE_INST_FUNC(add);
 DECLARE_INST_FUNC(adcs);
 DECLARE_INST_FUNC(adds);
@@ -250,6 +253,7 @@ MapInsert(instructions, kv);\
 // Add all instructions to the handler map.  This maps the instruction
 // spelling to a handler function.
 static void InitializeInstructions(Map* instructions) {
+  INST(davefunc);
   INST(adc);
   INST(add);
   INST(adcs);
@@ -865,10 +869,8 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
     AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
     int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
-    AssemblerRelocation* reloc =
-        NewAssemblerRelocation(sym, reloc_type,
-                               ASM.current_section, instruction_offset, 0);
-    AssemblerAddRelocation(&ASM, reloc);
+    AssemblerAddRelocationForSymbol(&ASM, sym, reloc_type,
+                                    ASM.current_section, instruction_offset, 0);
     if (shifted) {
       AssemblerEmitWord(&ASM, ASM.current_section,
                         ((uint32_t)(rd.width == kX) << 31) |
@@ -1230,10 +1232,10 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   int32_t immhi = (offset >> 2) & 0x7ffff;
   if (!known) {
     if (sym != NULL) {
-      AssemblerRelocation* reloc = NewAssemblerRelocation(
-          sym, op == 0 ? R_AARCH64_ADR_PREL_LO21 : R_AARCH64_ADR_PREL_PG_HI21,
+      AssemblerAddRelocationForSymbol(
+          &ASM, sym,
+          op == 0 ? R_AARCH64_ADR_PREL_LO21 : R_AARCH64_ADR_PREL_PG_HI21,
           ASM.current_section, instruction_offset, 0);
-      AssemblerAddRelocation(&ASM, reloc);
     }
     immlo = 0;
     immhi = 0;
@@ -1276,19 +1278,17 @@ static void Assemble_gotaddr(AARCH64Assembler* assembler) {
   LexNextToken(&ASM.lex);
 
   // adrp xd, :got:symbol -- the page the symbol's GOT slot is on.
-  AssemblerAddRelocation(
-      &ASM, NewAssemblerRelocation(sym, R_AARCH64_ADR_GOT_PAGE,
-                                   ASM.current_section,
-                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerAddRelocationForSymbol(
+      &ASM, sym, R_AARCH64_ADR_GOT_PAGE, ASM.current_section,
+      (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerEmitWord(&ASM, ASM.current_section,
                     (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
 
   // ldr xd, [xd, :got_lo12:symbol] -- the slot's offset within that page.  The
   // linker fills in the offset, so the immediate is emitted as 0.
-  AssemblerAddRelocation(
-      &ASM, NewAssemblerRelocation(sym, R_AARCH64_LD64_GOT_LO12_NC,
-                                   ASM.current_section,
-                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerAddRelocationForSymbol(
+      &ASM, sym, R_AARCH64_LD64_GOT_LO12_NC, ASM.current_section,
+      (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssembleLoadStoreUnsignedImmediate(assembler, &rd, &rd, /*size=*/3, /*fp=*/0,
                                      /*opc=*/1, /*v=*/0, /*offset=*/0);
 }
@@ -1788,10 +1788,10 @@ static void Assemble_extr(AARCH64Assembler* assembler) {
 
 static void AssembleMovInstruction(AARCH64Assembler* assembler, Register* rd,
                                    int sf, int opc, int imm16, int hw) {
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (sf << 31) | (opc << 29) | (0x25 << 23) |
-                    (hw << 21 | (imm16 << 5) | (rd->num)));
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    (int32_t)(AARCH64EncodeMoveWide(
+                                  sf != 0, opc, (uint16_t)imm16, hw) |
+                              (uint32_t)rd->num));
 }
 
 // Move an immediate value.
@@ -2139,10 +2139,8 @@ static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, in
           assembler->base.pic) {
         reloc_type = R_AARCH64_CALL_PLT;
       }
-      AssemblerRelocation* reloc = NewAssemblerRelocation(
-          sym, reloc_type,
-          ASM.current_section, instruction_offset, 0);
-      AssemblerAddRelocation(&ASM, reloc);
+      AssemblerAddRelocationForSymbol(
+          &ASM, sym, reloc_type, ASM.current_section, instruction_offset, 0);
     }
     offset = 0;
   }
@@ -2163,15 +2161,8 @@ static void Assemble_bl(AARCH64Assembler* assembler) {
 
 static void AssembleUnconditionalBranchRegister(AARCH64Assembler* assembler, int opc, int op3) {
   Register r = GetRegister(assembler);
-  
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (0x6b << 25) |
-                    (opc << 21) |
-                    (0x1f << 16) |
-                    (op3 << 10) |
-                    (0x5 << 26) |
-                    (r.num << 5));
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    (int32_t)AARCH64EncodeBranchRegister(opc, op3, r.num));
 }
         
 static void Assemble_blr(AARCH64Assembler* assembler) {
@@ -2190,13 +2181,8 @@ static void Assemble_ret(AARCH64Assembler* assembler) {
     reg = r.num;
   }
   
-  AssemblerEmitWord(
-      &ASM, ASM.current_section,
-                    (0x6b << 25) |
-                    (2 << 21) |
-                    (0x1f << 16) |
-                    (0x5 << 26) |
-                    (reg << 5));
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    (int32_t)AARCH64EncodeReturn(reg));
 }
 
 static void Assemble_svc(AARCH64Assembler* assembler) {
@@ -2695,10 +2681,9 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
 //    if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
 //      reloc_type = R_AARCH64_CALL_PLT;
 //    }
-    AssemblerRelocation* reloc = NewAssemblerRelocation(
-        sym, reloc_type,
-        ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
-    AssemblerAddRelocation(&ASM, reloc);
+    AssemblerAddRelocationForSymbol(
+        &ASM, sym, reloc_type, ASM.current_section,
+        (int32_t)AssemblerCurrentAddress(&ASM), 0);
     
     int opc = rt.width == kX;
     int v = 0;
@@ -3287,6 +3272,30 @@ static void Assemble_fneg(AARCH64Assembler* assembler) {
       0x1e214000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
 }
 
+static void Assemble_davefunc(AARCH64Assembler* assembler) {
+  if (!ASM.lex.suppress_preprocessing ||
+      !LexLookingAt(&ASM.lex, TOK(number))) {
+    AssemblerError(&ASM, "davefunc is only valid for generated input");
+    return;
+  }
+  int64_t index_value = ASM.lex.number;
+  LexNextToken(&ASM.lex);
+  if (index_value < 0 || compiler == NULL ||
+      (uint64_t)index_value >= compiler->functions.length) {
+    AssemblerError(&ASM, "Invalid generated function index");
+    return;
+  }
+  AARCH64Generator* generator =
+      compiler->functions.value.p[(size_t)index_value];
+  if (generator == NULL ||
+      generator->emission_index != (size_t)index_value ||
+      !AARCH64CanDirectEncodeFunction(generator)) {
+    AssemblerError(&ASM, "Generated function is not directly encodable");
+    return;
+  }
+  AARCH64DirectEncodeFunction(generator, &ASM);
+}
+
 #undef INST
 #undef UNDEFINED_INST
 #undef ASM
@@ -3309,21 +3318,17 @@ void AssembleAARCH64Instruction(Assembler* base, String* word) {
   }
 }
 
-bool AARCH64AssemblerInit(AARCH64Assembler* assembler, String* infile, String* outfile) {
-  static int reloc_types[] = {
+static int kAARCH64RelocTypes[] = {
     R_AARCH64_ABS16, R_AARCH64_ABS32,       R_AARCH64_ABS64,       R_AARCH64_ABS16, R_AARCH64_ABS32,
     R_AARCH64_ABS64,    R_AARCH64_ABS16,    R_AARCH64_ABS32, R_AARCH64_ABS64,
     R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21,
     R_AARCH64_TLSLE_ADD_TPREL_HI12,
     R_AARCH64_TLSLE_ADD_TPREL_LO12_NC,
     R_AARCH64_TLS_TPREL,
-  };
-  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_AARCH64, 0, reloc_types, infile, outfile)) {
-    return false;
-  }
+};
 
+static void AARCH64AssemblerInitSections(AARCH64Assembler* assembler) {
   MapInitForCharPointerKeys(&assembler->instructions);
-
   InitializeInstructions(&assembler->instructions);
 
   // Add a NULL section at the start of the file.
@@ -3331,6 +3336,37 @@ bool AARCH64AssemblerInit(AARCH64Assembler* assembler, String* infile, String* o
   // Add a .bss section.
   assembler->bss = AssemblerAddSection(&assembler->base, NewString(".bss"),
                                        SHT(nobits), SHF(alloc) | SHF(write), 8);
+}
+
+bool AARCH64AssemblerInit(AARCH64Assembler* assembler, String* infile, String* outfile) {
+  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_AARCH64, 0,
+                     kAARCH64RelocTypes, infile, outfile)) {
+    return false;
+  }
+  AARCH64AssemblerInitSections(assembler);
+  return true;
+}
+
+bool AARCH64AssemblerInitGenerated(AARCH64Assembler* assembler, String* infile,
+                                   String* outfile) {
+  if (!AARCH64AssemblerInit(assembler, infile, outfile)) {
+    return false;
+  }
+  assembler->base.lex.suppress_preprocessing = true;
+  assembler->base.allow_layout_pass_skip = true;
+  return true;
+}
+
+bool AARCH64AssemblerInitFromGeneratedString(AARCH64Assembler* assembler,
+                                             const char* name, String* input,
+                                             String* outfile) {
+  if (!AssemblerInitFromString(&assembler->base, ELF_MACHINE_TYPE_AARCH64, 0,
+                               kAARCH64RelocTypes, name, input, outfile)) {
+    return false;
+  }
+  assembler->base.lex.suppress_preprocessing = true;
+  assembler->base.allow_layout_pass_skip = true;
+  AARCH64AssemblerInitSections(assembler);
   return true;
 }
 

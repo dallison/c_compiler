@@ -17,6 +17,9 @@ static ASTNode* ParseExpression(Assembler* assembler);
 
 static ASTNode* ParseIdentifier(Assembler* assembler) {
   Lex* lex = assembler->syntax.lex;
+  if (assembler->pass == 1 && assembler->parsing_layout_expression) {
+    assembler->requires_layout_pass = true;
+  }
 
   String name;
   StringInit(&name, lex->spelling.value);

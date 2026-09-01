@@ -6,6 +6,10 @@
 //  Copyright © 2017 David Allison. All rights reserved.
 //
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "compiler.h"
 #include <assert.h>
 #include <errno.h>
@@ -3350,6 +3354,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   StringSet(compiler->target_name, target->canonical_name);
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
+  compiler->direct_object_emission = false;
   ParseStandardOption(compiler, options);
   compiler->constexpr_eval_mode = kConstexprEvalAuto;
   String* constexpr_eval = OptionStringValue(kOptionConstexprEval, options);
@@ -3822,8 +3827,20 @@ bool CompilerInitForAssembler(const char* filename, Vector* options) {
 
 // Emit the assembly language into the filename given, returning true
 // if it worked.
-static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
-  FILE* asm_file = compiler->target->create_asm_file(&compiler->infile, asm_filename);
+static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename,
+                             String* generated_output) {
+  char* generated_buffer = NULL;
+  size_t generated_size = 0;
+  FILE* asm_file;
+  if (generated_output != NULL) {
+    asm_file = open_memstream(&generated_buffer, &generated_size);
+    if (asm_file != NULL) {
+      compiler->target->emit_assembly_preamble(&compiler->infile, asm_file);
+    }
+  } else {
+    asm_file =
+        compiler->target->create_asm_file(&compiler->infile, asm_filename);
+  }
   
   if (asm_file == NULL) {
     fprintf(stderr, "Unable to open assembler file %s\n",
@@ -3831,6 +3848,10 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     return false;
   }
   for (size_t i = 0; i < compiler->functions.length; i++) {
+    if (compiler->target->prepare_function_emission != NULL) {
+      compiler->target->prepare_function_emission(
+          compiler->functions.value.p[i], i);
+    }
     // Debug, print to stdout.
     if (compiler->print_back_end) {
       compiler->target->emit_function_assembly(compiler->functions.value.p[i],
@@ -3917,6 +3938,10 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
   if (asm_file != stdout) {
     fclose(asm_file);
   }
+  if (generated_output != NULL) {
+    StringAppendSegment(generated_output, generated_buffer, generated_size);
+    free(generated_buffer);
+  }
   return true;
 }
 
@@ -3937,6 +3962,25 @@ static String* Assemble(Compiler* compiler, String* asm_filename, Vector* option
   // Assemble using target-specific assembler.
   bool ok = compiler->target->assemble(asm_filename, object_filename);
   if (!ok) {
+    StringDelete(object_filename);
+    return NULL;
+  }
+  return object_filename;
+}
+
+static String* AssembleGeneratedString(Compiler* compiler, String* input,
+                                       Vector* options) {
+  String* output_filename = OptionStringValue(kOptionOutputFile, options);
+  String* object_filename;
+  if (output_filename != NULL) {
+    object_filename = NewString(output_filename->value);
+  } else {
+    object_filename = NewString(compiler->infile.value);
+    ReplaceSourceExtension(object_filename, ".o");
+  }
+
+  if (!compiler->target->assemble_string(compiler->infile.value, input,
+                                         object_filename)) {
     StringDelete(object_filename);
     return NULL;
   }
@@ -4152,7 +4196,16 @@ static String* Compile(Compiler* compiler, Vector* options) {
     StringInit(&asm_filename, compiler->infile.value);
     ReplaceSourceExtension(&asm_filename, ".s");
   }
-  bool ok = EmitAssemblyFile(compiler, &asm_filename);
+  bool use_in_memory_assembly =
+      !output_asm_only && !compiler->keep_asm_file &&
+      compiler->target->emit_assembly_preamble != NULL &&
+      compiler->target->assemble_string != NULL;
+  compiler->direct_object_emission =
+      use_in_memory_assembly && !compiler->debug_output;
+  String generated_assembly = {0};
+  bool ok = EmitAssemblyFile(
+      compiler, &asm_filename,
+      use_in_memory_assembly ? &generated_assembly : NULL);
   if (!ok) {
     StringDestruct(&asm_filename);
     return NULL;
@@ -4171,7 +4224,11 @@ static String* Compile(Compiler* compiler, Vector* options) {
 
   // Run the assembler to assemble into the object file.  Return the
   // name of rhe object file or NULL if something went wrong.
-  String* object_filename = Assemble(compiler, &asm_filename, options);
+  String* object_filename =
+      use_in_memory_assembly
+          ? AssembleGeneratedString(compiler, &generated_assembly, options)
+          : Assemble(compiler, &asm_filename, options);
+  StringDestruct(&generated_assembly);
   
   // Remove .s file unless told not to.
   if (!compiler->keep_asm_file) {
