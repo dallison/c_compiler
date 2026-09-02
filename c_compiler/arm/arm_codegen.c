@@ -670,6 +670,7 @@ static TargetVirtuals virtuals = {
   .is_expression = ARMIsExpression,
   .is_table_entry = ARMIsJumpableEntry,
   .get_branch_target = ARMGetBranchTarget,
+  .calls_may_stay_in_block = true,
 };
 
 void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {

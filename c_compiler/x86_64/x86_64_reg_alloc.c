@@ -306,11 +306,17 @@ static void FreeRegisters(X86_64RegisterAllocator* allocator,
 // Is the register meant to be saved by the callee?
 static bool IsSavedReg(X86_64Register* reg) {
   int num = reg->base.num;
-  if ((num >= X86_64_INT_SAVED_START_1 && num <= X86_64_INT_SAVED_END_1) ||
-      (num >= X86_64_INT_SAVED_START_2 && num <= X86_64_INT_SAVED_END_2) ||
-      (num >= X86_64_FP_SAVED_START_1 && num <= X86_64_FP_SAVED_END_1) ||
-      (num >= X86_64_FP_SAVED_START_2 && num <= X86_64_FP_SAVED_END_2)) {
-    return true;
+  switch (reg->type) {
+    case kX86_64RegTypeInt:
+      return (num >= X86_64_INT_SAVED_START_1 &&
+              num <= X86_64_INT_SAVED_END_1) ||
+             (num >= X86_64_INT_SAVED_START_2 &&
+              num <= X86_64_INT_SAVED_END_2);
+    case kX86_64RegTypeFloat:
+      return (num >= X86_64_FP_SAVED_START_1 &&
+              num <= X86_64_FP_SAVED_END_1) ||
+             (num >= X86_64_FP_SAVED_START_2 &&
+              num <= X86_64_FP_SAVED_END_2);
   }
   return false;
 }
@@ -462,6 +468,13 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
   }
   BitSetDestruct(&reentered);
   if (victim == NULL && fallback_victim == NULL) {
+    // The caller can compute the new value in the dedicated scratch register
+    // and spill it immediately after definition.  Report that no existing
+    // owner is available instead of aborting before that fallback can run.
+    if (unsafe != NULL) {
+      *unsafe = NULL;
+      return NULL;
+    }
     DumpRegisters(allocator);
     abort();
   }
@@ -772,7 +785,7 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
     TargetInstruction* victim = FindSpillVictim(
         allocator, type, can_use_temp, block,
         scratch != NULL && CanSpillAfterDefinition(inst) ? &unsafe : NULL);
-    if (victim == NULL && unsafe != NULL) {
+    if (victim == NULL && scratch != NULL && CanSpillAfterDefinition(inst)) {
       allocator->spill_after_definition = true;
       return scratch;
     }
@@ -1191,6 +1204,44 @@ static bool X86_64FixedArgDestType(TargetInstruction* inst,
   }
 }
 
+// The aN/faN pseudo-instructions are shared by every call in a function.  A
+// move into one makes it the owner of that physical argument register, but the
+// call consumes (and clobbers) that value.  When calls ended basic blocks,
+// block-entry initialization incidentally discarded these owners.  Calls that
+// stay inside a block need to do so explicitly or all argument registers
+// gradually appear occupied by stale fixed-register values.
+static void ReleaseCallArgumentRegisters(
+    X86_64RegisterAllocator* allocator, TargetInstruction* call) {
+  for (int i = 0; i < X86_64_NUM_INT_REGS; i++) {
+    int phys = X86_64IntPhysical(i);
+    bool is_argument = false;
+    for (int arg = 0; arg < X86_64_NUM_INT_ARGS; arg++) {
+      if (phys == X86_64IntPhysical(X86_64_INT_ARG_START + arg)) {
+        is_argument = true;
+        break;
+      }
+    }
+    if (is_argument && allocator->int_regs[i].base.owner != call &&
+        !allocator->int_regs[i].base.reserved) {
+      allocator->int_regs[i].base.owner = NULL;
+    }
+  }
+  for (int i = 0; i < X86_64_NUM_FLOAT_REGS; i++) {
+    int phys = X86_64FloatPhysical(i);
+    bool is_argument = false;
+    for (int arg = 0; arg < X86_64_NUM_FP_ARGS; arg++) {
+      if (phys == X86_64FloatPhysical(X86_64_FP_ARG_START + arg)) {
+        is_argument = true;
+        break;
+      }
+    }
+    if (is_argument && allocator->float_regs[i].base.owner != call &&
+        !allocator->float_regs[i].base.reserved) {
+      allocator->float_regs[i].base.owner = NULL;
+    }
+  }
+}
+
 static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
                               TargetInstruction* inst) {
   if (inst->dest == NULL) {
@@ -1263,8 +1314,24 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
   return true;
 }
 
+static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
+                                 TargetInstruction* inst);
+
 static void AllocateRegister(X86_64RegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  bool pushed =
+      allocator->allocating_depth < X86_64_MAX_ALLOCATION_DEPTH;
+  if (pushed) {
+    allocator->allocating[allocator->allocating_depth++] = inst;
+  }
+  AllocateRegisterOnce(allocator, inst);
+  if (pushed) {
+    allocator->allocating_depth--;
+  }
+}
+
+static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
    bool is_leaf = allocator->rv->base.num_calls == 0 &&
       compiler->optimize;
 
@@ -1370,6 +1437,12 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
     case X86_64_OP(a6):
     case X86_64_OP(a7):
       reg = &allocator->int_regs[(int)inst->opcode - X86_64_OP(a0) + X86_64_INT_ARG_START];
+      if (InstructionHasExternalDefs(allocator, inst)) {
+        inst->reg = &reg->base;
+        inst->uses = (int)inst->users.length;
+        inst->flags |= TARGET_INST_PROCESSED;
+        return;
+      }
       EvictPhysicalRegister(allocator, kX86_64RegTypeInt, reg->base.num, inst);
       break;
 
@@ -1388,6 +1461,12 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
     case X86_64_OP(fa7):
       reg = &allocator
                  ->float_regs[(int)inst->opcode - X86_64_OP(fa0) + X86_64_FP_ARG_START];
+      if (InstructionHasExternalDefs(allocator, inst)) {
+        inst->reg = &reg->base;
+        inst->uses = (int)inst->users.length;
+        inst->flags |= TARGET_INST_PROCESSED;
+        return;
+      }
       EvictPhysicalRegister(allocator, kX86_64RegTypeFloat, reg->base.num, inst);
       break;
 
@@ -1438,6 +1517,11 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
   }
 
   AssignRegister(reg, inst);
+
+  if (opcode == X86_64_OP(call) || opcode == X86_64_OP(rcall) ||
+      opcode == X86_64_OP(callf) || opcode == X86_64_OP(rcallf)) {
+    ReleaseCallArgumentRegisters(allocator, inst);
+  }
 
   if (allocator->spill_after_definition) {
     // No register could be freed, so this value went into the scratch register

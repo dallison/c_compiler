@@ -280,9 +280,11 @@ static void FreeRegisters(ARMRegisterAllocator* allocator,
 // Is the register meant to be saved by the callee?
 static bool IsSavedReg(ARMRegister* reg) {
   int num = reg->base.num;
-  if ((num >= ARM_INT_SAVED_START && num <= ARM_INT_SAVED_END) ||
-      (num >= ARM_FP_SAVED_START && num <= ARM_FP_SAVED_END)) {
-    return true;
+  switch (reg->type) {
+    case kARMRegTypeInt:
+      return num >= ARM_INT_SAVED_START && num <= ARM_INT_SAVED_END;
+    case kARMRegTypeFloat:
+      return num >= ARM_FP_SAVED_START && num <= ARM_FP_SAVED_END;
   }
   return false;
 }
@@ -1138,6 +1140,11 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
     case ARM_OP(atomic_fence):
     case   ARM_OP(oplsl):
       // These instructions do not have registers allocated to them.
+      // They still read operands from assigned physical registers, so mark
+      // them processed. If a later dominator-order allocation spills one of
+      // those operands, SpillInstruction must repair this already-bound read
+      // with a reload rather than merely retargeting it to a spill-slot pseudo.
+      inst->flags |= TARGET_INST_PROCESSED;
       return;
 
     case ARM_OP(regarg):
@@ -1241,6 +1248,17 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
   }
 }
 
+static bool BetterInputClaim(TargetInstruction* candidate,
+                             TargetInstruction* owner) {
+  if (owner == NULL || owner == candidate) {
+    return owner == NULL;
+  }
+  if ((candidate->uses > 0) != (owner->uses > 0)) {
+    return candidate->uses > 0;
+  }
+  return candidate->id > owner->id;
+}
+
 static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
                                           TargetBasicBlock* block) {
   for (int i = 0; i < ARM_NUM_INT_REGS; i++) {
@@ -1278,8 +1296,13 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
     TargetInstruction* inst = var != NULL ? var->inst : NULL;
     if (inst != NULL && inst->reg != NULL && !inst->reg->reserved &&
         (inst->flags & TARGET_INST_SPILLED) == 0) {
-      assert(inst->reg->owner == NULL || inst->reg->owner == inst);
-      inst->reg->owner = inst;
+      // Register-variable slots may be reused for variables with disjoint live
+      // ranges.  Reclaiming every promoted variable cannot make all such
+      // pseudos simultaneous owners; keep the first provisional owner and let
+      // the block's actual live-in set below select the relevant one.
+      if (inst->reg->owner == NULL) {
+        inst->reg->owner = inst;
+      }
     }
   }
 
@@ -1322,7 +1345,9 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
     // value.  Only claim the register if it is not already owned by another
     // live-in value processed above.
     assert(inst->reg != NULL);
-    if (inst->reg->owner == NULL || inst->reg->owner == inst ||
+    if ((inst->reg->owner != NULL &&
+         !BitSetContains(&block->input_ids, inst->reg->owner->id)) ||
+        BetterInputClaim(inst, inst->reg->owner) ||
         (ARMIsVarRegister(inst) &&
          !ARMIsVarRegister(inst->reg->owner))) {
       inst->reg->owner = inst;
@@ -1358,50 +1383,21 @@ static void ProcessBasicBlock(ARMRegisterAllocator* allocator,
 }
 
 
-static bool IsCallInstruction(TargetInstruction* inst) {
-  return inst->opcode == (TargetOpcode)ARM_OP(bl) ||
-         inst->opcode == (TargetOpcode)ARM_OP(blr);
-}
-
-static bool IsUser(TargetInstruction* inst, TargetInstruction* candidate) {
-  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
-    if (candidate->operand[i] == inst) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Build the preserved_instructions set, instructions that need a callee-saved
-// register.  Block outputs must survive every call in the block.  Values used
-// later in the same block must also be preserved when a call lies between
-// their definition and use.
-static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
+static void MarkIndirectCallTargets(TargetBasicBlock* block, void* data) {
   ARMRegisterAllocator* allocator = data;
-  if (block->contains_call) {
-    BitSetUnionInPlace(&allocator->preserved_instructions,
-                       &block->output_ids);
-  }
-
-  for (TargetInstruction* inst = block->code;
-       inst != NULL && inst != block->end_code; inst = TargetNext(inst)) {
+  for (TargetInstruction* inst = block->code; inst != NULL;
+       inst = inst == block->end_code ? NULL : TargetNext(inst)) {
     if ((inst->flags & kARMIndirectCallTarget) != 0) {
       BitSetInsert(&allocator->preserved_instructions, inst->id);
     }
-    bool crossed_call = false;
-    for (TargetInstruction* next = TargetNext(inst);
-         next != NULL; next = TargetNext(next)) {
-      if (IsCallInstruction(next)) {
-        crossed_call = true;
-      } else if (crossed_call && IsUser(inst, next)) {
-        BitSetInsert(&allocator->preserved_instructions, inst->id);
-        break;
-      }
-      if (next == block->end_code) {
-        break;
-      }
-    }
   }
+}
+
+static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
+  TargetOpcode move_opcode =
+      (call->flags & kARMFpReturn) != 0 ? (TargetOpcode)ARM_OP(fmov)
+                                        : (TargetOpcode)ARM_OP(mov);
+  return TargetNewInstruction1(move_opcode, call);
 }
 
 // Maximum number of register-argument moves we resolve in a single run.  ARM
@@ -1628,9 +1624,21 @@ void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
     }
   }
 
-  TargetTraverseDominatorTree(&allocator->g->base,
-                              BuildPreservedInstructionsSet,
+  TargetMarkCallPreservedInstructions(&allocator->g->base,
+                                      &allocator->preserved_instructions);
+  TargetTraverseDominatorTree(&allocator->g->base, MarkIndirectCallTargets,
                               kTraversePreOrder, allocator);
+  if (allocator->g->base.virtuals->calls_may_stay_in_block &&
+      TargetMaterializePreservedCallResults(
+          &allocator->g->base, &allocator->preserved_instructions,
+          CreateCallResultCopy)) {
+    TargetBuildBasicBlockInputsAndOutputs(&allocator->g->base);
+    BitSetClear(&allocator->preserved_instructions);
+    TargetMarkCallPreservedInstructions(&allocator->g->base,
+                                        &allocator->preserved_instructions);
+    TargetTraverseDominatorTree(&allocator->g->base, MarkIndirectCallTargets,
+                                kTraversePreOrder, allocator);
+  }
 
   // Process all basic blocks in the ARM generator by traversing the
   // dominator tree.

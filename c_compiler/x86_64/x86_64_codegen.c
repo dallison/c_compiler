@@ -433,8 +433,6 @@ bool X86_64IsResult(TargetInstruction* inst) {
 bool X86_64IsBranch(TargetInstruction* inst) {
   switch ((X86_64Opcode)inst->opcode) {
     case X86_64_OP(jmp):
-    case X86_64_OP(call):
-    case X86_64_OP(rcall):
     case X86_64_OP(je):
     case X86_64_OP(jne):
     case X86_64_OP(jl):
@@ -526,6 +524,7 @@ static TargetVirtuals virtuals = {
   .is_expression = X86_64IsExpression,
   .is_table_entry = X86_64IsJumpableEntry,
   .get_branch_target = X86_64GetBranchTarget,
+  .calls_may_stay_in_block = true,
 };
 
 void X86_64GeneratorInit(X86_64Generator* rv, Generator* gen) {
