@@ -1426,11 +1426,7 @@ static void ParseCXXSpecialMemberTrailingRequires(TypeParser* parser,
 }
 
 void QueueInlineMemberFunctionDefinition(Symbol* symbol) {
-  Vector* declarations = NewVector();
-  VectorAppend(declarations,
-               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  CompilerQueuePendingTemplateInstantiation(
-      NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingFunctionDefinition(symbol);
 }
 
 static void QueueInlineConstructorPreamble(Symbol* symbol,

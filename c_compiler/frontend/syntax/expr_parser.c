@@ -2572,11 +2572,7 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
 // Queue the closure's operator() for instantiation/codegen alongside template
 // instantiations, so its body is emitted after the enclosing context is parsed.
 static void QueueLambdaCallOperatorDefinition(Symbol* symbol) {
-  Vector* declarations = NewVector();
-  VectorAppend(declarations,
-               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  CompilerQueuePendingTemplateInstantiation(
-      NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingFunctionDefinition(symbol);
 }
 
 // Bring the lambda's parameters into the body's local scope before parsing it.

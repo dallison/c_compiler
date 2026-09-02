@@ -7075,11 +7075,7 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
     return;
   }
-  Vector* declarations = NewVector();
-  VectorAppend(declarations,
-               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  CompilerQueuePendingTemplateInstantiation(
-      NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingFunctionDefinition(symbol);
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 

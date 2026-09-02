@@ -1602,11 +1602,7 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       !symbol->flags.is_explicit_specialization) {
     symbol->flags.is_weak = true;
   }
-  Vector* declarations = NewVector();
-  VectorAppend(declarations,
-               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  CompilerQueuePendingTemplateInstantiation(
-      NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingFunctionDefinition(symbol);
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 
@@ -1811,11 +1807,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
         !symbol->flags.is_explicit_specialization) {
       symbol->flags.is_weak = true;
     }
-    Vector* declarations = NewVector();
-    VectorAppend(declarations,
-                 NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-    CompilerQueuePendingTemplateInstantiation(
-        NewDeclarationListASTNode(declarations, symbol->location));
+    CompilerQueuePendingFunctionDefinition(symbol);
     VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
   }
   VectorDeleteWithContents(completed_args,
@@ -6685,11 +6677,7 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
       // dependent body now can bind its own parameters against unrelated class
       // arguments (for example CharT against an engine type).
       if (!sym->flags.is_template) {
-        Vector* declarations = NewVector();
-        VectorAppend(declarations,
-                     NewVariableDeclarationASTNode(sym, NULL, sym->location));
-        CompilerQueuePendingTemplateInstantiation(
-            NewDeclarationListASTNode(declarations, sym->location));
+        CompilerQueuePendingFunctionDefinition(sym);
         VectorAppend(&compiler->declaration_asts,
                      sym->type->info.function.body);
       }

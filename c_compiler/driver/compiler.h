@@ -486,8 +486,9 @@ typedef struct Compiler {
   // unused private data members (-Wunused-private-field).
   Vector cxx_defined_classes;
 
-  // Declaration ASTs synthesized while instantiating templates.  Drained by
-  // the driver through the normal semantic/codegen path.
+  // Declaration ASTs synthesized while instantiating templates. Function
+  // definitions may be stored directly as vardecl nodes; other declarations
+  // retain their ordinary declaration-list roots.
   Vector pending_template_instantiations;
   // Shared FIFO cursor and nesting depth. Compilation can recursively request
   // another drain, so all active drains must advance the same cursor and only
@@ -575,6 +576,7 @@ typedef struct Compiler {
 extern Compiler* compiler;
 
 void CompilerQueuePendingTemplateInstantiation(struct ASTNode* declaration);
+void CompilerQueuePendingFunctionDefinition(struct Symbol* symbol);
 bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name);
 
 bool CompilerInitFromFile(Compiler* compiler, const char* filename,

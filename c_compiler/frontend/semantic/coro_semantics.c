@@ -4188,11 +4188,7 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
 /* Enqueue a synthesized coroutine function (resume/destroy) for later codegen by
  * adding it to the compiler's pending-instantiation and declaration lists. */
 static void QueueCoroutineGeneratedFunction(Symbol* symbol) {
-  Vector* declarations = NewVector();
-  VectorAppend(declarations,
-               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-  CompilerQueuePendingTemplateInstantiation(
-      NewDeclarationListASTNode(declarations, symbol->location));
+  CompilerQueuePendingFunctionDefinition(symbol);
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 

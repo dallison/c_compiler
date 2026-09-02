@@ -1904,11 +1904,7 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
     // local to the importing translation unit.  Its serialized body cannot be
     // satisfied by the module object's private definition, so emit a local
     // copy when this importer first references it.
-    Vector* declarations = NewVector();
-    VectorAppend(declarations,
-                 NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
-    CompilerQueuePendingTemplateInstantiation(
-        NewDeclarationListASTNode(declarations, symbol->location));
+    CompilerQueuePendingFunctionDefinition(symbol);
   }
   if (first_reference &&
       CompilerStringIndexInsert(compiler->referenced_function_name_index,
@@ -2225,6 +2221,44 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   return true;
 }
 
+static void CompileFunctionDefinitionNode(
+    Syntax* syntax, VariableDeclarationASTNode* decl) {
+  if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
+    return;
+  }
+  CheckMainSignature(syntax, decl->symbol);
+
+  TypeRecord* saved_current_function = compiler->current_function;
+  Struct* saved_class_access_context =
+      compiler->current_class_access_context;
+  compiler->current_function = decl->base.type;
+  if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
+    compiler->current_class_access_context =
+        decl->base.type->info.function.cxx_member_owner;
+  }
+
+  SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
+  if (compiler->print_front_end) {
+    SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
+  }
+  compiler->current_function = saved_current_function;
+  compiler->current_class_access_context = saved_class_access_context;
+  if (decl->base.type == NULL || !TypeIsFunction(decl->base.type)) {
+    return;
+  }
+  // Reference closure only controls which ODR-discardable definitions reach
+  // code generation. A syntax-only compilation returns before that phase.
+  if (!compiler->syntax_only &&
+      !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+    MarkFunctionsReferencedByBody(decl->base.type);
+  }
+  if (!(decl->base.type->info.function.is_consteval ||
+        (decl->base.type->info.function.is_constexpr &&
+         TypeIsConstevalOnly(decl->base.type)))) {
+    GenerateFunctionDefinition(syntax, decl);
+  }
+}
+
 static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
@@ -2256,47 +2290,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           continue;
         }
         if (IsFunctionOrInlineDefinition(decl->symbol)) {
-          if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
-            continue;
-          }
-          CheckMainSignature(syntax, decl->symbol);
-          
-          // This is a function definition, generate the code.
-          TypeRecord* saved_current_function = compiler->current_function;
-          Struct* saved_class_access_context =
-              compiler->current_class_access_context;
-          compiler->current_function = decl->base.type;
-          if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
-            compiler->current_class_access_context =
-                decl->base.type->info.function.cxx_member_owner;
-          }
-          
-          // Run the semantic analyzer.
-          SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
-          if (compiler->print_front_end) {
-            SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
-          }
-          compiler->current_function = saved_current_function;
-          compiler->current_class_access_context =
-              saved_class_access_context;
-          if (decl->base.type == NULL || !TypeIsFunction(decl->base.type)) {
-            continue;
-          }
-          // Reference closure only controls which ODR-discardable definitions
-          // reach code generation.  A syntax-only compilation returns before
-          // that phase, so walking the complete analyzed body here is pure
-          // overhead (and dominates large generated translation units).
-          if (!compiler->syntax_only &&
-              !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
-            MarkFunctionsReferencedByBody(decl->base.type);
-          }
-          if (!(decl->base.type != NULL &&
-                TypeIsFunction(decl->base.type) &&
-                (decl->base.type->info.function.is_consteval ||
-                 (decl->base.type->info.function.is_constexpr &&
-                  TypeIsConstevalOnly(decl->base.type))))) {
-            GenerateFunctionDefinition(syntax, decl);
-          }
+          CompileFunctionDefinitionNode(syntax, decl);
         } else {
           // Declaration is a variable or extern function.
           if (TypeIsFunction(decl->base.type)) {
@@ -2505,13 +2499,49 @@ static void CompilePendingTemplateInstantiations(Syntax* syntax) {
         pending->value.p[compiler->pending_template_instantiation_head++];
     ForgetUnindexedPendingTemplateInstantiation(node);
     SyntaxResetForNewDeclaration(syntax);
-    CompileDeclarationNode(syntax, node);
+    if (node != NULL && node->op == AST_OP(vardecl)) {
+      // Function instantiations are queued directly, avoiding a one-element
+      // declaration vector and the generic declaration classifier.
+      VectorAppend(&compiler->declaration_asts, node);
+      CompileFunctionDefinitionNode(
+          syntax, (VariableDeclarationASTNode*)node);
+    } else {
+      CompileDeclarationNode(syntax, node);
+    }
   }
   compiler->pending_template_instantiation_drain_depth--;
   if (compiler->pending_template_instantiation_drain_depth == 0) {
     VectorClear(pending);
     compiler->pending_template_instantiation_head = 0;
   }
+}
+
+static size_t DeclarationRootLength(ASTNode* root) {
+  if (root == NULL) {
+    return 0;
+  }
+  if (root->op == AST_OP(vardecl)) {
+    return 1;
+  }
+  if (root->op != AST_OP(decl_list)) {
+    return 0;
+  }
+  DeclarationListASTNode* declarations = (DeclarationListASTNode*)root;
+  return declarations->declarations != NULL
+             ? declarations->declarations->length
+             : 0;
+}
+
+static VariableDeclarationASTNode* DeclarationRootAt(ASTNode* root,
+                                                      size_t index) {
+  if (root->op == AST_OP(vardecl)) {
+    return index == 0 ? (VariableDeclarationASTNode*)root : NULL;
+  }
+  DeclarationListASTNode* declarations = (DeclarationListASTNode*)root;
+  ASTNode* declaration = declarations->declarations->value.p[index];
+  return declaration != NULL && declaration->op == AST_OP(vardecl)
+             ? (VariableDeclarationASTNode*)declaration
+             : NULL;
 }
 
 // Code generation itself records every function address it materializes.  Walk
@@ -2533,14 +2563,10 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
       MarkReferencedCXXMetadataDependencies();
       size_t num_roots = compiler->declaration_asts.length;
       for (size_t i = 0; i < num_roots; i++) {
-        ASTNode* node = compiler->declaration_asts.value.p[i];
-        if (node == NULL || node->op != AST_OP(decl_list)) {
-          continue;
-        }
-        DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
-        for (size_t j = 0; j < decls->declarations->length; j++) {
-          VariableDeclarationASTNode* decl =
-              decls->declarations->value.p[j];
+        ASTNode* root = compiler->declaration_asts.value.p[i];
+        size_t num_declarations = DeclarationRootLength(root);
+        for (size_t j = 0; j < num_declarations; j++) {
+          VariableDeclarationASTNode* decl = DeclarationRootAt(root, j);
           if (decl == NULL || decl->symbol == NULL) {
             continue;
           }
@@ -2569,14 +2595,10 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
     emitted = false;
     size_t num_roots = compiler->declaration_asts.length;
     for (size_t i = 0; i < num_roots; i++) {
-      ASTNode* node = compiler->declaration_asts.value.p[i];
-      if (node == NULL || node->op != AST_OP(decl_list)) {
-        continue;
-      }
-      DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
-      for (size_t j = 0; j < decls->declarations->length; j++) {
-        VariableDeclarationASTNode* decl =
-            decls->declarations->value.p[j];
+      ASTNode* root = compiler->declaration_asts.value.p[i];
+      size_t num_declarations = DeclarationRootLength(root);
+      for (size_t j = 0; j < num_declarations; j++) {
+        VariableDeclarationASTNode* decl = DeclarationRootAt(root, j);
         if (decl == NULL || decl->symbol == NULL ||
             !IsFunctionOrInlineDefinition(decl->symbol) ||
             decl->base.type == NULL ||
@@ -3035,16 +3057,14 @@ static bool IndexPendingTemplateInstantiationSymbol(Symbol* symbol) {
 }
 
 static bool IndexPendingTemplateInstantiation(ASTNode* declaration) {
-  if (declaration == NULL || declaration->op != AST_OP(decl_list)) {
+  size_t num_declarations = DeclarationRootLength(declaration);
+  if (num_declarations == 0) {
     return true;
   }
   bool fully_indexed = true;
-  DeclarationListASTNode* declarations =
-      (DeclarationListASTNode*)declaration;
-  for (size_t i = 0; declarations->declarations != NULL &&
-                     i < declarations->declarations->length; i++) {
+  for (size_t i = 0; i < num_declarations; i++) {
     VariableDeclarationASTNode* decl =
-        declarations->declarations->value.p[i];
+        DeclarationRootAt(declaration, i);
     Symbol* symbol = decl != NULL ? decl->symbol : NULL;
     if (symbol != NULL &&
         !IndexPendingTemplateInstantiationSymbol(symbol)) {
@@ -3063,6 +3083,15 @@ void CompilerQueuePendingTemplateInstantiation(ASTNode* declaration) {
     VectorAppend(&compiler->unindexed_pending_template_instantiations,
                  declaration);
   }
+}
+
+void CompilerQueuePendingFunctionDefinition(Symbol* symbol) {
+  if (compiler == NULL || symbol == NULL || symbol->flags.is_template ||
+      !IsFunctionOrInlineDefinition(symbol)) {
+    return;
+  }
+  CompilerQueuePendingTemplateInstantiation(
+      NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
 }
 
 bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name) {
