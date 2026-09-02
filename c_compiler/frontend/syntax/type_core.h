@@ -30,6 +30,7 @@ uint64_t TypeRecordSemanticIdentityHash(TypeRecord* record);
 void TypeRecordSetStructInfo(TypeRecord* record, Struct* str);
 void TypeRecordSyncStructSizes(Struct* str);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
+void TypeRecordInvalidateTemplateParameterSummary(TypeRecord* record);
 void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);

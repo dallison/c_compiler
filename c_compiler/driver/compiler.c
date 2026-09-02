@@ -2279,7 +2279,6 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           }
           if (!FunctionDefinitionIsODRDiscardable(decl->base.type)) {
             MarkFunctionsReferencedByBody(decl->base.type);
-            CompileReferencedInlineFunctions(syntax);
           }
           if (!(decl->base.type != NULL &&
                 TypeIsFunction(decl->base.type) &&

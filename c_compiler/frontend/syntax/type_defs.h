@@ -9,6 +9,7 @@
 #define type_defs_h
 
 #include <stdio.h>
+#include <stdint.h>
 
 #include "symbol.h"
 #include "vector.h"
@@ -322,6 +323,12 @@ typedef struct CXXBaseAdjustment {
   int vbtable_index;
 } CXXBaseAdjustment;
 
+enum {
+  kTypeTemplateParameterSummaryUnknown = 0,
+  kTypeTemplateParameterSummaryAbsent = 1,
+  kTypeTemplateParameterSummaryPresent = 2,
+};
+
 typedef struct CXXVBTableInfo {
   struct Struct* source;
   int source_offset;
@@ -468,6 +475,9 @@ typedef struct TypeRecord {
   Type type;                                                      // @wire 2
   Qualifiers qualifiers;                                          // @wire 3
   Declarator declarator;                                          // @wire 4
+  // Transient suffix summary used by TypeContainsTemplateParameter:
+  // 0 = unknown, 1 = absent, 2 = present.
+  uint8_t template_parameter_summary;                              // @wire -
   int size;                                                       // @wire 5
   int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6

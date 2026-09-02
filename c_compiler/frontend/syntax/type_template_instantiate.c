@@ -1429,6 +1429,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
   }
+  TypeCacheTemplateParameterSummary(func);
   return func;
 }
 
