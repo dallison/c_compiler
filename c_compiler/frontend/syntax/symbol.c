@@ -707,8 +707,7 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
                                              TemplateArgument* arg) {
   TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
   if (kind == kTemplateValueIntegral || kind == kTemplateValueNone) {
-    char value[64];
-    long long int_value = arg->int_value;
+    int64_t int_value = arg->int_value;
     StringAppendChar(out, 'L');
     if (arg->type != NULL) {
       AppendCXXTypeEncoding(out, arg->type);
@@ -716,11 +715,12 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
       StringAppendChar(out, 'i');
     }
     if (int_value < 0) {
-      snprintf(value, sizeof(value), "n%lldE", -int_value);
+      StringAppendChar(out, 'n');
+      StringAppendUInt64(out, UINT64_C(0) - (uint64_t)int_value);
     } else {
-      snprintf(value, sizeof(value), "%lldE", int_value);
+      StringAppendUInt64(out, (uint64_t)int_value);
     }
-    StringAppend(out, value);
+    StringAppendChar(out, 'E');
     return;
   }
   if (kind == kTemplateValueNull) {
@@ -1004,9 +1004,7 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       if (!type->info.array.is_flexible && !type->info.array.is_vla &&
           !type->info.array.is_placeholder_vla &&
           !type->info.array.is_dependent_bound) {
-        char bound[32];
-        snprintf(bound, sizeof(bound), "%d", type->info.array.size.fixed);
-        StringAppend(out, bound);
+        StringAppendInt64(out, type->info.array.size.fixed);
       }
       StringAppendChar(out, '_');
       AppendCXXTypeEncoding(out, type->next);

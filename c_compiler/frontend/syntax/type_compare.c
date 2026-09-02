@@ -149,7 +149,7 @@ static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
            kTypeTemplateParameterSummaryPresent;
   }
   bool contains = TypeRecordNodeContainsTemplateParameter(type) ||
-                  TypeContainsTemplateParameter(type->next);
+                  TypeContainsTemplateParameterImpl(type->next, cache_result);
   if (cache_result) {
     type->template_parameter_summary =
         contains ? kTypeTemplateParameterSummaryPresent
@@ -750,32 +750,18 @@ EnsureFunctionTemplateInstantiationCache(Symbol* templ) {
   return info->template_instantiation_cache;
 }
 
-/* True when a cached instantiation `candidate` corresponds to the freshly
- * requested instantiation `type` with the same template `args`. The template
- * arguments already uniquely identify an instantiation, but the cheap identity
- * check compares the whole function type. That fails for a function with a
- * deduced (`auto`) return: the return type is filled in lazily by analyzing the
- * body *after* the instantiation is cached, so a later request for the same
- * instantiation arrives with an as-yet-undeduced `auto` return and would not
- * TypeEqual the cached, now-deduced instantiation. Accept a match that differs
- * only in an auto-deduced return; otherwise a duplicate instantiation is
- * created whose body is never cloned (its asm name is already pending), leaving
- * its return type unresolved. */
+/* A function template and its completed arguments uniquely identify an
+ * instantiation. Comparing the complete function type is both redundant and
+ * unreliable for a deduced (`auto`) return, which is filled in after the
+ * instantiation enters the cache. */
 static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
-                                                 TypeRecord* type,
                                                  Vector* args) {
   if (candidate == NULL || candidate->flags.is_template ||
       candidate->type == NULL || !TypeIsFunction(candidate->type) ||
       !TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
     return false;
   }
-  if (TypeEqual(candidate->type, type)) {
-    return true;
-  }
-  return TypeIsFunction(type) &&
-         (candidate->type->info.function.is_auto_return_deduced ||
-          TypeContainsAuto(candidate->type->next) ||
-          TypeContainsAuto(type->next));
+  return true;
 }
 
 /* Search a function template's instantiation overload chain for one whose type
@@ -783,14 +769,15 @@ static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
 Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
                                                  TypeRecord* type,
                                                  Vector* args) {
-  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type)) {
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type) ||
+      !TypeIsFunction(type)) {
     return NULL;
   }
   for (Symbol* candidate = templ->overload_next; candidate != NULL;
        candidate = candidate->overload_next) {
     if (candidate->type != NULL &&
         candidate->type->info.function.template_origin == templ &&
-        FunctionTemplateInstantiationMatches(candidate, type, args)) {
+        FunctionTemplateInstantiationMatches(candidate, args)) {
       return candidate;
     }
   }
@@ -805,7 +792,7 @@ Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
     if (entry->argument_hash != argument_hash) {
       continue;
     }
-    if (FunctionTemplateInstantiationMatches(candidate, type, args)) {
+    if (FunctionTemplateInstantiationMatches(candidate, args)) {
       return candidate;
     }
   }
@@ -1388,8 +1375,11 @@ static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
+  if (t1 == t2) {
+    return true;
+  }
   if (t1 == NULL || t2 == NULL) {
-    return t1 == t2;
+    return false;
   }
   if (compiler != NULL) {
     TypeRecord* resolved1 =

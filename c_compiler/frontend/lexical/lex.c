@@ -287,34 +287,114 @@ static CXXReservedWord cxx_reserved_words[] = {
 #define NUM_CXX_RESERVED_WORDS() \
   (sizeof(cxx_reserved_words) / sizeof(CXXReservedWord))
 
-static int CompareReservedWord(const void* a, const void* b) {
-  const ReservedWord* word1 = a;
-  const ReservedWord* word2 = b;
-  return strcmp(word1->spelling, word2->spelling);
+typedef struct {
+  size_t start;
+  size_t count;
+} ReservedWordRange;
+
+static ReservedWordRange reserved_word_ranges[UCHAR_MAX + 1];
+static ReservedWordRange c_reserved_word_ranges[UCHAR_MAX + 1];
+static ReservedWordRange cxx_reserved_word_ranges[UCHAR_MAX + 1];
+static bool reserved_word_ranges_initialized;
+
+static void InitReservedWordRanges(void) {
+  for (size_t i = 0; i < NUM_RESERVED_WORDS(); i++) {
+    ReservedWordRange* range =
+        &reserved_word_ranges[(unsigned char)reserved_words[i].spelling[0]];
+    if (range->count == 0) {
+      range->start = i;
+    }
+    range->count++;
+  }
+  for (size_t i = 0; i < NUM_C_RESERVED_WORDS(); i++) {
+    ReservedWordRange* range =
+        &c_reserved_word_ranges[(unsigned char)c_reserved_words[i].spelling[0]];
+    if (range->count == 0) {
+      range->start = i;
+    }
+    range->count++;
+  }
+  for (size_t i = 0; i < NUM_CXX_RESERVED_WORDS(); i++) {
+    ReservedWordRange* range = &cxx_reserved_word_ranges[
+        (unsigned char)cxx_reserved_words[i].spelling[0]];
+    if (range->count == 0) {
+      range->start = i;
+    }
+    range->count++;
+  }
+  reserved_word_ranges_initialized = true;
 }
 
-static int CompareCXXReservedWord(const void* a, const void* b) {
-  const CXXReservedWord* word1 = a;
-  const CXXReservedWord* word2 = b;
-  return strcmp(word1->spelling, word2->spelling);
+static ReservedWord* FindReservedWord(const char* spelling) {
+  ReservedWordRange range =
+      reserved_word_ranges[(unsigned char)spelling[0]];
+  size_t low = range.start;
+  size_t high = low + range.count;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    int comparison = strcmp(spelling, reserved_words[mid].spelling);
+    if (comparison == 0) {
+      return &reserved_words[mid];
+    }
+    if (comparison < 0) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return NULL;
 }
 
-static int CompareCReservedWord(const void* a, const void* b) {
-  const CReservedWord* word1 = a;
-  const CReservedWord* word2 = b;
-  return strcmp(word1->spelling, word2->spelling);
+static CReservedWord* FindCReservedWord(const char* spelling) {
+  ReservedWordRange range =
+      c_reserved_word_ranges[(unsigned char)spelling[0]];
+  size_t low = range.start;
+  size_t high = low + range.count;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    int comparison = strcmp(spelling, c_reserved_words[mid].spelling);
+    if (comparison == 0) {
+      return &c_reserved_words[mid];
+    }
+    if (comparison < 0) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return NULL;
 }
 
-// Perform a binary search on the reserved_words array (sorted in alphabetic
-// order of keyword) to find the given spelling.  If found, set *token
-// to the token value and return true.
+static CXXReservedWord* FindCXXReservedWord(const char* spelling) {
+  ReservedWordRange range =
+      cxx_reserved_word_ranges[(unsigned char)spelling[0]];
+  size_t low = range.start;
+  size_t high = low + range.count;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    int comparison = strcmp(spelling, cxx_reserved_words[mid].spelling);
+    if (comparison == 0) {
+      return &cxx_reserved_words[mid];
+    }
+    if (comparison < 0) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return NULL;
+}
+
+// Search only the first-character bucket in each sorted keyword table.
 static bool IsReservedWord(const char* spelling, Token* token) {
+  if (spelling == NULL || *spelling == '\0') {
+    return false;
+  }
+  if (!reserved_word_ranges_initialized) {
+    InitReservedWordRanges();
+  }
   if (CompilerIsCXX()) {
-    CXXReservedWord key;
-    key.spelling = spelling;
-    CXXReservedWord* value =
-        bsearch(&key, cxx_reserved_words, NUM_CXX_RESERVED_WORDS(),
-                sizeof(CXXReservedWord), CompareCXXReservedWord);
+    CXXReservedWord* value = FindCXXReservedWord(spelling);
     if (value != NULL && CompilerCXXAtLeast(value->min_standard)) {
       *token = value->token;
       return true;
@@ -322,20 +402,13 @@ static bool IsReservedWord(const char* spelling, Token* token) {
     return false;
   }
 
-  CReservedWord c_key;
-  c_key.spelling = spelling;
-  CReservedWord* c_value =
-      bsearch(&c_key, c_reserved_words, NUM_C_RESERVED_WORDS(),
-              sizeof(CReservedWord), CompareCReservedWord);
+  CReservedWord* c_value = FindCReservedWord(spelling);
   if (c_value != NULL && CompilerCAtLeast(c_value->min_standard)) {
     *token = c_value->token;
     return true;
   }
 
-  ReservedWord key;
-  key.spelling = spelling;
-  ReservedWord* value = bsearch(&key, reserved_words, NUM_RESERVED_WORDS(),
-                                sizeof(ReservedWord), CompareReservedWord);
+  ReservedWord* value = FindReservedWord(spelling);
   if (value != NULL) {
     *token = value->token;
     return true;

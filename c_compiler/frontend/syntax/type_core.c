@@ -69,9 +69,8 @@ static TemplateArgumentArenaBlock* template_argument_arena = NULL;
 static TemplateArgumentSlot* free_template_arguments = NULL;
 
 static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
-  TypeArenaBlock* block = malloc(capacity + sizeof(TypeArenaBlock));
+  TypeArenaBlock* block = calloc(1, capacity + sizeof(TypeArenaBlock));
   block->next = NULL;
-  block->used = 0;
   block->capacity = capacity;
   return block;
 }
@@ -294,7 +293,6 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
     type |= kTypeInt;
   }
   TypeRecord* record = TypeArenaAlloc();
-  memset(record, 0, sizeof(*record));
   record->id = next_type_id++;
   record->type = type;
   record->qualifiers = quals;

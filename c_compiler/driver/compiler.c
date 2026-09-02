@@ -135,20 +135,6 @@ bool OptLevel3(void) {
   return compiler->optimize && compiler->opt_level >= 3;
 }
 
-bool CompilerIsCXX(void) {
-  return compiler != NULL &&
-         compiler->language_standard >= kLanguageStandardCXX98;
-}
-
-bool CompilerCAtLeast(LanguageStandard standard) {
-  return compiler != NULL && !CompilerIsCXX() &&
-         compiler->language_standard >= standard;
-}
-
-bool CompilerCXXAtLeast(LanguageStandard standard) {
-  return CompilerIsCXX() && compiler->language_standard >= standard;
-}
-
 bool CompilerTargetSupportsThreads(void) {
   if (compiler == NULL || compiler->target_name == NULL) {
     return false;

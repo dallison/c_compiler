@@ -633,9 +633,20 @@ bool OptLevel0(void);
 bool OptLevel1(void);
 bool OptLevel2(void);
 bool OptLevel3(void);
-bool CompilerIsCXX(void);
-bool CompilerCAtLeast(LanguageStandard standard);
-bool CompilerCXXAtLeast(LanguageStandard standard);
+static inline bool CompilerIsCXX(void) {
+  return compiler != NULL &&
+         compiler->language_standard >= kLanguageStandardCXX98;
+}
+static inline bool CompilerCAtLeast(LanguageStandard standard) {
+  return compiler != NULL &&
+         compiler->language_standard < kLanguageStandardCXX98 &&
+         compiler->language_standard >= standard;
+}
+static inline bool CompilerCXXAtLeast(LanguageStandard standard) {
+  return compiler != NULL &&
+         compiler->language_standard >= kLanguageStandardCXX98 &&
+         compiler->language_standard >= standard;
+}
 bool CompilerTargetSupportsThreads(void);
 bool CompilerTargetSupportsAtomics(void);
 bool CompilerTargetSupportsC11Atomics(void);

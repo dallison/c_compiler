@@ -157,9 +157,7 @@ void AppendCXXModuleIdentityMangling(String* out, const Symbol* symbol) {
   while (component != NULL && *component != '\0') {
     const char* dot = strchr(component, '.');
     size_t len = dot != NULL ? (size_t)(dot - component) : strlen(component);
-    char lenbuf[32];
-    snprintf(lenbuf, sizeof(lenbuf), "%zu", len);
-    StringAppend(out, lenbuf);
+    StringAppendUInt64(out, len);
     StringAppendSegment(out, component, len);
     component = dot != NULL ? dot + 1 : NULL;
   }
