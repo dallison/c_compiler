@@ -7515,9 +7515,10 @@ static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
       selected->type->template_arguments == NULL) {
     return selected;
   }
-  Symbol* instantiated = TypeInstantiateFunctionTemplate(
-      &compiler->syntax, selected->type->info.function.template_origin,
-      selected->type->template_arguments);
+  Symbol* instantiated =
+      TypeInstantiateFunctionTemplateWithCompletedArguments(
+          &compiler->syntax, selected->type->info.function.template_origin,
+          selected->type->template_arguments);
   CXXAnalyzeImmediateEscalationCandidate(instantiated);
   return instantiated != NULL ? instantiated : selected;
 }
@@ -7567,7 +7568,8 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
         if (args == NULL) {
           continue;
         }
-        inst = TypeInstantiateFunctionTemplate(&compiler->syntax, cand, args);
+        inst = TypeInstantiateFunctionTemplateWithCompletedArguments(
+            &compiler->syntax, cand, args);
         VectorDeleteWithContents(
             args, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
@@ -8084,10 +8086,11 @@ static StructMember* InstantiateSelectedMemberTemplateCandidate(
       selected->symbol->type->template_arguments == NULL) {
     return selected;
   }
-  Symbol* instantiated = TypeInstantiateFunctionTemplate(
-      &compiler->syntax,
-      selected->symbol->type->info.function.template_origin,
-      selected->symbol->type->template_arguments);
+  Symbol* instantiated =
+      TypeInstantiateFunctionTemplateWithCompletedArguments(
+          &compiler->syntax,
+          selected->symbol->type->info.function.template_origin,
+          selected->symbol->type->template_arguments);
   if (instantiated == NULL) {
     return selected;
   }

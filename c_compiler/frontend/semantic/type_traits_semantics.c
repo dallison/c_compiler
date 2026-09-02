@@ -83,8 +83,7 @@ static Vector* TemplateArgumentsFromTypeVector(Vector* types,
     return NULL;
   }
   for (size_t i = 0; i < types->length; i++) {
-    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-    memset(arg, 0, sizeof(*arg));
+    TemplateArgument* arg = TemplateArgumentAlloc();
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion =
         pack_flags != NULL && i < pack_flags->length &&

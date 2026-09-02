@@ -8096,8 +8096,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
       if (sym->associated_constraint != NULL && sym->type != NULL) {
         Vector* constraint_args = NewVector();
-        TemplateArgument* type_arg = malloc(sizeof(TemplateArgument));
-        memset(type_arg, 0, sizeof(*type_arg));
+        TemplateArgument* type_arg = TemplateArgumentAlloc();
         type_arg->kind = kTemplateParameterType;
         type_arg->type = TypeRecordCopy(sym->type);
         VectorAppend(constraint_args, type_arg);
@@ -8844,7 +8843,7 @@ static TemplateArgument* ParseTemplateNonTypeDefault(Syntax* syntax) {
   ASTNode* expr = SyntaxParseSingleExpression(syntax,
                                               TC(closebra) | TC(exprsep));
   syntax->parsing_template_argument = old_parsing_template_argument;
-  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterNonType;
   arg->template_parameter_index = -1;
   arg->location = expr != NULL ? expr->location : SOURCE_LOCATION_MISSING;
@@ -8912,8 +8911,7 @@ static TemplateArgument* TemplateTemplateArgumentFromType(
 
 static TemplateArgument* NewTemplateParameterTypeArgument(int index,
                                                          TypeRecord* type) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(type);
@@ -9670,8 +9668,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   }
   Vector* args = NewVector();
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
-    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-    memset(arg, 0, sizeof(*arg));
+    TemplateArgument* arg = TemplateArgumentAlloc();
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion = false;
     arg->type = NULL;

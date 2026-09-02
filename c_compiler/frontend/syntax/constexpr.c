@@ -5931,7 +5931,7 @@ Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
       }
       if (origin_type != NULL && TypeIsFunction(origin_type) &&
           origin_type->info.function.template_parameters.length > 0) {
-        definition = TypeInstantiateFunctionTemplate(
+        definition = TypeInstantiateFunctionTemplateWithCompletedArguments(
             &compiler->syntax, origin, args);
       }
     }
@@ -6025,8 +6025,9 @@ static bool EvaluateConstexprConvertingConstruction(ConstEvalContext* ctx,
       return false;
     }
     DiagnosticSuppressBegin();
-    callee = TypeInstantiateFunctionTemplate(
-        &compiler->syntax, ctor_symbol, candidate->type->template_arguments);
+    callee = TypeInstantiateFunctionTemplateWithCompletedArguments(
+        &compiler->syntax, ctor_symbol,
+        candidate->type->template_arguments);
     DiagnosticSuppressEnd();
     SymbolDelete(candidate);
   } else {
@@ -6307,7 +6308,7 @@ Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
         Symbol* instantiated =
             candidate != NULL && candidate->type != NULL &&
                     candidate->type->template_arguments != NULL
-                ? TypeInstantiateFunctionTemplate(
+                ? TypeInstantiateFunctionTemplateWithCompletedArguments(
                       &compiler->syntax, constructor_template,
                       candidate->type->template_arguments)
                 : NULL;

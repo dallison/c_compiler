@@ -3821,8 +3821,13 @@ void CompilerDestruct(Compiler* compiler) {
   // run before the type arena is released.
   StructRegistryRelease();
 
-  // Everything that references TypeRecords has now been torn down, so the type
-  // arena's struct memory can be reclaimed in one shot.
+  // Template arguments can own TypeRecord references, so release their recycled
+  // shells only after all argument payloads have been destructed and before the
+  // type arena itself is reclaimed.
+  TemplateArgumentArenaRelease();
+
+  // Everything that references TypeRecords has now been torn down, so the
+  // type arena's struct memory can be reclaimed in one shot.
   TypeRecordArenaRelease();
 }
 

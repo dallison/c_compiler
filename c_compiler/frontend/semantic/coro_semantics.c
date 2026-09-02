@@ -1613,7 +1613,7 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   if (type == NULL) {
     return NULL;
   }
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   assert(arg != NULL);
   memset(arg, 0, sizeof(*arg));
   arg->kind = kTemplateParameterType;

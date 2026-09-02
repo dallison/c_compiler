@@ -51,6 +51,23 @@ typedef struct TypeArenaBlock {
 
 static TypeArenaBlock* type_arena = NULL;
 
+typedef union TemplateArgumentSlot {
+  TemplateArgument argument;
+  union TemplateArgumentSlot* next;
+} TemplateArgumentSlot;
+
+typedef struct TemplateArgumentArenaBlock {
+  struct TemplateArgumentArenaBlock* next;
+  size_t used;
+  size_t capacity;
+  TemplateArgumentSlot slots[];
+} TemplateArgumentArenaBlock;
+
+#define TEMPLATE_ARGUMENT_ARENA_BLOCK_SIZE (64 * 1024)
+
+static TemplateArgumentArenaBlock* template_argument_arena = NULL;
+static TemplateArgumentSlot* free_template_arguments = NULL;
+
 static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
   TypeArenaBlock* block = malloc(capacity + sizeof(TypeArenaBlock));
   block->next = NULL;
@@ -82,6 +99,43 @@ void TypeRecordArenaRelease(void) {
     block = next;
   }
   type_arena = NULL;
+}
+
+TemplateArgument* TemplateArgumentAlloc(void) {
+  TemplateArgumentSlot* slot = free_template_arguments;
+  if (slot != NULL) {
+    free_template_arguments = slot->next;
+  } else {
+    if (template_argument_arena == NULL ||
+        template_argument_arena->used == template_argument_arena->capacity) {
+      size_t capacity =
+          (TEMPLATE_ARGUMENT_ARENA_BLOCK_SIZE -
+           offsetof(TemplateArgumentArenaBlock, slots)) /
+          sizeof(TemplateArgumentSlot);
+      TemplateArgumentArenaBlock* block =
+          malloc(offsetof(TemplateArgumentArenaBlock, slots) +
+                 capacity * sizeof(TemplateArgumentSlot));
+      block->next = template_argument_arena;
+      block->used = 0;
+      block->capacity = capacity;
+      template_argument_arena = block;
+    }
+    slot = &template_argument_arena
+                ->slots[template_argument_arena->used++];
+  }
+  memset(&slot->argument, 0, sizeof(slot->argument));
+  return &slot->argument;
+}
+
+void TemplateArgumentArenaRelease(void) {
+  TemplateArgumentArenaBlock* block = template_argument_arena;
+  while (block != NULL) {
+    TemplateArgumentArenaBlock* next = block->next;
+    free(block);
+    block = next;
+  }
+  template_argument_arena = NULL;
+  free_template_arguments = NULL;
 }
 
 // Registries of every Struct and Enum created.  Struct infos can form
@@ -240,29 +294,14 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
     type |= kTypeInt;
   }
   TypeRecord* record = TypeArenaAlloc();
+  memset(record, 0, sizeof(*record));
   record->id = next_type_id++;
   record->type = type;
   record->qualifiers = quals;
   record->template_parameter_summary =
       kTypeTemplateParameterSummaryUnknown;
-  record->size = 0;
-  record->bit_width = 0;
   record->template_parameter_index = -1;
-  record->template_parameter_name = NULL;
-  record->dependent_member_name = NULL;
-  record->template_origin = NULL;
-  record->template_arguments = NULL;
-  record->dependent_member_template_arguments = NULL;
-  record->dependent_decltype_expr = NULL;
-  record->is_pack_index = false;
-  record->pack_index_expr = NULL;
-  record->pack_index_pack = NULL;
-  record->dependent_splice_expr = NULL;
-  record->size_sync_owner = NULL;
-  record->refs = 0;
-  record->next = NULL;
   record->declarator = kDeclPrimitive;
-  memset(&record->info, 0, sizeof(record->info));
   Trap(record);
   return record;
 }
@@ -626,6 +665,7 @@ Vector* TemplateParameterVectorCopy(Vector* params) {
     return NULL;
   }
   Vector* copy = NewVector();
+  VectorReserve(copy, params->length);
   for (size_t i = 0; i < params->length; i++) {
     VectorAppend(copy, TemplateParameterCopy(params->value.p[i]));
   }
@@ -638,7 +678,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   if (arg == NULL) {
     return NULL;
   }
-  TemplateArgument* copy = malloc(sizeof(TemplateArgument));
+  TemplateArgument* copy = TemplateArgumentAlloc();
   copy->kind = arg->kind;
   copy->is_pack_expansion = arg->is_pack_expansion;
   copy->references_parameter_pack = arg->references_parameter_pack;
@@ -664,8 +704,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
 }
 
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->template_parameter_index = -1;
   arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
@@ -674,8 +713,7 @@ TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
 }
 
 TemplateArgument* NewIntegralTemplateArgument(long long value) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterNonType;
   arg->value_kind = kTemplateValueIntegral;
   arg->int_value = value;
@@ -686,7 +724,7 @@ TemplateArgument* NewIntegralTemplateArgument(long long value) {
 
 TemplateArgument* NewTemplateTemplateArgument(Symbol* symbol,
                                                int parameter_index) {
-  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterTemplate;
   arg->template_parameter_index = parameter_index;
   arg->template_symbol = symbol;
@@ -978,6 +1016,7 @@ Vector* TemplateArgumentVectorCopy(Vector* args) {
     return NULL;
   }
   Vector* copy = NewVector();
+  VectorReserve(copy, args->length);
   for (size_t i = 0; i < args->length; i++) {
     VectorAppend(copy, TemplateArgumentCopy(args->value.p[i]));
   }
@@ -989,6 +1028,7 @@ Vector* TemplateArgumentVectorListCopy(Vector* list) {
     return NULL;
   }
   Vector* copy = NewVector();
+  VectorReserve(copy, list->length);
   for (size_t i = 0; i < list->length; i++) {
     VectorAppend(copy, TemplateArgumentVectorCopy(list->value.p[i]));
   }
@@ -1458,7 +1498,10 @@ void TemplateArgumentDelete(TemplateArgument* arg) {
                              /*free_element=*/false);
   }
   ASTNodeDelete(arg->object_initializer);
-  free(arg);
+  memset(arg, 0, sizeof(*arg));
+  TemplateArgumentSlot* slot = (TemplateArgumentSlot*)arg;
+  slot->next = free_template_arguments;
+  free_template_arguments = slot;
 }
 
 /* Create a record describing a class-template partial specialization: its own

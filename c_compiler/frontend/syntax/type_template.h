@@ -45,6 +45,10 @@ Vector* TypeCompleteConceptArguments(struct Syntax* syntax,
 void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op);
 Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
                                         Vector* args);
+// Instantiate from a vector already returned by function-template argument
+// completion. The input remains owned by the caller.
+Symbol* TypeInstantiateFunctionTemplateWithCompletedArguments(
+    struct Syntax* syntax, Symbol* templ, Vector* completed_args);
 void TypeEnsureTemplateMemberFunctionDefinition(struct Syntax* syntax,
                                                 Symbol* symbol);
 Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,

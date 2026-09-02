@@ -1508,8 +1508,7 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   if (arg == NULL) {
     return NULL;
   }
-  TemplateArgument* copy = malloc(sizeof(TemplateArgument));
-  memset(copy, 0, sizeof(*copy));
+  TemplateArgument* copy = TemplateArgumentAlloc();
   copy->kind = arg->kind;
   copy->is_pack_expansion = arg->is_pack_expansion;
   copy->references_parameter_pack = arg->references_parameter_pack;
@@ -1668,7 +1667,7 @@ static Vector* NewIdentityParameterMappingFromParameters(Vector* parameters) {
   }
   for (size_t i = 0; i < parameters->length; i++) {
     TemplateParameter* param = parameters->value.p[i];
-    TemplateArgument* arg = calloc(1, sizeof(TemplateArgument));
+    TemplateArgument* arg = TemplateArgumentAlloc();
     if (param != NULL) {
       arg->kind = param->kind;
     } else {

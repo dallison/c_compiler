@@ -323,7 +323,7 @@ static TypeRecord* MetaSynthesisResolveTemplateArgumentType(
 
 static TemplateArgument* MetaSynthesisTemplateArgumentFromReflection(
     ReflectionValue* reflection) {
-  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->location = reflection != NULL ? reflection->location
                                      : SOURCE_LOCATION_MISSING;
   if (reflection == NULL) {

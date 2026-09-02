@@ -250,8 +250,7 @@ Vector* TemplateArgumentVectorCopyWithPackElement(Vector* args,
 TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
                                                  TemplateArgument* arg,
                                                  Vector* args) {
-  TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
-  memset(concrete, 0, sizeof(*concrete));
+  TemplateArgument* concrete = TemplateArgumentAlloc();
   concrete->kind = arg->kind;
   concrete->is_pack_expansion = false;
   concrete->type =
@@ -761,8 +760,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
   // corrupting an already-concrete instantiation into an empty one when its
   // type is re-substituted in an unrelated context.
   if (arg->pack_arguments != NULL) {
-    TemplateArgument* pack = malloc(sizeof(TemplateArgument));
-    memset(pack, 0, sizeof(*pack));
+    TemplateArgument* pack = TemplateArgumentAlloc();
     pack->kind = arg->kind;
     pack->is_pack_expansion = false;
     pack->type = NULL;
@@ -795,6 +793,7 @@ Vector* SubstituteTemplateArgumentVectorForTypes(TypeParser* parser,
     return NULL;
   }
   Vector* concrete_args = NewVector();
+  VectorReserve(concrete_args, template_args->length);
   for (size_t i = 0; i < template_args->length; i++) {
     AppendSubstitutedTemplateArgument(parser, concrete_args,
                                       template_args->value.p[i], args);
@@ -2630,8 +2629,7 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
   }
   if (param->kind == kTemplateParameterType && param->default_type != NULL &&
       !TypeContainsTemplateParameter(param->default_type)) {
-    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-    memset(arg, 0, sizeof(*arg));
+    TemplateArgument* arg = TemplateArgumentAlloc();
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion = false;
     arg->type = TypeRecordCopy(param->default_type);
@@ -2762,6 +2760,7 @@ static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
   }
 
   Vector* completed = NewVector();
+  VectorReserve(completed, parameter_count);
   for (size_t i = 0; i < parameter_count; i++) {
     TemplateParameter* param = parameters->value.p[i];
     if (param != NULL && param->is_parameter_pack) {
@@ -2827,6 +2826,7 @@ static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
   }
 
   Vector* completed = NewVector();
+  VectorReserve(completed, parameter_count);
   for (size_t i = 0; i < parameter_count; i++) {
     if (pack_index >= 0 && i == (size_t)pack_index) {
       TemplateArgument* pack = NewEmptyPackTemplateArgument(pack_kind);

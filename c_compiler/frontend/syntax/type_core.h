@@ -30,6 +30,10 @@ static inline void TypeRecordDelete(TypeRecord* record) {
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);
+// Allocate/recycle TemplateArgument shells while preserving normal payload
+// destruction. Release the backing blocks with the rest of frontend teardown.
+TemplateArgument* TemplateArgumentAlloc(void);
+void TemplateArgumentArenaRelease(void);
 // Free every Struct info (and its members) in one pass.  Call once, at
 // CompilerDestruct, after the AST/symbols/tags are gone but before
 // TypeRecordArenaRelease.  Structs are freed here rather than by refcount

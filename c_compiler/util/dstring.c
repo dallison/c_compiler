@@ -184,15 +184,19 @@ void StringAppendSegment(String* str, const char* value, size_t length) {
   // Full length of strings, including \0.
   size_t full_length = str->length + length + 1;
   if (str->capacity < full_length) {
+    size_t new_capacity = str->capacity * 2;
+    if (new_capacity < str->capacity || new_capacity < full_length) {
+      new_capacity = full_length;
+    }
     if (str->value == str->buffer) {
       // Moving from buffer, allocate memory and copy the buffer in to it.
-      str->value = malloc(full_length);
+      str->value = malloc(new_capacity);
       memcpy(str->value, str->buffer, STRING_BUFFER_SIZE);
     } else {
       // No space, reallocate memory.
-      str->value = realloc(str->value, full_length);
+      str->value = realloc(str->value, new_capacity);
     }
-    str->capacity = full_length;
+    str->capacity = new_capacity;
   }
 
   // Copy in new string at the end of the current one.

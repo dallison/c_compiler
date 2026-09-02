@@ -51,6 +51,9 @@ static bool DependentExpressionNodeContainsParameter(ASTNode* node,
 bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right);
 bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+static uint64_t HashTypeValue(uint64_t hash, uint64_t value);
+static uint64_t HashTemplateArgument(uint64_t hash, TemplateArgument* arg);
+static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type);
 
 bool DependentExpressionContainsTemplateParameter(ASTNode* expr) {
   return ASTNodeAny(expr, DependentExpressionNodeContainsParameter, NULL);
@@ -621,13 +624,18 @@ static uint64_t HashFunctionTemplateCacheString(const char* value) {
   return hash;
 }
 
-static uint64_t HashFunctionTemplateArguments(Symbol* templ, Vector* args) {
-  String key;
-  StringInit(&key, NULL);
-  AppendTemplateInstantiationName(&key, templ, args);
-  uint64_t hash = HashFunctionTemplateCacheString(key.value);
-  StringDestruct(&key);
+static uint64_t HashTemplateArgumentVector(uint64_t hash, Vector* args) {
+  hash ^= args != NULL ? args->length + 1 : 0;
+  hash *= UINT64_C(1099511628211);
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    hash = HashTemplateArgument(hash, args->value.p[i]);
+  }
   return hash;
+}
+
+static uint64_t HashFunctionTemplateArguments(Symbol* templ, Vector* args) {
+  (void)templ;
+  return HashTemplateArgumentVector(UINT64_C(1469598103934665603), args);
 }
 
 static struct FunctionTemplateInstantiationCache*
@@ -1110,6 +1118,273 @@ static Type CanonicalPrimitiveType(Type type) {
     return type;
   }
   return (type | kTypeInt) & ~kTypeSigned;
+}
+
+static uint64_t HashTypeValue(uint64_t hash, uint64_t value) {
+  hash ^= value;
+  hash *= UINT64_C(1099511628211);
+  return hash;
+}
+
+static uint64_t HashTypeBytes(uint64_t hash, const char* value,
+                              size_t length) {
+  for (size_t i = 0; value != NULL && i < length; i++) {
+    hash = HashTypeValue(hash, (unsigned char)value[i]);
+  }
+  return HashTypeValue(hash, length);
+}
+
+static uint64_t HashDependentTemplateArgExpr(uint64_t hash, ASTNode* expr) {
+  if (expr == NULL) {
+    return HashTypeValue(hash, 0);
+  }
+  hash = HashTypeValue(hash, (uint64_t)expr->op + 1);
+  switch (expr->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+      return HashTypeValue(hash, (uint64_t)((ConstantASTNode*)expr)->value.ivalue);
+    case AST_OP(identifier):
+      // Distinct symbols can compare equal by template-parameter index or by
+      // dependent qualified-name structure. Keep this deliberately coarse.
+      return hash;
+    case AST_OP(not):
+    case AST_OP(noexcept_expr):
+    case AST_OP(onescomp):
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+      return HashDependentTemplateArgExpr(hash, ((UnaryASTNode*)expr)->sub);
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshifta):
+    case AST_OP(rshiftl):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(logand):
+    case AST_OP(logor): {
+      BinaryASTNode* binary = (BinaryASTNode*)expr;
+      hash = HashDependentTemplateArgExpr(hash, binary->left);
+      return HashDependentTemplateArgExpr(hash, binary->right);
+    }
+    case AST_OP(cast): {
+      CastASTNode* cast = (CastASTNode*)expr;
+      hash = HashTypeRecord(hash, cast->cast_type);
+      return HashDependentTemplateArgExpr(hash, cast->expr);
+    }
+    case AST_OP(sizeof):
+    case AST_OP(alignof): {
+      if (ASTNodeGetShape(expr) != kASTShapeSizeof) {
+        return hash;
+      }
+      SizeofASTNode* size = (SizeofASTNode*)expr;
+      hash = HashTypeValue(hash, size->is_pack_size);
+      hash = HashDependentTemplateArgExpr(hash, size->expr);
+      return HashTypeRecord(hash, size->type_operand);
+    }
+    default:
+      break;
+  }
+  switch (ASTNodeGetShape(expr)) {
+    case kASTShapeUnary:
+      return HashDependentTemplateArgExpr(hash, ((UnaryASTNode*)expr)->sub);
+    case kASTShapeBinary: {
+      BinaryASTNode* binary = (BinaryASTNode*)expr;
+      hash = HashDependentTemplateArgExpr(hash, binary->left);
+      return HashDependentTemplateArgExpr(hash, binary->right);
+    }
+    case kASTShapeVector: {
+      VectorASTNode* vector = (VectorASTNode*)expr;
+      hash = HashDependentTemplateArgExpr(hash, vector->left);
+      hash = HashTypeValue(
+          hash, vector->children != NULL ? vector->children->length + 1 : 0);
+      for (size_t i = 0;
+           vector->children != NULL && i < vector->children->length; i++) {
+        hash = HashDependentTemplateArgExpr(
+            hash, vector->children->value.p[i]);
+      }
+      return hash;
+    }
+    default:
+      return hash;
+  }
+}
+
+static uint64_t HashStructForTypeEquality(uint64_t hash, Struct* str) {
+  if (str == NULL) {
+    return HashTypeValue(hash, 0);
+  }
+  if (str->tag_name == NULL) {
+    Symbol* origin =
+        str->tag_symbol != NULL && str->tag_symbol->type != NULL
+            ? str->tag_symbol->type->template_origin
+            : NULL;
+    if (origin != NULL) {
+      return HashTypeBytes(hash, origin->name.value, origin->name.length);
+    }
+    return HashTypeValue(hash, 1);
+  }
+  const char* name = str->tag_name->value;
+  size_t length = strncmp(name, "__invented__", 12) == 0
+                      ? str->tag_name->length
+                      : strcspn(name, "$");
+  return HashTypeBytes(hash, name, length);
+}
+
+static uint64_t HashTemplateArgument(uint64_t hash, TemplateArgument* arg) {
+  if (arg == NULL) {
+    return HashTypeValue(hash, 0);
+  }
+  hash = HashTypeValue(hash, (uint64_t)arg->kind + 1);
+  if (arg->pack_arguments != NULL) {
+    hash = HashTypeValue(hash, UINT64_C(0x7061636b));
+    return HashTemplateArgumentVector(hash, arg->pack_arguments);
+  }
+  if (arg->kind == kTemplateParameterType) {
+    return HashTypeRecord(hash, arg->type);
+  }
+  if (arg->kind == kTemplateParameterTemplate) {
+    hash = HashTypeValue(hash, (uintptr_t)arg->template_symbol);
+    hash = HashTypeValue(hash,
+                         (uint64_t)(uint32_t)arg->template_parameter_index);
+    return HashDependentTemplateArgExpr(hash, arg->pack_index_expr);
+  }
+  if (arg->dependent_expr != NULL) {
+    return HashDependentTemplateArgExpr(hash, arg->dependent_expr);
+  }
+  hash = HashTypeValue(hash,
+                       (uint64_t)(uint32_t)arg->template_parameter_index);
+  TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
+  hash = HashTypeValue(hash, (uint64_t)kind);
+  switch (kind) {
+    case kTemplateValueIntegral:
+      return HashTypeValue(hash, (uint64_t)arg->int_value);
+    case kTemplateValuePointer:
+      hash = HashTypeValue(hash, (uintptr_t)arg->value_symbol);
+      return HashTypeValue(hash, (uint64_t)arg->value_offset);
+    case kTemplateValueMemberPointer:
+      hash = HashTypeValue(hash, (uintptr_t)arg->value_symbol);
+      hash = HashTypeValue(hash, (uint64_t)arg->value_offset);
+      hash = HashTypeValue(hash, (uint64_t)arg->value_adjustment);
+      return HashTypeValue(hash, (uintptr_t)arg->member_function);
+    case kTemplateValueNull:
+    case kTemplateValueReflection:
+    case kTemplateValueObject:
+    case kTemplateValueNone:
+      // Equality for these values is resolved by the bucket collision check.
+      return hash;
+  }
+  return hash;
+}
+
+static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
+  if (type == NULL) {
+    return HashTypeValue(hash, 0);
+  }
+  hash = HashTypeValue(hash, (uint64_t)type->declarator + 1);
+  hash = HashTypeValue(hash, type->qualifiers & ~kQualRestrict);
+  hash = HashTypeValue(hash, type->is_pack_index);
+  if (type->is_pack_index) {
+    hash = HashDependentTemplateArgExpr(hash, type->pack_index_expr);
+    hash = HashTemplateArgument(hash, type->pack_index_pack);
+  }
+  if (type->declarator == kDeclPrimitive &&
+      (type->type & kTypeUnknown) != 0) {
+    if (type->template_parameter_index >= 0) {
+      hash = HashTypeValue(
+          hash, (uint64_t)(uint32_t)type->template_parameter_index);
+      if (type->dependent_member_name != NULL) {
+        hash = HashTypeBytes(hash, type->dependent_member_name->value,
+                             type->dependent_member_name->length);
+      }
+    } else if (type->template_origin != NULL) {
+      hash = HashTypeValue(hash, (uintptr_t)type->template_origin);
+      if (type->dependent_member_name != NULL) {
+        hash = HashTypeBytes(hash, type->dependent_member_name->value,
+                             type->dependent_member_name->length);
+      }
+      hash = HashTemplateArgumentVector(hash, type->template_arguments);
+    }
+    return hash;
+  }
+  switch (type->declarator) {
+    case kDeclArray:
+      // TypeArrayBoundsEqual intentionally lets a VLA match any non-dependent
+      // bound. Hash only the element type so that lenient comparison can never
+      // produce a cache false negative; exact bounds are checked in the bucket.
+      return HashTypeRecord(hash, type->next);
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      return HashTypeRecord(hash, type->next);
+    case kDeclMemberPointer:
+      if (type->template_parameter_index >= 0) {
+        hash = HashTypeValue(
+            hash, (uint64_t)(uint32_t)type->template_parameter_index);
+      } else {
+        hash = HashTypeValue(hash, (uintptr_t)type->info.struct_info);
+      }
+      return HashTypeRecord(hash, type->next);
+    case kDeclFunction:
+      hash = HashTypeRecord(hash, type->next);
+      hash = HashTypeValue(hash, type->info.function.prototype.length);
+      hash = HashTypeValue(hash, type->info.function.is_const_member);
+      hash = HashTypeValue(hash, type->info.function.is_volatile_member);
+      hash = HashTypeValue(hash, type->info.function.ref_qualifier);
+      hash = HashTypeValue(hash, type->info.function.is_noexcept);
+      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+        Symbol* formal = type->info.function.prototype.value.p[i];
+        hash = HashTypeRecord(hash, formal != NULL ? formal->type : NULL);
+      }
+      return hash;
+    case kDeclPrimitive:
+      break;
+  }
+  if (TypeIsBitInt(type) && !TypeIsEnum(type)) {
+    hash = HashTypeValue(hash, kTypeBitInt);
+    hash = HashTypeValue(hash, (uint64_t)(uint32_t)type->bit_width);
+    return HashTypeValue(hash, TypeIsUnsigned(type));
+  }
+  if (TypeIsStructOrUnion(type)) {
+    hash = HashTypeValue(hash, type->type);
+    Symbol* origin = type->template_origin;
+    if (origin == NULL && type->info.struct_info != NULL &&
+        type->info.struct_info->tag_symbol != NULL &&
+        type->info.struct_info->tag_symbol->type != NULL) {
+      origin =
+          type->info.struct_info->tag_symbol->type->template_origin;
+    }
+    Vector* specialization_args =
+        TypeSpecializationTemplateArguments(type);
+    if (origin != NULL && specialization_args != NULL) {
+      hash = HashTypeBytes(hash, origin->name.value, origin->name.length);
+      return HashTemplateArgumentVector(hash, specialization_args);
+    }
+    return HashStructForTypeEquality(hash, type->info.struct_info);
+  }
+  if (TypeIsEnum(type)) {
+    if (TypeIsScopedEnum(type)) {
+      return HashTypeValue(hash, (uintptr_t)type->info.enum_info);
+    }
+    Type enum_type =
+        type->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+    hash = HashTypeValue(hash, enum_type);
+    if ((type->type & kTypeBitInt) != 0) {
+      hash = HashTypeValue(hash, (uint64_t)(uint32_t)type->bit_width);
+    }
+    return hash;
+  }
+  return HashTypeValue(hash, CanonicalPrimitiveType(type->type));
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {

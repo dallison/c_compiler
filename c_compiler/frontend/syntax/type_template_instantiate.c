@@ -64,13 +64,19 @@ static Vector* TemplateParameterListForSymbol(Symbol* symbol);
 static bool TemplateTemplateParameterListsCompatible(Vector* formal,
                                                        Vector* actual);
 static int TemplateArgumentVectorPatternSpecificity(Vector* args);
+typedef enum {
+  kTemplateArgumentsBorrow,
+  kTemplateArgumentsConsume,
+} TemplateArgumentOwnership;
 static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                    TypeRecord* func,
                                                    Vector* args,
-                                                   bool emit_error);
+                                                   bool emit_error,
+                                                   TemplateArgumentOwnership ownership);
 static Vector* CompleteTemplateArguments(TypeParser* parser, Vector* parameters,
                                          Vector* args, const char* error_message,
-                                         bool emit_error);
+                                         bool emit_error,
+                                         TemplateArgumentOwnership ownership);
 static Vector* CompleteVariableTemplateArguments(TypeParser* parser,
                                                  VariableTemplate* vt,
                                                  Vector* args, bool emit_error);
@@ -1646,7 +1652,8 @@ static bool TemplateArgumentVectorContainsTemplateParameterForInstantiation(
  * concrete arguments the correct conversion can be selected. */
 static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
                                                  Symbol* templ,
-                                                 Vector* args) {
+                                                 Vector* args,
+                                                 bool args_are_completed) {
   if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
       !TypeIsFunction(templ->type)) {
     return templ;
@@ -1675,17 +1682,21 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       templ->value.func_defn->type->info.function.template_parameters.length > 0) {
     completion_type = templ->value.func_defn->type;
   }
+  bool owns_completed_args = !args_are_completed;
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(parser, completion_type, args,
-                                        /*emit_error=*/true);
+      args_are_completed
+          ? args
+          : CompleteFunctionTemplateArguments(parser, completion_type, args,
+                                              /*emit_error=*/true,
+                                              kTemplateArgumentsBorrow);
   if (completed_args == NULL) {
     return templ;
   }
   if (TemplateArgumentVectorContainsTemplateParameterForInstantiation(
           completed_args)) {
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
+    if (owns_completed_args) {
+      TemplateArgumentVectorDelete(completed_args);
+    }
     return templ;
   }
   Symbol* template_definition = templ;
@@ -1700,9 +1711,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   if (template_definition->type->info.function.body == NULL) {
     SyntaxError(parser->syntax,
                 "Function template definition is required for instantiation");
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
+    if (owns_completed_args) {
+      TemplateArgumentVectorDelete(completed_args);
+    }
     return templ;
   }
   bool saved_substitution_failed = parser->template_substitution_failed;
@@ -1717,9 +1728,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     // no valid substitution.  Abandon this instantiation quietly so overload
     // resolution can discard the candidate; do not create or queue a symbol.
     TypeRecordDelete(func);
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
+    if (owns_completed_args) {
+      TemplateArgumentVectorDelete(completed_args);
+    }
     return templ;
   }
   Symbol* existing = FindFunctionTemplateInstantiation(templ, func,
@@ -1730,9 +1741,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
           parser, template_definition, existing, completed_args);
     }
     TypeRecordDelete(func);
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
+    if (owns_completed_args) {
+      TemplateArgumentVectorDelete(completed_args);
+    }
     return existing;
   }
 
@@ -1741,28 +1752,28 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   symbol->namespace_ = templ->namespace_;
   func->info.function.symbol = symbol;
   func->info.function.template_origin = templ;
-  func->template_arguments = TemplateArgumentVectorCopy(completed_args);
+  // Freshly completed arguments can move directly into permanent storage.
+  // Already-completed caller arguments remain borrowed and are copied only on
+  // this cache-miss path; cache hits above require no argument copy.
+  func->template_arguments =
+      owns_completed_args ? completed_args
+                          : TemplateArgumentVectorCopy(completed_args);
+  Vector* instantiation_args = func->template_arguments;
   SymbolSetCXXMangledAsmName(symbol);
   existing = FindFunctionTemplateInstantiationByAsmName(templ,
                                                        symbol->asm_name.value);
   if (existing != NULL) {
     if (compiler->speculative_template_instantiation_depth == 0) {
       EnsureFunctionTemplateInstantiationQueued(
-          parser, template_definition, existing, completed_args);
+          parser, template_definition, existing, instantiation_args);
     }
     SymbolDelete(symbol);
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
     return existing;
   }
   if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
     AppendFunctionTemplateInstantiation(templ, symbol);
-    VectorDeleteWithContents(completed_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
     return symbol;
   }
   VectorDestruct(&symbol->attributes);
@@ -1782,7 +1793,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     PushFunctionInstantiationInProgress(&in_progress, symbol);
     Vector* body_args =
         FunctionTemplateBodyArguments(template_definition, symbol,
-                                      completed_args);
+                                      instantiation_args);
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, body_args);
@@ -1794,7 +1805,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     // subobjects (and any constexpr evaluation of them) would be skipped.
     SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                   symbol, body_args);
-    if (body_args != completed_args) {
+    if (body_args != instantiation_args) {
       VectorDeleteWithContents(body_args,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
@@ -1812,9 +1823,6 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     CompilerQueuePendingFunctionDefinition(symbol);
     VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
   }
-  VectorDeleteWithContents(completed_args,
-                           (VectorElementDestructor)TemplateArgumentDelete,
-                           /*free_element=*/false);
   return symbol;
 }
 
@@ -1822,8 +1830,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
  * type.  Deduced array/reference spines must not share element records with the
  * argument expression because deduction temporaries are destroyed earlier. */
 static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCalculateSize(TypeRecordCloneSpine(type));
@@ -1837,8 +1844,7 @@ static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
 
 /* Create a non-type template argument holding a deduced integer value. */
 static TemplateArgument* NewDeducedNonTypeTemplateArgument(long long value) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterNonType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -3084,6 +3090,7 @@ static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
                                                      Vector* explicit_args,
                                                      size_t* explicit_arg_count) {
   Vector* args = NewVector();
+  VectorReserve(args, func->info.function.template_parameters.length);
   size_t explicit_index = 0;
   size_t fixed_explicit_count = 0;
   for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
@@ -3460,7 +3467,8 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   }
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
-                                        /*emit_error=*/true);
+                                        /*emit_error=*/true,
+                                        kTemplateArgumentsConsume);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -3474,8 +3482,8 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
                              /*free_element=*/false);
     return templ;
   }
-  Symbol* symbol =
-      TypeInstantiateFunctionTemplate(syntax, templ, completed_args);
+  Symbol* symbol = TypeInstantiateFunctionTemplateWithCompletedArguments(
+      syntax, templ, completed_args);
   VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
@@ -3507,7 +3515,8 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   }
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
-                                        /*emit_error=*/false);
+                                        /*emit_error=*/false,
+                                        kTemplateArgumentsConsume);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -3548,7 +3557,8 @@ FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
   }
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
-                                        /*emit_error=*/false);
+                                        /*emit_error=*/false,
+                                        kTemplateArgumentsConsume);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
@@ -3605,7 +3615,8 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   }
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
-                                        /*emit_error=*/false);
+                                        /*emit_error=*/false,
+                                        kTemplateArgumentsConsume);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
@@ -3658,10 +3669,9 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   symbol->namespace_ = templ->namespace_;
   func->info.function.symbol = symbol;
   func->info.function.template_origin = templ;
-  func->template_arguments = TemplateArgumentVectorCopy(completed_args);
-  VectorDeleteWithContents(completed_args,
-                           (VectorElementDestructor)TemplateArgumentDelete,
-                           /*free_element=*/false);
+  // The candidate type owns this completed vector. Temporary candidate
+  // teardown releases it if overload resolution does not select it.
+  func->template_arguments = completed_args;
   TypeParserDestruct(&parser);
   return symbol;
 }
@@ -3713,7 +3723,8 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func, args,
-                                        /*emit_error=*/false);
+                                        /*emit_error=*/false,
+                                        kTemplateArgumentsConsume);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -3778,7 +3789,8 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func, args,
-                                        /*emit_error=*/false);
+                                        /*emit_error=*/false,
+                                        kTemplateArgumentsConsume);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -4055,8 +4067,7 @@ static bool SetDeducedClassTemplateTypeArgument(Vector* bindings, int index,
 }
 
 static TemplateArgument* NewDeducedTypePackTemplateArgument(void) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -4688,7 +4699,7 @@ static TemplateArgument* NewTemplateTemplateParameterCTADPatternArgument(
   if (param == NULL) {
     return NULL;
   }
-  TemplateArgument* arg = calloc(1, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = param->kind;
   arg->is_pack_expansion = param->is_parameter_pack;
   arg->references_parameter_pack = param->is_parameter_pack;
@@ -5111,7 +5122,7 @@ static Vector* CompleteVariableTemplateArguments(TypeParser* parser,
   }
   return CompleteTemplateArguments(parser, &vt->parameters, args,
                                    "Variable template instantiation failed",
-                                   emit_error);
+                                   emit_error, kTemplateArgumentsBorrow);
 }
 
 static void ReportVariableTemplateConstraintFailure(Syntax* syntax,
@@ -5546,7 +5557,8 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
         continue;
       }
       Vector* args = CompleteFunctionTemplateArguments(
-          &parser, guide->type, deduced_args, /*emit_error=*/false);
+          &parser, guide->type, deduced_args, /*emit_error=*/false,
+          kTemplateArgumentsConsume);
       VectorDeleteWithContents(
           deduced_args, (VectorElementDestructor)TemplateArgumentDelete,
           /*free_element=*/false);
@@ -5860,8 +5872,7 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
 }
 
 static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = type;
@@ -5875,8 +5886,7 @@ static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
 
 static TemplateArgument* NewDefaultNonTypeTemplateArgument(
     long long int_value, int template_parameter_index) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterNonType;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -5892,8 +5902,7 @@ static TemplateArgument* NewDefaultNonTypeTemplateArgument(
 
 TemplateArgument* NewEmptyPackTemplateArgument(
     TemplateParameterKind kind) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kind;
   arg->is_pack_expansion = false;
   arg->type = NULL;
@@ -6195,7 +6204,8 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                          Vector* template_parameters,
                                          Vector* args,
                                          const char* error_message,
-                                         bool emit_error) {
+                                         bool emit_error,
+                                         TemplateArgumentOwnership ownership) {
   if (args == NULL) {
     if (emit_error) {
       SyntaxError(parser->syntax, "%s", error_message);
@@ -6210,6 +6220,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     return NULL;
   }
   Vector* completed = NewVector();
+  VectorReserve(completed, template_parameters->length);
   for (size_t i = 0; i < template_parameters->length; i++) {
     TemplateParameter* param = template_parameters->value.p[i];
     if (param != NULL && param->is_parameter_pack) {
@@ -6267,18 +6278,39 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                   /*free_element=*/false);
               return NULL;
             }
-            VectorAppend(pack->pack_arguments, TemplateArgumentCopy(element));
+            if (ownership == kTemplateArgumentsConsume) {
+              arg->pack_arguments->value.p[k] = NULL;
+              VectorAppend(pack->pack_arguments, element);
+            } else {
+              VectorAppend(pack->pack_arguments,
+                           TemplateArgumentCopy(element));
+            }
+          }
+          if (ownership == kTemplateArgumentsConsume) {
+            args->value.p[j] = NULL;
+            TemplateArgumentDelete(arg);
           }
         } else {
-          VectorAppend(pack->pack_arguments, TemplateArgumentCopy(arg));
+          if (ownership == kTemplateArgumentsConsume) {
+            args->value.p[j] = NULL;
+            VectorAppend(pack->pack_arguments, arg);
+          } else {
+            VectorAppend(pack->pack_arguments, TemplateArgumentCopy(arg));
+          }
         }
       }
       VectorAppend(completed, pack);
       continue;
     }
     bool argument_from_default = false;
-    TemplateArgument* arg =
-        i < args->length ? TemplateArgumentCopy(args->value.p[i]) : NULL;
+    TemplateArgument* arg = i < args->length ? args->value.p[i] : NULL;
+    if (arg != NULL) {
+      if (ownership == kTemplateArgumentsConsume) {
+        args->value.p[i] = NULL;
+      } else {
+        arg = TemplateArgumentCopy(arg);
+      }
+    }
     if (arg == NULL) {
       if (param->kind == kTemplateParameterType &&
           param->default_type != NULL) {
@@ -6413,7 +6445,8 @@ Vector* TypeCompleteConceptArguments(Syntax* syntax, Vector* concept_parameters,
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed = CompleteTemplateArguments(
       &parser, concept_parameters, args,
-      "too few template arguments for concept", /*emit_error=*/false);
+      "too few template arguments for concept", /*emit_error=*/false,
+      kTemplateArgumentsBorrow);
   TypeParserDestruct(&parser);
   return completed;
 }
@@ -6426,7 +6459,8 @@ Vector* CompleteClassTemplateArguments(TypeParser* parser,
   return CompleteTemplateArguments(parser, &template_struct->template_parameters,
                                    args,
                                    "Class template instantiation is not supported yet",
-                                   /*emit_error=*/true);
+                                   /*emit_error=*/true,
+                                   kTemplateArgumentsBorrow);
 }
 
 /* Register a partial specialization (its tag and argument pattern) on the
@@ -6560,7 +6594,8 @@ void AddVariableTemplatePartialSpecialization(TypeParser* parser,
 static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  TypeRecord* func,
                                                  Vector* args,
-                                                 bool emit_error) {
+                                                 bool emit_error,
+                                                 TemplateArgumentOwnership ownership) {
   Vector* parameters = NULL;
   if (func != NULL && TypeIsFunction(func)) {
     parameters = &func->info.function.template_parameters;
@@ -6582,7 +6617,7 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   Vector* completed =
       CompleteTemplateArguments(parser, parameters, args,
                                 "Function template instantiation is not supported yet",
-                                emit_error);
+                                emit_error, ownership);
   if (completed == NULL) {
     return NULL;
   }
@@ -7428,8 +7463,7 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
     return NULL;
   }
   Vector* args = NewVector();
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(element_type);
@@ -7476,7 +7510,24 @@ Symbol* TypeInstantiateFunctionTemplate(Syntax* syntax, Symbol* templ,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
-  Symbol* symbol = InstantiateSimpleFunctionTemplate(&parser, templ, args);
+  Symbol* symbol =
+      InstantiateSimpleFunctionTemplate(&parser, templ, args,
+                                        /*args_are_completed=*/false);
+  TypeParserDestruct(&parser);
+  return symbol;
+}
+
+Symbol* TypeInstantiateFunctionTemplateWithCompletedArguments(
+    Syntax* syntax, Symbol* templ, Vector* completed_args) {
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    return templ;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Symbol* symbol =
+      InstantiateSimpleFunctionTemplate(&parser, templ, completed_args,
+                                        /*args_are_completed=*/true);
   TypeParserDestruct(&parser);
   return symbol;
 }

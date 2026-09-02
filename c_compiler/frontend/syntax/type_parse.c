@@ -2357,8 +2357,7 @@ static void ParseFormalArgument(TypeParser* proto_parser,
 
 static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
                                                                  TypeRecord* type) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
   arg->template_parameter_index = index;

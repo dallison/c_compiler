@@ -7104,7 +7104,7 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
           symbol->type->template_arguments, /*allow_lazy=*/false);
       TypeParserDestruct(&parser);
     } else {
-      TypeInstantiateFunctionTemplate(
+      TypeInstantiateFunctionTemplateWithCompletedArguments(
           syntax, template_definition, symbol->type->template_arguments);
     }
     return;

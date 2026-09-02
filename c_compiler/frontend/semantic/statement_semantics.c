@@ -2481,8 +2481,7 @@ static Symbol* FindStdSymbolByName(const char* name) {
 
 static TemplateArgument* NewNonTypeTemplateArgument(size_t value,
                                                     SourceLocation location) {
-  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
-  memset(arg, 0, sizeof(*arg));
+  TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterNonType;
   arg->is_pack_expansion = false;
   arg->type = NULL;

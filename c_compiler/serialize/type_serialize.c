@@ -704,7 +704,7 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
 
 static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
                                               WireBuffer* in) {
-  TemplateArgument* a = (TemplateArgument*)calloc(1, sizeof(*a));
+  TemplateArgument* a = TemplateArgumentAlloc();
   a->template_parameter_index = -1;
   a->location = SOURCE_LOCATION_MISSING;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {
