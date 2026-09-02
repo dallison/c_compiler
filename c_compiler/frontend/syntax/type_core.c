@@ -243,6 +243,8 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->id = next_type_id++;
   record->type = type;
   record->qualifiers = quals;
+  record->template_parameter_summary =
+      kTypeTemplateParameterSummaryUnknown;
   record->size = 0;
   record->bit_width = 0;
   record->template_parameter_index = -1;
@@ -576,6 +578,16 @@ TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals) {
 void TypeRecordChain(TypeRecord* from, TypeRecord* to) {
   TypeRecordIncRef(to);
   from->next = to;
+  from->template_parameter_summary =
+      kTypeTemplateParameterSummaryUnknown;
+}
+
+void TypeRecordInvalidateTemplateParameterSummary(TypeRecord* record) {
+  for (TypeRecord* current = record; current != NULL;
+       current = current->next) {
+    current->template_parameter_summary =
+        kTypeTemplateParameterSummaryUnknown;
+  }
 }
 
 static ASTNode* CloneVLAExpr(ASTNode* node, void* data) {
@@ -1053,6 +1065,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   }
   TypeRecord* r = TypeArenaAlloc();
   memcpy(r, record, offsetof(TypeRecord, info));
+  r->template_parameter_summary =
+      kTypeTemplateParameterSummaryUnknown;
   if (TypeIsFunction(record)) {
     memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
   } else if (record->declarator == kDeclArray) {

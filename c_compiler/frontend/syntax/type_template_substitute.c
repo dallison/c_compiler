@@ -1755,8 +1755,8 @@ static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
 }
 
 TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
-                                                TypeRecord* type,
-                                                Vector* args) {
+                                         TypeRecord* type,
+                                         Vector* args) {
   if (type == NULL) {
     return NULL;
   }
@@ -2178,6 +2178,7 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
   if (type == NULL || base <= 0) {
     return;
   }
+  TypeRecordInvalidateTemplateParameterSummary(type);
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     if (t->template_parameter_index >= base) {
       t->template_parameter_index -= base;
@@ -2215,6 +2216,7 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
   if (type == NULL || base <= 0) {
     return;
   }
+  TypeRecordInvalidateTemplateParameterSummary(type);
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     if (t->template_parameter_index >= base) {
       t->template_parameter_index -= base;

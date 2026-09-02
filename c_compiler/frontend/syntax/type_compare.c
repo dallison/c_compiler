@@ -88,60 +88,83 @@ bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
   return false;
 }
 
-/* True if `type` still mentions an unresolved template parameter anywhere: as a
- * bare parameter, an array bound, a template argument, or a function parameter
- * type. Used to decide whether a type is dependent. */
-bool TypeContainsTemplateParameter(TypeRecord* type) {
-  for (TypeRecord* t = type; t != NULL; t = t->next) {
-    if (TypeIsUnknown(t) && t->template_parameter_index >= 0) {
-      return true;
-    }
-    // A deferred `decltype` whose operand is still type-dependent (e.g.
-    // `iterator_t<R> = decltype(ranges::begin(declval<R&>()))` substituted while
-    // `R` survives) carries the unevaluated expression here.  Such a type is
-    // still dependent even though its placeholder spine (an `int` fallback)
-    // carries no parameter index, so it must be re-substituted once concrete
-    // arguments arrive.  The operand is only retained while dependent (it is
-    // dropped once the decltype resolves), so its mere presence is sufficient.
-    if (t->dependent_decltype_expr != NULL) {
-      return true;
-    }
-    if (t->dependent_splice_expr != NULL) {
-      return true;
-    }
-    if (t->is_pack_index) {
-      return true;
-    }
-    if (t->dependent_member_name != NULL &&
-        (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
-      return true;
-    }
-    if (t->template_origin != NULL &&
-        t->template_origin->flags.is_template_template_parameter) {
-      return true;
-    }
-    if (t->declarator == kDeclArray &&
-        t->info.array.template_parameter_index >= 0) {
-      return true;
-    }
-    if (t->template_arguments != NULL) {
-      for (size_t i = 0; i < t->template_arguments->length; i++) {
-        if (TemplateArgumentContainsTemplateParameter(
-                t->template_arguments->value.p[i])) {
-          return true;
-        }
-      }
-    }
-    if (TypeIsFunction(t)) {
-      for (size_t i = 0; i < t->info.function.prototype.length; i++) {
-        Symbol* formal = t->info.function.prototype.value.p[i];
-        if (formal != NULL && TypeContainsTemplateParameter(formal->type)) {
-          return true;
-        }
+static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
+  if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
+    return true;
+  }
+  // A deferred `decltype` whose operand is still type-dependent (e.g.
+  // `iterator_t<R> = decltype(ranges::begin(declval<R&>()))` substituted while
+  // `R` survives) carries the unevaluated expression here.  Such a type is
+  // still dependent even though its placeholder spine (an `int` fallback)
+  // carries no parameter index, so it must be re-substituted once concrete
+  // arguments arrive.  The operand is only retained while dependent (it is
+  // dropped once the decltype resolves), so its mere presence is sufficient.
+  if (type->dependent_decltype_expr != NULL ||
+      type->dependent_splice_expr != NULL || type->is_pack_index) {
+    return true;
+  }
+  if (type->dependent_member_name != NULL &&
+      (type->template_parameter_index >= 0 ||
+       type->template_origin != NULL)) {
+    return true;
+  }
+  if (type->template_origin != NULL &&
+      type->template_origin->flags.is_template_template_parameter) {
+    return true;
+  }
+  if (type->declarator == kDeclArray &&
+      type->info.array.template_parameter_index >= 0) {
+    return true;
+  }
+  if (TemplateArgumentVectorContainsTemplateParameter(
+          type->template_arguments)) {
+    return true;
+  }
+  if (TypeIsFunction(type)) {
+    for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+      Symbol* formal = type->info.function.prototype.value.p[i];
+      if (formal != NULL && TypeContainsTemplateParameter(formal->type)) {
+        return true;
       }
     }
   }
   return false;
+}
+
+/* True if `type` still mentions an unresolved template parameter anywhere: as a
+ * bare parameter, an array bound, a template argument, or a function parameter
+ * type. Cache the answer on every queried suffix so shared declarator tails are
+ * only examined once. */
+static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
+                                              bool cache_result) {
+  if (type == NULL) {
+    return false;
+  }
+  if (type->template_parameter_summary !=
+      kTypeTemplateParameterSummaryUnknown) {
+    return type->template_parameter_summary ==
+           kTypeTemplateParameterSummaryPresent;
+  }
+  bool contains = TypeRecordNodeContainsTemplateParameter(type) ||
+                  TypeContainsTemplateParameter(type->next);
+  if (cache_result) {
+    type->template_parameter_summary =
+        contains ? kTypeTemplateParameterSummaryPresent
+                 : kTypeTemplateParameterSummaryAbsent;
+  }
+  return contains;
+}
+
+bool TypeContainsTemplateParameterSlow(TypeRecord* type) {
+  return TypeContainsTemplateParameterImpl(type, false);
+}
+
+void TypeCacheTemplateParameterSummary(TypeRecord* type) {
+  if (type == NULL) {
+    return;
+  }
+  TypeCacheTemplateParameterSummary(type->next);
+  (void)TypeContainsTemplateParameterImpl(type, true);
 }
 
 static bool StructStackContains(Vector* stack, Struct* str) {

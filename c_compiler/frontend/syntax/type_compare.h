@@ -11,7 +11,19 @@
 struct ASTNode;
 struct Syntax;
 
-bool TypeContainsTemplateParameter(TypeRecord* type);
+bool TypeContainsTemplateParameterSlow(TypeRecord* type);
+static inline bool TypeContainsTemplateParameter(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (type->template_parameter_summary !=
+      kTypeTemplateParameterSummaryUnknown) {
+    return type->template_parameter_summary ==
+           kTypeTemplateParameterSummaryPresent;
+  }
+  return TypeContainsTemplateParameterSlow(type);
+}
+void TypeCacheTemplateParameterSummary(TypeRecord* type);
 bool SymbolIsInStdNamespace(Symbol* symbol);
 bool TypeIsUninitializedFriendly(TypeRecord* type);
 inline bool TypeIsPointer(TypeRecord* type) {

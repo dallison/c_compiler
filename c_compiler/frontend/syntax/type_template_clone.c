@@ -206,6 +206,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
           ? node->type->dependent_decltype_expr
           : NULL;
   if (deferred != NULL) {
+    TypeRecordInvalidateTemplateParameterSummary(node->type);
     node->type->dependent_decltype_expr = NULL;
   }
   ASTNode* result = CloneTemplateFunctionBodyNode(node, data);
@@ -223,6 +224,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
   }
   if (deferred != NULL) {
     node->type->dependent_decltype_expr = deferred;
+    TypeRecordInvalidateTemplateParameterSummary(node->type);
   }
   return result;
 }
