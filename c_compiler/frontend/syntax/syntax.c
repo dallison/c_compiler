@@ -2026,7 +2026,27 @@ static bool StaticAssertTemplateArgumentContainsTemplateParameter(
 static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
     Vector* args) {
   for (size_t i = 0; args != NULL && i < args->length; i++) {
-    if (StaticAssertTemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+    TemplateArgument* arg = args->value.p[i];
+    // A materialized scalar argument such as `value<42>` has no parameter,
+    // pack, dependent metadata, or nontrivial type spine. Its stored shape is
+    // already a compact non-dependence summary, so avoid recursive checking.
+    TypeRecord* type = arg != NULL ? arg->type : NULL;
+    bool plain_type =
+        type == NULL ||
+        (type->next == NULL && type->declarator == kDeclPrimitive &&
+         type->template_parameter_index < 0 &&
+         type->template_origin == NULL && type->template_arguments == NULL &&
+         type->dependent_member_name == NULL &&
+         type->dependent_member_template_arguments == NULL &&
+         type->dependent_decltype_expr == NULL &&
+         type->dependent_splice_expr == NULL && !type->is_pack_index &&
+         type->pack_index_expr == NULL && type->pack_index_pack == NULL &&
+         !TypeIsStructOrUnion(type) && !TypeIsEnum(type));
+    if (arg != NULL && arg->template_parameter_index < 0 &&
+        arg->pack_arguments == NULL && plain_type) {
+      continue;
+    }
+    if (StaticAssertTemplateArgumentContainsTemplateParameter(arg)) {
       return true;
     }
   }

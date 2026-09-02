@@ -943,21 +943,11 @@ static bool CXXSameClassTypeIgnoringQualifiers(TypeRecord* from,
       !TypeIsStructOrUnion(to)) {
     return false;
   }
-  TypeRecord* from_copy =
-      TypeRecordCalculateSize(TypeRecordCloneSpine(from));
-  TypeRecord* to_copy =
-      TypeRecordCalculateSize(TypeRecordCloneSpine(to));
-  if (from_copy == NULL || to_copy == NULL) {
-    TypeRecordDelete(from_copy);
-    TypeRecordDelete(to_copy);
-    return false;
-  }
-  from_copy->qualifiers = kQualPlain;
-  to_copy->qualifiers = kQualPlain;
-  bool same = TypeEqual(from_copy, to_copy);
-  TypeRecordDelete(from_copy);
-  TypeRecordDelete(to_copy);
-  return same;
+  TypeRecordQualifierOverlay from_overlay;
+  TypeRecordQualifierOverlay to_overlay;
+  return TypeEqual(
+      TypeRecordOverlayQualifiers(&from_overlay, from, kQualPlain),
+      TypeRecordOverlayQualifiers(&to_overlay, to, kQualPlain));
 }
 
 static bool CXXStructLayoutCompatibleShortcut(TypeRecord* from,
@@ -1111,13 +1101,11 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   // sign hack guarded against below.)
   if (TypeIsStructOrUnion(result) && TypeIsStructOrUnion(to) &&
       result->qualifiers != to->qualifiers) {
-    TypeRecord* bare_result = TypeRecordCopy(result);
-    TypeRecord* bare_to = TypeRecordCopy(to);
-    bare_result->qualifiers = kQualPlain;
-    bare_to->qualifiers = kQualPlain;
-    bool equal = TypeEqual(bare_result, bare_to);
-    TypeRecordDelete(bare_result);
-    TypeRecordDelete(bare_to);
+    TypeRecordQualifierOverlay result_overlay;
+    TypeRecordQualifierOverlay to_overlay;
+    bool equal = TypeEqual(
+        TypeRecordOverlayQualifiers(&result_overlay, result, kQualPlain),
+        TypeRecordOverlayQualifiers(&to_overlay, to, kQualPlain));
     if (equal) {
       return 0;
     }

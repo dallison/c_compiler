@@ -1908,14 +1908,18 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
 
 static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
                                                 TypeRecord* right) {
-  TypeRecord* left_copy = TypeRecordCopy(left);
-  TypeRecord* right_copy = TypeRecordCopy(right);
-  left_copy->qualifiers &= ~(kQualConst | kQualVolatile);
-  right_copy->qualifiers &= ~(kQualConst | kQualVolatile);
-  bool equal = TypeEqual(left_copy, right_copy);
-  TypeRecordDelete(left_copy);
-  TypeRecordDelete(right_copy);
-  return equal;
+  if (left == NULL || right == NULL) {
+    return left == right;
+  }
+  TypeRecordQualifierOverlay left_overlay;
+  TypeRecordQualifierOverlay right_overlay;
+  Qualifiers left_qualifiers =
+      left->qualifiers & ~(kQualConst | kQualVolatile);
+  Qualifiers right_qualifiers =
+      right->qualifiers & ~(kQualConst | kQualVolatile);
+  return TypeEqual(
+      TypeRecordOverlayQualifiers(&left_overlay, left, left_qualifiers),
+      TypeRecordOverlayQualifiers(&right_overlay, right, right_qualifiers));
 }
 
 static void SetCurrentFunctionReturnType(TypeRecord* deduced) {

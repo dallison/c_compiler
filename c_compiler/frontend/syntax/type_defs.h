@@ -252,6 +252,7 @@ typedef struct {
   bool has_coroutine_syntax;  // Body contains co_await/return/yield. // @wire 54
   bool has_constexpr_if;  // Body contains an if constexpr.         // @wire 55
   bool constexpr_if_checked;  // Transient summary cache.           // @wire -
+  bool references_marked;  // Transient: body reference edges visited. // @wire -
   struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
   struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
   int coroutine_suspend_count;  // Suspension points in body.       // @wire 39

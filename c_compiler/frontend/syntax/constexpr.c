@@ -6988,14 +6988,11 @@ static bool ConstexprExceptionTypesMatch(TypeRecord* thrown,
   if (thrown == NULL || caught == NULL) {
     return false;
   }
-  TypeRecord* plain_thrown = TypeRecordCopy(thrown);
-  TypeRecord* plain_caught = TypeRecordCopy(caught);
-  plain_thrown->qualifiers = kQualPlain;
-  plain_caught->qualifiers = kQualPlain;
-  bool matches = TypeEqual(plain_thrown, plain_caught);
-  TypeRecordDelete(plain_thrown);
-  TypeRecordDelete(plain_caught);
-  return matches;
+  TypeRecordQualifierOverlay thrown_overlay;
+  TypeRecordQualifierOverlay caught_overlay;
+  return TypeEqual(
+      TypeRecordOverlayQualifiers(&thrown_overlay, thrown, kQualPlain),
+      TypeRecordOverlayQualifiers(&caught_overlay, caught, kQualPlain));
 }
 
 static size_t ConstexprPublicBasePathCount(Struct* derived, Struct* target,

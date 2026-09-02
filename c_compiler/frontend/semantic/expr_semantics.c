@@ -2017,8 +2017,16 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
       (node->right != NULL && node->right->op == AST_OP(braced_init))) {
     return NULL;
   }
-  node->left = AnalyzeExpression(node->left);
-  node->right = AnalyzeExpression(node->right);
+  ASTNode* analyzed_left = AnalyzeExpression(node->left);
+  ASTNode* analyzed_right = AnalyzeExpression(node->right);
+  if (analyzed_left != node->left) {
+    ASTNodeReplaceChild((ASTNode*)node, 0, analyzed_left,
+                        /*delete_old_child=*/false);
+  }
+  if (analyzed_right != node->right) {
+    ASTNodeReplaceChild((ASTNode*)node, 1, analyzed_right,
+                        /*delete_old_child=*/false);
+  }
   ASTNodeSetType((ASTNode*)node, node->left->type);
   return TryAnalyzeOverloadedBinaryOperator(node);
 }

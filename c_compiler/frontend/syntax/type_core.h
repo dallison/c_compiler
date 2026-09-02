@@ -14,7 +14,19 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
 TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
 TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
                                 Qualifiers quals);
-void TypeRecordDelete(TypeRecord* record);
+void TypeRecordDeleteLastReference(TypeRecord* record);
+// Most releases only drop one of several references. Keep that common path
+// inline and reserve recursive destruction for the final owner.
+static inline void TypeRecordDelete(TypeRecord* record) {
+  if (record == NULL) {
+    return;
+  }
+  if (record->refs > 1) {
+    record->refs--;
+    return;
+  }
+  TypeRecordDeleteLastReference(record);
+}
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);
@@ -37,6 +49,24 @@ TypeRecord* TypeRecordCopy(TypeRecord* record);
 // Copies every node in a type's declarator spine so callers may safely mutate
 // qualifiers, template indices, or next links without touching shared nodes.
 TypeRecord* TypeRecordCloneSpine(TypeRecord* record);
+// A scoped, non-owning top-level view.  It shares every payload and declarator
+// tail with `base`, but lets read-only algorithms observe different qualifiers
+// without allocation or deep copying.  The returned pointer must not escape the
+// scope, be passed to TypeRecordDelete, or be structurally mutated.
+typedef struct {
+  TypeRecord value;
+} TypeRecordQualifierOverlay;
+
+static inline TypeRecord* TypeRecordOverlayQualifiers(
+    TypeRecordQualifierOverlay* overlay, TypeRecord* base,
+    Qualifiers qualifiers) {
+  if (overlay == NULL || base == NULL) {
+    return NULL;
+  }
+  overlay->value = *base;
+  overlay->value.qualifiers = qualifiers;
+  return &overlay->value;
+}
 int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
 Vector* TemplateParameterVectorCopy(Vector* params);

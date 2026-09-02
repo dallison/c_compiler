@@ -265,8 +265,7 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
   if (syntax == NULL || type == NULL) {
     return NULL;
   }
-  TypeRecord* copy = TypeRecordCopy(type);
-  for (TypeRecord* cur = copy; cur != NULL; cur = cur->next) {
+  for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
     if (TypeRecordIsCommonTypePlaceholder(cur)) {
       Vector* types = TypeVectorFromTemplateArguments(cur->template_arguments);
       TypeRecord* resolved = NULL;
@@ -281,7 +280,6 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
         }
       }
       VectorDelete(types);
-      TypeRecordDelete(copy);
       return resolved;
     }
     if (TypeRecordIsInvokeResultPlaceholder(cur)) {
@@ -294,11 +292,9 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
         }
       }
       VectorDelete(types);
-      TypeRecordDelete(copy);
       return resolved;
     }
   }
-  TypeRecordDelete(copy);
   return NULL;
 }
 

@@ -2105,7 +2105,12 @@ static void MarkReferencesInAST(ASTNode* node) {
 
 static void MarkFunctionsReferencedByBody(TypeRecord* function) {
   if (function != NULL && TypeIsFunction(function) &&
-      function->info.function.body != NULL) {
+      function->info.function.body != NULL &&
+      !function->info.function.references_marked) {
+    // The global reference sets only grow.  Once this body's outgoing edges
+    // have been added, rescanning it in later fixed-point iterations cannot
+    // discover anything new.
+    function->info.function.references_marked = true;
     MarkReferencesInAST(function->info.function.body);
   }
 }
@@ -2277,7 +2282,12 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           if (decl->base.type == NULL || !TypeIsFunction(decl->base.type)) {
             continue;
           }
-          if (!FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+          // Reference closure only controls which ODR-discardable definitions
+          // reach code generation.  A syntax-only compilation returns before
+          // that phase, so walking the complete analyzed body here is pure
+          // overhead (and dominates large generated translation units).
+          if (!compiler->syntax_only &&
+              !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
             MarkFunctionsReferencedByBody(decl->base.type);
           }
           if (!(decl->base.type != NULL &&

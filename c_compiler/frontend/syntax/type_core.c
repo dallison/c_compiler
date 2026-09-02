@@ -320,7 +320,7 @@ void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
 // record can be deleted.  When deleting it, the record pointed
 // to by the 'next' field is first deleted (using the same function)
 // and then the memory is freed.
-void TypeRecordDelete(TypeRecord* record) {
+void TypeRecordDeleteLastReference(TypeRecord* record) {
   if (record == NULL) {
     return;
   }
@@ -1069,6 +1069,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       kTypeTemplateParameterSummaryUnknown;
   if (TypeIsFunction(record)) {
     memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
+    r->info.function.references_marked = false;
   } else if (record->declarator == kDeclArray) {
     memcpy(&r->info.array, &record->info.array, sizeof(ArrayInfo));
   } else if (TypeIsStructOrUnion(record) ||
@@ -1425,6 +1426,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.has_coroutine_syntax = false;
   t->info.function.has_constexpr_if = false;
   t->info.function.constexpr_if_checked = false;
+  t->info.function.references_marked = false;
   t->info.function.coroutine_promise_type = NULL;
   t->info.function.coroutine_frame_type = NULL;
   t->info.function.coroutine_suspend_count = 0;

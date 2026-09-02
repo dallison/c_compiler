@@ -71,14 +71,11 @@ static bool StructInitializationTypesMatch(TypeRecord* expr_type,
   if (TypeEqual(expr_type, target_type)) {
     return true;
   }
-  TypeRecord* unqualified_expr = TypeRecordCopy(expr_type);
-  TypeRecord* unqualified_target = TypeRecordCopy(target_type);
-  unqualified_expr->qualifiers = kQualPlain;
-  unqualified_target->qualifiers = kQualPlain;
-  bool same_unqualified_type =
-      TypeEqual(unqualified_expr, unqualified_target);
-  TypeRecordDelete(unqualified_expr);
-  TypeRecordDelete(unqualified_target);
+  TypeRecordQualifierOverlay expr_overlay;
+  TypeRecordQualifierOverlay target_overlay;
+  bool same_unqualified_type = TypeEqual(
+      TypeRecordOverlayQualifiers(&expr_overlay, expr_type, kQualPlain),
+      TypeRecordOverlayQualifiers(&target_overlay, target_type, kQualPlain));
   if (same_unqualified_type) {
     return true;
   }
