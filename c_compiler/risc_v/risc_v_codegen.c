@@ -606,7 +606,7 @@ bool RVIsFloatingPoint(TargetInstruction* inst) {
     case RV_OP(fmv_d):
 //    case RV_OP(rmovf):
 //    case RV_OP(rmovd):
-//      return true;
+      return true;
     default:
       return false;
   }
@@ -815,6 +815,7 @@ static TargetVirtuals virtuals = {
   .is_expression = RVIsExpression,
   .is_table_entry = RVIsJumpableEntry,
   .get_branch_target = RVGetBranchTarget,
+  .calls_may_stay_in_block = true,
 };
 
 void RVGeneratorInit(RVGenerator* rv, Generator* gen) {

@@ -40,6 +40,8 @@ typedef struct Assembler {
   AssemblerSymbol* (*define_label)(struct Assembler*, String*);
 } Assembler;
 
+struct AsmModule;
+
 typedef void (*AssemblerRecordedEmitter)(Assembler* assembler, void* context);
 
 typedef enum {
@@ -93,6 +95,8 @@ void AssemblerAssembleInput(Assembler* assembler, const char* name, String* inpu
                             void (*run_func)(Assembler*, String*));
 void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
                                     void (*run_func)(Assembler*, String*));
+void AssemblerRunModule(Assembler* assembler, struct AsmModule* module);
+int AssemblerRelocTypeForWord(Assembler* assembler);
 
 void AssemblerEmitWord(Assembler* assembler, int section, int32_t word);
 void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte);

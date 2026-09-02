@@ -269,6 +269,10 @@ typedef struct {
   void (*emit_assembly_preamble)(String* src_file, FILE* asm_file);
   bool (*assemble_string)(const char* name, String* input,
                           String* object_filename);
+  // Optional structured assembler path. It emits either a canonical .s file
+  // or an ELF object from the same retained operation stream.
+  String* (*emit_program_file)(struct Compiler* compiler, Vector* options,
+                               bool assembly_only);
   String* (*emit_object_file)(struct Compiler* compiler, Vector* options);
 
   // Assembly language emitter.  The 'code' parameter is the return value from

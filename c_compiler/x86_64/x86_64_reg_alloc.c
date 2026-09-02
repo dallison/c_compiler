@@ -1603,62 +1603,6 @@ static void ProcessBasicBlock(X86_64RegisterAllocator* allocator,
 }
 
 
-static bool IsCallInstruction(TargetInstruction* inst) {
-  return inst->opcode == (TargetOpcode)X86_64_OP(call) ||
-         inst->opcode == (TargetOpcode)X86_64_OP(rcall) ||
-         inst->opcode == (TargetOpcode)X86_64_OP(callf) ||
-         inst->opcode == (TargetOpcode)X86_64_OP(rcallf);
-}
-
-static bool IsUser(TargetInstruction* inst, TargetInstruction* candidate) {
-  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
-    if (candidate->operand[i] == inst) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Build the preserved_instructions set, instructions that need a callee-saved
-// register. Block outputs must survive every call in the block. Values used
-// later in the same block must also be preserved when a call lies between
-// their definition and use.
-static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
-  X86_64RegisterAllocator* allocator = data;
-  bool contains_call =
-      block->end_code != NULL && IsCallInstruction(block->end_code);
-  for (TargetInstruction* inst = block->code;
-       inst != NULL; inst = TargetNext(inst)) {
-    if (IsCallInstruction(inst)) {
-      contains_call = true;
-      break;
-    }
-    if (inst == block->end_code) {
-      break;
-    }
-  }
-  if (contains_call) {
-    BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
-  }
-
-  for (TargetInstruction* inst = block->code;
-       inst != NULL && inst != block->end_code; inst = TargetNext(inst)) {
-    bool crossed_call = false;
-    for (TargetInstruction* next = TargetNext(inst);
-         next != NULL; next = TargetNext(next)) {
-      if (IsCallInstruction(next)) {
-        crossed_call = true;
-      } else if (crossed_call && IsUser(inst, next)) {
-        BitSetInsert(&allocator->preserved_instructions, inst->id);
-        break;
-      }
-      if (next == block->end_code) {
-        break;
-      }
-    }
-  }
-}
-
 // Register variables are pinned to a fixed physical register by index and are
 // allocated lazily at their first definition.  Those physical registers are
 // drawn from the same range the dynamic allocator searches, so without
@@ -1729,18 +1673,26 @@ static void ReserveDivisionRegisters(X86_64RegisterAllocator* allocator) {
   }
 }
 
+static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
+  X86_64Opcode call_opcode = (X86_64Opcode)call->opcode;
+  TargetOpcode move_opcode =
+      call_opcode == X86_64_OP(callf) || call_opcode == X86_64_OP(rcallf)
+          ? (TargetOpcode)X86_64_OP(fmv_d)
+          : (TargetOpcode)X86_64_OP(mv);
+  return TargetNewInstruction1(move_opcode, call);
+}
+
 void X86_64AllocateRegisters(X86_64RegisterAllocator* allocator) {
   ReserveDivisionRegisters(allocator);
-  TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
-                          kTraversePreOrder, allocator);
-  for (size_t i = 0; i < allocator->rv->base.basic_blocks.length; i++) {
-    TargetBasicBlock* block =
-        allocator->rv->base.basic_blocks.value.p[i];
-    if (block != allocator->rv->base.entry_block && block->idom == NULL) {
-      TargetBasicBlockTraverseDominatorTree(
-          &allocator->rv->base, block, BuildPreservedInstructionsSet,
-          kTraversePreOrder, allocator);
-    }
+  TargetMarkCallPreservedInstructions(&allocator->rv->base,
+                                      &allocator->preserved_instructions);
+  if (TargetMaterializePreservedCallResults(
+          &allocator->rv->base, &allocator->preserved_instructions,
+          CreateCallResultCopy)) {
+    TargetBuildBasicBlockInputsAndOutputs(&allocator->rv->base);
+    BitSetClear(&allocator->preserved_instructions);
+    TargetMarkCallPreservedInstructions(&allocator->rv->base,
+                                        &allocator->preserved_instructions);
   }
 
   ReserveVariableRegisters(allocator);

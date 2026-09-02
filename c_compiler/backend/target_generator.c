@@ -691,6 +691,7 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_instruction_id++;
   inst->opcode = opcode;
+  inst->call_epoch = 0;
   inst->uses = 0;
   inst->addr = -1;
   inst->dest = NULL;

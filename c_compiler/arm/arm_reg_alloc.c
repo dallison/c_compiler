@@ -1628,8 +1628,9 @@ void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
     }
   }
 
-  TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
-                          kTraversePreOrder, allocator);
+  TargetTraverseDominatorTree(&allocator->g->base,
+                              BuildPreservedInstructionsSet,
+                              kTraversePreOrder, allocator);
 
   // Process all basic blocks in the ARM generator by traversing the
   // dominator tree.

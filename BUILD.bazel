@@ -522,6 +522,14 @@ cc_test(
     deps = [":wireformat"],
 )
 
+cc_test(
+    name = "asm_module_test",
+    srcs = ["tests/asm_module_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":compiler"],
+)
+
 cc_library(
     name = "serialize",
     srcs = [
@@ -692,6 +700,7 @@ cc_library(
         "c_compiler/aarch64/aarch64_encode.c",
         "c_compiler/aarch64/aarch64_emitter.c",
         "c_compiler/aarch64/aarch64_object.c",
+        "c_compiler/aarch64/aarch64_program.c",
         "c_compiler/aarch64/aarch64_optimize.c",
         "c_compiler/aarch64/aarch64_reg_alloc.c",
         "c_compiler/aarch64/aarch64_target.c",
@@ -702,6 +711,7 @@ cc_library(
         "c_compiler/arm/arm_reg_alloc.c",
         "c_compiler/arm/arm_target.c",
         "c_compiler/assembler/asm_expr.c",
+        "c_compiler/assembler/asm_module.c",
         "c_compiler/assembler/asm_object.c",
         "c_compiler/assembler/assembler.c",
         "c_compiler/frontend/syntax/ast.c",
@@ -817,6 +827,7 @@ cc_library(
     ],
     includes = COMMON_INCLUDES,
     deps = [
+        ":disassembler",
         ":elf",
         ":utils",
         ":wasm32_object",

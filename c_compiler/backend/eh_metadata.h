@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include "asm_module.h"
 
 // Itanium/GCC LSDA and EH-frame constants shared by target emitters.
 
@@ -51,5 +52,13 @@ void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix);
 void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix);
+void DaveEHEmitGCCExceptTable(AsmModule* module,
+                              const DaveEHFrameEmitInfo* info);
+void DaveEHEmitEHFrameCIE(AsmModule* module,
+                          const DaveEHFrameEmitInfo* info,
+                          const char* cie_label_suffix);
+void DaveEHEmitEHFrameFDE(AsmModule* module,
+                          const DaveEHFrameEmitInfo* info,
+                          const char* cie_label_suffix);
 
 #endif /* eh_metadata_h */

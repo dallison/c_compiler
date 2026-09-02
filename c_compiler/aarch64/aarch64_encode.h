@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "asm_object.h"
+#include "asm_module.h"
 #include "assembler.h"
 
 struct AARCH64Generator;
@@ -126,6 +127,57 @@ uint32_t AARCH64EncodeRotateRightImmediate(const AARCH64AsmRegister* rd,
                                            const AARCH64AsmRegister* rn,
                                            int64_t shift);
 uint32_t AARCH64EncodeSvc(uint16_t immediate);
+uint32_t AARCH64EncodeDataProcessing3Source(bool is_64bit, int op54, int o0,
+                                            int rd, int rn, int rm, int ra);
+uint32_t AARCH64EncodeDivide(bool is_64bit, bool unsigned_divide, int rd,
+                             int rn, int rm);
+uint32_t AARCH64EncodeVariableShift(bool is_64bit, int shift_op, int rd,
+                                    int rn, int rm);
+uint32_t AARCH64EncodeHighMultiply(bool unsigned_multiply, int rd, int rn,
+                                   int rm);
+uint32_t AARCH64EncodeBitfield(bool is_64bit, int opc, int rd, int rn,
+                               int immr, int imms);
+uint32_t AARCH64EncodeDataProcessing1Source(bool is_64bit, int opcode, int rd,
+                                            int rn);
+uint32_t AARCH64EncodeExtract(bool is_64bit, int rd, int rn, int rm, int lsb);
+uint32_t AARCH64EncodeCompareBranch(bool is_64bit, bool nonzero, int rt);
+uint32_t AARCH64EncodeTestBranch(int bit, bool nonzero, int rt);
+uint32_t AARCH64EncodeConditionalCompare(bool is_64bit, bool negative,
+                                         bool immediate, int rn, int op2,
+                                         int nzcv, AARCH64AsmCondition cond);
+uint32_t AARCH64EncodeConditionalSelect(bool is_64bit, int op, int op2,
+                                        int rd, int rn, int rm,
+                                        AARCH64AsmCondition cond);
+uint32_t AARCH64EncodeLoadStoreUnsigned(int size, bool fp, int opc, int rt,
+                                        int rn, int offset);
+uint32_t AARCH64EncodeLoadStoreUnscaled(int size, bool fp, int opc, int rt,
+                                        int rn, int offset, int mode);
+uint32_t AARCH64EncodeLoadStoreRegister(int size, int opc, int rt, int rn,
+                                        int rm, int option, bool scaled);
+uint32_t AARCH64EncodeLoadStorePair(int opc, bool fp, bool load, int mode,
+                                    int rt, int rt2, int rn, int offset);
+uint32_t AARCH64EncodeExclusiveLoad(int size, bool acquire, int rt, int rn);
+uint32_t AARCH64EncodeExclusiveStore(int size, bool release, int status,
+                                     int rt, int rn);
+uint32_t AARCH64EncodeAcquireRelease(int size, bool load, int rt, int rn);
+uint32_t AARCH64EncodeDmb(int option);
+uint32_t AARCH64EncodeMrsTpidrEl0(int rt);
+uint32_t AARCH64EncodeFPDataProcessing2(bool is_double, int opcode, int rd,
+                                        int rn, int rm);
+uint32_t AARCH64EncodeFPSqrt(bool is_double, int rd, int rn);
+uint32_t AARCH64EncodeFPBitcast(bool destination_is_fp, bool is_64bit, int rd,
+                                int rn);
+uint32_t AARCH64EncodeFPConvertPrecision(bool source_is_double,
+                                         bool destination_is_double, int rd,
+                                         int rn);
+uint32_t AARCH64EncodeFPToInt(uint32_t base, bool int_is_64bit,
+                              bool source_is_double, bool unsigned_convert,
+                              int rd, int rn);
+uint32_t AARCH64EncodeIntToFP(bool int_is_64bit, bool destination_is_double,
+                              bool unsigned_convert, int rd, int rn);
+uint32_t AARCH64EncodeFPMove(bool is_double, int rd, int rn);
+uint32_t AARCH64EncodeFPCompare(bool is_double, int rn, int rm);
+uint32_t AARCH64EncodeFPNegate(bool is_double, int rd, int rn);
 
 void AARCH64EmitInstruction(AsmObject* object, uint32_t word);
 void AARCH64EmitInstructionInSection(AsmObject* object, int32_t section,
@@ -168,5 +220,7 @@ void AARCH64EmitUnconditionalBranchToSymbol(Assembler* assembler,
 bool AARCH64CanDirectEncodeFunction(struct AARCH64Generator* generator);
 void AARCH64DirectEncodeFunction(struct AARCH64Generator* generator,
                                  Assembler* assembler);
+void AARCH64DirectEncodeFunctionToModule(struct AARCH64Generator* generator,
+                                         AsmModule* module);
 
 #endif /* AARCH64_ENCODE_H */

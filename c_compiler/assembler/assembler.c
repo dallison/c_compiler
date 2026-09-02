@@ -7,6 +7,7 @@
 //
 
 #include "assembler.h"
+#include "asm_module.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -437,6 +438,21 @@ void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
   AsmObjectWriteELF(&assembler->object, assembler->out);
 }
 
+void AssemblerRunModule(Assembler* assembler, AsmModule* module) {
+  assembler->object.pass = 1;
+  while (!module->failed && assembler->num_errors == 0 &&
+         assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
+    AsmModuleEmit(module, assembler);
+    AssemblerAdvancePass(assembler);
+    if (assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
+      AssemblerReset(assembler, false);
+    }
+  }
+  if (!module->failed && assembler->num_errors == 0) {
+    AsmObjectWriteELF(&assembler->object, assembler->out);
+  }
+}
+
 void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   // Pass 1 discovers symbols, pass 2 converges variable-length directive
   // offsets, and pass 3 emits the final contents.
@@ -716,7 +732,7 @@ static bool IsEhTableSection(const Assembler* assembler) {
          strcmp(section->name->value, ".eh_frame") == 0;
 }
 
-static int RelocTypeForWord(Assembler* assembler) {
+int AssemblerRelocTypeForWord(Assembler* assembler) {
   if (IsEhTableSection(assembler)) {
     if (assembler->object.elf_machine_type == ELF_MACHINE_TYPE_ARM) {
       AssemblerSection* section =
@@ -776,7 +792,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   // label.  Maybe later.  The problem is that the section symbols aren't
   // created until we add the sections to the ELF file.
   int initial_reloc_type =
-      bits == 32 ? RelocTypeForWord(assembler)
+      bits == 32 ? AssemblerRelocTypeForWord(assembler)
                  : assembler->object.reloc_types[reloc_index];
   AssemblerRelocation* reloc = NewAssemblerRelocation(
       left, initial_reloc_type, assembler->object.current_section,
@@ -836,7 +852,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   int64_t value = constant_addend;
   if (known_values && additive_terms == subtractive_terms &&
       !(bits == 32 && IsEhTableSection(assembler) &&
-        RelocTypeForWord(assembler) == R_ARM_PREL31)) {
+        AssemblerRelocTypeForWord(assembler) == R_ARM_PREL31)) {
     value += left->value;
     for (size_t i = 1; i < relocations.length; i++) {
       AssemblerRelocation* reloc = relocations.value.p[i];
@@ -871,7 +887,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
                   sub_reloc->symbol->value;
       }
       AssemblerRelocation* merged = NewAssemblerRelocation(
-          add_reloc->symbol, RelocTypeForWord(assembler),
+          add_reloc->symbol, AssemblerRelocTypeForWord(assembler),
           assembler->object.current_section,
           (int32_t)AssemblerCurrentAddress(assembler), addend);
       VectorDestructWithContents(

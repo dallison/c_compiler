@@ -690,8 +690,8 @@ static void PrintBasicBlocks(Generator* gen, FILE* fp) {
   }
 }
 
-static void CreateBasicBlocks(Generator* gen,
-                              Vector* branches) {
+static void CreateBasicBlocks(Generator* gen, Vector* branches,
+                              BitSet* exception_calls) {
   gen->entry_block = GeneratorNewBasicBlock(gen);
   BasicBlock* current = gen->entry_block;
 
@@ -727,6 +727,9 @@ static void CreateBasicBlocks(Generator* gen,
       inst->block = b;
       b->code = inst;
       current = b;
+    } else if (IRIsCall(inst) &&
+               !BitSetContains(exception_calls, inst->id)) {
+      inst->block = current;
     } else if (IRIsBranch(inst) || IRIsReturn(inst) || IRIsCall(inst)) {
       // A branch (and return) ends a block.
       current->return_block = IRIsReturn(inst);
@@ -858,18 +861,49 @@ static void AddExceptionHandlerEdges(Generator* gen) {
 
 // All blocks with no output edges link to exit block.  Also blocks
 // that do not end in a branch or return fall through to next block.
-static void AddMissingLinks(Generator* gen) {
+static void AddMissingLinks(Generator* gen, BitSet* exception_calls) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value.p[i];
     if (b == gen->exit_block) {
       continue;
     }
-    if (!BasicBlockEndsInBranchReturnOrCall(b)) {
+    bool call_ends_block =
+        b->end_code != NULL && IRIsCall(b->end_code) &&
+        BitSetContains(exception_calls, b->end_code->id);
+    if (b->end_code == NULL ||
+        (!IRIsBranch(b->end_code) && !IRIsReturn(b->end_code) &&
+         !call_ends_block)) {
       // No branch or return, fall through to next block.
       BasicBlockAddEdge(b, FindBasicBlock(gen, b->block_id + 1));
     }
     if (b->out_edges.length == 0) {
       BasicBlockAddEdge(b, gen->exit_block);
+    }
+  }
+}
+
+static void FindExceptionCallBoundaries(Generator* gen,
+                                        BitSet* exception_calls) {
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (range->try_start == NULL || range->try_end == NULL) {
+      continue;
+    }
+    bool bounded = false;
+    for (IRNode* inst = range->try_start; inst != NULL; inst = IRNext(inst)) {
+      if (inst == range->try_end) {
+        bounded = true;
+        break;
+      }
+    }
+    if (!bounded) {
+      continue;
+    }
+    for (IRNode* inst = range->try_start; inst != range->try_end;
+         inst = IRNext(inst)) {
+      if (IRIsCall(inst)) {
+        BitSetInsert(exception_calls, inst->id);
+      }
     }
   }
 }
@@ -1120,13 +1154,17 @@ static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
     }
     // If the fallthrough block doesn't begin with a label, add a label
     // for it.
-    if (fallthrough->code->opcode != IR_OP(label)) {
+    if (fallthrough != gen->exit_block &&
+        fallthrough->code->opcode != IR_OP(label)) {
       IRNode* label = GeneratorEmitBefore(gen, NewIR(IR_OP(label)), fallthrough->code);
       label->block = fallthrough;
       fallthrough->code = label;
     }
-    IRNode* bra = GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), fallthrough->code), dest->end_code);
-    bra->block = dest;
+    if (fallthrough != gen->exit_block) {
+      IRNode* bra = GeneratorEmitBefore(
+          gen, NewIR1(IR_OP(bra), fallthrough->code), dest->end_code);
+      bra->block = dest;
+    }
   } else if (!IRIsUnconditionalBranch(last) && !IRIsReturn(last)) {
     // Block doesn't end in a branch or return. Add a single unconditional
     // branch to its single output edge.
@@ -1138,13 +1176,16 @@ static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
     // label; synthesize one, matching the conditional-branch case above, or the
     // emitted `bra` would point at a non-label node and never get a fixup,
     // producing an unconditional jump with a NULL target that crashes codegen.
-    if (output->code->opcode != IR_OP(label)) {
+    if (output != gen->exit_block && output->code->opcode != IR_OP(label)) {
       IRNode* label = GeneratorEmitBefore(gen, NewIR(IR_OP(label)), output->code);
       label->block = output;
       output->code = label;
     }
-    IRNode* bra = GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), output->code), dest->end_code);
-    bra->block = dest;
+    if (output != gen->exit_block) {
+      IRNode* bra = GeneratorEmitBefore(
+          gen, NewIR1(IR_OP(bra), output->code), dest->end_code);
+      bra->block = dest;
+    }
   }
   
   // Remove branch at end of dest block.
@@ -1189,7 +1230,9 @@ static void StraightenGraph(Generator* gen) {
             (terminator->flags & kIRJumpTableBranch) == 0;
         if (is_candidate) {
           // Don't merge a block that ends in a label or a result.
-          is_candidate = block->end_code->opcode != IR_OP(label) &&
+          is_candidate = block != gen->exit_block &&
+            block->end_code != NULL &&
+            block->end_code->opcode != IR_OP(label) &&
             !IRIsResult(block->end_code);
         }
         
@@ -1213,16 +1256,19 @@ static void BuildBasicBlocks(Generator* gen) {
   // the label to which it is branching.
   Vector branches;
   VectorInit(&branches);
+  BitSet exception_calls;
+  BitSetInit(&exception_calls);
+  FindExceptionCallBoundaries(gen, &exception_calls);
 
   // Create all basic blocks.
-  CreateBasicBlocks(gen, &branches);
+  CreateBasicBlocks(gen, &branches, &exception_calls);
   
   // Link the blocks into a graph.
   BuildBasicBlockGraph(gen, &branches);
 
   // All blocks with no output edges link to exit block.  Also blocks
   // that do not end in a branch or return fall through to next block.
-  AddMissingLinks(gen);
+  AddMissingLinks(gen, &exception_calls);
     
   // PrintBasicBlocks(gen, stdout);
   
@@ -1248,6 +1294,7 @@ static void BuildBasicBlocks(Generator* gen) {
 
   // Tidy up.
   // Delete the branches vector.
+  BitSetDestruct(&exception_calls);
   VectorDestruct(&branches);
 }
 

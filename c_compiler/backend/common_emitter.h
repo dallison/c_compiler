@@ -10,6 +10,7 @@
 #define common_emitter_h
 
 #include <stdio.h>
+#include "asm_module.h"
 #include "dstring.h"
 #include "compiler.h"
 
@@ -36,5 +37,22 @@ void CollectInitFiniArrayFunctions(Vector* functions, bool is_fini,
 
 bool EmitTranslationUnitContents(struct Compiler* compiler, FILE* asm_file);
 bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file);
+
+// Structured equivalents used by programmatic backends. The FILE-based
+// functions above remain the compatibility interface for legacy emitters.
+void EmitAssemblyPreambleToModule(struct Compiler* compiler, AsmModule* module);
+void EmitStaticVariableToModule(InitializedStaticVariable* var,
+                                AsmModule* module);
+void EmitBSSVariableToModule(UninitializedStaticVariable* var,
+                             AsmModule* module);
+void EmitLiteralToModule(Literal* literal, AsmModule* module);
+void EmitTlsVariableToModule(InitializedStaticVariable* var,
+                             AsmModule* module);
+void EmitTlsBSSVariableToModule(UninitializedStaticVariable* var,
+                                AsmModule* module);
+void EmitInitFiniArrayEntriesToModule(Vector* functions, bool is_fini,
+                                      AsmModule* module);
+bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
+                                          AsmModule* module);
 
 #endif /* common_emitter_h */

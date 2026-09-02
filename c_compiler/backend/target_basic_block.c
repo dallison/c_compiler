@@ -400,6 +400,10 @@ static void CreateTargetBasicBlocks(TargetGenerator* gen,
     if (gen->virtuals->is_floating_point(inst)) {
       current->uses_floating_point = true;
     }
+    bool is_call = gen->virtuals->is_call(inst);
+    if (is_call) {
+      current->contains_call = true;
+    }
     if (gen->virtuals->is_label(inst)) {
       current->end_code = TargetPrev(inst);
       
@@ -408,14 +412,16 @@ static void CreateTargetBasicBlocks(TargetGenerator* gen,
       inst->block = b;
       b->code = inst;
       current = b;
+    } else if (is_call && gen->virtuals->calls_may_stay_in_block &&
+               gen->exception_edges.length == 0) {
+      inst->block = current;
     } else if (gen->virtuals->is_branch(inst) ||
                gen->virtuals->is_return(inst) ||
-               gen->virtuals->is_call(inst)) {
+               is_call) {
       // Branch, return and call ends a block.
       current->end_code = inst;
       inst->block = current;
       VectorAppend(branches, inst);
-      current->contains_call = gen->virtuals->is_call(inst);
 
       // Allocate a new block starting at the next instruction provided it's
       // not a label (because that will be created in next iteration).
@@ -494,7 +500,8 @@ static void BuildTargetBasicBlockGraph(TargetGenerator* gen,
     } else if (gen->virtuals->is_call(inst)) {
       // Calls only link to their next block.
       TargetInstruction* fallthrough = TargetNext(inst);
-      TargetBasicBlockAddEdge(block, fallthrough->block);
+      TargetBasicBlockAddEdge(
+          block, fallthrough != NULL ? fallthrough->block : gen->exit_block);
     } else {
       // Unconditional branch only links to its target.
       TargetInstruction* target = gen->virtuals->get_branch_target(inst);
@@ -999,6 +1006,163 @@ static void ResetAllBlockLiveness(TargetGenerator* gen) {
   }
 }
 
+static bool TargetValueNeedsLiveness(TargetGenerator* gen,
+                                     TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  if (gen->virtuals->is_call(inst)) {
+    return true;
+  }
+  return !gen->virtuals->is_fixed_register(inst) &&
+         !gen->virtuals->is_const(inst) &&
+         !gen->virtuals->is_symbol(inst) &&
+         gen->virtuals->is_expression(inst);
+}
+
+static void BuildDataflowBlockUseAndDef(TargetGenerator* gen,
+                                        TargetBasicBlock* block,
+                                        BitSet* use, BitSet* def) {
+  for (TargetInstruction* inst = block->code; inst != NULL;
+       inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      TargetInstruction* operand = inst->operand[i];
+      if (TargetValueNeedsLiveness(gen, operand) &&
+          !BitSetContains(def, operand->id)) {
+        BitSetInsert(use, operand->id);
+      }
+    }
+    if (TargetValueNeedsLiveness(gen, inst)) {
+      BitSetInsert(def, inst->id);
+    }
+  }
+}
+
+static void BuildDataflowLiveIn(BitSet* use, BitSet* def, BitSet* live_out,
+                                BitSet* live_in) {
+  BitSetCopy(live_in, use);
+  BitSetIterator it;
+  BitSetIteratorStart(&it, live_out);
+  while (!BitSetIteratorDone(&it)) {
+    size_t id = BitSetIteratorValue(&it);
+    if (!BitSetContains(def, id)) {
+      BitSetInsert(live_in, id);
+    }
+    BitSetIteratorNext(&it);
+  }
+}
+
+static void AppendLiveValues(Vector* values, BitSet* ids,
+                             TargetInstruction** values_by_id,
+                             size_t values_by_id_count) {
+  BitSetIterator it;
+  BitSetIteratorStart(&it, ids);
+  while (!BitSetIteratorDone(&it)) {
+    size_t id = BitSetIteratorValue(&it);
+    assert(id < values_by_id_count);
+    TargetInstruction* inst = values_by_id[id];
+    assert(inst != NULL);
+    VectorAppend(values, inst);
+    BitSetIteratorNext(&it);
+  }
+}
+
+static void TargetBuildDataflowLiveness(TargetGenerator* gen) {
+  size_t block_count = gen->basic_blocks.length;
+  BitSet* use = calloc(block_count, sizeof(*use));
+  BitSet* def = calloc(block_count, sizeof(*def));
+  BitSet* live_in = calloc(block_count, sizeof(*live_in));
+  BitSet* live_out = calloc(block_count, sizeof(*live_out));
+  for (size_t i = 0; i < block_count; i++) {
+    BitSetInit(&use[i]);
+    BitSetInit(&def[i]);
+    BitSetInit(&live_in[i]);
+    BitSetInit(&live_out[i]);
+    BuildDataflowBlockUseAndDef(
+        gen, gen->basic_blocks.value.p[i], &use[i], &def[i]);
+  }
+
+  BitSet new_out;
+  BitSet new_in;
+  BitSetInit(&new_out);
+  BitSetInit(&new_in);
+  bool changed;
+  do {
+    changed = false;
+    for (size_t i = block_count; i > 0; i--) {
+      TargetBasicBlock* block = gen->basic_blocks.value.p[i - 1];
+      BitSetClear(&new_out);
+      for (size_t j = 0; j < block->out_edges.length; j++) {
+        TargetBlockId successor = block->out_edges.value.w[j];
+        BitSetUnionInPlace(&new_out, &live_in[successor]);
+      }
+      BuildDataflowLiveIn(&use[i - 1], &def[i - 1], &new_out, &new_in);
+      if (!BitSetEqual(&live_out[i - 1], &new_out) ||
+          !BitSetEqual(&live_in[i - 1], &new_in)) {
+        BitSetCopy(&live_out[i - 1], &new_out);
+        BitSetCopy(&live_in[i - 1], &new_in);
+        changed = true;
+      }
+    }
+  } while (changed);
+  BitSetDestruct(&new_in);
+  BitSetDestruct(&new_out);
+
+  size_t max_id = 0;
+  for (size_t i = 0; i < block_count; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      if (TargetValueNeedsLiveness(gen, inst) && (size_t)inst->id > max_id) {
+        max_id = inst->id;
+      }
+      for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
+        TargetInstruction* operand = inst->operand[j];
+        if (TargetValueNeedsLiveness(gen, operand) &&
+            (size_t)operand->id > max_id) {
+          max_id = operand->id;
+        }
+      }
+    }
+  }
+  size_t values_by_id_count = max_id + 1;
+  TargetInstruction** values_by_id =
+      calloc(values_by_id_count, sizeof(*values_by_id));
+  for (size_t i = 0; i < block_count; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      if (TargetValueNeedsLiveness(gen, inst)) {
+        values_by_id[inst->id] = inst;
+      }
+      for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
+        TargetInstruction* operand = inst->operand[j];
+        if (TargetValueNeedsLiveness(gen, operand)) {
+          values_by_id[operand->id] = operand;
+        }
+      }
+    }
+  }
+  for (size_t i = 0; i < block_count; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    BitSetCopy(&block->input_ids, &live_in[i]);
+    BitSetCopy(&block->output_ids, &live_out[i]);
+    AppendLiveValues(&block->inputs, &block->input_ids, values_by_id,
+                     values_by_id_count);
+    AppendLiveValues(&block->outputs, &block->output_ids, values_by_id,
+                     values_by_id_count);
+    BitSetDestruct(&live_out[i]);
+    BitSetDestruct(&live_in[i]);
+    BitSetDestruct(&def[i]);
+    BitSetDestruct(&use[i]);
+  }
+  free(values_by_id);
+  free(live_out);
+  free(live_in);
+  free(def);
+  free(use);
+}
+
 // An unreachable block may still hold a label the exception tables name, such
 // as the bound of a try range that turned out to be dead.  Keep those labels so
 // the tables still resolve and drop the rest of the block: the code is dead,
@@ -1238,17 +1402,108 @@ static bool HasNonDominatorTreeEdge(TargetGenerator* gen) {
 // information tells the register allocator the lifespan of
 // registers.
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
-   bool has_non_dominator_tree_edge = HasNonDominatorTreeEdge(gen);
-   ResetAllBlockLiveness(gen);
-   ResetAllInstructionUses(gen);
-   BuildInputsAndOutputs(gen, gen->entry_block,
+  bool has_non_dominator_tree_edge = HasNonDominatorTreeEdge(gen);
+  ResetAllBlockLiveness(gen);
+  ResetAllInstructionUses(gen);
+  if (gen->virtuals->calls_may_stay_in_block &&
+      gen->exception_edges.length == 0) {
+    TargetBuildDataflowLiveness(gen);
+  } else {
+    BuildInputsAndOutputs(gen, gen->entry_block,
                          has_non_dominator_tree_edge);
-   if (has_non_dominator_tree_edge) {
-     PropagateLiveInToPredecessors(gen);
-   }
+    if (has_non_dominator_tree_edge) {
+      PropagateLiveInToPredecessors(gen);
+    }
+  }
 
-   // Reset the uses count for all instructions.
-   ResetAllInstructionUses(gen);
+  // Reset the uses count for all instructions.
+  ResetAllInstructionUses(gen);
+}
+
+static void MarkPreservedValue(BitSet* preserved, TargetInstruction* value) {
+  if (value == NULL) {
+    return;
+  }
+  BitSetInsert(preserved, value->id);
+  if (value->dest != NULL) {
+    BitSetInsert(preserved, value->dest->id);
+  }
+}
+
+void TargetMarkCallPreservedInstructions(TargetGenerator* gen,
+                                         BitSet* preserved) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    if (!block->contains_call || block->code == NULL) {
+      continue;
+    }
+
+    int call_epoch = 0;
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      for (size_t operand_index = 0; operand_index < TARGET_MAX_OPERANDS;
+           operand_index++) {
+        TargetInstruction* operand = inst->operand[operand_index];
+        if (operand == NULL) {
+          continue;
+        }
+        int definition_epoch =
+            operand->block == block ? operand->call_epoch : 0;
+        if (definition_epoch < call_epoch) {
+          MarkPreservedValue(preserved, operand);
+        }
+      }
+
+      if (gen->virtuals->is_call(inst)) {
+        call_epoch++;
+      }
+      inst->call_epoch = call_epoch;
+    }
+
+    for (size_t output_index = 0; output_index < block->outputs.length;
+         output_index++) {
+      TargetInstruction* output = block->outputs.value.p[output_index];
+      int definition_epoch =
+          output->block == block ? output->call_epoch : 0;
+      if (definition_epoch < call_epoch) {
+        MarkPreservedValue(preserved, output);
+      }
+    }
+  }
+}
+
+static bool KeepMaterializedCallResult(TargetInstruction* user, void* data) {
+  return user != data;
+}
+
+bool TargetMaterializePreservedCallResults(TargetGenerator* gen,
+                                           BitSet* preserved,
+                                           TargetCreateCallResultCopyFunc
+                                               create_copy) {
+  assert(create_copy != NULL);
+  bool changed = false;
+  for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;) {
+    TargetInstruction* next = TargetNext(inst);
+    if (gen->virtuals->is_call(inst) &&
+        BitSetContains(preserved, inst->id) &&
+        (gen->exception_edges.length == 0 || inst->users.length > 1)) {
+      TargetInstruction* copy = create_copy(inst);
+      assert(copy != NULL);
+      if (inst == inst->block->end_code && next != NULL &&
+          next->block != inst->block) {
+        TargetBasicBlockEmitBefore(gen, next->block, copy, next);
+      } else {
+        TargetBasicBlockEmitAfter(gen, inst->block, copy, inst);
+      }
+      TargetRetargetInstructionIf(inst, copy, KeepMaterializedCallResult, copy);
+      changed = true;
+      if (copy->block == inst->block) {
+        next = TargetNext(copy);
+      }
+    }
+    inst = next;
+  }
+  return changed;
 }
 
 void TargetPrintBasicBlocks(TargetGenerator* gen, FILE* fp) {

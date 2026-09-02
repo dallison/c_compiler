@@ -499,3 +499,299 @@ bool EmitTranslationUnitContents(struct Compiler* compiler, FILE* asm_file) {
   }
   return EmitTranslationUnitRemainder(compiler, asm_file);
 }
+
+static void ModuleFilePrinter(int index, File* file, void* data) {
+  if (index != 0) {
+    AsmModuleFile(data, index, file->name.value);
+  }
+}
+
+void EmitAssemblyPreambleToModule(struct Compiler* compiler,
+                                  AsmModule* module) {
+  AsmModuleFile(module, -1, compiler->infile.value);
+  SourceTraverseFiles(module, ModuleFilePrinter);
+  AsmModuleSection(module, ".text", SHT(progbits),
+                   SHF(alloc) | SHF(execinstr), compiler->alignment);
+}
+
+static AssemblerSymbolBinding ModuleBinding(bool is_global, bool is_weak) {
+  if (is_weak) {
+    return SYM_BIND(weak);
+  }
+  return is_global ? SYM_BIND(global) : SYM_BIND(local);
+}
+
+static void EmitInitializedVariableToModule(InitializedStaticVariable* var,
+                                            AsmModule* module) {
+  char buf[256];
+  const char* name = VarName(var, buf, sizeof(buf));
+  AsmModuleAlign(module, var->alignment);
+  AsmModuleSymbol(module, name, var->is_tls ? SYM_TYPE(tls)
+                                            : SYM_TYPE(object),
+                  ModuleBinding(var->is_global, var->is_weak), 0,
+                  var->alignment, false, true, false);
+  AsmModuleLabel(module, name);
+  AsmExpr size;
+  AsmExprInitConstant(&size, (int64_t)var->size);
+  AsmModuleSymbolSize(module, name, &size);
+  AsmExprDestruct(&size);
+
+  int next_offset = 0;
+  for (size_t i = 0; i < var->initializers.length; i++) {
+    Initializer* init = var->initializers.value.p[i];
+    if (init->offset > next_offset) {
+      AsmModuleFill(module, init->offset - next_offset, 0);
+      next_offset = init->offset;
+    }
+    AsmExpr value;
+    switch (init->type) {
+      case kInitTypeByte:
+        AsmExprInitConstant(&value, init->value.byte);
+        AsmModuleInteger(module, 1, &value);
+        AsmExprDestruct(&value);
+        next_offset++;
+        break;
+      case kInitTypeHalf:
+        AsmExprInitConstant(&value, init->value.half);
+        AsmModuleInteger(module, 2, &value);
+        AsmExprDestruct(&value);
+        next_offset += 2;
+        break;
+      case kInitTypeWord:
+        AsmExprInitConstant(&value, init->value.word);
+        AsmModuleInteger(module, 4, &value);
+        AsmExprDestruct(&value);
+        next_offset += 4;
+        break;
+      case kInitTypeLong:
+        AsmExprInitConstant(&value, (int64_t)init->value._long);
+        AsmModuleInteger(module, 8, &value);
+        AsmExprDestruct(&value);
+        next_offset += 8;
+        break;
+      case kInitTypeSymbol: {
+        char symbol_buf[256];
+        const char* symbol_name =
+            TargetSymbolName(init->value.symbol, symbol_buf,
+                             sizeof(symbol_buf));
+        AsmExprInitSymbol(&value, symbol_name, init->symbol_addend);
+        AsmModuleSymbol(
+            module, value.symbol.value, SYM_TYPE(none),
+            init->value.symbol->flags.is_local
+                ? SYM_BIND(local)
+                : SymbolHasWeakBinding(init->value.symbol) ? SYM_BIND(weak)
+                                                           : SYM_BIND(global),
+            0, 1, false, true, false);
+        AsmModuleInteger(module, compiler->pointer_size, &value);
+        AsmExprDestruct(&value);
+        next_offset += compiler->pointer_size;
+        break;
+      }
+      case kInitTypeString: {
+        char literal_name[64];
+        snprintf(literal_name, sizeof(literal_name), ".str.%d",
+                 init->value.literal_id);
+        AsmExprInitSymbol(&value, literal_name, 0);
+        AsmModuleInteger(module, compiler->pointer_size, &value);
+        AsmExprDestruct(&value);
+        next_offset += compiler->pointer_size;
+        break;
+      }
+      case kInitTypeMemory:
+        AsmModuleBytes(module, init->value.memory.value,
+                       init->value.memory.length);
+        next_offset += (int)init->value.memory.length;
+        break;
+    }
+  }
+  if ((size_t)next_offset < var->size) {
+    AsmModuleFill(module, (int64_t)var->size - next_offset, 0);
+  }
+}
+
+void EmitStaticVariableToModule(InitializedStaticVariable* var,
+                                AsmModule* module) {
+  EmitInitializedVariableToModule(var, module);
+}
+
+void EmitBSSVariableToModule(UninitializedStaticVariable* var,
+                             AsmModule* module) {
+  char buf[256];
+  const char* name = VarName2(var, buf, sizeof(buf));
+  if (!var->is_weak) {
+    AsmModuleSymbol(module, name, SYM_TYPE(common), SYM_BIND(global),
+                    (int32_t)var->size,
+                    (int32_t)var->alignment, true, true, true);
+    return;
+  }
+  AsmModuleSymbol(module, name, SYM_TYPE(object), SYM_BIND(weak),
+                  (int32_t)var->size, (int32_t)var->alignment, false, true,
+                  false);
+  AsmModuleAlign(module, (int)var->alignment);
+  AsmModuleLabel(module, name);
+  AsmModuleFill(module, (int64_t)var->size, 0);
+}
+
+void EmitLiteralToModule(Literal* literal, AsmModule* module) {
+  if (literal->disabled) {
+    return;
+  }
+  char name[64];
+  snprintf(name, sizeof(name),
+           literal->type == kLiteralBuffer ? ".lit.%d" : ".str.%d",
+           literal->id);
+  AsmModuleSymbol(module, name, SYM_TYPE(object), SYM_BIND(local), 0, 1,
+                  false, true, false);
+  AsmModuleLabel(module, name);
+  size_t size = 0;
+  if (literal->type == kLiteralBuffer) {
+    BufferLiteral* value = (BufferLiteral*)literal;
+    AsmModuleBytes(module, value->value.value, value->value.length);
+    size = value->value.length;
+  } else {
+    StringLiteral* value = (StringLiteral*)literal;
+    AsmModuleBytes(module, value->value.value, value->value.length);
+    int terminator_size =
+        literal->type == kLiteralWideString ? value->element_size : 1;
+    AsmModuleFill(module, terminator_size, 0);
+    size = value->value.length + (size_t)terminator_size;
+  }
+  AsmExpr size_expr;
+  AsmExprInitConstant(&size_expr, (int64_t)size);
+  AsmModuleSymbolSize(module, name, &size_expr);
+  AsmExprDestruct(&size_expr);
+}
+
+void EmitTlsVariableToModule(InitializedStaticVariable* var,
+                             AsmModule* module) {
+  EmitInitializedVariableToModule(var, module);
+}
+
+void EmitTlsBSSVariableToModule(UninitializedStaticVariable* var,
+                                AsmModule* module) {
+  char buf[256];
+  const char* name = VarName2(var, buf, sizeof(buf));
+  AsmModuleSymbol(module, name, SYM_TYPE(tls),
+                  ModuleBinding(var->is_global, var->is_weak),
+                  (int32_t)var->size, (int32_t)var->alignment, false, true,
+                  false);
+  AsmModuleAlign(module, (int)var->alignment);
+  AsmModuleLabel(module, name);
+  AsmModuleFill(module, (int64_t)var->size, 0);
+}
+
+void EmitInitFiniArrayEntriesToModule(Vector* functions, bool is_fini,
+                                      AsmModule* module) {
+  if (functions == NULL || functions->length == 0) {
+    return;
+  }
+  Symbol** sorted = malloc(functions->length * sizeof(Symbol*));
+  if (sorted == NULL) {
+    module->failed = true;
+    return;
+  }
+  for (size_t i = 0; i < functions->length; i++) {
+    sorted[i] = functions->value.p[i];
+  }
+  StableSortInitFiniFunctions(sorted, functions->length, is_fini);
+  int current_priority = -1;
+  for (size_t i = 0; i < functions->length; i++) {
+    int priority = InitFiniPriorityForSymbol(sorted[i], is_fini);
+    if (priority != current_priority) {
+      char section[64];
+      const char* base = is_fini ? ".fini_array" : ".init_array";
+      if (priority == kCXXInitFiniPriorityDefault) {
+        snprintf(section, sizeof(section), "%s", base);
+      } else {
+        snprintf(section, sizeof(section), "%s.%05d", base, priority);
+      }
+      AsmModuleSection(module, section,
+                       is_fini ? SHT(fini_array) : SHT(init_array),
+                       SHF(alloc) | SHF(write), compiler->pointer_size);
+      AsmModuleAlign(module, compiler->pointer_size);
+      current_priority = priority;
+    }
+    char buf[256];
+    const char* name =
+        TargetSymbolName(sorted[i], buf, sizeof(buf));
+    AsmModuleSymbol(
+        module, name, SYM_TYPE(func),
+        sorted[i]->flags.is_local
+            ? SYM_BIND(local)
+            : SymbolHasWeakBinding(sorted[i]) ? SYM_BIND(weak)
+                                              : SYM_BIND(global),
+        0, 1, false, true, false);
+    AsmExpr value;
+    AsmExprInitSymbol(&value, name, 0);
+    AsmModuleInteger(module, compiler->pointer_size, &value);
+    AsmExprDestruct(&value);
+  }
+  free(sorted);
+}
+
+bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
+                                          AsmModule* module) {
+  AsmModuleSection(module, ".data", SHT(progbits),
+                   SHF(alloc) | SHF(write), compiler->alignment);
+  bool contains_tls_vars = false;
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (!var->is_tls) {
+      EmitStaticVariableToModule(var, module);
+    }
+    contains_tls_vars |= var->is_tls;
+  }
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+    UninitializedStaticVariable* var =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (!var->is_tls &&
+        (var->symbol->flags.is_tentative_decl || var->is_local ||
+         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
+      EmitBSSVariableToModule(var, module);
+    }
+    contains_tls_vars |= var->is_tls;
+  }
+  AsmModuleSection(module, ".rodata", SHT(progbits),
+                   SHF(alloc) | SHF(merge) | SHF(strings),
+                   compiler->alignment);
+  for (size_t i = 0; i < compiler->literals.length; i++) {
+    EmitLiteralToModule(compiler->literals.value.p[i], module);
+  }
+  if (contains_tls_vars) {
+    AsmModuleSection(module, ".tdata", SHT(progbits),
+                     SHF(alloc) | SHF(write) | SHF(tls),
+                     compiler->alignment);
+    for (size_t i = 0; i < compiler->initialized_static_variables.length;
+         i++) {
+      InitializedStaticVariable* var =
+          compiler->initialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        EmitTlsVariableToModule(var, module);
+      }
+    }
+    AsmModuleSection(module, ".tbss", SHT(nobits),
+                     SHF(alloc) | SHF(write) | SHF(tls),
+                     compiler->alignment);
+    for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
+         i++) {
+      UninitializedStaticVariable* var =
+          compiler->uninitialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        EmitTlsBSSVariableToModule(var, module);
+      }
+    }
+  }
+  AsmModuleSection(module, ".debug_line", SHT(progbits), 0, 1);
+  if (compiler->debug_output) {
+    compiler->debug_builder.module = module;
+    DebugBuilderEmitDebugInfo(&compiler->debug_builder);
+    DebugBuilderEmitAbbreviations(&compiler->debug_builder);
+    compiler->debug_builder.module = NULL;
+  }
+  EmitInitFiniArrayEntriesToModule(CXXInitArrayFunctionsVector(), false,
+                                   module);
+  EmitInitFiniArrayEntriesToModule(CXXFiniArrayFunctionsVector(), true,
+                                   module);
+  return !module->failed;
+}

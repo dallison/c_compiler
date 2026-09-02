@@ -230,6 +230,9 @@ DECLARE_INST_FUNC(ucvtf);
 DECLARE_INST_FUNC(fneg);
 DECLARE_INST_FUNC(svc);
 DECLARE_INST_FUNC(ret);
+DECLARE_INST_FUNC(sbfm);
+DECLARE_INST_FUNC(bfm);
+DECLARE_INST_FUNC(ubfm);
 
 #undef DECLARE_INST_FUNC
 
@@ -287,6 +290,9 @@ static void InitializeInstructions(Map* instructions) {
   INST(umull);
 
   INST(bfi);
+  INST(sbfm);
+  INST(bfm);
+  INST(ubfm);
   INST(bfxil);
   INST(cls);
   INST(clz);
@@ -1468,6 +1474,44 @@ static bool GetImmediate(AARCH64Assembler* assembler, int64_t* value) {
   LexMatch(&ASM.lex, TOK(hash));
   *value = AssemblerEvaluateExpression(&ASM);
   return true;
+}
+
+static void AssembleBitfieldRaw(AARCH64Assembler* assembler, int opc) {
+  Register rd = GetRegister(assembler);
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  Register rn = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) || !NeedComma(assembler)) {
+    return;
+  }
+  int64_t immr;
+  if (!GetImmediate(assembler, &immr) || !NeedComma(assembler)) {
+    return;
+  }
+  int64_t imms;
+  if (!GetImmediate(assembler, &imms)) {
+    return;
+  }
+  int maximum = rd.kind == kX ? 63 : 31;
+  if (immr < 0 || immr > maximum || imms < 0 || imms > maximum) {
+    AssemblerError(&ASM, "Invalid bitfield immediate");
+    return;
+  }
+  AssembleBitFieldMove(assembler, opc, &rd, &rn, rd.kind == kX,
+                       rd.kind == kX, (int)immr, (int)imms);
+}
+
+static void Assemble_sbfm(AARCH64Assembler* assembler) {
+  AssembleBitfieldRaw(assembler, 0);
+}
+
+static void Assemble_bfm(AARCH64Assembler* assembler) {
+  AssembleBitfieldRaw(assembler, 1);
+}
+
+static void Assemble_ubfm(AARCH64Assembler* assembler) {
+  AssembleBitfieldRaw(assembler, 2);
 }
 
 static bool GetLsbWidth(AARCH64Assembler* assembler, int64_t* lsb,

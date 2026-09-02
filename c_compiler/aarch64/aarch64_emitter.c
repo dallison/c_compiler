@@ -17,7 +17,7 @@
 #include "aarch64_assembler.h"
 #include "aarch64_encode.h"
 #include "aarch64_codegen.h"
-#include "aarch64_object.h"
+#include "aarch64_program.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
 
@@ -1228,35 +1228,13 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       StringLiteral* lit = CompilerFindStringLiteral(literal->literal_id);
       assert(lit != NULL);
 
-      AARCH64ObjectModule* object_module = emitter->object_module;
-      if (object_module != NULL) {
-        if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
-          char* fragment_ptr = NULL;
-          size_t fragment_size = 0;
-          FILE* fragment_stream =
-              open_memstream(&fragment_ptr, &fragment_size);
-          if (fragment_stream == NULL) {
-            return;
-          }
-          PrintExtendedAsm(fragment_stream, (AARCH64AsmInstruction*)inst,
-                           lit->value.value);
-          fclose(fragment_stream);
-          AARCH64AssembleFragment(object_module, "extended_asm", fragment_ptr,
-                                  fragment_size);
-          free(fragment_ptr);
-        } else {
-          AARCH64AssembleFragment(object_module, "inline_asm", lit->value.value,
-                                  lit->value.length);
-        }
+      fprintf(fp, "\t");
+      if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
+        PrintExtendedAsm(fp, (AARCH64AsmInstruction*)inst, lit->value.value);
       } else {
-        fprintf(fp, "\t");
-        if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
-          PrintExtendedAsm(fp, (AARCH64AsmInstruction*)inst, lit->value.value);
-        } else {
-          fprintf(fp, "%s", lit->value.value);
-        }
-        fprintf(fp, "\n");
+        fprintf(fp, "%s", lit->value.value);
       }
+      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }
@@ -1618,6 +1596,1776 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
 
 }
 
+static int ProgramRegNum(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return -1;
+  }
+  if (inst->reg != NULL) {
+    return inst->reg->num == AARCH64_SP_REG ? 31 : inst->reg->num;
+  }
+  if (inst->dest != NULL && inst->dest->reg != NULL) {
+    return inst->dest->reg->num == AARCH64_SP_REG ? 31
+                                                  : inst->dest->reg->num;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(zr):
+    case AARCH64_OP(sp):
+      return 31;
+    case AARCH64_OP(fp):
+      return 29;
+    case AARCH64_OP(lr):
+      return 30;
+    case AARCH64_OP(resulti):
+    case AARCH64_OP(resultf):
+    case AARCH64_OP(resultd):
+    case AARCH64_OP(r0):
+    case AARCH64_OP(d0):
+      return 0;
+    case AARCH64_OP(r1):
+    case AARCH64_OP(d1):
+      return 1;
+    case AARCH64_OP(r2):
+    case AARCH64_OP(d2):
+      return 2;
+    case AARCH64_OP(r3):
+    case AARCH64_OP(d3):
+      return 3;
+    case AARCH64_OP(r4):
+    case AARCH64_OP(d4):
+      return 4;
+    case AARCH64_OP(r5):
+    case AARCH64_OP(d5):
+      return 5;
+    case AARCH64_OP(r6):
+    case AARCH64_OP(d6):
+      return 6;
+    case AARCH64_OP(r7):
+    case AARCH64_OP(d7):
+      return 7;
+    case AARCH64_OP(r9):
+      return 9;
+    case AARCH64_OP(structreturn):
+      return 8;
+    default:
+      break;
+  }
+  return -1;
+}
+
+static bool ProgramRegIsFP(TargetInstruction* inst) {
+  TargetRegister* reg = inst != NULL ? inst->reg : NULL;
+  if (reg == NULL && inst != NULL && inst->dest != NULL) {
+    reg = inst->dest->reg;
+  }
+  return reg != NULL &&
+         ((AARCH64Register*)reg)->type == kAARCH64RegTypeFloat;
+}
+
+static bool ProgramIs64(TargetInstruction* inst) {
+  return GetRegisterSize(inst) != kSize32Bit;
+}
+
+static AARCH64AsmCondition ProgramCondition(TargetInstruction* condition) {
+  switch ((AARCH64Opcode)condition->opcode) {
+    case AARCH64_OP(eq): return AARCH64_ASM_COND_EQ;
+    case AARCH64_OP(ne): return AARCH64_ASM_COND_NE;
+    case AARCH64_OP(cs):
+    case AARCH64_OP(hs): return AARCH64_ASM_COND_CS;
+    case AARCH64_OP(cc):
+    case AARCH64_OP(lo): return AARCH64_ASM_COND_CC;
+    case AARCH64_OP(mi): return AARCH64_ASM_COND_MI;
+    case AARCH64_OP(pl): return AARCH64_ASM_COND_PL;
+    case AARCH64_OP(vs): return AARCH64_ASM_COND_VS;
+    case AARCH64_OP(vc): return AARCH64_ASM_COND_VC;
+    case AARCH64_OP(hi): return AARCH64_ASM_COND_HI;
+    case AARCH64_OP(ls): return AARCH64_ASM_COND_LS;
+    case AARCH64_OP(ge): return AARCH64_ASM_COND_GE;
+    case AARCH64_OP(lt): return AARCH64_ASM_COND_LT;
+    case AARCH64_OP(gt): return AARCH64_ASM_COND_GT;
+    case AARCH64_OP(le): return AARCH64_ASM_COND_LE;
+    case AARCH64_OP(al): return AARCH64_ASM_COND_AL;
+    default:
+      assert(false);
+      return AARCH64_ASM_COND_AL;
+  }
+}
+
+static AARCH64AsmCondition ProgramInvertCondition(AARCH64AsmCondition cond) {
+  if (cond == AARCH64_ASM_COND_AL) {
+    return cond;
+  }
+  return (AARCH64AsmCondition)(cond ^ 1);
+}
+
+static void ProgramMoveImmediate(AsmModule* module, int reg, bool is_64bit,
+                                 uint64_t value) {
+  if (!is_64bit) {
+    value &= 0xffffffffu;
+  }
+  if (value == 0) {
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeMoveWide(is_64bit, 2, 0, 0) | (uint32_t)reg);
+    return;
+  }
+  bool emitted = false;
+  int words = is_64bit ? 4 : 2;
+  for (int i = 0; i < words; i++) {
+    uint16_t part = (uint16_t)(value >> (i * 16));
+    if (part == 0) {
+      continue;
+    }
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeMoveWide(is_64bit, emitted ? 3 : 2, part, i) |
+                    (uint32_t)reg);
+    emitted = true;
+  }
+}
+
+static void ProgramAddSubImmediate(AsmModule* module, int dest, int source,
+                                   bool is_64bit, bool add, int64_t value) {
+  if (value < 0) {
+    value = -value;
+    add = !add;
+  }
+  if (value > 0xffffff) {
+    ProgramMoveImmediate(module, 8, is_64bit, (uint64_t)value);
+    AARCH64AsmRegister rd = {.num = dest,
+                             .kind = is_64bit ? AARCH64_ASM_REG_X
+                                             : AARCH64_ASM_REG_W};
+    AARCH64AsmRegister rn = rd;
+    rn.num = source;
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = {.num = 8,
+                .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W},
+    };
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeAddSubShiftedRegister(&rd, &rn, &rm, !add,
+                                                   false));
+    return;
+  }
+  if (value == 0 && dest != source) {
+    if (dest == 31 || source == 31) {
+      AARCH64AsmRegister rd = {.num = dest,
+                               .kind = is_64bit ? AARCH64_ASM_REG_X
+                                               : AARCH64_ASM_REG_W,
+                               .is_sp = dest == 31};
+      AARCH64AsmRegister rn = rd;
+      rn.num = source;
+      rn.is_sp = source == 31;
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeAddSubImmediate(&rd, &rn, 0, false, false, 0));
+      return;
+    }
+    AARCH64AsmRegister rd = {.num = dest,
+                             .kind = is_64bit ? AARCH64_ASM_REG_X
+                                             : AARCH64_ASM_REG_W};
+    AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = {.num = source, .kind = rd.kind},
+    };
+    AARCH64ProgramEmitWord(
+        module,
+        AARCH64EncodeLogicalShiftedRegister(&rd, &zr, &rm, is_64bit, 1, 0));
+    return;
+  }
+  int shift = 0;
+  while (value != 0) {
+    int part = (int)(value & 0xfff);
+    if (part != 0) {
+      AARCH64AsmRegister rd = {.num = dest,
+                               .kind = is_64bit ? AARCH64_ASM_REG_X
+                                               : AARCH64_ASM_REG_W};
+      AARCH64AsmRegister rn = rd;
+      rn.num = source;
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubImmediate(&rd, &rn, part, !add, false,
+                                               shift != 0));
+      source = dest;
+    }
+    value >>= 12;
+    shift += 12;
+  }
+}
+
+static void ProgramMoveRegister(AsmModule* module, int dest, int source,
+                                bool is_64bit, bool fp) {
+  if (dest == source) {
+    return;
+  }
+  if (fp) {
+    AARCH64ProgramEmitWord(module,
+                           AARCH64EncodeFPMove(is_64bit, dest, source));
+    return;
+  }
+  if (dest == 31 || source == 31) {
+    ProgramAddSubImmediate(module, dest, source, is_64bit, true, 0);
+    return;
+  }
+  AARCH64AsmRegister rd = {
+      .num = dest,
+      .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+  };
+  AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+  AARCH64AsmOperand rm = {
+      .type = AARCH64_ASM_OPERAND_REGISTER,
+      .reg = {.num = source, .kind = rd.kind},
+  };
+  AARCH64ProgramEmitWord(
+      module,
+      AARCH64EncodeLogicalShiftedRegister(&rd, &zr, &rm, is_64bit, 1, 0));
+}
+
+static void ProgramMoveTargetRegister(AsmModule* module, int dest,
+                                      TargetInstruction* source,
+                                      bool is_64bit, bool fp) {
+  int source_reg = ProgramRegNum(source);
+  if (!fp && source_reg == 31 &&
+      source->opcode != (TargetOpcode)AARCH64_OP(sp)) {
+    AARCH64AsmRegister rd = {
+        .num = dest,
+        .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+    };
+    AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = zr,
+    };
+    AARCH64ProgramEmitWord(
+        module,
+        AARCH64EncodeLogicalShiftedRegister(&rd, &zr, &rm, is_64bit, 1, 0));
+    return;
+  }
+  ProgramMoveRegister(module, dest, source_reg, is_64bit, fp);
+}
+
+static void ProgramLoadStore(AsmModule* module, bool load, bool fp, int size,
+                             bool sign, int value_reg, int base_reg,
+                             int offset) {
+  int opc = sign && load ? (size == 3 ? 2 : 3) : load;
+  int scale = 1 << size;
+  if (offset >= 0 && (offset & (scale - 1)) == 0 &&
+      offset / scale <= 0xfff) {
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeLoadStoreUnsigned(size, fp, opc, value_reg,
+                                               base_reg, offset));
+  } else {
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeLoadStoreUnscaled(size, fp, opc, value_reg,
+                                               base_reg, offset, 0));
+  }
+}
+
+static void ProgramLabelName(String* result, const char* function,
+                             TargetInstruction* label) {
+  StringClear(result);
+  if (label->opcode == (TargetOpcode)AARCH64_OP(named_label)) {
+    StringAppend(result, ((TargetNamedLabel*)label)->name);
+    return;
+  }
+  if (label->opcode == (TargetOpcode)AARCH64_OP(symbol)) {
+    char unused[1];
+    StringAppend(
+        result,
+        TargetSymbolName(((TargetSymbol*)label)->symbol, unused,
+                         sizeof(unused)));
+    return;
+  }
+  if (label->opcode == (TargetOpcode)AARCH64_OP(literal)) {
+    char id[32];
+    snprintf(id, sizeof(id), "%d", ((TargetLiteral*)label)->literal_id);
+    StringAppend(result, ".str.");
+    StringAppend(result, id);
+    return;
+  }
+  char id[32];
+  snprintf(id, sizeof(id), "%d", label->id);
+  StringAppendChar(result, '.');
+  StringAppend(result, function);
+  StringAppend(result, "_label_");
+  StringAppend(result, id);
+}
+
+static void ProgramNamedFunctionLabel(String* result, const char* prefix,
+                                      const char* function,
+                                      const char* suffix) {
+  StringClear(result);
+  StringAppend(result, prefix);
+  StringAppend(result, function);
+  StringAppend(result, suffix);
+}
+
+static void ProgramBranch(AsmModule* module, const char* mnemonic,
+                          uint32_t word, AARCH64FixupKind fixup,
+                          int relocation, const char* symbol,
+                          bool force_relocation) {
+  String text = {0};
+  StringAppend(&text, mnemonic);
+  StringAppendChar(&text, ' ');
+  StringAppend(&text, symbol);
+  AARCH64ProgramEmitFixup(module, word, fixup, relocation, symbol, 0,
+                          force_relocation, text.value);
+  StringDestruct(&text);
+}
+
+static void ProgramRegisterBranch(AsmModule* module, const char* mnemonic,
+                                  uint32_t word, AARCH64FixupKind fixup,
+                                  int relocation, int reg, bool is_64bit,
+                                  const char* symbol) {
+  char register_name[32];
+  snprintf(register_name, sizeof(register_name), "%c%d", is_64bit ? 'x' : 'w',
+           reg);
+  String text = {0};
+  StringAppend(&text, mnemonic);
+  StringAppendChar(&text, ' ');
+  StringAppend(&text, register_name);
+  StringAppend(&text, ", ");
+  StringAppend(&text, symbol);
+  AARCH64ProgramEmitFixup(module, word, fixup, relocation, symbol, 0, false,
+                          text.value);
+  StringDestruct(&text);
+}
+
+static void ProgramSpillAddress(AsmModule* module, int offset) {
+  if (offset <= 4095) {
+    ProgramAddSubImmediate(module, 16, 29, true, false, offset);
+  } else {
+    ProgramMoveImmediate(module, 16, true, (uint32_t)offset);
+    AARCH64AsmRegister rd = {.num = 16, .kind = AARCH64_ASM_REG_X};
+    AARCH64AsmRegister rn = {.num = 29, .kind = AARCH64_ASM_REG_X};
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = {.num = 16, .kind = AARCH64_ASM_REG_X},
+    };
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeAddSubShiftedRegister(&rd, &rn, &rm, true,
+                                                   false));
+  }
+}
+
+static void ProgramSaveRegisters(AARCH64Emitter* emitter, AsmModule* module) {
+  int stack_frame_size = StackFrameSize(emitter);
+  bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
+                 !emitter->g->not_leaf;
+  bool varargs = emitter->g->base.varargs;
+  int space_above_frame_pointer = VarargsSaveAreaSize(emitter);
+  int saved_reg_offset =
+      stack_frame_size - AARCH64_STACK_FRAME_HEADER_SIZE - 8 -
+      emitter->g->base.stack_frame_size - space_above_frame_pointer -
+      emitter->spill_region_size;
+  if (is_leaf) {
+    AsmModuleComment(module, "Leaf procedure, no stack frame generated");
+  }
+  if (!EmptyStackFrame(emitter)) {
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeLoadStorePair(2, false, false, 3, 29, 30, 31,
+                                           -16));
+    if (!varargs) {
+      String label = {0};
+      ProgramNamedFunctionLabel(&label, ".Leh_",
+                                emitter->g->base.function_name.value,
+                                "_after_push");
+      AsmModuleLabel(module, label.value);
+      StringDestruct(&label);
+    }
+    ProgramMoveRegister(module, 29, 31, true, false);
+    if (!varargs) {
+      String label = {0};
+      ProgramNamedFunctionLabel(&label, ".Leh_",
+                                emitter->g->base.function_name.value,
+                                "_after_leaq");
+      AsmModuleLabel(module, label.value);
+      StringDestruct(&label);
+    }
+    ProgramAddSubImmediate(module, 31, 31, true, false, stack_frame_size);
+    if (varargs && space_above_frame_pointer > 0) {
+      AsmModuleComment(module, "variadic argument register save area");
+      ProgramAddSubImmediate(module, 29, 29, true, false,
+                             space_above_frame_pointer);
+      int offset = 0;
+      for (int i = emitter->g->num_int_arg_regs; i < AARCH64_NUM_INT_ARGS;
+           i++) {
+        ProgramLoadStore(module, false, false, 3, false, i, 29, offset);
+        offset += 8;
+      }
+      offset = VarargsGpSaveSize(emitter);
+      for (int i = emitter->g->num_fp_arg_regs; i < AARCH64_NUM_FP_ARGS;
+           i++) {
+        ProgramLoadStore(module, false, true, 3, false, i, 29, offset);
+        offset += 16;
+      }
+    }
+  }
+  if (emitter->g->saved_regs.length > 0) {
+    AsmModuleComment(module, "Saved argument registers.");
+  }
+  for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
+    SavedArgumentRegister* saved = emitter->g->saved_regs.value.p[i];
+    ProgramLoadStore(module, false, saved->is_fp, 3, false, saved->reg_num,
+                     saved->base_reg_num, saved->offset);
+  }
+  if (!is_leaf) {
+    AsmModuleComment(module, "Local variable and spill area.");
+  }
+  int local_vars =
+      emitter->g->base.stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+  emitter->first_spill_offset = local_vars + 8;
+  emitter->saved_reg_offset = saved_reg_offset;
+
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  if (!BitSetIteratorDone(&it)) {
+    AsmModuleComment(module, "Saved integer registers.");
+  }
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    ProgramLoadStore(module, false, false, 3, false, reg, 31,
+                     saved_reg_offset);
+    saved_reg_offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  if (!BitSetIteratorDone(&it)) {
+    AsmModuleComment(module, "Saved floating point registers.");
+  }
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    ProgramLoadStore(module, false, true, 3, false, reg, 31,
+                     saved_reg_offset);
+    saved_reg_offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+}
+
+static void ProgramRestoreRegisters(AARCH64Emitter* emitter,
+                                    AsmModule* module) {
+  int stack_frame_size = StackFrameSize(emitter);
+  bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
+                 !emitter->g->not_leaf;
+  if (!is_leaf) {
+    AsmModuleComment(module, "Restored registers.");
+  }
+  if (!EmptyStackFrame(emitter)) {
+    int frame_adjustment =
+        stack_frame_size - VarargsSaveAreaSize(emitter);
+    ProgramAddSubImmediate(module, 31, 29, true, false, frame_adjustment);
+  }
+  int offset = emitter->saved_reg_offset;
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    ProgramLoadStore(module, true, false, 3, false,
+                     (int)BitSetIteratorValue(&it), 31, offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    ProgramLoadStore(module, true, true, 3, false,
+                     (int)BitSetIteratorValue(&it), 31, offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  if (!EmptyStackFrame(emitter)) {
+    ProgramAddSubImmediate(module, 31, 31, true, true, stack_frame_size);
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeLoadStorePair(2, false, true, 1, 29, 30, 31,
+                                           16));
+  }
+}
+
+static void ProgramRestoreExceptionLandingState(AARCH64Emitter* emitter,
+                                                AsmModule* module) {
+  int frame_adjustment =
+      StackFrameSize(emitter) - VarargsSaveAreaSize(emitter);
+  ProgramAddSubImmediate(module, 31, 29, true, false, frame_adjustment);
+  if (emitter->g->struct_return_reg >= 0) {
+    bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
+                   !emitter->g->not_leaf;
+    int reg = (is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
+                       : AARCH64_FIRST_INT_REG_VAR) +
+              emitter->g->struct_return_reg;
+    ProgramLoadStore(module, true, false, 3, false, reg, 29,
+                     emitter->g->struct_return_spill_offset);
+  }
+}
+
+static void ProgramEmitAtomic(AARCH64Emitter* emitter, TargetInstruction* inst,
+                              const char* function, AsmModule* module) {
+  int size = AtomicSizeLog2(inst);
+  int order = AtomicOrder(inst);
+  int failure_order = AtomicFailureOrder(inst);
+  bool acquire = AtomicOrderHasAcquire(order);
+  bool release = AtomicOrderHasRelease(order);
+  int result = ProgramRegNum(inst);
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(atomic_load):
+      if (acquire) {
+        AARCH64ProgramEmitWord(module, AARCH64EncodeAcquireRelease(
+                                             size, true, result,
+                                             ProgramRegNum(inst->operand[0])));
+      } else {
+        ProgramLoadStore(module, true, false, size, false, result,
+                         ProgramRegNum(inst->operand[0]), 0);
+      }
+      return;
+    case AARCH64_OP(atomic_store): {
+      int value = ProgramRegNum(inst->operand[0]);
+      int address = ProgramRegNum(inst->operand[1]);
+      if (release) {
+        AARCH64ProgramEmitWord(
+            module,
+            AARCH64EncodeAcquireRelease(size, false, value, address));
+      } else {
+        ProgramLoadStore(module, false, false, size, false, value, address, 0);
+      }
+      return;
+    }
+    case AARCH64_OP(atomic_fence):
+      if (order == 0) {
+        AsmModuleComment(module, "relaxed atomic fence");
+      } else {
+        AARCH64ProgramEmitWord(
+            module, AARCH64EncodeDmb(order == 1 || order == 2
+                                         ? 9
+                                         : order == 3 ? 10 : 11));
+      }
+      return;
+    case AARCH64_OP(atomic_fetch_add):
+    case AARCH64_OP(atomic_fetch_sub):
+    case AARCH64_OP(atomic_add_fetch):
+    case AARCH64_OP(atomic_sub_fetch): {
+      bool add = inst->opcode == (TargetOpcode)AARCH64_OP(atomic_fetch_add) ||
+                 inst->opcode == (TargetOpcode)AARCH64_OP(atomic_add_fetch);
+      bool return_new =
+          inst->opcode == (TargetOpcode)AARCH64_OP(atomic_add_fetch) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(atomic_sub_fetch);
+      int address = ProgramRegNum(inst->operand[0]);
+      int value = ProgramRegNum(inst->operand[1]);
+      int loaded = return_new ? 16 : result;
+      int updated = return_new ? result : 16;
+      char suffix[64];
+      snprintf(suffix, sizeof(suffix), "_atomic_retry_%d", inst->id);
+      String retry = {0};
+      ProgramNamedFunctionLabel(&retry, ".L", function, suffix);
+      AsmModuleLabel(module, retry.value);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExclusiveLoad(size, acquire, loaded, address));
+      AARCH64AsmRegister rd = {
+          .num = updated,
+          .kind = size == 3 ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+      };
+      AARCH64AsmRegister rn = rd;
+      rn.num = loaded;
+      AARCH64AsmOperand rm = {
+          .type = AARCH64_ASM_OPERAND_REGISTER,
+          .reg = {.num = value, .kind = rd.kind},
+      };
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubShiftedRegister(&rd, &rn, &rm, !add,
+                                                     false));
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeExclusiveStore(size, release, 17, updated, address));
+      ProgramRegisterBranch(
+          module, "cbnz", AARCH64EncodeCompareBranch(false, true, 17),
+          kAARCH64FixupBranch19, R_AARCH64_CONDBR19, 17, false, retry.value);
+      StringDestruct(&retry);
+      return;
+    }
+    case AARCH64_OP(atomic_compare_exchange_bool):
+    case AARCH64_OP(atomic_compare_exchange_val):
+    case AARCH64_OP(atomic_compare_exchange_n): {
+      bool expected_pointer =
+          inst->opcode ==
+          (TargetOpcode)AARCH64_OP(atomic_compare_exchange_n);
+      bool returns_bool =
+          inst->opcode !=
+          (TargetOpcode)AARCH64_OP(atomic_compare_exchange_val);
+      acquire |= AtomicOrderHasAcquire(failure_order);
+      int address = ProgramRegNum(inst->operand[0]);
+      int expected = ProgramRegNum(inst->operand[1]);
+      int desired = ProgramRegNum(inst->operand[2]);
+      if (expected_pointer) {
+        ProgramLoadStore(module, true, false, size, false, 16, expected, 0);
+        expected = 16;
+      } else if (size < 2) {
+        AARCH64ProgramEmitWord(
+            module, AARCH64EncodeBitfield(false, 2, 16, expected, 0,
+                                           size == 0 ? 7 : 15));
+        expected = 16;
+      }
+      String retry = {0}, mismatch = {0}, spurious = {0}, done = {0};
+      char suffix[64];
+      snprintf(suffix, sizeof(suffix), "_atomic_retry_%d", inst->id);
+      ProgramNamedFunctionLabel(&retry, ".L", function, suffix);
+      snprintf(suffix, sizeof(suffix), "_atomic_mismatch_%d", inst->id);
+      ProgramNamedFunctionLabel(&mismatch, ".L", function, suffix);
+      snprintf(suffix, sizeof(suffix), "_atomic_spurious_%d", inst->id);
+      ProgramNamedFunctionLabel(&spurious, ".L", function, suffix);
+      snprintf(suffix, sizeof(suffix), "_atomic_done_%d", inst->id);
+      ProgramNamedFunctionLabel(&done, ".L", function, suffix);
+      AsmModuleLabel(module, retry.value);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExclusiveLoad(size, acquire, result, address));
+      AARCH64AsmRegister zr = AARCH64AsmZeroRegister(
+          size == 3 ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W);
+      AARCH64AsmRegister rn = zr;
+      rn.num = result;
+      AARCH64AsmOperand rm = {
+          .type = AARCH64_ASM_OPERAND_REGISTER,
+          .reg = {.num = expected, .kind = zr.kind},
+      };
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeAddSubShiftedRegister(&zr, &rn, &rm, true, true));
+      ProgramBranch(module, "b.ne",
+                    AARCH64EncodeConditionalBranch(
+                        0, AARCH64_ASM_COND_NE, false),
+                    kAARCH64FixupBranch19, R_AARCH64_CONDBR19, mismatch.value,
+                    false);
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeExclusiveStore(size, release, 17, desired, address));
+      ProgramRegisterBranch(
+          module, "cbnz", AARCH64EncodeCompareBranch(false, true, 17),
+          kAARCH64FixupBranch19, R_AARCH64_CONDBR19, 17, false,
+          (inst->flags & AARCH64_ATOMIC_WEAK) ? spurious.value
+                                               : retry.value);
+      if (returns_bool) {
+        ProgramMoveImmediate(module, result, false, 1);
+      }
+      ProgramBranch(module, "b", AARCH64EncodeUnconditionalBranchImmediate(0,
+                                                                            false),
+                    kAARCH64FixupBranch26, R_AARCH64_JUMP26, done.value,
+                    false);
+      AsmModuleLabel(module, mismatch.value);
+      AARCH64ProgramEmitWord(module, 0xd5033f5fu);
+      if ((inst->flags & AARCH64_ATOMIC_WEAK) != 0) {
+        AsmModuleLabel(module, spurious.value);
+      }
+      if (expected_pointer) {
+        ProgramLoadStore(module, false, false, size, false, result,
+                         ProgramRegNum(inst->operand[1]), 0);
+      }
+      if (returns_bool) {
+        ProgramMoveImmediate(module, result, false, 0);
+      }
+      AsmModuleLabel(module, done.value);
+      StringDestruct(&retry);
+      StringDestruct(&mismatch);
+      StringDestruct(&spurious);
+      StringDestruct(&done);
+      return;
+    }
+    default:
+      assert(false);
+  }
+}
+
+static bool ProgramBinaryRegisters(TargetInstruction* inst, int* dest,
+                                   int* left, int* right) {
+  *dest = ProgramRegNum(inst);
+  *left = ProgramRegNum(inst->operand[0]);
+  *right = ProgramRegNum(inst->operand[1]);
+  return *dest >= 0 && *left >= 0 && *right >= 0;
+}
+
+static void ProgramUnsupportedInstruction(TargetInstruction* inst,
+                                          AsmModule* module);
+
+static bool ProgramShiftAmount(TargetInstruction* inst, int* amount) {
+  if (inst->operand[2] == NULL && inst->operand[3] == NULL) {
+    *amount = 0;
+    return true;
+  }
+  if (inst->operand[2] == NULL || inst->operand[3] == NULL ||
+      inst->operand[2]->opcode != (TargetOpcode)AARCH64_OP(oplsl) ||
+      !TargetIsConst(inst->operand[3])) {
+    return false;
+  }
+  *amount = (int)TargetIntValue(inst->operand[3]);
+  return true;
+}
+
+static void ProgramEmitAddSub(TargetInstruction* inst, AsmModule* module,
+                              bool subtract, bool set_flags,
+                              bool compare_alias) {
+  int dest;
+  int left;
+  TargetInstruction* right_value;
+  bool is_64bit;
+  if (compare_alias) {
+    left = ProgramRegNum(inst->operand[0]);
+    right_value = inst->operand[1];
+    is_64bit = ProgramIs64(inst);
+    dest = 31;
+  } else {
+    dest = ProgramRegNum(inst);
+    left = ProgramRegNum(inst->operand[0]);
+    right_value = inst->operand[1];
+    is_64bit = ProgramIs64(inst);
+  }
+  AARCH64AsmRegister rd = {
+      .num = dest,
+      .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+  };
+  AARCH64AsmRegister rn = rd;
+  rn.num = left;
+  if (right_value->opcode == (TargetOpcode)AARCH64_OP(symbol)) {
+    char buffer[256];
+    const char* symbol =
+        TargetSymbolName(((TargetSymbol*)right_value)->symbol, buffer,
+                         sizeof(buffer));
+    int relocation;
+    const char* modifier;
+    bool shifted = false;
+    if ((inst->flags & AARCH64_TPREL_HI_RELOC) != 0) {
+      relocation = R_AARCH64_TLSLE_ADD_TPREL_HI12;
+      modifier = "tprel_hi12";
+      shifted = true;
+    } else if ((inst->flags & AARCH64_TPREL_LO_RELOC) != 0) {
+      relocation = R_AARCH64_TLSLE_ADD_TPREL_LO12_NC;
+      modifier = "tprel_lo12_nc";
+    } else {
+      relocation = R_AARCH64_ADD_ABS_LO12_NC;
+      modifier = "lo12";
+    }
+    char prefix[128];
+    snprintf(prefix, sizeof(prefix), "%s %c%d, %c%d, :%s:",
+             subtract ? "sub" : "add", is_64bit ? 'x' : 'w', dest,
+             is_64bit ? 'x' : 'w', left, modifier);
+    String text = {0};
+    StringAppend(&text, prefix);
+    StringAppend(&text, symbol);
+    AARCH64ProgramEmitFixup(
+        module,
+        AARCH64EncodeAddSubImmediate(&rd, &rn, 0, subtract, set_flags,
+                                     shifted),
+        kAARCH64FixupRelocationOnly, relocation, symbol, 0, true, text.value);
+    StringDestruct(&text);
+    return;
+  }
+  if (TargetIsConst(right_value)) {
+    int64_t immediate = TargetIntValue(right_value);
+    if (left == 31 &&
+        inst->operand[0]->opcode != (TargetOpcode)AARCH64_OP(sp) &&
+        !subtract && !set_flags) {
+      ProgramMoveImmediate(module, dest, is_64bit, (uint64_t)immediate);
+      return;
+    }
+    if (!compare_alias && !set_flags) {
+      ProgramAddSubImmediate(module, dest, left, is_64bit, !subtract,
+                             immediate);
+    } else {
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubImmediate(&rd, &rn, (int)immediate,
+                                               subtract, set_flags, 0));
+    }
+  } else {
+    int shift;
+    if (!ProgramShiftAmount(inst, &shift)) {
+      ProgramUnsupportedInstruction(inst, module);
+      return;
+    }
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = {.num = ProgramRegNum(right_value), .kind = rd.kind},
+        .shift = {.type = AARCH64_ASM_SHIFT_LSL, .amount = shift},
+    };
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeAddSubShiftedRegister(&rd, &rn, &rm, subtract,
+                                                   set_flags));
+  }
+}
+
+static void ProgramEmitLogical(TargetInstruction* inst, AsmModule* module,
+                               int opc, bool invert, bool test_alias) {
+  bool is_64bit = ProgramIs64(inst);
+  int dest = test_alias ? 31 : ProgramRegNum(inst);
+  int left = ProgramRegNum(inst->operand[0]);
+  TargetInstruction* right_value = inst->operand[1];
+  AARCH64AsmRegister rd = {
+      .num = dest,
+      .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+  };
+  AARCH64AsmRegister rn = rd;
+  rn.num = left;
+  if (TargetIsConst(right_value)) {
+    uint64_t immediate = (uint64_t)TargetIntValue(right_value);
+    uint64_t encoded_immediate = invert ? ~immediate : immediate;
+    if (!is_64bit) {
+      encoded_immediate = (uint32_t)encoded_immediate;
+    }
+    static const char* operations[] = {"and", "orr", "eor", "ands"};
+    const char* operation = test_alias ? "tst" : operations[opc];
+    char text[160];
+    if (test_alias) {
+      snprintf(text, sizeof(text), "%s %c%d, #0x%llx", operation,
+               is_64bit ? 'x' : 'w', left,
+               (unsigned long long)immediate);
+    } else {
+      snprintf(text, sizeof(text), "%s %c%d, %c%d, #0x%llx", operation,
+               is_64bit ? 'x' : 'w', dest, is_64bit ? 'x' : 'w', left,
+               (unsigned long long)encoded_immediate);
+    }
+    AARCH64ProgramEmitWordText(
+        module,
+        AARCH64EncodeLogicalImmediateInst(&rd, &rn, encoded_immediate,
+                                          is_64bit, opc),
+        text);
+  } else {
+    int shift;
+    if (!ProgramShiftAmount(inst, &shift)) {
+      ProgramUnsupportedInstruction(inst, module);
+      return;
+    }
+    AARCH64AsmOperand rm = {
+        .type = AARCH64_ASM_OPERAND_REGISTER,
+        .reg = {.num = ProgramRegNum(right_value), .kind = rd.kind},
+        .shift = {.type = AARCH64_ASM_SHIFT_LSL, .amount = shift},
+    };
+    AARCH64ProgramEmitWord(
+        module, AARCH64EncodeLogicalShiftedRegister(&rd, &rn, &rm, is_64bit,
+                                                     opc, invert));
+  }
+}
+
+static void ProgramEmitInlineAsm(TargetInstruction* instruction,
+                                 AsmModule* module) {
+  TargetLiteral* literal = (TargetLiteral*)instruction->operand[0];
+  StringLiteral* text = CompilerFindStringLiteral(literal->literal_id);
+  assert(text != NULL);
+  if ((instruction->flags & AARCH64_INST_EXTENDED_ASM) == 0) {
+    AsmModuleText(module, "inline_asm", text->value.value,
+                  text->value.length);
+  } else {
+    char* value = NULL;
+    size_t length = 0;
+    FILE* stream = open_memstream(&value, &length);
+    if (stream == NULL) {
+      module->failed = true;
+      return;
+    }
+    PrintExtendedAsm(stream, (AARCH64AsmInstruction*)instruction,
+                     text->value.value);
+    if (fclose(stream) != 0) {
+      module->failed = true;
+    } else {
+      AsmModuleText(module, "extended_asm", value, length);
+    }
+    free(value);
+  }
+  text->base.disabled = true;
+}
+
+static void ProgramUnsupportedInstruction(TargetInstruction* inst,
+                                          AsmModule* module) {
+  fprintf(stderr, "Unsupported programmatic AArch64 opcode %s\n",
+          AARCH64OpcodeName(inst->opcode));
+  module->failed = true;
+}
+
+static void ProgramEmitInstruction(AARCH64Emitter* emitter,
+                                   TargetInstruction* inst,
+                                   const char* function, AsmModule* module) {
+  if (inst->block == NULL) {
+    return;
+  }
+  if (inst->block != emitter->current_block) {
+    char comment[128];
+    snprintf(comment, sizeof(comment), "*** Basic block %zd",
+             ((TargetBasicBlock*)inst->block)->block_id);
+    AsmModuleComment(module, comment);
+    emitter->current_block = inst->block;
+  }
+  if (inst->opcode == (TargetOpcode)AARCH64_OP(label)) {
+    String name = {0};
+    ProgramLabelName(&name, function, inst);
+    if ((inst->flags & AARCH64_EXPORTED_LABEL) != 0) {
+      AsmModuleSymbol(module, name.value, SYM_TYPE(none), SYM_BIND(local), 0, 1,
+                      false, true, false);
+    }
+    AsmModuleLabel(module, name.value);
+    StringDestruct(&name);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      ProgramRestoreExceptionLandingState(emitter, module);
+    }
+    return;
+  }
+  if (inst->opcode == (TargetOpcode)AARCH64_OP(named_label)) {
+    AsmModuleLabel(module, ((TargetNamedLabel*)inst)->name);
+    return;
+  }
+  if (!IsPrintable(inst) || inst->observable_checkpoint) {
+    return;
+  }
+  char id_comment[32];
+  snprintf(id_comment, sizeof(id_comment), "@%d", inst->id);
+  AsmModuleComment(module, id_comment);
+
+  int dest = ProgramRegNum(inst);
+  bool is_64bit = ProgramIs64(inst);
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(save):
+      ProgramSaveRegisters(emitter, module);
+      return;
+    case AARCH64_OP(restore):
+      ProgramRestoreRegisters(emitter, module);
+      return;
+    case AARCH64_OP(asm):
+      ProgramEmitInlineAsm(inst, module);
+      return;
+    case AARCH64_OP(loc): {
+      int file, line, column;
+      SourceLocationNumbers(((TargetLocation*)inst)->location, &file, &line,
+                            &column);
+      AsmModuleLocation(module, file + 1, line, column + 1);
+      return;
+    }
+    case AARCH64_OP(symbol): {
+      TargetSymbol* target = (TargetSymbol*)inst;
+      char name[256];
+      const char* spelling =
+          TargetSymbolName(target->symbol, name, sizeof(name));
+      AsmExpr symbol_expression;
+      AsmExprInitSymbol(&symbol_expression, spelling, 0);
+      AsmModuleSymbol(
+          module, symbol_expression.symbol.value, SYM_TYPE(none),
+          StorageIs(target->symbol->storage, STO(static))
+              ? SYM_BIND(local)
+              : SymbolHasWeakBinding(target->symbol) ? SYM_BIND(weak)
+                                                     : SYM_BIND(global),
+          0, 1, false, true, false);
+      AsmExprDestruct(&symbol_expression);
+      return;
+    }
+    case AARCH64_OP(tp):
+      AARCH64ProgramEmitWord(module, AARCH64EncodeMrsTpidrEl0(dest));
+      return;
+    case AARCH64_OP(fmv_s):
+    case AARCH64_OP(fmv_d):
+      ProgramMoveTargetRegister(
+          module, dest, inst->operand[0],
+          inst->opcode == (TargetOpcode)AARCH64_OP(fmv_d), true);
+      return;
+    case AARCH64_OP(mv):
+      if (inst->operand[1] != NULL) {
+        ProgramMoveTargetRegister(module, ProgramRegNum(inst->operand[0]),
+                                  inst->operand[1], is_64bit,
+                                  ProgramRegIsFP(inst->operand[0]));
+      } else if (TargetIsConst(inst->operand[0])) {
+        ProgramMoveImmediate(module, dest, is_64bit,
+                             (uint64_t)TargetIntValue(inst->operand[0]));
+      } else {
+        ProgramMoveTargetRegister(module, dest, inst->operand[0], is_64bit,
+                                  ProgramRegIsFP(inst));
+      }
+      return;
+    case AARCH64_OP(mov):
+      if (inst->operand[1] != NULL && inst->operand[0] != NULL &&
+          inst->operand[0]->reg != NULL && inst->operand[1]->reg != NULL) {
+        ProgramMoveTargetRegister(module, ProgramRegNum(inst->operand[0]),
+                                  inst->operand[1], is_64bit,
+                                  ProgramRegIsFP(inst->operand[0]));
+      } else if (TargetIsConst(inst->operand[0])) {
+        ProgramMoveImmediate(module, dest, is_64bit,
+                             (uint64_t)TargetIntValue(inst->operand[0]));
+      } else {
+        ProgramMoveTargetRegister(module, dest, inst->operand[0], is_64bit,
+                                  ProgramRegIsFP(inst));
+      }
+      return;
+    case AARCH64_OP(movz):
+    case AARCH64_OP(movk):
+    case AARCH64_OP(movn):
+      if (TargetIsConst(inst->operand[0])) {
+        ProgramMoveImmediate(module, dest, is_64bit,
+                             (uint64_t)TargetIntValue(inst->operand[0]));
+      } else {
+        ProgramMoveTargetRegister(module, dest, inst->operand[0], is_64bit,
+                                  ProgramRegIsFP(inst));
+      }
+      return;
+    case AARCH64_OP(bl): {
+      char name[512];
+      TargetSymbol* target = (TargetSymbol*)inst->operand[0];
+      const char* spelling =
+          TargetSymbolName(target->symbol, name, sizeof(name));
+      bool plt = compiler->pic &&
+                 !StorageIs(target->symbol->storage, STO(static));
+      ProgramBranch(module, "bl",
+                    AARCH64EncodeUnconditionalBranchImmediate(0, true),
+                    kAARCH64FixupBranch26,
+                    plt ? R_AARCH64_CALL_PLT : R_AARCH64_CALL26, spelling,
+                    plt);
+      return;
+    }
+    case AARCH64_OP(b): {
+      TargetInstruction* condition = inst->operand[0];
+      TargetInstruction* target = inst->operand[1];
+      String name = {0};
+      ProgramLabelName(&name, function, target);
+      AARCH64AsmCondition cond = ProgramCondition(condition);
+      if (cond == AARCH64_ASM_COND_AL) {
+        ProgramBranch(module, "b",
+                      AARCH64EncodeUnconditionalBranchImmediate(0, false),
+                      kAARCH64FixupBranch26, R_AARCH64_JUMP26, name.value,
+                      target->opcode == (TargetOpcode)AARCH64_OP(symbol) &&
+                          compiler->pic);
+      } else {
+        char mnemonic[16];
+        snprintf(mnemonic, sizeof(mnemonic), "b.%s",
+                 AARCH64OpcodeName(condition->opcode));
+        ProgramBranch(module, mnemonic,
+                      AARCH64EncodeConditionalBranch(0, cond, false),
+                      kAARCH64FixupBranch19, R_AARCH64_CONDBR19, name.value,
+                      false);
+      }
+      StringDestruct(&name);
+      return;
+    }
+    case AARCH64_OP(cbz):
+    case AARCH64_OP(cbnz): {
+      int reg = ProgramRegNum(inst->operand[0]);
+      bool width = ProgramIs64(inst);
+      String name = {0};
+      ProgramLabelName(&name, function, inst->operand[1]);
+      bool nonzero = inst->opcode == (TargetOpcode)AARCH64_OP(cbnz);
+      ProgramRegisterBranch(
+          module, nonzero ? "cbnz" : "cbz",
+          AARCH64EncodeCompareBranch(width, nonzero, reg),
+          kAARCH64FixupBranch19, R_AARCH64_CONDBR19, reg, width, name.value);
+      StringDestruct(&name);
+      return;
+    }
+    case AARCH64_OP(tbz):
+    case AARCH64_OP(tbnz): {
+      int reg = ProgramRegNum(inst->operand[0]);
+      int bit = (int)TargetIntValue(inst->operand[1]);
+      String name = {0};
+      ProgramLabelName(&name, function, inst->operand[2]);
+      bool nonzero = inst->opcode == (TargetOpcode)AARCH64_OP(tbnz);
+      char prefix[64];
+      snprintf(prefix, sizeof(prefix), "%s %c%d, #%d, ",
+               nonzero ? "tbnz" : "tbz",
+               ProgramIs64(inst) ? 'x' : 'w', reg, bit);
+      String text = {0};
+      StringAppend(&text, prefix);
+      StringAppend(&text, name.value);
+      AARCH64ProgramEmitFixup(
+          module, AARCH64EncodeTestBranch(bit, nonzero, reg),
+          kAARCH64FixupTestBranch14, R_AARCH64_TSTBR14, name.value, 0, false,
+          text.value);
+      StringDestruct(&text);
+      StringDestruct(&name);
+      return;
+    }
+    case AARCH64_OP(br):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeBranchRegister(
+                      0, 0, ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(blr):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeBranchRegister(
+                      1, 0, ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(ret):
+      AARCH64ProgramEmitWord(module, AARCH64EncodeReturn(30));
+      return;
+    case AARCH64_OP(add):
+      ProgramEmitAddSub(inst, module, false, false, false);
+      return;
+    case AARCH64_OP(adds):
+      ProgramEmitAddSub(inst, module, false, true, false);
+      return;
+    case AARCH64_OP(sub):
+      ProgramEmitAddSub(inst, module, true, false, false);
+      return;
+    case AARCH64_OP(subs):
+      ProgramEmitAddSub(inst, module, true, true, false);
+      return;
+    case AARCH64_OP(cmp):
+      ProgramEmitAddSub(inst, module, true, true, true);
+      return;
+    case AARCH64_OP(cmn):
+      ProgramEmitAddSub(inst, module, false, true, true);
+      return;
+    case AARCH64_OP(adc):
+    case AARCH64_OP(adcs):
+    case AARCH64_OP(sbc):
+    case AARCH64_OP(sbcs): {
+      int rd, rn, rm;
+      if (!ProgramBinaryRegisters(inst, &rd, &rn, &rm)) {
+        ProgramUnsupportedInstruction(inst, module);
+        return;
+      }
+      AARCH64AsmRegister dr = {
+          .num = rd,
+          .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+      };
+      AARCH64AsmRegister nr = dr;
+      nr.num = rn;
+      AARCH64AsmRegister mr = dr;
+      mr.num = rm;
+      bool subtract = inst->opcode == (TargetOpcode)AARCH64_OP(sbc) ||
+                      inst->opcode == (TargetOpcode)AARCH64_OP(sbcs);
+      bool flags = inst->opcode == (TargetOpcode)AARCH64_OP(adcs) ||
+                   inst->opcode == (TargetOpcode)AARCH64_OP(sbcs);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubWithCarry(&dr, &nr, &mr, subtract,
+                                               flags));
+      return;
+    }
+    case AARCH64_OP(and):
+      ProgramEmitLogical(inst, module, 0, false, false);
+      return;
+    case AARCH64_OP(bic):
+      ProgramEmitLogical(inst, module, 0, true, false);
+      return;
+    case AARCH64_OP(orr):
+      ProgramEmitLogical(inst, module, 1, false, false);
+      return;
+    case AARCH64_OP(orn):
+      ProgramEmitLogical(inst, module, 1, true, false);
+      return;
+    case AARCH64_OP(eor):
+      ProgramEmitLogical(inst, module, 2, false, false);
+      return;
+    case AARCH64_OP(eon):
+      ProgramEmitLogical(inst, module, 2, true, false);
+      return;
+    case AARCH64_OP(ands):
+      ProgramEmitLogical(inst, module, 3, false, false);
+      return;
+    case AARCH64_OP(bics):
+      ProgramEmitLogical(inst, module, 3, true, false);
+      return;
+    case AARCH64_OP(tst):
+      ProgramEmitLogical(inst, module, 3, false, true);
+      return;
+    case AARCH64_OP(mvn):
+    case AARCH64_OP(not): {
+      AARCH64AsmRegister rd = {
+          .num = dest,
+          .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+      };
+      AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+      AARCH64AsmOperand rm = {
+          .type = AARCH64_ASM_OPERAND_REGISTER,
+          .reg = {.num = ProgramRegNum(inst->operand[0]), .kind = rd.kind},
+      };
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeLogicalShiftedRegister(&rd, &zr, &rm, is_64bit, 1, 1));
+      return;
+    }
+    case AARCH64_OP(mul):
+    case AARCH64_OP(mneg): {
+      int rd, rn, rm;
+      ProgramBinaryRegisters(inst, &rd, &rn, &rm);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDataProcessing3Source(
+                      is_64bit, 0,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(mneg), rd, rn,
+                      rm, 31));
+      return;
+    }
+    case AARCH64_OP(madd):
+    case AARCH64_OP(msub): {
+      int rd = dest;
+      int rn = ProgramRegNum(inst->operand[0]);
+      int rm = ProgramRegNum(inst->operand[1]);
+      int ra = ProgramRegNum(inst->operand[2]);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDataProcessing3Source(
+                      is_64bit, 0,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(msub), rd, rn,
+                      rm, ra));
+      return;
+    }
+    case AARCH64_OP(sdiv):
+    case AARCH64_OP(udiv): {
+      int rd, rn, rm;
+      ProgramBinaryRegisters(inst, &rd, &rn, &rm);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDivide(
+                      is_64bit,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(udiv), rd, rn,
+                      rm));
+      return;
+    }
+    case AARCH64_OP(lslv):
+    case AARCH64_OP(lsrv):
+    case AARCH64_OP(asrv):
+    case AARCH64_OP(rorv): {
+      int rd, rn, rm;
+      ProgramBinaryRegisters(inst, &rd, &rn, &rm);
+      int shift = inst->opcode == (TargetOpcode)AARCH64_OP(lslv)
+                      ? 8
+                      : inst->opcode == (TargetOpcode)AARCH64_OP(lsrv)
+                            ? 9
+                            : inst->opcode == (TargetOpcode)AARCH64_OP(asrv)
+                                  ? 10
+                                  : 11;
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeVariableShift(is_64bit, shift, rd, rn, rm));
+      return;
+    }
+    case AARCH64_OP(smulh):
+    case AARCH64_OP(umulh): {
+      int rd, rn, rm;
+      ProgramBinaryRegisters(inst, &rd, &rn, &rm);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeHighMultiply(
+                      inst->opcode == (TargetOpcode)AARCH64_OP(umulh), rd, rn,
+                      rm));
+      return;
+    }
+    case AARCH64_OP(smull):
+    case AARCH64_OP(smnegl):
+    case AARCH64_OP(umull):
+    case AARCH64_OP(umnegl): {
+      int rd, rn, rm;
+      ProgramBinaryRegisters(inst, &rd, &rn, &rm);
+      bool unsigned_multiply =
+          inst->opcode == (TargetOpcode)AARCH64_OP(umull) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(umnegl);
+      bool negate = inst->opcode == (TargetOpcode)AARCH64_OP(smnegl) ||
+                    inst->opcode == (TargetOpcode)AARCH64_OP(umnegl);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDataProcessing3Source(
+                      true, unsigned_multiply ? 5 : 1, negate, rd, rn, rm,
+                      31));
+      return;
+    }
+    case AARCH64_OP(smaddl):
+    case AARCH64_OP(smsubl):
+    case AARCH64_OP(umaddl):
+    case AARCH64_OP(umsubl): {
+      bool unsigned_multiply =
+          inst->opcode == (TargetOpcode)AARCH64_OP(umaddl) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(umsubl);
+      bool subtract = inst->opcode == (TargetOpcode)AARCH64_OP(smsubl) ||
+                      inst->opcode == (TargetOpcode)AARCH64_OP(umsubl);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDataProcessing3Source(
+                      true, unsigned_multiply ? 5 : 1, subtract, dest,
+                      ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1]),
+                      ProgramRegNum(inst->operand[2])));
+      return;
+    }
+    case AARCH64_OP(neg):
+    case AARCH64_OP(negs): {
+      AARCH64AsmRegister rd = {
+          .num = dest,
+          .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+      };
+      AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+      AARCH64AsmOperand rm = {
+          .type = AARCH64_ASM_OPERAND_REGISTER,
+          .reg = {.num = ProgramRegNum(inst->operand[0]), .kind = rd.kind},
+      };
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubShiftedRegister(
+                      &rd, &zr, &rm, true,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(negs)));
+      return;
+    }
+    case AARCH64_OP(ngc):
+    case AARCH64_OP(ngcs): {
+      AARCH64AsmRegister rd = {
+          .num = dest,
+          .kind = is_64bit ? AARCH64_ASM_REG_X : AARCH64_ASM_REG_W,
+      };
+      AARCH64AsmRegister zr = AARCH64AsmZeroRegister(rd.kind);
+      AARCH64AsmRegister rm = rd;
+      rm.num = ProgramRegNum(inst->operand[0]);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAddSubWithCarry(
+                      &rd, &zr, &rm, true,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ngcs)));
+      return;
+    }
+    case AARCH64_OP(lsl):
+    case AARCH64_OP(lsr):
+    case AARCH64_OP(asr): {
+      int source = ProgramRegNum(inst->operand[0]);
+      int shift = (int)TargetIntValue(inst->operand[1]);
+      int maximum = is_64bit ? 63 : 31;
+      int opc = inst->opcode == (TargetOpcode)AARCH64_OP(asr) ? 0 : 2;
+      int immr = inst->opcode == (TargetOpcode)AARCH64_OP(lsl)
+                     ? (maximum + 1 - shift) % (maximum + 1)
+                     : shift;
+      int imms = inst->opcode == (TargetOpcode)AARCH64_OP(lsl)
+                     ? maximum - shift
+                     : maximum;
+      AARCH64ProgramEmitWord(
+          module,
+          AARCH64EncodeBitfield(is_64bit, opc, dest, source, immr, imms));
+      return;
+    }
+    case AARCH64_OP(ror):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExtract(is_64bit, dest,
+                                       ProgramRegNum(inst->operand[0]),
+                                       ProgramRegNum(inst->operand[0]),
+                                       (int)TargetIntValue(inst->operand[1])));
+      return;
+    case AARCH64_OP(rbit):
+    case AARCH64_OP(rev16):
+    case AARCH64_OP(rev32):
+    case AARCH64_OP(rev):
+    case AARCH64_OP(clz):
+    case AARCH64_OP(cls): {
+      int operation =
+          inst->opcode == (TargetOpcode)AARCH64_OP(rbit)
+              ? 0
+              : inst->opcode == (TargetOpcode)AARCH64_OP(rev16)
+                    ? 1
+                    : inst->opcode == (TargetOpcode)AARCH64_OP(rev32)
+                          ? 2
+                          : inst->opcode == (TargetOpcode)AARCH64_OP(rev)
+                                ? 3
+                                : inst->opcode == (TargetOpcode)AARCH64_OP(clz)
+                                      ? 4
+                                      : 5;
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeDataProcessing1Source(
+                      is_64bit, operation, dest,
+                      ProgramRegNum(inst->operand[0])));
+      return;
+    }
+    case AARCH64_OP(extr):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExtract(
+                      is_64bit, dest, ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1]),
+                      (int)TargetIntValue(inst->operand[2])));
+      return;
+    case AARCH64_OP(bfi):
+    case AARCH64_OP(bfxil):
+    case AARCH64_OP(sbfiz):
+    case AARCH64_OP(ubfiz):
+    case AARCH64_OP(sbfx):
+    case AARCH64_OP(ubfx): {
+      int lsb = (int)TargetIntValue(inst->operand[1]);
+      int width = (int)TargetIntValue(inst->operand[2]);
+      int modulus = is_64bit ? 64 : 32;
+      bool insert =
+          inst->opcode == (TargetOpcode)AARCH64_OP(bfi) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(sbfiz) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(ubfiz);
+      int opc = inst->opcode == (TargetOpcode)AARCH64_OP(bfi) ||
+                        inst->opcode == (TargetOpcode)AARCH64_OP(bfxil)
+                    ? 1
+                    : inst->opcode == (TargetOpcode)AARCH64_OP(sbfiz) ||
+                              inst->opcode == (TargetOpcode)AARCH64_OP(sbfx)
+                          ? 0
+                          : 2;
+      int immr = insert ? (modulus - lsb) & (modulus - 1) : lsb;
+      int imms = insert ? width - 1 : lsb + width - 1;
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeBitfield(
+                      is_64bit, opc, dest,
+                      ProgramRegNum(inst->operand[0]), immr, imms));
+      return;
+    }
+    case AARCH64_OP(sbxt):
+    case AARCH64_OP(sbxtb):
+    case AARCH64_OP(sbxth):
+    case AARCH64_OP(sxtb):
+    case AARCH64_OP(sxth):
+    case AARCH64_OP(sxtw):
+    case AARCH64_OP(ubxtb):
+    case AARCH64_OP(ubxth): {
+      int imms =
+          inst->opcode == (TargetOpcode)AARCH64_OP(sbxtb) ||
+                  inst->opcode == (TargetOpcode)AARCH64_OP(sxtb) ||
+                  inst->opcode == (TargetOpcode)AARCH64_OP(ubxtb)
+              ? 7
+              : inst->opcode == (TargetOpcode)AARCH64_OP(sbxth) ||
+                        inst->opcode == (TargetOpcode)AARCH64_OP(sxth) ||
+                        inst->opcode == (TargetOpcode)AARCH64_OP(ubxth)
+                    ? 15
+                    : 31;
+      bool zero = inst->opcode == (TargetOpcode)AARCH64_OP(ubxtb) ||
+                  inst->opcode == (TargetOpcode)AARCH64_OP(ubxth);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeBitfield(
+                      is_64bit, zero ? 2 : 0, dest,
+                      ProgramRegNum(inst->operand[0]), 0, imms));
+      return;
+    }
+    case AARCH64_OP(ubxt):
+      ProgramMoveRegister(module, dest, ProgramRegNum(inst->operand[0]),
+                          is_64bit, false);
+      return;
+    default:
+      break;
+  }
+
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(ldr):
+    case AARCH64_OP(ldur):
+    case AARCH64_OP(ldrb):
+    case AARCH64_OP(ldrh):
+    case AARCH64_OP(ldurb):
+    case AARCH64_OP(ldurh):
+    case AARCH64_OP(ldrsb):
+    case AARCH64_OP(ldrsh):
+    case AARCH64_OP(ldursb):
+    case AARCH64_OP(ldursh):
+    case AARCH64_OP(ldursw):
+    case AARCH64_OP(fldr): {
+      AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+      int size = op == AARCH64_OP(ldrb) || op == AARCH64_OP(ldurb) ||
+                         op == AARCH64_OP(ldrsb) ||
+                         op == AARCH64_OP(ldursb)
+                     ? 0
+                     : op == AARCH64_OP(ldrh) || op == AARCH64_OP(ldurh) ||
+                               op == AARCH64_OP(ldrsh) ||
+                               op == AARCH64_OP(ldursh)
+                           ? 1
+                           : op == AARCH64_OP(ldursw)
+                                 ? 2
+                                 : ProgramIs64(inst) ? 3 : 2;
+      bool sign = op == AARCH64_OP(ldrsb) || op == AARCH64_OP(ldrsh) ||
+                  op == AARCH64_OP(ldursb) || op == AARCH64_OP(ldursh) ||
+                  op == AARCH64_OP(ldursw);
+      int offset = TargetIsConst(inst->operand[1])
+                       ? (int)TargetIntValue(inst->operand[1])
+                       : 0;
+      ProgramLoadStore(module, true, op == AARCH64_OP(fldr), size, sign, dest,
+                       ProgramRegNum(inst->operand[0]), offset);
+      return;
+    }
+    case AARCH64_OP(str):
+    case AARCH64_OP(stur):
+    case AARCH64_OP(strb):
+    case AARCH64_OP(strh):
+    case AARCH64_OP(sturb):
+    case AARCH64_OP(sturh):
+    case AARCH64_OP(fstr): {
+      AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+      int size = op == AARCH64_OP(strb) || op == AARCH64_OP(sturb)
+                     ? 0
+                     : op == AARCH64_OP(strh) || op == AARCH64_OP(sturh)
+                           ? 1
+                           : ProgramIs64(inst) ? 3 : 2;
+      int offset = TargetIsConst(inst->operand[2])
+                       ? (int)TargetIntValue(inst->operand[2])
+                       : 0;
+      ProgramLoadStore(module, false, op == AARCH64_OP(fstr), size, false,
+                       ProgramRegNum(inst->operand[0]),
+                       ProgramRegNum(inst->operand[1]), offset);
+      return;
+    }
+    case AARCH64_OP(cset):
+    case AARCH64_OP(csetm): {
+      AARCH64AsmCondition condition =
+          ProgramInvertCondition(ProgramCondition(inst->operand[0]));
+      int op = inst->opcode == (TargetOpcode)AARCH64_OP(csetm);
+      int op2 = inst->opcode == (TargetOpcode)AARCH64_OP(cset);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeConditionalSelect(is_64bit, op, op2, dest, 31,
+                                                  31, condition));
+      return;
+    }
+    case AARCH64_OP(csel):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeConditionalSelect(
+                      is_64bit, 0, 0, dest, ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1]),
+                      ProgramCondition(inst->operand[2])));
+      return;
+    case AARCH64_OP(csinc):
+    case AARCH64_OP(csinv):
+    case AARCH64_OP(csneg):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeConditionalSelect(
+                      is_64bit,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(csinc) ? 0 : 1,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(csinv) ? 0 : 1,
+                      dest, ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1]),
+                      ProgramCondition(inst->operand[2])));
+      return;
+    case AARCH64_OP(cinc):
+    case AARCH64_OP(cinv):
+    case AARCH64_OP(cneg): {
+      int op = inst->opcode == (TargetOpcode)AARCH64_OP(cinc) ? 0 : 1;
+      int op2 = inst->opcode == (TargetOpcode)AARCH64_OP(cinv) ? 0 : 1;
+      int source = ProgramRegNum(inst->operand[0]);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeConditionalSelect(
+                      is_64bit, op, op2, dest, source, source,
+                      ProgramInvertCondition(
+                          ProgramCondition(inst->operand[1]))));
+      return;
+    }
+    case AARCH64_OP(ccmn):
+    case AARCH64_OP(ccmp): {
+      bool immediate = TargetIsConst(inst->operand[1]);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeConditionalCompare(
+                      ProgramIs64(inst->operand[0]),
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ccmp),
+                      immediate, ProgramRegNum(inst->operand[0]),
+                      immediate ? (int)TargetIntValue(inst->operand[1])
+                                : ProgramRegNum(inst->operand[1]),
+                      (int)TargetIntValue(inst->operand[2]),
+                      ProgramCondition(inst->operand[3])));
+      return;
+    }
+    case AARCH64_OP(adr):
+    case AARCH64_OP(adrp): {
+      if (TargetIsConst(inst->operand[0])) {
+        int64_t offset = TargetIntValue(inst->operand[0]);
+        uint32_t word = ((uint32_t)(inst->opcode ==
+                                    (TargetOpcode)AARCH64_OP(adrp))
+                         << 31) |
+                        (0x10u << 24) | (uint32_t)dest;
+        if (inst->opcode == (TargetOpcode)AARCH64_OP(adr)) {
+          uint32_t immediate = (uint32_t)offset & 0x1fffffu;
+          word |= ((immediate & 3u) << 29) |
+                  (((immediate >> 2) & 0x7ffffu) << 5);
+        }
+        AARCH64ProgramEmitWord(module, word);
+      } else {
+        String name = {0};
+        ProgramLabelName(&name, function, inst->operand[0]);
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "%s x%d, ",
+                 inst->opcode == (TargetOpcode)AARCH64_OP(adrp) ? "adrp"
+                                                                : "adr",
+                 dest);
+        String text = {0};
+        StringAppend(&text, prefix);
+        StringAppend(&text, name.value);
+        AARCH64ProgramEmitFixup(
+            module,
+            ((uint32_t)(inst->opcode == (TargetOpcode)AARCH64_OP(adrp))
+             << 31) |
+                (0x10u << 24) | (uint32_t)dest,
+            inst->opcode == (TargetOpcode)AARCH64_OP(adrp)
+                ? kAARCH64FixupADRP21
+                : kAARCH64FixupADR21,
+            inst->opcode == (TargetOpcode)AARCH64_OP(adrp)
+                ? R_AARCH64_ADR_PREL_PG_HI21
+                : R_AARCH64_ADR_PREL_LO21,
+            name.value, 0, inst->opcode == (TargetOpcode)AARCH64_OP(adrp),
+            text.value);
+        StringDestruct(&text);
+        StringDestruct(&name);
+      }
+      return;
+    }
+    case AARCH64_OP(gotaddr): {
+      String name = {0};
+      ProgramLabelName(&name, function, inst->operand[0]);
+      char prefix[64];
+      snprintf(prefix, sizeof(prefix), "adrp x%d, :got:", dest);
+      String text = {0};
+      StringAppend(&text, prefix);
+      StringAppend(&text, name.value);
+      AARCH64ProgramEmitFixup(
+          module, (1u << 31) | (0x10u << 24) | (uint32_t)dest,
+          kAARCH64FixupRelocationOnly, R_AARCH64_ADR_GOT_PAGE, name.value, 0,
+          true, text.value);
+      StringClear(&text);
+      snprintf(prefix, sizeof(prefix), "ldr x%d, [x%d, :got_lo12:", dest,
+               dest);
+      StringAppend(&text, prefix);
+      StringAppend(&text, name.value);
+      StringAppendChar(&text, ']');
+      AARCH64ProgramEmitFixup(
+          module,
+          AARCH64EncodeLoadStoreUnsigned(3, false, 1, dest, dest, 0),
+          kAARCH64FixupRelocationOnly, R_AARCH64_LD64_GOT_LO12_NC, name.value,
+          0, true, text.value);
+      StringDestruct(&text);
+      StringDestruct(&name);
+      return;
+    }
+    case AARCH64_OP(spill): {
+      int offset = (int)TargetIntValue(inst->operand[1]) +
+                   emitter->first_spill_offset;
+      ProgramSpillAddress(module, offset);
+      ProgramLoadStore(module, false, ProgramRegIsFP(inst), 3, false, dest, 16,
+                       0);
+      return;
+    }
+    case AARCH64_OP(reload): {
+      TargetInstruction* spill = inst->operand[0];
+      int offset = (int)TargetIntValue(spill->operand[1]) +
+                   emitter->first_spill_offset;
+      ProgramSpillAddress(module, offset);
+      ProgramLoadStore(module, true, ProgramRegIsFP(inst), 3, false, dest, 16,
+                       0);
+      return;
+    }
+    case AARCH64_OP(atomic_load):
+    case AARCH64_OP(atomic_store):
+    case AARCH64_OP(atomic_fetch_add):
+    case AARCH64_OP(atomic_fetch_sub):
+    case AARCH64_OP(atomic_add_fetch):
+    case AARCH64_OP(atomic_sub_fetch):
+    case AARCH64_OP(atomic_compare_exchange_bool):
+    case AARCH64_OP(atomic_compare_exchange_val):
+    case AARCH64_OP(atomic_compare_exchange_n):
+    case AARCH64_OP(atomic_fence):
+      ProgramEmitAtomic(emitter, inst, function, module);
+      return;
+    case AARCH64_OP(nop):
+      AARCH64ProgramEmitWord(module, 0xd503201fu);
+      return;
+    case AARCH64_OP(ldxr):
+    case AARCH64_OP(ldaxr):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExclusiveLoad(
+                      is_64bit ? 3 : 2,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ldaxr), dest,
+                      ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(stxr):
+    case AARCH64_OP(stlxr):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeExclusiveStore(
+                      ProgramIs64(inst->operand[1]) ? 3 : 2,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(stlxr),
+                      ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1]),
+                      ProgramRegNum(inst->operand[2])));
+      return;
+    case AARCH64_OP(ldar):
+    case AARCH64_OP(stlr):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeAcquireRelease(
+                      is_64bit ? 3 : 2,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ldar),
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ldar)
+                          ? dest
+                          : ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[inst->opcode ==
+                                                         (TargetOpcode)
+                                                             AARCH64_OP(ldar)
+                                                     ? 0
+                                                     : 1])));
+      return;
+    case AARCH64_OP(dmb):
+      AARCH64ProgramEmitWord(module, AARCH64EncodeDmb(11));
+      return;
+    case AARCH64_OP(clrex):
+      AARCH64ProgramEmitWord(module, 0xd5033f5fu);
+      return;
+    default:
+      break;
+  }
+
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(fadd):
+    case AARCH64_OP(fsub):
+    case AARCH64_OP(fmul):
+    case AARCH64_OP(fdiv):
+    case AARCH64_OP(fmin):
+    case AARCH64_OP(fmax): {
+      int opcode = inst->opcode == (TargetOpcode)AARCH64_OP(fadd)
+                       ? 0xa
+                       : inst->opcode == (TargetOpcode)AARCH64_OP(fsub)
+                             ? 0xe
+                             : inst->opcode == (TargetOpcode)AARCH64_OP(fmul)
+                                   ? 2
+                                   : inst->opcode ==
+                                             (TargetOpcode)AARCH64_OP(fdiv)
+                                         ? 6
+                                         : inst->opcode ==
+                                                   (TargetOpcode)AARCH64_OP(fmin)
+                                               ? 0x16
+                                               : 0x12;
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPDataProcessing2(
+                      is_64bit, opcode, dest,
+                      ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1])));
+      return;
+    }
+    case AARCH64_OP(fsqrt):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPSqrt(is_64bit, dest,
+                                      ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(fmov):
+      if (ProgramRegIsFP(inst) == ProgramRegIsFP(inst->operand[0])) {
+        ProgramMoveRegister(module, dest, ProgramRegNum(inst->operand[0]),
+                            is_64bit, true);
+      } else {
+        AARCH64ProgramEmitWord(
+            module, AARCH64EncodeFPBitcast(
+                        ProgramRegIsFP(inst), is_64bit, dest,
+                        ProgramRegNum(inst->operand[0])));
+      }
+      return;
+    case AARCH64_OP(fneg):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPNegate(is_64bit, dest,
+                                        ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(fcmp):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPCompare(
+                      is_64bit,
+                      ProgramRegNum(inst->operand[0]),
+                      ProgramRegNum(inst->operand[1])));
+      return;
+    case AARCH64_OP(fcvtsd):
+    case AARCH64_OP(fcvtds):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPConvertPrecision(
+                      inst->opcode == (TargetOpcode)AARCH64_OP(fcvtds),
+                      inst->opcode == (TargetOpcode)AARCH64_OP(fcvtsd), dest,
+                      ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(scvtf):
+    case AARCH64_OP(ucvtf):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeIntToFP(
+                      ProgramIs64(inst->operand[0]), is_64bit,
+                      inst->opcode == (TargetOpcode)AARCH64_OP(ucvtf), dest,
+                      ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(fcvtns):
+    case AARCH64_OP(fcvtnu):
+    case AARCH64_OP(fcvtzs):
+    case AARCH64_OP(fcvtzu):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPToInt(
+                      inst->opcode == (TargetOpcode)AARCH64_OP(fcvtzs) ||
+                              inst->opcode == (TargetOpcode)AARCH64_OP(fcvtzu)
+                          ? 0x1e380000u
+                          : 0x1e200000u,
+                      is_64bit, ProgramIs64(inst->operand[0]),
+                      inst->opcode == (TargetOpcode)AARCH64_OP(fcvtnu) ||
+                          inst->opcode == (TargetOpcode)AARCH64_OP(fcvtzu),
+                      dest, ProgramRegNum(inst->operand[0])));
+      return;
+    case AARCH64_OP(fcvt):
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeFPBitcast(
+                      ProgramRegIsFP(inst), is_64bit, dest,
+                      ProgramRegNum(inst->operand[0])));
+      return;
+    default:
+      ProgramUnsupportedInstruction(inst, module);
+      return;
+  }
+}
+
 void AARCH64EmitterInit(AARCH64Emitter* emitter, AARCH64Generator* g) {
   emitter->g = g;
   emitter->regs = &g->register_allocator;
@@ -1625,7 +3373,6 @@ void AARCH64EmitterInit(AARCH64Emitter* emitter, AARCH64Generator* g) {
   emitter->spill_region_size = g->register_allocator.max_spilled_region_size;
   emitter->first_spill_offset = 0;
   emitter->current_block = NULL;
-  emitter->object_module = NULL;
 }
 
 AARCH64Emitter* NewAARCH64Emitter(AARCH64Generator* rv) {
@@ -1736,6 +3483,40 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
   DaveEHPrintEHFrameFDE(fp, &info, "");
 }
 
+static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
+                                  const char* function) {
+  if (emitter->g->base.varargs) {
+    return;
+  }
+  DaveEHLSDARange ranges[64];
+  DaveEHFrameSavedReg saved_regs[AARCH64_NUM_INT_REGS];
+  size_t range_count = 0;
+  size_t saved_count =
+      AARCH64SavedCFIRegisters(emitter, saved_regs,
+                               sizeof(saved_regs) / sizeof(saved_regs[0]));
+  AARCH64FillLSDAInfo(emitter, function, ranges, &range_count);
+  DaveEHFrameEmitInfo info = {
+      .ranges = ranges,
+      .range_count = range_count,
+      .func_name = function,
+      .has_frame = !EmptyStackFrame(emitter),
+      .is_64bit = true,
+      .cie_ra_reg = 30,
+      .cie_cfa_reg = 31,
+      .cie_fp_reg = 29,
+      .entry_cfa_offset = 0,
+      .frame_cfa_offset = 16,
+      .fp_cfa_offset = 16,
+      .saved_fp_offset = -16,
+      .saved_ra_offset = -8,
+      .saved_regs = saved_regs,
+      .saved_reg_count = saved_count,
+  };
+  DaveEHEmitGCCExceptTable(module, &info);
+  DaveEHEmitEHFrameCIE(module, &info, "");
+  DaveEHEmitEHFrameFDE(module, &info, "");
+}
+
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
   if (emitter->g->base.is_weak) {
@@ -1762,48 +3543,38 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   AARCH64PrintEHMetadata(emitter, fp, func_name);
 }
 
-void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out,
-                         AARCH64ObjectModule* object_module) {
-  emitter->object_module = object_module;
-  if (object_module == NULL || !AARCH64CanDirectEncodeFunction(emitter->g)) {
-    AARCH64PrintFunction(emitter, text_out);
-    if (object_module != NULL) {
-      AARCH64ObjectModuleEndFunction(object_module);
-    }
-    emitter->object_module = NULL;
-    return;
-  }
-
-  const char* func_name = emitter->g->base.function_name.value;
-  if (emitter->g->base.is_weak) {
-    fprintf(text_out, "\t.weak %s\n", func_name);
-  } else if (emitter->g->base.is_global) {
-    fprintf(text_out, "\t.global %s\n", func_name);
-  } else {
-    fprintf(text_out, "\t.local  %s\n", func_name);
-  }
-  fprintf(text_out, "\t.type %s, @function\n\n", func_name);
-  fprintf(text_out, "%s:\n", func_name);
+void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
+  const char* function = emitter->g->base.function_name.value;
+  AsmModuleSymbol(module, function, SYM_TYPE(func),
+                  emitter->g->base.is_weak
+                      ? SYM_BIND(weak)
+                      : emitter->g->base.is_global ? SYM_BIND(global)
+                                                   : SYM_BIND(local),
+                  0, 4, false, true, false);
+  AsmModuleLabel(module, function);
   if (compiler->pic && emitter->g->base.is_global &&
-      strcmp(func_name, "main") != 0) {
-    fprintf(text_out, "\t.word 0xD503241F  // bti c\n");
+      strcmp(function, "main") != 0) {
+    AsmModuleComment(module, "bti c");
+    AARCH64ProgramEmitWord(module, 0xd503241fu);
   }
-  AARCH64ObjectModuleEndFunction(object_module);
-  if (!AARCH64ObjectModuleAppendFunction(object_module, emitter->g)) {
-    emitter->object_module = NULL;
-    return;
+  for (TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
+       inst != NULL && !module->failed; inst = TargetNext(inst)) {
+    ProgramEmitInstruction(emitter, inst, function, module);
   }
+  String end = {0};
+  ProgramNamedFunctionLabel(&end, ".func_end_", function, "");
+  AsmModuleLabel(module, end.value);
+  AsmExpr size;
+  AsmExprInitDifference(&size, end.value, function, 0);
+  AsmModuleSymbolSize(module, function, &size);
+  AsmExprDestruct(&size);
+  StringDestruct(&end);
 
-  FILE* suffix = AARCH64ObjectModuleAssemblyStream(object_module);
-  if (suffix == NULL) {
-    emitter->object_module = NULL;
-    return;
-  }
-  fprintf(suffix, ".func_end_%s:\n", func_name);
-  fprintf(suffix, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
-          func_name);
-  AARCH64ObjectModuleEndFunction(object_module);
-  emitter->object_module = NULL;
+  AARCH64EmitEHMetadata(emitter, module, function);
+}
+
+void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out) {
+  AARCH64PrintFunction(emitter, text_out);
 }
 
 void AARCH64PrintCXXAdjustorThunks(FILE* fp) {
@@ -1834,6 +3605,47 @@ void AARCH64PrintCXXAdjustorThunks(FILE* fp) {
     fprintf(fp, ".func_end_%s:\n", thunk_name);
     fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
             thunk_name);
+  }
+}
+
+void AARCH64EmitCXXAdjustorThunksToModule(AsmModule* module) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  AsmModuleSection(module, ".text", SHT(progbits),
+                   SHF(alloc) | SHF(execinstr), 4);
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk =
+        compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[1], target_buf[1];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    AsmModuleSymbol(module, thunk_name, SYM_TYPE(func), SYM_BIND(weak), 0, 4,
+                    false, true, false);
+    AsmModuleLabel(module, thunk_name);
+    if (thunk->this_adjustment != 0) {
+      ProgramAddSubImmediate(module, 0, 0, true,
+                             thunk->this_adjustment > 0,
+                             thunk->this_adjustment > 0
+                                 ? thunk->this_adjustment
+                                 : -thunk->this_adjustment);
+    }
+    ProgramBranch(module, "b",
+                  AARCH64EncodeUnconditionalBranchImmediate(0, false),
+                  kAARCH64FixupBranch26, R_AARCH64_JUMP26, target_name, true);
+    String end = {0};
+    ProgramNamedFunctionLabel(&end, ".func_end_", thunk_name, "");
+    AsmModuleLabel(module, end.value);
+    AsmExpr size;
+    AsmExprInitDifference(&size, end.value, thunk_name, 0);
+    AsmModuleSymbolSize(module, thunk_name, &size);
+    AsmExprDestruct(&size);
+    StringDestruct(&end);
   }
 }
 

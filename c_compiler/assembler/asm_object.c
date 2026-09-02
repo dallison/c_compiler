@@ -322,6 +322,9 @@ void AsmObjectAlignCurrentSection(AsmObject* object, int alignment) {
   }
   AssemblerSection* sect =
       object->sections.value.p[object->current_section];
+  if (alignment > sect->alignment) {
+    sect->alignment = alignment;
+  }
   size_t remainder = sect->address % (size_t)alignment;
   size_t next_address =
       remainder == 0 ? sect->address

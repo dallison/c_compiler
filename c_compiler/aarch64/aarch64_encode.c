@@ -4,6 +4,7 @@
 
 #include "aarch64_codegen.h"
 #include "aarch64_reg_alloc.h"
+#include "aarch64_program.h"
 #include "bitset.h"
 #include "target_generator.h"
 
@@ -110,6 +111,32 @@ void AARCH64DirectEncodeFunction(AARCH64Generator* generator,
       case AARCH64_OP(ret):
         AssemblerEmitWord(assembler, assembler->object.current_section,
                           (int32_t)AARCH64EncodeReturn(30));
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+void AARCH64DirectEncodeFunctionToModule(AARCH64Generator* generator,
+                                         AsmModule* module) {
+  assert(AARCH64CanDirectEncodeFunction(generator));
+  for (TargetInstruction* inst = TargetFirstInstruction(&generator->base);
+       inst != NULL; inst = TargetNext(inst)) {
+    if (inst->block == NULL) {
+      continue;
+    }
+    switch ((AARCH64Opcode)inst->opcode) {
+      case AARCH64_OP(movz): {
+        bool is_64bit = GetRegisterSize(inst) == kSize64Bit;
+        uint16_t immediate = (uint16_t)TargetIntValue(inst->operand[0]);
+        AARCH64ProgramEmitWord(
+            module, AARCH64EncodeMoveWide(is_64bit, 2, immediate, 0) |
+                        (uint32_t)inst->reg->num);
+        break;
+      }
+      case AARCH64_OP(ret):
+        AARCH64ProgramEmitWord(module, AARCH64EncodeReturn(30));
         break;
       default:
         break;
@@ -281,6 +308,214 @@ uint32_t AARCH64EncodeRotateRightImmediate(const AARCH64AsmRegister* rd,
 
 uint32_t AARCH64EncodeSvc(uint16_t immediate) {
   return 0xd4000001u | ((uint32_t)immediate << 5);
+}
+
+uint32_t AARCH64EncodeDataProcessing3Source(bool is_64bit, int op54, int o0,
+                                            int rd, int rn, int rm, int ra) {
+  return ((uint32_t)is_64bit << 31) | (0x1bu << 24) |
+         ((uint32_t)op54 << 21) | ((uint32_t)rm << 16) |
+         ((uint32_t)o0 << 15) | ((uint32_t)ra << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeDivide(bool is_64bit, bool unsigned_divide, int rd,
+                             int rn, int rm) {
+  return ((uint32_t)is_64bit << 31) | (0xd6u << 21) |
+         ((uint32_t)rm << 16) |
+         ((uint32_t)(unsigned_divide ? 2 : 3) << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeVariableShift(bool is_64bit, int shift_op, int rd,
+                                    int rn, int rm) {
+  return ((uint32_t)is_64bit << 31) | (0xd6u << 21) |
+         ((uint32_t)rm << 16) | ((uint32_t)shift_op << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeHighMultiply(bool unsigned_multiply, int rd, int rn,
+                                   int rm) {
+  return (1u << 31) | (0x1bu << 24) |
+         ((uint32_t)(unsigned_multiply ? 6 : 2) << 21) |
+         ((uint32_t)rm << 16) | (0x1fu << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeBitfield(bool is_64bit, int opc, int rd, int rn,
+                               int immr, int imms) {
+  return ((uint32_t)is_64bit << 31) | ((uint32_t)opc << 29) |
+         (0x26u << 23) | ((uint32_t)is_64bit << 22) |
+         (((uint32_t)immr & 0x3fu) << 16) |
+         (((uint32_t)imms & 0x3fu) << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeDataProcessing1Source(bool is_64bit, int opcode, int rd,
+                                            int rn) {
+  return ((uint32_t)is_64bit << 31) | (0x2d6u << 21) |
+         ((uint32_t)opcode << 10) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeExtract(bool is_64bit, int rd, int rn, int rm, int lsb) {
+  return ((uint32_t)is_64bit << 31) | (0x27u << 23) |
+         ((uint32_t)is_64bit << 22) | ((uint32_t)rm << 16) |
+         (((uint32_t)lsb & 0x3fu) << 10) | ((uint32_t)rn << 5) |
+         (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeCompareBranch(bool is_64bit, bool nonzero, int rt) {
+  return ((uint32_t)is_64bit << 31) | (0x1au << 25) |
+         ((uint32_t)nonzero << 24) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeTestBranch(int bit, bool nonzero, int rt) {
+  return ((uint32_t)(bit >> 5) << 31) | (0x1bu << 25) |
+         ((uint32_t)nonzero << 24) |
+         (((uint32_t)bit & 0x1fu) << 19) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeConditionalCompare(bool is_64bit, bool negative,
+                                         bool immediate, int rn, int op2,
+                                         int nzcv,
+                                         AARCH64AsmCondition cond) {
+  return ((uint32_t)is_64bit << 31) | ((uint32_t)negative << 30) |
+         (0x1d2u << 21) | ((uint32_t)op2 << 16) |
+         ((uint32_t)cond << 12) | ((uint32_t)immediate << 11) |
+         ((uint32_t)rn << 5) | ((uint32_t)nzcv & 15u);
+}
+
+uint32_t AARCH64EncodeConditionalSelect(bool is_64bit, int op, int op2,
+                                        int rd, int rn, int rm,
+                                        AARCH64AsmCondition cond) {
+  return ((uint32_t)is_64bit << 31) | ((uint32_t)op << 30) |
+         (0xd4u << 21) | ((uint32_t)rm << 16) |
+         ((uint32_t)cond << 12) | ((uint32_t)op2 << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeLoadStoreUnsigned(int size, bool fp, int opc, int rt,
+                                        int rn, int offset) {
+  int scale = 1 << size;
+  int immediate = offset / scale;
+  return ((uint32_t)size << 30) | (0x39u << 24) |
+         ((uint32_t)fp << 26) | ((uint32_t)opc << 22) |
+         ((uint32_t)immediate << 10) | ((uint32_t)rn << 5) |
+         (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeLoadStoreUnscaled(int size, bool fp, int opc, int rt,
+                                        int rn, int offset, int mode) {
+  return ((uint32_t)size << 30) | (0x7u << 27) |
+         ((uint32_t)fp << 26) | ((uint32_t)opc << 22) |
+         (((uint32_t)offset & 0x1ffu) << 12) |
+         ((uint32_t)mode << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeLoadStoreRegister(int size, int opc, int rt, int rn,
+                                        int rm, int option, bool scaled) {
+  return ((uint32_t)size << 30) | (0x7u << 27) |
+         ((uint32_t)opc << 22) | (1u << 21) |
+         ((uint32_t)rm << 16) | ((uint32_t)option << 13) |
+         ((uint32_t)scaled << 12) | (2u << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeLoadStorePair(int opc, bool fp, bool load, int mode,
+                                    int rt, int rt2, int rn, int offset) {
+  int scale = opc == 2 ? 8 : 4;
+  int immediate = offset / scale;
+  return ((uint32_t)opc << 30) | (0x28u << 24) |
+         ((uint32_t)fp << 26) | ((uint32_t)mode << 23) |
+         ((uint32_t)load << 22) |
+         (((uint32_t)immediate & 0x7fu) << 15) |
+         ((uint32_t)rt2 << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeExclusiveLoad(int size, bool acquire, int rt, int rn) {
+  return ((uint32_t)size << 30) | 0x085f7c00u |
+         (acquire ? 0x00008000u : 0) | ((uint32_t)rn << 5) |
+         (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeExclusiveStore(int size, bool release, int status,
+                                     int rt, int rn) {
+  return ((uint32_t)size << 30) | 0x08007c00u |
+         (release ? 0x00008000u : 0) | ((uint32_t)status << 16) |
+         ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeAcquireRelease(int size, bool load, int rt, int rn) {
+  uint32_t base = load ? 0x08dffc00u : 0x089ffc00u;
+  return ((uint32_t)size << 30) | base | ((uint32_t)rn << 5) |
+         (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeDmb(int option) {
+  return 0xd50330bfu | ((uint32_t)option << 8);
+}
+
+uint32_t AARCH64EncodeMrsTpidrEl0(int rt) {
+  return 0xd53bd040u | (uint32_t)rt;
+}
+
+uint32_t AARCH64EncodeFPDataProcessing2(bool is_double, int opcode, int rd,
+                                        int rn, int rm) {
+  return 0x1e200000u | ((uint32_t)is_double << 22) |
+         ((uint32_t)opcode << 10) | ((uint32_t)rm << 16) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPSqrt(bool is_double, int rd, int rn) {
+  return 0x1e21c000u | ((uint32_t)is_double << 22) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPBitcast(bool destination_is_fp, bool is_64bit, int rd,
+                                int rn) {
+  uint32_t base = destination_is_fp
+                      ? (is_64bit ? 0x9e670000u : 0x1e270000u)
+                      : (is_64bit ? 0x9e660000u : 0x1e260000u);
+  return base | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPConvertPrecision(bool source_is_double,
+                                         bool destination_is_double, int rd,
+                                         int rn) {
+  return 0x1e224000u | ((uint32_t)source_is_double << 22) |
+         ((uint32_t)destination_is_double << 15) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPToInt(uint32_t base, bool int_is_64bit,
+                              bool source_is_double, bool unsigned_convert,
+                              int rd, int rn) {
+  return base | ((uint32_t)int_is_64bit << 31) |
+         ((uint32_t)source_is_double << 22) |
+         ((uint32_t)unsigned_convert << 16) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeIntToFP(bool int_is_64bit, bool destination_is_double,
+                              bool unsigned_convert, int rd, int rn) {
+  return 0x1e220000u | ((uint32_t)int_is_64bit << 31) |
+         ((uint32_t)destination_is_double << 22) |
+         ((uint32_t)unsigned_convert << 16) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPMove(bool is_double, int rd, int rn) {
+  return 0x1e204000u | ((uint32_t)is_double << 22) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+uint32_t AARCH64EncodeFPCompare(bool is_double, int rn, int rm) {
+  return 0x1e202000u | ((uint32_t)is_double << 22) |
+         ((uint32_t)rm << 16) | ((uint32_t)rn << 5);
+}
+
+uint32_t AARCH64EncodeFPNegate(bool is_double, int rd, int rn) {
+  return 0x1e214000u | ((uint32_t)is_double << 22) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 void AARCH64EmitInstruction(AsmObject* object, uint32_t word) {

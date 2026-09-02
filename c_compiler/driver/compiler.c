@@ -4106,6 +4106,10 @@ static String* Compile(Compiler* compiler, Vector* options) {
   PruneUnreferencedCXXMetadata();
   PruneUnreferencedInlineVariables();
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);
+  if (compiler->target->emit_program_file != NULL) {
+    return compiler->target->emit_program_file(compiler, options,
+                                                output_asm_only);
+  }
   if (!output_asm_only && !compiler->keep_asm_file &&
       compiler->target->emit_object_file != NULL) {
     return compiler->target->emit_object_file(compiler, options);

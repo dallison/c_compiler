@@ -1226,17 +1226,6 @@ static void ProcessBasicBlock(RVRegisterAllocator* allocator,
 }
 
 
-// Build the preserved_instructions set, instructions that need their
-// register to be preserved across calls.  If the block contains a call
-// all outputs need to be preserved.
-static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
-  RVRegisterAllocator* allocator = data;
-  if (block->contains_call) {
-    BitSetUnionInPlace(&allocator->preserved_instructions,
-                       &block->output_ids);
-  }
-}
-
 // Variable registers are assigned a fixed physical register by index
 // (FIRST_*_REG_VAR + varnum) and are allocated lazily at their first
 // definition.  Those physical registers are drawn from the same range the
@@ -1673,6 +1662,15 @@ static void RVResolveArgumentMoves(RVRegisterAllocator* alloc) {
   }
 }
 
+static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
+  RVOpcode call_opcode = (RVOpcode)call->opcode;
+  TargetOpcode move_opcode =
+      call_opcode == RV_OP(callf) || call_opcode == RV_OP(rcallf)
+          ? (TargetOpcode)RV_OP(fmv_d)
+          : (TargetOpcode)RV_OP(mv);
+  return TargetNewInstruction1(move_opcode, call);
+}
+
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
   // t1 and t2 are required as untracked scratch registers by the atomic
   // emitter, while t2 also stages indirect call targets.  Functions without
@@ -1694,8 +1692,16 @@ void RVAllocateRegisters(RVRegisterAllocator* allocator) {
     allocator->int_regs[reg_num].base.reserved = true;
   }
 
-  TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
-                          kTraversePreOrder, allocator);
+  TargetMarkCallPreservedInstructions(&allocator->rv->base,
+                                      &allocator->preserved_instructions);
+  if (TargetMaterializePreservedCallResults(
+          &allocator->rv->base, &allocator->preserved_instructions,
+          CreateCallResultCopy)) {
+    TargetBuildBasicBlockInputsAndOutputs(&allocator->rv->base);
+    BitSetClear(&allocator->preserved_instructions);
+    TargetMarkCallPreservedInstructions(&allocator->rv->base,
+                                        &allocator->preserved_instructions);
+  }
 
   ReserveVariableRegisters(allocator);
 

@@ -13,6 +13,7 @@
 #include <inttypes.h>
 #include "ast.h"
 #include "compiler.h"
+#include "asm_module.h"
 #include "member_pointer.h"
 
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag);
@@ -50,6 +51,8 @@ void DebugBuilderInit(DebugBuilder* builder,
   VectorInit(&builder->all_dies);
   VectorInit(&builder->top_dies);
   BufferInit(&builder->bytes);
+  builder->fp = NULL;
+  builder->module = NULL;
   
   // Build DW_TAG(compile_unit) DIE
   builder->compile_unit = malloc(sizeof(DIE));
@@ -948,11 +951,49 @@ void DebugAttributeValueDelete(DebugAttributeValue* v) {
 // The builders convert a DIE tree into DWARF output format.
 
 static void FlushAccumulator(DebugBuilder* builder) {
+  if (builder->module != NULL) {
+    AsmModuleBytes(builder->module, builder->bytes.value,
+                   builder->bytes.length);
+    BufferClear(&builder->bytes);
+    return;
+  }
   FILE* fp = builder->fp;
   for (size_t i = 0; i < builder->bytes.length; i++) {
     fprintf(fp, "\t.byte 0x%02x\n", builder->bytes.value[i] & 0xff);
   }
   BufferClear(&builder->bytes);
+}
+
+static void DebugModuleInteger(DebugBuilder* builder, int width,
+                               const char* expression) {
+  AsmExpr expr;
+  const char* value = expression;
+  size_t length = strlen(value);
+  if (length >= 2 && value[0] == '(' && value[length - 1] == ')') {
+    value++;
+    length -= 2;
+  }
+  const char* minus = memchr(value, '-', length);
+  if (minus != NULL) {
+    char left[512];
+    char right[512];
+    size_t left_length = (size_t)(minus - value);
+    size_t right_length = length - left_length - 1;
+    assert(left_length < sizeof(left) && right_length < sizeof(right));
+    memcpy(left, value, left_length);
+    left[left_length] = '\0';
+    memcpy(right, minus + 1, right_length);
+    right[right_length] = '\0';
+    AsmExprInitDifference(&expr, left, right, 0);
+  } else {
+    char symbol[512];
+    assert(length < sizeof(symbol));
+    memcpy(symbol, value, length);
+    symbol[length] = '\0';
+    AsmExprInitSymbol(&expr, symbol, 0);
+  }
+  AsmModuleInteger(builder->module, width, &expr);
+  AsmExprDestruct(&expr);
 }
 
 static void WriteUnsignedLEB128(Buffer* buffer, uint64_t value) {
@@ -1014,30 +1055,55 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
       break;
     case DW_FORM(ref4):
       FlushAccumulator(builder);
-      fprintf(builder->fp, "\t.word __DW_DIE%d\n", attr->v.die->id);
+      if (builder->module != NULL) {
+        char label[64];
+        snprintf(label, sizeof(label), "__DW_DIE%d", attr->v.die->id);
+        DebugModuleInteger(builder, 4, label);
+      } else {
+        fprintf(builder->fp, "\t.word __DW_DIE%d\n", attr->v.die->id);
+      }
       break;
     case DW_FORM(flag):
       WriteByte(buffer, attr->v.flag);
       break;
     case DW_FORM(string):
       FlushAccumulator(builder);
-      fprintf(builder->fp, "\t.string \"%s\"\n", attr->v.string.value);
+      if (builder->module != NULL) {
+        AsmModuleString(builder->module, attr->v.string.value, true);
+      } else {
+        fprintf(builder->fp, "\t.string \"%s\"\n", attr->v.string.value);
+      }
       break;
     case DW_FORM(strp): {
       FlushAccumulator(builder);
       size_t offset = builder->string_table.length;
-      fprintf(builder->fp, "\t.word 0x%zx\n", offset);
+      if (builder->module != NULL) {
+        AsmExpr value;
+        AsmExprInitConstant(&value, (int64_t)offset);
+        AsmModuleInteger(builder->module, 4, &value);
+        AsmExprDestruct(&value);
+      } else {
+        fprintf(builder->fp, "\t.word 0x%zx\n", offset);
+      }
       BufferAppend(&builder->string_table, attr->v.string.value,
                    attr->v.string.length + 1);
       break;
     }
     case DW_FORM(addr):
       FlushAccumulator(builder);
-      fprintf(builder->fp, "\t.long %s\n", attr->v.string.value);
+      if (builder->module != NULL) {
+        DebugModuleInteger(builder, 8, attr->v.string.value);
+      } else {
+        fprintf(builder->fp, "\t.long %s\n", attr->v.string.value);
+      }
       break;
     case DW_FORM(high_pc):
       FlushAccumulator(builder);
-      fprintf(builder->fp, "\t.word %s\n", attr->v.string.value);
+      if (builder->module != NULL) {
+        DebugModuleInteger(builder, 4, attr->v.string.value);
+      } else {
+        fprintf(builder->fp, "\t.word %s\n", attr->v.string.value);
+      }
       break;
 default:
       assert(false);
@@ -1068,8 +1134,18 @@ void DIEAllocateAbbreviation(DebugBuilder* builder, DIE* die) {
 
 static void DIEBaseEmit(DebugBuilder* builder, DIE* die) {
   FlushAccumulator(builder);
-  fprintf(builder->fp, "__DW_DIE%d:\t\t// %s (abbrev %d)\n", die->id,
-          DW_TAGString(die->tag), die->abbrev->num);
+  if (builder->module != NULL) {
+    char label[64];
+    char comment[256];
+    snprintf(label, sizeof(label), "__DW_DIE%d", die->id);
+    snprintf(comment, sizeof(comment), "%s (abbrev %d)",
+             DW_TAGString(die->tag), die->abbrev->num);
+    AsmModuleLabel(builder->module, label);
+    AsmModuleComment(builder->module, comment);
+  } else {
+    fprintf(builder->fp, "__DW_DIE%d:\t\t// %s (abbrev %d)\n", die->id,
+            DW_TAGString(die->tag), die->abbrev->num);
+  }
   WriteUnsignedLEB128(&builder->bytes, die->abbrev->num);
   for (size_t i = 0; i < die->attr_values.length; i++) {
     DebugAttributeValueEmit(builder, die->attr_values.value.p[i]);
@@ -1602,7 +1678,12 @@ void DebugBuilderEmitAbbreviations(DebugBuilder* builder) {
     DebugAbbreviationPrint(builder->abbreviations.value.p[i], 0);
   }
 #endif
-  fprintf(builder->fp, "\n\t.section .debug_abbrev,\"\",@progbits\n");
+  if (builder->module != NULL) {
+    AsmModuleSection(builder->module, ".debug_abbrev", SHT(progbits), 0,
+                     compiler->alignment);
+  } else {
+    fprintf(builder->fp, "\n\t.section .debug_abbrev,\"\",@progbits\n");
+  }
   for (size_t i = 0; i < builder->abbreviations.length; i++) {
     DebugAbbreviationEmit(builder, builder->abbreviations.value.p[i]);
   }
@@ -1641,8 +1722,14 @@ static void CompileUnitDIEEmit(DebugBuilder* builder, DIE* die) {
 
 void DebugBuilderEmitDebugInfo(DebugBuilder* builder) {
   FlushAccumulator(builder);
-  fprintf(builder->fp, "\n\t.section .debug_info,\"\",@progbits\n");
-  fprintf(builder->fp, "\t.word .DW_info_end\n");
+  if (builder->module != NULL) {
+    AsmModuleSection(builder->module, ".debug_info", SHT(progbits), 0,
+                     compiler->alignment);
+    DebugModuleInteger(builder, 4, ".DW_info_end");
+  } else {
+    fprintf(builder->fp, "\n\t.section .debug_info,\"\",@progbits\n");
+    fprintf(builder->fp, "\t.word .DW_info_end\n");
+  }
   
   // Write out the DIEs.
   for (size_t i = 0; i < builder->top_dies.length; i++) {
@@ -1653,15 +1740,28 @@ void DebugBuilderEmitDebugInfo(DebugBuilder* builder) {
   }
   EmitEndOfChildren(builder);
   FlushAccumulator(builder);
-  fprintf(builder->fp, ".DW_info_end:\n");
+  if (builder->module != NULL) {
+    AsmModuleLabel(builder->module, ".DW_info_end");
+  } else {
+    fprintf(builder->fp, ".DW_info_end:\n");
+  }
 
   // Emit string table.
   Buffer* strtab = &builder->string_table;
-    fprintf(builder->fp, "\n\t.section .debug_str,\"MS\",@progbits\n");
+    if (builder->module != NULL) {
+      AsmModuleSection(builder->module, ".debug_str", SHT(progbits),
+                       SHF(merge) | SHF(strings), compiler->alignment);
+    } else {
+      fprintf(builder->fp, "\n\t.section .debug_str,\"MS\",@progbits\n");
+    }
     size_t index = 0;
     while (index < strtab->length) {
       // Output string and move to the end of it.
-      fprintf(builder->fp, "\t.string \"%s\"\n", &strtab->value[index]);
+      if (builder->module != NULL) {
+        AsmModuleString(builder->module, &strtab->value[index], true);
+      } else {
+        fprintf(builder->fp, "\t.string \"%s\"\n", &strtab->value[index]);
+      }
       index += strlen(&strtab->value[index]) + 1;
     }
 }

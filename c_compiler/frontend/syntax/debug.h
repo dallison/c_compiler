@@ -70,6 +70,7 @@ typedef struct DebugBuilder {
   
   // Output handler.
   FILE* fp;
+  struct AsmModule* module;
   Buffer bytes;
 } DebugBuilder;
 

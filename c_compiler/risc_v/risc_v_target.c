@@ -101,6 +101,7 @@ CompilerTarget* NewRVTarget() {
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;
+  target->emit_program_file = NULL;
   target->emit_object_file = NULL;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;

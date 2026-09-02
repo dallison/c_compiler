@@ -87,6 +87,14 @@ void TargetBasicBlockClear(struct TargetGenerator* rv, TargetBasicBlock* b);
 void TargetBuildBasicBlocks(struct TargetGenerator* rv);
 void TargetPrintBasicBlocks(TargetGenerator* rv, FILE* fp);
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* rv);
+void TargetMarkCallPreservedInstructions(TargetGenerator* rv,
+                                         BitSet* preserved);
+typedef TargetInstruction* (*TargetCreateCallResultCopyFunc)(
+    TargetInstruction* call);
+bool TargetMaterializePreservedCallResults(TargetGenerator* rv,
+                                           BitSet* preserved,
+                                           TargetCreateCallResultCopyFunc
+                                               create_copy);
 
 // TraverseMode is in basic_block.h
 

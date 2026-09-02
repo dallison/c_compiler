@@ -820,8 +820,8 @@ static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
   AssignRegister(reg, inst);
 }
 
-static COMPILER_UNUSED void AllocateForRmov(AARCH64RegisterAllocator* allocator,
-                            TargetInstruction* inst) {
+static COMPILER_UNUSED void AllocateForRmov(
+    AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
   assert(((int)inst->opcode == (int)AARCH64_OP(mv)) || ((int)inst->opcode == (int)AARCH64_OP(fmv_s)) ||
          ((int)inst->opcode == (int)AARCH64_OP(fmv_d)));
   TargetInstruction* dest = inst->operand[0];
@@ -854,7 +854,6 @@ static COMPILER_UNUSED void AllocateForRmov(AARCH64RegisterAllocator* allocator,
   inst->reg = &reg->base;
   inst->flags |= TARGET_INST_PROCESSED;
 }
-
 
 static void ReloadSpills(AARCH64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
@@ -1495,28 +1494,12 @@ static void BuildShortLivedVarRegSet(AARCH64RegisterAllocator* allocator) {
   free(info);
 }
 
-
-// Build the preserved_instructions set, instructions that need their
-// register to be preserved across calls.  If the block contains a call
-// all outputs need to be preserved.
-static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
-  AARCH64RegisterAllocator* allocator = data;
-  if (!block->contains_call) {
-    return;
-  }
-  // Preserve all outputs.
-  BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
-  // A value written into a variable register shares that register with it, and
-  // it is the variable that is asked whether a caller-saved register will do.
-  // The variable is often not read at all -- the readers name the value
-  // instead, which is how `delete p` reads the pointer twice around the
-  // destructor call -- so it has to be told about the value's live range.
-  for (size_t i = 0; i < block->outputs.length; i++) {
-    TargetInstruction* output = block->outputs.value.p[i];
-    if (output->dest != NULL) {
-      BitSetInsert(&allocator->preserved_instructions, output->dest->id);
-    }
-  }
+static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
+  TargetOpcode opcode =
+      (call->flags & AARCH64_INST_FP_RETURN) != 0
+          ? (TargetOpcode)AARCH64_OP(fmv_d)
+          : (TargetOpcode)AARCH64_OP(mv);
+  return TargetNewInstruction1(opcode, call);
 }
 
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
@@ -1531,9 +1514,17 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
     allocator->int_regs[first + allocator->g->struct_return_reg]
         .base.reserved = true;
   }
+  TargetMarkCallPreservedInstructions(&allocator->g->base,
+                                      &allocator->preserved_instructions);
+  if (TargetMaterializePreservedCallResults(
+          &allocator->g->base, &allocator->preserved_instructions,
+          CreateCallResultCopy)) {
+    TargetBuildBasicBlockInputsAndOutputs(&allocator->g->base);
+    BitSetClear(&allocator->preserved_instructions);
+    TargetMarkCallPreservedInstructions(&allocator->g->base,
+                                        &allocator->preserved_instructions);
+  }
   BuildShortLivedVarRegSet(allocator);
-  TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
-                          kTraversePreOrder, allocator);
 
   // Process all basic blocks in the AARCH64 generator by traversing the
   // dominator tree.

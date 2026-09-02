@@ -98,6 +98,7 @@ typedef struct TargetInstruction {
   ListElement header;
   TargetOpcode opcode;
   int id;                     // Unique instruction id.
+  int call_epoch;             // Scratch epoch for call-crossing analysis.
   struct TargetInstruction* dest;  // Optional destination.
   struct TargetRegister* reg;  // Register assigned by register allocator.
   struct TargetInstruction* operand[TARGET_MAX_OPERANDS];
@@ -197,6 +198,7 @@ typedef struct {
   TargetInferenceFunc is_expression;
   TargetInferenceFunc is_table_entry;
   TargetGetBranchTargetFunc get_branch_target;
+  bool calls_may_stay_in_block;
 } TargetVirtuals;
 
 typedef struct TargetGenerator {

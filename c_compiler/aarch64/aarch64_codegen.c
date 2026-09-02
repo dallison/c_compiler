@@ -732,6 +732,7 @@ static TargetVirtuals virtuals = {
   .is_expression = AARCH64IsExpression,
   .is_table_entry = AARCH64IsJumpableEntry,
   .get_branch_target = AARCH64GetBranchTarget,
+  .calls_may_stay_in_block = true,
 };
 
 void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {

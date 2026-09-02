@@ -26,7 +26,7 @@ static void* GenerateCode(Generator* gen) {
 static void EmitFunctionAssembly(void* code, FILE* asm_file) {
   AARCH64Emitter emitter;
   AARCH64EmitterInit(&emitter, (AARCH64Generator*)code);
-  AARCH64EmitFunction(&emitter, asm_file, NULL);
+  AARCH64EmitFunction(&emitter, asm_file);
   AARCH64EmitterDestruct(&emitter);
 }
 
@@ -137,7 +137,8 @@ CompilerTarget* NewAARCH64Target() {
   target->create_asm_file = CreateAssemblyFile;
   target->emit_assembly_preamble = EmitAssemblyPreambleToStream;
   target->assemble_string = AssembleString;
-  target->emit_object_file = AARCH64EmitObjectFile;
+  target->emit_program_file = AARCH64EmitProgramFile;
+  target->emit_object_file = NULL;
   target->emit_static_variable = EmitStaticVariable;
   target->emit_bss_space = EmitBSSVariable;
   target->emit_data_start = EmitDataStart;

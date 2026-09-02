@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compiler.h"
+
 // DWARF EH pointer encodings used in LSDA headers.
 #define DW_EH_PE_omit 0xff
 #define DW_EH_PE_uleb128 0x01
@@ -473,4 +475,380 @@ void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
   fprintf(fp, ".Leh_%s_fde_end:\n", func);
   fprintf(fp, "\t.align 3\n");
   fprintf(fp, "\t.text\n\n");
+}
+
+static void ModuleInteger(AsmModule* module, int width, int64_t value) {
+  AsmExpr expr;
+  AsmExprInitConstant(&expr, value);
+  AsmModuleInteger(module, width, &expr);
+  AsmExprDestruct(&expr);
+}
+
+static void ModuleDifference(AsmModule* module, int width, const char* left,
+                             const char* right) {
+  AsmExpr expr;
+  AsmExprInitDifference(&expr, left, right, 0);
+  AsmModuleInteger(module, width, &expr);
+  AsmExprDestruct(&expr);
+}
+
+static void ModuleRelocDifference(AsmModule* module, int width,
+                                  const char* left, const char* right) {
+  AsmExpr expr;
+  AsmExprInitDifference(&expr, left, right, 0);
+  AsmExprForceRelocation(&expr);
+  AsmModuleInteger(module, width, &expr);
+  AsmExprDestruct(&expr);
+}
+
+static void ModuleLeb128(AsmModule* module, bool is_signed, int64_t value) {
+  AsmExpr expr;
+  AsmExprInitConstant(&expr, value);
+  if (is_signed) {
+    AsmModuleSleb128(module, &expr);
+  } else {
+    AsmModuleUleb128(module, &expr);
+  }
+  AsmExprDestruct(&expr);
+}
+
+static void ModuleLeb128Difference(AsmModule* module, const char* left,
+                                   const char* right) {
+  AsmExpr expr;
+  AsmExprInitDifference(&expr, left, right, 0);
+  AsmModuleUleb128(module, &expr);
+  AsmExprDestruct(&expr);
+}
+
+static void EHLabelName(String* result, const char* function,
+                        const char* suffix) {
+  StringClear(result);
+  StringAppend(result, ".Leh_");
+  StringAppend(result, function);
+  StringAppend(result, suffix);
+}
+
+static void EHLabelNameWithSuffix(String* result, const char* function,
+                                  const char* kind, const char* suffix) {
+  EHLabelName(result, function, kind);
+  StringAppend(result, suffix);
+}
+
+static void InsnLabelName(String* result, const char* function, long long id) {
+  char number[32];
+  snprintf(number, sizeof(number), "%lld", id);
+  StringClear(result);
+  StringAppendChar(result, '.');
+  StringAppend(result, function);
+  StringAppend(result, "_label_");
+  StringAppend(result, number);
+}
+
+static void OffsetLabels(String* left, String* right, const char* function,
+                         long long from, long long to) {
+  InsnLabelName(left, function, to);
+  if (from == 0) {
+    StringSet(right, function);
+  } else {
+    InsnLabelName(right, function, from);
+  }
+}
+
+void DaveEHEmitGCCExceptTable(AsmModule* module,
+                              const DaveEHFrameEmitInfo* info) {
+  if (info == NULL || info->range_count == 0) {
+    return;
+  }
+  const char* function = info->func_name;
+  const char* type_symbols[64];
+  size_t type_count = 0;
+  bool has_catch_all = false;
+  for (size_t i = 0; i < info->range_count; i++) {
+    const DaveEHLSDARange* range = &info->ranges[i];
+    if (range->is_cleanup) {
+      continue;
+    }
+    if (range->catch_typeinfo == NULL) {
+      has_catch_all = true;
+    } else if (FindTypeIndex(type_symbols, type_count,
+                             range->catch_typeinfo) == 0 &&
+               type_count < 64) {
+      type_symbols[type_count++] = range->catch_typeinfo;
+    }
+  }
+  if (has_catch_all && type_count < 64) {
+    type_symbols[type_count++] = NULL;
+  }
+
+  LSDACallSiteGroup groups[64];
+  LSDAActionEntry actions[128];
+  size_t group_count = 0;
+  size_t action_count = 0;
+  for (size_t i = 0; i < info->range_count; i++) {
+    const DaveEHLSDARange* range = &info->ranges[i];
+    size_t group = 0;
+    while (group < group_count &&
+           (groups[group].try_start_id != range->try_start_id ||
+            groups[group].try_end_id != range->try_end_id ||
+            groups[group].landing_pad_id != range->landing_pad_id)) {
+      group++;
+    }
+    if (group == group_count) {
+      if (group_count >= 64 || action_count >= 128) {
+        continue;
+      }
+      groups[group] = (LSDACallSiteGroup){
+          .try_start_id = range->try_start_id,
+          .try_end_id = range->try_end_id,
+          .landing_pad_id = range->landing_pad_id,
+          .first_action = action_count,
+          .action_count = 0,
+      };
+      group_count++;
+    }
+    if (action_count < 128) {
+      actions[action_count++].type_filter =
+          RangeTypeFilter(range, type_symbols, type_count);
+      groups[group].action_count++;
+    }
+  }
+  for (size_t i = 0; i < group_count; i++) {
+    for (size_t j = i + 1; j < group_count; j++) {
+      if (CallSiteGroupLess(&groups[j], &groups[i]) < 0) {
+        LSDACallSiteGroup group = groups[i];
+        groups[i] = groups[j];
+        groups[j] = group;
+      }
+    }
+  }
+  LSDAActionEntry sorted_actions[128];
+  size_t sorted_count = 0;
+  for (size_t i = 0; i < group_count; i++) {
+    size_t old_first = groups[i].first_action;
+    groups[i].first_action = sorted_count;
+    for (size_t j = 0; j < groups[i].action_count; j++) {
+      sorted_actions[sorted_count++] = actions[old_first + j];
+    }
+  }
+  memcpy(actions, sorted_actions, sorted_count * sizeof(actions[0]));
+  size_t action_byte_offset = 0;
+  size_t action_index = 0;
+  for (size_t i = 0; i < group_count; i++) {
+    groups[i].first_action = action_byte_offset;
+    for (size_t j = 0; j < groups[i].action_count; j++) {
+      action_byte_offset +=
+          Sleb128Size(actions[action_index++].type_filter) + 1;
+    }
+  }
+
+  AsmModuleSection(module, ".gcc_except_table", SHT(progbits), SHF(alloc), 4);
+  AsmModuleAlign(module, 4);
+  String label = {0};
+  String left = {0};
+  String right = {0};
+  EHLabelName(&label, function, "_lsda");
+  AsmModuleLabel(module, label.value);
+  ModuleInteger(module, 1, DW_EH_PE_omit);
+  if (type_count != 0) {
+    ModuleInteger(module, 1, DW_EH_PE_pcrel_sdata4);
+    EHLabelName(&left, function, "_ttype_end");
+    EHLabelName(&right, function, "_ttype_base");
+    ModuleLeb128Difference(module, left.value, right.value);
+    AsmModuleLabel(module, right.value);
+  } else {
+    ModuleInteger(module, 1, DW_EH_PE_omit);
+  }
+  ModuleInteger(module, 1, DW_EH_PE_uleb128);
+  EHLabelName(&left, function, "_cs_end");
+  EHLabelName(&right, function, "_cs_start");
+  ModuleLeb128Difference(module, left.value, right.value);
+  AsmModuleLabel(module, right.value);
+  for (size_t i = 0; i < group_count; i++) {
+    OffsetLabels(&left, &right, function, 0, groups[i].try_start_id);
+    ModuleLeb128Difference(module, left.value, right.value);
+    OffsetLabels(&left, &right, function, groups[i].try_start_id,
+                 groups[i].try_end_id);
+    ModuleLeb128Difference(module, left.value, right.value);
+    OffsetLabels(&left, &right, function, 0, groups[i].landing_pad_id);
+    ModuleLeb128Difference(module, left.value, right.value);
+    ModuleLeb128(module, false, (int64_t)groups[i].first_action + 1);
+  }
+  EHLabelName(&label, function, "_cs_end");
+  AsmModuleLabel(module, label.value);
+  action_index = 0;
+  for (size_t i = 0; i < group_count; i++) {
+    for (size_t j = 0; j < groups[i].action_count; j++) {
+      ModuleLeb128(module, true, actions[action_index++].type_filter);
+      ModuleLeb128(module, true,
+                   j + 1 < groups[i].action_count ? 1 : 0);
+    }
+  }
+  if (type_count != 0) {
+    EHLabelName(&label, function, "_ttype");
+    AsmModuleLabel(module, label.value);
+    for (size_t i = type_count; i-- > 0;) {
+      char suffix[64];
+      snprintf(suffix, sizeof(suffix), "_ttype_entry_%zu", i);
+      EHLabelName(&right, function, suffix);
+      AsmModuleLabel(module, right.value);
+      if (type_symbols[i] == NULL) {
+        ModuleInteger(module, 4, 0);
+      } else {
+        ModuleRelocDifference(module, 4, type_symbols[i], right.value);
+      }
+    }
+    EHLabelName(&label, function, "_ttype_end");
+    AsmModuleLabel(module, label.value);
+  }
+  StringDestruct(&label);
+  StringDestruct(&left);
+  StringDestruct(&right);
+  AsmModuleAlign(module, 4);
+  AsmModuleSection(module, ".text", SHT(progbits),
+                   SHF(alloc) | SHF(execinstr), compiler->alignment);
+}
+
+void DaveEHEmitEHFrameCIE(AsmModule* module,
+                          const DaveEHFrameEmitInfo* info,
+                          const char* suffix) {
+  const char* function = info->func_name;
+  bool with_eh = info->range_count > 0;
+  AsmModuleSection(module, ".eh_frame", SHT(progbits), SHF(alloc), 8);
+  AsmModuleAlign(module, 8);
+  if (with_eh) {
+    AsmModuleSymbol(module, DAVECC_EH_PERSONALITY, SYM_TYPE(none),
+                    SYM_BIND(weak), 0, 1, false, true, false);
+  }
+  String label = {0};
+  String reference = {0};
+  EHLabelNameWithSuffix(&label, function, "_cie", suffix);
+  AsmModuleLabel(module, label.value);
+  ModuleInteger(module, 4, (int64_t)EHFrameCIELength(info));
+  EHLabelNameWithSuffix(&label, function, "_cie_start", suffix);
+  AsmModuleLabel(module, label.value);
+  ModuleInteger(module, 4, 0);
+  ModuleInteger(module, 1, 1);
+  AsmModuleString(module, with_eh ? "zPLR" : "zR", true);
+  unsigned char bytes[64];
+  size_t count = 0;
+  AppendUleb128(bytes, &count, 1);
+  AppendSleb128(bytes, &count, -8);
+  AppendUleb128(bytes, &count, info->cie_ra_reg);
+  if (with_eh) {
+    AppendUleb128(bytes, &count, 7);
+    bytes[count++] = 0x1b;
+    AsmModuleBytes(module, bytes, count);
+    count = 0;
+    EHLabelNameWithSuffix(&reference, function, "_cie_pers_ref", suffix);
+    AsmModuleLabel(module, reference.value);
+    ModuleRelocDifference(module, 4, DAVECC_EH_PERSONALITY,
+                          reference.value);
+    bytes[count++] = 0x1b;
+    bytes[count++] = 0x1b;
+  } else {
+    AppendUleb128(bytes, &count, 1);
+    bytes[count++] = 0x1b;
+  }
+  bytes[count++] = 12;
+  AppendUleb128(bytes, &count, info->cie_cfa_reg);
+  AppendUleb128(bytes, &count, info->entry_cfa_offset);
+  if (info->saved_ra_offset != 0 &&
+      info->saved_ra_offset == -info->entry_cfa_offset) {
+    bytes[count++] = (unsigned char)(0x80 | info->cie_ra_reg);
+    AppendUleb128(bytes, &count, -info->saved_ra_offset / 8);
+  }
+  AsmModuleBytes(module, bytes, count);
+  EHLabelNameWithSuffix(&label, function, "_cie_end", suffix);
+  AsmModuleLabel(module, label.value);
+  StringDestruct(&label);
+  StringDestruct(&reference);
+}
+
+void DaveEHEmitEHFrameFDE(AsmModule* module,
+                          const DaveEHFrameEmitInfo* info,
+                          const char* suffix) {
+  const char* function = info->func_name;
+  bool with_eh = info->range_count > 0;
+  bool has_frame = info->has_frame;
+  size_t length = 12 + Uleb128Size(with_eh ? 4 : 0) +
+                  (with_eh ? 4 : 0);
+  if (has_frame) {
+    length += 5 + 1 + Uleb128Size(info->frame_cfa_offset);
+    length += 1 + Uleb128Size(-info->saved_fp_offset / 8);
+    if (info->saved_ra_offset != 0 &&
+        info->saved_ra_offset != -info->entry_cfa_offset) {
+      length += 1 + Uleb128Size(-info->saved_ra_offset / 8);
+    }
+    length += 5 + 1 + Uleb128Size(info->cie_fp_reg) +
+              Uleb128Size(info->fp_cfa_offset);
+    for (size_t i = 0; i < info->saved_reg_count; i++) {
+      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
+      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
+          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
+        length += 1 + Uleb128Size(-saved->cfa_offset / 8);
+      }
+    }
+  }
+  String label = {0};
+  String left = {0};
+  String right = {0};
+  EHLabelName(&label, function, "_fde");
+  AsmModuleLabel(module, label.value);
+  ModuleInteger(module, 4, length);
+  EHLabelName(&label, function, "_fde_start");
+  AsmModuleLabel(module, label.value);
+  ModuleInteger(module, 4, EHFrameCIELength(info) + 8);
+  EHLabelName(&right, function, "_fde_pc");
+  AsmModuleLabel(module, right.value);
+  ModuleRelocDifference(module, 4, function, right.value);
+  StringSet(&left, ".func_end_");
+  StringAppend(&left, function);
+  ModuleDifference(module, 4, left.value, function);
+  if (with_eh) {
+    ModuleLeb128(module, false, 4);
+    EHLabelName(&right, function, "_fde_lsda_ref");
+    AsmModuleLabel(module, right.value);
+    EHLabelName(&left, function, "_lsda");
+    ModuleRelocDifference(module, 4, left.value, right.value);
+  } else {
+    ModuleLeb128(module, false, 0);
+  }
+  if (has_frame) {
+    ModuleInteger(module, 1, 4);
+    EHLabelName(&left, function, "_after_push");
+    ModuleDifference(module, 4, left.value, function);
+    ModuleInteger(module, 1, 14);
+    ModuleLeb128(module, false, info->frame_cfa_offset);
+    ModuleInteger(module, 1, 0x80 | info->cie_fp_reg);
+    ModuleLeb128(module, false, -info->saved_fp_offset / 8);
+    if (info->saved_ra_offset != 0 &&
+        info->saved_ra_offset != -info->entry_cfa_offset) {
+      ModuleInteger(module, 1, 0x80 | info->cie_ra_reg);
+      ModuleLeb128(module, false, -info->saved_ra_offset / 8);
+    }
+    ModuleInteger(module, 1, 4);
+    EHLabelName(&left, function, "_after_leaq");
+    EHLabelName(&right, function, "_after_push");
+    ModuleDifference(module, 4, left.value, right.value);
+    ModuleInteger(module, 1, 12);
+    ModuleLeb128(module, false, info->cie_fp_reg);
+    ModuleLeb128(module, false, info->fp_cfa_offset);
+    for (size_t i = 0; i < info->saved_reg_count; i++) {
+      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
+      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
+          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
+        ModuleInteger(module, 1, 0x80 | saved->dwarf_reg);
+        ModuleLeb128(module, false, -saved->cfa_offset / 8);
+      }
+    }
+  }
+  EHLabelName(&label, function, "_fde_end");
+  AsmModuleLabel(module, label.value);
+  StringDestruct(&label);
+  StringDestruct(&left);
+  StringDestruct(&right);
+  AsmModuleAlign(module, 8);
+  AsmModuleSection(module, ".text", SHT(progbits),
+                   SHF(alloc) | SHF(execinstr), compiler->alignment);
+  (void)suffix;
 }

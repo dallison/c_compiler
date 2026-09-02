@@ -250,8 +250,15 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     static const char* shifts[] = {"lsl", "lsr", "asr", "ror"};
     const char* op = sub ? (set_flags ? "subs" : "sub")
                          : (set_flags ? "adds" : "add");
-    DAsmFormat(out, "%s %s, %s, %s, %s #%d", op, XReg(rd, sf, true),
-               XReg(rn, sf, true), XReg(rm, sf, false), shifts[shift], amount);
+    if (set_flags && rd == 31) {
+      DAsmFormat(out, "%s %s, %s, %s #%d", sub ? "cmp" : "cmn",
+                 XReg(rn, sf, false), XReg(rm, sf, false), shifts[shift],
+                 amount);
+    } else {
+      DAsmFormat(out, "%s %s, %s, %s, %s #%d", op,
+                 XReg(rd, sf, false), XReg(rn, sf, false),
+                 XReg(rm, sf, false), shifts[shift], amount);
+    }
     return true;
   }
   if ((inst & 0x7fe0fc00u) == 0x1a000000u ||

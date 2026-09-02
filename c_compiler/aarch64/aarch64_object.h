@@ -6,37 +6,29 @@
 #include <stdio.h>
 
 #include "aarch64_assembler.h"
+#include "asm_module.h"
 #include "compiler.h"
 #include "dstring.h"
 #include "vector.h"
 
-struct AARCH64ObjectModule {
+typedef struct AARCH64ObjectModule {
   AARCH64Assembler assembler;
-  Vector chunks;
-  char* pending_ptr;
-  size_t pending_size;
-  FILE* pending_stream;
+  AsmModule program;
   String object_file;
   String src_file;
   bool pic;
-  int fragment_id;
   bool owns_assembler;
   bool failed;
-};
+} AARCH64ObjectModule;
 
 bool AARCH64ObjectModuleInit(AARCH64ObjectModule* module, String* src_file,
                              String* object_file, bool pic);
-FILE* AARCH64ObjectModuleAssemblyStream(AARCH64ObjectModule* module);
-
-bool AARCH64ObjectModuleAppendFunction(AARCH64ObjectModule* module,
-                                      AARCH64Generator* generator);
-void AARCH64ObjectModuleEndFunction(AARCH64ObjectModule* module);
-bool AARCH64AssembleFragment(AARCH64ObjectModule* module, const char* name,
-                             const char* text, size_t length);
-
 bool AARCH64ObjectModuleFinalize(AARCH64ObjectModule* module);
+bool AARCH64ObjectModuleWriteAssembly(AARCH64ObjectModule* module, FILE* out);
 void AARCH64ObjectModuleDestruct(AARCH64ObjectModule* module);
 
 String* AARCH64EmitObjectFile(Compiler* compiler, Vector* options);
+String* AARCH64EmitProgramFile(Compiler* compiler, Vector* options,
+                               bool assembly_only);
 
 #endif /* aarch64_object_h */
