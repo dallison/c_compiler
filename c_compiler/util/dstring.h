@@ -128,6 +128,8 @@ void StringAppend(String* str, const char* value);
 void StringAppendString(String* str, String* value);
 void StringAppendChar(String* str, char ch);
 void StringAppendSegment(String* str, const char* value, size_t length);
+void StringAppendUInt64(String* str, uint64_t value);
+void StringAppendInt64(String* str, int64_t value);
 
 // Printf-style setting of String contents.
 void StringPrintf(String* str, const char* format, ...);

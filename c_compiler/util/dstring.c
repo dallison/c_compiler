@@ -276,6 +276,30 @@ void StringAppendChar(String* str, char ch) {
   str->value[str->length] = '\0';
 }
 
+void StringAppendUInt64(String* str, uint64_t value) {
+  char digits[20];
+  size_t length = 0;
+  do {
+    digits[length++] = (char)('0' + value % 10);
+    value /= 10;
+  } while (value != 0);
+  for (size_t i = 0; i < length / 2; i++) {
+    char tmp = digits[i];
+    digits[i] = digits[length - i - 1];
+    digits[length - i - 1] = tmp;
+  }
+  StringAppendSegment(str, digits, length);
+}
+
+void StringAppendInt64(String* str, int64_t value) {
+  uint64_t magnitude = (uint64_t)value;
+  if (value < 0) {
+    StringAppendChar(str, '-');
+    magnitude = (uint64_t)(-(value + 1)) + 1;
+  }
+  StringAppendUInt64(str, magnitude);
+}
+
 void StringReplace(String* str, size_t pos, size_t len, const char* p, size_t plen) {
   CheckMutable(str);
   ssize_t len_diff = plen - len;

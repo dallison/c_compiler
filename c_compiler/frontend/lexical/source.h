@@ -85,6 +85,7 @@ typedef struct Source {
   struct Source* prev;  // Previous Source in stack.
   SourceDevice device;  // Where the input comes from.
   bool at_start;        // No source bytes have been consumed yet.
+  bool reached_eof;     // A read has reached the end of this source.
   union {
     FILE* file;  // File to read, if from file.
     struct {

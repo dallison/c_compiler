@@ -1388,64 +1388,11 @@ void ContractAssertionDelete(ContractAssertion* assertion) {
 TypeRecord* NewFunctionTypeRecord() {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, kQualPlain);
   t->declarator = kDeclFunction;
-  t->size = 0;
-  t->info.function.symbol = NULL;
-  t->info.function.varargs = false;
-  t->info.function.unknown_args = false;
-  t->info.function.definition = false;
-  t->info.function.is_constructor = false;
-  t->info.function.is_destructor = false;
-  t->info.function.is_const_member = false;
-  t->info.function.is_volatile_member = false;
-  t->info.function.has_explicit_object_parameter = false;
-  t->info.function.ref_qualifier = kCXXRefQualifierNone;
-  t->info.function.is_explicit = false;
-  t->info.function.is_explicit_conversion = false;
-  t->info.function.is_virtual = false;
-  t->info.function.is_override = false;
-  t->info.function.is_final = false;
-  t->info.function.is_pure_virtual = false;
-  t->info.function.is_defaulted = false;
-  t->info.function.is_deleted = false;
-  t->info.function.cxx_special_member_kind = kCXXSpecialMemberNone;
-  t->info.function.is_user_declared = false;
-  t->info.function.is_user_provided = false;
-  t->info.function.is_explicitly_defaulted = false;
-  t->info.function.is_explicitly_deleted = false;
-  t->info.function.is_implicitly_declared = false;
-  t->info.function.is_implicitly_deleted = false;
-  t->info.function.is_trivial_special_member = false;
-  t->info.function.is_constexpr_eligible = false;
+  // NewTypeRecord zero-initializes FunctionInfo, including its vectors and
+  // enum fields whose "none" values are zero. Only nonzero defaults belong
+  // here.
   t->info.function.is_noexcept_eligible = true;
-  t->info.function.is_noexcept = false;
-  t->info.function.is_auto_return_deduced = false;
-  t->info.function.is_decltype_auto_return_deduced = false;
-  t->info.function.deleted_reason = NULL;
-  t->info.function.is_deduction_guide = false;
-  t->info.function.is_coroutine = false;
-  t->info.function.has_coroutine_syntax = false;
-  t->info.function.has_constexpr_if = false;
-  t->info.function.constexpr_if_checked = false;
-  t->info.function.references_marked = false;
-  t->info.function.coroutine_promise_type = NULL;
-  t->info.function.coroutine_frame_type = NULL;
-  t->info.function.coroutine_suspend_count = 0;
   t->info.function.virtual_index = -1;
-  t->info.function.cxx_member_owner = NULL;
-  t->info.function.template_origin = NULL;
-  t->info.function.template_parameter_count = 0;
-  t->info.function.template_parameter_base = 0;
-  t->info.function.old_style = false;
-  t->info.function.is_inline = false;
-  t->info.function.is_constexpr = false;
-  t->info.function.is_consteval = false;
-  t->info.function.body = NULL;
-  VectorInit(&t->info.function.prototype);
-  VectorInit(&t->info.function.template_parameters);
-  VectorInit(&t->info.function.template_instantiations);
-  VectorInit(&t->info.function.contract_assertions);
-  t->info.function.associated_constraint = NULL;
-  t->info.function.explicit_condition = NULL;
   return t;
 }
 

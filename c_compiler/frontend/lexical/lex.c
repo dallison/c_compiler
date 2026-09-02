@@ -1934,6 +1934,7 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
       lex->source->from.file != NULL) {
     fsetpos(lex->source->from.file, &checkpoint->file_pos);
     clearerr(lex->source->from.file);
+    lex->source->reached_eof = false;
   } else if (checkpoint->source_device == kSourceFromString) {
     lex->source->from.string.index = checkpoint->string_index;
   }

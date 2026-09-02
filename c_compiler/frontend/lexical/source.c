@@ -164,6 +164,7 @@ Source* NewSourceFromFile(const char* filename, FILE* in) {
   src->from.file = in;
   src->device = kSourceFromFile;
   src->at_start = true;
+  src->reached_eof = false;
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
@@ -180,6 +181,7 @@ Source* NewSourceFromString(const char* filename, String* str) {
   src->from.string.index = 0;
   src->device = kSourceFromString;
   src->at_start = true;
+  src->reached_eof = false;
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
@@ -231,6 +233,7 @@ void SourceRewind(Source* src) {
   }
   src->lineno = 0;
   src->at_start = true;
+  src->reached_eof = false;
   src->file_index = -1;
 }
 
@@ -243,11 +246,7 @@ void SourceResetFiles(Source* src) {
 bool SourceEof(Source* src) {
   switch (src->device) {
     case kSourceFromFile:
-      // From a file, use feof.
-      if (src->from.file == NULL) {
-        return true;
-      }
-      return feof(src->from.file);
+      return src->from.file == NULL || src->reached_eof;
     case kSourceFromString:
       // From a string, check current index against length.
       return src->from.string.index > src->from.string.string->length;
@@ -260,7 +259,13 @@ int SourceGetChar(Source* src) {
       if (src->from.file == NULL) {
         return EOF;
       }
-      return fgetc(src->from.file);
+      // Sources are consumed by one compiler thread, so avoid stdio's lock on
+      // every byte. The FILE still provides block buffering underneath.
+      int ch = getc_unlocked(src->from.file);
+      if (ch == EOF) {
+        src->reached_eof = true;
+      }
+      return ch;
       break;
     case kSourceFromString:
       if (src->from.string.index > src->from.string.string->length) {

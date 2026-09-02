@@ -594,15 +594,25 @@ static void AppendReflectionInstantiationKey(String* name,
     StringAppend(name, "R-");
     return;
   }
-  StringPrintf(
-      name, "R%d:T%d:S%d:M%d:B%zu:P%zu:Q",
-      (int)reflection->kind,
-      reflection->reflected_type != NULL ? reflection->reflected_type->id : -1,
-      reflection->symbol != NULL ? reflection->symbol->id : -1,
-      reflection->member != NULL && reflection->member->symbol != NULL
-          ? reflection->member->symbol->id
-          : -1,
-      reflection->base_index, reflection->parameter_index);
+  StringAppendChar(name, 'R');
+  StringAppendInt64(name, reflection->kind);
+  StringAppend(name, ":T");
+  StringAppendInt64(
+      name,
+      reflection->reflected_type != NULL ? reflection->reflected_type->id : -1);
+  StringAppend(name, ":S");
+  StringAppendInt64(name,
+                    reflection->symbol != NULL ? reflection->symbol->id : -1);
+  StringAppend(name, ":M");
+  StringAppendInt64(
+      name, reflection->member != NULL && reflection->member->symbol != NULL
+                ? reflection->member->symbol->id
+                : -1);
+  StringAppend(name, ":B");
+  StringAppendUInt64(name, reflection->base_index);
+  StringAppend(name, ":P");
+  StringAppendUInt64(name, reflection->parameter_index);
+  StringAppend(name, ":Q");
   if (reflection->namespace_ != NULL) {
     StringAppendString(name, &reflection->namespace_->qualified_name);
   } else if (reflection->namespace_alias_target != NULL) {
@@ -619,10 +629,10 @@ static void AppendReflectionInstantiationKey(String* name,
     if (argument->kind == kTemplateParameterType) {
       TypeRecordToTemplateKeyString(argument->type, name);
     } else if (argument->kind == kTemplateParameterTemplate) {
-      StringPrintf(name, "TT%d",
-                   argument->template_symbol != NULL
-                       ? argument->template_symbol->id
-                       : argument->template_parameter_index);
+      StringAppend(name, "TT");
+      StringAppendInt64(name, argument->template_symbol != NULL
+                                  ? argument->template_symbol->id
+                                  : argument->template_parameter_index);
     } else {
       AppendTemplateNonTypeInstantiationKey(name, argument);
     }
@@ -639,7 +649,8 @@ static void AppendReflectionInstantiationKey(String* name,
     } else if (reflection->scalar_is_float) {
       StringPrintf(name, ":F%a", reflection->scalar_fvalue);
     } else {
-      StringPrintf(name, ":I%" PRId64, reflection->scalar_ivalue);
+      StringAppend(name, ":I");
+      StringAppendInt64(name, reflection->scalar_ivalue);
     }
   }
 }
@@ -648,22 +659,30 @@ static void AppendTemplateNonTypeInstantiationKey(
     String* name, TemplateArgument* arg) {
   switch (TemplateArgumentConcreteValueKind(arg)) {
     case kTemplateValueIntegral:
-      StringPrintf(name, "I%" PRId64, arg->int_value);
+      StringAppendChar(name, 'I');
+      StringAppendInt64(name, arg->int_value);
       break;
     case kTemplateValueNull:
       StringAppend(name, "N");
       break;
     case kTemplateValuePointer:
-      StringPrintf(name, "P%d:%" PRId64,
-                   arg->value_symbol != NULL ? arg->value_symbol->id : -1,
-                   arg->value_offset);
+      StringAppendChar(name, 'P');
+      StringAppendInt64(
+          name, arg->value_symbol != NULL ? arg->value_symbol->id : -1);
+      StringAppendChar(name, ':');
+      StringAppendInt64(name, arg->value_offset);
       break;
     case kTemplateValueMemberPointer:
-      StringPrintf(
-          name, "M%d:%" PRId64 ":%" PRId64 ":%d",
-          arg->value_symbol != NULL ? arg->value_symbol->id : -1,
-          arg->value_offset, arg->value_adjustment,
-          arg->member_function != NULL ? arg->member_function->id : -1);
+      StringAppendChar(name, 'M');
+      StringAppendInt64(
+          name, arg->value_symbol != NULL ? arg->value_symbol->id : -1);
+      StringAppendChar(name, ':');
+      StringAppendInt64(name, arg->value_offset);
+      StringAppendChar(name, ':');
+      StringAppendInt64(name, arg->value_adjustment);
+      StringAppendChar(name, ':');
+      StringAppendInt64(
+          name, arg->member_function != NULL ? arg->member_function->id : -1);
       break;
     case kTemplateValueReflection:
       AppendReflectionInstantiationKey(name, arg->reflection_value);
@@ -681,6 +700,37 @@ static void AppendTemplateNonTypeInstantiationKey(
   }
 }
 
+static void AppendTemplateArgumentInstantiationKey(String* name,
+                                                   TemplateArgument* arg) {
+  if (arg->pack_arguments != NULL) {
+    StringAppendChar(name, '[');
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      if (i != 0) {
+        StringAppendChar(name, ',');
+      }
+      AppendTemplateArgumentInstantiationKey(
+          name, arg->pack_arguments->value.p[i]);
+    }
+    StringAppendChar(name, ']');
+  } else if (arg->kind == kTemplateParameterType) {
+    TypeRecordToTemplateKeyString(arg->type, name);
+  } else if (arg->kind == kTemplateParameterTemplate) {
+    if (arg->template_parameter_index >= 0) {
+      StringAppend(name, "$TT");
+      StringAppendInt64(name, arg->template_parameter_index);
+    } else {
+      StringAppend(name, "TT");
+      StringAppendInt64(
+          name, arg->template_symbol != NULL ? arg->template_symbol->id : -1);
+    }
+  } else if (arg->template_parameter_index >= 0) {
+    StringAppend(name, "$N");
+    StringAppendInt64(name, arg->template_parameter_index);
+  } else {
+    AppendTemplateNonTypeInstantiationKey(name, arg);
+  }
+}
+
 void AppendTemplateInstantiationName(String* name, Symbol* templ,
                                      Vector* args) {
   Struct* template_struct =
@@ -688,7 +738,9 @@ void AppendTemplateInstantiationName(String* name, Symbol* templ,
           ? templ->type->info.struct_info
           : NULL;
   if (template_struct != NULL && template_struct->lexical_parent != NULL) {
-    StringPrintf(name, "$nested%d$", templ->id);
+    StringSet(name, "$nested");
+    StringAppendInt64(name, templ->id);
+    StringAppendChar(name, '$');
     StringAppendString(name, &templ->name);
   } else {
     StringSet(name, templ->name.value);
@@ -696,59 +748,9 @@ void AppendTemplateInstantiationName(String* name, Symbol* templ,
   StringAppendChar(name, '<');
   for (size_t i = 0; i < args->length; i++) {
     if (i != 0) {
-      StringAppend(name, ",");
+      StringAppendChar(name, ',');
     }
-    String arg_name;
-    StringInit(&arg_name, NULL);
-    TemplateArgument* arg = args->value.p[i];
-    if (arg->pack_arguments != NULL) {
-      StringAppendChar(&arg_name, '[');
-      for (size_t j = 0; j < arg->pack_arguments->length; j++) {
-        if (j != 0) {
-          StringAppend(&arg_name, ",");
-        }
-        String element_name;
-        StringInit(&element_name, NULL);
-        TemplateArgument* element = arg->pack_arguments->value.p[j];
-        if (element->kind == kTemplateParameterType) {
-          TypeRecordToTemplateKeyString(element->type, &element_name);
-        } else if (element->kind == kTemplateParameterTemplate) {
-          if (element->template_parameter_index >= 0) {
-            StringPrintf(&element_name, "$TT%d",
-                         element->template_parameter_index);
-          } else {
-            StringPrintf(&element_name, "TT%d",
-                         element->template_symbol != NULL
-                             ? element->template_symbol->id : -1);
-          }
-        } else if (element->template_parameter_index >= 0) {
-          StringPrintf(&element_name, "$N%d", element->template_parameter_index);
-        } else {
-          AppendTemplateNonTypeInstantiationKey(&element_name, element);
-        }
-        StringAppendString(&arg_name, &element_name);
-        StringDestruct(&element_name);
-      }
-      StringAppendChar(&arg_name, ']');
-    } else if (arg->kind == kTemplateParameterType) {
-      TypeRecordToTemplateKeyString(arg->type, &arg_name);
-    } else if (arg->kind == kTemplateParameterTemplate) {
-      if (arg->template_parameter_index >= 0) {
-        StringPrintf(&arg_name, "$TT%d", arg->template_parameter_index);
-      } else {
-        StringPrintf(&arg_name, "TT%d",
-                     arg->template_symbol != NULL
-                         ? arg->template_symbol->id : -1);
-      }
-    } else {
-      if (arg->template_parameter_index >= 0) {
-        StringPrintf(&arg_name, "$N%d", arg->template_parameter_index);
-      } else {
-        AppendTemplateNonTypeInstantiationKey(&arg_name, arg);
-      }
-    }
-    StringAppendString(name, &arg_name);
-    StringDestruct(&arg_name);
+    AppendTemplateArgumentInstantiationKey(name, args->value.p[i]);
   }
   StringAppendChar(name, '>');
 }

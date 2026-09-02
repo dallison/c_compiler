@@ -2164,6 +2164,9 @@ static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type) {
 
 static bool GenerateFunctionDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* decl) {
+  if (compiler->syntax_only || NumErrors() != 0) {
+    return false;
+  }
   if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
     return false;
   }
@@ -2180,8 +2183,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
       !decl->symbol->flags.invented && !decl->symbol->flags.is_c_linkage &&
       strcmp(decl->symbol->name.value, "main") != 0 &&
       strncmp(decl->symbol->name.value, "__", 2) != 0;
-  if (compiler->syntax_only || NumErrors() != 0 || dependent_function_body ||
-      uninstantiated_function_template ||
+  if (dependent_function_body || uninstantiated_function_template ||
       unnamed_cxx_function ||
       (decl->base.type->info.function.is_inline &&
        !decl->symbol->flags.is_inline_defn) ||
@@ -2915,6 +2917,7 @@ TlsModel ParseTlsModelName(String* tls_model) {
 typedef struct CompilerStringIndexEntry {
   char* key;
   void* value;
+  uint64_t hash;
   struct CompilerStringIndexEntry* next;
 } CompilerStringIndexEntry;
 
@@ -2968,7 +2971,7 @@ static CompilerStringIndexEntry* CompilerStringIndexFindEntry(
   size_t bucket = hash % index->bucket_count;
   for (CompilerStringIndexEntry* entry = index->buckets[bucket];
        entry != NULL; entry = entry->next) {
-    if (strcmp(entry->key, key) == 0) {
+    if (entry->hash == hash && strcmp(entry->key, key) == 0) {
       return entry;
     }
   }
@@ -3000,8 +3003,7 @@ static void ResizeCompilerStringIndex(struct CompilerStringIndex* index) {
     CompilerStringIndexEntry* entry = index->buckets[i];
     while (entry != NULL) {
       CompilerStringIndexEntry* next = entry->next;
-      uint64_t hash = HashCompilerStringIndexKey(entry->key);
-      size_t bucket = hash % new_bucket_count;
+      size_t bucket = entry->hash % new_bucket_count;
       entry->next = buckets[bucket];
       buckets[bucket] = entry;
       entry = next;
@@ -3017,17 +3019,22 @@ static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
   if (index == NULL || key == NULL || *key == '\0') {
     return false;
   }
-  if (CompilerStringIndexContains(index, key)) {
-    return false;
+  uint64_t hash = HashCompilerStringIndexKey(key);
+  size_t bucket = hash % index->bucket_count;
+  for (CompilerStringIndexEntry* entry = index->buckets[bucket];
+       entry != NULL; entry = entry->next) {
+    if (entry->hash == hash && strcmp(entry->key, key) == 0) {
+      return false;
+    }
   }
   if ((index->entry_count + 1) * 4 > index->bucket_count * 3) {
     ResizeCompilerStringIndex(index);
+    bucket = hash % index->bucket_count;
   }
-  uint64_t hash = HashCompilerStringIndexKey(key);
-  size_t bucket = hash % index->bucket_count;
   CompilerStringIndexEntry* entry = malloc(sizeof(*entry));
   entry->key = strdup(key);
   entry->value = value;
+  entry->hash = hash;
   entry->next = index->buckets[bucket];
   index->buckets[bucket] = entry;
   index->entry_count++;
