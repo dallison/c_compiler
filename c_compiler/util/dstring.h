@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 
 #ifndef COMPILER_UNUSED
@@ -124,10 +125,42 @@ int StringCompareStringCaseBlind(String* str1, String* str2);
 // Set and append.
 void StringSet(String* str, const char* value);
 void StringSetString(String* str, String* value);
-void StringAppend(String* str, const char* value);
-void StringAppendString(String* str, String* value);
-void StringAppendChar(String* str, char ch);
-void StringAppendSegment(String* str, const char* value, size_t length);
+void StringAppendSegmentSlow(String* str, const char* value, size_t length);
+static inline void StringAppendSegment(String* str, const char* value,
+                                       size_t length) {
+  if (str->value == NULL || str->capacity == STRING_IMMUTABLE ||
+      length >= str->capacity - str->length) {
+    StringAppendSegmentSlow(str, value, length);
+    return;
+  }
+  if (length != 0) {
+    memcpy(str->value + str->length, value, length);
+  }
+  str->length += length;
+  str->value[str->length] = '\0';
+}
+static inline void StringAppend(String* str, const char* value) {
+  StringAppendSegment(str, value, value != NULL ? strlen(value) : 0);
+}
+static inline void StringAppendString(String* str, String* value) {
+  if (value->value == NULL) {
+    value->value = value->buffer;
+    value->length = 0;
+    value->capacity = STRING_BUFFER_SIZE;
+  }
+  StringAppendSegment(str, value->value, value->length);
+}
+// Initializes or grows a string before appending one character.
+void StringAppendCharSlow(String* str, char ch);
+static inline void StringAppendChar(String* str, char ch) {
+  if (str->value == NULL || str->capacity == STRING_IMMUTABLE ||
+      str->length + 1 >= str->capacity) {
+    StringAppendCharSlow(str, ch);
+    return;
+  }
+  str->value[str->length++] = ch;
+  str->value[str->length] = '\0';
+}
 void StringAppendUInt64(String* str, uint64_t value);
 void StringAppendInt64(String* str, int64_t value);
 

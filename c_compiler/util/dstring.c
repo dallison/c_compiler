@@ -179,7 +179,7 @@ void StringSetString(String* str, String* value) {
   StringSet(str, value->value);
 }
 
-void StringAppendSegment(String* str, const char* value, size_t length) {
+void StringAppendSegmentSlow(String* str, const char* value, size_t length) {
   CheckMutable(str);
   // Full length of strings, including \0.
   size_t full_length = str->length + length + 1;
@@ -200,21 +200,11 @@ void StringAppendSegment(String* str, const char* value, size_t length) {
   }
 
   // Copy in new string at the end of the current one.
-  memcpy(str->value + str->length, value, length);
+  if (length != 0) {
+    memcpy(str->value + str->length, value, length);
+  }
   str->value[str->length + length] = '\0';
   str->length = full_length - 1;
-}
-
-void StringAppend(String* str, const char* value) {
-  LazyInit(str);
-  // Get length of value (without \0).
-  size_t value_length = value == NULL ? 0 : strlen(value);
-  StringAppendSegment(str, value, value_length);
-}
-
-void StringAppendString(String* str, String* value) {
-  LazyInit(value);
-  StringAppend(str, value->value);
 }
 
 void StringTrimEnd(String* s) {
@@ -252,7 +242,7 @@ void StringTrim(String* s) {
 
 // This needs to be optimal since code that build up strings tends
 // to call it a lot.
-void StringAppendChar(String* str, char ch) {
+void StringAppendCharSlow(String* str, char ch) {
   CheckMutable(str);
   // We are appending a single char but the memory needs a '\0'
   // at the end and this is not included in str->length, so

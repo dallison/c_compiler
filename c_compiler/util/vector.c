@@ -15,12 +15,6 @@
 // initial capacity small so that we don't waste memory.
 #define INIT_CAPACITY 1
 
-void VectorInit(Vector* vec) {
-  vec->value.p = NULL;
-  vec->length = 0;
-  vec->capacity = 0;
-}
-
 Vector* NewVector(void) {
   Vector* vec = malloc(sizeof(Vector));
   VectorInit(vec);
@@ -59,8 +53,6 @@ void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor, b
   free(vec);
 }
 
-void VectorClear(Vector* vec) { vec->length = 0; }
-
 void VectorClearWithContents(Vector* vec, VectorElementDestructor destructor, bool free_element) {
   for (size_t i = 0; i < vec->length; i++) {
     if (vec->value.p[i] == NULL) {
@@ -76,27 +68,24 @@ void VectorClearWithContents(Vector* vec, VectorElementDestructor destructor, bo
   vec->length = 0;
 }
 
-static void MakeSpace(Vector* vec) {
-  // If the vector is initially empty, allocate it with default capacity.
+void VectorGrowForAppend(Vector* vec) {
+  assert(vec->length == vec->capacity);
+  size_t old_capacity = vec->capacity;
+  vec->capacity =
+      old_capacity == 0 ? INIT_CAPACITY : old_capacity * 2;
   if (vec->value.p == NULL) {
-    vec->capacity = INIT_CAPACITY;
     vec->value.p = malloc(sizeof(int64_t) * vec->capacity);
-    memset(vec->value.p, 0, sizeof(int64_t) * vec->capacity);
+  } else {
+    vec->value.p =
+        realloc(vec->value.p, sizeof(int64_t) * vec->capacity);
   }
-
-  // Make room for new contents.
-  if (vec->length + 1 > vec->capacity) {
-    size_t old_capacity = vec->capacity;
-    vec->capacity *= 2;
-    vec->value.p = realloc(vec->value.p, sizeof(int64_t) * vec->capacity);
-    memset(vec->value.p + old_capacity, 0,
-           (vec->capacity - old_capacity) * sizeof(int64_t));
-  }
+  memset(vec->value.p + old_capacity, 0,
+         (vec->capacity - old_capacity) * sizeof(int64_t));
 }
 
 void VectorReserve(Vector* vec, size_t n) {
   if (vec->value.p == NULL) {
-    vec->capacity = n;;
+    vec->capacity = n;
     vec->value.p = malloc(sizeof(int64_t) * vec->capacity);
     memset(vec->value.p, 0, sizeof(int64_t) * vec->capacity);
   }
@@ -111,28 +100,6 @@ void VectorReserve(Vector* vec, size_t n) {
          (vec->capacity - old_capacity) * sizeof(int64_t));
 }
 
-void VectorAppend(Vector* vec, void* value) {
-  MakeSpace(vec);
-
-  // Append value to end of memory.
-  vec->value.p[vec->length] = value;
-  vec->length++;
-}
-
-void VectorSet(Vector* vec, size_t index, void* value) {
-  vec->value.p[index] = value;
-}
-
-void* VectorGet(Vector* vec, size_t index) { return vec->value.p[index]; }
-
-void* VectorFirst(Vector* vec) {
-  return vec->length == 0 ? NULL : vec->value.p[0];
-}
-
-void* VectorLast(Vector* vec) {
-  return vec->length == 0 ? NULL : vec->value.p[vec->length - 1];
-}
-
 void VectorCopy(Vector* dest, Vector* src) {
   VectorClear(dest);
   for (size_t i = 0; i < src->length; i++) {
@@ -143,14 +110,6 @@ void VectorCopy(Vector* dest, Vector* src) {
 void VectorAppendVector(Vector* dest, Vector* src) {
   for (size_t i = 0; i < src->length; i++) {
     VectorAppend(dest, src->value.p[i]);
-  }
-}
-
-void VectorPush(Vector* v, void* value) { VectorAppend(v, value); }
-
-void VectorPop(Vector* v) {
-  if (v->length > 0) {
-    v->length--;
   }
 }
 
@@ -168,7 +127,9 @@ bool VectorEqual(Vector* a, Vector* b) {
 
 void VectorInsertBefore(Vector* vec, size_t index, void* value) {
   assert(index < vec->length);
-  MakeSpace(vec);
+  if (vec->length == vec->capacity) {
+    VectorGrowForAppend(vec);
+  }
   size_t elements_to_move = vec->length - index;
   memmove(vec->value.p + index + 1, vec->value.p + index,
           sizeof(int64_t) * elements_to_move);
@@ -183,7 +144,9 @@ void VectorInsertAfter(Vector* vec, size_t index, void* value) {
     return;
   }
 
-  MakeSpace(vec);
+  if (vec->length == vec->capacity) {
+    VectorGrowForAppend(vec);
+  }
   size_t elements_to_move = vec->length - index - 1;
 
   memmove(vec->value.p + index + 2, vec->value.p + index + 1,

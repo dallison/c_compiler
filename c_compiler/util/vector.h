@@ -27,8 +27,15 @@ typedef struct Vector {
   size_t capacity;  // Number of pointers we have space for.
 } Vector;
 
+// Out-of-line slow path used by the inline append operation.
+void VectorGrowForAppend(Vector* vec);
+
 // Initializes an empty vector.
-void VectorInit(Vector* vec);
+static inline void VectorInit(Vector* vec) {
+  vec->value.p = NULL;
+  vec->length = 0;
+  vec->capacity = 0;
+}
 
 // Allocates a new vector using malloc and initializes it.
 Vector* NewVector(void);
@@ -58,7 +65,7 @@ void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor,
 
 // Clears the vector but doesn't touch the elements - just sets the length to
 // zero and leaves the capacity as is.
-void VectorClear(Vector* vec);
+static inline void VectorClear(Vector* vec) { vec->length = 0; }
 
 // Clears the vector and also destruct and frees the elements if free_element
 // is true.  The elements must be allocated using malloc if free_element is
@@ -68,25 +75,45 @@ void VectorClearWithContents(Vector* vec, VectorElementDestructor destructor,
 
 // Appends a pointer to the vector, reallocating the space
 // as necessary.
-void VectorAppend(Vector* vec, void* value);
+static inline void VectorAppend(Vector* vec, void* value) {
+  if (vec->length == vec->capacity) {
+    VectorGrowForAppend(vec);
+  }
+  vec->value.p[vec->length++] = value;
+}
 
 // Sets an element in the vector to the value given.
-void VectorSet(Vector* vec, size_t index, void* value);
+static inline void VectorSet(Vector* vec, size_t index, void* value) {
+  vec->value.p[index] = value;
+}
 
 // Gets a value from the vector at the given index.
-void* VectorGet(Vector* vec, size_t index);
+static inline void* VectorGet(Vector* vec, size_t index) {
+  return vec->value.p[index];
+}
 
 // Gets the first pointer in the vector.
-void* VectorFirst(Vector* vec);
+static inline void* VectorFirst(Vector* vec) {
+  return vec->length == 0 ? NULL : vec->value.p[0];
+}
 
 // Gets the last pointer in the vector.
-void* VectorLast(Vector* vec);
+static inline void* VectorLast(Vector* vec) {
+  return vec->length == 0 ? NULL : vec->value.p[vec->length - 1];
+}
 
 void VectorCopy(Vector* dest, Vector* src);
 void VectorAppendVector(Vector* dest, Vector* src);
 
-void VectorPush(Vector* v, void* value);
-void VectorPop(Vector* v);
+static inline void VectorPush(Vector* vec, void* value) {
+  VectorAppend(vec, value);
+}
+
+static inline void VectorPop(Vector* vec) {
+  if (vec->length > 0) {
+    vec->length--;
+  }
+}
 
 bool VectorEqual(Vector* a, Vector* b);
 
