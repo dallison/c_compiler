@@ -4164,10 +4164,188 @@ static ASTNode* ConstexprObjectInitializerForExpressionImpl(
   return initializer;
 }
 
+static ASTNode* ConstexprInitializerScalarExpression(ASTNode* initializer) {
+  while (initializer != NULL) {
+    if (initializer->op == AST_OP(expr_init)) {
+      initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+    } else if (initializer->op == AST_OP(designated_init)) {
+      initializer = ((DesignatedInitializerASTNode*)initializer)->init;
+    } else {
+      break;
+    }
+  }
+  return initializer;
+}
+
+static bool EvaluateScalarFloatingConstant(ASTNode* expression,
+                                           double* result) {
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok =
+      EvaluateFloatingPointExpressionInContext(&ctx, expression, result);
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
+static bool EvaluateComplexConstantExpression(TypeRecord* type,
+                                              ASTNode* expression,
+                                              double* real,
+                                              double* imaginary) {
+  if (!TypeIsComplex(expression->type)) {
+    *imaginary = 0.0;
+    return EvaluateScalarFloatingConstant(expression, real);
+  }
+  if (expression->op == AST_OP(cast)) {
+    return EvaluateComplexConstantExpression(
+        type, ((CastASTNode*)expression)->expr, real, imaginary);
+  }
+  if (expression->op == AST_OP(uplus) ||
+      expression->op == AST_OP(uminus)) {
+    bool ok = EvaluateComplexConstantExpression(
+        type, ((UnaryASTNode*)expression)->sub, real, imaginary);
+    if (ok && expression->op == AST_OP(uminus)) {
+      *real = -*real;
+      *imaginary = -*imaginary;
+    }
+    return ok;
+  }
+  if (expression->op == AST_OP(compound_literal)) {
+    CompoundLiteralASTNode* compound =
+        (CompoundLiteralASTNode*)expression;
+    if (compound->initializer == NULL ||
+        compound->initializer->op != AST_OP(braced_init)) {
+      return false;
+    }
+    *real = 0.0;
+    *imaginary = 0.0;
+    size_t next_component = 0;
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)compound->initializer;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* initializer = braced->initializers->value.p[i];
+      size_t component = next_component;
+      if (initializer->op == AST_OP(designated_init)) {
+        DesignatedInitializerASTNode* designated =
+            (DesignatedInitializerASTNode*)initializer;
+        if (designated->designators->length == 0) {
+          return false;
+        }
+        Designator* designator = designated->designators->value.p[0];
+        if (designator->designator_type != kDesignatorStruct ||
+            !designator->is_resolved_member ||
+            designator->value.struct_member == NULL) {
+          return false;
+        }
+        component = designator->value.struct_member->index;
+      }
+      if (component > 1) {
+        return false;
+      }
+      ASTNode* scalar =
+          ConstexprInitializerScalarExpression(initializer);
+      double value;
+      if (scalar == NULL ||
+          !EvaluateScalarFloatingConstant(scalar, &value)) {
+        return false;
+      }
+      if (component == 0) {
+        *real = value;
+      } else {
+        *imaginary = value;
+      }
+      next_component = component + 1;
+    }
+    return true;
+  }
+  if (expression->op == AST_OP(plus) ||
+      expression->op == AST_OP(minus) ||
+      expression->op == AST_OP(mult) ||
+      expression->op == AST_OP(div)) {
+    BinaryASTNode* binary = (BinaryASTNode*)expression;
+    double left_real, left_imaginary, right_real, right_imaginary;
+    if (!EvaluateComplexConstantExpression(
+            type, binary->left, &left_real, &left_imaginary) ||
+        !EvaluateComplexConstantExpression(
+            type, binary->right, &right_real, &right_imaginary)) {
+      return false;
+    }
+    switch (expression->op) {
+      case AST_OP(plus):
+        *real = left_real + right_real;
+        *imaginary = left_imaginary + right_imaginary;
+        return true;
+      case AST_OP(minus):
+        *real = left_real - right_real;
+        *imaginary = left_imaginary - right_imaginary;
+        return true;
+      case AST_OP(mult):
+        *real = left_real * right_real - left_imaginary * right_imaginary;
+        *imaginary =
+            left_real * right_imaginary + left_imaginary * right_real;
+        return true;
+      case AST_OP(div): {
+        double denominator =
+            right_real * right_real + right_imaginary * right_imaginary;
+        *real = (left_real * right_real +
+                 left_imaginary * right_imaginary) /
+                denominator;
+        *imaginary = (left_imaginary * right_real -
+                      left_real * right_imaginary) /
+                     denominator;
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  ASTNode* initializer = ConstexprObjectInitializerForExpressionImpl(
+      type, expression, /*template_argument=*/false);
+  if (initializer == NULL || initializer->op != AST_OP(braced_init)) {
+    ASTNodeDelete(initializer);
+    return false;
+  }
+  BracedInitializerASTNode* braced =
+      (BracedInitializerASTNode*)initializer;
+  bool ok = braced->initializers->length >= 2;
+  if (ok) {
+    ASTNode* real_expression = ConstexprInitializerScalarExpression(
+        braced->initializers->value.p[0]);
+    ASTNode* imaginary_expression = ConstexprInitializerScalarExpression(
+        braced->initializers->value.p[1]);
+    ok = real_expression != NULL && imaginary_expression != NULL &&
+         EvaluateScalarFloatingConstant(real_expression, real) &&
+         EvaluateScalarFloatingConstant(imaginary_expression, imaginary);
+  }
+  ASTNodeDelete(initializer);
+  return ok;
+}
+
 ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
                                                  ASTNode* expression) {
-  return ConstexprObjectInitializerForExpressionImpl(
+  ASTNode* initializer = ConstexprObjectInitializerForExpressionImpl(
       type, expression, /*template_argument=*/false);
+  if (initializer != NULL || !TypeIsComplex(type)) {
+    return initializer;
+  }
+  double real, imaginary;
+  if (!EvaluateComplexConstantExpression(
+          type, expression, &real, &imaginary)) {
+    return NULL;
+  }
+  Type element_type = TypeComplexElementType(type);
+  Vector* elements = NewVector();
+  VectorAppend(
+      elements,
+      NewRealConstantASTNode(
+          real, NewTypeRecordWithSize(element_type, kQualPlain),
+          expression->location));
+  VectorAppend(
+      elements,
+      NewRealConstantASTNode(
+          imaginary, NewTypeRecordWithSize(element_type, kQualPlain),
+          expression->location));
+  return NewBracedInitializerASTNode(elements, type, expression->location);
 }
 
 ASTNode* ConstexprTemplateArgumentObjectInitializerForExpression(

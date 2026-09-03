@@ -2323,6 +2323,9 @@ static bool GenericTypeMatch(TypeRecord* a, TypeRecord* b) {
       if (a->qualifiers != b->qualifiers) {
         return false;
       }
+      if (TypeIsComplex(a) || TypeIsComplex(b)) {
+        return TypeIsComplex(a) && TypeIsComplex(b) && TypeEqual(a, b);
+      }
       if (TypeIsStructOrUnion(a) || TypeIsStructOrUnion(b)) {
         return TypeIsStructOrUnion(a) && TypeIsStructOrUnion(b) &&
                a->info.struct_info == b->info.struct_info;

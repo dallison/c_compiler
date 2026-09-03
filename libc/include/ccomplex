@@ -1,0 +1,6 @@
+#ifndef __davecc_ccomplex__
+#define __davecc_ccomplex__
+
+#include <complex>
+
+#endif

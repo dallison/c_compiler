@@ -414,7 +414,7 @@ void SemanticCheckScalarType(ASTNode* node) {
     SemanticError(node, "Illegal use of void type");
     return;
   }
-  if (TypeIsStructOrUnion(node->type)) {
+  if (!TypeIsScalar(node->type)) {
     SemanticError(node, "Illegal use of composite type (struct or union)");
   }
 }
@@ -1425,6 +1425,34 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
+    return;
+  }
+
+  if (TypeIsComplex(from->type) || TypeIsComplex(to)) {
+    bool from_arithmetic = TypeIsComplex(from->type) ||
+                           TypeIsIntegral(from->type) ||
+                           TypeIsFloatingPoint(from->type);
+    bool to_arithmetic = TypeIsComplex(to) || TypeIsIntegral(to) ||
+                         TypeIsFloatingPoint(to);
+    if (!from_arithmetic || !to_arithmetic) {
+      SemanticTypeConversionError(
+          from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
+      return;
+    }
+
+    ASTNode* parent = from->parent;
+    if (parent == NULL) {
+      // Conversion nodes normally replace an operand in its parent.  Preserve
+      // a useful type during recovery for a detached expression.
+      ASTNodeSetType(from, to);
+      return;
+    }
+    int child_id = from->child_id;
+    ASTNode* converted = NewCastASTNode(to, from->location, from);
+    ASTNodeSetType(converted, to);
+    converted->value_category = kValueCategoryPrvalue;
+    converted->flags |= kASTAnalyzed;
+    ASTNodeReplaceChild(parent, child_id, converted, false);
     return;
   }
 

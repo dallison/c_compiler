@@ -909,11 +909,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
   Token tok = lex->current_token;
   bool found = false;
 
-  // Complex and imaginary types are not implemented.  Consume the specifier and
-  // carry on with the real type beside it: these keywords are classified as type
-  // tokens, so leaving one in place stalls every recovery point that stops at a
-  // type token, and the enclosing parse then repeats forever.
-  if (tok == TOK(complex) || tok == TOK(imaginary)) {
+  if (tok == TOK(complex)) {
+    type |= kTypeComplex;
+    LexNextToken(lex);
+    tok = lex->current_token;
+    found = true;
+  } else if (tok == TOK(imaginary)) {
+    // C's imaginary types are optional.  Keep rejecting them explicitly while
+    // supporting the required complex domain.
     SyntaxError(parser->syntax, "'%s' types are not supported",
                 TokenName(tok));
     LexNextToken(lex);
@@ -1677,9 +1680,15 @@ static Type valid_types[] = {
   kTypeLongLong | kTypeUnsigned | kTypeInt,
   
   kTypeFloat,
+  kTypeFloat | kTypeComplex,
   
   kTypeDouble,
   kTypeDouble | kTypeLong,
+  kTypeComplex,
+  kTypeComplex | kTypeLong,
+  kTypeComplex | kTypeLongDouble,
+  kTypeDouble | kTypeComplex,
+  kTypeDouble | kTypeLong | kTypeComplex,
   
   kTypeBool,
 
@@ -1871,6 +1880,15 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
   if (type->type_record == NULL) {
     if (type->type == kTypeImplicit) {
       return NULL;
+    }
+    if ((type->type & kTypeComplex) != 0) {
+      Type element_type = kTypeDouble;
+      if ((type->type & (kTypeLong | kTypeLongDouble)) != 0) {
+        element_type = kTypeLongDouble;
+      } else if ((type->type & kTypeFloat) != 0) {
+        element_type = kTypeFloat;
+      }
+      return NewComplexTypeRecord(element_type, type->quals);
     }
     return NewTypeRecordWithSize(type->type, type->quals);
   } else {

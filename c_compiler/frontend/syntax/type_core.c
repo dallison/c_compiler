@@ -1700,6 +1700,32 @@ Struct* NewStruct(bool is_union) {
   return s;
 }
 
+TypeRecord* NewComplexTypeRecord(Type element_type, Qualifiers quals) {
+  assert(element_type == kTypeFloat || element_type == kTypeDouble ||
+         element_type == kTypeLongDouble);
+
+  Struct* layout = NewStruct(false);
+  // This is an implementation layout for a scalar arithmetic type, not a C++
+  // class.  Keeping the ordinary two-member aggregate machinery underneath it
+  // lets every backend reuse its established by-value memory paths.
+  layout->is_aggregate = false;
+
+  const char* names[] = {"__real", "__imag"};
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    TypeRecord* member_type =
+        NewTypeRecordWithSize(element_type, kQualPlain);
+    Symbol* symbol = NewSymbol(names[i], member_type, STO(implicit));
+    symbol->flags.invented = true;
+    symbol->flags.is_defined = true;
+    StructAddSyntheticMember(layout, NewStructMember(symbol));
+  }
+
+  TypeRecord* result =
+      NewTypeRecord(kTypeComplex | kTypeStruct | element_type, quals);
+  TypeRecordSetStructInfo(result, layout);
+  return TypeRecordCalculateSize(result);
+}
+
 // Tear down a struct's members and member tables, but do NOT free the Struct
 // itself (see StructRegistryRelease's two-phase teardown).
 static void StructTeardownMembers(Struct* s) {

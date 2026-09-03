@@ -392,6 +392,21 @@ IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
       GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), reload_addr)), type);
 }
 
+static IRNode* GeneratorSpillObjectToTemp(Generator* gen,
+                                          IRNode* source_address,
+                                          TypeRecord* type) {
+  Symbol* tmp = SyntaxNewTemporary(gen->syntax, type);
+  tmp->flags.address_taken = true;
+  IRNode* var = GeneratorGetVariable(gen, tmp);
+  IRNode* tmp_address =
+      IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
+                NewPointerTo(kQualPlain, type));
+  GeneratorEmit(
+      gen, NewIR3(IR_OP(memcpy), tmp_address, source_address,
+                  GeneratorGetIntConstant(gen, NULL, type->size)));
+  return tmp_address;
+}
+
 // String literals are global to the compiler.  Each one has a
 // unique id allocated by the compiler.  The IR instruction
 // contains this ID.
@@ -604,8 +619,384 @@ static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node,
                                   IRNode* input);
+static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub);
+
+static TypeRecord* ComplexElementTypeRecord(TypeRecord* complex_type) {
+  return NewTypeRecordWithSize(TypeComplexElementType(complex_type),
+                               kQualPlain);
+}
+
+static IRNode* ComplexObjectAddress(Generator* gen, IRNode* value,
+                                    TypeRecord* complex_type) {
+  if (TypeIsPointer(value->type) && value->type->next != NULL &&
+      TypeIsComplex(value->type->next)) {
+    return value;
+  }
+  return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
+                   NewPointerTo(kQualPlain, complex_type));
+}
+
+static IRNode* ComplexComponentAddress(Generator* gen, IRNode* address,
+                                       TypeRecord* element_type,
+                                       bool imaginary) {
+  if (!imaginary) {
+    return address;
+  }
+  return IRSetType(
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(adda), address,
+                      GeneratorGetIntConstant(gen, NULL, element_type->size))),
+      NewPointerTo(kQualPlain, element_type));
+}
+
+static IRNode* LoadComplexComponent(Generator* gen, IRNode* address,
+                                    TypeRecord* element_type,
+                                    bool imaginary) {
+  IRNode* component_address =
+      ComplexComponentAddress(gen, address, element_type, imaginary);
+  return IRSetType(
+      GeneratorEmit(
+          gen, NewIR1(GetLoadOpcodeForType(element_type), component_address)),
+      element_type);
+}
+
+static ASTOpcode ComplexScalarConversionOpcode(TypeRecord* from,
+                                               TypeRecord* to) {
+  if (TypeIsIntegral(from)) {
+    return TypeUsesFloat32Representation(to) ? AST_OP(i2f) : AST_OP(i2d);
+  }
+  if (TypeUsesFloat32Representation(from)) {
+    if (TypeUsesFloat64Representation(to)) {
+      return AST_OP(f2d);
+    }
+    if (TypeIsBool(to)) {
+      return AST_OP(f2b);
+    }
+    if (TypeIsCharFamily(to)) {
+      return AST_OP(f2c);
+    }
+    if (TypeIsShort(to)) {
+      return AST_OP(f2s);
+    }
+    if (TypeIsLongLong(to)) {
+      return AST_OP(f2ll);
+    }
+    if (TypeIsLong(to)) {
+      return AST_OP(f2l);
+    }
+    return AST_OP(f2i);
+  }
+  if (TypeUsesFloat64Representation(from)) {
+    if (TypeUsesFloat32Representation(to)) {
+      return AST_OP(d2f);
+    }
+    if (TypeIsBool(to)) {
+      return AST_OP(d2b);
+    }
+    if (TypeIsCharFamily(to)) {
+      return AST_OP(d2c);
+    }
+    if (TypeIsShort(to)) {
+      return AST_OP(d2s);
+    }
+    if (TypeIsLongLong(to)) {
+      return AST_OP(d2ll);
+    }
+    if (TypeIsLong(to)) {
+      return AST_OP(d2l);
+    }
+    return AST_OP(d2i);
+  }
+  return AST_OP(bad);
+}
+
+static IRNode* ConvertComplexScalar(Generator* gen, IRNode* value,
+                                    TypeRecord* from, TypeRecord* to) {
+  if ((TypeUsesFloat32Representation(from) &&
+       TypeUsesFloat32Representation(to)) ||
+      (TypeUsesFloat64Representation(from) &&
+       TypeUsesFloat64Representation(to)) ||
+      (TypeIsIntegral(from) && TypeIsIntegral(to))) {
+    return IRSetType(value, to);
+  }
+  ASTOpcode opcode = ComplexScalarConversionOpcode(from, to);
+  assert(opcode != AST_OP(bad));
+  UnaryASTNode conversion = {0};
+  conversion.base.op = opcode;
+  conversion.base.type = to;
+  return IRSetType(
+      GenerateConversion(gen, &conversion.base, value), to);
+}
+
+static IRNode* LoadConvertedComplexComponent(
+    Generator* gen, IRNode* address, TypeRecord* complex_type,
+    TypeRecord* target_element_type, bool imaginary) {
+  TypeRecord* source_element_type =
+      ComplexElementTypeRecord(complex_type);
+  IRNode* value = LoadComplexComponent(gen, address, source_element_type,
+                                       imaginary);
+  return ConvertComplexScalar(gen, value, source_element_type,
+                              target_element_type);
+}
+
+static IRNode* NewComplexResult(Generator* gen, TypeRecord* complex_type,
+                                IRNode** address) {
+  Symbol* temporary = SyntaxNewTemporary(gen->syntax, complex_type);
+  temporary->flags.address_taken = true;
+  IRNode* result = GeneratorGetVariable(gen, temporary);
+  *address = ComplexObjectAddress(gen, result, complex_type);
+  return result;
+}
+
+static void StoreComplexComponent(Generator* gen, IRNode* address,
+                                  TypeRecord* element_type, bool imaginary,
+                                  IRNode* value) {
+  GeneratorEmit(
+      gen, NewIR2(GetStoreOpcodeForType(element_type),
+                  ComplexComponentAddress(gen, address, element_type,
+                                          imaginary),
+                  value));
+}
+
+static IRNode* StoreComplexResult(Generator* gen, TypeRecord* complex_type,
+                                  IRNode* real, IRNode* imaginary) {
+  TypeRecord* element_type = ComplexElementTypeRecord(complex_type);
+  IRNode* address = NULL;
+  IRNode* result = NewComplexResult(gen, complex_type, &address);
+  StoreComplexComponent(gen, address, element_type, false, real);
+  StoreComplexComponent(gen, address, element_type, true, imaginary);
+  return result;
+}
+
+static IRNode* GenerateComplexBinaryFromAddresses(
+    Generator* gen, BinaryASTNode* node, IRNode* left_address,
+    IRNode* right_address) {
+  bool comparison = node->base.op == AST_OP(equal) ||
+                    node->base.op == AST_OP(noteq);
+  TypeRecord* element_type = ComplexElementTypeRecord(
+      comparison ? node->left->type : node->base.type);
+  bool use_float = TypeUsesFloat32Representation(element_type);
+
+  if (comparison) {
+    IRNode* ar = LoadConvertedComplexComponent(
+        gen, left_address, node->left->type, element_type, false);
+    IRNode* ai = LoadConvertedComplexComponent(
+        gen, left_address, node->left->type, element_type, true);
+    IRNode* br = LoadConvertedComplexComponent(
+        gen, right_address, node->right->type, element_type, false);
+    IRNode* bi = LoadConvertedComplexComponent(
+        gen, right_address, node->right->type, element_type, true);
+    IROpcode compare =
+        node->base.op == AST_OP(equal)
+            ? (use_float ? IR_OP(cmpeqf) : IR_OP(cmpeqd))
+            : (use_float ? IR_OP(cmpnef) : IR_OP(cmpned));
+    IRNode* real_compare = GeneratorEmit(gen, NewIR2(compare, ar, br));
+    IRNode* imag_compare = GeneratorEmit(gen, NewIR2(compare, ai, bi));
+    IRNode* result = GeneratorEmit(
+        gen, NewIR2(node->base.op == AST_OP(equal) ? IR_OP(andi)
+                                                   : IR_OP(ori),
+                    real_compare, imag_compare));
+    IRSetType(result, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return TypeIsBool(node->base.type)
+               ? result
+               : GenerateZeroExtend(gen, &node->base, result);
+  }
+
+  IROpcode add = use_float ? IR_OP(addf) : IR_OP(addd);
+  IROpcode sub = use_float ? IR_OP(subf) : IR_OP(subd);
+  IROpcode mul = use_float ? IR_OP(mulf) : IR_OP(muld);
+  IROpcode div = use_float ? IR_OP(divf) : IR_OP(divd);
+  if (node->base.op == AST_OP(plus) ||
+      node->base.op == AST_OP(minus)) {
+    IROpcode operation =
+        node->base.op == AST_OP(plus) ? add : sub;
+    IRNode* result_address = NULL;
+    IRNode* result =
+        NewComplexResult(gen, node->base.type, &result_address);
+    IRNode* real = GeneratorEmit(
+        gen, NewIR2(operation,
+                    LoadConvertedComplexComponent(
+                        gen, left_address, node->left->type, element_type,
+                        false),
+                    LoadConvertedComplexComponent(
+                        gen, right_address, node->right->type, element_type,
+                        false)));
+    IRSetType(real, element_type);
+    StoreComplexComponent(gen, result_address, element_type, false, real);
+    IRNode* imaginary = GeneratorEmit(
+        gen, NewIR2(operation,
+                    LoadConvertedComplexComponent(
+                        gen, left_address, node->left->type, element_type,
+                        true),
+                    LoadConvertedComplexComponent(
+                        gen, right_address, node->right->type, element_type,
+                        true)));
+    IRSetType(imaginary, element_type);
+    StoreComplexComponent(gen, result_address, element_type, true,
+                          imaginary);
+    return result;
+  }
+
+  switch (node->base.op) {
+    case AST_OP(mult): {
+      IRNode* result_address = NULL;
+      IRNode* result =
+          NewComplexResult(gen, node->base.type, &result_address);
+      IRNode* arbr = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          false),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          false)));
+      IRNode* arbr_spill =
+          GeneratorSpillValueToTemp(gen, arbr, element_type);
+      IRNode* aibi = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          true),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          true)));
+      arbr =
+          GeneratorReloadSpilledValue(gen, arbr_spill, element_type);
+      IRNode* real = GeneratorEmit(gen, NewIR2(sub, arbr, aibi));
+      IRSetType(real, element_type);
+      StoreComplexComponent(gen, result_address, element_type, false, real);
+
+      IRNode* arbi = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          false),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          true)));
+      IRNode* arbi_spill =
+          GeneratorSpillValueToTemp(gen, arbi, element_type);
+      IRNode* aibr = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          true),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          false)));
+      arbi =
+          GeneratorReloadSpilledValue(gen, arbi_spill, element_type);
+      IRNode* imaginary = GeneratorEmit(gen, NewIR2(add, arbi, aibr));
+      IRSetType(imaginary, element_type);
+      StoreComplexComponent(gen, result_address, element_type, true,
+                            imaginary);
+      return result;
+    }
+    case AST_OP(div): {
+      IRNode* result_address = NULL;
+      IRNode* result =
+          NewComplexResult(gen, node->base.type, &result_address);
+      IRNode* denominator_real = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, false);
+      IRNode* brbr = GeneratorEmit(
+          gen, NewIR2(mul, denominator_real, denominator_real));
+      IRNode* brbr_spill =
+          GeneratorSpillValueToTemp(gen, brbr, element_type);
+      IRNode* denominator_imag = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, true);
+      IRNode* bibi = GeneratorEmit(
+          gen, NewIR2(mul, denominator_imag, denominator_imag));
+      brbr =
+          GeneratorReloadSpilledValue(gen, brbr_spill, element_type);
+      IRNode* denominator = GeneratorEmit(gen, NewIR2(add, brbr, bibi));
+      IRNode* denominator_spill =
+          GeneratorSpillValueToTemp(gen, denominator, element_type);
+
+      IRNode* arbr = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          false),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          false)));
+      IRNode* arbr_spill =
+          GeneratorSpillValueToTemp(gen, arbr, element_type);
+      IRNode* aibi = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          true),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          true)));
+      arbr =
+          GeneratorReloadSpilledValue(gen, arbr_spill, element_type);
+      IRNode* numerator_real = GeneratorEmit(gen, NewIR2(add, arbr, aibi));
+      denominator = GeneratorReloadSpilledValue(
+          gen, denominator_spill, element_type);
+      IRNode* real =
+          GeneratorEmit(gen, NewIR2(div, numerator_real, denominator));
+      IRSetType(real, element_type);
+      StoreComplexComponent(gen, result_address, element_type, false, real);
+
+      IRNode* aibr = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          true),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          false)));
+      IRNode* aibr_spill =
+          GeneratorSpillValueToTemp(gen, aibr, element_type);
+      IRNode* arbi = GeneratorEmit(
+          gen, NewIR2(mul,
+                      LoadConvertedComplexComponent(
+                          gen, left_address, node->left->type, element_type,
+                          false),
+                      LoadConvertedComplexComponent(
+                          gen, right_address, node->right->type, element_type,
+                          true)));
+      aibr =
+          GeneratorReloadSpilledValue(gen, aibr_spill, element_type);
+      IRNode* numerator_imag = GeneratorEmit(gen, NewIR2(sub, aibr, arbi));
+      denominator = GeneratorReloadSpilledValue(
+          gen, denominator_spill, element_type);
+      IRNode* imaginary =
+          GeneratorEmit(gen, NewIR2(div, numerator_imag, denominator));
+      IRSetType(imaginary, element_type);
+      StoreComplexComponent(gen, result_address, element_type, true,
+                            imaginary);
+      return result;
+    }
+    default:
+      assert(false);
+      return NULL;
+  }
+}
+
+static IRNode* GenerateComplexBinaryExpression(Generator* gen,
+                                               BinaryASTNode* node) {
+  IRNode* left_value = GenerateExpression(gen, node->left);
+  IRNode* left_address =
+      ComplexObjectAddress(gen, left_value, node->left->type);
+  if (ContainsCall(node->right)) {
+    left_address = GeneratorSpillObjectToTemp(
+        gen, left_address, node->left->type);
+  }
+  IRNode* right_value = GenerateExpression(gen, node->right);
+  IRNode* right_address =
+      ComplexObjectAddress(gen, right_value, node->right->type);
+  return GenerateComplexBinaryFromAddresses(gen, node, left_address,
+                                            right_address);
+}
 
 static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
+  if (TypeIsComplex(node->left->type) ||
+      TypeIsComplex(node->right->type)) {
+    return GenerateComplexBinaryExpression(gen, node);
+  }
   // Preserve the left result while evaluating a call on the right. Targets
   // with selectable return registers can still use a globally shared
   // temporary register bank that callees clobber (notably the 65C02).
@@ -741,6 +1132,27 @@ static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
 
 static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
   IRNode* sub = GenerateExpression(gen, node->sub);
+  if (TypeIsComplex(node->sub->type)) {
+    if (node->base.op == AST_OP(uplus)) {
+      return sub;
+    }
+    assert(node->base.op == AST_OP(uminus));
+    TypeRecord* element_type = ComplexElementTypeRecord(node->sub->type);
+    IRNode* address =
+        ComplexObjectAddress(gen, sub, node->sub->type);
+    IROpcode negate = TypeUsesFloat32Representation(element_type)
+                          ? IR_OP(negf)
+                          : IR_OP(negd);
+    IRNode* real = GeneratorEmit(
+        gen, NewIR1(negate,
+                    LoadComplexComponent(gen, address, element_type, false)));
+    IRNode* imaginary = GeneratorEmit(
+        gen, NewIR1(negate,
+                    LoadComplexComponent(gen, address, element_type, true)));
+    IRSetType(real, element_type);
+    IRSetType(imaginary, element_type);
+    return StoreComplexResult(gen, node->base.type, real, imaginary);
+  }
   if (node->base.op == AST_OP(uplus)) {
     return sub;
   }
@@ -1746,7 +2158,13 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   IRNode* value = GenerateExpression(gen, node->right);
   IRNode* value_tmp_addr = NULL;
   TypeRecord* value_tmp_type = NULL;
-  if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+  IRNode* complex_value_tmp_addr = NULL;
+  if (TypeIsComplex(node->left->type) && ContainsCall(node->left)) {
+    IRNode* value_address =
+        ComplexObjectAddress(gen, value, node->right->type);
+    complex_value_tmp_addr = GeneratorSpillObjectToTemp(
+        gen, value_address, node->right->type);
+  } else if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
       !IRIsVariable(value)) {
     value_tmp_type = value->type;
     value_tmp_addr =
@@ -1769,6 +2187,44 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     }
   }
   assert(alu_op != AST_OP(bad));
+
+  if (TypeIsComplex(node->left->type)) {
+    BinaryASTNode operation = *node;
+    operation.base.op = alu_op;
+    operation.base.type = node->right->type;
+    IRNode* left_address =
+        ComplexObjectAddress(gen, dest, node->left->type);
+    IRNode* right_address = complex_value_tmp_addr != NULL
+                                ? complex_value_tmp_addr
+                                : ComplexObjectAddress(
+                                      gen, value, node->right->type);
+    IRNode* result = GenerateComplexBinaryFromAddresses(
+        gen, &operation, left_address, right_address);
+    if (!TypeEqual(operation.base.type, node->left->type)) {
+      TypeRecord* from_element =
+          ComplexElementTypeRecord(operation.base.type);
+      TypeRecord* to_element =
+          ComplexElementTypeRecord(node->left->type);
+      IRNode* source_address =
+          ComplexObjectAddress(gen, result, operation.base.type);
+      IRNode* real = ConvertComplexScalar(
+          gen, LoadComplexComponent(gen, source_address, from_element, false),
+          from_element, to_element);
+      IRNode* imaginary = ConvertComplexScalar(
+          gen, LoadComplexComponent(gen, source_address, from_element, true),
+          from_element, to_element);
+      result =
+          StoreComplexResult(gen, node->left->type, real, imaginary);
+    }
+    IRNode* result_address =
+        ComplexObjectAddress(gen, result, node->left->type);
+    IRNode* assignment = GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), left_address, result_address,
+                    GeneratorGetIntConstant(gen, NULL,
+                                            node->left->type->size)));
+    CheckForVarDef(assignment, node->left);
+    return result_address_needed ? left_address : result;
+  }
 
   // Special case for right shift.  If the type is unsigned we use a logical
   // shift, otherwise it's an arithmetic shift (sign extended).
@@ -3588,6 +4044,36 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
     }
     return GenerateExpression(gen, colon->right);
   }
+
+  if (TypeIsComplex(node->base.type)) {
+    IRNode* result_address = gen->current_struct_address;
+    IRNode* result = result_address;
+    if (result_address == NULL) {
+      result = NewComplexResult(gen, node->base.type, &result_address);
+    }
+    IRNode* false_label = NewIR(IR_OP(label));
+    IRNode* end_label = NewIR(IR_OP(label));
+    IRNode* cond = GenerateExpression(gen, node->left);
+    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, false_label));
+
+    IRNode* left = GenerateExpression(gen, colon->left);
+    IRNode* left_address =
+        ComplexObjectAddress(gen, left, colon->left->type);
+    GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), result_address, left_address,
+                    GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+
+    GeneratorEmit(gen, false_label);
+    IRNode* right = GenerateExpression(gen, colon->right);
+    IRNode* right_address =
+        ComplexObjectAddress(gen, right, colon->right->type);
+    GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), result_address, right_address,
+                    GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
+    GeneratorEmit(gen, end_label);
+    return result;
+  }
   
   bool value_is_used = OptLevel0() || ASTNodeUsesValue(node->base.parent, &node->base);
   bool direct_struct_destination =
@@ -4270,6 +4756,50 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
   }
 }
 
+static IRNode* GenerateComplexCast(Generator* gen, CastASTNode* node) {
+  TypeRecord* from = node->expr->type;
+  TypeRecord* to = node->cast_type;
+  IRNode* source = GenerateExpression(gen, node->expr);
+
+  if (TypeIsComplex(from)) {
+    TypeRecord* from_element = ComplexElementTypeRecord(from);
+    IRNode* source_address =
+        ComplexObjectAddress(gen, source, from);
+    IRNode* real =
+        LoadComplexComponent(gen, source_address, from_element, false);
+    IRNode* imaginary =
+        LoadComplexComponent(gen, source_address, from_element, true);
+    if (TypeIsComplex(to)) {
+      TypeRecord* to_element = ComplexElementTypeRecord(to);
+      real = ConvertComplexScalar(gen, real, from_element, to_element);
+      imaginary =
+          ConvertComplexScalar(gen, imaginary, from_element, to_element);
+      return StoreComplexResult(gen, to, real, imaginary);
+    }
+    if (TypeIsBool(to)) {
+      bool use_float = TypeUsesFloat32Representation(from_element);
+      IROpcode compare = use_float ? IR_OP(cmpnef) : IR_OP(cmpned);
+      IRNode* zero =
+          GeneratorGetFloatingPointConstant(gen, from_element, 0.0);
+      IRNode* real_nonzero =
+          GeneratorEmit(gen, NewIR2(compare, real, zero));
+      IRNode* imag_nonzero =
+          GeneratorEmit(gen, NewIR2(compare, imaginary, zero));
+      return IRSetType(
+          GeneratorEmit(gen, NewIR2(IR_OP(ori), real_nonzero, imag_nonzero)),
+          to);
+    }
+    return ConvertComplexScalar(gen, real, from_element, to);
+  }
+
+  assert(TypeIsComplex(to));
+  TypeRecord* to_element = ComplexElementTypeRecord(to);
+  IRNode* real = ConvertComplexScalar(gen, source, from, to_element);
+  IRNode* imaginary =
+      GeneratorGetFloatingPointConstant(gen, to_element, 0.0);
+  return StoreComplexResult(gen, to, real, imaginary);
+}
+
 // Assembly language IR node.  This refers to a string literal.
 static IRNode* GenerateAsm(Generator* gen, AsmASTNode* node) {
   int literal_id = CompilerAddStringLiteral(node->text, 1);
@@ -4523,6 +5053,11 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     }
 
     case AST_OP(cast):
+      if (TypeIsComplex(cast_node->cast_type) ||
+          TypeIsComplex(cast_node->expr->type)) {
+        result = GenerateComplexCast(gen, cast_node);
+        break;
+      }
       if (cast_node->kind == kCastDynamic && cast_node->dynamic_runtime) {
         result = GenerateDynamicCast(gen, cast_node);
         break;

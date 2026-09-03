@@ -57,6 +57,18 @@ void TypeToString(Type type, String* result) {
     StringAppend(result, "nullptr_t");
     return;
   }
+  if ((type & kTypeComplex) != 0) {
+    if ((type & kTypeLongDouble) != 0 ||
+        ((type & (kTypeLong | kTypeDouble)) ==
+         (kTypeLong | kTypeDouble))) {
+      StringAppend(result, "long double _Complex");
+    } else if ((type & kTypeFloat) != 0) {
+      StringAppend(result, "float _Complex");
+    } else {
+      StringAppend(result, "double _Complex");
+    }
+    return;
+  }
   const char* separator = "";
   if ((type & kTypeSigned) != 0) {
     StringAppend(result, "signed");
@@ -297,7 +309,7 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
       } else {
         TypeToString(printable_type, result);
       }
-      if (TypeIsStructOrUnion(type)) {
+      if (TypeIsStructOrUnion(type) && !TypeIsComplex(type)) {
         if (printable_type != kTypeImplicit) {
           StringAppend(result, " ");
         }

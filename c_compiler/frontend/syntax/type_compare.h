@@ -98,6 +98,23 @@ inline bool TypeIsBitInt(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeBitInt) != 0;
 }
 
+static inline bool TypeIsComplex(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeComplex) != 0;
+}
+
+static inline Type TypeComplexElementType(TypeRecord* type) {
+  if (!TypeIsComplex(type)) {
+    return kTypeImplicit;
+  }
+  if ((type->type & kTypeLongDouble) != 0) {
+    return kTypeLongDouble;
+  }
+  if ((type->type & kTypeDouble) != 0) {
+    return kTypeDouble;
+  }
+  return kTypeFloat;
+}
+
 // Reflection is a consteval-only type.  Compound declarators preserve that
 // property so pointers, references, and arrays of reflection values cannot
 // escape into runtime code.
@@ -170,7 +187,7 @@ inline bool TypeIsIntegral(TypeRecord* type) {
 }
 
 inline bool TypeIsFloatingPoint(TypeRecord* type) {
-  return TypeIsPrimitive(type) &&
+  return TypeIsPrimitive(type) && !TypeIsComplex(type) &&
          (type->type & (kTypeFloat | kTypeDouble | kTypeLongDouble |
                         kTypeFloat32 | kTypeFloat64)) != 0;
 }
@@ -186,7 +203,9 @@ inline bool TypeIsStructOrUnion(TypeRecord* type) {
          (type->type & (kTypeStruct | kTypeUnion)) != 0;
 }
 
-inline bool TypeIsScalar(TypeRecord* type) { return !TypeIsStructOrUnion(type); }
+inline bool TypeIsScalar(TypeRecord* type) {
+  return TypeIsComplex(type) || !TypeIsStructOrUnion(type);
+}
 
 
 inline bool TypeIsInt(TypeRecord* type) {
@@ -261,25 +280,29 @@ inline bool TypeIsUnsignedLongLong(TypeRecord* type) {
 }
 
 inline bool TypeIsFloat(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeFloat) != 0;
+  return TypeIsPrimitive(type) && !TypeIsComplex(type) &&
+         (type->type & kTypeFloat) != 0;
 }
 inline bool TypeIsFloat32(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeFloat32) != 0;
 }
 inline bool TypeIsDouble(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeDouble) != 0;
+  return TypeIsPrimitive(type) && !TypeIsComplex(type) &&
+         (type->type & kTypeDouble) != 0;
 }
 inline bool TypeIsFloat64(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeFloat64) != 0;
 }
 inline bool TypeIsLongDouble(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeLongDouble) != 0;
+  return TypeIsPrimitive(type) && !TypeIsComplex(type) &&
+         (type->type & kTypeLongDouble) != 0;
 }
 inline bool TypeUsesFloat32Representation(TypeRecord* type) {
-  return TypeIsFloat(type) || TypeIsFloat32(type);
+  return !TypeIsComplex(type) && (TypeIsFloat(type) || TypeIsFloat32(type));
 }
 inline bool TypeUsesFloat64Representation(TypeRecord* type) {
-  return TypeIsDouble(type) || TypeIsFloat64(type) || TypeIsLongDouble(type);
+  return !TypeIsComplex(type) &&
+         (TypeIsDouble(type) || TypeIsFloat64(type) || TypeIsLongDouble(type));
 }
 inline bool TypeIsBool(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeBool) != 0;

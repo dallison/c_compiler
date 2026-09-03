@@ -175,8 +175,8 @@ expect_compile unsupported_profile_macros pcode \
 #if __STDC_NO_THREADS__ != 1
 #error incomplete threads profile must be advertised
 #endif
-#if __STDC_NO_COMPLEX__ != 1
-#error unavailable complex arithmetic must be advertised
+#ifdef __STDC_NO_COMPLEX__
+#error complex arithmetic is supported
 #endif
 #ifdef __STDC_NO_VLA__
 #error VLA support must not be disabled
@@ -190,13 +190,31 @@ expect_compile optional_macros x86_64 \
 #if __STDC_NO_THREADS__ != 1
 #error incomplete C11 threads profile must be advertised
 #endif
-#if __STDC_NO_COMPLEX__ != 1
-#error unavailable complex arithmetic must be advertised
+#ifdef __STDC_NO_COMPLEX__
+#error complex arithmetic is supported
 #endif
 #ifdef __STDC_NO_VLA__
 #error VLA support must not be disabled
 #endif
 int test(int n) { int values[n]; return sizeof(values) != 0; }'
+
+expect_compile complex_generic x86_64 \
+  'typedef float _Complex complex_float;
+typedef double _Complex complex_double;
+typedef long _Complex complex_long_double;
+_Static_assert(_Generic((complex_float){0}, complex_float: 1, default: 0),
+               "float complex generic selection");
+_Static_assert(_Generic((complex_double){0}, complex_double: 1, default: 0),
+               "double complex generic selection");
+_Static_assert(_Generic((complex_long_double){0},
+                        long double _Complex: 1, default: 0),
+               "long complex means long double complex");
+int test(void) { return 0; }'
+
+expect_fail complex_increment x86_64 \
+  "Cannot increment or decrement a complex value" \
+  'double _Complex value;
+int test(void) { ++value; return 0; }'
 
 expect_compile character_type_macros x86_64 \
   'typedef __CHAR16_TYPE__ compiler_char16_t;

@@ -935,6 +935,30 @@ static int IntRank(void) {
   return GetRank(&int_type);
 }
 
+static Type ComplexArithmeticElementType(TypeRecord* left,
+                                         TypeRecord* right) {
+  Type result = kTypeFloat;
+  TypeRecord* operands[] = {left, right};
+  for (size_t i = 0; i < sizeof(operands) / sizeof(operands[0]); i++) {
+    TypeRecord* operand = operands[i];
+    Type element =
+        TypeIsComplex(operand) ? TypeComplexElementType(operand)
+                               : TypeIsLongDouble(operand) ? kTypeLongDouble
+                               : TypeIsDouble(operand) || TypeIsFloat64(operand)
+                                   ? kTypeDouble
+                               : TypeIsFloat(operand) || TypeIsFloat32(operand)
+                                   ? kTypeFloat
+                                   : kTypeImplicit;
+    if (element == kTypeLongDouble) {
+      return kTypeLongDouble;
+    }
+    if (element == kTypeDouble) {
+      result = kTypeDouble;
+    }
+  }
+  return result;
+}
+
 static TypeRecord* NewLogicalResultType(void) {
   return NewTypeRecordWithSize(CompilerIsCXX() ? kTypeBool : kTypeInt,
                                kQualPlain);
@@ -959,6 +983,9 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
       // Not operator is boolean.
       break;
     case AST_OP(uminus): {
+      if (TypeIsComplex(node->sub->type)) {
+        break;
+      }
       int rank = GetRank(node->sub->type);
       if (!TypeIsBitInt(node->sub->type) && rank < IntRank()) {
         NormalConversion(
@@ -1129,6 +1156,28 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
   DiagnoseCXX26EnumArithmetic(node);
   if (TypeIsMemberPointer(node->left->type) ||
       TypeIsMemberPointer(node->right->type)) {
+    return;
+  }
+  if (TypeIsComplex(node->left->type) || TypeIsComplex(node->right->type)) {
+    bool left_arithmetic = TypeIsComplex(node->left->type) ||
+                           TypeIsIntegral(node->left->type) ||
+                           TypeIsFloatingPoint(node->left->type);
+    bool right_arithmetic = TypeIsComplex(node->right->type) ||
+                            TypeIsIntegral(node->right->type) ||
+                            TypeIsFloatingPoint(node->right->type);
+    if (!left_arithmetic || !right_arithmetic) {
+      SemanticTypeConversionError(node->left, node->right->type,
+                                  "Illegal numeric operand types "
+                                  "'%s' and '%s'");
+      return;
+    }
+    TypeRecord* target =
+        NewComplexTypeRecord(
+            ComplexArithmeticElementType(node->left->type, node->right->type),
+            kQualPlain);
+    NormalConversion(node->left, target);
+    NormalConversion(node->right, target);
+    ASTNodeSetType((ASTNode*)node, target);
     return;
   }
   if (TypeIsStructOrUnion(node->left->type) ||
@@ -2483,6 +2532,15 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   if (overloaded != NULL) {
     return overloaded;
   }
+  if ((TypeIsComplex(node->left->type) ||
+       TypeIsComplex(node->right->type)) &&
+      node->base.op != AST_OP(equal) &&
+      node->base.op != AST_OP(noteq)) {
+    SemanticError((ASTNode*)node,
+                  "Only == and != are valid for complex operands");
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+    return (ASTNode*)node;
+  }
   if (DiagnoseCXX26ArrayComparison(node)) {
     ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
     return (ASTNode*)node;
@@ -2627,6 +2685,14 @@ static ASTNode* AnalyzeThreeWayComparison(BinaryASTNode* node) {
   ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
   if (overloaded != NULL) {
     return overloaded;
+  }
+  if (TypeIsComplex(node->left->type) ||
+      TypeIsComplex(node->right->type)) {
+    SemanticError((ASTNode*)node,
+                  "Three-way comparison is not valid for complex operands");
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
   }
   if (DiagnoseCXX26ArrayComparison(node)) {
     ASTNodeSetType((ASTNode*)node,
@@ -2900,6 +2966,21 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   InsertNumericConversions(colon, false);
+  if (colon->base.type != NULL && TypeIsComplex(colon->base.type)) {
+    ASTNode* operands[] = {colon->left, colon->right};
+    for (size_t i = 0; i < sizeof(operands) / sizeof(operands[0]); i++) {
+      ASTNode* operand = operands[i];
+      int child_id = operand->child_id;
+      TypeRecord* target = TypeRecordCopy(colon->base.type);
+      ASTNode* converted =
+          NewCastASTNode(target, operand->location, operand);
+      ASTNodeSetType(converted, target);
+      converted->value_category = kValueCategoryPrvalue;
+      converted->flags |= kASTAnalyzed;
+      ASTNodeReplaceChild((ASTNode*)colon, child_id, converted, false);
+    }
+    colon->base.value_category = kValueCategoryPrvalue;
+  }
   // [expr.cond]/7: when the operands have arithmetic (or unscoped enumeration)
   // type, the usual arithmetic conversions apply and the result is a prvalue of
   // the cv-unqualified common type (InsertNumericConversions strips the cv).
@@ -3756,9 +3837,21 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
 // keep the historical behaviour of converting the right operand to the left
 // type.
 static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
-  if (TypeUsesFloat32Representation(node->left->type) &&
-      TypeUsesFloat64Representation(node->right->type)) {
-    NormalConversion(node->right, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
+  bool left_float =
+      TypeUsesFloat32Representation(node->left->type) ||
+      (TypeIsComplex(node->left->type) &&
+       TypeComplexElementType(node->left->type) == kTypeFloat);
+  bool right_double =
+      TypeUsesFloat64Representation(node->right->type) ||
+      (TypeIsComplex(node->right->type) &&
+       TypeComplexElementType(node->right->type) != kTypeFloat);
+  if (left_float && right_double) {
+    TypeRecord* operation_type =
+        TypeIsComplex(node->left->type) ||
+                TypeIsComplex(node->right->type)
+            ? NewComplexTypeRecord(kTypeDouble, kQualPlain)
+            : NewTypeRecordWithSize(kTypeDouble, kQualPlain);
+    NormalConversion(node->right, operation_type);
     return;
   }
   NormalConversion(node->right, node->left->type);
@@ -3941,6 +4034,10 @@ static ASTNode* AnalyzeIncDec(UnaryASTNode* node) {
   AnalyzeUnaryExpression(node);
   if (!IsAssignable(node->sub, false)) {
     SemanticError(node->sub, "Cannot increment or decrement this value");
+  }
+  if (TypeIsComplex(node->sub->type)) {
+    SemanticError(node->sub,
+                  "Cannot increment or decrement a complex value");
   }
   if (TypeIsAtomic(node->sub->type) &&
       !TypeIsIntegral(node->sub->type) &&
