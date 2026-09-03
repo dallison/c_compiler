@@ -156,15 +156,19 @@ static void __load_version(tzdb& database) {
 static void __load_leap_seconds(tzdb& database) {
   database.leap_seconds.clear();
   uint32_t count = 0;
+  int32_t previous_correction = 0;
   __check_syscall(syscall(SYS_TZDB_LEAP_COUNT, &count),
                     "get_tzdb leap count");
   for (uint32_t index = 0; index < count; ++index) {
     __wire_leap_second wire{};
     __check_syscall(syscall(SYS_TZDB_LEAP_INFO, index, &wire),
                       "get_tzdb leap info");
+    const int32_t adjustment =
+        wire.correction_seconds - previous_correction;
+    previous_correction = wire.correction_seconds;
     database.leap_seconds.emplace_back(
         sys_seconds(seconds(wire.date_seconds)),
-        seconds(wire.correction_seconds));
+        seconds(adjustment));
   }
 }
 

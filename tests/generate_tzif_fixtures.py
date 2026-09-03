@@ -91,7 +91,9 @@ def main():
     write_fixture(
         output,
         "LeapZone",
-        build_tzif_v2([], [(0, 0, "UTC")], leaps=[(78796800, 1)]),
+        build_tzif_v2(
+            [], [(0, 0, "UTC")], leaps=[(78796800, 1), (94694400, 2)]
+        ),
     )
 
     alias_path = os.path.join(output, "Alias")

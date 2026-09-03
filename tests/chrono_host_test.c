@@ -98,9 +98,9 @@ int main(void) {
       DaveHostChronoReload(&generation) != 0 || generation <= 1 ||
       DaveHostChronoCurrentZone(current, sizeof(current)) != 0 ||
       strcmp(current, "FixedOffset") != 0 ||
-      DaveHostChronoLeapCount(&leap_count) != 0 || leap_count != 1 ||
-      DaveHostChronoLeapInfo(0, &leap_info) != 0 ||
-      leap_info.correction_seconds != 1) {
+      DaveHostChronoLeapCount(&leap_count) != 0 || leap_count != 2 ||
+      DaveHostChronoLeapInfo(1, &leap_info) != 0 ||
+      leap_info.correction_seconds != 2) {
     fprintf(stderr, "chrono_host_test failed: reload/current/leap\n");
     return 1;
   }

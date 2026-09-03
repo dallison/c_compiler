@@ -88,10 +88,10 @@ int main(void) {
   if (syscall(SYS_TZDB_RELOAD, &generation) != 0 || generation <= 1) return 15;
   if (syscall(SYS_TZDB_CURRENT_ZONE, current, sizeof(current)) != 0) return 16;
   if (current[0] == '\0') return 17;
-  if (syscall(SYS_TZDB_LEAP_COUNT, &leap_count) != 0 || leap_count != 1)
+  if (syscall(SYS_TZDB_LEAP_COUNT, &leap_count) != 0 || leap_count != 2)
     return 18;
-  if (syscall(SYS_TZDB_LEAP_INFO, 0, &leap_info) != 0 ||
-      leap_info.correction_seconds != 1)
+  if (syscall(SYS_TZDB_LEAP_INFO, 1, &leap_info) != 0 ||
+      leap_info.correction_seconds != 2)
     return 19;
   return 0;
 }

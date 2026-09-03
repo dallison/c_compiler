@@ -1441,6 +1441,11 @@ class leap_second {
   }
 };
 
+struct leap_second_info {
+  bool is_leap_second;
+  seconds elapsed;
+};
+
 struct tzdb {
   string version;
   vector<time_zone> zones;
@@ -1511,6 +1516,27 @@ const tzdb& get_tzdb();
 const tzdb_list& get_tzdb_list();
 const tzdb& reload_tzdb();
 string remote_version();
+
+template <class Duration>
+leap_second_info get_leap_second_info(const utc_time<Duration>& value) {
+  const seconds current =
+      duration_cast<seconds>(value.time_since_epoch());
+  seconds elapsed(0);
+  const vector<leap_second>& leap_seconds = get_tzdb().leap_seconds;
+  for (const leap_second& leap : leap_seconds) {
+    const seconds boundary =
+        duration_cast<seconds>(leap.date().time_since_epoch()) + elapsed;
+    if (current < boundary) {
+      break;
+    }
+    if (leap.value().count() > 0 &&
+        current < boundary + leap.value()) {
+      return {true, elapsed + leap.value()};
+    }
+    elapsed += leap.value();
+  }
+  return {false, elapsed};
+}
 
 const time_zone* locate_zone(string_view name);
 const time_zone* locate_zone(string_view name, tzdb& database);

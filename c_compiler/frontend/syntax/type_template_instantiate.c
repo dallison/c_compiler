@@ -2380,6 +2380,35 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   bool formal_is_template_parameter =
       formal_origin->flags.is_template_template_parameter;
   Vector* formal_args = TypeSpecializationTemplateArguments(formal);
+  if (StorageIs(formal_origin->storage, STO(typedef)) &&
+      formal_origin->type != NULL &&
+      formal_origin->type->template_origin != NULL && formal_args != NULL) {
+    Vector* alias_args =
+        CompleteAliasTemplateArguments(formal_origin, formal_args);
+    if (alias_args == NULL) {
+      return false;
+    }
+    TypeParser parser;
+    TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                   STO(implicit), compiler->syntax.context);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    TypeRecord* expanded =
+        SubstituteTemplateParameters(&parser, formal_origin->type, alias_args);
+    bool failed =
+        parser.template_substitution_failed || DiagnosticErrorTrapped();
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    TypeParserDestruct(&parser);
+    VectorDeleteWithContents(alias_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    bool ok =
+        !failed && DeduceFunctionTemplateTypeArgument(
+                       args, explicit_arg_count, expanded, actual);
+    TypeRecordDelete(expanded);
+    return ok;
+  }
   if (formal_is_template_parameter) {
     if (actual_origin == NULL ||
         !TemplateTemplateParameterListsCompatible(

@@ -114,11 +114,42 @@ int main() {
     return 60;
   }
 
-  if (database.leap_seconds.empty()) {
+  if (database.leap_seconds.size() != 2) {
     return 70;
   }
-  if (database.leap_seconds.front().value().count() != 1) {
+  if (database.leap_seconds[0].value().count() != 1 ||
+      database.leap_seconds[1].value().count() != 1) {
     return 71;
+  }
+  const seconds leap_date =
+      database.leap_seconds.front().date().time_since_epoch();
+  const leap_second_info before_leap =
+      get_leap_second_info(utc_time<seconds>(leap_date - seconds(1)));
+  const leap_second_info during_leap =
+      get_leap_second_info(utc_time<seconds>(leap_date));
+  const leap_second_info after_leap =
+      get_leap_second_info(utc_time<seconds>(leap_date + seconds(1)));
+  if (before_leap.is_leap_second || before_leap.elapsed.count() != 0) {
+    return 72;
+  }
+  if (!during_leap.is_leap_second || during_leap.elapsed.count() != 1) {
+    return 73;
+  }
+  if (after_leap.is_leap_second || after_leap.elapsed.count() != 1) {
+    return 74;
+  }
+  const seconds second_leap_utc =
+      database.leap_seconds[1].date().time_since_epoch() + seconds(1);
+  const leap_second_info second_leap =
+      get_leap_second_info(utc_time<seconds>(second_leap_utc));
+  const leap_second_info after_second_leap =
+      get_leap_second_info(utc_time<seconds>(second_leap_utc + seconds(1)));
+  if (!second_leap.is_leap_second || second_leap.elapsed.count() != 2) {
+    return 75;
+  }
+  if (after_second_leap.is_leap_second ||
+      after_second_leap.elapsed.count() != 2) {
+    return 76;
   }
 
   const tzdb& reloaded = reload_tzdb();
