@@ -67,6 +67,7 @@ filegroup(
         "libc/include/forward_list",
         "libc/include/fstream",
         "libc/include/functional",
+        "libc/include/future",
         "libc/include/generator",
         "libc/include/hive",
         "libc/include/iomanip",
