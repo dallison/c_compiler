@@ -1113,6 +1113,27 @@ inline wstring vformat(wstring_view text, wformat_args args) {
 }
 
 template <class OutputIt>
+OutputIt vformat_to(OutputIt out, wstring_view text, wformat_args args) {
+  wstring result = vformat(text, args);
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class OutputIt>
+OutputIt vformat_to(OutputIt out, const locale&, string_view text,
+                    format_args args) {
+  return vformat_to(out, text, args);
+}
+
+template <class OutputIt>
+OutputIt vformat_to(OutputIt out, const locale&, wstring_view text,
+                    wformat_args args) {
+  return vformat_to(out, text, args);
+}
+
+template <class OutputIt>
 OutputIt vformat_to(OutputIt out, string_view text, format_args args) {
   string result = vformat(text, args);
   for (size_t i = 0; i < result.size(); ++i) {
@@ -1242,6 +1263,39 @@ format_to_n_result<OutputIt> format_to_n(
   return {out, result.size()};
 }
 
+template <class OutputIt, class... Args>
+format_to_n_result<OutputIt> format_to_n(
+    OutputIt out, size_t n,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  wstring result = __format_detail::__wformat_invoke(
+      text.data(), text.size(), static_cast<Args&&>(args)...);
+  size_t count = result.size() < n ? result.size() : n;
+  for (size_t i = 0; i < count; ++i) {
+    *out++ = result[i];
+  }
+  return {out, result.size()};
+}
+
+template <class OutputIt, class... Args>
+format_to_n_result<OutputIt> format_to_n(
+    OutputIt out, size_t n, const locale&,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return format_to_n(out, n, text, static_cast<Args&&>(args)...);
+}
+
+template <class OutputIt, class... Args>
+format_to_n_result<OutputIt> format_to_n(
+    OutputIt out, size_t n, const locale&,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return format_to_n(out, n, text, static_cast<Args&&>(args)...);
+}
+
 template <class... Args>
 size_t formatted_size(
     const typename __format_detail::__non_deduced<
@@ -1260,6 +1314,24 @@ size_t formatted_size(
   return __format_detail::__wformat_invoke(
              text.data(), text.size(), static_cast<Args&&>(args)...)
       .size();
+}
+
+template <class... Args>
+size_t formatted_size(
+    const locale&,
+    const typename __format_detail::__non_deduced<
+        format_string<Args...>>::type& text,
+    Args&&... args) {
+  return formatted_size(text, static_cast<Args&&>(args)...);
+}
+
+template <class... Args>
+size_t formatted_size(
+    const locale&,
+    const typename __format_detail::__non_deduced<
+        wformat_string<Args...>>::type& text,
+    Args&&... args) {
+  return formatted_size(text, static_cast<Args&&>(args)...);
 }
 
 enum class range_format {

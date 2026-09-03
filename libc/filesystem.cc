@@ -706,7 +706,10 @@ bool create_directory(const path& value, error_code& error) noexcept {
       reinterpret_cast<const void*>(static_cast<intptr_t>(0777)));
   if (result == -EEXIST) {
     bool result_is_directory = is_directory(value, error);
-    return error ? false : !result_is_directory ? false : false;
+    if (!error && !result_is_directory) {
+      error.assign(EEXIST, generic_category());
+    }
+    return false;
   }
   if (__filesystem_detail::__error(error, result)) return false;
   return true;
@@ -722,11 +725,15 @@ bool create_directory(const path& value, const path& attributes,
                       error_code& error) noexcept {
   file_status attributes_status = status(attributes, error);
   if (error) return false;
-  int64_t result = syscall(
+  int64_t result = __filesystem_detail::__call2(
       SYS_FS_CREATE_DIRECTORY, value.c_str(),
-      static_cast<unsigned>(attributes_status.permissions()) & 07777);
+      reinterpret_cast<const void*>(static_cast<intptr_t>(
+          static_cast<unsigned>(attributes_status.permissions()) & 07777)));
   if (result == -EEXIST) {
-    error.clear();
+    bool result_is_directory = is_directory(value, error);
+    if (!error && !result_is_directory) {
+      error.assign(EEXIST, generic_category());
+    }
     return false;
   }
   return !__filesystem_detail::__error(error, result);

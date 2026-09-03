@@ -217,12 +217,16 @@ class path {
     if (__value.empty()) return path();
     size_t end = __value.size();
     while (end > 1 && __value[end - 1] == '/') --end;
+    if (end < __value.size()) {
+      return path(__value.substr(0, end));
+    }
     if (end == 1 && __value[0] == '/') return path("/");
     size_t slash = end;
     while (slash > 0 && __value[slash - 1] != '/') --slash;
     if (slash == 0) return path();
-    while (slash > 1 && __value[slash - 1] == '/') --slash;
-    return path(__value.substr(0, slash));
+    size_t parent_end = slash - 1;
+    while (parent_end > 0 && __value[parent_end - 1] == '/') --parent_end;
+    return parent_end == 0 ? path("/") : path(__value.substr(0, parent_end));
   }
   path filename() const {
     if (__value.empty()) return path();

@@ -5,6 +5,7 @@
 #include <istream>
 #include <streambuf>
 #include <typeinfo>
+#include <vector>
 
 // Locale core: classic facet registry and iostream locale hooks.
 
@@ -15,18 +16,16 @@ extern "C" void __davecc_raise_bad_cast(void);
 namespace std {
 
 struct __locale_impl {
-  static const size_t __max_facets_ = 16;
   mutable size_t __refs;
   const char* __name;
-  size_t __facet_count;
-  locale::facet* __facets[__max_facets_];
+  vector<locale::facet*> __facets;
 
   explicit __locale_impl(const char* name);
   __locale_impl(const __locale_impl& other);
   ~__locale_impl();
 
   locale::facet* __get(size_t index) const {
-    return index < __facet_count ? __facets[index] : nullptr;
+    return index < __facets.size() ? __facets[index] : nullptr;
   }
   bool __has(size_t index) const { return __get(index) != nullptr; }
   void __install(locale::facet* facet, size_t index);
@@ -128,16 +127,11 @@ unsigned short __debug_classic_mask(unsigned char c) {
 }
 
 __locale_impl::__locale_impl(const char* name)
-    : __refs(0), __name(name != nullptr ? name : "C"), __facet_count(0) {
-  for (size_t i = 0; i < __max_facets_; ++i) {
-    __facets[i] = nullptr;
-  }
-}
+    : __refs(0), __name(name != nullptr ? name : "C"), __facets() {}
 
 __locale_impl::__locale_impl(const __locale_impl& other)
-    : __refs(0), __name(other.__name), __facet_count(other.__facet_count) {
-  for (size_t i = 0; i < __max_facets_; ++i) {
-    __facets[i] = other.__facets[i];
+    : __refs(0), __name(other.__name), __facets(other.__facets) {
+  for (size_t i = 0; i < __facets.size(); ++i) {
     if (__facets[i] != nullptr) {
       __facets[i]->__add_ref();
     }
@@ -145,7 +139,7 @@ __locale_impl::__locale_impl(const __locale_impl& other)
 }
 
 __locale_impl::~__locale_impl() {
-  for (size_t i = 0; i < __facet_count; ++i) {
+  for (size_t i = 0; i < __facets.size(); ++i) {
     if (__facets[i] != nullptr) {
       __facets[i]->__release();
     }
@@ -153,11 +147,11 @@ __locale_impl::~__locale_impl() {
 }
 
 void __locale_impl::__install(locale::facet* facet, size_t index) {
-  if (facet == nullptr || index >= __max_facets_) {
+  if (facet == nullptr) {
     return;
   }
-  if (index >= __facet_count) {
-    __facet_count = index + 1;
+  if (index >= __facets.size()) {
+    __facets.resize(index + 1, static_cast<locale::facet*>(nullptr));
   }
   if (__facets[index] != nullptr) {
     __facets[index]->__release();
@@ -324,6 +318,59 @@ __locale_impl* locale::__combine_impl(const __locale_impl* base,
     return add != nullptr ? new __locale_impl(*add) : __make_classic();
   }
   return base->__combine_with(add, cat);
+}
+
+__locale_impl* locale::__replace_facet_impl(const __locale_impl* base,
+                                            locale::facet* replacement,
+                                            locale::id& facet_id) {
+  if (replacement == nullptr) {
+    __locale_impl* result = const_cast<__locale_impl*>(base);
+    if (result != nullptr) {
+      ++result->__refs;
+    }
+    return result;
+  }
+  __locale_impl* result =
+      base != nullptr ? new __locale_impl(*base) : new __locale_impl("C");
+  result->__name = "*";
+#ifdef __cpp_exceptions
+  try {
+    result->__install(replacement, facet_id.__index());
+  } catch (...) {
+    delete result;
+    delete replacement;
+    throw;
+  }
+#else
+  result->__install(replacement, facet_id.__index());
+#endif
+  result->__refs = 1;
+  return result;
+}
+
+__locale_impl* locale::__combine_facet_impl(const __locale_impl* base,
+                                            const __locale_impl* add,
+                                            locale::id& facet_id) {
+  locale::facet* replacement =
+      add != nullptr ? add->__get(facet_id.__index()) : nullptr;
+  if (replacement == nullptr) {
+    __locale_detail::__throw_bad_cast();
+  }
+  __locale_impl* result =
+      base != nullptr ? new __locale_impl(*base) : new __locale_impl("C");
+  result->__name = "*";
+#ifdef __cpp_exceptions
+  try {
+    result->__install(replacement, facet_id.__index());
+  } catch (...) {
+    delete result;
+    throw;
+  }
+#else
+  result->__install(replacement, facet_id.__index());
+#endif
+  result->__refs = 1;
+  return result;
 }
 
 static __locale_impl*& __global_locale_impl() {

@@ -14,6 +14,15 @@
 
 static int callback_count = 0;
 
+class custom_numpunct : public std::numpunct<char> {
+ protected:
+  char do_decimal_point() const override { return ','; }
+  char do_thousands_sep() const override { return '.'; }
+  std::string do_grouping() const override { return "\3"; }
+  std::string do_truename() const override { return "yes"; }
+  std::string do_falsename() const override { return "no"; }
+};
+
 void on_imbue(std::ios_base::event, std::ios_base&, int index) {
   if (index == 7) {
     ++callback_count;
@@ -91,6 +100,23 @@ int main() {
   if (!std::has_facet<std::num_get<char, std::istreambuf_iterator>>(
           classic)) {
     return 11;
+  }
+
+  std::locale customized(classic, new custom_numpunct);
+  const std::numpunct<char>& custom =
+      std::use_facet<std::numpunct<char>>(customized);
+  if (custom.decimal_point() != ',' || custom.thousands_sep() != '.' ||
+      custom.grouping() != "\3" || custom.truename() != "yes" ||
+      custom.falsename() != "no" || customized.name() != "*") {
+    return 12;
+  }
+  std::locale combined = classic.combine<std::numpunct<char>>(customized);
+  if (std::use_facet<std::numpunct<char>>(combined).truename() != "yes") {
+    return 13;
+  }
+  std::locale copied(classic, static_cast<custom_numpunct*>(nullptr));
+  if (copied != classic) {
+    return 14;
   }
 
   return 0;

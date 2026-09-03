@@ -5,6 +5,10 @@
 using namespace std::chrono_literals;
 using namespace std::chrono;
 
+#if __cpp_lib_chrono != 201907L
+#error "unexpected __cpp_lib_chrono value"
+#endif
+
 int check_duration_helpers(void) {
   if (floor<seconds>(milliseconds(2500)).count() != 2) {
     return 10;
@@ -23,6 +27,11 @@ int check_duration_helpers(void) {
   }
   if (!hh_mm_ss<milliseconds>(-90s).is_negative()) {
     return 15;
+  }
+  if (duration_values<unsigned>::min() != 0 ||
+      duration_values<unsigned>::max() !=
+          std::numeric_limits<unsigned>::max()) {
+    return 16;
   }
   return 0;
 }
@@ -66,6 +75,21 @@ int check_calendar(void) {
   }
   if (runtime_thursday[4].weekday().c_encoding() != 4) {
     return 35;
+  }
+  if (Sunday.c_encoding() != 0 || Sunday.iso_encoding() != 7 ||
+      weekday(7).ok()) {
+    return 37;
+  }
+  month advanced = January + months(13);
+  month retreated = January - months(1);
+  if (advanced != February) return 38;
+  if (retreated != December) return 40;
+  months month_difference = January - December;
+  if (month_difference.count() != 1)
+    return static_cast<int>(month_difference.count());
+  if (year::min() != year(-32767) || year::max() != year(32767) ||
+      -year(2024) != year(-2024)) {
+    return 39;
   }
   const sys_days thanksgiving =
       operator/(2024y / November / runtime_thursday[4]);

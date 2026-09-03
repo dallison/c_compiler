@@ -20,6 +20,12 @@ int main() {
   if (lexical.filename() != fs::path("gamma.txt")) return 2;
   if (lexical.stem() != fs::path("gamma")) return 3;
   if (lexical.extension() != fs::path(".txt")) return 4;
+  if (fs::path("alpha/beta").parent_path() != fs::path("alpha")) return 25;
+  if (fs::path("/alpha/beta").parent_path() != fs::path("/alpha")) return 26;
+  if (fs::path("alpha/").parent_path() != fs::path("alpha")) return 27;
+  fs::path without_filename("alpha/beta");
+  without_filename.remove_filename();
+  if (without_filename != fs::path("alpha/")) return 28;
 
   std::error_code error;
   fs::path root = fs::temp_directory_path(error) / "davecc-filesystem-0327";
@@ -30,12 +36,19 @@ int main() {
   fs::path nested = root / "one" / "two";
   if (!fs::create_directories(nested, error) || error) return 6;
   if (!fs::is_directory(nested, error) || error) return 7;
+  if (fs::create_directory(nested, error) || error) return 29;
 
   fs::path source = nested / "source.txt";
   {
     std::ofstream output(source.c_str());
     output << "filesystem";
   }
+  if (fs::create_directory(source, error) || !error) return 30;
+  error.clear();
+  fs::path attributed = root / "attributed";
+  if (!fs::create_directory(attributed, nested, error) || error) return 31;
+  if (!fs::is_directory(attributed, error) || error) return 32;
+  if (!fs::remove(attributed, error) || error) return 33;
   if (fs::file_size(source, error) != 10 || error) return 8;
 
   fs::path copied = nested / "copied.txt";

@@ -136,6 +136,9 @@ class locale {
   locale(const char* std_name);
   locale(const locale& other, const char* std_name, category cat);
   locale(const locale& other, const locale& add, category cat);
+  template <class Facet>
+  locale(const locale& other, Facet* facet)
+      : __impl_(__replace_facet_impl(other.__impl_, facet, Facet::id)) {}
   ~locale();
 
   const locale& operator=(const locale& other) noexcept;
@@ -164,8 +167,20 @@ class locale {
   static __locale_impl* __combine_impl(const __locale_impl* base,
                                        const __locale_impl* add,
                                        category cat);
+  static __locale_impl* __replace_facet_impl(const __locale_impl* base,
+                                             facet* replacement,
+                                             id& facet_id);
+  static __locale_impl* __combine_facet_impl(const __locale_impl* base,
+                                             const __locale_impl* add,
+                                             id& facet_id);
   friend class ios_base;
 };
+
+template <class Facet>
+locale locale::combine(const locale& other) const {
+  return locale(__combine_facet_impl(__impl_, other.__impl_, Facet::id),
+                __from_impl());
+}
 
 template <class Facet>
 const Facet& use_facet(const locale& loc) {
@@ -533,18 +548,11 @@ class numpunct : public locale::facet {
 
   explicit numpunct(size_t refs = 0) : locale::facet(refs) {}
 
-  char_type decimal_point() const { return CharT('.'); }
-  char_type thousands_sep() const { return CharT(','); }
-  string grouping() const { return string(); }
-  string_type truename() const {
-    const CharT value[] = {CharT('t'), CharT('r'), CharT('u'), CharT('e')};
-    return string_type(value, 4);
-  }
-  string_type falsename() const {
-    const CharT value[] = {CharT('f'), CharT('a'), CharT('l'), CharT('s'),
-                           CharT('e')};
-    return string_type(value, 5);
-  }
+  char_type decimal_point() const { return do_decimal_point(); }
+  char_type thousands_sep() const { return do_thousands_sep(); }
+  string grouping() const { return do_grouping(); }
+  string_type truename() const { return do_truename(); }
+  string_type falsename() const { return do_falsename(); }
 
  protected:
   ~numpunct() override {}

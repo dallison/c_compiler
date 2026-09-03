@@ -14,6 +14,15 @@
 #define __cpp_lib_memory_resource 201603L
 #define __cpp_lib_sample 201603L
 #define __cpp_lib_allocator_traits_is_always_equal 201411L
+#ifndef __cpp_lib_chrono
+#define __cpp_lib_chrono 201611L
+#endif
+#endif
+
+#if __cplusplus >= 201402L
+#ifndef __cpp_lib_chrono_udls
+#define __cpp_lib_chrono_udls 201304L
+#endif
 #endif
 
 #if __cplusplus >= 202002L
@@ -25,12 +34,16 @@
 #endif
 #define __cpp_lib_constexpr_dynamic_alloc 201907L
 #define __cpp_lib_endian 201907L
+#ifndef __cpp_lib_format
 #define __cpp_lib_format 201907L
+#endif
 #define __cpp_lib_int_pow2 202002L
 #define __cpp_lib_math_constants 201907L
 #define __cpp_lib_source_location 201907L
 #define __cpp_lib_span 202002L
 #define __cpp_lib_syncbuf 201803L
+#undef __cpp_lib_chrono
+#define __cpp_lib_chrono 201907L
 
 #if !defined(__6502__)
 #define __cpp_lib_atomic_ref 201806L

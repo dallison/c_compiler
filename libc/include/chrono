@@ -10,6 +10,7 @@
 
 #include <compare>
 #include <cstdint>
+#include <limits>
 #include <ratio>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,15 @@
 #include <time.h>
 #include <type_traits>
 #include <vector>
+
+#if __cplusplus >= 202002L
+#define __cpp_lib_chrono 201907L
+#elif __cplusplus >= 201703L
+#define __cpp_lib_chrono 201611L
+#endif
+#if __cplusplus >= 201402L
+#define __cpp_lib_chrono_udls 201304L
+#endif
 
 namespace std {
 namespace chrono {
@@ -28,8 +38,8 @@ struct treat_as_floating_point : is_floating_point<Rep> {
 template <class Rep>
 struct duration_values {
   static constexpr Rep zero() { return Rep(0); }
-  static constexpr Rep min() { return Rep(-9223372036854775807LL - 1); }
-  static constexpr Rep max() { return Rep(9223372036854775807LL); }
+  static constexpr Rep min() { return numeric_limits<Rep>::lowest(); }
+  static constexpr Rep max() { return numeric_limits<Rep>::max(); }
 };
 
 template <class Rep, class Period = ratio<1>>
@@ -556,6 +566,20 @@ class month {
   constexpr explicit month(unsigned value) noexcept : __m_(static_cast<unsigned char>(value)) {}
   constexpr explicit operator unsigned() const noexcept { return __m_; }
   constexpr bool ok() const noexcept { return __m_ >= 1 && __m_ <= 12; }
+  constexpr month& operator+=(const months& value) noexcept {
+    const months::rep offset = value.count() % 12;
+    int index = (static_cast<int>(__m_) - 1 +
+                 static_cast<int>(offset)) %
+                12;
+    if (index < 0) {
+      index += 12;
+    }
+    __m_ = static_cast<unsigned char>(index + 1);
+    return *this;
+  }
+  constexpr month& operator-=(const months& value) noexcept {
+    return *this += -value;
+  }
   constexpr month operator++() noexcept { return month{__m_ == 12 ? 1u : static_cast<unsigned>(__m_ + 1)}; }
   constexpr month operator++(int) noexcept {
     month old(*this);
@@ -567,6 +591,26 @@ class month {
     month old(*this);
     --*this;
     return old;
+  }
+  friend constexpr month operator+(month value, const months& amount) {
+    value += amount;
+    return value;
+  }
+  friend constexpr month operator+(const months& amount, month value) {
+    value += amount;
+    return value;
+  }
+  friend constexpr month operator-(month value, const months& amount) {
+    value -= amount;
+    return value;
+  }
+  friend constexpr months operator-(month left, month right) {
+    int difference = static_cast<int>(static_cast<unsigned>(left)) -
+                     static_cast<int>(static_cast<unsigned>(right));
+    if (difference < 0) {
+      difference += 12;
+    }
+    return months(static_cast<months::rep>(difference));
   }
   friend constexpr bool operator==(month left, month right) {
     return static_cast<unsigned>(left) == static_cast<unsigned>(right);
@@ -594,6 +638,8 @@ class year {
   constexpr bool is_leap() const noexcept {
     return __y_ % 4 == 0 && (__y_ % 100 != 0 || __y_ % 400 == 0);
   }
+  constexpr year operator+() const noexcept { return *this; }
+  constexpr year operator-() const noexcept { return year(-__y_); }
   constexpr year operator++() noexcept { return year{++__y_}; }
   constexpr year operator++(int) noexcept {
     year old(*this);
@@ -611,6 +657,8 @@ class year {
     return *this;
   }
   constexpr year& operator-=(const years& value) noexcept { return *this += -value; }
+  static constexpr year min() noexcept { return year(-32767); }
+  static constexpr year max() noexcept { return year(32767); }
   friend constexpr year operator+(year value, const years& amount) { return value += amount; }
   friend constexpr year operator+(const years& amount, year value) { return value + amount; }
   friend constexpr year operator-(year value, const years& amount) { return value -= amount; }
@@ -638,14 +686,18 @@ class weekday {
 
  public:
   weekday() = default;
-  constexpr explicit weekday(unsigned value) noexcept : __wd_(static_cast<unsigned char>(value % 7)) {}
+  constexpr explicit weekday(unsigned value) noexcept
+      : __wd_(static_cast<unsigned char>(value)) {}
   constexpr explicit operator unsigned() const noexcept { return __wd_; }
-  constexpr unsigned c_encoding() const noexcept { return __wd_ == 0u ? 7u : __wd_; }
+  constexpr unsigned c_encoding() const noexcept { return __wd_; }
   constexpr unsigned iso_encoding() const noexcept { return __wd_ == 0u ? 7u : __wd_; }
   constexpr bool ok() const noexcept { return __wd_ <= 6; }
   weekday_indexed operator[](unsigned index) const noexcept;
   weekday_last operator[](last_spec) const noexcept;
-  constexpr weekday operator++() noexcept { return weekday{static_cast<unsigned>(__wd_ + 1)}; }
+  constexpr weekday operator++() noexcept {
+    __wd_ = static_cast<unsigned char>((__wd_ + 1) % 7);
+    return *this;
+  }
   constexpr weekday operator++(int) noexcept {
     weekday old(*this);
     ++*this;

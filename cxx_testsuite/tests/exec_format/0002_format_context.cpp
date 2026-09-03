@@ -2,6 +2,8 @@
 // EXPECT_EXIT: 0
 
 #include <format>
+#include <locale>
+#include <string>
 
 struct point {
   int x;
@@ -41,6 +43,37 @@ int main() {
       short_output[0] != '1' || short_output[2] != '3') return 4;
   if (std::formatted_size("{} {}", 123, "xy") != 6) return 5;
   if (std::format("{}", point{2, 5}) != "(2, 5)") return 6;
+
+  std::wstring wide_output;
+  std::format_to(std::back_inserter(wide_output), L"{}-{}", 7, 9);
+  if (wide_output != L"7-9") return 8;
+
+  wchar_t short_wide[2] = {};
+  auto wide_result = std::format_to_n(short_wide, 2, L"{}", 456);
+  if (wide_result.out != short_wide + 2 || wide_result.size != 3 ||
+      short_wide[0] != L'4' || short_wide[1] != L'5') {
+    return 9;
+  }
+
+  int runtime_value = 42;
+  std::string runtime_output;
+  std::vformat_to(std::back_inserter(runtime_output), "{}",
+                  std::make_format_args(runtime_value));
+  if (runtime_output != "42") return 10;
+
+  std::wstring wide_runtime_output;
+  std::vformat_to(std::back_inserter(wide_runtime_output), L"{}",
+                  std::make_wformat_args(runtime_value));
+  if (wide_runtime_output != L"42") return 11;
+
+  const std::locale classic = std::locale::classic();
+  char localized[2] = {};
+  auto localized_result =
+      std::format_to_n(localized, 2, classic, "{}", 789);
+  if (localized_result.out != localized + 2 || localized_result.size != 3 ||
+      std::formatted_size(classic, "{}", 789) != 3) {
+    return 12;
+  }
 
 #ifdef __cpp_exceptions
   bool caught = false;
