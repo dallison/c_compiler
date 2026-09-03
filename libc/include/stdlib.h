@@ -61,13 +61,13 @@ typedef struct __lldiv_t {
 #endif
 
 #if !defined(__WCHAR_T) && !defined(__cplusplus)
-typedef int wchar_t;
+typedef __WCHAR_TYPE__ wchar_t;
 #define __WCHAR_T
 #endif
 
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
-#define RAND_MAX 0xffffffff
+#define RAND_MAX 32767
 #define MB_CUR_MAX 4
 
 
@@ -110,6 +110,8 @@ void __attribute__((noreturn)) abort(void);
 int atexit(void (*func)(void));
 void exit(int status);
 void _Exit(int status);
+int at_quick_exit(void (*func)(void));
+void quick_exit(int status);
 char *getenv(const char *name);
 char *realpath(const char * restrict path, char * restrict resolved_path);
 extern char **environ;
@@ -133,7 +135,12 @@ size_t mbstowcs(wchar_t * restrict pwcs,
       const char * restrict s, size_t n);
 size_t wcstombs(char * restrict s,
 const wchar_t * restrict pwcs, size_t n);
-char* realpath(const char* path, char* resolved_path);
+int strfromd(char* restrict output, size_t count,
+             const char* restrict format, double value);
+int strfromf(char* restrict output, size_t count,
+             const char* restrict format, float value);
+int strfroml(char* restrict output, size_t count,
+             const char* restrict format, long double value);
 
 #if !defined(__cplusplus) && defined(__STDC_VERSION__) && \
     __STDC_VERSION__ >= 202311L

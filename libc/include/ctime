@@ -27,6 +27,15 @@ using ::ctime;
 using ::gmtime;
 using ::localtime;
 using ::strftime;
+using ::timespec;
+using ::timespec_get;
+using ::timespec_getres;
+using ::asctime_r;
+using ::ctime_r;
+using ::gmtime_r;
+using ::localtime_r;
+using ::strptime;
+using ::tzset;
 
 }  // namespace std
 

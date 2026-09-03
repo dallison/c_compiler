@@ -26,11 +26,9 @@ template <size_t N>
 class bitset {
  private:
   typedef unsigned long long __word_type;
-  static constexpr size_t __word_bits = sizeof(__word_type) * CHAR_BIT;
-  static constexpr size_t __word_count =
-      N == 0 ? 1 : (N + __word_bits - 1) / __word_bits;
+  enum { __word_bits = sizeof(__word_type) * CHAR_BIT };
 
-  __word_type __words[__word_count];
+  __word_type __words[N == 0 ? 1 : (N + __word_bits - 1) / __word_bits];
 
   static __DAVECC_BITSET_CONSTEXPR size_t __word_index(size_t pos) noexcept {
     return pos / __word_bits;
@@ -43,7 +41,7 @@ class bitset {
 
   __DAVECC_BITSET_CONSTEXPR void __trim() noexcept {
     if (N != 0 && N % __word_bits != 0) {
-      __words[__word_count - 1] &=
+      __words[sizeof(__words) / sizeof(__words[0]) - 1] &=
           (__word_type(1) << (N % __word_bits)) - 1;
     }
   }
@@ -116,11 +114,21 @@ class bitset {
     }
   };
 
+#if __cplusplus >= 201103L
   constexpr bitset() noexcept : __words{} {}
 
   constexpr bitset(unsigned long long value) noexcept : __words{value} {
     __trim();
   }
+#else
+  bitset() { reset(); }
+
+  bitset(unsigned long long value) {
+    reset();
+    __words[0] = value;
+    __trim();
+  }
+#endif
 
   template <class CharT, class Traits, class Allocator>
   explicit bitset(
@@ -128,8 +136,8 @@ class bitset {
       typename basic_string<CharT, Traits, Allocator>::size_type pos = 0,
       typename basic_string<CharT, Traits, Allocator>::size_type n =
           basic_string<CharT, Traits, Allocator>::npos,
-      CharT zero = CharT('0'), CharT one = CharT('1'))
-      : __words{} {
+      CharT zero = CharT('0'), CharT one = CharT('1')) {
+    reset();
     typedef basic_string<CharT, Traits, Allocator> __string_type;
     if (pos > str.size()) {
       __DAVECC_THROW(out_of_range("bitset::bitset"));
@@ -148,21 +156,21 @@ class bitset {
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& operator&=(const bitset& other) noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] &= other.__words[i];
     }
     return *this;
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& operator|=(const bitset& other) noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] |= other.__words[i];
     }
     return *this;
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& operator^=(const bitset& other) noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] ^= other.__words[i];
     }
     return *this;
@@ -213,7 +221,7 @@ class bitset {
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& set() noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] = ~__word_type(0);
     }
     __trim();
@@ -229,7 +237,7 @@ class bitset {
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& reset() noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] = 0;
     }
     return *this;
@@ -244,7 +252,7 @@ class bitset {
   }
 
   __DAVECC_BITSET_CONSTEXPR bitset& flip() noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       __words[i] = ~__words[i];
     }
     __trim();
@@ -301,7 +309,7 @@ class bitset {
 
   __DAVECC_BITSET_CONSTEXPR size_t count() const noexcept {
     size_t result = 0;
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       result += __popcount(__words[i]);
     }
     return result;
@@ -313,7 +321,7 @@ class bitset {
 
   __DAVECC_BITSET_CONSTEXPR bool operator==(const bitset& other) const
       noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       if (__words[i] != other.__words[i]) {
         return false;
       }
@@ -338,7 +346,7 @@ class bitset {
   }
 
   __DAVECC_BITSET_CONSTEXPR bool any() const noexcept {
-    for (size_t i = 0; i < __word_count; ++i) {
+    for (size_t i = 0; i < sizeof(__words) / sizeof(__words[0]); ++i) {
       if (__words[i] != 0) {
         return true;
       }

@@ -3,8 +3,7 @@
 //  c_compiler
 //
 //  C++ wrapper for <inttypes.h>.  The PRI*/SCN* format-specifier macros are
-//  global; the fixed-width integer types come in via <cstdint>.  (The
-//  imaxdiv_t helpers are not provided by this libc.)
+//  global; the fixed-width integer types come in via <cstdint>.
 //
 
 #ifndef cinttypes_h
@@ -12,5 +11,15 @@
 
 #include <cstdint>
 #include <inttypes.h>
+
+namespace std {
+
+using ::imaxdiv_t;
+using ::imaxabs;
+using ::imaxdiv;
+using ::strtoimax;
+using ::strtoumax;
+
+}  // namespace std
 
 #endif /* cinttypes_h */

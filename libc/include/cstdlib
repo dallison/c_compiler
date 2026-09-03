@@ -38,8 +38,13 @@ using ::malloc;
 using ::realloc;
 using ::abort;
 using ::atexit;
+using ::at_quick_exit;
 using ::exit;
 using ::_Exit;
+using ::quick_exit;
+#if __cplusplus >= 201703L
+using ::aligned_alloc;
+#endif
 using ::getenv;
 using ::system;
 using ::bsearch;

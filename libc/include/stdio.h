@@ -66,6 +66,7 @@ typedef struct FILE {
   char unget_index;     // Index into unget_buf for ungotten bytes.
   char eof_flag;        // 1 if EOF reached.
   char error_flag;      // 1 for error condition.
+  signed char orientation;  // -1 byte, 0 unoriented, 1 wide.
   char unget_buf[10];   // Buffer for unget.
   struct FILE* prev;
   struct FILE* next;
@@ -84,7 +85,7 @@ typedef struct FILE {
 #endif
 #define BUFSIZ BUFSIZE
 
-#define FOPEN_MAX 0
+#define FOPEN_MAX 16
 #if defined(__6502__)
 #define FILENAME_MAX 16
 #else
@@ -150,13 +151,13 @@ int vsscanf(const char * restrict s,
 int fgetc(FILE *stream);
 char *fgets(char * restrict s, int n,
      FILE * restrict stream);
-int fputc(char_t c, FILE *stream);
+int fputc(int c, FILE *stream);
 int fputs(const char * restrict s,
      FILE * restrict stream);
 int getc(FILE *stream);
 int getchar(void);
 char *gets(char *s);
-int putchar(char_t c);
+int putchar(int c);
 int puts(const char *s);
 int ungetc(int c, FILE *stream);
 size_t fread(void * restrict ptr, size_t size, size_t nmemb, FILE * restrict stream);

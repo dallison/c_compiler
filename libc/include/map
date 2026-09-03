@@ -8,12 +8,164 @@
 #ifndef __davecc_map__
 #define __davecc_map__
 
+#if __cplusplus < 201103L
+
+#include <functional>
+#include <list>
+#include <utility>
+
+namespace std {
+
+template <class Key, class T, class Compare = less<Key>,
+          class Allocator = allocator<pair<const Key, T> > >
+class map {
+  typedef list<pair<const Key, T>, Allocator> storage_type;
+
+ public:
+  typedef Key key_type;
+  typedef T mapped_type;
+  typedef pair<const Key, T> value_type;
+  typedef Compare key_compare;
+  typedef Allocator allocator_type;
+  typedef typename storage_type::size_type size_type;
+  typedef typename storage_type::difference_type difference_type;
+  typedef value_type& reference;
+  typedef const value_type& const_reference;
+  typedef typename storage_type::iterator iterator;
+  typedef typename storage_type::const_iterator const_iterator;
+
+  explicit map(const Compare& compare = Compare(),
+               const Allocator& allocator_value = Allocator())
+      : values_(allocator_value), compare_(compare) {}
+
+  template <class InputIt>
+  map(InputIt first, InputIt last, const Compare& compare = Compare(),
+      const Allocator& allocator_value = Allocator())
+      : values_(allocator_value), compare_(compare) {
+    while (first != last) insert(*first++);
+  }
+
+  iterator begin() { return values_.begin(); }
+  const_iterator begin() const { return values_.begin(); }
+  iterator end() { return values_.end(); }
+  const_iterator end() const { return values_.end(); }
+  bool empty() const { return values_.empty(); }
+  size_type size() const { return values_.size(); }
+  key_compare key_comp() const { return compare_; }
+  allocator_type get_allocator() const { return values_.get_allocator(); }
+
+  iterator find(const key_type& key) {
+    iterator current = begin();
+    while (current != end() &&
+           (compare_(current->first, key) || compare_(key, current->first))) {
+      ++current;
+    }
+    return current;
+  }
+  const_iterator find(const key_type& key) const {
+    const_iterator current = begin();
+    while (current != end() &&
+           (compare_(current->first, key) || compare_(key, current->first))) {
+      ++current;
+    }
+    return current;
+  }
+  size_type count(const key_type& key) const { return find(key) == end() ? 0 : 1; }
+
+  pair<iterator, bool> insert(const value_type& value) {
+    iterator existing = find(value.first);
+    if (existing != end()) return pair<iterator, bool>(existing, false);
+    storage_type replacement(get_allocator());
+    size_type index = 0;
+    bool added = false;
+    for (const_iterator current = begin(); current != end(); ++current) {
+      if (!added && compare_(value.first, current->first)) {
+        replacement.push_back(value);
+        added = true;
+      }
+      if (!added) ++index;
+      replacement.push_back(*current);
+    }
+    if (!added) {
+      index = replacement.size();
+      replacement.push_back(value);
+    }
+    values_.swap(replacement);
+    return pair<iterator, bool>(begin() + index, true);
+  }
+
+  mapped_type& operator[](const key_type& key) {
+    return insert(value_type(key, mapped_type())).first->second;
+  }
+
+  iterator lower_bound(const key_type& key) {
+    iterator current = begin();
+    while (current != end() && compare_(current->first, key)) ++current;
+    return current;
+  }
+  const_iterator lower_bound(const key_type& key) const {
+    const_iterator current = begin();
+    while (current != end() && compare_(current->first, key)) ++current;
+    return current;
+  }
+  iterator upper_bound(const key_type& key) {
+    iterator current = begin();
+    while (current != end() && !compare_(key, current->first)) ++current;
+    return current;
+  }
+  const_iterator upper_bound(const key_type& key) const {
+    const_iterator current = begin();
+    while (current != end() && !compare_(key, current->first)) ++current;
+    return current;
+  }
+  pair<iterator, iterator> equal_range(const key_type& key) {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  size_type erase(const key_type& key) {
+    iterator target = find(key);
+    if (target == end()) return 0;
+    storage_type replacement(get_allocator());
+    for (const_iterator current = begin(); current != end(); ++current) {
+      if (compare_(current->first, key) || compare_(key, current->first)) {
+        replacement.push_back(*current);
+      }
+    }
+    values_.swap(replacement);
+    return 1;
+  }
+  void clear() { values_.clear(); }
+  void swap(map& other) {
+    values_.swap(other.values_);
+    std::swap(compare_, other.compare_);
+  }
+
+ private:
+  storage_type values_;
+  Compare compare_;
+};
+
+template <class Key, class T, class Compare, class Allocator>
+bool operator==(const map<Key, T, Compare, Allocator>& left,
+                const map<Key, T, Compare, Allocator>& right) {
+  return left.size() == right.size() &&
+         std::equal(left.begin(), left.end(), right.begin());
+}
+
+}  // namespace std
+
+#else
+
 #include <__exception_support>
 #include <functional>
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <iterator>
 #include <memory>
+#if __cplusplus >= 201703L
 #include <memory_resource>
+#endif
 #include <optional>
 #include <stddef.h>
 #ifdef __cpp_exceptions
@@ -1359,5 +1511,7 @@ using map =
 #endif
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_map__ */

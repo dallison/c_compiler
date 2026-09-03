@@ -8,17 +8,17 @@
 
 #include <math.h>
 
-static const double kLn2Hi = 6.93147180369123816490e-01;
-static const double kLn2Lo = 1.90821492927058770002e-10;
-static const double kInvLn2 = 1.44269504088896340736;
-static const double kExpP0 = 1.9875691500e-4;
-static const double kExpP1 = 1.3981999507e-3;
-static const double kExpP2 = 8.3334519073e-3;
-static const double kExpP3 = 4.1665795894e-2;
-static const double kExpP4 = 1.6666665459e-1;
-static const double kExpP5 = 5.0000001201e-1;
+#define kLn2Hi 6.93147180369123816490e-01
+#define kLn2Lo 1.90821492927058770002e-10
+#define kInvLn2 1.44269504088896340736
 
 double exp(double x) {
+  double scaled;
+  double remainder;
+  double term;
+  double result;
+  int k;
+  int i;
   if (x != x) {
     return x;
   }
@@ -41,20 +41,23 @@ double exp(double x) {
   }
 #endif
 
-  int k = (int)floor(x * kInvLn2 + 0.5);
-  double ln2_term = (double)k * kLn2Hi + (double)k * kLn2Lo;
-  double r = x - ln2_term;
-  double r2 = r * r;
-  double p = kExpP0;
-  p = p * r + kExpP1;
-  p = p * r + kExpP2;
-  p = p * r + kExpP3;
-  p = p * r + kExpP4;
-  p = p * r + kExpP5;
-  p = p * r2 + r + 1.0;
-  {
-    double scale = p;
-    int exponent = k;
-    return ldexp(scale, exponent);
+  scaled = x * kInvLn2;
+  k = (int)scaled;
+  if (scaled < 0.0 && (double)k != scaled) k--;
+  remainder = x - (double)k * kLn2Hi - (double)k * kLn2Lo;
+  term = 1.0;
+  result = 1.0;
+  for (i = 1; i <= 18; i++) {
+    term *= remainder / (double)i;
+    result += term;
   }
+  while (k > 0) {
+    result *= 2.0;
+    k--;
+  }
+  while (k < 0) {
+    result *= 0.5;
+    k++;
+  }
+  return result;
 }

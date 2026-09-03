@@ -14,7 +14,10 @@ extern void Break();
 extern void (*__davecc_stdio_fini_hook)(void);
 void __davecc_stdio_fini(void);
 
-int fputc(char_t c, FILE* stream) {
+int fputc(int c, FILE* stream) {
+  if (stream->orientation == 0) {
+    stream->orientation = -1;
+  }
   if (stream->buf == NULL) {
     char ch = c;
     ssize_t remaining = 1;
@@ -25,7 +28,7 @@ int fputc(char_t c, FILE* stream) {
       }
       remaining -= n;
     }
-    return c;
+    return (unsigned char)c;
   }
   if (__davecc_stdio_fini_hook == NULL) {
     __davecc_stdio_fini_hook = __davecc_stdio_fini;
@@ -42,12 +45,14 @@ int fputc(char_t c, FILE* stream) {
 
   if (c == '\n' && stream->buffering_mode == _IOLBF) {
     // Flush on newline.
-    return fflush(stream);
+    if (fflush(stream) != 0) {
+      return EOF;
+    }
   }
-  return 0;
+  return (unsigned char)c;
 }
 
-int putchar(char_t c) {
+int putchar(int c) {
   return fputc(c, stdout);
 }
 

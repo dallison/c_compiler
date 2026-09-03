@@ -11,7 +11,25 @@
 
 #include <stdint.h>
 
-# if __WORDSIZE == 64
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+typedef struct {
+  intmax_t quot;
+  intmax_t rem;
+} imaxdiv_t;
+
+intmax_t imaxabs(intmax_t value);
+imaxdiv_t imaxdiv(intmax_t numerator, intmax_t denominator);
+intmax_t strtoimax(const char* restrict string, char** restrict end, int base);
+uintmax_t strtoumax(const char* restrict string, char** restrict end, int base);
+
+#if defined(__cplusplus)
+}
+#endif
+
+# if defined(__LP64__)
 #  define __PRI64_PREFIX  "l"
 #  define __PRIPTR_PREFIX  "l"
 # else
@@ -271,7 +289,7 @@
 # define SCNx64    __PRI64_PREFIX "x"
 
 # define SCNxLEAST8  "hhx"
-# define SCNxLEAST16  __SCN_SHORT_PREFIX "h"
+# define SCNxLEAST16  __SCN_SHORT_PREFIX "x"
 # define SCNxLEAST32  __SCN_INT_PREFIX "x"
 # define SCNxLEAST64  __PRI64_PREFIX "x"
 

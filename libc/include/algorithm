@@ -20,6 +20,271 @@
 #ifndef __davecc_algorithm__
 #define __davecc_algorithm__
 
+#if __cplusplus < 201103L
+
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <utility>
+
+namespace std {
+
+template <class T>
+const T& min(const T& left, const T& right) {
+  return right < left ? right : left;
+}
+
+template <class T, class Compare>
+const T& min(const T& left, const T& right, Compare compare) {
+  return compare(right, left) ? right : left;
+}
+
+template <class T>
+const T& max(const T& left, const T& right) {
+  return left < right ? right : left;
+}
+
+template <class T, class Compare>
+const T& max(const T& left, const T& right, Compare compare) {
+  return compare(left, right) ? right : left;
+}
+
+template <class Iterator1, class Iterator2>
+void iter_swap(Iterator1 left, Iterator2 right) {
+  typename iterator_traits<Iterator1>::value_type temporary = *left;
+  *left = *right;
+  *right = temporary;
+}
+
+template <class InputIt, class OutputIt>
+OutputIt copy(InputIt first, InputIt last, OutputIt output) {
+  while (first != last) {
+    *output = *first;
+    ++first;
+    ++output;
+  }
+  return output;
+}
+
+template <class BidirectionalIt1, class BidirectionalIt2>
+BidirectionalIt2 copy_backward(BidirectionalIt1 first, BidirectionalIt1 last,
+                               BidirectionalIt2 output_last) {
+  while (first != last) {
+    *--output_last = *--last;
+  }
+  return output_last;
+}
+
+template <class ForwardIt, class T>
+void fill(ForwardIt first, ForwardIt last, const T& value) {
+  while (first != last) {
+    *first++ = value;
+  }
+}
+
+template <class OutputIt, class Size, class T>
+OutputIt fill_n(OutputIt output, Size count, const T& value) {
+  while (count-- > 0) {
+    *output++ = value;
+  }
+  return output;
+}
+
+template <class InputIt, class T>
+InputIt find(InputIt first, InputIt last, const T& value) {
+  while (first != last && !(*first == value)) ++first;
+  return first;
+}
+
+template <class InputIt, class Predicate>
+InputIt find_if(InputIt first, InputIt last, Predicate predicate) {
+  while (first != last && !predicate(*first)) ++first;
+  return first;
+}
+
+template <class InputIt, class T>
+typename iterator_traits<InputIt>::difference_type count(
+    InputIt first, InputIt last, const T& value) {
+  typename iterator_traits<InputIt>::difference_type result = 0;
+  for (; first != last; ++first) {
+    if (*first == value) ++result;
+  }
+  return result;
+}
+
+template <class InputIt, class Predicate>
+typename iterator_traits<InputIt>::difference_type count_if(
+    InputIt first, InputIt last, Predicate predicate) {
+  typename iterator_traits<InputIt>::difference_type result = 0;
+  for (; first != last; ++first) {
+    if (predicate(*first)) ++result;
+  }
+  return result;
+}
+
+template <class InputIt1, class InputIt2>
+bool equal(InputIt1 first, InputIt1 last, InputIt2 other) {
+  for (; first != last; ++first, ++other) {
+    if (!(*first == *other)) return false;
+  }
+  return true;
+}
+
+template <class InputIt1, class InputIt2, class Predicate>
+bool equal(InputIt1 first, InputIt1 last, InputIt2 other,
+           Predicate predicate) {
+  for (; first != last; ++first, ++other) {
+    if (!predicate(*first, *other)) return false;
+  }
+  return true;
+}
+
+template <class InputIt1, class InputIt2>
+pair<InputIt1, InputIt2> mismatch(
+    InputIt1 first, InputIt1 last, InputIt2 other) {
+  while (first != last && *first == *other) {
+    ++first;
+    ++other;
+  }
+  return pair<InputIt1, InputIt2>(first, other);
+}
+
+template <class InputIt1, class InputIt2>
+bool lexicographical_compare(InputIt1 first1, InputIt1 last1,
+                             InputIt2 first2, InputIt2 last2) {
+  while (first1 != last1 && first2 != last2) {
+    if (*first1 < *first2) return true;
+    if (*first2 < *first1) return false;
+    ++first1;
+    ++first2;
+  }
+  return first1 == last1 && first2 != last2;
+}
+
+template <class InputIt1, class InputIt2, class Compare>
+bool lexicographical_compare(InputIt1 first1, InputIt1 last1,
+                             InputIt2 first2, InputIt2 last2,
+                             Compare compare) {
+  while (first1 != last1 && first2 != last2) {
+    if (compare(*first1, *first2)) return true;
+    if (compare(*first2, *first1)) return false;
+    ++first1;
+    ++first2;
+  }
+  return first1 == last1 && first2 != last2;
+}
+
+template <class InputIt, class Function>
+Function for_each(InputIt first, InputIt last, Function function) {
+  for (; first != last; ++first) function(*first);
+  return function;
+}
+
+template <class InputIt, class OutputIt, class Function>
+OutputIt transform(InputIt first, InputIt last, OutputIt output,
+                   Function function) {
+  for (; first != last; ++first, ++output) *output = function(*first);
+  return output;
+}
+
+template <class InputIt1, class InputIt2, class OutputIt, class Function>
+OutputIt transform(InputIt1 first1, InputIt1 last1, InputIt2 first2,
+                   OutputIt output, Function function) {
+  for (; first1 != last1; ++first1, ++first2, ++output) {
+    *output = function(*first1, *first2);
+  }
+  return output;
+}
+
+template <class ForwardIt, class T>
+ForwardIt remove(ForwardIt first, ForwardIt last, const T& value) {
+  first = std::find(first, last, value);
+  if (first == last) return first;
+  ForwardIt output = first;
+  while (++first != last) {
+    if (!(*first == value)) *output++ = *first;
+  }
+  return output;
+}
+
+template <class ForwardIt, class Predicate>
+ForwardIt remove_if(ForwardIt first, ForwardIt last, Predicate predicate) {
+  first = std::find_if(first, last, predicate);
+  if (first == last) return first;
+  ForwardIt output = first;
+  while (++first != last) {
+    if (!predicate(*first)) *output++ = *first;
+  }
+  return output;
+}
+
+template <class BidirectionalIt>
+void reverse(BidirectionalIt first, BidirectionalIt last) {
+  while (first != last && first != --last) {
+    std::iter_swap(first++, last);
+  }
+}
+
+template <class RandomIt, class Compare>
+void sort(RandomIt first, RandomIt last, Compare compare) {
+  if (first == last) return;
+  for (RandomIt current = first + 1; current != last; ++current) {
+    RandomIt position = current;
+    while (position != first && compare(*position, *(position - 1))) {
+      std::iter_swap(position, position - 1);
+      --position;
+    }
+  }
+}
+
+template <class RandomIt>
+void sort(RandomIt first, RandomIt last) {
+  typedef typename iterator_traits<RandomIt>::value_type value_type;
+  std::sort(first, last, std::less<value_type>());
+}
+
+template <class ForwardIt, class T, class Compare>
+ForwardIt lower_bound(ForwardIt first, ForwardIt last, const T& value,
+                      Compare compare) {
+  typename iterator_traits<ForwardIt>::difference_type length =
+      std::distance(first, last);
+  while (length > 0) {
+    typename iterator_traits<ForwardIt>::difference_type half = length / 2;
+    ForwardIt middle = first;
+    std::advance(middle, half);
+    if (compare(*middle, value)) {
+      first = ++middle;
+      length -= half + 1;
+    } else {
+      length = half;
+    }
+  }
+  return first;
+}
+
+template <class ForwardIt, class T>
+ForwardIt lower_bound(ForwardIt first, ForwardIt last, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  return std::lower_bound(first, last, value, std::less<value_type>());
+}
+
+template <class ForwardIt, class T, class Compare>
+bool binary_search(ForwardIt first, ForwardIt last, const T& value,
+                   Compare compare) {
+  first = std::lower_bound(first, last, value, compare);
+  return first != last && !compare(value, *first);
+}
+
+template <class ForwardIt, class T>
+bool binary_search(ForwardIt first, ForwardIt last, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  return std::binary_search(first, last, value, std::less<value_type>());
+}
+
+}  // namespace std
+
+#else
+
 #if __cplusplus >= 201103L
 #include <__random_uniform>
 #endif
@@ -3623,5 +3888,7 @@ constexpr auto fold_right_last(R&& range, F f) {
 #endif
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_algorithm__ */

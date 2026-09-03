@@ -23,6 +23,7 @@ typedef struct ExitFunction {
 } ExitFunction;
 
 static ExitFunction* __davecc_exit_functions;
+static ExitFunction* __davecc_quick_exit_functions;
 static unsigned char __davecc_exit_lock;
 
 #if defined(__DAVECC_HAS_ATEXIT_LOCK__)
@@ -58,6 +59,22 @@ int atexit(void (*p)(void)) {
   entry->dso = NULL;
   entry->has_argument = 0;
   return RegisterExitFunction(entry);
+}
+
+int at_quick_exit(void (*p)(void)) {
+  ExitFunction* entry = malloc(sizeof(ExitFunction));
+  if (entry == NULL) {
+    return -1;
+  }
+  entry->function.plain = p;
+  entry->argument = NULL;
+  entry->dso = NULL;
+  entry->has_argument = 0;
+  __davecc_atexit_lock(&__davecc_exit_lock);
+  entry->next = __davecc_quick_exit_functions;
+  __davecc_quick_exit_functions = entry;
+  __davecc_atexit_unlock(&__davecc_exit_lock);
+  return 0;
 }
 
 int __cxa_atexit(void (*p)(void*), void* argument, void* dso) {
@@ -177,5 +194,25 @@ void __davecc_finalize(void) {
 void exit(int status) {
   __davecc_run_fini();
   syscall(SYS_EXIT_CLEAN, status);
+  _Exit(status);
+}
+
+void quick_exit(int status) {
+  ExitFunction* entries;
+  for (;;) {
+    __davecc_atexit_lock(&__davecc_exit_lock);
+    entries = __davecc_quick_exit_functions;
+    __davecc_quick_exit_functions = NULL;
+    __davecc_atexit_unlock(&__davecc_exit_lock);
+    if (entries == NULL) {
+      break;
+    }
+    while (entries != NULL) {
+      ExitFunction* entry = entries;
+      entries = entry->next;
+      entry->function.plain();
+      free(entry);
+    }
+  }
   _Exit(status);
 }

@@ -8,6 +8,196 @@
 #ifndef __davecc_functional__
 #define __davecc_functional__
 
+#if __cplusplus < 201103L
+
+namespace std {
+
+template <class Arg, class Result>
+struct unary_function {
+  typedef Arg argument_type;
+  typedef Result result_type;
+};
+
+template <class Arg1, class Arg2, class Result>
+struct binary_function {
+  typedef Arg1 first_argument_type;
+  typedef Arg2 second_argument_type;
+  typedef Result result_type;
+};
+
+#define __DAVECC_CXX98_BINARY_FUNCTOR(name, expression)                     \
+  template <class T>                                                        \
+  struct name : binary_function<T, T, T> {                                  \
+    T operator()(const T& left, const T& right) const { return expression; } \
+  };
+
+__DAVECC_CXX98_BINARY_FUNCTOR(plus, left + right)
+__DAVECC_CXX98_BINARY_FUNCTOR(minus, left - right)
+__DAVECC_CXX98_BINARY_FUNCTOR(multiplies, left * right)
+__DAVECC_CXX98_BINARY_FUNCTOR(divides, left / right)
+__DAVECC_CXX98_BINARY_FUNCTOR(modulus, left % right)
+
+#undef __DAVECC_CXX98_BINARY_FUNCTOR
+
+template <class T>
+struct negate : unary_function<T, T> {
+  T operator()(const T& value) const { return -value; }
+};
+
+#define __DAVECC_CXX98_COMPARE_FUNCTOR(name, expression)                    \
+  template <class T>                                                        \
+  struct name : binary_function<T, T, bool> {                               \
+    bool operator()(const T& left, const T& right) const { return expression; } \
+  };
+
+__DAVECC_CXX98_COMPARE_FUNCTOR(equal_to, left == right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(not_equal_to, left != right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(greater, left > right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(less, left < right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(greater_equal, left >= right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(less_equal, left <= right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(logical_and, left && right)
+__DAVECC_CXX98_COMPARE_FUNCTOR(logical_or, left || right)
+
+#undef __DAVECC_CXX98_COMPARE_FUNCTOR
+
+template <class T>
+struct logical_not : unary_function<T, bool> {
+  bool operator()(const T& value) const { return !value; }
+};
+
+template <class Predicate>
+class unary_negate
+    : public unary_function<typename Predicate::argument_type, bool> {
+ public:
+  explicit unary_negate(const Predicate& predicate) : predicate_(predicate) {}
+  bool operator()(const typename Predicate::argument_type& value) const {
+    return !predicate_(value);
+  }
+
+ private:
+  Predicate predicate_;
+};
+
+template <class Predicate>
+unary_negate<Predicate> not1(const Predicate& predicate) {
+  return unary_negate<Predicate>(predicate);
+}
+
+template <class Predicate>
+class binary_negate
+    : public binary_function<typename Predicate::first_argument_type,
+                             typename Predicate::second_argument_type, bool> {
+ public:
+  explicit binary_negate(const Predicate& predicate) : predicate_(predicate) {}
+  bool operator()(const typename Predicate::first_argument_type& left,
+                  const typename Predicate::second_argument_type& right) const {
+    return !predicate_(left, right);
+  }
+
+ private:
+  Predicate predicate_;
+};
+
+template <class Predicate>
+binary_negate<Predicate> not2(const Predicate& predicate) {
+  return binary_negate<Predicate>(predicate);
+}
+
+template <class Operation>
+class binder1st
+    : public unary_function<typename Operation::second_argument_type,
+                            typename Operation::result_type> {
+ public:
+  binder1st(const Operation& operation,
+            const typename Operation::first_argument_type& value)
+      : operation_(operation), value_(value) {}
+  typename Operation::result_type operator()(
+      const typename Operation::second_argument_type& argument) const {
+    return operation_(value_, argument);
+  }
+
+ private:
+  Operation operation_;
+  typename Operation::first_argument_type value_;
+};
+
+template <class Operation, class T>
+binder1st<Operation> bind1st(const Operation& operation, const T& value) {
+  typedef typename Operation::first_argument_type argument_type;
+  return binder1st<Operation>(operation, argument_type(value));
+}
+
+template <class Operation>
+class binder2nd
+    : public unary_function<typename Operation::first_argument_type,
+                            typename Operation::result_type> {
+ public:
+  binder2nd(const Operation& operation,
+            const typename Operation::second_argument_type& value)
+      : operation_(operation), value_(value) {}
+  typename Operation::result_type operator()(
+      const typename Operation::first_argument_type& argument) const {
+    return operation_(argument, value_);
+  }
+
+ private:
+  Operation operation_;
+  typename Operation::second_argument_type value_;
+};
+
+template <class Operation, class T>
+binder2nd<Operation> bind2nd(const Operation& operation, const T& value) {
+  typedef typename Operation::second_argument_type argument_type;
+  return binder2nd<Operation>(operation, argument_type(value));
+}
+
+template <class Arg, class Result>
+class pointer_to_unary_function : public unary_function<Arg, Result> {
+ public:
+  explicit pointer_to_unary_function(Result (*function)(Arg))
+      : function_(function) {}
+  Result operator()(Arg value) const { return function_(value); }
+
+ private:
+  Result (*function_)(Arg);
+};
+
+template <class Arg, class Result>
+pointer_to_unary_function<Arg, Result> ptr_fun(Result (*function)(Arg)) {
+  return pointer_to_unary_function<Arg, Result>(function);
+}
+
+template <class Arg1, class Arg2, class Result>
+class pointer_to_binary_function
+    : public binary_function<Arg1, Arg2, Result> {
+ public:
+  explicit pointer_to_binary_function(Result (*function)(Arg1, Arg2))
+      : function_(function) {}
+  Result operator()(Arg1 left, Arg2 right) const {
+    return function_(left, right);
+  }
+
+ private:
+  Result (*function_)(Arg1, Arg2);
+};
+
+template <class Arg1, class Arg2, class Result>
+pointer_to_binary_function<Arg1, Arg2, Result> ptr_fun(
+    Result (*function)(Arg1, Arg2)) {
+  return pointer_to_binary_function<Arg1, Arg2, Result>(function);
+}
+
+}  // namespace std
+
+#else
+
+#if __cplusplus >= 201703L
+#define __DAVECC_FUNCTION_IF_CONSTEXPR if constexpr
+#else
+#define __DAVECC_FUNCTION_IF_CONSTEXPR if
+#endif
+
 #include <__exception_support>
 #include <stddef.h>
 #include <stdint.h>
@@ -668,7 +858,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static F* get(__storage_type& storage) {
-    if (is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_local) {
       return reinterpret_cast<F*>(storage.data);
     } else {
       return heap_pointer(storage);
@@ -676,7 +866,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static const F* get(const __storage_type& storage) {
-    if (is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_local) {
       return reinterpret_cast<const F*>(storage.data);
     } else {
       return heap_pointer(storage);
@@ -685,12 +875,17 @@ struct __manager<F, R(Args...)> {
 
   static R invoke_target(__storage_type* storage, Args... args) {
     F* target = get(*storage);
-    return std::invoke(*target, static_cast<Args&&>(args)...);
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_void<R>::value) {
+      std::invoke(*target, static_cast<Args&&>(args)...);
+      return;
+    } else {
+      return std::invoke(*target, static_cast<Args&&>(args)...);
+    }
   }
 
   static void copy(__storage_type* destination,
                    const __storage_type* source) {
-    if (is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_local) {
       ::new (static_cast<void*>(destination->data)) F(*get(*source));
     } else {
       heap_pointer(*destination) = new F(*get(*source));
@@ -698,7 +893,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static void move(__storage_type* destination, __storage_type* source) {
-    if (is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_local) {
       F* source_target = get(*source);
       ::new (static_cast<void*>(destination->data))
           F(static_cast<F&&>(*source_target));
@@ -710,7 +905,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static void destroy(__storage_type* storage) {
-    if (is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (is_local) {
       get(*storage)->~F();
     } else {
       delete heap_pointer(*storage);
@@ -803,15 +998,13 @@ class function<R(Args...)> {
   void __initialize(F&& value) {
     using Target = decay_t<F>;
     using Manager = __function_detail::__manager<Target, __signature>;
-    using nullable = integral_constant<
-        bool, is_pointer<Target>::value ||
-                  is_member_pointer<Target>::value>;
-    if (__function_detail::__is_null_target<Target>(
-            static_cast<F&&>(value), nullable())) {
-      return;
+    __DAVECC_FUNCTION_IF_CONSTEXPR (
+        is_pointer<Target>::value || is_member_pointer<Target>::value) {
+      if (static_cast<Target>(value) == nullptr) {
+        return;
+      }
     }
-
-    if (Manager::is_local) {
+    __DAVECC_FUNCTION_IF_CONSTEXPR (Manager::is_local) {
       ::new (static_cast<void*>(__storage.data))
           Target(static_cast<F&&>(value));
     } else {
@@ -1350,5 +1543,9 @@ __DAVECC_MOVE_ONLY_FUNCTION(const &&, 5, noexcept, true)
 #endif
 
 }  // namespace std
+
+#undef __DAVECC_FUNCTION_IF_CONSTEXPR
+
+#endif
 
 #endif /* __davecc_functional__ */

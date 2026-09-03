@@ -16,11 +16,103 @@
 #ifndef __davecc_deque__
 #define __davecc_deque__
 
+#if __cplusplus < 201103L
+
+#include <vector>
+
+namespace std {
+
+template <class T, class Allocator = allocator<T> >
+class deque {
+  typedef vector<T, Allocator> storage_type;
+
+ public:
+  typedef T value_type;
+  typedef Allocator allocator_type;
+  typedef typename storage_type::size_type size_type;
+  typedef typename storage_type::difference_type difference_type;
+  typedef typename storage_type::reference reference;
+  typedef typename storage_type::const_reference const_reference;
+  typedef typename storage_type::iterator iterator;
+  typedef typename storage_type::const_iterator const_iterator;
+
+  explicit deque(const Allocator& allocator_value = Allocator())
+      : values_(allocator_value) {}
+  explicit deque(size_type count, const T& value = T(),
+                 const Allocator& allocator_value = Allocator())
+      : values_(count, value, allocator_value) {}
+  template <class InputIt>
+  deque(InputIt first, InputIt last,
+        const Allocator& allocator_value = Allocator())
+      : values_(first, last, allocator_value) {}
+
+  iterator begin() { return values_.begin(); }
+  const_iterator begin() const { return values_.begin(); }
+  iterator end() { return values_.end(); }
+  const_iterator end() const { return values_.end(); }
+  bool empty() const { return values_.empty(); }
+  size_type size() const { return values_.size(); }
+  reference operator[](size_type index) { return values_[index]; }
+  const_reference operator[](size_type index) const { return values_[index]; }
+  reference at(size_type index) { return values_.at(index); }
+  const_reference at(size_type index) const { return values_.at(index); }
+  reference front() { return values_.front(); }
+  const_reference front() const { return values_.front(); }
+  reference back() { return values_.back(); }
+  const_reference back() const { return values_.back(); }
+  void push_back(const T& value) { values_.push_back(value); }
+  void push_front(const T& value) { values_.insert(values_.begin(), value); }
+  void pop_back() { values_.pop_back(); }
+  void pop_front() { values_.erase(values_.begin()); }
+  iterator insert(iterator position, const T& value) {
+    return values_.insert(position, value);
+  }
+  iterator erase(iterator position) { return values_.erase(position); }
+  iterator erase(iterator first, iterator last) {
+    return values_.erase(first, last);
+  }
+  void clear() { values_.clear(); }
+  void resize(size_type count, T value = T()) { values_.resize(count, value); }
+  void swap(deque& other) { values_.swap(other.values_); }
+  allocator_type get_allocator() const { return values_.get_allocator(); }
+
+ private:
+  storage_type values_;
+};
+
+template <class T, class Allocator>
+bool operator==(const deque<T, Allocator>& left,
+                const deque<T, Allocator>& right) {
+  return left.size() == right.size() &&
+         std::equal(left.begin(), left.end(), right.begin());
+}
+template <class T, class Allocator>
+bool operator!=(const deque<T, Allocator>& left,
+                const deque<T, Allocator>& right) {
+  return !(left == right);
+}
+template <class T, class Allocator>
+bool operator<(const deque<T, Allocator>& left,
+               const deque<T, Allocator>& right) {
+  return std::lexicographical_compare(left.begin(), left.end(),
+                                      right.begin(), right.end());
+}
+
+}  // namespace std
+
+#else
+
+#if __cplusplus >= 202002L
 #include <compare>
+#endif
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <iterator>
 #include <memory>
+#if __cplusplus >= 201703L
 #include <memory_resource>
+#endif
 #include <new>
 #include <stddef.h>
 #ifdef __cpp_exceptions
@@ -989,5 +1081,7 @@ using deque = std::deque<T, polymorphic_allocator<T>>;
 #endif
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_deque__ */

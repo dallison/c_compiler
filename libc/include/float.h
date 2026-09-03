@@ -9,6 +9,11 @@
 #define float_h
 
 #define FLT_RADIX 2
+#define FLT_ROUNDS 1
+#define FLT_EVAL_METHOD 0
+#define FLT_HAS_SUBNORM 1
+#define DBL_HAS_SUBNORM 1
+#define LDBL_HAS_SUBNORM 1
 
 #if defined(__6502__)
 // 65C02 uses 32-bit IEEE-754 single precision for float, double, and
@@ -46,6 +51,11 @@
 #  define LDBL_MAX        ((long double)FLT_MAX)
 #  define LDBL_EPSILON    ((long double)FLT_EPSILON)
 
+#  define DECIMAL_DIG      9
+#  define FLT_DECIMAL_DIG  9
+#  define DBL_DECIMAL_DIG  9
+#  define LDBL_DECIMAL_DIG 9
+
 #else
 #  define FLT_MANT_DIG   24
 #  define FLT_DIG        6
@@ -79,6 +89,20 @@
 #  define LDBL_TRUE_MIN   ((long double)DBL_TRUE_MIN)
 #  define LDBL_MAX        ((long double)DBL_MAX)
 #  define LDBL_EPSILON    ((long double)DBL_EPSILON)
+
+#  define DECIMAL_DIG       17
+#  define FLT_DECIMAL_DIG   9
+#  define DBL_DECIMAL_DIG   17
+#  define LDBL_DECIMAL_DIG  17
+#endif
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define FLT_NORM_MAX FLT_MAX
+#define DBL_NORM_MAX DBL_MAX
+#define LDBL_NORM_MAX LDBL_MAX
+#define FLT_IS_IEC_60559 1
+#define DBL_IS_IEC_60559 1
+#define LDBL_IS_IEC_60559 1
 #endif
 
 #endif /* float_h */

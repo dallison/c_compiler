@@ -8,12 +8,123 @@
 #ifndef __davecc_set__
 #define __davecc_set__
 
+#if __cplusplus < 201103L
+
+#include <functional>
+#include <list>
+#include <utility>
+
+namespace std {
+
+template <class Key, class Compare = less<Key>,
+          class Allocator = allocator<Key> >
+class set {
+  typedef list<Key, Allocator> storage_type;
+
+ public:
+  typedef Key key_type;
+  typedef Key value_type;
+  typedef Compare key_compare;
+  typedef Compare value_compare;
+  typedef Allocator allocator_type;
+  typedef typename storage_type::size_type size_type;
+  typedef typename storage_type::difference_type difference_type;
+  typedef typename storage_type::const_reference reference;
+  typedef typename storage_type::const_reference const_reference;
+  typedef typename storage_type::const_iterator iterator;
+  typedef typename storage_type::const_iterator const_iterator;
+
+  explicit set(const Compare& compare = Compare(),
+               const Allocator& allocator_value = Allocator())
+      : values_(allocator_value), compare_(compare) {}
+  template <class InputIt>
+  set(InputIt first, InputIt last, const Compare& compare = Compare(),
+      const Allocator& allocator_value = Allocator())
+      : values_(allocator_value), compare_(compare) {
+    while (first != last) insert(*first++);
+  }
+
+  iterator begin() const { return values_.begin(); }
+  iterator end() const { return values_.end(); }
+  bool empty() const { return values_.empty(); }
+  size_type size() const { return values_.size(); }
+  key_compare key_comp() const { return compare_; }
+  value_compare value_comp() const { return compare_; }
+  allocator_type get_allocator() const { return values_.get_allocator(); }
+
+  iterator find(const key_type& key) const {
+    iterator current = begin();
+    while (current != end() &&
+           (compare_(*current, key) || compare_(key, *current))) {
+      ++current;
+    }
+    return current;
+  }
+  size_type count(const key_type& key) const { return find(key) == end() ? 0 : 1; }
+
+  pair<iterator, bool> insert(const value_type& value) {
+    iterator existing = find(value);
+    if (existing != end()) return pair<iterator, bool>(existing, false);
+    typename storage_type::iterator position = values_.begin();
+    while (position != values_.end() && compare_(*position, value)) ++position;
+    return pair<iterator, bool>(values_.insert(position, value), true);
+  }
+
+  iterator lower_bound(const key_type& key) const {
+    iterator current = begin();
+    while (current != end() && compare_(*current, key)) ++current;
+    return current;
+  }
+  iterator upper_bound(const key_type& key) const {
+    iterator current = begin();
+    while (current != end() && !compare_(key, *current)) ++current;
+    return current;
+  }
+  pair<iterator, iterator> equal_range(const key_type& key) const {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
+  size_type erase(const key_type& key) {
+    typename storage_type::iterator current = values_.begin();
+    while (current != values_.end() &&
+           (compare_(*current, key) || compare_(key, *current))) {
+      ++current;
+    }
+    if (current == values_.end()) return 0;
+    values_.erase(current);
+    return 1;
+  }
+  void clear() { values_.clear(); }
+  void swap(set& other) {
+    values_.swap(other.values_);
+    std::swap(compare_, other.compare_);
+  }
+
+ private:
+  storage_type values_;
+  Compare compare_;
+};
+
+template <class Key, class Compare, class Allocator>
+bool operator==(const set<Key, Compare, Allocator>& left,
+                const set<Key, Compare, Allocator>& right) {
+  return left.size() == right.size() &&
+         std::equal(left.begin(), left.end(), right.begin());
+}
+
+}  // namespace std
+
+#else
+
 #include <__exception_support>
 #include <functional>
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <iterator>
 #include <memory>
+#if __cplusplus >= 201703L
 #include <memory_resource>
+#endif
 #include <cstddef>
 #include <utility>
 
@@ -1187,5 +1298,7 @@ using set = std::set<Key, Compare, polymorphic_allocator<Key>>;
 #endif
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_set__ */

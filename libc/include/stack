@@ -12,9 +12,44 @@
 #ifndef __davecc_stack__
 #define __davecc_stack__
 
-#include <compare>
+#if __cplusplus < 201103L
+
 #include <deque>
+
+namespace std {
+
+template <class T, class Container = deque<T> >
+class stack {
+ public:
+  typedef typename Container::value_type value_type;
+  typedef typename Container::size_type size_type;
+  typedef typename Container::reference reference;
+  typedef typename Container::const_reference const_reference;
+  typedef Container container_type;
+
+  explicit stack(const Container& container = Container()) : c(container) {}
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  reference top() { return c.back(); }
+  const_reference top() const { return c.back(); }
+  void push(const T& value) { c.push_back(value); }
+  void pop() { c.pop_back(); }
+
+ protected:
+  Container c;
+};
+
+}  // namespace std
+
+#else
+
+#if __cplusplus >= 202002L
+#include <compare>
+#endif
+#include <deque>
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <utility>
 
 namespace std {
@@ -103,5 +138,7 @@ void swap(stack<T, Container>& a, stack<T, Container>& b) noexcept {
 }
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_stack__ */

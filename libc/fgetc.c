@@ -19,6 +19,9 @@ static void SetErrorOrEof(FILE* stream, ssize_t n) {
 }
 
 int getc(FILE* stream) {
+  if (stream->orientation == 0) {
+    stream->orientation = -1;
+  }
   if (stream->buf == NULL) {
     if (stream->error_flag != 0 || stream->eof_flag != 0) {
       return EOF;

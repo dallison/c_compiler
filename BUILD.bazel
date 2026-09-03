@@ -52,7 +52,9 @@ filegroup(
         "libc/include/cstdlib",
         "libc/include/cstring",
         "libc/include/ctime",
+        "libc/include/cuchar",
         "libc/include/cwchar",
+        "libc/include/cwctype",
         "libc/include/coroutine",
         "libc/include/deque",
         "libc/include/exception",
@@ -285,6 +287,7 @@ LIBC_SRCS = [
     "libc/ckdint.c",
     "libc/ceil.c",
     "libc/ctype.c",
+    "libc/inttypes.c",
     "libc/cxx_guard.c",
     "libc/cxx_new.c",
     "libc/cxx_rtti.c",
@@ -328,7 +331,11 @@ LIBC_SRCS = [
     "libc/ldexp.c",
     "libc/libc_test.c",
     "libc/log.c",
+    "libc/math_extra.c",
     "libc/locale_c.c",
+    "libc/uchar.c",
+    "libc/wchar.c",
+    "libc/wctype.c",
     "libc/malloc.c",
     "libc/memccpy.c",
     "libc/memchr.c",
@@ -385,11 +392,13 @@ LIBC_SRCS = [
     "libc/strtoll.c",
     "libc/strtoul.c",
     "libc/strtoull.c",
+    "libc/stdlib_extra.c",
     "libc/strtox.h",
     "libc/strtox_long.h",
     "libc/string_conversion_helpers.h",
     "libc/stacktrace.c",
     "libc/syscall.c",
+    "libc/tmpfile.c",
     "libc/time.c",
     "libc/cxx_tls.c",
     "libc/cxx_tls_stubs.c",
@@ -1512,8 +1521,10 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stdlib_extra.c"
   "libc/stacktrace.c"
   "libc/syscall.c"
+  "libc/tmpfile.c"
   "libc/time.c"
   "libc/threads.c"
   "libc/ungetc.c"
@@ -1527,7 +1538,12 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/math_extra.c"
   "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -1690,8 +1706,10 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stdlib_extra.c"
   "libc/stacktrace.c"
   "libc/syscall.c"
+  "libc/tmpfile.c"
   "libc/time.c"
   "libc/threads.c"
   "libc/ungetc.c"
@@ -1706,7 +1724,12 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/math_extra.c"
   "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -1871,8 +1894,10 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stdlib_extra.c"
   "libc/stacktrace.c"
   "libc/syscall.c"
+  "libc/tmpfile.c"
   "libc/time.c"
   "libc/ungetc.c"
   "libc/acos.c"
@@ -1885,7 +1910,12 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/math_extra.c"
   "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -2048,8 +2078,10 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stdlib_extra.c"
   "libc/stacktrace.c"
   "libc/syscall.c"
+  "libc/tmpfile.c"
   "libc/time.c"
   "libc/threads.c"
   "libc/guest_heap.c"
@@ -2064,7 +2096,12 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/math_extra.c"
   "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -2397,8 +2434,10 @@ libc_srcs=(
   "libc/strtoll.c"
   "libc/strtoul.c"
   "libc/strtoull.c"
+  "libc/stdlib_extra.c"
   "libc/stacktrace.c"
   "libc/syscall.c"
+  "libc/tmpfile.c"
   "libc/time.c"
   "libc/threads.c"
   "libc/guest_heap.c"
@@ -2413,7 +2452,12 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/math_extra.c"
   "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"

@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <string.h>
+#include <string.h>
 
 static char c_locale_name[] = "C";
 static char decimal_point[] = ".";
@@ -55,4 +56,19 @@ char* setlocale(int category, const char* locale) {
 
 struct lconv* localeconv(void) {
   return &c_locale;
+}
+
+int strcoll(const char* first, const char* second) {
+  return strcmp(first, second);
+}
+
+size_t strxfrm(char* restrict destination, const char* restrict source,
+               size_t count) {
+  size_t length = strlen(source);
+  if (count != 0) {
+    size_t copied = length < count - 1 ? length : count - 1;
+    memcpy(destination, source, copied);
+    destination[copied] = '\0';
+  }
+  return length;
 }

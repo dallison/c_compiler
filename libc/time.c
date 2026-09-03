@@ -254,3 +254,256 @@ char* ctime_r(const time_t* time_point, char* buffer) {
 char* ctime(const time_t* time_point) {
   return ctime_r(time_point, formatted_time);
 }
+
+double difftime(time_t later, time_t earlier) {
+  return (double)later - (double)earlier;
+}
+
+time_t mktime(struct tm* value) {
+  int64_t year;
+  int64_t month;
+  int64_t seconds;
+  time_t result;
+  struct tm normalized;
+  if (value == NULL) {
+    errno = EINVAL;
+    return (time_t)-1;
+  }
+  year = (int64_t)value->tm_year + 1900;
+  month = value->tm_mon;
+  year += month / 12;
+  month %= 12;
+  if (month < 0) {
+    month += 12;
+    year--;
+  }
+  seconds = DaysFromCivil(year, (unsigned)month + 1, 1) * 86400 +
+            (int64_t)(value->tm_mday - 1) * 86400 +
+            (int64_t)value->tm_hour * 3600 +
+            (int64_t)value->tm_min * 60 + value->tm_sec;
+  result = (time_t)seconds;
+  if ((int64_t)result != seconds) {
+    errno = EOVERFLOW;
+    return (time_t)-1;
+  }
+#if defined(__DAVECC_HAS_HOST_TZDB__)
+  if (localtime_r(&result, &normalized) != NULL) {
+    seconds -= normalized.tm_gmtoff;
+    result = (time_t)seconds;
+    if ((int64_t)result != seconds) {
+      errno = EOVERFLOW;
+      return (time_t)-1;
+    }
+  }
+#endif
+  if (localtime_r(&result, &normalized) == NULL) return (time_t)-1;
+  *value = normalized;
+  return result;
+}
+
+static int AppendText(char* output, size_t capacity, size_t* length,
+                      const char* text) {
+  while (*text != '\0') {
+    if (*length + 1 >= capacity) return 0;
+    output[(*length)++] = *text++;
+  }
+  return 1;
+}
+
+static int AppendNumber(char* output, size_t capacity, size_t* length,
+                        int value, int width, char padding) {
+  char buffer[32];
+  int used = 0;
+  unsigned int magnitude;
+  int negative = value < 0;
+  magnitude = negative ? (unsigned int)(-(value + 1)) + 1
+                       : (unsigned int)value;
+  do {
+    buffer[used++] = (char)('0' + magnitude % 10);
+    magnitude /= 10;
+  } while (magnitude != 0);
+  if (negative) buffer[used++] = '-';
+  while (used < width) buffer[used++] = padding;
+  while (used != 0) {
+    if (*length + 1 >= capacity) return 0;
+    output[(*length)++] = buffer[--used];
+  }
+  return 1;
+}
+
+size_t strftime(char* restrict output, size_t capacity,
+                const char* restrict format, const struct tm* restrict value) {
+  static const char* const week_days[] = {
+      "Sunday", "Monday", "Tuesday", "Wednesday",
+      "Thursday", "Friday", "Saturday"};
+  static const char* const months[] = {
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"};
+  size_t length = 0;
+  if (output == NULL || format == NULL || value == NULL || capacity == 0) {
+    return 0;
+  }
+  while (*format != '\0') {
+    char conversion;
+    const char* text;
+    if (*format != '%') {
+      if (length + 1 >= capacity) return 0;
+      output[length++] = *format++;
+      continue;
+    }
+    format++;
+    conversion = *format++;
+    if (conversion == '%') {
+      if (length + 1 >= capacity) return 0;
+      output[length++] = '%';
+    } else if (conversion == 'Y') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_year + 1900, 4, '0')) return 0;
+    } else if (conversion == 'y') {
+      if (!AppendNumber(output, capacity, &length,
+                        (value->tm_year + 1900) % 100, 2, '0')) return 0;
+    } else if (conversion == 'C') {
+      if (!AppendNumber(output, capacity, &length,
+                        (value->tm_year + 1900) / 100, 2, '0')) return 0;
+    } else if (conversion == 'm') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_mon + 1, 2, '0')) return 0;
+    } else if (conversion == 'd') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_mday, 2, '0')) return 0;
+    } else if (conversion == 'e') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_mday, 2, ' ')) return 0;
+    } else if (conversion == 'H') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_hour, 2, '0')) return 0;
+    } else if (conversion == 'I') {
+      int hour = value->tm_hour % 12;
+      if (hour == 0) hour = 12;
+      if (!AppendNumber(output, capacity, &length, hour, 2, '0')) return 0;
+    } else if (conversion == 'M') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_min, 2, '0')) return 0;
+    } else if (conversion == 'S') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_sec, 2, '0')) return 0;
+    } else if (conversion == 'j') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_yday + 1, 3, '0')) return 0;
+    } else if (conversion == 'w') {
+      if (!AppendNumber(output, capacity, &length,
+                        value->tm_wday, 1, '0')) return 0;
+    } else if (conversion == 'u') {
+      int day = value->tm_wday == 0 ? 7 : value->tm_wday;
+      if (!AppendNumber(output, capacity, &length, day, 1, '0')) return 0;
+    } else if (conversion == 'a' || conversion == 'A') {
+      text = value->tm_wday >= 0 && value->tm_wday < 7
+                 ? week_days[value->tm_wday] : "?";
+      if (conversion == 'a') {
+        char short_name[4] = {text[0], text[1], text[2], '\0'};
+        if (!AppendText(output, capacity, &length, short_name)) return 0;
+      } else if (!AppendText(output, capacity, &length, text)) {
+        return 0;
+      }
+    } else if (conversion == 'b' || conversion == 'B' || conversion == 'h') {
+      text = value->tm_mon >= 0 && value->tm_mon < 12
+                 ? months[value->tm_mon] : "?";
+      if (conversion != 'B') {
+        char short_name[4] = {text[0], text[1], text[2], '\0'};
+        if (!AppendText(output, capacity, &length, short_name)) return 0;
+      } else if (!AppendText(output, capacity, &length, text)) {
+        return 0;
+      }
+    } else if (conversion == 'p') {
+      if (!AppendText(output, capacity, &length,
+                      value->tm_hour < 12 ? "AM" : "PM")) return 0;
+    } else if (conversion == 'n' || conversion == 't') {
+      if (length + 1 >= capacity) return 0;
+      output[length++] = conversion == 'n' ? '\n' : '\t';
+    } else if (conversion == 'z') {
+      int offset = (int)value->tm_gmtoff;
+      char sign = '+';
+      if (offset < 0) {
+        sign = '-';
+        offset = -offset;
+      }
+      if (length + 1 >= capacity) return 0;
+      output[length++] = sign;
+      if (!AppendNumber(output, capacity, &length,
+                        offset / 3600, 2, '0') ||
+          !AppendNumber(output, capacity, &length,
+                        (offset / 60) % 60, 2, '0')) return 0;
+    } else if (conversion == 'Z') {
+      if (!AppendText(output, capacity, &length,
+                      value->tm_zone == NULL ? "" : value->tm_zone)) return 0;
+    } else if (conversion == 'F' || conversion == 'D' ||
+               conversion == 'R' || conversion == 'T') {
+      const char* replacement =
+          conversion == 'F' ? "%Y-%m-%d" :
+          conversion == 'D' ? "%m/%d/%y" :
+          conversion == 'R' ? "%H:%M" : "%H:%M:%S";
+      char nested[32];
+      size_t nested_length = strftime(nested, sizeof(nested),
+                                      replacement, value);
+      if (nested_length == 0 ||
+          !AppendText(output, capacity, &length, nested)) return 0;
+    } else {
+      if (length + 2 >= capacity) return 0;
+      output[length++] = '%';
+      output[length++] = conversion;
+    }
+  }
+  output[length] = '\0';
+  return length;
+}
+
+static const char* ParseNumber(const char* input, int width, int* output) {
+  int value = 0;
+  int digits = 0;
+  while (digits < width && input[digits] >= '0' && input[digits] <= '9') {
+    value = value * 10 + input[digits] - '0';
+    digits++;
+  }
+  if (digits == 0) return NULL;
+  *output = value;
+  return input + digits;
+}
+
+char* strptime(const char* restrict input, const char* restrict format,
+               struct tm* restrict value) {
+  while (*format != '\0') {
+    int parsed;
+    int width;
+    char conversion;
+    const char* next;
+    if (*format != '%') {
+      if (*input++ != *format++) return NULL;
+      continue;
+    }
+    conversion = *++format;
+    format++;
+    if (conversion == '%') {
+      if (*input++ != '%') return NULL;
+      continue;
+    }
+    width = conversion == 'Y' ? 4 :
+            conversion == 'j' ? 3 : 2;
+    next = ParseNumber(input, width, &parsed);
+    if (next == NULL) return NULL;
+    if (conversion == 'Y') value->tm_year = parsed - 1900;
+    else if (conversion == 'y') value->tm_year = parsed + (parsed < 69 ? 100 : 0);
+    else if (conversion == 'm') value->tm_mon = parsed - 1;
+    else if (conversion == 'd' || conversion == 'e') value->tm_mday = parsed;
+    else if (conversion == 'H') value->tm_hour = parsed;
+    else if (conversion == 'M') value->tm_min = parsed;
+    else if (conversion == 'S') value->tm_sec = parsed;
+    else if (conversion == 'j') value->tm_yday = parsed - 1;
+    else return NULL;
+    input = next;
+  }
+  return (char*)input;
+}
+
+char* tzname[] = {"UTC", "UTC"};
+
+void tzset(void) {}

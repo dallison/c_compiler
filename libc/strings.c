@@ -35,23 +35,26 @@ char *rindex(const char *s, int c) { return strrchr(s, c); }
 
 int strcasecmp(const char *a, const char *b) {
   while (*a != '\0' && *b != '\0') {
-    if (tolower(*a) != tolower(*b)) {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
       break;
     }
     a++;
     b++;
   }
-  return tolower(*a) - tolower(*b);
+  return tolower((unsigned char)*a) - tolower((unsigned char)*b);
 }
 
 int strncasecmp(const char *a, const char *b, size_t n) {
-  ssize_t len = n;
-  while (len-- > 0 && *a != '\0') {
-    if (tolower(*a) != tolower(*b)) {
+  while (n != 0 && *a != '\0') {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
       break;
     }
     a++;
     b++;
+    n--;
   }
-  return tolower(*a) - tolower(*b);
+  if (n == 0) {
+    return 0;
+  }
+  return tolower((unsigned char)*a) - tolower((unsigned char)*b);
 }

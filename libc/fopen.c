@@ -27,6 +27,7 @@ static FILE* AllocateFile(int fd) {
   fp->unget_index = 0;
   fp->eof_flag = 0;
   fp->error_flag = 0;
+  fp->orientation = 0;
   fp->next = NULL;
   __last_file->next = fp;
   fp->prev = __last_file;
@@ -48,16 +49,27 @@ static int ValidMode(const char* mode) {
 }
 
 FILE* fopen(const char* filename, const char* mode) {
-  char base = '\0';
+  char base;
   int plus = 0;
-  const char* m = mode;
+  int binary = 0;
+  int exclusive = 0;
+  const char* m;
+  if (filename == NULL || mode == NULL) {
+    return NULL;
+  }
+  base = *mode;
+  if (base != 'r' && base != 'w' && base != 'a') {
+    return NULL;
+  }
+  m = mode + 1;
   while (*m != '\0') {
-    if (*m == 'r' || *m == 'w' || *m == 'a') {
-      base = *m;
-    } else if (*m == '+') {
+    if (*m == '+' && !plus) {
       plus = 1;
-    } else if (*m == 'b') {
+    } else if (*m == 'b' && !binary) {
       // Text/binary distinction is a no-op on this platform.
+      binary = 1;
+    } else if (*m == 'x' && !exclusive && base == 'w') {
+      exclusive = 1;
     } else {
       return NULL;
     }
@@ -72,6 +84,9 @@ FILE* fopen(const char* filename, const char* mode) {
     open_mode = (plus ? O_RDWR : O_WRONLY) | O_APPEND | O_CREAT;
   } else {
     return NULL;
+  }
+  if (exclusive) {
+    open_mode |= O_EXCL;
   }
   int fd = open(filename, open_mode, 0777);
   if (fd == -1) {

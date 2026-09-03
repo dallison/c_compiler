@@ -2,9 +2,7 @@
 //  cwchar
 //  c_compiler
 //
-//  C++ wrapper for <wchar.h>.  This libc provides only minimal wide-character
-//  support, so only size_t is exposed in namespace std here.  (wchar_t is a
-//  built-in type in C++ and is always available unqualified.)
+//  C++ wrapper for <wchar.h>.
 //
 
 #ifndef cwchar_h
@@ -15,6 +13,61 @@
 namespace std {
 
 using ::size_t;
+using ::wint_t;
+using ::mbstate_t;
+using ::fwprintf;
+using ::fwscanf;
+using ::swprintf;
+using ::swscanf;
+using ::vfwprintf;
+using ::vfwscanf;
+using ::vswprintf;
+using ::vswscanf;
+using ::fgetwc;
+using ::fgetws;
+using ::fputwc;
+using ::fputws;
+using ::fwide;
+using ::getwc;
+using ::getwchar;
+using ::putwc;
+using ::putwchar;
+using ::ungetwc;
+using ::wcstod;
+using ::wcstof;
+using ::wcstold;
+using ::wcstol;
+using ::wcstoll;
+using ::wcstoul;
+using ::wcstoull;
+using ::wcscpy;
+using ::wcsncpy;
+using ::wmemcpy;
+using ::wmemmove;
+using ::wcscat;
+using ::wcsncat;
+using ::wcscmp;
+using ::wcscoll;
+using ::wcsncmp;
+using ::wmemcmp;
+using ::wcsxfrm;
+using ::wcschr;
+using ::wcscspn;
+using ::wcspbrk;
+using ::wcsrchr;
+using ::wcsspn;
+using ::wcsstr;
+using ::wcstok;
+using ::wmemchr;
+using ::wcslen;
+using ::wmemset;
+using ::wcsftime;
+using ::mbsinit;
+using ::mbrlen;
+using ::mbrtowc;
+using ::wcrtomb;
+using ::mbsrtowcs;
+using ::wcsrtombs;
 
 }  // namespace std
 

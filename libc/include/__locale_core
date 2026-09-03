@@ -24,7 +24,7 @@ namespace __locale_detail {
 size_t __next_facet_index();
 
 inline bool __is_classic_name(const char* name) {
-  return name == nullptr || name[0] == '\0' || strcmp(name, "C") == 0 ||
+  return name == 0 || name[0] == '\0' || strcmp(name, "C") == 0 ||
          strcmp(name, "POSIX") == 0;
 }
 
