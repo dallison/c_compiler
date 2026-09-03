@@ -329,18 +329,19 @@ static bool CXXRecordHasDefaultConstructorMember(TypeRecord* type) {
         overload->symbol->type->info.function.is_deleted) {
       continue;
     }
-    size_t explicit_parameters = 0;
+    size_t required_parameters = 0;
     for (size_t i = 0;
          i < overload->symbol->type->info.function.prototype.length; i++) {
       Symbol* formal =
           overload->symbol->type->info.function.prototype.value.p[i];
       if (formal == NULL || StringEqual(&formal->name, "this") ||
-          StringEqual(&formal->name, "__complete_object")) {
+          StringEqual(&formal->name, "__complete_object") ||
+          formal->default_argument != NULL || formal->flags.is_parameter_pack) {
         continue;
       }
-      explicit_parameters++;
+      required_parameters++;
     }
-    if (explicit_parameters == 0) {
+    if (required_parameters == 0) {
       return true;
     }
   }
@@ -3997,6 +3998,57 @@ static bool ClonedStructuredBindingStillDependent(
          ExpressionIsTemplateDependent(binding->initializer);
 }
 
+static bool BodyCloneTypeWasVisited(Vector* visited_types, TypeRecord* type) {
+  for (size_t i = 0; i < visited_types->length; i++) {
+    if (visited_types->value.p[i] == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void RebindBodyCloneDecltypeExpressions(
+    TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
+    Vector* rebound_types, Vector* original_expressions) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (BodyCloneTypeWasVisited(visited_types, current)) {
+      continue;
+    }
+    VectorAppend(visited_types, current);
+    if (current->dependent_decltype_expr != NULL) {
+      ASTNode* rebound =
+          ASTNodeClone(current->dependent_decltype_expr,
+                       CloneTemplateFunctionBodyNode, clone, NULL);
+      if (rebound != NULL) {
+        VectorAppend(rebound_types, current);
+        VectorAppend(original_expressions, current->dependent_decltype_expr);
+        current->dependent_decltype_expr = rebound;
+      }
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      TemplateArgument* arg = current->template_arguments->value.p[i];
+      if (arg != NULL && arg->kind == kTemplateParameterType &&
+          arg->type != NULL) {
+        RebindBodyCloneDecltypeExpressions(
+            clone, arg->type, visited_types, rebound_types,
+            original_expressions);
+      }
+    }
+  }
+}
+
+static void RestoreBodyCloneDecltypeExpressions(Vector* rebound_types,
+                                                Vector* original_expressions) {
+  for (size_t i = 0; i < rebound_types->length; i++) {
+    TypeRecord* type = rebound_types->value.p[i];
+    ASTNodeDelete(type->dependent_decltype_expr);
+    type->dependent_decltype_expr = original_expressions->value.p[i];
+  }
+}
+
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
   if (node->op == AST_OP(structured_binding)) {
@@ -4512,8 +4564,22 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         }
       }
       if (concrete == NULL) {
-        concrete =
-            SubstituteTemplateParameters(clone->parser, scope, clone->args);
+        Vector rebound_types;
+        Vector original_expressions;
+        Vector visited_types;
+        VectorInit(&rebound_types);
+        VectorInit(&original_expressions);
+        VectorInit(&visited_types);
+        RebindBodyCloneDecltypeExpressions(
+            clone, scope, &visited_types, &rebound_types,
+            &original_expressions);
+        concrete = SubstituteTemplateParameters(clone->parser, scope,
+                                                clone->args);
+        RestoreBodyCloneDecltypeExpressions(&rebound_types,
+                                            &original_expressions);
+        VectorDestruct(&original_expressions);
+        VectorDestruct(&rebound_types);
+        VectorDestruct(&visited_types);
       }
       RebaseTemplateParameterIndices(concrete,
                                      clone->rebase_template_parameter_base);
@@ -5118,6 +5184,40 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         }
       }
       node->flags &= ~kASTDependentNewAllocation;
+      bool already_has_deferred_initializer =
+          node->parent != NULL && node->parent->op == AST_OP(assign);
+      if (!already_has_deferred_initializer &&
+          (node->flags & kASTCXXArrayNew) == 0 &&
+          TypeIsStructOrUnion(allocated_type) &&
+          CXXRecordHasDefaultConstructorMember(allocated_type)) {
+        TypeRecord* pointer_type = TypeRecordCopy(node->type);
+        Symbol* temp = SyntaxNewTemporary(clone->parser->syntax, pointer_type);
+        temp->flags.address_taken = true;
+        ASTNode* temp_lhs = NewIdentifierASTNode(temp, node->location);
+        temp_lhs->flags |= kASTNeedAddress;
+        ASTNode* assign =
+            NewBinaryASTNode(AST_OP(assign), pointer_type, node->location,
+                             temp_lhs, node);
+        ASTNode* receiver = NewUnaryASTNode(
+            AST_OP(contents), allocated_type, node->location,
+            NewIdentifierASTNode(temp, node->location));
+        ASTNode* init = NewClonedDependentConstructorCall(
+            allocated_type, receiver, NewVector(), node->location);
+        Vector* statements = NewVector();
+        VectorAppend(statements,
+                     NewVariableDeclarationASTNode(temp, NULL, node->location));
+        VectorAppend(statements,
+                     NewExpressionStatementASTNode(assign, node->location));
+        VectorAppend(statements,
+                     NewExpressionStatementASTNode(init, node->location));
+        VectorAppend(
+            statements,
+            NewExpressionStatementASTNode(
+                NewIdentifierASTNode(temp, node->location), node->location));
+        return NewUnaryASTNode(
+            AST_OP(stmt_expr), pointer_type, node->location,
+            NewCompoundStatementASTNode(statements, node->location));
+      }
     }
   }
   if (node->op == AST_OP(call)) {

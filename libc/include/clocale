@@ -1,0 +1,19 @@
+//
+//  clocale
+//  c_compiler
+//
+
+#ifndef __davecc_clocale__
+#define __davecc_clocale__
+
+#include <locale.h>
+
+namespace std {
+
+using ::lconv;
+using ::localeconv;
+using ::setlocale;
+
+}  // namespace std
+
+#endif /* __davecc_clocale__ */

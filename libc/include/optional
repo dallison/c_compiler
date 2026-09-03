@@ -86,9 +86,11 @@ class optional {
     __construct_move(std::move(value));
   }
 
-  template <class U>
-    requires(!is_same_v<remove_cvref_t<U>, optional> &&
-             is_constructible_v<T, U>)
+  template <
+      class U,
+      typename enable_if<!is_same<remove_cvref_t<U>, optional>::value &&
+                             is_constructible<T, U>::value,
+                         int>::type = 0>
   constexpr optional(U&& value) : __engaged_(false) {
     new (__ptr()) T(std::forward<U>(value));
     __engaged_ = true;

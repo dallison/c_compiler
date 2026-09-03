@@ -754,12 +754,14 @@ void swap(list<T, Allocator>& left, list<T, Allocator>& right) noexcept {
   left.swap(right);
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class T>
 using list = std::list<T, polymorphic_allocator<T>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

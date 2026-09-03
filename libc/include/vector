@@ -911,6 +911,7 @@ bool operator>=(const vector<T, Allocator>& a,
   return !(a < b);
 }
 
+#if __cplusplus >= 202002L
 template <class T, class Allocator>
 strong_ordering operator<=>(const vector<T, Allocator>& a,
                             const vector<T, Allocator>& b) {
@@ -931,18 +932,21 @@ strong_ordering operator<=>(const vector<T, Allocator>& a,
   }
   return strong_ordering::equal;
 }
+#endif
 
 template <class T, class Allocator>
 void swap(vector<T, Allocator>& a, vector<T, Allocator>& b) noexcept {
   a.swap(b);
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class T>
 using vector = std::vector<T, polymorphic_allocator<T>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

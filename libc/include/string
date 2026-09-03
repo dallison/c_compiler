@@ -16,10 +16,14 @@
 #define __davecc_string__
 
 #include <__char_traits>
+#if __cplusplus >= 202002L
 #include <compare>
+#endif
 #include <cstddef>
 #include <memory>
+#if __cplusplus >= 201703L
 #include <memory_resource>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <type_traits>
@@ -117,8 +121,12 @@ class basic_string {
     __assign_raw(s, n);
   }
 
+#if __cplusplus >= 201103L
   template <class InputIt,
             enable_if_t<!is_integral_v<InputIt>, int> = 0>
+#else
+  template <class InputIt>
+#endif
   basic_string(InputIt first, InputIt last) : __alloc(Allocator()) {
     __set_empty();
     for (; first != last; ++first) {
@@ -454,18 +462,22 @@ class basic_string {
 
 using string = basic_string<char>;
 using wstring = basic_string<wchar_t>;
+#if __cplusplus >= 201103L
 #if __cplusplus >= 202002L
 using u8string = basic_string<char8_t>;
 #endif
 using u16string = basic_string<char16_t>;
 using u32string = basic_string<char32_t>;
+#endif
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 using string =
     basic_string<char, char_traits<char>, polymorphic_allocator<char>>;
 
 }  // namespace pmr
+#endif
 
 string to_string(int value);
 string to_string(unsigned int value);
@@ -552,6 +564,7 @@ bool operator==(const basic_string<CharT, Traits, Allocator>& a,
   return a.compare(b) == 0;
 }
 
+#if __cplusplus >= 202002L
 template <class CharT, class Traits, class Allocator>
 std::strong_ordering operator<=>(
     const basic_string<CharT, Traits, Allocator>& a,
@@ -570,6 +583,7 @@ std::strong_ordering operator<=>(
                : r > 0 ? std::strong_ordering::greater
                        : std::strong_ordering::equal;
 }
+#endif
 
 template <class CharT, class Traits, class Allocator>
 void swap(basic_string<CharT, Traits, Allocator>& a,

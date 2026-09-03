@@ -10,6 +10,13 @@
 #ifndef __davecc_char_traits__
 #define __davecc_char_traits__
 
+#if __cplusplus < 201103L
+#define constexpr
+#define noexcept
+#define nullptr 0
+#define __DAVECC_CHAR_TRAITS_LEGACY_KEYWORDS
+#endif
+
 #include <cstddef>
 #include <string.h>
 
@@ -17,10 +24,10 @@ namespace std {
 
 template <class CharT>
 struct char_traits {
-  using char_type = CharT;
-  using int_type = unsigned long;
-  using pos_type = long;
-  using off_type = long;
+  typedef CharT char_type;
+  typedef unsigned long int_type;
+  typedef long pos_type;
+  typedef long off_type;
 
   static constexpr void assign(char_type& a, const char_type& b) noexcept {
     a = b;
@@ -102,10 +109,10 @@ struct char_traits {
 
 template <>
 struct char_traits<char> {
-  using char_type = char;
-  using int_type = int;
-  using pos_type = long;
-  using off_type = long;
+  typedef char char_type;
+  typedef int int_type;
+  typedef long pos_type;
+  typedef long off_type;
 
   static constexpr void assign(char_type& a, const char_type& b) noexcept {
     a = b;
@@ -178,5 +185,12 @@ struct char_traits<char> {
 };
 
 }  // namespace std
+
+#ifdef __DAVECC_CHAR_TRAITS_LEGACY_KEYWORDS
+#undef constexpr
+#undef noexcept
+#undef nullptr
+#undef __DAVECC_CHAR_TRAITS_LEGACY_KEYWORDS
+#endif
 
 #endif /* __davecc_char_traits__ */

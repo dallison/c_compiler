@@ -1,0 +1,418 @@
+//
+//  complex
+//  c_compiler
+//
+//  Standard Cartesian complex numbers, independent of C _Complex support.
+//
+
+#ifndef __davecc_complex__
+#define __davecc_complex__
+
+#include <cmath>
+#include <ios>
+
+namespace std {
+
+template <class T>
+class complex {
+ public:
+  typedef T value_type;
+
+  complex(const T& real_value = T(), const T& imag_value = T())
+      : __real_(real_value), __imag_(imag_value) {}
+
+  template <class U>
+  complex(const complex<U>& other)
+      : __real_(static_cast<T>(other.real())),
+        __imag_(static_cast<T>(other.imag())) {}
+
+  T real() const { return __real_; }
+  T imag() const { return __imag_; }
+  void real(T value) { __real_ = value; }
+  void imag(T value) { __imag_ = value; }
+
+  complex& operator=(const T& value) {
+    __real_ = value;
+    __imag_ = T();
+    return *this;
+  }
+
+  complex& operator+=(const T& value) {
+    __real_ += value;
+    return *this;
+  }
+  complex& operator-=(const T& value) {
+    __real_ -= value;
+    return *this;
+  }
+  complex& operator*=(const T& value) {
+    __real_ *= value;
+    __imag_ *= value;
+    return *this;
+  }
+  complex& operator/=(const T& value) {
+    __real_ /= value;
+    __imag_ /= value;
+    return *this;
+  }
+
+  template <class U>
+  complex& operator+=(const complex<U>& value) {
+    __real_ += static_cast<T>(value.real());
+    __imag_ += static_cast<T>(value.imag());
+    return *this;
+  }
+  template <class U>
+  complex& operator-=(const complex<U>& value) {
+    __real_ -= static_cast<T>(value.real());
+    __imag_ -= static_cast<T>(value.imag());
+    return *this;
+  }
+  template <class U>
+  complex& operator*=(const complex<U>& value) {
+    T a = __real_;
+    T b = __imag_;
+    T c = static_cast<T>(value.real());
+    T d = static_cast<T>(value.imag());
+    __real_ = a * c - b * d;
+    __imag_ = a * d + b * c;
+    return *this;
+  }
+  template <class U>
+  complex& operator/=(const complex<U>& value) {
+    T a = __real_;
+    T b = __imag_;
+    T c = static_cast<T>(value.real());
+    T d = static_cast<T>(value.imag());
+    T denominator = c * c + d * d;
+    __real_ = (a * c + b * d) / denominator;
+    __imag_ = (b * c - a * d) / denominator;
+    return *this;
+  }
+
+ private:
+  T __real_;
+  T __imag_;
+};
+
+template <class T>
+inline complex<T> operator+(const complex<T>& value) {
+  return value;
+}
+
+template <class T>
+inline complex<T> operator-(const complex<T>& value) {
+  return complex<T>(-value.real(), -value.imag());
+}
+
+template <class T>
+inline complex<T> operator+(complex<T> left, const complex<T>& right) {
+  left += right;
+  return left;
+}
+template <class T>
+inline complex<T> operator+(complex<T> left, const T& right) {
+  left += right;
+  return left;
+}
+template <class T>
+inline complex<T> operator+(const T& left, complex<T> right) {
+  right += left;
+  return right;
+}
+
+template <class T>
+inline complex<T> operator-(complex<T> left, const complex<T>& right) {
+  left -= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator-(complex<T> left, const T& right) {
+  left -= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator-(const T& left, const complex<T>& right) {
+  return complex<T>(left - right.real(), -right.imag());
+}
+
+template <class T>
+inline complex<T> operator*(complex<T> left, const complex<T>& right) {
+  left *= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator*(complex<T> left, const T& right) {
+  left *= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator*(const T& left, complex<T> right) {
+  right *= left;
+  return right;
+}
+
+template <class T>
+inline complex<T> operator/(complex<T> left, const complex<T>& right) {
+  left /= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator/(complex<T> left, const T& right) {
+  left /= right;
+  return left;
+}
+template <class T>
+inline complex<T> operator/(const T& left, const complex<T>& right) {
+  complex<T> result(left);
+  result /= right;
+  return result;
+}
+
+template <class T>
+inline bool operator==(const complex<T>& left, const complex<T>& right) {
+  return left.real() == right.real() && left.imag() == right.imag();
+}
+template <class T>
+inline bool operator==(const complex<T>& left, const T& right) {
+  return left.real() == right && left.imag() == T();
+}
+template <class T>
+inline bool operator==(const T& left, const complex<T>& right) {
+  return right == left;
+}
+
+#if __cplusplus < 202002L
+template <class T>
+inline bool operator!=(const complex<T>& left, const complex<T>& right) {
+  return !(left == right);
+}
+template <class T>
+inline bool operator!=(const complex<T>& left, const T& right) {
+  return !(left == right);
+}
+template <class T>
+inline bool operator!=(const T& left, const complex<T>& right) {
+  return !(left == right);
+}
+#endif
+
+template <class T>
+inline T real(const complex<T>& value) {
+  return value.real();
+}
+template <class T>
+inline T imag(const complex<T>& value) {
+  return value.imag();
+}
+template <class T>
+inline T norm(const complex<T>& value) {
+  return value.real() * value.real() + value.imag() * value.imag();
+}
+template <class T>
+inline T abs(const complex<T>& value) {
+  return static_cast<T>(
+      std::sqrt(static_cast<double>(norm(value))));
+}
+template <class T>
+inline T arg(const complex<T>& value) {
+  return static_cast<T>(std::atan2(static_cast<double>(value.imag()),
+                                  static_cast<double>(value.real())));
+}
+template <class T>
+inline complex<T> conj(const complex<T>& value) {
+  return complex<T>(value.real(), -value.imag());
+}
+template <class T>
+inline complex<T> proj(const complex<T>& value) {
+  return value;
+}
+template <class T>
+inline complex<T> polar(const T& magnitude, const T& angle = T()) {
+  return complex<T>(
+      magnitude * static_cast<T>(std::cos(static_cast<double>(angle))),
+      magnitude * static_cast<T>(std::sin(static_cast<double>(angle))));
+}
+
+template <class T>
+inline complex<T> exp(const complex<T>& value) {
+  T scale = static_cast<T>(std::exp(static_cast<double>(value.real())));
+  return polar(scale, value.imag());
+}
+template <class T>
+inline complex<T> log(const complex<T>& value) {
+  return complex<T>(
+      static_cast<T>(std::log(static_cast<double>(abs(value)))),
+      arg(value));
+}
+template <class T>
+inline complex<T> log10(const complex<T>& value) {
+  return log(value) / static_cast<T>(std::log(10.0));
+}
+template <class T>
+inline complex<T> sqrt(const complex<T>& value) {
+  T magnitude = abs(value);
+  T real_part = static_cast<T>(
+      std::sqrt(static_cast<double>((magnitude + value.real()) / T(2))));
+  T imag_part = static_cast<T>(
+      std::sqrt(static_cast<double>((magnitude - value.real()) / T(2))));
+  if (value.imag() < T()) {
+    imag_part = -imag_part;
+  }
+  return complex<T>(real_part, imag_part);
+}
+
+template <class T>
+inline complex<T> sin(const complex<T>& value) {
+  double y = static_cast<double>(value.imag());
+  double ey = std::exp(y);
+  double emy = std::exp(-y);
+  T cosh_y = static_cast<T>((ey + emy) / 2.0);
+  T sinh_y = static_cast<T>((ey - emy) / 2.0);
+  return complex<T>(
+      static_cast<T>(std::sin(static_cast<double>(value.real()))) * cosh_y,
+      static_cast<T>(std::cos(static_cast<double>(value.real()))) * sinh_y);
+}
+template <class T>
+inline complex<T> cos(const complex<T>& value) {
+  double y = static_cast<double>(value.imag());
+  double ey = std::exp(y);
+  double emy = std::exp(-y);
+  T cosh_y = static_cast<T>((ey + emy) / 2.0);
+  T sinh_y = static_cast<T>((ey - emy) / 2.0);
+  return complex<T>(
+      static_cast<T>(std::cos(static_cast<double>(value.real()))) * cosh_y,
+      -static_cast<T>(std::sin(static_cast<double>(value.real()))) * sinh_y);
+}
+template <class T>
+inline complex<T> tan(const complex<T>& value) {
+  return sin(value) / cos(value);
+}
+template <class T>
+inline complex<T> sinh(const complex<T>& value) {
+  return (exp(value) - exp(-value)) / T(2);
+}
+template <class T>
+inline complex<T> cosh(const complex<T>& value) {
+  return (exp(value) + exp(-value)) / T(2);
+}
+template <class T>
+inline complex<T> tanh(const complex<T>& value) {
+  return sinh(value) / cosh(value);
+}
+
+template <class T>
+inline complex<T> pow(const complex<T>& base, const complex<T>& exponent) {
+  return exp(exponent * log(base));
+}
+template <class T>
+inline complex<T> pow(const complex<T>& base, const T& exponent) {
+  return exp(complex<T>(exponent) * log(base));
+}
+template <class T>
+inline complex<T> pow(const T& base, const complex<T>& exponent) {
+  return exp(exponent * log(complex<T>(base)));
+}
+template <class T>
+inline complex<T> pow(const complex<T>& base, int exponent) {
+  if (exponent < 0) {
+    return complex<T>(T(1)) / pow(base, -exponent);
+  }
+  complex<T> result(T(1));
+  complex<T> factor(base);
+  while (exponent != 0) {
+    if ((exponent & 1) != 0) {
+      result *= factor;
+    }
+    exponent >>= 1;
+    if (exponent != 0) {
+      factor *= factor;
+    }
+  }
+  return result;
+}
+
+template <class T>
+inline complex<T> asin(const complex<T>& value) {
+  const complex<T> i(T(), T(1));
+  return -i * log(i * value + sqrt(complex<T>(T(1)) - value * value));
+}
+template <class T>
+inline complex<T> acos(const complex<T>& value) {
+  const T half_pi =
+      static_cast<T>(std::atan2(1.0, 0.0));
+  return complex<T>(half_pi) - asin(value);
+}
+template <class T>
+inline complex<T> atan(const complex<T>& value) {
+  const complex<T> i(T(), T(1));
+  return (i / T(2)) *
+         (log(complex<T>(T(1)) - i * value) -
+          log(complex<T>(T(1)) + i * value));
+}
+
+template <class CharT, class Traits, class T>
+basic_ostream<CharT, Traits>& operator<<(basic_ostream<CharT, Traits>& output,
+                                        const complex<T>& value) {
+  output << CharT('(') << value.real() << CharT(',') << value.imag()
+         << CharT(')');
+  return output;
+}
+
+template <class CharT, class Traits, class T>
+basic_istream<CharT, Traits>& operator>>(basic_istream<CharT, Traits>& input,
+                                        complex<T>& value) {
+  T real_value = T();
+  T imag_value = T();
+  CharT ch = CharT();
+  input >> ch;
+  if (ch == CharT('(')) {
+    input >> real_value >> ch;
+    if (ch == CharT(',')) {
+      input >> imag_value >> ch;
+      if (ch != CharT(')')) {
+        input.setstate(ios_base::failbit);
+      }
+    } else if (ch == CharT(')')) {
+      imag_value = T();
+    } else {
+      input.setstate(ios_base::failbit);
+    }
+  } else {
+    input.putback(ch);
+    input >> real_value;
+  }
+  if (input) {
+    value = complex<T>(real_value, imag_value);
+  }
+  return input;
+}
+
+#if __cplusplus >= 201402L
+inline namespace literals {
+inline namespace complex_literals {
+inline complex<double> operator""i(long double value) {
+  return complex<double>(0.0, static_cast<double>(value));
+}
+inline complex<float> operator""if(long double value) {
+  return complex<float>(0.0f, static_cast<float>(value));
+}
+inline complex<long double> operator""il(long double value) {
+  return complex<long double>(0.0L, value);
+}
+inline complex<double> operator""i(unsigned long long value) {
+  return complex<double>(0.0, static_cast<double>(value));
+}
+inline complex<float> operator""if(unsigned long long value) {
+  return complex<float>(0.0f, static_cast<float>(value));
+}
+inline complex<long double> operator""il(unsigned long long value) {
+  return complex<long double>(0.0L, static_cast<long double>(value));
+}
+}  // namespace complex_literals
+}  // namespace literals
+#endif
+
+}  // namespace std
+
+#endif /* __davecc_complex__ */

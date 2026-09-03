@@ -70,6 +70,10 @@ struct __is_transparent_compare<
     Compare, void_t<typename Compare::is_transparent>> : true_type {
 };
 
+template <class Compare, class>
+struct __is_transparent_compare_for : __is_transparent_compare<Compare> {
+};
+
 }  // namespace __map_detail
 
 template <class Key, class T, class Compare = less<Key>,
@@ -1068,16 +1072,20 @@ class map {
                : optional<const mapped_type&>(node->value.second);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   constexpr optional<mapped_type&> lookup(const K& key) {
     __node* node = __find_node_as(key);
     return node == nullptr ? optional<mapped_type&>()
                            : optional<mapped_type&>(node->value.second);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   constexpr optional<const mapped_type&> lookup(const K& key) const {
     __node* node = __find_node_as(key);
     return node == nullptr
@@ -1094,14 +1102,18 @@ class map {
     return const_iterator(__find_node(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   iterator find(const K& key) {
     return iterator(__find_node_as(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   const_iterator find(const K& key) const {
     return const_iterator(__find_node_as(key), __root_);
   }
@@ -1110,8 +1122,10 @@ class map {
     return __find_node(key) != nullptr;
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   bool contains(const K& key) const {
     return __find_node_as(key) != nullptr;
   }
@@ -1120,8 +1134,10 @@ class map {
     return contains(key) ? 1 : 0;
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   size_type count(const K& key) const {
     return contains(key) ? 1 : 0;
   }
@@ -1134,14 +1150,18 @@ class map {
     return const_iterator(__lower_bound_node(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   iterator lower_bound(const K& key) {
     return iterator(__lower_bound_node_as(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   const_iterator lower_bound(const K& key) const {
     return const_iterator(__lower_bound_node_as(key), __root_);
   }
@@ -1154,14 +1174,18 @@ class map {
     return const_iterator(__upper_bound_node(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   iterator upper_bound(const K& key) {
     return iterator(__upper_bound_node_as(key), __root_);
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   const_iterator upper_bound(const K& key) const {
     return const_iterator(__upper_bound_node_as(key), __root_);
   }
@@ -1174,14 +1198,18 @@ class map {
     return pair<const_iterator, const_iterator>(lower_bound(key), upper_bound(key));
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   pair<iterator, iterator> equal_range(const K& key) {
     return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
   }
 
-  template <class K>
-    requires (__map_detail::__is_transparent_compare<Compare>::value)
+  template <class K,
+            typename enable_if<
+                __map_detail::__is_transparent_compare_for<Compare, K>::value,
+                int>::type = 0>
   pair<const_iterator, const_iterator> equal_range(const K& key) const {
     return pair<const_iterator, const_iterator>(lower_bound(key), upper_bound(key));
   }
@@ -1319,6 +1347,7 @@ typename map<Key, T, Compare, Allocator>::size_type erase_if(
   return old_size - c.size();
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class Key, class T, class Compare = less<Key>>
@@ -1327,6 +1356,7 @@ using map =
              polymorphic_allocator<pair<const Key, T>>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

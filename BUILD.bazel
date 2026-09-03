@@ -28,6 +28,7 @@ filegroup(
         "libc/include/charconv",
         "libc/include/chrono",
         "libc/include/compare",
+        "libc/include/complex",
         "libc/include/concepts",
         "libc/include/condition_variable",
         "libc/include/contracts",
@@ -37,8 +38,10 @@ filegroup(
         "libc/include/cfloat",
         "libc/include/cinttypes",
         "libc/include/ciso646",
+        "libc/include/clocale",
         "libc/include/climits",
         "libc/include/cmath",
+        "libc/include/csignal",
         "libc/include/csetjmp",
         "libc/include/cstdalign",
         "libc/include/cstdarg",
@@ -93,10 +96,12 @@ filegroup(
         "libc/include/random",
         "libc/include/ranges",
         "libc/include/ratio",
+        "libc/include/scoped_allocator",
         "libc/include/semaphore",
         "libc/include/set",
         "libc/include/source_location",
         "libc/include/span",
+        "libc/include/spanstream",
         "libc/include/sstream",
         "libc/include/stack",
         "libc/include/stacktrace",
@@ -323,6 +328,7 @@ LIBC_SRCS = [
     "libc/ldexp.c",
     "libc/libc_test.c",
     "libc/log.c",
+    "libc/locale_c.c",
     "libc/malloc.c",
     "libc/memccpy.c",
     "libc/memchr.c",
@@ -351,6 +357,7 @@ LIBC_SRCS = [
     "libc/rand.c",
     "libc/realloc.c",
     "libc/scanf.c",
+    "libc/signal.c",
     "libc/sincos.c",
     "libc/sqrt.c",
     "libc/stdio.c",
@@ -1478,6 +1485,7 @@ libc_srcs=(
   "libc/rand.c"
   "libc/realloc.c"
   "libc/scanf.c"
+  "libc/signal.c"
   "libc/sincos.c"
   "libc/stdio.c"
   "libc/stdio_flags.c"
@@ -1519,6 +1527,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/locale_c.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -1654,6 +1663,7 @@ libc_srcs=(
   "libc/rand.c"
   "libc/realloc.c"
   "libc/scanf.c"
+  "libc/signal.c"
   "libc/sincos.c"
   "libc/stdio.c"
   "libc/stdio_flags.c"
@@ -1696,6 +1706,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/locale_c.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -1833,6 +1844,7 @@ libc_srcs=(
   "libc/rand.c"
   "libc/realloc.c"
   "libc/scanf.c"
+  "libc/signal.c"
   "libc/sincos.c"
   "libc/stdio.c"
   "libc/stdio_flags.c"
@@ -1873,6 +1885,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/locale_c.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -2008,6 +2021,7 @@ libc_srcs=(
   "libc/rand.c"
   "libc/realloc.c"
   "libc/scanf.c"
+  "libc/signal.c"
   "libc/sincos.c"
   "libc/stdio.c"
   "libc/stdio_flags.c"
@@ -2050,6 +2064,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/locale_c.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -2355,6 +2370,7 @@ libc_srcs=(
   "libc/rand.c"
   "libc/realloc.c"
   "libc/scanf.c"
+  "libc/signal.c"
   "libc/sincos.c"
   "libc/stdio.c"
   "libc/stdio_flags.c"
@@ -2397,6 +2413,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/locale_c.c"
   "libc/pow.c"
   "libc/sqrt.c"
   "libc/tan.c"
@@ -2537,6 +2554,16 @@ LIBC_TEST_DATA = LIBC_SRCS + LIBC_CXX_SRCS + [
     "x86_64 support/*.s",
     "RISCV_support/*.s",
 ])
+
+sh_test(
+    name = "standard_headers_all_targets_test",
+    srcs = ["libc/tests/standard_headers_all_targets.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
 
 sh_test(
     name = "libc_x86_64_compile_test",

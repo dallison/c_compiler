@@ -12,9 +12,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <exception>
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <new>
+#if __cplusplus >= 201103L
 #include <tuple>
+#endif
 #include <typeinfo>
 #include <type_traits>
 #include <utility>
@@ -333,8 +337,9 @@ constexpr __davecc_invoke_result_t(F) invoke(F&& function) {
   return static_cast<F&&>(function)();
 }
 
-template <class F, class T, class... Args>
-  requires (__is_member_pointer_argument<F>::value)
+template <class F, class T, class... Args,
+          typename enable_if<__is_member_pointer_argument<F>::value,
+                             int>::type = 0>
 constexpr __davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
 invoke(F&& function, reference_wrapper<T>&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
@@ -345,8 +350,9 @@ invoke(F&& function, reference_wrapper<T>&& object, Args&&... args) {
       function, object, static_cast<Args&&>(args)...);
 }
 
-template <class F, class T, class... Args>
-  requires (__is_member_pointer_argument<F>::value)
+template <class F, class T, class... Args,
+          typename enable_if<__is_member_pointer_argument<F>::value,
+                             int>::type = 0>
 constexpr __davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
 invoke(F&& function, reference_wrapper<T>& object, Args&&... args) {
   using Function = remove_reference_t<F>;
@@ -357,9 +363,11 @@ invoke(F&& function, reference_wrapper<T>& object, Args&&... args) {
       function, object, static_cast<Args&&>(args)...);
 }
 
-template <class F, class T, class... Args>
-  requires (__is_member_pointer_argument<F>::value &&
-            __davecc_is_member_pointer_direct_object(F, T) != 0)
+template <
+    class F, class T, class... Args,
+    typename enable_if<__is_member_pointer_argument<F>::value &&
+                           __davecc_is_member_pointer_direct_object(F, T) != 0,
+                       int>::type = 0>
 constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
@@ -370,9 +378,11 @@ invoke(F&& function, T&& object, Args&&... args) {
       function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
 }
 
-template <class F, class T, class... Args>
-  requires (__is_member_pointer_argument<F>::value &&
-            __davecc_is_member_pointer_direct_object(F, T) == 0)
+template <
+    class F, class T, class... Args,
+    typename enable_if<__is_member_pointer_argument<F>::value &&
+                           __davecc_is_member_pointer_direct_object(F, T) == 0,
+                       int>::type = 0>
 constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   using Function = remove_reference_t<F>;
@@ -383,8 +393,9 @@ invoke(F&& function, T&& object, Args&&... args) {
       function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
 }
 
-template <class F, class T, class... Args>
-  requires (!__is_member_pointer_argument<F>::value)
+template <class F, class T, class... Args,
+          typename enable_if<!__is_member_pointer_argument<F>::value,
+                             int>::type = 0>
 constexpr __davecc_invoke_result_t(F, T, Args...)
 invoke(F&& function, T&& object, Args&&... args) {
   return static_cast<F&&>(function)(static_cast<T&&>(object),
@@ -657,7 +668,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static F* get(__storage_type& storage) {
-    if constexpr (is_local) {
+    if (is_local) {
       return reinterpret_cast<F*>(storage.data);
     } else {
       return heap_pointer(storage);
@@ -665,7 +676,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static const F* get(const __storage_type& storage) {
-    if constexpr (is_local) {
+    if (is_local) {
       return reinterpret_cast<const F*>(storage.data);
     } else {
       return heap_pointer(storage);
@@ -674,17 +685,12 @@ struct __manager<F, R(Args...)> {
 
   static R invoke_target(__storage_type* storage, Args... args) {
     F* target = get(*storage);
-    if constexpr (is_void<R>::value) {
-      std::invoke(*target, static_cast<Args&&>(args)...);
-      return;
-    } else {
-      return std::invoke(*target, static_cast<Args&&>(args)...);
-    }
+    return std::invoke(*target, static_cast<Args&&>(args)...);
   }
 
   static void copy(__storage_type* destination,
                    const __storage_type* source) {
-    if constexpr (is_local) {
+    if (is_local) {
       ::new (static_cast<void*>(destination->data)) F(*get(*source));
     } else {
       heap_pointer(*destination) = new F(*get(*source));
@@ -692,7 +698,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static void move(__storage_type* destination, __storage_type* source) {
-    if constexpr (is_local) {
+    if (is_local) {
       F* source_target = get(*source);
       ::new (static_cast<void*>(destination->data))
           F(static_cast<F&&>(*source_target));
@@ -704,7 +710,7 @@ struct __manager<F, R(Args...)> {
   }
 
   static void destroy(__storage_type* storage) {
-    if constexpr (is_local) {
+    if (is_local) {
       get(*storage)->~F();
     } else {
       delete heap_pointer(*storage);
@@ -772,6 +778,16 @@ template <class F>
 using __function_guide_t =
     typename __function_guide<decltype(&F::operator())>::type;
 
+template <class Target, class Value>
+bool __is_null_target(Value&& value, true_type) {
+  return static_cast<Target>(value) == nullptr;
+}
+
+template <class Target, class Value>
+bool __is_null_target(Value&&, false_type) {
+  return false;
+}
+
 }  // namespace __function_detail
 
 template <class R, class... Args>
@@ -787,14 +803,15 @@ class function<R(Args...)> {
   void __initialize(F&& value) {
     using Target = decay_t<F>;
     using Manager = __function_detail::__manager<Target, __signature>;
-    if constexpr (is_pointer<Target>::value ||
-                  is_member_pointer<Target>::value) {
-      if (static_cast<Target>(value) == nullptr) {
-        return;
-      }
+    using nullable = integral_constant<
+        bool, is_pointer<Target>::value ||
+                  is_member_pointer<Target>::value>;
+    if (__function_detail::__is_null_target<Target>(
+            static_cast<F&&>(value), nullable())) {
+      return;
     }
 
-    if constexpr (Manager::is_local) {
+    if (Manager::is_local) {
       ::new (static_cast<void*>(__storage.data))
           Target(static_cast<F&&>(value));
     } else {
@@ -832,9 +849,12 @@ class function<R(Args...)> {
     }
   }
 
-  template <class F>
-    requires (__function_detail::__valid_target<decay_t<F>, F&&, __self,
-                                                 __signature>::value)
+  template <
+      class F,
+      typename enable_if<
+          __function_detail::__valid_target<decay_t<F>, F&&, __self,
+                                            __signature>::value,
+          int>::type = 0>
   function(F&& value) : __storage{}, __ops(nullptr), __invoke(nullptr) {
     __initialize(static_cast<F&&>(value));
   }
@@ -863,9 +883,12 @@ class function<R(Args...)> {
     return *this;
   }
 
-  template <class F>
-    requires (__function_detail::__valid_target<decay_t<F>, F&&, __self,
-                                                 __signature>::value)
+  template <
+      class F,
+      typename enable_if<
+          __function_detail::__valid_target<decay_t<F>, F&&, __self,
+                                            __signature>::value,
+          int>::type = 0>
   function& operator=(F&& value) {
     __self temporary = static_cast<F&&>(value);
     temporary.swap(*this);
@@ -945,8 +968,7 @@ class function<R(Args...)> {
 template <class R, class... Args>
 function(R (*)(Args...)) -> function<R(Args...)>;
 
-template <class F>
-  requires is_class<F>::value
+template <class F, typename enable_if<is_class<F>::value, int>::type = 0>
 function(F) -> function<__function_detail::__function_guide_t<F>>;
 
 template <class R, class... Args>

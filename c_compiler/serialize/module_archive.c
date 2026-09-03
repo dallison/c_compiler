@@ -18,6 +18,7 @@
 #include "symbol.h"
 #include "symbol_table.h"
 #include "type.h"
+#include "type_class_internal.h"
 #include "type_internal.h"
 #include "type_member.h"
 
@@ -539,6 +540,7 @@ static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
     Struct* st = (Struct*)VectorGet(struct_pool, i);
     if (st != NULL) {
       StructRebuildMemberLookupTables(st);
+      CollectCXXVirtualBases(st);
       // A type record that named this class was read before the class itself
       // and so took a size of zero from it.  Nothing lays out an imported
       // class, which is where a parsed one propagates its finished size, so

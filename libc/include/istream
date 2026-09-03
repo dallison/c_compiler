@@ -423,17 +423,26 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
   }
 
   bool __extract_bool_with_locale(bool& v, ios_base::iostate& err) {
-    if constexpr (is_same_v<CharT, char>) {
-      istreambuf_iterator in(this->rdbuf());
-      istreambuf_iterator end;
-      use_facet<num_get<char, istreambuf_iterator>>(this->getloc())
-          .get(in, end, *this, err, v);
-    } else {
-      wistreambuf_iterator in(this->rdbuf());
-      wistreambuf_iterator end;
-      use_facet<num_get<wchar_t, wistreambuf_iterator>>(this->getloc())
-          .get(in, end, *this, err, v);
-    }
+    typedef typename is_same<CharT, char>::type character_tag;
+    return __extract_bool_with_locale_impl(
+        v, err, character_tag());
+  }
+
+  bool __extract_bool_with_locale_impl(
+      bool& v, ios_base::iostate& err, true_type) {
+    istreambuf_iterator in(this->rdbuf());
+    istreambuf_iterator end;
+    use_facet<num_get<char, istreambuf_iterator>>(this->getloc())
+        .get(in, end, *this, err, v);
+    return true;
+  }
+
+  bool __extract_bool_with_locale_impl(
+      bool& v, ios_base::iostate& err, false_type) {
+    wistreambuf_iterator in(this->rdbuf());
+    wistreambuf_iterator end;
+    use_facet<num_get<wchar_t, wistreambuf_iterator>>(this->getloc())
+        .get(in, end, *this, err, v);
     return true;
   }
 

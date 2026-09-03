@@ -10,7 +10,9 @@
 
 #include <__random_uniform>
 #include <cmath>
+#if __cplusplus >= 202002L
 #include <concepts>
+#endif
 #include <cstdint>
 #include <initializer_list>
 #include <istream>
@@ -24,6 +26,7 @@
 
 namespace std {
 
+#if __cplusplus >= 202002L
 template <class G>
 concept uniform_random_bit_generator =
     requires(G& g) {
@@ -34,6 +37,7 @@ concept uniform_random_bit_generator =
       G::max();
     } &&
     (G::min() < G::max());
+#endif
 
 namespace __random_detail {
 
@@ -68,7 +72,7 @@ constexpr UInt __add_mod(UInt a, UInt b, UInt modulus) {
 template <class UInt>
 constexpr UInt __multiply_mod(UInt a, UInt b, UInt modulus) {
   if (modulus == 0) return static_cast<UInt>(a * b);
-  if constexpr (sizeof(UInt) <= 4) {
+  if (sizeof(UInt) <= 4) {
     return static_cast<UInt>(
         (static_cast<unsigned long long>(a) *
          static_cast<unsigned long long>(b)) %
@@ -214,7 +218,7 @@ class linear_congruential_engine {
   }
 
   void seed(result_type value = default_seed) {
-    if constexpr (m != 0) value %= m;
+    if (m != 0) value %= m;
     state_ = c == 0 && value == 0 ? result_type(1) : value;
   }
 

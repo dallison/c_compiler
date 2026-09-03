@@ -9,6 +9,42 @@
 #ifndef __davecc_exception__
 #define __davecc_exception__
 
+#if __cplusplus < 201103L
+
+extern "C" int __davecc_uncaught_exceptions();
+
+namespace std {
+
+typedef void (*terminate_handler)();
+typedef void (*unexpected_handler)();
+
+terminate_handler set_terminate(terminate_handler handler);
+terminate_handler get_terminate();
+void terminate();
+
+class exception {
+ public:
+  exception() {}
+  exception(const exception&) {}
+  exception& operator=(const exception&) { return *this; }
+  virtual ~exception() {}
+  virtual const char* what() const { return "std::exception"; }
+};
+
+class bad_exception : public exception {
+ public:
+  bad_exception() {}
+  virtual const char* what() const { return "std::bad_exception"; }
+};
+
+inline bool uncaught_exception() {
+  return __davecc_uncaught_exceptions() != 0;
+}
+
+}  // namespace std
+
+#else
+
 #include <type_traits>
 #include <utility>
 
@@ -174,22 +210,48 @@ class __with_nested : public T, public nested_exception {
 };
 }  // namespace __exception_detail
 
+#if __cplusplus >= 202600L
+#define __davecc_exception_constexpr constexpr
+#else
+#define __davecc_exception_constexpr
+#endif
+
 template <class T>
-[[noreturn]] constexpr void throw_with_nested(T&& value) {
-  using U = remove_cv_t<remove_reference_t<T>>;
-  if constexpr (is_class_v<U> && !is_base_of_v<nested_exception, U>) {
-    throw __exception_detail::__with_nested<U>(static_cast<T&&>(value));
-  } else {
-    throw static_cast<T&&>(value);
-  }
+[[noreturn]] __davecc_exception_constexpr typename enable_if<
+    is_class<typename remove_cv<typename remove_reference<T>::type>::type>::value &&
+        !is_base_of<
+            nested_exception,
+            typename remove_cv<typename remove_reference<T>::type>::type>::value,
+    void>::type
+throw_with_nested(T&& value) {
+  typedef typename remove_cv<typename remove_reference<T>::type>::type U;
+  throw __exception_detail::__with_nested<U>(static_cast<T&&>(value));
 }
 
 template <class T>
-constexpr void rethrow_if_nested(const T& value) {
-  if constexpr (is_base_of_v<nested_exception, T>) {
-    static_cast<const nested_exception&>(value).rethrow_nested();
-  }
+[[noreturn]] __davecc_exception_constexpr typename enable_if<
+    !is_class<typename remove_cv<typename remove_reference<T>::type>::type>::value ||
+        is_base_of<
+            nested_exception,
+            typename remove_cv<typename remove_reference<T>::type>::type>::value,
+    void>::type
+throw_with_nested(T&& value) {
+  throw static_cast<T&&>(value);
 }
+
+template <class T>
+__davecc_exception_constexpr typename enable_if<
+    is_base_of<nested_exception, T>::value, void>::type
+rethrow_if_nested(const T& value) {
+  static_cast<const nested_exception&>(value).rethrow_nested();
+}
+
+template <class T>
+__davecc_exception_constexpr typename enable_if<
+    !is_base_of<nested_exception, T>::value, void>::type
+rethrow_if_nested(const T&) {}
+
+#undef __davecc_exception_constexpr
 
 constexpr int uncaught_exceptions() noexcept {
   return __davecc_uncaught_exceptions();
@@ -200,5 +262,7 @@ constexpr bool uncaught_exception() noexcept {
 }
 
 }  // namespace std
+
+#endif
 
 #endif /* __davecc_exception__ */

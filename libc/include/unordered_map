@@ -330,6 +330,7 @@ typename unordered_map<Key, T, Hash, KeyEqual, Allocator>::size_type erase_if(
   return old_size - c.size();
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class Key, class T, class Hash = hash<Key>,
@@ -339,6 +340,7 @@ using unordered_map =
                        polymorphic_allocator<pair<const Key, T>>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

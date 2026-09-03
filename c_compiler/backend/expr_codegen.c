@@ -945,7 +945,10 @@ static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
 
 static IRNode* GenerateVariableReference(Generator* gen,
                                          IdentifierASTNode* node) {
-  if (TypeIsVLA(node->symbol->type) &&
+  // A VLA object declaration stores its runtime address holder in value.other.
+  // A function parameter uses the same union slot for arg_number, even when
+  // its adjusted array type still contains a variable bound.
+  if (!node->symbol->flags.is_argument && TypeIsVLA(node->symbol->type) &&
       node->symbol->value.other != NULL) {
     IRNode* address_holder = node->symbol->value.other;
     return GeneratorReloadSpilledValue(

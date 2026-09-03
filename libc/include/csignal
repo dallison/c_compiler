@@ -1,0 +1,19 @@
+//
+//  csignal
+//  c_compiler
+//
+
+#ifndef __davecc_csignal__
+#define __davecc_csignal__
+
+#include <signal.h>
+
+namespace std {
+
+using ::sig_atomic_t;
+using ::raise;
+using ::signal;
+
+}  // namespace std
+
+#endif /* __davecc_csignal__ */

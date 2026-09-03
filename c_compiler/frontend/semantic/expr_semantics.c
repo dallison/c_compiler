@@ -1523,6 +1523,8 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
 }
 
 static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
+  Symbol* alias_extensions =
+      first != NULL && first->flags.is_using_alias ? first->overload_next : NULL;
   first = FollowUsingAliasForADL(first);
   // Static member functions link their overloads through the StructMember chain
   // rather than the symbol-level overload_next chain that ordinary
@@ -1561,6 +1563,15 @@ static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
     }
   }
   for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    Symbol* effective = FollowUsingAliasForADL(candidate);
+    if (effective != NULL && effective->type != NULL &&
+        TypeIsFunction(effective->type) &&
+        !VectorContainsPointer(candidates, effective)) {
+      VectorAppend(candidates, effective);
+    }
+  }
+  for (Symbol* candidate = alias_extensions; candidate != NULL;
        candidate = candidate->overload_next) {
     Symbol* effective = FollowUsingAliasForADL(candidate);
     if (effective != NULL && effective->type != NULL &&

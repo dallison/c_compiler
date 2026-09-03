@@ -38,25 +38,6 @@ struct tuple<T0, Rest...> {
   constexpr tuple(__tuple_prepend_t, T0 v0, tuple<Rest...> rest)
       : __0(static_cast<T0&&>(v0)),
         __rest(static_cast<tuple<Rest...>&&>(rest)) {}
-
-  template <size_t I>
-  constexpr auto& __get() {
-    if constexpr (I == 0) {
-      return __0;
-    } else {
-      static_assert(I < 1 + sizeof...(Rest), "tuple index out of range");
-      return __rest.template __get<I - 1>();
-    }
-  }
-  template <size_t I>
-  constexpr const auto& __get() const {
-    if constexpr (I == 0) {
-      return __0;
-    } else {
-      static_assert(I < 1 + sizeof...(Rest), "tuple index out of range");
-      return __rest.template __get<I - 1>();
-    }
-  }
 };
 
 template <class T>
@@ -127,14 +108,39 @@ struct tuple_element<I, const volatile T> {
 template <size_t I, class T>
 using tuple_element_t = typename tuple_element<I, T>::type;
 
+template <size_t I, class Tuple>
+struct __tuple_getter;
+
+template <class T0, class... Rest>
+struct __tuple_getter<0, tuple<T0, Rest...>> {
+  static constexpr T0& get(tuple<T0, Rest...>& value) { return value.__0; }
+  static constexpr const T0& get(const tuple<T0, Rest...>& value) {
+    return value.__0;
+  }
+};
+
+template <size_t I, class T0, class... Rest>
+struct __tuple_getter<I, tuple<T0, Rest...>> {
+  static constexpr typename tuple_element<I, tuple<T0, Rest...>>::type& get(
+      tuple<T0, Rest...>& value) {
+    return __tuple_getter<I - 1, tuple<Rest...>>::get(value.__rest);
+  }
+  static constexpr const typename tuple_element<I, tuple<T0, Rest...>>::type&
+  get(const tuple<T0, Rest...>& value) {
+    return __tuple_getter<I - 1, tuple<Rest...>>::get(value.__rest);
+  }
+};
+
 template <size_t I, class... Types>
-constexpr auto& get(tuple<Types...>& value) {
-  return value.template __get<I>();
+constexpr typename tuple_element<I, tuple<Types...>>::type& get(
+    tuple<Types...>& value) {
+  return __tuple_getter<I, tuple<Types...>>::get(value);
 }
 
 template <size_t I, class... Types>
-constexpr const auto& get(const tuple<Types...>& value) {
-  return value.template __get<I>();
+constexpr const typename tuple_element<I, tuple<Types...>>::type& get(
+    const tuple<Types...>& value) {
+  return __tuple_getter<I, tuple<Types...>>::get(value);
 }
 
 template <size_t I, class... Types>
@@ -151,24 +157,35 @@ constexpr const tuple_element_t<I, tuple<Types...>>&& get(
 }
 
 template <size_t I, class T1, class T2>
-constexpr tuple_element_t<I, pair<T1, T2>>& get(pair<T1, T2>& value) {
-  if constexpr (I == 0) {
+struct __pair_getter;
+
+template <class T1, class T2>
+struct __pair_getter<0, T1, T2> {
+  static constexpr T1& get(pair<T1, T2>& value) { return value.first; }
+  static constexpr const T1& get(const pair<T1, T2>& value) {
     return value.first;
-  } else {
-    static_assert(I == 1, "pair index out of range");
+  }
+};
+
+template <class T1, class T2>
+struct __pair_getter<1, T1, T2> {
+  static constexpr T2& get(pair<T1, T2>& value) { return value.second; }
+  static constexpr const T2& get(const pair<T1, T2>& value) {
     return value.second;
   }
+};
+
+template <size_t I, class T1, class T2>
+constexpr tuple_element_t<I, pair<T1, T2>>& get(pair<T1, T2>& value) {
+  static_assert(I < 2, "pair index out of range");
+  return __pair_getter<I, T1, T2>::get(value);
 }
 
 template <size_t I, class T1, class T2>
 constexpr const tuple_element_t<I, pair<T1, T2>>& get(
     const pair<T1, T2>& value) {
-  if constexpr (I == 0) {
-    return value.first;
-  } else {
-    static_assert(I == 1, "pair index out of range");
-    return value.second;
-  }
+  static_assert(I < 2, "pair index out of range");
+  return __pair_getter<I, T1, T2>::get(value);
 }
 
 }  // namespace std

@@ -46,7 +46,7 @@ typedef int wchar_t;
 #define __WCHAR_T
 #endif
 
-#ifdef __cplusplus
+#if defined(__cplusplus) && __cplusplus >= 201103L
 namespace std {
 using nullptr_t = decltype(nullptr);
 }

@@ -4274,9 +4274,14 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
     TypeParser parser;
     TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
                    STO(implicit), compiler->syntax.context);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
     TypeRecord* substituted =
         SubstituteTemplateParameters(&parser, pattern->type, bindings);
-    bool substitution_failed = parser.template_substitution_failed;
+    bool substitution_failed =
+        parser.template_substitution_failed || DiagnosticErrorTrapped();
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
     TypeParserDestruct(&parser);
     if (substitution_failed) {
       TypeRecordDelete(substituted);

@@ -354,6 +354,76 @@ class ctype_byname<wchar_t> : public ctype<wchar_t> {
 };
 
 template <class CharT>
+class collate : public locale::facet {
+ public:
+  typedef CharT char_type;
+  typedef basic_string<CharT> string_type;
+
+  static locale::id id;
+
+  explicit collate(size_t refs = 0) : locale::facet(refs) {}
+
+  int compare(const CharT* low1, const CharT* high1, const CharT* low2,
+              const CharT* high2) const {
+    return do_compare(low1, high1, low2, high2);
+  }
+
+  string_type transform(const CharT* low, const CharT* high) const {
+    return do_transform(low, high);
+  }
+
+  long hash(const CharT* low, const CharT* high) const {
+    return do_hash(low, high);
+  }
+
+ protected:
+  virtual ~collate() {}
+
+  virtual int do_compare(const CharT* low1, const CharT* high1,
+                         const CharT* low2, const CharT* high2) const {
+    while (low1 != high1 && low2 != high2) {
+      if (*low1 < *low2) {
+        return -1;
+      }
+      if (*low2 < *low1) {
+        return 1;
+      }
+      ++low1;
+      ++low2;
+    }
+    return low1 == high1 ? (low2 == high2 ? 0 : -1) : 1;
+  }
+
+  virtual string_type do_transform(const CharT* low,
+                                   const CharT* high) const {
+    return string_type(low, static_cast<size_t>(high - low));
+  }
+
+  virtual long do_hash(const CharT* low, const CharT* high) const {
+    unsigned long value = 1469598103UL;
+    while (low != high) {
+      value ^= static_cast<unsigned long>(*low++);
+      value *= 16777619UL;
+    }
+    return static_cast<long>(value);
+  }
+};
+
+template <class CharT>
+class collate_byname : public collate<CharT> {
+ public:
+  explicit collate_byname(const char* name, size_t refs = 0)
+      : collate<CharT>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~collate_byname() override {}
+};
+
+template <class CharT>
 class numpunct : public locale::facet {
  public:
   typedef CharT char_type;

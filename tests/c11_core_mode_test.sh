@@ -198,6 +198,24 @@ expect_compile optional_macros x86_64 \
 #endif
 int test(int n) { int values[n]; return sizeof(values) != 0; }'
 
+expect_compile character_type_macros x86_64 \
+  'typedef __CHAR16_TYPE__ compiler_char16_t;
+typedef __CHAR32_TYPE__ compiler_char32_t;
+typedef __WCHAR_TYPE__ compiler_wchar_t;
+_Static_assert(sizeof(compiler_char16_t) == 2, "char16 type width");
+_Static_assert(sizeof(compiler_char32_t) == 4, "char32 type width");
+_Static_assert(sizeof(compiler_wchar_t) == 4, "wchar type width");
+int test(void) { return 0; }'
+
+expect_compile character_type_macros_65c02 65c02 \
+  'typedef __CHAR16_TYPE__ compiler_char16_t;
+typedef __CHAR32_TYPE__ compiler_char32_t;
+typedef __WCHAR_TYPE__ compiler_wchar_t;
+_Static_assert(sizeof(compiler_char16_t) == 2, "char16 type width");
+_Static_assert(sizeof(compiler_char32_t) == 4, "char32 type width");
+_Static_assert(sizeof(compiler_wchar_t) == 2, "wchar type width");
+int test(void) { return 0; }'
+
 expect_compile pre_c11_identifiers x86_64 \
   '#ifdef __STDC_NO_COMPLEX__
 #error C99 has no optional-complex feature macro

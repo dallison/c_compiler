@@ -290,6 +290,9 @@ static void PredefineMacros(Preprocessor* p) {
       // DaveCC's threads.h intentionally remains an extension until its
       // thread-specific-storage API and destructor iteration are complete.
       PreprocessorDefineMacro(p, "__STDC_NO_THREADS__", "1");
+      // C11 makes complex arithmetic optional when this macro is defined.
+      // C99 has no corresponding opt-out and must remain visibly incomplete.
+      PreprocessorDefineMacro(p, "__STDC_NO_COMPLEX__", "1");
     }
     if (CompilerCAtLeast(kLanguageStandardC23)) {
       PreprocessorDefineMacro(p, "__STDC_UTF_8__", "1");
@@ -474,6 +477,8 @@ static void PredefineMacros(Preprocessor* p) {
       !StringEqual(compiler->target_name, "65c02")) {
     PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned long");
     PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned long");
+    PreprocessorDefineMacro(p, "__CHAR16_TYPE__", "unsigned short");
+    PreprocessorDefineMacro(p, "__CHAR32_TYPE__", "unsigned int");
     PreprocessorDefineMacro(p, "__WCHAR_TYPE__", "int");
     PreprocessorDefineMacro(p, "__WINT_TYPE__", "int");
     PreprocessorDefineMacro(p, "__INTMAX_TYPE__", "int");
@@ -506,6 +511,8 @@ static void PredefineMacros(Preprocessor* p) {
   } else {
     PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned int");
     PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__CHAR16_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__CHAR32_TYPE__", "unsigned long");
     PreprocessorDefineMacro(p, "__WCHAR_TYPE__", "int");
     PreprocessorDefineMacro(p, "__WINT_TYPE__", "int");
     PreprocessorDefineMacro(p, "__INTMAX_TYPE__", "int");

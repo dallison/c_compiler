@@ -174,6 +174,16 @@ __locale_impl* __locale_impl::__combine_with(const __locale_impl* source,
   }
   result->__name = "*";
 
+  if ((cat & locale::collate) != 0) {
+    locale::facet* facet = source->__get(collate<char>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, collate<char>::id.__index());
+    }
+    facet = source->__get(collate<wchar_t>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, collate<wchar_t>::id.__index());
+    }
+  }
   if ((cat & locale::ctype) != 0) {
     locale::facet* facet = source->__get(ctype<char>::id.__index());
     if (facet != nullptr) {
@@ -215,8 +225,13 @@ __locale_impl* __locale_impl::__combine_with(const __locale_impl* source,
   return result;
 }
 
+template class collate<char>;
+template class collate<wchar_t>;
+
 locale::id ctype<char>::id;
 locale::id ctype<wchar_t>::id;
+locale::id collate<char>::id;
+locale::id collate<wchar_t>::id;
 locale::id numpunct<char>::id;
 locale::id numpunct<wchar_t>::id;
 locale::id __davecc_num_put_char::id;
@@ -271,6 +286,8 @@ class __classic_numpunct_wchar : public numpunct<wchar_t> {
 };
 
 void __install_classic_facets(__locale_impl* impl) {
+  __install_facet<collate<char>>(impl, __make_facet<collate<char>>());
+  __install_facet<collate<wchar_t>>(impl, __make_facet<collate<wchar_t>>());
   __install_facet<ctype<char>>(impl, __make_facet<ctype<char>>());
   __install_facet<ctype<wchar_t>>(impl, __make_facet<ctype<wchar_t>>());
   __install_facet<numpunct<char>>(impl, __make_facet<__classic_numpunct_char>());

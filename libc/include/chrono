@@ -433,6 +433,7 @@ using milliseconds = duration<long long, milli>;
 using seconds = duration<long long>;
 using minutes = duration<long long, ratio<60>>;
 using hours = duration<long long, ratio<3600>>;
+#if __cplusplus >= 202002L
 using days = duration<long long, ratio<86400>>;
 using weeks = duration<long long, ratio<604800>>;
 using years = duration<long long, ratio<31556952>>;
@@ -1103,6 +1104,8 @@ inline constexpr weekday Thursday{4};
 inline constexpr weekday Friday{5};
 inline constexpr weekday Saturday{6};
 
+#endif
+
 class system_clock {
  public:
   using rep = long long;
@@ -1127,6 +1130,7 @@ class steady_clock {
   static time_point now() noexcept;
 };
 
+#if __cplusplus >= 202002L
 struct local_t {
   explicit local_t() = default;
 };
@@ -1786,6 +1790,7 @@ clock_cast(const time_point<SourceClock, Duration>& source) {
             source.time_since_epoch()));
   }
 }
+#endif
 
 }  // namespace chrono
 
@@ -1842,12 +1847,14 @@ constexpr chrono::nanoseconds operator""ns(unsigned long long value) {
 constexpr chrono::duration<long double, nano> operator""ns(long double value) {
   return chrono::duration<long double, nano>(value);
 }
+#if __cplusplus >= 202002L
 constexpr chrono::year operator""y(unsigned long long value) {
   return chrono::year(static_cast<int>(value));
 }
 constexpr chrono::day operator""d(unsigned long long value) {
   return chrono::day(static_cast<unsigned>(value));
 }
+#endif
 
 }  // namespace chrono_literals
 }  // namespace literals

@@ -15,12 +15,14 @@
 #endif
 
 #include <chrono>
+#if __cplusplus >= 202002L
 #include <compare>
-#include <exception>
 #include <format>
+#include <stop_token>
+#endif
+#include <exception>
 #include <functional>
 #include <new>
-#include <stop_token>
 #include <system_error>
 #include <threads.h>
 #include <type_traits>
@@ -106,6 +108,7 @@ struct __plain_invocation {
   }
 };
 
+#if __cplusplus >= 202002L
 template <class Function, class... Args>
 struct __stoppable_invocation {
   stop_token __token;
@@ -123,6 +126,7 @@ struct __stoppable_invocation {
         __function, __arguments, std::move(__token));
   }
 };
+#endif
 
 [[noreturn]] inline void __throw_thread_error(errc error,
                                               const char* operation) {
@@ -206,9 +210,27 @@ class thread {
     friend constexpr bool operator==(id left, id right) noexcept {
       return left.__value_ == right.__value_;
     }
+#if __cplusplus >= 202002L
     friend constexpr strong_ordering operator<=>(id left, id right) noexcept {
       return left.__value_ <=> right.__value_;
     }
+#else
+    friend constexpr bool operator!=(id left, id right) noexcept {
+      return !(left == right);
+    }
+    friend constexpr bool operator<(id left, id right) noexcept {
+      return left.__value_ < right.__value_;
+    }
+    friend constexpr bool operator<=(id left, id right) noexcept {
+      return !(right < left);
+    }
+    friend constexpr bool operator>(id left, id right) noexcept {
+      return right < left;
+    }
+    friend constexpr bool operator>=(id left, id right) noexcept {
+      return !(left < right);
+    }
+#endif
 
    private:
     explicit constexpr id(thrd_t value) noexcept : __value_(value) {}
@@ -222,8 +244,10 @@ class thread {
 
   thread() noexcept : __handle_(0) {}
 
-  template <class Function, class... Args>
-    requires (!is_same_v<remove_cvref_t<Function>, thread>)
+  template <class Function, class... Args,
+            typename enable_if<
+                !is_same<decay_t<Function>, thread>::value,
+                int>::type = 0>
   explicit thread(Function&& function, Args&&... arguments) : __handle_(0) {
     using state_type =
         __thread_detail::__state<decay_t<Function>, decay_t<Args>...>;
@@ -325,6 +349,7 @@ struct hash<thread::id> {
   }
 };
 
+#if __cplusplus >= 202002L
 template <>
 struct formatter<thread::id, char> {
   const char* __specification_data = nullptr;
@@ -488,6 +513,7 @@ class jthread {
 inline void swap(jthread& left, jthread& right) noexcept {
   left.swap(right);
 }
+#endif
 
 namespace this_thread {
 

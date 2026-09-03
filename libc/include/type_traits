@@ -1020,6 +1020,7 @@ struct __cond_res {
                                                        T, void>::type>::type;
 };
 
+#if __cplusplus >= 202002L
 template <class... T>
 struct common_reference {
 };
@@ -1075,6 +1076,7 @@ struct common_reference<T, U, Rest...> {
 
 template <class... T>
 using common_reference_t = typename common_reference<T...>::type;
+#endif
 
 template <class T>
 struct is_trivially_destructible

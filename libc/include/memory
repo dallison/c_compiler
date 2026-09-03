@@ -8,6 +8,124 @@
 #ifndef memory_h
 #define memory_h
 
+#if __cplusplus < 201103L
+
+#include <cstddef>
+#include <new>
+#include <utility>
+
+namespace std {
+
+template <class Iterator>
+struct iterator_traits;
+
+template <class T>
+class allocator {
+ public:
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  typedef T* pointer;
+  typedef const T* const_pointer;
+  typedef T& reference;
+  typedef const T& const_reference;
+  typedef T value_type;
+
+  template <class U>
+  struct rebind { typedef allocator<U> other; };
+
+  allocator() {}
+  allocator(const allocator&) {}
+  template <class U> allocator(const allocator<U>&) {}
+
+  pointer address(reference value) const { return &value; }
+  const_pointer address(const_reference value) const { return &value; }
+  pointer allocate(size_type count, const void* = 0) {
+    return static_cast<pointer>(::operator new(count * sizeof(T)));
+  }
+  void deallocate(pointer value, size_type) { ::operator delete(value); }
+  size_type max_size() const { return size_type(-1) / sizeof(T); }
+  void construct(pointer where, const T& value) {
+    ::new (static_cast<void*>(where)) T(value);
+  }
+  void destroy(pointer where) { where->~T(); }
+};
+
+template <>
+class allocator<void> {
+ public:
+  typedef void value_type;
+  typedef void* pointer;
+  typedef const void* const_pointer;
+  template <class U>
+  struct rebind { typedef allocator<U> other; };
+};
+
+template <class T, class U>
+bool operator==(const allocator<T>&, const allocator<U>&) { return true; }
+template <class T, class U>
+bool operator!=(const allocator<T>&, const allocator<U>&) { return false; }
+
+template <class InputIt, class ForwardIt>
+ForwardIt uninitialized_copy(InputIt first, InputIt last, ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; first != last; ++first, ++output) {
+    ::new (static_cast<void*>(&*output)) value_type(*first);
+  }
+  return output;
+}
+
+template <class ForwardIt, class T>
+void uninitialized_fill(ForwardIt first, ForwardIt last, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; first != last; ++first) {
+    ::new (static_cast<void*>(&*first)) value_type(value);
+  }
+}
+
+template <class ForwardIt, class Size, class T>
+ForwardIt uninitialized_fill_n(ForwardIt first, Size count, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; count > 0; --count, ++first) {
+    ::new (static_cast<void*>(&*first)) value_type(value);
+  }
+  return first;
+}
+
+template <class T>
+class auto_ptr {
+ public:
+  typedef T element_type;
+  explicit auto_ptr(T* value = 0) : value_(value) {}
+  auto_ptr(auto_ptr& other) : value_(other.release()) {}
+  template <class U> auto_ptr(auto_ptr<U>& other) : value_(other.release()) {}
+  ~auto_ptr() { delete value_; }
+  auto_ptr& operator=(auto_ptr& other) {
+    reset(other.release());
+    return *this;
+  }
+  T& operator*() const { return *value_; }
+  T* operator->() const { return value_; }
+  T* get() const { return value_; }
+  T* release() {
+    T* result = value_;
+    value_ = 0;
+    return result;
+  }
+  void reset(T* value = 0) {
+    if (value_ != value) {
+      delete value_;
+      value_ = value;
+    }
+  }
+
+ private:
+  T* value_;
+};
+
+}  // namespace std
+
+#else
+
 #if !defined(__6502__) && !defined(__W65C02__)
 #include <atomic>
 #endif
@@ -36,6 +154,19 @@ constexpr void start_lifetime(T& object) noexcept {
 
 // Minimal std::allocator: a stateless allocator that obtains and releases raw
 // storage through the global ::operator new / ::operator delete.
+template <class U, bool>
+struct __allocator_destroy_impl;
+
+template <class U>
+struct __allocator_destroy_impl<U, true> {
+  static void apply(U* ptr) { ptr->~U(); }
+};
+
+template <class U>
+struct __allocator_destroy_impl<U, false> {
+  static void apply(U* ptr) { (void)ptr; }
+};
+
 template <class T>
 struct allocator {
   using value_type = T;
@@ -87,10 +218,9 @@ struct allocator {
   }
 
   template <class U>
-  constexpr void destroy(U* ptr) {
-    if constexpr (!is_trivially_destructible<U>::value) {
-      ptr->~U();
-    }
+  void destroy(U* ptr) {
+    __allocator_destroy_impl<U, !is_trivially_destructible<U>::value>::apply(
+        ptr);
   }
 
   size_type max_size() const noexcept {
@@ -109,7 +239,11 @@ using __void_t = typename __alloc_void<T>::type;
 struct allocator_arg_t {
 };
 
+#if __cplusplus >= 201703L
 inline constexpr allocator_arg_t allocator_arg = {};
+#else
+static const allocator_arg_t allocator_arg = allocator_arg_t();
+#endif
 
 template <class T, class Allocator, class = void>
 struct uses_allocator : false_type {
@@ -186,6 +320,20 @@ struct __alloc_traits_always_equal<
 template <class Alloc, class T>
 struct __alloc_traits_rebind {
   using type = typename Alloc::template rebind<T>::other;
+};
+
+template <class Alloc, class = void>
+struct __alloc_select_on_copy {
+  static Alloc call(const Alloc& alloc) { return alloc; }
+};
+
+template <class Alloc>
+struct __alloc_select_on_copy<
+    Alloc, __void_t<decltype(declval<const Alloc&>()
+                               .select_on_container_copy_construction())>> {
+  static Alloc call(const Alloc& alloc) {
+    return alloc.select_on_container_copy_construction();
+  }
 };
 
 template <class Alloc>
@@ -266,7 +414,7 @@ struct allocator_traits {
   }
 
   static Alloc select_on_container_copy_construction(const Alloc& alloc) {
-    return alloc;
+    return __alloc_select_on_copy<Alloc>::call(alloc);
   }
 };
 
@@ -1319,5 +1467,7 @@ void swap(weak_ptr<T>& left, weak_ptr<T>& right) noexcept {
 }
 
 }  // namespace std
+
+#endif
 
 #endif /* memory_h */

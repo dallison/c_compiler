@@ -20,12 +20,20 @@
 #ifndef __davecc_algorithm__
 #define __davecc_algorithm__
 
+#if __cplusplus >= 201103L
 #include <__random_uniform>
+#endif
+#if __cplusplus >= 201103L
 #include <initializer_list>
+#endif
 #include <iterator>
 #include <functional>
+#if __cplusplus >= 201703L
 #include <optional>
+#endif
+#if __cplusplus >= 202002L
 #include <ranges>
+#endif
 #include <stddef.h>
 #include <type_traits>
 #include <utility>
@@ -1751,6 +1759,7 @@ SampleIt sample(PopulationIt first, PopulationIt last, SampleIt output,
                                             category());
 }
 
+#if __cplusplus >= 202002L
 namespace ranges {
 
 template <class Proj, class T>
@@ -3611,6 +3620,7 @@ constexpr auto fold_right_last(R&& range, F f) {
 }
 
 }  // namespace ranges
+#endif
 
 }  // namespace std
 

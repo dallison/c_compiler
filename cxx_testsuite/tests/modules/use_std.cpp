@@ -24,6 +24,7 @@ static_assert(std::is_same_v<decltype(1.0f32), std::float32_t>);
 static_assert(__cpp_lib_stacktrace == 202011L);
 static_assert(std::is_same_v<std::stacktrace::value_type,
                              std::stacktrace_entry>);
+static_assert(std::bitset<8>().size() == 8);
 #if defined(__STDCPP_FLOAT64_T__)
 static_assert(std::is_same_v<decltype(1.0f64), std::float64_t>);
 #endif
@@ -80,6 +81,26 @@ int main() {
   std::stacktrace trace = std::stacktrace::current(0, 1);
   if (trace.size() != 1 || !trace[0]) {
     return 7;
+  }
+  int sequence[3] = {2, 3, 5};
+  if (std::accumulate(sequence, sequence + 3, 0) != 10) {
+    return 8;
+  }
+  std::bitset<4> bits(5);
+  if (bits.count() != 2 || std::type_index(typeid(int)) !=
+                               std::type_index(typeid(int))) {
+    return 9;
+  }
+  std::complex<double> complex_value(2.0, 3.0);
+  if ((complex_value * complex_value).real() != -5.0) {
+    return 10;
+  }
+  char span_storage[8] = {};
+  std::ospanstream span_output(std::span<char>(span_storage, 8));
+  span_output << 42;
+  if (span_output.span().size() != 2 || span_storage[0] != '4' ||
+      span_storage[1] != '2') {
+    return 11;
   }
   return 0;
 }

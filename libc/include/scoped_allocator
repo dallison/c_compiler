@@ -1,0 +1,723 @@
+//
+//  scoped_allocator
+//  c_compiler
+//
+//  C++11 scoped allocator adaptor support.
+//
+
+#ifndef __davecc_scoped_allocator__
+#define __davecc_scoped_allocator__
+
+#include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#if __cplusplus >= 201703L && !defined(__cpp_lib_allocator_traits_is_always_equal)
+#define __cpp_lib_allocator_traits_is_always_equal 201411L
+#endif
+
+namespace std {
+namespace __scoped_allocator_detail {
+
+struct __scoped_trait_false {
+  enum { value = false };
+};
+
+struct __scoped_trait_true {
+  enum { value = true };
+};
+
+template <bool B>
+struct __scoped_trait_bool {
+  enum { value = B };
+};
+
+template <class... Allocs>
+struct __scoped_poc_copy {
+  static const bool value = false;
+};
+
+template <class A0>
+struct __scoped_poc_copy<A0> {
+  static const bool value = __alloc_traits_bool(
+      static_cast<typename allocator_traits<A0>::
+                      propagate_on_container_copy_assignment*>(nullptr));
+};
+
+template <class A0, class A1, class... Rest>
+struct __scoped_poc_copy<A0, A1, Rest...> {
+  static const bool value =
+      __scoped_poc_copy<A0>::value || __scoped_poc_copy<A1, Rest...>::value;
+};
+
+template <class... Allocs>
+struct __scoped_poc_move {
+  static const bool value = false;
+};
+
+template <class A0>
+struct __scoped_poc_move<A0> {
+  static const bool value = __alloc_traits_bool(
+      static_cast<typename allocator_traits<A0>::
+                      propagate_on_container_move_assignment*>(nullptr));
+};
+
+template <class A0, class A1, class... Rest>
+struct __scoped_poc_move<A0, A1, Rest...> {
+  static const bool value =
+      __scoped_poc_move<A0>::value || __scoped_poc_move<A1, Rest...>::value;
+};
+
+template <class... Allocs>
+struct __scoped_poc_swap {
+  static const bool value = false;
+};
+
+template <class A0>
+struct __scoped_poc_swap<A0> {
+  static const bool value = __alloc_traits_bool(
+      static_cast<typename allocator_traits<A0>::propagate_on_container_swap*>(
+          nullptr));
+};
+
+template <class A0, class A1, class... Rest>
+struct __scoped_poc_swap<A0, A1, Rest...> {
+  static const bool value =
+      __scoped_poc_swap<A0>::value || __scoped_poc_swap<A1, Rest...>::value;
+};
+
+template <class... Allocs>
+struct __scoped_is_always_equal {
+  static const bool value = true;
+};
+
+template <class A0>
+struct __scoped_is_always_equal<A0> {
+  static const bool value = __alloc_traits_bool(
+      static_cast<typename allocator_traits<A0>::is_always_equal*>(nullptr));
+};
+
+template <class A0, class A1, class... Rest>
+struct __scoped_is_always_equal<A0, A1, Rest...> {
+  static const bool value =
+      __scoped_is_always_equal<A0>::value &&
+      __scoped_is_always_equal<A1, Rest...>::value;
+};
+
+template <class... Allocs>
+struct __scoped_trait_from_poc_copy
+    : __scoped_trait_bool<__scoped_poc_copy<Allocs...>::value> {};
+
+template <>
+struct __scoped_trait_from_poc_copy<> : __scoped_trait_false {};
+
+template <class... Allocs>
+struct __scoped_trait_from_poc_move
+    : __scoped_trait_bool<__scoped_poc_move<Allocs...>::value> {};
+
+template <>
+struct __scoped_trait_from_poc_move<> : __scoped_trait_false {};
+
+template <class... Allocs>
+struct __scoped_trait_from_poc_swap
+    : __scoped_trait_bool<__scoped_poc_swap<Allocs...>::value> {};
+
+template <>
+struct __scoped_trait_from_poc_swap<> : __scoped_trait_false {};
+
+template <class... Allocs>
+struct __scoped_trait_from_is_always_equal
+    : __scoped_trait_bool<__scoped_is_always_equal<Allocs...>::value> {};
+
+template <>
+struct __scoped_trait_from_is_always_equal<> : __scoped_trait_true {};
+
+template <class Alloc, class = void>
+struct __scoped_void_pointer {
+  typedef void* type;
+};
+
+template <class Alloc>
+struct __scoped_void_pointer<Alloc, typename Alloc::void_pointer> {
+  typedef typename Alloc::void_pointer type;
+};
+
+template <class Alloc, class = void>
+struct __scoped_const_void_pointer {
+  typedef const void* type;
+};
+
+template <class Alloc>
+struct __scoped_const_void_pointer<Alloc,
+                                   typename Alloc::const_void_pointer> {
+  typedef typename Alloc::const_void_pointer type;
+};
+
+template <class T, class Alloc, class... Args>
+struct __uses_alloc_ctor {
+  static const int value =
+      uses_allocator<T, typename remove_reference<Alloc>::type>::value
+          ? (is_constructible<T, allocator_arg_t, Alloc, Args...>::value
+                 ? 1
+                 : (is_constructible<T, Args..., Alloc>::value ? 2 : 0))
+          : 0;
+};
+
+template <class T>
+struct __scoped_void_t {
+  typedef void type;
+};
+
+template <class Alloc, class = void>
+struct __has_outer_allocator : false_type {};
+
+template <class Alloc>
+struct __has_outer_allocator<
+    Alloc,
+    typename __scoped_void_t<
+        decltype(declval<Alloc&>().outer_allocator())>::type>
+    : true_type {};
+
+template <class Alloc>
+Alloc& __outermost_alloc(Alloc& alloc) {
+  return alloc;
+}
+
+template <class Alloc>
+typename enable_if<
+    __has_outer_allocator<Alloc>::value,
+    typename remove_reference<decltype(declval<Alloc&>().outer_allocator())>::
+        type&>::type
+__outermost_alloc(Alloc& alloc) {
+  return __outermost_alloc(alloc.outer_allocator());
+}
+
+template <class Self, class OuterTraits, class InnerAdapt>
+struct __scoped_methods {
+  typedef typename OuterTraits::value_type value_type;
+  typedef typename OuterTraits::size_type size_type;
+  typedef typename OuterTraits::difference_type difference_type;
+  typedef typename OuterTraits::pointer pointer;
+  typedef typename OuterTraits::const_pointer const_pointer;
+
+  Self& self() { return static_cast<Self&>(*this); }
+  const Self& self() const { return static_cast<const Self&>(*this); }
+
+  pointer allocate(size_type n) {
+    return OuterTraits::allocate(self().outer_allocator(), n);
+  }
+
+  pointer allocate(size_type n, typename Self::const_void_pointer) {
+    return allocate(n);
+  }
+
+  void deallocate(pointer p, size_type n) {
+    OuterTraits::deallocate(self().outer_allocator(), p, n);
+  }
+
+  size_type max_size() const {
+    return OuterTraits::max_size(self().outer_allocator());
+  }
+};
+
+template <class Adaptor, class InnerAdapt, class T>
+void __scoped_adaptor_destroy(Adaptor& self, T* p) {
+  allocator_traits<
+      typename remove_reference<decltype(__outermost_alloc(
+          self.outer_allocator()))>::type>::destroy(
+      __outermost_alloc(self.outer_allocator()), p);
+}
+
+template <class Adaptor, class InnerAdapt, class T, class... Args>
+typename enable_if<
+    __uses_alloc_ctor<T, InnerAdapt, Args...>::value == 0, void>::type
+__scoped_adaptor_construct(Adaptor& self, T* p, Args&&... args) {
+  self.__construct_plain(p, forward<Args>(args)...);
+}
+
+template <class Adaptor, class InnerAdapt, class T, class... Args>
+typename enable_if<
+    __uses_alloc_ctor<T, InnerAdapt, Args...>::value == 1, void>::type
+__scoped_adaptor_construct(Adaptor& self, T* p, Args&&... args) {
+  self.__construct_with_prefix(p, forward<Args>(args)...);
+}
+
+template <class Adaptor, class InnerAdapt, class T, class... Args>
+typename enable_if<
+    __uses_alloc_ctor<T, InnerAdapt, Args...>::value == 2, void>::type
+__scoped_adaptor_construct(Adaptor& self, T* p, Args&&... args) {
+  self.__construct_with_suffix(p, forward<Args>(args)...);
+}
+
+template <class Adaptor, class InnerAdapt, class T1, class T2,
+          class... Args1, class... Args2>
+void __scoped_adaptor_construct_pair(Adaptor& self, pair<T1, T2>* p,
+                                     piecewise_construct_t, tuple<Args1...> x,
+                                     tuple<Args2...> y) {
+  allocator_traits<
+      typename remove_reference<decltype(__outermost_alloc(
+          self.outer_allocator()))>::type>::construct(
+      __outermost_alloc(self.outer_allocator()), p, piecewise_construct_t(),
+      self.__transform_tuple(
+          integral_constant<int,
+                            __uses_alloc_ctor<T1, InnerAdapt, Args1...>::value>(),
+          move(x), index_sequence_for<Args1...>()),
+      self.__transform_tuple(
+          integral_constant<int,
+                            __uses_alloc_ctor<T2, InnerAdapt, Args2...>::value>(),
+          move(y), index_sequence_for<Args2...>()));
+}
+
+}  // namespace __scoped_allocator_detail
+
+template <class OuterAlloc, class... InnerAllocs>
+class scoped_allocator_adaptor;
+
+template <class OuterAlloc>
+class scoped_allocator_adaptor<OuterAlloc>
+    : public OuterAlloc,
+      public __scoped_allocator_detail::__scoped_methods<
+          scoped_allocator_adaptor<OuterAlloc>,
+          allocator_traits<OuterAlloc>,
+          scoped_allocator_adaptor<OuterAlloc>> {
+  typedef allocator_traits<OuterAlloc> OuterTraits;
+  typedef __scoped_allocator_detail::__scoped_methods<
+      scoped_allocator_adaptor<OuterAlloc>, OuterTraits,
+      scoped_allocator_adaptor<OuterAlloc>> Methods;
+  typedef scoped_allocator_adaptor<OuterAlloc> InnerAdapt;
+
+ public:
+  typedef OuterAlloc outer_allocator_type;
+  typedef scoped_allocator_adaptor<OuterAlloc> inner_allocator_type;
+  typedef typename OuterTraits::value_type value_type;
+  typedef typename OuterTraits::size_type size_type;
+  typedef typename OuterTraits::difference_type difference_type;
+  typedef typename OuterTraits::pointer pointer;
+  typedef typename OuterTraits::const_pointer const_pointer;
+  typedef typename __scoped_allocator_detail::__scoped_void_pointer<
+      OuterAlloc>::type void_pointer;
+  typedef typename __scoped_allocator_detail::__scoped_const_void_pointer<
+      OuterAlloc>::type const_void_pointer;
+
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_copy<
+      outer_allocator_type> propagate_on_container_copy_assignment;
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_move<
+      outer_allocator_type> propagate_on_container_move_assignment;
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_swap<
+      outer_allocator_type> propagate_on_container_swap;
+  typedef __scoped_allocator_detail::__scoped_trait_from_is_always_equal<
+      outer_allocator_type> is_always_equal;
+
+  template <class Tp>
+  struct rebind {
+    typedef scoped_allocator_adaptor<
+        typename OuterTraits::template rebind_alloc<Tp> >
+        other;
+  };
+
+  scoped_allocator_adaptor() {}
+
+  template <class OuterA2>
+  scoped_allocator_adaptor(OuterA2&& outer_alloc)
+      : outer_allocator_type(forward<OuterA2>(outer_alloc)) {}
+
+  scoped_allocator_adaptor(const scoped_allocator_adaptor& other)
+      : outer_allocator_type(other.outer_allocator()) {}
+
+  scoped_allocator_adaptor(scoped_allocator_adaptor&& other)
+      : outer_allocator_type(move(other.outer_allocator())) {}
+
+  template <class OuterA2>
+  scoped_allocator_adaptor(const scoped_allocator_adaptor<OuterA2>& other)
+      : outer_allocator_type(other.outer_allocator()) {}
+
+  template <class OuterA2>
+  scoped_allocator_adaptor(scoped_allocator_adaptor<OuterA2>&& other)
+      : outer_allocator_type(move(other.outer_allocator())) {}
+
+  inner_allocator_type& inner_allocator() {
+    return static_cast<inner_allocator_type&>(*this);
+  }
+  const inner_allocator_type& inner_allocator() const {
+    return static_cast<const inner_allocator_type&>(*this);
+  }
+
+  outer_allocator_type& outer_allocator() {
+    return static_cast<outer_allocator_type&>(*this);
+  }
+  const outer_allocator_type& outer_allocator() const {
+    return static_cast<const outer_allocator_type&>(*this);
+  }
+
+  using Methods::allocate;
+  using Methods::deallocate;
+  using Methods::max_size;
+
+  template <class T, class... Args>
+  void construct(T* p, Args&&... args) {
+    __scoped_allocator_detail::__scoped_adaptor_construct<
+        scoped_allocator_adaptor<OuterAlloc>, InnerAdapt>(
+        *this, p, forward<Args>(args)...);
+  }
+
+  template <class T1, class T2, class... Args1, class... Args2>
+  void construct(pair<T1, T2>* p, piecewise_construct_t, tuple<Args1...> x,
+                 tuple<Args2...> y) {
+    __scoped_allocator_detail::__scoped_adaptor_construct_pair<
+        scoped_allocator_adaptor<OuterAlloc>, InnerAdapt>(
+        *this, p, piecewise_construct_t(), move(x), move(y));
+  }
+
+  template <class T1, class T2>
+  void construct(pair<T1, T2>* p) {
+    construct(p, piecewise_construct_t(), tuple<>(), tuple<>());
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, U&& x, V&& y) {
+    construct(p, piecewise_construct_t(),
+              tuple<typename decay<U>::type>(forward<U>(x)),
+              tuple<typename decay<V>::type>(forward<V>(y)));
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, const pair<U, V>& x) {
+#if __cplusplus >= 201402L
+    construct(p, piecewise_construct_t(), tuple<U>{x.first},
+              tuple<V>{x.second});
+#else
+    construct(p, piecewise_construct_t(), tuple<U>(x.first),
+              tuple<V>(x.second));
+#endif
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, pair<U, V>&& x) {
+#if __cplusplus >= 201402L
+    construct(p, piecewise_construct_t(), tuple<U>{move(x.first)},
+              tuple<V>{move(x.second)});
+#else
+    construct(p, piecewise_construct_t(), tuple<U>(move(x.first)),
+              tuple<V>(move(x.second)));
+#endif
+  }
+
+  template <class T>
+  void destroy(T* p) {
+    __scoped_allocator_detail::__scoped_adaptor_destroy<
+        scoped_allocator_adaptor<OuterAlloc>, InnerAdapt>(*this, p);
+  }
+
+  scoped_allocator_adaptor select_on_container_copy_construction() const {
+    return scoped_allocator_adaptor<OuterAlloc>(
+        OuterTraits::select_on_container_copy_construction(
+            outer_allocator()));
+  }
+
+ private:
+  friend Methods;
+
+  template <class T, class... Args>
+  void __construct_plain(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, forward<Args>(args)...);
+  }
+
+  template <class T, class... Args>
+  void __construct_with_prefix(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, allocator_arg, inner_allocator(), forward<Args>(args)...);
+  }
+
+  template <class T, class... Args>
+  void __construct_with_suffix(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, forward<Args>(args)..., inner_allocator());
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<Args&&...> __transform_tuple(integral_constant<int, 0>,
+                                     tuple<Args...>&& t,
+                                     index_sequence<Idx...>) {
+    return tuple<Args&&...>(forward<Args>(get<Idx>(move(t)))...);
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<allocator_arg_t, inner_allocator_type&, Args&&...> __transform_tuple(
+      integral_constant<int, 1>, tuple<Args...>&& t,
+      index_sequence<Idx...>) {
+    return tuple<allocator_arg_t, inner_allocator_type&, Args&&...>(
+        allocator_arg, inner_allocator(),
+        forward<Args>(get<Idx>(move(t)))...);
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<Args&&..., inner_allocator_type&> __transform_tuple(
+      integral_constant<int, 2>, tuple<Args...>&& t,
+      index_sequence<Idx...>) {
+    return tuple<Args&&..., inner_allocator_type&>(
+        forward<Args>(get<Idx>(move(t)))..., inner_allocator());
+  }
+};
+
+template <class OuterAlloc, class Inner0, class... InnerRest>
+class scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>
+    : public OuterAlloc,
+      public __scoped_allocator_detail::__scoped_methods<
+          scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>,
+          allocator_traits<OuterAlloc>,
+          scoped_allocator_adaptor<Inner0, InnerRest...>> {
+  typedef allocator_traits<OuterAlloc> OuterTraits;
+  typedef scoped_allocator_adaptor<Inner0, InnerRest...> inner_allocator_type;
+  typedef __scoped_allocator_detail::__scoped_methods<
+      scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>, OuterTraits,
+      inner_allocator_type> Methods;
+
+ public:
+  typedef OuterAlloc outer_allocator_type;
+  typedef typename OuterTraits::value_type value_type;
+  typedef typename OuterTraits::size_type size_type;
+  typedef typename OuterTraits::difference_type difference_type;
+  typedef typename OuterTraits::pointer pointer;
+  typedef typename OuterTraits::const_pointer const_pointer;
+  typedef typename __scoped_allocator_detail::__scoped_void_pointer<
+      OuterAlloc>::type void_pointer;
+  typedef typename __scoped_allocator_detail::__scoped_const_void_pointer<
+      OuterAlloc>::type const_void_pointer;
+
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_copy<
+      outer_allocator_type, Inner0, InnerRest...>
+      propagate_on_container_copy_assignment;
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_move<
+      outer_allocator_type, Inner0, InnerRest...>
+      propagate_on_container_move_assignment;
+  typedef __scoped_allocator_detail::__scoped_trait_from_poc_swap<
+      outer_allocator_type, Inner0, InnerRest...>
+      propagate_on_container_swap;
+  typedef __scoped_allocator_detail::__scoped_trait_from_is_always_equal<
+      outer_allocator_type, Inner0, InnerRest...>
+      is_always_equal;
+
+  template <class Tp>
+  struct rebind {
+    typedef scoped_allocator_adaptor<
+        typename OuterTraits::template rebind_alloc<Tp>, Inner0, InnerRest...>
+        other;
+  };
+
+  scoped_allocator_adaptor() : outer_allocator_type(), __inner_() {}
+
+  template <class OuterA2, class... Inners>
+  scoped_allocator_adaptor(OuterA2&& outer_alloc, Inners&&... inners)
+      : outer_allocator_type(forward<OuterA2>(outer_alloc)),
+        __inner_(forward<Inners>(inners)...) {}
+
+  scoped_allocator_adaptor(const scoped_allocator_adaptor& other)
+      : outer_allocator_type(other.outer_allocator()),
+        __inner_(other.inner_allocator()) {}
+
+  scoped_allocator_adaptor(scoped_allocator_adaptor&& other)
+      : outer_allocator_type(move(other.outer_allocator())),
+        __inner_(move(other.inner_allocator())) {}
+
+  template <class OuterA2>
+  scoped_allocator_adaptor(
+      const scoped_allocator_adaptor<OuterA2, Inner0, InnerRest...>& other)
+      : outer_allocator_type(other.outer_allocator()),
+        __inner_(other.inner_allocator()) {}
+
+  template <class OuterA2>
+  scoped_allocator_adaptor(
+      scoped_allocator_adaptor<OuterA2, Inner0, InnerRest...>&& other)
+      : outer_allocator_type(move(other.outer_allocator())),
+        __inner_(move(other.inner_allocator())) {}
+
+  inner_allocator_type& inner_allocator() { return __inner_; }
+  const inner_allocator_type& inner_allocator() const { return __inner_; }
+
+  outer_allocator_type& outer_allocator() {
+    return static_cast<outer_allocator_type&>(*this);
+  }
+  const outer_allocator_type& outer_allocator() const {
+    return static_cast<const outer_allocator_type&>(*this);
+  }
+
+  using Methods::allocate;
+  using Methods::deallocate;
+  using Methods::max_size;
+
+  template <class T, class... Args>
+  void construct(T* p, Args&&... args) {
+    __scoped_allocator_detail::__scoped_adaptor_construct<
+        scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>,
+        inner_allocator_type>(*this, p, forward<Args>(args)...);
+  }
+
+  template <class T1, class T2, class... Args1, class... Args2>
+  void construct(pair<T1, T2>* p, piecewise_construct_t, tuple<Args1...> x,
+                 tuple<Args2...> y) {
+    __scoped_allocator_detail::__scoped_adaptor_construct_pair<
+        scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>,
+        inner_allocator_type>(
+        *this, p, piecewise_construct_t(), move(x), move(y));
+  }
+
+  template <class T1, class T2>
+  void construct(pair<T1, T2>* p) {
+    construct(p, piecewise_construct_t(), tuple<>(), tuple<>());
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, U&& x, V&& y) {
+    construct(p, piecewise_construct_t(),
+              tuple<typename decay<U>::type>(forward<U>(x)),
+              tuple<typename decay<V>::type>(forward<V>(y)));
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, const pair<U, V>& x) {
+#if __cplusplus >= 201402L
+    construct(p, piecewise_construct_t(), tuple<U>{x.first},
+              tuple<V>{x.second});
+#else
+    construct(p, piecewise_construct_t(), tuple<U>(x.first),
+              tuple<V>(x.second));
+#endif
+  }
+
+  template <class T1, class T2, class U, class V>
+  void construct(pair<T1, T2>* p, pair<U, V>&& x) {
+#if __cplusplus >= 201402L
+    construct(p, piecewise_construct_t(), tuple<U>{move(x.first)},
+              tuple<V>{move(x.second)});
+#else
+    construct(p, piecewise_construct_t(), tuple<U>(move(x.first)),
+              tuple<V>(move(x.second)));
+#endif
+  }
+
+  template <class T>
+  void destroy(T* p) {
+    __scoped_allocator_detail::__scoped_adaptor_destroy<
+        scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>,
+        inner_allocator_type>(*this, p);
+  }
+
+  scoped_allocator_adaptor select_on_container_copy_construction() const {
+    return scoped_allocator_adaptor<OuterAlloc, Inner0, InnerRest...>(
+        OuterTraits::select_on_container_copy_construction(
+            outer_allocator()),
+        allocator_traits<inner_allocator_type>::
+            select_on_container_copy_construction(inner_allocator()));
+  }
+
+ private:
+  inner_allocator_type __inner_;
+  friend Methods;
+
+  template <class T, class... Args>
+  void __construct_plain(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, forward<Args>(args)...);
+  }
+
+  template <class T, class... Args>
+  void __construct_with_prefix(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, allocator_arg, inner_allocator(), forward<Args>(args)...);
+  }
+
+  template <class T, class... Args>
+  void __construct_with_suffix(T* p, Args&&... args) {
+    allocator_traits<
+        typename remove_reference<decltype(__scoped_allocator_detail::
+                                              __outermost_alloc(
+                                                  outer_allocator()))>::type>::
+        construct(__scoped_allocator_detail::__outermost_alloc(
+                      outer_allocator()),
+                  p, forward<Args>(args)..., inner_allocator());
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<Args&&...> __transform_tuple(integral_constant<int, 0>,
+                                     tuple<Args...>&& t,
+                                     index_sequence<Idx...>) {
+    return tuple<Args&&...>(forward<Args>(get<Idx>(move(t)))...);
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<allocator_arg_t, inner_allocator_type&, Args&&...> __transform_tuple(
+      integral_constant<int, 1>, tuple<Args...>&& t,
+      index_sequence<Idx...>) {
+    return tuple<allocator_arg_t, inner_allocator_type&, Args&&...>(
+        allocator_arg, inner_allocator(),
+        forward<Args>(get<Idx>(move(t)))...);
+  }
+
+  template <class... Args, size_t... Idx>
+  tuple<Args&&..., inner_allocator_type&> __transform_tuple(
+      integral_constant<int, 2>, tuple<Args...>&& t,
+      index_sequence<Idx...>) {
+    return tuple<Args&&..., inner_allocator_type&>(
+        forward<Args>(get<Idx>(move(t)))..., inner_allocator());
+  }
+};
+
+template <class OuterA1, class OuterA2>
+inline bool operator==(const scoped_allocator_adaptor<OuterA1>& a,
+                       const scoped_allocator_adaptor<OuterA2>& b) {
+  return a.outer_allocator() == b.outer_allocator();
+}
+
+template <class OuterA1, class OuterA2, class Inner0, class... InnerRest>
+inline bool operator==(
+    const scoped_allocator_adaptor<OuterA1, Inner0, InnerRest...>& a,
+    const scoped_allocator_adaptor<OuterA2, Inner0, InnerRest...>& b) {
+  return a.outer_allocator() == b.outer_allocator() &&
+         a.inner_allocator() == b.inner_allocator();
+}
+
+#if __cplusplus < 202002L
+template <class OuterA1, class OuterA2>
+inline bool operator!=(const scoped_allocator_adaptor<OuterA1>& a,
+                       const scoped_allocator_adaptor<OuterA2>& b) {
+  return !(a == b);
+}
+
+template <class OuterA1, class OuterA2, class Inner0, class... InnerRest>
+inline bool operator!=(
+    const scoped_allocator_adaptor<OuterA1, Inner0, InnerRest...>& a,
+    const scoped_allocator_adaptor<OuterA2, Inner0, InnerRest...>& b) {
+  return !(a == b);
+}
+#endif
+
+}  // namespace std
+
+#endif /* __davecc_scoped_allocator__ */

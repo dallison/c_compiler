@@ -13,6 +13,16 @@
 
 #include <exception>
 
+#if __cplusplus >= 201103L
+#define __DAVECC_TYPEINFO_CONSTEXPR constexpr
+#define __DAVECC_TYPEINFO_NOEXCEPT noexcept
+#define __DAVECC_TYPEINFO_OVERRIDE override
+#else
+#define __DAVECC_TYPEINFO_CONSTEXPR
+#define __DAVECC_TYPEINFO_NOEXCEPT
+#define __DAVECC_TYPEINFO_OVERRIDE
+#endif
+
 namespace std {
 
 #if defined(__DAVECC_LEGACY_RTTI__)
@@ -33,9 +43,11 @@ class type_info {
   bool operator!=(const type_info& other) const { return this != &other; }
 
   bool before(const type_info& other) const { return this < &other; }
+#if __cplusplus >= 201103L
   unsigned long hash_code() const {
     return reinterpret_cast<unsigned long>(this);
   }
+#endif
 };
 
 #else
@@ -49,9 +61,11 @@ class type_info {
   bool operator!=(const type_info& other) const { return this != &other; }
 
   bool before(const type_info& other) const { return this < &other; }
+#if __cplusplus >= 201103L
   unsigned long hash_code() const {
     return reinterpret_cast<unsigned long>(this);
   }
+#endif
 
  private:
   type_info(const type_info&);
@@ -63,20 +77,26 @@ class type_info {
 
 class bad_cast : public exception {
  public:
-  constexpr bad_cast() noexcept {}
-  constexpr const char* what() const noexcept override {
+  __DAVECC_TYPEINFO_CONSTEXPR bad_cast() __DAVECC_TYPEINFO_NOEXCEPT {}
+  __DAVECC_TYPEINFO_CONSTEXPR const char* what() const
+      __DAVECC_TYPEINFO_NOEXCEPT __DAVECC_TYPEINFO_OVERRIDE {
     return "std::bad_cast";
   }
 };
 
 class bad_typeid : public exception {
  public:
-  constexpr bad_typeid() noexcept {}
-  constexpr const char* what() const noexcept override {
+  __DAVECC_TYPEINFO_CONSTEXPR bad_typeid() __DAVECC_TYPEINFO_NOEXCEPT {}
+  __DAVECC_TYPEINFO_CONSTEXPR const char* what() const
+      __DAVECC_TYPEINFO_NOEXCEPT __DAVECC_TYPEINFO_OVERRIDE {
     return "std::bad_typeid";
   }
 };
 
 }  // namespace std
+
+#undef __DAVECC_TYPEINFO_CONSTEXPR
+#undef __DAVECC_TYPEINFO_NOEXCEPT
+#undef __DAVECC_TYPEINFO_OVERRIDE
 
 #endif /* typeinfo_h */

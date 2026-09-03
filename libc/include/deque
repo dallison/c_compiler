@@ -979,12 +979,14 @@ void swap(deque<T, Allocator>& a, deque<T, Allocator>& b) noexcept {
   a.swap(b);
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class T>
 using deque = std::deque<T, polymorphic_allocator<T>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

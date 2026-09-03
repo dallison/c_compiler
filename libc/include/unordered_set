@@ -216,6 +216,7 @@ typename unordered_set<Key, Hash, KeyEqual, Allocator>::size_type erase_if(
   return old_size - c.size();
 }
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class Key, class Hash = hash<Key>,
@@ -224,6 +225,7 @@ using unordered_set =
     std::unordered_set<Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

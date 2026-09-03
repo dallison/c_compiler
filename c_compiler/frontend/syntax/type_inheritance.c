@@ -711,8 +711,11 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
 
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = symbol;
-  var->is_global = false;
-  var->is_weak = false;
+  // Vtables are ODR entities. Inline/template constructors can be selected
+  // from a different translation unit, so their referenced tables must use
+  // coalescible external linkage rather than translation-unit-local symbols.
+  var->is_global = true;
+  var->is_weak = true;
   var->size = symbol->type->size;
   var->alignment = TypeRecordAlignment(symbol->type->next);
   VectorInit(&var->initializers);
@@ -860,8 +863,8 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
 
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = symbol;
-  var->is_global = false;
-  var->is_weak = false;
+  var->is_global = true;
+  var->is_weak = true;
   var->size = symbol->type->size;
   var->alignment = TypeRecordAlignment(symbol->type->next);
   VectorInit(&var->initializers);

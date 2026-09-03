@@ -712,6 +712,7 @@ typename forward_list<T, Allocator>::size_type erase_if(
 }
 #endif
 
+#if __cplusplus >= 201703L
 namespace pmr {
 
 template <class T>
@@ -719,6 +720,7 @@ using forward_list =
     std::forward_list<T, polymorphic_allocator<T>>;
 
 }  // namespace pmr
+#endif
 
 }  // namespace std
 

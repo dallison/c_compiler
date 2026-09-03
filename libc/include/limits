@@ -8,12 +8,25 @@
 #ifndef std_limits_h
 #define std_limits_h
 
-#include <bit>
+#if __cplusplus < 201103L
+#define constexpr const
+#define noexcept
+#define __DAVECC_LIMITS_LEGACY_KEYWORDS
+#endif
+
 #include <cstdint>
+#include <cstring>
 #include <float.h>
 #include <limits.h>
 
 namespace std {
+
+template <class To, class From>
+constexpr To __limits_bit_cast(const From& from) noexcept {
+  To result;
+  ::memcpy(&result, &from, sizeof(To));
+  return result;
+}
 
 enum float_round_style {
   round_indeterminate = -1,
@@ -121,6 +134,7 @@ class numeric_limits<char8_t>
                                       true> {};
 #endif
 
+#if __cplusplus >= 201103L
 template <>
 class numeric_limits<char16_t>
     : public __numeric_limits_integer<char16_t, 0, 65535, 16, 4, false, true> {
@@ -130,6 +144,7 @@ template <>
 class numeric_limits<char32_t>
     : public __numeric_limits_integer<char32_t, 0, 4294967295U, 32, 9, false,
                                       true> {};
+#endif
 
 #if !defined(__DAVECC__)
 template <>
@@ -203,14 +218,15 @@ class numeric_limits<unsigned long long>
 namespace __limits_detail {
 
 constexpr float __float_from_bits(uint32_t bits) {
-  return bit_cast<float>(bits);
+  return __limits_bit_cast<float>(bits);
 }
 
 constexpr double __double_from_bits(uint64_t bits) {
 #if DBL_MANT_DIG == FLT_MANT_DIG
-  return static_cast<double>(bit_cast<float>(static_cast<uint32_t>(bits)));
+  return static_cast<double>(
+      __limits_bit_cast<float>(static_cast<uint32_t>(bits)));
 #else
-  return bit_cast<double>(bits);
+  return __limits_bit_cast<double>(bits);
 #endif
 }
 
@@ -418,5 +434,11 @@ class numeric_limits<long double> : public numeric_limits<double> {
 };
 
 }  // namespace std
+
+#ifdef __DAVECC_LIMITS_LEGACY_KEYWORDS
+#undef constexpr
+#undef noexcept
+#undef __DAVECC_LIMITS_LEGACY_KEYWORDS
+#endif
 
 #endif /* std_limits_h */

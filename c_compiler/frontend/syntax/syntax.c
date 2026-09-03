@@ -611,7 +611,8 @@ static bool TryAppendSameSignatureConstrainedTemplateOverload(
 static Symbol* FollowAlias(Symbol* symbol) {
   int depth = 0;
   while (symbol != NULL && symbol->flags.is_using_alias &&
-         symbol->alias_target != NULL && depth < 64) {
+         symbol->alias_target != NULL && symbol->overload_next == NULL &&
+         depth < 64) {
     symbol = symbol->alias_target;
     depth++;
   }
@@ -8121,7 +8122,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                               ? "constinit variable requires an initializer"
                               : "constexpr variable requires an initializer");
     }
-    if (!syntax->parsing_template_declaration &&
+    if (CompilerCXXAtLeast(kLanguageStandardCXX17) &&
+        !syntax->parsing_template_declaration &&
         TypeIsClassTemplatePlaceholder(sym->type)) {
       SyntaxError(syntax, "Class template argument deduction requires an initializer");
     }
