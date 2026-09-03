@@ -268,6 +268,7 @@ class path {
     path result;
     if (is_absolute()) result.__value.push_back(preferred_separator);
     vector<string_type> parts;
+    bool terminal_directory_component = false;
     size_t position = result.is_absolute() ? 1 : 0;
     while (position < __value.size()) {
       while (position < __value.size() && __value[position] == '/') ++position;
@@ -276,9 +277,15 @@ class path {
       if (start == position) break;
       string_type part(__value.data() + start, position - start);
       if (part == ".") {
+        if (position == __value.size()) {
+          terminal_directory_component = true;
+        }
       } else if (part == "..") {
         if (!parts.empty() && parts.back() != "..") {
           parts.pop_back();
+          if (position == __value.size()) {
+            terminal_directory_component = true;
+          }
         } else if (!result.is_absolute()) {
           parts.push_back(part);
         }
@@ -292,9 +299,11 @@ class path {
       }
       result.__value.append(parts[i]);
     }
-    if (!__value.empty() && __value.back() == preferred_separator &&
+    if ((!__value.empty() && __value.back() == preferred_separator ||
+         terminal_directory_component) &&
         !result.__value.empty() &&
-        result.__value.back() != '/') {
+        result.__value.back() != '/' &&
+        !parts.empty() && parts.back() != "..") {
       result.__value.push_back('/');
     }
     if (result.empty()) return path(".");

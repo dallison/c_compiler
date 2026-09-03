@@ -26,6 +26,11 @@ int main() {
   fs::path without_filename("alpha/beta");
   without_filename.remove_filename();
   if (without_filename != fs::path("alpha/")) return 28;
+  if (fs::path("alpha/.").lexically_normal() != fs::path("alpha/")) return 34;
+  if (fs::path("alpha/beta/..").lexically_normal() != fs::path("alpha/"))
+    return 35;
+  if (fs::path("../alpha/..").lexically_normal() != fs::path("..")) return 36;
+  if (fs::path("alpha/..").lexically_normal() != fs::path(".")) return 37;
 
   std::error_code error;
   fs::path root = fs::temp_directory_path(error) / "davecc-filesystem-0327";
