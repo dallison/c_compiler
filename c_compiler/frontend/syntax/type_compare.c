@@ -1342,6 +1342,10 @@ static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
     hash = HashTypeValue(hash, (uint64_t)(uint32_t)type->bit_width);
     return HashTypeValue(hash, TypeIsUnsigned(type));
   }
+  if (TypeIsComplex(type)) {
+    hash = HashTypeValue(hash, kTypeComplex);
+    return HashTypeValue(hash, TypeComplexElementType(type));
+  }
   if (TypeIsStructOrUnion(type)) {
     hash = HashTypeValue(hash, type->type);
     Symbol* origin = type->template_origin;
@@ -1501,6 +1505,10 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
         return TypeIsBitInt(t1) && TypeIsBitInt(t2) &&
                t1->bit_width == t2->bit_width &&
                TypeIsUnsigned(t1) == TypeIsUnsigned(t2);
+      }
+      if (TypeIsComplex(t1) || TypeIsComplex(t2)) {
+        return TypeIsComplex(t1) && TypeIsComplex(t2) &&
+               TypeComplexElementType(t1) == TypeComplexElementType(t2);
       }
       if (TypeIsStructOrUnion(t1) || TypeIsStructOrUnion(t2)) {
         if (!TypeIsStructOrUnion(t1) || !TypeIsStructOrUnion(t2) ||
@@ -1983,6 +1991,10 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       }
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive: {
+      if (TypeIsComplex(t1) || TypeIsComplex(t2)) {
+        return TypeIsComplex(t1) && TypeIsComplex(t2) &&
+               TypeComplexElementType(t1) == TypeComplexElementType(t2);
+      }
       if ((TypeIsBitInt(t1) || TypeIsBitInt(t2)) &&
           !TypeIsEnum(t1) && !TypeIsEnum(t2)) {
         return TypeIsBitInt(t1) && TypeIsBitInt(t2) &&

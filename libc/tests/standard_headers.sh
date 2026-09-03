@@ -57,8 +57,8 @@ cxx_removed_at_20="ccomplex ciso646 cstdalign cstdbool ctgmath"
 cxx_removed_at_26="codecvt"
 
 # Not yet implemented.  Remove entries here as the headers land.
-c_missing="complex.h tgmath.h"
-cxx_missing="ccomplex ctgmath
+c_missing="tgmath.h"
+cxx_missing="ctgmath
              debugging hazard_pointer linalg rcu simd text_encoding"
 
 # These headers exist and are self-contained, but their standard surface or

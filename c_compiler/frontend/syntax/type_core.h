@@ -12,6 +12,7 @@
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
 TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
+TypeRecord* NewComplexTypeRecord(Type element_type, Qualifiers quals);
 TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
                                 Qualifiers quals);
 void TypeRecordDeleteLastReference(TypeRecord* record);

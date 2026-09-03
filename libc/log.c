@@ -34,6 +34,9 @@ double log(double x) {
     double z = 0.0;
     return -1.0 / z;
   }
+  if (x == 1.0) {
+    return 0.0;
+  }
 
   int e;
   double m = frexp(x, &e);

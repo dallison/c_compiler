@@ -28,6 +28,7 @@ filegroup(
         "libc/include/charconv",
         "libc/include/chrono",
         "libc/include/compare",
+        "libc/include/ccomplex",
         "libc/include/complex",
         "libc/include/concepts",
         "libc/include/condition_variable",
@@ -293,6 +294,12 @@ LIBC_SRCS = [
     "libc/cdiv.c",
     "libc/ckdint.c",
     "libc/ceil.c",
+    "libc/complex_core.c",
+    "libc/complex_exp.c",
+    "libc/complex_hyperbolic.c",
+    "libc/complex_inverse.c",
+    "libc/complex_sqrt.c",
+    "libc/complex_trig.c",
     "libc/ctype.c",
     "libc/inttypes.c",
     "libc/cxx_guard.c",
@@ -1445,6 +1452,12 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1625,6 +1638,12 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1813,6 +1832,12 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -1998,6 +2023,12 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
@@ -2354,6 +2385,12 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
   "libc/ctype.c"
   "libc/cxx_guard.c"
   "libc/cxx_new.c"

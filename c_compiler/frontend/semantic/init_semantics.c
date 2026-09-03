@@ -548,6 +548,17 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
         inode->expr = ASTNodeMove(expr);
         return AdvanceCurrent(inode->parent);
       }
+      if (TypeIsComplex(inode->type) && !TypeIsComplex(expr->type)) {
+        // A complex object is a scalar even though its internal layout is a
+        // two-member aggregate.  One scalar initializer initializes the real
+        // component and zero-initializes the imaginary component, then moves
+        // to the next enclosing subobject.
+        AppendStructMembers(inode);
+        if (!InitCurrentAndAdvance(inode->current, expr, constants_only)) {
+          return false;
+        }
+        return inode->current != NULL && AdvanceCurrent(inode->current);
+      }
       // Lazy append of all struct members.
       AppendStructMembers(inode);
       return InitCurrentAndAdvance(inode->current, expr, constants_only);

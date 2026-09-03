@@ -419,6 +419,11 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL || left->declarator != right->declarator) {
     return false;
   }
+  // Complex arithmetic types use a synthetic struct for storage, but their
+  // identity is the element type rather than the per-declaration layout node.
+  if (TypeIsComplex(left) || TypeIsComplex(right)) {
+    return TypeEqual(left, right);
+  }
   if (TypeIsStructOrUnion(left) || TypeIsStructOrUnion(right)) {
     if (!TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right) ||
         left->type != right->type || left->qualifiers != right->qualifiers) {

@@ -1741,8 +1741,9 @@ static void CopyToMemoryIndirectIndexed(W65C02Generator* g, TargetInstruction* t
       if (size > 2) {
         // 4 or 8 byte constant.  There is a literal for it.
         from = GetImmediateLiteral(g, from);
-        CopyWithLoopYX(g, to, from, size, 0, 0,
-                      kAddrModeIndirectIndexed, kAddrModeLiteralIndexedX);
+        CopyWithLoopYX(g, to, from, size, to_start_index, 0,
+                       kAddrModeIndirectIndexed,
+                       kAddrModeLiteralIndexedX);
       } else {
         InlineCopy(g, to, from, size, to_start_index, from_start_index);
       }

@@ -63,12 +63,17 @@ typedef enum {
   // C23 bit-precise integer type.  The exact value width is stored in
   // TypeRecord::bit_width; kTypeUnsigned selects the unsigned variant.
   kTypeBitInt = 1 << 25,
+  // C99 complex arithmetic type.  The corresponding real type bit is also set
+  // (float, double, or long double).  Complex values have a two-component
+  // aggregate representation while remaining scalar arithmetic types in the
+  // language.
+  kTypeComplex = 1 << 26,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 25
+#define TYPE_LAST_BIT 26
 
 // DaveCC's IR and constant evaluator currently use 64-bit integer lanes.
 #define DAVECC_BITINT_MAXWIDTH 64
