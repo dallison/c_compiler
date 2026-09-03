@@ -344,6 +344,19 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   if (unparenthesized_identifier && expr != NULL &&
       expr->op == AST_OP(identifier)) {
     declared_symbol = ((IdentifierASTNode*)expr)->symbol;
+    if (declared_symbol != NULL &&
+        parser->syntax->current_template_parameters != NULL &&
+        (declared_symbol->flags.invented ||
+         declared_symbol->type == NULL ||
+         TypeIsUnknown(declared_symbol->type) ||
+         TypeContainsTemplateParameter(declared_symbol->type))) {
+      // The declared type of a dependent unparenthesized id-expression cannot
+      // be known until substitution. Retain the operand just like any other
+      // dependent decltype, while recording the entity rule so substitution
+      // returns the member's declared type rather than an lvalue reference.
+      expr->flags |= kASTUnparenthesizedDecltypeEntity;
+      declared_symbol = NULL;
+    }
   }
   if (!parenthesized_expression && expr != NULL &&
       expr->op == AST_OP(pack_index)) {
