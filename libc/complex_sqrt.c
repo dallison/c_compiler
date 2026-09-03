@@ -15,7 +15,7 @@ double complex csqrt(double complex z) {
   if (imaginary_squared < 0.0) imaginary_squared = 0.0;
   double real = sqrt(real_squared);
   double imaginary = sqrt(imaginary_squared);
-  if (z.__imag < 0.0) imaginary = -imaginary;
+  if (signbit(z.__imag)) imaginary = -imaginary;
   return CMPLX(real, imaginary);
 }
 

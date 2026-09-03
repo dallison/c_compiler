@@ -6377,6 +6377,17 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   if (TypeIsIntegral(actual) && TypeIsIntegral(target)) {
     return 2;
   }
+  // Standard arithmetic conversion sequences.  In particular, a converted
+  // prvalue can bind to a const reference parameter after this conversion
+  // (for example, float -> const double&).
+  if (TypeIsFloat(actual) && TypeIsDouble(target)) {
+    return 1;
+  }
+  if ((TypeIsFloatingPoint(actual) && TypeIsFloatingPoint(target)) ||
+      (TypeIsIntegral(actual) && TypeIsFloatingPoint(target)) ||
+      (TypeIsFloatingPoint(actual) && TypeIsIntegral(target))) {
+    return 2;
+  }
   if (TypeIsPointerOrArray(actual) && TypeIsPointerOrArray(target)) {
     if (TypeChar8IdentityDiffers(actual, target)) {
       return -1;
@@ -9850,8 +9861,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
             SemanticError(actual, "Reference argument must be an lvalue");
           }
         }
-        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual) &&
-            TypeIsStructOrUnion(actual->type)) {
+        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual)) {
           ASTNode* materialized =
               MaterializeTemporary(actual, reference_type->next);
           ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);

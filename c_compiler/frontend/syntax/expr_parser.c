@@ -2343,7 +2343,10 @@ static bool GenericTypeMatch(TypeRecord* a, TypeRecord* b) {
   }
 }
 
-// Parse a C11 _Generic selection:
+// Parse a _Generic selection.  _Generic became a standard language construct
+// in C11, but accepting its globally reserved spelling as an extension in
+// earlier C modes lets the C99-mandated <tgmath.h> implement type-generic
+// dispatch without evaluating its controlling arguments.
 //   _Generic ( assignment-expression , generic-assoc-list )
 //   generic-association:
 //     type-name : assignment-expression
@@ -3781,8 +3784,8 @@ static ASTNode* ParseNestedPrimaryExpression(Syntax* syntax,
     return node;
   }
 
-  // C11 _Generic selection (lexes as an identifier).
-  if (CompilerCAtLeast(kLanguageStandardC11) &&
+  // _Generic selection (standard in C11, a reserved-name extension earlier).
+  if (!CompilerIsCXX() &&
       LexLookingAt(lex, TOK(identifier)) &&
       StringEqual(&lex->spelling, "_Generic")) {
     return ParseGenericSelection(syntax, followers);

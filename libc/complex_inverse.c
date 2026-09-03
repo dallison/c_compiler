@@ -1,17 +1,23 @@
 #include <complex.h>
 
 double complex casin(double complex z) {
+  if (z.__real == 0.0 && z.__imag == 0.0)
+    return z;
   double complex iz = CMPLX(-z.__imag, z.__real);
   double complex value = clog(iz + csqrt(CMPLX(1.0, 0.0) - z * z));
   return CMPLX(value.__imag, -value.__real);
 }
 
 double complex cacos(double complex z) {
+  if (z.__real == 1.0 && z.__imag == 0.0)
+    return CMPLX(0.0, -z.__imag);
   double complex value = casin(z);
   return CMPLX(1.57079632679489661923 - value.__real, -value.__imag);
 }
 
 double complex catan(double complex z) {
+  if (z.__real == 0.0 && z.__imag == 0.0)
+    return z;
   double complex iz = CMPLX(-z.__imag, z.__real);
   double complex value =
       clog(CMPLX(1.0, 0.0) - iz) - clog(CMPLX(1.0, 0.0) + iz);
@@ -19,15 +25,21 @@ double complex catan(double complex z) {
 }
 
 double complex casinh(double complex z) {
+  if (z.__real == 0.0 && z.__imag == 0.0)
+    return z;
   return clog(z + csqrt(z * z + CMPLX(1.0, 0.0)));
 }
 
 double complex cacosh(double complex z) {
+  if (z.__real == 1.0 && z.__imag == 0.0)
+    return CMPLX(0.0, z.__imag);
   return clog(z + csqrt(z + CMPLX(1.0, 0.0)) *
                       csqrt(z - CMPLX(1.0, 0.0)));
 }
 
 double complex catanh(double complex z) {
+  if (z.__real == 0.0 && z.__imag == 0.0)
+    return z;
   return (clog(CMPLX(1.0, 0.0) + z) -
           clog(CMPLX(1.0, 0.0) - z)) *
          0.5;

@@ -1,6 +1,10 @@
 #ifndef _DAVECC_COMPLEX_H
 #define _DAVECC_COMPLEX_H
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define __STDC_VERSION_COMPLEX_H__ 202311L
+#endif
+
 #ifdef __cplusplus
 #include <complex>
 #else
@@ -23,13 +27,6 @@ long double creall(long double complex);
 float cimagf(float complex);
 double cimag(double complex);
 long double cimagl(long double complex);
-
-#define crealf(z) ((z).__real)
-#define creal(z) ((z).__real)
-#define creall(z) ((z).__real)
-#define cimagf(z) ((z).__imag)
-#define cimag(z) ((z).__imag)
-#define cimagl(z) ((z).__imag)
 
 float cabsf(float complex);
 double cabs(double complex);

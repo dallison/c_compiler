@@ -54,6 +54,7 @@ filegroup(
         "libc/include/cstdio",
         "libc/include/cstdlib",
         "libc/include/cstring",
+        "libc/include/ctgmath",
         "libc/include/ctime",
         "libc/include/cuchar",
         "libc/include/cwchar",
@@ -2964,6 +2965,52 @@ filegroup(
 filegroup(
     name = "math_smoke_source",
     srcs = ["tests/math_smoke.c"],
+)
+
+filegroup(
+    name = "tgmath_smoke_source",
+    srcs = ["tests/tgmath_smoke.c"],
+)
+
+sh_test(
+    name = "tgmath_x86_64_test",
+    srcs = ["tests/tgmath_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :tgmath_smoke_source)",
+        "-",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":tgmath_smoke_source",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "tgmath_65c02_test",
+    srcs = ["tests/tgmath_backend_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "65c02",
+        "$(rootpath :6502)",
+        "$(rootpath :libc_65c02)",
+        "$(rootpath :tgmath_smoke_source)",
+        "$(rootpath :support_rom_65c02)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
+        ":tgmath_smoke_source",
+    ],
 )
 
 sh_test(

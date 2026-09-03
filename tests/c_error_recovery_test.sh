@@ -81,32 +81,25 @@ expect_diagnosed() {
   fi
 }
 
-# _Complex and _Imaginary are classified as type tokens but name no implemented
-# type.  Unless the type parser consumes them, recovery that stops at a type
-# token cannot move past one, and the enclosing parse repeats forever.  The
-# positions below spun in the translation-unit loop, the struct member loop and
-# the old-style argument declaration list respectively.
-complex_unsupported="'_Complex' types are not supported"
-expect_diagnosed complex_declaration_specifier \
+# Complex types are supported, but keep the former non-termination positions
+# covered so parser recovery changes cannot reintroduce those loops.
+expect_terminates complex_declaration_specifier \
   'double _Complex f(void);
-int main(void) { return 0; }' \
-  "$complex_unsupported"
+int main(void) { return 0; }'
 
-expect_diagnosed complex_struct_member \
-  'struct S { _Complex float d; };' \
-  "$complex_unsupported"
+expect_terminates complex_struct_member \
+  'struct S { _Complex float d; };'
 
 expect_diagnosed imaginary_declaration_specifier \
   '_Imaginary double x;' \
   "'_Imaginary' types are not supported"
 
-# The GNU spelling of the same specifier.
-expect_diagnosed gnu_complex_declaration_specifier \
+# The GNU spelling of the same specifier must also terminate.
+expect_terminates gnu_complex_declaration_specifier \
   '__complex__ double foo (__complex__ double x, __complex__ double y)
 {
   return x / y;
-}' \
-  "$complex_unsupported"
+}'
 
 # An old-style argument declaration list that reaches end of input before the
 # function body: that loop only stopped at the '{' of the body.

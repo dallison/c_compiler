@@ -3,6 +3,15 @@
 
 #include <complex>
 #include <sstream>
+#include <type_traits>
+
+static_assert(
+    std::is_convertible<std::complex<float>, std::complex<double> >::value);
+static_assert(
+    !std::is_convertible<std::complex<double>, std::complex<float> >::value);
+static_assert(
+    std::is_same<decltype(std::pow(std::complex<float>(), 2)),
+                 std::complex<double> >::value);
 
 static bool near(double left, double right) {
   double difference = left - right;
@@ -51,6 +60,14 @@ int main() {
   stream >> parsed;
   if (parsed != a) {
     return 8;
+  }
+
+  std::stringstream aligned;
+  aligned.setf(std::ios_base::left, std::ios_base::adjustfield);
+  aligned.width(10);
+  aligned << std::complex<double>(1.0, 2.0);
+  if (aligned.str() != "(1,2)     ") {
+    return 9;
   }
   return 0;
 }

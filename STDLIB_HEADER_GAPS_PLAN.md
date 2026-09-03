@@ -27,8 +27,8 @@ header that exposed it.
   the `chars_format` and precision overloads, range/error behavior, and
   round-trip tests. Covered by `0470_standard_charconv.cpp`. P-code needed the
   assembler to accept `#inf`/`#nan` immediates (`0471_fp_inf_nan_constants.cpp`).
-  Remaining Phase 2 items: `<complex>`, `<scoped_allocator>`, `<valarray>`,
-  `<spanstream>`.
+  The Phase 2 `<complex>`, `<scoped_allocator>`, `<valarray>`, and
+  `<spanstream>` items are complete.
 
 Keep the ground rule above: preserve conforming tests and fix compiler defects
 at their source rather than adding library workarounds.
@@ -53,9 +53,9 @@ Missing (9):
 | `signal.h` | C89 | `signal`, `raise`, `sig_atomic_t`. No signal support anywhere in libc, loader, or interpreters. |
 | `iso646.h` | C95 | Pure macros; trivial. |
 | `wctype.h` | C95 | `iswalpha` family, `wctype_t`, `towlower`. |
-| `complex.h` | C99 | Blocked: compiler rejects `_Complex`. |
+| `complex.h` | C99 | Implemented with compiler and runtime support. |
 | `fenv.h` | C99 | Rounding modes and exception flags; per-backend. |
-| `tgmath.h` | C99 | `_Generic` works, so the real-typed half is unblocked today. |
+| `tgmath.h` | C99 | Implemented using unevaluated `_Generic` dispatch. |
 | `stdalign.h` | C11 | Macros only, but blocked by an `_Alignas` parser bug (§3.1). |
 | `uchar.h` | C11 | `mbrtoc16`/`c16rtomb` etc.; `char16_t`/`char32_t` work in C++ already. |
 
@@ -99,7 +99,7 @@ Probed against a fresh `bazel build //:davecc //:libc_x86_64 //:x86_64`:
 | C++ `alignas` / `alignof` | work |
 | `char16_t` / `char32_t` / `wchar_t` + `u""` `U""` `L""` | work |
 | non-type template params, proxy references, template UDL `operator""` | work |
-| `_Complex` | **unsupported**; C11+ advertises `__STDC_NO_COMPLEX__`, while hosted C99 remains nonconforming |
+| `_Complex` | supported across the type system, constant evaluation, ABI lowering, and libc |
 | `__CHAR16_TYPE__` and friends | not predefined (§3.3) |
 | `<locale>`, `<ios>` width/precision/fill/flags | work |
 
@@ -247,11 +247,8 @@ Gate on `__DAVECC_HAS_GUEST_THREADS__` the way `<thread>`, `<latch>`, and
    plus the POSIX variants, `regex_iterator`, `regex_token_iterator`.
 2. `<codecvt>` — deprecated in C++17, removed in C++26. Needed for C++11–17
    conformance; gate accordingly.
-3. `<complex.h>` + `<ccomplex>` + `<tgmath.h>` + `<ctgmath>` — blocked on §3.2.
-   Until implemented, C11 and later truthfully advertise the optional omission
-   with `__STDC_NO_COMPLEX__`; hosted C99 still requires the feature.
-   `tgmath.h` can ship its real-typed half earlier if the complex half is
-   staged behind the compiler work.
+3. [x] `<complex.h>` + `<ccomplex>` + `<tgmath.h>` + `<ctgmath>`, including
+   type-generic real/complex dispatch and the C complex runtime.
 4. C++26: `<debugging>`, `<text_encoding>`, `<hazard_pointer>`, `<rcu>`,
    `<linalg>`, `<simd>`. Treat as a separate effort after the C++98–23 set is
    whole; `<simd>` in particular wants backend vector support.
@@ -469,14 +466,14 @@ so `main`'s own frame does not get the entry alignment the ABI would otherwise
 guarantee, and only 8-byte alignment is observable there. Alignment assertions
 belong in a callee.
 
-### 3.5 `_Complex` is unsupported
+### 3.5 `_Complex` support (fixed)
 
-`error: '_Complex' types are not supported`. The keyword is lexed and then
-rejected; there is no complex type in the type system, no arithmetic lowering,
-and no backend ABI story for complex return values. This is the single largest
-compiler prerequisite in the plan and is why `complex.h`/`tgmath.h` are staged
-last. Sequence it as: type-system representation → constant folding and
-arithmetic lowering → per-target ABI (return-in-registers vs. sret) → library.
+The compiler now represents all three standard complex floating types, folds
+complex constant expressions, lowers arithmetic and conversions, and passes
+complex values through each target ABI. `<complex.h>` provides the complete
+C99 function families, C11 construction macros, and the C23 header-version
+macro; `<tgmath.h>` supplies single-evaluation type-generic dispatch, including
+the pointer-parameter `modf` case, in C99 and later modes.
 
 ### 3.6 SFINAE is ignored on a defaulted non-type template parameter (fixed)
 

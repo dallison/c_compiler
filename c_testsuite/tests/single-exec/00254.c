@@ -22,6 +22,10 @@ static complex_double rotate(complex_double value) {
   return value * I;
 }
 
+static complex_double add_two(complex_double left, complex_double right) {
+  return left + right;
+}
+
 int main(void) {
   if (global_holder.prefix != 17 || global_holder.suffix != 23)
     return 1;
@@ -34,6 +38,9 @@ int main(void) {
 
   complex_double rotated = rotate(CMPLX(3.0, 4.0));
   if (creal(rotated) != -4.0 || cimag(rotated) != 3.0) return 4;
+
+  complex_double added = add_two(CMPLX(1.0, 2.0), CMPLX(3.0, 4.0));
+  if (creal(added) != 4.0 || cimag(added) != 6.0) return 5;
 
   puts("ok");
   return 0;

@@ -1428,6 +1428,10 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
+  if (ctx == kConvertCast && TypeIsVoid(to)) {
+    return;
+  }
+
   if (TypeIsComplex(from->type) || TypeIsComplex(to)) {
     bool from_arithmetic = TypeIsComplex(from->type) ||
                            TypeIsIntegral(from->type) ||

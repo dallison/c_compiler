@@ -1,0 +1,7 @@
+#ifndef __davecc_ctgmath__
+#define __davecc_ctgmath__
+
+#include <cmath>
+#include <complex>
+
+#endif /* __davecc_ctgmath__ */

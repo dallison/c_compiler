@@ -768,6 +768,131 @@ static IRNode* StoreComplexResult(Generator* gen, TypeRecord* complex_type,
   return result;
 }
 
+static IRNode* GenerateFloatingAbsoluteValue(Generator* gen, IRNode* value,
+                                             TypeRecord* type,
+                                             bool use_float) {
+  IROpcode negate = use_float ? IR_OP(negf) : IR_OP(negd);
+  IROpcode less = use_float ? IR_OP(cmpltf) : IR_OP(cmpltd);
+  IRNode* source = GeneratorSpillValueToTemp(gen, value, type);
+  IRNode* result = GeneratorSpillValueToTemp(
+      gen, GeneratorReloadSpilledValue(gen, source, type), type);
+  IRNode* negative = GeneratorEmit(
+      gen, NewIR2(less, GeneratorReloadSpilledValue(gen, source, type),
+                  GeneratorEmit(
+                      gen, NewIR1(negate, GeneratorReloadSpilledValue(
+                                             gen, source, type)))));
+  IRNode* end = NewIR(IR_OP(label));
+  GeneratorEmit(gen, NewIR2(IR_OP(bfalse), negative, end));
+  IRNode* negated = GeneratorEmit(
+      gen, NewIR1(negate, GeneratorReloadSpilledValue(gen, source, type)));
+  GeneratorEmit(
+      gen, NewIR2(GetStoreOpcodeForType(type), result, negated));
+  GeneratorEmit(gen, end);
+  return GeneratorReloadSpilledValue(gen, result, type);
+}
+
+static void GenerateStableComplexDivisionBranch(
+    Generator* gen, IRNode* result_address, TypeRecord* element_type,
+    bool use_float, IRNode* ar_spill, IRNode* ai_spill, IRNode* br_spill,
+    IRNode* bi_spill, bool real_denominator_dominates) {
+  IROpcode add = use_float ? IR_OP(addf) : IR_OP(addd);
+  IROpcode sub = use_float ? IR_OP(subf) : IR_OP(subd);
+  IROpcode mul = use_float ? IR_OP(mulf) : IR_OP(muld);
+  IROpcode div = use_float ? IR_OP(divf) : IR_OP(divd);
+  IRNode* dominant = real_denominator_dominates ? br_spill : bi_spill;
+  IRNode* secondary = real_denominator_dominates ? bi_spill : br_spill;
+  IRNode* ratio = GeneratorEmit(
+      gen, NewIR2(div, GeneratorReloadSpilledValue(gen, secondary, element_type),
+                  GeneratorReloadSpilledValue(gen, dominant, element_type)));
+  IRNode* ratio_spill =
+      GeneratorSpillValueToTemp(gen, ratio, element_type);
+  IRNode* ratio_squared = GeneratorEmit(
+      gen, NewIR2(mul, GeneratorReloadSpilledValue(gen, ratio_spill,
+                                                   element_type),
+                  GeneratorReloadSpilledValue(gen, ratio_spill,
+                                              element_type)));
+  IRNode* one = GeneratorEmitConstant(
+      gen, NewFloatingPointIRConstant(element_type, 1.0));
+  IRNode* denominator = GeneratorEmit(gen, NewIR2(add, one, ratio_squared));
+  IRNode* denominator_spill =
+      GeneratorSpillValueToTemp(gen, denominator, element_type);
+
+  IRNode* ar_over_dominant = GeneratorEmit(
+      gen, NewIR2(div, GeneratorReloadSpilledValue(gen, ar_spill, element_type),
+                  GeneratorReloadSpilledValue(gen, dominant, element_type)));
+  IRNode* ai_over_dominant = GeneratorEmit(
+      gen, NewIR2(div, GeneratorReloadSpilledValue(gen, ai_spill, element_type),
+                  GeneratorReloadSpilledValue(gen, dominant, element_type)));
+  IRNode* ar_over_spill =
+      GeneratorSpillValueToTemp(gen, ar_over_dominant, element_type);
+  IRNode* ai_over_spill =
+      GeneratorSpillValueToTemp(gen, ai_over_dominant, element_type);
+
+  IRNode* real;
+  IRNode* imaginary;
+  if (real_denominator_dominates) {
+    IRNode* scaled_imaginary = GeneratorEmit(
+        gen, NewIR2(mul, GeneratorReloadSpilledValue(gen, ai_over_spill,
+                                                     element_type),
+                    GeneratorReloadSpilledValue(gen, ratio_spill,
+                                                element_type)));
+    IRNode* real_numerator = GeneratorEmit(
+        gen, NewIR2(add, GeneratorReloadSpilledValue(gen, ar_over_spill,
+                                                     element_type),
+                    scaled_imaginary));
+    real = GeneratorEmit(
+        gen, NewIR2(div, real_numerator,
+                    GeneratorReloadSpilledValue(gen, denominator_spill,
+                                                element_type)));
+
+    IRNode* scaled_real = GeneratorEmit(
+        gen, NewIR2(mul, GeneratorReloadSpilledValue(gen, ar_over_spill,
+                                                     element_type),
+                    GeneratorReloadSpilledValue(gen, ratio_spill,
+                                                element_type)));
+    IRNode* imaginary_numerator = GeneratorEmit(
+        gen, NewIR2(sub, GeneratorReloadSpilledValue(gen, ai_over_spill,
+                                                     element_type),
+                    scaled_real));
+    imaginary = GeneratorEmit(
+        gen, NewIR2(div, imaginary_numerator,
+                    GeneratorReloadSpilledValue(gen, denominator_spill,
+                                                element_type)));
+  } else {
+    IRNode* scaled_real = GeneratorEmit(
+        gen, NewIR2(mul, GeneratorReloadSpilledValue(gen, ar_over_spill,
+                                                     element_type),
+                    GeneratorReloadSpilledValue(gen, ratio_spill,
+                                                element_type)));
+    IRNode* real_numerator = GeneratorEmit(
+        gen, NewIR2(add, scaled_real,
+                    GeneratorReloadSpilledValue(gen, ai_over_spill,
+                                                element_type)));
+    real = GeneratorEmit(
+        gen, NewIR2(div, real_numerator,
+                    GeneratorReloadSpilledValue(gen, denominator_spill,
+                                                element_type)));
+
+    IRNode* scaled_imaginary = GeneratorEmit(
+        gen, NewIR2(mul, GeneratorReloadSpilledValue(gen, ai_over_spill,
+                                                     element_type),
+                    GeneratorReloadSpilledValue(gen, ratio_spill,
+                                                element_type)));
+    IRNode* imaginary_numerator = GeneratorEmit(
+        gen, NewIR2(sub, scaled_imaginary,
+                    GeneratorReloadSpilledValue(gen, ar_over_spill,
+                                                element_type)));
+    imaginary = GeneratorEmit(
+        gen, NewIR2(div, imaginary_numerator,
+                    GeneratorReloadSpilledValue(gen, denominator_spill,
+                                                element_type)));
+  }
+  IRSetType(real, element_type);
+  IRSetType(imaginary, element_type);
+  StoreComplexComponent(gen, result_address, element_type, false, real);
+  StoreComplexComponent(gen, result_address, element_type, true, imaginary);
+}
+
 static IRNode* GenerateComplexBinaryFromAddresses(
     Generator* gen, BinaryASTNode* node, IRNode* left_address,
     IRNode* right_address) {
@@ -896,78 +1021,128 @@ static IRNode* GenerateComplexBinaryFromAddresses(
       IRNode* result_address = NULL;
       IRNode* result =
           NewComplexResult(gen, node->base.type, &result_address);
-      IRNode* denominator_real = LoadConvertedComplexComponent(
-          gen, right_address, node->right->type, element_type, false);
-      IRNode* brbr = GeneratorEmit(
-          gen, NewIR2(mul, denominator_real, denominator_real));
-      IRNode* brbr_spill =
-          GeneratorSpillValueToTemp(gen, brbr, element_type);
-      IRNode* denominator_imag = LoadConvertedComplexComponent(
-          gen, right_address, node->right->type, element_type, true);
-      IRNode* bibi = GeneratorEmit(
-          gen, NewIR2(mul, denominator_imag, denominator_imag));
-      brbr =
-          GeneratorReloadSpilledValue(gen, brbr_spill, element_type);
-      IRNode* denominator = GeneratorEmit(gen, NewIR2(add, brbr, bibi));
-      IRNode* denominator_spill =
-          GeneratorSpillValueToTemp(gen, denominator, element_type);
+      if (StringEqual(compiler->target_name, "65c02")) {
+        IRNode* denominator_real = LoadConvertedComplexComponent(
+            gen, right_address, node->right->type, element_type, false);
+        IRNode* brbr = GeneratorEmit(
+            gen, NewIR2(mul, denominator_real, denominator_real));
+        IRNode* brbr_spill =
+            GeneratorSpillValueToTemp(gen, brbr, element_type);
+        IRNode* denominator_imag = LoadConvertedComplexComponent(
+            gen, right_address, node->right->type, element_type, true);
+        IRNode* bibi = GeneratorEmit(
+            gen, NewIR2(mul, denominator_imag, denominator_imag));
+        brbr =
+            GeneratorReloadSpilledValue(gen, brbr_spill, element_type);
+        IRNode* denominator = GeneratorEmit(gen, NewIR2(add, brbr, bibi));
+        IRNode* denominator_spill =
+            GeneratorSpillValueToTemp(gen, denominator, element_type);
 
-      IRNode* arbr = GeneratorEmit(
-          gen, NewIR2(mul,
-                      LoadConvertedComplexComponent(
-                          gen, left_address, node->left->type, element_type,
-                          false),
-                      LoadConvertedComplexComponent(
-                          gen, right_address, node->right->type, element_type,
-                          false)));
-      IRNode* arbr_spill =
-          GeneratorSpillValueToTemp(gen, arbr, element_type);
-      IRNode* aibi = GeneratorEmit(
-          gen, NewIR2(mul,
-                      LoadConvertedComplexComponent(
-                          gen, left_address, node->left->type, element_type,
-                          true),
-                      LoadConvertedComplexComponent(
-                          gen, right_address, node->right->type, element_type,
-                          true)));
-      arbr =
-          GeneratorReloadSpilledValue(gen, arbr_spill, element_type);
-      IRNode* numerator_real = GeneratorEmit(gen, NewIR2(add, arbr, aibi));
-      denominator = GeneratorReloadSpilledValue(
-          gen, denominator_spill, element_type);
-      IRNode* real =
-          GeneratorEmit(gen, NewIR2(div, numerator_real, denominator));
-      IRSetType(real, element_type);
-      StoreComplexComponent(gen, result_address, element_type, false, real);
+        IRNode* arbr = GeneratorEmit(
+            gen, NewIR2(mul,
+                        LoadConvertedComplexComponent(
+                            gen, left_address, node->left->type, element_type,
+                            false),
+                        LoadConvertedComplexComponent(
+                            gen, right_address, node->right->type, element_type,
+                            false)));
+        IRNode* arbr_spill =
+            GeneratorSpillValueToTemp(gen, arbr, element_type);
+        IRNode* aibi = GeneratorEmit(
+            gen, NewIR2(mul,
+                        LoadConvertedComplexComponent(
+                            gen, left_address, node->left->type, element_type,
+                            true),
+                        LoadConvertedComplexComponent(
+                            gen, right_address, node->right->type, element_type,
+                            true)));
+        arbr =
+            GeneratorReloadSpilledValue(gen, arbr_spill, element_type);
+        IRNode* numerator_real =
+            GeneratorEmit(gen, NewIR2(add, arbr, aibi));
+        denominator = GeneratorReloadSpilledValue(
+            gen, denominator_spill, element_type);
+        IRNode* real = GeneratorEmit(
+            gen, NewIR2(div, numerator_real, denominator));
+        IRSetType(real, element_type);
+        StoreComplexComponent(
+            gen, result_address, element_type, false, real);
 
-      IRNode* aibr = GeneratorEmit(
-          gen, NewIR2(mul,
-                      LoadConvertedComplexComponent(
-                          gen, left_address, node->left->type, element_type,
-                          true),
-                      LoadConvertedComplexComponent(
-                          gen, right_address, node->right->type, element_type,
-                          false)));
-      IRNode* aibr_spill =
-          GeneratorSpillValueToTemp(gen, aibr, element_type);
-      IRNode* arbi = GeneratorEmit(
-          gen, NewIR2(mul,
-                      LoadConvertedComplexComponent(
-                          gen, left_address, node->left->type, element_type,
-                          false),
-                      LoadConvertedComplexComponent(
-                          gen, right_address, node->right->type, element_type,
-                          true)));
-      aibr =
-          GeneratorReloadSpilledValue(gen, aibr_spill, element_type);
-      IRNode* numerator_imag = GeneratorEmit(gen, NewIR2(sub, aibr, arbi));
-      denominator = GeneratorReloadSpilledValue(
-          gen, denominator_spill, element_type);
-      IRNode* imaginary =
-          GeneratorEmit(gen, NewIR2(div, numerator_imag, denominator));
-      IRSetType(imaginary, element_type);
-      StoreComplexComponent(gen, result_address, element_type, true,
-                            imaginary);
+        IRNode* aibr = GeneratorEmit(
+            gen, NewIR2(mul,
+                        LoadConvertedComplexComponent(
+                            gen, left_address, node->left->type, element_type,
+                            true),
+                        LoadConvertedComplexComponent(
+                            gen, right_address, node->right->type, element_type,
+                            false)));
+        IRNode* aibr_spill =
+            GeneratorSpillValueToTemp(gen, aibr, element_type);
+        IRNode* arbi = GeneratorEmit(
+            gen, NewIR2(mul,
+                        LoadConvertedComplexComponent(
+                            gen, left_address, node->left->type, element_type,
+                            false),
+                        LoadConvertedComplexComponent(
+                            gen, right_address, node->right->type, element_type,
+                            true)));
+        aibr =
+            GeneratorReloadSpilledValue(gen, aibr_spill, element_type);
+        IRNode* numerator_imag =
+            GeneratorEmit(gen, NewIR2(sub, aibr, arbi));
+        denominator = GeneratorReloadSpilledValue(
+            gen, denominator_spill, element_type);
+        IRNode* imaginary = GeneratorEmit(
+            gen, NewIR2(div, numerator_imag, denominator));
+        IRSetType(imaginary, element_type);
+        StoreComplexComponent(
+            gen, result_address, element_type, true, imaginary);
+        return result;
+      }
+      IRNode* ar_spill = GeneratorSpillValueToTemp(
+          gen, LoadConvertedComplexComponent(
+                   gen, left_address, node->left->type, element_type, false),
+          element_type);
+      IRNode* ai_spill = GeneratorSpillValueToTemp(
+          gen, LoadConvertedComplexComponent(
+                   gen, left_address, node->left->type, element_type, true),
+          element_type);
+      IRNode* br_spill = GeneratorSpillValueToTemp(
+          gen, LoadConvertedComplexComponent(
+                   gen, right_address, node->right->type, element_type, false),
+          element_type);
+      IRNode* bi_spill = GeneratorSpillValueToTemp(
+          gen, LoadConvertedComplexComponent(
+                   gen, right_address, node->right->type, element_type, true),
+          element_type);
+      IRNode* absolute_br = GenerateFloatingAbsoluteValue(
+          gen, GeneratorReloadSpilledValue(gen, br_spill, element_type),
+          element_type, use_float);
+      IRNode* absolute_br_spill =
+          GeneratorSpillValueToTemp(gen, absolute_br, element_type);
+      IRNode* absolute_bi = GenerateFloatingAbsoluteValue(
+          gen, GeneratorReloadSpilledValue(gen, bi_spill, element_type),
+          element_type, use_float);
+      IROpcode greater_equal =
+          use_float ? IR_OP(cmpgef) : IR_OP(cmpged);
+      IRNode* real_dominates = GeneratorEmit(
+          gen, NewIR2(greater_equal,
+                      GeneratorReloadSpilledValue(
+                          gen, absolute_br_spill, element_type),
+                      absolute_bi));
+      IRNode* imaginary_branch = NewIR(IR_OP(label));
+      IRNode* end = NewIR(IR_OP(label));
+      GeneratorEmit(
+          gen, NewIR2(IR_OP(bfalse), real_dominates, imaginary_branch));
+      GenerateStableComplexDivisionBranch(
+          gen, result_address, element_type, use_float, ar_spill, ai_spill,
+          br_spill, bi_spill, true);
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), end));
+      GeneratorEmit(gen, imaginary_branch);
+      GenerateStableComplexDivisionBranch(
+          gen, result_address, element_type, use_float, ar_spill, ai_spill,
+          br_spill, bi_spill, false);
+      GeneratorEmit(gen, end);
       return result;
     }
     default:
@@ -981,10 +1156,12 @@ static IRNode* GenerateComplexBinaryExpression(Generator* gen,
   IRNode* left_value = GenerateExpression(gen, node->left);
   IRNode* left_address =
       ComplexObjectAddress(gen, left_value, node->left->type);
-  if (ContainsCall(node->right)) {
-    left_address = GeneratorSpillObjectToTemp(
-        gen, left_address, node->left->type);
-  }
+  // Complex expression results use addressable temporary storage. Preserve
+  // the left operand before evaluating the right, which may reuse that storage
+  // even when neither expression contains a call (for example, two CMPLX
+  // compound literals).
+  left_address = GeneratorSpillObjectToTemp(
+      gen, left_address, node->left->type);
   IRNode* right_value = GenerateExpression(gen, node->right);
   IRNode* right_address =
       ComplexObjectAddress(gen, right_value, node->right->type);
@@ -2721,7 +2898,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else if (must_survive_later_call && argument_contains_call &&
                (!aggregate_actual || stashable_reference_actual ||
                 call_result_reference_actual || aggregate_reference_actual)) {
-      if (CompilerIsCXX() &&
+      if (CompilerIsCXX() && reference_formal && !aggregate_actual &&
+          compiler->call_return_fixed_reg) {
+        // The reference-binding path below immediately materializes this
+        // scalar prvalue in addressable temporary storage.  Stashing the fixed
+        // return register here as well creates a deferred spill that is then
+        // treated as the temporary's address, producing a null/dangling
+        // reference when another argument call is evaluated.
+      } else if (CompilerIsCXX() &&
           ((!reference_formal && !aggregate_actual) ||
            (!compiler->call_return_fixed_reg &&
             (stashable_reference_actual || aggregate_reference_actual)))) {
@@ -4760,6 +4944,11 @@ static IRNode* GenerateComplexCast(Generator* gen, CastASTNode* node) {
   TypeRecord* from = node->expr->type;
   TypeRecord* to = node->cast_type;
   IRNode* source = GenerateExpression(gen, node->expr);
+
+  if (TypeIsVoid(to)) {
+    IRNode* result = GeneratorEmit(gen, NewIR1(IR_OP(cast), source));
+    return IRSetType(result, to);
+  }
 
   if (TypeIsComplex(from)) {
     TypeRecord* from_element = ComplexElementTypeRecord(from);

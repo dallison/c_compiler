@@ -2,7 +2,7 @@
 //  complex
 //  c_compiler
 //
-//  Standard Cartesian complex numbers, independent of C _Complex support.
+//  Standard Cartesian complex numbers.
 //
 
 #ifndef __davecc_complex__
@@ -10,66 +10,160 @@
 
 #include <cmath>
 #include <ios>
+#include <sstream>
+#if __cplusplus >= 201103L
+#include <type_traits>
+#endif
+#if __cplusplus >= 202600L
+#include <tuple>
+#endif
+
+#if __cplusplus >= 201402L
+#define __DAVECC_COMPLEX_CXX14_CONSTEXPR constexpr
+#else
+#define __DAVECC_COMPLEX_CXX14_CONSTEXPR
+#endif
+
+#if __cplusplus >= 202002L
+#define __DAVECC_COMPLEX_CXX20_CONSTEXPR constexpr
+#else
+#define __DAVECC_COMPLEX_CXX20_CONSTEXPR
+#endif
+
+#define __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR
+
+#if __cplusplus >= 202002L
+#ifndef __cpp_lib_constexpr_complex
+#define __cpp_lib_constexpr_complex 201711L
+#endif
+#endif
+
+#if __cplusplus >= 201402L
+#ifndef __cpp_lib_complex_udls
+#define __cpp_lib_complex_udls 201309L
+#endif
+#endif
+
+#if __cplusplus >= 202600L
+#ifndef __cpp_lib_tuple_like
+#define __cpp_lib_tuple_like 202311L
+#endif
+#endif
 
 namespace std {
+
+#if __cplusplus >= 201103L && __cplusplus < 202302L
+template <class To, class From>
+struct __complex_conversion_is_implicit : false_type {};
+
+template <>
+struct __complex_conversion_is_implicit<double, float> : true_type {};
+template <>
+struct __complex_conversion_is_implicit<long double, float> : true_type {};
+template <>
+struct __complex_conversion_is_implicit<long double, double> : true_type {};
+#endif
+
+#if __cplusplus >= 201103L
+template <class T, class U>
+struct __complex_pow_result {
+#if __cplusplus >= 202302L
+  typedef typename common_type<T, U>::type type;
+#else
+  typedef typename conditional<
+      is_same<T, long double>::value || is_same<U, long double>::value,
+      long double,
+      typename conditional<
+          is_same<T, double>::value || is_same<U, double>::value ||
+              is_integral<T>::value || is_integral<U>::value,
+          double, float>::type>::type type;
+#endif
+};
+#endif
 
 template <class T>
 class complex {
  public:
   typedef T value_type;
 
+  __DAVECC_COMPLEX_CXX14_CONSTEXPR
   complex(const T& real_value = T(), const T& imag_value = T())
       : __real_(real_value), __imag_(imag_value) {}
 
   template <class U>
-  complex(const complex<U>& other)
+#if __cplusplus >= 202302L
+  explicit(!requires(U value) { T{value}; })
+  __DAVECC_COMPLEX_CXX14_CONSTEXPR complex(const complex<U>& other)
+      : __real_(static_cast<T>(other.real())),
+        __imag_(static_cast<T>(other.imag())) {}
+#elif __cplusplus >= 201103L
+  __DAVECC_COMPLEX_CXX14_CONSTEXPR complex(
+      const complex<U>& other,
+      typename enable_if<
+          __complex_conversion_is_implicit<T, U>::value, int>::type* = 0)
       : __real_(static_cast<T>(other.real())),
         __imag_(static_cast<T>(other.imag())) {}
 
-  T real() const { return __real_; }
-  T imag() const { return __imag_; }
-  void real(T value) { __real_ = value; }
-  void imag(T value) { __imag_ = value; }
+  template <class U>
+  explicit __DAVECC_COMPLEX_CXX14_CONSTEXPR complex(
+      const complex<U>& other,
+      typename enable_if<
+          !__complex_conversion_is_implicit<T, U>::value, long>::type* = 0)
+      : __real_(static_cast<T>(other.real())),
+        __imag_(static_cast<T>(other.imag())) {}
+#else
+  complex(const complex<U>& other)
+      : __real_(static_cast<T>(other.real())),
+        __imag_(static_cast<T>(other.imag())) {}
+#endif
 
-  complex& operator=(const T& value) {
+  __DAVECC_COMPLEX_CXX14_CONSTEXPR T real() const { return __real_; }
+  __DAVECC_COMPLEX_CXX14_CONSTEXPR T imag() const { return __imag_; }
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR void real(T value) { __real_ = value; }
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR void imag(T value) { __imag_ = value; }
+
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator=(const T& value) {
     __real_ = value;
     __imag_ = T();
     return *this;
   }
 
-  complex& operator+=(const T& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator+=(const T& value) {
     __real_ += value;
     return *this;
   }
-  complex& operator-=(const T& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator-=(const T& value) {
     __real_ -= value;
     return *this;
   }
-  complex& operator*=(const T& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator*=(const T& value) {
     __real_ *= value;
     __imag_ *= value;
     return *this;
   }
-  complex& operator/=(const T& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator/=(const T& value) {
     __real_ /= value;
     __imag_ /= value;
     return *this;
   }
 
   template <class U>
-  complex& operator+=(const complex<U>& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator+=(
+      const complex<U>& value) {
     __real_ += static_cast<T>(value.real());
     __imag_ += static_cast<T>(value.imag());
     return *this;
   }
   template <class U>
-  complex& operator-=(const complex<U>& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator-=(
+      const complex<U>& value) {
     __real_ -= static_cast<T>(value.real());
     __imag_ -= static_cast<T>(value.imag());
     return *this;
   }
   template <class U>
-  complex& operator*=(const complex<U>& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator*=(
+      const complex<U>& value) {
     T a = __real_;
     T b = __imag_;
     T c = static_cast<T>(value.real());
@@ -79,16 +173,34 @@ class complex {
     return *this;
   }
   template <class U>
-  complex& operator/=(const complex<U>& value) {
+  __DAVECC_COMPLEX_CXX20_CONSTEXPR complex& operator/=(
+      const complex<U>& value) {
     T a = __real_;
     T b = __imag_;
     T c = static_cast<T>(value.real());
     T d = static_cast<T>(value.imag());
-    T denominator = c * c + d * d;
-    __real_ = (a * c + b * d) / denominator;
-    __imag_ = (b * c - a * d) / denominator;
+    T absolute_c = c < T() ? -c : c;
+    T absolute_d = d < T() ? -d : d;
+    if (absolute_c >= absolute_d) {
+      T ratio = d / c;
+      T denominator = T(1) + ratio * ratio;
+      __real_ = (a / c + (b / c) * ratio) / denominator;
+      __imag_ = (b / c - (a / c) * ratio) / denominator;
+    } else {
+      T ratio = c / d;
+      T denominator = T(1) + ratio * ratio;
+      __real_ = ((a / d) * ratio + b / d) / denominator;
+      __imag_ = ((b / d) * ratio - a / d) / denominator;
+    }
     return *this;
   }
+
+#if __cplusplus >= 202600L
+  constexpr T& __real_ref() { return __real_; }
+  constexpr const T& __real_ref() const { return __real_; }
+  constexpr T& __imag_ref() { return __imag_; }
+  constexpr const T& __imag_ref() const { return __imag_; }
+#endif
 
  private:
   T __real_;
@@ -96,174 +208,283 @@ class complex {
 };
 
 template <class T>
-inline complex<T> operator+(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator+(
+    const complex<T>& value) {
   return value;
 }
 
 template <class T>
-inline complex<T> operator-(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator-(
+    const complex<T>& value) {
   return complex<T>(-value.real(), -value.imag());
 }
 
 template <class T>
-inline complex<T> operator+(complex<T> left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator+(
+    complex<T> left, const complex<T>& right) {
   left += right;
   return left;
 }
 template <class T>
-inline complex<T> operator+(complex<T> left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator+(
+    complex<T> left, const T& right) {
   left += right;
   return left;
 }
 template <class T>
-inline complex<T> operator+(const T& left, complex<T> right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator+(
+    const T& left, complex<T> right) {
   right += left;
   return right;
 }
 
 template <class T>
-inline complex<T> operator-(complex<T> left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator-(
+    complex<T> left, const complex<T>& right) {
   left -= right;
   return left;
 }
 template <class T>
-inline complex<T> operator-(complex<T> left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator-(
+    complex<T> left, const T& right) {
   left -= right;
   return left;
 }
 template <class T>
-inline complex<T> operator-(const T& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator-(
+    const T& left, const complex<T>& right) {
   return complex<T>(left - right.real(), -right.imag());
 }
 
 template <class T>
-inline complex<T> operator*(complex<T> left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator*(
+    complex<T> left, const complex<T>& right) {
   left *= right;
   return left;
 }
 template <class T>
-inline complex<T> operator*(complex<T> left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator*(
+    complex<T> left, const T& right) {
   left *= right;
   return left;
 }
 template <class T>
-inline complex<T> operator*(const T& left, complex<T> right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator*(
+    const T& left, complex<T> right) {
   right *= left;
   return right;
 }
 
 template <class T>
-inline complex<T> operator/(complex<T> left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator/(
+    complex<T> left, const complex<T>& right) {
   left /= right;
   return left;
 }
 template <class T>
-inline complex<T> operator/(complex<T> left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator/(
+    complex<T> left, const T& right) {
   left /= right;
   return left;
 }
 template <class T>
-inline complex<T> operator/(const T& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> operator/(
+    const T& left, const complex<T>& right) {
   complex<T> result(left);
   result /= right;
   return result;
 }
 
 template <class T>
-inline bool operator==(const complex<T>& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator==(
+    const complex<T>& left, const complex<T>& right) {
   return left.real() == right.real() && left.imag() == right.imag();
 }
 template <class T>
-inline bool operator==(const complex<T>& left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator==(
+    const complex<T>& left, const T& right) {
   return left.real() == right && left.imag() == T();
 }
 template <class T>
-inline bool operator==(const T& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator==(
+    const T& left, const complex<T>& right) {
   return right == left;
 }
 
 #if __cplusplus < 202002L
 template <class T>
-inline bool operator!=(const complex<T>& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator!=(
+    const complex<T>& left, const complex<T>& right) {
   return !(left == right);
 }
 template <class T>
-inline bool operator!=(const complex<T>& left, const T& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator!=(
+    const complex<T>& left, const T& right) {
   return !(left == right);
 }
 template <class T>
-inline bool operator!=(const T& left, const complex<T>& right) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR bool operator!=(
+    const T& left, const complex<T>& right) {
   return !(left == right);
 }
 #endif
 
 template <class T>
-inline T real(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX14_CONSTEXPR T real(const complex<T>& value) {
   return value.real();
 }
 template <class T>
-inline T imag(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX14_CONSTEXPR T imag(const complex<T>& value) {
   return value.imag();
 }
 template <class T>
-inline T norm(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR T norm(const complex<T>& value) {
   return value.real() * value.real() + value.imag() * value.imag();
 }
 template <class T>
-inline T abs(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR T abs(
+    const complex<T>& value) {
   return static_cast<T>(
-      std::sqrt(static_cast<double>(norm(value))));
+      std::hypot(static_cast<double>(value.real()),
+                 static_cast<double>(value.imag())));
 }
 template <class T>
-inline T arg(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR T arg(
+    const complex<T>& value) {
   return static_cast<T>(std::atan2(static_cast<double>(value.imag()),
                                   static_cast<double>(value.real())));
 }
 template <class T>
-inline complex<T> conj(const complex<T>& value) {
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<T> conj(
+    const complex<T>& value) {
   return complex<T>(value.real(), -value.imag());
 }
 template <class T>
-inline complex<T> proj(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> proj(
+    const complex<T>& value) {
+  if (isinf(value.real()) || isinf(value.imag())) {
+    return complex<T>(
+        static_cast<T>(HUGE_VAL),
+        static_cast<T>(std::copysign(0.0, static_cast<double>(value.imag()))));
+  }
   return value;
 }
 template <class T>
-inline complex<T> polar(const T& magnitude, const T& angle = T()) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> polar(
+    const T& magnitude, const T& angle = T()) {
   return complex<T>(
       magnitude * static_cast<T>(std::cos(static_cast<double>(angle))),
       magnitude * static_cast<T>(std::sin(static_cast<double>(angle))));
 }
 
+#if __cplusplus >= 201103L
+#define __DAVECC_COMPLEX_REAL_SCALAR_OVERLOADS(Type)                    \
+  inline __DAVECC_COMPLEX_CXX20_CONSTEXPR Type real(Type value) {       \
+    return value;                                                       \
+  }                                                                    \
+  inline __DAVECC_COMPLEX_CXX20_CONSTEXPR Type imag(Type) {             \
+    return Type();                                                      \
+  }                                                                    \
+  inline Type arg(Type value) {                                        \
+    return static_cast<Type>(                                          \
+        std::atan2(0.0, static_cast<double>(value)));                   \
+  }                                                                    \
+  inline __DAVECC_COMPLEX_CXX20_CONSTEXPR Type norm(Type value) {       \
+    return value * value;                                               \
+  }                                                                    \
+  inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<Type> conj(           \
+      Type value) {                                                     \
+    return complex<Type>(value);                                       \
+  }                                                                    \
+  inline __DAVECC_COMPLEX_CXX20_CONSTEXPR complex<Type> proj(           \
+      Type value) {                                                     \
+    return complex<Type>(value);                                       \
+  }
+
+__DAVECC_COMPLEX_REAL_SCALAR_OVERLOADS(float)
+__DAVECC_COMPLEX_REAL_SCALAR_OVERLOADS(double)
+__DAVECC_COMPLEX_REAL_SCALAR_OVERLOADS(long double)
+
+#undef __DAVECC_COMPLEX_REAL_SCALAR_OVERLOADS
+
+template <class Integer>
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR
+    typename enable_if<is_integral<Integer>::value, double>::type
+real(Integer value) {
+  return static_cast<double>(value);
+}
+
+template <class Integer>
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR
+    typename enable_if<is_integral<Integer>::value, double>::type
+imag(Integer) {
+  return 0.0;
+}
+
+template <class Integer>
+inline typename enable_if<is_integral<Integer>::value, double>::type
+arg(Integer value) {
+  return std::atan2(0.0, static_cast<double>(value));
+}
+
+template <class Integer>
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR
+    typename enable_if<is_integral<Integer>::value, double>::type
+norm(Integer value) {
+  double promoted = static_cast<double>(value);
+  return promoted * promoted;
+}
+
+template <class Integer>
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR
+    typename enable_if<is_integral<Integer>::value, complex<double>>::type
+conj(Integer value) {
+  return complex<double>(static_cast<double>(value));
+}
+
+template <class Integer>
+inline __DAVECC_COMPLEX_CXX20_CONSTEXPR
+    typename enable_if<is_integral<Integer>::value, complex<double>>::type
+proj(Integer value) {
+  return complex<double>(static_cast<double>(value));
+}
+#endif
+
 template <class T>
-inline complex<T> exp(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> exp(
+    const complex<T>& value) {
   T scale = static_cast<T>(std::exp(static_cast<double>(value.real())));
   return polar(scale, value.imag());
 }
 template <class T>
-inline complex<T> log(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> log(
+    const complex<T>& value) {
   return complex<T>(
       static_cast<T>(std::log(static_cast<double>(abs(value)))),
       arg(value));
 }
 template <class T>
-inline complex<T> log10(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> log10(
+    const complex<T>& value) {
   return log(value) / static_cast<T>(std::log(10.0));
 }
 template <class T>
-inline complex<T> sqrt(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> sqrt(
+    const complex<T>& value) {
   T magnitude = abs(value);
   T real_part = static_cast<T>(
       std::sqrt(static_cast<double>((magnitude + value.real()) / T(2))));
   T imag_part = static_cast<T>(
       std::sqrt(static_cast<double>((magnitude - value.real()) / T(2))));
-  if (value.imag() < T()) {
-    imag_part = -imag_part;
-  }
+  imag_part = static_cast<T>(
+      std::copysign(static_cast<double>(imag_part),
+                    static_cast<double>(value.imag())));
   return complex<T>(real_part, imag_part);
 }
 
 template <class T>
-inline complex<T> sin(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> sin(
+    const complex<T>& value) {
   double y = static_cast<double>(value.imag());
   double ey = std::exp(y);
   double emy = std::exp(-y);
@@ -274,7 +495,8 @@ inline complex<T> sin(const complex<T>& value) {
       static_cast<T>(std::cos(static_cast<double>(value.real()))) * sinh_y);
 }
 template <class T>
-inline complex<T> cos(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> cos(
+    const complex<T>& value) {
   double y = static_cast<double>(value.imag());
   double ey = std::exp(y);
   double emy = std::exp(-y);
@@ -285,22 +507,58 @@ inline complex<T> cos(const complex<T>& value) {
       -static_cast<T>(std::sin(static_cast<double>(value.real()))) * sinh_y);
 }
 template <class T>
-inline complex<T> tan(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> tan(
+    const complex<T>& value) {
   return sin(value) / cos(value);
 }
 template <class T>
-inline complex<T> sinh(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> sinh(
+    const complex<T>& value) {
   return (exp(value) - exp(-value)) / T(2);
 }
 template <class T>
-inline complex<T> cosh(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> cosh(
+    const complex<T>& value) {
   return (exp(value) + exp(-value)) / T(2);
 }
 template <class T>
-inline complex<T> tanh(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> tanh(
+    const complex<T>& value) {
   return sinh(value) / cosh(value);
 }
 
+#if __cplusplus >= 201103L
+template <class T, class U>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR
+    complex<typename __complex_pow_result<T, U>::type>
+pow(const complex<T>& base, const complex<U>& exponent) {
+  typedef typename __complex_pow_result<T, U>::type result_type;
+  return exp(complex<result_type>(exponent) *
+             log(complex<result_type>(base)));
+}
+
+template <class T, class U>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR
+    typename enable_if<
+        is_arithmetic<U>::value,
+        complex<typename __complex_pow_result<T, U>::type> >::type
+pow(const complex<T>& base, const U& exponent) {
+  typedef typename __complex_pow_result<T, U>::type result_type;
+  return exp(complex<result_type>(static_cast<result_type>(exponent)) *
+             log(complex<result_type>(base)));
+}
+
+template <class T, class U>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR
+    typename enable_if<
+        is_arithmetic<T>::value,
+        complex<typename __complex_pow_result<T, U>::type> >::type
+pow(const T& base, const complex<U>& exponent) {
+  typedef typename __complex_pow_result<T, U>::type result_type;
+  return exp(complex<result_type>(exponent) *
+             log(complex<result_type>(static_cast<result_type>(base))));
+}
+#else
 template <class T>
 inline complex<T> pow(const complex<T>& base, const complex<T>& exponent) {
   return exp(exponent * log(base));
@@ -315,48 +573,78 @@ inline complex<T> pow(const T& base, const complex<T>& exponent) {
 }
 template <class T>
 inline complex<T> pow(const complex<T>& base, int exponent) {
-  if (exponent < 0) {
-    return complex<T>(T(1)) / pow(base, -exponent);
-  }
+  bool negative = exponent < 0;
+  unsigned int remaining =
+      negative ? 0u - static_cast<unsigned int>(exponent)
+               : static_cast<unsigned int>(exponent);
   complex<T> result(T(1));
   complex<T> factor(base);
-  while (exponent != 0) {
-    if ((exponent & 1) != 0) {
+  while (remaining != 0) {
+    if ((remaining & 1u) != 0) {
       result *= factor;
     }
-    exponent >>= 1;
-    if (exponent != 0) {
+    remaining >>= 1;
+    if (remaining != 0) {
       factor *= factor;
     }
   }
-  return result;
+  return negative ? complex<T>(T(1)) / result : result;
 }
+#endif
 
 template <class T>
-inline complex<T> asin(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> asin(
+    const complex<T>& value) {
   const complex<T> i(T(), T(1));
   return -i * log(i * value + sqrt(complex<T>(T(1)) - value * value));
 }
 template <class T>
-inline complex<T> acos(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> acos(
+    const complex<T>& value) {
   const T half_pi =
       static_cast<T>(std::atan2(1.0, 0.0));
   return complex<T>(half_pi) - asin(value);
 }
 template <class T>
-inline complex<T> atan(const complex<T>& value) {
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> atan(
+    const complex<T>& value) {
   const complex<T> i(T(), T(1));
   return (i / T(2)) *
          (log(complex<T>(T(1)) - i * value) -
           log(complex<T>(T(1)) + i * value));
 }
 
+template <class T>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> asinh(
+    const complex<T>& value) {
+  return log(value + sqrt(value * value + complex<T>(T(1))));
+}
+
+template <class T>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> acosh(
+    const complex<T>& value) {
+  return log(value + sqrt(value + complex<T>(T(1))) *
+                         sqrt(value - complex<T>(T(1))));
+}
+
+template <class T>
+inline __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR complex<T> atanh(
+    const complex<T>& value) {
+  return (log(complex<T>(T(1)) + value) -
+          log(complex<T>(T(1)) - value)) /
+         T(2);
+}
+
 template <class CharT, class Traits, class T>
 basic_ostream<CharT, Traits>& operator<<(basic_ostream<CharT, Traits>& output,
                                         const complex<T>& value) {
-  output << CharT('(') << value.real() << CharT(',') << value.imag()
+  basic_ostringstream<CharT, Traits> buffer;
+  buffer.flags(output.flags());
+  buffer.imbue(output.getloc());
+  buffer.precision(output.precision());
+  buffer << CharT('(') << value.real() << CharT(',') << value.imag()
          << CharT(')');
-  return output;
+  return output << buffer.str();
 }
 
 template <class CharT, class Traits, class T>
@@ -391,28 +679,82 @@ basic_istream<CharT, Traits>& operator>>(basic_istream<CharT, Traits>& input,
 #if __cplusplus >= 201402L
 inline namespace literals {
 inline namespace complex_literals {
-inline complex<double> operator""i(long double value) {
+inline constexpr complex<double> operator""i(long double value) {
   return complex<double>(0.0, static_cast<double>(value));
 }
-inline complex<float> operator""if(long double value) {
+inline constexpr complex<float> operator""if(long double value) {
   return complex<float>(0.0f, static_cast<float>(value));
 }
-inline complex<long double> operator""il(long double value) {
+inline constexpr complex<long double> operator""il(long double value) {
   return complex<long double>(0.0L, value);
 }
-inline complex<double> operator""i(unsigned long long value) {
+inline constexpr complex<double> operator""i(unsigned long long value) {
   return complex<double>(0.0, static_cast<double>(value));
 }
-inline complex<float> operator""if(unsigned long long value) {
+inline constexpr complex<float> operator""if(unsigned long long value) {
   return complex<float>(0.0f, static_cast<float>(value));
 }
-inline complex<long double> operator""il(unsigned long long value) {
+inline constexpr complex<long double> operator""il(unsigned long long value) {
   return complex<long double>(0.0L, static_cast<long double>(value));
 }
 }  // namespace complex_literals
 }  // namespace literals
 #endif
 
+#if __cplusplus >= 202600L
+template <class T>
+struct tuple_size<complex<T> > : integral_constant<size_t, 2> {};
+
+template <size_t I, class T>
+struct tuple_element<I, complex<T> > {
+  static_assert(I < 2, "complex index out of range");
+  typedef T type;
+};
+
+template <size_t I, class T>
+struct __complex_getter;
+
+template <class T>
+struct __complex_getter<0, T> {
+  static constexpr T& get(complex<T>& value) { return value.__real_ref(); }
+  static constexpr const T& get(const complex<T>& value) {
+    return value.__real_ref();
+  }
+};
+
+template <class T>
+struct __complex_getter<1, T> {
+  static constexpr T& get(complex<T>& value) { return value.__imag_ref(); }
+  static constexpr const T& get(const complex<T>& value) {
+    return value.__imag_ref();
+  }
+};
+
+template <size_t I, class T>
+constexpr T& get(complex<T>& value) noexcept {
+  return __complex_getter<I, T>::get(value);
+}
+
+template <size_t I, class T>
+constexpr const T& get(const complex<T>& value) noexcept {
+  return __complex_getter<I, T>::get(value);
+}
+
+template <size_t I, class T>
+constexpr T&& get(complex<T>&& value) noexcept {
+  return static_cast<T&&>(__complex_getter<I, T>::get(value));
+}
+
+template <size_t I, class T>
+constexpr const T&& get(const complex<T>&& value) noexcept {
+  return static_cast<const T&&>(__complex_getter<I, T>::get(value));
+}
+#endif
+
 }  // namespace std
+
+#undef __DAVECC_COMPLEX_CXX14_CONSTEXPR
+#undef __DAVECC_COMPLEX_CXX20_CONSTEXPR
+#undef __DAVECC_COMPLEX_TRANSCENDENTAL_CONSTEXPR
 
 #endif /* __davecc_complex__ */

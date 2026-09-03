@@ -20,6 +20,7 @@
 #endif
 
 #if __cplusplus >= 201402L
+#define __cpp_lib_complex_udls 201309L
 #ifndef __cpp_lib_chrono_udls
 #define __cpp_lib_chrono_udls 201304L
 #endif
@@ -33,6 +34,7 @@
 #define __cpp_lib_bitops 201907L
 #endif
 #define __cpp_lib_constexpr_dynamic_alloc 201907L
+#define __cpp_lib_constexpr_complex 201711L
 #define __cpp_lib_endian 201907L
 #ifndef __cpp_lib_format
 #define __cpp_lib_format 201907L
@@ -96,6 +98,9 @@
 #endif
 
 #if __cplusplus >= 202600L
+#ifndef __cpp_lib_tuple_like
+#define __cpp_lib_tuple_like 202311L
+#endif
 #ifndef __cpp_lib_observable_checkpoint
 #define __cpp_lib_observable_checkpoint 202506L
 #endif

@@ -134,6 +134,15 @@ int test(void) {
 }' \
   -std=c23
 
+expect_compile c23_complex_header x86_64 \
+  '#include <complex.h>
+#if __STDC_VERSION_COMPLEX_H__ != 202311L
+#error incorrect C23 complex header version
+#endif
+double complex value = CMPLX(1.0, 2.0);
+int test(void) { return creal(value) != 1.0 || cimag(value) != 2.0; }' \
+  -std=c23 -isystem "$ROOT/libc/include"
+
 expect_fail atomic_aggregate x86_64 \
   "_Atomic currently supports only scalar and pointer types" \
   'struct pair { int x; int y; };
@@ -226,6 +235,42 @@ _Static_assert(_Generic((complex_long_double){0},
                         long double _Complex: 1, default: 0),
                "long complex means long double complex");
 int test(void) { return 0; }'
+
+expect_compile tgmath_c99_dispatch x86_64 \
+  '#include <tgmath.h>
+typedef char sin_float[
+    _Generic((sin(0.0f)), float: 1, default: -1)];
+typedef char sin_integer[
+    _Generic((sin(1)), double: 1, default: -1)];
+typedef char sqrt_complex_float[
+    _Generic((sqrt(CMPLXF(4.0f, 0.0f))),
+             float _Complex: 1, default: -1)];
+typedef char pow_integer_promotes_to_double[
+    _Generic((pow(2.0f, 3)), double: 1, default: -1)];
+typedef char conjugate_long_double[
+    _Generic((conj(CMPLXL(1.0L, 2.0L))),
+             long double _Complex: 1, default: -1)];
+typedef char real_component_float[
+    _Generic((creal(CMPLXF(1.0f, 2.0f))), float: 1, default: -1)];
+typedef char imaginary_integer_is_double[
+    _Generic((cimag(1)), double: 1, default: -1)];
+int test(void) {
+  int evaluations = 0;
+  (void)sin(evaluations++);
+  return evaluations != 1;
+}' \
+  -std=c99 -isystem "$ROOT/libc/include"
+
+expect_compile complex_header_function_contract x86_64 \
+  '#include <complex.h>
+double (*real_part)(double _Complex) = creal;
+double (*imaginary_part)(double _Complex) = cimag;
+typedef char unsuffixed_creal_returns_double[
+    _Generic((creal(CMPLXF(1.0f, 2.0f))), double: 1, default: -1)];
+int test(void) {
+  return real_part(1.0) != 1.0 || imaginary_part(1.0) != 0.0;
+}' \
+  -std=c99 -isystem "$ROOT/libc/include"
 
 expect_fail complex_increment x86_64 \
   "Cannot increment or decrement a complex value" \
