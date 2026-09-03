@@ -518,11 +518,13 @@ file_clock::time_point file_clock::now() noexcept {
   return time_point(__realtime_since_epoch());
 }
 
-sys_time file_clock::to_sys(const file_clock::time_point& value) noexcept {
-  return sys_time{value.time_since_epoch()};
+system_clock::time_point file_clock::to_sys(
+    const file_clock::time_point& value) noexcept {
+  return system_clock::time_point{value.time_since_epoch()};
 }
 
-file_clock::time_point file_clock::from_sys(const sys_time& value) noexcept {
+file_clock::time_point file_clock::from_sys(
+    const system_clock::time_point& value) noexcept {
   return time_point(value.time_since_epoch());
 }
 
@@ -530,24 +532,31 @@ utc_clock::time_point utc_clock::now() noexcept {
   return from_sys(system_clock::now());
 }
 
-sys_time utc_clock::to_sys(const utc_clock::time_point& value) noexcept {
-  return sys_time{system_clock::duration(value.time_since_epoch().count())};
+system_clock::time_point utc_clock::to_sys(
+    const utc_clock::time_point& value) noexcept {
+  return system_clock::time_point{
+      system_clock::duration(value.time_since_epoch().count())};
 }
 
-utc_clock::time_point utc_clock::from_sys(const sys_time& value) noexcept {
-  return utc_time{utc_clock::duration(value.time_since_epoch().count())};
+utc_clock::time_point utc_clock::from_sys(
+    const system_clock::time_point& value) noexcept {
+  return utc_clock::time_point{
+      utc_clock::duration(value.time_since_epoch().count())};
 }
 
 tai_clock::time_point tai_clock::now() noexcept {
   return from_utc(utc_clock::now());
 }
 
-utc_time tai_clock::to_utc(const tai_clock::time_point& value) noexcept {
-  return utc_time{utc_clock::duration(value.time_since_epoch().count() -
-                                       __chrono_detail::__tai_minus_utc.count())};
+utc_clock::time_point tai_clock::to_utc(
+    const tai_clock::time_point& value) noexcept {
+  return utc_clock::time_point{
+      utc_clock::duration(value.time_since_epoch().count() -
+                          __chrono_detail::__tai_minus_utc.count())};
 }
 
-tai_clock::time_point tai_clock::from_utc(const utc_time& value) noexcept {
+tai_clock::time_point tai_clock::from_utc(
+    const utc_clock::time_point& value) noexcept {
   return time_point{tai_clock::duration(value.time_since_epoch().count() +
                                         __chrono_detail::__tai_minus_utc.count())};
 }
@@ -556,12 +565,15 @@ gps_clock::time_point gps_clock::now() noexcept {
   return from_utc(utc_clock::now());
 }
 
-utc_time gps_clock::to_utc(const gps_clock::time_point& value) noexcept {
-  return utc_time{utc_clock::duration(value.time_since_epoch().count() -
-                                       __chrono_detail::__gps_minus_utc.count())};
+utc_clock::time_point gps_clock::to_utc(
+    const gps_clock::time_point& value) noexcept {
+  return utc_clock::time_point{
+      utc_clock::duration(value.time_since_epoch().count() -
+                          __chrono_detail::__gps_minus_utc.count())};
 }
 
-gps_clock::time_point gps_clock::from_utc(const utc_time& value) noexcept {
+gps_clock::time_point gps_clock::from_utc(
+    const utc_clock::time_point& value) noexcept {
   return time_point{gps_clock::duration(value.time_since_epoch().count() +
                                         __chrono_detail::__gps_minus_utc.count())};
 }

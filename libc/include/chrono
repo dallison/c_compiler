@@ -1245,27 +1245,23 @@ class gps_clock {
 
 using high_resolution_clock = system_clock;
 
-using sys_time = time_point<system_clock, system_clock::duration>;
-using sys_seconds = time_point<system_clock, seconds>;
-using sys_days = time_point<system_clock, days>;
+template <class Duration>
+using sys_time = time_point<system_clock, Duration>;
+using sys_seconds = sys_time<seconds>;
+using sys_days = sys_time<days>;
 using local_days = time_point<local_t, days>;
-using file_time = file_clock::time_point;
-using utc_time = utc_clock::time_point;
-using tai_time = tai_clock::time_point;
-using gps_time = gps_clock::time_point;
+template <class Duration>
+using file_time = time_point<file_clock, Duration>;
+template <class Duration>
+using utc_time = time_point<utc_clock, Duration>;
+template <class Duration>
+using tai_time = time_point<tai_clock, Duration>;
+template <class Duration>
+using gps_time = time_point<gps_clock, Duration>;
 using file_time_type = time_point<file_clock, nanoseconds>;
 
 template <class Duration>
-struct local_time : time_point<local_t, Duration> {
-  using __base = time_point<local_t, Duration>;
-
-  constexpr local_time() : __base() {}
-  constexpr explicit local_time(const Duration& d) : __base(d) {}
-
-  template <class Duration2>
-  constexpr local_time(const time_point<local_t, Duration2>& other)
-      : __base(duration_cast<Duration>(other.time_since_epoch())) {}
-};
+using local_time = time_point<local_t, Duration>;
 
 using local_seconds = local_time<seconds>;
 
@@ -1688,12 +1684,16 @@ inline year_month_day __year_month_day_from_last_weekday(const year_month& ym,
                                             wl.weekday_encoding());
 }
 
-constexpr utc_time __utc_from_sys(const sys_time& value) {
-  return utc_time{utc_clock::duration(value.time_since_epoch().count())};
+constexpr utc_time<utc_clock::duration> __utc_from_sys(
+    const sys_time<system_clock::duration>& value) {
+  return utc_time<utc_clock::duration>{
+      utc_clock::duration(value.time_since_epoch().count())};
 }
 
-constexpr sys_time __sys_from_utc(const utc_time& value) {
-  return sys_time{system_clock::duration(value.time_since_epoch().count())};
+constexpr sys_time<system_clock::duration> __sys_from_utc(
+    const utc_time<utc_clock::duration>& value) {
+  return sys_time<system_clock::duration>{
+      system_clock::duration(value.time_since_epoch().count())};
 }
 
 // Fixed offsets without a leap-second table: POSIX system time ignores leap
@@ -1788,8 +1788,6 @@ constexpr local_days local_days_from_sys_days(sys_days value) noexcept {
 constexpr sys_days sys_days_from_local_days(local_days value) noexcept {
   return sys_days{value.time_since_epoch()};
 }
-
-constexpr sys_time clock_cast(const sys_time& value) noexcept { return value; }
 
 template <class DestClock, class SourceClock, class Duration>
 constexpr time_point<DestClock,
