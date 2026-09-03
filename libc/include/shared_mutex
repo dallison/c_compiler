@@ -1,0 +1,302 @@
+//
+//  shared_mutex
+//  libc
+//
+
+#ifndef shared_mutex_h
+#define shared_mutex_h
+
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <utility>
+
+namespace std {
+
+namespace __shared_mutex_detail {
+
+template <class Mutex, class Rep, class Period>
+bool __try_lock_shared_for(
+    Mutex& mutex, const chrono::duration<Rep, Period>& timeout) {
+  return mutex.try_lock_shared_for(timeout);
+}
+
+template <class Mutex, class Clock, class Duration>
+bool __try_lock_shared_until(
+    Mutex& mutex, const chrono::time_point<Clock, Duration>& timeout) {
+  return mutex.try_lock_shared_until(timeout);
+}
+
+class __base {
+ public:
+  __base() : __readers_(0), __waiting_writers_(0), __writer_(false) {}
+  __base(const __base&) = delete;
+  __base& operator=(const __base&) = delete;
+
+  void lock() {
+    unique_lock<mutex> guard(__mutex_);
+    ++__waiting_writers_;
+    __condition_.wait(guard, [this] {
+      return !this->__writer_ && this->__readers_ == 0;
+    });
+    --__waiting_writers_;
+    __writer_ = true;
+  }
+
+  bool try_lock() {
+    lock_guard<mutex> guard(__mutex_);
+    if (__writer_ || __readers_ != 0) return false;
+    __writer_ = true;
+    return true;
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    unique_lock<mutex> guard(__mutex_);
+    ++__waiting_writers_;
+    bool acquired = __condition_.wait_until(guard, timeout, [this] {
+      return !this->__writer_ && this->__readers_ == 0;
+    });
+    --__waiting_writers_;
+    if (!acquired) {
+      __condition_.notify_all();
+      return false;
+    }
+    __writer_ = true;
+    return true;
+  }
+
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    return try_lock_until(chrono::steady_clock::now() + timeout);
+  }
+
+  void unlock() {
+    {
+      lock_guard<mutex> guard(__mutex_);
+      __writer_ = false;
+    }
+    __condition_.notify_all();
+  }
+
+  void lock_shared() {
+    unique_lock<mutex> guard(__mutex_);
+    __condition_.wait(guard, [this] {
+      return !this->__writer_ && this->__waiting_writers_ == 0;
+    });
+    ++__readers_;
+  }
+
+  bool try_lock_shared() {
+    lock_guard<mutex> guard(__mutex_);
+    if (__writer_ || __waiting_writers_ != 0) return false;
+    ++__readers_;
+    return true;
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_shared_until(
+      const chrono::time_point<Clock, Duration>& timeout) {
+    unique_lock<mutex> guard(__mutex_);
+    if (!__condition_.wait_until(guard, timeout, [this] {
+          return !this->__writer_ && this->__waiting_writers_ == 0;
+        })) {
+      return false;
+    }
+    ++__readers_;
+    return true;
+  }
+
+  template <class Rep, class Period>
+  bool try_lock_shared_for(const chrono::duration<Rep, Period>& timeout) {
+    return try_lock_shared_until(chrono::steady_clock::now() + timeout);
+  }
+
+  void unlock_shared() {
+    bool notify;
+    {
+      lock_guard<mutex> guard(__mutex_);
+      --__readers_;
+      notify = __readers_ == 0;
+    }
+    if (notify) __condition_.notify_all();
+  }
+
+ public:
+  mutex __mutex_;
+  condition_variable __condition_;
+  unsigned long __readers_;
+  unsigned long __waiting_writers_;
+  bool __writer_;
+};
+
+}  // namespace __shared_mutex_detail
+
+class shared_mutex {
+ public:
+  shared_mutex() = default;
+  ~shared_mutex() = default;
+  shared_mutex(const shared_mutex&) = delete;
+  shared_mutex& operator=(const shared_mutex&) = delete;
+
+  void lock() { __base_.lock(); }
+  bool try_lock() { return __base_.try_lock(); }
+  void unlock() { __base_.unlock(); }
+  void lock_shared() { __base_.lock_shared(); }
+  bool try_lock_shared() { return __base_.try_lock_shared(); }
+  void unlock_shared() { __base_.unlock_shared(); }
+
+ private:
+  __shared_mutex_detail::__base __base_;
+};
+
+class shared_timed_mutex {
+ public:
+  shared_timed_mutex() = default;
+  ~shared_timed_mutex() = default;
+  shared_timed_mutex(const shared_timed_mutex&) = delete;
+  shared_timed_mutex& operator=(const shared_timed_mutex&) = delete;
+
+  void lock() { __base_.lock(); }
+  bool try_lock() { return __base_.try_lock(); }
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    return __base_.try_lock_for(timeout);
+  }
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    return __base_.try_lock_until(timeout);
+  }
+  void unlock() { __base_.unlock(); }
+  void lock_shared() { __base_.lock_shared(); }
+  bool try_lock_shared() { return __base_.try_lock_shared(); }
+  template <class Rep, class Period>
+  bool try_lock_shared_for(const chrono::duration<Rep, Period>& timeout) {
+    return __base_.try_lock_shared_for(timeout);
+  }
+  template <class Clock, class Duration>
+  bool try_lock_shared_until(
+      const chrono::time_point<Clock, Duration>& timeout) {
+    return __base_.try_lock_shared_until(timeout);
+  }
+  void unlock_shared() { __base_.unlock_shared(); }
+
+ private:
+  __shared_mutex_detail::__base __base_;
+};
+
+template <class Mutex>
+class shared_lock {
+ public:
+  using mutex_type = Mutex;
+
+  shared_lock() noexcept : __mutex_(nullptr), __owns_(false) {}
+  explicit shared_lock(mutex_type& mutex)
+      : __mutex_(&mutex), __owns_(false) {
+    lock();
+  }
+  shared_lock(mutex_type& mutex, defer_lock_t) noexcept
+      : __mutex_(&mutex), __owns_(false) {}
+  shared_lock(mutex_type& mutex, try_to_lock_t)
+      : __mutex_(&mutex), __owns_(mutex.try_lock_shared()) {}
+  shared_lock(mutex_type& mutex, adopt_lock_t)
+      : __mutex_(&mutex), __owns_(true) {}
+
+  template <class Clock, class Duration>
+  shared_lock(mutex_type& mutex,
+              const chrono::time_point<Clock, Duration>& timeout)
+      : __mutex_(&mutex),
+        __owns_(
+            __shared_mutex_detail::__try_lock_shared_until(mutex, timeout)) {}
+
+  template <class Rep, class Period>
+  shared_lock(mutex_type& mutex,
+              const chrono::duration<Rep, Period>& timeout)
+      : __mutex_(&mutex),
+        __owns_(
+            __shared_mutex_detail::__try_lock_shared_for(mutex, timeout)) {}
+
+  ~shared_lock() {
+    if (__owns_) __mutex_->unlock_shared();
+  }
+
+  shared_lock(shared_lock&& other) noexcept
+      : __mutex_(other.__mutex_), __owns_(other.__owns_) {
+    other.__mutex_ = nullptr;
+    other.__owns_ = false;
+  }
+
+  shared_lock& operator=(shared_lock&& other) noexcept {
+    if (this != &other) {
+      if (__owns_) __mutex_->unlock_shared();
+      __mutex_ = other.__mutex_;
+      __owns_ = other.__owns_;
+      other.__mutex_ = nullptr;
+      other.__owns_ = false;
+    }
+    return *this;
+  }
+
+  shared_lock(const shared_lock&) = delete;
+  shared_lock& operator=(const shared_lock&) = delete;
+
+  void lock() {
+    if (__mutex_ == nullptr || __owns_) abort();
+    __mutex_->lock_shared();
+    __owns_ = true;
+  }
+
+  bool try_lock() {
+    if (__mutex_ == nullptr || __owns_) abort();
+    return __owns_ = __mutex_->try_lock_shared();
+  }
+
+  template <class Rep, class Period>
+  bool try_lock_for(const chrono::duration<Rep, Period>& timeout) {
+    if (__mutex_ == nullptr || __owns_) abort();
+    return __owns_ =
+        __shared_mutex_detail::__try_lock_shared_for(*__mutex_, timeout);
+  }
+
+  template <class Clock, class Duration>
+  bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout) {
+    if (__mutex_ == nullptr || __owns_) abort();
+    return __owns_ =
+        __shared_mutex_detail::__try_lock_shared_until(*__mutex_, timeout);
+  }
+
+  void unlock() {
+    if (!__owns_) abort();
+    __mutex_->unlock_shared();
+    __owns_ = false;
+  }
+
+  void swap(shared_lock& other) noexcept {
+    std::swap(__mutex_, other.__mutex_);
+    std::swap(__owns_, other.__owns_);
+  }
+
+  mutex_type* release() noexcept {
+    mutex_type* result = __mutex_;
+    __mutex_ = nullptr;
+    __owns_ = false;
+    return result;
+  }
+
+  bool owns_lock() const noexcept { return __owns_; }
+  explicit operator bool() const noexcept { return __owns_; }
+  mutex_type* mutex() const noexcept { return __mutex_; }
+
+ private:
+  mutex_type* __mutex_;
+  bool __owns_;
+};
+
+template <class Mutex>
+void swap(shared_lock<Mutex>& left, shared_lock<Mutex>& right) noexcept {
+  left.swap(right);
+}
+
+}  // namespace std
+
+#endif /* shared_mutex_h */

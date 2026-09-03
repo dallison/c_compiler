@@ -454,18 +454,26 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
     return;
   }
   bool is_pack_expansion = LexMatch(parser->lex, TOK(ellipsis));
-  if (!name.is_qualified || name.components.length != 2) {
+  if (!name.is_qualified || name.components.length < 2) {
     SyntaxError(parser->syntax,
                 "Member using declaration requires Base::member");
     FullyQualifiedIdentifierDestruct(&name);
     return;
   }
 
-  String* base_name = name.components.value.p[0];
-  String* member_name = name.components.value.p[1];
-  Symbol* base_symbol = SyntaxFindSymbol(parser->syntax, base_name);
-  if (base_symbol == NULL) {
-    base_symbol = SyntaxFindTag(parser->syntax, base_name);
+  size_t base_component = name.components.length - 2;
+  String* base_name = name.components.value.p[base_component];
+  String* member_name =
+      name.components.value.p[name.components.length - 1];
+  Symbol* base_symbol = NULL;
+  if (name.components.length == 2 && !name.absolute) {
+    base_symbol = SyntaxFindSymbol(parser->syntax, base_name);
+    if (base_symbol == NULL) {
+      base_symbol = SyntaxFindTag(parser->syntax, base_name);
+    }
+  } else {
+    base_symbol = SyntaxFindQualifiedPrefixSymbol(
+        parser->syntax, &name, name.components.length - 1);
   }
   if (base_symbol == NULL || base_symbol->type == NULL) {
     SyntaxError(parser->syntax, "No such base class %s", base_name->value);
@@ -475,8 +483,10 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
 
   TypeRecord* base_type = NULL;
   Vector* base_args = NULL;
-  if (base_symbol->flags.is_template && name.template_arguments.length > 0) {
-    base_args = TemplateArgumentVectorCopy(name.template_arguments.value.p[0]);
+  if (base_symbol->flags.is_template &&
+      base_component < name.template_arguments.length) {
+    base_args = TemplateArgumentVectorCopy(
+        name.template_arguments.value.p[base_component]);
   }
   if (base_symbol->flags.is_template && base_args != NULL &&
       !parser->syntax->parsing_template_declaration &&

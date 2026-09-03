@@ -433,10 +433,17 @@ static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
   return NULL;
 }
 
+// While a lambda body is parsed, an explicit `this` expression denotes the
+// enclosing member function's object rather than the closure's synthesized
+// `this` parameter. Nested lambda parsing saves and restores this override.
+static Symbol* lambda_enclosing_this;
+
 static ASTNode* ParseThisExpression(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);
-  Symbol* this_symbol = FindThisSymbol(syntax);
+  Symbol* this_symbol =
+      lambda_enclosing_this != NULL ? lambda_enclosing_this
+                                    : FindThisSymbol(syntax);
   if (this_symbol == NULL) {
     SyntaxError(syntax, "'this' is only valid inside a C++ member function");
     TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
@@ -2503,6 +2510,29 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
 
   while (!LexLookingAt(syntax->lex, TOK(rsquare)) && !LexEof(syntax->lex)) {
     bool by_reference = LexMatch(syntax->lex, TOK(amp));
+    if (LexLookingAt(syntax->lex, TOK(this))) {
+      Symbol* symbol =
+          lambda_enclosing_this != NULL ? lambda_enclosing_this
+                                        : FindThisSymbol(syntax);
+      if (by_reference) {
+        SyntaxError(syntax, "'this' cannot be captured by reference");
+      }
+      if (symbol == NULL) {
+        SyntaxError(syntax,
+                    "'this' capture is only valid inside a member function");
+      } else if (FindLambdaCapture(captures, symbol) == NULL) {
+        VectorAppend(captures,
+                     NewLambdaCapture(symbol, /*by_reference=*/false,
+                                      /*is_pack_expansion=*/false,
+                                      /*initializer=*/NULL,
+                                      /*is_init_capture=*/false));
+      }
+      LexNextToken(syntax->lex);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
+    }
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected lambda capture name");
       break;
@@ -3425,10 +3455,16 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
     SyntaxError(syntax, "static lambda cannot have captures");
   }
   TypeRecord* enclosing_function = compiler->current_function;
+  Symbol* enclosing_this =
+      lambda_enclosing_this != NULL ? lambda_enclosing_this
+                                    : FindThisSymbol(syntax);
+  Symbol* saved_lambda_enclosing_this = lambda_enclosing_this;
   compiler->current_function = call_operator->type;
+  lambda_enclosing_this = enclosing_this;
   syntax->parsing_lambda_body_depth++;
   ParseLambdaBody(syntax, call_operator, &captures, followers);
   syntax->parsing_lambda_body_depth--;
+  lambda_enclosing_this = saved_lambda_enclosing_this;
   compiler->current_function = enclosing_function;
   if (opened_template_scope) {
     // The TemplateParameter objects were transferred into the operator()'s
@@ -5662,6 +5698,43 @@ static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_typ
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static ASTNode* NewArrayValueInitializationLoop(
+    Syntax* syntax, TypeRecord* element_type, Symbol* ptr, Symbol* count,
+    ASTNode* initializer, SourceLocation location) {
+  Symbol* index =
+      SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(index, location),
+                             NewIntLiteral(0, location), index->type,
+                             location),
+                   location));
+  ASTNode* element =
+      NewUnaryASTNode(AST_OP(contents), element_type, location,
+                      NewPtrAdd(NewIdentifierASTNode(ptr, location),
+                                NewIdentifierASTNode(index, location),
+                                location));
+  Vector* body_statements = NewVector();
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewAssign(element, initializer, element_type, location),
+                   location));
+  VectorAppend(body_statements,
+               NewExpressionStatement(NewPostIncrement(index, location),
+                                      location));
+  ASTNode* condition =
+      NewBinaryASTNode(AST_OP(less), NULL, location,
+                       NewIdentifierASTNode(index, location),
+                       NewIdentifierASTNode(count, location));
+  VectorAppend(statements,
+               NewCombinedStatementASTNode(
+                   AST_OP(while), condition,
+                   NewCompoundStatementASTNode(body_statements, location),
+                   location));
+  return NewCompoundStatementASTNode(statements, location);
+}
+
 static ASTNode* NewArrayDestructionLoop(Syntax* syntax, TypeRecord* element_type,
                                         Symbol* ptr, Symbol* count,
                                         SourceLocation location) {
@@ -5869,6 +5942,21 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     LexNextToken(syntax->lex);
     array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+    if (LexLookingAt(syntax->lex, TOK(lparen)) ||
+        LexLookingAt(syntax->lex, TOK(lbrace))) {
+      Token array_initializer_open = syntax->lex->current_token;
+      Vector* initializers = ParseCXXNewInitializerArguments(
+          syntax, array_initializer_open, followers);
+      if (initializers->length == 0) {
+        value_init = true;
+        scalar_initializer = NewIntLiteral(0, location);
+        VectorDelete(initializers);
+      } else {
+        SyntaxError(syntax,
+                    "non-empty array new initializer is not supported");
+        VectorDeleteWithContents(initializers, NULL, true);
+      }
+    }
   } else if (ctor_actuals == NULL &&
              (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace))) {
     if (FindCXXConstructorForType(allocated_type) == NULL) {
@@ -6049,6 +6137,11 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       VectorAppend(statements,
                    NewArrayConstructionLoop(syntax, allocated_type, object_ptr,
                                             array_count, location));
+    } else if (scalar_initializer != NULL) {
+      VectorAppend(statements,
+                   NewArrayValueInitializationLoop(
+                       syntax, allocated_type, object_ptr, array_count,
+                       scalar_initializer, location));
     }
     VectorAppend(statements,
                  NewExpressionStatement(NewIdentifierASTNode(object_ptr,
@@ -6138,12 +6231,13 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
     Symbol* header = SyntaxNewTemporary(syntax, size_ptr_type);
     Symbol* count = SyntaxNewTemporary(syntax, size_type);
     Vector* statements = NewVector();
+    Vector* guarded_statements = NewVector();
     VectorAppend(statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(object_ptr, location),
                                expr, object_ptr->type, location),
                      location));
-    VectorAppend(statements,
+    VectorAppend(guarded_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(header, location),
                                NewPtrSub(NewTypedCast(size_ptr_type,
@@ -6154,7 +6248,7 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                          NewIntLiteral(1, location), location),
                                header->type, location),
                      location));
-    VectorAppend(statements,
+    VectorAppend(guarded_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(count, location),
                                NewUnaryASTNode(AST_OP(contents), size_type,
@@ -6165,19 +6259,28 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                      location));
     if (TypeIsStructOrUnionPointer(pointer_type) &&
         FindCXXDestructorForType(pointer_type->next) != NULL) {
-      VectorAppend(statements,
+      VectorAppend(guarded_statements,
                    NewArrayDestructionLoop(syntax, pointer_type->next,
                                            object_ptr, count, location));
     }
     Vector* actuals = NewVector();
     VectorAppend(actuals, NewIdentifierASTNode(header, location));
-    VectorAppend(statements,
+    VectorAppend(guarded_statements,
                  NewExpressionStatement(
                      NewCallASTNode(GetCXXOperatorDeleteForType(
                                         pointer_type->next, true, location,
                                         global_scope),
                                     location, actuals),
                      location));
+    ASTNode* nonnull = NewBinaryASTNode(
+        AST_OP(noteq), NULL, location,
+        NewIdentifierASTNode(object_ptr, location),
+        NewIntLiteral(0, location));
+    VectorAppend(statements,
+                 NewIfStatementASTNode(
+                     nonnull,
+                     NewCompoundStatementASTNode(guarded_statements, location),
+                     NULL, false, location));
     return NewUnaryASTNode(
         AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
         location, NewCompoundStatementASTNode(statements, location));
@@ -6205,11 +6308,23 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
       NewCallASTNode(GetCXXOperatorDeleteForType(pointer_type->next, false,
                                                  location, global_scope),
                      location, actuals);
-  return NewBinaryASTNode(
-      AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
-      assign, NewBinaryASTNode(AST_OP(comma),
-                               NewTypeRecordWithSize(kTypeVoid, kQualPlain),
-                               location, destructor, deallocate));
+  Vector* guarded_statements = NewVector();
+  VectorAppend(guarded_statements,
+               NewExpressionStatement(destructor, location));
+  VectorAppend(guarded_statements,
+               NewExpressionStatement(deallocate, location));
+  ASTNode* nonnull = NewBinaryASTNode(
+      AST_OP(noteq), NULL, location, NewIdentifierASTNode(temp, location),
+      NewIntLiteral(0, location));
+  ASTNode* guarded_delete = NewIfStatementASTNode(
+      nonnull, NewCompoundStatementASTNode(guarded_statements, location), NULL,
+      false, location);
+  Vector* statements = NewVector();
+  VectorAppend(statements, NewExpressionStatement(assign, location));
+  VectorAppend(statements, guarded_delete);
+  return NewUnaryASTNode(
+      AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+      location, NewCompoundStatementASTNode(statements, location));
 }
 
 static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers,

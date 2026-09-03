@@ -96,6 +96,9 @@ static bool ProcessMemoryOk(X86_64Interpreter* interpreter, uint64_t addr,
 
 static bool InterpreterAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
                                  size_t size) {
+  if ((uint64_t)size > UINT64_MAX - addr) {
+    return false;
+  }
   if (interpreter->fs_base != 0 && interpreter->tls_block_size > 0) {
     uint64_t tls_start = interpreter->fs_base;
     uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
@@ -2035,6 +2038,7 @@ static int X86_64InterpreterRunLoop(X86_64Interpreter* interpreter) {
         }
       }
       printf("\n");
+      fflush(stdout);
     }
 
     if (interpreter->trace_registers) {

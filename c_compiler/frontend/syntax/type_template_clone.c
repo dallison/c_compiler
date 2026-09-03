@@ -4407,9 +4407,14 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     VectorASTNode* call = (VectorASTNode*)node;
     if (call->children != NULL && call->children->length == 1) {
       ASTNode* expr = call->children->value.p[0];
+      ASTNode* analyzed_expr = AnalyzeExpression(expr);
+      if (analyzed_expr != expr) {
+        VectorSet(call->children, 0, analyzed_expr);
+        expr = analyzed_expr;
+      }
       if (expr->type != NULL && TypeContainsTemplateParameter(expr->type)) {
-        TypeRecord* concrete = SubstituteTemplateParameters(
-            clone->parser, expr->type, clone->args);
+        TypeRecord* concrete =
+            SubstituteTemplateBodyType(clone, expr->type);
         RebaseTemplateParameterIndices(
             concrete, clone->rebase_template_parameter_base);
         TypeRecordCalculateSize(concrete);
@@ -4417,10 +4422,13 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         TypeRecordDelete(concrete);
       }
       bool is_array_delete = (node->flags & kASTDependentArrayDelete) != 0;
-      return NewCXXDeleteExpressionForPointer(clone->parser->syntax, expr,
-                                              is_array_delete,
-                                              node->location,
-                                              /*global_scope=*/false);
+      // Transfer the operand into the replacement tree. The old deferred call
+      // is deleted by the clone transform after this callback returns.
+      VectorSet(call->children, 0, NULL);
+      ASTNode* rewritten = NewCXXDeleteExpressionForPointer(
+          clone->parser->syntax, expr, is_array_delete, node->location,
+          /*global_scope=*/false);
+      return rewritten;
     }
   }
   // Injected-class-name as a functional-cast callee: `ClassName(args)` inside a

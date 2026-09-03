@@ -58,9 +58,7 @@ cxx_removed_at_26="codecvt"
 
 # Not yet implemented.  Remove entries here as the headers land.
 c_missing="complex.h fenv.h tgmath.h"
-cxx_missing="valarray
-             ccomplex codecvt ctgmath cfenv future regex
-             shared_mutex execution
+cxx_missing="ccomplex codecvt ctgmath cfenv future regex
              debugging hazard_pointer linalg rcu simd text_encoding"
 
 # These headers exist and are self-contained, but their standard surface or
@@ -108,7 +106,7 @@ known_profile_omission() {
   case "$target" in
     wasm32|p-code|pcode|6502|65c02)
       if in_set "$header" \
-          "barrier condition_variable latch semaphore stop_token thread"; then
+          "barrier condition_variable latch semaphore shared_mutex stop_token thread"; then
         return 0
       fi
       ;;

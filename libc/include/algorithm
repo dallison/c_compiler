@@ -8,8 +8,8 @@
 //  operating on iterator pairs.  The second half provides the constrained
 //  (std::ranges) algorithms, which add sentinel and projection support and hand
 //  the heavy lifting -- introsort, insertion sort, heap sifting -- to the
-//  classic implementations above.  The ExecutionPolicy overloads are not
-//  included; they require a parallelism runtime.
+//  classic implementations above. Execution-policy overloads use the same
+//  serial implementations when the target has no parallel algorithm runtime.
 //
 //  min/max/minmax and swap-family helpers that the standard also lists in
 //  other headers are kept where the standard primarily places them: swap,
@@ -294,6 +294,7 @@ bool binary_search(ForwardIt first, ForwardIt last, const T& value) {
 #include <iterator>
 #include <functional>
 #if __cplusplus >= 201703L
+#include <execution>
 #include <optional>
 #endif
 #if __cplusplus >= 202002L
@@ -1589,6 +1590,74 @@ template <class It>
 constexpr void stable_sort(It first, It last) {
   std::stable_sort(first, last, __algorithm_detail::__less());
 }
+
+#if __cplusplus >= 201703L
+template <class ExecutionPolicy>
+using __enable_execution_policy = typename enable_if<
+    is_execution_policy<typename remove_cv<typename remove_reference<
+        ExecutionPolicy>::type>::type>::value, int>::type;
+
+template <class ExecutionPolicy, class It, class Fn,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+Fn for_each(ExecutionPolicy&&, It first, It last, Fn function) {
+  return std::for_each(first, last, function);
+}
+
+template <class ExecutionPolicy, class It, class T,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+It find(ExecutionPolicy&&, It first, It last, const T& value) {
+  return std::find(first, last, value);
+}
+
+template <class ExecutionPolicy, class It, class Predicate,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+It find_if(ExecutionPolicy&&, It first, It last, Predicate predicate) {
+  return std::find_if(first, last, predicate);
+}
+
+template <class ExecutionPolicy, class In, class Out,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+Out copy(ExecutionPolicy&&, In first, In last, Out output) {
+  return std::copy(first, last, output);
+}
+
+template <class ExecutionPolicy, class It, class T,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+void fill(ExecutionPolicy&&, It first, It last, const T& value) {
+  std::fill(first, last, value);
+}
+
+template <class ExecutionPolicy, class In, class Out, class Operation,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+Out transform(ExecutionPolicy&&, In first, In last, Out output,
+              Operation operation) {
+  return std::transform(first, last, output, operation);
+}
+
+template <class ExecutionPolicy, class It, class Compare,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+void sort(ExecutionPolicy&&, It first, It last, Compare compare) {
+  std::sort(first, last, compare);
+}
+
+template <class ExecutionPolicy, class It,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+void sort(ExecutionPolicy&&, It first, It last) {
+  std::sort(first, last);
+}
+
+template <class ExecutionPolicy, class It, class Compare,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+void stable_sort(ExecutionPolicy&&, It first, It last, Compare compare) {
+  std::stable_sort(first, last, compare);
+}
+
+template <class ExecutionPolicy, class It,
+          __enable_execution_policy<ExecutionPolicy> = 0>
+void stable_sort(ExecutionPolicy&&, It first, It last) {
+  std::stable_sort(first, last);
+}
+#endif
 
 template <class It, class Compare>
 constexpr void inplace_merge(It first, It mid, It last, Compare comp) {

@@ -389,7 +389,22 @@ static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
       left->ref_qualifier != right->ref_qualifier) {
     return false;
   }
-  for (size_t i = 0; i < left->prototype.length; i++) {
+  size_t first_parameter = 0;
+  if (left->prototype.length != 0) {
+    Symbol* left_first = left->prototype.value.p[0];
+    Symbol* right_first = right->prototype.value.p[0];
+    bool left_has_this =
+        left_first != NULL && StringEqual(&left_first->name, "this");
+    bool right_has_this =
+        right_first != NULL && StringEqual(&right_first->name, "this");
+    if (left_has_this != right_has_this) {
+      return false;
+    }
+    if (left_has_this) {
+      first_parameter = 1;
+    }
+  }
+  for (size_t i = first_parameter; i < left->prototype.length; i++) {
     Symbol* left_arg = left->prototype.value.p[i];
     Symbol* right_arg = right->prototype.value.p[i];
     if (left_arg == NULL || right_arg == NULL ||
@@ -7770,6 +7785,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           !syntax->parsing_template_specialization) {
         StructMember* matching_member = FindStructMemberOverload(
             parser->cxx_member_definition, sym->type);
+        if (matching_member == NULL) {
+          for (StructMember* candidate = parser->cxx_member_definition;
+               candidate != NULL; candidate = candidate->overload_next) {
+            if (candidate->symbol != NULL &&
+                RedeclarationTypesEqual(candidate->symbol->type, sym->type)) {
+              matching_member = candidate;
+              break;
+            }
+          }
+        }
         if (matching_member != NULL) {
           parser->cxx_member_definition = matching_member;
           old_sym = matching_member->symbol;
