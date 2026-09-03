@@ -225,6 +225,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
     link_thread_test thread_sleep libc/tests/runtime/thread_sleep.c
     link_thread_test thread_condition libc/tests/runtime/thread_condition.c
     link_thread_test thread_addr_wait libc/tests/runtime/thread_addr_wait.c
+    link_thread_test thread_tss libc/tests/runtime/thread_tss.c
 
     link_thread_libc_test heap_allocator libc/tests/runtime/heap_allocator.c
     link_thread_libc_test thread_heap_stress libc/tests/runtime/thread_heap_stress.c

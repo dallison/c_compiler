@@ -118,10 +118,38 @@ typedef _Atomic _Bool atomic_flag;
   __atomic_fetch_add((object), (operand), (order))
 #define atomic_fetch_sub_explicit(object, operand, order) \
   __atomic_fetch_sub((object), (operand), (order))
+#define __davecc_atomic_fetch_bitwise(object, operand, order, op) \
+  ({ \
+    memory_order __davecc_order = (order); \
+    __typeof__(object) __davecc_object = (object); \
+    __typeof__(atomic_load_explicit(__davecc_object, memory_order_relaxed)) \
+        __davecc_old = atomic_load_explicit( \
+            __davecc_object, memory_order_relaxed); \
+    __typeof__(__davecc_old) __davecc_operand = (operand); \
+    __typeof__(__davecc_old) __davecc_desired; \
+    do { \
+      __davecc_desired = __davecc_old op __davecc_operand; \
+    } while (!atomic_compare_exchange_weak_explicit( \
+        __davecc_object, &__davecc_old, __davecc_desired, __davecc_order, \
+        memory_order_relaxed)); \
+    __davecc_old; \
+  })
+#define atomic_fetch_or_explicit(object, operand, order) \
+  __davecc_atomic_fetch_bitwise((object), (operand), (order), |)
+#define atomic_fetch_xor_explicit(object, operand, order) \
+  __davecc_atomic_fetch_bitwise((object), (operand), (order), ^)
+#define atomic_fetch_and_explicit(object, operand, order) \
+  __davecc_atomic_fetch_bitwise((object), (operand), (order), &)
 #define atomic_fetch_add(object, operand) \
   atomic_fetch_add_explicit((object), (operand), memory_order_seq_cst)
 #define atomic_fetch_sub(object, operand) \
   atomic_fetch_sub_explicit((object), (operand), memory_order_seq_cst)
+#define atomic_fetch_or(object, operand) \
+  atomic_fetch_or_explicit((object), (operand), memory_order_seq_cst)
+#define atomic_fetch_xor(object, operand) \
+  atomic_fetch_xor_explicit((object), (operand), memory_order_seq_cst)
+#define atomic_fetch_and(object, operand) \
+  atomic_fetch_and_explicit((object), (operand), memory_order_seq_cst)
 
 #define atomic_thread_fence(order) __atomic_thread_fence(order)
 #define atomic_signal_fence(order) __atomic_signal_fence(order)

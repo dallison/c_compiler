@@ -36,6 +36,7 @@ filegroup(
         "libc/include/cctype",
         "libc/include/cerrno",
         "libc/include/cfloat",
+        "libc/include/cfenv",
         "libc/include/cinttypes",
         "libc/include/ciso646",
         "libc/include/clocale",
@@ -311,6 +312,7 @@ LIBC_SRCS = [
     "libc/exit.c",
     "libc/exp.c",
     "libc/fabs.c",
+    "libc/fenv.c",
     "libc/fclose.c",
     "libc/fflush.c",
     "libc/fgetc.c",
@@ -1541,6 +1543,7 @@ libc_srcs=(
   "libc/ceil.c"
   "libc/exp.c"
   "libc/fabs.c"
+  "libc/fenv.c"
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
@@ -1727,6 +1730,7 @@ libc_srcs=(
   "libc/ceil.c"
   "libc/exp.c"
   "libc/fabs.c"
+  "libc/fenv.c"
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
@@ -1913,6 +1917,7 @@ libc_srcs=(
   "libc/ceil.c"
   "libc/exp.c"
   "libc/fabs.c"
+  "libc/fenv.c"
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
@@ -2099,6 +2104,7 @@ libc_srcs=(
   "libc/ceil.c"
   "libc/exp.c"
   "libc/fabs.c"
+  "libc/fenv.c"
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
@@ -2455,6 +2461,7 @@ libc_srcs=(
   "libc/ceil.c"
   "libc/exp.c"
   "libc/fabs.c"
+  "libc/fenv.c"
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
@@ -2613,6 +2620,7 @@ sh_test(
         ":davecc",
     ],
     tags = ["manual"],
+    timeout = "long",
 )
 
 sh_test(

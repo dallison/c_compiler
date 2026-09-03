@@ -6514,14 +6514,28 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     // exact `T*` parameter only by adding pointee cv-qualifiers; give it a small
     // penalty so the exact `T*` overload wins instead of being ambiguous (e.g.
     // `get_if<0>(variant<...>*)` between the `variant<Types...>*` and
-    // `const variant<Types...>*` overloads).  The penalty is a sub-tier +1 so it
-    // never outweighs a genuine conversion in another argument.
+    // `const variant<Types...>*` overloads).  This applies to either const or
+    // volatile qualification; otherwise the standard volatile overloads of
+    // the atomic free functions are ambiguous for non-volatile objects.  Each
+    // added qualifier contributes one sub-tier so adding const is better
+    // than adding both const and volatile, without outweighing a genuine
+    // conversion in another argument.
+    Qualifiers added_pointer_qualifiers =
+        (target->next != NULL && actual->type->next != NULL)
+            ? ((target->next->qualifiers & (kQualConst | kQualVolatile)) &
+               ~(actual->type->next->qualifiers &
+                 (kQualConst | kQualVolatile)))
+            : 0;
     bool pointer_qualification_conversion =
         TypeIsPointer(actual->type) && TypeIsPointer(target) &&
         actual->type->next != NULL && target->next != NULL &&
-        !TypeIsConst(actual->type->next) && TypeIsConst(target->next) &&
+        added_pointer_qualifiers != 0 &&
         TypeEqualIgnoringQualifiers(actual->type, target);
-    int qualification_penalty = pointer_qualification_conversion ? 1 : 0;
+    int qualification_penalty =
+        pointer_qualification_conversion
+            ? ((added_pointer_qualifiers & kQualConst) != 0) +
+                  ((added_pointer_qualifiers & kQualVolatile) != 0)
+            : 0;
     return base_rank * 10 + 5 + qualification_penalty;
   }
   if (FuncAddrBaseRank(actual, target) >= 0) {

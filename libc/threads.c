@@ -16,6 +16,24 @@
 #define __DAVECC_HAS_GUEST_THREADS__ 1
 #endif
 
+#define DAVECC_TSS_KEYS_MAX 64
+
+typedef struct DaveCCTssKey {
+  tss_dtor_t destructor;
+  unsigned int generation;
+  int active;
+} DaveCCTssKey;
+
+static DaveCCTssKey tss_keys[DAVECC_TSS_KEYS_MAX];
+static unsigned int tss_registry_lock;
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+static __thread void* tss_values[DAVECC_TSS_KEYS_MAX];
+static __thread unsigned int tss_generations[DAVECC_TSS_KEYS_MAX];
+#else
+static void* tss_values[DAVECC_TSS_KEYS_MAX];
+static unsigned int tss_generations[DAVECC_TSS_KEYS_MAX];
+#endif
+
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
 void __davecc_tls_thread_init(void);
 void __davecc_tls_thread_fini(void);
@@ -411,6 +429,102 @@ void thrd_yield(void) {
 #endif
 }
 
+static void TssRegistryLock(void) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  for (;;) {
+    unsigned int expected = 0;
+    if (__atomic_compare_exchange_n(&tss_registry_lock, &expected, 1, 0, 2,
+                                    0)) {
+      return;
+    }
+    thrd_yield();
+  }
+#endif
+}
+
+static void TssRegistryUnlock(void) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  __atomic_store_n(&tss_registry_lock, 0, 3);
+#endif
+}
+
+void __davecc_tss_thread_init(void) {
+  for (tss_t key = 0; key < DAVECC_TSS_KEYS_MAX; ++key) {
+    tss_values[key] = NULL;
+    tss_generations[key] = 0;
+  }
+}
+
+int tss_create(tss_t* key, tss_dtor_t destructor) {
+  if (key == NULL) return thrd_error;
+  TssRegistryLock();
+  for (tss_t i = 0; i < DAVECC_TSS_KEYS_MAX; ++i) {
+    if (!tss_keys[i].active) {
+      unsigned int generation = tss_keys[i].generation + 1;
+      if (generation == 0) generation = 1;
+      tss_keys[i].generation = generation;
+      tss_keys[i].destructor = destructor;
+      tss_keys[i].active = 1;
+      *key = i;
+      TssRegistryUnlock();
+      return thrd_success;
+    }
+  }
+  TssRegistryUnlock();
+  return thrd_error;
+}
+
+void tss_delete(tss_t key) {
+  if (key >= DAVECC_TSS_KEYS_MAX) return;
+  TssRegistryLock();
+  tss_keys[key].active = 0;
+  tss_keys[key].destructor = NULL;
+  TssRegistryUnlock();
+}
+
+void* tss_get(tss_t key) {
+  if (key >= DAVECC_TSS_KEYS_MAX) return NULL;
+  TssRegistryLock();
+  int valid = tss_keys[key].active &&
+              tss_generations[key] == tss_keys[key].generation;
+  void* value = valid ? tss_values[key] : NULL;
+  TssRegistryUnlock();
+  return value;
+}
+
+int tss_set(tss_t key, void* value) {
+  if (key >= DAVECC_TSS_KEYS_MAX) return thrd_error;
+  TssRegistryLock();
+  if (!tss_keys[key].active) {
+    TssRegistryUnlock();
+    return thrd_error;
+  }
+  tss_values[key] = value;
+  tss_generations[key] = tss_keys[key].generation;
+  TssRegistryUnlock();
+  return thrd_success;
+}
+
+static void RunTssDestructors(void) {
+  for (int pass = 0; pass < TSS_DTOR_ITERATIONS; ++pass) {
+    int called_destructor = 0;
+    for (tss_t key = 0; key < DAVECC_TSS_KEYS_MAX; ++key) {
+      TssRegistryLock();
+      int valid = tss_keys[key].active &&
+                  tss_generations[key] == tss_keys[key].generation;
+      void* value = valid ? tss_values[key] : NULL;
+      tss_dtor_t destructor = valid ? tss_keys[key].destructor : NULL;
+      tss_values[key] = NULL;
+      TssRegistryUnlock();
+      if (value != NULL && destructor != NULL) {
+        called_destructor = 1;
+        destructor(value);
+      }
+    }
+    if (!called_destructor) return;
+  }
+}
+
 static thrd_t MutexOwnerToken(void) {
   thrd_t owner = thrd_current();
   return owner == 0 ? 1 : owner;
@@ -681,6 +795,7 @@ int __davecc_cnd_notify_all_at_thread_exit(cnd_t* condition, mtx_t* mutex) {
 
 void __davecc_thread_exit_callbacks(void) {
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
+  RunTssDestructors();
   while (condition_at_exit != NULL) {
     DaveCCConditionAtExit* entry = condition_at_exit;
     condition_at_exit = entry->next;

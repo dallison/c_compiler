@@ -140,7 +140,11 @@ bool CompilerTargetSupportsThreads(void) {
     return false;
   }
   return !StringEqual(compiler->target_name, "6502") &&
-         !StringEqual(compiler->target_name, "65c02");
+         !StringEqual(compiler->target_name, "65c02") &&
+         !StringEqual(compiler->target_name, "p-code") &&
+         !StringEqual(compiler->target_name, "pcode") &&
+         !StringEqual(compiler->target_name, "wasm32") &&
+         !StringEqual(compiler->target_name, "wasm");
 }
 
 bool CompilerTargetSupportsAtomics(void) {
@@ -166,7 +170,9 @@ bool CompilerTargetSupportsC11Atomics(void) {
          !StringEqual(compiler->target_name, "arm") &&
          !StringEqual(compiler->target_name, "armv7") &&
          !StringEqual(compiler->target_name, "armv7-a") &&
-         !StringEqual(compiler->target_name, "arm32");
+         !StringEqual(compiler->target_name, "arm32") &&
+         !StringEqual(compiler->target_name, "wasm32") &&
+         !StringEqual(compiler->target_name, "wasm");
 }
 
 bool CompilerTargetSupportsAtomicSize(int size) {

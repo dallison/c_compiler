@@ -8,6 +8,10 @@
 #ifndef threads_h
 #define threads_h
 
+#if defined(__STDC_NO_THREADS__)
+#error "<threads.h> is unavailable on this target"
+#endif
+
 #include <stddef.h>
 #include <time.h>
 
@@ -17,6 +21,10 @@ extern "C" {
 
 typedef unsigned long thrd_t;
 typedef int (*thrd_start_t)(void*);
+typedef unsigned int tss_t;
+typedef void (*tss_dtor_t)(void*);
+
+#define TSS_DTOR_ITERATIONS 4
 typedef struct {
   unsigned int state;
   thrd_t owner;
@@ -75,6 +83,10 @@ int cnd_broadcast(cnd_t* condition);
 int cnd_wait(cnd_t* condition, mtx_t* mutex);
 int cnd_timedwait(cnd_t* condition, mtx_t* mutex,
                   const struct timespec* time_point);
+int tss_create(tss_t* key, tss_dtor_t destructor);
+void tss_delete(tss_t key);
+void* tss_get(tss_t key);
+int tss_set(tss_t key, void* value);
 #ifndef __cplusplus
 void call_once(once_flag* flag, void (*func)(void));
 #endif

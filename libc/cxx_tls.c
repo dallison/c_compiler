@@ -14,6 +14,7 @@
 void __davecc_tls_thread_init_impl(void);
 void __davecc_tls_thread_fini_impl(void);
 void __davecc_thread_exit_callbacks(void);
+void __davecc_tss_thread_init(void);
 #if defined(__DAVECC_HAS_HEAP_LOCK__)
 void __davecc_heap_thread_cleanup(void);
 #endif
@@ -69,6 +70,10 @@ void __davecc_tls_thread_init(void) {
     return;
   }
   __davecc_tls_lifetime_state = 1;
+#if defined(__DAVECC_HAS_GUEST_THREADS__) || \
+    defined(__DAVECC_HAS_NATIVE_THREADS__)
+  __davecc_tss_thread_init();
+#endif
   __davecc_tls_thread_init_impl();
 }
 

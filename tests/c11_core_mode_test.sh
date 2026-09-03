@@ -104,6 +104,11 @@ int test(void) {
   if (atomic_fetch_add(&value, 2) != 3) {
     return 2;
   }
+  if (atomic_fetch_or(&value, 2) != 5 ||
+      atomic_fetch_and(&value, 6) != 7 ||
+      atomic_fetch_xor(&value, 3) != 6) {
+    return 5;
+  }
   if (atomic_flag_test_and_set(&flag)) {
     return 3;
   }
@@ -116,6 +121,17 @@ expect_compile c23_stdnoreturn x86_64 \
   '#include <stdnoreturn.h>
 noreturn void stop(void) { for (;;) {} }
 int test(void) { return 0; }' \
+  -std=c23
+
+expect_compile c23_fenv x86_64 \
+  '#include <fenv.h>
+int test(void) {
+  femode_t mode;
+  fexcept_t flags = FE_INVALID;
+  return fegetmode(&mode) || fesetmode(FE_DFL_MODE) ||
+         fesetexcept(FE_INVALID) ||
+         fetestexceptflag(&flags, FE_INVALID) != FE_INVALID;
+}' \
   -std=c23
 
 expect_fail atomic_aggregate x86_64 \
@@ -173,7 +189,7 @@ expect_compile unsupported_profile_macros pcode \
 #error unsupported target must define __STDC_NO_ATOMICS__
 #endif
 #if __STDC_NO_THREADS__ != 1
-#error incomplete threads profile must be advertised
+#error unsupported target must advertise unavailable threads
 #endif
 #if __STDC_NO_COMPLEX__ != 1
 #error unavailable complex arithmetic must be advertised
@@ -187,8 +203,8 @@ expect_compile optional_macros x86_64 \
   '#ifdef __STDC_NO_ATOMICS__
 #error native target must support milestone atomics
 #endif
-#if __STDC_NO_THREADS__ != 1
-#error incomplete C11 threads profile must be advertised
+#ifdef __STDC_NO_THREADS__
+#error native target must support C11 threads
 #endif
 #if __STDC_NO_COMPLEX__ != 1
 #error unavailable complex arithmetic must be advertised

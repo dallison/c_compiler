@@ -57,14 +57,14 @@ cxx_removed_at_20="ccomplex ciso646 cstdalign cstdbool ctgmath"
 cxx_removed_at_26="codecvt"
 
 # Not yet implemented.  Remove entries here as the headers land.
-c_missing="complex.h fenv.h tgmath.h"
-cxx_missing="ccomplex ctgmath cfenv
+c_missing="complex.h tgmath.h"
+cxx_missing="ccomplex ctgmath
              debugging hazard_pointer linalg rcu simd text_encoding"
 
 # These headers exist and are self-contained, but their standard surface or
 # required runtime behavior is known to be incomplete. Unlike MISSING and
 # INCOMPATIBLE, this category is still compiled so syntax regressions fail.
-c_incomplete="threads.h"
+c_incomplete=""
 cxx_incomplete="chrono codecvt filesystem format future locale regex"
 
 # The C++ headers were only ever exercised at C++20 and later and use C++17/20
@@ -99,14 +99,14 @@ known_profile_omission() {
     wasm32:setjmp.h|wasm32:csetjmp)
       return 0
       ;;
-    6502:atomic|65c02:atomic)
+    6502:atomic|65c02:atomic|6502:regex|65c02:regex)
       return 0
       ;;
   esac
   case "$target" in
     wasm32|p-code|pcode|6502|65c02)
       if in_set "$header" \
-          "barrier condition_variable latch semaphore shared_mutex stop_token thread"; then
+          "barrier condition_variable future latch semaphore shared_mutex stop_token thread threads.h"; then
         return 0
       fi
       ;;

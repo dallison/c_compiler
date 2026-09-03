@@ -287,9 +287,9 @@ static void PredefineMacros(Preprocessor* p) {
       if (!CompilerTargetSupportsC11Atomics()) {
         PreprocessorDefineMacro(p, "__STDC_NO_ATOMICS__", "1");
       }
-      // DaveCC's threads.h intentionally remains an extension until its
-      // thread-specific-storage API and destructor iteration are complete.
-      PreprocessorDefineMacro(p, "__STDC_NO_THREADS__", "1");
+      if (!CompilerTargetSupportsThreads()) {
+        PreprocessorDefineMacro(p, "__STDC_NO_THREADS__", "1");
+      }
       // C11 makes complex arithmetic optional when this macro is defined.
       // C99 has no corresponding opt-out and must remain visibly incomplete.
       PreprocessorDefineMacro(p, "__STDC_NO_COMPLEX__", "1");
