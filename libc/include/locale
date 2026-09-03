@@ -13,6 +13,7 @@
 #include <__locale_core>
 #include <__itoa.h>
 #include <cstddef>
+#include <cwchar>
 #include <ios>
 #include <streambuf>
 #include <string>
@@ -71,6 +72,17 @@ class ctype_byname;
 
 template <class CharT>
 class numpunct_byname;
+
+class codecvt_base {
+ public:
+  enum result { ok, partial, error, noconv };
+};
+
+template <class InternT, class ExternT, class StateT>
+class codecvt;
+
+template <class InternT, class ExternT, class StateT>
+class codecvt_byname;
 
 class locale {
  public:
@@ -168,6 +180,94 @@ template <class Facet>
 bool has_facet(const locale& loc) {
   return loc.__has_facet(Facet::id);
 }
+
+template <class InternT, class ExternT, class StateT>
+class codecvt : public locale::facet, public codecvt_base {
+ public:
+  typedef InternT intern_type;
+  typedef ExternT extern_type;
+  typedef StateT state_type;
+  static locale::id id;
+
+  explicit codecvt(size_t refs = 0) : locale::facet(refs) {}
+
+  result out(state_type& state, const intern_type* from,
+             const intern_type* from_end, const intern_type*& from_next,
+             extern_type* to, extern_type* to_end,
+             extern_type*& to_next) const {
+    return do_out(state, from, from_end, from_next, to, to_end, to_next);
+  }
+  result unshift(state_type& state, extern_type* to, extern_type* to_end,
+                 extern_type*& to_next) const {
+    return do_unshift(state, to, to_end, to_next);
+  }
+  result in(state_type& state, const extern_type* from,
+            const extern_type* from_end, const extern_type*& from_next,
+            intern_type* to, intern_type* to_end,
+            intern_type*& to_next) const {
+    return do_in(state, from, from_end, from_next, to, to_end, to_next);
+  }
+  int encoding() const noexcept { return do_encoding(); }
+  bool always_noconv() const noexcept { return do_always_noconv(); }
+  int length(state_type& state, const extern_type* from,
+             const extern_type* from_end, size_t max) const {
+    return do_length(state, from, from_end, max);
+  }
+  int max_length() const noexcept { return do_max_length(); }
+
+ protected:
+  ~codecvt() override {}
+
+  virtual result do_out(state_type&, const intern_type* from,
+                        const intern_type*, const intern_type*& from_next,
+                        extern_type* to, extern_type*,
+                        extern_type*& to_next) const {
+    from_next = from;
+    to_next = to;
+    return sizeof(intern_type) == sizeof(extern_type) ? noconv : error;
+  }
+  virtual result do_unshift(state_type&, extern_type* to,
+                            extern_type*, extern_type*& to_next) const {
+    to_next = to;
+    return noconv;
+  }
+  virtual result do_in(state_type&, const extern_type* from,
+                       const extern_type*, const extern_type*& from_next,
+                       intern_type* to, intern_type*,
+                       intern_type*& to_next) const {
+    from_next = from;
+    to_next = to;
+    return sizeof(intern_type) == sizeof(extern_type) ? noconv : error;
+  }
+  virtual int do_encoding() const noexcept {
+    return sizeof(intern_type) == sizeof(extern_type) ? 1 : 0;
+  }
+  virtual bool do_always_noconv() const noexcept {
+    return sizeof(intern_type) == sizeof(extern_type);
+  }
+  virtual int do_length(state_type&, const extern_type* from,
+                        const extern_type* from_end, size_t max) const {
+    size_t available = static_cast<size_t>(from_end - from);
+    return static_cast<int>(available < max ? available : max);
+  }
+  virtual int do_max_length() const noexcept {
+    return sizeof(intern_type) == sizeof(extern_type) ? 1 : 4;
+  }
+};
+
+template <class InternT, class ExternT, class StateT>
+class codecvt_byname : public codecvt<InternT, ExternT, StateT> {
+ public:
+  explicit codecvt_byname(const char* name, size_t refs = 0)
+      : codecvt<InternT, ExternT, StateT>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~codecvt_byname() override {}
+};
 
 template <>
 class ctype<char> : public locale::facet, public ctype_base {

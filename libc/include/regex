@@ -1,0 +1,842 @@
+//
+//  regex
+//  libc
+//
+
+#ifndef __davecc_regex__
+#define __davecc_regex__
+
+#include <cstddef>
+#include <iterator>
+#include <locale>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+namespace regex_constants {
+
+enum syntax_option_type {
+  icase = 1 << 0,
+  nosubs = 1 << 1,
+  optimize = 1 << 2,
+  collate = 1 << 3,
+  ECMAScript = 1 << 4,
+  basic = 1 << 5,
+  extended = 1 << 6,
+  awk = 1 << 7,
+  grep = 1 << 8,
+  egrep = 1 << 9,
+  multiline = 1 << 10,
+};
+
+enum match_flag_type {
+  match_default = 0,
+  match_not_bol = 1 << 0,
+  match_not_eol = 1 << 1,
+  match_not_bow = 1 << 2,
+  match_not_eow = 1 << 3,
+  match_any = 1 << 4,
+  match_not_null = 1 << 5,
+  match_continuous = 1 << 6,
+  match_prev_avail = 1 << 7,
+  format_default = 0,
+  format_sed = 1 << 8,
+  format_no_copy = 1 << 9,
+  format_first_only = 1 << 10,
+};
+
+enum error_type {
+  error_collate,
+  error_ctype,
+  error_escape,
+  error_backref,
+  error_brack,
+  error_paren,
+  error_brace,
+  error_badbrace,
+  error_range,
+  error_space,
+  error_badrepeat,
+  error_complexity,
+  error_stack,
+};
+
+inline match_flag_type operator|(match_flag_type left, match_flag_type right) {
+  return static_cast<match_flag_type>(
+      static_cast<int>(left) | static_cast<int>(right));
+}
+inline match_flag_type operator&(match_flag_type left, match_flag_type right) {
+  return static_cast<match_flag_type>(
+      static_cast<int>(left) & static_cast<int>(right));
+}
+inline match_flag_type operator^(match_flag_type left, match_flag_type right) {
+  return static_cast<match_flag_type>(
+      static_cast<int>(left) ^ static_cast<int>(right));
+}
+inline match_flag_type operator~(match_flag_type value) {
+  return static_cast<match_flag_type>(~static_cast<int>(value));
+}
+inline match_flag_type& operator|=(match_flag_type& left,
+                                  match_flag_type right) {
+  return left = left | right;
+}
+inline match_flag_type& operator&=(match_flag_type& left,
+                                  match_flag_type right) {
+  return left = left & right;
+}
+inline match_flag_type& operator^=(match_flag_type& left,
+                                  match_flag_type right) {
+  return left = left ^ right;
+}
+
+}  // namespace regex_constants
+
+class regex_error : public runtime_error {
+ public:
+  explicit regex_error(regex_constants::error_type code)
+      : runtime_error("regular expression error"), __code_(code) {}
+  regex_constants::error_type code() const { return __code_; }
+
+ private:
+  regex_constants::error_type __code_;
+};
+
+template <class CharT>
+struct regex_traits {
+  typedef CharT char_type;
+  typedef basic_string<char_type> string_type;
+  typedef locale locale_type;
+  typedef unsigned long char_class_type;
+
+  static size_t length(const char_type* value) {
+    size_t result = 0;
+    while (value[result] != char_type()) ++result;
+    return result;
+  }
+  char_type translate(char_type value) const { return value; }
+  char_type translate_nocase(char_type value) const {
+    return value >= char_type('A') && value <= char_type('Z')
+               ? static_cast<char_type>(value - char_type('A') + char_type('a'))
+               : value;
+  }
+  template <class ForwardIterator>
+  string_type transform(ForwardIterator first, ForwardIterator last) const {
+    return string_type(first, last);
+  }
+  template <class ForwardIterator>
+  string_type transform_primary(ForwardIterator first,
+                                ForwardIterator last) const {
+    return string_type(first, last);
+  }
+  template <class ForwardIterator>
+  char_class_type lookup_classname(ForwardIterator first,
+                                   ForwardIterator last,
+                                   bool = false) const {
+    char_type name[6] = {};
+    size_t size = 0;
+    while (first != last && size < 5) name[size++] = *first++;
+    if (first != last) return 0;
+    if (size == 5 && name[0] == char_type('d') &&
+        name[1] == char_type('i') && name[2] == char_type('g') &&
+        name[3] == char_type('i') && name[4] == char_type('t')) return 1;
+    if (size == 5 && name[0] == char_type('a') &&
+        name[1] == char_type('l') && name[2] == char_type('p') &&
+        name[3] == char_type('h') && name[4] == char_type('a')) return 2;
+    if (size == 5 && name[0] == char_type('a') &&
+        name[1] == char_type('l') && name[2] == char_type('n') &&
+        name[3] == char_type('u') && name[4] == char_type('m')) return 3;
+    if (size == 5 && name[0] == char_type('s') &&
+        name[1] == char_type('p') && name[2] == char_type('a') &&
+        name[3] == char_type('c') && name[4] == char_type('e')) return 4;
+    if (size == 4 && name[0] == char_type('w') &&
+        name[1] == char_type('o') && name[2] == char_type('r') &&
+        name[3] == char_type('d')) return 5;
+    return 0;
+  }
+  template <class ForwardIterator>
+  char_type lookup_collatename(ForwardIterator first,
+                               ForwardIterator last) const {
+    return first != last ? *first : char_type();
+  }
+  bool isctype(char_type value, char_class_type type) const {
+    bool digit = value >= char_type('0') && value <= char_type('9');
+    bool alpha = (value >= char_type('a') && value <= char_type('z')) ||
+                 (value >= char_type('A') && value <= char_type('Z'));
+    bool space = value == char_type(' ') || value == char_type('\t') ||
+                 value == char_type('\n') || value == char_type('\r') ||
+                 value == char_type('\f') || value == char_type('\v');
+    return type == 1 ? digit
+         : type == 2 ? alpha
+         : type == 3 ? alpha || digit
+         : type == 4 ? space
+         : type == 5 ? alpha || digit || value == char_type('_')
+                     : false;
+  }
+  int value(char_type digit, int radix) const {
+    int result = -1;
+    if (digit >= char_type('0') && digit <= char_type('9')) {
+      result = static_cast<int>(digit - char_type('0'));
+    } else if (digit >= char_type('a') && digit <= char_type('f')) {
+      result = static_cast<int>(digit - char_type('a')) + 10;
+    } else if (digit >= char_type('A') && digit <= char_type('F')) {
+      result = static_cast<int>(digit - char_type('A')) + 10;
+    }
+    return result < radix ? result : -1;
+  }
+  locale_type imbue(locale_type value) {
+    locale_type old = __locale_;
+    __locale_ = value;
+    return old;
+  }
+  locale_type getloc() const { return __locale_; }
+
+ private:
+  locale_type __locale_;
+};
+
+template <class CharT, class Traits = regex_traits<CharT>>
+class basic_regex {
+ public:
+  typedef CharT value_type;
+  typedef Traits traits_type;
+  typedef typename traits_type::string_type string_type;
+  typedef regex_constants::syntax_option_type flag_type;
+
+  static const flag_type icase = regex_constants::icase;
+  static const flag_type nosubs = regex_constants::nosubs;
+  static const flag_type optimize = regex_constants::optimize;
+  static const flag_type collate = regex_constants::collate;
+  static const flag_type ECMAScript = regex_constants::ECMAScript;
+  static const flag_type basic = regex_constants::basic;
+  static const flag_type extended = regex_constants::extended;
+  static const flag_type awk = regex_constants::awk;
+  static const flag_type grep = regex_constants::grep;
+  static const flag_type egrep = regex_constants::egrep;
+  static const flag_type multiline = regex_constants::multiline;
+
+  basic_regex() : __flags_(ECMAScript), __marks_(0) {}
+  explicit basic_regex(const CharT* pattern,
+                       flag_type flags = ECMAScript) {
+    assign(pattern, flags);
+  }
+  basic_regex(const CharT* pattern, size_t count,
+              flag_type flags = ECMAScript) {
+    assign(pattern, count, flags);
+  }
+  template <class StringTraits, class Allocator>
+  explicit basic_regex(
+      const basic_string<CharT, StringTraits, Allocator>& pattern,
+      flag_type flags = ECMAScript) {
+    assign(pattern.begin(), pattern.end(), flags);
+  }
+  template <class ForwardIterator>
+  basic_regex(ForwardIterator first, ForwardIterator last,
+              flag_type flags = ECMAScript) {
+    assign(first, last, flags);
+  }
+
+  basic_regex& operator=(const CharT* pattern) {
+    return assign(pattern);
+  }
+  basic_regex& assign(const CharT* pattern,
+                      flag_type flags = ECMAScript) {
+    return assign(pattern, traits_type::length(pattern), flags);
+  }
+  basic_regex& assign(const CharT* pattern, size_t count,
+                      flag_type flags = ECMAScript) {
+    __pattern_ = string_type(pattern, count);
+    __flags_ = flags;
+    __validate();
+    return *this;
+  }
+  template <class ForwardIterator>
+  basic_regex& assign(ForwardIterator first, ForwardIterator last,
+                      flag_type flags = ECMAScript) {
+    __pattern_.clear();
+    while (first != last) __pattern_.push_back(*first++);
+    __flags_ = flags;
+    __validate();
+    return *this;
+  }
+
+  unsigned mark_count() const { return __marks_; }
+  flag_type flags() const { return __flags_; }
+  locale imbue(locale value) {
+    locale old = __locale_;
+    __locale_ = value;
+    return old;
+  }
+  locale getloc() const { return __locale_; }
+  void swap(basic_regex& other) {
+    __pattern_.swap(other.__pattern_);
+    std::swap(__flags_, other.__flags_);
+    std::swap(__marks_, other.__marks_);
+    std::swap(__locale_, other.__locale_);
+  }
+
+  const string_type& __pattern() const { return __pattern_; }
+
+ private:
+  void __validate() {
+    __marks_ = 0;
+    unsigned depth = 0;
+    bool bracket = false;
+    bool escaped = false;
+    for (size_t i = 0; i < __pattern_.size(); ++i) {
+      CharT value = __pattern_[i];
+      if (escaped) {
+        escaped = false;
+      } else if (value == CharT('\\')) {
+        escaped = true;
+      } else if (value == CharT('[')) {
+        bracket = true;
+      } else if (value == CharT(']')) {
+        if (!bracket) throw regex_error(regex_constants::error_brack);
+        bracket = false;
+      } else if (!bracket && value == CharT('(')) {
+        ++depth;
+        ++__marks_;
+      } else if (!bracket && value == CharT(')')) {
+        if (depth == 0) throw regex_error(regex_constants::error_paren);
+        --depth;
+      }
+    }
+    if (escaped) throw regex_error(regex_constants::error_escape);
+    if (bracket) throw regex_error(regex_constants::error_brack);
+    if (depth != 0) throw regex_error(regex_constants::error_paren);
+  }
+
+  string_type __pattern_;
+  flag_type __flags_;
+  unsigned __marks_;
+  locale __locale_;
+};
+
+typedef basic_regex<char> regex;
+typedef basic_regex<wchar_t> wregex;
+
+template <class BidirectionalIterator>
+class sub_match : public pair<BidirectionalIterator, BidirectionalIterator> {
+ public:
+  typedef BidirectionalIterator iterator;
+  typedef typename iterator_traits<iterator>::value_type value_type;
+  typedef basic_string<value_type> string_type;
+  typedef typename iterator_traits<iterator>::difference_type difference_type;
+
+  bool matched;
+
+  sub_match() : matched(false) {}
+  difference_type length() const {
+    return matched ? std::distance(this->first, this->second) : 0;
+  }
+  string_type str() const {
+    string_type result;
+    if (matched) {
+      iterator current = this->first;
+      while (current != this->second) result.push_back(*current++);
+    }
+    return result;
+  }
+  operator string_type() const { return str(); }
+  int compare(const sub_match& other) const {
+    return str().compare(other.str());
+  }
+  int compare(const string_type& other) const { return str().compare(other); }
+  int compare(const value_type* other) const { return str().compare(other); }
+};
+
+template <class BidirectionalIterator>
+bool operator==(const sub_match<BidirectionalIterator>& left,
+                const sub_match<BidirectionalIterator>& right) {
+  return left.compare(right) == 0;
+}
+template <class BidirectionalIterator>
+bool operator!=(const sub_match<BidirectionalIterator>& left,
+                const sub_match<BidirectionalIterator>& right) {
+  return !(left == right);
+}
+
+template <class BidirectionalIterator,
+          class Allocator = allocator<sub_match<BidirectionalIterator>>>
+class match_results {
+ public:
+  typedef sub_match<BidirectionalIterator> value_type;
+  typedef const value_type& const_reference;
+  typedef typename vector<value_type, Allocator>::const_iterator const_iterator;
+  typedef typename iterator_traits<BidirectionalIterator>::difference_type
+      difference_type;
+  typedef basic_string<typename value_type::value_type> string_type;
+
+  match_results() : __ready_(false) {}
+  bool ready() const { return __ready_; }
+  size_t size() const { return __matches_.size(); }
+  size_t max_size() const { return __matches_.max_size(); }
+  bool empty() const { return __matches_.empty(); }
+  const_reference operator[](size_t sub) const {
+    return sub < size() ? __matches_[sub] : __unmatched_;
+  }
+  const_reference prefix() const { return __prefix_; }
+  const_reference suffix() const { return __suffix_; }
+  const_iterator begin() const { return __matches_.begin(); }
+  const_iterator end() const { return __matches_.end(); }
+  const_iterator cbegin() const { return begin(); }
+  const_iterator cend() const { return end(); }
+  difference_type length(size_t sub = 0) const {
+    return (*this)[sub].length();
+  }
+  difference_type position(size_t sub = 0) const {
+    return (*this)[sub].matched
+               ? std::distance(__origin_, (*this)[sub].first)
+               : difference_type(-1);
+  }
+  string_type str(size_t sub = 0) const { return (*this)[sub].str(); }
+  void swap(match_results& other) {
+    __matches_.swap(other.__matches_);
+    std::swap(__prefix_, other.__prefix_);
+    std::swap(__suffix_, other.__suffix_);
+    std::swap(__unmatched_, other.__unmatched_);
+    std::swap(__origin_, other.__origin_);
+    std::swap(__ready_, other.__ready_);
+  }
+
+  void __set(BidirectionalIterator origin, BidirectionalIterator finish,
+             BidirectionalIterator first, BidirectionalIterator last,
+             size_t count) {
+    __matches_.assign(count + 1, value_type());
+    __matches_[0].first = first;
+    __matches_[0].second = last;
+    __matches_[0].matched = true;
+    __origin_ = origin;
+    __prefix_.first = origin;
+    __prefix_.second = first;
+    __prefix_.matched = origin != first;
+    __suffix_.first = last;
+    __suffix_.second = finish;
+    __suffix_.matched = last != finish;
+    __unmatched_.first = finish;
+    __unmatched_.second = finish;
+    __unmatched_.matched = false;
+    __ready_ = true;
+  }
+  void __clear() {
+    __matches_.clear();
+    __prefix_ = value_type();
+    __suffix_ = value_type();
+    __unmatched_ = value_type();
+    __ready_ = true;
+  }
+
+ private:
+  vector<value_type, Allocator> __matches_;
+  value_type __prefix_;
+  value_type __suffix_;
+  value_type __unmatched_;
+  BidirectionalIterator __origin_;
+  bool __ready_;
+};
+
+typedef match_results<const char*> cmatch;
+typedef match_results<const wchar_t*> wcmatch;
+typedef match_results<string::const_iterator> smatch;
+typedef match_results<wstring::const_iterator> wsmatch;
+
+namespace __regex_detail {
+
+template <class CharT>
+struct __engine {
+static CharT __fold(CharT value, bool insensitive) {
+  return insensitive && value >= CharT('A') && value <= CharT('Z')
+             ? static_cast<CharT>(value - CharT('A') + CharT('a'))
+             : value;
+}
+
+static bool __class_match(const basic_string<CharT>& pattern,
+                   size_t first, size_t last, CharT value,
+                   bool insensitive) {
+  bool negate = first < last && pattern[first] == CharT('^');
+  if (negate) ++first;
+  bool matched = false;
+  while (first < last) {
+    CharT low = pattern[first++];
+    if (low == CharT('\\') && first < last) low = pattern[first++];
+    if (first + 1 < last && pattern[first] == CharT('-')) {
+      ++first;
+      CharT high = pattern[first++];
+      CharT folded = __fold(value, insensitive);
+      matched = matched ||
+          (folded >= __fold(low, insensitive) &&
+           folded <= __fold(high, insensitive));
+    } else {
+      matched = matched ||
+          __fold(low, insensitive) == __fold(value, insensitive);
+    }
+  }
+  return negate ? !matched : matched;
+}
+
+static size_t __atom_end(const basic_string<CharT>& pattern, size_t position,
+                  size_t end) {
+  if (position >= end) return position;
+  if (pattern[position] == CharT('\\')) {
+    return position + (position + 1 < end ? 2 : 1);
+  }
+  if (pattern[position] == CharT('[')) {
+    size_t current = position + 1;
+    while (current < end && pattern[current] != CharT(']')) ++current;
+    return current < end ? current + 1 : end;
+  }
+  return position + 1;
+}
+
+static bool __atom_match(const basic_string<CharT>& pattern,
+                  size_t first, size_t last, CharT value,
+                  bool insensitive) {
+  if (pattern[first] == CharT('.')) return true;
+  if (pattern[first] == CharT('[')) {
+    return __class_match(
+        pattern, first + 1, last - 1, value, insensitive);
+  }
+  if (pattern[first] == CharT('\\') && first + 1 < last) {
+    CharT escaped = pattern[first + 1];
+    bool digit = value >= CharT('0') && value <= CharT('9');
+    bool alpha = (value >= CharT('a') && value <= CharT('z')) ||
+                 (value >= CharT('A') && value <= CharT('Z'));
+    bool space = value == CharT(' ') || value == CharT('\t') ||
+                 value == CharT('\n') || value == CharT('\r');
+    if (escaped == CharT('d')) return digit;
+    if (escaped == CharT('D')) return !digit;
+    if (escaped == CharT('w')) return alpha || digit || value == CharT('_');
+    if (escaped == CharT('W')) return !(alpha || digit || value == CharT('_'));
+    if (escaped == CharT('s')) return space;
+    if (escaped == CharT('S')) return !space;
+    return __fold(escaped, insensitive) ==
+           __fold(value, insensitive);
+  }
+  return __fold(pattern[first], insensitive) ==
+         __fold(value, insensitive);
+}
+
+static bool __match_segment(const basic_string<CharT>& pattern,
+                     size_t pattern_first, size_t pattern_last,
+                     const basic_string<CharT>& input, size_t input_pos,
+                     bool insensitive, bool not_eol, size_t& result) {
+  if (pattern_first == pattern_last) {
+    result = input_pos;
+    return true;
+  }
+  CharT token = pattern[pattern_first];
+  if (token == CharT('$') && pattern_first + 1 == pattern_last) {
+    if (!not_eol && input_pos == input.size()) {
+      result = input_pos;
+      return true;
+    }
+    return false;
+  }
+  if (token == CharT('(')) {
+    size_t depth = 1;
+    size_t close = pattern_first + 1;
+    while (close < pattern_last && depth != 0) {
+      if (pattern[close] == CharT('\\')) {
+        close += 2;
+        continue;
+      }
+      if (pattern[close] == CharT('(')) ++depth;
+      if (pattern[close] == CharT(')')) --depth;
+      if (depth != 0) ++close;
+    }
+    if (depth != 0) return false;
+    size_t group_end;
+    if (!__match_segment(
+            pattern, pattern_first + 1, close, input,
+            input_pos, insensitive, not_eol, group_end)) {
+      return false;
+    }
+    return __match_segment(
+        pattern, close + 1, pattern_last, input,
+        group_end, insensitive, not_eol, result);
+  }
+  size_t atom_last =
+      __atom_end(pattern, pattern_first, pattern_last);
+  CharT quantifier = atom_last < pattern_last
+                         ? pattern[atom_last]
+                         : CharT();
+  size_t rest = atom_last;
+  size_t minimum = 1;
+  size_t maximum = 1;
+  if (quantifier == CharT('*') || quantifier == CharT('+') ||
+      quantifier == CharT('?')) {
+    rest = atom_last + 1;
+    minimum = quantifier == CharT('+') ? 1 : 0;
+    maximum = quantifier == CharT('?') ? 1 : input.size() - input_pos;
+  }
+  size_t count = 0;
+  while (count < maximum && input_pos + count < input.size() &&
+         __atom_match(
+             pattern, pattern_first, atom_last,
+             input[input_pos + count], insensitive)) {
+    ++count;
+  }
+  while (count >= minimum) {
+    if (__match_segment(
+            pattern, rest, pattern_last, input,
+            input_pos + count, insensitive, not_eol, result)) {
+      return true;
+    }
+    if (count == 0) break;
+    --count;
+  }
+  return false;
+}
+
+static bool __find(const basic_string<CharT>& input,
+            const basic_regex<CharT>& expression,
+            size_t& first, size_t& last, bool require_full,
+            regex_constants::match_flag_type flags) {
+  const basic_string<CharT>& pattern = expression.__pattern();
+  bool anchored = !pattern.empty() && pattern[0] == CharT('^');
+  bool insensitive =
+      (expression.flags() & regex_constants::icase) != 0;
+  size_t pattern_first = anchored ? 1 : 0;
+  size_t start = 0;
+  size_t stop = anchored ||
+                        (flags & regex_constants::match_continuous) != 0
+                    ? 0
+                    : input.size();
+  for (; start <= stop; ++start) {
+    size_t end;
+    if (__match_segment(
+            pattern, pattern_first, pattern.size(), input,
+            start, insensitive,
+            (flags & regex_constants::match_not_eol) != 0, end) &&
+        (!require_full || (start == 0 && end == input.size()))) {
+      if ((flags & regex_constants::match_not_null) != 0 && end == start) {
+        continue;
+      }
+      first = start;
+      last = end;
+      return true;
+    }
+  }
+  return false;
+}
+
+};
+
+}  // namespace __regex_detail
+
+template <class CharT, class Traits>
+bool regex_match(
+    const basic_string<CharT>& input,
+    match_results<typename basic_string<CharT>::const_iterator>& results,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  bool found = __regex_detail::__engine<CharT>::__find(
+      input, expression, first, last, true, flags);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  typename basic_string<CharT>::const_iterator begin = input.begin();
+  results.__set(begin, input.end(), begin + first, begin + last,
+                expression.mark_count());
+  return true;
+}
+
+template <class CharT, class Traits>
+bool regex_match(
+    const basic_string<CharT>& input,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  return __regex_detail::__engine<CharT>::__find(
+      input, expression, first, last, true, flags);
+}
+
+template <class CharT, class Traits>
+bool regex_search(
+    const basic_string<CharT>& input,
+    match_results<typename basic_string<CharT>::const_iterator>& results,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  bool found = __regex_detail::__engine<CharT>::__find(
+      input, expression, first, last, false, flags);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  typename basic_string<CharT>::const_iterator begin = input.begin();
+  results.__set(begin, input.end(), begin + first, begin + last,
+                expression.mark_count());
+  return true;
+}
+
+template <class CharT, class Traits>
+bool regex_search(
+    const basic_string<CharT>& input,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  return __regex_detail::__engine<CharT>::__find(
+      input, expression, first, last, false, flags);
+}
+
+inline bool regex_search(
+    const string& input, smatch& results, const regex& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  bool found = __regex_detail::__engine<char>::__find(
+      input, expression, first, last, false, flags);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  string::const_iterator begin = input.begin();
+  results.__set(begin, input.end(), begin + first, begin + last,
+                expression.mark_count());
+  return true;
+}
+
+template <class CharT, class Traits>
+bool regex_match(
+    const CharT* input, match_results<const CharT*>& results,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  basic_string<CharT> value(input);
+  size_t first;
+  size_t last;
+  bool found = __regex_detail::__engine<CharT>::__find(
+      value, expression, first, last, true, flags);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  results.__set(input, input + value.size(), input + first, input + last,
+                expression.mark_count());
+  return true;
+}
+
+template <class CharT, class Traits>
+bool regex_match(
+    const CharT* input, const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  basic_string<CharT> value(input);
+  size_t first;
+  size_t last;
+  return __regex_detail::__engine<CharT>::__find(
+      value, expression, first, last, true, flags);
+}
+
+template <class CharT, class Traits>
+bool regex_search(
+    const CharT* input, match_results<const CharT*>& results,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  basic_string<CharT> value(input);
+  size_t first;
+  size_t last;
+  bool found = __regex_detail::__engine<CharT>::__find(
+      value, expression, first, last, false, flags);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  results.__set(input, input + value.size(), input + first, input + last,
+                expression.mark_count());
+  return true;
+}
+
+template <class CharT, class Traits>
+bool regex_search(
+    const CharT* input, const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  basic_string<CharT> value(input);
+  size_t first;
+  size_t last;
+  return __regex_detail::__engine<CharT>::__find(
+      value, expression, first, last, false, flags);
+}
+
+template <class CharT, class Traits>
+basic_string<CharT> regex_replace(
+    const basic_string<CharT>& input,
+    const basic_regex<CharT, Traits>& expression,
+    const basic_string<CharT>& format,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  if (!__regex_detail::__engine<CharT>::__find(
+          input, expression, first, last, false, flags)) {
+    return input;
+  }
+  basic_string<CharT> result;
+  if ((flags & regex_constants::format_no_copy) == 0) {
+    result.append(input.begin(), input.begin() + first);
+  }
+  for (size_t i = 0; i < format.size(); ++i) {
+    if (format[i] == CharT('$') && i + 1 < format.size() &&
+        format[i + 1] == CharT('&')) {
+      result.append(input.begin() + first, input.begin() + last);
+      ++i;
+    } else {
+      result.push_back(format[i]);
+    }
+  }
+  if ((flags & regex_constants::format_no_copy) == 0) {
+    result.append(input.begin() + last, input.end());
+  }
+  return result;
+}
+
+template <class CharT, class Traits>
+basic_string<CharT> regex_replace(
+    const basic_string<CharT>& input,
+    const basic_regex<CharT, Traits>& expression, const CharT* format,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  return regex_replace(input, expression, basic_string<CharT>(format), flags);
+}
+
+inline string regex_replace(
+    const string& input, const regex& expression, const string& format,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  if (!__regex_detail::__engine<char>::__find(
+          input, expression, first, last, false, flags)) {
+    return input;
+  }
+  string result;
+  if ((flags & regex_constants::format_no_copy) == 0) {
+    for (size_t i = 0; i < first; ++i) result.push_back(input[i]);
+  }
+  for (size_t i = 0; i < format.size(); ++i) {
+    if (format[i] == '$' && i + 1 < format.size() &&
+        format[i + 1] == '&') {
+      for (size_t position = first; position < last; ++position) {
+        result.push_back(input[position]);
+      }
+      ++i;
+    } else {
+      result.push_back(format[i]);
+    }
+  }
+  if ((flags & regex_constants::format_no_copy) == 0) {
+    for (size_t i = last; i < input.size(); ++i) {
+      result.push_back(input[i]);
+    }
+  }
+  return result;
+}
+
+}  // namespace std
+
+#endif /* __davecc_regex__ */

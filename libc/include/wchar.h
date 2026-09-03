@@ -18,7 +18,7 @@ typedef __WINT_TYPE__ wint_t;
 #endif
 
 #ifndef __MBSTATE_T
-typedef struct {
+typedef struct __davecc_mbstate_t {
   unsigned int __value;
   unsigned short __pending;
   unsigned char __count;

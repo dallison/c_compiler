@@ -58,14 +58,14 @@ cxx_removed_at_26="codecvt"
 
 # Not yet implemented.  Remove entries here as the headers land.
 c_missing="complex.h fenv.h tgmath.h"
-cxx_missing="ccomplex codecvt ctgmath cfenv regex
+cxx_missing="ccomplex ctgmath cfenv
              debugging hazard_pointer linalg rcu simd text_encoding"
 
 # These headers exist and are self-contained, but their standard surface or
 # required runtime behavior is known to be incomplete. Unlike MISSING and
 # INCOMPATIBLE, this category is still compiled so syntax regressions fail.
 c_incomplete="threads.h"
-cxx_incomplete="chrono filesystem format future locale print stacktrace stdfloat"
+cxx_incomplete="chrono codecvt filesystem format future locale print regex stacktrace stdfloat"
 
 # The C++ headers were only ever exercised at C++20 and later and use C++17/20
 # syntax unconditionally, so most of them do not compile below C++20 yet. Until
