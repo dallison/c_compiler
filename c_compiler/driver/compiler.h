@@ -411,6 +411,10 @@ typedef struct Compiler {
   CompilerTarget* target;
   String* target_name;
   CompilerTargetTriple target_triple;
+  bool target_supports_threads;
+  bool target_supports_atomics;
+  bool target_supports_c11_atomics;
+  bool target_supports_8_byte_atomics;
 
   // Vector containing all the code for all functions.
   Vector functions;

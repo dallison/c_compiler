@@ -136,54 +136,23 @@ bool OptLevel3(void) {
 }
 
 bool CompilerTargetSupportsThreads(void) {
-  if (compiler == NULL || compiler->target_name == NULL) {
-    return false;
-  }
-  return !StringEqual(compiler->target_name, "6502") &&
-         !StringEqual(compiler->target_name, "65c02") &&
-         !StringEqual(compiler->target_name, "p-code") &&
-         !StringEqual(compiler->target_name, "pcode") &&
-         !StringEqual(compiler->target_name, "wasm32") &&
-         !StringEqual(compiler->target_name, "wasm");
+  return compiler != NULL && compiler->target_supports_threads;
 }
 
 bool CompilerTargetSupportsAtomics(void) {
-  if (compiler == NULL || compiler->target_name == NULL) {
-    return false;
-  }
-  return !StringEqual(compiler->target_name, "6502") &&
-         !StringEqual(compiler->target_name, "65c02");
+  return compiler != NULL && compiler->target_supports_atomics;
 }
 
 bool CompilerTargetSupportsC11Atomics(void) {
-  if (!CompilerTargetSupportsAtomics()) {
-    return false;
-  }
-  // The 32-bit ARM backend has no 64-bit atomic lowering.  C11 requires the
-  // atomic_llong typedef and operations even when they are not lock-free.
-  // AArch64's current atomic lowering also lacks the required bit-preserving
-  // transfer between floating-point values and exclusive-load/store registers.
-  // Do not advertise the complete C11 profile on either backend yet.
-  return !StringEqual(compiler->target_name, "p-code") &&
-         !StringEqual(compiler->target_name, "pcode") &&
-         !StringEqual(compiler->target_name, "aarch64") &&
-         !StringEqual(compiler->target_name, "arm") &&
-         !StringEqual(compiler->target_name, "armv7") &&
-         !StringEqual(compiler->target_name, "armv7-a") &&
-         !StringEqual(compiler->target_name, "arm32") &&
-         !StringEqual(compiler->target_name, "wasm32") &&
-         !StringEqual(compiler->target_name, "wasm");
+  return compiler != NULL && compiler->target_supports_c11_atomics;
 }
 
 bool CompilerTargetSupportsAtomicSize(int size) {
   if (!CompilerTargetSupportsAtomics()) {
     return false;
   }
-  bool arm32 = StringEqual(compiler->target_name, "arm") ||
-               StringEqual(compiler->target_name, "armv7") ||
-               StringEqual(compiler->target_name, "armv7-a") ||
-               StringEqual(compiler->target_name, "arm32");
-  return size == 1 || size == 2 || size == 4 || (!arm32 && size == 8);
+  return size == 1 || size == 2 || size == 4 ||
+         (size == 8 && compiler->target_supports_8_byte_atomics);
 }
 
 bool CompilerExceptionsEnabled(void) {
@@ -238,21 +207,42 @@ bool CompilerHasModuleImportHandler(void) {
 
 // Add new targets here.
 #define kMaxTargetNames 4
+
+enum {
+  kTargetSupportsThreads = 1u << 0,
+  kTargetSupportsAtomics = 1u << 1,
+  // A complete C11 profile includes atomic_llong even when it is not lock-free.
+  // ARM32 lacks 64-bit lowering; AArch64 lacks the required bit-preserving
+  // floating-point transfer; pcode and wasm do not yet implement the profile.
+  kTargetSupportsC11Atomics = 1u << 2,
+  kTargetSupports8ByteAtomics = 1u << 3,
+};
+
 static struct CompilerTargetDefinition{
   const char* canonical_name;
   const char* names[kMaxTargetNames];
   CompilerTarget* (*factory)(void);
   bool static_linkage_only;
   int default_opt_level;
+  unsigned capabilities;
 } compiler_targets[] = {
-  {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false, 0},
-  {"riscv", {"riscv", "risc-v"}, NewRVTarget, false, 0},
-  {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0},
-  {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false, 0},
-  {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0},
-  {"6502", {"6502"}, New6502Target, true, 2},
-  {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2},
-  {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0},
+  {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false, 0,
+   kTargetSupportsAtomics | kTargetSupports8ByteAtomics},
+  {"riscv", {"riscv", "risc-v"}, NewRVTarget, false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
+  {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupports8ByteAtomics},
+  {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics},
+  {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
+  {"6502", {"6502"}, New6502Target, true, 2, 0},
+  {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2, 0},
+  {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0,
+   kTargetSupportsAtomics | kTargetSupports8ByteAtomics},
 };
 
 #define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))
@@ -3191,6 +3181,10 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->current_class_access_context = NULL;
   compiler->global_namespace = NULL;
   compiler->module_header = false;
+  compiler->target_supports_threads = false;
+  compiler->target_supports_atomics = false;
+  compiler->target_supports_c11_atomics = false;
+  compiler->target_supports_8_byte_atomics = false;
   
   char dirname[4096];
   char* wd = getcwd(dirname, sizeof(dirname));
@@ -3390,6 +3384,14 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   }
   compiler->target = target->factory();
   StringSet(compiler->target_name, target->canonical_name);
+  compiler->target_supports_threads =
+      (target->capabilities & kTargetSupportsThreads) != 0;
+  compiler->target_supports_atomics =
+      (target->capabilities & kTargetSupportsAtomics) != 0;
+  compiler->target_supports_c11_atomics =
+      (target->capabilities & kTargetSupportsC11Atomics) != 0;
+  compiler->target_supports_8_byte_atomics =
+      (target->capabilities & kTargetSupports8ByteAtomics) != 0;
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
   ParseStandardOption(compiler, options);
