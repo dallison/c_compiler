@@ -2898,7 +2898,9 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else if (must_survive_later_call && argument_contains_call &&
                (!aggregate_actual || stashable_reference_actual ||
                 call_result_reference_actual || aggregate_reference_actual)) {
-      if (CompilerIsCXX() && reference_formal && !aggregate_actual &&
+      if (CompilerIsCXX() && formal_type != NULL &&
+          formal_type->declarator == kDeclReference &&
+          !reference_returning_call && !aggregate_actual &&
           compiler->call_return_fixed_reg) {
         // The reference-binding path below immediately materializes this
         // scalar prvalue in addressable temporary storage.  Stashing the fixed

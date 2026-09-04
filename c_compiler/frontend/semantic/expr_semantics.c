@@ -9861,7 +9861,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
             SemanticError(actual, "Reference argument must be an lvalue");
           }
         }
-        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual)) {
+        bool materialize_scalar_lvalue_reference =
+            reference_type->declarator == kDeclReference &&
+            actual->value_category == kValueCategoryPrvalue &&
+            !TypeIsStructOrUnion(actual->type);
+        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual) &&
+            (TypeIsStructOrUnion(actual->type) ||
+             materialize_scalar_lvalue_reference)) {
           ASTNode* materialized =
               MaterializeTemporary(actual, reference_type->next);
           ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);

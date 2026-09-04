@@ -1814,6 +1814,27 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   if (type->dependent_decltype_expr != NULL &&
       !DependentDecltypeStackContains(type->dependent_decltype_expr)) {
     VectorAppend(&g_dependent_decltype_stack, type->dependent_decltype_expr);
+    if ((type->dependent_decltype_expr->flags &
+         kASTUnparenthesizedDecltypeEntity) != 0 &&
+        type->dependent_decltype_expr->op == AST_OP(identifier)) {
+      Symbol* entity =
+          ((IdentifierASTNode*)type->dependent_decltype_expr)->symbol;
+      if (entity != NULL && entity->type != NULL && entity->type != type) {
+        // An unparenthesized id-expression uses the entity's declared type.
+        // Resolve that type directly so a parameter-pack element such as
+        // `decltype(args)...` is substituted against the selected pack element
+        // rather than reanalyzing an identifier that still denotes the whole
+        // function parameter pack.
+        TypeRecord* declared =
+            SubstituteTemplateParameters(parser, entity->type, args);
+        if (declared != NULL && !TypeContainsTemplateParameter(declared)) {
+          declared->qualifiers |= type->qualifiers;
+          VectorPop(&g_dependent_decltype_stack);
+          return TypeRecordCalculateSize(declared);
+        }
+        TypeRecordDelete(declared);
+      }
+    }
     // decltype is unevaluated: cloning and resolving a declaration-only
     // function such as std::declval must not require a function body.
     DiagnosticSuppressBegin();
