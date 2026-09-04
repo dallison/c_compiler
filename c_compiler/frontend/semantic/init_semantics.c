@@ -1180,6 +1180,19 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
+      if (CompilerIsCXX() && !constants_only && inode->kind == kIStruct &&
+          inode->type->info.struct_info != NULL &&
+          (inode->type->info.struct_info->tag_symbol == NULL ||
+           !inode->type->info.struct_info->tag_symbol->flags.invented) &&
+          !inode->type->info.struct_info->is_aggregate) {
+        ASTNode* constructed =
+            LowerCXXBracedClassInitToConstructor(init_expr, inode->type);
+        if (constructed != NULL) {
+          inode->num_initializers++;
+          inode->expr = ASTNodeMove(constructed);
+          return AdvanceCurrent(inode->parent);
+        }
+      }
       if (braced_init->initializers->length == 0 && !CompilerIsCXX() &&
           !CompilerCAtLeast(kLanguageStandardC23)) {
         SemanticError(init_expr,

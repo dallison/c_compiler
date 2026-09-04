@@ -1062,6 +1062,28 @@ bool IRIsComparison(IRNode* node) {
   return node->opcode >= IR_OP(cmpeqi) && node->opcode <= IR_OP(cmpgea);
 }
 
+bool IRComparisonIsUnsigned(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(cmplta):
+    case IR_OP(cmplea):
+    case IR_OP(cmpgta):
+    case IR_OP(cmpgea):
+    case IR_OP(cmp3waya):
+      return true;
+    case IR_OP(cmplti):
+    case IR_OP(cmplei):
+    case IR_OP(cmpgti):
+    case IR_OP(cmpgei):
+    case IR_OP(cmp3wayi): {
+      IRNode* lhs =
+          node->inputs.length != 0 ? node->inputs.value.p[0] : NULL;
+      return lhs != NULL && TypeIsUnsigned(lhs->type);
+    }
+    default:
+      return false;
+  }
+}
+
 bool IRIsStoreOnly(IRNode* node) {
   switch (node->opcode) {
     case IR_OP(store32):

@@ -5234,6 +5234,30 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
   StructMember* constructor = TypeIsStructOrUnion(member_type)
                                   ? FindCXXConstructor(member_type)
                                   : NULL;
+  bool braced_aggregate =
+      TypeIsStructOrUnion(member_type) &&
+      member_type->info.struct_info != NULL &&
+      member_type->info.struct_info->is_aggregate &&
+      actuals->length == 1 &&
+      actuals->value.p[0] != NULL &&
+      ((ASTNode*)actuals->value.p[0])->op == AST_OP(braced_init);
+  if (braced_aggregate) {
+    ASTNode* initializer = actuals->value.p[0];
+    actuals->value.p[0] = NULL;
+    VectorDelete(actuals);
+    ASTNode* target =
+        NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+    if (target == NULL) {
+      ASTNodeDelete(initializer);
+      return NULL;
+    }
+    target->flags |= kASTNeedAddress | kASTIsDeclaration;
+    ASTNode* init =
+        NewBinaryASTNode(AST_OP(init), member_type, location, target,
+                         initializer);
+    init->flags |= kASTCXXMemberInitializer;
+    return NewExpressionStatementASTNode(init, location);
+  }
   if (constructor != NULL) {
     bool zero_before_default =
         value_initialize_empty && actuals->length == 0 &&
@@ -5433,8 +5457,14 @@ static Vector* ResolveCXXBracedConstructorInitializerActuals(
     return actuals;
   }
   ASTNode* root = actuals->value.p[0];
+  StructMember* constructor = TypeIsStructOrUnion(target_type)
+                                  ? FindCXXConstructor(target_type)
+                                  : NULL;
   if (root == NULL || root->op != AST_OP(braced_init) ||
-      CXXConstructorSetHasInitializerList(FindCXXConstructor(target_type))) {
+      (TypeIsStructOrUnion(target_type) &&
+       target_type->info.struct_info != NULL &&
+       target_type->info.struct_info->is_aggregate) ||
+      CXXConstructorSetHasInitializerList(constructor)) {
     return actuals;
   }
 
@@ -5501,6 +5531,9 @@ void SyntaxParseCXXConstructorInitializerList(
               : NULL;
       LexNextToken(syntax->lex);
       if (target_type == NULL ||
+          (TypeIsStructOrUnion(target_type) &&
+           target_type->info.struct_info != NULL &&
+           target_type->info.struct_info->is_aggregate) ||
           CXXConstructorSetHasInitializerList(constructor)) {
         actuals = NewVector();
         VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
@@ -6718,6 +6751,7 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   parser.is_constexpr = is_constexpr;
   parser.is_consteval = is_consteval;
   parser.is_constinit = is_constinit;
+  parser.parsing_friend_declaration = true;
   // Let the friend's signature name the class currently being defined via its
   // own template-id (e.g. 'friend f(const Box<T>&)' inside 'template Box').
   // This only affects type resolution; the friend is still declared at the
@@ -6747,6 +6781,29 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   // inline even when the `inline` specifier is omitted ([dcl.fct.spec]).
   if (LexLookingAt(syntax->lex, TOK(lbrace))) {
     sym->type->info.function.is_inline = true;
+  }
+
+  // A qualified friend declaration can name a namespace-scope function that
+  // was declared before the befriending class. It does not redeclare that
+  // function in the class's enclosing namespace.
+  if (parser.cxx_qualified_friend_function != NULL) {
+    Symbol* friend_function =
+        FindMatchingOverload(parser.cxx_qualified_friend_function, sym->type,
+                             /*incoming=*/NULL);
+    if (friend_function == NULL) {
+      SyntaxError(syntax,
+                  "Qualified friend declaration does not match an existing "
+                  "function");
+    } else {
+      StructAddFriendFunction(befriending, friend_function);
+    }
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
   }
 
   // 'friend void A::f();' names an existing member function of another class.

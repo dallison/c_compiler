@@ -59,6 +59,8 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->enclosing_template_substitution_source = NULL;
   parser->enclosing_template_substitution_target = NULL;
   parser->cxx_member_definition = NULL;
+  parser->cxx_qualified_friend_function = NULL;
+  parser->parsing_friend_declaration = false;
   parser->declarator_template_arguments = NULL;
   parser->parsing_direct_class_template = false;
   parser->template_substitution_failed = false;
@@ -83,6 +85,8 @@ void TypeParserReset(TypeParser* parser) {
   parser->enclosing_template_substitution_source = NULL;
   parser->enclosing_template_substitution_target = NULL;
   parser->cxx_member_definition = NULL;
+  parser->cxx_qualified_friend_function = NULL;
+  parser->parsing_friend_declaration = false;
   parser->parsing_direct_class_template = false;
   parser->placeholder_variable_constraint = NULL;
   if (parser->declarator_template_arguments != NULL) {
@@ -3196,6 +3200,21 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
                                              FullyQualifiedIdentifier* name) {
   if (!name->is_qualified || name->components.length < 2) {
     return;
+  }
+
+  // A qualified friend declarator may name a previously declared namespace
+  // function as well as a class member. Friend parsing supplies the
+  // befriending class as cxx_member_owner even though the declarator itself is
+  // parsed in file scope.
+  if (parser->parsing_friend_declaration) {
+    Symbol* function = SyntaxFindQualifiedPrefixSymbol(
+        parser->syntax, name, name->components.length);
+    if (function != NULL && function->type != NULL &&
+        TypeIsFunction(function->type) &&
+        function->type->info.function.cxx_member_owner == NULL) {
+      parser->cxx_qualified_friend_function = function;
+      return;
+    }
   }
 
   Symbol* owner = SyntaxFindQualifiedPrefixSymbol(

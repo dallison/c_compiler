@@ -67,5 +67,7 @@ void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from);
 // braced node is re-parented into the result, so splice it in with
 // delete_old_child = false.
 ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target);
+ASTNode* LowerCXXBracedClassInitToConstructor(ASTNode* braced,
+                                              TypeRecord* target);
 
 #endif /* expr_semantics_h */

@@ -408,6 +408,7 @@ bool IRIsConstant(IRNode* inst);
 bool IRIsCommutative(IRNode* inst);
 
 bool IRIsComparison(IRNode* node);
+bool IRComparisonIsUnsigned(IRNode* node);
 bool IRIsStoreOnly(IRNode* node);
 bool IRIsStore(IRNode* node);
 bool IRIsLoad(IRNode* node);

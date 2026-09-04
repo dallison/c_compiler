@@ -1,0 +1,168 @@
+#ifndef __davecc_hazard_pointer__
+#define __davecc_hazard_pointer__
+
+#include <cstddef>
+#include <exception>
+#include <memory>
+#include <new>
+#include <utility>
+
+#if !defined(__6502__) && !defined(__W65C02__)
+#include <atomic>
+#endif
+
+namespace std {
+namespace __hazard_detail {
+
+struct __slot;
+
+struct __retired_record {
+  const void* address;
+  void* context;
+  void (*reclaim)(void*) noexcept;
+  __retired_record* next;
+
+  __retired_record(const void* value, void* state,
+                   void (*function)(void*) noexcept) noexcept
+      : address(value), context(state), reclaim(function), next(nullptr) {}
+};
+
+__slot* __acquire_slot();
+void __release_slot(__slot*) noexcept;
+void __set_protection(__slot*, const void*) noexcept;
+void __retire(__retired_record*) noexcept;
+
+template <class T, class D>
+struct __retired_object {
+  __retired_record header;
+  T* object;
+  D deleter;
+
+  __retired_object(T* value, D d)
+      : header(value, this, &__reclaim),
+        object(value),
+        deleter(static_cast<D&&>(d)) {}
+
+  static void __reclaim(void* context) noexcept {
+    __retired_object* record =
+        static_cast<__retired_object*>(context);
+    record->deleter(record->object);
+    delete record;
+  }
+};
+
+}  // namespace __hazard_detail
+
+#if __cplusplus >= 202600L && \
+    !defined(__6502__) && !defined(__W65C02__)
+
+#define __cpp_lib_hazard_pointer 202306L
+
+template <class T, class D = default_delete<T>>
+class hazard_pointer_obj_base {
+ public:
+  void retire(D deleter = D()) noexcept {
+    using __record = __hazard_detail::__retired_object<T, D>;
+    __record* record =
+        new (nothrow) __record(static_cast<T*>(this),
+                              static_cast<D&&>(deleter));
+    if (record == nullptr) {
+      terminate();
+    }
+    __hazard_detail::__retire(&record->header);
+  }
+
+ protected:
+  hazard_pointer_obj_base() = default;
+  hazard_pointer_obj_base(const hazard_pointer_obj_base&) = default;
+  hazard_pointer_obj_base(hazard_pointer_obj_base&&) = default;
+  hazard_pointer_obj_base& operator=(const hazard_pointer_obj_base&) = default;
+  hazard_pointer_obj_base& operator=(hazard_pointer_obj_base&&) = default;
+  ~hazard_pointer_obj_base() = default;
+};
+
+class hazard_pointer {
+ private:
+  __hazard_detail::__slot* __slot;
+
+  explicit hazard_pointer(__hazard_detail::__slot* slot) noexcept
+      : __slot(slot) {}
+
+  friend hazard_pointer make_hazard_pointer();
+
+ public:
+  hazard_pointer() noexcept : __slot(nullptr) {}
+
+  hazard_pointer(hazard_pointer&& other) noexcept : __slot(other.__slot) {
+    other.__slot = nullptr;
+  }
+
+  hazard_pointer& operator=(hazard_pointer&& other) noexcept {
+    if (this != &other) {
+      if (__slot != nullptr) {
+        __hazard_detail::__release_slot(__slot);
+      }
+      __slot = other.__slot;
+      other.__slot = nullptr;
+    }
+    return *this;
+  }
+
+  hazard_pointer(const hazard_pointer&) = delete;
+  hazard_pointer& operator=(const hazard_pointer&) = delete;
+
+  ~hazard_pointer() {
+    if (__slot != nullptr) {
+      __hazard_detail::__release_slot(__slot);
+    }
+  }
+
+  bool empty() const noexcept { return __slot == nullptr; }
+
+  template <class T>
+  T* protect(const atomic<T*>& source) noexcept {
+    T* pointer = source.load(memory_order_relaxed);
+    while (!try_protect(pointer, source)) {
+    }
+    return pointer;
+  }
+
+  template <class T>
+  bool try_protect(T*& pointer, const atomic<T*>& source) noexcept {
+    __hazard_detail::__set_protection(__slot, pointer);
+    T* observed = source.load(memory_order_acquire);
+    if (observed == pointer) {
+      return true;
+    }
+    pointer = observed;
+    __hazard_detail::__set_protection(__slot, nullptr);
+    return false;
+  }
+
+  template <class T>
+  void reset_protection(const T* pointer) noexcept {
+    __hazard_detail::__set_protection(__slot, pointer);
+  }
+
+  void reset_protection(nullptr_t = nullptr) noexcept {
+    __hazard_detail::__set_protection(__slot, nullptr);
+  }
+
+  void swap(hazard_pointer& other) noexcept {
+    std::swap(__slot, other.__slot);
+  }
+};
+
+inline hazard_pointer make_hazard_pointer() {
+  return hazard_pointer(__hazard_detail::__acquire_slot());
+}
+
+inline void swap(hazard_pointer& left, hazard_pointer& right) noexcept {
+  left.swap(right);
+}
+
+#endif /* C++26 */
+
+}  // namespace std
+
+#endif /* __davecc_hazard_pointer__ */

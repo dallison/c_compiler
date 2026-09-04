@@ -256,6 +256,23 @@ static SCCPValue TruncateLoad(IRNode* inst, SCCPValue value) {
   return ConstantValue((int64_t)truncated);
 }
 
+static int64_t NormalizeIntegerValue(int64_t value, TypeRecord* type) {
+  if (type == NULL || !TypeIsIntegral(type)) {
+    return value;
+  }
+  int bits = TypeIsBitInt(type) ? type->bit_width : type->size * 8;
+  if (bits <= 0 || bits >= 64) {
+    return value;
+  }
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  uint64_t normalized = (uint64_t)value & mask;
+  if (!TypeIsUnsigned(type) &&
+      (normalized & (UINT64_C(1) << (bits - 1))) != 0) {
+    normalized |= ~mask;
+  }
+  return (int64_t)normalized;
+}
+
 static bool ReadOperands(SCCPContext* context, IRNode* inst,
                          SCCPValue* lhs, SCCPValue* rhs) {
   if (inst->inputs.length == 0) {
@@ -312,11 +329,19 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
     return UndefinedValue();
   }
 
+  IRNode* lhs_node = inst->inputs.value.p[0];
+  IRNode* rhs_node =
+      inst->inputs.length > 1 ? inst->inputs.value.p[1] : NULL;
+  lhs.value = NormalizeIntegerValue(lhs.value, lhs_node->type);
+  if (!unary) {
+    rhs.value = NormalizeIntegerValue(rhs.value, rhs_node->type);
+  }
   uint64_t ulhs = (uint64_t)lhs.value;
   uint64_t urhs = (uint64_t)rhs.value;
-  IRNode* lhs_node = inst->inputs.value.p[0];
   bool is_unsigned =
-      lhs_node->type != NULL && TypeIsUnsigned(lhs_node->type);
+      IRIsComparison(inst) ? IRComparisonIsUnsigned(inst)
+                           : lhs_node->type != NULL &&
+                                 TypeIsUnsigned(lhs_node->type);
   int width = lhs_node->type != NULL && TypeIsBitInt(lhs_node->type)
                   ? lhs_node->type->bit_width
                   : (inst->type != NULL && inst->type->size > 0

@@ -4047,7 +4047,7 @@ static void LowerConditionalBranch(W65C02Generator* g,
   }
   IRNode* lhs = input->inputs.value.p[0];
   IRNode* rhs = input->inputs.value.p[1];
-  bool is_unsigned = TypeIsUnsigned(lhs->type);
+  bool is_unsigned = IRComparisonIsUnsigned(input);
 
   if (TypeIsFloatingPoint(lhs->type)) {
     TargetInstruction* dest = TempRegister(g, node->type, 1);
@@ -7423,7 +7423,7 @@ static void LowerComparison(W65C02Generator* g, IRNode* node) {
   // Size is the size of the inputs.  They will all be the same.
   IRNode* op1 = node->inputs.value.p[0];
   int size = Sizeof(op1->type);
-  bool is_unsigned = TypeIsUnsigned(op1->type);
+  bool is_unsigned = IRComparisonIsUnsigned(node);
   AddReloadPoint(g, dest);
 
   IRNode* lhs = node->inputs.value.p[0];

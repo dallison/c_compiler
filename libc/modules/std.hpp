@@ -12,6 +12,9 @@
 #include <concepts>
 #include <condition_variable>
 #include <coroutine>
+#if __cplusplus >= 202600L
+#include <debugging>
+#endif
 #include <deque>
 #include <exception>
 #include <expected>
@@ -23,6 +26,7 @@
 #include <functional>
 #include <generator>
 #if __cplusplus >= 202600L
+#include <hazard_pointer>
 #include <hive>
 #endif
 #include <iomanip>
@@ -51,6 +55,9 @@
 #include <random>
 #include <ratio>
 #include <ranges>
+#if __cplusplus >= 202600L
+#include <rcu>
+#endif
 #include <scoped_allocator>
 #include <semaphore>
 #include <set>

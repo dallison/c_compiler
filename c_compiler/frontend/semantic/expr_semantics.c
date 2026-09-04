@@ -3399,6 +3399,15 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
   return analyzed;
 }
 
+ASTNode* LowerCXXBracedClassInitToConstructor(ASTNode* braced,
+                                              TypeRecord* target) {
+  if (braced == NULL || braced->op != AST_OP(braced_init)) {
+    return NULL;
+  }
+  return LowerCXXBracedInitToConstructorCall(
+      (BracedInitializerASTNode*)braced, target, braced->location);
+}
+
 // Lower a bare braced-init-list that appears where an expression of a known
 // type is required (a function argument, a return value, or the right-hand
 // side of an assignment) into a temporary of that `target` type, initialized

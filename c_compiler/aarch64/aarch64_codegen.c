@@ -2348,7 +2348,7 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
   }
   // Size is the size of the inputs.  They will all be the same.
   IRNode* op1 = node->inputs.value.p[0];
-  bool is_unsigned = TypeIsUnsigned(op1->type);
+  bool is_unsigned = IRComparisonIsUnsigned(node);
 
   IRNode* lhs = node->inputs.value.p[0];
   IRNode* rhs = node->inputs.value.p[1];
@@ -3053,7 +3053,7 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
   }
   IRNode* lhs = input->inputs.value.p[0];
   IRNode* rhs = input->inputs.value.p[1];
-  bool is_unsigned = TypeIsUnsigned(lhs->type);
+  bool is_unsigned = IRComparisonIsUnsigned(input);
   return CompareAndBranch(g, lhs, rhs, target_node, is_unsigned, reverse, expr->opcode);
 }
 

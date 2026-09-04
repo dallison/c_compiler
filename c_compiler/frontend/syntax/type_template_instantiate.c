@@ -2694,6 +2694,13 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   if (formal->is_pack_index) {
     return true;
   }
+  // A qualified dependent type is a non-deduced context. Defer both the
+  // `Owner<T>::member` and bare `T::member` forms during the first deduction
+  // pass so another parameter can supply T without this argument contaminating
+  // that deduction. The extension below is retried only if T remains unbound.
+  if (formal->dependent_member_name != NULL && g_deduce_defer_bare_member) {
+    return true;
+  }
   if (formal->template_origin != NULL &&
       formal->dependent_member_name != NULL) {
     TypeRecord* owner =
@@ -2713,16 +2720,6 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
     }
     TypeRecordDelete(owner);
     return ok;
-  }
-  // A qualified dependent name rooted directly at a template parameter
-  // (`T::member`, e.g. `range_difference_t<R>` reducing to
-  // `R::...::difference_type`) is a non-deduced context [temp.deduct.type].
-  // While deferring, leave the root parameter unbound so a default template
-  // argument can supply it; the bare-member extension below is only retried
-  // when no default is available.  (The `Owner<T>::member` template-id form is
-  // handled by the block above and never reaches here.)
-  if (formal->dependent_member_name != NULL && g_deduce_defer_bare_member) {
-    return true;
   }
   int bare_parameter_index = -1;
   if (TypeIsTemplateParameterPlaceholder(formal, &bare_parameter_index)) {

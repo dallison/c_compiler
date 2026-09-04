@@ -1729,9 +1729,9 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       // Auto variable is in the stack frame.  These are accessed through
       // the frame pointer with a negative offset.
       TargetInstruction* addr = FramePointer(g);
-      return MarkFrameOffset(
-          OffsetFrom(g, addr, LocalVariableOffset(g, var_offset)),
-          kARMFrameStorageOffset);
+      uint32_t frame_flag = kARMFrameStorageOffset;
+      return MoveOffsetIntoAddress(
+          g, addr, LocalVariableOffset(g, var_offset), &frame_flag);
     }
   } else if (IRIsArgument(node)) {
     // TODO: structs passed by reference.
@@ -1749,10 +1749,9 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       // Argument is on the stack.
       TargetInstruction* addr = FramePointer(g);
       int32_t var_offset = node->data.ivalue;
-      return MarkFrameOffset(
-          OffsetFrom(g, addr, var_offset),
-          var_offset < 0 ? kARMFrameStorageOffset
-                         : kARMIncomingFrameOffset);
+      uint32_t frame_flag =
+          var_offset < 0 ? kARMFrameStorageOffset : kARMIncomingFrameOffset;
+      return MoveOffsetIntoAddress(g, addr, var_offset, &frame_flag);
     }
   } else if (IRIsStaticVariable(node)) {
     // The address of static variables need to be moved into a register.
@@ -2738,7 +2737,7 @@ static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
   }
   // Size is the size of the inputs.  They will all be the same.
   IRNode* op1 = node->inputs.value.p[0];
-  bool is_unsigned = TypeIsUnsigned(op1->type);
+  bool is_unsigned = IRComparisonIsUnsigned(node);
 
   IRNode* lhs = node->inputs.value.p[0];
   IRNode* rhs = node->inputs.value.p[1];
@@ -3542,7 +3541,7 @@ static TargetInstruction* LowerConditionalBranch(ARMGenerator* g,
   }
   IRNode* lhs = input->inputs.value.p[0];
   IRNode* rhs = input->inputs.value.p[1];
-  bool is_unsigned = TypeIsUnsigned(lhs->type);
+  bool is_unsigned = IRComparisonIsUnsigned(input);
   return CompareAndBranch(g, lhs, rhs, target_node, is_unsigned, reverse, expr->opcode);
 }
 

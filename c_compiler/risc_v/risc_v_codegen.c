@@ -834,7 +834,6 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
   VectorInit(&rv->saved_regs);
-  VectorInit(&rv->offsets);
   VectorInit(&rv->exception_ranges);
   VectorInit(&rv->exception_typeinfos);
 
@@ -851,7 +850,6 @@ void RVGeneratorDestruct(RVGenerator* rv) {
   TargetGeneratorDestruct(&rv->base);
   VectorDestructWithContents(&rv->var_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->saved_regs, NULL, /*free_element=*/true);
-  VectorDestructWithContents(&rv->offsets, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->exception_ranges, NULL,
                              /*free_element=*/true);
   VectorDestruct(&rv->exception_typeinfos);
@@ -1146,23 +1144,11 @@ static TargetInstruction* PagedOffsetFrom(RVGenerator* rv, TargetInstruction* sr
   } else {
     page = offset & ~0x7ff;
   }
-  TargetInstruction* page_inst = NULL;
-  for (size_t i = 0; i < rv->offsets.length; i++) {
-    Offset* f = rv->offsets.value.p[i];
-    if (f->page_offset == page) {
-      page_inst = f->inst;
-      break;
-    }
-  }
-  if (page_inst == NULL) {
-    // No page offset calculated, need to calculate one.
-    page_inst =
-        AddImmediate(rv, src, page);
-    Offset* f = malloc(sizeof(Offset));
-    f->inst = page_inst;
-    f->page_offset = page;
-    VectorAppend(&rv->offsets, f);
-  }
+  // Do not cache this calculation globally.  The source is not necessarily the
+  // frame pointer, and a calculation emitted in one control-flow branch may not
+  // dominate a later use.  Keeping one page value live across a large function
+  // also forces every unrelated block to preserve or spill it.
+  TargetInstruction* page_inst = AddImmediate(rv, src, page);
   *page_offset = offset - page;
   return page_inst;
 }
@@ -2114,7 +2100,7 @@ static TargetInstruction* SubtractForComparison(RVGenerator* rv, IRNode* node,
 // instructions.
 static TargetInstruction* CompareLessThanInt(RVGenerator* rv, IRNode* node,
                                              IRNode* op1, IRNode* op2) {
-  bool is_unsigned = TypeIsUnsigned(op1->type);
+  bool is_unsigned = IRComparisonIsUnsigned(node);
   if (!IRIsConst(op2)) {
     // Second operand isn't constant, compile as slt/sltu.
     TargetInstruction* i1 = Materialize(rv, op1);

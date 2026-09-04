@@ -1,0 +1,18 @@
+#ifndef __davecc_debugging__
+#define __davecc_debugging__
+
+#if __cplusplus >= 202600L
+
+#define __cpp_lib_debugging 202403L
+
+namespace std {
+
+void breakpoint() noexcept;
+void breakpoint_if_debugging() noexcept;
+bool is_debugger_present() noexcept;
+
+}  // namespace std
+
+#endif /* C++26 */
+
+#endif /* __davecc_debugging__ */

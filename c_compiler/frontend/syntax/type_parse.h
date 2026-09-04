@@ -47,6 +47,8 @@ typedef struct {
   Struct* enclosing_template_substitution_source;
   Struct* enclosing_template_substitution_target;
   StructMember* cxx_member_definition;
+  Symbol* cxx_qualified_friend_function;
+  bool parsing_friend_declaration;
   Vector* declarator_template_arguments;
   bool parsing_direct_class_template;
   // Set when substituting template arguments into a type produces a hard

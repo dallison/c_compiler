@@ -1,0 +1,156 @@
+#ifndef __davecc_rcu__
+#define __davecc_rcu__
+
+#include <cstddef>
+#include <memory>
+#include <new>
+#include <utility>
+
+namespace std {
+
+class rcu_domain;
+
+namespace __rcu_detail {
+
+struct __retired_record {
+  void* context;
+  void (*reclaim)(void*) noexcept;
+  __retired_record* next;
+  size_t ticket;
+};
+
+void* __default_state() noexcept;
+void __lock(void*) noexcept;
+bool __try_lock(void*) noexcept;
+void __unlock(void*) noexcept;
+void __synchronize(void*) noexcept;
+void __barrier(void*) noexcept;
+void __schedule_state(__retired_record*, void*) noexcept;
+void __schedule(__retired_record*, rcu_domain&) noexcept;
+
+template <class T, class D>
+struct __allocated_record {
+  __retired_record header;
+  T* object;
+  D deleter;
+
+  __allocated_record(T* value, D d)
+      : header{this, &__reclaim, nullptr},
+        object(value),
+        deleter(static_cast<D&&>(d)) {}
+
+  static void __reclaim(void* context) noexcept {
+    __allocated_record* record =
+        static_cast<__allocated_record*>(context);
+    record->deleter(record->object);
+    delete record;
+  }
+};
+
+}  // namespace __rcu_detail
+
+#if __cplusplus >= 202600L && \
+    defined(__DAVECC_HAS_GUEST_THREADS__) && \
+    !defined(__6502__) && !defined(__W65C02__)
+
+#define __cpp_lib_rcu 202306L
+
+rcu_domain& rcu_default_domain() noexcept;
+void rcu_synchronize(rcu_domain& domain = rcu_default_domain()) noexcept;
+void rcu_barrier(rcu_domain& domain = rcu_default_domain()) noexcept;
+
+class rcu_domain {
+ private:
+  void* __state;
+
+  explicit rcu_domain(void* state) noexcept : __state(state) {}
+
+  friend rcu_domain& rcu_default_domain() noexcept;
+  friend void rcu_synchronize(rcu_domain&) noexcept;
+  friend void rcu_barrier(rcu_domain&) noexcept;
+  friend void __rcu_detail::__schedule(
+      __rcu_detail::__retired_record*, rcu_domain&) noexcept;
+
+ public:
+  rcu_domain(const rcu_domain&) = delete;
+  rcu_domain& operator=(const rcu_domain&) = delete;
+
+  void lock() noexcept {
+    __rcu_detail::__lock(__state);
+  }
+
+  bool try_lock() noexcept {
+    return __rcu_detail::__try_lock(__state);
+  }
+
+  void unlock() noexcept {
+    __rcu_detail::__unlock(__state);
+  }
+};
+
+inline rcu_domain& rcu_default_domain() noexcept {
+  static rcu_domain domain(__rcu_detail::__default_state());
+  return domain;
+}
+
+inline void rcu_synchronize(rcu_domain& domain) noexcept {
+  __rcu_detail::__synchronize(domain.__state);
+}
+
+inline void rcu_barrier(rcu_domain& domain) noexcept {
+  __rcu_detail::__barrier(domain.__state);
+}
+
+namespace __rcu_detail {
+
+inline void __schedule(__retired_record* record,
+                       rcu_domain& domain) noexcept {
+  __schedule_state(record, domain.__state);
+}
+
+}  // namespace __rcu_detail
+
+template <class T, class D = default_delete<T>>
+void rcu_retire(T* pointer, D deleter = D(),
+                rcu_domain& domain = rcu_default_domain()) {
+  using __record = __rcu_detail::__allocated_record<T, D>;
+  __record* record =
+      new __record(pointer, static_cast<D&&>(deleter));
+  __rcu_detail::__schedule(&record->header, domain);
+}
+
+template <class T, class D = default_delete<T>>
+class rcu_obj_base {
+ private:
+  __rcu_detail::__retired_record __record;
+  D __deleter;
+
+  static void __reclaim(void* context) noexcept {
+    rcu_obj_base* base = static_cast<rcu_obj_base*>(context);
+    base->__deleter(static_cast<T*>(base));
+  }
+
+ public:
+  void retire(D deleter = D(),
+              rcu_domain& domain = rcu_default_domain()) noexcept {
+    __deleter = static_cast<D&&>(deleter);
+    __record.context = this;
+    __record.reclaim = &__reclaim;
+    __record.next = nullptr;
+    __rcu_detail::__schedule(&__record, domain);
+  }
+
+ protected:
+  rcu_obj_base() = default;
+  rcu_obj_base(const rcu_obj_base&) = default;
+  rcu_obj_base(rcu_obj_base&&) = default;
+  rcu_obj_base& operator=(const rcu_obj_base&) = default;
+  rcu_obj_base& operator=(rcu_obj_base&&) = default;
+  ~rcu_obj_base() = default;
+};
+
+#endif /* C++26 with atomic/thread support */
+
+}  // namespace std
+
+#endif /* __davecc_rcu__ */

@@ -362,19 +362,6 @@ typedef struct {
 } SavedArgumentRegister;
 
 
-// For large offsets that don't fit into an immediate field
-// of load and store instructions we divide the offsets up into
-// pages, each of which is 11 bits long.  Ww store the address of this
-// page in an instruction (an add instruction) and use that as the
-// base for the load and store.
-//
-// The offsets for load and store are 12 bit signed offsets, giving us
-// a range of -2048...2047.
-typedef struct {
-  TargetInstruction* inst;    // Page calculation instruction.
-  int page_offset;            // Offset for page.
-} Offset;
-
 typedef struct {
   TargetInstruction* inst;      // Actually a TargetSymbol*.
   int varnum;
@@ -402,7 +389,6 @@ typedef struct RVGenerator {
   bool not_leaf;          // Not a leaf procedure.
   
   Vector saved_regs;
-  Vector offsets;         // Pointers to Offset.
   
   TargetInstruction* int_argument_registers[RV_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[RV_NUM_FP_ARGS];

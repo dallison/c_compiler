@@ -2669,13 +2669,13 @@ static void CompileDeferredCXXStaticMembers(Syntax* syntax) {
     struct Struct* saved_access = compiler->current_class_access_context;
     compiler->current_class_access_context = owner;
     SemanticAnalyzeVariableDefinition(syntax, decl);
-    compiler->current_class_access_context = saved_access;
 
     Vector* declarations = NewVector();
     VectorAppend(declarations, decl);
     SyntaxResetForNewDeclaration(syntax);
     CompileDeclarationNode(
         syntax, NewDeclarationListASTNode(declarations, decl->base.location));
+    compiler->current_class_access_context = saved_access;
   }
 }
 
