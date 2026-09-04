@@ -968,14 +968,15 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
           i < type->dependent_member_template_arguments->length
               ? type->dependent_member_template_arguments->value.p[i]
               : NULL;
+      TypeRecord* owner = current;
       StructMember* member =
-          FindStructMember(current->info.struct_info, component);
-      TypeRecordDelete(current);
+          FindStructMember(owner->info.struct_info, component);
       current = NULL;
       if (member == NULL || member->symbol == NULL ||
           member->symbol->type == NULL ||
           (!StorageIs(member->symbol->storage, STO(typedef)) &&
            !TypeIsStructOrUnion(member->symbol->type))) {
+        TypeRecordDelete(owner);
         break;
       }
       if (component_args != NULL) {
@@ -983,6 +984,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
             (!TypeIsStructOrUnion(member->symbol->type) ||
              member->symbol->type->info.struct_info == NULL ||
              !member->symbol->type->info.struct_info->is_template)) {
+          TypeRecordDelete(owner);
           break;
         }
         Vector* concrete_args =
@@ -1001,10 +1003,23 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
           }
         }
         if (TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
-          VectorDeleteWithContents(
-              concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
-              /*free_element=*/false);
-          resolved = TypeRecordCopy(type);
+          if (i + 1 == components->length) {
+            resolved = TypeRecordCopy(member->symbol->type);
+            if (resolved->template_arguments != NULL) {
+              VectorDeleteWithContents(
+                  resolved->template_arguments,
+                  (VectorElementDestructor)TemplateArgumentDelete,
+                  /*free_element=*/false);
+            }
+            resolved->template_origin = member->symbol;
+            resolved->template_arguments = concrete_args;
+          } else {
+            VectorDeleteWithContents(
+                concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+            resolved = TypeRecordCopy(type);
+          }
+          TypeRecordDelete(owner);
           break;
         }
         current = InstantiateSimpleClassTemplate(parser, member->symbol,
@@ -1012,8 +1027,19 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
         VectorDeleteWithContents(concrete_args,
                                  (VectorElementDestructor)TemplateArgumentDelete,
                                  /*free_element=*/false);
+        TypeRecordDelete(owner);
       } else {
-        current = TypeRecordCopy(member->symbol->type);
+        Vector* owner_args = owner->template_arguments;
+        if (owner_args == NULL && owner->info.struct_info->tag_symbol != NULL &&
+            owner->info.struct_info->tag_symbol->type != NULL) {
+          owner_args =
+              owner->info.struct_info->tag_symbol->type->template_arguments;
+        }
+        current = owner_args != NULL
+                      ? SubstituteTemplateParameters(
+                            parser, member->symbol->type, owner_args)
+                      : TypeRecordCopy(member->symbol->type);
+        TypeRecordDelete(owner);
       }
       if (i + 1 == components->length) {
         resolved = current;
@@ -1065,6 +1091,31 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     TypeRecordDelete(owner_type);
   }
   return TypeRecordCalculateSize(subst);
+}
+
+static TypeRecord* SubstituteResolvedDependentMemberSuffix(
+    TypeParser* parser, TypeRecord* pattern, TypeRecord* root, Vector* args) {
+  if (pattern == NULL || pattern->dependent_member_name == NULL ||
+      root == NULL) {
+    return root;
+  }
+  Vector* path_args = TemplateArgumentVectorCopy(args);
+  if (path_args == NULL) {
+    path_args = NewVector();
+  }
+  int root_index = (int)path_args->length;
+  VectorAppend(path_args, NewTypeTemplateArgument(root));
+  TypeRecord* member_pattern = TypeRecordCopy(pattern);
+  member_pattern->declarator = kDeclPrimitive;
+  member_pattern->template_parameter_index = root_index;
+  TypeRecord* result =
+      SubstituteDependentMemberType(parser, member_pattern, path_args);
+  TypeRecordDelete(member_pattern);
+  VectorDeleteWithContents(
+      path_args, (VectorElementDestructor)TemplateArgumentDelete,
+      /*free_element=*/false);
+  TypeRecordDelete(root);
+  return result;
 }
 
 /* Recover the template-id represented by `type`. Some instantiated class types
@@ -1284,6 +1335,31 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   subst->qualifiers |= type->qualifiers;
 
   if (type->dependent_member_name != NULL &&
+      type->dependent_member_template_arguments != NULL &&
+      type->dependent_member_template_arguments->length > 1) {
+    Vector* path_args = TemplateArgumentVectorCopy(args);
+    if (path_args == NULL) {
+      path_args = NewVector();
+    }
+    int root_index = (int)path_args->length;
+    VectorAppend(path_args, NewTypeTemplateArgument(subst));
+    TypeRecord* path_type = TypeRecordCopy(type);
+    path_type->declarator = kDeclPrimitive;
+    path_type->template_parameter_index = root_index;
+    TypeRecord* member_type =
+        SubstituteDependentMemberType(parser, path_type, path_args);
+    TypeRecordDelete(path_type);
+    VectorDeleteWithContents(
+        path_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    TypeRecordDelete(subst);
+    VectorDeleteWithContents(
+        concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return TypeRecordCalculateSize(member_type);
+  }
+
+  if (type->dependent_member_name != NULL &&
       TypeIsStructOrUnion(subst) && subst->info.struct_info != NULL) {
     StructMember* member =
         FindStructMember(subst->info.struct_info,
@@ -1300,19 +1376,26 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         Vector* concrete_member_args =
             SubstituteTemplateArgumentVectorForTypes(parser, member_template_args,
                                                     args);
-        Vector* combined_args = TemplateArgumentVectorCopy(concrete_args);
-        for (size_t i = 0; i < concrete_member_args->length; i++) {
-          VectorAppend(combined_args,
-                       TemplateArgumentCopy(concrete_member_args->value.p[i]));
+        Vector* combined_args = NULL;
+        if (member->symbol->flags.is_template &&
+            TypeIsStructOrUnion(member->symbol->type)) {
+          member_type = InstantiateSimpleClassTemplate(
+              parser, member->symbol, concrete_member_args);
+        } else {
+          combined_args = TemplateArgumentVectorCopy(concrete_args);
+          for (size_t i = 0; i < concrete_member_args->length; i++) {
+            VectorAppend(combined_args,
+                         TemplateArgumentCopy(concrete_member_args->value.p[i]));
+          }
+          member_type = SubstituteTemplateParameters(
+              parser, member->symbol->type, combined_args);
         }
-        member_type = SubstituteTemplateParameters(
-            parser, member->symbol->type, combined_args);
         // Expanding a member alias template can expose another deferred
         // template-id whose local parameter indices were not visible on the
         // outer dependent-member type (for example allocator_traits'
         // rebind_alloc<T>).  Resolve that newly exposed layer while the
         // combined enclosing/member argument list is still available.
-        if (member_type != NULL &&
+        if (combined_args != NULL && member_type != NULL &&
             TypeContainsTemplateParameter(member_type)) {
           TemplateIdSubstitutionInfo exposed =
               TemplateIdInfoForSubstitution(member_type);
@@ -1331,9 +1414,11 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                 /*free_element=*/false);
           }
         }
-        VectorDeleteWithContents(
-            combined_args, (VectorElementDestructor)TemplateArgumentDelete,
-            /*free_element=*/false);
+        if (combined_args != NULL) {
+          VectorDeleteWithContents(
+              combined_args, (VectorElementDestructor)TemplateArgumentDelete,
+              /*free_element=*/false);
+        }
         VectorDeleteWithContents(
             concrete_member_args, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
@@ -1829,6 +1914,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
             SubstituteTemplateParameters(parser, entity->type, args);
         if (declared != NULL && !TypeContainsTemplateParameter(declared)) {
           declared->qualifiers |= type->qualifiers;
+          declared = SubstituteResolvedDependentMemberSuffix(
+              parser, type, declared, args);
           VectorPop(&g_dependent_decltype_stack);
           return TypeRecordCalculateSize(declared);
         }
@@ -1912,6 +1999,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         }
         if (result != NULL) {
           result->qualifiers |= type->qualifiers;
+          result = SubstituteResolvedDependentMemberSuffix(
+              parser, type, result, args);
           ASTNodeDelete(expr);
           DiagnosticSuppressEnd();
           VectorPop(&g_dependent_decltype_stack);

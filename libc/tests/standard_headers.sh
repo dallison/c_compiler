@@ -58,7 +58,7 @@ cxx_removed_at_26="codecvt"
 
 # Not yet implemented.  Remove entries here as the headers land.
 c_missing=""
-cxx_missing="linalg simd"
+cxx_missing="simd"
 
 # These headers exist and are self-contained, but their standard surface or
 # required runtime behavior is known to be incomplete. Unlike MISSING and

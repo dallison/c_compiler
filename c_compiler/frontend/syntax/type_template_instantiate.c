@@ -5811,20 +5811,9 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
                                                        StructMember* member,
                                                        Vector* args,
                                                        Vector* pending) {
-  TypeRecord* source_owner =
-      member->symbol != NULL && member->symbol->type != NULL
-          ? member->symbol->type
-                ->info.function.cxx_member_owner != NULL
-                ? member->symbol->type->info.function.cxx_member_owner
-                      ->tag_symbol != NULL
-                      ? member->symbol->type->info.function.cxx_member_owner
-                            ->tag_symbol->type
-                      : NULL
-                : NULL
-          : NULL;
   Struct* substitution_source =
-      source_owner != NULL && TypeIsStructOrUnion(source_owner)
-          ? source_owner->info.struct_info
+      member->symbol != NULL && member->symbol->type != NULL
+          ? member->symbol->type->info.function.cxx_member_owner
           : NULL;
   TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
       parser, substitution_source, owner);

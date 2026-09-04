@@ -43,6 +43,7 @@
 #include <memory_resource>
 #include <mdspan>
 #if __cplusplus >= 202600L
+#include <linalg>
 #include <meta>
 #endif
 #include <mutex>

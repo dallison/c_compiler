@@ -88,6 +88,7 @@ filegroup(
         "libc/include/__locale_core",
         "libc/include/__basic_ios_locale",
         "libc/include/locale",
+        "libc/include/linalg",
         "libc/include/list",
         "libc/include/limits",
         "libc/include/map",

@@ -593,6 +593,38 @@ static bool FunctionTemplateParameterListsDiffer(Symbol* candidate,
       &candidate->type->info.function.template_parameters, overload_params);
 }
 
+static void AppendClonedConstraint(ConstraintExpr** target,
+                                   ConstraintExpr* constraint) {
+  if (target == NULL || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* clone = ConceptsCloneConstraint(constraint);
+  if (*target == NULL) {
+    *target = clone;
+  } else {
+    *target = NewConjunctionConstraint(*target, clone, clone->location);
+  }
+}
+
+static ConstraintExpr* PendingFunctionTemplateConstraint(
+    Symbol* symbol, Vector* parameters, ConstraintExpr* trailing_constraint) {
+  ConstraintExpr* result = NULL;
+  if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type)) {
+    AppendClonedConstraint(
+        &result, symbol->type->info.function.associated_constraint);
+  }
+  if (parameters != NULL) {
+    for (size_t i = 0; i < parameters->length; i++) {
+      TemplateParameter* param = parameters->value.p[i];
+      if (param != NULL) {
+        AppendClonedConstraint(&result, param->associated_constraint);
+      }
+    }
+  }
+  AppendClonedConstraint(&result, trailing_constraint);
+  return result;
+}
+
 static bool TryAppendSameSignatureConstrainedTemplateOverload(
     Syntax* syntax, Symbol* first, Symbol* overload,
     ConstraintExpr* pending_constraint) {
@@ -7866,9 +7898,18 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       if (parser->cxx_member_definition == NULL &&
           CanOverloadFunctions(old_sym, sym)) {
+        ConstraintExpr* saved_constraint =
+            sym->type->info.function.associated_constraint;
+        ConstraintExpr* comparison_constraint =
+            PendingFunctionTemplateConstraint(
+                sym, PendingTemplateParameterList(syntax, sym),
+                syntax->current_template_requires_clause);
+        if (comparison_constraint != NULL) {
+          sym->type->info.function.associated_constraint =
+              comparison_constraint;
+        }
         if (TryAppendSameSignatureConstrainedTemplateOverload(
-                syntax, old_sym, sym,
-                syntax->current_template_requires_clause)) {
+                syntax, old_sym, sym, NULL)) {
           old_sym = NULL;
           overload_was_appended = true;
         } else {
@@ -7881,6 +7922,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           overload_was_appended = true;
           }
         }
+        sym->type->info.function.associated_constraint = saved_constraint;
+        ConstraintExprDelete(comparison_constraint);
       }
       if (parser->cxx_member_definition != NULL &&
           !syntax->parsing_template_specialization) {

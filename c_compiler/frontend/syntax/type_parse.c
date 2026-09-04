@@ -318,6 +318,94 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
   return result;
 }
 
+static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
+                                            TypeRecord* result) {
+  if (result == NULL || !LexMatch(parser->lex, TOK(coloncolon))) {
+    return result;
+  }
+  FullyQualifiedIdentifier member;
+  FullyQualifiedIdentifierInit(&member);
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+          parser->syntax, &member, TC(type))) {
+    SyntaxError(parser->syntax, "Expected nested type name after decltype");
+    FullyQualifiedIdentifierDestruct(&member);
+    return result;
+  }
+
+  if (result->dependent_decltype_expr != NULL ||
+      TypeContainsTemplateParameter(result)) {
+    if (result->dependent_member_name != NULL) {
+      StringDelete(result->dependent_member_name);
+    }
+    result->dependent_member_name = NewString(member.spelling.value);
+    if (result->dependent_member_template_arguments != NULL) {
+      VectorDeleteWithContents(
+          result->dependent_member_template_arguments,
+          (VectorElementDestructor)TemplateArgumentVectorDelete,
+          /*free_element=*/false);
+    }
+    result->dependent_member_template_arguments = NewVector();
+    for (size_t i = 0; i < member.template_arguments.length; i++) {
+      VectorAppend(result->dependent_member_template_arguments,
+                   TemplateArgumentVectorCopy(
+                       member.template_arguments.value.p[i]));
+    }
+    FullyQualifiedIdentifierDestruct(&member);
+    return result;
+  }
+
+  TypeRecord* current = result;
+  for (size_t i = 0; i < member.components.length; i++) {
+    if (!TypeIsStructOrUnion(current) ||
+        current->info.struct_info == NULL) {
+      SyntaxError(parser->syntax, "Nested type name requires a class type");
+      break;
+    }
+    StructMember* nested =
+        FindStructMember(current->info.struct_info, member.components.value.p[i]);
+    if (nested == NULL || nested->symbol == NULL ||
+        nested->symbol->type == NULL ||
+        (!StorageIs(nested->symbol->storage, STO(typedef)) &&
+         !TypeIsStructOrUnion(nested->symbol->type))) {
+      SyntaxError(parser->syntax, "Unknown nested type %s",
+                  ((String*)member.components.value.p[i])->value);
+      break;
+    }
+    Vector* template_args = member.template_arguments.value.p[i];
+    TypeRecord* next = NULL;
+    if (template_args != NULL && nested->symbol->flags.is_template &&
+        TypeIsStructOrUnion(nested->symbol->type)) {
+      Vector* copied_args = TemplateArgumentVectorCopy(template_args);
+      next = InstantiateSimpleClassTemplate(parser, nested->symbol,
+                                            copied_args);
+      VectorDeleteWithContents(
+          copied_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    } else {
+      Vector* owner_args = current->template_arguments;
+      if (owner_args == NULL &&
+          current->info.struct_info->tag_symbol != NULL &&
+          current->info.struct_info->tag_symbol->type != NULL) {
+        owner_args =
+            current->info.struct_info->tag_symbol->type->template_arguments;
+      }
+      next = owner_args != NULL
+                 ? SubstituteTemplateParameters(parser, nested->symbol->type,
+                                                owner_args)
+                 : TypeRecordCopy(nested->symbol->type);
+    }
+    if (next == NULL) {
+      SyntaxError(parser->syntax, "Could not instantiate nested type %s",
+                  ((String*)member.components.value.p[i])->value);
+      break;
+    }
+    TypeRecordDelete(current);
+    current = next;
+  }
+  FullyQualifiedIdentifierDestruct(&member);
+  return current;
+}
+
 static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   LexNextToken(parser->lex);
   SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
@@ -391,6 +479,17 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
         (TypeIsUnknown(expr->type) ||
          TypeContainsTemplateParameter(expr->type) ||
          DependentExpressionContainsTemplateParameter(expr))) {
+      if (result->dependent_member_name != NULL) {
+        StringDelete(result->dependent_member_name);
+        result->dependent_member_name = NULL;
+      }
+      if (result->dependent_member_template_arguments != NULL) {
+        VectorDeleteWithContents(
+            result->dependent_member_template_arguments,
+            (VectorElementDestructor)TemplateArgumentVectorDelete,
+            /*free_element=*/false);
+        result->dependent_member_template_arguments = NULL;
+      }
       result->dependent_decltype_expr = expr;
       expr = NULL;
     }
@@ -402,7 +501,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     SyntaxError(parser->syntax, "Invalid decltype specifier");
     result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
-  return result;
+  return ParseCXXNestedTypeSuffix(parser, result);
 }
 
 bool CurrentClassNameMatchesTypeName(Struct* owner, String* name) {
@@ -639,8 +738,30 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   String encoded_name;
   StringInit(&encoded_name, NULL);
   Vector* component_args = NewVector();
+  if (base_type != NULL && base_type->dependent_member_name != NULL) {
+    StringAppendString(&encoded_name, base_type->dependent_member_name);
+    size_t old_component_count = 1;
+    for (const char* cursor = base_type->dependent_member_name->value;
+         cursor[0] != '\0'; cursor++) {
+      if (cursor[0] == ':' && cursor[1] == ':') {
+        old_component_count++;
+        cursor++;
+      }
+    }
+    if (base_type->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0;
+           i < base_type->dependent_member_template_arguments->length; i++) {
+        Vector* old_args =
+            base_type->dependent_member_template_arguments->value.p[i];
+        VectorAppend(component_args, TemplateArgumentVectorCopy(old_args));
+      }
+    }
+    while (component_args->length < old_component_count) {
+      VectorAppend(component_args, NULL);
+    }
+  }
   for (size_t i = 1; i < name->components.length; i++) {
-    if (i != 1) {
+    if (encoded_name.length != 0) {
       StringAppend(&encoded_name, "::");
     }
     StringAppendString(&encoded_name, name->components.value.p[i]);
@@ -1202,6 +1323,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 TemplateArgumentVectorCopy(parsed_args);
             type_record->dependent_member_name =
                 NewString(member_name->value);
+            type_record->dependent_member_template_arguments = NewVector();
+            for (size_t i = base_index + 1;
+                 i < typename_name.template_arguments.length; i++) {
+              VectorAppend(
+                  type_record->dependent_member_template_arguments,
+                  TemplateArgumentVectorCopy(
+                      typename_name.template_arguments.value.p[i]));
+            }
             type |= type_record->type;
             handled_dependent_template_member = true;
             }

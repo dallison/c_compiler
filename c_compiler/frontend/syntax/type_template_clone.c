@@ -7232,6 +7232,16 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
                    syntax->context);
     SynthesizeDefaultedMemberFunctionBody(&parser, symbol);
     TypeParserDestruct(&parser);
+    Struct* owner = symbol->type->info.function.cxx_member_owner;
+    bool dependent_owner =
+        owner == NULL || StructContainsTemplateParameter(owner) ||
+        (owner->lexical_parent != NULL &&
+         (owner->lexical_parent->is_template ||
+          StructContainsTemplateParameter(owner->lexical_parent)));
+    if (syntax->parsing_template_declaration && !dependent_owner &&
+        symbol->type->info.function.body != NULL) {
+      CompilerQueuePendingFunctionDefinition(symbol);
+    }
     return;
   }
   if (symbol->value.func_defn == NULL) {

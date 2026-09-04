@@ -1,0 +1,1987 @@
+//
+//  linalg
+//  c_compiler
+//
+//  C++26 basic linear algebra algorithms for mdspan.
+//
+
+#ifndef __davecc_linalg__
+#define __davecc_linalg__
+
+#if __cplusplus >= 202600L
+
+#include <array>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <execution>
+#include <limits>
+#include <mdspan>
+#include <type_traits>
+#include <utility>
+
+#ifndef __cpp_lib_linalg
+#define __cpp_lib_linalg 202311L
+#endif
+
+namespace std::linalg {
+
+struct column_major_t {
+  explicit column_major_t() = default;
+};
+inline constexpr column_major_t column_major{};
+struct row_major_t {
+  explicit row_major_t() = default;
+};
+inline constexpr row_major_t row_major{};
+struct upper_triangle_t {
+  explicit upper_triangle_t() = default;
+};
+inline constexpr upper_triangle_t upper_triangle{};
+struct lower_triangle_t {
+  explicit lower_triangle_t() = default;
+};
+inline constexpr lower_triangle_t lower_triangle{};
+struct implicit_unit_diagonal_t {
+  explicit implicit_unit_diagonal_t() = default;
+};
+inline constexpr implicit_unit_diagonal_t implicit_unit_diagonal{};
+struct explicit_diagonal_t {
+  explicit explicit_diagonal_t() = default;
+};
+inline constexpr explicit_diagonal_t explicit_diagonal{};
+
+template <class Triangle, class StorageOrder>
+class layout_blas_packed {
+ public:
+  using triangle_type = Triangle;
+  using storage_order_type = StorageOrder;
+
+  template <class Extents>
+  class mapping {
+   public:
+    using extents_type = Extents;
+    using index_type = typename extents_type::index_type;
+    using size_type = typename extents_type::size_type;
+    using rank_type = typename extents_type::rank_type;
+    using layout_type = layout_blas_packed;
+
+   private:
+    extents_type __extents{};
+
+   public:
+    constexpr mapping() noexcept = default;
+    constexpr mapping(const mapping&) noexcept = default;
+    constexpr explicit mapping(const extents_type& extents) noexcept
+        : __extents(extents) {}
+
+    template <class OtherExtents>
+    constexpr explicit(!is_convertible<OtherExtents, extents_type>::value)
+        mapping(const mapping<OtherExtents>& other) noexcept
+        : __extents(other.extents()) {}
+
+    constexpr mapping& operator=(const mapping&) noexcept = default;
+    constexpr const extents_type& extents() const noexcept { return __extents; }
+
+    constexpr index_type required_span_size() const noexcept {
+      index_type n = static_cast<index_type>(__extents.extent(0));
+      return n * (n + 1) / 2;
+    }
+
+    template <class Index0, class Index1>
+    constexpr index_type operator()(Index0 row, Index1 column) const noexcept {
+      index_type i = static_cast<index_type>(row);
+      index_type j = static_cast<index_type>(column);
+      if (i > j) {
+        index_type temp = i;
+        i = j;
+        j = temp;
+      }
+      index_type n = __extents.extent(0);
+      if constexpr (
+          (is_same<StorageOrder, column_major_t>::value &&
+           is_same<Triangle, upper_triangle_t>::value) ||
+          (is_same<StorageOrder, row_major_t>::value &&
+           is_same<Triangle, lower_triangle_t>::value)) {
+        return i + j * (j + 1) / 2;
+      } else {
+        return j + n * i - i * (i + 1) / 2;
+      }
+    }
+
+    static constexpr bool is_always_unique() {
+      return (extents_type::static_extent(0) != dynamic_extent &&
+              extents_type::static_extent(0) < 2) ||
+             (extents_type::static_extent(1) != dynamic_extent &&
+              extents_type::static_extent(1) < 2);
+    }
+    static constexpr bool is_always_exhaustive() { return true; }
+    static constexpr bool is_always_strided() { return is_always_unique(); }
+    constexpr bool is_unique() const noexcept {
+      return __extents.extent(0) < 2;
+    }
+    constexpr bool is_exhaustive() const noexcept { return true; }
+    constexpr bool is_strided() const noexcept { return is_unique(); }
+    constexpr index_type stride(rank_type) const noexcept { return 1; }
+
+    template <class OtherExtents>
+    friend constexpr bool operator==(
+        const mapping& left, const mapping<OtherExtents>& right) noexcept {
+      return left.extents() == right.extents();
+    }
+  };
+};
+
+template <class T>
+struct __is_mdspan : false_type {};
+
+template <class E, class X, class L, class A>
+struct __is_mdspan<mdspan<E, X, L, A>> : true_type {};
+
+template <class T>
+struct __mdspan_rank;
+
+template <class E, class X, class L, class A>
+struct __mdspan_rank<mdspan<E, X, L, A>>
+    : integral_constant<size_t, X::rank()> {};
+
+template <class T>
+struct __object_rank
+    : __mdspan_rank<typename remove_cvref<T>::type> {};
+
+template <class T>
+concept __in_vector =
+    __is_mdspan<typename remove_cvref<T>::type>::value &&
+    __object_rank<T>::value == 1;
+template <class T>
+concept __out_vector = __in_vector<T>;
+template <class T>
+concept __inout_vector = __in_vector<T>;
+template <class T>
+concept __in_matrix =
+    __is_mdspan<typename remove_cvref<T>::type>::value &&
+    __object_rank<T>::value == 2;
+template <class T>
+concept __out_matrix = __in_matrix<T>;
+template <class T>
+concept __inout_matrix = __in_matrix<T>;
+template <class T>
+concept __possibly_packed_inout_matrix = __in_matrix<T>;
+template <class T>
+concept __in_object = __in_vector<T> || __in_matrix<T>;
+template <class T>
+concept __out_object = __in_object<T>;
+template <class T>
+concept __inout_object = __in_object<T>;
+
+template <class T>
+struct __number_traits {
+  using real_type = T;
+  static constexpr T conjugate(const T& value) { return value; }
+  static constexpr T absolute(const T& value) {
+    return value < T() ? -value : value;
+  }
+};
+
+template <class T>
+struct __number_traits<complex<T>> {
+  using real_type = T;
+  static constexpr complex<T> conjugate(const complex<T>& value) {
+    return complex<T>(value.real(), -value.imag());
+  }
+  static T absolute(const complex<T>& value) {
+    using std::sqrt;
+    return sqrt(value.real() * value.real() + value.imag() * value.imag());
+  }
+};
+
+template <class T>
+constexpr auto __conjugate(const T& value) {
+  using value_type = typename remove_cvref<T>::type;
+  return __number_traits<value_type>::conjugate(value);
+}
+
+template <class T>
+constexpr auto __abs_value(const T& value) {
+  using value_type = typename remove_cvref<T>::type;
+  return __number_traits<value_type>::absolute(value);
+}
+
+template <class T>
+constexpr auto __abs1_value(const T& value) {
+  return __abs_value(value);
+}
+
+template <class T>
+constexpr T __abs1_value(const complex<T>& value) {
+  return __abs_value(value.real()) + __abs_value(value.imag());
+}
+
+template <class T>
+constexpr T __real_if_needed(const T& value) {
+  return value;
+}
+
+template <class T>
+constexpr complex<T> __real_if_needed(const complex<T>& value) {
+  return complex<T>(value.real());
+}
+
+template <class Triangle>
+constexpr bool __is_upper_triangle() {
+  return is_same<typename remove_cvref<Triangle>::type,
+                 upper_triangle_t>::value;
+}
+
+template <class DiagonalStorage>
+constexpr bool __is_implicit_diagonal() {
+  return is_same<typename remove_cvref<DiagonalStorage>::type,
+                 implicit_unit_diagonal_t>::value;
+}
+
+template <class A, class Triangle>
+constexpr auto __symmetric_element(A a, Triangle, typename A::index_type i,
+                                   typename A::index_type j) {
+  if constexpr (__is_upper_triangle<Triangle>())
+    return i <= j ? a[i, j] : a[j, i];
+  else
+    return i >= j ? a[i, j] : a[j, i];
+}
+
+template <class A, class Triangle>
+constexpr auto __hermitian_element(A a, Triangle, typename A::index_type i,
+                                   typename A::index_type j) {
+  if (i == j) return __real_if_needed(a[i, i]);
+  if constexpr (__is_upper_triangle<Triangle>())
+    return i <= j ? a[i, j] : __conjugate(a[j, i]);
+  else
+    return i >= j ? a[i, j] : __conjugate(a[j, i]);
+}
+
+template <class A, class Triangle, class DiagonalStorage>
+constexpr auto __triangular_element(A a, Triangle, DiagonalStorage,
+                                    typename A::index_type i,
+                                    typename A::index_type j) {
+  using value_type = typename A::value_type;
+  if (i == j && __is_implicit_diagonal<DiagonalStorage>())
+    return value_type(1);
+  if constexpr (__is_upper_triangle<Triangle>())
+    return i <= j ? a[i, j] : value_type();
+  else
+    return i >= j ? a[i, j] : value_type();
+}
+
+template <class Real>
+struct setup_givens_rotation_result {
+  Real c;
+  Real s;
+  Real r;
+};
+
+template <class Real>
+struct setup_givens_rotation_result<complex<Real>> {
+  Real c;
+  complex<Real> s;
+  complex<Real> r;
+};
+
+template <class Real>
+setup_givens_rotation_result<Real> setup_givens_rotation(Real a,
+                                                         Real b) noexcept {
+  if (b == Real()) return {Real(1), Real(), a};
+  if (a == Real()) {
+    Real b_abs = __abs_value(b);
+    return {Real(), b / b_abs, b_abs};
+  }
+  using std::sqrt;
+  Real r = sqrt(a * a + b * b);
+  return {a / r, b / r, r};
+}
+
+template <class Real>
+setup_givens_rotation_result<complex<Real>> setup_givens_rotation(
+    complex<Real> a, complex<Real> b) noexcept {
+  Real a_abs = __abs_value(a);
+  Real b_abs = __abs_value(b);
+  if (b_abs == Real()) return {Real(1), complex<Real>(), a};
+  if (a_abs == Real())
+    return {Real(), __conjugate(b) / b_abs, complex<Real>(b_abs)};
+  using std::sqrt;
+  Real norm = sqrt(a_abs * a_abs + b_abs * b_abs);
+  complex<Real> alpha = a / a_abs;
+  return {a_abs / norm, alpha * __conjugate(b) / norm, alpha * norm};
+}
+
+template <__inout_vector X, __inout_vector Y, class Real>
+void apply_givens_rotation(X x, Y y, Real c, Real s) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+    auto old_x = x[i];
+    auto old_y = y[i];
+    x[i] = c * old_x + s * old_y;
+    y[i] = c * old_y - s * old_x;
+  }
+}
+
+template <__inout_vector X, __inout_vector Y, class Real>
+void apply_givens_rotation(X x, Y y, Real c, complex<Real> s) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+    auto old_x = x[i];
+    auto old_y = y[i];
+    x[i] = c * old_x + s * old_y;
+    y[i] = c * old_y - __conjugate(s) * old_x;
+  }
+}
+
+template <class ExecutionPolicy, __inout_vector X, __inout_vector Y,
+          class Real>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void apply_givens_rotation(ExecutionPolicy&&, X x, Y y, Real c, Real s) {
+  apply_givens_rotation(x, y, c, s);
+}
+
+template <class ExecutionPolicy, __inout_vector X, __inout_vector Y,
+          class Real>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void apply_givens_rotation(ExecutionPolicy&&, X x, Y y, Real c,
+                           complex<Real> s) {
+  apply_givens_rotation(x, y, c, s);
+}
+
+template <class ScalingFactor, class Accessor>
+class scaled_accessor {
+ public:
+  using offset_policy =
+      scaled_accessor<ScalingFactor, typename Accessor::offset_policy>;
+  using element_type = remove_cv_t<decltype(
+      declval<ScalingFactor>() * declval<typename Accessor::reference>())>;
+  using reference = element_type;
+  using data_handle_type = typename Accessor::data_handle_type;
+
+ private:
+  ScalingFactor __factor{};
+  Accessor __accessor{};
+
+ public:
+  constexpr scaled_accessor() = default;
+  constexpr scaled_accessor(const ScalingFactor& factor,
+                            const Accessor& accessor)
+      : __factor(factor), __accessor(accessor) {}
+
+  constexpr reference access(data_handle_type handle, size_t index) const {
+    return __factor * __accessor.access(handle, index);
+  }
+
+  constexpr typename offset_policy::data_handle_type offset(
+      data_handle_type handle, size_t index) const {
+    return __accessor.offset(handle, index);
+  }
+
+  constexpr const ScalingFactor& scaling_factor() const noexcept {
+    return __factor;
+  }
+  constexpr const Accessor& nested_accessor() const noexcept {
+    return __accessor;
+  }
+};
+
+template <class ScalingFactor, class ElementType, class Extents,
+          class Layout, class Accessor>
+constexpr auto scaled(ScalingFactor factor,
+                      mdspan<ElementType, Extents, Layout, Accessor> x) {
+  using accessor_type = scaled_accessor<ScalingFactor, Accessor>;
+  using element_type = typename accessor_type::element_type;
+  return mdspan<element_type, Extents, Layout, accessor_type>(
+      x.data_handle(), x.mapping(), accessor_type(factor, x.accessor()));
+}
+
+template <class Accessor>
+class conjugated_accessor {
+ public:
+  using offset_policy =
+      conjugated_accessor<typename Accessor::offset_policy>;
+  using element_type = remove_cv_t<decltype(
+      __conjugate(declval<typename Accessor::reference>()))>;
+  using reference = element_type;
+  using data_handle_type = typename Accessor::data_handle_type;
+
+ private:
+  Accessor __accessor{};
+
+ public:
+  constexpr conjugated_accessor() = default;
+  constexpr explicit conjugated_accessor(const Accessor& accessor)
+      : __accessor(accessor) {}
+
+  constexpr reference access(data_handle_type handle, size_t index) const {
+    return __conjugate(__accessor.access(handle, index));
+  }
+
+  constexpr typename offset_policy::data_handle_type offset(
+      data_handle_type handle, size_t index) const {
+    return __accessor.offset(handle, index);
+  }
+
+  constexpr const Accessor& nested_accessor() const noexcept {
+    return __accessor;
+  }
+};
+
+template <class ElementType, class Extents, class Layout, class Accessor>
+constexpr auto conjugated(mdspan<ElementType, Extents, Layout, Accessor> x) {
+  if constexpr (is_arithmetic<typename remove_cv<ElementType>::type>::value) {
+    return x;
+  } else {
+    using accessor_type = conjugated_accessor<Accessor>;
+    using element_type = typename accessor_type::element_type;
+    return mdspan<element_type, Extents, Layout, accessor_type>(
+        x.data_handle(), x.mapping(), accessor_type(x.accessor()));
+  }
+}
+
+template <class Extents>
+struct __transpose_extents;
+
+template <class IndexType, size_t First, size_t Second>
+struct __transpose_extents<extents<IndexType, First, Second>> {
+  using type = extents<IndexType, Second, First>;
+};
+
+template <class Layout>
+class layout_transpose;
+
+template <class Layout>
+class layout_transpose {
+ public:
+  using nested_layout_type = Layout;
+
+  template <class Extents>
+  class mapping {
+    using nested_extents = typename __transpose_extents<Extents>::type;
+    using nested_mapping_type =
+        typename Layout::template mapping<nested_extents>;
+
+   public:
+    using extents_type = Extents;
+    using index_type = typename extents_type::index_type;
+    using size_type = typename extents_type::size_type;
+    using rank_type = typename extents_type::rank_type;
+    using layout_type = layout_transpose;
+
+   private:
+    nested_mapping_type __nested_mapping;
+    extents_type __extents{};
+
+    static constexpr extents_type __make_extents(
+        const nested_mapping_type& nested) {
+      return extents_type(nested.extents().extent(1),
+                          nested.extents().extent(0));
+    }
+
+   public:
+    constexpr explicit mapping(const nested_mapping_type& nested)
+        : __nested_mapping(nested), __extents(__make_extents(nested)) {}
+
+    constexpr const extents_type& extents() const noexcept {
+      return __extents;
+    }
+    constexpr index_type required_span_size() const noexcept {
+      return __nested_mapping.required_span_size();
+    }
+    template <class Index0, class Index1>
+    constexpr index_type operator()(Index0 i, Index1 j) const noexcept {
+      return __nested_mapping(j, i);
+    }
+    constexpr const nested_mapping_type& nested_mapping() const noexcept {
+      return __nested_mapping;
+    }
+    static constexpr bool is_always_unique() {
+      return nested_mapping_type::is_always_unique();
+    }
+    static constexpr bool is_always_exhaustive() {
+      return nested_mapping_type::is_always_exhaustive();
+    }
+    static constexpr bool is_always_strided() {
+      return nested_mapping_type::is_always_strided();
+    }
+    constexpr bool is_unique() const {
+      return __nested_mapping.is_unique();
+    }
+    constexpr bool is_exhaustive() const {
+      return __nested_mapping.is_exhaustive();
+    }
+    constexpr bool is_strided() const {
+      return __nested_mapping.is_strided();
+    }
+    constexpr index_type stride(rank_type r) const {
+      return __nested_mapping.stride(r == 0 ? 1 : 0);
+    }
+
+    template <class OtherExtents>
+    friend constexpr bool operator==(
+        const mapping& left, const mapping<OtherExtents>& right) {
+      return left.nested_mapping() == right.nested_mapping();
+    }
+  };
+};
+
+template <class Layout>
+struct __packed_layout_info {
+  static constexpr bool value = false;
+};
+
+template <class Triangle, class StorageOrder>
+struct __packed_layout_info<layout_blas_packed<Triangle, StorageOrder>> {
+  static constexpr bool value = true;
+  using transpose_layout = layout_blas_packed<
+      conditional_t<is_same<Triangle, upper_triangle_t>::value,
+                    lower_triangle_t, upper_triangle_t>,
+      conditional_t<is_same<StorageOrder, column_major_t>::value,
+                    row_major_t, column_major_t>>;
+};
+
+template <class Layout>
+struct __transpose_layout_info {
+  static constexpr bool value = false;
+};
+
+template <class NestedLayout>
+struct __transpose_layout_info<layout_transpose<NestedLayout>> {
+  static constexpr bool value = true;
+  using nested_layout = NestedLayout;
+};
+
+template <class ElementType, class Extents, class Layout, class Accessor>
+constexpr auto transposed(mdspan<ElementType, Extents, Layout, Accessor> x) {
+  using extents_type = typename __transpose_extents<Extents>::type;
+  extents_type result_extents(x.extent(1), x.extent(0));
+  if constexpr (is_same<Layout, layout_left>::value) {
+    using layout_type = layout_right;
+    using mapping_type = typename layout_type::template mapping<extents_type>;
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), mapping_type(result_extents), x.accessor());
+  } else if constexpr (is_same<Layout, layout_right>::value) {
+    using layout_type = layout_left;
+    using mapping_type = typename layout_type::template mapping<extents_type>;
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), mapping_type(result_extents), x.accessor());
+  } else if constexpr (__packed_layout_info<Layout>::value) {
+    using layout_type =
+        typename __packed_layout_info<Layout>::transpose_layout;
+    using mapping_type = typename layout_type::template mapping<extents_type>;
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), mapping_type(result_extents), x.accessor());
+  } else if constexpr (is_same<Layout, layout_stride>::value) {
+    using layout_type = layout_stride;
+    using mapping_type = typename layout_type::template mapping<extents_type>;
+    array<typename extents_type::index_type, 2> strides{
+        x.mapping().stride(1), x.mapping().stride(0)};
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), mapping_type(result_extents, strides), x.accessor());
+  } else if constexpr (__transpose_layout_info<Layout>::value) {
+    using layout_type =
+        typename __transpose_layout_info<Layout>::nested_layout;
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), x.mapping().nested_mapping(), x.accessor());
+  } else {
+    using layout_type = layout_transpose<Layout>;
+    using mapping_type = typename layout_type::template mapping<extents_type>;
+    return mdspan<ElementType, extents_type, layout_type, Accessor>(
+        x.data_handle(), mapping_type(x.mapping()), x.accessor());
+  }
+}
+
+template <class ElementType, class Extents, class Layout, class Accessor>
+constexpr auto conjugate_transposed(
+    mdspan<ElementType, Extents, Layout, Accessor> x) {
+  return conjugated(transposed(x));
+}
+
+template <__inout_object X, __inout_object Y>
+constexpr void swap_elements(X x, Y y) {
+  if constexpr (__object_rank<X>::value == 1) {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+      auto temporary = std::move(x[i]);
+      x[i] = std::move(y[i]);
+      y[i] = std::move(temporary);
+    }
+  } else {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      for (typename X::index_type j = 0; j < x.extent(1); ++j) {
+        auto temporary = std::move(x[i, j]);
+        x[i, j] = std::move(y[i, j]);
+        y[i, j] = std::move(temporary);
+      }
+  }
+}
+
+template <class ExecutionPolicy, __inout_object X, __inout_object Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void swap_elements(ExecutionPolicy&&, X x, Y y) {
+  swap_elements(x, y);
+}
+
+template <class Scalar, __inout_object X>
+constexpr void scale(Scalar alpha, X x) {
+  if constexpr (__object_rank<X>::value == 1) {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      x[i] *= alpha;
+  } else {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      for (typename X::index_type j = 0; j < x.extent(1); ++j)
+        x[i, j] *= alpha;
+  }
+}
+
+template <class ExecutionPolicy, class Scalar, __inout_object X>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void scale(ExecutionPolicy&&, Scalar alpha, X x) {
+  scale(alpha, x);
+}
+
+template <__in_object X, __out_object Y>
+constexpr void copy(X x, Y y) {
+  if constexpr (__object_rank<X>::value == 1) {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      y[i] = x[i];
+  } else {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      for (typename X::index_type j = 0; j < x.extent(1); ++j)
+        y[i, j] = x[i, j];
+  }
+}
+
+template <class ExecutionPolicy, __in_object X, __out_object Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void copy(ExecutionPolicy&&, X x, Y y) {
+  copy(x, y);
+}
+
+template <__in_object X, __in_object Y, __out_object Z>
+constexpr void add(X x, Y y, Z z) {
+  if constexpr (__object_rank<X>::value == 1) {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      z[i] = x[i] + y[i];
+  } else {
+    for (typename X::index_type i = 0; i < x.extent(0); ++i)
+      for (typename X::index_type j = 0; j < x.extent(1); ++j)
+        z[i, j] = x[i, j] + y[i, j];
+  }
+}
+
+template <class ExecutionPolicy, __in_object X, __in_object Y,
+          __out_object Z>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void add(ExecutionPolicy&&, X x, Y y, Z z) {
+  add(x, y, z);
+}
+
+template <__in_vector X, __in_vector Y, class Scalar>
+constexpr Scalar dot(X x, Y y, Scalar init) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i)
+    init += x[i] * y[i];
+  return init;
+}
+
+template <__in_vector X, __in_vector Y>
+constexpr auto dot(X x, Y y) {
+  using result_type =
+      decltype(declval<typename X::value_type>() *
+               declval<typename Y::value_type>());
+  return dot(x, y, result_type());
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar dot(ExecutionPolicy&&, X x, Y y, Scalar init) {
+  return dot(x, y, init);
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto dot(ExecutionPolicy&&, X x, Y y) {
+  return dot(x, y);
+}
+
+template <__in_vector X, __in_vector Y, class Scalar>
+constexpr Scalar dotc(X x, Y y, Scalar init) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i)
+    init += __conjugate(x[i]) * y[i];
+  return init;
+}
+
+template <__in_vector X, __in_vector Y>
+constexpr auto dotc(X x, Y y) {
+  using result_type =
+      decltype(__conjugate(declval<typename X::value_type>()) *
+               declval<typename Y::value_type>());
+  return dotc(x, y, result_type());
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar dotc(ExecutionPolicy&&, X x, Y y, Scalar init) {
+  return dotc(x, y, init);
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto dotc(ExecutionPolicy&&, X x, Y y) {
+  return dotc(x, y);
+}
+
+template <class Scalar>
+struct sum_of_squares_result {
+  Scalar scaling_factor;
+  Scalar scaled_sum_of_squares;
+};
+
+template <__in_vector X, class Scalar>
+constexpr sum_of_squares_result<Scalar> vector_sum_of_squares(
+    X x, sum_of_squares_result<Scalar> init) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+    Scalar value = static_cast<Scalar>(__abs_value(x[i]));
+    if (value == Scalar()) continue;
+    if (init.scaling_factor < value) {
+      Scalar ratio = init.scaling_factor / value;
+      init.scaled_sum_of_squares =
+          Scalar(1) + init.scaled_sum_of_squares * ratio * ratio;
+      init.scaling_factor = value;
+    } else {
+      Scalar ratio = value / init.scaling_factor;
+      init.scaled_sum_of_squares += ratio * ratio;
+    }
+  }
+  return init;
+}
+
+template <class ExecutionPolicy, __in_vector X, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+sum_of_squares_result<Scalar> vector_sum_of_squares(
+    ExecutionPolicy&&, X x, sum_of_squares_result<Scalar> init) {
+  return vector_sum_of_squares(x, init);
+}
+
+template <__in_vector X, class Scalar>
+Scalar vector_two_norm(X x, Scalar init) {
+  auto init_abs = __abs_value(init);
+  Scalar sum = static_cast<Scalar>(init_abs * init_abs);
+  for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+    auto value = __abs_value(x[i]);
+    sum += static_cast<Scalar>(value * value);
+  }
+  using std::sqrt;
+  return sqrt(sum);
+}
+
+template <__in_vector X>
+auto vector_two_norm(X x) {
+  using value_type = typename X::value_type;
+  using result_type =
+      typename __number_traits<
+          typename remove_cv<value_type>::type>::real_type;
+  return vector_two_norm(x, result_type());
+}
+
+template <class ExecutionPolicy, __in_vector X, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar vector_two_norm(ExecutionPolicy&&, X x, Scalar init) {
+  return vector_two_norm(x, init);
+}
+
+template <class ExecutionPolicy, __in_vector X>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto vector_two_norm(ExecutionPolicy&&, X x) {
+  return vector_two_norm(x);
+}
+
+template <__in_vector X, class Scalar>
+constexpr Scalar vector_abs_sum(X x, Scalar init) {
+  for (typename X::index_type i = 0; i < x.extent(0); ++i)
+    init += static_cast<Scalar>(__abs1_value(x[i]));
+  return init;
+}
+
+template <__in_vector X>
+constexpr auto vector_abs_sum(X x) {
+  using result_type = typename X::value_type;
+  return vector_abs_sum(x, result_type());
+}
+
+template <class ExecutionPolicy, __in_vector X, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar vector_abs_sum(ExecutionPolicy&&, X x, Scalar init) {
+  return vector_abs_sum(x, init);
+}
+
+template <class ExecutionPolicy, __in_vector X>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto vector_abs_sum(ExecutionPolicy&&, X x) {
+  return vector_abs_sum(x);
+}
+
+template <__in_vector X>
+constexpr typename X::size_type vector_idx_abs_max(X x) {
+  if (x.extent(0) == 0)
+    return numeric_limits<typename X::size_type>::max();
+  typename X::size_type best = 0;
+  auto best_value = __abs1_value(x[0]);
+  for (typename X::index_type i = 1; i < x.extent(0); ++i) {
+    auto value = __abs1_value(x[i]);
+    if (best_value < value) {
+      best = static_cast<typename X::size_type>(i);
+      best_value = value;
+    }
+  }
+  return best;
+}
+
+template <class ExecutionPolicy, __in_vector X>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+constexpr typename X::size_type vector_idx_abs_max(ExecutionPolicy&&, X x) {
+  return vector_idx_abs_max(x);
+}
+
+template <__in_matrix A, class Scalar>
+Scalar matrix_frob_norm(A a, Scalar init) {
+  auto init_abs = __abs_value(init);
+  Scalar sum = static_cast<Scalar>(init_abs * init_abs);
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      auto value = __abs_value(a[i, j]);
+      sum += static_cast<Scalar>(value * value);
+    }
+  using std::sqrt;
+  return sqrt(sum);
+}
+
+template <__in_matrix A>
+auto matrix_frob_norm(A a) {
+  using value_type = typename A::value_type;
+  using result_type =
+      typename __number_traits<
+          typename remove_cv<value_type>::type>::real_type;
+  return matrix_frob_norm(a, result_type());
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar matrix_frob_norm(ExecutionPolicy&&, A a, Scalar init) {
+  return matrix_frob_norm(a, init);
+}
+
+template <class ExecutionPolicy, __in_matrix A>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto matrix_frob_norm(ExecutionPolicy&&, A a) {
+  return matrix_frob_norm(a);
+}
+
+template <__in_matrix A, class Scalar>
+constexpr Scalar matrix_one_norm(A a, Scalar init) {
+  Scalar best = init;
+  for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+    Scalar sum{};
+    for (typename A::index_type i = 0; i < a.extent(0); ++i)
+      sum += static_cast<Scalar>(__abs_value(a[i, j]));
+    if (best < sum) best = sum;
+  }
+  return best;
+}
+
+template <__in_matrix A>
+constexpr auto matrix_one_norm(A a) {
+  using value_type = typename A::value_type;
+  using result_type =
+      typename __number_traits<
+          typename remove_cv<value_type>::type>::real_type;
+  return matrix_one_norm(a, result_type());
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar matrix_one_norm(ExecutionPolicy&&, A a, Scalar init) {
+  return matrix_one_norm(a, init);
+}
+
+template <class ExecutionPolicy, __in_matrix A>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto matrix_one_norm(ExecutionPolicy&&, A a) {
+  return matrix_one_norm(a);
+}
+
+template <__in_matrix A, class Scalar>
+constexpr Scalar matrix_inf_norm(A a, Scalar init) {
+  Scalar best = init;
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    Scalar sum{};
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += static_cast<Scalar>(__abs_value(a[i, j]));
+    if (best < sum) best = sum;
+  }
+  return best;
+}
+
+template <__in_matrix A>
+constexpr auto matrix_inf_norm(A a) {
+  using value_type = typename A::value_type;
+  using result_type =
+      typename __number_traits<
+          typename remove_cv<value_type>::type>::real_type;
+  return matrix_inf_norm(a, result_type());
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Scalar>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+Scalar matrix_inf_norm(ExecutionPolicy&&, A a, Scalar init) {
+  return matrix_inf_norm(a, init);
+}
+
+template <class ExecutionPolicy, __in_matrix A>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+auto matrix_inf_norm(ExecutionPolicy&&, A a) {
+  return matrix_inf_norm(a);
+}
+
+template <__in_matrix A, __in_vector X, __out_vector Y>
+constexpr void matrix_vector_product(A a, X x, Y y) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    using result_type = typename Y::value_type;
+    result_type sum = result_type();
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += a[i, j] * x[j];
+    y[i] = sum;
+  }
+}
+
+template <class ExecutionPolicy, __in_matrix A, __in_vector X,
+          __out_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_vector_product(ExecutionPolicy&&, A a, X x, Y y) {
+  matrix_vector_product(a, x, y);
+}
+
+template <__in_matrix A, __in_vector X, __in_vector Y, __out_vector Z>
+constexpr void matrix_vector_product(A a, X x, Y y, Z z) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    auto sum = y[i];
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += a[i, j] * x[j];
+    z[i] = sum;
+  }
+}
+
+template <class ExecutionPolicy, __in_matrix A, __in_vector X,
+          __in_vector Y, __out_vector Z>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_vector_product(ExecutionPolicy&&, A a, X x, Y y, Z z) {
+  matrix_vector_product(a, x, y, z);
+}
+
+template <__in_matrix A, class Triangle, __in_vector X, __out_vector Y>
+constexpr void symmetric_matrix_vector_product(A a, Triangle triangle, X x,
+                                               Y y) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    using result_type = typename Y::value_type;
+    result_type sum = result_type();
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __symmetric_element(a, triangle, i, j) * x[j];
+    y[i] = sum;
+  }
+}
+
+template <__in_matrix A, class Triangle, __in_vector X, __in_vector Y,
+          __out_vector Z>
+constexpr void symmetric_matrix_vector_product(A a, Triangle triangle, X x,
+                                               Y y, Z z) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    auto sum = y[i];
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __symmetric_element(a, triangle, i, j) * x[j];
+    z[i] = sum;
+  }
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          __in_vector X, __out_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_vector_product(ExecutionPolicy&&, A a,
+                                     Triangle triangle, X x, Y y) {
+  symmetric_matrix_vector_product(a, triangle, x, y);
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          __in_vector X, __in_vector Y, __out_vector Z>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_vector_product(ExecutionPolicy&&, A a,
+                                     Triangle triangle, X x, Y y, Z z) {
+  symmetric_matrix_vector_product(a, triangle, x, y, z);
+}
+
+template <__in_matrix A, class Triangle, __in_vector X, __out_vector Y>
+constexpr void hermitian_matrix_vector_product(A a, Triangle triangle, X x,
+                                               Y y) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    using result_type = typename Y::value_type;
+    result_type sum = result_type();
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __hermitian_element(a, triangle, i, j) * x[j];
+    y[i] = sum;
+  }
+}
+
+template <__in_matrix A, class Triangle, __in_vector X, __in_vector Y,
+          __out_vector Z>
+constexpr void hermitian_matrix_vector_product(A a, Triangle triangle, X x,
+                                               Y y, Z z) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    auto sum = y[i];
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __hermitian_element(a, triangle, i, j) * x[j];
+    z[i] = sum;
+  }
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          __in_vector X, __out_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_vector_product(ExecutionPolicy&&, A a,
+                                     Triangle triangle, X x, Y y) {
+  hermitian_matrix_vector_product(a, triangle, x, y);
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          __in_vector X, __in_vector Y, __out_vector Z>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_vector_product(ExecutionPolicy&&, A a,
+                                     Triangle triangle, X x, Y y, Z z) {
+  hermitian_matrix_vector_product(a, triangle, x, y, z);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_vector X, __out_vector Y>
+constexpr void triangular_matrix_vector_product(A a, Triangle triangle,
+                                                DiagonalStorage diagonal, X x,
+                                                Y y) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    using result_type = typename Y::value_type;
+    result_type sum = result_type();
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __triangular_element(a, triangle, diagonal, i, j) * x[j];
+    y[i] = sum;
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_vector X, __in_vector Y, __out_vector Z>
+constexpr void triangular_matrix_vector_product(A a, Triangle triangle,
+                                                DiagonalStorage diagonal, X x,
+                                                Y y, Z z) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+    auto sum = y[i];
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      sum += __triangular_element(a, triangle, diagonal, i, j) * x[j];
+    z[i] = sum;
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_vector Y>
+constexpr void triangular_matrix_vector_product(A a, Triangle triangle,
+                                                DiagonalStorage diagonal,
+                                                Y y) {
+  if constexpr (__is_upper_triangle<Triangle>()) {
+    for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+      auto sum = __triangular_element(a, triangle, diagonal, i, i) * y[i];
+      for (typename A::index_type j = i + 1; j < a.extent(1); ++j)
+        sum += __triangular_element(a, triangle, diagonal, i, j) * y[j];
+      y[i] = sum;
+    }
+  } else {
+    typename A::index_type i = a.extent(0);
+    while (i != 0) {
+      --i;
+      auto sum = __triangular_element(a, triangle, diagonal, i, i) * y[i];
+      for (typename A::index_type j = 0; j < i; ++j)
+        sum += __triangular_element(a, triangle, diagonal, i, j) * y[j];
+      y[i] = sum;
+    }
+  }
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          class DiagonalStorage, __in_vector X, __out_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_vector_product(ExecutionPolicy&&, A a,
+                                      Triangle triangle,
+                                      DiagonalStorage diagonal, X x, Y y) {
+  triangular_matrix_vector_product(a, triangle, diagonal, x, y);
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          class DiagonalStorage, __inout_vector Y>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_vector_product(ExecutionPolicy&&, A a,
+                                      Triangle triangle,
+                                      DiagonalStorage diagonal, Y y) {
+  triangular_matrix_vector_product(a, triangle, diagonal, y);
+}
+
+template <class ExecutionPolicy, __in_matrix A, class Triangle,
+          class DiagonalStorage, __in_vector X, __in_vector Y,
+          __out_vector Z>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_vector_product(ExecutionPolicy&&, A a,
+                                      Triangle triangle,
+                                      DiagonalStorage diagonal, X x, Y y,
+                                      Z z) {
+  triangular_matrix_vector_product(a, triangle, diagonal, x, y, z);
+}
+
+struct __default_divide {
+  template <class Left, class Right>
+  constexpr auto operator()(Left left, Right right) const {
+    return left / right;
+  }
+};
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_vector X, class BinaryDivideOp>
+constexpr void __triangular_vector_solve_in_place(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x,
+    BinaryDivideOp divide) {
+  if constexpr (__is_upper_triangle<Triangle>()) {
+    typename A::index_type i = a.extent(0);
+    while (i != 0) {
+      --i;
+      auto value = x[i];
+      for (typename A::index_type j = i + 1; j < a.extent(1); ++j)
+        value -= a[i, j] * x[j];
+      if (!__is_implicit_diagonal<DiagonalStorage>())
+        value = divide(value, a[i, i]);
+      x[i] = value;
+    }
+  } else {
+    for (typename A::index_type i = 0; i < a.extent(0); ++i) {
+      auto value = x[i];
+      for (typename A::index_type j = 0; j < i; ++j)
+        value -= a[i, j] * x[j];
+      if (!__is_implicit_diagonal<DiagonalStorage>())
+        value = divide(value, a[i, i]);
+      x[i] = value;
+    }
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_vector B, __out_vector X, class BinaryDivideOp>
+constexpr void triangular_matrix_vector_solve(A a, Triangle triangle,
+                                              DiagonalStorage diagonal, B b,
+                                              X x, BinaryDivideOp divide) {
+  copy(b, x);
+  __triangular_vector_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_vector X, class BinaryDivideOp>
+constexpr void triangular_matrix_vector_solve(A a, Triangle triangle,
+                                              DiagonalStorage diagonal, X x,
+                                              BinaryDivideOp divide) {
+  __triangular_vector_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_vector B, __out_vector X>
+constexpr void triangular_matrix_vector_solve(A a, Triangle triangle,
+                                              DiagonalStorage diagonal, B b,
+                                              X x) {
+  triangular_matrix_vector_solve(a, triangle, diagonal, b, x,
+                                 __default_divide());
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_vector X>
+constexpr void triangular_matrix_vector_solve(A a, Triangle triangle,
+                                              DiagonalStorage diagonal, X x) {
+  triangular_matrix_vector_solve(a, triangle, diagonal, x,
+                                 __default_divide());
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_vector_solve(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_vector_solve(args...);
+}
+
+template <__in_vector X, __in_vector Y, __inout_matrix A>
+constexpr void matrix_rank_1_update(X x, Y y, A a) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      a[i, j] += x[i] * y[j];
+}
+
+template <__in_vector X, __in_vector Y, __inout_matrix A>
+constexpr void matrix_rank_1_update_c(X x, Y y, A a) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j)
+      a[i, j] += x[i] * __conjugate(y[j]);
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y,
+          __inout_matrix A>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_rank_1_update(ExecutionPolicy&&, X x, Y y, A a) {
+  matrix_rank_1_update(x, y, a);
+}
+
+template <class ExecutionPolicy, __in_vector X, __in_vector Y,
+          __inout_matrix A>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_rank_1_update_c(ExecutionPolicy&&, X x, Y y, A a) {
+  matrix_rank_1_update_c(x, y, a);
+}
+
+template <class Scalar, __in_vector X,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void symmetric_matrix_rank_1_update(Scalar alpha, X x, A a,
+                                              Triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j) a[i, j] = alpha * x[i] * x[j];
+      } else {
+        if (i >= j) a[i, j] = alpha * x[i] * x[j];
+      }
+    }
+}
+
+template <class Scalar, __in_vector X, __in_matrix E,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void symmetric_matrix_rank_1_update(Scalar alpha, X x, E e, A a,
+                                              Triangle triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j)
+          a[i, j] = __symmetric_element(e, triangle, i, j) +
+                    alpha * x[i] * x[j];
+      } else {
+        if (i >= j)
+          a[i, j] = __symmetric_element(e, triangle, i, j) +
+                    alpha * x[i] * x[j];
+      }
+    }
+}
+
+template <class Scalar, __in_vector X,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void hermitian_matrix_rank_1_update(Scalar alpha, X x, A a,
+                                              Triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j) a[i, j] = alpha * x[i] * __conjugate(x[j]);
+      } else {
+        if (i >= j) a[i, j] = alpha * x[i] * __conjugate(x[j]);
+      }
+    }
+}
+
+template <class Scalar, __in_vector X, __in_matrix E,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void hermitian_matrix_rank_1_update(Scalar alpha, X x, E e, A a,
+                                              Triangle triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j)
+          a[i, j] = __hermitian_element(e, triangle, i, j) +
+                    alpha * x[i] * __conjugate(x[j]);
+      } else {
+        if (i >= j)
+          a[i, j] = __hermitian_element(e, triangle, i, j) +
+                    alpha * x[i] * __conjugate(x[j]);
+      }
+    }
+}
+
+template <__in_vector X, __in_vector Y,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void symmetric_matrix_rank_2_update(X x, Y y, A a, Triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j) a[i, j] = x[i] * y[j] + y[i] * x[j];
+      } else {
+        if (i >= j) a[i, j] = x[i] * y[j] + y[i] * x[j];
+      }
+    }
+}
+
+template <__in_vector X, __in_vector Y, __in_matrix E,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void symmetric_matrix_rank_2_update(X x, Y y, E e, A a,
+                                              Triangle triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i <= j) ||
+          (!__is_upper_triangle<Triangle>() && i >= j))
+        a[i, j] = __symmetric_element(e, triangle, i, j) +
+                  x[i] * y[j] + y[i] * x[j];
+    }
+}
+
+template <__in_vector X, __in_vector Y,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void hermitian_matrix_rank_2_update(X x, Y y, A a, Triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      auto update =
+          x[i] * __conjugate(y[j]) + y[i] * __conjugate(x[j]);
+      if constexpr (__is_upper_triangle<Triangle>()) {
+        if (i <= j) a[i, j] = update;
+      } else {
+        if (i >= j) a[i, j] = update;
+      }
+    }
+}
+
+template <__in_vector X, __in_vector Y, __in_matrix E,
+          __possibly_packed_inout_matrix A, class Triangle>
+constexpr void hermitian_matrix_rank_2_update(X x, Y y, E e, A a,
+                                              Triangle triangle) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename A::index_type j = 0; j < a.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i <= j) ||
+          (!__is_upper_triangle<Triangle>() && i >= j))
+        a[i, j] = __hermitian_element(e, triangle, i, j) +
+                  x[i] * __conjugate(y[j]) +
+                  y[i] * __conjugate(x[j]);
+    }
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_rank_1_update(ExecutionPolicy&&, Args... args) {
+  symmetric_matrix_rank_1_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_rank_1_update(ExecutionPolicy&&, Args... args) {
+  hermitian_matrix_rank_1_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_rank_2_update(ExecutionPolicy&&, Args... args) {
+  symmetric_matrix_rank_2_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_rank_2_update(ExecutionPolicy&&, Args... args) {
+  hermitian_matrix_rank_2_update(args...);
+}
+
+template <__in_matrix A, __in_matrix B, __out_matrix C>
+constexpr void matrix_product(A a, B b, C c) {
+  for (typename A::index_type i = 0; i < a.extent(0); ++i)
+    for (typename B::index_type j = 0; j < b.extent(1); ++j) {
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * b[k, j];
+      c[i, j] = sum;
+    }
+}
+
+template <__in_matrix A, __in_matrix B, __in_matrix E, __out_matrix C>
+constexpr void matrix_product(A a, B b, E e, C c) {
+  matrix_product(a, b, c);
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j)
+      c[i, j] += e[i, j];
+}
+
+template <class ExecutionPolicy, __in_matrix A, __in_matrix B,
+          __out_matrix C>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_product(ExecutionPolicy&&, A a, B b, C c) {
+  matrix_product(a, b, c);
+}
+
+template <class ExecutionPolicy, __in_matrix A, __in_matrix B,
+          __in_matrix E, __out_matrix C>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void matrix_product(ExecutionPolicy&&, A a, B b, E e, C c) {
+  matrix_product(a, b, e, c);
+}
+
+template <bool Hermitian, __in_matrix A, class Triangle, __in_matrix B,
+          __out_matrix C>
+constexpr void __structured_matrix_left_product(A a, Triangle triangle, B b,
+                                                C c) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k) {
+        if constexpr (Hermitian)
+          sum += __hermitian_element(a, triangle, i, k) * b[k, j];
+        else
+          sum += __symmetric_element(a, triangle, i, k) * b[k, j];
+      }
+      c[i, j] = sum;
+    }
+}
+
+template <bool Hermitian, __in_matrix B, __in_matrix A, class Triangle,
+          __out_matrix C>
+constexpr void __structured_matrix_right_product(B b, A a,
+                                                 Triangle triangle, C c) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(0); ++k) {
+        if constexpr (Hermitian)
+          sum += b[i, k] * __hermitian_element(a, triangle, k, j);
+        else
+          sum += b[i, k] * __symmetric_element(a, triangle, k, j);
+      }
+      c[i, j] = sum;
+    }
+}
+
+template <__in_matrix A, class Triangle, __in_matrix B, __out_matrix C>
+constexpr void symmetric_matrix_product(A a, Triangle triangle, B b, C c) {
+  __structured_matrix_left_product<false>(a, triangle, b, c);
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle, __out_matrix C>
+constexpr void symmetric_matrix_product(B b, A a, Triangle triangle, C c) {
+  __structured_matrix_right_product<false>(b, a, triangle, c);
+}
+
+template <__in_matrix A, class Triangle, __in_matrix B, __in_matrix E,
+          __out_matrix C>
+constexpr void symmetric_matrix_product(A a, Triangle triangle, B b, E e,
+                                        C c) {
+  symmetric_matrix_product(a, triangle, b, c);
+  add(c, e, c);
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle, __in_matrix E,
+          __out_matrix C>
+constexpr void symmetric_matrix_product(B b, A a, Triangle triangle, E e,
+                                        C c) {
+  symmetric_matrix_product(b, a, triangle, c);
+  add(c, e, c);
+}
+
+template <__in_matrix A, class Triangle, __in_matrix B, __out_matrix C>
+constexpr void hermitian_matrix_product(A a, Triangle triangle, B b, C c) {
+  __structured_matrix_left_product<true>(a, triangle, b, c);
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle, __out_matrix C>
+constexpr void hermitian_matrix_product(B b, A a, Triangle triangle, C c) {
+  __structured_matrix_right_product<true>(b, a, triangle, c);
+}
+
+template <__in_matrix A, class Triangle, __in_matrix B, __in_matrix E,
+          __out_matrix C>
+constexpr void hermitian_matrix_product(A a, Triangle triangle, B b, E e,
+                                        C c) {
+  hermitian_matrix_product(a, triangle, b, c);
+  add(c, e, c);
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle, __in_matrix E,
+          __out_matrix C>
+constexpr void hermitian_matrix_product(B b, A a, Triangle triangle, E e,
+                                        C c) {
+  hermitian_matrix_product(b, a, triangle, c);
+  add(c, e, c);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_product(ExecutionPolicy&&, Args... args) {
+  symmetric_matrix_product(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_product(ExecutionPolicy&&, Args... args) {
+  hermitian_matrix_product(args...);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __out_matrix C>
+constexpr void triangular_matrix_product(A a, Triangle triangle,
+                                         DiagonalStorage diagonal, B b, C c) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += __triangular_element(a, triangle, diagonal, i, k) * b[k, j];
+      c[i, j] = sum;
+    }
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle,
+          class DiagonalStorage, __out_matrix C>
+constexpr void triangular_matrix_product(B b, A a, Triangle triangle,
+                                         DiagonalStorage diagonal, C c) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(0); ++k)
+        sum += b[i, k] *
+               __triangular_element(a, triangle, diagonal, k, j);
+      c[i, j] = sum;
+    }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __in_matrix E, __out_matrix C>
+constexpr void triangular_matrix_product(A a, Triangle triangle,
+                                         DiagonalStorage diagonal, B b, E e,
+                                         C c) {
+  triangular_matrix_product(a, triangle, diagonal, b, c);
+  add(c, e, c);
+}
+
+template <__in_matrix B, __in_matrix A, class Triangle,
+          class DiagonalStorage, __in_matrix E, __out_matrix C>
+constexpr void triangular_matrix_product(B b, A a, Triangle triangle,
+                                         DiagonalStorage diagonal, E e, C c) {
+  triangular_matrix_product(b, a, triangle, diagonal, c);
+  add(c, e, c);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix C>
+constexpr void triangular_matrix_left_product(A a, Triangle triangle,
+                                              DiagonalStorage diagonal, C c) {
+  if constexpr (__is_upper_triangle<Triangle>()) {
+    for (typename C::index_type column = 0; column < c.extent(1); ++column)
+      for (typename C::index_type i = 0; i < c.extent(0); ++i) {
+        auto sum =
+            __triangular_element(a, triangle, diagonal, i, i) * c[i, column];
+        for (typename C::index_type k = i + 1; k < c.extent(0); ++k)
+          sum += a[i, k] * c[k, column];
+        c[i, column] = sum;
+      }
+  } else {
+    for (typename C::index_type column = 0; column < c.extent(1); ++column) {
+      typename C::index_type i = c.extent(0);
+      while (i != 0) {
+        --i;
+        auto sum =
+            __triangular_element(a, triangle, diagonal, i, i) * c[i, column];
+        for (typename C::index_type k = 0; k < i; ++k)
+          sum += a[i, k] * c[k, column];
+        c[i, column] = sum;
+      }
+    }
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix C>
+constexpr void triangular_matrix_right_product(A a, Triangle triangle,
+                                               DiagonalStorage diagonal, C c) {
+  for (typename C::index_type row = 0; row < c.extent(0); ++row) {
+    if constexpr (__is_upper_triangle<Triangle>()) {
+      typename C::index_type j = c.extent(1);
+      while (j != 0) {
+        --j;
+        auto sum =
+            c[row, j] * __triangular_element(a, triangle, diagonal, j, j);
+        for (typename C::index_type k = 0; k < j; ++k)
+          sum += c[row, k] * a[k, j];
+        c[row, j] = sum;
+      }
+    } else {
+      for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+        auto sum =
+            c[row, j] * __triangular_element(a, triangle, diagonal, j, j);
+        for (typename C::index_type k = j + 1; k < c.extent(1); ++k)
+          sum += c[row, k] * a[k, j];
+        c[row, j] = sum;
+      }
+    }
+  }
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_product(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_product(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_left_product(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_left_product(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_right_product(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_right_product(args...);
+}
+
+template <class Scalar, __in_matrix A,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void symmetric_matrix_rank_k_update(Scalar alpha, A a, C c,
+                                              Triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * a[j, k];
+      c[i, j] = alpha * sum;
+    }
+}
+
+template <class Scalar, __in_matrix A, __in_matrix E,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void symmetric_matrix_rank_k_update(Scalar alpha, A a, E e, C c,
+                                              Triangle triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * a[j, k];
+      c[i, j] = __symmetric_element(e, triangle, i, j) + alpha * sum;
+    }
+}
+
+template <class Scalar, __in_matrix A,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void hermitian_matrix_rank_k_update(Scalar alpha, A a, C c,
+                                              Triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * __conjugate(a[j, k]);
+      c[i, j] = alpha * sum;
+    }
+}
+
+template <class Scalar, __in_matrix A, __in_matrix E,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void hermitian_matrix_rank_k_update(Scalar alpha, A a, E e, C c,
+                                              Triangle triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      using result_type = typename C::value_type;
+      result_type sum = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * __conjugate(a[j, k]);
+      c[i, j] = __hermitian_element(e, triangle, i, j) + alpha * sum;
+    }
+}
+
+template <__in_matrix A, __in_matrix B,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void symmetric_matrix_rank_2k_update(A a, B b, C c, Triangle) {
+  using result_type = typename C::value_type;
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      c[i, j] = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        c[i, j] += a[i, k] * b[j, k] + b[i, k] * a[j, k];
+    }
+}
+
+template <__in_matrix A, __in_matrix B,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void hermitian_matrix_rank_2k_update(A a, B b, C c, Triangle) {
+  using result_type = typename C::value_type;
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      c[i, j] = result_type();
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        c[i, j] += a[i, k] * __conjugate(b[j, k]) +
+                   b[i, k] * __conjugate(a[j, k]);
+    }
+}
+
+template <__in_matrix A, __in_matrix B, __in_matrix E,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void symmetric_matrix_rank_2k_update(A a, B b, E e, C c,
+                                               Triangle triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      auto sum = __symmetric_element(e, triangle, i, j);
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * b[j, k] + b[i, k] * a[j, k];
+      c[i, j] = sum;
+    }
+}
+
+template <__in_matrix A, __in_matrix B, __in_matrix E,
+          __possibly_packed_inout_matrix C, class Triangle>
+constexpr void hermitian_matrix_rank_2k_update(A a, B b, E e, C c,
+                                               Triangle triangle) {
+  for (typename C::index_type i = 0; i < c.extent(0); ++i)
+    for (typename C::index_type j = 0; j < c.extent(1); ++j) {
+      if ((__is_upper_triangle<Triangle>() && i > j) ||
+          (!__is_upper_triangle<Triangle>() && i < j))
+        continue;
+      auto sum = __hermitian_element(e, triangle, i, j);
+      for (typename A::index_type k = 0; k < a.extent(1); ++k)
+        sum += a[i, k] * __conjugate(b[j, k]) +
+               b[i, k] * __conjugate(a[j, k]);
+      c[i, j] = sum;
+    }
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_rank_k_update(ExecutionPolicy&&, Args... args) {
+  symmetric_matrix_rank_k_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_rank_k_update(ExecutionPolicy&&, Args... args) {
+  hermitian_matrix_rank_k_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void symmetric_matrix_rank_2k_update(ExecutionPolicy&&, Args... args) {
+  symmetric_matrix_rank_2k_update(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void hermitian_matrix_rank_2k_update(ExecutionPolicy&&, Args... args) {
+  hermitian_matrix_rank_2k_update(args...);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X, class BinaryDivideOp>
+constexpr void __triangular_matrix_left_solve_in_place(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x,
+    BinaryDivideOp divide) {
+  for (typename X::index_type column = 0; column < x.extent(1); ++column) {
+    if constexpr (__is_upper_triangle<Triangle>()) {
+      typename X::index_type i = x.extent(0);
+      while (i != 0) {
+        --i;
+        auto value = x[i, column];
+        for (typename X::index_type k = i + 1; k < x.extent(0); ++k)
+          value -= a[i, k] * x[k, column];
+        if (!__is_implicit_diagonal<DiagonalStorage>())
+          value = divide(value, a[i, i]);
+        x[i, column] = value;
+      }
+    } else {
+      for (typename X::index_type i = 0; i < x.extent(0); ++i) {
+        auto value = x[i, column];
+        for (typename X::index_type k = 0; k < i; ++k)
+          value -= a[i, k] * x[k, column];
+        if (!__is_implicit_diagonal<DiagonalStorage>())
+          value = divide(value, a[i, i]);
+        x[i, column] = value;
+      }
+    }
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X, class BinaryDivideOp>
+constexpr void __triangular_matrix_right_solve_in_place(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x,
+    BinaryDivideOp divide) {
+  for (typename X::index_type row = 0; row < x.extent(0); ++row) {
+    if constexpr (__is_upper_triangle<Triangle>()) {
+      for (typename X::index_type j = 0; j < x.extent(1); ++j) {
+        auto value = x[row, j];
+        for (typename X::index_type k = 0; k < j; ++k)
+          value -= x[row, k] * a[k, j];
+        if (!__is_implicit_diagonal<DiagonalStorage>())
+          value = divide(value, a[j, j]);
+        x[row, j] = value;
+      }
+    } else {
+      typename X::index_type j = x.extent(1);
+      while (j != 0) {
+        --j;
+        auto value = x[row, j];
+        for (typename X::index_type k = j + 1; k < x.extent(1); ++k)
+          value -= x[row, k] * a[k, j];
+        if (!__is_implicit_diagonal<DiagonalStorage>())
+          value = divide(value, a[j, j]);
+        x[row, j] = value;
+      }
+    }
+  }
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __out_matrix X, class BinaryDivideOp>
+constexpr void triangular_matrix_matrix_left_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, B b, X x,
+    BinaryDivideOp divide) {
+  copy(b, x);
+  __triangular_matrix_left_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X, class BinaryDivideOp>
+constexpr void triangular_matrix_matrix_left_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x,
+    BinaryDivideOp divide) {
+  __triangular_matrix_left_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __out_matrix X>
+constexpr void triangular_matrix_matrix_left_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, B b, X x) {
+  triangular_matrix_matrix_left_solve(a, triangle, diagonal, b, x,
+                                      __default_divide());
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X>
+constexpr void triangular_matrix_matrix_left_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x) {
+  triangular_matrix_matrix_left_solve(a, triangle, diagonal, x,
+                                      __default_divide());
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __out_matrix X, class BinaryDivideOp>
+constexpr void triangular_matrix_matrix_right_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, B b, X x,
+    BinaryDivideOp divide) {
+  copy(b, x);
+  __triangular_matrix_right_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X, class BinaryDivideOp>
+constexpr void triangular_matrix_matrix_right_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x,
+    BinaryDivideOp divide) {
+  __triangular_matrix_right_solve_in_place(a, triangle, diagonal, x, divide);
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __in_matrix B, __out_matrix X>
+constexpr void triangular_matrix_matrix_right_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, B b, X x) {
+  triangular_matrix_matrix_right_solve(a, triangle, diagonal, b, x,
+                                       __default_divide());
+}
+
+template <__in_matrix A, class Triangle, class DiagonalStorage,
+          __inout_matrix X>
+constexpr void triangular_matrix_matrix_right_solve(
+    A a, Triangle triangle, DiagonalStorage diagonal, X x) {
+  triangular_matrix_matrix_right_solve(a, triangle, diagonal, x,
+                                       __default_divide());
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_matrix_left_solve(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_matrix_left_solve(args...);
+}
+
+template <class ExecutionPolicy, class... Args>
+  requires(is_execution_policy<
+           typename remove_cvref<ExecutionPolicy>::type>::value)
+void triangular_matrix_matrix_right_solve(ExecutionPolicy&&, Args... args) {
+  triangular_matrix_matrix_right_solve(args...);
+}
+
+}  // namespace std::linalg
+
+#endif /* C++26 */
+
+#endif /* __davecc_linalg__ */
