@@ -1075,16 +1075,26 @@ static bool StoreDirectConstexprPCodeInitializer(
       uint64_t address = DirectSymbolRuntimeAddress(
           object, image, target_name, &address_ok);
       if (!address_ok) {
-        address = 0;
-      } else {
-        address += (uint64_t)init->symbol_addend;
+        return false;
       }
+      address += (uint64_t)init->symbol_addend;
       size_t pointer_size = (size_t)SizeofPointer();
       if (available < pointer_size) return false;
       memcpy(dest, &address, pointer_size);
       return true;
     }
-    case kInitTypeString:
+    case kInitTypeString: {
+      char literal_name[64];
+      snprintf(literal_name, sizeof(literal_name), ".str.%d",
+               init->value.literal_id);
+      bool address_ok = true;
+      uint64_t address = DirectSymbolRuntimeAddress(
+          object, image, literal_name, &address_ok);
+      size_t pointer_size = (size_t)SizeofPointer();
+      if (!address_ok || available < pointer_size) return false;
+      memcpy(dest, &address, pointer_size);
+      return true;
+    }
     case kInitTypeMemory:
       return false;
   }
@@ -1565,9 +1575,7 @@ static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
     };
     ok = StoreConstexprScalarBytes(symbol->type, &value, memory);
   }
-  if (!ok && compiler->constexpr_eval_mode == kConstexprEvalPCode &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
+  if (!ok) {
     free(memory);
     return false;
   }
@@ -2458,9 +2466,13 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   }
   Vector address_regions;
   VectorInit(&address_regions);
-  if (!PrepareConstexprPCodeCallStack(ctx, &vm, func, node, &halt_instruction,
-                                      &allocations, &address_regions,
-                                      struct_return, reason)) {
+  ConstexprEvalMode saved_eval_mode = compiler->constexpr_eval_mode;
+  compiler->constexpr_eval_mode = kConstexprEvalAST;
+  bool prepared = PrepareConstexprPCodeCallStack(
+      ctx, &vm, func, node, &halt_instruction, &allocations, &address_regions,
+      struct_return, reason);
+  compiler->constexpr_eval_mode = saved_eval_mode;
+  if (!prepared) {
     for (size_t i = 0; i < allocations.length; i++) {
       free(allocations.value.p[i]);
     }
@@ -2730,9 +2742,13 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
     return false;
   }
 
-  if (!PrepareConstexprPCodeConstructorStack(
-          ctx, &vm, func, node, &halt_instruction, &allocations, object_memory,
-          reason)) {
+  ConstexprEvalMode saved_eval_mode = compiler->constexpr_eval_mode;
+  compiler->constexpr_eval_mode = kConstexprEvalAST;
+  bool prepared = PrepareConstexprPCodeConstructorStack(
+      ctx, &vm, func, node, &halt_instruction, &allocations, object_memory,
+      reason);
+  compiler->constexpr_eval_mode = saved_eval_mode;
+  if (!prepared) {
     for (size_t i = 0; i < allocations.length; i++) {
       free(allocations.value.p[i]);
     }
@@ -5091,7 +5107,9 @@ static bool PCodeEvaluatePointerInitializer(ASTNode* expr, int64_t* result) {
   return ok;
 }
 
-static bool PCodeEvaluateScalarInitializer(TypeRecord* type, ASTNode* initializer,
+static bool PCodeEvaluateScalarInitializer(ConstEvalContext* ctx,
+                                           TypeRecord* type,
+                                           ASTNode* initializer,
                                            ConstexprValue* result) {
   ASTNode* expr = ConstexprInitializerExpression(initializer);
   if (expr == NULL || result == NULL) {
@@ -5114,6 +5132,10 @@ static bool PCodeEvaluateScalarInitializer(TypeRecord* type, ASTNode* initialize
         .ivalue = (int64_t)fvalue,
         .fvalue = fvalue,
     };
+    return true;
+  }
+  if (TypeIsPointer(type) &&
+      ConstexprEvaluateAddressValue(ctx, expr, result)) {
     return true;
   }
   if (TypeIsIntegral(type) || TypeIsPointer(type)) {
@@ -5188,7 +5210,7 @@ static bool PCodeStoreInitializer(ConstEvalContext* ctx, TypeRecord* type,
     };
     return true;
   }
-  return PCodeEvaluateScalarInitializer(type, initializer, slot);
+  return PCodeEvaluateScalarInitializer(ctx, type, initializer, slot);
 }
 
 static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
@@ -5450,6 +5472,7 @@ bool ConstexprPCodeEvaluateObjectConstantForSymbol(ConstEvalContext* ctx,
       return false;
     }
   }
+  ConstexprPersistObjectAddresses(object);
   symbol->value.other = object;
   symbol->flags.value_set = true;
   return ConstexprPCodeSuccess(ctx);

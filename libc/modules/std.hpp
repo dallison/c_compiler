@@ -75,6 +75,9 @@
 #include <string_view>
 #include <syncstream>
 #include <system_error>
+#if __cplusplus >= 202600L
+#include <text_encoding>
+#endif
 #include <thread>
 #include <tuple>
 #include <type_traits>

@@ -1824,9 +1824,45 @@ bool SyntaxAddBorrowedSymbol(Syntax* syntax, Symbol* symbol) {
   return InsertLocalSymbol(syntax->local_symbol_stack, symbol);
 }
 
+static Symbol* FindCurrentClassMemberTag(Syntax* syntax, String* name) {
+  if (!CompilerIsCXX()) {
+    return NULL;
+  }
+  Struct* owner = NULL;
+  if (syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (owner == NULL) {
+    owner = syntax->cxx_class_head;
+  }
+  if (owner == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindStructMember(owner, name);
+  if (member == NULL || member->symbol == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef)) ||
+      member->symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = member->symbol->type;
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    return type->info.struct_info->tag_symbol;
+  }
+  if (TypeIsEnum(type) && type->info.enum_info != NULL) {
+    return type->info.enum_info->tag_symbol;
+  }
+  return NULL;
+}
+
 Symbol* SyntaxFindTag(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_tag_stack;
   Symbol* symbol = FindLocalSymbol(scope, name);
+  if (symbol != NULL) {
+    return FollowAlias(symbol);
+  }
+  symbol = FindCurrentClassMemberTag(syntax, name);
   if (symbol != NULL) {
     return FollowAlias(symbol);
   }
@@ -6779,7 +6815,8 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   sym->type->info.function.is_explicit = false;
   // A friend function defined in a non-local class definition is implicitly
   // inline even when the `inline` specifier is omitted ([dcl.fct.spec]).
-  if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+  bool has_inline_friend_body = LexLookingAt(syntax->lex, TOK(lbrace));
+  if (has_inline_friend_body) {
     sym->type->info.function.is_inline = true;
   }
 
@@ -6934,14 +6971,16 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   Struct* saved_access_context = compiler->current_class_access_context;
   Struct* saved_comparison_owner =
       sym->type->info.function.cxx_member_owner;
-  if (sym->type->info.function.is_defaulted &&
-      saved_comparison_owner == NULL &&
+  bool defaulted_comparison =
+      sym->type->info.function.is_defaulted &&
       (StringEqual(&sym->name, "operator==") ||
-       StringEqual(&sym->name, "operator<=>"))) {
-    // A defaulted hidden-friend comparison is a namespace-scope function, but
-    // its generated memberwise body needs the befriending class as the object
-    // layout.  Supply that owner only while synthesizing the body; restoring it
-    // preserves free-function lookup and mangling.
+       StringEqual(&sym->name, "operator<=>"));
+  if (saved_comparison_owner == NULL &&
+      (has_inline_friend_body || defaulted_comparison)) {
+    // A hidden friend is a namespace-scope function, but its body is parsed in
+    // the scope of the befriending class. Supply that owner while parsing an
+    // inline body (or synthesizing a defaulted comparison), then restore it to
+    // preserve free-function lookup and mangling.
     sym->type->info.function.cxx_member_owner = befriending;
   }
   compiler->current_class_access_context = befriending;

@@ -111,7 +111,7 @@ typedef enum {
 } ConstexprStatementResult;
 
 #define CONSTEXPR_MAX_CALL_DEPTH 512
-#define CONSTEXPR_MAX_STEPS 1000000
+#define CONSTEXPR_MAX_STEPS 10000000
 
 static int template_argument_object_evaluation_depth;
 static int symbolic_constexpr_reference_depth;
@@ -123,11 +123,6 @@ static void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
 static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
                                                      ConstexprValue value);
 static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value);
-static bool TypeIsBasicStringViewType(TypeRecord* type);
-static bool ConstexprStringViewDataCharacter(ConstEvalContext* ctx,
-                                             ConstexprValue* data_slot,
-                                             size_t index,
-                                             int64_t* character);
 static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
                                            TypeRecord* type,
                                            size_t slot_count);
@@ -2300,6 +2295,10 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object) {
       ConstexprPersistAddressObjects(slot->object);
     }
   }
+}
+
+void ConstexprPersistObjectAddresses(ConstexprObject* object) {
+  ConstexprPersistAddressObjects(object);
 }
 
 static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
@@ -4850,23 +4849,6 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       if (index < 0) {
         return false;
       }
-      if (TypeIsBasicStringViewType(object_value.object->type)) {
-        ConstexprValue* size_slot = ConstexprObjectSlot(object_value.object, 1);
-        ConstexprValue* data_slot = ConstexprObjectSlot(object_value.object, 0);
-        int64_t size = 0;
-        if (size_slot == NULL || data_slot == NULL ||
-            !ConstexprValueAsInteger(*size_slot, &size) ||
-            (size_t)index >= (size_t)size) {
-          return false;
-        }
-        result->is_object = false;
-        result->is_address = false;
-        result->is_floating = false;
-        result->fvalue = 0;
-        result->object = NULL;
-        return ConstexprStringViewDataCharacter(ctx, data_slot, (size_t)index,
-                                                &result->ivalue);
-      }
       slot = ConstexprObjectSlot(object_value.object, (size_t)index);
     } else {
       ConstexprValue address;
@@ -4918,9 +4900,21 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     if (member_node->member == NULL) {
       return false;
     }
-    if (!EvaluateConstexprObjectAccess(ctx, member_access->left,
-                                       &object_value) ||
-        object_value.object == NULL) {
+    bool have_object = false;
+    if (node->op == AST_OP(arrow)) {
+      ConstexprValue address = {0};
+      have_object =
+          EvaluateConstexprAddressValue(ctx, member_access->left, &address) &&
+          ConstexprDereferenceAddress(address, &object_value) &&
+          object_value.object != NULL;
+    }
+    if (!have_object) {
+      have_object =
+          EvaluateConstexprObjectAccess(ctx, member_access->left,
+                                        &object_value) &&
+          object_value.object != NULL;
+    }
+    if (!have_object) {
       object_value = (ConstexprValue){
           .is_object = true,
           .object = ConstexprVirtualMemberRootObject(
@@ -5567,6 +5561,14 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     return true;
   }
   if (node->op == AST_OP(subscript)) {
+    if (node->type != NULL && TypeIsPointer(node->type)) {
+      ConstexprValue pointer = {0};
+      if (EvaluateConstexprObjectAccess(ctx, node, &pointer) &&
+          pointer.is_address) {
+        *result = pointer;
+        return true;
+      }
+    }
     BinaryASTNode* subscript = (BinaryASTNode*)node;
     ConstexprValue base;
     int64_t index;
@@ -5681,7 +5683,17 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
     return true;
   }
   if (EvaluateConstexprObjectLValue(ctx, node, &slot, true)) {
-    *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    ConstexprValue address = {0};
+    if (node != NULL &&
+        (node->op == AST_OP(subscript) || node->op == AST_OP(dot) ||
+         node->op == AST_OP(arrow)) &&
+        EvaluateConstexprAddressValue(ctx, node, &address) &&
+        address.address_object != NULL) {
+      address.address_slot = slot;
+      *result = address;
+    } else {
+      *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    }
     return true;
   }
   // A reference parameter can bind to a class/array prvalue that has been
@@ -5714,6 +5726,11 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
     *result = object_value;
     return true;
   }
+  return EvaluateConstexprAddressValue(ctx, node, result);
+}
+
+bool ConstexprEvaluateAddressValue(ConstEvalContext* ctx, ASTNode* node,
+                                   ConstexprValue* result) {
   return EvaluateConstexprAddressValue(ctx, node, result);
 }
 
@@ -6082,6 +6099,13 @@ bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
 Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
     return NULL;
+  }
+  Symbol* canonical = symbol->type->info.function.symbol;
+  if (symbol->type->info.function.body == NULL &&
+      symbol->value.func_defn == NULL && canonical != NULL &&
+      canonical != symbol && canonical->type != NULL &&
+      TypeIsFunction(canonical->type)) {
+    symbol = canonical;
   }
   if (symbol->type->info.function.body == NULL &&
       symbol->type->info.function.cxx_member_owner != NULL) {
@@ -8292,391 +8316,87 @@ static bool EvaluateConstexprExceptionCall(ConstEvalContext* ctx,
   return false;
 }
 
-static bool TypeIsBasicStringViewType(TypeRecord* type) {
-  if (type == NULL || !TypeIsStructOrUnion(type) ||
-      type->info.struct_info == NULL) {
+static bool ConstexprReadByte(ConstexprValue address, size_t offset,
+                              unsigned char* result) {
+  if (result == NULL || !address.is_address) {
     return false;
   }
-  Struct* str = type->info.struct_info;
-  return FindStructMemberByName(str, "__data") != NULL &&
-         FindStructMemberByName(str, "__size") != NULL;
-}
-
-static bool ConstexprStringViewDataCharacter(ConstEvalContext* ctx,
-                                             ConstexprValue* data_slot,
-                                             size_t index,
-                                             int64_t* character) {
-  if (data_slot == NULL || character == NULL) {
-    return false;
-  }
-  ConstexprValue data = *data_slot;
-  ConstexprCanonicalizeAddressValue(&data);
-  if (data.is_address && data.address_object != NULL) {
-    ConstexprValue* char_slot = ConstexprObjectSlot(
-        data.address_object, data.address_index + index);
-    return char_slot != NULL &&
-           ConstexprValueAsInteger(*char_slot, character);
-  }
-  if (data.is_address && data.heap_block != NULL &&
-      data.heap_block->live) {
-    size_t byte_index = data.heap_index + index;
-    if (byte_index >= data.heap_block->size) {
+  ConstexprCanonicalizeAddressValue(&address);
+  if (address.heap_block != NULL && address.heap_block->live) {
+    if (address.heap_index > address.heap_block->size ||
+        offset > address.heap_block->size - address.heap_index) {
       return false;
     }
-    *character =
-        (int64_t)(signed char)data.heap_block->memory[byte_index];
-    return true;
-  }
-  (void)ctx;
-  return false;
-}
-
-static ASTNode* ConstexprStringLiteralOperand(ASTNode* node) {
-  if (node == NULL) {
-    return NULL;
-  }
-  if (node->op == AST_OP(string)) {
-    return node;
-  }
-  if (node->op == AST_OP(cast)) {
-    return ConstexprStringLiteralOperand(((CastASTNode*)node)->expr);
-  }
-  if (node->op == AST_OP(expr_init)) {
-    return ConstexprStringLiteralOperand(
-        ((ExpressionInitializerASTNode*)node)->expr);
-  }
-  if (node->op == AST_OP(comma)) {
-    BinaryASTNode* binary = (BinaryASTNode*)node;
-    ASTNode* literal = ConstexprStringLiteralOperand(binary->left);
-    return literal != NULL ? literal
-                           : ConstexprStringLiteralOperand(binary->right);
-  }
-  if (node->op == AST_OP(call)) {
-    VectorASTNode* call = (VectorASTNode*)node;
-    ASTNode* literal = ConstexprStringLiteralOperand(call->left);
-    if (literal != NULL) {
-      return literal;
-    }
-    if (call->children != NULL) {
-      for (size_t i = 0; i < call->children->length; i++) {
-        literal = ConstexprStringLiteralOperand(call->children->value.p[i]);
-        if (literal != NULL) {
-          return literal;
-        }
-      }
-    }
-  }
-  return NULL;
-}
-
-static bool ConstexprStringViewSubscriptChar(ConstEvalContext* ctx,
-                                             ASTNode* view, size_t index,
-                                             int64_t* character) {
-  if (ctx == NULL || view == NULL || character == NULL) {
-    return false;
-  }
-  ASTNode* index_node = NewIntConstantASTNode((int64_t)index, NewSizeTypeRecord(),
-                                              view->location);
-  BinaryASTNode* subscript = (BinaryASTNode*)NewBinaryASTNode(
-      AST_OP(subscript), view->type, view->location, view, index_node);
-  ConstexprValue value = {0};
-  return EvaluateConstexprObjectAccess(ctx, (ASTNode*)subscript, &value) &&
-         ConstexprValueAsInteger(value, character);
-}
-
-static bool ConstexprStringViewBytesEqual(ConstEvalContext* ctx,
-                                          ASTNode* left_expr,
-                                          ConstexprObject* left,
-                                          ASTNode* right,
-                                          bool* equal) {
-  if (left == NULL || right == NULL || equal == NULL) {
-    return false;
-  }
-  ConstexprValue* left_size_slot = ConstexprObjectSlot(left, 1);
-  ConstexprValue* left_data_slot = ConstexprObjectSlot(left, 0);
-  if (left_size_slot == NULL || left_data_slot == NULL) {
-    return false;
-  }
-  int64_t left_size = 0;
-  if (!ConstexprValueAsInteger(*left_size_slot, &left_size)) {
-    return false;
-  }
-
-  ASTNode* literal = ConstexprStringLiteralOperand(right);
-  if (literal != NULL && literal->op == AST_OP(string)) {
-    ConstantASTNode* string_node = (ConstantASTNode*)literal;
-    const char* text =
-        string_node->value.string != NULL ? string_node->value.string->value
-                                          : "";
-    size_t right_size = text != NULL ? strlen(text) : 0;
-    if ((int64_t)right_size != left_size) {
-      *equal = false;
-      return true;
-    }
-    for (size_t i = 0; i < right_size; i++) {
-      int64_t left_ch = 0;
-      bool found =
-          ConstexprStringViewDataCharacter(ctx, left_data_slot, i, &left_ch) ||
-          ConstexprStringViewSubscriptChar(ctx, left_expr, i, &left_ch);
-      if (!found) {
-        *equal = false;
-        return true;
-      }
-      if (left_ch != (unsigned char)text[i]) {
-        *equal = false;
-        return true;
-      }
-    }
-    *equal = true;
-    return true;
-  }
-
-  ConstexprValue right_value;
-  if (EvaluateConstexprObjectAccess(ctx, right, &right_value) &&
-      right_value.object != NULL &&
-      TypeIsBasicStringViewType(right_value.object->type)) {
-    ConstexprValue* right_size_slot = ConstexprObjectSlot(right_value.object, 1);
-    ConstexprValue* right_data_slot = ConstexprObjectSlot(right_value.object, 0);
-    if (right_size_slot == NULL || right_data_slot == NULL) {
+    size_t index = address.heap_index + offset;
+    if (index >= address.heap_block->size ||
+        (ValueState)address.heap_block->states[index] != kValueStateValid) {
       return false;
     }
-    int64_t right_size = 0;
-    if (!ConstexprValueAsInteger(*right_size_slot, &right_size)) {
-      return false;
-    }
-    if (left_size != right_size) {
-      *equal = false;
-      return true;
-    }
-    for (int64_t i = 0; i < left_size; i++) {
-      int64_t left_ch = 0;
-      int64_t right_ch = 0;
-      if (!ConstexprStringViewDataCharacter(ctx, left_data_slot, (size_t)i,
-                                            &left_ch) ||
-          !ConstexprStringViewDataCharacter(ctx, right_data_slot, (size_t)i,
-                                            &right_ch) ||
-          left_ch != right_ch) {
-        *equal = false;
-        return true;
-      }
-    }
-    *equal = true;
+    *result = address.heap_block->memory[index];
     return true;
   }
-  ConstexprValue right_address = {0};
-  if (EvaluateConstexprAddressValue(ctx, right, &right_address)) {
-    right_address = ConstexprResolveForwardedAddress(right_address);
-    ConstexprCanonicalizeAddressValue(&right_address);
-    if (right_address.address_object != NULL &&
-        right_address.address_object->type != NULL &&
-        TypeIsFixedArray(right_address.address_object->type) &&
-        TypeIsCharFamily(right_address.address_object->type->next)) {
-      for (int64_t i = 0;; i++) {
-        int64_t left_ch = 0;
-        int64_t right_ch = 0;
-        ConstexprValue* right_slot = ConstexprObjectSlot(
-            right_address.address_object, right_address.address_index + (size_t)i);
-        if (i >= left_size) {
-          *equal = right_slot != NULL &&
-                   ConstexprValueAsInteger(*right_slot, &right_ch) &&
-                   right_ch == 0;
-          return true;
-        }
-        if (right_slot == NULL ||
-            !ConstexprValueAsInteger(*right_slot, &right_ch) ||
-            !ConstexprStringViewDataCharacter(ctx, left_data_slot, (size_t)i,
-                                              &left_ch) ||
-            left_ch != right_ch) {
-          *equal = false;
-          return true;
-        }
-        if (right_ch == 0) {
-          *equal = false;
-          return true;
-        }
-      }
-    }
+  ConstexprObject* object = address.address_object;
+  size_t index = address.address_index;
+  if (object == NULL && address.address_slot != NULL &&
+      address.address_slot->is_object) {
+    object = address.address_slot->object;
+    index = 0;
   }
-  return false;
-}
-
-static ASTNode* ConstexprStringViewExpr(ASTNode* node) {
-  for (size_t depth = 0; node != NULL && depth < 64; depth++) {
-    if (node->op == AST_OP(cast)) {
-      node = ((CastASTNode*)node)->expr;
-    } else if (node->op == AST_OP(expr_init)) {
-      node = ((ExpressionInitializerASTNode*)node)->expr;
-    } else if (node->op == AST_OP(identifier)) {
-      Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
-      ASTNode* initializer =
-          symbol != NULL && symbol->constexpr_initializer != NULL
-              ? ConstexprInitializerExpression(symbol->constexpr_initializer)
-              : NULL;
-      if (initializer == NULL || initializer == node) {
-        break;
-      }
-      node = initializer;
-    } else {
-      break;
-    }
-  }
-  return node;
-}
-
-bool ConstexprEvaluateBasicStringViewEquality(ConstEvalContext* ctx,
-                                              ASTNode* left, ASTNode* right,
-                                              bool* equal) {
-  if (ctx == NULL || left == NULL || right == NULL || equal == NULL) {
+  if (object == NULL || offset > SIZE_MAX - index) {
     return false;
   }
-  left = ConstexprStringViewExpr(left);
-  right = ConstexprStringViewExpr(right);
-  ASTNode* left_literal = ConstexprStringLiteralOperand(left);
-  ASTNode* right_literal = ConstexprStringLiteralOperand(right);
-  if (left_literal != NULL && right_literal != NULL) {
-    String* left_text = ((ConstantASTNode*)left_literal)->value.string;
-    String* right_text = ((ConstantASTNode*)right_literal)->value.string;
-    *equal = left_text != NULL && right_text != NULL &&
-             left_text->length == right_text->length &&
-             memcmp(left_text->value, right_text->value,
-                    left_text->length) == 0;
-    return true;
-  }
-  ConstexprValue left_value = {0};
-  if (!EvaluateConstexprObjectAccess(ctx, left, &left_value) ||
-      left_value.object == NULL ||
-      !TypeIsBasicStringViewType(left_value.object->type)) {
+  ConstexprValue* slot = ConstexprObjectSlot(object, index + offset);
+  int64_t value = 0;
+  if (slot == NULL || !ConstexprValueAsInteger(*slot, &value)) {
     return false;
   }
-  return ConstexprStringViewBytesEqual(ctx, left, left_value.object, right,
-                                       equal);
-}
-
-static bool ConstexprTryEvaluateBasicStringViewEqual(ConstEvalContext* ctx,
-                                                     VectorASTNode* call,
-                                                     ConstexprValue* result) {
-  if (ctx == NULL || call == NULL || result == NULL ||
-      call->base.op != AST_OP(call) || call->children == NULL ||
-      call->children->length != 2) {
-    return false;
-  }
-  Symbol* callee = ConstexprCallSymbol((ASTNode*)call);
-  ConstexprValue probe = {0};
-  size_t view_index = 0;
-  if (!EvaluateConstexprObjectAccess(ctx, call->children->value.p[0], &probe) ||
-      probe.object == NULL ||
-      !TypeIsBasicStringViewType(probe.object->type)) {
-    probe = (ConstexprValue){0};
-    view_index = 1;
-    if (!EvaluateConstexprObjectAccess(ctx, call->children->value.p[1],
-                                      &probe) ||
-        probe.object == NULL ||
-        !TypeIsBasicStringViewType(probe.object->type)) {
-      return false;
-    }
-  }
-  bool equal = false;
-  if (!ConstexprEvaluateBasicStringViewEquality(
-          ctx, call->children->value.p[view_index],
-          call->children->value.p[1 - view_index],
-          &equal)) {
-    return false;
-  }
-  if (callee != NULL && callee->name.value != NULL &&
-      strcmp(callee->name.value, "operator!=") == 0) {
-    equal = !equal;
-  }
-  result->ivalue = equal ? 1 : 0;
-  result->is_object = false;
-  result->is_address = false;
-  result->is_floating = false;
-  result->fvalue = 0;
-  result->object = NULL;
+  *result = (unsigned char)value;
   return true;
 }
 
-static bool ConstexprTryEvaluateBasicStringViewCall(ConstEvalContext* ctx,
-                                                    ASTNode* node,
-                                                    ConstexprValue* result) {
+static bool ConstexprTryEvaluateMemoryComparison(ConstEvalContext* ctx,
+                                                 ASTNode* node,
+                                                 ConstexprValue* result) {
+  Symbol* symbol = ConstexprCallSymbol(node);
   if (ctx == NULL || node == NULL || node->op != AST_OP(call) ||
-      result == NULL) {
+      result == NULL || symbol == NULL || symbol->name.value == NULL ||
+      (strcmp(symbol->name.value, "memcmp") != 0 &&
+       strcmp(symbol->name.value, "__builtin_memcmp") != 0)) {
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)node;
-  if (call->left == NULL || call->left->op != AST_OP(dot)) {
+  if (call->children == NULL || call->children->length != 3) {
     return false;
   }
-  BinaryASTNode* member_access = (BinaryASTNode*)call->left;
-  ASTNode* receiver = member_access->left;
-  const char* name = NULL;
-  if (member_access->right != NULL &&
-      member_access->right->op == AST_OP(string)) {
-    ConstantASTNode* member_name = (ConstantASTNode*)member_access->right;
-    name = member_name->value.string != NULL ? member_name->value.string->value
-                                             : NULL;
-  } else if (member_access->right != NULL &&
-             member_access->right->op == AST_OP(structmember)) {
-    StructMember* member = ((StructMemberASTNode*)member_access->right)->member;
-    name = member != NULL && member->symbol != NULL
-               ? member->symbol->name.value
-               : NULL;
-  }
-  if (receiver == NULL || name == NULL) {
+  ConstexprValue left = {0};
+  ConstexprValue right = {0};
+  int64_t count = 0;
+  if (!EvaluateConstexprAddressValue(ctx, call->children->value.p[0], &left) ||
+      !EvaluateConstexprAddressValue(ctx, call->children->value.p[1], &right) ||
+      !EvaluateIntegerExpressionInContext(ctx, call->children->value.p[2],
+                                          &count) ||
+      count < 0) {
     return false;
   }
-  ConstexprValue object_value;
-  if (!EvaluateConstexprObjectAccess(ctx, receiver, &object_value) ||
-      object_value.object == NULL ||
-      !TypeIsBasicStringViewType(object_value.object->type)) {
-    return false;
-  }
-  ConstexprObject* object = object_value.object;
-  ConstexprValue* size_slot = ConstexprObjectSlot(object, 1);
-  ConstexprValue* data_slot = ConstexprObjectSlot(object, 0);
-  if (size_slot == NULL || data_slot == NULL) {
-    return false;
-  }
-  int64_t size = 0;
-  if (!ConstexprValueAsInteger(*size_slot, &size)) {
-    return false;
-  }
-  if (strcmp(name, "operator[]") == 0) {
-    if (call->children == NULL || call->children->length != 1) {
+  for (int64_t i = 0; i < count; i++) {
+    if (!ConstEvalStep(ctx)) {
       return false;
     }
-    int64_t index = 0;
-    if (!EvaluateIntegerExpressionInContext(ctx, call->children->value.p[0],
-                                            &index) ||
-        index < 0 || (size_t)index >= (size_t)size) {
+    unsigned char left_byte = 0;
+    unsigned char right_byte = 0;
+    if (!ConstexprReadByte(left, (size_t)i, &left_byte) ||
+        !ConstexprReadByte(right, (size_t)i, &right_byte)) {
       return false;
     }
-    if (!ConstexprStringViewDataCharacter(ctx, data_slot, (size_t)index,
-                                          &result->ivalue)) {
-      return false;
+    if (left_byte != right_byte) {
+      *result = (ConstexprValue){
+          .ivalue = left_byte < right_byte ? -1 : 1,
+      };
+      return true;
     }
-    result->is_object = false;
-    result->is_address = false;
-    result->is_floating = false;
-    result->fvalue = 0;
-    result->object = NULL;
-    return true;
   }
-  if ((strcmp(name, "size") == 0 || strcmp(name, "length") == 0 ||
-       strcmp(name, "empty") == 0) &&
-      (call->children == NULL || call->children->length == 0)) {
-    if (strcmp(name, "empty") == 0) {
-      result->ivalue = size == 0 ? 1 : 0;
-    } else {
-      result->ivalue = size;
-    }
-    result->is_object = false;
-    result->is_address = false;
-    result->is_floating = false;
-    result->fvalue = 0;
-    result->object = NULL;
-    return true;
-  }
-  return false;
+  *result = (ConstexprValue){0};
+  return true;
 }
 
 bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
@@ -8684,14 +8404,9 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   if (ctx->call_depth >= CONSTEXPR_MAX_CALL_DEPTH) {
     return false;
   }
-  if (ConstexprTryEvaluateBasicStringViewCall(ctx, node, result)) {
+  *result = (ConstexprValue){0};
+  if (ConstexprTryEvaluateMemoryComparison(ctx, node, result)) {
     return true;
-  }
-  if (node->op == AST_OP(call)) {
-    if (ConstexprTryEvaluateBasicStringViewEqual(
-            ctx, (VectorASTNode*)node, result)) {
-      return true;
-    }
   }
   Symbol* allocation_symbol = ConstexprCallSymbol(node);
   bool exception_call = false;
@@ -9024,24 +8739,6 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     return true;
   }
   if (mode == kConstexprEvalAuto && pcode_ok) {
-    if (node->op == AST_OP(call)) {
-      VectorASTNode* call = (VectorASTNode*)node;
-      ConstexprValue probe = {0};
-      if (call->children != NULL && call->children->length == 2 &&
-          EvaluateConstexprObjectAccess(ctx, call->children->value.p[0], &probe) &&
-          probe.object != NULL &&
-          TypeIsBasicStringViewType(probe.object->type)) {
-        ConstexprEvalMode saved = compiler->constexpr_eval_mode;
-        compiler->constexpr_eval_mode = kConstexprEvalAST;
-        ConstexprValue ast_value = {0};
-        bool ast_ok = EvaluateConstexprCall(ctx, node, &ast_value) &&
-                      ConstexprValueAsInteger(ast_value, result);
-        compiler->constexpr_eval_mode = saved;
-        if (ast_ok) {
-          return true;
-        }
-      }
-    }
     *result = use_overlay_result ? overlay_result : pcode_result;
     return true;
   }
@@ -9065,7 +8762,7 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
     ReportConstexprPCodeFailure(ctx, node, false);
     return false;
   }
-  if (mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) {
+  if (mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
   ConstexprValue value;
@@ -9228,7 +8925,7 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
     // AST fallback that would contain an evaluator-owned opaque token.
     return false;
   }
-  if (mode == kConstexprEvalAudit) {
+  if (mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
   ConstexprValue value;

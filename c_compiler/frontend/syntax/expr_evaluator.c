@@ -580,14 +580,6 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
         return true;
       }
-      if (binary_node->left != NULL && binary_node->right != NULL) {
-        bool string_equal = false;
-        if (ConstexprEvaluateBasicStringViewEquality(
-                ctx, binary_node->left, binary_node->right, &string_equal)) {
-          *result = node->op == AST_OP(equal) ? string_equal : !string_equal;
-          return true;
-        }
-      }
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
         double fleft;
         double fright;
@@ -825,6 +817,29 @@ case AST_OP(ast_op): \
       }
       if (snode->expr != NULL && TypeIsVLA(snode->expr->type)) {
         return false;
+      }
+      if (snode->expr != NULL) {
+        TypeRecord* operand_type = snode->expr->type;
+        if (snode->expr->op == AST_OP(identifier)) {
+          IdentifierASTNode* id = (IdentifierASTNode*)snode->expr;
+          if (id->symbol != NULL && id->symbol->type != NULL) {
+            operand_type = id->symbol->type;
+          }
+        }
+        if (CompilerIsCXX() && TypeIsReference(operand_type)) {
+          operand_type = operand_type->next;
+        }
+        if (operand_type != NULL && TypeIsArray(operand_type) &&
+            operand_type->info.array.is_flexible) {
+          return false;
+        }
+        if (operand_type != NULL && !TypeIsVLA(operand_type)) {
+          TypeRecordCalculateSize(operand_type);
+          *result = node->op == AST_OP(alignof)
+                        ? TypeRecordAlignment(operand_type)
+                        : operand_type->size;
+          return true;
+        }
       }
       *result = snode->base.value.ivalue;
       return true;

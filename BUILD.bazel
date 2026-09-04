@@ -126,6 +126,7 @@ filegroup(
         "libc/include/string_view",
         "libc/include/syncstream",
         "libc/include/system_error",
+        "libc/include/text_encoding",
         "libc/include/thread",
         "libc/include/tuple",
         "libc/include/type_traits",

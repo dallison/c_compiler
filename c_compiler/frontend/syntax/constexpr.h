@@ -103,6 +103,8 @@ bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,
                                         size_t* count);
 bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
                                     ConstexprObject** object);
+bool ConstexprEvaluateAddressValue(ConstEvalContext* ctx, ASTNode* node,
+                                   ConstexprValue* result);
 bool ConstexprEvaluateObjectSlotInteger(ASTNode* node, size_t slot,
                                         int64_t* result);
 // Evaluates a constant char pointer and copies `count` code units from it.
@@ -111,6 +113,7 @@ bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
+void ConstexprPersistObjectAddresses(ConstexprObject* object);
 void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state);
 Symbol* ConstexprFunctionDefinition(Symbol* symbol);
 Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver);
@@ -121,8 +124,5 @@ bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
                                        ConstexprObject** object);
 ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
                                              SourceLocation location);
-bool ConstexprEvaluateBasicStringViewEquality(ConstEvalContext* ctx,
-                                              ASTNode* left, ASTNode* right,
-                                              bool* equal);
 
 #endif /* constexpr_h */

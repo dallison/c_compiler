@@ -14,6 +14,7 @@
 #include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
+#include "init_semantics.h"
 #include "member_pointer.h"
 #include "lex.h"
 #include "reflection_semantics.h"
@@ -1713,6 +1714,15 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   if (node->initializer == NULL) {
     return;
   }
+  bool must_be_constant = node->symbol->flags.is_constexpr ||
+                          node->symbol->flags.is_constinit;
+  if (compiler->current_function == NULL &&
+      TypeIsArray(node->symbol->type) &&
+      node->symbol->type->info.array.is_flexible) {
+    node->initializer =
+        AnalyzeInitializer(node->symbol->type, node->initializer,
+                           must_be_constant);
+  }
   bool object_initializer =
       (TypeIsFixedArray(node->symbol->type) ||
        TypeIsStructOrUnion(node->symbol->type)) &&
@@ -1729,8 +1739,6 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     // A constexpr or constinit variable's initializer is interpreted from its
     // semantic AST, and inlining a call replaces the call with a body the
     // interpreter does not accept, so hold inlining off over the analysis.
-    bool must_be_constant = node->symbol->flags.is_constexpr ||
-                            node->symbol->flags.is_constinit;
     if (must_be_constant) {
       compiler->constant_evaluation_required_depth++;
     }

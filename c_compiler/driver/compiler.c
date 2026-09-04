@@ -1005,7 +1005,9 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
 
 static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* init) {
   TypeRecord* type = symbol->type;
-  if (!TypeIsScalar(type)) {
+  if (!TypeIsIntegral(type) && !TypeIsFloatingPoint(type) &&
+      !TypeIsPointer(type) && !TypeIsEnum(type) &&
+      !TypeIsMemberPointer(type)) {
     return;
   }
   if ((type->qualifiers & kQualConst) == 0) {

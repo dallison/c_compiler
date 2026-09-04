@@ -112,6 +112,9 @@
 #endif
 #endif
 #endif
+#ifndef __cpp_lib_text_encoding
+#define __cpp_lib_text_encoding 202306L
+#endif
 #ifndef __cpp_lib_tuple_like
 #define __cpp_lib_tuple_like 202311L
 #endif

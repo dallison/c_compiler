@@ -37,6 +37,9 @@ extern "C" int tolower(int);
 namespace std {
 
 struct __locale_impl;
+#if __cplusplus >= 202600L
+struct text_encoding;
+#endif
 
 class ctype_base {
  public:
@@ -147,6 +150,9 @@ class locale {
   locale combine(const locale& other) const;
 
   string name() const;
+#if __cplusplus >= 202600L
+  text_encoding encoding() const;
+#endif
   bool operator==(const locale& other) const;
   bool operator!=(const locale& other) const { return !(*this == other); }
 
@@ -1033,5 +1039,9 @@ class num_get<wchar_t, wistreambuf_iterator> : public __davecc_num_get_wchar {
 };
 
 }  // namespace std
+
+#if __cplusplus >= 202600L && !defined(__davecc_ranges__)
+#include <text_encoding>
+#endif
 
 #endif /* __davecc_locale__ */
