@@ -310,6 +310,18 @@ typedef enum {
   AARCH64_OP(scvtf),
   AARCH64_OP(ucvtf),
   AARCH64_OP(fneg),
+
+  // 64-bit Advanced SIMD integer operations.
+  AARCH64_OP(vadd),
+  AARCH64_OP(vsub),
+  AARCH64_OP(vand),
+  AARCH64_OP(vorr),
+  AARCH64_OP(veor),
+  AARCH64_OP(vcmeq),
+  AARCH64_OP(vcmgt),
+  AARCH64_OP(vcmge),
+  AARCH64_OP(vcmhi),
+  AARCH64_OP(vcmhs),
    
   AARCH64_OP(xxx),
   AARCH64_OP(not),

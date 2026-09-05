@@ -585,8 +585,16 @@ static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
   return false;
 }
 
+static bool IsVectorValue(TargetInstruction* inst) {
+  return inst != NULL &&
+         (((inst->flags & X86_64_VECTOR_VALUE) != 0) ||
+          (int)inst->opcode == (int)X86_64_OP(loadv) ||
+          (int)inst->opcode == (int)X86_64_OP(resultv));
+}
+
 static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, TargetInstruction* inst) {
   X86_64Register* reg = (X86_64Register*)inst->reg;    // Current register.
+  bool is_vector = IsVectorValue(inst);
 
   // Spilled values are addressed relative to the frame pointer (rbp).  A leaf
   // function that emits no frame never establishes rbp, so its spill slots
@@ -601,12 +609,19 @@ static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, Targ
   // We don't set the spilled instruction yet because TargetRetargetInstruction
   // will see it and retarget it to the spill.
   TrapSpill(inst);
+  if (is_vector) {
+    allocator->current_spilled_region_size =
+        (allocator->current_spilled_region_size + 15) & ~15;
+  }
   TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)X86_64_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->rv->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
-  allocator->current_spilled_region_size += 8;    // Space for one register.
+  if (is_vector) {
+    spill->flags |= X86_64_VECTOR_VALUE;
+  }
+  allocator->current_spilled_region_size += is_vector ? 16 : 8;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
@@ -836,10 +851,15 @@ static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
                                  TargetInstruction* owner,
                                  TargetInstruction* inst) {
   allocator->rv->not_leaf = true;
+  bool is_vector = IsVectorValue(owner);
+  if (is_vector) {
+    allocator->current_spilled_region_size =
+        (allocator->current_spilled_region_size + 15) & ~15;
+  }
   TargetInstruction* offset = TargetGetIntConstant(
       &allocator->rv->base, NULL, kTargetType32Bit,
       allocator->current_spilled_region_size);
-  allocator->current_spilled_region_size += 8;
+  allocator->current_spilled_region_size += is_vector ? 16 : 8;
   if (allocator->current_spilled_region_size >
       allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
@@ -848,6 +868,9 @@ static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
       (TargetOpcode)X86_64_OP(spill), owner, offset);
   store->reg = owner->reg;
   store->flags |= TARGET_INST_PROCESSED;
+  if (is_vector) {
+    store->flags |= X86_64_VECTOR_VALUE;
+  }
   TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, store, inst);
 
   TargetInstruction* restore =
@@ -905,8 +928,27 @@ static X86_64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case X86_64_OP(fvarreg):
     case X86_64_OP(loadss):
     case X86_64_OP(loadsd):
+    case X86_64_OP(loadv):
     case X86_64_OP(storess):
     case X86_64_OP(storesd):
+    case X86_64_OP(storev):
+    case X86_64_OP(paddb):
+    case X86_64_OP(paddw):
+    case X86_64_OP(paddd):
+    case X86_64_OP(paddq):
+    case X86_64_OP(psubb):
+    case X86_64_OP(psubw):
+    case X86_64_OP(psubd):
+    case X86_64_OP(psubq):
+    case X86_64_OP(pand):
+    case X86_64_OP(por):
+    case X86_64_OP(pxor):
+    case X86_64_OP(pcmpeqb):
+    case X86_64_OP(pcmpeqw):
+    case X86_64_OP(pcmpeqd):
+    case X86_64_OP(pcmpgtb):
+    case X86_64_OP(pcmpgtw):
+    case X86_64_OP(pcmpgtd):
     case X86_64_OP(addss):
     case X86_64_OP(addsd):
     case X86_64_OP(subss):
@@ -932,6 +974,7 @@ static X86_64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case X86_64_OP(rcallf):
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
       return kX86_64RegTypeFloat;
 
     case X86_64_OP(cvttsd2si):
@@ -1483,6 +1526,7 @@ static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
 
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
       reg = &allocator->float_regs[X86_64_FLOAT_RETURN_REG];
       break;
 

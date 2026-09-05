@@ -1552,6 +1552,35 @@ static void EmitSSEMove(X86_64Assembler* assembler, uint8_t prefix_f2,
   EncodeFinish(&enc);
 }
 
+static void Assemble_movdqu(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (dst.kind == kX86OpReg && dst.reg.is_xmm) {
+    EmitOpcodeBytes(&enc, false, false, true, 0x6f, true);
+    if (src.kind == kX86OpReg && src.reg.is_xmm) {
+      EncodeXmmRegOperand(&enc, dst.reg.num, &src.reg);
+    } else if (src.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, dst.reg.num, &src);
+    } else {
+      AssemblerError(&ASM, "movdqu load expects XMM or memory source");
+      return;
+    }
+  } else if (src.kind == kX86OpReg && src.reg.is_xmm &&
+             dst.kind == kX86OpMem) {
+    EmitOpcodeBytes(&enc, false, false, true, 0x7f, true);
+    EncodeMemOperand(&enc, src.reg.num, &dst);
+  } else {
+    AssemblerError(&ASM, "movdqu expects an XMM register and memory operand");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
 static void EmitMovdParsed(X86_64Assembler* assembler, const X86Op* src,
                            const X86Op* dst, bool gpr_to_xmm) {
   X86Encode enc;
@@ -1859,6 +1888,23 @@ static void Assemble_sqrtss(X86_64Assembler* assembler) { EmitSSE(assembler, fal
 static void Assemble_sqrtsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x51, false); }
 static void Assemble_ucomiss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x2e, false); }
 static void Assemble_ucomisd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x2e, false); }
+static void Assemble_paddb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfc, false); }
+static void Assemble_paddw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfd, false); }
+static void Assemble_paddd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfe, false); }
+static void Assemble_paddq(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xd4, false); }
+static void Assemble_psubb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf8, false); }
+static void Assemble_psubw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf9, false); }
+static void Assemble_psubd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfa, false); }
+static void Assemble_psubq(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfb, false); }
+static void Assemble_pand(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xdb, false); }
+static void Assemble_por(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xeb, false); }
+static void Assemble_pxor(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xef, false); }
+static void Assemble_pcmpeqb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x74, false); }
+static void Assemble_pcmpeqw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x75, false); }
+static void Assemble_pcmpeqd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x76, false); }
+static void Assemble_pcmpgtb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x64, false); }
+static void Assemble_pcmpgtw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x65, false); }
+static void Assemble_pcmpgtd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x66, false); }
 
 static void EmitSSEConvertFromInt(X86_64Assembler* assembler, uint8_t prefix_f2,
                                   uint8_t prefix_f3, uint8_t opcode) {
@@ -2035,6 +2081,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(storesd);
   INST(movd);
   INST(movq_xmm);
+  INST(movdqu);
   INST(push);
   INST(pushq);
   INST(pop);
@@ -2140,6 +2187,23 @@ static void InitializeInstructions(Map* instructions) {
   INST(sqrtsd);
   INST(ucomiss);
   INST(ucomisd);
+  INST(paddb);
+  INST(paddw);
+  INST(paddd);
+  INST(paddq);
+  INST(psubb);
+  INST(psubw);
+  INST(psubd);
+  INST(psubq);
+  INST(pand);
+  INST(por);
+  INST(pxor);
+  INST(pcmpeqb);
+  INST(pcmpeqw);
+  INST(pcmpeqd);
+  INST(pcmpgtb);
+  INST(pcmpgtw);
+  INST(pcmpgtd);
   INST(cvtsi2ss);
   INST(cvtsi2sd);
   INST(cvttss2si);

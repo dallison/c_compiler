@@ -1170,6 +1170,50 @@ static IRNode* GenerateComplexBinaryExpression(Generator* gen,
 }
 
 static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
+  if (TypeIsVector(node->left->type) ||
+      TypeIsVector(node->right->type)) {
+    IROpcode opcode = IR_OP(nop);
+    switch (node->base.op) {
+      case AST_OP(plus): opcode = IR_OP(vadd); break;
+      case AST_OP(minus): opcode = IR_OP(vsub); break;
+      case AST_OP(mult): opcode = IR_OP(vmul); break;
+      case AST_OP(div): opcode = IR_OP(vdiv); break;
+      case AST_OP(mod): opcode = IR_OP(vmod); break;
+      case AST_OP(lshift): opcode = IR_OP(vlsl); break;
+      case AST_OP(rshiftl): opcode = IR_OP(vlsr); break;
+      case AST_OP(rshifta): opcode = IR_OP(vasr); break;
+      case AST_OP(and): opcode = IR_OP(vand); break;
+      case AST_OP(bitor): opcode = IR_OP(vor); break;
+      case AST_OP(exor): opcode = IR_OP(vxor); break;
+      case AST_OP(equal): opcode = IR_OP(vcmpeq); break;
+      case AST_OP(noteq): opcode = IR_OP(vcmpne); break;
+      case AST_OP(less): opcode = IR_OP(vcmplt); break;
+      case AST_OP(lesseq): opcode = IR_OP(vcmple); break;
+      case AST_OP(greater): opcode = IR_OP(vcmpgt); break;
+      case AST_OP(greatereq): opcode = IR_OP(vcmpge); break;
+      default:
+        assert(false && "unsupported vector binary operation");
+    }
+    if (TypeIsUnsigned(TypeVectorElement(node->left->type))) {
+      switch (opcode) {
+        case IR_OP(vcmplt): opcode = IR_OP(vcmpltu); break;
+        case IR_OP(vcmple): opcode = IR_OP(vcmpleu); break;
+        case IR_OP(vcmpgt): opcode = IR_OP(vcmpgtu); break;
+        case IR_OP(vcmpge): opcode = IR_OP(vcmpgeu); break;
+        default: break;
+      }
+    }
+    IRNode* left = GenerateExpression(gen, node->left);
+    IRNode* right = GenerateExpression(gen, node->right);
+    Symbol* temporary = SyntaxNewTemporary(gen->syntax, node->base.type);
+    temporary->flags.address_taken = true;
+    IRNode* destination = GeneratorGetVariable(gen, temporary);
+    IRNode* operation =
+        IRSetType(GeneratorEmit(gen, NewIR3(opcode, destination, left, right)),
+                  node->base.type);
+    operation->aux = node->left->type;
+    return destination;
+  }
   if (TypeIsComplex(node->left->type) ||
       TypeIsComplex(node->right->type)) {
     return GenerateComplexBinaryExpression(gen, node);
@@ -1309,6 +1353,20 @@ static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
 
 static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
   IRNode* sub = GenerateExpression(gen, node->sub);
+  if (TypeIsVector(node->sub->type)) {
+    if (node->base.op == AST_OP(uplus)) {
+      return sub;
+    }
+    IROpcode opcode = node->base.op == AST_OP(uminus)
+                          ? IR_OP(vneg)
+                          : IR_OP(vonescomp);
+    Symbol* temporary = SyntaxNewTemporary(gen->syntax, node->base.type);
+    temporary->flags.address_taken = true;
+    IRNode* destination = GeneratorGetVariable(gen, temporary);
+    IRSetType(GeneratorEmit(gen, NewIR2(opcode, destination, sub)),
+              node->base.type);
+    return destination;
+  }
   if (TypeIsComplex(node->sub->type)) {
     if (node->base.op == AST_OP(uplus)) {
       return sub;
@@ -1550,6 +1608,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
         gen, address_holder, address_holder->type->next);
     if ((node->base.flags & kASTNeedAddress) != 0 ||
         TypeIsArray(node->base.type) ||
+        TypeIsVector(node->base.type) ||
         TypeIsStructOrUnion(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type)) {
       return address;
@@ -1567,7 +1626,8 @@ static IRNode* GenerateVariableReference(Generator* gen,
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), var_ref)),
                   NewPointerTo(kQualPlain, node->base.type));
     if ((node->base.flags & kASTNeedAddress) != 0 ||
-        TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
+        TypeIsArray(node->base.type) || TypeIsVector(node->base.type) ||
+        TypeIsStructOrUnion(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type) ||
         TypeIsFunction(node->base.type)) {
       return ref_addr;
@@ -1579,6 +1639,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
   IRNode* result;
   if ((node->base.flags & kASTNeedAddress) != 0 ||
       TypeIsFunction(node->base.type) ||
+      TypeIsVector(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
     // Need the address of the node, not the value.  A whole struct/union is
@@ -1889,7 +1950,8 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // ordinary sequential array elements.
       TypeRecord* aggregate_type =
           init->base.type != NULL ? init->base.type : node->type;
-      assert(aggregate_type != NULL && TypeIsArray(aggregate_type));
+      assert(aggregate_type != NULL &&
+             (TypeIsArray(aggregate_type) || TypeIsVector(aggregate_type)));
       memset(&sequential_init, 0, sizeof(sequential_init));
       sequential_init.base.op = AST_OP(designated_init);
       sequential_init.base.type = aggregate_type->next;
@@ -1940,6 +2002,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
     // For a struct/union we set the gen->current_struct_address to the
     // address we want to store it in.
     if (TypeIsStructOrUnion(designated_init->base.type) ||
+        TypeIsVector(designated_init->base.type) ||
         TypeIsMemberPointerAggregate(designated_init->base.type)) {
       IRNode* ref = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), destaddr)), NewPointerTo(kQualPlain, designated_init->base.type));
       IRSetType(ref, NewPointerTo(kQualPlain, designated_init->base.type));
@@ -1963,6 +2026,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
     IRNode* value = GenerateExpression(gen, designated_init->init);
     IRNode* write = NULL;
     if (TypeIsStructOrUnion(designated_init->base.type) ||
+        TypeIsVector(designated_init->base.type) ||
         TypeIsMemberPointerAggregate(designated_init->base.type)) {
       // A call that returns the struct *by value* constructs its result
       // directly into the destination address (sret), so no copy is needed.
@@ -2004,7 +2068,8 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       //    int i = 0;
       // we have to store it.
       if (destination_was_zeroed && init->base.type != NULL &&
-          (TypeIsArray(init->base.type) || TypeIsStructOrUnion(init->base.type) ||
+          (TypeIsArray(init->base.type) || TypeIsVector(init->base.type) ||
+           TypeIsStructOrUnion(init->base.type) ||
            TypeIsMemberPointerAggregate(init->base.type)) &&
           IRIsZero(value)) {
         // If we have eliminated a memzero for a union we have to store the zero
@@ -2110,6 +2175,7 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
   // standard says that all non-initialized members should be initialized
   // as if they are static.  This means that we zero out the memory.
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
+      TypeIsVector(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
     if (!CanElideMemzero(init)) {
       IRNode* memzero = GeneratorEmit(gen, NewIR1(IR_OP(memzero), dest));
@@ -2144,6 +2210,7 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
   // standard says that all non-initialized members should be initialized
   // as if they are static.  This means that we zero out the memory.
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
+      TypeIsVector(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
     if (!CanElideMemzero(init)) {
       IRNode* memzero = GeneratorEmit(gen, NewIR1(IR_OP(memzero), dest));
@@ -2196,6 +2263,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   IRNode* value;
   IRNode* assignment;
   if (TypeIsStructOrUnion(node->left->type) ||
+      TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     dest = GenerateExpression(gen, node->left);
     if (node->right->op == AST_OP(call) &&
@@ -2272,6 +2340,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     CheckForVarDef(assignment, node->left);
   }
   if (TypeIsStructOrUnion(node->left->type) ||
+      TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     GenerateConstexprLifetimeMarker(
           gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
@@ -2827,7 +2896,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       if (reference_formal &&
           (arg->value_category == kValueCategoryLvalue ||
            reference_returning_call) &&
-          !TypeIsStructOrUnion(arg->type)) {
+          !TypeIsStructOrUnion(arg->type) && !TypeIsVector(arg->type)) {
         arg->flags |= kASTNeedAddress;
       } else if (reference_formal) {
         // A reference bound to a conversion/prvalue needs a fresh temporary
@@ -2866,6 +2935,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     // leave those untouched.
     bool aggregate_actual =
         TypeIsStructOrUnion(arg->type) || TypeIsArray(arg->type) ||
+        TypeIsVector(arg->type) ||
         TypeIsMemberPointerAggregate(arg->type);
     bool stashable_reference_actual =
         reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
@@ -2925,8 +2995,10 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         (!TypeIsFunction(arg_value->type) || !function_reference_formal) &&
         !TypeIsStructOrUnion(arg->type) &&
         !TypeIsArray(arg->type) &&
+        !TypeIsVector(arg->type) &&
         !TypeIsStructOrUnion(arg_value->type) &&
         !TypeIsArray(arg_value->type) &&
+        !TypeIsVector(arg_value->type) &&
         !TypeIsMemberPointerAggregate(arg_value->type)) {
       IRNode* ref_source = arg_value;
       bool materialize_prvalue =
@@ -2946,12 +3018,15 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
 
     if (reference_formal && reference_returning_call) {
       if (TypeIsStructOrUnion(arg_value->type) ||
-          TypeIsArray(arg_value->type)) {
+          TypeIsArray(arg_value->type) ||
+          TypeIsVector(arg_value->type)) {
         arg_value =
             GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
       }
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
-    } else if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
+    } else if (reference_formal &&
+               (TypeIsStructOrUnion(arg_value->type) ||
+                TypeIsVector(arg_value->type))) {
       if (IRIsVariable(arg_value)) {
         IRVariable* variable = (IRVariable*)arg_value;
         if (variable->symbol != NULL) {
@@ -2988,14 +3063,25 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     bool aggregate_value_formal =
         formal_type != NULL && !reference_formal &&
         (TypeIsStructOrUnion(formal_type) ||
+         TypeIsVector(formal_type) ||
          TypeIsMemberPointerAggregate(formal_type));
-    if ((aggregate_value_formal || TypeIsStructOrUnion(arg->type) ||
+    bool native_vector_value =
+        !reference_formal &&
+        TypeUsesNativeVectorABI(formal_type != NULL ? formal_type : arg->type);
+    if (native_vector_value) {
+      arg_value =
+          IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(vectorarg), arg_value)),
+                    formal_type != NULL ? formal_type : arg->type);
+      CheckForVarUse(arg_value, arg);
+    } else if ((aggregate_value_formal || TypeIsStructOrUnion(arg->type) ||
+         TypeIsVector(arg->type) ||
          TypeIsMemberPointerAggregate(arg->type)) &&
         !reference_formal) {
       // If the argument is the result of another call it may
       // have been converted to an IR_OP(addressof) which is no longer
       // a struct type (we want its address, not its value)
       if (aggregate_value_formal || TypeIsStructOrUnion(arg_value->type) ||
+          TypeIsVector(arg_value->type) ||
           TypeIsMemberPointerAggregate(arg_value->type)) {
         arg_value = GeneratorEmit(gen,
                                NewIR1(IR_OP(structarg),
@@ -3145,6 +3231,19 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       ret = ret->inputs.value.p[0];
     }
     return ret;
+  }
+  if (TypeUsesNativeVectorABI(node->base.type)) {
+    IRNode* destination;
+    if (gen->current_struct_address != NULL) {
+      destination = FreshCallAddress(gen, gen->current_struct_address);
+    } else {
+      Symbol* temporary = SyntaxNewTemporary(gen->syntax, node->base.type);
+      temporary->flags.address_taken = true;
+      destination = GeneratorGetVariable(gen, temporary);
+    }
+    IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(capturev), destination, call)),
+              node->base.type);
+    return destination;
   }
   if (returns_reference &&
       (node->base.flags & kASTNeedAddress) == 0 &&
@@ -3960,7 +4059,8 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     if ((node->base.flags & kASTNeedAddress) != 0) {
       return var_ref;
     }
-    if (TypeIsArray(symbol->type) || TypeIsStructOrUnion(symbol->type) ||
+    if (TypeIsArray(symbol->type) || TypeIsVector(symbol->type) ||
+        TypeIsStructOrUnion(symbol->type) ||
         TypeIsMemberPointerAggregate(symbol->type)) {
       IRSetType(var_ref, node->base.type);
       return var_ref;
@@ -4019,6 +4119,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), addr)),
                   NewPointerTo(kQualPlain, referent));
     if ((node->base.flags & kASTNeedAddress) != 0 || TypeIsArray(referent) ||
+        TypeIsVector(referent) ||
         TypeIsStructOrUnion(referent) ||
         TypeIsMemberPointerAggregate(referent)) {
       return ref_addr;
@@ -4045,6 +4146,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     // Need value, load it.
     // Unless it's an array or struct/union.
     if (TypeIsArray(member->member->symbol->type) ||
+        TypeIsVector(member->member->symbol->type) ||
         TypeIsStructOrUnion(member->member->symbol->type) ||
         TypeIsMemberPointerAggregate(member->member->symbol->type)) {
       IRSetType(addr, node->base.type);

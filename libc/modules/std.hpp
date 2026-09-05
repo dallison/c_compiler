@@ -45,6 +45,7 @@
 #if __cplusplus >= 202600L
 #include <linalg>
 #include <meta>
+#include <simd>
 #endif
 #include <mutex>
 #include <new>

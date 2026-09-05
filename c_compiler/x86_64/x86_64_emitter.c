@@ -53,6 +53,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case X86_64_OP(resulti):
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
     case X86_64_OP(a0):
     case X86_64_OP(a1):
     case X86_64_OP(a2):
@@ -516,7 +517,9 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
     const char* store = "movq";
     X86_64RegisterType reg_type = kX86_64RegTypeInt;
     if (saved_reg->is_fp) {
-      store = saved_reg->value_bytes == 4 ? "storess" : "storesd";
+      store = saved_reg->value_bytes == 16
+                  ? "movdqu"
+                  : saved_reg->value_bytes == 4 ? "storess" : "storesd";
       reg_type = kX86_64RegTypeFloat;
     }
     fprintf(fp, "\t%s ", store);
@@ -768,6 +771,7 @@ static const char* GetRegisterName(TargetInstruction* inst, char* buf, size_t si
                                        buf, size);
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
     case X86_64_OP(callf):
     case X86_64_OP(rcallf):
       return X86_64RegisterNameFromNum(X86_64_FLOAT_RETURN_REG, kX86_64RegTypeFloat,
@@ -1156,7 +1160,9 @@ static void PrintMovToDestIfNeeded(FILE* fp, TargetInstruction* inst,
           (X86_64Opcode)inst->opcode == X86_64_OP(cvtss2sd) ||
           (X86_64Opcode)inst->opcode == X86_64_OP(cvtsd2ss) ||
           (X86_64Opcode)inst->opcode == X86_64_OP(fneg_sd);
-      if (((X86_64Register*)inst->operand[0]->reg)->type == kX86_64RegTypeInt &&
+      if ((inst->flags & X86_64_VECTOR_VALUE) != 0) {
+        mov = "movdqu";
+      } else if (((X86_64Register*)inst->operand[0]->reg)->type == kX86_64RegTypeInt &&
           inst->reg != NULL &&
           ((X86_64Register*)inst->reg)->type == kX86_64RegTypeFloat) {
         mov = "movq_xmm";
@@ -1235,11 +1241,25 @@ static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
   // preserved.  (sub/div are not commutative and are not handled here.)
   bool commutative = opcode == X86_64_OP(imul) || opcode == X86_64_OP(imull) ||
                      opcode == X86_64_OP(addss) || opcode == X86_64_OP(addsd) ||
-                     opcode == X86_64_OP(mulss) || opcode == X86_64_OP(mulsd);
+                     opcode == X86_64_OP(mulss) || opcode == X86_64_OP(mulsd) ||
+                     opcode == X86_64_OP(paddb) || opcode == X86_64_OP(paddw) ||
+                     opcode == X86_64_OP(paddd) || opcode == X86_64_OP(paddq) ||
+                     opcode == X86_64_OP(pand) || opcode == X86_64_OP(por) ||
+                     opcode == X86_64_OP(pxor) ||
+                     opcode == X86_64_OP(pcmpeqb) ||
+                     opcode == X86_64_OP(pcmpeqw) ||
+                     opcode == X86_64_OP(pcmpeqd);
   bool non_commutative_sse = opcode == X86_64_OP(subss) ||
                              opcode == X86_64_OP(subsd) ||
                              opcode == X86_64_OP(divss) ||
-                             opcode == X86_64_OP(divsd);
+                             opcode == X86_64_OP(divsd) ||
+                             opcode == X86_64_OP(psubb) ||
+                             opcode == X86_64_OP(psubw) ||
+                             opcode == X86_64_OP(psubd) ||
+                             opcode == X86_64_OP(psubq) ||
+                             opcode == X86_64_OP(pcmpgtb) ||
+                             opcode == X86_64_OP(pcmpgtw) ||
+                             opcode == X86_64_OP(pcmpgtd);
   bool swapped = false;
   if (commutative && inst->operand[0] != NULL && inst->operand[1] != NULL &&
       !TargetIsConst(inst->operand[1]) &&
@@ -1256,8 +1276,11 @@ static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
       SamePhysicalReg(inst->operand[1]->reg, inst->reg) &&
       !SamePhysicalReg(inst->operand[0]->reg, inst->reg)) {
     const char* mov =
-        opcode == X86_64_OP(subsd) || opcode == X86_64_OP(divsd) ? "movsd"
-                                                                  : "movss";
+        (inst->flags & X86_64_VECTOR_VALUE) != 0
+            ? "movdqu"
+            : opcode == X86_64_OP(subsd) || opcode == X86_64_OP(divsd)
+                  ? "movsd"
+                  : "movss";
     fprintf(fp, "\t%s ", mov);
     PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
     fprintf(fp, ", %%xmm15\n");
@@ -1456,6 +1479,23 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
     case X86_64_OP(mulsd):
     case X86_64_OP(divss):
     case X86_64_OP(divsd):
+    case X86_64_OP(paddb):
+    case X86_64_OP(paddw):
+    case X86_64_OP(paddd):
+    case X86_64_OP(paddq):
+    case X86_64_OP(psubb):
+    case X86_64_OP(psubw):
+    case X86_64_OP(psubd):
+    case X86_64_OP(psubq):
+    case X86_64_OP(pand):
+    case X86_64_OP(por):
+    case X86_64_OP(pxor):
+    case X86_64_OP(pcmpeqb):
+    case X86_64_OP(pcmpeqw):
+    case X86_64_OP(pcmpeqd):
+    case X86_64_OP(pcmpgtb):
+    case X86_64_OP(pcmpgtw):
+    case X86_64_OP(pcmpgtd):
       PrintBinaryRegOp(fp, AttMnemonic(opcode), inst, buf1, buf2);
       return;
 
@@ -2079,7 +2119,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     case X86_64_OP(spill): {
       X86_64Register* reg = (X86_64Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
-      const char* mov = reg->type == kX86_64RegTypeInt ? "movq" : "storesd";
+      const char* mov = (inst->flags & X86_64_VECTOR_VALUE) != 0
+                            ? "movdqu"
+                            : reg->type == kX86_64RegTypeInt ? "movq" : "storesd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s ", mov);
         PrintPercentReg(fp, X86_64RegisterName(reg, buf1, sizeof(buf1)));
@@ -2119,7 +2161,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       X86_64Register* reg = (X86_64Register*)inst->reg;
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
-      const char* mov = reg->type == kX86_64RegTypeInt ? "movq" : "movsd";
+      const char* mov = (spill->flags & X86_64_VECTOR_VALUE) != 0
+                            ? "movdqu"
+                            : reg->type == kX86_64RegTypeInt ? "movq" : "movsd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s -%d(%%rbp), ", mov, offset);
         PrintPercentReg(fp, X86_64RegisterName(reg, buf1, sizeof(buf1)));
@@ -2167,7 +2211,8 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     case X86_64_OP(loadw_z):
     case X86_64_OP(loadss):
     case X86_64_OP(loadq):
-    case X86_64_OP(loadsd): {
+    case X86_64_OP(loadsd):
+    case X86_64_OP(loadv): {
       const char* mov = "movq";
       switch ((X86_64Opcode)inst->opcode) {
         case X86_64_OP(loadl):
@@ -2184,6 +2229,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           break;
         case X86_64_OP(loadsd):
           mov = "movsd";
+          break;
+        case X86_64_OP(loadv):
+          mov = "movdqu";
           break;
         case X86_64_OP(loadb):
           // Signed byte load must sign-extend into the full register; a plain
@@ -2280,7 +2328,8 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     case X86_64_OP(storeq):
     case X86_64_OP(storeb):
     case X86_64_OP(storess):
-    case X86_64_OP(storesd): {
+    case X86_64_OP(storesd):
+    case X86_64_OP(storev): {
       const char* mov = "movq";
       switch ((X86_64Opcode)inst->opcode) {
         case X86_64_OP(storel):
@@ -2291,6 +2340,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           break;
         case X86_64_OP(storesd):
           mov = "storesd";
+          break;
+        case X86_64_OP(storev):
+          mov = "movdqu";
           break;
         case X86_64_OP(storeb):
           mov = "movb";

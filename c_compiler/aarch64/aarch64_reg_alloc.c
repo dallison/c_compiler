@@ -766,6 +766,16 @@ static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) 
     case  AARCH64_OP(scvtf):
     case  AARCH64_OP(ucvtf):
     case  AARCH64_OP(fneg):
+    case AARCH64_OP(vadd):
+    case AARCH64_OP(vsub):
+    case AARCH64_OP(vand):
+    case AARCH64_OP(vorr):
+    case AARCH64_OP(veor):
+    case AARCH64_OP(vcmeq):
+    case AARCH64_OP(vcmgt):
+    case AARCH64_OP(vcmge):
+    case AARCH64_OP(vcmhi):
+    case AARCH64_OP(vcmhs):
     case AARCH64_OP(fvarreg):
       return kAARCH64RegTypeFloat;
 

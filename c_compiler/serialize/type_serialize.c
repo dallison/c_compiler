@@ -1899,7 +1899,9 @@ static void ReadFriendTypeVector(DeserializeContext* ctx, WireBuffer* in,
 // ---------------------------------------------------------------------------
 static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   TypeRecord* t = (TypeRecord*)obj;
-  assert(t->declarator != kDeclArray || t->next != NULL);
+  assert((t->declarator != kDeclArray &&
+          t->declarator != kDeclVector) ||
+         t->next != NULL);
   WireWriteInt32(buf, kType_id, t->id);
   WireWriteInt32(buf, kType_type, (int32_t)t->type);
   WireWriteInt32(buf, kType_qualifiers, (int32_t)t->qualifiers);
@@ -1934,7 +1936,7 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
             t->dependent_splice_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
 
-  if (t->declarator == kDeclArray) {
+  if (t->declarator == kDeclArray || t->declarator == kDeclVector) {
     WireBuffer sub;
     WireBufferInitOwned(&sub, 16);
     WriteArrayInfo(ctx, &sub, &t->info.array);

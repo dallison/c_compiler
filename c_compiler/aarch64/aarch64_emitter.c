@@ -1247,6 +1247,32 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       return;
     }
 
+    case AARCH64_OP(vadd):
+    case AARCH64_OP(vsub):
+    case AARCH64_OP(vand):
+    case AARCH64_OP(vorr):
+    case AARCH64_OP(veor):
+    case AARCH64_OP(vcmeq):
+    case AARCH64_OP(vcmgt):
+    case AARCH64_OP(vcmge):
+    case AARCH64_OP(vcmhi):
+    case AARCH64_OP(vcmhs): {
+      const char* mnemonic =
+          inst->opcode == (TargetOpcode)AARCH64_OP(vadd) ? "add" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vsub) ? "sub" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vand) ? "and" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ? "orr" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(veor) ? "eor" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmeq) ? "cmeq" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmgt) ? "cmgt" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmge) ? "cmge" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? "cmhi" : "cmhs";
+      fprintf(fp, "\t%-12sv%d.8b, v%d.8b, v%d.8b\n", mnemonic,
+              inst->reg->num, inst->operand[0]->reg->num,
+              inst->operand[1]->reg->num);
+      return;
+    }
+
     case AARCH64_OP(spill): {
       AARCH64Register* reg = (AARCH64Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
@@ -3269,6 +3295,32 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
   }
 
   switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(vadd):
+    case AARCH64_OP(vsub):
+    case AARCH64_OP(vand):
+    case AARCH64_OP(vorr):
+    case AARCH64_OP(veor):
+    case AARCH64_OP(vcmeq):
+    case AARCH64_OP(vcmgt):
+    case AARCH64_OP(vcmge):
+    case AARCH64_OP(vcmhi):
+    case AARCH64_OP(vcmhs): {
+      uint32_t base =
+          inst->opcode == (TargetOpcode)AARCH64_OP(vadd) ? 0x0e208400u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vsub) ? 0x2e208400u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vand) ? 0x0e201c00u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ? 0x0ea01c00u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(veor) ? 0x2e201c00u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmeq) ? 0x2e208c00u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmgt) ? 0x0e203400u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmge) ? 0x0e203c00u :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? 0x2e203400u :
+                                                           0x2e203c00u;
+      AARCH64ProgramEmitWord(
+          module, base | (ProgramRegNum(inst->operand[1]) << 16) |
+                      (ProgramRegNum(inst->operand[0]) << 5) | dest);
+      return;
+    }
     case AARCH64_OP(fadd):
     case AARCH64_OP(fsub):
     case AARCH64_OP(fmul):

@@ -445,6 +445,9 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
     case kDeclArray:
       return TypeArrayBoundsEqual(&left->info.array, &right->info.array) &&
              OverloadTypesEqual(left->next, right->next);
+    case kDeclVector:
+      return left->info.array.size.fixed == right->info.array.size.fixed &&
+             OverloadTypesEqual(left->next, right->next);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -3216,7 +3219,7 @@ static bool IsKnownAttribute(const char* name) {
     "sysv_abi", "may_alias", "gnu_inline", "nothrow", "leaf", "cold", "hot",
     "malloc", "pure", "const", "nonnull", "returns_nonnull", "sentinel",
     "weak", "alias", "section", "visibility", "used",
-    "transparent_union", "vector_size", "mode",
+    "transparent_union", "vector_size", "ext_vector_type", "mode",
     "no_instrument_function", "cleanup", "returns_twice", "artificial",
     "designated_init", "fallthrough", "warning", "error", "alloc_size",
     "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
@@ -3239,6 +3242,7 @@ bool SyntaxAttributeIsSupported(const char* name) {
       "deprecated",      "unused",           "warn_unused_result",
       "noreturn",        "noinline",         "always_inline",
       "constructor",     "destructor",        "indeterminate",
+      "vector_size",     "ext_vector_type",
   };
   for (size_t i = 0; i < sizeof(supported) / sizeof(supported[0]); i++) {
     if (strcmp(supported[i], name) == 0) {
@@ -3287,9 +3291,7 @@ bool SyntaxAttributeIsReflectable(const Attribute* attr) {
 }
 
 static bool IsUnsupportedTypeAttribute(const char* name) {
-  return strcmp(name, "vector_size") == 0 ||
-         strcmp(name, "ext_vector_type") == 0 ||
-         strcmp(name, "mode") == 0;
+  return strcmp(name, "mode") == 0;
 }
 
 // Parse an __attribute__((...)) clause list, appending parsed Attribute* to
@@ -3706,10 +3708,65 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
 
 // Interprets attributes that have just been attached to a declared symbol and
 // affect the symbol/type directly (layout and function-behavior flags).
+static void ApplyVectorTypeAttribute(Syntax* syntax, Symbol* sym) {
+  Attribute* vector_size =
+      AttributeListFind(&sym->attributes, "vector_size");
+  Attribute* ext_vector =
+      AttributeListFind(&sym->attributes, "ext_vector_type");
+  Attribute* attr = vector_size != NULL ? vector_size : ext_vector;
+  if (attr == NULL) {
+    return;
+  }
+  if (vector_size != NULL && ext_vector != NULL) {
+    SyntaxError(syntax,
+                "'vector_size' and 'ext_vector_type' cannot be combined");
+    return;
+  }
+  if (AttributeArgCount(attr) != 1) {
+    SyntaxError(syntax, "'%s' attribute requires one argument",
+                attr->name.value);
+    return;
+  }
+  long argument = 0;
+  if (!AttributeArgInt(attr, 0, &argument) || argument <= 0) {
+    SyntaxError(syntax, "'%s' attribute argument must be a positive integer",
+                attr->name.value);
+    return;
+  }
+  TypeRecordCalculateSize(sym->type);
+  TypeRecord* element = sym->type;
+  if (TypeIsVector(element) || !TypeIsPrimitive(element) ||
+      (!TypeIsIntegral(element) && !TypeIsFloatingPoint(element)) ||
+      TypeIsBool(element) || TypeIsEnum(element) || TypeIsBitInt(element)) {
+    SyntaxError(syntax,
+                "'%s' attribute requires an integer or floating scalar type",
+                attr->name.value);
+    return;
+  }
+  long lanes = argument;
+  if (vector_size != NULL) {
+    if (element->size <= 0 || argument % element->size != 0) {
+      SyntaxError(syntax,
+                  "vector size must be a positive multiple of element size");
+      return;
+    }
+    lanes = argument / element->size;
+  }
+  long bytes = lanes * element->size;
+  if (lanes <= 0 || lanes > INT_MAX || bytes <= 0 ||
+      (bytes & (bytes - 1)) != 0) {
+    SyntaxError(syntax, "vector size must be a power of two");
+    return;
+  }
+  SymbolSetType(sym, NewVectorTypeRecord(element, (int)lanes));
+}
+
 void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
   if (sym == NULL) {
     return;
   }
+
+  ApplyVectorTypeAttribute(syntax, sym);
 
   // Function-behavior flags (also meaningful on forward declarations).
   if (AttributeListHas(&sym->attributes, "noreturn")) {
@@ -8641,6 +8698,9 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   TypeRecord* type = TypeParserParseType(&parser, true);
   Symbol* parsed = TypeParserParseDeclarator(&parser, type);
+  if (parsed != NULL) {
+    SyntaxApplyDeclarationAttributes(syntax, parsed);
+  }
   TypeParserDestruct(&parser);
 
   TypeRecord* alias_type = parsed != NULL ? parsed->type : type;

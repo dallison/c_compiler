@@ -409,9 +409,9 @@ static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
     return;
   }
   TypeRecord* type = TypeParserParseType(parser, true);
-  Symbol* parsed = NULL;
-  if (type != NULL && !LexLookingAt(parser->lex, TOK(semicolon))) {
-    parsed = TypeParserParseDeclarator(parser, type);
+  Symbol* parsed = TypeParserParseDeclarator(parser, type);
+  if (parsed != NULL) {
+    SyntaxApplyDeclarationAttributes(parser->syntax, parsed);
   }
   TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
   AddCXXNestedAliasMember(parser, owner, alias_name.value, alias_type, access,

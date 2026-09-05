@@ -152,6 +152,8 @@ TypeRecord* TypeInstantiateVariableTemplateType(struct Syntax* syntax,
 TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(struct Syntax* syntax,
                                                      Symbol* var_template,
                                                      Vector* args);
+struct ASTNode* TypeInstantiateVariableTemplateInitializer(
+    struct Syntax* syntax, Symbol* var_template, Vector* args);
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
 TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
                                              Symbol* class_template,

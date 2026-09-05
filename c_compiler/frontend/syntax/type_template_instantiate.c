@@ -1321,6 +1321,59 @@ TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(Syntax* syntax,
                                                  /*emit_constraint_error=*/false);
 }
 
+ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
+                                                    Symbol* var_template,
+                                                    Vector* args) {
+  if (var_template == NULL || var_template->variable_template == NULL ||
+      var_template->variable_template->initializer == NULL) {
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args = CompleteVariableTemplateArguments(
+      &parser, var_template->variable_template, args,
+      /*emit_constraint_error=*/true);
+  if (completed_args == NULL) {
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
+
+  Vector* partial_args = NULL;
+  ClassTemplatePartialSpecialization* partial =
+      SelectVariableTemplatePartialSpecialization(
+          &parser, var_template, completed_args, &partial_args);
+  ASTNode* initializer = var_template->variable_template->initializer;
+  ConstraintExpr* constraint =
+      var_template->variable_template->associated_constraint;
+  Vector* substitution_args = completed_args;
+  if (partial != NULL) {
+    initializer = partial->variable_initializer;
+    constraint = partial->associated_constraint;
+    substitution_args = partial_args;
+  }
+
+  ASTNode* concrete = NULL;
+  if (ConceptsConstraintSatisfied(constraint, substitution_args) &&
+      initializer != NULL) {
+    concrete =
+        CloneDependentExpressionWithArgs(&parser, initializer,
+                                         substitution_args);
+  } else if (partial == NULL) {
+    ReportVariableTemplateConstraintFailure(syntax, var_template,
+                                            completed_args);
+  }
+  if (partial_args != NULL) {
+    VectorDeleteWithContents(partial_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             false);
+  }
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           false);
+  TypeParserDestruct(&parser);
+  return concrete;
+}
+
 static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
                                                    TypeRecord* from,
                                                    Vector* args) {
@@ -2786,6 +2839,10 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
       TypeRecordDelete(actual_element);
       return ok;
     }
+    case kDeclVector:
+      return formal->info.array.size.fixed == actual->info.array.size.fixed &&
+             DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                                formal->next, actual->next);
     case kDeclMemberPointer:
       return TypeMemberPointerClass(formal) ==
                  TypeMemberPointerClass(actual) &&
@@ -4576,6 +4633,11 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
       }
       return ClassTemplateTypePatternMatches(bindings, pattern->next,
                                              actual->next);
+    case kDeclVector:
+      return pattern->info.array.size.fixed ==
+                 actual->info.array.size.fixed &&
+             ClassTemplateTypePatternMatches(bindings, pattern->next,
+                                             actual->next);
     case kDeclFunction:
       if (!ClassTemplateTypePatternMatches(bindings, pattern->next,
                                            actual->next) ||
@@ -4943,6 +5005,8 @@ static int TemplateTypePatternSpecificity(TypeRecord* type) {
       return score + 2 + TemplateTypePatternSpecificity(type->next);
     case kDeclArray:
       return score + 2 + TemplateTypePatternSpecificity(type->next);
+    case kDeclVector:
+      return score + 3 + TemplateTypePatternSpecificity(type->next);
     case kDeclFunction:
       if (type->info.function.is_const_member) {
         score++;

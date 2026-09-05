@@ -589,6 +589,13 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
                         NewTypeRecordDIE(builder, type->next));
       break;
 
+    case kDeclVector:
+      // Until DW_TAG_GNU_vector_type is emitted, describe the storage as a
+      // fixed array so debuggers can still inspect individual lanes.
+      die = NewArrayDIE(builder, type->info.array.size.fixed,
+                        NewTypeRecordDIE(builder, type->next));
+      break;
+
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:

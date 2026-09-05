@@ -96,6 +96,7 @@ TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
 TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
 TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);
+TypeRecord* NewVectorTypeRecord(TypeRecord* element_type, int lane_count);
 
 TypeRecord* NewFunctionTypeRecord(void);
 ContractAssertion* NewContractAssertion(ContractAssertionKind kind,

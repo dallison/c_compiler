@@ -268,6 +268,16 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(ucvtf): return "ucvtf";
     case AARCH64_OP(fneg): return "fneg";
     case AARCH64_OP(fcvt): return "fcvt";
+    case AARCH64_OP(vadd): return "vadd";
+    case AARCH64_OP(vsub): return "vsub";
+    case AARCH64_OP(vand): return "vand";
+    case AARCH64_OP(vorr): return "vorr";
+    case AARCH64_OP(veor): return "veor";
+    case AARCH64_OP(vcmeq): return "vcmeq";
+    case AARCH64_OP(vcmgt): return "vcmgt";
+    case AARCH64_OP(vcmge): return "vcmge";
+    case AARCH64_OP(vcmhi): return "vcmhi";
+    case AARCH64_OP(vcmhs): return "vcmhs";
 
   case AARCH64_OP(xxx): return "xxx";
     case AARCH64_OP(not): return "not";
@@ -448,7 +458,8 @@ bool AARCH64IsConst(TargetInstruction* inst) {
 }
 
 bool AARCH64IsFloatingPoint(TargetInstruction* inst) {
-  if ((AARCH64Opcode)inst->opcode < AARCH64_OP(fldr) || (AARCH64Opcode)inst->opcode > AARCH64_OP(ucvtf)) {
+  if ((AARCH64Opcode)inst->opcode < AARCH64_OP(fldr) ||
+      (AARCH64Opcode)inst->opcode > AARCH64_OP(vcmhs)) {
     return false;
   }
   switch ((AARCH64Opcode)inst->opcode) {
@@ -2656,23 +2667,23 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
       opcode = AARCH64_OP(ldr);
       break;
     case IR_OP(load8):
-      opcode = AARCH64_OP(ldrb);
+      opcode = AARCH64_OP(ldrsb);
       break;
     case IR_OP(load64):
       opcode = AARCH64_OP(ldr);
       size = kSize64Bit;
       break;
     case IR_OP(load16):
-      opcode = AARCH64_OP(ldrh);
+      opcode = AARCH64_OP(ldrsh);
       break;
     case IR_OP(loadu32):
-      opcode = AARCH64_OP(ldur);
+      opcode = AARCH64_OP(ldr);
       break;
     case IR_OP(loadu8):
-      opcode = AARCH64_OP(ldurb);
+      opcode = AARCH64_OP(ldrb);
       break;
     case IR_OP(loadu16):
-      opcode = AARCH64_OP(ldurh);
+      opcode = AARCH64_OP(ldrh);
       break;
     case IR_OP(loadf):
       opcode = AARCH64_OP(fldr);
@@ -3100,6 +3111,19 @@ static TargetInstruction* LowerNamedLabel(AARCH64Generator* g, IRNode* label) {
 
 static TargetInstruction* LowerResult(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
+  if (node->opcode == IR_OP(resultv)) {
+    TargetInstruction* address = Materialize(g, node->inputs.value.p[0]);
+    TargetInstruction* load = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(
+                   AARCH64_OP(fldr), address,
+                   GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+               kSize64Bit));
+    TargetInstruction* result_reg =
+        EmitSymbol(g, NewInstruction(AARCH64_OP(resultd)));
+    load->dest = result_reg;
+    return SetLoweredNode(node, load);
+  }
   AARCH64Opcode result_reg_opcode, opcode;
   switch (node->opcode) {
     case IR_OP(resulti):
@@ -3128,6 +3152,89 @@ static TargetInstruction* LowerResult(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* result_reg = EmitSymbol(g, NewInstruction(result_reg_opcode));
   return SetLoweredNode(node, SetDestOrMove(g, result, result_reg, opcode));
 #endif
+}
+
+static TargetInstruction* LowerCaptureVectorResult(AARCH64Generator* g,
+                                                   IRNode* node) {
+  assert(node->inputs.length == 2);
+  TargetInstruction* destination = Materialize(g, node->inputs.value.p[0]);
+  TargetInstruction* call = Materialize(g, node->inputs.value.p[1]);
+  call->flags |= AARCH64_INST_FP_RETURN;
+  return SetLoweredNode(
+      node, Emit(g, SetInstructionSize(
+                        NewInstruction3(
+                            AARCH64_OP(fstr), call, destination,
+                            GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                        kSize64Bit)));
+}
+
+static TargetInstruction* LowerVectorOperation(AARCH64Generator* g,
+                                               IRNode* node) {
+  assert(node->inputs.length == 3);
+  AARCH64Opcode opcode;
+  bool swap_operands = false;
+  switch (node->opcode) {
+    case IR_OP(vadd): opcode = AARCH64_OP(vadd); break;
+    case IR_OP(vsub): opcode = AARCH64_OP(vsub); break;
+    case IR_OP(vand): opcode = AARCH64_OP(vand); break;
+    case IR_OP(vor): opcode = AARCH64_OP(vorr); break;
+    case IR_OP(vxor): opcode = AARCH64_OP(veor); break;
+    case IR_OP(vcmpeq): opcode = AARCH64_OP(vcmeq); break;
+    case IR_OP(vcmpgt): opcode = AARCH64_OP(vcmgt); break;
+    case IR_OP(vcmpge): opcode = AARCH64_OP(vcmge); break;
+    case IR_OP(vcmplt):
+      opcode = AARCH64_OP(vcmgt);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmple):
+      opcode = AARCH64_OP(vcmge);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpgtu): opcode = AARCH64_OP(vcmhi); break;
+    case IR_OP(vcmpgeu): opcode = AARCH64_OP(vcmhs); break;
+    case IR_OP(vcmpltu):
+      opcode = AARCH64_OP(vcmhi);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpleu):
+      opcode = AARCH64_OP(vcmhs);
+      swap_operands = true;
+      break;
+    default:
+      assert(false);
+      COMPILER_UNREACHABLE();
+  }
+
+  TargetInstruction* destination = Materialize(g, node->inputs.value.p[0]);
+  TargetInstruction* left_address = Materialize(g, node->inputs.value.p[1]);
+  TargetInstruction* right_address = Materialize(g, node->inputs.value.p[2]);
+  TargetInstruction* left = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(
+                 AARCH64_OP(fldr), left_address,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             kSize64Bit));
+  TargetInstruction* right = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(
+                 AARCH64_OP(fldr), right_address,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             kSize64Bit));
+  if (swap_operands) {
+    TargetInstruction* temporary = left;
+    left = right;
+    right = temporary;
+  }
+  TargetInstruction* operation = Emit(
+      g, SetInstructionSize(NewInstruction2(opcode, left, right),
+                            kSize64Bit));
+  TargetInstruction* store = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(
+                 AARCH64_OP(fstr), operation, destination,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             kSize64Bit));
+  return SetLoweredNode(node, store);
 }
 
 static TargetInstruction* LowerAsm(AARCH64Generator* g, IRNode* node) {
@@ -3890,7 +3997,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeIsFloatingPoint(arg_node->type) ||
+               TypeIsVector(arg_node->type)) {
       if (next_fp_arg_reg < AARCH64_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -4007,6 +4115,16 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     IRNode* arg_node = node->inputs.value.p[i];
     TargetInstruction* arg = Materialize(g, arg_node);
+    if (TypeIsVector(arg_node->type)) {
+      TargetInstruction* staged = Emit(
+          g, SetInstructionSize(
+                 NewInstruction2(
+                     AARCH64_OP(fldr), arg,
+                     GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                 kSize64Bit));
+      VectorSet(&staged_register_args, i - 1, staged);
+      continue;
+    }
     if (TypeIsStructOrUnion(arg_node->type) && arg_node->type->size <= 8) {
       arg = Emit(g, CopyInstructionSize(
                         NewInstruction2(
@@ -4096,6 +4214,13 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       }
       case kArgLocationPushed: {
         TargetInstruction* arg = Materialize(g, arg_node);
+        if (TypeIsVector(arg_node->type)) {
+          arg = Emit(g, SetInstructionSize(
+                            NewInstruction2(
+                                AARCH64_OP(ldr), arg,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                            kSize64Bit));
+        }
         if (TypeIsStructOrUnion(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
@@ -4116,7 +4241,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
             VectorGet(&staged_register_args, i - 1);
         assert(arg != NULL);
         AARCH64Opcode mov_opcode = AARCH64_OP(mov);
-        if (TypeIsFloatingPoint(arg_node->type)) {
+        if (TypeIsFloatingPoint(arg_node->type) ||
+            TypeIsVector(arg_node->type)) {
           mov_opcode = AARCH64_OP(fmov);
         }
         // Emit(g, NewInstruction2(mov_opcode, arg_location->location.reg, arg));
@@ -4184,7 +4310,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     call =
         Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
-    if (TypeIsFloatingPoint(node->type)) {
+    if (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type)) {
       // The value comes back in the floating-point return register (d0), not
       // x0; tell the register allocator so the result isn't read from x0.
       call->flags |= AARCH64_INST_FP_RETURN;
@@ -4868,6 +4994,7 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
       return LowerCall(g, node);
 
     case IR_OP(structarg):
+    case IR_OP(vectorarg):
       // Same as its input.
       return SetLoweredNode(node, Materialize(g, node->inputs.value.p[0]));
       
@@ -4875,7 +5002,37 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(resultf):
     case IR_OP(resultd):
     case IR_OP(resulta):
+    case IR_OP(resultv):
       return LowerResult(g, node);
+    case IR_OP(capturev):
+      return LowerCaptureVectorResult(g, node);
+
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
+      return LowerVectorOperation(g, node);
+
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpne):
+      break;
 
     case IR_OP(memzero):
       return LowerMemzero(g, node);
@@ -4957,7 +5114,7 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
       ((IRVariable*)arg)->symbol != NULL) {
     type = ((IRVariable*)arg)->symbol->type;
   }
-  if (TypeIsFloatingPoint(type)) {
+  if (TypeIsFloatingPoint(type) || TypeIsVector(type)) {
     return 8;
   }
   if (TypeIsPointerOrArray(type)) {
@@ -5016,7 +5173,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = stack_offset;
           location.second_offset = stack_offset + 8;
         }
-      } else if (TypeIsFloatingPoint(arg_type)) {
+      } else if (TypeIsFloatingPoint(arg_type) || TypeIsVector(arg_type)) {
         if (fp_reg <= AARCH64_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -5052,7 +5209,8 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       } else {
         stack_offset += 16;
       }
-    } else if (TypeIsFloatingPoint(arg_symbol->type)) {
+    } else if (TypeIsFloatingPoint(arg_symbol->type) ||
+               TypeIsVector(arg_symbol->type)) {
       if (fp_reg <= AARCH64_FP_ARG_END) {
         fp_reg++;
       } else {
@@ -5209,7 +5367,29 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
   assert(size != 0);
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
-  if (TypeIsFloatingPoint(entry->pooled->type)) {
+  if (TypeIsVector(variable_type)) {
+    AlignOffset(entry, var_offset);
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      if (location.type == kArgLocationRegister) {
+        int offset = -24 - (int)g->saved_regs.length * 8;
+        SavedArgumentRegister* saved = NewSavedArgumentRegister(
+            (int)location.location.offset, AARCH64_FP_REG, offset, true);
+        entry->pooled->data.ivalue = offset;
+        VectorAppend(&g->saved_regs, saved);
+        g->num_fp_arg_regs++;
+        SetDebugStackLocation(entry, offset);
+      } else {
+        g->not_leaf = true;
+        entry->pooled->data.ivalue = 16 + (int)location.location.offset;
+        SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+      }
+    } else {
+      entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
+      *var_offset += size;
+    }
+  } else if (TypeIsFloatingPoint(entry->pooled->type)) {
     if (UseRegisterForVariable(g, entry->pooled)) {
       int reg = g->num_fp_reg_vars++;
       entry->pooled->data.ivalue = AARCH64_REG_VAR | reg;

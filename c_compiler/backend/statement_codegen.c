@@ -1303,6 +1303,7 @@ static void GenerateVariableDeclaration(Generator* gen,
       return;
     }
     if (!TypeIsArray(node->symbol->type) &&
+        !TypeIsVector(node->symbol->type) &&
         !TypeIsStructOrUnion(node->symbol->type)) {
       IRNode* zero =
           TypeIsFloatingPoint(node->symbol->type)
@@ -2400,6 +2401,10 @@ static void GenerateReturnStatement(Generator* gen,
           deferred_result_value = expr;
         }
         deferred_result_op = IR_OP(resulta);
+        have_deferred_result = true;
+      } else if (TypeUsesNativeVectorABI(node->cond->type)) {
+        deferred_result_value = expr;
+        deferred_result_op = IR_OP(resultv);
         have_deferred_result = true;
       } else if (TypeReturnedThroughHiddenPointer(node->cond->type)) {
         if ((node->cond->flags & kASTRvoCall) != 0) {

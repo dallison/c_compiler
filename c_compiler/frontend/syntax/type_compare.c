@@ -520,6 +520,9 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
         return false;
       }
       return TemplateTypePatternEqual(left->next, right->next);
+    case kDeclVector:
+      return left->info.array.size.fixed == right->info.array.size.fixed &&
+             TemplateTypePatternEqual(left->next, right->next);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -1310,6 +1313,9 @@ static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
       // bound. Hash only the element type so that lenient comparison can never
       // produce a cache false negative; exact bounds are checked in the bucket.
       return HashTypeRecord(hash, type->next);
+    case kDeclVector:
+      hash = HashTypeValue(hash, type->info.array.size.fixed);
+      return HashTypeRecord(hash, type->next);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -1479,6 +1485,9 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
         return false;
       }
       return TypeArrayBoundsEqual(&t1->info.array, &t2->info.array);
+    case kDeclVector:
+      return t1->info.array.size.fixed == t2->info.array.size.fixed &&
+             TypeEqual(t1->next, t2->next);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -1970,6 +1979,9 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
         return false;
       }
       return TypeArrayBoundsEqual(&t1->info.array, &t2->info.array);
+    case kDeclVector:
+      return t1->info.array.size.fixed == t2->info.array.size.fixed &&
+             TypeEqualIgnoringSign(t1->next, t2->next);
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -2057,6 +2069,7 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
   } else {
     switch (t1->declarator) {
       case kDeclArray:
+      case kDeclVector:
       case kDeclPointer:
       case kDeclReference:
       case kDeclRValueReference:

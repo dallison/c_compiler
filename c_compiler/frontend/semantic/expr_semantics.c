@@ -342,8 +342,29 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       temp->location = location;
       ASTNode* temp_id = NewIdentifierASTNode(temp, location);
       temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
-      ASTNode* initializer =
-          NewBracedInitializerASTNode(NewVector(), NULL, location);
+      Vector* initializer_values = NewVector();
+      Struct* value_class = concrete->info.struct_info;
+      bool has_object_state = false;
+      for (size_t i = 0;
+           value_class != NULL && i < value_class->members.length; ++i) {
+        StructMember* member = value_class->members.value.p[i];
+        if (member != NULL && member->symbol != NULL &&
+            !member->is_static && !member->is_member_function &&
+            !StorageIs(member->symbol->storage, STO(typedef))) {
+          has_object_state = true;
+          break;
+        }
+      }
+      if (has_object_state) {
+        ASTNode* concrete_initializer =
+            TypeInstantiateVariableTemplateInitializer(
+                &compiler->syntax, node->symbol, node->template_arguments);
+        if (concrete_initializer != NULL) {
+          VectorAppend(initializer_values, concrete_initializer);
+        }
+      }
+      ASTNode* initializer = NewBracedInitializerASTNode(
+          initializer_values, NULL, location);
       ASTNode* literal =
           NewCompoundLiteralASTNode(temp_id, location, initializer);
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, literal, true);
@@ -877,8 +898,12 @@ static void AnalyzeBinaryExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
   ASTNodeSetType((ASTNode*)node, node->left->type);
-  SemanticCheckScalarType(node->left);
-  SemanticCheckScalarType(node->right);
+  if (!TypeIsVector(node->left->type)) {
+    SemanticCheckScalarType(node->left);
+  }
+  if (!TypeIsVector(node->right->type)) {
+    SemanticCheckScalarType(node->right);
+  }
 }
 
 // Ranks for types.  Larger ranks are closer to the end
@@ -964,6 +989,24 @@ static TypeRecord* NewLogicalResultType(void) {
                                kQualPlain);
 }
 
+static TypeRecord* NewVectorComparisonResultType(TypeRecord* vector_type) {
+  TypeRecord* source = TypeVectorElement(vector_type);
+  TypeRecord* element = NULL;
+  if (TypeIsIntegral(source)) {
+    element = TypeRecordCopy(source);
+    element->type &= ~kTypeUnsigned;
+    element->type |= kTypeSigned;
+    element->qualifiers = kQualPlain;
+  } else {
+    Type type = source->size == 1 ? kTypeChar
+                : source->size == 2 ? kTypeShort
+                : source->size == 4 ? kTypeInt
+                                    : kTypeLongLong;
+    element = NewTypeRecordWithSize(type | kTypeSigned, kQualPlain);
+  }
+  return NewVectorTypeRecord(element, TypeVectorLaneCount(vector_type));
+}
+
 // Analyze a unary expression by analyzing the sub expression
 // and propagating the type up.  Also checks that the expression
 // is scalar and promotes types smaller than int to int if needed.
@@ -977,13 +1020,17 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
                         NewTypeRecordWithSize(kTypeBool, kQualPlain),
                         kConvertContextualBool);
   }
-  SemanticCheckScalarType(node->sub);
+  if (!TypeIsVector(node->sub->type)) {
+    SemanticCheckScalarType(node->sub);
+  } else if (node->base.op == AST_OP(not)) {
+    SemanticError((ASTNode*)node, "logical not is not valid for vector types");
+  }
   switch (node->base.op) {
     case AST_OP(not):
       // Not operator is boolean.
       break;
     case AST_OP(uminus): {
-      if (TypeIsComplex(node->sub->type)) {
+      if (TypeIsComplex(node->sub->type) || TypeIsVector(node->sub->type)) {
         break;
       }
       int rank = GetRank(node->sub->type);
@@ -1154,6 +1201,19 @@ static void DiagnoseCXX26EnumArithmetic(BinaryASTNode* node) {
 // and insert conversions as necessary.
 static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
   DiagnoseCXX26EnumArithmetic(node);
+  if (TypeIsVector(node->left->type) || TypeIsVector(node->right->type)) {
+    if (!TypeIsVector(node->left->type) ||
+        !TypeIsVector(node->right->type) ||
+        !TypeEqual(node->left->type, node->right->type)) {
+      SemanticTypeConversionError(node->left, node->right->type,
+                                  "Vector operand types '%s' and '%s' differ");
+      return;
+    }
+    TypeRecord* result = TypeRecordCopy(node->left->type);
+    result->qualifiers = kQualPlain;
+    ASTNodeSetType((ASTNode*)node, result);
+    return;
+  }
   if (TypeIsMemberPointer(node->left->type) ||
       TypeIsMemberPointer(node->right->type)) {
     return;
@@ -2137,8 +2197,12 @@ static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   if (overloaded != NULL) {
     return overloaded;
   }
-  SemanticCheckScalarType(node->left);
-  SemanticCheckScalarType(node->right);
+  if (!TypeIsVector(node->left->type)) {
+    SemanticCheckScalarType(node->left);
+  }
+  if (!TypeIsVector(node->right->type)) {
+    SemanticCheckScalarType(node->right);
+  }
   if (TypeIsPointerOrArray(node->left->type)) {
     ASTNodeSetType((ASTNode*)node,
                    PointerArithmeticResultType(node->left->type));
@@ -2298,9 +2362,19 @@ static ASTNode* AnalyzeShift(BinaryASTNode* node) {
   if (overloaded != NULL) {
     return overloaded;
   }
-  SemanticCheckScalarType(node->left);
-  SemanticCheckScalarType(node->right);
-  if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
+  bool vector_shift =
+      TypeIsVector(node->left->type) && TypeIsVector(node->right->type) &&
+      TypeEqual(node->left->type, node->right->type);
+  if (!vector_shift) {
+    SemanticCheckScalarType(node->left);
+    SemanticCheckScalarType(node->right);
+  }
+  if (vector_shift) {
+    if (!TypeIsIntegral(TypeVectorElement(node->left->type))) {
+      SemanticError((ASTNode*)node, "Shift operator needs integral types");
+    }
+  } else if (!TypeIsIntegral(node->left->type) ||
+             !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Shift operator needs integral types");
   }
 
@@ -2308,15 +2382,20 @@ static ASTNode* AnalyzeShift(BinaryASTNode* node) {
   // the result is the promoted type of the LEFT operand (C11 6.5.7p3).  The
   // usual arithmetic conversions are NOT applied, so the right operand's type
   // (e.g. a `long long` shift count) must not widen the result.
-  PromoteShiftOperand(node->left);
-  PromoteShiftOperand(node->right);
+  if (!vector_shift) {
+    PromoteShiftOperand(node->left);
+    PromoteShiftOperand(node->right);
+  }
   ASTNodeSetType((ASTNode*)node, node->left->type);
 
   // Convert node opcode to correct shift type.   An unsigned type uses a
   // logical shift an a signed type uses an arithmetic (sign extension) shift.
   if (node->base.op == AST_OP(rshift)) {
     // Right shift only.
-    if (TypeIsUnsigned(node->base.type)) {
+    TypeRecord* signedness_type =
+        TypeIsVector(node->base.type) ? TypeVectorElement(node->base.type)
+                                     : node->base.type;
+    if (TypeIsUnsigned(signedness_type)) {
       node->base.op = AST_OP(rshiftl);
     } else {
       node->base.op = AST_OP(rshifta);
@@ -2334,9 +2413,21 @@ static ASTNode* AnalyzeBitwiseOperator(BinaryASTNode* node) {
   if (overloaded != NULL) {
     return overloaded;
   }
-  SemanticCheckScalarType(node->left);
-  SemanticCheckScalarType(node->right);
-  if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
+  bool vector_bitwise =
+      TypeIsVector(node->left->type) && TypeIsVector(node->right->type) &&
+      TypeEqual(node->left->type, node->right->type);
+  if (!vector_bitwise) {
+    SemanticCheckScalarType(node->left);
+    SemanticCheckScalarType(node->right);
+  }
+  if (vector_bitwise) {
+    if (!TypeIsIntegral(TypeVectorElement(node->left->type))) {
+      SemanticError((ASTNode*)node, "Bitwise operator needs integral types");
+    } else {
+      InsertNumericConversions(node, true);
+    }
+  } else if (!TypeIsIntegral(node->left->type) ||
+             !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Bitwise operator needs integral types");
   } else {
     InsertNumericConversions(node, true);
@@ -2658,6 +2749,16 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNode* reversed = TryReversedComparisonOperator(node);
   if (reversed != NULL) {
     return reversed;
+  }
+  if (TypeIsVector(node->left->type) || TypeIsVector(node->right->type)) {
+    InsertNumericConversions(node, true);
+    if (TypeIsVector(node->left->type) &&
+        TypeIsVector(node->right->type) &&
+        TypeEqual(node->left->type, node->right->type)) {
+      ASTNodeSetType((ASTNode*)node,
+                     NewVectorComparisonResultType(node->left->type));
+    }
+    return (ASTNode*)node;
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
@@ -4112,8 +4213,9 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
     SemanticError(node->right, "Subscripts must be integral types");
   }
-  if (node->left != NULL && !TypeIsPointerOrArray(node->left->type)) {
-    SemanticError(node->left, "Can only subscript arrays and pointers");
+  if (node->left != NULL && !TypeIsPointerOrArray(node->left->type) &&
+      !TypeIsVector(node->left->type)) {
+    SemanticError(node->left, "Can only subscript arrays, pointers, and vectors");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return (ASTNode*)node;
   }
@@ -4122,6 +4224,9 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   TypeRecord* subtype = node->left->type->next;
   ASTNodeSetType((ASTNode*)node, subtype);
   node->base.value_category = kValueCategoryLvalue;
+  if (TypeIsVector(node->left->type)) {
+    node->left->flags |= kASTNeedAddress;
+  }
   return (ASTNode*)node;
 }
 
@@ -10964,6 +11069,9 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
     case kDeclRValueReference:
     case kDeclArray:
       return TypeEqualIgnoringQualifiers(left->next, right->next);
+    case kDeclVector:
+      return left->info.array.size.fixed == right->info.array.size.fixed &&
+             TypeEqualIgnoringQualifiers(left->next, right->next);
     case kDeclMemberPointer:
       return TypeMemberPointerClass(left) == TypeMemberPointerClass(right) &&
              TypeEqualIgnoringQualifiers(
@@ -11848,7 +11956,11 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(mod):
       AnalyzeBinaryExpression(binary_node);
       InsertNumericConversions(binary_node, true);
-      if (!TypeIsIntegral(binary_node->left->type)) {
+      TypeRecord* modulus_type =
+          TypeIsVector(binary_node->left->type)
+              ? TypeVectorElement(binary_node->left->type)
+              : binary_node->left->type;
+      if (!TypeIsIntegral(modulus_type)) {
         SemanticError(node, "Modulus operator needs an integral type");
       }
       break;

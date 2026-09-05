@@ -147,5 +147,7 @@ typedef uint64_t uint_fast64_t;
 #endif
 #endif
 
+#else
+#include_next <stdint.h>
 #endif /* __DAVECC__ */
 #endif /* stdint_h */

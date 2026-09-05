@@ -64,6 +64,7 @@ static struct {
     {IR_OP(loadd), "loadd"},
     {IR_OP(loada), "loada"},
     {IR_OP(structarg), "structarg"},
+    {IR_OP(vectorarg), "vectorarg"},
 
     // stores.
     {IR_OP(store32), "store32"},
@@ -125,6 +126,30 @@ static struct {
     {IR_OP(negi), "negi"},
     {IR_OP(negf), "negf"},
     {IR_OP(negd), "negd"},
+
+    {IR_OP(vadd), "vadd"},
+    {IR_OP(vsub), "vsub"},
+    {IR_OP(vmul), "vmul"},
+    {IR_OP(vdiv), "vdiv"},
+    {IR_OP(vmod), "vmod"},
+    {IR_OP(vlsl), "vlsl"},
+    {IR_OP(vlsr), "vlsr"},
+    {IR_OP(vasr), "vasr"},
+    {IR_OP(vand), "vand"},
+    {IR_OP(vor), "vor"},
+    {IR_OP(vxor), "vxor"},
+    {IR_OP(vneg), "vneg"},
+    {IR_OP(vonescomp), "vonescomp"},
+    {IR_OP(vcmpeq), "vcmpeq"},
+    {IR_OP(vcmpne), "vcmpne"},
+    {IR_OP(vcmplt), "vcmplt"},
+    {IR_OP(vcmple), "vcmple"},
+    {IR_OP(vcmpgt), "vcmpgt"},
+    {IR_OP(vcmpge), "vcmpge"},
+    {IR_OP(vcmpltu), "vcmpltu"},
+    {IR_OP(vcmpleu), "vcmpleu"},
+    {IR_OP(vcmpgtu), "vcmpgtu"},
+    {IR_OP(vcmpgeu), "vcmpgeu"},
 
     // Compares.
     {IR_OP(cmpeqi), "cmpeqi"},
@@ -196,6 +221,8 @@ static struct {
     {IR_OP(resultf), "resultf"},
     {IR_OP(resultd), "resultd"},
     {IR_OP(resulta), "resulta"},
+    {IR_OP(resultv), "resultv"},
+    {IR_OP(capturev), "capturev"},
 
     {IR_OP(i2f), "i2f"},
     {IR_OP(i2d), "i2d"},
@@ -885,6 +912,7 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(loadd):
     case IR_OP(loada):
     case IR_OP(structarg):
+    case IR_OP(vectorarg):
 
       // Stores are expressions;
     case IR_OP(store32):
@@ -940,6 +968,29 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(negi):
     case IR_OP(negf):
     case IR_OP(negd):
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmpne):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
 
     case IR_OP(localvar):   // Local variable.
     case IR_OP(externvar):  // External global variable.
@@ -1050,6 +1101,13 @@ bool IRIsCommutative(IRNode* inst) {
     case IR_OP(ori):
     case IR_OP(andi):
     case IR_OP(xori):
+    case IR_OP(vadd):
+    case IR_OP(vmul):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmpne):
     case IR_OP(phi):
       return true;
     default:
@@ -1148,6 +1206,30 @@ bool IRIsStore(IRNode* node) {
     case IR_OP(decf):
     case IR_OP(decd):
     case IR_OP(setbit):
+    case IR_OP(capturev):
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmpne):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
      return true;
     default:
       return IRIsIncDec(node);
@@ -1188,6 +1270,7 @@ bool IRIsLoad(IRNode* node) {
     case IR_OP(loadd):
     case IR_OP(loada):
     case IR_OP(structarg):
+    case IR_OP(vectorarg):
     case IR_OP(pusharg):
     case IR_OP(addressof):
     case IR_OP(cast):
@@ -1247,6 +1330,7 @@ bool IRIsResult(IRNode* node) {
     case IR_OP(resultf):
     case IR_OP(resultd):
     case IR_OP(resulta):
+    case IR_OP(resultv):
        return true;
     default:
       return false;

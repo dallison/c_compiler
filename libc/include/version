@@ -104,6 +104,12 @@
 #ifndef __cpp_lib_linalg
 #define __cpp_lib_linalg 202311L
 #endif
+#ifndef __cpp_lib_simd
+#define __cpp_lib_simd 202411L
+#endif
+#ifndef __cpp_lib_simd_complex
+#define __cpp_lib_simd_complex 202502L
+#endif
 #if !defined(__6502__) && !defined(__W65C02__) && \
     !defined(__DAVECC_NO_ATOMICS__)
 #ifndef __cpp_lib_hazard_pointer

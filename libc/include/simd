@@ -1,0 +1,1156 @@
+#ifndef _DAVE_STD_SIMD_H
+#define _DAVE_STD_SIMD_H
+
+#if __cplusplus < 202600L
+#error "<simd> requires C++26"
+#endif
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <bitset>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <cstring>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace simd {
+
+using __simd_size_type = size_t;
+
+template <size_t N>
+struct __abi {
+  static constexpr size_t __size = N;
+};
+
+#if defined(__aarch64__)
+inline constexpr size_t __native_vector_bytes = 8;
+#else
+inline constexpr size_t __native_vector_bytes = 16;
+#endif
+
+template <class T>
+using __native_abi = __abi<(__native_vector_bytes / sizeof(T) > 0
+                                ? __native_vector_bytes / sizeof(T)
+                                : 1)>;
+
+}  // namespace simd
+}  // namespace std
+
+namespace __dave_simd_detail {
+
+using std::memcpy;
+
+template <class T, std::size_t N>
+struct __native_ops {
+  static constexpr bool __enabled = false;
+  using __vector_type = void;
+};
+
+#define __DAVE_NATIVE_OPS(TYPE, LANES, BYTES)                         \
+  template <>                                                         \
+  struct __native_ops<TYPE, LANES> {                                  \
+    static constexpr bool __enabled = true;                           \
+    using __vector_type = TYPE __attribute__((vector_size(BYTES)));   \
+    static __vector_type __load(const TYPE* source) noexcept {         \
+      __vector_type result;                                           \
+      memcpy((void*)&result, (const void*)source, BYTES);             \
+      return result;                                                  \
+    }                                                                 \
+    static void __store(TYPE* destination, __vector_type value)       \
+        noexcept {                                                    \
+      memcpy((void*)destination, (const void*)&value, BYTES);         \
+    }                                                                 \
+    static __vector_type __add(__vector_type a, __vector_type b) {    \
+      return a + b;                                                   \
+    }                                                                 \
+    static __vector_type __sub(__vector_type a, __vector_type b) {    \
+      return a - b;                                                   \
+    }                                                                 \
+    static __vector_type __mul(__vector_type a, __vector_type b) {    \
+      return a * b;                                                   \
+    }                                                                 \
+    static __vector_type __div(__vector_type a, __vector_type b) {    \
+      return a / b;                                                   \
+    }                                                                 \
+    static __vector_type __mod(__vector_type a, __vector_type b) {    \
+      return a % b;                                                   \
+    }                                                                 \
+    static __vector_type __and(__vector_type a, __vector_type b) {    \
+      return a & b;                                                   \
+    }                                                                 \
+    static __vector_type __or(__vector_type a, __vector_type b) {     \
+      return a | b;                                                   \
+    }                                                                 \
+    static __vector_type __xor(__vector_type a, __vector_type b) {    \
+      return a ^ b;                                                   \
+    }                                                                 \
+    static __vector_type __lshift(__vector_type a, __vector_type b) { \
+      return a << b;                                                  \
+    }                                                                 \
+    static __vector_type __rshift(__vector_type a, __vector_type b) { \
+      return a >> b;                                                  \
+    }                                                                 \
+    static __vector_type __neg(__vector_type a) { return -a; }        \
+    static __vector_type __not(__vector_type a) { return ~a; }        \
+    static auto __eq(__vector_type a, __vector_type b) {              \
+      return a == b;                                                  \
+    }                                                                 \
+    static auto __ne(__vector_type a, __vector_type b) {              \
+      return a != b;                                                  \
+    }                                                                 \
+    static auto __ge(__vector_type a, __vector_type b) {              \
+      return a >= b;                                                  \
+    }                                                                 \
+    static auto __le(__vector_type a, __vector_type b) {              \
+      return a <= b;                                                  \
+    }                                                                 \
+    static auto __gt(__vector_type a, __vector_type b) {              \
+      return a > b;                                                   \
+    }                                                                 \
+    static auto __lt(__vector_type a, __vector_type b) {              \
+      return a < b;                                                   \
+    }                                                                 \
+  }
+
+#if defined(__aarch64__)
+__DAVE_NATIVE_OPS(signed char, 8, 8);
+__DAVE_NATIVE_OPS(unsigned char, 8, 8);
+__DAVE_NATIVE_OPS(short, 4, 8);
+__DAVE_NATIVE_OPS(unsigned short, 4, 8);
+__DAVE_NATIVE_OPS(int, 2, 8);
+__DAVE_NATIVE_OPS(unsigned int, 2, 8);
+__DAVE_NATIVE_OPS(long, 1, 8);
+__DAVE_NATIVE_OPS(unsigned long, 1, 8);
+__DAVE_NATIVE_OPS(long long, 1, 8);
+__DAVE_NATIVE_OPS(unsigned long long, 1, 8);
+#elif defined(__x86_64__)
+__DAVE_NATIVE_OPS(signed char, 16, 16);
+__DAVE_NATIVE_OPS(unsigned char, 16, 16);
+__DAVE_NATIVE_OPS(short, 8, 16);
+__DAVE_NATIVE_OPS(unsigned short, 8, 16);
+__DAVE_NATIVE_OPS(int, 4, 16);
+__DAVE_NATIVE_OPS(unsigned int, 4, 16);
+__DAVE_NATIVE_OPS(long, 2, 16);
+__DAVE_NATIVE_OPS(unsigned long, 2, 16);
+__DAVE_NATIVE_OPS(long long, 2, 16);
+__DAVE_NATIVE_OPS(unsigned long long, 2, 16);
+#endif
+
+#undef __DAVE_NATIVE_OPS
+
+}  // namespace __dave_simd_detail
+
+namespace std {
+namespace simd {
+
+template <class T, size_t N>
+using __native_ops = ::__dave_simd_detail::__native_ops<T, N>;
+
+template <class T, size_t N>
+using __deduce_abi_t = __abi<N>;
+
+template <size_t Bytes, class Abi>
+class basic_mask;
+
+template <class T, class Abi = __abi<4>>
+class basic_vec;
+
+template <class T, size_t N = 4>
+using vec = basic_vec<T, __deduce_abi_t<T, N>>;
+
+template <class T, size_t N = 4>
+using mask = basic_mask<sizeof(T), __deduce_abi_t<T, N>>;
+
+template <class V, class U = typename V::value_type>
+struct alignment
+    : integral_constant<size_t, alignof(U) * V::size()> {};
+
+template <class V, class U = typename V::value_type>
+inline constexpr size_t alignment_v = alignment<V, U>::value;
+
+template <class T, class V>
+struct rebind;
+
+template <class T, class U, class Abi>
+struct rebind<T, basic_vec<U, Abi>> {
+  using type = basic_vec<T, Abi>;
+};
+
+template <class T, size_t Bytes, class Abi>
+struct rebind<T, basic_mask<Bytes, Abi>> {
+  using type = basic_mask<sizeof(T), Abi>;
+};
+
+template <class T, class V>
+using rebind_t = typename rebind<T, V>::type;
+
+template <size_t N, class V>
+struct resize;
+
+template <size_t N, class T, class Abi>
+struct resize<N, basic_vec<T, Abi>> {
+  using type = vec<T, N>;
+};
+
+template <size_t N, size_t Bytes, class Abi>
+struct resize<N, basic_mask<Bytes, Abi>> {
+  using type = basic_mask<Bytes, __abi<N>>;
+};
+
+template <size_t N, class V>
+using resize_t = typename resize<N, V>::type;
+
+struct __convert_flag {};
+struct __aligned_flag {};
+template <size_t N>
+struct __overaligned_flag {};
+
+template <class... Flags>
+struct flags {};
+
+inline constexpr flags<> flag_default{};
+inline constexpr flags<__convert_flag> flag_convert{};
+inline constexpr flags<__aligned_flag> flag_aligned{};
+
+template <size_t N>
+inline constexpr flags<__overaligned_flag<N>> flag_overaligned{};
+
+template <size_t Bytes>
+struct __integer_from;
+template <>
+struct __integer_from<1> { using type = signed char; };
+template <>
+struct __integer_from<2> { using type = short; };
+template <>
+struct __integer_from<4> { using type = int; };
+template <>
+struct __integer_from<8> { using type = long long; };
+
+template <size_t Bytes, class Abi>
+class basic_mask {
+ public:
+  using value_type = bool;
+  using abi_type = Abi;
+  using __integer_type = typename __integer_from<Bytes>::type;
+  static constexpr __simd_size_type size() noexcept { return Abi::__size; }
+
+  bool __data[Abi::__size];
+
+  class const_iterator {
+    const basic_mask* __owner;
+    size_t __index;
+   public:
+    constexpr const_iterator(const basic_mask* owner, size_t index)
+        : __owner(owner), __index(index) {}
+    constexpr bool operator*() const { return (*__owner)[__index]; }
+    constexpr const_iterator& operator++() {
+      ++__index;
+      return *this;
+    }
+    friend constexpr bool operator==(const const_iterator& a,
+                                     const const_iterator& b) {
+      return a.__owner == b.__owner && a.__index == b.__index;
+    }
+    friend constexpr bool operator!=(const const_iterator& a,
+                                     const const_iterator& b) {
+      return !(a == b);
+    }
+  };
+  using iterator = const_iterator;
+  constexpr iterator begin() noexcept { return iterator(this, 0); }
+  constexpr const_iterator begin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr const_iterator cbegin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr iterator end() noexcept { return iterator(this, size()); }
+  constexpr const_iterator end() const noexcept {
+    return const_iterator(this, size());
+  }
+  constexpr const_iterator cend() const noexcept {
+    return const_iterator(this, size());
+  }
+
+  constexpr basic_mask() noexcept = default;
+  constexpr basic_mask(const basic_mask&) noexcept = default;
+  constexpr basic_mask(basic_mask&) noexcept = default;
+  constexpr basic_mask(basic_mask&&) noexcept = default;
+  constexpr basic_mask& operator=(const basic_mask&) noexcept = default;
+
+  constexpr explicit basic_mask(bool value) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = value;
+  }
+
+  template <size_t UBytes, class UAbi>
+  constexpr explicit basic_mask(
+      const basic_mask<UBytes, UAbi>& other) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = other[i];
+  }
+
+  template <class G>
+  constexpr explicit basic_mask(G&& gen) {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = static_cast<bool>(gen(i));
+  }
+
+  constexpr basic_mask(const bitset<Abi::__size>& bits) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = bits[i];
+  }
+
+  constexpr explicit basic_mask(unsigned int bits) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = i < numeric_limits<unsigned int>::digits &&
+                  ((bits >> i) & 1u) != 0;
+  }
+
+  constexpr bool operator[](size_t i) const { return __data[i]; }
+  constexpr void __set(size_t i, bool value) { __data[i] = value; }
+
+  constexpr basic_mask operator!() const noexcept {
+    basic_mask result;
+    for (size_t i = 0; i < size(); ++i)
+      result.__data[i] = !__data[i];
+    return result;
+  }
+
+  constexpr auto operator+() const noexcept;
+  constexpr auto operator-() const noexcept;
+  constexpr auto operator~() const noexcept;
+
+  constexpr bitset<Abi::__size> to_bitset() const noexcept {
+    bitset<Abi::__size> result;
+    for (size_t i = 0; i < size(); ++i)
+      result.set(i, __data[i]);
+    return result;
+  }
+
+  constexpr unsigned long long to_ullong() const {
+    unsigned long long result = 0;
+    for (size_t i = 0;
+         i < size() && i < numeric_limits<unsigned long long>::digits; ++i) {
+      if (__data[i])
+        result |= 1ULL << i;
+    }
+    return result;
+  }
+
+  friend constexpr basic_mask operator&&(const basic_mask& a,
+                                          const basic_mask& b) noexcept {
+    basic_mask result;
+    for (size_t i = 0; i < size(); ++i)
+      result.__data[i] = a[i] && b[i];
+    return result;
+  }
+
+  friend constexpr basic_mask operator||(const basic_mask& a,
+                                          const basic_mask& b) noexcept {
+    basic_mask result;
+    for (size_t i = 0; i < size(); ++i)
+      result.__data[i] = a[i] || b[i];
+    return result;
+  }
+
+#define __DAVE_MASK_BINARY(OP)                                             \
+  friend constexpr basic_mask operator OP(const basic_mask& a,             \
+                                            const basic_mask& b) noexcept { \
+    basic_mask result;                                                      \
+    for (size_t i = 0; i < size(); ++i)                                     \
+      result.__data[i] = a[i] OP b[i];                                      \
+    return result;                                                          \
+  }
+  __DAVE_MASK_BINARY(&)
+  __DAVE_MASK_BINARY(|)
+  __DAVE_MASK_BINARY(^)
+  __DAVE_MASK_BINARY(==)
+  __DAVE_MASK_BINARY(!=)
+  __DAVE_MASK_BINARY(>=)
+  __DAVE_MASK_BINARY(<=)
+  __DAVE_MASK_BINARY(>)
+  __DAVE_MASK_BINARY(<)
+#undef __DAVE_MASK_BINARY
+
+#define __DAVE_MASK_ASSIGN(OP)                                      \
+  friend constexpr basic_mask& operator OP##=(basic_mask& a,         \
+                                               const basic_mask& b) { \
+    for (size_t i = 0; i < size(); ++i)                              \
+      a.__data[i] = a[i] OP b[i];                                    \
+    return a;                                                        \
+  }
+  __DAVE_MASK_ASSIGN(&)
+  __DAVE_MASK_ASSIGN(|)
+  __DAVE_MASK_ASSIGN(^)
+#undef __DAVE_MASK_ASSIGN
+};
+
+template <class T, class Abi>
+class basic_vec {
+ public:
+  using value_type = T;
+  using mask_type = basic_mask<sizeof(T), Abi>;
+  using abi_type = Abi;
+  static constexpr __simd_size_type size() noexcept { return Abi::__size; }
+
+  T __data[Abi::__size];
+
+  class const_iterator {
+    const basic_vec* __owner;
+    size_t __index;
+   public:
+    constexpr const_iterator(const basic_vec* owner, size_t index)
+        : __owner(owner), __index(index) {}
+    constexpr T operator*() const { return (*__owner)[__index]; }
+    constexpr const_iterator& operator++() {
+      ++__index;
+      return *this;
+    }
+    friend constexpr bool operator==(const const_iterator& a,
+                                     const const_iterator& b) {
+      return a.__owner == b.__owner && a.__index == b.__index;
+    }
+    friend constexpr bool operator!=(const const_iterator& a,
+                                     const const_iterator& b) {
+      return !(a == b);
+    }
+  };
+  using iterator = const_iterator;
+  constexpr iterator begin() noexcept { return iterator(this, 0); }
+  constexpr const_iterator begin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr const_iterator cbegin() const noexcept {
+    return const_iterator(this, 0);
+  }
+  constexpr iterator end() noexcept { return iterator(this, size()); }
+  constexpr const_iterator end() const noexcept {
+    return const_iterator(this, size());
+  }
+  constexpr const_iterator cend() const noexcept {
+    return const_iterator(this, size());
+  }
+
+  constexpr basic_vec() noexcept = default;
+  constexpr basic_vec(const basic_vec&) noexcept = default;
+  constexpr basic_vec(basic_vec&) noexcept = default;
+  constexpr basic_vec(basic_vec&&) noexcept = default;
+  constexpr basic_vec& operator=(const basic_vec&) noexcept = default;
+
+  constexpr basic_vec(T value) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = value;
+  }
+
+  template <class U, class UAbi>
+  requires(UAbi::__size == Abi::__size)
+  constexpr explicit basic_vec(const basic_vec<U, UAbi>& other) noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = static_cast<T>(other[i]);
+  }
+
+  template <class G>
+  requires(is_invocable<G&, size_t>::value)
+  constexpr explicit basic_vec(G&& gen) {
+    for (size_t i = 0; i < size(); ++i)
+      __data[i] = static_cast<T>(gen(i));
+  }
+
+  constexpr T operator[](size_t i) const { return __data[i]; }
+  constexpr void __set(size_t i, const T& value) { __data[i] = value; }
+
+  constexpr basic_vec& operator++() noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      ++__data[i];
+    return *this;
+  }
+  constexpr basic_vec operator++(int) noexcept {
+    basic_vec old = *this;
+    ++*this;
+    return old;
+  }
+  constexpr basic_vec& operator--() noexcept {
+    for (size_t i = 0; i < size(); ++i)
+      --__data[i];
+    return *this;
+  }
+  constexpr basic_vec operator--(int) noexcept {
+    basic_vec old = *this;
+    --*this;
+    return old;
+  }
+  constexpr mask_type operator!() const noexcept {
+    mask_type result;
+    for (size_t i = 0; i < size(); ++i)
+      result.__set(i, !__data[i]);
+    return result;
+  }
+  constexpr basic_vec operator~() const noexcept {
+    basic_vec result;
+    if constexpr (is_integral<T>::value) {
+      using __ops = __native_ops<T, Abi::__size>;
+      if consteval {
+      } else {
+        if constexpr (__ops::__enabled) {
+          typename __ops::__vector_type __value;
+          memcpy((void*)&__value, (const void*)__data, sizeof(__value));
+          auto __native_result = ~__value;
+          memcpy((void*)result.__data, (const void*)&__native_result,
+                 sizeof(__native_result));
+          return result;
+        }
+      }
+      for (size_t i = 0; i < size(); ++i)
+        result.__data[i] = ~__data[i];
+    }
+    return result;
+  }
+  constexpr basic_vec operator+() const noexcept { return *this; }
+  constexpr basic_vec operator-() const noexcept {
+    basic_vec result;
+    using __ops = __native_ops<T, Abi::__size>;
+    if consteval {
+    } else {
+      if constexpr (__ops::__enabled) {
+        typename __ops::__vector_type __value;
+        memcpy((void*)&__value, (const void*)__data, sizeof(__value));
+        auto __native_result = -__value;
+        memcpy((void*)result.__data, (const void*)&__native_result,
+               sizeof(__native_result));
+        return result;
+      }
+    }
+    for (size_t i = 0; i < size(); ++i)
+      result.__data[i] = -__data[i];
+    return result;
+  }
+
+#define __DAVE_VEC_BINARY(OP, NAME)                                       \
+  friend constexpr basic_vec operator OP(const basic_vec& a,              \
+                                           const basic_vec& b) noexcept {  \
+    basic_vec result;                                                       \
+    using __ops = __native_ops<T, Abi::__size>;                            \
+    if consteval {                                                         \
+    } else {                                                               \
+      if constexpr (__ops::__enabled) {                                    \
+        typename __ops::__vector_type __left;                              \
+        typename __ops::__vector_type __right;                             \
+        memcpy((void*)&__left, (const void*)a.__data, sizeof(__left));     \
+        memcpy((void*)&__right, (const void*)b.__data, sizeof(__right));   \
+        auto __native_result = __left OP __right;                          \
+        memcpy((void*)result.__data, (const void*)&__native_result,         \
+               sizeof(__native_result));                                   \
+        return result;                                                     \
+      }                                                                    \
+    }                                                                      \
+    for (size_t i = 0; i < size(); ++i)                                    \
+      result.__data[i] = a[i] OP b[i];                                     \
+    return result;                                                         \
+  }
+  __DAVE_VEC_BINARY(+, __add)
+  __DAVE_VEC_BINARY(-, __sub)
+  __DAVE_VEC_BINARY(*, __mul)
+  __DAVE_VEC_BINARY(/, __div)
+#undef __DAVE_VEC_BINARY
+
+#define __DAVE_VEC_INTEGRAL_BINARY(OP, NAME)                              \
+  friend constexpr basic_vec operator OP(const basic_vec& a,               \
+                                           const basic_vec& b) noexcept {  \
+    basic_vec result;                                                       \
+    if constexpr (is_integral<T>::value) {                                  \
+      using __ops = __native_ops<T, Abi::__size>;                           \
+      if consteval {                                                        \
+      } else {                                                              \
+        if constexpr (__ops::__enabled) {                                   \
+          typename __ops::__vector_type __left;                             \
+          typename __ops::__vector_type __right;                            \
+          memcpy((void*)&__left, (const void*)a.__data, sizeof(__left));    \
+          memcpy((void*)&__right, (const void*)b.__data, sizeof(__right));  \
+          auto __native_result = __left OP __right;                         \
+          memcpy((void*)result.__data, (const void*)&__native_result,        \
+                 sizeof(__native_result));                                  \
+          return result;                                                    \
+        }                                                                   \
+      }                                                                     \
+      for (size_t i = 0; i < size(); ++i)                                  \
+        result.__data[i] = a[i] OP b[i];                                   \
+    }                                                                       \
+    return result;                                                          \
+  }
+  __DAVE_VEC_INTEGRAL_BINARY(%, __mod)
+  __DAVE_VEC_INTEGRAL_BINARY(&, __and)
+  __DAVE_VEC_INTEGRAL_BINARY(|, __or)
+  __DAVE_VEC_INTEGRAL_BINARY(^, __xor)
+  __DAVE_VEC_INTEGRAL_BINARY(<<, __lshift)
+  __DAVE_VEC_INTEGRAL_BINARY(>>, __rshift)
+#undef __DAVE_VEC_INTEGRAL_BINARY
+
+  friend constexpr basic_vec operator<<(const basic_vec& a,
+                                         size_t shift) noexcept {
+    basic_vec result;
+    if constexpr (is_integral<T>::value) {
+      for (size_t i = 0; i < size(); ++i)
+        result.__data[i] = a[i] << shift;
+    }
+    return result;
+  }
+  friend constexpr basic_vec operator>>(const basic_vec& a,
+                                         size_t shift) noexcept {
+    basic_vec result;
+    if constexpr (is_integral<T>::value) {
+      for (size_t i = 0; i < size(); ++i)
+        result.__data[i] = a[i] >> shift;
+    }
+    return result;
+  }
+
+#define __DAVE_VEC_ASSIGN(OP)                                      \
+  friend constexpr basic_vec& operator OP##=(basic_vec& a,          \
+                                              const basic_vec& b) {  \
+    for (size_t i = 0; i < size(); ++i)                             \
+      a.__data[i] OP##= b[i];                                       \
+    return a;                                                       \
+  }
+  __DAVE_VEC_ASSIGN(+)
+  __DAVE_VEC_ASSIGN(-)
+  __DAVE_VEC_ASSIGN(*)
+  __DAVE_VEC_ASSIGN(/)
+#undef __DAVE_VEC_ASSIGN
+
+  friend constexpr basic_vec& operator%=(basic_vec& a, const basic_vec& b) {
+    return a = a % b;
+  }
+  friend constexpr basic_vec& operator&=(basic_vec& a, const basic_vec& b) {
+    return a = a & b;
+  }
+  friend constexpr basic_vec& operator|=(basic_vec& a, const basic_vec& b) {
+    return a = a | b;
+  }
+  friend constexpr basic_vec& operator^=(basic_vec& a, const basic_vec& b) {
+    return a = a ^ b;
+  }
+  friend constexpr basic_vec& operator<<=(basic_vec& a, const basic_vec& b) {
+    return a = a << b;
+  }
+  friend constexpr basic_vec& operator>>=(basic_vec& a, const basic_vec& b) {
+    return a = a >> b;
+  }
+  friend constexpr basic_vec& operator<<=(basic_vec& a, size_t shift) {
+    return a = a << shift;
+  }
+  friend constexpr basic_vec& operator>>=(basic_vec& a, size_t shift) {
+    return a = a >> shift;
+  }
+
+#define __DAVE_VEC_COMPARE(OP, NAME)                                     \
+  friend constexpr mask_type operator OP(const basic_vec& a,             \
+                                           const basic_vec& b) noexcept { \
+    mask_type result;                                                      \
+    using __ops = __native_ops<T, Abi::__size>;                           \
+    if consteval {                                                        \
+    } else {                                                              \
+      if constexpr (__ops::__enabled) {                                   \
+        typename __ops::__vector_type __left;                             \
+        typename __ops::__vector_type __right;                            \
+        memcpy((void*)&__left, (const void*)a.__data, sizeof(__left));    \
+        memcpy((void*)&__right, (const void*)b.__data, sizeof(__right));  \
+        auto __native_result = __left OP __right;                         \
+        T __lanes[Abi::__size];                                           \
+        memcpy((void*)__lanes, (const void*)&__native_result,             \
+               sizeof(__native_result));                                 \
+        for (size_t i = 0; i < size(); ++i)                              \
+          result.__set(i, __lanes[i] != 0);                              \
+        return result;                                                    \
+      }                                                                   \
+    }                                                                     \
+    for (size_t i = 0; i < size(); ++i)                                   \
+      result.__set(i, a[i] OP b[i]);                                      \
+    return result;                                                        \
+  }
+  __DAVE_VEC_COMPARE(==, __eq)
+  __DAVE_VEC_COMPARE(!=, __ne)
+  __DAVE_VEC_COMPARE(>=, __ge)
+  __DAVE_VEC_COMPARE(<=, __le)
+  __DAVE_VEC_COMPARE(>, __gt)
+  __DAVE_VEC_COMPARE(<, __lt)
+#undef __DAVE_VEC_COMPARE
+};
+
+template <size_t Bytes, class Abi>
+constexpr auto basic_mask<Bytes, Abi>::operator+() const noexcept {
+  using V = basic_vec<__integer_type, Abi>;
+  V result;
+  for (size_t i = 0; i < size(); ++i)
+    result.__set(i, __data[i] ? 1 : 0);
+  return result;
+}
+
+template <size_t Bytes, class Abi>
+constexpr auto basic_mask<Bytes, Abi>::operator-() const noexcept {
+  using V = basic_vec<__integer_type, Abi>;
+  V result;
+  for (size_t i = 0; i < size(); ++i)
+    result.__set(i, __data[i] ? -1 : 0);
+  return result;
+}
+
+template <size_t Bytes, class Abi>
+constexpr auto basic_mask<Bytes, Abi>::operator~() const noexcept {
+  using V = basic_vec<__integer_type, Abi>;
+  V result;
+  for (size_t i = 0; i < size(); ++i)
+    result.__set(i, ~static_cast<__integer_type>(__data[i]));
+  return result;
+}
+
+template <size_t Bytes, class Abi>
+constexpr bool all_of(const basic_mask<Bytes, Abi>& value) noexcept {
+  for (size_t i = 0; i < value.size(); ++i)
+    if (!value[i]) return false;
+  return true;
+}
+
+template <size_t Bytes, class Abi>
+constexpr bool any_of(const basic_mask<Bytes, Abi>& value) noexcept {
+  for (size_t i = 0; i < value.size(); ++i)
+    if (value[i]) return true;
+  return false;
+}
+
+template <size_t Bytes, class Abi>
+constexpr bool none_of(const basic_mask<Bytes, Abi>& value) noexcept {
+  return !any_of(value);
+}
+
+template <size_t Bytes, class Abi>
+constexpr size_t reduce_count(const basic_mask<Bytes, Abi>& value) noexcept {
+  size_t result = 0;
+  for (size_t i = 0; i < value.size(); ++i)
+    if (value[i]) ++result;
+  return result;
+}
+
+template <size_t Bytes, class Abi>
+constexpr size_t reduce_min_index(const basic_mask<Bytes, Abi>& value) {
+  for (size_t i = 0; i < value.size(); ++i)
+    if (value[i]) return i;
+  return value.size();
+}
+
+template <size_t Bytes, class Abi>
+constexpr size_t reduce_max_index(const basic_mask<Bytes, Abi>& value) {
+  for (size_t i = value.size(); i > 0; --i)
+    if (value[i - 1]) return i - 1;
+  return value.size();
+}
+
+constexpr bool all_of(bool value) noexcept { return value; }
+constexpr bool any_of(bool value) noexcept { return value; }
+constexpr bool none_of(bool value) noexcept { return !value; }
+constexpr size_t reduce_count(bool value) noexcept { return value ? 1 : 0; }
+constexpr size_t reduce_min_index(bool) { return 0; }
+constexpr size_t reduce_max_index(bool) { return 0; }
+
+template <class T>
+struct __plus_op {
+  constexpr T operator()(const T& a, const T& b) const { return a + b; }
+};
+
+template <class T, class Abi, class BinaryOperation = __plus_op<T>>
+constexpr T reduce(const basic_vec<T, Abi>& value,
+                   BinaryOperation op = {}) {
+  T result = value[0];
+  for (size_t i = 1; i < value.size(); ++i)
+    result = op(result, value[i]);
+  return result;
+}
+
+template <class T, class Abi, class BinaryOperation = __plus_op<T>>
+constexpr T reduce(const basic_vec<T, Abi>& value,
+                   const typename basic_vec<T, Abi>::mask_type& selected,
+                   BinaryOperation op = {}, T identity = T()) {
+  T result = identity;
+  for (size_t i = 0; i < value.size(); ++i)
+    if (selected[i]) result = op(result, value[i]);
+  return result;
+}
+
+template <class T, class BinaryOperation = __plus_op<T>>
+constexpr T reduce(const T& value, BinaryOperation = {}) { return value; }
+
+template <class T, class BinaryOperation = __plus_op<T>>
+constexpr T reduce(const T& value, bool selected, BinaryOperation = {},
+                   T identity = T()) {
+  return selected ? value : identity;
+}
+
+template <class T, class Abi>
+constexpr T reduce_min(const basic_vec<T, Abi>& value) noexcept {
+  T result = value[0];
+  for (size_t i = 1; i < value.size(); ++i)
+    if (value[i] < result) result = value[i];
+  return result;
+}
+
+template <class T, class Abi>
+constexpr T reduce_max(const basic_vec<T, Abi>& value) noexcept {
+  T result = value[0];
+  for (size_t i = 1; i < value.size(); ++i)
+    if (value[i] > result) result = value[i];
+  return result;
+}
+
+template <class T, class Abi>
+constexpr T reduce_min(
+    const basic_vec<T, Abi>& value,
+    const typename basic_vec<T, Abi>::mask_type& selected) noexcept {
+  T result = numeric_limits<T>::max();
+  for (size_t i = 0; i < value.size(); ++i)
+    if (selected[i] && value[i] < result) result = value[i];
+  return result;
+}
+
+template <class T, class Abi>
+constexpr T reduce_max(
+    const basic_vec<T, Abi>& value,
+    const typename basic_vec<T, Abi>::mask_type& selected) noexcept {
+  T result = numeric_limits<T>::lowest();
+  for (size_t i = 0; i < value.size(); ++i)
+    if (selected[i] && value[i] > result) result = value[i];
+  return result;
+}
+
+template <class T>
+constexpr T reduce_min(const T& value) noexcept { return value; }
+template <class T>
+constexpr T reduce_max(const T& value) noexcept { return value; }
+template <class T>
+constexpr T reduce_min(const T& value, bool) noexcept { return value; }
+template <class T>
+constexpr T reduce_max(const T& value, bool) noexcept { return value; }
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> min(const basic_vec<T, Abi>& a,
+                                 const basic_vec<T, Abi>& b) noexcept {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < a.size(); ++i)
+    result.__set(i, a[i] < b[i] ? a[i] : b[i]);
+  return result;
+}
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> max(const basic_vec<T, Abi>& a,
+                                 const basic_vec<T, Abi>& b) noexcept {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < a.size(); ++i)
+    result.__set(i, a[i] > b[i] ? a[i] : b[i]);
+  return result;
+}
+
+template <class T, class Abi>
+constexpr pair<basic_vec<T, Abi>, basic_vec<T, Abi>> minmax(
+    const basic_vec<T, Abi>& a, const basic_vec<T, Abi>& b) noexcept {
+  return {min(a, b), max(a, b)};
+}
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> clamp(const basic_vec<T, Abi>& value,
+                                   const basic_vec<T, Abi>& lo,
+                                   const basic_vec<T, Abi>& hi) {
+  return min(max(value, lo), hi);
+}
+
+template <class T, class U>
+constexpr auto select(bool condition, const T& a, const U& b)
+    -> typename remove_cvref<decltype(condition ? a : b)>::type {
+  return condition ? a : b;
+}
+
+template <size_t Bytes, class Abi>
+constexpr basic_mask<Bytes, Abi> select(
+    const basic_mask<Bytes, Abi>& condition,
+    const basic_mask<Bytes, Abi>& a,
+    const basic_mask<Bytes, Abi>& b) noexcept {
+  basic_mask<Bytes, Abi> result;
+  for (size_t i = 0; i < condition.size(); ++i)
+    result.__set(i, condition[i] ? a[i] : b[i]);
+  return result;
+}
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> select(
+    const typename basic_vec<T, Abi>::mask_type& condition,
+    const basic_vec<T, Abi>& a, const basic_vec<T, Abi>& b) noexcept {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < condition.size(); ++i)
+    result.__set(i, condition[i] ? a[i] : b[i]);
+  return result;
+}
+
+template <class V, class R, class... Flags>
+constexpr V partial_load(R&& range, flags<Flags...> = {}) {
+  V result(static_cast<typename V::value_type>(0));
+  size_t n = range.size();
+  for (size_t i = 0; i < V::size() && i < n; ++i)
+    result.__set(i, static_cast<typename V::value_type>(range[i]));
+  return result;
+}
+
+template <class V, class R, class... Flags>
+constexpr V partial_load(R&& range, const typename V::mask_type& selected,
+                         flags<Flags...> = {}) {
+  V result(static_cast<typename V::value_type>(0));
+  size_t n = range.size();
+  for (size_t i = 0; i < V::size() && i < n; ++i)
+    if (selected[i])
+      result.__set(i, static_cast<typename V::value_type>(range[i]));
+  return result;
+}
+
+template <class V, class R, class... Flags>
+constexpr V unchecked_load(R&& range, flags<Flags...> f = {}) {
+  return partial_load<V>(forward<R>(range), f);
+}
+
+template <class V, class R, class... Flags>
+constexpr V unchecked_load(R&& range, const typename V::mask_type& selected,
+                           flags<Flags...> f = {}) {
+  return partial_load<V>(forward<R>(range), selected, f);
+}
+
+template <class T, class Abi, class R, class... Flags>
+constexpr void partial_store(const basic_vec<T, Abi>& value, R&& range,
+                             flags<Flags...> = {}) {
+  size_t n = range.size();
+  for (size_t i = 0; i < value.size() && i < n; ++i)
+    range[i] = value[i];
+}
+
+template <class T, class Abi, class R, class... Flags>
+constexpr void partial_store(
+    const basic_vec<T, Abi>& value, R&& range,
+    const typename basic_vec<T, Abi>::mask_type& selected,
+    flags<Flags...> = {}) {
+  size_t n = range.size();
+  for (size_t i = 0; i < value.size() && i < n; ++i)
+    if (selected[i]) range[i] = value[i];
+}
+
+template <class T, class Abi, class R, class... Flags>
+constexpr void unchecked_store(const basic_vec<T, Abi>& value, R&& range,
+                               flags<Flags...> f = {}) {
+  partial_store(value, forward<R>(range), f);
+}
+
+template <class T, class Abi, class R, class... Flags>
+constexpr void unchecked_store(
+    const basic_vec<T, Abi>& value, R&& range,
+    const typename basic_vec<T, Abi>::mask_type& selected,
+    flags<Flags...> f = {}) {
+  partial_store(value, forward<R>(range), selected, f);
+}
+
+inline constexpr size_t zero_element = static_cast<size_t>(-1);
+inline constexpr size_t uninit_element = static_cast<size_t>(-2);
+
+template <size_t N, class V, class IdxMap>
+constexpr resize_t<N, V> permute(const V& value, IdxMap&& map) {
+  resize_t<N, V> result;
+  for (size_t i = 0; i < N; ++i) {
+    size_t source = static_cast<size_t>(map(i));
+    if (source == zero_element)
+      result.__set(i, static_cast<typename V::value_type>(0));
+    else if (source != uninit_element)
+      result.__set(i, value[source]);
+  }
+  return result;
+}
+
+template <class V, class I>
+constexpr resize_t<I::size(), V> permute(const V& value, const I& indices) {
+  resize_t<I::size(), V> result;
+  for (size_t i = 0; i < I::size(); ++i)
+    result.__set(i, value[static_cast<size_t>(indices[i])]);
+  return result;
+}
+
+template <class V>
+constexpr V compress(const V& value, const typename V::mask_type& selected) {
+  V result{};
+  size_t out = 0;
+  for (size_t i = 0; i < V::size(); ++i)
+    if (selected[i]) result.__set(out++, value[i]);
+  return result;
+}
+
+template <class V>
+constexpr V compress(const V& value, const typename V::mask_type& selected,
+                     const typename V::value_type& fill) {
+  V result(fill);
+  size_t out = 0;
+  for (size_t i = 0; i < V::size(); ++i)
+    if (selected[i]) result.__set(out++, value[i]);
+  return result;
+}
+
+template <class V>
+constexpr V expand(const V& value, const typename V::mask_type& selected,
+                   const V& original = {}) {
+  V result = original;
+  size_t in = 0;
+  for (size_t i = 0; i < V::size(); ++i)
+    if (selected[i]) result.__set(i, value[in++]);
+  return result;
+}
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> abs(const basic_vec<T, Abi>& value) {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < value.size(); ++i)
+    result.__set(i, value[i] < T() ? -value[i] : value[i]);
+  return result;
+}
+
+#define __DAVE_SIMD_UNARY_MATH(NAME)                                      \
+  template <class T, class Abi>                                            \
+  constexpr basic_vec<T, Abi> NAME(const basic_vec<T, Abi>& value) {       \
+    basic_vec<T, Abi> result;                                               \
+    for (size_t i = 0; i < value.size(); ++i)                              \
+      result.__set(i, std::NAME(value[i]));                                \
+    return result;                                                          \
+  }
+__DAVE_SIMD_UNARY_MATH(sqrt)
+__DAVE_SIMD_UNARY_MATH(cbrt)
+__DAVE_SIMD_UNARY_MATH(exp)
+__DAVE_SIMD_UNARY_MATH(exp2)
+__DAVE_SIMD_UNARY_MATH(log)
+__DAVE_SIMD_UNARY_MATH(log2)
+__DAVE_SIMD_UNARY_MATH(log10)
+__DAVE_SIMD_UNARY_MATH(sin)
+__DAVE_SIMD_UNARY_MATH(cos)
+__DAVE_SIMD_UNARY_MATH(tan)
+__DAVE_SIMD_UNARY_MATH(asin)
+__DAVE_SIMD_UNARY_MATH(acos)
+__DAVE_SIMD_UNARY_MATH(atan)
+__DAVE_SIMD_UNARY_MATH(sinh)
+__DAVE_SIMD_UNARY_MATH(cosh)
+__DAVE_SIMD_UNARY_MATH(tanh)
+__DAVE_SIMD_UNARY_MATH(asinh)
+__DAVE_SIMD_UNARY_MATH(acosh)
+__DAVE_SIMD_UNARY_MATH(atanh)
+__DAVE_SIMD_UNARY_MATH(ceil)
+__DAVE_SIMD_UNARY_MATH(floor)
+__DAVE_SIMD_UNARY_MATH(round)
+__DAVE_SIMD_UNARY_MATH(trunc)
+__DAVE_SIMD_UNARY_MATH(erf)
+__DAVE_SIMD_UNARY_MATH(erfc)
+__DAVE_SIMD_UNARY_MATH(tgamma)
+__DAVE_SIMD_UNARY_MATH(lgamma)
+#undef __DAVE_SIMD_UNARY_MATH
+
+#define __DAVE_SIMD_BINARY_MATH(NAME)                                    \
+  template <class T, class Abi>                                           \
+  constexpr basic_vec<T, Abi> NAME(const basic_vec<T, Abi>& a,            \
+                                    const basic_vec<T, Abi>& b) {          \
+    basic_vec<T, Abi> result;                                              \
+    for (size_t i = 0; i < a.size(); ++i)                                 \
+      result.__set(i, std::NAME(a[i], b[i]));                             \
+    return result;                                                         \
+  }
+__DAVE_SIMD_BINARY_MATH(pow)
+__DAVE_SIMD_BINARY_MATH(hypot)
+__DAVE_SIMD_BINARY_MATH(atan2)
+__DAVE_SIMD_BINARY_MATH(fmod)
+__DAVE_SIMD_BINARY_MATH(remainder)
+__DAVE_SIMD_BINARY_MATH(copysign)
+__DAVE_SIMD_BINARY_MATH(nextafter)
+__DAVE_SIMD_BINARY_MATH(fdim)
+__DAVE_SIMD_BINARY_MATH(fmax)
+__DAVE_SIMD_BINARY_MATH(fmin)
+#undef __DAVE_SIMD_BINARY_MATH
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> fma(const basic_vec<T, Abi>& a,
+                                 const basic_vec<T, Abi>& b,
+                                 const basic_vec<T, Abi>& c) {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < a.size(); ++i)
+    result.__set(i, std::fma(a[i], b[i], c[i]));
+  return result;
+}
+
+template <class T, class Abi>
+constexpr basic_vec<T, Abi> lerp(const basic_vec<T, Abi>& a,
+                                  const basic_vec<T, Abi>& b,
+                                  const basic_vec<T, Abi>& t) {
+  basic_vec<T, Abi> result;
+  for (size_t i = 0; i < a.size(); ++i)
+    result.__set(i, a[i] + t[i] * (b[i] - a[i]));
+  return result;
+}
+
+template <class T>
+inline constexpr T iota = T();
+
+template <class T, class Abi>
+inline constexpr basic_vec<T, Abi> iota<basic_vec<T, Abi>> =
+    basic_vec<T, Abi>([](size_t i) { return static_cast<T>(i); });
+
+}  // namespace simd
+
+using simd::abs;
+using simd::acos;
+using simd::acosh;
+using simd::asin;
+using simd::asinh;
+using simd::atan;
+using simd::atan2;
+using simd::atanh;
+using simd::cbrt;
+using simd::ceil;
+using simd::clamp;
+using simd::copysign;
+using simd::cos;
+using simd::cosh;
+using simd::erf;
+using simd::erfc;
+using simd::exp;
+using simd::exp2;
+using simd::fdim;
+using simd::floor;
+using simd::fma;
+using simd::fmax;
+using simd::fmin;
+using simd::fmod;
+using simd::hypot;
+using simd::lerp;
+using simd::lgamma;
+using simd::log;
+using simd::log10;
+using simd::log2;
+using simd::max;
+using simd::min;
+using simd::minmax;
+using simd::nextafter;
+using simd::pow;
+using simd::remainder;
+using simd::round;
+using simd::sin;
+using simd::sinh;
+using simd::sqrt;
+using simd::tan;
+using simd::tanh;
+using simd::tgamma;
+using simd::trunc;
+
+}  // namespace std
+
+#endif

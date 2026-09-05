@@ -1009,6 +1009,13 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       StringAppendChar(out, '_');
       AppendCXXTypeEncoding(out, type->next);
       return;
+    case kDeclVector:
+      // Itanium ABI fixed-length vector encoding.
+      StringAppend(out, "Dv");
+      StringAppendInt64(out, type->info.array.size.fixed);
+      StringAppendChar(out, '_');
+      AppendCXXTypeEncoding(out, type->next);
+      return;
     case kDeclFunction:
       StringAppendChar(out, 'F');
       AppendCXXTypeEncoding(out, type->next);
@@ -1083,8 +1090,21 @@ static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
     StringAppendChar(out, 'v');
     return;
   }
+  TypeRecord* first_vector_type = NULL;
   for (size_t i = first_arg; i < func->info.function.prototype.length; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
+    if (TypeIsVector(formal->type)) {
+      if (first_vector_type != NULL &&
+          TypeEqual(first_vector_type, formal->type)) {
+        // Fixed vector types are substitutable in the Itanium ABI.  This is
+        // the common `f(vec, vec)` form emitted by GCC and Clang.
+        StringAppend(out, "S_");
+        continue;
+      }
+      if (first_vector_type == NULL) {
+        first_vector_type = formal->type;
+      }
+    }
     AppendCXXTypeEncoding(out, formal->type);
   }
 }

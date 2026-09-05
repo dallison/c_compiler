@@ -13,8 +13,10 @@
 #include <stdint.h>
 #include "assembler.h"
 #include "ast.h"
+#include "basic_block.h"
 #include "compiler.h"
 #include "errors.h"
+#include "expr_codegen.h"
 #include "gvn.h"
 #include "list.h"
 #include "member_pointer.h"
@@ -66,6 +68,11 @@ uint64_t CXXExceptionTypeID(TypeRecord* type) {
         continue;
       case kDeclArray:
         hash = HashExceptionTypePart(hash, (uint64_t)type->info.array.size.fixed);
+        type = type->next;
+        continue;
+      case kDeclVector:
+        hash = HashExceptionTypePart(hash,
+                                    (uint64_t)type->info.array.size.fixed);
         type = type->next;
         continue;
       case kDeclFunction:
@@ -1656,8 +1663,230 @@ static void ResetASTIRLabel(ASTNode* node, void* data, int child_id,
   }
 }
 
+bool TypeUsesNativeVectorABI(TypeRecord* type) {
+  if (!TypeIsVector(type) || type->size <= 0 || type->size > 16) {
+    return false;
+  }
+  if (StringEqual(compiler->target_name, "x86_64")) {
+    return true;
+  }
+  // AAPCS64 uses the low 64 bits of v0-v7 for short vectors.  The AArch64
+  // backend does not yet allocate full Q registers, so keep 128-bit vectors
+  // on the target-independent indirect ABI until Q-register allocation lands.
+  return StringEqual(compiler->target_name, "aarch64") && type->size <= 8;
+}
+
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
-  return TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type);
+  return TypeIsStructOrUnion(type) ||
+         (TypeIsVector(type) && !TypeUsesNativeVectorABI(type)) ||
+         TypeIsMemberPointerAggregate(type);
+}
+
+static bool IsVectorIROpcode(IROpcode opcode) {
+  return opcode >= IR_OP(vadd) && opcode <= IR_OP(vcmpgeu);
+}
+
+static TypeRecord* VectorObjectTypeFromAddress(IRNode* address) {
+  TypeRecord* type = address != NULL ? address->type : NULL;
+  if (TypeIsPointer(type) && TypeIsVector(type->next)) {
+    return type->next;
+  }
+  return TypeIsVector(type) ? type : NULL;
+}
+
+static IROpcode VectorScalarOpcode(IROpcode vector_opcode,
+                                   TypeRecord* element) {
+  bool f32 = TypeUsesFloat32Representation(element);
+  bool f64 = TypeUsesFloat64Representation(element);
+  switch (vector_opcode) {
+    case IR_OP(vadd): return f32 ? IR_OP(addf) : f64 ? IR_OP(addd) : IR_OP(addi);
+    case IR_OP(vsub): return f32 ? IR_OP(subf) : f64 ? IR_OP(subd) : IR_OP(subi);
+    case IR_OP(vmul): return f32 ? IR_OP(mulf) : f64 ? IR_OP(muld) : IR_OP(muli);
+    case IR_OP(vdiv): return f32 ? IR_OP(divf) : f64 ? IR_OP(divd) : IR_OP(divi);
+    case IR_OP(vmod): return IR_OP(modi);
+    case IR_OP(vlsl): return IR_OP(lsli);
+    case IR_OP(vlsr): return IR_OP(lsri);
+    case IR_OP(vasr): return IR_OP(asri);
+    case IR_OP(vand): return IR_OP(andi);
+    case IR_OP(vor): return IR_OP(ori);
+    case IR_OP(vxor): return IR_OP(xori);
+    case IR_OP(vneg): return f32 ? IR_OP(negf) : f64 ? IR_OP(negd) : IR_OP(negi);
+    case IR_OP(vonescomp): return IR_OP(onescomp);
+    case IR_OP(vcmpeq): return f32 ? IR_OP(cmpeqf) : f64 ? IR_OP(cmpeqd)
+                                                     : IR_OP(cmpeqi);
+    case IR_OP(vcmpne): return f32 ? IR_OP(cmpnef) : f64 ? IR_OP(cmpned)
+                                                     : IR_OP(cmpnei);
+    case IR_OP(vcmplt): return f32 ? IR_OP(cmpltf) : f64 ? IR_OP(cmpltd)
+                                                     : IR_OP(cmplti);
+    case IR_OP(vcmple): return f32 ? IR_OP(cmplef) : f64 ? IR_OP(cmpled)
+                                                     : IR_OP(cmplei);
+    case IR_OP(vcmpgt): return f32 ? IR_OP(cmpgtf) : f64 ? IR_OP(cmpgtd)
+                                                     : IR_OP(cmpgti);
+    case IR_OP(vcmpge): return f32 ? IR_OP(cmpgef) : f64 ? IR_OP(cmpged)
+                                                     : IR_OP(cmpgei);
+    case IR_OP(vcmpltu): return IR_OP(cmplti);
+    case IR_OP(vcmpleu): return IR_OP(cmplei);
+    case IR_OP(vcmpgtu): return IR_OP(cmpgti);
+    case IR_OP(vcmpgeu): return IR_OP(cmpgei);
+    default: return IR_OP(nop);
+  }
+}
+
+static IRNode* EmitVectorLaneAddressBefore(Generator* gen, BasicBlock* block,
+                                           IRNode* position, IRNode* base,
+                                           TypeRecord* element, int offset) {
+  if (offset == 0) {
+    return base;
+  }
+  IRNode* address = IRSetType(
+      NewIR2(IR_OP(adda), base,
+             GeneratorGetIntConstant(gen, NULL, offset)),
+      NewPointerTo(kQualPlain, element));
+  BasicBlockEmitBefore(gen, block, address, position);
+  return address;
+}
+
+static void ScalarizeVectorOperation(Generator* gen, IRNode* operation) {
+  BasicBlock* block = operation->block;
+  IRNode* destination = operation->inputs.value.p[0];
+  IRNode* left = operation->inputs.value.p[1];
+  IRNode* right = operation->inputs.length > 2
+                      ? operation->inputs.value.p[2]
+                      : NULL;
+  TypeRecord* source_vector =
+      TypeIsVector((TypeRecord*)operation->aux)
+          ? (TypeRecord*)operation->aux
+          : VectorObjectTypeFromAddress(left);
+  TypeRecord* result_vector = operation->type;
+  assert(block != NULL && source_vector != NULL &&
+         TypeIsVector(result_vector));
+  TypeRecord* source_element = TypeVectorElement(source_vector);
+  TypeRecord* result_element = TypeVectorElement(result_vector);
+  IROpcode scalar_opcode =
+      VectorScalarOpcode(operation->opcode, source_element);
+  bool comparison =
+      operation->opcode >= IR_OP(vcmpeq) &&
+      operation->opcode <= IR_OP(vcmpgeu);
+  bool signed_comparison =
+      operation->opcode == IR_OP(vcmplt) ||
+      operation->opcode == IR_OP(vcmple) ||
+      operation->opcode == IR_OP(vcmpgt) ||
+      operation->opcode == IR_OP(vcmpge);
+
+  for (int lane = 0; lane < TypeVectorLaneCount(source_vector); lane++) {
+    IRNode* left_address = EmitVectorLaneAddressBefore(
+        gen, block, operation, left, source_element,
+        lane * source_element->size);
+    IRNode* left_value = IRSetType(
+        NewIR1(GetLoadOpcodeForType(source_element), left_address),
+        source_element);
+    BasicBlockEmitBefore(gen, block, left_value, operation);
+    if (signed_comparison && source_element->size < 4) {
+      TypeRecord* promoted =
+          NewTypeRecordWithSize(kTypeInt, kQualPlain);
+      left_value = IRSetType(
+          NewIR2(IR_OP(signextendi), left_value,
+                 GeneratorGetIntConstant(
+                     gen, NULL, (4 - source_element->size) * 8)),
+          promoted);
+      BasicBlockEmitBefore(gen, block, left_value, operation);
+    }
+
+    IRNode* value = NULL;
+    if (right != NULL) {
+      IRNode* right_address = EmitVectorLaneAddressBefore(
+          gen, block, operation, right, source_element,
+          lane * source_element->size);
+      IRNode* right_value = IRSetType(
+          NewIR1(GetLoadOpcodeForType(source_element), right_address),
+          source_element);
+      BasicBlockEmitBefore(gen, block, right_value, operation);
+      if (signed_comparison && source_element->size < 4) {
+        TypeRecord* promoted =
+            NewTypeRecordWithSize(kTypeInt, kQualPlain);
+        right_value = IRSetType(
+            NewIR2(IR_OP(signextendi), right_value,
+                   GeneratorGetIntConstant(
+                       gen, NULL, (4 - source_element->size) * 8)),
+            promoted);
+        BasicBlockEmitBefore(gen, block, right_value, operation);
+      }
+      value = IRSetType(NewIR2(scalar_opcode, left_value, right_value),
+                        comparison
+                            ? NewTypeRecordWithSize(kTypeBool, kQualPlain)
+                            : source_element);
+    } else {
+      value = IRSetType(NewIR1(scalar_opcode, left_value), source_element);
+    }
+    BasicBlockEmitBefore(gen, block, value, operation);
+
+    if (comparison) {
+      value = IRSetType(NewIR1(IR_OP(negi), value), result_element);
+      BasicBlockEmitBefore(gen, block, value, operation);
+    }
+    IRNode* destination_address = EmitVectorLaneAddressBefore(
+        gen, block, operation, destination, result_element,
+        lane * result_element->size);
+    IRNode* store = IRSetType(
+        NewIR2(GetStoreOpcodeForType(result_element), destination_address,
+               value),
+        result_element);
+    BasicBlockEmitBefore(gen, block, store, operation);
+  }
+  BasicBlockRemoveInstruction(gen, block, operation);
+}
+
+static void ScalarizeVectorOperations(Generator* gen) {
+  for (IRNode* node = (IRNode*)gen->code.first; node != NULL;) {
+    IRNode* next = IRNext(node);
+    if (IsVectorIROpcode(node->opcode)) {
+      TypeRecord* vector_type =
+          TypeIsVector((TypeRecord*)node->aux)
+              ? (TypeRecord*)node->aux
+              : node->inputs.length > 0
+                    ? VectorObjectTypeFromAddress(node->inputs.value.p[0])
+                    : NULL;
+      TypeRecord* element =
+          vector_type != NULL ? TypeVectorElement(vector_type) : NULL;
+      bool native_x86 =
+          StringEqual(compiler->target_name, "x86_64") &&
+          vector_type != NULL && vector_type->size == 16 &&
+          element != NULL && TypeIsIntegral(element) &&
+          ((node->opcode == IR_OP(vadd) ||
+            node->opcode == IR_OP(vsub) ||
+            node->opcode == IR_OP(vand) ||
+            node->opcode == IR_OP(vor) ||
+            node->opcode == IR_OP(vxor)) ||
+           ((node->opcode == IR_OP(vcmpeq)) && element->size <= 4) ||
+           ((node->opcode == IR_OP(vcmpgt) ||
+             node->opcode == IR_OP(vcmplt)) &&
+            !TypeIsUnsigned(element) && element->size <= 4));
+      bool native_aarch64 =
+          StringEqual(compiler->target_name, "aarch64") &&
+          vector_type != NULL && vector_type->size == 8 &&
+          element != NULL && TypeIsIntegral(element) &&
+          (node->opcode == IR_OP(vadd) ||
+           node->opcode == IR_OP(vsub) ||
+           node->opcode == IR_OP(vand) ||
+           node->opcode == IR_OP(vor) ||
+           node->opcode == IR_OP(vxor) ||
+           node->opcode == IR_OP(vcmpeq) ||
+           node->opcode == IR_OP(vcmplt) ||
+           node->opcode == IR_OP(vcmple) ||
+           node->opcode == IR_OP(vcmpgt) ||
+           node->opcode == IR_OP(vcmpge) ||
+           node->opcode == IR_OP(vcmpltu) ||
+           node->opcode == IR_OP(vcmpleu) ||
+           node->opcode == IR_OP(vcmpgtu) ||
+           node->opcode == IR_OP(vcmpgeu));
+      if (native_x86 || native_aarch64) {
+        node = next;
+        continue;
+      }
+      ScalarizeVectorOperation(gen, node);
+    }
+    node = next;
+  }
 }
 
 void* GenerateFunction(Generator* gen) {
@@ -1841,6 +2070,8 @@ void* GenerateFunction(Generator* gen) {
   if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
     PrintBasicBlocks(gen, compiler->ir_output_file);
   }
+
+  ScalarizeVectorOperations(gen);
   
   TrapFunctionAfterCodegen(gen);
   

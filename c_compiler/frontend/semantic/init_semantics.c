@@ -240,7 +240,7 @@ INode* BuildINode(TypeRecord* type, INode* parent) {
   IKind kind = kIScalar;
   if (TypeIsStructOrUnion(type)) {
     kind = kIStruct;
-  } else if (TypeIsArray(type)) {
+  } else if (TypeIsArray(type) || TypeIsVector(type)) {
     kind = kIArray;
   }
   return NewINode(kind, type, parent);
@@ -530,6 +530,15 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
       return AdvanceCurrent(inode);
       
     case kIArray:
+      if (TypeIsVector(inode->type) &&
+          TypeEqual(expr->type, inode->type)) {
+        if (constants_only && !dependent_initializer) {
+          SemanticError(expr,
+                        "vector expression is not a compile-time constant");
+        }
+        inode->expr = ASTNodeMove(expr);
+        return AdvanceCurrent(inode->parent);
+      }
       return InitArrayAndAdvance(inode, expr, constants_only);
  
     case kIStruct:

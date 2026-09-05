@@ -157,6 +157,18 @@ inline bool TypeIsAtomic(TypeRecord* type) {
 inline bool TypeIsArray(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclArray;
 }
+
+static inline bool TypeIsVector(TypeRecord* type) {
+  return type != NULL && type->declarator == kDeclVector;
+}
+
+static inline TypeRecord* TypeVectorElement(TypeRecord* type) {
+  return TypeIsVector(type) ? type->next : NULL;
+}
+
+static inline int TypeVectorLaneCount(TypeRecord* type) {
+  return TypeIsVector(type) ? type->info.array.size.fixed : 0;
+}
 inline bool TypeIsFixedArray(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclArray &&
       !type->info.array.is_vla && !type->info.array.is_dependent_bound;
@@ -203,8 +215,9 @@ inline bool TypeIsStructOrUnion(TypeRecord* type) {
          (type->type & (kTypeStruct | kTypeUnion)) != 0;
 }
 
-inline bool TypeIsScalar(TypeRecord* type) {
-  return TypeIsComplex(type) || !TypeIsStructOrUnion(type);
+static inline bool TypeIsScalar(TypeRecord* type) {
+  return !TypeIsVector(type) &&
+         (TypeIsComplex(type) || !TypeIsStructOrUnion(type));
 }
 
 

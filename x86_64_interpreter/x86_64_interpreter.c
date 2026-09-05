@@ -854,6 +854,21 @@ static bool ExecuteSyscall(X86_64Interpreter* interpreter) {
 // recognized SSE opcode (in which case *ok reports whether execution
 // succeeded); returns false for opcodes this handler does not implement so the
 // caller can fall through to other 0x0F handlers.
+static uint64_t ReadPackedLane(const uint8_t* bytes, size_t width) {
+  uint64_t value = 0;
+  memcpy(&value, bytes, width);
+  return value;
+}
+
+static void WritePackedLane(uint8_t* bytes, size_t width, uint64_t value) {
+  memcpy(bytes, &value, width);
+}
+
+static int64_t SignExtendPackedLane(uint64_t value, size_t width) {
+  unsigned shift = 64 - (unsigned)(width * 8);
+  return (int64_t)(value << shift) >> shift;
+}
+
 static bool ExecuteSSE(X86_64Interpreter* interpreter, size_t* pos, REX rex,
                        uint8_t prefix, uint8_t opcode, bool* ok) {
   bool is_sd = (prefix == 0xf2);  // scalar double (f2)
@@ -1173,6 +1188,121 @@ static bool ExecuteSSE(X86_64Interpreter* interpreter, size_t* pos, REX rex,
       }
       interpreter->xmm[modrm.reg][0] = rex.w ? v : (uint32_t)v;
       interpreter->xmm[modrm.reg][1] = 0;
+      *ok = true;
+      return true;
+    }
+
+    case 0x6f:    // movdqu/movdqa: xmm <- xmm/mem (f3/66 prefix)
+    case 0x7f: {  // movdqu/movdqa: xmm/mem <- xmm (f3/66 prefix)
+      if (!is_ss && !is_pd) {
+        return false;
+      }
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, pos, rex, true, &modrm)) {
+        *ok = false;
+        return true;
+      }
+      bool store = (opcode == 0x7f);
+      int xmm = modrm.reg;
+      if (modrm.mod == 3) {
+        int other = modrm.rm;
+        int src = store ? xmm : other;
+        int dst = store ? other : xmm;
+        interpreter->xmm[dst][0] = interpreter->xmm[src][0];
+        interpreter->xmm[dst][1] = interpreter->xmm[src][1];
+      } else {
+        uint64_t addr = EffectiveAddress(interpreter, &modrm, *pos);
+        if (store) {
+          Store64(interpreter, addr, interpreter->xmm[xmm][0]);
+          Store64(interpreter, addr + 8, interpreter->xmm[xmm][1]);
+        } else {
+          interpreter->xmm[xmm][0] = Load64(interpreter, addr);
+          interpreter->xmm[xmm][1] = Load64(interpreter, addr + 8);
+        }
+      }
+      *ok = true;
+      return true;
+    }
+
+    case 0x64:  // pcmpgtb
+    case 0x65:  // pcmpgtw
+    case 0x66:  // pcmpgtd
+    case 0x74:  // pcmpeqb
+    case 0x75:  // pcmpeqw
+    case 0x76:  // pcmpeqd
+    case 0xd4:  // paddq
+    case 0xdb:  // pand
+    case 0xeb:  // por
+    case 0xef:  // pxor
+    case 0xf8:  // psubb
+    case 0xf9:  // psubw
+    case 0xfa:  // psubd
+    case 0xfb:  // psubq
+    case 0xfc:  // paddb
+    case 0xfd:  // paddw
+    case 0xfe: {  // paddd
+      if (!is_pd) {
+        return false;
+      }
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, pos, rex, true, &modrm)) {
+        *ok = false;
+        return true;
+      }
+      uint8_t source[16];
+      if (modrm.mod == 3) {
+        memcpy(source, interpreter->xmm[modrm.rm], sizeof(source));
+      } else {
+        uint64_t addr = EffectiveAddress(interpreter, &modrm, *pos);
+        uint64_t halves[2] = {
+            Load64(interpreter, addr), Load64(interpreter, addr + 8)};
+        memcpy(source, halves, sizeof(source));
+      }
+      uint8_t result[16];
+      memcpy(result, interpreter->xmm[modrm.reg], sizeof(result));
+      if (opcode == 0xdb || opcode == 0xeb || opcode == 0xef) {
+        for (int i = 0; i < 16; ++i) {
+          result[i] = opcode == 0xdb ? result[i] & source[i]
+                      : opcode == 0xeb ? result[i] | source[i]
+                                       : result[i] ^ source[i];
+        }
+      } else {
+        size_t width =
+            (opcode == 0x64 || opcode == 0x74 || opcode == 0xf8 ||
+             opcode == 0xfc)
+                ? 1
+                : (opcode == 0x65 || opcode == 0x75 || opcode == 0xf9 ||
+                   opcode == 0xfd)
+                      ? 2
+                      : (opcode == 0xd4 || opcode == 0xfb) ? 8 : 4;
+        bool add = opcode == 0xd4 || opcode == 0xfc || opcode == 0xfd ||
+                   opcode == 0xfe;
+        bool subtract =
+            opcode == 0xf8 || opcode == 0xf9 || opcode == 0xfa ||
+            opcode == 0xfb;
+        bool equal = opcode == 0x74 || opcode == 0x75 || opcode == 0x76;
+        uint64_t mask = width == 8 ? UINT64_MAX
+                                  : (UINT64_C(1) << (width * 8)) - 1;
+        for (size_t i = 0; i < 16; i += width) {
+          uint64_t left = ReadPackedLane(result + i, width);
+          uint64_t right = ReadPackedLane(source + i, width);
+          uint64_t value;
+          if (add) {
+            value = (left + right) & mask;
+          } else if (subtract) {
+            value = (left - right) & mask;
+          } else if (equal) {
+            value = left == right ? mask : 0;
+          } else {
+            value = SignExtendPackedLane(left, width) >
+                            SignExtendPackedLane(right, width)
+                        ? mask
+                        : 0;
+          }
+          WritePackedLane(result + i, width, value);
+        }
+      }
+      memcpy(interpreter->xmm[modrm.reg], result, sizeof(result));
       *ok = true;
       return true;
     }

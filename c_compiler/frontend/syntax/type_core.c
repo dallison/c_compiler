@@ -460,6 +460,8 @@ int TypeRecordAlignment(TypeRecord* record) {
   switch (record->declarator) {
     case kDeclArray:
       return TypeRecordAlignment(record->next);
+    case kDeclVector:
+      return record->size > 0 ? record->size : 1;
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
@@ -503,7 +505,9 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
     return NULL;
   }
   TypeRecordCalculateSize(record->next);
-  if (record->declarator == kDeclArray && !record->info.array.is_vla &&
+  if ((record->declarator == kDeclArray ||
+       record->declarator == kDeclVector) &&
+      !record->info.array.is_vla &&
       !record->info.array.is_dependent_bound) {
     record->size = record->info.array.size.fixed * record->next->size;
     return record;
@@ -529,6 +533,7 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:
+      case kDeclVector:
         if (!record->info.array.is_vla &&
             !record->info.array.is_dependent_bound) {
           record->size = record->info.array.size.fixed * record->next->size;
@@ -1108,7 +1113,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   if (TypeIsFunction(record)) {
     memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
     r->info.function.references_marked = false;
-  } else if (record->declarator == kDeclArray) {
+  } else if (record->declarator == kDeclArray ||
+             record->declarator == kDeclVector) {
     memcpy(&r->info.array, &record->info.array, sizeof(ArrayInfo));
   } else if (TypeIsStructOrUnion(record) ||
              record->declarator == kDeclMemberPointer) {
@@ -1391,6 +1397,14 @@ TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible
   t->info.array.size.fixed = size;
   t->info.array.is_flexible = is_flexible;
   return t;
+}
+
+TypeRecord* NewVectorTypeRecord(TypeRecord* element_type, int lane_count) {
+  TypeRecord* t = NewArrayTypeRecord(kQualPlain, false);
+  t->declarator = kDeclVector;
+  t->info.array.size.fixed = lane_count;
+  TypeRecordChain(t, element_type);
+  return TypeRecordCalculateSize(t);
 }
 
 ContractAssertion* NewContractAssertion(ContractAssertionKind kind,

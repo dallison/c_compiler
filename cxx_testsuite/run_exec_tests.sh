@@ -211,6 +211,7 @@ read_test_directives() {
   local line
   EXPECT_EXIT=""
   TEST_STANDARD="-std=c++20"
+  TEST_TARGETS=""
   TEST_COMPILE_ARGS=()
   while IFS= read -r line; do
     case "$line" in
@@ -228,6 +229,9 @@ read_test_directives() {
         ;;
       "// EXPECT_EXIT:"*)
         EXPECT_EXIT="${line#// EXPECT_EXIT: }"
+        ;;
+      "// TARGETS:"*)
+        TEST_TARGETS="${line#// TARGETS: }"
         ;;
     esac
   done < "$file"
@@ -256,6 +260,15 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   [ -e "$src" ] || continue
   base=$(basename "$src")
   read_test_directives "$src"
+  if [ -n "$TEST_TARGETS" ]; then
+    case " $TEST_TARGETS " in
+      *" $TARGET "*) ;;
+      *)
+        echo "skip $base (target $TARGET)"
+        continue
+        ;;
+    esac
+  fi
   exp="${src}.expected"
   bin="$work/test.bin"
   out="$work/test.out"

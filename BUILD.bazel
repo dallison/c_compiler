@@ -113,6 +113,7 @@ filegroup(
         "libc/include/semaphore",
         "libc/include/set",
         "libc/include/shared_mutex",
+        "libc/include/simd",
         "libc/include/source_location",
         "libc/include/span",
         "libc/include/spanstream",

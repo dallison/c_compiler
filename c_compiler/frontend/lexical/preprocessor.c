@@ -561,11 +561,17 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   // Architecture macros.
   if (StringEqual(compiler->target_name, "x86_64")) {
     PreprocessorDefineMacro(p, "__x86_64__", "1");
+    PreprocessorDefineMacro(p, "__SSE__", "1");
+    PreprocessorDefineMacro(p, "__SSE2__", "1");
+    PreprocessorDefineMacro(p, "__SSE_MATH__", "1");
+    PreprocessorDefineMacro(p, "__SSE2_MATH__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
     PreprocessorDefineMacro(p, "__LP64__", "1");
     PreprocessorDefineMacro(p, "_LP64", "1");
   } else if (StringEqual(compiler->target_name, "aarch64")) {
     PreprocessorDefineMacro(p, "__aarch64__", "1");
+    PreprocessorDefineMacro(p, "__ARM_NEON", "1");
+    PreprocessorDefineMacro(p, "__ARM_NEON__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
     PreprocessorDefineMacro(p, "__LP64__", "1");
     PreprocessorDefineMacro(p, "_LP64", "1");

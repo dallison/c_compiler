@@ -70,6 +70,7 @@ typedef enum {
   X86_64_OP(fvarreg),
 
   // End of TargetOpcode enumeration.
+  X86_64_OP(resultv),
 
   // Integer memory operations.
   X86_64_OP(loadb),
@@ -88,8 +89,29 @@ typedef enum {
   // Floating point memory operations.
   X86_64_OP(loadss),
   X86_64_OP(loadsd),
+  X86_64_OP(loadv),
   X86_64_OP(storess),
   X86_64_OP(storesd),
+  X86_64_OP(storev),
+
+  // SSE2 packed integer operations.
+  X86_64_OP(paddb),
+  X86_64_OP(paddw),
+  X86_64_OP(paddd),
+  X86_64_OP(paddq),
+  X86_64_OP(psubb),
+  X86_64_OP(psubw),
+  X86_64_OP(psubd),
+  X86_64_OP(psubq),
+  X86_64_OP(pand),
+  X86_64_OP(por),
+  X86_64_OP(pxor),
+  X86_64_OP(pcmpeqb),
+  X86_64_OP(pcmpeqw),
+  X86_64_OP(pcmpeqd),
+  X86_64_OP(pcmpgtb),
+  X86_64_OP(pcmpgtw),
+  X86_64_OP(pcmpgtd),
 
   // Integer arithmetic and logic.
   X86_64_OP(add),
@@ -218,6 +240,7 @@ typedef enum {
 #define X86_64_LO_RELOC 0x2000
 #define X86_64_PCREL_HI_RELOC 0x4000
 #define X86_64_PCREL_LO_RELOC 0x8000
+#define X86_64_VECTOR_VALUE 0x80
 #define X86_64_EXPORTED_LABEL 0x10000
 #define X86_64_UNSIGNED_MOD 0x20000
 #define X86_64_GOTPCREL_RELOC 0x40000

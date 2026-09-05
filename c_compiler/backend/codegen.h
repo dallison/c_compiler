@@ -143,6 +143,7 @@ bool SymbolNeedsDynamicStackAllocation(Symbol* symbol);
 // and unions this covers a pointer to member function, whose pair layout is too
 // wide for one register and which is already passed by address as an argument.
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type);
+bool TypeUsesNativeVectorABI(TypeRecord* type);
 
 void* GenerateFunction(Generator* gen);
 

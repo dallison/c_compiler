@@ -955,6 +955,42 @@ static bool ExecuteBarrier(AARCH64Interpreter* interpreter, uint32_t insn) {
   return true;
 }
 
+static bool ExecuteAdvancedSIMD8B(AARCH64Interpreter* interpreter,
+                                 uint32_t insn) {
+  uint32_t opcode = insn & 0xffe0fc00u;
+  int rd = insn & 0x1f;
+  int rn = (insn >> 5) & 0x1f;
+  int rm = (insn >> 16) & 0x1f;
+  uint64_t left = interpreter->v[rn];
+  uint64_t right = interpreter->v[rm];
+  uint64_t result = 0;
+  for (int lane = 0; lane < 8; lane++) {
+    uint8_t lhs = (uint8_t)(left >> (lane * 8));
+    uint8_t rhs = (uint8_t)(right >> (lane * 8));
+    uint8_t value;
+    switch (opcode) {
+      case 0x0e208400u: value = (uint8_t)(lhs + rhs); break;
+      case 0x2e208400u: value = (uint8_t)(lhs - rhs); break;
+      case 0x0e201c00u: value = lhs & rhs; break;
+      case 0x0ea01c00u: value = lhs | rhs; break;
+      case 0x2e201c00u: value = lhs ^ rhs; break;
+      case 0x2e208c00u: value = lhs == rhs ? 0xff : 0; break;
+      case 0x0e203400u:
+        value = (int8_t)lhs > (int8_t)rhs ? 0xff : 0;
+        break;
+      case 0x0e203c00u:
+        value = (int8_t)lhs >= (int8_t)rhs ? 0xff : 0;
+        break;
+      case 0x2e203400u: value = lhs > rhs ? 0xff : 0; break;
+      case 0x2e203c00u: value = lhs >= rhs ? 0xff : 0; break;
+      default: return false;
+    }
+    result |= (uint64_t)value << (lane * 8);
+  }
+  interpreter->v[rd] = result;
+  return true;
+}
+
 // Handles the integer load/store register forms: unsigned scaled 12-bit
 // immediate (0x39 group) as well as the unscaled, pre-/post-indexed and
 // register-offset forms (0x38 group), for byte/half/word/dword sizes with
@@ -1409,6 +1445,19 @@ static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
   }
   if ((insn & 0x3E000000) == 0x28000000) {
     return ExecuteLoadStorePair(interpreter, insn);
+  }
+  switch (insn & 0xffe0fc00u) {
+    case 0x0e208400u:
+    case 0x2e208400u:
+    case 0x0e201c00u:
+    case 0x0ea01c00u:
+    case 0x2e201c00u:
+    case 0x2e208c00u:
+    case 0x0e203400u:
+    case 0x0e203c00u:
+    case 0x2e203400u:
+    case 0x2e203c00u:
+      return ExecuteAdvancedSIMD8B(interpreter, insn);
   }
   if ((insn & 0x5F000000) == 0x1E000000) {
     return ExecuteFP(interpreter, insn);

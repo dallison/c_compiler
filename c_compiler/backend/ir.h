@@ -60,6 +60,7 @@ typedef enum {
   IR_OP(loadd),   // Load 64-bit float from [op0]
   IR_OP(loada),   // Load address from [op0]
   IR_OP(structarg),  // Load struct address from [op0] for call
+  IR_OP(vectorarg),  // Load a native vector value from object address for call
   
   // stores.
   IR_OP(store32),  // Store 32-bit op1 in [op0]
@@ -124,6 +125,32 @@ typedef enum {
   IR_OP(negi),      // -op0 (int)
   IR_OP(negf),      // -op0 (float)
   IR_OP(negd),      // -op0 (double)
+
+  // Target-independent fixed-vector operations. Operands and destination are
+  // object addresses; the result type records lane type and lane count.
+  IR_OP(vadd),
+  IR_OP(vsub),
+  IR_OP(vmul),
+  IR_OP(vdiv),
+  IR_OP(vmod),
+  IR_OP(vlsl),
+  IR_OP(vlsr),
+  IR_OP(vasr),
+  IR_OP(vand),
+  IR_OP(vor),
+  IR_OP(vxor),
+  IR_OP(vneg),
+  IR_OP(vonescomp),
+  IR_OP(vcmpeq),
+  IR_OP(vcmpne),
+  IR_OP(vcmplt),
+  IR_OP(vcmple),
+  IR_OP(vcmpgt),
+  IR_OP(vcmpge),
+  IR_OP(vcmpltu),
+  IR_OP(vcmpleu),
+  IR_OP(vcmpgtu),
+  IR_OP(vcmpgeu),
 
   // Compares (NOTE: keep these contiguous).
   IR_OP(cmpeqi),  // op0 == op1 (ints)
@@ -198,6 +225,8 @@ typedef enum {
   IR_OP(resultf),  // Float result is op0
   IR_OP(resultd),  // Double result is op0
   IR_OP(resulta),  // Address result is op0
+  IR_OP(resultv),  // Native vector result loaded from object address
+  IR_OP(capturev), // Store a native vector call result to object address
 
   IR_OP(i2f),  // (float)op0
   IR_OP(i2d),  // (double)op0

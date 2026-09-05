@@ -51,8 +51,27 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(storeq)
     OPCODE(loadss)
     OPCODE(loadsd)
+    OPCODE(loadv)
     OPCODE(storess)
     OPCODE(storesd)
+    OPCODE(storev)
+    OPCODE(paddb)
+    OPCODE(paddw)
+    OPCODE(paddd)
+    OPCODE(paddq)
+    OPCODE(psubb)
+    OPCODE(psubw)
+    OPCODE(psubd)
+    OPCODE(psubq)
+    OPCODE(pand)
+    OPCODE(por)
+    OPCODE(pxor)
+    OPCODE(pcmpeqb)
+    OPCODE(pcmpeqw)
+    OPCODE(pcmpeqd)
+    OPCODE(pcmpgtb)
+    OPCODE(pcmpgtw)
+    OPCODE(pcmpgtd)
     OPCODE(add)
     OPCODE(addl)
     OPCODE(sub)
@@ -146,6 +165,7 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(fa6)
     OPCODE(fa7)
     OPCODE(nrvoval)
+    OPCODE(resultv)
     OPCODE(x0)
     OPCODE(t0)
     OPCODE(regarg)
@@ -186,6 +206,7 @@ bool X86_64IsExpression(TargetInstruction* inst) {
     case X86_64_OP(storeq):
     case X86_64_OP(storess):
     case X86_64_OP(storesd):
+    case X86_64_OP(storev):
     case X86_64_OP(loc):
     case X86_64_OP(named_label):
     case X86_64_OP(regarg):
@@ -208,6 +229,7 @@ bool X86_64GeneratesOutput(TargetInstruction* inst) {
     case X86_64_OP(resulti):
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
       return false;
     default:
       return X86_64IsExpression(inst) && !X86_64IsSymbol(inst) && !X86_64IsConst(inst);
@@ -225,6 +247,7 @@ bool X86_64IsLoad(TargetInstruction* inst) {
     case X86_64_OP(loadw_z):
     case X86_64_OP(loadss):
     case X86_64_OP(loadsd):
+    case X86_64_OP(loadv):
       return true;
     default:
       return false;
@@ -253,6 +276,7 @@ bool X86_64IsStore(TargetInstruction* inst) {
     case X86_64_OP(storew):
     case X86_64_OP(storess):
     case X86_64_OP(storesd):
+    case X86_64_OP(storev):
       return true;
     default:
       return false;
@@ -289,8 +313,27 @@ bool X86_64IsFloatingPoint(TargetInstruction* inst) {
   switch ((X86_64Opcode)inst->opcode) {
     case X86_64_OP(loadss):
     case X86_64_OP(loadsd):
+    case X86_64_OP(loadv):
     case X86_64_OP(storess):
     case X86_64_OP(storesd):
+    case X86_64_OP(storev):
+    case X86_64_OP(paddb):
+    case X86_64_OP(paddw):
+    case X86_64_OP(paddd):
+    case X86_64_OP(paddq):
+    case X86_64_OP(psubb):
+    case X86_64_OP(psubw):
+    case X86_64_OP(psubd):
+    case X86_64_OP(psubq):
+    case X86_64_OP(pand):
+    case X86_64_OP(por):
+    case X86_64_OP(pxor):
+    case X86_64_OP(pcmpeqb):
+    case X86_64_OP(pcmpeqw):
+    case X86_64_OP(pcmpeqd):
+    case X86_64_OP(pcmpgtb):
+    case X86_64_OP(pcmpgtw):
+    case X86_64_OP(pcmpgtd):
     case X86_64_OP(addss):
     case X86_64_OP(addsd):
     case X86_64_OP(subss):
@@ -330,6 +373,7 @@ bool X86_64IsFloatingPoint(TargetInstruction* inst) {
     case X86_64_OP(constd):
     case X86_64_OP(resultf):
     case X86_64_OP(resultd):
+    case X86_64_OP(resultv):
       return true;
     default:
       return false;
@@ -424,6 +468,7 @@ bool X86_64IsResult(TargetInstruction* inst) {
      case X86_64_OP(resulti):
       case X86_64_OP(resultf):
       case X86_64_OP(resultd):
+      case X86_64_OP(resultv):
       return true;
     default:
       return false;
@@ -2985,6 +3030,18 @@ static TargetInstruction* LowerNamedLabel(X86_64Generator* rv, IRNode* label) {
 
 static TargetInstruction* LowerResult(X86_64Generator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
+  if (node->opcode == IR_OP(resultv)) {
+    TargetInstruction* address = Materialize(rv, node->inputs.value.p[0]);
+    TargetInstruction* load = Emit(
+        rv, NewInstruction2(
+                X86_64_OP(loadv), address,
+                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+    TargetInstruction* result_reg =
+        EmitSymbol(rv, NewInstruction(X86_64_OP(resultv)));
+    result_reg->flags |= X86_64_VECTOR_VALUE;
+    load->dest = result_reg;
+    return SetLoweredNode(node, load);
+  }
   X86_64Opcode result_reg_opcode, opcode;
   switch (node->opcode) {
     case IR_OP(resulti):
@@ -3007,6 +3064,91 @@ static TargetInstruction* LowerResult(X86_64Generator* rv, IRNode* node) {
   TargetInstruction* result = Materialize(rv, node->inputs.value.p[0]);
   TargetInstruction* result_reg = EmitSymbol(rv, NewInstruction(result_reg_opcode));
   return SetLoweredNode(node, SetDestOrMove(rv, result, result_reg, opcode));
+}
+
+static TargetInstruction* LowerCaptureVectorResult(X86_64Generator* rv,
+                                                   IRNode* node) {
+  assert(node->inputs.length == 2);
+  TargetInstruction* destination = Materialize(rv, node->inputs.value.p[0]);
+  TargetInstruction* call = Materialize(rv, node->inputs.value.p[1]);
+  call->flags |= X86_64_VECTOR_VALUE;
+  TargetInstruction* store = Emit(
+      rv, NewInstruction3(
+              X86_64_OP(storev), call, destination,
+              GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  return SetLoweredNode(node, store);
+}
+
+static TargetInstruction* LowerVectorOperation(X86_64Generator* rv,
+                                               IRNode* node) {
+  assert(node->inputs.length == 3);
+  TypeRecord* vector_type = (TypeRecord*)node->aux;
+  if (!TypeIsVector(vector_type)) {
+    vector_type = ((IRNode*)node->inputs.value.p[0])->type;
+    if (TypeIsPointer(vector_type)) {
+      vector_type = vector_type->next;
+    }
+  }
+  assert(TypeIsVector(vector_type));
+  TypeRecord* element = TypeVectorElement(vector_type);
+  assert(element != NULL);
+
+  X86_64Opcode opcode;
+  switch (node->opcode) {
+    case IR_OP(vand): opcode = X86_64_OP(pand); break;
+    case IR_OP(vor): opcode = X86_64_OP(por); break;
+    case IR_OP(vxor): opcode = X86_64_OP(pxor); break;
+    case IR_OP(vadd):
+      opcode = element->size == 1 ? X86_64_OP(paddb)
+               : element->size == 2 ? X86_64_OP(paddw)
+               : element->size == 4 ? X86_64_OP(paddd)
+                                    : X86_64_OP(paddq);
+      break;
+    case IR_OP(vsub):
+      opcode = element->size == 1 ? X86_64_OP(psubb)
+               : element->size == 2 ? X86_64_OP(psubw)
+               : element->size == 4 ? X86_64_OP(psubd)
+                                    : X86_64_OP(psubq);
+      break;
+    case IR_OP(vcmpeq):
+      opcode = element->size == 1 ? X86_64_OP(pcmpeqb)
+               : element->size == 2 ? X86_64_OP(pcmpeqw)
+                                    : X86_64_OP(pcmpeqd);
+      break;
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmplt):
+      opcode = element->size == 1 ? X86_64_OP(pcmpgtb)
+               : element->size == 2 ? X86_64_OP(pcmpgtw)
+                                    : X86_64_OP(pcmpgtd);
+      break;
+    default:
+      assert(false);
+  }
+
+  TargetInstruction* destination = Materialize(rv, node->inputs.value.p[0]);
+  TargetInstruction* left_address = Materialize(rv, node->inputs.value.p[1]);
+  TargetInstruction* right_address = Materialize(rv, node->inputs.value.p[2]);
+  TargetInstruction* left = Emit(
+      rv, NewInstruction2(
+              X86_64_OP(loadv), left_address,
+              GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  TargetInstruction* right = Emit(
+      rv, NewInstruction2(
+              X86_64_OP(loadv), right_address,
+              GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  if (node->opcode == IR_OP(vcmplt)) {
+    TargetInstruction* temporary = left;
+    left = right;
+    right = temporary;
+  }
+  TargetInstruction* operation =
+      Emit(rv, NewInstruction2(opcode, left, right));
+  operation->flags |= X86_64_VECTOR_VALUE;
+  TargetInstruction* store = Emit(
+      rv, NewInstruction3(
+              X86_64_OP(storev), operation, destination,
+              GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  return SetLoweredNode(node, store);
 }
 
 static TargetInstruction* LowerAsm(X86_64Generator* rv, IRNode* node) {
@@ -3749,6 +3891,18 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
         }
         struct_area_size += struct_size;
       }
+    } else if (TypeIsVector(arg_node->type)) {
+      if (next_fp_arg_reg < X86_64_NUM_FP_ARGS) {
+        TargetInstruction* arg_reg =
+            FloatingPointArgumentRegister(rv, next_fp_arg_reg++);
+        VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
+      } else {
+        VectorAppend(
+            &arg_locations,
+            NewArgLocationPushed(kArgLocationPushed,
+                                 next_pushed_arg_offset));
+        next_pushed_arg_offset += (size_t)arg_node->type->size;
+      }
     } else if (TypeIsFloatingPoint(arg_node->type)) {
       if (next_fp_arg_reg < X86_64_NUM_FP_ARGS) {
         // Argument goes in an argument register.
@@ -3899,6 +4053,21 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
       }
       case kArgLocationPushed: {
         TargetInstruction* arg = Materialize(rv, arg_node);
+        if (TypeIsVector(arg_node->type)) {
+          TargetInstruction* address = arg;
+          TargetInstruction* first = Emit(rv, NewInstruction2(
+              X86_64_OP(loadq), address,
+              GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+          PushArg(rv, arg_node, first, arg_location->location.offset);
+          if (arg_node->type->size > 8) {
+            TargetInstruction* second = Emit(rv, NewInstruction2(
+                X86_64_OP(loadq), address,
+                GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
+            PushArg(rv, arg_node, second,
+                    arg_location->location.offset + 8);
+          }
+          break;
+        }
         if (TypeIsStructOrUnion(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
@@ -3917,6 +4086,15 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
       }
       case kArgLocationRegister: {
         // Argument is in a register.
+        if (TypeIsVector(arg_node->type)) {
+          TargetInstruction* address = Materialize(rv, arg_node);
+          TargetInstruction* load = Emit(
+              rv, NewInstruction2(
+                      X86_64_OP(loadv), address,
+                      GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+          load->dest = arg_location->location.reg;
+          break;
+        }
         TargetInstruction* arg;
         if (arg_location->staged) {
           X86_64Opcode load_opcode = X86_64_OP(loadq);
@@ -4017,10 +4195,14 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
   } else {
     if (((int)addr->opcode == (int)X86_64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
-      opcode = TypeIsFloatingPoint(node->type) ? X86_64_OP(callf) : X86_64_OP(call);
+      opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+                   ? X86_64_OP(callf)
+                   : X86_64_OP(call);
     } else {
       // Calling through a register, rcall.
-      opcode = TypeIsFloatingPoint(node->type) ? X86_64_OP(rcallf) : X86_64_OP(rcall);
+      opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+                   ? X86_64_OP(rcallf)
+                   : X86_64_OP(rcall);
     }
     call =
         Emit(rv, NewInstruction2(opcode, addr, BuildArgList(rv, &arg_locations)));
@@ -4616,12 +4798,27 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(structarg):
       // Same as its input.
       return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
+    case IR_OP(vectorarg):
+      // The call lowering loads this address into an XMM argument register.
+      return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
       
     case IR_OP(resulti):
     case IR_OP(resultf):
     case IR_OP(resultd):
     case IR_OP(resulta):
+    case IR_OP(resultv):
       return LowerResult(rv, node);
+    case IR_OP(capturev):
+      return LowerCaptureVectorResult(rv, node);
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmpgt):
+      return LowerVectorOperation(rv, node);
 
     case IR_OP(memzero):
       return LowerMemzero(rv, node);
@@ -4783,7 +4980,8 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
           location.location.offset = stack_offset;
           location.second_offset = stack_offset + 8;
         }
-      } else if (TypeIsFloatingPoint(arg->pooled->type)) {
+      } else if (TypeIsFloatingPoint(arg->pooled->type) ||
+                 TypeIsVector(arg->pooled->type)) {
         if (fp_reg <= X86_64_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -4817,11 +5015,14 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
       } else {
         stack_offset += 16;
       }
-    } else if (TypeIsFloatingPoint(arg_symbol->type)) {
+    } else if (TypeIsFloatingPoint(arg_symbol->type) ||
+               TypeIsVector(arg_symbol->type)) {
       if (fp_reg <= X86_64_FP_ARG_END) {
         fp_reg++;
       } else {
-        stack_offset += 8;
+        stack_offset += TypeIsVector(arg_symbol->type)
+                            ? arg_symbol->type->size
+                            : 8;
       }
     } else {
       if (int_reg <= X86_64_INT_ARG_END) {
@@ -4976,7 +5177,37 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
   assert(size != 0);
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
-  if (TypeIsFloatingPoint(entry->pooled->type)) {
+  if (TypeIsVector(entry->pooled->type)) {
+    AlignOffset(entry, var_offset);
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args, func);
+      if (location.type == kArgLocationRegister) {
+        int copy_size = (int)((size + 15) & ~15);
+        int offset = -16 - rv->saved_arg_area_size - copy_size;
+        rv->saved_arg_area_size += copy_size;
+        entry->pooled->data.ivalue = offset;
+        SetDebugStackLocation(entry, offset);
+        rv->num_fp_arg_regs++;
+        VectorAppend(&rv->saved_regs,
+                     NewSavedArgumentRegister(
+                         (int)location.location.offset, X86_64_FP_REG, offset,
+                         /*is_fp=*/true, (int)size));
+      } else {
+        int space_above_frame_pointer =
+            compiler->current_function->info.function.varargs
+                ? X86_64_VARARG_SAVE_AREA_SIZE
+                : 0;
+        entry->pooled->data.ivalue =
+            (int)location.location.offset + 8 + space_above_frame_pointer;
+        rv->has_incoming_stack_args = true;
+        SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+      }
+    } else {
+      entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
+      *var_offset += (int)size;
+    }
+  } else if (TypeIsFloatingPoint(entry->pooled->type)) {
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = X86_64_REG_VAR | reg;
@@ -5052,7 +5283,8 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
-  } else if (TypeIsStructOrUnion(entry->pooled->type)) {
+  } else if (TypeIsStructOrUnion(entry->pooled->type) ||
+             TypeIsVector(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
         // Less than a pointer, passed in reg

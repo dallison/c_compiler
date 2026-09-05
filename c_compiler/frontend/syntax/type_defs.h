@@ -94,6 +94,9 @@ typedef enum {
   kDeclReference,
   kDeclRValueReference,
   kDeclArray,
+  // GCC/Clang fixed-width vector type. The lane count is stored in
+  // info.array.size.fixed and next names the scalar element type.
+  kDeclVector,
   kDeclFunction,
   kDeclMemberPointer,
 } Declarator;
@@ -515,7 +518,7 @@ typedef struct TypeRecord {
   Struct* size_sync_owner;                                           // @wire -
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
-    ArrayInfo array;             // @wire 11 (kDeclArray)
+    ArrayInfo array;             // @wire 11 (kDeclArray/kDeclVector)
     FunctionInfo function;       // @wire 12 (kDeclFunction)
     Struct* struct_info;         // @wire 13 (kTypeStruct/kTypeUnion)
     Enum* enum_info;             // @wire 14 (kTypeEnum)

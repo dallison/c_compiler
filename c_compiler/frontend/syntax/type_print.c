@@ -393,6 +393,11 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
       }
       break;
 
+    case kDeclVector:
+      TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
+      StringPrintf(result, " __attribute__((vector_size(%d)))", type->size);
+      break;
+
     case kDeclFunction: {
       TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       StringAppendChar(result, '(');
@@ -843,6 +848,11 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         StringAppendChar(result, '$');
         QualifiersToString(type->qualifiers, result);
       }
+      break;
+
+    case kDeclVector:
+      TypeRecordToTemplateKeyString(type->next, result);
+      StringPrintf(result, "$vector%d", type->info.array.size.fixed);
       break;
 
     case kDeclFunction:
