@@ -298,7 +298,7 @@ class basic_regex {
         bracket = false;
       } else if (!bracket && value == CharT('(')) {
         ++depth;
-        ++__marks_;
+        if ((__flags_ & nosubs) == 0) ++__marks_;
       } else if (!bracket && value == CharT(')')) {
         if (depth == 0) throw regex_error(regex_constants::error_paren);
         --depth;
@@ -409,6 +409,11 @@ class match_results {
     __matches_[0].first = first;
     __matches_[0].second = last;
     __matches_[0].matched = true;
+    for (size_t i = 1; i < __matches_.size(); ++i) {
+      __matches_[i].first = finish;
+      __matches_[i].second = finish;
+      __matches_[i].matched = false;
+    }
     __origin_ = origin;
     __prefix_.first = origin;
     __prefix_.second = first;
@@ -420,6 +425,13 @@ class match_results {
     __unmatched_.second = finish;
     __unmatched_.matched = false;
     __ready_ = true;
+  }
+  void __set_capture(size_t index, BidirectionalIterator first,
+                     BidirectionalIterator last, bool matched) {
+    if (index >= __matches_.size()) return;
+    __matches_[index].first = first;
+    __matches_[index].second = last;
+    __matches_[index].matched = matched;
   }
   void __clear() {
     __matches_.clear();
@@ -444,6 +456,13 @@ typedef match_results<string::const_iterator> smatch;
 typedef match_results<wstring::const_iterator> wsmatch;
 
 namespace __regex_detail {
+
+struct __cap {
+  size_t first;
+  size_t last;
+  bool matched;
+  __cap() : first(0), last(0), matched(false) {}
+};
 
 template <class CharT>
 struct __engine {
@@ -519,10 +538,26 @@ static bool __atom_match(const basic_string<CharT>& pattern,
          __fold(value, insensitive);
 }
 
+struct __state {
+  vector<__cap> groups;
+  unsigned next;
+  __state() : next(1) {}
+  void reset(unsigned n) {
+    groups.assign(n, __cap());
+    next = 1;
+  }
+};
+
+static void __restore(__state& state, const __state& saved) {
+  state.groups = saved.groups;
+  state.next = saved.next;
+}
+
 static bool __match_segment(const basic_string<CharT>& pattern,
                      size_t pattern_first, size_t pattern_last,
                      const basic_string<CharT>& input, size_t input_pos,
-                     bool insensitive, bool not_eol, size_t& result) {
+                     bool insensitive, bool not_eol, size_t& result,
+                     __state& state) {
   if (pattern_first == pattern_last) {
     result = input_pos;
     return true;
@@ -548,15 +583,21 @@ static bool __match_segment(const basic_string<CharT>& pattern,
       if (depth != 0) ++close;
     }
     if (depth != 0) return false;
+    unsigned mark = state.next++;
     size_t group_end;
     if (!__match_segment(
             pattern, pattern_first + 1, close, input,
-            input_pos, insensitive, not_eol, group_end)) {
+            input_pos, insensitive, not_eol, group_end, state)) {
       return false;
+    }
+    if (mark >= 1 && mark <= state.groups.size()) {
+      state.groups[mark - 1].first = input_pos;
+      state.groups[mark - 1].last = group_end;
+      state.groups[mark - 1].matched = true;
     }
     return __match_segment(
         pattern, close + 1, pattern_last, input,
-        group_end, insensitive, not_eol, result);
+        group_end, insensitive, not_eol, result, state);
   }
   size_t atom_last =
       __atom_end(pattern, pattern_first, pattern_last);
@@ -580,11 +621,13 @@ static bool __match_segment(const basic_string<CharT>& pattern,
     ++count;
   }
   while (count >= minimum) {
+    __state saved = state;
     if (__match_segment(
             pattern, rest, pattern_last, input,
-            input_pos + count, insensitive, not_eol, result)) {
+            input_pos + count, insensitive, not_eol, result, state)) {
       return true;
     }
+    __restore(state, saved);
     if (count == 0) break;
     --count;
   }
@@ -594,7 +637,8 @@ static bool __match_segment(const basic_string<CharT>& pattern,
 static bool __find_from(const basic_string<CharT>& input,
             const basic_regex<CharT>& expression,
             size_t& first, size_t& last, bool require_full,
-            regex_constants::match_flag_type flags, size_t start_min) {
+            regex_constants::match_flag_type flags, size_t start_min,
+            vector<__cap>* captures = 0) {
   const basic_string<CharT>& pattern = expression.__pattern();
   bool anchored = !pattern.empty() && pattern[0] == CharT('^');
   bool insensitive =
@@ -606,18 +650,22 @@ static bool __find_from(const basic_string<CharT>& input,
                         (flags & regex_constants::match_continuous) != 0
                     ? start_min
                     : input.size();
+  unsigned marks = expression.mark_count();
   for (; start <= stop; ++start) {
     size_t end;
+    __state state;
+    state.reset(marks);
     if (__match_segment(
             pattern, pattern_first, pattern.size(), input,
             start, insensitive,
-            (flags & regex_constants::match_not_eol) != 0, end) &&
+            (flags & regex_constants::match_not_eol) != 0, end, state) &&
         (!require_full || (start == 0 && end == input.size()))) {
       if ((flags & regex_constants::match_not_null) != 0 && end == start) {
         continue;
       }
       first = start;
       last = end;
+      if (captures != 0) *captures = state.groups;
       return true;
     }
   }
@@ -627,8 +675,109 @@ static bool __find_from(const basic_string<CharT>& input,
 static bool __find(const basic_string<CharT>& input,
             const basic_regex<CharT>& expression,
             size_t& first, size_t& last, bool require_full,
-            regex_constants::match_flag_type flags) {
-  return __find_from(input, expression, first, last, require_full, flags, 0);
+            regex_constants::match_flag_type flags,
+            vector<__cap>* captures = 0) {
+  return __find_from(input, expression, first, last, require_full, flags, 0,
+                     captures);
+}
+
+static void __append_span(basic_string<CharT>& output,
+                          const basic_string<CharT>& input, size_t from,
+                          size_t to) {
+  for (size_t i = from; i < to; ++i) output.push_back(input[i]);
+}
+
+static void __format(basic_string<CharT>& output,
+                     const basic_string<CharT>& input, size_t first,
+                     size_t last, const vector<__cap>& captures,
+                     const basic_string<CharT>& format) {
+  for (size_t i = 0; i < format.size(); ++i) {
+    if (format[i] != CharT('$') || i + 1 >= format.size()) {
+      output.push_back(format[i]);
+      continue;
+    }
+    CharT next = format[i + 1];
+    if (next == CharT('$')) {
+      output.push_back(CharT('$'));
+      ++i;
+      continue;
+    }
+    if (next == CharT('&')) {
+      __append_span(output, input, first, last);
+      ++i;
+      continue;
+    }
+    if (next == CharT('`')) {
+      __append_span(output, input, 0, first);
+      ++i;
+      continue;
+    }
+    if (next == CharT('\'')) {
+      __append_span(output, input, last, input.size());
+      ++i;
+      continue;
+    }
+    if (next >= CharT('0') && next <= CharT('9')) {
+      size_t index = static_cast<size_t>(next - CharT('0'));
+      size_t consumed = 1;
+      if (i + 2 < format.size() && format[i + 2] >= CharT('0') &&
+          format[i + 2] <= CharT('9')) {
+        size_t two = index * 10 +
+                     static_cast<size_t>(format[i + 2] - CharT('0'));
+        if (two <= captures.size()) {
+          index = two;
+          consumed = 2;
+        }
+      }
+      i += consumed;
+      if (index == 0) {
+        __append_span(output, input, first, last);
+      } else if (index <= captures.size() && captures[index - 1].matched) {
+        __append_span(output, input, captures[index - 1].first,
+                      captures[index - 1].last);
+      }
+      continue;
+    }
+    output.push_back(format[i]);
+  }
+}
+
+static basic_string<CharT> __replace(
+    const basic_string<CharT>& input,
+    const basic_regex<CharT>& expression,
+    const basic_string<CharT>& format,
+    regex_constants::match_flag_type flags) {
+  basic_string<CharT> result;
+  size_t pos = 0;
+  bool any = false;
+  bool first_only =
+      (flags & regex_constants::format_first_only) != 0;
+  bool no_copy = (flags & regex_constants::format_no_copy) != 0;
+  while (pos <= input.size()) {
+    size_t first = 0;
+    size_t last = 0;
+    vector<__cap> captures;
+    bool found = __find_from(input, expression, first, last, false, flags,
+                             pos, &captures);
+    if (!found) break;
+    any = true;
+    if (!no_copy) __append_span(result, input, pos, first);
+    __format(result, input, first, last, captures, format);
+    if (last == first) {
+      if (last >= input.size()) {
+        pos = last;
+        break;
+      }
+      if (!no_copy) result.push_back(input[last]);
+      pos = last + 1;
+    } else {
+      pos = last;
+    }
+    if (first_only) break;
+  }
+  if (!any) return input;
+  if (!no_copy) __append_span(result, input, pos, input.size());
+  return result;
 }
 
 };
@@ -650,6 +799,21 @@ BidirectionalIterator __advance_copy(BidirectionalIterator first, size_t count) 
   return first;
 }
 
+template <class BidirectionalIterator, class Allocator>
+void __fill_results(match_results<BidirectionalIterator, Allocator>& results,
+                    BidirectionalIterator origin, BidirectionalIterator finish,
+                    size_t found_first, size_t found_last, unsigned marks,
+                    const vector<__cap>& captures) {
+  results.__set(origin, finish, __advance_copy(origin, found_first),
+                __advance_copy(origin, found_last), marks);
+  for (size_t i = 0; i < captures.size(); ++i) {
+    if (!captures[i].matched) continue;
+    results.__set_capture(
+        i + 1, __advance_copy(origin, captures[i].first),
+        __advance_copy(origin, captures[i].last), true);
+  }
+}
+
 template <class BidirectionalIterator, class Allocator, class CharT,
           class Traits>
 bool __search_range(BidirectionalIterator first, BidirectionalIterator last,
@@ -665,14 +829,16 @@ bool __search_range(BidirectionalIterator first, BidirectionalIterator last,
   }
   size_t found_first = 0;
   size_t found_last = 0;
+  vector<__cap> captures;
   const bool found = __engine<CharT>::__find_from(
-      input, expression, found_first, found_last, false, flags, origin);
+      input, expression, found_first, found_last, false, flags, origin,
+      &captures);
   if (!found) {
     results.__clear();
     return false;
   }
-  results.__set(first, last, __advance_copy(first, found_first),
-                __advance_copy(first, found_last), expression.mark_count());
+  __fill_results(results, first, last, found_first, found_last,
+                 expression.mark_count(), captures);
   return true;
 }
 
@@ -681,26 +847,6 @@ bool __search_range(BidirectionalIterator first, BidirectionalIterator last,
 template <class CharT, class Traits>
 bool regex_match(
     const basic_string<CharT>& input,
-    match_results<typename basic_string<CharT>::const_iterator>& results,
-    const basic_regex<CharT, Traits>& expression,
-    regex_constants::match_flag_type flags = regex_constants::match_default) {
-  size_t first;
-  size_t last;
-  bool found = __regex_detail::__engine<CharT>::__find(
-      input, expression, first, last, true, flags);
-  if (!found) {
-    results.__clear();
-    return false;
-  }
-  typename basic_string<CharT>::const_iterator begin = input.begin();
-  results.__set(begin, input.end(), begin + first, begin + last,
-                expression.mark_count());
-  return true;
-}
-
-template <class CharT, class Traits>
-bool regex_match(
-    const basic_string<CharT>& input,
     const basic_regex<CharT, Traits>& expression,
     regex_constants::match_flag_type flags = regex_constants::match_default) {
   size_t first;
@@ -712,32 +858,30 @@ bool regex_match(
 template <class CharT, class Traits>
 bool regex_search(
     const basic_string<CharT>& input,
-    match_results<typename basic_string<CharT>::const_iterator>& results,
-    const basic_regex<CharT, Traits>& expression,
-    regex_constants::match_flag_type flags = regex_constants::match_default) {
-  size_t first;
-  size_t last;
-  bool found = __regex_detail::__engine<CharT>::__find(
-      input, expression, first, last, false, flags);
-  if (!found) {
-    results.__clear();
-    return false;
-  }
-  typename basic_string<CharT>::const_iterator begin = input.begin();
-  results.__set(begin, input.end(), begin + first, begin + last,
-                expression.mark_count());
-  return true;
-}
-
-template <class CharT, class Traits>
-bool regex_search(
-    const basic_string<CharT>& input,
     const basic_regex<CharT, Traits>& expression,
     regex_constants::match_flag_type flags = regex_constants::match_default) {
   size_t first;
   size_t last;
   return __regex_detail::__engine<CharT>::__find(
       input, expression, first, last, false, flags);
+}
+
+inline bool regex_match(
+    const string& input, smatch& results, const regex& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  size_t first;
+  size_t last;
+  vector<__regex_detail::__cap> captures;
+  bool found = __regex_detail::__engine<char>::__find(
+      input, expression, first, last, true, flags, &captures);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  string::const_iterator begin = input.begin();
+  __regex_detail::__fill_results(results, begin, input.end(), first, last,
+                                 expression.mark_count(), captures);
+  return true;
 }
 
 inline bool regex_search(
@@ -745,15 +889,16 @@ inline bool regex_search(
     regex_constants::match_flag_type flags = regex_constants::match_default) {
   size_t first;
   size_t last;
+  vector<__regex_detail::__cap> captures;
   bool found = __regex_detail::__engine<char>::__find(
-      input, expression, first, last, false, flags);
+      input, expression, first, last, false, flags, &captures);
   if (!found) {
     results.__clear();
     return false;
   }
   string::const_iterator begin = input.begin();
-  results.__set(begin, input.end(), begin + first, begin + last,
-                expression.mark_count());
+  __regex_detail::__fill_results(results, begin, input.end(), first, last,
+                                 expression.mark_count(), captures);
   return true;
 }
 
@@ -765,14 +910,15 @@ bool regex_match(
   basic_string<CharT> value(input);
   size_t first;
   size_t last;
+  vector<__regex_detail::__cap> captures;
   bool found = __regex_detail::__engine<CharT>::__find(
-      value, expression, first, last, true, flags);
+      value, expression, first, last, true, flags, &captures);
   if (!found) {
     results.__clear();
     return false;
   }
-  results.__set(input, input + value.size(), input + first, input + last,
-                expression.mark_count());
+  __regex_detail::__fill_results(results, input, input + value.size(), first,
+                                 last, expression.mark_count(), captures);
   return true;
 }
 
@@ -795,14 +941,15 @@ bool regex_search(
   basic_string<CharT> value(input);
   size_t first;
   size_t last;
+  vector<__regex_detail::__cap> captures;
   bool found = __regex_detail::__engine<CharT>::__find(
-      value, expression, first, last, false, flags);
+      value, expression, first, last, false, flags, &captures);
   if (!found) {
     results.__clear();
     return false;
   }
-  results.__set(input, input + value.size(), input + first, input + last,
-                expression.mark_count());
+  __regex_detail::__fill_results(results, input, input + value.size(), first,
+                                 last, expression.mark_count(), captures);
   return true;
 }
 
@@ -823,29 +970,8 @@ basic_string<CharT> regex_replace(
     const basic_regex<CharT, Traits>& expression,
     const basic_string<CharT>& format,
     regex_constants::match_flag_type flags = regex_constants::match_default) {
-  size_t first;
-  size_t last;
-  if (!__regex_detail::__engine<CharT>::__find(
-          input, expression, first, last, false, flags)) {
-    return input;
-  }
-  basic_string<CharT> result;
-  if ((flags & regex_constants::format_no_copy) == 0) {
-    result.append(input.begin(), input.begin() + first);
-  }
-  for (size_t i = 0; i < format.size(); ++i) {
-    if (format[i] == CharT('$') && i + 1 < format.size() &&
-        format[i + 1] == CharT('&')) {
-      result.append(input.begin() + first, input.begin() + last);
-      ++i;
-    } else {
-      result.push_back(format[i]);
-    }
-  }
-  if ((flags & regex_constants::format_no_copy) == 0) {
-    result.append(input.begin() + last, input.end());
-  }
-  return result;
+  return __regex_detail::__engine<CharT>::__replace(input, expression, format,
+                                                    flags);
 }
 
 template <class CharT, class Traits>
@@ -859,33 +985,8 @@ basic_string<CharT> regex_replace(
 inline string regex_replace(
     const string& input, const regex& expression, const string& format,
     regex_constants::match_flag_type flags = regex_constants::match_default) {
-  size_t first;
-  size_t last;
-  if (!__regex_detail::__engine<char>::__find(
-          input, expression, first, last, false, flags)) {
-    return input;
-  }
-  string result;
-  if ((flags & regex_constants::format_no_copy) == 0) {
-    for (size_t i = 0; i < first; ++i) result.push_back(input[i]);
-  }
-  for (size_t i = 0; i < format.size(); ++i) {
-    if (format[i] == '$' && i + 1 < format.size() &&
-        format[i + 1] == '&') {
-      for (size_t position = first; position < last; ++position) {
-        result.push_back(input[position]);
-      }
-      ++i;
-    } else {
-      result.push_back(format[i]);
-    }
-  }
-  if ((flags & regex_constants::format_no_copy) == 0) {
-    for (size_t i = last; i < input.size(); ++i) {
-      result.push_back(input[i]);
-    }
-  }
-  return result;
+  return __regex_detail::__engine<char>::__replace(input, expression, format,
+                                                   flags);
 }
 
 template <class BidirectionalIterator, class Allocator, class CharT,
