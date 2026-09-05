@@ -285,9 +285,18 @@ class basic_regex {
     unsigned depth = 0;
     bool bracket = false;
     bool escaped = false;
+    bool bre = (__flags_ & regex_constants::basic) != 0 ||
+               (__flags_ & regex_constants::grep) != 0;
     for (size_t i = 0; i < __pattern_.size(); ++i) {
       CharT value = __pattern_[i];
       if (escaped) {
+        if (bre && value == CharT('(')) {
+          ++depth;
+          if ((__flags_ & nosubs) == 0) ++__marks_;
+        } else if (bre && value == CharT(')')) {
+          if (depth == 0) throw regex_error(regex_constants::error_paren);
+          --depth;
+        }
         escaped = false;
       } else if (value == CharT('\\')) {
         escaped = true;
@@ -296,10 +305,13 @@ class basic_regex {
       } else if (value == CharT(']')) {
         if (!bracket) throw regex_error(regex_constants::error_brack);
         bracket = false;
-      } else if (!bracket && value == CharT('(')) {
+      } else if (!bracket && !bre && value == CharT('(')) {
+        bool non_capturing = i + 2 < __pattern_.size() &&
+                             __pattern_[i + 1] == CharT('?') &&
+                             __pattern_[i + 2] == CharT(':');
         ++depth;
-        if ((__flags_ & nosubs) == 0) ++__marks_;
-      } else if (!bracket && value == CharT(')')) {
+        if (!non_capturing && (__flags_ & nosubs) == 0) ++__marks_;
+      } else if (!bracket && !bre && value == CharT(')')) {
         if (depth == 0) throw regex_error(regex_constants::error_paren);
         --depth;
       }
@@ -496,6 +508,36 @@ static bool __class_match(const basic_string<CharT>& pattern,
   return negate ? !matched : matched;
 }
 
+static bool __is_bre(unsigned syntax) {
+  return (syntax & regex_constants::basic) != 0 ||
+         (syntax & regex_constants::grep) != 0;
+}
+
+static bool __is_ere(unsigned syntax) {
+  return (syntax & regex_constants::extended) != 0 ||
+         (syntax & regex_constants::awk) != 0 ||
+         (syntax & regex_constants::egrep) != 0;
+}
+
+static bool __is_ecma(unsigned syntax) {
+  bool found = __is_bre(syntax);
+  if (found) return false;
+  found = __is_ere(syntax);
+  return !found;
+}
+
+static bool __newline_alt(unsigned syntax) {
+  return (syntax & regex_constants::grep) != 0 ||
+         (syntax & regex_constants::egrep) != 0;
+}
+
+static size_t __class_end(const basic_string<CharT>& pattern, size_t position,
+                          size_t end) {
+  size_t current = position + 1;
+  while (current < end && pattern[current] != CharT(']')) ++current;
+  return current < end ? current + 1 : end;
+}
+
 static size_t __atom_end(const basic_string<CharT>& pattern, size_t position,
                   size_t end) {
   if (position >= end) return position;
@@ -503,34 +545,45 @@ static size_t __atom_end(const basic_string<CharT>& pattern, size_t position,
     return position + (position + 1 < end ? 2 : 1);
   }
   if (pattern[position] == CharT('[')) {
-    size_t current = position + 1;
-    while (current < end && pattern[current] != CharT(']')) ++current;
-    return current < end ? current + 1 : end;
+    return __class_end(pattern, position, end);
   }
   return position + 1;
 }
 
 static bool __atom_match(const basic_string<CharT>& pattern,
                   size_t first, size_t last, CharT value,
-                  bool insensitive) {
-  if (pattern[first] == CharT('.')) return true;
+                  bool insensitive, unsigned syntax) {
+  if (pattern[first] == CharT('.')) {
+    if (__is_ecma(syntax) && value == CharT('\n')) return false;
+    return true;
+  }
   if (pattern[first] == CharT('[')) {
     return __class_match(
         pattern, first + 1, last - 1, value, insensitive);
   }
   if (pattern[first] == CharT('\\') && first + 1 < last) {
     CharT escaped = pattern[first + 1];
-    bool digit = value >= CharT('0') && value <= CharT('9');
-    bool alpha = (value >= CharT('a') && value <= CharT('z')) ||
-                 (value >= CharT('A') && value <= CharT('Z'));
-    bool space = value == CharT(' ') || value == CharT('\t') ||
-                 value == CharT('\n') || value == CharT('\r');
-    if (escaped == CharT('d')) return digit;
-    if (escaped == CharT('D')) return !digit;
-    if (escaped == CharT('w')) return alpha || digit || value == CharT('_');
-    if (escaped == CharT('W')) return !(alpha || digit || value == CharT('_'));
-    if (escaped == CharT('s')) return space;
-    if (escaped == CharT('S')) return !space;
+    if (__is_ecma(syntax) || (syntax & regex_constants::awk) != 0) {
+      if (escaped == CharT('n')) return value == CharT('\n');
+      if (escaped == CharT('t')) return value == CharT('\t');
+      if (escaped == CharT('r')) return value == CharT('\r');
+      if (escaped == CharT('f')) return value == CharT('\f');
+      if (escaped == CharT('v')) return value == CharT('\v');
+      if (escaped == CharT('a')) return value == CharT('\a');
+    }
+    if (__is_ecma(syntax)) {
+      bool digit = value >= CharT('0') && value <= CharT('9');
+      bool alpha = (value >= CharT('a') && value <= CharT('z')) ||
+                   (value >= CharT('A') && value <= CharT('Z'));
+      bool space = value == CharT(' ') || value == CharT('\t') ||
+                   value == CharT('\n') || value == CharT('\r');
+      if (escaped == CharT('d')) return digit;
+      if (escaped == CharT('D')) return !digit;
+      if (escaped == CharT('w')) return alpha || digit || value == CharT('_');
+      if (escaped == CharT('W')) return !(alpha || digit || value == CharT('_'));
+      if (escaped == CharT('s')) return space;
+      if (escaped == CharT('S')) return !space;
+    }
     return __fold(escaped, insensitive) ==
            __fold(value, insensitive);
   }
@@ -540,98 +593,508 @@ static bool __atom_match(const basic_string<CharT>& pattern,
 
 struct __state {
   vector<__cap> groups;
-  unsigned next;
-  __state() : next(1) {}
-  void reset(unsigned n) {
-    groups.assign(n, __cap());
-    next = 1;
-  }
+  void reset(unsigned n) { groups.assign(n, __cap()); }
 };
 
 static void __restore(__state& state, const __state& saved) {
   state.groups = saved.groups;
-  state.next = saved.next;
+}
+
+static bool __is_alt_char(CharT value, unsigned syntax) {
+  if (value == CharT('|') && !__is_bre(syntax)) return true;
+  if (value == CharT('\n') && __newline_alt(syntax)) return true;
+  return false;
+}
+
+static bool __group_open(const basic_string<CharT>& pattern, size_t position,
+                         size_t end, unsigned syntax, bool nosubs,
+                         bool& capturing, size_t& inner) {
+  if (position >= end) return false;
+  if (__is_bre(syntax)) {
+    if (position + 1 < end && pattern[position] == CharT('\\') &&
+        pattern[position + 1] == CharT('(')) {
+      capturing = !nosubs;
+      inner = position + 2;
+      return true;
+    }
+    return false;
+  }
+  if (pattern[position] != CharT('(')) return false;
+  if (__is_ecma(syntax) && position + 2 < end &&
+      pattern[position + 1] == CharT('?') &&
+      pattern[position + 2] == CharT(':')) {
+    capturing = false;
+    inner = position + 3;
+    return true;
+  }
+  capturing = !nosubs;
+  inner = position + 1;
+  return true;
+}
+
+static size_t __group_close(const basic_string<CharT>& pattern, size_t inner,
+                            size_t end, unsigned syntax) {
+  size_t depth = 1;
+  size_t current = inner;
+  if (__is_bre(syntax)) {
+    while (current < end) {
+      if (pattern[current] == CharT('\\') && current + 1 < end) {
+        CharT next = pattern[current + 1];
+        if (next == CharT('(')) ++depth;
+        if (next == CharT(')')) {
+          --depth;
+          if (depth == 0) return current;
+        }
+        current += 2;
+        continue;
+      }
+      if (pattern[current] == CharT('[')) {
+        current = __class_end(pattern, current, end);
+        continue;
+      }
+      ++current;
+    }
+    return end;
+  }
+  while (current < end) {
+    if (pattern[current] == CharT('\\')) {
+      current += current + 1 < end ? 2 : 1;
+      continue;
+    }
+    if (pattern[current] == CharT('[')) {
+      current = __class_end(pattern, current, end);
+      continue;
+    }
+    if (pattern[current] == CharT('(')) ++depth;
+    if (pattern[current] == CharT(')')) {
+      --depth;
+      if (depth == 0) return current;
+    }
+    ++current;
+  }
+  return end;
+}
+
+static size_t __group_after(size_t close, unsigned syntax) {
+  return __is_bre(syntax) ? close + 2 : close + 1;
+}
+
+static unsigned __mark_number(const basic_string<CharT>& pattern, size_t open,
+                              unsigned syntax, bool nosubs) {
+  if (nosubs) return 0;
+  unsigned count = 0;
+  size_t i = 0;
+  while (i <= open && i < pattern.size()) {
+    bool capturing = false;
+    size_t inner = 0;
+    if (__group_open(pattern, i, pattern.size(), syntax, nosubs, capturing,
+                     inner)) {
+      if (capturing) ++count;
+      if (i == open) return count;
+      i = inner;
+      continue;
+    }
+    if (pattern[i] == CharT('\\')) {
+      i += i + 1 < pattern.size() ? 2 : 1;
+      continue;
+    }
+    if (pattern[i] == CharT('[')) {
+      i = __class_end(pattern, i, pattern.size());
+      continue;
+    }
+    ++i;
+  }
+  return count;
+}
+
+static bool __parse_brace(const basic_string<CharT>& pattern, size_t position,
+                          size_t end, bool escaped_close, size_t& minimum,
+                          size_t& maximum, size_t& after) {
+  if (position >= end || pattern[position] < CharT('0') ||
+      pattern[position] > CharT('9')) {
+    return false;
+  }
+  size_t current = position;
+  size_t value = 0;
+  while (current < end && pattern[current] >= CharT('0') &&
+         pattern[current] <= CharT('9')) {
+    value = value * 10 + static_cast<size_t>(pattern[current] - CharT('0'));
+    ++current;
+  }
+  minimum = value;
+  maximum = value;
+  if (escaped_close) {
+    if (current + 1 < end && pattern[current] == CharT('\\') &&
+        pattern[current + 1] == CharT('}')) {
+      after = current + 2;
+      return true;
+    }
+    if (current < end && pattern[current] == CharT(',')) {
+      ++current;
+      if (current + 1 < end && pattern[current] == CharT('\\') &&
+          pattern[current + 1] == CharT('}')) {
+        maximum = static_cast<size_t>(-1);
+        after = current + 2;
+        return true;
+      }
+      if (current >= end || pattern[current] < CharT('0') ||
+          pattern[current] > CharT('9')) {
+        return false;
+      }
+      value = 0;
+      while (current < end && pattern[current] >= CharT('0') &&
+             pattern[current] <= CharT('9')) {
+        value = value * 10 + static_cast<size_t>(pattern[current] - CharT('0'));
+        ++current;
+      }
+      maximum = value;
+      if (current + 1 < end && pattern[current] == CharT('\\') &&
+          pattern[current + 1] == CharT('}')) {
+        after = current + 2;
+        return minimum <= maximum;
+      }
+    }
+    return false;
+  }
+  if (current < end && pattern[current] == CharT('}')) {
+    after = current + 1;
+    return true;
+  }
+  if (current < end && pattern[current] == CharT(',')) {
+    ++current;
+    if (current < end && pattern[current] == CharT('}')) {
+      maximum = static_cast<size_t>(-1);
+      after = current + 1;
+      return true;
+    }
+    if (current >= end || pattern[current] < CharT('0') ||
+        pattern[current] > CharT('9')) {
+      return false;
+    }
+    value = 0;
+    while (current < end && pattern[current] >= CharT('0') &&
+           pattern[current] <= CharT('9')) {
+      value = value * 10 + static_cast<size_t>(pattern[current] - CharT('0'));
+      ++current;
+    }
+    maximum = value;
+    if (current < end && pattern[current] == CharT('}')) {
+      after = current + 1;
+      return minimum <= maximum;
+    }
+  }
+  return false;
+}
+
+static void __parse_quant(const basic_string<CharT>& pattern, size_t position,
+                          size_t end, unsigned syntax, size_t& minimum,
+                          size_t& maximum, size_t& after) {
+  minimum = 1;
+  maximum = 1;
+  after = position;
+  if (position >= end) return;
+  if (__is_bre(syntax)) {
+    if (pattern[position] == CharT('*')) {
+      minimum = 0;
+      maximum = static_cast<size_t>(-1);
+      after = position + 1;
+      return;
+    }
+    if (position + 1 < end && pattern[position] == CharT('\\') &&
+        pattern[position + 1] == CharT('{')) {
+      size_t parsed_after = position;
+      if (__parse_brace(pattern, position + 2, end, true, minimum, maximum,
+                        parsed_after)) {
+        after = parsed_after;
+      }
+    }
+    return;
+  }
+  CharT token = pattern[position];
+  if (token == CharT('*')) {
+    minimum = 0;
+    maximum = static_cast<size_t>(-1);
+    after = position + 1;
+    return;
+  }
+  if (token == CharT('+')) {
+    minimum = 1;
+    maximum = static_cast<size_t>(-1);
+    after = position + 1;
+    return;
+  }
+  if (token == CharT('?')) {
+    minimum = 0;
+    maximum = 1;
+    after = position + 1;
+    return;
+  }
+  if (token == CharT('{')) {
+    size_t parsed_after = position;
+    if (__parse_brace(pattern, position + 1, end, false, minimum, maximum,
+                      parsed_after)) {
+      after = parsed_after;
+    }
+  }
+}
+
+static bool __is_backref(const basic_string<CharT>& pattern, size_t position,
+                         size_t end, unsigned& index, size_t& after) {
+  if (position + 1 >= end || pattern[position] != CharT('\\')) return false;
+  CharT digit = pattern[position + 1];
+  if (digit < CharT('1') || digit > CharT('9')) return false;
+  index = static_cast<unsigned>(digit - CharT('0'));
+  after = position + 2;
+  return true;
+}
+
+static bool __match_one(const basic_string<CharT>& pattern, int kind,
+                        size_t item_first, size_t item_last, unsigned mark,
+                        bool capturing, const basic_string<CharT>& input,
+                        size_t input_pos, unsigned syntax, bool insensitive,
+                        bool nosubs, bool not_bol, bool not_eol, size_t& next,
+                        __state& state) {
+  if (kind == 1) {
+    if (input_pos != 0 || not_bol) return false;
+    next = input_pos;
+    return true;
+  }
+  if (kind == 2) {
+    if (not_eol || input_pos != input.size()) return false;
+    next = input_pos;
+    return true;
+  }
+  if (kind == 3) {
+    size_t inner_end;
+    if (!__match_alt(pattern, item_first, item_last, input, input_pos, syntax,
+                     insensitive, nosubs, not_bol, not_eol, inner_end, state)) {
+      return false;
+    }
+    if (capturing && mark >= 1 && mark <= state.groups.size()) {
+      state.groups[mark - 1].first = input_pos;
+      state.groups[mark - 1].last = inner_end;
+      state.groups[mark - 1].matched = true;
+    }
+    next = inner_end;
+    return true;
+  }
+  if (kind == 4) {
+    if (mark < 1 || mark > state.groups.size()) return false;
+    if (!state.groups[mark - 1].matched) return false;
+    size_t first = state.groups[mark - 1].first;
+    size_t last = state.groups[mark - 1].last;
+    size_t length = last - first;
+    if (input_pos + length > input.size()) return false;
+    for (size_t i = 0; i < length; ++i) {
+      if (__fold(input[input_pos + i], insensitive) !=
+          __fold(input[first + i], insensitive)) {
+        return false;
+      }
+    }
+    next = input_pos + length;
+    return true;
+  }
+  if (input_pos >= input.size()) return false;
+  if (!__atom_match(pattern, item_first, item_last, input[input_pos],
+                    insensitive, syntax)) {
+    return false;
+  }
+  next = input_pos + 1;
+  return true;
+}
+
+static bool __match_concat(const basic_string<CharT>& pattern,
+                           size_t pattern_first, size_t pattern_last,
+                           const basic_string<CharT>& input, size_t input_pos,
+                           unsigned syntax, bool insensitive, bool nosubs,
+                           bool not_bol, bool not_eol, size_t& result,
+                           __state& state) {
+  if (pattern_first == pattern_last) {
+    result = input_pos;
+    return true;
+  }
+  int kind = 0;
+  size_t item_first = pattern_first;
+  size_t item_last = pattern_first;
+  size_t after_item = pattern_first;
+  unsigned mark = 0;
+  bool capturing = false;
+  size_t inner = 0;
+  unsigned backref = 0;
+  size_t backref_after = 0;
+  if (pattern[pattern_first] == CharT('^')) {
+    kind = 1;
+    after_item = pattern_first + 1;
+  } else if (pattern[pattern_first] == CharT('$')) {
+    kind = 2;
+    after_item = pattern_first + 1;
+  } else if (__group_open(pattern, pattern_first, pattern_last, syntax, nosubs,
+                          capturing, inner)) {
+    size_t close = __group_close(pattern, inner, pattern_last, syntax);
+    if (close >= pattern_last) return false;
+    kind = 3;
+    item_first = inner;
+    item_last = close;
+    after_item = __group_after(close, syntax);
+    if (capturing) {
+      mark = __mark_number(pattern, pattern_first, syntax, nosubs);
+    }
+  } else if (__is_backref(pattern, pattern_first, pattern_last, backref,
+                          backref_after)) {
+    kind = 4;
+    mark = backref;
+    after_item = backref_after;
+  } else {
+    kind = 0;
+    item_first = pattern_first;
+    item_last = __atom_end(pattern, pattern_first, pattern_last);
+    after_item = item_last;
+  }
+  size_t minimum = 1;
+  size_t maximum = 1;
+  size_t rest = after_item;
+  __parse_quant(pattern, after_item, pattern_last, syntax, minimum, maximum,
+                rest);
+  if (maximum == static_cast<size_t>(-1)) {
+    maximum = input.size() - input_pos + 1;
+  }
+  vector<size_t> ends;
+  vector<__state> snapshots;
+  ends.push_back(input_pos);
+  snapshots.push_back(state);
+  size_t current = input_pos;
+  size_t count = 0;
+  while (count < maximum) {
+    __state saved = state;
+    size_t next = current;
+    if (!__match_one(pattern, kind, item_first, item_last, mark, capturing,
+                     input, current, syntax, insensitive, nosubs, not_bol,
+                     not_eol, next, state)) {
+      __restore(state, saved);
+      break;
+    }
+    ends.push_back(next);
+    snapshots.push_back(state);
+    if (next == current) break;
+    current = next;
+    ++count;
+  }
+  size_t index = ends.size();
+  while (index > 0) {
+    --index;
+    if (index < minimum) break;
+    __restore(state, snapshots[index]);
+    if (__match_concat(pattern, rest, pattern_last, input, ends[index], syntax,
+                       insensitive, nosubs, not_bol, not_eol, result, state)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool __match_alt(const basic_string<CharT>& pattern, size_t pattern_first,
+                        size_t pattern_last, const basic_string<CharT>& input,
+                        size_t input_pos, unsigned syntax, bool insensitive,
+                        bool nosubs, bool not_bol, bool not_eol, size_t& result,
+                        __state& state) {
+  size_t branch = pattern_first;
+  size_t current = pattern_first;
+  size_t depth = 0;
+  while (current < pattern_last) {
+    bool capturing = false;
+    size_t inner = 0;
+    if (__group_open(pattern, current, pattern_last, syntax, nosubs, capturing,
+                     inner)) {
+      ++depth;
+      current = inner;
+      continue;
+    }
+    if (__is_bre(syntax)) {
+      if (current + 1 < pattern_last && pattern[current] == CharT('\\') &&
+          pattern[current + 1] == CharT(')')) {
+        if (depth > 0) --depth;
+        current += 2;
+        continue;
+      }
+    } else if (pattern[current] == CharT(')')) {
+      if (depth > 0) --depth;
+      ++current;
+      continue;
+    }
+    if (pattern[current] == CharT('\\')) {
+      current += current + 1 < pattern_last ? 2 : 1;
+      continue;
+    }
+    if (pattern[current] == CharT('[')) {
+      current = __class_end(pattern, current, pattern_last);
+      continue;
+    }
+    if (depth == 0 && __is_alt_char(pattern[current], syntax)) {
+      __state saved = state;
+      if (__match_concat(pattern, branch, current, input, input_pos, syntax,
+                         insensitive, nosubs, not_bol, not_eol, result,
+                         state)) {
+        return true;
+      }
+      __restore(state, saved);
+      ++current;
+      branch = current;
+      continue;
+    }
+    ++current;
+  }
+  return __match_concat(pattern, branch, pattern_last, input, input_pos, syntax,
+                        insensitive, nosubs, not_bol, not_eol, result, state);
+}
+
+static bool __has_top_alt(const basic_string<CharT>& pattern, unsigned syntax) {
+  size_t current = 0;
+  size_t depth = 0;
+  bool nosubs = false;
+  while (current < pattern.size()) {
+    bool capturing = false;
+    size_t inner = 0;
+    if (__group_open(pattern, current, pattern.size(), syntax, nosubs,
+                     capturing, inner)) {
+      ++depth;
+      current = inner;
+      continue;
+    }
+    if (__is_bre(syntax)) {
+      if (current + 1 < pattern.size() && pattern[current] == CharT('\\') &&
+          pattern[current + 1] == CharT(')')) {
+        if (depth > 0) --depth;
+        current += 2;
+        continue;
+      }
+    } else if (pattern[current] == CharT(')')) {
+      if (depth > 0) --depth;
+      ++current;
+      continue;
+    }
+    if (pattern[current] == CharT('\\')) {
+      current += current + 1 < pattern.size() ? 2 : 1;
+      continue;
+    }
+    if (pattern[current] == CharT('[')) {
+      current = __class_end(pattern, current, pattern.size());
+      continue;
+    }
+    if (depth == 0 && __is_alt_char(pattern[current], syntax)) return true;
+    ++current;
+  }
+  return false;
 }
 
 static bool __match_segment(const basic_string<CharT>& pattern,
                      size_t pattern_first, size_t pattern_last,
                      const basic_string<CharT>& input, size_t input_pos,
-                     bool insensitive, bool not_eol, size_t& result,
+                     unsigned syntax, bool insensitive, bool nosubs,
+                     bool not_bol, bool not_eol, size_t& result,
                      __state& state) {
-  if (pattern_first == pattern_last) {
-    result = input_pos;
-    return true;
-  }
-  CharT token = pattern[pattern_first];
-  if (token == CharT('$') && pattern_first + 1 == pattern_last) {
-    if (!not_eol && input_pos == input.size()) {
-      result = input_pos;
-      return true;
-    }
-    return false;
-  }
-  if (token == CharT('(')) {
-    size_t depth = 1;
-    size_t close = pattern_first + 1;
-    while (close < pattern_last && depth != 0) {
-      if (pattern[close] == CharT('\\')) {
-        close += 2;
-        continue;
-      }
-      if (pattern[close] == CharT('(')) ++depth;
-      if (pattern[close] == CharT(')')) --depth;
-      if (depth != 0) ++close;
-    }
-    if (depth != 0) return false;
-    unsigned mark = state.next++;
-    size_t group_end;
-    if (!__match_segment(
-            pattern, pattern_first + 1, close, input,
-            input_pos, insensitive, not_eol, group_end, state)) {
-      return false;
-    }
-    if (mark >= 1 && mark <= state.groups.size()) {
-      state.groups[mark - 1].first = input_pos;
-      state.groups[mark - 1].last = group_end;
-      state.groups[mark - 1].matched = true;
-    }
-    return __match_segment(
-        pattern, close + 1, pattern_last, input,
-        group_end, insensitive, not_eol, result, state);
-  }
-  size_t atom_last =
-      __atom_end(pattern, pattern_first, pattern_last);
-  CharT quantifier = atom_last < pattern_last
-                         ? pattern[atom_last]
-                         : CharT();
-  size_t rest = atom_last;
-  size_t minimum = 1;
-  size_t maximum = 1;
-  if (quantifier == CharT('*') || quantifier == CharT('+') ||
-      quantifier == CharT('?')) {
-    rest = atom_last + 1;
-    minimum = quantifier == CharT('+') ? 1 : 0;
-    maximum = quantifier == CharT('?') ? 1 : input.size() - input_pos;
-  }
-  size_t count = 0;
-  while (count < maximum && input_pos + count < input.size() &&
-         __atom_match(
-             pattern, pattern_first, atom_last,
-             input[input_pos + count], insensitive)) {
-    ++count;
-  }
-  while (count >= minimum) {
-    __state saved = state;
-    if (__match_segment(
-            pattern, rest, pattern_last, input,
-            input_pos + count, insensitive, not_eol, result, state)) {
-      return true;
-    }
-    __restore(state, saved);
-    if (count == 0) break;
-    --count;
-  }
-  return false;
+  return __match_alt(pattern, pattern_first, pattern_last, input, input_pos,
+                     syntax, insensitive, nosubs, not_bol, not_eol, result,
+                     state);
 }
 
 static bool __find_from(const basic_string<CharT>& input,
@@ -640,10 +1103,13 @@ static bool __find_from(const basic_string<CharT>& input,
             regex_constants::match_flag_type flags, size_t start_min,
             vector<__cap>* captures = 0) {
   const basic_string<CharT>& pattern = expression.__pattern();
-  bool anchored = !pattern.empty() && pattern[0] == CharT('^');
-  bool insensitive =
-      (expression.flags() & regex_constants::icase) != 0;
-  size_t pattern_first = anchored ? 1 : 0;
+  unsigned syntax = static_cast<unsigned>(expression.flags());
+  bool insensitive = (syntax & regex_constants::icase) != 0;
+  bool nosubs = (syntax & regex_constants::nosubs) != 0;
+  bool not_bol = (flags & regex_constants::match_not_bol) != 0;
+  bool not_eol = (flags & regex_constants::match_not_eol) != 0;
+  bool anchored = !pattern.empty() && pattern[0] == CharT('^') &&
+                  !__has_top_alt(pattern, syntax);
   if (start_min > input.size()) return false;
   size_t start = start_min;
   size_t stop = anchored ||
@@ -656,9 +1122,8 @@ static bool __find_from(const basic_string<CharT>& input,
     __state state;
     state.reset(marks);
     if (__match_segment(
-            pattern, pattern_first, pattern.size(), input,
-            start, insensitive,
-            (flags & regex_constants::match_not_eol) != 0, end, state) &&
+            pattern, 0, pattern.size(), input, start, syntax, insensitive,
+            nosubs, not_bol, not_eol, end, state) &&
         (!require_full || (start == 0 && end == input.size()))) {
       if ((flags & regex_constants::match_not_null) != 0 && end == start) {
         continue;
