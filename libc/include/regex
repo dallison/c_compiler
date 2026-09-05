@@ -591,19 +591,20 @@ static bool __match_segment(const basic_string<CharT>& pattern,
   return false;
 }
 
-static bool __find(const basic_string<CharT>& input,
+static bool __find_from(const basic_string<CharT>& input,
             const basic_regex<CharT>& expression,
             size_t& first, size_t& last, bool require_full,
-            regex_constants::match_flag_type flags) {
+            regex_constants::match_flag_type flags, size_t start_min) {
   const basic_string<CharT>& pattern = expression.__pattern();
   bool anchored = !pattern.empty() && pattern[0] == CharT('^');
   bool insensitive =
       (expression.flags() & regex_constants::icase) != 0;
   size_t pattern_first = anchored ? 1 : 0;
-  size_t start = 0;
+  if (start_min > input.size()) return false;
+  size_t start = start_min;
   size_t stop = anchored ||
                         (flags & regex_constants::match_continuous) != 0
-                    ? 0
+                    ? start_min
                     : input.size();
   for (; start <= stop; ++start) {
     size_t end;
@@ -623,7 +624,57 @@ static bool __find(const basic_string<CharT>& input,
   return false;
 }
 
+static bool __find(const basic_string<CharT>& input,
+            const basic_regex<CharT>& expression,
+            size_t& first, size_t& last, bool require_full,
+            regex_constants::match_flag_type flags) {
+  return __find_from(input, expression, first, last, require_full, flags, 0);
+}
+
 };
+
+template <class BidirectionalIterator, class CharT>
+basic_string<CharT> __copy_range(BidirectionalIterator first,
+                                 BidirectionalIterator last) {
+  basic_string<CharT> result;
+  while (first != last) result.push_back(*first++);
+  return result;
+}
+
+template <class BidirectionalIterator>
+BidirectionalIterator __advance_copy(BidirectionalIterator first, size_t count) {
+  while (count != 0) {
+    ++first;
+    --count;
+  }
+  return first;
+}
+
+template <class BidirectionalIterator, class Allocator, class CharT,
+          class Traits>
+bool __search_range(BidirectionalIterator first, BidirectionalIterator last,
+                    BidirectionalIterator from,
+                    match_results<BidirectionalIterator, Allocator>& results,
+                    const basic_regex<CharT, Traits>& expression,
+                    regex_constants::match_flag_type flags) {
+  basic_string<CharT> input =
+      __copy_range<BidirectionalIterator, CharT>(first, last);
+  size_t origin = 0;
+  for (BidirectionalIterator current = first; current != from; ++current) {
+    ++origin;
+  }
+  size_t found_first = 0;
+  size_t found_last = 0;
+  const bool found = __engine<CharT>::__find_from(
+      input, expression, found_first, found_last, false, flags, origin);
+  if (!found) {
+    results.__clear();
+    return false;
+  }
+  results.__set(first, last, __advance_copy(first, found_first),
+                __advance_copy(first, found_last), expression.mark_count());
+  return true;
+}
 
 }  // namespace __regex_detail
 
@@ -836,6 +887,210 @@ inline string regex_replace(
   }
   return result;
 }
+
+template <class BidirectionalIterator, class Allocator, class CharT,
+          class Traits>
+bool regex_search(
+    BidirectionalIterator first, BidirectionalIterator last,
+    match_results<BidirectionalIterator, Allocator>& results,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  return __regex_detail::__search_range(first, last, first, results, expression,
+                                        flags);
+}
+
+template <class BidirectionalIterator, class CharT, class Traits>
+bool regex_search(
+    BidirectionalIterator first, BidirectionalIterator last,
+    const basic_regex<CharT, Traits>& expression,
+    regex_constants::match_flag_type flags = regex_constants::match_default) {
+  match_results<BidirectionalIterator> results;
+  return regex_search(first, last, results, expression, flags);
+}
+
+template <class BidirectionalIterator,
+          class CharT = typename iterator_traits<BidirectionalIterator>::value_type,
+          class Traits = regex_traits<CharT>>
+class regex_iterator {
+ public:
+  typedef basic_regex<CharT, Traits> regex_type;
+  typedef match_results<BidirectionalIterator> value_type;
+  typedef ptrdiff_t difference_type;
+  typedef const value_type* pointer;
+  typedef const value_type& reference;
+  typedef forward_iterator_tag iterator_category;
+
+  regex_iterator() : __regex_(0), __ok_(false) {}
+  regex_iterator(BidirectionalIterator first, BidirectionalIterator last,
+                 const regex_type& expression,
+                 regex_constants::match_flag_type flags =
+                     regex_constants::match_default)
+      : __begin_(first),
+        __end_(last),
+        __regex_(&expression),
+        __flags_(flags),
+        __ok_(false) {
+    __ok_ = regex_search(__begin_, __end_, __match_, *__regex_, __flags_);
+  }
+
+  bool operator==(const regex_iterator& other) const {
+    if (!__ok_ && !other.__ok_) return true;
+    if (__ok_ != other.__ok_) return false;
+    return __begin_ == other.__begin_ && __end_ == other.__end_ &&
+           __regex_ == other.__regex_ &&
+           __match_[0].first == other.__match_[0].first &&
+           __match_[0].second == other.__match_[0].second;
+  }
+  bool operator!=(const regex_iterator& other) const {
+    return !(*this == other);
+  }
+  const value_type& operator*() const { return __match_; }
+  const value_type* operator->() const { return &__match_; }
+  regex_iterator& operator++() {
+    if (!__ok_) return *this;
+    BidirectionalIterator next = __match_[0].second;
+    regex_constants::match_flag_type flags = __flags_;
+    flags = flags | regex_constants::match_prev_avail;
+    if (next == __match_[0].first) {
+      if (next == __end_) {
+        __ok_ = false;
+        return *this;
+      }
+      ++next;
+      flags = flags | regex_constants::match_not_null;
+    }
+    __ok_ = __regex_detail::__search_range( __begin_, __end_, next, __match_,
+                                           *__regex_, flags);
+    return *this;
+  }
+  regex_iterator operator++(int) {
+    regex_iterator previous = *this;
+    ++*this;
+    return previous;
+  }
+
+ private:
+  BidirectionalIterator __begin_;
+  BidirectionalIterator __end_;
+  const regex_type* __regex_;
+  regex_constants::match_flag_type __flags_;
+  value_type __match_;
+  bool __ok_;
+};
+
+typedef regex_iterator<const char*> cregex_iterator;
+typedef regex_iterator<const wchar_t*> wcregex_iterator;
+typedef regex_iterator<string::const_iterator> sregex_iterator;
+typedef regex_iterator<wstring::const_iterator> wsregex_iterator;
+
+template <class BidirectionalIterator,
+          class CharT = typename iterator_traits<BidirectionalIterator>::value_type,
+          class Traits = regex_traits<CharT>>
+class regex_token_iterator {
+ public:
+  typedef basic_regex<CharT, Traits> regex_type;
+  typedef sub_match<BidirectionalIterator> value_type;
+  typedef ptrdiff_t difference_type;
+  typedef const value_type* pointer;
+  typedef const value_type& reference;
+  typedef forward_iterator_tag iterator_category;
+
+  regex_token_iterator() : __ok_(false), __index_(0) {}
+  regex_token_iterator(BidirectionalIterator first, BidirectionalIterator last,
+                       const regex_type& expression, int submatch = 0,
+                       regex_constants::match_flag_type flags =
+                           regex_constants::match_default)
+      : __ok_(false), __index_(0) {
+    __subs_.push_back(submatch);
+    __collect(first, last, expression, flags);
+  }
+  regex_token_iterator(BidirectionalIterator first, BidirectionalIterator last,
+                       const regex_type& expression,
+                       const vector<int>& submatches,
+                       regex_constants::match_flag_type flags =
+                           regex_constants::match_default)
+      : __subs_(submatches), __ok_(false), __index_(0) {
+    if (__subs_.empty()) __subs_.push_back(0);
+    __collect(first, last, expression, flags);
+  }
+
+  bool operator==(const regex_token_iterator& other) const {
+    if (!__ok_ && !other.__ok_) return true;
+    if (__ok_ != other.__ok_) return false;
+    return __index_ == other.__index_;
+  }
+  bool operator!=(const regex_token_iterator& other) const {
+    return !(*this == other);
+  }
+  const value_type& operator*() const { return __pieces_[__index_]; }
+  const value_type* operator->() const { return &__pieces_[__index_]; }
+  regex_token_iterator& operator++() {
+    if (!__ok_) return *this;
+    ++__index_;
+    if (__index_ >= __pieces_.size()) __ok_ = false;
+    return *this;
+  }
+  regex_token_iterator operator++(int) {
+    regex_token_iterator previous = *this;
+    ++*this;
+    return previous;
+  }
+
+ private:
+  typedef regex_iterator<BidirectionalIterator, CharT, Traits> __iterator;
+  bool __has_split() const {
+    for (size_t i = 0; i < __subs_.size(); ++i) {
+      if (__subs_[i] == -1) return true;
+    }
+    return false;
+  }
+  void __push(BidirectionalIterator first, BidirectionalIterator last,
+              bool matched) {
+    value_type piece;
+    piece.first = first;
+    piece.second = last;
+    piece.matched = matched;
+    __pieces_.push_back(piece);
+  }
+  void __collect(BidirectionalIterator first, BidirectionalIterator last,
+                 const regex_type& expression,
+                 regex_constants::match_flag_type flags) {
+    __iterator current(first, last, expression, flags);
+    __iterator done;
+    BidirectionalIterator prev = first;
+    bool split = __has_split();
+    while (current != done) {
+      if (split) {
+        if (prev != (*current)[0].first) {
+          __push(prev, (*current)[0].first, true);
+        }
+      } else {
+        for (size_t i = 0; i < __subs_.size(); ++i) {
+          int sub = __subs_[i];
+          if (sub < 0) continue;
+          __push((*current)[static_cast<size_t>(sub)].first,
+                 (*current)[static_cast<size_t>(sub)].second,
+                 (*current)[static_cast<size_t>(sub)].matched);
+        }
+      }
+      prev = (*current)[0].second;
+      ++current;
+    }
+    if (split && prev != last) __push(prev, last, true);
+    __index_ = 0;
+    __ok_ = __pieces_.size() != 0;
+  }
+
+  vector<int> __subs_;
+  vector<value_type> __pieces_;
+  bool __ok_;
+  size_t __index_;
+};
+
+typedef regex_token_iterator<const char*> cregex_token_iterator;
+typedef regex_token_iterator<const wchar_t*> wcregex_token_iterator;
+typedef regex_token_iterator<string::const_iterator> sregex_token_iterator;
+typedef regex_token_iterator<wstring::const_iterator> wsregex_token_iterator;
 
 }  // namespace std
 
