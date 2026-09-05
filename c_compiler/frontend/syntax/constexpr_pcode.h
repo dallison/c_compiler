@@ -25,6 +25,8 @@ ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node);
 ConstexprPCodeCapability ConstexprPCodeCapabilityForFunction(Symbol* function);
 bool ConstexprPCodeFunctionContainsThrow(Symbol* function);
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node);
+bool ConstexprPCodeAutoShouldAttempt(ASTNode* node);
+void ConstexprPCodeAutoRecordASTEvaluation(ASTNode* node, int steps);
 const char* ConstexprPCodeFailureReason(ConstEvalContext* ctx);
 bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                          int64_t* result);

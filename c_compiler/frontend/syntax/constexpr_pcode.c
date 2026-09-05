@@ -282,6 +282,20 @@ static bool pcode_static_data_initialized = false;
 static Vector pcode_thunk_cache;
 static bool pcode_thunk_cache_initialized = false;
 
+typedef struct {
+  TypeRecord* function;
+  size_t static_cost;
+  uint64_t ast_steps;
+  unsigned ast_evaluations;
+} ConstexprPCodeAutoStats;
+
+static Vector pcode_auto_stats;
+static bool pcode_auto_stats_initialized = false;
+
+#define CONSTEXPR_PCODE_AUTO_STATIC_COST 256
+#define CONSTEXPR_PCODE_AUTO_EVALUATIONS 8
+#define CONSTEXPR_PCODE_AUTO_AST_STEPS 2048
+
 #define CONSTEXPR_PCODE_HEAP_SIZE (1024 * 1024)
 
 enum {
@@ -637,6 +651,10 @@ void ConstexprPCodeClearImageCache(void) {
   if (pcode_thunk_cache_initialized) {
     VectorDestructWithContents(&pcode_thunk_cache, NULL, /*free_element=*/true);
     pcode_thunk_cache_initialized = false;
+  }
+  if (pcode_auto_stats_initialized) {
+    VectorDestructWithContents(&pcode_auto_stats, NULL, /*free_element=*/true);
+    pcode_auto_stats_initialized = false;
   }
 }
 
@@ -2840,6 +2858,160 @@ static Symbol* PCodeConstexprCallSymbol(ASTNode* node) {
     }
   }
   return NULL;
+}
+
+typedef struct {
+  size_t cost;
+  bool ast_safe;
+} ConstexprPCodeStaticCost;
+
+// AST-first evaluation is restricted to pure scalar functions. More involved
+// functions go directly to pcode because the AST evaluator intentionally does
+// not model every object-lifetime and compiler-intrinsic rule.
+static void MeasureConstexprPCodeStaticCost(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren) {
+    return;
+  }
+  ConstexprPCodeStaticCost* measurement = data;
+  measurement->cost++;
+  if ((node->type != NULL &&
+       (TypeIsPointerOrArray(node->type) || TypeIsReference(node->type) ||
+        TypeIsStructOrUnion(node->type))) ||
+      node->op == AST_OP(contents) || node->op == AST_OP(address) ||
+      node->op == AST_OP(arrow) || node->op == AST_OP(dot) ||
+      node->op == AST_OP(subscript) || node->op == AST_OP(call) ||
+      node->op == AST_OP(inline_call) || node->op == AST_OP(try) ||
+      node->op == AST_OP(catch) || node->op == AST_OP(throw) ||
+      node->op == AST_OP(consteval_block) ||
+      node->op == AST_OP(vardecl) || node->op == AST_OP(assign) ||
+      node->op == AST_OP(pluseq) || node->op == AST_OP(minuseq) ||
+      node->op == AST_OP(multeq) || node->op == AST_OP(diveq) ||
+      node->op == AST_OP(percenteq) || node->op == AST_OP(andeq) ||
+      node->op == AST_OP(oreq) || node->op == AST_OP(exoreq) ||
+      node->op == AST_OP(lshifteq) || node->op == AST_OP(rshifteq) ||
+      node->op == AST_OP(rshifteql) || node->op == AST_OP(rshifteqa) ||
+      node->op == AST_OP(preinc) || node->op == AST_OP(predec) ||
+      node->op == AST_OP(postinc) || node->op == AST_OP(postdec) ||
+      node->op == AST_OP(braced_init) ||
+      node->op == AST_OP(designated_init) ||
+      node->op == AST_OP(compound_literal) ||
+      node->op == AST_OP(expansion_for) ||
+      node->op == AST_OP(builtin_source_file) ||
+      node->op == AST_OP(builtin_source_line) ||
+      node->op == AST_OP(builtin_source_column) ||
+      node->op == AST_OP(builtin_source_function) ||
+      node->op == AST_OP(builtin_source_pretty_function) ||
+      (node->op >= AST_OP(builtin_va_start) &&
+       node->op <= AST_OP(builtin_unreachable))) {
+    measurement->ast_safe = false;
+  }
+  switch (node->op) {
+    case AST_OP(call):
+      measurement->cost += 8;
+      break;
+    case AST_OP(while):
+    case AST_OP(do):
+    case AST_OP(for):
+    case AST_OP(expansion_for):
+      measurement->cost += 96;
+      break;
+    case AST_OP(if):
+    case AST_OP(switch):
+    case AST_OP(question):
+      measurement->cost += 8;
+      break;
+    default:
+      break;
+  }
+}
+
+static ConstexprPCodeAutoStats* ConstexprPCodeAutoStatsForCall(ASTNode* node,
+                                                              bool create) {
+  Symbol* function =
+      PCodeConstexprFunctionDefinition(PCodeConstexprCallSymbol(node));
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return NULL;
+  }
+  if (pcode_auto_stats_initialized) {
+    for (size_t i = 0; i < pcode_auto_stats.length; i++) {
+      ConstexprPCodeAutoStats* stats = pcode_auto_stats.value.p[i];
+      if (stats != NULL && stats->function == function->type) {
+        return stats;
+      }
+    }
+  }
+  if (!create) {
+    return NULL;
+  }
+  if (!pcode_auto_stats_initialized) {
+    VectorInit(&pcode_auto_stats);
+    pcode_auto_stats_initialized = true;
+  }
+  ConstexprPCodeStaticCost measurement = {.ast_safe = true};
+  ASTNodeVisit(function->type->info.function.body,
+               MeasureConstexprPCodeStaticCost, 0, &measurement);
+  if (function->type->info.function.cxx_member_owner != NULL ||
+      function->type->info.function.is_constructor ||
+      function->type->info.function.is_destructor) {
+    measurement.ast_safe = false;
+  }
+  TypeRecord* return_type = function->type->next;
+  if (return_type == NULL || TypeIsPointerOrArray(return_type) ||
+      TypeIsReference(return_type) || TypeIsStructOrUnion(return_type)) {
+    measurement.ast_safe = false;
+  }
+  for (size_t i = 0;
+       measurement.ast_safe &&
+       i < function->type->info.function.prototype.length;
+       i++) {
+    Symbol* parameter =
+        function->type->info.function.prototype.value.p[i];
+    TypeRecord* parameter_type = parameter != NULL ? parameter->type : NULL;
+    if (parameter_type == NULL || TypeIsPointerOrArray(parameter_type) ||
+        TypeIsReference(parameter_type) ||
+        TypeIsStructOrUnion(parameter_type)) {
+      measurement.ast_safe = false;
+    }
+  }
+  ConstexprPCodeAutoStats* stats = calloc(1, sizeof(*stats));
+  if (stats == NULL) {
+    return NULL;
+  }
+  stats->function = function->type;
+  stats->static_cost = measurement.ast_safe ? measurement.cost : SIZE_MAX;
+  VectorAppend(&pcode_auto_stats, stats);
+  return stats;
+}
+
+bool ConstexprPCodeAutoShouldAttempt(ASTNode* node) {
+  ConstexprPCodeAutoStats* stats =
+      ConstexprPCodeAutoStatsForCall(node, /*create=*/true);
+  if (stats == NULL) {
+    // Preserve existing behavior for expression thunks and calls that cannot
+    // be associated with a completed constexpr function definition.
+    return true;
+  }
+  if (ConstexprPCodeFindCachedObject(stats->function) != NULL) {
+    return true;
+  }
+  return stats->static_cost >= CONSTEXPR_PCODE_AUTO_STATIC_COST ||
+         stats->ast_evaluations >= CONSTEXPR_PCODE_AUTO_EVALUATIONS ||
+         stats->ast_steps >= CONSTEXPR_PCODE_AUTO_AST_STEPS;
+}
+
+void ConstexprPCodeAutoRecordASTEvaluation(ASTNode* node, int steps) {
+  ConstexprPCodeAutoStats* stats =
+      ConstexprPCodeAutoStatsForCall(node, /*create=*/true);
+  if (stats == NULL) {
+    return;
+  }
+  stats->ast_evaluations++;
+  if (steps > 0) {
+    stats->ast_steps += (uint64_t)steps;
+  }
 }
 
 static void ValidationReject(ValidationState* state, const char* reason) {

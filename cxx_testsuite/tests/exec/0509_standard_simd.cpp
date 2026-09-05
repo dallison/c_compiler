@@ -13,6 +13,12 @@
 #error "incorrect __cpp_lib_simd_complex"
 #endif
 
+using ConstexprV = std::simd::vec<int, 4>;
+constexpr ConstexprV constexpr_left(2);
+constexpr ConstexprV constexpr_right(3);
+constexpr ConstexprV constexpr_sum = constexpr_left + constexpr_right;
+static_assert(constexpr_sum[0] == 5 && constexpr_sum[3] == 5);
+
 int main() {
   using V = std::simd::vec<int, 4>;
   using M = V::mask_type;

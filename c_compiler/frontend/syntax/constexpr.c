@@ -2365,7 +2365,10 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
           ? kConstexprPCodeASTOnly
           : ConstexprPCodeCapabilityForExpression(initializer);
   bool pcode_attempted =
-      mode != kConstexprEvalAST && capability != kConstexprPCodeASTOnly;
+      mode != kConstexprEvalAST && capability != kConstexprPCodeASTOnly &&
+      (mode != kConstexprEvalAuto ||
+       capability != kConstexprPCodeEligible ||
+       ConstexprPCodeAutoShouldAttempt(initializer));
   ConstEvalContext pcode_context;
   ConstEvalContextInit(&pcode_context);
   bool pcode_ok =
@@ -6489,6 +6492,7 @@ Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
     member = FindStructMember(receiver_type->info.struct_info,
                               member_name->value.string);
   }
+  Symbol* arity_fallback = NULL;
   while (member != NULL) {
     if (member->symbol != NULL && member->symbol->type != NULL &&
         TypeIsFunction(member->symbol->type)) {
@@ -6544,17 +6548,25 @@ Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
         }
       }
     }
-    if (member->is_member_function && member->symbol != NULL &&
+    if (member->is_member_function &&
+        ConstexprConstructorCandidateMatches(member->symbol, call)) {
+      *receiver = member_access->left;
+      return member->symbol;
+    }
+    if (arity_fallback == NULL && member->is_member_function &&
+        member->symbol != NULL &&
         member->symbol->type != NULL && TypeIsFunction(member->symbol->type) &&
         member->symbol->type->info.function.is_constructor &&
         member->symbol->type->info.function.prototype.length ==
             call->children->length + 1) {
-      *receiver = member_access->left;
-      return member->symbol;
+      arity_fallback = member->symbol;
     }
     member = member->overload_next;
   }
-  return NULL;
+  if (arity_fallback != NULL) {
+    *receiver = member_access->left;
+  }
+  return arity_fallback;
 }
 
 Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
@@ -8727,7 +8739,10 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   if (mode == kConstexprEvalAuto) {
     compiler->constexpr_eval_mode = kConstexprEvalPCode;
   }
-  bool pcode_ok = mode != kConstexprEvalAST &&
+  bool auto_attempt_pcode =
+      mode != kConstexprEvalAuto || capability != kConstexprPCodeEligible ||
+      ConstexprPCodeAutoShouldAttempt(node);
+  bool pcode_ok = mode != kConstexprEvalAST && auto_attempt_pcode &&
                   ConstexprPCodeEvaluateCallAsInteger(ctx, node, &pcode_result);
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
@@ -8765,9 +8780,13 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   if (mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
+  int ast_start_steps = ctx->steps;
   ConstexprValue value;
   bool ast_ok = EvaluateConstexprCall(ctx, node, &value) &&
                 ConstexprValueAsInteger(value, result);
+  if (mode == kConstexprEvalAuto && !auto_attempt_pcode) {
+    ConstexprPCodeAutoRecordASTEvaluation(node, ctx->steps - ast_start_steps);
+  }
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalAudit &&
       ctx->call_depth == 0 &&
@@ -8826,7 +8845,10 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   if (mode == kConstexprEvalAuto) {
     compiler->constexpr_eval_mode = kConstexprEvalPCode;
   }
-  bool pcode_ok = mode != kConstexprEvalAST &&
+  bool auto_attempt_pcode =
+      mode != kConstexprEvalAuto || capability != kConstexprPCodeEligible ||
+      ConstexprPCodeAutoShouldAttempt(node);
+  bool pcode_ok = mode != kConstexprEvalAST && auto_attempt_pcode &&
                   ConstexprPCodeEvaluateCallAsFloating(ctx, node, &pcode_result);
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
@@ -8854,9 +8876,13 @@ bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   if (mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
+  int ast_start_steps = ctx->steps;
   ConstexprValue value;
   bool ast_ok = EvaluateConstexprCall(ctx, node, &value) &&
                 ConstexprValueAsFloating(value, result);
+  if (mode == kConstexprEvalAuto && !auto_attempt_pcode) {
+    ConstexprPCodeAutoRecordASTEvaluation(node, ctx->steps - ast_start_steps);
+  }
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalAudit &&
       (pcode_ok != ast_ok ||
@@ -8901,8 +8927,11 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   if (mode == kConstexprEvalAuto) {
     compiler->constexpr_eval_mode = kConstexprEvalPCode;
   }
+  bool auto_attempt_pcode =
+      mode != kConstexprEvalAuto || capability != kConstexprPCodeEligible ||
+      ConstexprPCodeAutoShouldAttempt(node);
   bool pcode_ok =
-      mode != kConstexprEvalAST &&
+      mode != kConstexprEvalAST && auto_attempt_pcode &&
       ConstexprPCodeEvaluateCallAsObject(ctx, node);
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalPCode) {
@@ -8914,7 +8943,8 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   if (mode == kConstexprEvalAuto && pcode_ok) {
     return true;
   }
-  if (mode == kConstexprEvalAuto && !pcode_ok && node->type != NULL &&
+  if (mode == kConstexprEvalAuto && auto_attempt_pcode && !pcode_ok &&
+      node->type != NULL &&
       TypeIsStructOrUnion(node->type) && node->type->info.struct_info != NULL &&
       node->type->info.struct_info->tag_name != NULL &&
       node->type->info.struct_info->tag_name->value != NULL &&
@@ -8928,9 +8958,13 @@ bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
   if (mode == kConstexprEvalAuto || mode == kConstexprEvalAudit) {
     compiler->constexpr_eval_mode = kConstexprEvalAST;
   }
+  int ast_start_steps = ctx->steps;
   ConstexprValue value;
   bool ast_ok = EvaluateConstexprCall(ctx, node, &value) && value.is_object &&
                 value.object != NULL;
+  if (mode == kConstexprEvalAuto && !auto_attempt_pcode) {
+    ConstexprPCodeAutoRecordASTEvaluation(node, ctx->steps - ast_start_steps);
+  }
   compiler->constexpr_eval_mode = mode;
   if (mode == kConstexprEvalAudit &&
       ctx->call_depth == 0 &&
