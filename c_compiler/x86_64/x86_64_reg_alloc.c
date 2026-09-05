@@ -949,6 +949,14 @@ static X86_64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case X86_64_OP(pcmpgtb):
     case X86_64_OP(pcmpgtw):
     case X86_64_OP(pcmpgtd):
+    case X86_64_OP(addps):
+    case X86_64_OP(addpd):
+    case X86_64_OP(subps):
+    case X86_64_OP(subpd):
+    case X86_64_OP(mulps):
+    case X86_64_OP(mulpd):
+    case X86_64_OP(divps):
+    case X86_64_OP(divpd):
     case X86_64_OP(addss):
     case X86_64_OP(addsd):
     case X86_64_OP(subss):

@@ -34,6 +34,12 @@ struct TargetBasicBlock;
 #define kAARCH64InstructionSize (1 << 16)
 #define kSize32Bit 1
 #define kSize64Bit 2
+#define kSize128Bit 3
+
+// SIMD element size for Advanced SIMD three-same ops: log2(elem_bytes) in
+// bits 12-13 of flags (8/16/32/64-bit lanes).
+#define AARCH64_SIMD_ELEM_SHIFT 12
+#define AARCH64_SIMD_ELEM_MASK (3 << 12)
 
 // AARCH64 addressing modes. The value is stored in bit 21:18
 //  of the TargetInstruction's flags member.
@@ -322,6 +328,10 @@ typedef enum {
   AARCH64_OP(vcmge),
   AARCH64_OP(vcmhi),
   AARCH64_OP(vcmhs),
+  AARCH64_OP(vfadd),
+  AARCH64_OP(vfsub),
+  AARCH64_OP(vfmul),
+  AARCH64_OP(vfdiv),
    
   AARCH64_OP(xxx),
   AARCH64_OP(not),
@@ -499,6 +509,7 @@ bool AARCH64IsArgRegister(TargetInstruction* inst);
 bool AARCH64IsVarRegister(TargetInstruction* inst);
 bool AARCH64IsJumpTableEntry(TargetInstruction* inst);
 int GetRegisterSize(TargetInstruction* inst);
+TargetInstruction* SetInstructionSize(TargetInstruction* inst, int size);
 
 TargetInstruction* AARCH64GetBranchTarget(TargetInstruction* inst);
 

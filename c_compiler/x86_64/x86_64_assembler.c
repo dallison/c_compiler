@@ -1905,6 +1905,14 @@ static void Assemble_pcmpeqd(X86_64Assembler* assembler) { EmitSSE(assembler, tr
 static void Assemble_pcmpgtb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x64, false); }
 static void Assemble_pcmpgtw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x65, false); }
 static void Assemble_pcmpgtd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x66, false); }
+static void Assemble_addps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x58, false); }
+static void Assemble_addpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x58, false); }
+static void Assemble_subps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5c, false); }
+static void Assemble_subpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5c, false); }
+static void Assemble_mulps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x59, false); }
+static void Assemble_mulpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x59, false); }
+static void Assemble_divps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5e, false); }
+static void Assemble_divpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5e, false); }
 
 static void EmitSSEConvertFromInt(X86_64Assembler* assembler, uint8_t prefix_f2,
                                   uint8_t prefix_f3, uint8_t opcode) {
@@ -2204,6 +2212,14 @@ static void InitializeInstructions(Map* instructions) {
   INST(pcmpgtb);
   INST(pcmpgtw);
   INST(pcmpgtd);
+  INST(addps);
+  INST(addpd);
+  INST(subps);
+  INST(subpd);
+  INST(mulps);
+  INST(mulpd);
+  INST(divps);
+  INST(divpd);
   INST(cvtsi2ss);
   INST(cvtsi2sd);
   INST(cvttss2si);

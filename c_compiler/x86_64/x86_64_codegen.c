@@ -72,6 +72,14 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(pcmpgtb)
     OPCODE(pcmpgtw)
     OPCODE(pcmpgtd)
+    OPCODE(addps)
+    OPCODE(addpd)
+    OPCODE(subps)
+    OPCODE(subpd)
+    OPCODE(mulps)
+    OPCODE(mulpd)
+    OPCODE(divps)
+    OPCODE(divpd)
     OPCODE(add)
     OPCODE(addl)
     OPCODE(sub)
@@ -334,6 +342,14 @@ bool X86_64IsFloatingPoint(TargetInstruction* inst) {
     case X86_64_OP(pcmpgtb):
     case X86_64_OP(pcmpgtw):
     case X86_64_OP(pcmpgtd):
+    case X86_64_OP(addps):
+    case X86_64_OP(addpd):
+    case X86_64_OP(subps):
+    case X86_64_OP(subpd):
+    case X86_64_OP(mulps):
+    case X86_64_OP(mulpd):
+    case X86_64_OP(divps):
+    case X86_64_OP(divpd):
     case X86_64_OP(addss):
     case X86_64_OP(addsd):
     case X86_64_OP(subss):
@@ -3099,16 +3115,28 @@ static TargetInstruction* LowerVectorOperation(X86_64Generator* rv,
     case IR_OP(vor): opcode = X86_64_OP(por); break;
     case IR_OP(vxor): opcode = X86_64_OP(pxor); break;
     case IR_OP(vadd):
-      opcode = element->size == 1 ? X86_64_OP(paddb)
-               : element->size == 2 ? X86_64_OP(paddw)
-               : element->size == 4 ? X86_64_OP(paddd)
-                                    : X86_64_OP(paddq);
+      if (TypeUsesFloat64Representation(element)) {
+        opcode = X86_64_OP(addpd);
+      } else if (TypeUsesFloat32Representation(element)) {
+        opcode = X86_64_OP(addps);
+      } else {
+        opcode = element->size == 1 ? X86_64_OP(paddb)
+                 : element->size == 2 ? X86_64_OP(paddw)
+                 : element->size == 4 ? X86_64_OP(paddd)
+                                      : X86_64_OP(paddq);
+      }
       break;
     case IR_OP(vsub):
-      opcode = element->size == 1 ? X86_64_OP(psubb)
-               : element->size == 2 ? X86_64_OP(psubw)
-               : element->size == 4 ? X86_64_OP(psubd)
-                                    : X86_64_OP(psubq);
+      if (TypeUsesFloat64Representation(element)) {
+        opcode = X86_64_OP(subpd);
+      } else if (TypeUsesFloat32Representation(element)) {
+        opcode = X86_64_OP(subps);
+      } else {
+        opcode = element->size == 1 ? X86_64_OP(psubb)
+                 : element->size == 2 ? X86_64_OP(psubw)
+                 : element->size == 4 ? X86_64_OP(psubd)
+                                      : X86_64_OP(psubq);
+      }
       break;
     case IR_OP(vcmpeq):
       opcode = element->size == 1 ? X86_64_OP(pcmpeqb)
@@ -3120,6 +3148,14 @@ static TargetInstruction* LowerVectorOperation(X86_64Generator* rv,
       opcode = element->size == 1 ? X86_64_OP(pcmpgtb)
                : element->size == 2 ? X86_64_OP(pcmpgtw)
                                     : X86_64_OP(pcmpgtd);
+      break;
+    case IR_OP(vmul):
+      opcode = TypeUsesFloat64Representation(element) ? X86_64_OP(mulpd)
+                                                      : X86_64_OP(mulps);
+      break;
+    case IR_OP(vdiv):
+      opcode = TypeUsesFloat64Representation(element) ? X86_64_OP(divpd)
+                                                      : X86_64_OP(divps);
       break;
     default:
       assert(false);
@@ -4812,6 +4848,8 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       return LowerCaptureVectorResult(rv, node);
     case IR_OP(vadd):
     case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
     case IR_OP(vand):
     case IR_OP(vor):
     case IR_OP(vxor):

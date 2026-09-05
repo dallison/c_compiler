@@ -29,16 +29,21 @@ struct __abi {
   static constexpr size_t __size = N;
 };
 
-#if defined(__aarch64__)
-inline constexpr size_t __native_vector_bytes = 8;
-#else
+// x86-64 SSE and AArch64 NEON both have 16-byte vector registers.  32-bit
+// ARM keeps the same default width but uses the scalar-lane fallback.
 inline constexpr size_t __native_vector_bytes = 16;
-#endif
 
 template <class T>
-using __native_abi = __abi<(__native_vector_bytes / sizeof(T) > 0
-                                ? __native_vector_bytes / sizeof(T)
-                                : 1)>;
+struct native_abi {
+  static constexpr size_t __size =
+      sizeof(T) == 0 ? 1
+                     : (__native_vector_bytes / sizeof(T) > 0
+                            ? __native_vector_bytes / sizeof(T)
+                            : 1);
+};
+
+template <class T>
+using __native_abi = native_abi<T>;
 
 }  // namespace simd
 }  // namespace std
@@ -53,84 +58,15 @@ struct __native_ops {
   using __vector_type = void;
 };
 
-#define __DAVE_NATIVE_OPS(TYPE, LANES, BYTES)                         \
-  template <>                                                         \
-  struct __native_ops<TYPE, LANES> {                                  \
-    static constexpr bool __enabled = true;                           \
-    using __vector_type = TYPE __attribute__((vector_size(BYTES)));   \
-    static __vector_type __load(const TYPE* source) noexcept {         \
-      __vector_type result;                                           \
-      memcpy((void*)&result, (const void*)source, BYTES);             \
-      return result;                                                  \
-    }                                                                 \
-    static void __store(TYPE* destination, __vector_type value)       \
-        noexcept {                                                    \
-      memcpy((void*)destination, (const void*)&value, BYTES);         \
-    }                                                                 \
-    static __vector_type __add(__vector_type a, __vector_type b) {    \
-      return a + b;                                                   \
-    }                                                                 \
-    static __vector_type __sub(__vector_type a, __vector_type b) {    \
-      return a - b;                                                   \
-    }                                                                 \
-    static __vector_type __mul(__vector_type a, __vector_type b) {    \
-      return a * b;                                                   \
-    }                                                                 \
-    static __vector_type __div(__vector_type a, __vector_type b) {    \
-      return a / b;                                                   \
-    }                                                                 \
-    static __vector_type __mod(__vector_type a, __vector_type b) {    \
-      return a % b;                                                   \
-    }                                                                 \
-    static __vector_type __and(__vector_type a, __vector_type b) {    \
-      return a & b;                                                   \
-    }                                                                 \
-    static __vector_type __or(__vector_type a, __vector_type b) {     \
-      return a | b;                                                   \
-    }                                                                 \
-    static __vector_type __xor(__vector_type a, __vector_type b) {    \
-      return a ^ b;                                                   \
-    }                                                                 \
-    static __vector_type __lshift(__vector_type a, __vector_type b) { \
-      return a << b;                                                  \
-    }                                                                 \
-    static __vector_type __rshift(__vector_type a, __vector_type b) { \
-      return a >> b;                                                  \
-    }                                                                 \
-    static __vector_type __neg(__vector_type a) { return -a; }        \
-    static __vector_type __not(__vector_type a) { return ~a; }        \
-    static auto __eq(__vector_type a, __vector_type b) {              \
-      return a == b;                                                  \
-    }                                                                 \
-    static auto __ne(__vector_type a, __vector_type b) {              \
-      return a != b;                                                  \
-    }                                                                 \
-    static auto __ge(__vector_type a, __vector_type b) {              \
-      return a >= b;                                                  \
-    }                                                                 \
-    static auto __le(__vector_type a, __vector_type b) {              \
-      return a <= b;                                                  \
-    }                                                                 \
-    static auto __gt(__vector_type a, __vector_type b) {              \
-      return a > b;                                                   \
-    }                                                                 \
-    static auto __lt(__vector_type a, __vector_type b) {              \
-      return a < b;                                                   \
-    }                                                                 \
+#define __DAVE_NATIVE_OPS(TYPE, LANES, BYTES)                       \
+  template <>                                                       \
+  struct __native_ops<TYPE, LANES> {                                \
+    static constexpr bool __enabled = true;                         \
+    using __vector_type = TYPE __attribute__((vector_size(BYTES))); \
   }
 
-#if defined(__aarch64__)
-__DAVE_NATIVE_OPS(signed char, 8, 8);
-__DAVE_NATIVE_OPS(unsigned char, 8, 8);
-__DAVE_NATIVE_OPS(short, 4, 8);
-__DAVE_NATIVE_OPS(unsigned short, 4, 8);
-__DAVE_NATIVE_OPS(int, 2, 8);
-__DAVE_NATIVE_OPS(unsigned int, 2, 8);
-__DAVE_NATIVE_OPS(long, 1, 8);
-__DAVE_NATIVE_OPS(unsigned long, 1, 8);
-__DAVE_NATIVE_OPS(long long, 1, 8);
-__DAVE_NATIVE_OPS(unsigned long long, 1, 8);
-#elif defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
+__DAVE_NATIVE_OPS(char, 16, 16);
 __DAVE_NATIVE_OPS(signed char, 16, 16);
 __DAVE_NATIVE_OPS(unsigned char, 16, 16);
 __DAVE_NATIVE_OPS(short, 8, 16);
@@ -141,6 +77,23 @@ __DAVE_NATIVE_OPS(long, 2, 16);
 __DAVE_NATIVE_OPS(unsigned long, 2, 16);
 __DAVE_NATIVE_OPS(long long, 2, 16);
 __DAVE_NATIVE_OPS(unsigned long long, 2, 16);
+__DAVE_NATIVE_OPS(float, 4, 16);
+__DAVE_NATIVE_OPS(double, 2, 16);
+#endif
+#if defined(__aarch64__)
+__DAVE_NATIVE_OPS(char, 8, 8);
+__DAVE_NATIVE_OPS(signed char, 8, 8);
+__DAVE_NATIVE_OPS(unsigned char, 8, 8);
+__DAVE_NATIVE_OPS(short, 4, 8);
+__DAVE_NATIVE_OPS(unsigned short, 4, 8);
+__DAVE_NATIVE_OPS(int, 2, 8);
+__DAVE_NATIVE_OPS(unsigned int, 2, 8);
+__DAVE_NATIVE_OPS(long, 1, 8);
+__DAVE_NATIVE_OPS(unsigned long, 1, 8);
+__DAVE_NATIVE_OPS(long long, 1, 8);
+__DAVE_NATIVE_OPS(unsigned long long, 1, 8);
+__DAVE_NATIVE_OPS(float, 2, 8);
+__DAVE_NATIVE_OPS(double, 1, 8);
 #endif
 
 #undef __DAVE_NATIVE_OPS
@@ -164,6 +117,9 @@ class basic_vec;
 
 template <class T, size_t N = 4>
 using vec = basic_vec<T, __deduce_abi_t<T, N>>;
+
+template <class T>
+using native_vec = basic_vec<T, native_abi<T>>;
 
 template <class T, size_t N = 4>
 using mask = basic_mask<sizeof(T), __deduce_abi_t<T, N>>;
@@ -654,26 +610,28 @@ class basic_vec {
   friend constexpr mask_type operator OP(const basic_vec& a,             \
                                            const basic_vec& b) noexcept { \
     mask_type result;                                                      \
-    using __ops = __native_ops<T, Abi::__size>;                           \
-    if consteval {                                                        \
-    } else {                                                              \
-      if constexpr (__ops::__enabled) {                                   \
-        typename __ops::__vector_type __left;                             \
-        typename __ops::__vector_type __right;                            \
-        memcpy((void*)&__left, (const void*)a.__data, sizeof(__left));    \
-        memcpy((void*)&__right, (const void*)b.__data, sizeof(__right));  \
-        auto __native_result = __left OP __right;                         \
-        T __lanes[Abi::__size];                                           \
-        memcpy((void*)__lanes, (const void*)&__native_result,             \
-               sizeof(__native_result));                                 \
-        for (size_t i = 0; i < size(); ++i)                              \
-          result.__set(i, __lanes[i] != 0);                              \
-        return result;                                                    \
-      }                                                                   \
-    }                                                                     \
-    for (size_t i = 0; i < size(); ++i)                                   \
-      result.__set(i, a[i] OP b[i]);                                      \
-    return result;                                                        \
+    if constexpr (is_arithmetic<T>::value) {                               \
+      using __ops = __native_ops<T, Abi::__size>;                           \
+      if consteval {                                                        \
+      } else {                                                              \
+        if constexpr (__ops::__enabled) {                                   \
+          typename __ops::__vector_type __left;                             \
+          typename __ops::__vector_type __right;                            \
+          memcpy((void*)&__left, (const void*)a.__data, sizeof(__left));    \
+          memcpy((void*)&__right, (const void*)b.__data, sizeof(__right));  \
+          auto __native_result = __left OP __right;                         \
+          T __lanes[Abi::__size];                                           \
+          memcpy((void*)__lanes, (const void*)&__native_result,             \
+                 sizeof(__native_result));                                 \
+          for (size_t i = 0; i < size(); ++i)                              \
+            result.__set(i, __lanes[i] != 0);                              \
+          return result;                                                    \
+        }                                                                   \
+      }                                                                     \
+      for (size_t i = 0; i < size(); ++i)                                  \
+        result.__set(i, a[i] OP b[i]);                                      \
+    }                                                                       \
+    return result;                                                          \
   }
   __DAVE_VEC_COMPARE(==, __eq)
   __DAVE_VEC_COMPARE(!=, __ne)

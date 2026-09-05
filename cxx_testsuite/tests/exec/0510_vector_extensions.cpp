@@ -59,5 +59,22 @@ int main() {
   if (nested_sum[0] != 5 || nested_sum[3] != 5) {
     return 5;
   }
+
+  typedef float float4 __attribute__((vector_size(16)));
+  float4 fleft = {1.f, 2.f, 3.f, 4.f};
+  float4 fright = {2.f, 0.5f, 4.f, 0.25f};
+  float4 fsum = fleft + fright;
+  float4 fprod = fleft * fright;
+  if (fsum[0] != 3.f || fsum[3] != 4.25f ||
+      fprod[0] != 2.f || fprod[1] != 1.f) {
+    return 6;
+  }
+  typedef double double2 __attribute__((vector_size(16)));
+  double2 dleft = {8.0, 27.0};
+  double2 dright = {2.0, 3.0};
+  double2 dquot = dleft / dright;
+  if (dquot[0] != 4.0 || dquot[1] != 9.0) {
+    return 7;
+  }
   return 0;
 }

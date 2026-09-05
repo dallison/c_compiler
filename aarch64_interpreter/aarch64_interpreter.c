@@ -38,7 +38,7 @@ static uint64_t ReadSp(AARCH64Interpreter* interpreter, int reg) {
 // pattern; singles live in the low 32 bits.
 static double ReadD(AARCH64Interpreter* interpreter, int reg) {
   double d;
-  uint64_t bits = interpreter->v[reg];
+  uint64_t bits = interpreter->v[reg][0];
   memcpy(&d, &bits, sizeof(d));
   return d;
 }
@@ -46,12 +46,13 @@ static double ReadD(AARCH64Interpreter* interpreter, int reg) {
 static void WriteD(AARCH64Interpreter* interpreter, int reg, double value) {
   uint64_t bits;
   memcpy(&bits, &value, sizeof(bits));
-  interpreter->v[reg] = bits;
+  interpreter->v[reg][0] = bits;
+  interpreter->v[reg][1] = 0;
 }
 
 static float ReadS(AARCH64Interpreter* interpreter, int reg) {
   float f;
-  uint32_t bits = (uint32_t)interpreter->v[reg];
+  uint32_t bits = (uint32_t)interpreter->v[reg][0];
   memcpy(&f, &bits, sizeof(f));
   return f;
 }
@@ -59,7 +60,8 @@ static float ReadS(AARCH64Interpreter* interpreter, int reg) {
 static void WriteS(AARCH64Interpreter* interpreter, int reg, float value) {
   uint32_t bits;
   memcpy(&bits, &value, sizeof(bits));
-  interpreter->v[reg] = bits;  // Upper 32 bits cleared.
+  interpreter->v[reg][0] = bits;
+  interpreter->v[reg][1] = 0;
 }
 
 // A range that runs off the end of the address space is in no region, and
@@ -955,39 +957,108 @@ static bool ExecuteBarrier(AARCH64Interpreter* interpreter, uint32_t insn) {
   return true;
 }
 
-static bool ExecuteAdvancedSIMD8B(AARCH64Interpreter* interpreter,
-                                 uint32_t insn) {
-  uint32_t opcode = insn & 0xffe0fc00u;
+static bool ExecuteAdvancedSIMD(AARCH64Interpreter* interpreter,
+                                uint32_t insn) {
   int rd = insn & 0x1f;
   int rn = (insn >> 5) & 0x1f;
   int rm = (insn >> 16) & 0x1f;
-  uint64_t left = interpreter->v[rn];
-  uint64_t right = interpreter->v[rm];
-  uint64_t result = 0;
-  for (int lane = 0; lane < 8; lane++) {
-    uint8_t lhs = (uint8_t)(left >> (lane * 8));
-    uint8_t rhs = (uint8_t)(right >> (lane * 8));
-    uint8_t value;
+  int q = (insn >> 30) & 1;
+  int size = (insn >> 22) & 3;
+  uint8_t left[16];
+  uint8_t right[16];
+  uint8_t result[16];
+  memset(result, 0, sizeof(result));
+  memcpy(left, interpreter->v[rn], 16);
+  memcpy(right, interpreter->v[rm], 16);
+
+  // AND/ORR/EOR encode the operation in the size field; keep those bits.
+  uint32_t bitwise = insn & 0xbfe0fc00u;
+  if (bitwise == 0x0e201c00u || bitwise == 0x0ea01c00u ||
+      bitwise == 0x2e201c00u) {
+    int lanes = q ? 16 : 8;
+    for (int lane = 0; lane < lanes; lane++) {
+      uint8_t value = 0;
+      switch (bitwise) {
+        case 0x0e201c00u: value = left[lane] & right[lane]; break;
+        case 0x0ea01c00u: value = left[lane] | right[lane]; break;
+        default: value = left[lane] ^ right[lane]; break;
+      }
+      result[lane] = value;
+    }
+    memcpy(interpreter->v[rd], result, 16);
+    return true;
+  }
+
+  uint32_t opcode = insn & 0xbf20fc00u;
+
+  bool is_float = opcode == 0x0e20d400u || opcode == 0x0ea0d400u ||
+                  opcode == 0x0e20dc00u || opcode == 0x0e20fc00u;
+  if (is_float) {
+    int lanes = q ? (size == 1 ? 2 : 4) : (size == 1 ? 1 : 2);
+    int width = size == 1 ? 8 : 4;
+    for (int lane = 0; lane < lanes; lane++) {
+      if (width == 8) {
+        double a, b, r;
+        memcpy(&a, left + lane * 8, 8);
+        memcpy(&b, right + lane * 8, 8);
+        switch (opcode) {
+          case 0x0e20d400u: r = a + b; break;
+          case 0x0ea0d400u: r = a - b; break;
+          case 0x0e20dc00u: r = a * b; break;
+          default: r = a / b; break;
+        }
+        memcpy(result + lane * 8, &r, 8);
+      } else {
+        float a, b, r;
+        memcpy(&a, left + lane * 4, 4);
+        memcpy(&b, right + lane * 4, 4);
+        switch (opcode) {
+          case 0x0e20d400u: r = a + b; break;
+          case 0x0ea0d400u: r = a - b; break;
+          case 0x0e20dc00u: r = a * b; break;
+          default: r = a / b; break;
+        }
+        memcpy(result + lane * 4, &r, 4);
+      }
+    }
+    memcpy(interpreter->v[rd], result, 16);
+    return true;
+  }
+
+  int esize = 8 << size;
+  int lanes = ((q ? 128 : 64) / esize);
+  for (int lane = 0; lane < lanes; lane++) {
+    uint64_t lhs = 0;
+    uint64_t rhs = 0;
+    memcpy(&lhs, left + lane * (esize / 8), (size_t)(esize / 8));
+    memcpy(&rhs, right + lane * (esize / 8), (size_t)(esize / 8));
+    uint64_t value = 0;
+    uint64_t mask = esize == 64 ? ~0ULL : ((1ULL << esize) - 1ULL);
     switch (opcode) {
-      case 0x0e208400u: value = (uint8_t)(lhs + rhs); break;
-      case 0x2e208400u: value = (uint8_t)(lhs - rhs); break;
-      case 0x0e201c00u: value = lhs & rhs; break;
-      case 0x0ea01c00u: value = lhs | rhs; break;
-      case 0x2e201c00u: value = lhs ^ rhs; break;
-      case 0x2e208c00u: value = lhs == rhs ? 0xff : 0; break;
-      case 0x0e203400u:
-        value = (int8_t)lhs > (int8_t)rhs ? 0xff : 0;
+      case 0x0e208400u: value = lhs + rhs; break;
+      case 0x2e208400u: value = lhs - rhs; break;
+      case 0x2e208c00u: value = (lhs & mask) == (rhs & mask) ? mask : 0; break;
+      case 0x0e203400u: {
+        unsigned shift = 64 - (unsigned)esize;
+        int64_t a = (int64_t)(lhs << shift) >> shift;
+        int64_t b = (int64_t)(rhs << shift) >> shift;
+        value = a > b ? mask : 0;
         break;
-      case 0x0e203c00u:
-        value = (int8_t)lhs >= (int8_t)rhs ? 0xff : 0;
+      }
+      case 0x0e203c00u: {
+        unsigned shift = 64 - (unsigned)esize;
+        int64_t a = (int64_t)(lhs << shift) >> shift;
+        int64_t b = (int64_t)(rhs << shift) >> shift;
+        value = a >= b ? mask : 0;
         break;
-      case 0x2e203400u: value = lhs > rhs ? 0xff : 0; break;
-      case 0x2e203c00u: value = lhs >= rhs ? 0xff : 0; break;
+      }
+      case 0x2e203400u: value = (lhs & mask) > (rhs & mask) ? mask : 0; break;
+      case 0x2e203c00u: value = (lhs & mask) >= (rhs & mask) ? mask : 0; break;
       default: return false;
     }
-    result |= (uint64_t)value << (lane * 8);
+    memcpy(result + lane * (esize / 8), &value, (size_t)(esize / 8));
   }
-  interpreter->v[rd] = result;
+  memcpy(interpreter->v[rd], result, 16);
   return true;
 }
 
@@ -1011,7 +1082,11 @@ static bool ExecuteLoadStoreImm(AARCH64Interpreter* interpreter,
   if ((insn >> 24) & 1) {
     // Unsigned scaled 12-bit immediate offset.
     uint64_t imm12 = (insn >> 10) & 0xfff;
-    addr = base + (imm12 << size);
+    int scale = size;
+    if (is_fp && size == 0 && (opc == 2 || opc == 3)) {
+      scale = 4;  // 128-bit SIMD&FP
+    }
+    addr = base + (imm12 << scale);
   } else if ((insn >> 21) & 1) {
     // Register offset, with optional extend/shift.
     int rm = (insn >> 16) & 0x1f;
@@ -1045,17 +1120,28 @@ static bool ExecuteLoadStoreImm(AARCH64Interpreter* interpreter,
   }
 
   if (is_fp) {
-    // FP/SIMD scalar load/store.  opc bit 0 selects load(1)/store(0).
+    // FP/SIMD load/store.  opc bit 0 selects load(1)/store(0).  size=00 with
+    // opc 10/11 is a 128-bit Q-register access.
     bool load = (opc & 1) != 0;
-    if (load) {
+    bool is_q = size == 0 && (opc == 2 || opc == 3);
+    if (is_q) {
+      if (load) {
+        interpreter->v[rt][0] = Load64(interpreter, addr);
+        interpreter->v[rt][1] = Load64(interpreter, addr + 8);
+      } else {
+        Store64(interpreter, addr, interpreter->v[rt][0]);
+        Store64(interpreter, addr + 8, interpreter->v[rt][1]);
+      }
+    } else if (load) {
       uint64_t value;
       switch (size) {
         case 2: value = Load32(interpreter, addr); break;
         default: value = Load64(interpreter, addr); break;
       }
-      interpreter->v[rt] = value;
+      interpreter->v[rt][0] = value;
+      interpreter->v[rt][1] = 0;
     } else {
-      uint64_t value = interpreter->v[rt];
+      uint64_t value = interpreter->v[rt][0];
       switch (size) {
         case 2: Store32(interpreter, addr, (uint32_t)value); break;
         default: Store64(interpreter, addr, value); break;
@@ -1258,12 +1344,13 @@ static bool ExecuteFP(AARCH64Interpreter* interpreter, uint32_t insn) {
       }
       case 6: {  // FMOV FP -> GP (bitcast).
         WriteX(interpreter, rd,
-               isD ? interpreter->v[rn] : (uint32_t)interpreter->v[rn]);
+               isD ? interpreter->v[rn][0] : (uint32_t)interpreter->v[rn][0]);
         return true;
       }
       case 7: {  // FMOV GP -> FP (bitcast).
         uint64_t bits = ReadX(interpreter, rn);
-        interpreter->v[rd] = isD ? bits : (uint32_t)bits;
+        interpreter->v[rd][0] = isD ? bits : (uint32_t)bits;
+        interpreter->v[rd][1] = 0;
         return true;
       }
       default:
@@ -1312,8 +1399,9 @@ static bool ExecuteFP(AARCH64Interpreter* interpreter, uint32_t insn) {
     int opcode = (insn >> 15) & 0x3f;
     switch (opcode) {
       case 0x0:  // FMOV (register).
-        interpreter->v[rd] = isD ? interpreter->v[rn]
-                                 : (uint32_t)interpreter->v[rn];
+        interpreter->v[rd][0] = isD ? interpreter->v[rn][0]
+                                    : (uint32_t)interpreter->v[rn][0];
+        interpreter->v[rd][1] = 0;
         return true;
       case 0x1: {  // FABS.
         if (isD) WriteD(interpreter, rd, fabs(ReadD(interpreter, rn)));
@@ -1446,18 +1534,24 @@ static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
   if ((insn & 0x3E000000) == 0x28000000) {
     return ExecuteLoadStorePair(interpreter, insn);
   }
-  switch (insn & 0xffe0fc00u) {
+  if ((insn & 0xbfe0fc00u) == 0x0e201c00u ||
+      (insn & 0xbfe0fc00u) == 0x0ea01c00u ||
+      (insn & 0xbfe0fc00u) == 0x2e201c00u) {
+    return ExecuteAdvancedSIMD(interpreter, insn);
+  }
+  switch (insn & 0xbf20fc00u) {
     case 0x0e208400u:
     case 0x2e208400u:
-    case 0x0e201c00u:
-    case 0x0ea01c00u:
-    case 0x2e201c00u:
     case 0x2e208c00u:
     case 0x0e203400u:
     case 0x0e203c00u:
     case 0x2e203400u:
     case 0x2e203c00u:
-      return ExecuteAdvancedSIMD8B(interpreter, insn);
+    case 0x0e20d400u:
+    case 0x0ea0d400u:
+    case 0x0e20dc00u:
+    case 0x0e20fc00u:
+      return ExecuteAdvancedSIMD(interpreter, insn);
   }
   if ((insn & 0x5F000000) == 0x1E000000) {
     return ExecuteFP(interpreter, insn);

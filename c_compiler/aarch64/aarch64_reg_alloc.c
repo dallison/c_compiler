@@ -607,12 +607,19 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
   // We don't set the spilled instruction yet because TargetRetargetInstruction
   // will see it and retarget it to the spill.
   TrapSpill(inst);
+  int spill_bytes = GetRegisterSize(inst) == kSize128Bit ? 16 : 8;
+  if (spill_bytes == 16) {
+    allocator->current_spilled_region_size =
+        (allocator->current_spilled_region_size + 15) & ~15;
+  }
   TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)AARCH64_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->g->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
-  allocator->current_spilled_region_size += 8;    // Space for one register.
+  SetInstructionSize(spill, GetRegisterSize(inst) == 0 ? kSize64Bit
+                                                       : GetRegisterSize(inst));
+  allocator->current_spilled_region_size += spill_bytes;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
@@ -776,6 +783,10 @@ static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) 
     case AARCH64_OP(vcmge):
     case AARCH64_OP(vcmhi):
     case AARCH64_OP(vcmhs):
+    case AARCH64_OP(vfadd):
+    case AARCH64_OP(vfsub):
+    case AARCH64_OP(vfmul):
+    case AARCH64_OP(vfdiv):
     case AARCH64_OP(fvarreg):
       return kAARCH64RegTypeFloat;
 
@@ -1591,6 +1602,8 @@ static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type
       // size (0) keeps the 64-bit "d" name.
       if (size == kSize32Bit) {
         snprintf(buf, len, "s%d", num);
+      } else if (size == kSize128Bit) {
+        snprintf(buf, len, "q%d", num);
       } else {
         snprintf(buf, len, "d%d", num);
       }
@@ -1626,6 +1639,9 @@ static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type
                 prefix = "d";
                 break;
             }
+            break;
+          case kSize128Bit:
+            prefix = type == kAARCH64RegTypeFloat ? "q" : "x";
             break;
        }
         snprintf(buf, len, "%s%d", prefix,

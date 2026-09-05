@@ -1256,7 +1256,23 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     case AARCH64_OP(vcmgt):
     case AARCH64_OP(vcmge):
     case AARCH64_OP(vcmhi):
-    case AARCH64_OP(vcmhs): {
+    case AARCH64_OP(vcmhs):
+    case AARCH64_OP(vfadd):
+    case AARCH64_OP(vfsub):
+    case AARCH64_OP(vfmul):
+    case AARCH64_OP(vfdiv): {
+      int q = GetRegisterSize(inst) == kSize128Bit;
+      int size_log = (inst->flags >> AARCH64_SIMD_ELEM_SHIFT) & 3;
+      static const char* arrangements[2][4] = {
+          {"8b", "4h", "2s", "1d"},
+          {"16b", "8h", "4s", "2d"},
+      };
+      const char* arrangement = arrangements[q][size_log];
+      if (inst->opcode == (TargetOpcode)AARCH64_OP(vand) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(veor)) {
+        arrangement = q ? "16b" : "8b";
+      }
       const char* mnemonic =
           inst->opcode == (TargetOpcode)AARCH64_OP(vadd) ? "add" :
           inst->opcode == (TargetOpcode)AARCH64_OP(vsub) ? "sub" :
@@ -1266,20 +1282,27 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
           inst->opcode == (TargetOpcode)AARCH64_OP(vcmeq) ? "cmeq" :
           inst->opcode == (TargetOpcode)AARCH64_OP(vcmgt) ? "cmgt" :
           inst->opcode == (TargetOpcode)AARCH64_OP(vcmge) ? "cmge" :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? "cmhi" : "cmhs";
-      fprintf(fp, "\t%-12sv%d.8b, v%d.8b, v%d.8b\n", mnemonic,
-              inst->reg->num, inst->operand[0]->reg->num,
-              inst->operand[1]->reg->num);
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? "cmhi" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhs) ? "cmhs" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfadd) ? "fadd" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfsub) ? "fsub" :
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfmul) ? "fmul" : "fdiv";
+      fprintf(fp, "\t%-12sv%d.%s, v%d.%s, v%d.%s\n", mnemonic,
+              inst->reg->num, arrangement,
+              inst->operand[0]->reg->num, arrangement,
+              inst->operand[1]->reg->num, arrangement);
       return;
     }
 
     case AARCH64_OP(spill): {
       AARCH64Register* reg = (AARCH64Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
+      int spill_size = GetRegisterSize(inst) == kSize128Bit ? kSize128Bit
+                                                            : kSize64Bit;
       PrintSpillSlotAddress(offset, fp);
       fprintf(fp, "\t%s %s, [x16, #0]\t// Spilled @%d\n",
               reg->type == kAARCH64RegTypeInt ? "str" : "fstr",
-              AARCH64RegisterName(reg, kSize64Bit, buf1, sizeof(buf1)),
+              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)),
               inst->operand[0]->id);
       return;
     }
@@ -1288,10 +1311,12 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       AARCH64Register* reg = (AARCH64Register*)inst->reg;
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
+      int spill_size = GetRegisterSize(spill) == kSize128Bit ? kSize128Bit
+                                                             : kSize64Bit;
       PrintSpillSlotAddress(offset, fp);
       fprintf(fp, "\t%s %s, [x16, #0]\t// Reloaded spilled @%d\n",
               reg->type == kAARCH64RegTypeInt ? "ldr" : "fldr",
-              AARCH64RegisterName(reg, kSize64Bit, buf1, sizeof(buf1)),
+              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)),
               spill->operand[0]->id);
       return;
     }
@@ -1870,6 +1895,22 @@ static void ProgramMoveTargetRegister(AsmModule* module, int dest,
 static void ProgramLoadStore(AsmModule* module, bool load, bool fp, int size,
                              bool sign, int value_reg, int base_reg,
                              int offset) {
+  if (size == 4) {
+    // 128-bit SIMD&FP: size field 00, opc 11 (load) or 10 (store), scale 16.
+    int opc = load ? 3 : 2;
+    if (offset >= 0 && (offset & 15) == 0 && offset / 16 <= 0xfff) {
+      int immediate = offset / 16;
+      AARCH64ProgramEmitWord(
+          module, (0x39u << 24) | (1u << 26) | ((uint32_t)opc << 22) |
+                      ((uint32_t)immediate << 10) | ((uint32_t)base_reg << 5) |
+                      (uint32_t)value_reg);
+    } else {
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStoreUnscaled(0, true, opc, value_reg,
+                                                 base_reg, offset, 0));
+    }
+    return;
+  }
   int opc = sign && load ? (size == 3 ? 2 : 3) : load;
   int scale = 1 << size;
   if (offset >= 0 && (offset & (scale - 1)) == 0 &&
@@ -3060,6 +3101,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
                            ? 1
                            : op == AARCH64_OP(ldursw)
                                  ? 2
+                                 : GetRegisterSize(inst) == kSize128Bit ? 4
                                  : ProgramIs64(inst) ? 3 : 2;
       bool sign = op == AARCH64_OP(ldrsb) || op == AARCH64_OP(ldrsh) ||
                   op == AARCH64_OP(ldursb) || op == AARCH64_OP(ldursh) ||
@@ -3083,6 +3125,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
                      ? 0
                      : op == AARCH64_OP(strh) || op == AARCH64_OP(sturh)
                            ? 1
+                           : GetRegisterSize(inst) == kSize128Bit ? 4
                            : ProgramIs64(inst) ? 3 : 2;
       int offset = TargetIsConst(inst->operand[2])
                        ? (int)TargetIntValue(inst->operand[2])
@@ -3222,8 +3265,9 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(spill): {
       int offset = (int)TargetIntValue(inst->operand[1]) +
                    emitter->first_spill_offset;
+      int size = GetRegisterSize(inst) == kSize128Bit ? 4 : 3;
       ProgramSpillAddress(module, offset);
-      ProgramLoadStore(module, false, ProgramRegIsFP(inst), 3, false, dest, 16,
+      ProgramLoadStore(module, false, ProgramRegIsFP(inst), size, false, dest, 16,
                        0);
       return;
     }
@@ -3231,8 +3275,9 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) +
                    emitter->first_spill_offset;
+      int size = GetRegisterSize(spill) == kSize128Bit ? 4 : 3;
       ProgramSpillAddress(module, offset);
-      ProgramLoadStore(module, true, ProgramRegIsFP(inst), 3, false, dest, 16,
+      ProgramLoadStore(module, true, ProgramRegIsFP(inst), size, false, dest, 16,
                        0);
       return;
     }
@@ -3304,18 +3349,44 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(vcmgt):
     case AARCH64_OP(vcmge):
     case AARCH64_OP(vcmhi):
-    case AARCH64_OP(vcmhs): {
-      uint32_t base =
-          inst->opcode == (TargetOpcode)AARCH64_OP(vadd) ? 0x0e208400u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vsub) ? 0x2e208400u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vand) ? 0x0e201c00u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ? 0x0ea01c00u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(veor) ? 0x2e201c00u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vcmeq) ? 0x2e208c00u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vcmgt) ? 0x0e203400u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vcmge) ? 0x0e203c00u :
-          inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? 0x2e203400u :
-                                                           0x2e203c00u;
+    case AARCH64_OP(vcmhs):
+    case AARCH64_OP(vfadd):
+    case AARCH64_OP(vfsub):
+    case AARCH64_OP(vfmul):
+    case AARCH64_OP(vfdiv): {
+      int q = GetRegisterSize(inst) == kSize128Bit ? 1 : 0;
+      int size_log = (inst->flags >> AARCH64_SIMD_ELEM_SHIFT) & 3;
+      uint32_t base;
+      bool bitwise = inst->opcode == (TargetOpcode)AARCH64_OP(vand) ||
+                     inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ||
+                     inst->opcode == (TargetOpcode)AARCH64_OP(veor);
+      if (inst->opcode == (TargetOpcode)AARCH64_OP(vfadd) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfsub) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfmul) ||
+          inst->opcode == (TargetOpcode)AARCH64_OP(vfdiv)) {
+        // Vector FP three-same: size=00 single, size=01 double.
+        int fp_size = size_log == 3 ? 1 : 0;
+        base = inst->opcode == (TargetOpcode)AARCH64_OP(vfadd) ? 0x0e20d400u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vfsub) ? 0x0ea0d400u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vfmul) ? 0x0e20dc00u :
+                                                                0x0e20fc00u;
+        base |= ((uint32_t)q << 30) | ((uint32_t)fp_size << 22);
+      } else {
+        base = inst->opcode == (TargetOpcode)AARCH64_OP(vadd) ? 0x0e208400u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vsub) ? 0x2e208400u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vand) ? 0x0e201c00u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vorr) ? 0x0ea01c00u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(veor) ? 0x2e201c00u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vcmeq) ? 0x2e208c00u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vcmgt) ? 0x0e203400u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vcmge) ? 0x0e203c00u :
+               inst->opcode == (TargetOpcode)AARCH64_OP(vcmhi) ? 0x2e203400u :
+                                                                0x2e203c00u;
+        base |= ((uint32_t)q << 30);
+        if (!bitwise) {
+          base |= ((uint32_t)size_log << 22);
+        }
+      }
       AARCH64ProgramEmitWord(
           module, base | (ProgramRegNum(inst->operand[1]) << 16) |
                       (ProgramRegNum(inst->operand[0]) << 5) | dest);

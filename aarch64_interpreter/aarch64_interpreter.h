@@ -26,9 +26,9 @@ typedef struct AARCH64Interpreter {
   uint64_t tp_base;
   size_t tls_block_size;
   uint64_t x[31];
-  // Scalar floating-point / SIMD register file.  Only the low 64 bits are
-  // modelled (enough for float/double scalars).
-  uint64_t v[32];
+  // SIMD&FP register file.  Each register is 128 bits; scalar float/double
+  // operations use the low 32/64 bits and zero the rest on write.
+  uint64_t v[32][2];
   uint64_t sp;
   uint64_t pc;
   bool flag_n;

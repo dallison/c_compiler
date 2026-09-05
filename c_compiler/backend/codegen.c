@@ -1851,34 +1851,49 @@ static void ScalarizeVectorOperations(Generator* gen) {
       bool native_x86 =
           StringEqual(compiler->target_name, "x86_64") &&
           vector_type != NULL && vector_type->size == 16 &&
-          element != NULL && TypeIsIntegral(element) &&
-          ((node->opcode == IR_OP(vadd) ||
-            node->opcode == IR_OP(vsub) ||
-            node->opcode == IR_OP(vand) ||
-            node->opcode == IR_OP(vor) ||
-            node->opcode == IR_OP(vxor)) ||
-           ((node->opcode == IR_OP(vcmpeq)) && element->size <= 4) ||
-           ((node->opcode == IR_OP(vcmpgt) ||
-             node->opcode == IR_OP(vcmplt)) &&
-            !TypeIsUnsigned(element) && element->size <= 4));
+          element != NULL &&
+          ((TypeIsIntegral(element) &&
+            ((node->opcode == IR_OP(vadd) ||
+              node->opcode == IR_OP(vsub) ||
+              node->opcode == IR_OP(vand) ||
+              node->opcode == IR_OP(vor) ||
+              node->opcode == IR_OP(vxor)) ||
+             ((node->opcode == IR_OP(vcmpeq)) && element->size <= 4) ||
+             ((node->opcode == IR_OP(vcmpgt) ||
+               node->opcode == IR_OP(vcmplt)) &&
+              !TypeIsUnsigned(element) && element->size <= 4))) ||
+           ((TypeUsesFloat32Representation(element) ||
+             TypeUsesFloat64Representation(element)) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vmul) ||
+             node->opcode == IR_OP(vdiv))));
       bool native_aarch64 =
           StringEqual(compiler->target_name, "aarch64") &&
-          vector_type != NULL && vector_type->size == 8 &&
-          element != NULL && TypeIsIntegral(element) &&
-          (node->opcode == IR_OP(vadd) ||
-           node->opcode == IR_OP(vsub) ||
-           node->opcode == IR_OP(vand) ||
-           node->opcode == IR_OP(vor) ||
-           node->opcode == IR_OP(vxor) ||
-           node->opcode == IR_OP(vcmpeq) ||
-           node->opcode == IR_OP(vcmplt) ||
-           node->opcode == IR_OP(vcmple) ||
-           node->opcode == IR_OP(vcmpgt) ||
-           node->opcode == IR_OP(vcmpge) ||
-           node->opcode == IR_OP(vcmpltu) ||
-           node->opcode == IR_OP(vcmpleu) ||
-           node->opcode == IR_OP(vcmpgtu) ||
-           node->opcode == IR_OP(vcmpgeu));
+          vector_type != NULL &&
+          (vector_type->size == 8 || vector_type->size == 16) &&
+          element != NULL &&
+          ((TypeIsIntegral(element) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vand) ||
+             node->opcode == IR_OP(vor) ||
+             node->opcode == IR_OP(vxor) ||
+             node->opcode == IR_OP(vcmpeq) ||
+             node->opcode == IR_OP(vcmplt) ||
+             node->opcode == IR_OP(vcmple) ||
+             node->opcode == IR_OP(vcmpgt) ||
+             node->opcode == IR_OP(vcmpge) ||
+             node->opcode == IR_OP(vcmpltu) ||
+             node->opcode == IR_OP(vcmpleu) ||
+             node->opcode == IR_OP(vcmpgtu) ||
+             node->opcode == IR_OP(vcmpgeu))) ||
+           ((TypeUsesFloat32Representation(element) ||
+             TypeUsesFloat64Representation(element)) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vmul) ||
+             node->opcode == IR_OP(vdiv))));
       if (native_x86 || native_aarch64) {
         node = next;
         continue;

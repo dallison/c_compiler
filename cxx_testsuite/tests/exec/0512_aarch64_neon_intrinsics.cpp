@@ -63,5 +63,42 @@ int main() {
       greater[6] != 0xff || greater[7] != 0xff) {
     return 5;
   }
+
+  const uint8_t wide_bytes[16] = {
+      3, 0x80, 7, 3, 0xfe, 9, 3, 0xff, 3, 1, 2, 3, 4, 5, 6, 7};
+  uint8x16_t wide = vld1q_u8(wide_bytes);
+  uint8x16_t wide_matches = vceqq_u8(wide, vdupq_n_u8(3));
+  if (wide_matches[0] != 0xff || wide_matches[1] != 0 ||
+      wide_matches[8] != 0xff || wide_matches[11] != 0xff ||
+      wide_matches[15] != 0) {
+    return 7;
+  }
+  uint8_t wide_out[16] = {};
+  vst1q_u8(wide_out, wide_matches);
+  if (wide_out[0] != 0xff || wide_out[3] != 0xff || wide_out[15] != 0) {
+    return 8;
+  }
+
+  int32x4_t i32_left = {1, 2, 3, 4};
+  int32x4_t i32_right = {10, 20, 30, 40};
+  int32x4_t i32_sum = vaddq_s32(i32_left, i32_right);
+  if (i32_sum[0] != 11 || i32_sum[3] != 44) {
+    return 9;
+  }
+
+  float32x4_t f32_left = {1.f, 2.f, 3.f, 4.f};
+  float32x4_t f32_right = {5.f, 6.f, 7.f, 8.f};
+  float32x4_t f32_sum = vaddq_f32(f32_left, f32_right);
+  float32x4_t f32_prod = vmulq_f32(f32_left, f32_right);
+  if (f32_sum[0] != 6.f || f32_sum[3] != 12.f ||
+      f32_prod[1] != 12.f || f32_prod[2] != 21.f) {
+    return 10;
+  }
+  float64x2_t f64_left = {1.5, 2.5};
+  float64x2_t f64_right = {0.5, 1.5};
+  float64x2_t f64_sum = vaddq_f64(f64_left, f64_right);
+  if (f64_sum[0] != 2.0 || f64_sum[1] != 4.0) {
+    return 11;
+  }
   return 0;
 }

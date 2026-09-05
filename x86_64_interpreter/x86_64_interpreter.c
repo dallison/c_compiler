@@ -1092,6 +1092,55 @@ static bool ExecuteSSE(X86_64Interpreter* interpreter, size_t* pos, REX rex,
         *ok = true;
         return true;
       }
+      if (!is_ss && !is_sd) {
+        uint8_t source[16];
+        uint8_t dest[16];
+        memcpy(dest, interpreter->xmm[dst], sizeof(dest));
+        if (modrm.mod == 3) {
+          memcpy(source, interpreter->xmm[modrm.rm], sizeof(source));
+        } else {
+          uint64_t addr = EffectiveAddress(interpreter, &modrm, *pos);
+          uint64_t halves[2] = {
+              Load64(interpreter, addr), Load64(interpreter, addr + 8)};
+          memcpy(source, halves, sizeof(source));
+        }
+        if (is_pd) {
+          for (int lane = 0; lane < 2; lane++) {
+            double a, b, r;
+            memcpy(&a, dest + lane * 8, sizeof(a));
+            memcpy(&b, source + lane * 8, sizeof(b));
+            switch (opcode) {
+              case 0x51: r = sqrt(b); break;
+              case 0x58: r = a + b; break;
+              case 0x59: r = a * b; break;
+              case 0x5c: r = a - b; break;
+              case 0x5e: r = a / b; break;
+              case 0x5d: r = (a < b) ? a : b; break;
+              default: r = (a > b) ? a : b; break;
+            }
+            memcpy(dest + lane * 8, &r, sizeof(r));
+          }
+        } else {
+          for (int lane = 0; lane < 4; lane++) {
+            float a, b, r;
+            memcpy(&a, dest + lane * 4, sizeof(a));
+            memcpy(&b, source + lane * 4, sizeof(b));
+            switch (opcode) {
+              case 0x51: r = sqrtf(b); break;
+              case 0x58: r = a + b; break;
+              case 0x59: r = a * b; break;
+              case 0x5c: r = a - b; break;
+              case 0x5e: r = a / b; break;
+              case 0x5d: r = (a < b) ? a : b; break;
+              default: r = (a > b) ? a : b; break;
+            }
+            memcpy(dest + lane * 4, &r, sizeof(r));
+          }
+        }
+        memcpy(interpreter->xmm[dst], dest, sizeof(dest));
+        *ok = true;
+        return true;
+      }
       if (is_sd) {
         double a = XmmReadDouble(interpreter, dst);
         double b;

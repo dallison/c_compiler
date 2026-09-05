@@ -1242,6 +1242,8 @@ static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
   bool commutative = opcode == X86_64_OP(imul) || opcode == X86_64_OP(imull) ||
                      opcode == X86_64_OP(addss) || opcode == X86_64_OP(addsd) ||
                      opcode == X86_64_OP(mulss) || opcode == X86_64_OP(mulsd) ||
+                     opcode == X86_64_OP(addps) || opcode == X86_64_OP(addpd) ||
+                     opcode == X86_64_OP(mulps) || opcode == X86_64_OP(mulpd) ||
                      opcode == X86_64_OP(paddb) || opcode == X86_64_OP(paddw) ||
                      opcode == X86_64_OP(paddd) || opcode == X86_64_OP(paddq) ||
                      opcode == X86_64_OP(pand) || opcode == X86_64_OP(por) ||
@@ -1253,6 +1255,10 @@ static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
                              opcode == X86_64_OP(subsd) ||
                              opcode == X86_64_OP(divss) ||
                              opcode == X86_64_OP(divsd) ||
+                             opcode == X86_64_OP(subps) ||
+                             opcode == X86_64_OP(subpd) ||
+                             opcode == X86_64_OP(divps) ||
+                             opcode == X86_64_OP(divpd) ||
                              opcode == X86_64_OP(psubb) ||
                              opcode == X86_64_OP(psubw) ||
                              opcode == X86_64_OP(psubd) ||
@@ -1496,6 +1502,14 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
     case X86_64_OP(pcmpgtb):
     case X86_64_OP(pcmpgtw):
     case X86_64_OP(pcmpgtd):
+    case X86_64_OP(addps):
+    case X86_64_OP(addpd):
+    case X86_64_OP(subps):
+    case X86_64_OP(subpd):
+    case X86_64_OP(mulps):
+    case X86_64_OP(mulpd):
+    case X86_64_OP(divps):
+    case X86_64_OP(divpd):
       PrintBinaryRegOp(fp, AttMnemonic(opcode), inst, buf1, buf2);
       return;
 

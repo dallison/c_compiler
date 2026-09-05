@@ -112,6 +112,14 @@ typedef enum {
   X86_64_OP(pcmpgtb),
   X86_64_OP(pcmpgtw),
   X86_64_OP(pcmpgtd),
+  X86_64_OP(addps),
+  X86_64_OP(addpd),
+  X86_64_OP(subps),
+  X86_64_OP(subpd),
+  X86_64_OP(mulps),
+  X86_64_OP(mulpd),
+  X86_64_OP(divps),
+  X86_64_OP(divpd),
 
   // Integer arithmetic and logic.
   X86_64_OP(add),

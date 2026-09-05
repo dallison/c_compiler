@@ -278,6 +278,10 @@ const char* AARCH64OpcodeName(int op) {
     case AARCH64_OP(vcmge): return "vcmge";
     case AARCH64_OP(vcmhi): return "vcmhi";
     case AARCH64_OP(vcmhs): return "vcmhs";
+    case AARCH64_OP(vfadd): return "vfadd";
+    case AARCH64_OP(vfsub): return "vfsub";
+    case AARCH64_OP(vfmul): return "vfmul";
+    case AARCH64_OP(vfdiv): return "vfdiv";
 
   case AARCH64_OP(xxx): return "xxx";
     case AARCH64_OP(not): return "not";
@@ -672,6 +676,9 @@ TargetInstruction* SetInstructionSize(TargetInstruction* inst, int size) {
   return inst;
 }
 
+static bool TypeUsesAArch64FpArgReg(TypeRecord* type);
+static bool TypePassedAsAArch64Aggregate(TypeRecord* type);
+
 // Copy size from operand.
 TargetInstruction* CopyInstructionSize(TargetInstruction* inst, int op) {
   if (inst->operand[op] == NULL) {
@@ -700,7 +707,7 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
         TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
         TypeUsesFloat64Representation(node->type) ||
-        TypeIsStructOrUnion(node->type)) {
+        TypeIsStructOrUnion(node->type) || TypeIsVector(node->type)) {
       size = kSize64Bit;
     }
     SetInstructionSize(inst, size);
@@ -1735,7 +1742,7 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
     // or frame slot holds a pointer to the caller's copy, which *is* the
     // address of the parameter.
     bool by_ref_struct =
-        TypeIsStructOrUnion(node->type) && node->type->size > 8;
+        TypePassedAsAArch64Aggregate(node->type) && node->type->size > 8;
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       IRVariable* var = (IRVariable*)node;
@@ -2578,7 +2585,7 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
     // register) holds a *pointer* to the caller's copy, which is the address of
     // the parameter.  Dereference it so callers see the struct's address.
     bool by_ref_struct =
-        TypeIsStructOrUnion(addr_node->type) && addr_node->type->size > 8;
+        TypePassedAsAArch64Aggregate(addr_node->type) && addr_node->type->size > 8;
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~AARCH64_REG_VAR;
@@ -3168,14 +3175,42 @@ static TargetInstruction* LowerCaptureVectorResult(AARCH64Generator* g,
                         kSize64Bit)));
 }
 
+static TargetInstruction* SetSimdArrangement(TargetInstruction* inst,
+                                             int vector_bytes, int elem_bytes) {
+  int elem_log = elem_bytes <= 1 ? 0 : elem_bytes == 2 ? 1 : elem_bytes == 4 ? 2 : 3;
+  inst->flags = (inst->flags & ~AARCH64_SIMD_ELEM_MASK) |
+                (elem_log << AARCH64_SIMD_ELEM_SHIFT);
+  return SetInstructionSize(
+      inst, vector_bytes == 16 ? kSize128Bit : kSize64Bit);
+}
+
 static TargetInstruction* LowerVectorOperation(AARCH64Generator* g,
                                                IRNode* node) {
   assert(node->inputs.length == 3);
+  TypeRecord* vector_type = (TypeRecord*)node->aux;
+  if (!TypeIsVector(vector_type)) {
+    vector_type = ((IRNode*)node->inputs.value.p[0])->type;
+    if (TypeIsPointer(vector_type)) {
+      vector_type = vector_type->next;
+    }
+  }
+  assert(TypeIsVector(vector_type));
+  TypeRecord* element = TypeVectorElement(vector_type);
+  assert(element != NULL);
+  bool is_float = TypeUsesFloat32Representation(element) ||
+                  TypeUsesFloat64Representation(element);
+
   AARCH64Opcode opcode;
   bool swap_operands = false;
   switch (node->opcode) {
-    case IR_OP(vadd): opcode = AARCH64_OP(vadd); break;
-    case IR_OP(vsub): opcode = AARCH64_OP(vsub); break;
+    case IR_OP(vadd):
+      opcode = is_float ? AARCH64_OP(vfadd) : AARCH64_OP(vadd);
+      break;
+    case IR_OP(vsub):
+      opcode = is_float ? AARCH64_OP(vfsub) : AARCH64_OP(vsub);
+      break;
+    case IR_OP(vmul): opcode = AARCH64_OP(vfmul); break;
+    case IR_OP(vdiv): opcode = AARCH64_OP(vfdiv); break;
     case IR_OP(vand): opcode = AARCH64_OP(vand); break;
     case IR_OP(vor): opcode = AARCH64_OP(vorr); break;
     case IR_OP(vxor): opcode = AARCH64_OP(veor); break;
@@ -3205,6 +3240,7 @@ static TargetInstruction* LowerVectorOperation(AARCH64Generator* g,
       COMPILER_UNREACHABLE();
   }
 
+  int vec_size = vector_type->size == 16 ? kSize128Bit : kSize64Bit;
   TargetInstruction* destination = Materialize(g, node->inputs.value.p[0]);
   TargetInstruction* left_address = Materialize(g, node->inputs.value.p[1]);
   TargetInstruction* right_address = Materialize(g, node->inputs.value.p[2]);
@@ -3213,27 +3249,27 @@ static TargetInstruction* LowerVectorOperation(AARCH64Generator* g,
              NewInstruction2(
                  AARCH64_OP(fldr), left_address,
                  GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-             kSize64Bit));
+             vec_size));
   TargetInstruction* right = Emit(
       g, SetInstructionSize(
              NewInstruction2(
                  AARCH64_OP(fldr), right_address,
                  GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-             kSize64Bit));
+             vec_size));
   if (swap_operands) {
     TargetInstruction* temporary = left;
     left = right;
     right = temporary;
   }
   TargetInstruction* operation = Emit(
-      g, SetInstructionSize(NewInstruction2(opcode, left, right),
-                            kSize64Bit));
+      g, SetSimdArrangement(NewInstruction2(opcode, left, right),
+                            vector_type->size, element->size));
   TargetInstruction* store = Emit(
       g, SetInstructionSize(
              NewInstruction3(
                  AARCH64_OP(fstr), operation, destination,
                  GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-             kSize64Bit));
+             vec_size));
   return SetLoweredNode(node, store);
 }
 
@@ -3822,6 +3858,16 @@ typedef struct {
   size_t second_offset;
 } ArgLocation;
 
+static bool TypeUsesAArch64FpArgReg(TypeRecord* type) {
+  return TypeIsFloatingPoint(type) ||
+         (TypeIsVector(type) && TypeUsesNativeVectorABI(type));
+}
+
+static bool TypePassedAsAArch64Aggregate(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) ||
+         (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
+}
+
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = kArgLocationRegister;
@@ -3961,10 +4007,9 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                      NewArgLocationPushedPair(next_pushed_arg_offset));
         next_pushed_arg_offset += 16;
       }
-    } else if (TypeIsStructOrUnion(arg_node->type)) {
-      // Struct or union that fit in a register are passed in a register.  If
-      // they are bigger than 8 bytes they are passed by reference (first making
-      // a copy on the stack).
+    } else if (TypePassedAsAArch64Aggregate(arg_node->type)) {
+      // Struct, union, or non-native vector that fits in a register is passed
+      // in a register.  Wider values are copied and passed by reference.
       size_t struct_size = arg_node->type->size;
       if (struct_size <= 8) {
         if (next_int_arg_reg < AARCH64_NUM_INT_ARGS) {
@@ -3997,8 +4042,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type) ||
-               TypeIsVector(arg_node->type)) {
+    } else if (TypeUsesAArch64FpArgReg(arg_node->type)) {
       if (next_fp_arg_reg < AARCH64_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -4115,7 +4159,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     IRNode* arg_node = node->inputs.value.p[i];
     TargetInstruction* arg = Materialize(g, arg_node);
-    if (TypeIsVector(arg_node->type)) {
+    if (TypeIsVector(arg_node->type) && TypeUsesNativeVectorABI(arg_node->type)) {
       TargetInstruction* staged = Emit(
           g, SetInstructionSize(
                  NewInstruction2(
@@ -4125,7 +4169,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       VectorSet(&staged_register_args, i - 1, staged);
       continue;
     }
-    if (TypeIsStructOrUnion(arg_node->type) && arg_node->type->size <= 8) {
+    if (TypePassedAsAArch64Aggregate(arg_node->type) && arg_node->type->size <= 8) {
       arg = Emit(g, CopyInstructionSize(
                         NewInstruction2(
                             AARCH64_OP(ldr), arg,
@@ -4214,14 +4258,14 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       }
       case kArgLocationPushed: {
         TargetInstruction* arg = Materialize(g, arg_node);
-        if (TypeIsVector(arg_node->type)) {
+        if (TypeIsVector(arg_node->type) && TypeUsesNativeVectorABI(arg_node->type)) {
           arg = Emit(g, SetInstructionSize(
                             NewInstruction2(
                                 AARCH64_OP(ldr), arg,
                                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
                             kSize64Bit));
         }
-        if (TypeIsStructOrUnion(arg_node->type)) {
+        if (TypePassedAsAArch64Aggregate(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed directly on stack.  The
@@ -4241,8 +4285,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
             VectorGet(&staged_register_args, i - 1);
         assert(arg != NULL);
         AARCH64Opcode mov_opcode = AARCH64_OP(mov);
-        if (TypeIsFloatingPoint(arg_node->type) ||
-            TypeIsVector(arg_node->type)) {
+        if (TypeUsesAArch64FpArgReg(arg_node->type)) {
           mov_opcode = AARCH64_OP(fmov);
         }
         // Emit(g, NewInstruction2(mov_opcode, arg_location->location.reg, arg));
@@ -4310,7 +4353,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     call =
         Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
-    if (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type)) {
+    if (TypeUsesAArch64FpArgReg(node->type)) {
       // The value comes back in the floating-point return register (d0), not
       // x0; tell the register allocator so the result isn't read from x0.
       call->flags |= AARCH64_INST_FP_RETURN;
@@ -5009,6 +5052,8 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
 
     case IR_OP(vadd):
     case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
     case IR_OP(vand):
     case IR_OP(vor):
     case IR_OP(vxor):
@@ -5023,8 +5068,6 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(vcmpgeu):
       return LowerVectorOperation(g, node);
 
-    case IR_OP(vmul):
-    case IR_OP(vdiv):
     case IR_OP(vmod):
     case IR_OP(vlsl):
     case IR_OP(vlsr):
@@ -5114,8 +5157,8 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
       ((IRVariable*)arg)->symbol != NULL) {
     type = ((IRVariable*)arg)->symbol->type;
   }
-  if (TypeIsFloatingPoint(type) || TypeIsVector(type)) {
-    return 8;
+  if (TypeUsesAArch64FpArgReg(type)) {
+    return TypeUsesNativeVectorABI(type) && type->size == 16 ? 16 : 8;
   }
   if (TypeIsPointerOrArray(type)) {
     return 8;
@@ -5173,7 +5216,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = stack_offset;
           location.second_offset = stack_offset + 8;
         }
-      } else if (TypeIsFloatingPoint(arg_type) || TypeIsVector(arg_type)) {
+      } else if (TypeUsesAArch64FpArgReg(arg_type)) {
         if (fp_reg <= AARCH64_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -5209,8 +5252,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       } else {
         stack_offset += 16;
       }
-    } else if (TypeIsFloatingPoint(arg_symbol->type) ||
-               TypeIsVector(arg_symbol->type)) {
+    } else if (TypeUsesAArch64FpArgReg(arg_symbol->type)) {
       if (fp_reg <= AARCH64_FP_ARG_END) {
         fp_reg++;
       } else {
@@ -5367,7 +5409,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
   assert(size != 0);
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
-  if (TypeIsVector(variable_type)) {
+  if (TypeIsVector(variable_type) && TypeUsesNativeVectorABI(variable_type)) {
     AlignOffset(entry, var_offset);
     if (is_arg) {
       ArgLocation location = ArgumentLocation(entry, args);
@@ -5455,7 +5497,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
-  } else if (TypeIsStructOrUnion(entry->pooled->type)) {
+  } else if (TypePassedAsAArch64Aggregate(variable_type)) {
     if (is_arg) {
       if (size <= 8) {
         // A struct/union that fits in a single register is passed by value in
