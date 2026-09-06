@@ -6,6 +6,10 @@
 #ifndef __davecc_codecvt__
 #define __davecc_codecvt__
 
+#if __cplusplus >= 202600L
+#error "<codecvt> was removed in C++26"
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -112,6 +116,93 @@ inline void __write_u16(uint16_t value, bool little, char* output) {
   }
 }
 
+inline bool __header_seen(const mbstate_t& state) { return state.__count != 0; }
+
+inline void __set_header_seen(mbstate_t& state, bool little = false) {
+  state.__count = 1;
+  state.__has_pending = little ? 1 : 0;
+}
+
+inline bool __utf16_little(const mbstate_t& state, bool mode_little) {
+  return __header_seen(state) ? state.__has_pending != 0 : mode_little;
+}
+
+inline codecvt_base::result __emit_utf8_bom(mbstate_t& state, char*& to,
+                                            char* to_end) {
+  if (__header_seen(state)) {
+    return codecvt_base::ok;
+  }
+  if (to_end - to < 3) {
+    return codecvt_base::partial;
+  }
+  *to++ = static_cast<char>(0xef);
+  *to++ = static_cast<char>(0xbb);
+  *to++ = static_cast<char>(0xbf);
+  __set_header_seen(state);
+  return codecvt_base::ok;
+}
+
+inline codecvt_base::result __consume_utf8_bom(mbstate_t& state,
+                                               const char*& from,
+                                               const char* from_end) {
+  if (__header_seen(state) || from == from_end) {
+    return codecvt_base::ok;
+  }
+  unsigned char first = static_cast<unsigned char>(*from);
+  if (first != 0xef) {
+    __set_header_seen(state);
+    return codecvt_base::ok;
+  }
+  if (from_end - from < 3) {
+    return codecvt_base::partial;
+  }
+  if (static_cast<unsigned char>(from[1]) == 0xbb &&
+      static_cast<unsigned char>(from[2]) == 0xbf) {
+    from += 3;
+  }
+  __set_header_seen(state);
+  return codecvt_base::ok;
+}
+
+inline codecvt_base::result __emit_utf16_bom(mbstate_t& state, bool little,
+                                             char*& to, char* to_end) {
+  if (__header_seen(state)) {
+    return codecvt_base::ok;
+  }
+  if (to_end - to < 2) {
+    return codecvt_base::partial;
+  }
+  __write_u16(0xfeff, little, to);
+  to += 2;
+  __set_header_seen(state, little);
+  return codecvt_base::ok;
+}
+
+inline codecvt_base::result __consume_utf16_bom(mbstate_t& state, bool little,
+                                                const char*& from,
+                                                const char* from_end) {
+  if (__header_seen(state)) {
+    return codecvt_base::ok;
+  }
+  if (from == from_end) {
+    return codecvt_base::ok;
+  }
+  if (from_end - from < 2) {
+    return codecvt_base::partial;
+  }
+  uint16_t marker = __read_u16(from, little);
+  if (marker == 0xfeff) {
+    from += 2;
+    __set_header_seen(state, little);
+  } else if (marker == 0xfffe) {
+    from += 2;
+    __set_header_seen(state, !little);
+  } else {
+    __set_header_seen(state, little);
+  }
+  return codecvt_base::ok;
+}
+
 }  // namespace __codecvt_detail
 
 template <class Elem, unsigned long Maxcode = 0x10ffff,
@@ -123,16 +214,15 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
 
  protected:
   typename codecvt_base::result do_out(
-      mbstate_t&, const Elem* from, const Elem* from_end,
+      mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
       char*& to_next) const {
     from_next = from;
     to_next = to;
     if ((Mode & generate_header) != 0) {
-      if (to_end - to_next < 3) return codecvt_base::partial;
-      *to_next++ = static_cast<char>(0xef);
-      *to_next++ = static_cast<char>(0xbb);
-      *to_next++ = static_cast<char>(0xbf);
+      codecvt_base::result bom =
+          __codecvt_detail::__emit_utf8_bom(state, to_next, to_end);
+      if (bom != codecvt_base::ok) return bom;
     }
     while (from_next != from_end) {
       uint32_t value = static_cast<uint32_t>(*from_next);
@@ -151,16 +241,15 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_in(
-      mbstate_t&, const char* from, const char* from_end,
+      mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
       Elem*& to_next) const {
     from_next = from;
     to_next = to;
-    if ((Mode & consume_header) != 0 && from_end - from_next >= 3 &&
-        static_cast<unsigned char>(from_next[0]) == 0xef &&
-        static_cast<unsigned char>(from_next[1]) == 0xbb &&
-        static_cast<unsigned char>(from_next[2]) == 0xbf) {
-      from_next += 3;
+    if ((Mode & consume_header) != 0) {
+      codecvt_base::result bom =
+          __codecvt_detail::__consume_utf8_bom(state, from_next, from_end);
+      if (bom != codecvt_base::ok) return bom;
     }
     while (from_next != from_end) {
       if (to_next == to_end) return codecvt_base::partial;
@@ -182,15 +271,16 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_unshift(
       mbstate_t&, char* to, char*, char*& to_next) const {
     to_next = to;
-    return codecvt_base::noconv;
+    return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
-  int do_length(mbstate_t&, const char* from, const char* from_end,
+  int do_length(mbstate_t& state, const char* from, const char* from_end,
                 size_t max) const {
     const char* current = from;
     size_t converted = 0;
-    if ((Mode & consume_header) != 0 && from_end - current >= 3 &&
+    if ((Mode & consume_header) != 0 &&
+        !__codecvt_detail::__header_seen(state) && from_end - current >= 3 &&
         static_cast<unsigned char>(current[0]) == 0xef &&
         static_cast<unsigned char>(current[1]) == 0xbb &&
         static_cast<unsigned char>(current[2]) == 0xbf) {
@@ -223,16 +313,15 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
 
  protected:
   typename codecvt_base::result do_out(
-      mbstate_t&, const Elem* from, const Elem* from_end,
+      mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
       char*& to_next) const {
     from_next = from;
     to_next = to;
     if ((Mode & generate_header) != 0) {
-      if (to_end - to_next < 3) return codecvt_base::partial;
-      *to_next++ = static_cast<char>(0xef);
-      *to_next++ = static_cast<char>(0xbb);
-      *to_next++ = static_cast<char>(0xbf);
+      codecvt_base::result bom =
+          __codecvt_detail::__emit_utf8_bom(state, to_next, to_end);
+      if (bom != codecvt_base::ok) return bom;
     }
     while (from_next != from_end) {
       uint32_t value = static_cast<uint16_t>(*from_next);
@@ -259,16 +348,15 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_in(
-      mbstate_t&, const char* from, const char* from_end,
+      mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
       Elem*& to_next) const {
     from_next = from;
     to_next = to;
-    if ((Mode & consume_header) != 0 && from_end - from_next >= 3 &&
-        static_cast<unsigned char>(from_next[0]) == 0xef &&
-        static_cast<unsigned char>(from_next[1]) == 0xbb &&
-        static_cast<unsigned char>(from_next[2]) == 0xbf) {
-      from_next += 3;
+    if ((Mode & consume_header) != 0) {
+      codecvt_base::result bom =
+          __codecvt_detail::__consume_utf8_bom(state, from_next, from_end);
+      if (bom != codecvt_base::ok) return bom;
     }
     while (from_next != from_end) {
       const char* decoded_next;
@@ -296,14 +384,21 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_unshift(
       mbstate_t&, char* to, char*, char*& to_next) const {
     to_next = to;
-    return codecvt_base::noconv;
+    return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
-  int do_length(mbstate_t&, const char* from, const char* from_end,
+  int do_length(mbstate_t& state, const char* from, const char* from_end,
                 size_t max) const {
     const char* current = from;
     size_t units = 0;
+    if ((Mode & consume_header) != 0 &&
+        !__codecvt_detail::__header_seen(state) && from_end - current >= 3 &&
+        static_cast<unsigned char>(current[0]) == 0xef &&
+        static_cast<unsigned char>(current[1]) == 0xbb &&
+        static_cast<unsigned char>(current[2]) == 0xbf) {
+      current += 3;
+    }
     while (current != from_end) {
       const char* next;
       uint32_t value;
@@ -333,16 +428,18 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
 
  protected:
   typename codecvt_base::result do_out(
-      mbstate_t&, const Elem* from, const Elem* from_end,
+      mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
       char*& to_next) const {
     from_next = from;
     to_next = to;
-    bool little = (Mode & little_endian) != 0;
+    bool little = __codecvt_detail::__utf16_little(
+        state, (Mode & little_endian) != 0);
     if ((Mode & generate_header) != 0) {
-      if (to_end - to_next < 2) return codecvt_base::partial;
-      __codecvt_detail::__write_u16(0xfeff, little, to_next);
-      to_next += 2;
+      codecvt_base::result bom = __codecvt_detail::__emit_utf16_bom(
+          state, little, to_next, to_end);
+      if (bom != codecvt_base::ok) return bom;
+      little = __codecvt_detail::__utf16_little(state, little);
     }
     while (from_next != from_end) {
       uint32_t value = static_cast<uint32_t>(*from_next);
@@ -372,20 +469,18 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_in(
-      mbstate_t&, const char* from, const char* from_end,
+      mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
       Elem*& to_next) const {
     from_next = from;
     to_next = to;
-    bool little = (Mode & little_endian) != 0;
-    if ((Mode & consume_header) != 0 && from_end - from_next >= 2) {
-      uint16_t marker = __codecvt_detail::__read_u16(from_next, little);
-      if (marker == 0xfeff) {
-        from_next += 2;
-      } else if (marker == 0xfffe) {
-        little = !little;
-        from_next += 2;
-      }
+    bool little = __codecvt_detail::__utf16_little(
+        state, (Mode & little_endian) != 0);
+    if ((Mode & consume_header) != 0) {
+      codecvt_base::result bom = __codecvt_detail::__consume_utf16_bom(
+          state, little, from_next, from_end);
+      if (bom != codecvt_base::ok) return bom;
+      little = __codecvt_detail::__utf16_little(state, little);
     }
     while (from_next != from_end) {
       if (from_end - from_next < 2 || to_next == to_end) {
@@ -413,16 +508,44 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_unshift(
       mbstate_t&, char* to, char*, char*& to_next) const {
     to_next = to;
-    return codecvt_base::noconv;
+    return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
-  int do_length(mbstate_t&, const char* from, const char* from_end,
+  int do_length(mbstate_t& state, const char* from, const char* from_end,
                 size_t max) const {
-    size_t available = static_cast<size_t>(from_end - from);
-    size_t bytes = max * 4;
-    if (bytes > available) bytes = available;
-    return static_cast<int>(bytes - (bytes & 1));
+    const char* current = from;
+    size_t converted = 0;
+    bool little = __codecvt_detail::__utf16_little(
+        state, (Mode & little_endian) != 0);
+    if ((Mode & consume_header) != 0 &&
+        !__codecvt_detail::__header_seen(state) && from_end - current >= 2) {
+      uint16_t marker = __codecvt_detail::__read_u16(current, little);
+      if (marker == 0xfeff) {
+        current += 2;
+      } else if (marker == 0xfffe) {
+        little = !little;
+        current += 2;
+      }
+    }
+    while (current != from_end && converted < max) {
+      if (from_end - current < 2) break;
+      uint32_t value = __codecvt_detail::__read_u16(current, little);
+      size_t consumed = 2;
+      if (value >= 0xd800 && value <= 0xdbff) {
+        if (from_end - current < 4) break;
+        uint32_t low = __codecvt_detail::__read_u16(current + 2, little);
+        if (low < 0xdc00 || low > 0xdfff) break;
+        value = 0x10000 + ((value - 0xd800) << 10) + (low - 0xdc00);
+        consumed = 4;
+      } else if (value >= 0xdc00 && value <= 0xdfff) {
+        break;
+      }
+      if (value > Maxcode) break;
+      current += consumed;
+      ++converted;
+    }
+    return static_cast<int>(current - from);
   }
   int do_max_length() const noexcept override {
     return (Mode & consume_header) != 0 ? 6 : 4;

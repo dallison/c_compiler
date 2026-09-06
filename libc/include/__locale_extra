@@ -820,12 +820,19 @@ class wstring_convert {
   typedef basic_string<Elem> wide_string;
   typedef typename Codecvt::state_type state_type;
 
-  wstring_convert() {}
+  wstring_convert() : __cvt_(), __state_(), __converted_(0) {}
   ~wstring_convert() {}
 
   byte_string to_bytes(Elem wide) {
     const Elem src[1] = {wide};
     return to_bytes(src, src + 1);
+  }
+  byte_string to_bytes(const Elem* ptr) {
+    const Elem* last = ptr;
+    while (*last != Elem()) {
+      ++last;
+    }
+    return to_bytes(ptr, last);
   }
   byte_string to_bytes(const wide_string& wstr) {
     const Elem* data = wstr.data();
@@ -833,8 +840,9 @@ class wstring_convert {
   }
   byte_string to_bytes(const Elem* first, const Elem* last) {
     byte_string out;
-    state_type state = state_type();
+    state_type state = __state_;
     const Elem* from_next = first;
+    __converted_ = 0;
     while (from_next != last) {
       char buf[32];
       char* to_next = buf;
@@ -850,6 +858,7 @@ class wstring_convert {
         out.push_back(buf[i]);
         ++i;
       }
+      __converted_ += static_cast<size_t>(from_next - previous);
       if (status == codecvt_base::ok || status == codecvt_base::noconv) {
         break;
       }
@@ -857,6 +866,18 @@ class wstring_convert {
         __DAVECC_THROW(range_error("wstring_convert"));
       }
     }
+    char shift[32];
+    char* shift_next = shift;
+    if (__cvt_.unshift(state, shift, shift + 32, shift_next) !=
+        codecvt_base::error) {
+      size_t produced = static_cast<size_t>(shift_next - shift);
+      size_t i = 0;
+      while (i < produced) {
+        out.push_back(shift[i]);
+        ++i;
+      }
+    }
+    __state_ = state;
     return out;
   }
 
@@ -864,14 +885,22 @@ class wstring_convert {
     const char src[1] = {byte};
     return from_bytes(src, src + 1);
   }
+  wide_string from_bytes(const char* str) {
+    const char* last = str;
+    while (*last != '\0') {
+      ++last;
+    }
+    return from_bytes(str, last);
+  }
   wide_string from_bytes(const byte_string& bytes) {
     const char* data = bytes.data();
     return from_bytes(data, data + bytes.size());
   }
   wide_string from_bytes(const char* first, const char* last) {
     wide_string out;
-    state_type state = state_type();
+    state_type state = __state_;
     const char* from_next = first;
+    __converted_ = 0;
     while (from_next != last) {
       Elem buf[8];
       Elem* to_next = buf;
@@ -887,6 +916,7 @@ class wstring_convert {
         out.push_back(buf[i]);
         ++i;
       }
+      __converted_ += produced;
       if (status == codecvt_base::ok || status == codecvt_base::noconv) {
         break;
       }
@@ -894,11 +924,17 @@ class wstring_convert {
         __DAVECC_THROW(range_error("wstring_convert"));
       }
     }
+    __state_ = state;
     return out;
   }
 
+  size_t converted() const { return __converted_; }
+  state_type state() const { return __state_; }
+
  private:
   Codecvt __cvt_;
+  state_type __state_;
+  size_t __converted_;
   wstring_convert(const wstring_convert&);
   wstring_convert& operator=(const wstring_convert&);
 };

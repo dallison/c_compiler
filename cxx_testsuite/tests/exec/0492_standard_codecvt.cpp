@@ -65,5 +65,73 @@ int main() {
       static_cast<unsigned char>(utf16_bytes[1]) != 0x03) {
     return 10;
   }
+
+  std::mbstate_t bom_state = {};
+  std::codecvt_utf8<char32_t, 0x10ffff, std::generate_header> utf8_bom;
+  const char32_t letter[] = {U'A'};
+  const char32_t* letter_next = nullptr;
+  char bom_bytes[8] = {};
+  char* bom_next = nullptr;
+  if (utf8_bom.out(bom_state, letter, letter + 1, letter_next,
+                   bom_bytes, bom_bytes + 8, bom_next) !=
+      std::codecvt_base::ok) {
+    return 11;
+  }
+  if (bom_next - bom_bytes != 4 ||
+      static_cast<unsigned char>(bom_bytes[0]) != 0xef ||
+      static_cast<unsigned char>(bom_bytes[3]) != 'A') {
+    return 12;
+  }
+  char extra[4] = {};
+  char* extra_next = nullptr;
+  if (utf8_bom.out(bom_state, letter, letter + 1, letter_next,
+                   extra, extra + 4, extra_next) != std::codecvt_base::ok) {
+    return 13;
+  }
+  if (extra_next - extra != 1 || extra[0] != 'A') {
+    return 14;
+  }
+
+  std::mbstate_t consume_state = {};
+  std::codecvt_utf8<char32_t, 0x10ffff, std::consume_header> utf8_consume;
+  const char* bom_read = nullptr;
+  char32_t decoded_letter[1] = {};
+  char32_t* decoded_letter_next = nullptr;
+  if (utf8_consume.in(consume_state, bom_bytes, bom_next, bom_read,
+                      decoded_letter, decoded_letter + 1,
+                      decoded_letter_next) != std::codecvt_base::ok ||
+      decoded_letter[0] != U'A') {
+    return 15;
+  }
+
+  char bad[] = {static_cast<char>(0xff)};
+  const char* bad_next = nullptr;
+  char32_t bad_out[1] = {};
+  char32_t* bad_out_next = nullptr;
+  std::mbstate_t error_state = {};
+  if (utf8.in(error_state, bad, bad + 1, bad_next, bad_out, bad_out + 1,
+              bad_out_next) != std::codecvt_base::error) {
+    return 16;
+  }
+
+  char16_t roundtrip[2] = {};
+  char16_t* roundtrip_next = nullptr;
+  const char* pair_read = nullptr;
+  if (utf8_utf16.in(state, pair_bytes, pair_bytes_next, pair_read,
+                    roundtrip, roundtrip + 2, roundtrip_next) !=
+          std::codecvt_base::ok ||
+      roundtrip[0] != 0xd83d || roundtrip[1] != 0xde00) {
+    return 17;
+  }
+
+  std::mbstate_t length_state = {};
+  if (utf8.length(length_state, encoded, encoded_next, 2) != 4) {
+    return 18;
+  }
+
+  std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
+  if (converter.from_bytes("A").size() != 1 || converter.converted() != 1) {
+    return 19;
+  }
   return 0;
 }
