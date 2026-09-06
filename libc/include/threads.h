@@ -101,6 +101,7 @@ int __davecc_mtx_timedlock_for(mtx_t* mutex, long long timeout_us);
 int __davecc_cnd_timedwait_for(cnd_t* condition, mtx_t* mutex,
                                long long timeout_us);
 int __davecc_cnd_notify_all_at_thread_exit(cnd_t* condition, mtx_t* mutex);
+int __davecc_register_thread_exit(void (*fn)(void*), void* arg);
 int __davecc_once_begin(dave_once_flag_t* flag);
 void __davecc_once_complete(dave_once_flag_t* flag);
 void __davecc_once_abort(dave_once_flag_t* flag);

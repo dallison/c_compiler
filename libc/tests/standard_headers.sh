@@ -64,7 +64,7 @@ cxx_missing=""
 # required runtime behavior is known to be incomplete. Unlike MISSING and
 # INCOMPATIBLE, this category is still compiled so syntax regressions fail.
 c_incomplete=""
-cxx_incomplete="chrono codecvt filesystem format future locale regex"
+cxx_incomplete="chrono codecvt filesystem format locale regex"
 
 # The C++ headers were only ever exercised at C++20 and later and use C++17/20
 # syntax unconditionally, so most of them do not compile below C++20 yet. Until

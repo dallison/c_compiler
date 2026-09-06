@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <thread>
 
 int add(int left, int right) {
@@ -66,5 +67,96 @@ int main() {
   std::future<void> completion = void_promise.get_future();
   void_promise.set_value();
   completion.get();
+
+  std::promise<int> first_swap;
+  std::promise<int> second_swap;
+  std::future<int> first_future = first_swap.get_future();
+  std::swap(first_swap, second_swap);
+  second_swap.set_value(12);
+  if (first_future.get() != 12) return 10;
+
+  std::promise<int> swap_src;
+  std::future<int> swap_left = swap_src.get_future();
+  std::future<int> swap_right;
+  swap_left.swap(swap_right);
+  if (swap_left.valid() || !swap_right.valid()) return 20;
+  swap_src.set_value(13);
+  if (swap_right.get() != 13) return 21;
+
+  try {
+    throw std::future_error(std::future_errc::no_state);
+  } catch (const std::future_error& error) {
+    if (error.code() !=
+        std::make_error_code(std::future_errc::no_state)) {
+      return 11;
+    }
+  }
+
+  bool uses_alloc =
+      std::uses_allocator<std::promise<int>, std::allocator<char>>::value;
+  if (!uses_alloc) {
+    return 12;
+  }
+  bool uses_task_alloc = std::uses_allocator<
+      std::packaged_task<int(int)>, std::allocator<char>>::value;
+  if (!uses_task_alloc) {
+    return 19;
+  }
+
+  std::promise<int> delayed;
+  std::future<int> delayed_value = delayed.get_future();
+  std::promise<void> setter_started;
+  std::promise<void> allow_exit;
+  std::thread delayed_worker([&] {
+    delayed.set_value_at_thread_exit(42);
+    setter_started.set_value();
+    allow_exit.get_future().wait();
+  });
+  setter_started.get_future().wait();
+  if (delayed_value.wait_for(std::chrono::milliseconds(0)) !=
+      std::future_status::timeout) {
+    return 13;
+  }
+  allow_exit.set_value();
+  delayed_worker.join();
+  if (delayed_value.get() != 42) return 14;
+
+  std::packaged_task<int(int)> delayed_task(square);
+  std::future<int> delayed_task_result = delayed_task.get_future();
+  std::promise<void> task_started;
+  std::promise<void> task_allow_exit;
+  std::thread task_worker([&] {
+    delayed_task.make_ready_at_thread_exit(7);
+    task_started.set_value();
+    task_allow_exit.get_future().wait();
+  });
+  task_started.get_future().wait();
+  if (delayed_task_result.wait_for(std::chrono::milliseconds(0)) !=
+      std::future_status::timeout) {
+    return 15;
+  }
+  task_allow_exit.set_value();
+  task_worker.join();
+  if (delayed_task_result.get() != 49) return 16;
+
+  std::promise<int> satisfied;
+  std::future<int> satisfied_future = satisfied.get_future();
+  int satisfied_status = 0;
+  std::thread already([&] {
+    satisfied.set_value_at_thread_exit(1);
+    try {
+      satisfied.set_value(2);
+      satisfied_status = 1;
+    } catch (const std::future_error& error) {
+      if (error.code() !=
+          std::make_error_code(std::future_errc::promise_already_satisfied)) {
+        satisfied_status = 2;
+      }
+    }
+  });
+  already.join();
+  if (satisfied_status != 0) return 17;
+  if (satisfied_future.get() != 1) return 18;
+
   return 0;
 }

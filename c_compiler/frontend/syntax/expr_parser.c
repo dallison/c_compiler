@@ -2481,6 +2481,12 @@ static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
       StorageIs(symbol->storage, STO(static) | STO(extern) | STO(typedef))) {
     return false;
   }
+  // Enumerators are constants, not objects.  Default capture must not treat
+  // `E::enumerator` as a by-reference local (that emits an undefined symbol).
+  // STO(implicit) is 0, so it cannot be tested with StorageIs().
+  if (symbol->flags.value_set && symbol->storage == STO(implicit)) {
+    return false;
+  }
   Symbol* global = FindGlobalSymbol(&symbol->name);
   return global != symbol;
 }
@@ -3084,25 +3090,44 @@ typedef struct {
   Vector* body_locals;  // Symbols declared in this lambda body (not capturable).
 } LambdaCaptureScan;
 
-// Collect symbols introduced by variable declarations in the lambda body so
-// default-capture scanning does not treat them as enclosing-scope captures
-// (e.g. `[&]{ auto inner = []{}; return inner(); }` must not capture `inner`).
+// Collect symbols introduced in the lambda body so default-capture scanning
+// does not treat them as enclosing-scope captures (e.g. `[&]{ auto inner =
+// []{}; return inner(); }` must not capture `inner`, and a catch parameter
+// must not be treated as a by-reference capture of a non-existent local).
 static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
                                           int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
-  // Locals declared inside a nested lambda belong to that nested closure.
-  // Its body is not under this compound-literal subtree; only skip walking
-  // further when we are at the nested lambda expression itself if needed.
-  // Nested lambda bodies are attached to their call operators, not here.
-  if (node->op != AST_OP(vardecl)) {
+  Vector* locals = (Vector*)data;
+  if (node->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+    if (decl->symbol != NULL) {
+      VectorAppend(locals, decl->symbol);
+    }
     return;
   }
-  VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
-  if (decl->symbol != NULL) {
-    VectorAppend((Vector*)data, decl->symbol);
+  if (node->op == AST_OP(catch)) {
+    CatchASTNode* clause = (CatchASTNode*)node;
+    if (clause->symbol != NULL) {
+      VectorAppend(locals, clause->symbol);
+    }
+    return;
+  }
+  if (node->op == AST_OP(structured_binding)) {
+    StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+    if (binding->symbols != NULL) {
+      for (size_t i = 0; i < binding->symbols->length; i++) {
+        Symbol* symbol = binding->symbols->value.p[i];
+        if (symbol != NULL) {
+          VectorAppend(locals, symbol);
+        }
+      }
+    }
+    if (binding->condition_symbol != NULL) {
+      VectorAppend(locals, binding->condition_symbol);
+    }
   }
 }
 

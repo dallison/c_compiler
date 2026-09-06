@@ -70,6 +70,9 @@ class future_error : public logic_error {
  public:
   explicit future_error(error_code code)
       : logic_error(code.message()), __code_(code) {}
+  explicit future_error(future_errc error)
+      : logic_error(make_error_code(error).message()),
+        __code_(make_error_code(error)) {}
   const error_code& code() const noexcept { return __code_; }
 
  private:
@@ -126,15 +129,28 @@ namespace __future_detail {
   throw future_error(make_error_code(error));
 }
 
+template <class State>
+struct __ready_at_exit_job {
+  shared_ptr<State> __state;
+};
+
+template <class State>
+void __ready_at_exit_fn(void* arg);
+
 class __state_base {
  public:
   __state_base()
-      : __ready_(false), __retrieved_(false), __deferred_running_(false) {}
+      : __ready_(false),
+        __exit_scheduled_(false),
+        __retrieved_(false),
+        __deferred_running_(false) {}
 
   void __set_exception(exception_ptr error) {
     {
       lock_guard<mutex> guard(__mutex_);
-      if (__ready_) __throw(future_errc::promise_already_satisfied);
+      if (__ready_ || __exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
       __exception_ = error;
       __ready_ = true;
       __deferred_ = function<void()>();
@@ -142,10 +158,37 @@ class __state_base {
     __condition_.notify_all();
   }
 
+  void __set_exception_at_thread_exit(exception_ptr error) {
+    {
+      lock_guard<mutex> guard(__mutex_);
+      if (__ready_ || __exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
+      __exception_ = error;
+      __exit_scheduled_ = true;
+      __deferred_ = function<void()>();
+    }
+  }
+
+  void __complete_at_thread_exit() {
+    {
+      lock_guard<mutex> guard(__mutex_);
+      __ready_ = true;
+    }
+    __condition_.notify_all();
+  }
+
+  template <class State>
+  static void __schedule_ready(const shared_ptr<State>& self) {
+    __ready_at_exit_job<State>* job = new __ready_at_exit_job<State>;
+    job->__state = self;
+    __davecc_register_thread_exit(&__ready_at_exit_fn<State>, job);
+  }
+
   void __break_promise() noexcept {
     try {
       lock_guard<mutex> guard(__mutex_);
-      if (__ready_) return;
+      if (__ready_ || __exit_scheduled_) return;
       __exception_ =
           make_exception_ptr(future_error(make_error_code(
               future_errc::broken_promise)));
@@ -215,6 +258,7 @@ class __state_base {
   mutex __mutex_;
   condition_variable __condition_;
   bool __ready_;
+  bool __exit_scheduled_;
 
  private:
   bool __retrieved_;
@@ -222,6 +266,14 @@ class __state_base {
   exception_ptr __exception_;
   function<void()> __deferred_;
 };
+
+template <class State>
+void __ready_at_exit_fn(void* arg) {
+  __ready_at_exit_job<State>* job =
+      static_cast<__ready_at_exit_job<State>*>(arg);
+  job->__state->__complete_at_thread_exit();
+  delete job;
+}
 
 template <class T>
 class __state : public __state_base {
@@ -232,11 +284,27 @@ class __state : public __state_base {
   void __set_value(U&& value) {
     {
       lock_guard<mutex> guard(this->__mutex_);
-      if (this->__ready_) __throw(future_errc::promise_already_satisfied);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
       __value_.reset(new T(std::forward<U>(value)));
       this->__ready_ = true;
     }
     this->__condition_.notify_all();
+  }
+
+  template <class U>
+  void __set_value_at_thread_exit(U&& value,
+                                  const shared_ptr<__state<T>>& self) {
+    {
+      lock_guard<mutex> guard(this->__mutex_);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
+      __value_.reset(new T(std::forward<U>(value)));
+      this->__exit_scheduled_ = true;
+    }
+    __state_base::__schedule_ready(self);
   }
 
   T __take() {
@@ -259,11 +327,26 @@ class __state<T&> : public __state_base {
   void __set_value(T& value) {
     {
       lock_guard<mutex> guard(this->__mutex_);
-      if (this->__ready_) __throw(future_errc::promise_already_satisfied);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
       __value_ = &value;
       this->__ready_ = true;
     }
     this->__condition_.notify_all();
+  }
+
+  void __set_value_at_thread_exit(T& value,
+                                  const shared_ptr<__state<T&>>& self) {
+    {
+      lock_guard<mutex> guard(this->__mutex_);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
+      __value_ = &value;
+      this->__exit_scheduled_ = true;
+    }
+    __state_base::__schedule_ready(self);
   }
   T& __take() {
     this->__rethrow_if_needed();
@@ -286,10 +369,23 @@ class __state<void> : public __state_base {
   void __set_value() {
     {
       lock_guard<mutex> guard(this->__mutex_);
-      if (this->__ready_) __throw(future_errc::promise_already_satisfied);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
       this->__ready_ = true;
     }
     this->__condition_.notify_all();
+  }
+
+  void __set_value_at_thread_exit(const shared_ptr<__state<void>>& self) {
+    {
+      lock_guard<mutex> guard(this->__mutex_);
+      if (this->__ready_ || this->__exit_scheduled_) {
+        __throw(future_errc::promise_already_satisfied);
+      }
+      this->__exit_scheduled_ = true;
+    }
+    __state_base::__schedule_ready(self);
   }
   void __take() { this->__rethrow_if_needed(); }
   void __share() { this->__rethrow_if_needed(); }
@@ -411,6 +507,32 @@ struct __packaged_invoke<void, Args...> {
   }
 };
 
+template <class R, class... Args>
+struct __packaged_invoke_at_exit {
+  static void __call(promise<R>& output, function<R(Args...)>& function,
+                     Args... args) {
+    try {
+      output.set_value_at_thread_exit(function(std::forward<Args>(args)...));
+    } catch (...) {
+      output.set_exception_at_thread_exit(current_exception());
+    }
+  }
+};
+
+template <class... Args>
+struct __packaged_invoke_at_exit<void, Args...> {
+  static void __call(promise<void>& output,
+                     function<void(Args...)>& function, Args... args) {
+    try {
+      function(std::forward<Args>(args)...);
+    } catch (...) {
+      output.set_exception_at_thread_exit(current_exception());
+      return;
+    }
+    output.set_value_at_thread_exit();
+  }
+};
+
 }  // namespace __future_detail
 
 template <class T>
@@ -423,6 +545,7 @@ class future {
   future& operator=(const future&) = delete;
 
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(future& other) noexcept { __state_.swap(other.__state_); }
   T get() {
     __check();
     shared_ptr<__future_detail::__state<T>> state = std::move(__state_);
@@ -472,6 +595,7 @@ class future<T&> {
   future(const future&) = delete;
   future& operator=(const future&) = delete;
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(future& other) noexcept { __state_.swap(other.__state_); }
   T& get() {
     __check();
     shared_ptr<__future_detail::__state<T&>> state = std::move(__state_);
@@ -520,6 +644,7 @@ class future<void> {
   future(const future&) = delete;
   future& operator=(const future&) = delete;
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(future& other) noexcept { __state_.swap(other.__state_); }
   void get() {
     __check();
     shared_ptr<__future_detail::__state<void>> state = std::move(__state_);
@@ -563,6 +688,9 @@ template <class T>
 class promise {
  public:
   promise() : __state_(make_shared<__future_detail::__state<T>>()) {}
+  template <class Alloc>
+  promise(allocator_arg_t, const Alloc&)
+      : __state_(make_shared<__future_detail::__state<T>>()) {}
   ~promise() {
     if (__state_) __state_->__break_promise();
   }
@@ -594,6 +722,19 @@ class promise {
     __check();
     __state_->__set_exception(error);
   }
+  void set_value_at_thread_exit(const T& value) {
+    __check();
+    __state_->__set_value_at_thread_exit(value, __state_);
+  }
+  void set_value_at_thread_exit(T&& value) {
+    __check();
+    __state_->__set_value_at_thread_exit(std::move(value), __state_);
+  }
+  void set_exception_at_thread_exit(exception_ptr error) {
+    __check();
+    __state_->__set_exception_at_thread_exit(error);
+    __future_detail::__state_base::__schedule_ready(__state_);
+  }
 
  private:
   void __check() const {
@@ -603,9 +744,17 @@ class promise {
 };
 
 template <class T>
+void swap(promise<T>& left, promise<T>& right) noexcept {
+  left.swap(right);
+}
+
+template <class T>
 class promise<T&> {
  public:
   promise() : __state_(make_shared<__future_detail::__state<T&>>()) {}
+  template <class Alloc>
+  promise(allocator_arg_t, const Alloc&)
+      : __state_(make_shared<__future_detail::__state<T&>>()) {}
   ~promise() {
     if (__state_) __state_->__break_promise();
   }
@@ -633,6 +782,15 @@ class promise<T&> {
     __check();
     __state_->__set_exception(error);
   }
+  void set_value_at_thread_exit(T& value) {
+    __check();
+    __state_->__set_value_at_thread_exit(value, __state_);
+  }
+  void set_exception_at_thread_exit(exception_ptr error) {
+    __check();
+    __state_->__set_exception_at_thread_exit(error);
+    __future_detail::__state_base::__schedule_ready(__state_);
+  }
 
  private:
   void __check() const {
@@ -645,6 +803,9 @@ template <>
 class promise<void> {
  public:
   promise() : __state_(make_shared<__future_detail::__state<void>>()) {}
+  template <class Alloc>
+  promise(allocator_arg_t, const Alloc&)
+      : __state_(make_shared<__future_detail::__state<void>>()) {}
   ~promise() {
     if (__state_) __state_->__break_promise();
   }
@@ -672,6 +833,15 @@ class promise<void> {
     __check();
     __state_->__set_exception(error);
   }
+  void set_value_at_thread_exit() {
+    __check();
+    __state_->__set_value_at_thread_exit(__state_);
+  }
+  void set_exception_at_thread_exit(exception_ptr error) {
+    __check();
+    __state_->__set_exception_at_thread_exit(error);
+    __future_detail::__state_base::__schedule_ready(__state_);
+  }
 
  private:
   void __check() const {
@@ -691,6 +861,9 @@ class shared_future {
   shared_future(future<T>&& other) noexcept
       : __state_(std::move(other.__state_)) {}
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(shared_future& other) noexcept {
+    __state_.swap(other.__state_);
+  }
   const T& get() const {
     __check();
     __state_->__wait();
@@ -732,6 +905,9 @@ class shared_future<T&> {
   shared_future(future<T&>&& other) noexcept
       : __state_(std::move(other.__state_)) {}
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(shared_future& other) noexcept {
+    __state_.swap(other.__state_);
+  }
   T& get() const {
     __check();
     __state_->__wait();
@@ -773,6 +949,9 @@ class shared_future<void> {
   shared_future(future<void>&& other) noexcept
       : __state_(std::move(other.__state_)) {}
   bool valid() const noexcept { return static_cast<bool>(__state_); }
+  void swap(shared_future& other) noexcept {
+    __state_.swap(other.__state_);
+  }
   void get() const {
     __check();
     __state_->__wait();
@@ -818,6 +997,9 @@ class packaged_task<R(Args...)> {
   template <class Function>
   explicit packaged_task(Function&& function)
       : __function_(std::forward<Function>(function)), __promise_() {}
+  template <class Function, class Alloc>
+  packaged_task(allocator_arg_t, const Alloc&, Function&& function)
+      : __function_(std::forward<Function>(function)), __promise_() {}
   packaged_task(packaged_task&&) noexcept = default;
   packaged_task& operator=(packaged_task&&) noexcept = default;
   packaged_task(const packaged_task&) = delete;
@@ -827,6 +1009,11 @@ class packaged_task<R(Args...)> {
   void operator()(Args... args) {
     if (!valid()) __future_detail::__throw(future_errc::no_state);
     __future_detail::__packaged_invoke<R, Args...>::__call(
+        __promise_, __function_, std::forward<Args>(args)...);
+  }
+  void make_ready_at_thread_exit(Args... args) {
+    if (!valid()) __future_detail::__throw(future_errc::no_state);
+    __future_detail::__packaged_invoke_at_exit<R, Args...>::__call(
         __promise_, __function_, std::forward<Args>(args)...);
   }
   void reset() {
@@ -894,6 +1081,22 @@ async(Function&& callable, Args&&... args) {
       std::forward<Function>(callable),
       std::forward<Args>(args)...);
 }
+
+template <class T>
+void swap(future<T>& left, future<T>& right) noexcept {
+  left.swap(right);
+}
+
+template <class T>
+void swap(shared_future<T>& left, shared_future<T>& right) noexcept {
+  left.swap(right);
+}
+
+template <class T, class Alloc>
+struct uses_allocator<promise<T>, Alloc> : true_type {};
+
+template <class R, class Alloc, class... Args>
+struct uses_allocator<packaged_task<R(Args...)>, Alloc> : true_type {};
 
 }  // namespace std
 

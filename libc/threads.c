@@ -29,6 +29,14 @@ static unsigned int tss_registry_lock;
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
 static __thread void* tss_values[DAVECC_TSS_KEYS_MAX];
 static __thread unsigned int tss_generations[DAVECC_TSS_KEYS_MAX];
+
+typedef struct DaveCCThreadExitJob {
+  void (*fn)(void*);
+  void* arg;
+  struct DaveCCThreadExitJob* next;
+} DaveCCThreadExitJob;
+
+static __thread DaveCCThreadExitJob* thread_exit_jobs;
 #else
 static void* tss_values[DAVECC_TSS_KEYS_MAX];
 static unsigned int tss_generations[DAVECC_TSS_KEYS_MAX];
@@ -796,6 +804,16 @@ int __davecc_cnd_notify_all_at_thread_exit(cnd_t* condition, mtx_t* mutex) {
 void __davecc_thread_exit_callbacks(void) {
 #if defined(__DAVECC_HAS_GUEST_THREADS__)
   RunTssDestructors();
+  while (thread_exit_jobs != NULL) {
+    DaveCCThreadExitJob* job = thread_exit_jobs;
+    thread_exit_jobs = job->next;
+    void (*fn)(void*) = job->fn;
+    void* arg = job->arg;
+    free(job);
+    if (fn != NULL) {
+      fn(arg);
+    }
+  }
   while (condition_at_exit != NULL) {
     DaveCCConditionAtExit* entry = condition_at_exit;
     condition_at_exit = entry->next;
@@ -803,6 +821,27 @@ void __davecc_thread_exit_callbacks(void) {
     (void)cnd_broadcast(entry->condition);
     free(entry);
   }
+#endif
+}
+
+int __davecc_register_thread_exit(void (*fn)(void*), void* arg) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  if (fn == NULL) {
+    return thrd_error;
+  }
+  DaveCCThreadExitJob* job = malloc(sizeof(*job));
+  if (job == NULL) {
+    return thrd_nomem;
+  }
+  job->fn = fn;
+  job->arg = arg;
+  job->next = thread_exit_jobs;
+  thread_exit_jobs = job;
+  return thrd_success;
+#else
+  (void)fn;
+  (void)arg;
+  return thrd_error;
 #endif
 }
 
