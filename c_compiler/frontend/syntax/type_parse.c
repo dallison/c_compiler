@@ -2840,7 +2840,11 @@ void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   
   info->old_style = false;
 
-  while (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
+  while (!LexLookingAt(proto_parser->lex, TOK(rparen)) &&
+         !LexEof(proto_parser->lex)) {
+    Token token_before = proto_parser->lex->current_token;
+    SourceLocation location_before = proto_parser->lex->current_token_location;
+    int errors_before = NumErrors();
     if (LexMatch(proto_parser->lex, TOK(ellipsis))) {
       if (arg_number == 0 && !CompilerIsCXX() &&
           !CompilerCAtLeast(kLanguageStandardC23)) {
@@ -2887,6 +2891,8 @@ void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
       }
       break;
     }
+    SyntaxEnsureProgress(proto_parser->syntax, token_before, location_before,
+                         errors_before, TC(closebra));
     if (!LexMatch(proto_parser->lex, TOK(comma))) {
       break;
     }

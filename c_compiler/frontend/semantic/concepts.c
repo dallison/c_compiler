@@ -2883,7 +2883,12 @@ static ConstraintExpr* ParseRequiresExpressionConstraint(Syntax* syntax) {
 
   Vector* requirements = NewVector();
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(rbrace))) {
+    Token token_before = lex->current_token;
+    SourceLocation location_before = lex->current_token_location;
+    int errors_before = NumErrors();
     VectorAppend(requirements, ParseRequiresRequirement(syntax));
+    SyntaxEnsureProgress(syntax, token_before, location_before, errors_before,
+                         TC(closebrace));
   }
   SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebra) | TC(semicolon));
   SyntaxCloseScope(syntax);

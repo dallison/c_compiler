@@ -29,8 +29,12 @@
 // int array[1000000] = {0};
 //
 // We don't want to allocate 1000000 INodes for the elements when only one
-// is initialized.  We do this by doubling the number of children added
-// to the array INode every time we run out of them.
+// is initialized.  Sequential initializers double the number of children
+// added to the array INode every time we run out of them.  A designated
+// initializer that jumps to a high index materializes only that slot: the
+// holes are zero at rest, and FlattenINode emits only nodes that have a
+// value.  Filling 0..N for `{ [N] = x }` is what used to hang on a large
+// but still representable designator.
 
 typedef enum {
   kIScalar,      // Scalar with an initialization expression.
@@ -143,6 +147,11 @@ static void AppendStructMembers(INode* inode) {
     return;
   }
   TypeRecord* type = inode->type;
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    // Recovery can leave a struct-or-union type without a definition.
+    return;
+  }
   INode* prev = NULL;
   for (size_t i = 0; i < type->info.struct_info->bases.length; i++) {
     CXXBaseSpecifier* base = type->info.struct_info->bases.value.p[i];
@@ -186,42 +195,59 @@ static void AppendStructMembers(INode* inode) {
   }
 }
 
-// Append more elements into the array INode.  Exponentially
-// increase the size.
-// for an array of 1000:
-// 1: first = 0; last = 1
-// 2: first = 1; last = 2
-// 3: first = 2; last = 4
-// 4: first = 4; last = 8
-// 5: first = 8; last = 16
-// 6: first = 16; last = 32
-// 7: first = 32; last = 64
-// 8: first = 64; last = 128
-// 9: first = 128; last = 256
-// 10: first = 256; last = 512
-// 11: first = 512; last = 1024 (done)
+// Append more elements into the array INode.
+// Sequential growth (`min == 0`) doubles the number of children, assigning
+// consecutive indices after the last child's index:
+//   1 child -> 2, 2 -> 4, ... until a fixed bound is reached.
+// A designated jump (`min > 0`) adds only the requested slot.  Children are
+// looked up by `index`, not by vector position, so holes need not exist as
+// INodes.
 static void AppendArrayINodeChildren(INode* inode, size_t min) {
   size_t first = inode->children.length;
   INode* prev = VectorLast(&inode->children);
-  // Only append if we're out of nodes.
-  if ((min == 0 && inode->current != prev) ||
-      (!inode->type->info.array.is_flexible && first == inode->type->info.array.size.fixed)) {
+  bool flexible = inode->type->info.array.is_flexible;
+  size_t fixed = (size_t)inode->type->info.array.size.fixed;
+
+  if (min > 0) {
+    for (size_t i = 0; i < inode->children.length; i++) {
+      INode* child = inode->children.value.p[i];
+      if (child->index == min && !child->is_base_subobject) {
+        return;
+      }
+    }
+    if (!flexible && min >= fixed) {
+      return;
+    }
+    INode* child = BuildINode(inode->type->next, inode);
+    child->index = min;
+    VectorAppend(&inode->children, child);
+    if (prev != NULL) {
+      prev->next = child;
+    }
+    if (first == 0) {
+      inode->current = child;
+    }
     return;
   }
-  // Exponentially increase the size by doubling it until it goes
-  // beyond the length.
-  size_t last = first == 0 ? 1 : first * 2;
-  if (min > 0 && last <= min) {
-    // Make sure we add the minimum amount.
-    last = min + 1;
+
+  // Only append if we're out of sequential nodes.
+  if (inode->current != prev || (!flexible && first == fixed)) {
+    return;
   }
-  if (!inode->type->info.array.is_flexible &&
-      last > inode->type->info.array.size.fixed) {
-    last = inode->type->info.array.size.fixed;
+  size_t next_index = prev == NULL ? 0 : prev->index + 1;
+  if (!flexible && next_index >= fixed) {
+    return;
   }
-  for (size_t i = first; i < last; i++) {
+  size_t to_add = first == 0 ? 1 : first;
+  if (!flexible) {
+    size_t remaining = fixed - next_index;
+    if (to_add > remaining) {
+      to_add = remaining;
+    }
+  }
+  for (size_t i = 0; i < to_add; i++) {
     INode* child = BuildINode(inode->type->next, inode);
-    child->index = i;
+    child->index = next_index + i;
     VectorAppend(&inode->children, child);
     if (prev != NULL) {
       prev->next = child;
@@ -229,8 +255,6 @@ static void AppendArrayINodeChildren(INode* inode, size_t min) {
     prev = child;
   }
   if (first == 0) {
-    // Current node is first child, but only if this is the first
-    // time we add children.
     inode->current = (INode*)inode->children.value.p[0];
   }
 }
@@ -279,7 +303,8 @@ static bool AdvanceCurrent(INode* inode) {
     // Append some of remaining children.
     AppendArrayINodeChildren(inode, 0);
   }
-  if (inode->kind == kIScalar || inode->current->next == NULL) {
+  if (inode->kind == kIScalar || inode->current == NULL ||
+      inode->current->next == NULL) {
     AdvanceCurrent(inode->parent);
     return true;
   }
@@ -628,9 +653,7 @@ static INode* FindDesignator(INode* inode,
                       designator->value.array_index);
         return NULL;
       }
-      if (designator->value.array_index >= inode->children.length) {
-        AppendArrayINodeChildren(inode, designator->value.array_index);
-      }
+      AppendArrayINodeChildren(inode, (size_t)designator->value.array_index);
       INode* element = GetChildAtIndex(inode,
                                        designator->value.array_index, false);
       if (element == NULL) {
@@ -649,6 +672,10 @@ static INode* FindDesignator(INode* inode,
         return NULL;
       }
       AppendStructMembers(inode);
+      if (inode->type == NULL || inode->type->info.struct_info == NULL) {
+        SemanticError(ast_node, "Use of struct designator on a non-struct");
+        return NULL;
+      }
       StructMember* member =
           designator->is_resolved_member
               ? designator->value.struct_member
@@ -1279,17 +1306,20 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
         }
       }
       if (inode->kind == kIArray && inode->type->info.array.is_flexible) {
-        // "Flexible" array (without size).  We can set it now and add all
-        // nodes for its children now that we know the size.  This only
-        // occurs at the top level and never inside a struct.
-        // We look for the last child with an initializer.  There can be gaps
-        // if designated initializers are used.
-        for (ssize_t i = inode->children.length - 1; i >= 0; i--) {
+        // "Flexible" array (without size).  We can set it now that we know
+        // the size.  This only occurs at the top level and never inside a
+        // struct.  Designators can leave holes, and those holes are not
+        // stored as INodes, so the bound is the highest initialized index
+        // plus one rather than the number of children.
+        int bound = 0;
+        for (size_t i = 0; i < inode->children.length; i++) {
           INode* child = inode->children.value.p[i];
-          if (INodeWasInitialized(child)) {
-            inode->num_initializers = (int)i + 1;
-            break;
+          if (INodeWasInitialized(child) && (int)child->index + 1 > bound) {
+            bound = (int)child->index + 1;
           }
+        }
+        if (bound > 0) {
+          inode->num_initializers = bound;
         }
         if (parent == NULL) {
           inode->type->info.array.size.fixed = inode->num_initializers;

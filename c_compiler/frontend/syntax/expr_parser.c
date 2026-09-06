@@ -6520,7 +6520,10 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     SourceLocation location = syntax->lex->current_token_location;
     if (!LexMatch(syntax->lex, TOK(lparen))) {
       SyntaxError(syntax, "Expected ( after noexcept");
-      return NewUnaryASTNode(AST_OP(noexcept_expr), NULL, location, NULL);
+      TypeRecord* type =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      return NewUnaryASTNode(AST_OP(noexcept_expr), NULL, location,
+                             (ASTNode*)NewIntConstantASTNode(0, type, location));
     }
     ASTNode* expression =
         SyntaxParseSingleExpression(syntax, TC(closebra));

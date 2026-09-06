@@ -1416,7 +1416,9 @@ ASTNode* NewUnaryASTNode(ASTOpcode op, TypeRecord* type,
   UnaryASTNode* node = ASTArenaAlloc(sizeof(UnaryASTNode));
   ASTNodeInit(&node->base, op, type, location, &unary_vtbl);
   node->sub = sub;
-  sub->parent = (ASTNode*)node;
+  if (sub != NULL) {
+    sub->parent = (ASTNode*)node;
+  }
   return (ASTNode*)node;
 }
 

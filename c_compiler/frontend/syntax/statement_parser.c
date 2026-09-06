@@ -250,6 +250,9 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
       source_empty = false;
     } else {
       source_empty = false;
+      Token token_before = lex->current_token;
+      SourceLocation location_before = lex->current_token_location;
+      int errors_before = compiler->num_errors;
       ASTNode* stmt;
       if (SyntaxLookingAtDeclaration(syntax)) {
         if (seen_statement) {
@@ -262,6 +265,8 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
         seen_statement = true;
         stmt = SyntaxParseStatement(syntax, followers | TC(closebrace));
       }
+      SyntaxEnsureProgress(syntax, token_before, location_before,
+                           errors_before, TC(closebrace));
       if (stmt != NULL) {
         VectorAppend(statements, stmt);
         if (stmt->op == AST_OP(consteval_block) &&

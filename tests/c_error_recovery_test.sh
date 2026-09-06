@@ -148,6 +148,25 @@ expect_diagnosed array_designator_bound_unrepresentable \
   'static char *name[] = { [0x7ffffff0] = "bar" };' \
   'larger than this compiler can lay out'
 
+# A designator index can be representable and still name a huge array.  The
+# initializer tree used to allocate one node per element up to that index.
+# Only the designated slot is built now, so this must finish immediately.
+expect_terminates array_designator_sparse_large \
+  'static char *name[] = { [0x08000000] = "bar" };'
+
+# The same jump in a range designator must not clone the initializer once per
+# index in the range.
+expect_diagnosed array_designator_range_too_large \
+  'static int a[] = { [0 ... 0x08000000] = 1 };' \
+  'larger than this compiler can lay out' \
+  gnu17
+
+# Positional initializers after a designated hole still target the next index
+# (a[5] then a[6]), without filling the hole with INodes.
+expect_terminates array_designator_sparse_then_positional \
+  'int a[] = { [5] = 1, 2 };
+int recovery_anchor(void) { return a[6]; }'
+
 # An operand that is itself an expression is parsed by recursive descent, and
 # the parser cannot tell how much stack is left, so beyond a fixed nesting depth
 # the input is rejected.  These nest far past that depth and used to exhaust the
@@ -174,11 +193,102 @@ expect_terminates struct_definition_nesting_limit_unclosed \
   "$(python3 -c '
 print("".join("struct s%d {" % i for i in range(10000)) + " int x;")')"
 
+# Unclosed nested structs at end of input used to report "Missing }" and
+# "Expected semicolon" once per level.  After the first of each, further
+# copies at EOF are dropped.
+expect_terminates unclosed_nested_structs_few_diagnostics \
+  "$(python3 -c '
+print("".join("struct s%d {" % i for i in range(20)) + " int x;")')"
+nerr=$(grep -c '^error:' "$WORK/unclosed_nested_structs_few_diagnostics.out" || true)
+if [[ "$nerr" -gt 4 ]]; then
+  echo "unclosed_nested_structs_few_diagnostics: $nerr diagnostics, expected at most 4" >&2
+  head -8 "$WORK/unclosed_nested_structs_few_diagnostics.out" | sed 's/^/  /' >&2
+  exit 1
+fi
+
 # A comment that no line closes.  Looking for the close read past the end of
 # the input, where waiting for the lexer to report end of file could not
 # succeed: the lexer had not yet consumed the line being tokenized.
 expect_terminates unterminated_comment \
   'int main(void) { return 0; }
 /* the input ends inside this comment'
+
+# `else` is a statement keyword, not a type.  Classifying it as a type made
+# "Type expected" recovery stop on the same token forever inside a member list.
+expect_diagnosed else_in_struct_member_list \
+  'struct S { else };
+int recovery_anchor(void) { return 42; }' \
+  'Type expected'
+
+# The same token in a namespace body, and a punctuator that does not start a
+# declaration, must not spin in the namespace-declaration loop.
+expect_diagnosed else_in_namespace_body \
+  'namespace { else }
+int recovery_anchor() { return 42; }' \
+  'Expected semicolon' \
+  c++17
+
+expect_terminates punctuator_in_namespace_body \
+  'namespace { int x; << else }
+int recovery_anchor() { return 42; }' \
+  c++17
+
+# A missing semicolon after a junk initializer must not skip the function's
+# closing brace and treat the next function as nested (which used to report
+# "Function definition not allowed here" and then miss the closer).
+expect_diagnosed local_decl_does_not_skip_function_close \
+  'int f(void) { int x = @ }
+int recovery_anchor(void) { return 42; }' \
+  'primary expression expected'
+
+if grep -Fq 'Function definition not allowed' "$WORK/local_decl_does_not_skip_function_close.out"; then
+  echo "local_decl_does_not_skip_function_close: skipped '}' and nested the next function" >&2
+  exit 1
+fi
+
+expect_diagnosed paren_after_struct_tag \
+  'struct(S {});
+int recovery_anchor() { return 42; }' \
+  'Missing close parenthesis' \
+  c++17
+
+expect_diagnosed noexcept_without_paren_in_array \
+  'unsigned [ noexcept x;
+int recovery_anchor() { return 42; }' \
+  'Expected ( after noexcept' \
+  c++17
+
+expect_terminates return_in_array_bound_statement_expr \
+  'int old(a) int([({{ a; { return a; }'
+
+expect_diagnosed old_style_extra_close_paren \
+  'int old(a) ) int a; { return 0; }' \
+  'Expected semicolon'
+
+expect_terminates identifier_list_without_comma \
+  'void g(vo id) { }
+int recovery_anchor(void) { return 42; }'
+
+expect_diagnosed unknown_type_as_parameter \
+  'int f(inat x) { return 0; }
+int recovery_anchor(void) { return 42; }'
+
+# `class;` with no name and no body is not an anonymous aggregate.  Injecting
+# its members used to dereference a null type.
+expect_diagnosed anonymous_class_without_body \
+  'struct S { class; };
+int recovery_anchor() { return 42; }' \
+  'must have a definition' \
+  c++17
+
+expect_terminates friend_recovery_then_class_semicolon \
+  'struct S { te]pl-te<class T> friend  &&^= class; };
+int recovery_anchor() { return 42; }' \
+  c++20
+
+expect_terminates friend_recovery_template_soup \
+  'struct S { templ&ate<cl typeid ass T> friendend class; },;
+int recovery_anchor() { return 42; }' \
+  c++26
 
 echo "c error recovery ok"

@@ -1654,6 +1654,8 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->c_linkage = false;
   syntax->explicit_cxx_linkage = false;
   syntax->export_depth = 0;
+  syntax->eof_missing_bracket = TOK(eof);
+  syntax->eof_expected_semicolon = false;
 }
 
 
@@ -2023,6 +2025,12 @@ void SyntaxWarning(Syntax* syntax, const char* warn, const char* format, ...) {
 
 void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers) {
   if (!LexMatch(syntax->lex, TOK(semicolon))) {
+    if (LexEof(syntax->lex) && syntax->eof_expected_semicolon) {
+      return;
+    }
+    if (LexEof(syntax->lex)) {
+      syntax->eof_expected_semicolon = true;
+    }
     SyntaxError(syntax, "Expected semicolon");
     SyntaxRecover(syntax, followers | TC(semicolon));
   }
@@ -2921,6 +2929,17 @@ static void ParseDesignatedInitializer(Syntax* syntax,
       Designator* range = designators->value.p[range_pos];
       int start = range->value.array_index;
       int end = range->array_index_end;
+      // Expanding a [start ... end] range clones the initializer once per
+      // index.  A range that would materialize millions of AST nodes is
+      // rejected the same way a single huge designator used to be: diagnose
+      // and keep a single slot so parsing can continue.
+      if (end > start && (int64_t)end - (int64_t)start >= 65536) {
+        SyntaxError(syntax,
+                    "Array designator range [%d ... %d] is larger than this "
+                    "compiler can lay out",
+                    start, end);
+        end = start;
+      }
       for (int v = start; v <= end; v++) {
         Vector* desigs = CloneDesignators(designators, range_pos, v);
         ASTNode* init_for_index = (v == end) ? init : CloneInitializer(init);
@@ -6349,6 +6368,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     // Stop at end of input as well: the recovery below cannot move past it, so
     // an unparsable argument declaration would repeat forever.
     while (!LexLookingAt(syntax->lex, TOK(lbrace)) && !LexEof(syntax->lex)) {
+      Token token_before = syntax->lex->current_token;
+      SourceLocation location_before = syntax->lex->current_token_location;
+      int errors_before = NumErrors();
       TypeParser arg_parser;
       TypeParserInit(&arg_parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
       TypeRecord* arg_type = TypeParserParseType(&arg_parser, true);
@@ -6369,6 +6391,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       }
       SyntaxNeedSemicolon(syntax, TC(openbra));
       TypeParserDestruct(&arg_parser);
+      // Waiting for '{', so any other stuck token (including ')') must move.
+      SyntaxEnsureProgress(syntax, token_before, location_before, errors_before,
+                           TC(stmt));
     }
     // We need a function body after the argument declarations.
     if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
@@ -10701,7 +10726,7 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
 
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
-ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
+static ASTNode* ParseExternalDeclarationBody(Syntax* syntax) {
   syntax->context = kParsingFileScope;
   if (syntax->current_namespace == NULL) {
     syntax->current_namespace = compiler->global_namespace;
@@ -10858,6 +10883,16 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);
+}
+
+ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
+  Token token_before = syntax->lex->current_token;
+  SourceLocation location_before = syntax->lex->current_token_location;
+  int errors_before = NumErrors();
+  ASTNode* node = ParseExternalDeclarationBody(syntax);
+  SyntaxEnsureProgress(syntax, token_before, location_before, errors_before,
+                       TC(closebrace));
+  return node;
 }
 
 // We have consumed the open brace, skip tokens until we find the
@@ -13000,8 +13035,9 @@ static ASTNode* ParseLocalDeclarationImpl(Syntax* syntax,
   TypeRecordDelete(type);
 
   if (require_semicolon) {
-    // The declaration is followed by a semicolon.
-    SyntaxNeedSemicolon(syntax, TC(type));
+    // Stop at a closing brace as well: a missing ';' after a local declaration
+    // must not skip the '}' that ends the function and swallow what follows.
+    SyntaxNeedSemicolon(syntax, TC(type) | TC(closebrace));
   }
 
   AttributeListDestruct(&attributes);
@@ -13024,6 +13060,12 @@ ASTNode* SyntaxParseConditionDeclaration(Syntax* syntax) {
 
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers) {
   if (!LexMatch(syntax->lex, bracket)) {
+    if (LexEof(syntax->lex) && syntax->eof_missing_bracket == bracket) {
+      return;
+    }
+    if (LexEof(syntax->lex)) {
+      syntax->eof_missing_bracket = bracket;
+    }
     SyntaxError(syntax, "Missing %s", TokenName(bracket));
     SyntaxRecover(syntax, followers);
   }
@@ -13037,11 +13079,60 @@ void SyntaxNeedTemplateClose(Syntax* syntax, TokenClass followers) {
 }
 
 void SyntaxRecover(Syntax* syntax, TokenClass tc) {
-  while (!LexEof(syntax->lex)) {
-    TokenClass c = ClassifyToken(syntax->lex->current_token);
-    if ((c & tc) != 0) {
+  // Skip tokens until a follower of `tc` is found at the current nesting
+  // depth.  An unmatched closer is left in the stream: consuming it here
+  // would desynchronize every enclosing skip-until-'}' / skip-until-')' loop
+  // and is what turns a single syntax error into an infinite diagnostic
+  // storm or a skipped later declaration.
+  Lex* lex = syntax->lex;
+  int paren = 0;
+  int brace = 0;
+  int square = 0;
+  while (!LexEof(lex)) {
+    Token tok = lex->current_token;
+    if (brace == 0 && tok == TOK(rbrace)) {
       break;
     }
+    if (paren == 0 && tok == TOK(rparen)) {
+      break;
+    }
+    if (square == 0 && (tok == TOK(rsquare) || tok == TOK(splice_close))) {
+      break;
+    }
+    TokenClass c = ClassifyToken(tok);
+    if (paren == 0 && brace == 0 && square == 0 && (c & tc) != 0) {
+      break;
+    }
+    if (tok == TOK(lparen) || tok == TOK(splice_open)) {
+      paren++;
+    } else if ((tok == TOK(rparen)) && paren > 0) {
+      paren--;
+    } else if (tok == TOK(lbrace)) {
+      brace++;
+    } else if (tok == TOK(rbrace) && brace > 0) {
+      brace--;
+    } else if (tok == TOK(lsquare)) {
+      square++;
+    } else if ((tok == TOK(rsquare) || tok == TOK(splice_close)) &&
+               square > 0) {
+      square--;
+    }
+    LexNextToken(lex);
+  }
+}
+
+void SyntaxEnsureProgress(Syntax* syntax, Token token_before,
+                          SourceLocation location_before, int errors_before,
+                          TokenClass leave) {
+  if (NumErrors() == errors_before || LexEof(syntax->lex)) {
+    return;
+  }
+  TokenClass c = ClassifyToken(syntax->lex->current_token);
+  if ((c & leave) != 0) {
+    return;
+  }
+  if (syntax->lex->current_token == token_before &&
+      syntax->lex->current_token_location == location_before) {
     LexNextToken(syntax->lex);
   }
 }
@@ -13607,6 +13698,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(continue):
     case TOK(default):
     case TOK(do):
+    case TOK(else):
     case TOK(for):
     case TOK(if):
     case TOK(goto):
@@ -13642,7 +13734,6 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(complex):
     case TOK(const):
     case TOK(double):
-    case TOK(else):
     case TOK(float):
     case TOK(enum):
     case TOK(imaginary):
