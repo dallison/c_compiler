@@ -1,0 +1,907 @@
+//
+//  Extra classic locale facets: monetary, time, messages, and wstring_convert.
+//  Included from <locale> inside namespace std.
+//
+
+#ifndef __davecc_locale_extra__
+#define __davecc_locale_extra__
+
+class money_base {
+ public:
+  enum part { none, space, symbol, sign, value };
+  struct pattern {
+    char field[4];
+  };
+};
+
+namespace __locale_detail {
+
+inline money_base::pattern __classic_money_pattern() {
+  money_base::pattern result;
+  result.field[0] = static_cast<char>(money_base::symbol);
+  result.field[1] = static_cast<char>(money_base::sign);
+  result.field[2] = static_cast<char>(money_base::none);
+  result.field[3] = static_cast<char>(money_base::value);
+  return result;
+}
+
+template <class CharT>
+basic_string<CharT> __ascii_to_string(const char* text) {
+  basic_string<CharT> result;
+  while (*text != '\0') {
+    result.push_back(static_cast<CharT>(*text));
+    ++text;
+  }
+  return result;
+}
+
+template <class CharT>
+basic_string<CharT> __money_units_to_digits(long double units, int frac) {
+  int negative = 0;
+  if (units < 0) {
+    negative = 1;
+    units = -units;
+  }
+  int i = 0;
+  while (i < frac) {
+    units *= 10;
+    ++i;
+  }
+  unsigned long long value = static_cast<unsigned long long>(units + 0.5L);
+  basic_string<CharT> digits;
+  if (negative != 0) {
+    digits.push_back(static_cast<CharT>('-'));
+  }
+  if (value == 0) {
+    digits.push_back(static_cast<CharT>('0'));
+    return digits;
+  }
+  CharT buf[32];
+  int n = 0;
+  while (value != 0 && n < 32) {
+    buf[n] = static_cast<CharT>('0' + static_cast<int>(value % 10));
+    value /= 10;
+    ++n;
+  }
+  while (n > 0) {
+    --n;
+    digits.push_back(buf[n]);
+  }
+  return digits;
+}
+
+template <class Iter, class CharT>
+Iter __write_ascii(Iter out, const char* text) {
+  while (*text != '\0') {
+    *out = static_cast<CharT>(*text);
+    ++out;
+    ++text;
+  }
+  return out;
+}
+
+template <class Iter, class CharT>
+Iter __write_number(Iter out, int value, int width) {
+  CharT digits[16];
+  if (width < 1) {
+    width = 1;
+  }
+  if (width > 16) {
+    width = 16;
+  }
+  if (value < 0) {
+    value = 0;
+  }
+  int i = width - 1;
+  while (i >= 0) {
+    digits[i] = static_cast<CharT>('0' + value % 10);
+    value /= 10;
+    --i;
+  }
+  i = 0;
+  while (i < width) {
+    *out = digits[i];
+    ++out;
+    ++i;
+  }
+  return out;
+}
+
+inline const char* __month_name(int month, int abbreviated) {
+  static const char* full[] = {"January",   "February", "March",    "April",
+                               "May",       "June",     "July",     "August",
+                               "September", "October",  "November", "December"};
+  static const char* abbr[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  if (month < 0 || month > 11) {
+    return abbreviated != 0 ? "???" : "???";
+  }
+  return abbreviated != 0 ? abbr[month] : full[month];
+}
+
+inline const char* __weekday_name(int weekday, int abbreviated) {
+  static const char* full[] = {"Sunday",    "Monday",   "Tuesday", "Wednesday",
+                               "Thursday",  "Friday",   "Saturday"};
+  static const char* abbr[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  if (weekday < 0 || weekday > 6) {
+    return abbreviated != 0 ? "???" : "???";
+  }
+  return abbreviated != 0 ? abbr[weekday] : full[weekday];
+}
+
+template <class Iter, class CharT>
+int __read_number(Iter& in, Iter end, int width, int& value) {
+  value = 0;
+  int seen = 0;
+  while (seen < width && in != end) {
+    CharT ch = *in;
+    if (ch < static_cast<CharT>('0') || ch > static_cast<CharT>('9')) {
+      break;
+    }
+    value = value * 10 + static_cast<int>(ch - static_cast<CharT>('0'));
+    ++in;
+    ++seen;
+  }
+  return seen;
+}
+
+}  // namespace __locale_detail
+
+template <class CharT, bool Intl = false>
+class moneypunct : public locale::facet, public money_base {
+ public:
+  typedef CharT char_type;
+  typedef basic_string<CharT> string_type;
+  static locale::id id;
+
+  explicit moneypunct(size_t refs = 0) : locale::facet(refs) {}
+
+  char_type decimal_point() const { return do_decimal_point(); }
+  char_type thousands_sep() const { return do_thousands_sep(); }
+  string grouping() const { return do_grouping(); }
+  string_type curr_symbol() const { return do_curr_symbol(); }
+  string_type positive_sign() const { return do_positive_sign(); }
+  string_type negative_sign() const { return do_negative_sign(); }
+  int frac_digits() const { return do_frac_digits(); }
+  pattern pos_format() const { return do_pos_format(); }
+  pattern neg_format() const { return do_neg_format(); }
+
+ protected:
+  ~moneypunct() override {}
+
+  virtual char_type do_decimal_point() const { return CharT('.'); }
+  virtual char_type do_thousands_sep() const { return CharT(','); }
+  virtual string do_grouping() const { return string(); }
+  virtual string_type do_curr_symbol() const {
+    if (Intl) {
+      return __locale_detail::__ascii_to_string<CharT>("");
+    }
+    return string_type();
+  }
+  virtual string_type do_positive_sign() const { return string_type(); }
+  virtual string_type do_negative_sign() const {
+    return __locale_detail::__ascii_to_string<CharT>("-");
+  }
+  virtual int do_frac_digits() const { return 0; }
+  virtual pattern do_pos_format() const {
+    return __locale_detail::__classic_money_pattern();
+  }
+  virtual pattern do_neg_format() const {
+    return __locale_detail::__classic_money_pattern();
+  }
+};
+
+template <class CharT, bool Intl = false>
+class moneypunct_byname : public moneypunct<CharT, Intl> {
+ public:
+  explicit moneypunct_byname(const char* name, size_t refs = 0)
+      : moneypunct<CharT, Intl>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~moneypunct_byname() override {}
+};
+
+template <class CharT, class OutputIterator>
+class money_put : public locale::facet {
+ public:
+  typedef CharT char_type;
+  typedef OutputIterator iter_type;
+  typedef basic_string<CharT> string_type;
+  static locale::id id;
+
+  explicit money_put(size_t refs = 0) : locale::facet(refs) {}
+
+  iter_type put(iter_type s, ios_base& f, char_type fill, long double units,
+                bool intl = false) const {
+    return do_put(s, f, fill, units, intl);
+  }
+  iter_type put(iter_type s, ios_base& f, char_type fill,
+                const string_type& digits, bool intl = false) const {
+    return do_put(s, f, fill, digits, intl);
+  }
+
+ protected:
+  ~money_put() override {}
+
+  virtual iter_type do_put(iter_type s, ios_base& f, char_type fill,
+                           long double units, bool intl) const {
+    (void)fill;
+    typedef moneypunct<CharT, false> LocalPunct;
+    typedef moneypunct<CharT, true> IntlPunct;
+    int frac = intl ? use_facet<IntlPunct>(f.getloc()).frac_digits()
+                    : use_facet<LocalPunct>(f.getloc()).frac_digits();
+    return do_put(s, f, fill,
+                  __locale_detail::__money_units_to_digits<CharT>(units, frac),
+                  intl);
+  }
+
+  virtual iter_type do_put(iter_type s, ios_base& f, char_type fill,
+                           const string_type& digits, bool intl) const {
+    (void)f;
+    (void)fill;
+    (void)intl;
+    size_t i = 0;
+    while (i < digits.size()) {
+      *s = digits[i];
+      ++s;
+      ++i;
+    }
+    return s;
+  }
+};
+
+template <class CharT, class InputIterator>
+class money_get : public locale::facet {
+ public:
+  typedef CharT char_type;
+  typedef InputIterator iter_type;
+  typedef basic_string<CharT> string_type;
+  static locale::id id;
+
+  explicit money_get(size_t refs = 0) : locale::facet(refs) {}
+
+  iter_type get(iter_type in, iter_type end, bool intl, ios_base& f,
+                ios_base::iostate& err, long double& units) const {
+    return do_get(in, end, intl, f, err, units);
+  }
+  iter_type get(iter_type in, iter_type end, bool intl, ios_base& f,
+                ios_base::iostate& err, string_type& digits) const {
+    return do_get(in, end, intl, f, err, digits);
+  }
+
+ protected:
+  ~money_get() override {}
+
+  virtual iter_type do_get(iter_type in, iter_type end, bool intl, ios_base& f,
+                           ios_base::iostate& err, long double& units) const {
+    string_type digits;
+    in = do_get(in, end, intl, f, err, digits);
+    if ((err & ios_base::failbit) != 0) {
+      return in;
+    }
+    units = 0;
+    size_t i = 0;
+    int negative = 0;
+    if (i < digits.size() && digits[i] == static_cast<CharT>('-')) {
+      negative = 1;
+      ++i;
+    }
+    while (i < digits.size()) {
+      units = units * 10 + static_cast<int>(digits[i] - static_cast<CharT>('0'));
+      ++i;
+    }
+    if (negative != 0) {
+      units = -units;
+    }
+    return in;
+  }
+
+  virtual iter_type do_get(iter_type in, iter_type end, bool intl, ios_base& f,
+                           ios_base::iostate& err, string_type& digits) const {
+    (void)intl;
+    (void)f;
+    digits = string_type();
+    if (in == end) {
+      err |= ios_base::failbit | ios_base::eofbit;
+      return in;
+    }
+    if (*in == static_cast<CharT>('-') || *in == static_cast<CharT>('+')) {
+      if (*in == static_cast<CharT>('-')) {
+        digits.push_back(*in);
+      }
+      ++in;
+    }
+    int seen = 0;
+    while (in != end) {
+      CharT ch = *in;
+      if (ch < static_cast<CharT>('0') || ch > static_cast<CharT>('9')) {
+        break;
+      }
+      digits.push_back(ch);
+      ++in;
+      ++seen;
+    }
+    if (seen == 0) {
+      err |= ios_base::failbit;
+    }
+    if (in == end) {
+      err |= ios_base::eofbit;
+    }
+    return in;
+  }
+};
+
+class time_base {
+ public:
+  enum dateorder { no_order, dmy, mdy, ymd, ydm };
+};
+
+template <class CharT, class OutputIterator>
+class time_put : public locale::facet {
+ public:
+  typedef CharT char_type;
+  typedef OutputIterator iter_type;
+  static locale::id id;
+
+  explicit time_put(size_t refs = 0) : locale::facet(refs) {}
+
+  iter_type put(iter_type s, ios_base& f, char_type fill, const tm* tmb,
+                const CharT* fmt, const CharT* fmtend) const {
+    return do_put(s, f, fill, tmb, fmt, fmtend);
+  }
+  iter_type put(iter_type s, ios_base& f, char_type fill, const tm* tmb,
+                char format, char modifier = 0) const {
+    return do_put(s, f, fill, tmb, format, modifier);
+  }
+
+ protected:
+  ~time_put() override {}
+
+  virtual iter_type do_put(iter_type s, ios_base& f, char_type fill,
+                           const tm* tmb, const CharT* fmt,
+                           const CharT* fmtend) const {
+    while (fmt != fmtend) {
+      CharT ch = *fmt;
+      ++fmt;
+      if (ch != static_cast<CharT>('%')) {
+        *s = ch;
+        ++s;
+        continue;
+      }
+      if (fmt == fmtend) {
+        break;
+      }
+      char modifier = 0;
+      char format = static_cast<char>(*fmt);
+      ++fmt;
+      if (format == 'E' || format == 'O') {
+        modifier = format;
+        if (fmt == fmtend) {
+          break;
+        }
+        format = static_cast<char>(*fmt);
+        ++fmt;
+      }
+      s = do_put(s, f, fill, tmb, format, modifier);
+    }
+    return s;
+  }
+
+  virtual iter_type do_put(iter_type s, ios_base& f, char_type fill,
+                           const tm* tmb, char format, char modifier) const {
+    (void)f;
+    (void)fill;
+    (void)modifier;
+    if (tmb == 0) {
+      return s;
+    }
+    switch (format) {
+      case '%':
+        *s = static_cast<CharT>('%');
+        ++s;
+        return s;
+      case 'Y':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_year + 1900, 4);
+      case 'y':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, (tmb->tm_year + 1900) % 100, 2);
+      case 'm':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_mon + 1, 2);
+      case 'd':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_mday, 2);
+      case 'H':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_hour, 2);
+      case 'M':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_min, 2);
+      case 'S':
+        return __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_sec, 2);
+      case 'w':
+        return __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_wday,
+                                                                1);
+      case 'a':
+        return __locale_detail::__write_ascii<iter_type, CharT>(
+            s, __locale_detail::__weekday_name(tmb->tm_wday, 1));
+      case 'A':
+        return __locale_detail::__write_ascii<iter_type, CharT>(
+            s, __locale_detail::__weekday_name(tmb->tm_wday, 0));
+      case 'b':
+      case 'h':
+        return __locale_detail::__write_ascii<iter_type, CharT>(
+            s, __locale_detail::__month_name(tmb->tm_mon, 1));
+      case 'B':
+        return __locale_detail::__write_ascii<iter_type, CharT>(
+            s, __locale_detail::__month_name(tmb->tm_mon, 0));
+      case 'F': {
+        s = __locale_detail::__write_number<iter_type, CharT>(
+            s, tmb->tm_year + 1900, 4);
+        *s = static_cast<CharT>('-');
+        ++s;
+        s = __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_mon + 1,
+                                                             2);
+        *s = static_cast<CharT>('-');
+        ++s;
+        return __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_mday,
+                                                                2);
+      }
+      case 'T': {
+        s = __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_hour, 2);
+        *s = static_cast<CharT>(':');
+        ++s;
+        s = __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_min, 2);
+        *s = static_cast<CharT>(':');
+        ++s;
+        return __locale_detail::__write_number<iter_type, CharT>(s, tmb->tm_sec,
+                                                                2);
+      }
+      case 'c': {
+        const CharT fmt[] = {CharT('%'), CharT('a'), CharT(' '), CharT('%'),
+                             CharT('b'), CharT(' '), CharT('%'), CharT('d'),
+                             CharT(' '), CharT('%'), CharT('T'), CharT(' '),
+                             CharT('%'), CharT('Y')};
+        return do_put(s, f, fill, tmb, fmt, fmt + 14);
+      }
+      case 'x': {
+        const CharT fmt[] = {CharT('%'), CharT('m'), CharT('/'), CharT('%'),
+                             CharT('d'), CharT('/'), CharT('%'), CharT('y')};
+        return do_put(s, f, fill, tmb, fmt, fmt + 8);
+      }
+      case 'X':
+        return do_put(s, f, fill, tmb, 'T', 0);
+      default:
+        *s = static_cast<CharT>(format);
+        ++s;
+        return s;
+    }
+  }
+};
+
+template <class CharT, class OutputIterator>
+class time_put_byname : public time_put<CharT, OutputIterator> {
+ public:
+  explicit time_put_byname(const char* name, size_t refs = 0)
+      : time_put<CharT, OutputIterator>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~time_put_byname() override {}
+};
+
+template <class CharT, class InputIterator>
+class time_get : public locale::facet, public time_base {
+ public:
+  typedef CharT char_type;
+  typedef InputIterator iter_type;
+  static locale::id id;
+
+  explicit time_get(size_t refs = 0) : locale::facet(refs) {}
+
+  dateorder date_order() const { return do_date_order(); }
+
+  iter_type get_time(iter_type in, iter_type end, ios_base& f,
+                     ios_base::iostate& err, tm* tmb) const {
+    return do_get_time(in, end, f, err, tmb);
+  }
+  iter_type get_date(iter_type in, iter_type end, ios_base& f,
+                     ios_base::iostate& err, tm* tmb) const {
+    return do_get_date(in, end, f, err, tmb);
+  }
+  iter_type get_weekday(iter_type in, iter_type end, ios_base& f,
+                        ios_base::iostate& err, tm* tmb) const {
+    return do_get_weekday(in, end, f, err, tmb);
+  }
+  iter_type get_monthname(iter_type in, iter_type end, ios_base& f,
+                          ios_base::iostate& err, tm* tmb) const {
+    return do_get_monthname(in, end, f, err, tmb);
+  }
+  iter_type get_year(iter_type in, iter_type end, ios_base& f,
+                     ios_base::iostate& err, tm* tmb) const {
+    return do_get_year(in, end, f, err, tmb);
+  }
+  iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err,
+                tm* tmb, char format, char modifier = 0) const {
+    return do_get(in, end, f, err, tmb, format, modifier);
+  }
+  iter_type get(iter_type in, iter_type end, ios_base& f, ios_base::iostate& err,
+                tm* tmb, const char_type* fmt, const char_type* fmtend) const {
+    return do_get(in, end, f, err, tmb, fmt, fmtend);
+  }
+
+ protected:
+  ~time_get() override {}
+
+  virtual dateorder do_date_order() const { return ymd; }
+
+  virtual iter_type do_get_time(iter_type in, iter_type end, ios_base& f,
+                                ios_base::iostate& err, tm* tmb) const {
+    const CharT fmt[] = {CharT('%'), CharT('H'), CharT(':'), CharT('%'),
+                         CharT('M'), CharT(':'), CharT('%'), CharT('S')};
+    return do_get(in, end, f, err, tmb, fmt, fmt + 8);
+  }
+  virtual iter_type do_get_date(iter_type in, iter_type end, ios_base& f,
+                                ios_base::iostate& err, tm* tmb) const {
+    const CharT fmt[] = {CharT('%'), CharT('Y'), CharT('-'), CharT('%'),
+                         CharT('m'), CharT('-'), CharT('%'), CharT('d')};
+    return do_get(in, end, f, err, tmb, fmt, fmt + 8);
+  }
+  virtual iter_type do_get_weekday(iter_type in, iter_type end, ios_base& f,
+                                   ios_base::iostate& err, tm* tmb) const {
+    return do_get(in, end, f, err, tmb, 'a', 0);
+  }
+  virtual iter_type do_get_monthname(iter_type in, iter_type end, ios_base& f,
+                                     ios_base::iostate& err, tm* tmb) const {
+    return do_get(in, end, f, err, tmb, 'b', 0);
+  }
+  virtual iter_type do_get_year(iter_type in, iter_type end, ios_base& f,
+                                ios_base::iostate& err, tm* tmb) const {
+    return do_get(in, end, f, err, tmb, 'Y', 0);
+  }
+
+  virtual iter_type do_get(iter_type in, iter_type end, ios_base& f,
+                           ios_base::iostate& err, tm* tmb, char format,
+                           char modifier) const {
+    (void)f;
+    (void)modifier;
+    if (tmb == 0) {
+      err |= ios_base::failbit;
+      return in;
+    }
+    int value = 0;
+    int width = format == 'Y' ? 4 : (format == 'w' ? 1 : 2);
+    if (format == 'a' || format == 'A') {
+      int weekday = __match_name(in, end, 1);
+      if (weekday < 0) {
+        err |= ios_base::failbit;
+        return in;
+      }
+      tmb->tm_wday = weekday;
+      return in;
+    }
+    if (format == 'b' || format == 'h' || format == 'B') {
+      int month = __match_name(in, end, 0);
+      if (month < 0) {
+        err |= ios_base::failbit;
+        return in;
+      }
+      tmb->tm_mon = month;
+      return in;
+    }
+    if (format == 'F') {
+      const CharT fmt[] = {CharT('%'), CharT('Y'), CharT('-'), CharT('%'),
+                           CharT('m'), CharT('-'), CharT('%'), CharT('d')};
+      return do_get(in, end, f, err, tmb, fmt, fmt + 8);
+    }
+    if (format == 'T' || format == 'X') {
+      return do_get_time(in, end, f, err, tmb);
+    }
+    if (format == 'x') {
+      const CharT fmt[] = {CharT('%'), CharT('m'), CharT('/'), CharT('%'),
+                           CharT('d'), CharT('/'), CharT('%'), CharT('y')};
+      return do_get(in, end, f, err, tmb, fmt, fmt + 8);
+    }
+    int seen = __locale_detail::__read_number<iter_type, CharT>(in, end, width,
+                                                                value);
+    if (seen == 0) {
+      err |= ios_base::failbit;
+      if (in == end) {
+        err |= ios_base::eofbit;
+      }
+      return in;
+    }
+    switch (format) {
+      case 'Y':
+        tmb->tm_year = value - 1900;
+        break;
+      case 'y':
+        tmb->tm_year = value + (value < 69 ? 100 : 0);
+        break;
+      case 'm':
+        tmb->tm_mon = value - 1;
+        break;
+      case 'd':
+        tmb->tm_mday = value;
+        break;
+      case 'H':
+        tmb->tm_hour = value;
+        break;
+      case 'M':
+        tmb->tm_min = value;
+        break;
+      case 'S':
+        tmb->tm_sec = value;
+        break;
+      case 'w':
+        tmb->tm_wday = value;
+        break;
+      default:
+        err |= ios_base::failbit;
+        break;
+    }
+    if (in == end) {
+      err |= ios_base::eofbit;
+    }
+    return in;
+  }
+
+  virtual iter_type do_get(iter_type in, iter_type end, ios_base& f,
+                           ios_base::iostate& err, tm* tmb, const CharT* fmt,
+                           const CharT* fmtend) const {
+    while (fmt != fmtend && (err & ios_base::failbit) == 0) {
+      CharT ch = *fmt;
+      ++fmt;
+      if (ch != static_cast<CharT>('%')) {
+        if (in == end || *in != ch) {
+          err |= ios_base::failbit;
+          if (in == end) {
+            err |= ios_base::eofbit;
+          }
+          return in;
+        }
+        ++in;
+        continue;
+      }
+      if (fmt == fmtend) {
+        break;
+      }
+      char modifier = 0;
+      char format = static_cast<char>(*fmt);
+      ++fmt;
+      if (format == 'E' || format == 'O') {
+        modifier = format;
+        if (fmt == fmtend) {
+          break;
+        }
+        format = static_cast<char>(*fmt);
+        ++fmt;
+      }
+      if (format == '%') {
+        if (in == end || *in != static_cast<CharT>('%')) {
+          err |= ios_base::failbit;
+          return in;
+        }
+        ++in;
+        continue;
+      }
+      in = do_get(in, end, f, err, tmb, format, modifier);
+    }
+    return in;
+  }
+
+ private:
+  static int __ascii_ieq(CharT left, char right) {
+    char value = static_cast<char>(left);
+    if (value >= 'A' && value <= 'Z') {
+      value = static_cast<char>(value - 'A' + 'a');
+    }
+    if (right >= 'A' && right <= 'Z') {
+      right = static_cast<char>(right - 'A' + 'a');
+    }
+    return value == right;
+  }
+
+  static int __match_one(iter_type& in, iter_type end, const char* name) {
+    iter_type current = in;
+    const char* cursor = name;
+    while (*cursor != '\0') {
+      if (current == end || !__ascii_ieq(*current, *cursor)) {
+        return 0;
+      }
+      ++current;
+      ++cursor;
+    }
+    in = current;
+    return 1;
+  }
+
+  static int __match_name(iter_type& in, iter_type end, int weekday) {
+    int i = 0;
+    int count = weekday != 0 ? 7 : 12;
+    while (i < count) {
+      const char* full =
+          weekday != 0 ? __locale_detail::__weekday_name(i, 0)
+                       : __locale_detail::__month_name(i, 0);
+      const char* abbr =
+          weekday != 0 ? __locale_detail::__weekday_name(i, 1)
+                       : __locale_detail::__month_name(i, 1);
+      iter_type saved = in;
+      if (__match_one(in, end, full)) {
+        return i;
+      }
+      in = saved;
+      if (__match_one(in, end, abbr)) {
+        return i;
+      }
+      in = saved;
+      ++i;
+    }
+    return -1;
+  }
+};
+
+template <class CharT, class InputIterator>
+class time_get_byname : public time_get<CharT, InputIterator> {
+ public:
+  explicit time_get_byname(const char* name, size_t refs = 0)
+      : time_get<CharT, InputIterator>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~time_get_byname() override {}
+};
+
+class messages_base {
+ public:
+  typedef int catalog;
+};
+
+template <class CharT>
+class messages : public locale::facet, public messages_base {
+ public:
+  typedef CharT char_type;
+  typedef basic_string<CharT> string_type;
+  static locale::id id;
+
+  explicit messages(size_t refs = 0) : locale::facet(refs) {}
+
+  catalog open(const string& name, const locale& loc) const {
+    return do_open(name, loc);
+  }
+  string_type get(catalog cat, int set, int msgid,
+                  const string_type& dfault) const {
+    return do_get(cat, set, msgid, dfault);
+  }
+  void close(catalog cat) const { do_close(cat); }
+
+ protected:
+  ~messages() override {}
+
+  virtual catalog do_open(const string&, const locale&) const { return 0; }
+  virtual string_type do_get(catalog, int, int,
+                             const string_type& dfault) const {
+    return dfault;
+  }
+  virtual void do_close(catalog) const {}
+};
+
+template <class CharT>
+class messages_byname : public messages<CharT> {
+ public:
+  explicit messages_byname(const char* name, size_t refs = 0)
+      : messages<CharT>(refs) {
+    if (!__locale_detail::__is_classic_name(name)) {
+      __locale_detail::__throw_runtime("unsupported locale name");
+    }
+  }
+
+ protected:
+  ~messages_byname() override {}
+};
+
+#if __cplusplus < 202600L
+template <class Codecvt, class Elem = wchar_t>
+class wstring_convert {
+ public:
+  typedef basic_string<char> byte_string;
+  typedef basic_string<Elem> wide_string;
+  typedef typename Codecvt::state_type state_type;
+
+  wstring_convert() {}
+  ~wstring_convert() {}
+
+  byte_string to_bytes(Elem wide) {
+    const Elem src[1] = {wide};
+    return to_bytes(src, src + 1);
+  }
+  byte_string to_bytes(const wide_string& wstr) {
+    const Elem* data = wstr.data();
+    return to_bytes(data, data + wstr.size());
+  }
+  byte_string to_bytes(const Elem* first, const Elem* last) {
+    byte_string out;
+    state_type state = state_type();
+    const Elem* from_next = first;
+    while (from_next != last) {
+      char buf[32];
+      char* to_next = buf;
+      const Elem* previous = from_next;
+      codecvt_base::result status = __cvt_.out(
+          state, from_next, last, from_next, buf, buf + 32, to_next);
+      if (status == codecvt_base::error) {
+        __DAVECC_THROW(range_error("wstring_convert"));
+      }
+      size_t produced = static_cast<size_t>(to_next - buf);
+      size_t i = 0;
+      while (i < produced) {
+        out.push_back(buf[i]);
+        ++i;
+      }
+      if (status == codecvt_base::ok || status == codecvt_base::noconv) {
+        break;
+      }
+      if (from_next == previous) {
+        __DAVECC_THROW(range_error("wstring_convert"));
+      }
+    }
+    return out;
+  }
+
+  wide_string from_bytes(char byte) {
+    const char src[1] = {byte};
+    return from_bytes(src, src + 1);
+  }
+  wide_string from_bytes(const byte_string& bytes) {
+    const char* data = bytes.data();
+    return from_bytes(data, data + bytes.size());
+  }
+  wide_string from_bytes(const char* first, const char* last) {
+    wide_string out;
+    state_type state = state_type();
+    const char* from_next = first;
+    while (from_next != last) {
+      Elem buf[8];
+      Elem* to_next = buf;
+      const char* previous = from_next;
+      codecvt_base::result status = __cvt_.in(
+          state, from_next, last, from_next, buf, buf + 8, to_next);
+      if (status == codecvt_base::error) {
+        __DAVECC_THROW(range_error("wstring_convert"));
+      }
+      size_t produced = static_cast<size_t>(to_next - buf);
+      size_t i = 0;
+      while (i < produced) {
+        out.push_back(buf[i]);
+        ++i;
+      }
+      if (status == codecvt_base::ok || status == codecvt_base::noconv) {
+        break;
+      }
+      if (from_next == previous) {
+        __DAVECC_THROW(range_error("wstring_convert"));
+      }
+    }
+    return out;
+  }
+
+ private:
+  Codecvt __cvt_;
+  wstring_convert(const wstring_convert&);
+  wstring_convert& operator=(const wstring_convert&);
+};
+#endif
+
+#endif

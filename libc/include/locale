@@ -17,6 +17,7 @@
 #include <ios>
 #include <streambuf>
 #include <string>
+#include <time.h>
 
 extern "C" int isspace(int);
 extern "C" int isprint(int);
@@ -1037,6 +1038,8 @@ class num_get<wchar_t, wistreambuf_iterator> : public __davecc_num_get_wchar {
  protected:
   ~num_get() override {}
 };
+
+#include <__locale_extra>
 
 }  // namespace std
 

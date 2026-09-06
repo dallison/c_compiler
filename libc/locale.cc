@@ -216,6 +216,77 @@ __locale_impl* __locale_impl::__combine_with(const __locale_impl* source,
                         num_get<wchar_t, wistreambuf_iterator>::id.__index());
     }
   }
+  if ((cat & locale::monetary) != 0) {
+    locale::facet* facet = source->__get(moneypunct<char>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, moneypunct<char>::id.__index());
+    }
+    facet = source->__get(moneypunct<wchar_t>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, moneypunct<wchar_t>::id.__index());
+    }
+    facet = source->__get(moneypunct<char, true>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, moneypunct<char, true>::id.__index());
+    }
+    facet = source->__get(moneypunct<wchar_t, true>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, moneypunct<wchar_t, true>::id.__index());
+    }
+    facet = source->__get(money_put<char, ostreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, money_put<char, ostreambuf_iterator>::id.__index());
+    }
+    facet =
+        source->__get(money_put<wchar_t, wostreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet,
+                        money_put<wchar_t, wostreambuf_iterator>::id.__index());
+    }
+    facet = source->__get(money_get<char, istreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, money_get<char, istreambuf_iterator>::id.__index());
+    }
+    facet =
+        source->__get(money_get<wchar_t, wistreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet,
+                        money_get<wchar_t, wistreambuf_iterator>::id.__index());
+    }
+  }
+  if ((cat & locale::time) != 0) {
+    locale::facet* facet =
+        source->__get(time_put<char, ostreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, time_put<char, ostreambuf_iterator>::id.__index());
+    }
+    facet =
+        source->__get(time_put<wchar_t, wostreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet,
+                        time_put<wchar_t, wostreambuf_iterator>::id.__index());
+    }
+    facet = source->__get(time_get<char, istreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, time_get<char, istreambuf_iterator>::id.__index());
+    }
+    facet =
+        source->__get(time_get<wchar_t, wistreambuf_iterator>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet,
+                        time_get<wchar_t, wistreambuf_iterator>::id.__index());
+    }
+  }
+  if ((cat & locale::messages) != 0) {
+    locale::facet* facet = source->__get(messages<char>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, messages<char>::id.__index());
+    }
+    facet = source->__get(messages<wchar_t>::id.__index());
+    if (facet != nullptr) {
+      result->__install(facet, messages<wchar_t>::id.__index());
+    }
+  }
   return result;
 }
 
@@ -232,6 +303,35 @@ locale::id __davecc_num_put_char::id;
 locale::id __davecc_num_put_wchar::id;
 locale::id __davecc_num_get_char::id;
 locale::id __davecc_num_get_wchar::id;
+locale::id moneypunct<char>::id;
+locale::id moneypunct<wchar_t>::id;
+locale::id moneypunct<char, true>::id;
+locale::id moneypunct<wchar_t, true>::id;
+locale::id money_put<char, ostreambuf_iterator>::id;
+locale::id money_put<wchar_t, wostreambuf_iterator>::id;
+locale::id money_get<char, istreambuf_iterator>::id;
+locale::id money_get<wchar_t, wistreambuf_iterator>::id;
+locale::id time_put<char, ostreambuf_iterator>::id;
+locale::id time_put<wchar_t, wostreambuf_iterator>::id;
+locale::id time_get<char, istreambuf_iterator>::id;
+locale::id time_get<wchar_t, wistreambuf_iterator>::id;
+locale::id messages<char>::id;
+locale::id messages<wchar_t>::id;
+
+template class moneypunct<char>;
+template class moneypunct<wchar_t>;
+template class moneypunct<char, true>;
+template class moneypunct<wchar_t, true>;
+template class money_put<char, ostreambuf_iterator>;
+template class money_put<wchar_t, wostreambuf_iterator>;
+template class money_get<char, istreambuf_iterator>;
+template class money_get<wchar_t, wistreambuf_iterator>;
+template class time_put<char, ostreambuf_iterator>;
+template class time_put<wchar_t, wostreambuf_iterator>;
+template class time_get<char, istreambuf_iterator>;
+template class time_get<wchar_t, wistreambuf_iterator>;
+template class messages<char>;
+template class messages<wchar_t>;
 
 const locale::category locale::none = 0;
 const locale::category locale::collate = 1;
@@ -291,6 +391,30 @@ void __install_classic_facets(__locale_impl* impl) {
   __install_facet<__davecc_num_get_char>(impl, __make_facet<__davecc_num_get_char>());
   __install_facet<__davecc_num_put_wchar>(impl, __make_facet<__davecc_num_put_wchar>());
   __install_facet<__davecc_num_get_wchar>(impl, __make_facet<__davecc_num_get_wchar>());
+  __install_facet<moneypunct<char>>(impl, __make_facet<moneypunct<char>>());
+  __install_facet<moneypunct<wchar_t>>(impl, __make_facet<moneypunct<wchar_t>>());
+  __install_facet<moneypunct<char, true> >(
+      impl, __make_facet<moneypunct<char, true> >());
+  __install_facet<moneypunct<wchar_t, true> >(
+      impl, __make_facet<moneypunct<wchar_t, true> >());
+  __install_facet<money_put<char, ostreambuf_iterator>>(
+      impl, __make_facet<money_put<char, ostreambuf_iterator>>());
+  __install_facet<money_put<wchar_t, wostreambuf_iterator>>(
+      impl, __make_facet<money_put<wchar_t, wostreambuf_iterator>>());
+  __install_facet<money_get<char, istreambuf_iterator>>(
+      impl, __make_facet<money_get<char, istreambuf_iterator>>());
+  __install_facet<money_get<wchar_t, wistreambuf_iterator>>(
+      impl, __make_facet<money_get<wchar_t, wistreambuf_iterator>>());
+  __install_facet<time_put<char, ostreambuf_iterator>>(
+      impl, __make_facet<time_put<char, ostreambuf_iterator>>());
+  __install_facet<time_put<wchar_t, wostreambuf_iterator>>(
+      impl, __make_facet<time_put<wchar_t, wostreambuf_iterator>>());
+  __install_facet<time_get<char, istreambuf_iterator>>(
+      impl, __make_facet<time_get<char, istreambuf_iterator>>());
+  __install_facet<time_get<wchar_t, wistreambuf_iterator>>(
+      impl, __make_facet<time_get<wchar_t, wistreambuf_iterator>>());
+  __install_facet<messages<char>>(impl, __make_facet<messages<char>>());
+  __install_facet<messages<wchar_t>>(impl, __make_facet<messages<wchar_t>>());
 }
 
 }  // namespace

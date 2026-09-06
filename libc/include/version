@@ -77,6 +77,11 @@
 #define __cpp_lib_spanstream 202106L
 #define __cpp_lib_constexpr_charconv 202207L
 #define __cpp_lib_stacktrace 202011L
+#if __cplusplus < 202600L
+#ifndef __cpp_lib_optional
+#define __cpp_lib_optional 202110L
+#endif
+#endif
 #ifndef __cpp_lib_stdfloat
 #define __cpp_lib_stdfloat 202306L
 #endif

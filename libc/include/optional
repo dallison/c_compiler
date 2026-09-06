@@ -9,7 +9,13 @@
 #define optional_h
 
 #if __cplusplus >= 202600L
+#ifndef __cpp_lib_optional
 #define __cpp_lib_optional 202506L
+#endif
+#elif __cplusplus >= 202302L
+#ifndef __cpp_lib_optional
+#define __cpp_lib_optional 202110L
+#endif
 #endif
 
 #include <__exception_support>
@@ -19,6 +25,9 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+#if __cplusplus >= 202302L
+#include <functional>
+#endif
 
 namespace std {
 
@@ -278,6 +287,107 @@ class optional {
       other.reset();
     }
   }
+
+#if __cplusplus >= 202302L
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, T&>> and_then(F&& function) & {
+    using Result = remove_cvref_t<invoke_result_t<F, T&>>;
+    if (__engaged_) {
+      return std::invoke(std::forward<F>(function), **this);
+    }
+    return Result();
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const T&>> and_then(
+      F&& function) const& {
+    using Result = remove_cvref_t<invoke_result_t<F, const T&>>;
+    if (__engaged_) {
+      return std::invoke(std::forward<F>(function), **this);
+    }
+    return Result();
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, T&&>> and_then(F&& function) && {
+    using Result = remove_cvref_t<invoke_result_t<F, T&&>>;
+    if (__engaged_) {
+      return std::invoke(std::forward<F>(function), static_cast<T&&>(**this));
+    }
+    return Result();
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, const T&&>> and_then(
+      F&& function) const&& {
+    using Result = remove_cvref_t<invoke_result_t<F, const T&&>>;
+    if (__engaged_) {
+      return std::invoke(std::forward<F>(function),
+                         static_cast<const T&&>(**this));
+    }
+    return Result();
+  }
+
+  template <class F>
+  constexpr optional<remove_cv_t<invoke_result_t<F, T&>>> transform(
+      F&& function) & {
+    using U = remove_cv_t<invoke_result_t<F, T&>>;
+    if (__engaged_) {
+      return optional<U>(std::invoke(std::forward<F>(function), **this));
+    }
+    return optional<U>();
+  }
+
+  template <class F>
+  constexpr optional<remove_cv_t<invoke_result_t<F, const T&>>> transform(
+      F&& function) const& {
+    using U = remove_cv_t<invoke_result_t<F, const T&>>;
+    if (__engaged_) {
+      return optional<U>(std::invoke(std::forward<F>(function), **this));
+    }
+    return optional<U>();
+  }
+
+  template <class F>
+  constexpr optional<remove_cv_t<invoke_result_t<F, T&&>>> transform(
+      F&& function) && {
+    using U = remove_cv_t<invoke_result_t<F, T&&>>;
+    if (__engaged_) {
+      return optional<U>(
+          std::invoke(std::forward<F>(function), static_cast<T&&>(**this)));
+    }
+    return optional<U>();
+  }
+
+  template <class F>
+  constexpr optional<remove_cv_t<invoke_result_t<F, const T&&>>> transform(
+      F&& function) const&& {
+    using U = remove_cv_t<invoke_result_t<F, const T&&>>;
+    if (__engaged_) {
+      return optional<U>(std::invoke(std::forward<F>(function),
+                                     static_cast<const T&&>(**this)));
+    }
+    return optional<U>();
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>> or_else(F&& function) const& {
+    using Result = remove_cvref_t<invoke_result_t<F>>;
+    if (__engaged_) {
+      return *this;
+    }
+    return std::invoke(std::forward<F>(function));
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>> or_else(F&& function) && {
+    using Result = remove_cvref_t<invoke_result_t<F>>;
+    if (__engaged_) {
+      return static_cast<optional&&>(*this);
+    }
+    return std::invoke(std::forward<F>(function));
+  }
+#endif
 };
 
 #if __cplusplus >= 202600L
@@ -287,7 +397,7 @@ class optional<T&> {
   T* __ptr_ = nullptr;
 
  public:
-  using value_type = T&;
+  using value_type = T;
 
   constexpr optional() noexcept = default;
   constexpr optional(nullopt_t) noexcept {}
@@ -295,8 +405,10 @@ class optional<T&> {
   constexpr explicit optional(in_place_t, T& value) noexcept
       : __ptr_(&value) {}
 
-  template <class U>
-    requires is_convertible_v<U*, T*>
+  template <class U,
+            typename enable_if<!is_same<remove_cv_t<U>, T>::value &&
+                                   is_convertible<U*, T*>::value,
+                               int>::type = 0>
   constexpr optional(U& value) noexcept : __ptr_(&value) {}
 
   constexpr optional(const optional&) noexcept = default;
@@ -344,6 +456,35 @@ class optional<T&> {
     T* value = __ptr_;
     __ptr_ = other.__ptr_;
     other.__ptr_ = value;
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F, T&>> and_then(
+      F&& function) const {
+    using Result = remove_cvref_t<invoke_result_t<F, T&>>;
+    if (__ptr_ != nullptr) {
+      return std::invoke(std::forward<F>(function), *__ptr_);
+    }
+    return Result();
+  }
+
+  template <class F>
+  constexpr optional<remove_cv_t<invoke_result_t<F, T&>>> transform(
+      F&& function) const {
+    using U = remove_cv_t<invoke_result_t<F, T&>>;
+    if (__ptr_ != nullptr) {
+      return optional<U>(std::invoke(std::forward<F>(function), *__ptr_));
+    }
+    return optional<U>();
+  }
+
+  template <class F>
+  constexpr remove_cvref_t<invoke_result_t<F>> or_else(F&& function) const {
+    using Result = remove_cvref_t<invoke_result_t<F>>;
+    if (__ptr_ != nullptr) {
+      return *this;
+    }
+    return std::invoke(std::forward<F>(function));
   }
 };
 

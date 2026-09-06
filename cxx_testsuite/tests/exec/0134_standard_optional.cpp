@@ -1,5 +1,6 @@
 // RUN: -std=c++20
 // EXPECT_EXIT: 0
+#include <compare>
 #include <optional>
 #include <utility>
 

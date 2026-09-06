@@ -86,6 +86,7 @@ filegroup(
         "libc/include/iterator",
         "libc/include/latch",
         "libc/include/__locale_core",
+        "libc/include/__locale_extra",
         "libc/include/__basic_ios_locale",
         "libc/include/locale",
         "libc/include/linalg",
