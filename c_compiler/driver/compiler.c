@@ -2793,15 +2793,8 @@ static void CompileDeclaration(Syntax* syntax) {
   SourceLocation location_before = syntax->lex->current_token_location;
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
   DiagnosticSwapState(diag_state);
-  // A construct that the declaration parser rejects without consuming anything
-  // would be offered to it again by the translation-unit loop, reporting the
-  // same error forever.  Drop the token to guarantee progress.  Requiring a new
-  // error keeps this from discarding a token of a valid declaration.
-  if (NumErrors() != errors_before && !LexEof(syntax->lex) &&
-      syntax->lex->current_token == token_before &&
-      syntax->lex->current_token_location == location_before) {
-    LexNextToken(syntax->lex);
-  }
+  SyntaxEnsureProgress(syntax, token_before, location_before, errors_before,
+                       0);
   CompileDeclarationNode(syntax, node);
   CompilePendingTemplateInstantiations(syntax);
   CompilerDrainPendingInjectedDeclarations(syntax);

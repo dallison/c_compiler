@@ -2144,13 +2144,27 @@ static bool ParseCXXConversionOperatorMember(
 
 void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
                                int base_offset) {
+  if (src == NULL) {
+    return;
+  }
   for (size_t i = 0; i < src->members.length; i++) {
     StructMember* member = src->members.value.p[i];
+    if (member == NULL) {
+      continue;
+    }
     Symbol* symbol = member->symbol;
     if (member->is_anon) {
-      // Anonymous member, deal with recursively.
-      InjectCXXAnonymousMembers(parser, dest, symbol->type->info.struct_info,
+      // Anonymous member, deal with recursively.  Recovery can leave an
+      // anonymous `class;` / `struct;` with no definition to inject from.
+      Struct* nested = (symbol != NULL && symbol->type != NULL &&
+                        TypeIsStructOrUnion(symbol->type))
+                           ? symbol->type->info.struct_info
+                           : NULL;
+      InjectCXXAnonymousMembers(parser, dest, nested,
                                 base_offset + member->byte_offset);
+      continue;
+    }
+    if (symbol == NULL) {
       continue;
     }
     if (!CheckStructMember(dest, &symbol->name)) {
@@ -2296,6 +2310,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->deferred_noexcept_specifiers;
   parser->deferred_noexcept_specifiers = &deferred_noexcept_specifiers;
   while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
+    Token token_before = parser->lex->current_token;
+    SourceLocation location_before = parser->lex->current_token_location;
+    int errors_before = NumErrors();
     if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
         LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
@@ -2651,6 +2668,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         if (TypeIsEnum(member_type)) {
           AddCXXUnscopedEnumConstantMembers(parser, str, member_type,
                                             current_access);
+          break;
+        }
+        if (member_type == NULL || !TypeIsStructOrUnion(member_type) ||
+            member_type->info.struct_info == NULL) {
+          // `class;` / `struct;` with no name and no body is not an anonymous
+          // aggregate.  Recovery lands here after a broken friend or similar.
+          SyntaxError(parser->syntax,
+                      "Anonymous class, struct or union must have a definition");
           break;
         }
         TypeRecordCalculateSize(member_type);
@@ -3040,8 +3065,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     if (!member_decl_had_inline_body && !LexLookingAt(parser->lex, TOK(rbrace))) {
-      SyntaxNeedSemicolon(parser->syntax, TC(type));
+      SyntaxNeedSemicolon(parser->syntax, TC(type) | TC(closebrace));
     }
+    SyntaxEnsureProgress(parser->syntax, token_before, location_before,
+                         errors_before, TC(closebrace));
     AttributeListDestruct(&member_attributes);
     if (is_member_template) {
       SyntaxCloseScope(parser->syntax);

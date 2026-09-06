@@ -81,6 +81,12 @@ typedef struct Syntax {
   bool c_linkage;            // Effective linkage is from `extern "C"`.
   bool explicit_cxx_linkage; // Effective linkage is explicit `extern "C++"`.
   int export_depth;          // Nesting depth of C++20 `export` regions.
+  // At end of input, each unclosed construct used to report its own
+  // "Missing }" / "Expected semicolon".  Nested structs then produced one
+  // pair per level.  Once a given closer has been diagnosed at EOF, further
+  // copies of that diagnostic are dropped.
+  Token eof_missing_bracket;
+  bool eof_expected_semicolon;
 } Syntax;
 
 typedef struct FullyQualifiedIdentifier {
@@ -231,6 +237,13 @@ void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);
 // current token does not close the list.
 void SyntaxNeedTemplateClose(Syntax* syntax, TokenClass followers);
 void SyntaxRecover(Syntax* syntax, TokenClass tc);
+// If a diagnostic was issued and the lexer has not moved, consume one token so
+// a surrounding parse loop cannot report the same error forever.  Tokens whose
+// class intersects `leave` (typically TC(closebrace) inside a brace-delimited
+// list) are left for the construct that opened them.
+void SyntaxEnsureProgress(Syntax* syntax, Token token_before,
+                          SourceLocation location_before, int errors_before,
+                          TokenClass leave);
 void SyntaxCheckThreadLocal(Syntax* syntax, Symbol* symbol,
                             ParserContext context, bool is_static_member,
                             bool is_nonstatic_member);

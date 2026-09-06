@@ -2218,8 +2218,19 @@ static bool CXXExpressionDesignatesTemporary(ASTNode* expr) {
 }
 
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
-  if (compiler->current_function != NULL &&
-      compiler->current_function->info.function.is_coroutine &&
+  if (compiler->current_function == NULL) {
+    // Recovery can place a return inside a GNU statement-expression that is
+    // itself an array bound or other non-function context.
+    if (node->cond != NULL) {
+      ASTNode* return_value = AnalyzeExpression(node->cond);
+      if (return_value != node->cond) {
+        ASTNodeReplaceChild((ASTNode*)node, 0, return_value, false);
+      }
+      node->cond = return_value;
+    }
+    return;
+  }
+  if (compiler->current_function->info.function.is_coroutine &&
       (((ASTNode*)node)->flags & kASTCoroutineLoweredReturn) == 0) {
     SemanticError((ASTNode*)node,
                   "return statement is not allowed in a coroutine; use co_return");
