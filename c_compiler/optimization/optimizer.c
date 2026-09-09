@@ -9,6 +9,8 @@
 #include "optimizer.h"
 #include "basic_block.h"
 #include "type_compare.h"
+#include "type_core.h"
+#include <limits.h>
 #include <stdint.h>
 
 // Is the node an integer constant with the value given?
@@ -153,6 +155,202 @@ static bool FoldNestedAdd(Generator* gen, BasicBlock* block, IRNode* node) {
   return true;
 }
 
+typedef struct {
+  uint32_t magic;
+  int shift;
+  bool add;
+} UnsignedDivMagic;
+
+typedef struct {
+  int32_t magic;
+  int shift;
+} SignedDivMagic;
+
+// Hacker's Delight Fig. 10-3.  M, s, and the add indicator implement
+// unsigned 32-bit n/d as a widening multiply and shifts for every n.
+static UnsignedDivMagic UnsignedMagic32(uint32_t d) {
+  UnsignedDivMagic mag = {0, 0, false};
+  uint32_t nc = 0xffffffffu - ((uint32_t)(0u - d) % d);
+  int p = 31;
+  uint32_t q1 = 0x80000000u / nc;
+  uint32_t r1 = 0x80000000u - q1 * nc;
+  uint32_t q2 = 0x7fffffffu / d;
+  uint32_t r2 = 0x7fffffffu - q2 * d;
+  do {
+    p++;
+    if (r1 >= nc - r1) {
+      q1 = 2 * q1 + 1;
+      r1 = 2 * r1 - nc;
+    } else {
+      q1 = 2 * q1;
+      r1 = 2 * r1;
+    }
+    if (r2 + 1 >= d - r2) {
+      if (q2 >= 0x7fffffffu) {
+        mag.add = true;
+      }
+      q2 = 2 * q2 + 1;
+      r2 = 2 * r2 + 1 - d;
+    } else {
+      if (q2 >= 0x80000000u) {
+        mag.add = true;
+      }
+      q2 = 2 * q2;
+      r2 = 2 * r2 + 1;
+    }
+  } while (p < 64 && (q1 < d - 1 - r2 || (q1 == d - 1 - r2 && r1 == 0)));
+  mag.magic = q2 + 1;
+  mag.shift = p - 32;
+  return mag;
+}
+
+// Hacker's Delight Fig. 10-1.  Positive d only; M may still be negative.
+static SignedDivMagic SignedMagic32(int32_t d) {
+  SignedDivMagic mag = {0, 0};
+  uint32_t ad = (uint32_t)d;
+  uint32_t two31 = 0x80000000u;
+  uint32_t t = two31 + ((uint32_t)d >> 31);
+  uint32_t anc = t - 1 - t % ad;
+  int p = 31;
+  uint32_t q1 = two31 / anc;
+  uint32_t r1 = two31 - q1 * anc;
+  uint32_t q2 = two31 / ad;
+  uint32_t r2 = two31 - q2 * ad;
+  uint32_t delta;
+  do {
+    p++;
+    q1 = 2 * q1;
+    r1 = 2 * r1;
+    if (r1 >= anc) {
+      q1 = q1 + 1;
+      r1 = r1 - anc;
+    }
+    q2 = 2 * q2;
+    r2 = 2 * r2;
+    if (r2 >= ad) {
+      q2 = q2 + 1;
+      r2 = r2 - ad;
+    }
+    delta = ad - r2;
+  } while (q1 < delta || (q1 == delta && r1 == 0));
+  mag.magic = (int32_t)(q2 + 1);
+  mag.shift = p - 32;
+  return mag;
+}
+
+static IRNode* EmitBinBefore(Generator* gen, BasicBlock* block, IRNode* pos,
+                             IROpcode opcode, IRNode* left, IRNode* right,
+                             TypeRecord* type) {
+  IRNode* inst = IRSetType(NewIR2(opcode, left, right), type);
+  inst->location = pos->location;
+  BasicBlockEmitBefore(gen, block, inst, pos);
+  return inst;
+}
+
+static IRNode* ExtendBefore(Generator* gen, BasicBlock* block, IRNode* pos,
+                            IRNode* value, TypeRecord* wide, bool is_signed) {
+  int bit_diff = (wide->size - value->type->size) * 8;
+  if (bit_diff == 0) {
+    return value;
+  }
+  IROpcode op = is_signed ? IR_OP(signextendi) : IR_OP(zeroextendi);
+  IRNode* bits = GeneratorGetIntConstant(gen, wide, bit_diff);
+  return EmitBinBefore(gen, block, pos, op, value, bits, wide);
+}
+
+static IRNode* NarrowBefore(Generator* gen, BasicBlock* block, IRNode* pos,
+                            IRNode* value, TypeRecord* narrow, bool is_signed) {
+  if (value->type != NULL && value->type->size <= narrow->size) {
+    return value;
+  }
+  int bit_diff = (narrow->size - value->type->size) * 8;
+  IROpcode op = is_signed ? IR_OP(signextendi) : IR_OP(zeroextendi);
+  IRNode* bits = GeneratorGetIntConstant(gen, narrow, bit_diff);
+  return EmitBinBefore(gen, block, pos, op, value, bits, narrow);
+}
+
+// Replace n / C with a widening multiply and shifts.  32-bit (and narrower)
+// integers only: 64-bit division would need a 128-bit product.
+static bool FoldConstantDivision(Generator* gen, BasicBlock* block,
+                                 IRNode* node) {
+  if (node->type == NULL || !TypeIsIntegral(node->type) ||
+      node->type->size <= 0 || node->type->size > 4) {
+    return false;
+  }
+  IRNode* dividend = node->inputs.value.p[0];
+  IRNode* divisor = node->inputs.value.p[1];
+  if (dividend == NULL || dividend->type == NULL || !IRIsIntConst(divisor)) {
+    return false;
+  }
+  TypeRecord* wide_u =
+      NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+  TypeRecord* wide_s = NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
+  if (wide_u == NULL || wide_s == NULL || wide_u->size != 8 ||
+      wide_s->size != 8) {
+    return false;
+  }
+
+  IRNode* result = NULL;
+  if (TypeIsUnsigned(node->type)) {
+    uint64_t d = (uint64_t)IRIntConstValue(divisor);
+    if (node->type->size < 8) {
+      d &= (UINT64_C(1) << (node->type->size * 8)) - 1;
+    }
+    if (d <= 1) {
+      return false;
+    }
+    UnsignedDivMagic mag = UnsignedMagic32((uint32_t)d);
+    IRNode* n64 = ExtendBefore(gen, block, node, dividend, wide_u, false);
+    IRNode* magic = GeneratorGetIntConstant(gen, wide_u, (int64_t)mag.magic);
+    IRNode* prod =
+        EmitBinBefore(gen, block, node, IR_OP(muli), n64, magic, wide_u);
+    if (!mag.add) {
+      IRNode* shamt =
+          GeneratorGetIntConstant(gen, wide_u, 32 + mag.shift);
+      result = EmitBinBefore(gen, block, node, IR_OP(lsri), prod, shamt, wide_u);
+    } else {
+      IRNode* sh32 = GeneratorGetIntConstant(gen, wide_u, 32);
+      IRNode* hi =
+          EmitBinBefore(gen, block, node, IR_OP(lsri), prod, sh32, wide_u);
+      IRNode* sum =
+          EmitBinBefore(gen, block, node, IR_OP(addi), hi, n64, wide_u);
+      IRNode* shamt = GeneratorGetIntConstant(gen, wide_u, mag.shift);
+      result = mag.shift == 0 ? sum
+                              : EmitBinBefore(gen, block, node, IR_OP(lsri),
+                                              sum, shamt, wide_u);
+    }
+  } else {
+    int64_t d = IRIntConstValue(divisor);
+    if (d <= 1 || d > INT32_MAX) {
+      return false;
+    }
+    SignedDivMagic mag = SignedMagic32((int32_t)d);
+    IRNode* n64 = ExtendBefore(gen, block, node, dividend, wide_s, true);
+    IRNode* magic = GeneratorGetIntConstant(gen, wide_s, mag.magic);
+    IRNode* prod =
+        EmitBinBefore(gen, block, node, IR_OP(muli), n64, magic, wide_s);
+    IRNode* sh32 = GeneratorGetIntConstant(gen, wide_s, 32);
+    IRNode* hi =
+        EmitBinBefore(gen, block, node, IR_OP(asri), prod, sh32, wide_s);
+    if (mag.magic < 0) {
+      hi = EmitBinBefore(gen, block, node, IR_OP(addi), hi, n64, wide_s);
+    }
+    if (mag.shift > 0) {
+      IRNode* shamt = GeneratorGetIntConstant(gen, wide_s, mag.shift);
+      hi = EmitBinBefore(gen, block, node, IR_OP(asri), hi, shamt, wide_s);
+    }
+    IRNode* signbit =
+        EmitBinBefore(gen, block, node, IR_OP(lsri), n64,
+                      GeneratorGetIntConstant(gen, wide_s, 63), wide_s);
+    result = EmitBinBefore(gen, block, node, IR_OP(addi), hi, signbit, wide_s);
+  }
+
+  result = NarrowBefore(gen, block, node, result, node->type,
+                        !TypeIsUnsigned(node->type));
+  BasicBlockReplaceInstruction(gen, block, node, result);
+  return true;
+}
+
 // Perform strength reduction on the given node (in the given basic block). This
 // looks at the operation and its operands.  If it can be simplified into
 // something that is cheaper to execute, it is replaced by the better
@@ -251,6 +449,8 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
           IRNode* log2 = GeneratorGetIntConstant(
               gen, c->type, LogBase2(node->inputs.value.p[1]));
           IRReplaceInput(node, 1, log2);
+        } else {
+          FoldConstantDivision(gen, block, node);
         }
       }
       break;

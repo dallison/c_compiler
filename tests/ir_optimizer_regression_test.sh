@@ -374,6 +374,42 @@ else
   exit 1
 fi
 
+# Constant division becomes a widening multiply and shifts.  The original
+# divi must not remain; /10 uses the 0xcccccccd magic.
+udiv10_body=$(
+  awk '/IR for function udiv_const10/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq '[[:space:]]divi\(' <<<"$udiv10_body" ||
+   ! grep -Eq '[[:space:]]muli\(' <<<"$udiv10_body"; then
+  echo "unsigned /10 was not rewritten to a multiply" >&2
+  exit 1
+fi
+sdiv10_body=$(
+  awk '/IR for function sdiv_const10/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq '[[:space:]]divi\(' <<<"$sdiv10_body" ||
+   ! grep -Eq '[[:space:]]muli\(' <<<"$sdiv10_body"; then
+  echo "signed /10 was not rewritten to a multiply" >&2
+  exit 1
+fi
+udiv7_body=$(
+  awk '/IR for function udiv_const7/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq '[[:space:]]divi\(' <<<"$udiv7_body" ||
+   ! grep -Eq '[[:space:]]muli\(' <<<"$udiv7_body"; then
+  echo "unsigned /7 was not rewritten to a multiply" >&2
+  exit 1
+fi
+
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.
 induction_body=$(

@@ -104,6 +104,18 @@ __attribute__((noinline)) int combine_and_zero(int value) {
   return (value & 0) + (value | 0);
 }
 
+__attribute__((noinline)) unsigned udiv_const10(unsigned value) {
+  return value / 10u;
+}
+
+__attribute__((noinline)) unsigned udiv_const7(unsigned value) {
+  return value / 7u;
+}
+
+__attribute__((noinline)) int sdiv_const10(int value) {
+  return value / 10;
+}
+
 __attribute__((noinline)) int induction_reload(int count) {
   int result = 0;
   for (int i = 0; i < count; ++i) {
@@ -243,7 +255,10 @@ int main(void) {
   memopt_global = 9;
   if (store_forward_global() != 11 || load_cse_global() != 22 ||
       dead_store_global(13) != 13 || memopt_global != 13 ||
-      combine_nested_add(5) != 12 || combine_and_zero(7) != 7) {
+      combine_nested_add(5) != 12 || combine_and_zero(7) != 7 ||
+      udiv_const10(100u) != 10u || udiv_const10(9u) != 0u ||
+      udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||
+      sdiv_const10(-17) != -1 || sdiv_const10(99) != 9) {
     result |= 8;
   } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;
