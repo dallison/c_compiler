@@ -245,6 +245,17 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       return false;
 
+    case AST_OP(builtin_is_constant_evaluated):
+      // Keep the builtin in function bodies so runtime and constant evaluation
+      // can disagree.  Fold only in an actual constant-evaluation context.
+      if (compiler->constant_evaluation_required_depth > 0 ||
+          compiler->immediate_function_context_depth > 0 ||
+          (ctx != NULL && ctx->call_depth > 0)) {
+        *result = 1;
+        return true;
+      }
+      return false;
+
     case AST_OP(noexcept_expr):
       *result =
           !ExpressionPotentiallyThrows(((UnaryASTNode*)node)->sub);

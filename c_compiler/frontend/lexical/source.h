@@ -25,6 +25,7 @@
 typedef struct {
   String name;   // Name of file
   Vector lines;  // All line numbers with code on them.
+  bool is_system_header;  // True if any location was created from -isystem.
 } File;
 
 uint32_t NewFile(const char* filename);
@@ -113,6 +114,7 @@ Source* NewSourceFromFile(const char* filename, FILE* in);
 Source* NewSourceFromString(const char* filenname, String* str);
 void SourceMarkSystemHeader(Source* source);
 bool SourceIsSystemHeader(const Source* source);
+bool SourceLocationIsSystemHeader(SourceLocation location);
 void SourceRewind(Source* src);
 
 int SourceGetChar(Source* src);

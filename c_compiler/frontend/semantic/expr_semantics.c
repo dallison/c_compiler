@@ -568,6 +568,10 @@ static void FindConstevalContextUse(ASTNode* node, void* data, int child_id,
     query->found = true;
     return;
   }
+  if (node->op == AST_OP(builtin_is_constant_evaluated)) {
+    query->found = true;
+    return;
+  }
   if (node->op != AST_OP(call)) {
     return;
   }
@@ -640,11 +644,12 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
     return NULL;
   }
   // Speculative runtime folding is not a manifestly constant-evaluated
-  // context. Keep calls that can reach `if consteval` intact so target codegen
-  // selects their runtime arms. Constant-required consumers (static_assert,
-  // constexpr initialization, template arguments) evaluate the retained tree
+  // context. Keep calls that can reach `if consteval` or
+  // std::is_constant_evaluated() intact so target codegen selects their
+  // runtime arms. Constant-required consumers (static_assert, constexpr
+  // initialization, template arguments) evaluate the retained tree
   // explicitly and therefore still select the constant-evaluation arms.
-  if (CompilerCXXAtLeast(kLanguageStandardCXX23) &&
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
       compiler->constant_evaluation_required_depth == 0 &&
       ExpressionMayObserveConstantEvaluation(node)) {
     return NULL;
@@ -11862,6 +11867,12 @@ static void AnalyzeBuiltinTerminator(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
+static void AnalyzeBuiltinIsConstantEvaluated(VectorASTNode* node) {
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  node->base.value_category = kValueCategoryPrvalue;
+}
+
 static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
   SourceLocation location = node->base.location;
   if (node->children == NULL || node->children->length == 0) {
@@ -12287,6 +12298,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
       AnalyzeBuiltinTerminator(vector_node);
+      break;
+
+    case AST_OP(builtin_is_constant_evaluated):
+      AnalyzeBuiltinIsConstantEvaluated(vector_node);
       break;
 
     case AST_OP(builtin_type_trait):

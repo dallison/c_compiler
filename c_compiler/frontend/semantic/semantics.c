@@ -197,6 +197,7 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
     case AST_OP(builtin_observable_checkpoint):
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
+    case AST_OP(builtin_is_constant_evaluated):
       return true;
     case AST_OP(label): {
       LabelASTNode* label = (LabelASTNode*)node;
@@ -592,6 +593,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
+  SemanticDiagnoseConstexprFunctionBody(node);
   SemanticAnalyzeFunctionContracts(node->type, node);
   CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);

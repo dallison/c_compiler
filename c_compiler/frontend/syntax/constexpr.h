@@ -122,6 +122,8 @@ Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
 bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
                                        TypeRecord* object_type,
                                        ConstexprObject** object);
+bool ConstexprEvaluateValue(ConstEvalContext* ctx, ASTNode* node,
+                            TypeRecord* type, ConstexprValue* result);
 ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
                                              SourceLocation location);
 

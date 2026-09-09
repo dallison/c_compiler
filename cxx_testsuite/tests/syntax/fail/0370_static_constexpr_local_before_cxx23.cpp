@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: static_assert expression is not an integer constant expression
+// EXPECT: static or thread_local variable in a constexpr function requires C++23
 
 constexpr char hex_digit(int value) {
   static constexpr char digits[] = "0123456789abcdef";

@@ -20,6 +20,7 @@ uint32_t NewFile(const char* filename) {
   File* file = malloc(sizeof(File));
   StringInit(&file->name, filename);
   VectorInit(&file->lines);
+  file->is_system_header = false;
   size_t curr_length = all_files.length;
   VectorAppend(&all_files, file);
   return (uint32_t)curr_length;
@@ -92,6 +93,9 @@ SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
     return SOURCE_LOCATION_MISSING;
   }
   File* file = (File*)all_files.value.p[file_index];
+  if (source->is_system_header) {
+    file->is_system_header = true;
+  }
   size_t line_index = file->lines.length;     // One greater than index.
   int64_t length = end - start;
   if (line_index > MAX_LINE_INDEX || length > MAX_TOKEN_LENGTH) {
@@ -197,6 +201,19 @@ void SourceMarkSystemHeader(Source* source) {
 
 bool SourceIsSystemHeader(const Source* source) {
   return source != NULL && source->is_system_header;
+}
+
+bool SourceLocationIsSystemHeader(SourceLocation location) {
+  if (location == SOURCE_LOCATION_COMMAND_LINE ||
+      location == SOURCE_LOCATION_MISSING) {
+    return false;
+  }
+  uint32_t file_index = (location >> LOC_FILE_SHIFT) & LOC_FILE_MASK;
+  if (file_index >= all_files.length) {
+    return false;
+  }
+  File* file = (File*)all_files.value.p[file_index];
+  return file != NULL && file->is_system_header;
 }
 
 void SourceDestruct(Source* src) {

@@ -6359,6 +6359,10 @@ static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
   SyntaxError(syntax, "function specifier must be '= default' or '= delete'");
 }
 
+static void CheckMatchingConstexprConsteval(Syntax* syntax,
+                                            TypeRecord* previous,
+                                            TypeRecord* current);
+
 static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                         Vector* declarations,
                              Symbol* sym, Symbol* old_sym) {
@@ -6492,13 +6496,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
       old_sym->value.func_defn = sym;
-      if (old_sym->type->info.function.is_constexpr) {
-        sym->type->info.function.is_constexpr = true;
-      }
-      if (old_sym->type->info.function.is_consteval) {
-        sym->type->info.function.is_consteval = true;
-        sym->type->info.function.is_constexpr = true;
-      }
+      CheckMatchingConstexprConsteval(syntax, old_sym->type, sym->type);
       if (old_sym->flags.is_weak) {
         sym->flags.is_weak = true;
       }
@@ -7205,6 +7203,34 @@ static bool ParseCXXExplicitDeclarationSpecifier(Syntax* syntax,
   return ok && value != 0;
 }
 
+static void DiagnoseConstevalOnNonFunction(Syntax* syntax, TypeRecord* type,
+                                           bool is_consteval) {
+  if (is_consteval && (type == NULL || !TypeIsFunction(type))) {
+    SyntaxError(syntax, "'consteval' can only be applied to functions");
+  }
+}
+
+static void CheckMatchingConstexprConsteval(Syntax* syntax,
+                                            TypeRecord* previous,
+                                            TypeRecord* current) {
+  if (!CompilerIsCXX() || previous == NULL || current == NULL ||
+      !TypeIsFunction(previous) || !TypeIsFunction(current)) {
+    return;
+  }
+  bool previous_immediate = previous->info.function.is_consteval;
+  bool current_immediate = current->info.function.is_consteval;
+  bool previous_constexpr =
+      previous->info.function.is_constexpr && !previous_immediate;
+  bool current_constexpr =
+      current->info.function.is_constexpr && !current_immediate;
+  if (previous_immediate != current_immediate ||
+      previous_constexpr != current_constexpr) {
+    SyntaxError(syntax,
+                "'constexpr' and 'consteval' specifiers must match previous "
+                "declaration");
+  }
+}
+
 static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                                       bool* is_inline, bool* is_constexpr,
                                       bool* is_consteval, bool* is_constinit,
@@ -7274,6 +7300,10 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       }
       *is_explicit = *is_explicit || explicit_value;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
+      if (*is_consteval) {
+        SyntaxError(syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
+      }
       if (*is_constexpr) {
         SyntaxError(syntax, "Duplicate 'constexpr' specifier");
       }
@@ -7285,6 +7315,9 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       if (*is_consteval) {
         SyntaxWarning(syntax, "duplicate-decl-specifier",
                       "Duplicate 'consteval' specifier");
+      } else if (*is_constexpr) {
+        SyntaxError(syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
       }
       if (*is_constinit) {
         SyntaxError(syntax, "'consteval' and 'constinit' cannot be combined");
@@ -8087,6 +8120,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
           MergeCXXContractAssertions(syntax, old_sym, sym);
+          CheckMatchingConstexprConsteval(syntax, old_sym->type, sym->type);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);
@@ -8097,17 +8131,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                         sym->name.value);
           }
           sym->flags.is_defined = true;
-        }
-        // A mismatched redeclaration is diagnosed above and still reaches here,
-        // so the previous symbol is not necessarily a function.
-        if (TypeIsFunction(old_sym->type) && TypeIsFunction(sym->type)) {
-          if (sym->type->info.function.is_constexpr) {
-            old_sym->type->info.function.is_constexpr = true;
-          }
-          if (sym->type->info.function.is_consteval) {
-            old_sym->type->info.function.is_consteval = true;
-            old_sym->type->info.function.is_constexpr = true;
-          }
         }
       } else {
         if (!overload_was_appended) {
@@ -8308,6 +8331,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     } else {
       sym->flags.is_constexpr = parser->is_constexpr;
       sym->flags.is_constinit = parser->is_constinit;
+      DiagnoseConstevalOnNonFunction(syntax, sym->type, parser->is_consteval);
       if (CompilerIsCXX() && parser->is_inline) {
         sym->flags.is_defined = true;
         if (!StorageIs(sym->storage, STO(static))) {
@@ -8690,6 +8714,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
     MergeCXXDefaultArguments(syntax, old_sym, sym);
     MergeCXXContractAssertions(syntax, old_sym, sym);
+    CheckMatchingConstexprConsteval(syntax, old_sym->type, sym->type);
     old_sym->flags.is_defined = true;
   }
 
@@ -12675,6 +12700,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       } else {
         sym->flags.is_constexpr = parser->is_constexpr;
         sym->flags.is_constinit = parser->is_constinit;
+        DiagnoseConstevalOnNonFunction(syntax, sym->type, parser->is_consteval);
         if (parser->is_constinit &&
             !StorageIs(storage, STO(static) | STO(extern) | STO(thread))) {
           SyntaxError(
@@ -12755,6 +12781,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
           MergeCXXContractAssertions(syntax, old_sym, sym);
+          CheckMatchingConstexprConsteval(syntax, old_sym->type, sym->type);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);
