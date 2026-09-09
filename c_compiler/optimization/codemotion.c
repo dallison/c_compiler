@@ -123,8 +123,10 @@ static void HoistToPreheader(Generator* gen, const LoopInfo* loop,
 }
 
 static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
-  if (loop->parent != NULL || loop->children.length != 0 ||
-      loop->preheader == NULL || BasicBlockIsEmpty(loop->preheader) ||
+  // Nested loops are eligible: inner preheaders sit inside the parent, so an
+  // invariant moved inward can be considered again for the enclosing loop.
+  // A per-loop `moved` set (not a function-wide one) is what makes that work.
+  if (loop->preheader == NULL || BasicBlockIsEmpty(loop->preheader) ||
       LoopContainsObservableCheckpoint(gen, loop)) {
     return false;
   }
@@ -157,8 +159,6 @@ static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
 }
 
 void CodeMotionOptimization(Generator* gen) {
-  Set moved;
-  SetInitForPointers(&moved);
   int max_depth = 0;
   for (size_t i = 0; i < gen->loops.length; i++) {
     LoopInfo* loop = gen->loops.value.p[i];
@@ -167,14 +167,17 @@ void CodeMotionOptimization(Generator* gen) {
     }
   }
   // Inner loops first.  An invariant moved to an inner preheader can then be
-  // considered for movement out of its parent loop.
+  // considered for movement out of its parent loop.  Each loop has its own
+  // moved set so a hoist into an inner preheader is not frozen there.
   for (int depth = max_depth; depth > 0; depth--) {
     for (size_t i = 0; i < gen->loops.length; i++) {
       LoopInfo* loop = gen->loops.value.p[i];
       if (loop->depth == depth) {
+        Set moved;
+        SetInitForPointers(&moved);
         HoistLoopInvariants(gen, loop, &moved);
+        SetDestruct(&moved);
       }
     }
   }
-  SetDestruct(&moved);
 }

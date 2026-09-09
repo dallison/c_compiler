@@ -206,6 +206,7 @@ davecc_library(davecc_compiler
   c_compiler/optimization/codemotion.c
   c_compiler/optimization/constprop.c
   c_compiler/optimization/gvn.c
+  c_compiler/optimization/memopt.c
   c_compiler/optimization/optimizer.c
   c_compiler/optimization/ssa.c
   c_compiler/p_code/p_code_assembler.c

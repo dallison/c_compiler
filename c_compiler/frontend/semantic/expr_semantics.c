@@ -5024,14 +5024,17 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // __attribute__((always_inline)) forces inlining even without the 'inline'
   // keyword (and bypasses the size heuristic below).
   bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
-  if ((!func->is_inline && !force_inline) || !func->symbol->flags.is_defined ||
+  bool unmarked_at_o3 = OptLevel3() && !func->is_inline && !force_inline;
+  if ((!func->is_inline && !force_inline && !unmarked_at_o3) ||
+      !func->symbol->flags.is_defined ||
       func->body == NULL || compiler->current_function == NULL ||
       compiler->current_function->info.function.is_constexpr ||
       func->symbol == compiler->current_function->info.function.symbol ||
       func->unknown_args || func->varargs) {
     return false;
   }
-  const int kMaxInlineNodeCount = 100;    // Arbitrary.
+  const int kMaxInlineNodeCount = OptLevel3() ? 250 : 100;
+  const int kMaxUnmarkedInlineNodeCount = 40;
   GotoFinder finder = {0, false};
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
@@ -5051,7 +5054,9 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   if (force_inline) {
     return true;
   }
-  return finder.node_count < kMaxInlineNodeCount;
+  int max_nodes =
+      unmarked_at_o3 ? kMaxUnmarkedInlineNodeCount : kMaxInlineNodeCount;
+  return finder.node_count < max_nodes;
 }
 
 // The class of argument a printf/scanf conversion expects.  Used by the

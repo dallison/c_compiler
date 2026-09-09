@@ -8,6 +8,7 @@
 
 #include "optimizer.h"
 #include "basic_block.h"
+#include "type_compare.h"
 #include <stdint.h>
 
 // Is the node an integer constant with the value given?
@@ -78,6 +79,80 @@ static int64_t BitMask(IRNode* node) {
   return value - 1;
 }
 
+static int64_t WrapToType(TypeRecord* type, int64_t value) {
+  int bits = type->size * 8;
+  if (bits <= 0 || bits >= 64) {
+    return value;
+  }
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  uint64_t bits_val = (uint64_t)value & mask;
+  if (!TypeIsUnsigned(type) &&
+      (bits_val & (UINT64_C(1) << (bits - 1))) != 0) {
+    return (int64_t)(bits_val | ~mask);
+  }
+  return (int64_t)bits_val;
+}
+
+static bool IsIntAllOnes(IRNode* node) {
+  if (node == NULL || !IRIsIntConst(node) || node->type == NULL ||
+      !TypeIsIntegral(node->type)) {
+    return false;
+  }
+  int bits = node->type->size * 8;
+  if (bits <= 0 || bits > 64) {
+    return false;
+  }
+  uint64_t value = (uint64_t)IRIntConstValue(node);
+  if (bits < 64) {
+    uint64_t mask = (UINT64_C(1) << bits) - 1;
+    return (value & mask) == mask;
+  }
+  return value == UINT64_MAX;
+}
+
+static int ConstOperandIndex(IRNode* inst) {
+  if (inst == NULL || inst->inputs.length != 2) {
+    return -1;
+  }
+  bool left = IRIsIntConst(inst->inputs.value.p[0]);
+  bool right = IRIsIntConst(inst->inputs.value.p[1]);
+  if (left && !right) {
+    return 0;
+  }
+  if (right && !left) {
+    return 1;
+  }
+  return -1;
+}
+
+static bool FoldNestedAdd(Generator* gen, BasicBlock* block, IRNode* node) {
+  int outer = ConstOperandIndex(node);
+  if (outer < 0) {
+    return false;
+  }
+  IRNode* inner = node->inputs.value.p[1 - outer];
+  if (inner == NULL || inner->opcode != IR_OP(addi) || inner->dest != NULL ||
+      inner->type == NULL || !TypeEqual(inner->type, node->type)) {
+    return false;
+  }
+  int inner_const = ConstOperandIndex(inner);
+  if (inner_const < 0) {
+    return false;
+  }
+  int64_t sum = WrapToType(
+      node->type, IRIntConstValue(node->inputs.value.p[outer]) +
+                      IRIntConstValue(inner->inputs.value.p[inner_const]));
+  IRNode* base = inner->inputs.value.p[1 - inner_const];
+  if (sum == 0) {
+    BasicBlockReplaceInstruction(gen, block, node, base);
+    return true;
+  }
+  IRNode* combined = GeneratorGetIntConstant(gen, node->type, sum);
+  IRReplaceInput(node, 0, base);
+  IRReplaceInput(node, 1, combined);
+  return true;
+}
+
 // Perform strength reduction on the given node (in the given basic block). This
 // looks at the operation and its operands.  If it can be simplified into
 // something that is cheaper to execute, it is replaced by the better
@@ -107,6 +182,8 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
         BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
       } else if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
         BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      } else {
+        FoldNestedAdd(gen, block, node);
       }
       break;
     case IR_OP(subi):
@@ -194,6 +271,58 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
           IRNode* mask = GeneratorGetIntConstant(gen, c->type, BitMask(c));
           IRReplaceInput(node, 1, mask);
         }
+      }
+      break;
+
+    case IR_OP(andi):
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0) ||
+          IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        IRNode* zero = IsIntConstantWithValue(node->inputs.value.p[0], 0)
+                           ? node->inputs.value.p[0]
+                           : node->inputs.value.p[1];
+        BasicBlockReplaceInstruction(gen, block, node, zero);
+      } else if (IsIntAllOnes(node->inputs.value.p[0])) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntAllOnes(node->inputs.value.p[1])) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      }
+      break;
+
+    case IR_OP(ori):
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      } else if (IsIntAllOnes(node->inputs.value.p[0]) ||
+                 IsIntAllOnes(node->inputs.value.p[1])) {
+        IRNode* ones = IsIntAllOnes(node->inputs.value.p[0])
+                           ? node->inputs.value.p[0]
+                           : node->inputs.value.p[1];
+        BasicBlockReplaceInstruction(gen, block, node, ones);
+      }
+      break;
+
+    case IR_OP(xori):
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      }
+      break;
+
+    case IR_OP(cmpeqi):
+      if (node->inputs.length == 2 &&
+          node->inputs.value.p[0] == node->inputs.value.p[1]) {
+        BasicBlockReplaceInstruction(
+            gen, block, node, GeneratorGetIntConstant(gen, node->type, 1));
+      }
+      break;
+
+    case IR_OP(cmpnei):
+      if (node->inputs.length == 2 &&
+          node->inputs.value.p[0] == node->inputs.value.p[1]) {
+        BasicBlockReplaceInstruction(
+            gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
       }
       break;
 

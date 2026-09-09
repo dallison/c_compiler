@@ -69,6 +69,8 @@ __attribute__((noinline)) int licm_invariant(int value, int count) {
   return result;
 }
 
+static int memopt_global;
+
 __attribute__((noinline)) int nested_licm(int value) {
   int result = 0;
   for (int i = 0; i < 2; ++i) {
@@ -77,6 +79,29 @@ __attribute__((noinline)) int nested_licm(int value) {
     }
   }
   return result;
+}
+
+__attribute__((noinline)) int store_forward_global(void) {
+  memopt_global = 11;
+  return memopt_global;
+}
+
+__attribute__((noinline)) int load_cse_global(void) {
+  return memopt_global + memopt_global;
+}
+
+__attribute__((noinline)) int dead_store_global(int value) {
+  memopt_global = 1;
+  memopt_global = value;
+  return memopt_global;
+}
+
+__attribute__((noinline)) int combine_nested_add(int value) {
+  return (value + 3) + 4;
+}
+
+__attribute__((noinline)) int combine_and_zero(int value) {
+  return (value & 0) + (value | 0);
 }
 
 __attribute__((noinline)) int induction_reload(int count) {
@@ -198,7 +223,8 @@ int main(void) {
   if (volatile_value != 3 || dead_expression(5) != 5) {
     result |= 32;
   }
-  if (licm_invariant(3, 4) != 136 || licm_invariant(3, 0) != 0) {
+  if (licm_invariant(3, 4) != 136 || licm_invariant(3, 0) != 0 ||
+      nested_licm(3) != 132) {
     result |= 64;
   }
   if (induction_reload(5) != 10) {
@@ -214,7 +240,12 @@ int main(void) {
   if (induction_reverse_sum(4) != 7532 || induction_reverse_sum(0) != 0) {
     result |= 16;
   }
-  if (checkpoint_order(&checkpoint_input) != 62) {
+  memopt_global = 9;
+  if (store_forward_global() != 11 || load_cse_global() != 22 ||
+      dead_store_global(13) != 13 || memopt_global != 13 ||
+      combine_nested_add(5) != 12 || combine_and_zero(7) != 7) {
+    result |= 8;
+  } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;
   }
   return result;
