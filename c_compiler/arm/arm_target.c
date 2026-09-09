@@ -117,6 +117,7 @@ CompilerTarget* NewARMTarget() {
   target->emit_literal = EmitLiteral;
   target->emit_cxx_thunks = ARMPrintCXXAdjustorThunks;
   target->emit_debug = EmitDebug;
+  target->dwarf_frame_register = 11;
   target->emit_tdata_start = EmitTlsDataStart;
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;

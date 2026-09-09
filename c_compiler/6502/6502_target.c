@@ -64,7 +64,7 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
   fprintf(fp, "\t.set __mem_dest 0x%x\n", W65C02_MDST_REG + start_addr);
   fprintf(fp, "\t.set __mem_size 0x%x\n", W65C02_MSZ_REG + start_addr);
 
-  fprintf(fp, "\n\n");
+  fprintf(fp, "\n.PCbegin:\n");
   return fp;
 }
 
@@ -144,6 +144,7 @@ CompilerTarget* New6502Target() {
   target->emit_literal = EmitLiteral;
   target->emit_cxx_thunks = W65C02PrintCXXAdjustorThunks;
   target->emit_debug = EmitDebug;
+  target->dwarf_frame_register = -1;
   target->emit_tdata_start = EmitTlsDataStart;
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;

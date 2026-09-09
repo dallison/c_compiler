@@ -116,6 +116,7 @@ CompilerTarget* NewRVTarget() {
   target->emit_literal = EmitLiteral;
   target->emit_cxx_thunks = RVPrintCXXAdjustorThunks;
   target->emit_debug = EmitDebug;
+  target->dwarf_frame_register = 8;
   target->emit_tdata_start = EmitTlsDataStart;
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;

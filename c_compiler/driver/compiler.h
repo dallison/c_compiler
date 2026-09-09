@@ -317,6 +317,9 @@ typedef struct {
   // Emit debug information.
   void (*emit_debug)(FILE* asm_file);
 
+  // DWARF register number of the frame pointer, or -1 if the target has none.
+  int dwarf_frame_register;
+
   // Clean up all memory used by the target for the given code.
   void (*cleanup)(void* code);
   

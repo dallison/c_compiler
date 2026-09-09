@@ -24,6 +24,8 @@ typedef struct {
   DW_AT id;
   DW_FORM form;
   int size;
+  // If set, a DW_FORM(exprloc) is DW_OP_addr followed by this symbol.
+  const char* addr_symbol;
   
   union {
     uint8_t data1;      // Also ref1.
@@ -149,6 +151,8 @@ typedef struct {
   NamedDIE die;
   DIE* subtype;
   LexicalScopeDIE* top_scope;
+  const char* linkage_name;
+  bool is_external;
 } FunctionTypeDIE;
 
 typedef struct {
@@ -212,6 +216,7 @@ typedef struct {
 typedef struct {
   NamedDIE die;
   Vector enumerators;
+  int byte_size;
 } EnumDIE;
 
 void DIEDestruct(DIE* die);

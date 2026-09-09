@@ -6337,6 +6337,28 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   }
 }
 
+static void FinalizeDebugStackLocations(ARMGenerator* g, Vector* vars) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  for (size_t i = 0; i < vars->length; i++) {
+    PoolEntry* entry = vars->value.p[i];
+    if (entry->value.symbol == NULL || entry->value.symbol->die == NULL) {
+      continue;
+    }
+    VariableDIE* var = (VariableDIE*)entry->value.symbol->die;
+    if (var->location.type != kLocationOnStack) {
+      continue;
+    }
+    if (entry->pooled->opcode == IR_OP(localvar) ||
+        entry->pooled->opcode == IR_OP(tempvar)) {
+      VariableDIESetStackOffset(
+          entry->value.symbol->die,
+          LocalVariableOffset(g, var->location.v.stack_offset));
+    }
+  }
+}
+
 static void AssignRegisterVars(ARMGenerator* g, Generator* gen, Vector* vars,
                                Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
@@ -6363,6 +6385,7 @@ static void AssignRegisterVars(ARMGenerator* g, Generator* gen, Vector* vars,
   g->base.stack_frame_size = (int32_t)var_offset + g->saved_arg_size;
   // Align to 8 byte boundary (AAPCS).
   g->base.stack_frame_size = (g->base.stack_frame_size + 7) & ~7;
+  FinalizeDebugStackLocations(g, vars);
 }
 
 static void LowerVariables(ARMGenerator* g, Generator* gen) {

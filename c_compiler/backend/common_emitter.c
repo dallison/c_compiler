@@ -271,7 +271,7 @@ void EmitLiteral(Literal* literal, FILE* fp) {
 }
 
 void EmitDebug(FILE* fp) {
-  fprintf(fp, "\t.section \".debug_line\", \"\", @progbits\n");
+  fprintf(fp, "\t.section \".debug_line\", \"\", @progbits, 1\n");
 }
 
 void EmitP2Align(int alignment, FILE* fp) {
@@ -423,6 +423,9 @@ void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp) {
 bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file) {
   if (compiler->target->emit_cxx_thunks != NULL) {
     compiler->target->emit_cxx_thunks(asm_file);
+  }
+  if (compiler->debug_output) {
+    fprintf(asm_file, ".PCend:\n");
   }
   compiler->target->emit_data_start(asm_file);
 
@@ -731,6 +734,11 @@ void EmitInitFiniArrayEntriesToModule(Vector* functions, bool is_fini,
 
 bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
                                           AsmModule* module) {
+  if (compiler->debug_output) {
+    AsmModuleSection(module, ".text", SHT(progbits),
+                     SHF(alloc) | SHF(execinstr), compiler->alignment);
+    AsmModuleLabel(module, ".PCend");
+  }
   AsmModuleSection(module, ".data", SHT(progbits),
                    SHF(alloc) | SHF(write), compiler->alignment);
   bool contains_tls_vars = false;

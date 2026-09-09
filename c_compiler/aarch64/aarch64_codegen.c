@@ -5637,6 +5637,28 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
   }
 }
 
+static void FinalizeDebugStackLocations(AARCH64Generator* g, Vector* vars) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  for (size_t i = 0; i < vars->length; i++) {
+    PoolEntry* entry = vars->value.p[i];
+    if (entry->value.symbol == NULL || entry->value.symbol->die == NULL) {
+      continue;
+    }
+    VariableDIE* var = (VariableDIE*)entry->value.symbol->die;
+    if (var->location.type != kLocationOnStack) {
+      continue;
+    }
+    if (entry->pooled->opcode == IR_OP(localvar) ||
+        entry->pooled->opcode == IR_OP(tempvar)) {
+      VariableDIESetStackOffset(
+          entry->value.symbol->die,
+          LocalVariableOffset(g, var->location.v.stack_offset));
+    }
+  }
+}
+
 static void AssignRegisterVars(AARCH64Generator* g, Vector* vars, Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
@@ -5661,6 +5683,7 @@ static void AssignRegisterVars(AARCH64Generator* g, Vector* vars, Vector* args) 
       (int32_t)var_offset + (int)g->saved_regs.length * 8;
   // Align to 16 byte boundary.
   g->base.stack_frame_size = (g->base.stack_frame_size + 15) & ~15;
+  FinalizeDebugStackLocations(g, vars);
 }
 
 static void LowerVariables(AARCH64Generator* g, Generator* gen) {

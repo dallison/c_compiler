@@ -129,6 +129,7 @@ CompilerTarget* NewWasm32Target(void) {
   target->emit_literal = Wasm32EmitLiteral;
   target->emit_cxx_thunks = NULL;
   target->emit_debug = Wasm32EmitDebugInfo;
+  target->dwarf_frame_register = -1;
   target->handle_options = HandleOptions;
   return target;
 }
