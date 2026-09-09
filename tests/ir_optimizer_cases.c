@@ -96,6 +96,16 @@ __attribute__((noinline)) int dead_store_global(int value) {
   return memopt_global;
 }
 
+static int unroll_values[4] = {1, 2, 3, 4};
+
+__attribute__((noinline)) int unroll_sum4(int *a) {
+  int s = 0;
+  for (int i = 0; i < 4; i++) {
+    s += a[i];
+  }
+  return s;
+}
+
 __attribute__((noinline)) int combine_nested_add(int value) {
   return (value + 3) + 4;
 }
@@ -258,7 +268,8 @@ int main(void) {
       combine_nested_add(5) != 12 || combine_and_zero(7) != 7 ||
       udiv_const10(100u) != 10u || udiv_const10(9u) != 0u ||
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||
-      sdiv_const10(-17) != -1 || sdiv_const10(99) != 9) {
+      sdiv_const10(-17) != -1 || sdiv_const10(99) != 9 ||
+      unroll_sum4(unroll_values) != 10) {
     result |= 8;
   } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;

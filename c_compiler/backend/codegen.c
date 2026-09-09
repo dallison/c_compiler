@@ -33,6 +33,7 @@
 #include "induction.h"
 #include "loop_info.h"
 #include "memopt.h"
+#include "unroll.h"
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
@@ -2071,6 +2072,14 @@ void* GenerateFunction(Generator* gen) {
   if (!compiler->keep_ssa) {
     // Remove any SSA nodes we added, converting back from SSA form.
     GeneratorRemoveSSA(gen);
+  }
+
+  if (OptLevel3() && !compiler->keep_ssa) {
+    LoopUnrollOptimization(gen);
+    // Unrolled copies of a load/store accumulator sit in one block; forwarding
+    // them now turns the copies into a value chain the allocator can keep in
+    // a single register.
+    MemoryOptimization(gen);
   }
   
   // It's possible that the optimizations have made some blocks unreaachable

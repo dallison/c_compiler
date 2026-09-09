@@ -410,6 +410,65 @@ if grep -Eq '[[:space:]]divi\(' <<<"$udiv7_body" ||
   exit 1
 fi
 
+# Complete unroll is -O3 only.  A 4-trip counted loop must still be a loop at
+# -O2 and must become straight-line at -O3 (no back-edge compare/increment).
+unroll_o2_body=$(
+  awk '/IR for function unroll_sum4/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '^  Loop nesting: 1$' <<<"$unroll_o2_body" ||
+   ! grep -Eq '[[:space:]]inc32\(' <<<"$unroll_o2_body" ||
+   ! grep -Eq '[[:space:]]btrue\(' <<<"$unroll_o2_body"; then
+  echo "constant-trip loop was unrolled at -O2" >&2
+  exit 1
+fi
+UNROLL_DUMP_SOURCE="$WORK/unroll_dump.c"
+cp "$C_SOURCE" "$UNROLL_DUMP_SOURCE"
+"$DAVECC" -target x86_64 -O3 -Xsave-ir -S \
+  "$UNROLL_DUMP_SOURCE" -o "$WORK/unroll.s"
+UNROLL_IR_FILE="${UNROLL_DUMP_SOURCE%.c}.ir"
+if [[ ! -f "$UNROLL_IR_FILE" ]]; then
+  echo "unroll IR dump was not produced" >&2
+  exit 1
+fi
+unroll_o3_body=$(
+  awk '/IR for function unroll_sum4/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$UNROLL_IR_FILE"
+)
+if grep -Eq '[[:space:]]inc32\(' <<<"$unroll_o3_body" ||
+   grep -Eq '[[:space:]]btrue\(' <<<"$unroll_o3_body" ||
+   grep -Eq '[[:space:]]cmplti\(' <<<"$unroll_o3_body" ||
+   ! grep -Eq '[[:space:]]adda\(' <<<"$unroll_o3_body"; then
+  echo "constant-trip loop was not completely unrolled at -O3" >&2
+  exit 1
+fi
+adda_count=$(grep -c '[[:space:]]adda(' <<<"$unroll_o3_body" || true)
+if [[ "$adda_count" -lt 4 ]]; then
+  echo "unrolled body did not contain four address adds (found $adda_count)" >&2
+  exit 1
+fi
+
+UNROLL_O0_EXE="$WORK/unroll_o0.exe"
+UNROLL_O3_EXE="$WORK/unroll_o3.exe"
+"$DAVECC" -target x86_64 -O0 -static -isystem "$ROOT/libc/include" \
+  -Wl,-e -Wl,main "$C_SOURCE" "$LIBC_X86" -o "$UNROLL_O0_EXE"
+"$DAVECC" -target x86_64 -O3 -static -isystem "$ROOT/libc/include" \
+  -Wl,-e -Wl,main "$C_SOURCE" "$LIBC_X86" -o "$UNROLL_O3_EXE"
+set +e
+"$INTERP_X86" -i "$UNROLL_O0_EXE"
+unroll_o0_rc=$?
+"$INTERP_X86" -i "$UNROLL_O3_EXE"
+unroll_o3_rc=$?
+set -e
+if [[ "$unroll_o3_rc" -ne "$unroll_o0_rc" ]]; then
+  echo "x86_64 -O3 returned $unroll_o3_rc; -O0 returned $unroll_o0_rc" >&2
+  exit 1
+fi
+
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.
 induction_body=$(
