@@ -117,6 +117,7 @@ CompilerTarget* NewX86_64Target() {
   target->emit_literal = EmitLiteral;
   target->emit_cxx_thunks = X86_64PrintCXXAdjustorThunks;
   target->emit_debug = EmitDebug;
+  target->dwarf_frame_register = 6;
   target->emit_tdata_start = EmitTlsDataStart;
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;

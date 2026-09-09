@@ -799,15 +799,15 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
       (int32_t)AssemblerCurrentAddress(assembler), 0);
   
   VectorAppend(&relocations, reloc);
-  bool known_values = left->is_label && left->type == SYM_TYPE(none) &&
-      assembler->object.current_section == left->section && !assembler->object.absolute;
-  // The section base address cancels out of an expression only when its
-  // additive and subtractive same-section terms balance (e.g. a `label2 -
-  // label1` difference).  Such a value is position-independent and can be
-  // resolved here with no relocation.  A lone `label` (or otherwise unbalanced
-  // expression) is section-base-relative, so it MUST keep its relocation for
-  // the linker to patch in the final address; folding it to the assembly-time
-  // section offset would leave a bogus small value at run time.
+  // Same-section label differences (e.g. `.func_end_add-add` or
+  // `.PCend-.PCbegin`) are position-independent constants, even when the
+  // expression is written into another section such as `.debug_info`.
+  bool known_values =
+      left->is_label && left->defined && !assembler->object.absolute;
+  // A lone `label` (or otherwise unbalanced expression) is section-base
+  // relative, so it MUST keep its relocation for the linker to patch in the
+  // final address; folding it to the assembly-time section offset would leave
+  // a bogus small value at run time.
   int additive_terms = 1;
   int subtractive_terms = 0;
   int64_t constant_addend = 0;
@@ -839,8 +839,8 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     AssemblerRelocation* reloc = NewAssemblerRelocation(
                 right, assembler->object.reloc_types[reloc_type], assembler->object.current_section,
                             (int32_t)AssemblerCurrentAddress(assembler), 0);
-    known_values &= right->is_label && right->type == SYM_TYPE(none) &&
-        assembler->object.current_section == right->section;
+    known_values &= right->is_label && right->defined &&
+                    right->section == left->section;
     if (tok == TOK(plus)) {
       additive_terms++;
     } else {

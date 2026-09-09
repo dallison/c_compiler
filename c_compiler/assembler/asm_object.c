@@ -576,6 +576,13 @@ static void AddSections(AsmObject* object, ELFWriterFile* elf) {
 
     bool align = true;
     bool is_debug_line_section = StringEqual(section->name, ".debug_line");
+    bool is_debug_section =
+        section->name != NULL && section->name->length >= 7 &&
+        memcmp(section->name->value, ".debug_", 7) == 0;
+
+    if (is_debug_section) {
+      section->alignment = 1;
+    }
 
     if (is_debug_line_section) {
       section->alignment = 1;

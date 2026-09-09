@@ -4733,6 +4733,19 @@ sh_test(
 )
 
 sh_test(
+    name = "dwarf_debug_info_test",
+    srcs = ["tests/dwarf_debug_info_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
+        "tests/dwarf_debug_info_cases.c",
+        "tests/dwarf_debug_info_cases.cpp",
+    ],
+)
+
+sh_test(
     name = "ir_optimizer_regression_test",
     srcs = ["tests/ir_optimizer_regression_test.sh"],
     args = [

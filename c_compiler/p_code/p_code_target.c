@@ -115,6 +115,7 @@ CompilerTarget* NewPCodeTarget() {
   target->emit_literal = EmitLiteral;
   target->emit_cxx_thunks = NULL;
   target->emit_debug = EmitDebug;
+  target->dwarf_frame_register = -1;
   target->handle_options = HandleOptions;
   return target;
 }
