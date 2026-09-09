@@ -2,6 +2,9 @@
 
 #include <version>
 
+#if __cpp_lib_is_constant_evaluated != 201811L
+#error "__cpp_lib_is_constant_evaluated has the wrong value"
+#endif
 #if __cpp_lib_bit_cast != 201806L
 #error "__cpp_lib_bit_cast has the wrong value"
 #endif

@@ -658,6 +658,39 @@ void ConstexprPCodeClearImageCache(void) {
   }
 }
 
+const char* ConstexprPCodeCStringAt(uint64_t address) {
+  if (address == 0) {
+    return NULL;
+  }
+  if (pcode_static_data_initialized) {
+    for (size_t i = 0; i < pcode_static_data.length; i++) {
+      ConstexprPCodeStaticData* entry = pcode_static_data.value.p[i];
+      if (entry == NULL || entry->memory == NULL || entry->size == 0) {
+        continue;
+      }
+      uint64_t start = (uint64_t)(uintptr_t)entry->memory;
+      uint64_t end = start + entry->size;
+      if (address >= start && address < end) {
+        return (const char*)(uintptr_t)address;
+      }
+    }
+  }
+  if (pcode_image_cache_initialized) {
+    for (size_t i = 0; i < pcode_image_cache.length; i++) {
+      ConstexprPCodeImageCacheEntry* entry = pcode_image_cache.value.p[i];
+      if (entry == NULL || entry->rodata == NULL || entry->rodata_size == 0) {
+        continue;
+      }
+      uint64_t start = (uint64_t)(uintptr_t)entry->rodata;
+      uint64_t end = start + entry->rodata_size;
+      if (address >= start && address < end) {
+        return (const char*)(uintptr_t)address;
+      }
+    }
+  }
+  return NULL;
+}
+
 static bool VectorContainsPointer(Vector* vector, void* value) {
   for (size_t i = 0; i < vector->length; i++) {
     if (vector->value.p[i] == value) {
@@ -1113,8 +1146,19 @@ static bool StoreDirectConstexprPCodeInitializer(
       memcpy(dest, &address, pointer_size);
       return true;
     }
-    case kInitTypeMemory:
-      return false;
+    case kInitTypeMemory: {
+      size_t length = init->value.memory.length;
+      if (length > available) {
+        return false;
+      }
+      if (length != 0) {
+        if (init->value.memory.value == NULL) {
+          return false;
+        }
+        memcpy(dest, init->value.memory.value, length);
+      }
+      return true;
+    }
   }
   return false;
 }
@@ -1143,8 +1187,8 @@ static bool RegisterDirectConstexprPCodeGeneratedStatic(
   }
   VectorAppend(&pcode_static_data, entry);
   for (size_t i = 0; i < var->initializers.length; i++) {
-    if (!StoreDirectConstexprPCodeInitializer(
-            object, image, entry, var->initializers.value.p[i])) {
+    Initializer* init = var->initializers.value.p[i];
+    if (!StoreDirectConstexprPCodeInitializer(object, image, entry, init)) {
       pcode_static_data.length--;
       StringDestruct(&entry->name);
       free(entry->memory);
@@ -1408,6 +1452,10 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
     return 0;
   }
   TypeRecordCalculateSize(type);
+  if (TypeIsMemberPointer(type)) {
+    int size = MemberPointerSize(type);
+    return size < 4 ? 4 : (size_t)size;
+  }
   if (TypeUsesFloat32Representation(type) || TypeIsInt(type) ||
       TypeIsShort(type) ||
       TypeIsCharFamily(type)) {
@@ -1422,6 +1470,76 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
     return 8;
   }
   return type->size < 4 ? 4 : type->size;
+}
+
+static void StoreConstexprPCodeWord(unsigned char* dest, int64_t value,
+                                    int word) {
+  if (word == 4) {
+    int32_t narrowed = (int32_t)value;
+    memcpy(dest, &narrowed, sizeof(narrowed));
+  } else if (word == 2) {
+    int16_t narrowed = (int16_t)value;
+    memcpy(dest, &narrowed, sizeof(narrowed));
+  } else {
+    memcpy(dest, &value, sizeof(value));
+  }
+}
+
+static bool ResolveConstexprPCodeFunctionAddress(PCodeVM* vm, Symbol* function,
+                                                 uint64_t* address,
+                                                 const char** reason) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) || address == NULL) {
+    *reason = "could not resolve constexpr function-pointer argument";
+    return false;
+  }
+  ConstexprPCodeImage image;
+  ConstexprPCodeImageInit(&image);
+  DiagnosticSuppressBegin();
+  bool ok = CompileConstexprFunctionImage(function->type, &image, reason);
+  DiagnosticSuppressEnd();
+  if (!ok) {
+    ConstexprPCodeImageDestruct(&image);
+    return false;
+  }
+  if (!PCodeVMRegisterMemoryRegion(vm, image.text, image.text_size, false) ||
+      !PCodeVMRegisterMemoryRegion(vm, image.rodata, image.rodata_size,
+                                   false) ||
+      !PCodeVMRegisterMemoryRegion(vm, image.exception_table,
+                                   image.exception_table_size, false)) {
+    ConstexprPCodeImageDestruct(&image);
+    *reason = "could not register constexpr function-pointer image";
+    return false;
+  }
+  *address = image.entry;
+  ConstexprPCodeImageDestruct(&image);
+  return true;
+}
+
+static bool StoreConstexprMemberPointerArgument(PCodeVM* vm, TypeRecord* type,
+                                                ASTNode* arg,
+                                                unsigned char* dest,
+                                                const char** reason) {
+  MemberPointerValue value;
+  if (!MemberPointerTryEvaluateConstant(arg, type, &value)) {
+    *reason = "could not evaluate member-pointer constexpr argument";
+    return false;
+  }
+  int word = compiler != NULL ? compiler->pointer_size : 8;
+  int64_t ptr = value.ptr;
+  if (value.fn_symbol != NULL) {
+    uint64_t address = 0;
+    if (!ResolveConstexprPCodeFunctionAddress(vm, value.fn_symbol, &address,
+                                              reason)) {
+      return false;
+    }
+    ptr = (int64_t)address;
+  }
+  StoreConstexprPCodeWord(dest, ptr, word);
+  if (MemberPointerUsesPairLayout(type)) {
+    StoreConstexprPCodeWord(dest + word, value.adj, word);
+  }
+  return true;
 }
 
 static bool StoreConstexprScalarBytes(TypeRecord* type, ConstexprValue* value,
@@ -2099,19 +2217,8 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     return true;
   }
   *sp -= size;
-  if (TypeIsMemberDataPointer(type)) {
-    MemberPointerValue value;
-    if (!MemberPointerTryEvaluateConstant(arg, type, &value)) {
-      *reason = "could not evaluate member-pointer constexpr argument";
-      return false;
-    }
-    if (size == 4) {
-      int32_t narrowed = (int32_t)value.ptr;
-      memcpy(*sp, &narrowed, sizeof(narrowed));
-    } else {
-      memcpy(*sp, &value.ptr, sizeof(value.ptr));
-    }
-    return true;
+  if (TypeIsMemberPointer(type)) {
+    return StoreConstexprMemberPointerArgument(vm, type, arg, *sp, reason);
   }
   if (TypeIsStructOrUnion(type)) {
     ConstexprObject* object = ConstexprObjectArgument(arg);
@@ -2168,7 +2275,19 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     }
     return true;
   }
-  *reason = "aggregate constexpr arguments are not implemented";
+  ConstexprValue evaluated = {0};
+  if (ctx != NULL && arg != NULL &&
+      ConstexprEvaluateValue(ctx, arg, type, &evaluated)) {
+    if (evaluated.is_object) {
+      if (evaluated.object != NULL &&
+          StoreConstexprObjectBytes(type, evaluated.object, *sp)) {
+        return true;
+      }
+    } else if (StoreConstexprScalarBytes(type, &evaluated, *sp)) {
+      return true;
+    }
+  }
+  *reason = "could not marshal constexpr argument";
   return false;
 }
 
@@ -2189,9 +2308,14 @@ static bool PrepareConstexprPCodeCallStack(ConstEvalContext* ctx,
       call->left != NULL &&
       (call->left->op == AST_OP(dot) || call->left->op == AST_OP(arrow));
   size_t explicit_count = call->children != NULL ? call->children->length : 0;
-  size_t expected_count = explicit_count + (has_receiver ? 1 : 0);
-  if (call->children == NULL ||
-      expected_count != func->info.function.prototype.length) {
+  size_t actual_count = explicit_count + (has_receiver ? 1 : 0);
+  size_t named_count = func->info.function.prototype.length;
+  if (func->info.function.varargs) {
+    if (actual_count < named_count) {
+      *reason = "constexpr pcode argument count mismatch";
+      return false;
+    }
+  } else if (actual_count != named_count) {
     *reason = "constexpr pcode argument count mismatch";
     return false;
   }
@@ -2199,10 +2323,19 @@ static bool PrepareConstexprPCodeCallStack(ConstEvalContext* ctx,
   unsigned char* sp = (unsigned char*)vm->stack + vm->stack_size;
   for (size_t i = explicit_count; i > 0; i--) {
     size_t formal_index = i - 1 + (has_receiver ? 1 : 0);
-    Symbol* formal = func->info.function.prototype.value.p[formal_index];
     ASTNode* arg = call->children->value.p[i - 1];
-    if (formal == NULL ||
-        !StoreConstexprPCodeArgument(ctx, vm, &sp, formal->type, arg,
+    TypeRecord* arg_type = NULL;
+    if (formal_index < named_count) {
+      Symbol* formal = func->info.function.prototype.value.p[formal_index];
+      if (formal == NULL) {
+        *reason = "constexpr pcode argument count mismatch";
+        return false;
+      }
+      arg_type = formal->type;
+    } else if (arg != NULL) {
+      arg_type = arg->type;
+    }
+    if (!StoreConstexprPCodeArgument(ctx, vm, &sp, arg_type, arg,
                                      allocations, address_regions, reason)) {
       return false;
     }
@@ -2251,24 +2384,58 @@ static bool PrepareConstexprPCodeConstructorStack(ConstEvalContext* ctx,
   }
   VectorASTNode* call = (VectorASTNode*)call_node;
   size_t child_count = call->children != NULL ? call->children->length : 0;
+  size_t named_count = func->info.function.prototype.length;
   size_t argument_offset = 0;
-  if (child_count == func->info.function.prototype.length) {
+  if (child_count == named_count) {
     // Some analyzed constructor calls retain the implicit receiver as their
     // first child. The pcode entry stack supplies its own destination object.
     argument_offset = 1;
+  } else if (func->info.function.varargs && named_count > 0 &&
+             child_count > named_count) {
+    Symbol* this_param = func->info.function.prototype.value.p[0];
+    ASTNode* first = call->children->value.p[0];
+    TypeRecord* this_type = this_param != NULL ? this_param->type : NULL;
+    TypeRecord* first_type = first != NULL ? first->type : NULL;
+    if (TypeIsReference(first_type)) {
+      first_type = first_type->next;
+    }
+    if (TypeIsPointer(this_type) && this_type->next != NULL &&
+        first_type != NULL &&
+        ((TypeIsPointer(first_type) && first_type->next != NULL &&
+          TypeEqualIgnoringTopLevelQualifierMask(
+              this_type->next, first_type->next, kQualConst | kQualVolatile)) ||
+         TypeEqualIgnoringTopLevelQualifierMask(
+             this_type->next, first_type, kQualConst | kQualVolatile))) {
+      argument_offset = 1;
+    }
   }
   size_t explicit_count = child_count - argument_offset;
-  if (explicit_count + 1 != func->info.function.prototype.length) {
+  size_t expected_explicit = named_count > 0 ? named_count - 1 : 0;
+  if (func->info.function.varargs) {
+    if (explicit_count < expected_explicit) {
+      *reason = "constexpr pcode constructor argument count mismatch";
+      return false;
+    }
+  } else if (explicit_count != expected_explicit) {
     *reason = "constexpr pcode constructor argument count mismatch";
     return false;
   }
 
   unsigned char* sp = (unsigned char*)vm->stack + vm->stack_size;
   for (size_t i = explicit_count; i > 0; i--) {
-    Symbol* formal = func->info.function.prototype.value.p[i];
     ASTNode* arg = call->children->value.p[argument_offset + i - 1];
-    if (formal == NULL ||
-        !StoreConstexprPCodeArgument(ctx, vm, &sp, formal->type, arg,
+    TypeRecord* arg_type = NULL;
+    if (i < named_count) {
+      Symbol* formal = func->info.function.prototype.value.p[i];
+      if (formal == NULL) {
+        *reason = "constexpr pcode constructor argument count mismatch";
+        return false;
+      }
+      arg_type = formal->type;
+    } else if (arg != NULL) {
+      arg_type = arg->type;
+    }
+    if (!StoreConstexprPCodeArgument(ctx, vm, &sp, arg_type, arg,
                                      allocations, NULL, reason)) {
       return false;
     }
@@ -2904,7 +3071,7 @@ static void MeasureConstexprPCodeStaticCost(ASTNode* node, void* data,
       node->op == AST_OP(builtin_source_function) ||
       node->op == AST_OP(builtin_source_pretty_function) ||
       (node->op >= AST_OP(builtin_va_start) &&
-       node->op <= AST_OP(builtin_unreachable))) {
+       node->op <= AST_OP(builtin_is_constant_evaluated))) {
     measurement->ast_safe = false;
   }
   switch (node->op) {
@@ -5060,16 +5227,6 @@ static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
     return ConstexprPCodeFailure(
         ctx, kConstexprPCodeFailureUnsupported,
         "pcode call target is not a constructor");
-  }
-  if (callee->type->info.function.is_virtual) {
-    return ConstexprPCodeFailure(
-        ctx, kConstexprPCodeFailureUnsupported,
-        "virtual pcode constructor is unsupported");
-  }
-  if (callee->type->info.function.varargs) {
-    return ConstexprPCodeFailure(
-        ctx, kConstexprPCodeFailureUnsupported,
-        "variadic pcode constructor is unsupported");
   }
   ValidationState state = {.reason = "ok", .ok = true};
   ASTNodeVisit(callee->type->info.function.body, ValidateASTNode, 0, &state);

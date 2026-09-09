@@ -2926,6 +2926,11 @@ bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
   return true;
 }
 
+bool ConstexprEvaluateValue(ConstEvalContext* ctx, ASTNode* node,
+                            TypeRecord* type, ConstexprValue* result) {
+  return EvaluateConstexprValue(ctx, node, type, result);
+}
+
 static bool ConstexprIsVirtualPointerAssignment(BinaryASTNode* node) {
   if (node == NULL || node->base.op != AST_OP(assign) ||
       node->left == NULL ||
@@ -4359,6 +4364,85 @@ ASTNode* ConstexprTemplateArgumentObjectInitializerForExpression(
 static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
                                                        ConstexprObject* right);
 
+static bool ConstexprCharArrayEqualsCString(ConstexprObject* object,
+                                            const char* text) {
+  if (object == NULL || text == NULL || !TypeIsFixedArray(object->type) ||
+      object->type->next == NULL || !TypeIsCharFamily(object->type->next)) {
+    return false;
+  }
+  size_t i = 0;
+  for (; i < object->slots.length; i++) {
+    ConstexprValue* slot = object->slots.value.p[i];
+    unsigned char expected = slot != NULL ? (unsigned char)slot->ivalue : 0;
+    if (expected != (unsigned char)text[i]) {
+      return false;
+    }
+    if (expected == 0) {
+      return true;
+    }
+  }
+  return text[i] == '\0';
+}
+
+static bool ConstexprCharArraysEqual(ConstexprObject* left,
+                                     ConstexprObject* right) {
+  if (left == NULL || right == NULL || !TypeIsFixedArray(left->type) ||
+      !TypeIsFixedArray(right->type) || left->type->next == NULL ||
+      right->type->next == NULL || !TypeIsCharFamily(left->type->next) ||
+      !TypeIsCharFamily(right->type->next)) {
+    return false;
+  }
+  size_t length =
+      left->slots.length < right->slots.length ? left->slots.length
+                                               : right->slots.length;
+  for (size_t i = 0; i < length; i++) {
+    ConstexprValue* left_slot = left->slots.value.p[i];
+    ConstexprValue* right_slot = right->slots.value.p[i];
+    int64_t left_value = left_slot != NULL ? left_slot->ivalue : 0;
+    int64_t right_value = right_slot != NULL ? right_slot->ivalue : 0;
+    if (left_value != right_value) {
+      return false;
+    }
+    if (left_value == 0) {
+      return true;
+    }
+  }
+  return true;
+}
+
+static ConstexprObject* ConstexprValueStringObject(ConstexprValue* value) {
+  return value != NULL && value->is_address ? value->address_object : NULL;
+}
+
+static const char* ConstexprValueRawCString(ConstexprValue* value) {
+  if (value == NULL || value->is_object || value->is_address ||
+      value->is_floating || value->ivalue == 0) {
+    return NULL;
+  }
+  return ConstexprPCodeCStringAt((uint64_t)value->ivalue);
+}
+
+static bool ConstexprStringPointerValuesEquivalent(ConstexprValue* left,
+                                                   ConstexprValue* right) {
+  ConstexprObject* left_object = ConstexprValueStringObject(left);
+  ConstexprObject* right_object = ConstexprValueStringObject(right);
+  const char* left_text = ConstexprValueRawCString(left);
+  const char* right_text = ConstexprValueRawCString(right);
+  if (left_object != NULL && right_object != NULL) {
+    return ConstexprCharArraysEqual(left_object, right_object);
+  }
+  if (left_object != NULL && right_text != NULL) {
+    return ConstexprCharArrayEqualsCString(left_object, right_text);
+  }
+  if (right_object != NULL && left_text != NULL) {
+    return ConstexprCharArrayEqualsCString(right_object, left_text);
+  }
+  if (left_text != NULL && right_text != NULL) {
+    return strcmp(left_text, right_text) == 0;
+  }
+  return false;
+}
+
 static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
                                                       ConstexprValue* right) {
   if (left == NULL || right == NULL) {
@@ -4371,6 +4455,9 @@ static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
     return left->is_object == right->is_object &&
            ConstexprObjectsTemplateArgumentEquivalent(left->object,
                                                       right->object);
+  }
+  if (ConstexprStringPointerValuesEquivalent(left, right)) {
+    return true;
   }
   if (left->is_address || right->is_address) {
     if (left->is_address != right->is_address ||
@@ -4395,14 +4482,53 @@ static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
   return left->ivalue == right->ivalue;
 }
 
+static bool ConstexprObjectHasData(ConstexprObject* object) {
+  if (object == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < object->slots.length; i++) {
+    ConstexprValue* slot = object->slots.value.p[i];
+    if (slot == NULL || slot->lifetime_ended) {
+      continue;
+    }
+    if (slot->is_object) {
+      if (ConstexprObjectHasData(slot->object)) {
+        return true;
+      }
+      continue;
+    }
+    if (slot->is_address) {
+      return true;
+    }
+    if (slot->is_floating) {
+      if (slot->fvalue != 0.0) {
+        return true;
+      }
+      continue;
+    }
+    if (slot->ivalue != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
                                                        ConstexprObject* right) {
   if (left == NULL || right == NULL) {
     return left == right;
   }
   if (!TypeEqual(left->type, right->type) ||
-      left->active_union_member != right->active_union_member ||
-      left->slots.length != right->slots.length) {
+      left->active_union_member != right->active_union_member) {
+    return false;
+  }
+  // Empty classes (and empty-base adaptors such as ranges::views::all) can
+  // have a different slot layout in the AST and pcode evaluators.  With no
+  // stored data the objects are equivalent regardless of that modeling.
+  if (!ConstexprObjectHasData(left) && !ConstexprObjectHasData(right)) {
+    return true;
+  }
+  if (left->slots.length != right->slots.length) {
     return false;
   }
   for (size_t i = 0; i < left->slots.length; i++) {
@@ -6302,7 +6428,13 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
                                  Vector* actuals) {
   TypeRecord* func = function->type;
   size_t count = actuals->length;
-  if (count != func->info.function.prototype.length) {
+  size_t named = func->info.function.prototype.length;
+  if (func->info.function.varargs) {
+    if (count < named) {
+      return false;
+    }
+    count = named;
+  } else if (count != named) {
     return false;
   }
   // Evaluate every actual argument in the *caller's* binding context before
@@ -6392,15 +6524,22 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = function->type;
+  size_t named = func->info.function.prototype.length;
   size_t formal_offset = 1;
   bool has_complete_object_parameter =
-      func->info.function.prototype.length == actuals->length + 2 &&
+      named >= 2 &&
       func->info.function.prototype.value.p[1] != NULL &&
       StringEqual(
           &((Symbol*)func->info.function.prototype.value.p[1])->name,
           "__complete_object");
-  if (func->info.function.prototype.length !=
-      actuals->length + 1 + (has_complete_object_parameter ? 1 : 0)) {
+  size_t implicit = 1 + (has_complete_object_parameter ? 1 : 0);
+  size_t named_actuals = named >= implicit ? named - implicit : 0;
+  if (func->info.function.varargs) {
+    if (actuals->length < named_actuals) {
+      return false;
+    }
+  } else if (named !=
+             actuals->length + 1 + (has_complete_object_parameter ? 1 : 0)) {
     return false;
   }
   Symbol* this_formal = func->info.function.prototype.value.p[0];
@@ -6415,7 +6554,7 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
                          (ConstexprValue){.ivalue = 1});
     formal_offset++;
   }
-  for (size_t i = 0; i < actuals->length; i++) {
+  for (size_t i = 0; i < named_actuals; i++) {
     Symbol* formal =
         func->info.function.prototype.value.p[i + formal_offset];
     ASTNode* actual = actuals->value.p[i];
@@ -6441,12 +6580,20 @@ static bool ConstexprConstructorCandidateMatches(Symbol* candidate,
                                                  VectorASTNode* call) {
   if (candidate == NULL || candidate->type == NULL ||
       !TypeIsFunction(candidate->type) ||
-      !candidate->type->info.function.is_constructor ||
-      candidate->type->info.function.prototype.length !=
-          call->children->length + 1) {
+      !candidate->type->info.function.is_constructor) {
     return false;
   }
-  for (size_t a = 0; a < call->children->length; a++) {
+  size_t named = candidate->type->info.function.prototype.length;
+  size_t named_actuals = named > 0 ? named - 1 : 0;
+  size_t actual_count = call->children != NULL ? call->children->length : 0;
+  if (candidate->type->info.function.varargs) {
+    if (actual_count < named_actuals) {
+      return false;
+    }
+  } else if (named != actual_count + 1) {
+    return false;
+  }
+  for (size_t a = 0; a < named_actuals; a++) {
     ASTNode* actual = call->children->value.p[a];
     Symbol* formal =
         candidate->type->info.function.prototype.value.p[a + 1];
@@ -6582,10 +6729,13 @@ Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
       if (member->is_member_function && member->symbol != NULL &&
           member->symbol->type != NULL &&
           TypeIsFunction(member->symbol->type) &&
-          member->symbol->type->info.function.is_constructor &&
-          member->symbol->type->info.function.prototype.length ==
-              actual_count + 1) {
-        return member->symbol;
+          member->symbol->type->info.function.is_constructor) {
+        size_t named = member->symbol->type->info.function.prototype.length;
+        bool varargs = member->symbol->type->info.function.varargs;
+        if (varargs ? actual_count + 1 >= named
+                    : named == actual_count + 1) {
+          return member->symbol;
+        }
       }
       member = member->overload_next;
     }
@@ -6601,7 +6751,13 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
     return BindConstexprActuals(ctx, function, actuals);
   }
   TypeRecord* func = function->type;
-  if (func->info.function.prototype.length != actuals->length + 1) {
+  size_t named = func->info.function.prototype.length;
+  size_t named_actuals = named > 0 ? named - 1 : 0;
+  if (func->info.function.varargs) {
+    if (actuals->length < named_actuals) {
+      return false;
+    }
+  } else if (named != actuals->length + 1) {
     return false;
   }
   Symbol* this_formal = func->info.function.prototype.value.p[0];
@@ -6614,7 +6770,7 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
   }
   PushConstexprBinding(ctx, this_formal,
                        (ConstexprValue){.is_object = true, .object = object});
-  for (size_t i = 0; i < actuals->length; i++) {
+  for (size_t i = 0; i < named_actuals; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i + 1];
     ASTNode* actual = actuals->value.p[i];
     if (formal == NULL || actual == NULL ||
@@ -8571,8 +8727,7 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       func->info.function.is_constructor ||
-      func->info.function.is_destructor ||
-      func->info.function.varargs) {
+      func->info.function.is_destructor) {
     return false;
   }
   // Refuse to interpret a body that is still being semantically analyzed (its
@@ -9263,9 +9418,7 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       !func->info.function.is_constructor ||
-      func->info.function.is_destructor ||
-      func->info.function.is_virtual ||
-      func->info.function.varargs) {
+      func->info.function.is_destructor) {
     return false;
   }
 
@@ -9319,9 +9472,7 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
       !func->info.function.is_constructor ||
-      func->info.function.is_destructor ||
-      func->info.function.is_virtual ||
-      func->info.function.varargs) {
+      func->info.function.is_destructor) {
     return false;
   }
 

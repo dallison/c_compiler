@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: static_assert expression is not an integer constant expression
+// EXPECT: label in a constexpr function requires C++23
 
 constexpr int labeled() {
 label:

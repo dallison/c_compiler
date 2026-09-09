@@ -2482,8 +2482,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(consteval))) {
       is_consteval_member = true;
       is_constexpr_member = true;
+      if (LexMatch(parser->lex, TOK(constexpr))) {
+        SyntaxError(parser->syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
+      }
     } else {
       is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+      if (is_constexpr_member && LexMatch(parser->lex, TOK(consteval))) {
+        SyntaxError(parser->syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
+        is_consteval_member = true;
+      }
     }
     parser->is_inline = is_inline_member;
     parser->is_constexpr = is_constexpr_member;
@@ -2500,8 +2509,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       if (CompilerIsCXX() && LexMatch(parser->lex, TOK(consteval))) {
         is_consteval_member = true;
         is_constexpr_member = true;
+        if (LexMatch(parser->lex, TOK(constexpr))) {
+          SyntaxError(parser->syntax,
+                      "'constexpr' and 'consteval' cannot both be specified");
+        }
       } else {
         is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+        if (is_constexpr_member && LexMatch(parser->lex, TOK(consteval))) {
+          SyntaxError(parser->syntax,
+                      "'constexpr' and 'consteval' cannot both be specified");
+          is_consteval_member = true;
+        }
       }
       parser->is_constexpr = is_constexpr_member;
       parser->is_consteval = is_consteval_member;
@@ -2585,8 +2603,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       if (CompilerIsCXX() && LexMatch(parser->lex, TOK(consteval))) {
         is_consteval_member = true;
         is_constexpr_member = true;
+        if (LexMatch(parser->lex, TOK(constexpr))) {
+          SyntaxError(parser->syntax,
+                      "'constexpr' and 'consteval' cannot both be specified");
+        }
       } else {
         is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+        if (is_constexpr_member && LexMatch(parser->lex, TOK(consteval))) {
+          SyntaxError(parser->syntax,
+                      "'constexpr' and 'consteval' cannot both be specified");
+          is_consteval_member = true;
+        }
       }
       parser->is_constexpr = is_constexpr_member;
       parser->is_consteval = is_consteval_member;
@@ -2726,6 +2753,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                             !TypeIsFunction(member_symbol->type);
         member_symbol->flags.is_constinit =
             is_constinit_member && !TypeIsFunction(member_symbol->type);
+        if (is_consteval_member && !TypeIsFunction(member_symbol->type)) {
+          SyntaxError(parser->syntax,
+                      "'consteval' can only be applied to functions");
+        }
         if (member_symbol->flags.is_constexpr) {
           member_symbol->type->qualifiers |= kQualConst;
         }

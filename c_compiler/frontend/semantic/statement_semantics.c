@@ -21,6 +21,7 @@
 #include "init_semantics.h"
 #include "bitset.h"
 #include "errors.h"
+#include "source.h"
 #include "type_inheritance.h"
 
 static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
@@ -3479,6 +3480,162 @@ void AnalyzeStatement(ASTNode* node) {
       assert(false);
   }
   node->flags |= kASTAnalyzed;
+}
+
+typedef struct {
+  ASTNode* diagnostic;
+  FunctionInfo* info;
+  int returns;
+  bool reported;
+} ConstexprBodyAudit;
+
+static bool ConstexprBodyNodeIsExempt(ASTNode* node) {
+  if (node == NULL) {
+    return true;
+  }
+  if ((node->flags & kASTCXXMemberInitializer) != 0) {
+    return true;
+  }
+  if (node->op == AST_OP(label)) {
+    return false;
+  }
+  return SemanticNodeIsCompilerGenerated(node);
+}
+
+static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  (void)child_id;
+  ConstexprBodyAudit* audit = data;
+  if (mode != kVisitPreChildren || audit->reported || node == NULL ||
+      ConstexprBodyNodeIsExempt(node)) {
+    return;
+  }
+  bool cxx11 = !CompilerCXXAtLeast(kLanguageStandardCXX14);
+  bool before_cxx20 = !CompilerCXXAtLeast(kLanguageStandardCXX20);
+  bool before_cxx23 = !CompilerCXXAtLeast(kLanguageStandardCXX23);
+  switch (node->op) {
+    case AST_OP(compound):
+    case AST_OP(static_assert):
+    case AST_OP(decl_list):
+    case AST_OP(case):
+      return;
+    case AST_OP(return):
+      audit->returns++;
+      if (cxx11 && audit->info->is_constructor) {
+        SemanticError(node,
+                      "constexpr constructor cannot contain a return statement "
+                      "before C++14");
+        audit->reported = true;
+      } else if (cxx11 && !audit->info->is_constructor && audit->returns > 1) {
+        SemanticError(node,
+                      "constexpr function can have only one return statement "
+                      "before C++14");
+        audit->reported = true;
+      }
+      return;
+    case AST_OP(expr): {
+      ExpressionStatementASTNode* stmt = (ExpressionStatementASTNode*)node;
+      if (stmt->expr == NULL ||
+          (stmt->expr->flags & kASTCXXMemberInitializer) != 0) {
+        return;
+      }
+      if (cxx11) {
+        SemanticError(node,
+                      "statement is not allowed in a C++11 constexpr function");
+        audit->reported = true;
+      }
+      return;
+    }
+    case AST_OP(vardecl): {
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+      if (decl->symbol != NULL &&
+          StorageIs(decl->symbol->storage, STO(typedef))) {
+        return;
+      }
+      if (decl->symbol != NULL &&
+          StorageIs(decl->symbol->storage, STO(static) | STO(thread))) {
+        if (before_cxx23) {
+          SemanticError(
+              node,
+              "static or thread_local variable in a constexpr function "
+              "requires C++23");
+          audit->reported = true;
+        }
+        return;
+      }
+      if (cxx11) {
+        SemanticError(node,
+                      "local variable in a constexpr function requires C++14");
+        audit->reported = true;
+      }
+      return;
+    }
+    case AST_OP(goto):
+      if (before_cxx23) {
+        SemanticError(node, "goto in a constexpr function requires C++23");
+        audit->reported = true;
+      }
+      return;
+    case AST_OP(asm):
+      if (before_cxx23) {
+        SemanticError(node, "asm in a constexpr function requires C++23");
+        audit->reported = true;
+      }
+      return;
+    case AST_OP(label): {
+      LabelASTNode* label = (LabelASTNode*)node;
+      if (!label->named && before_cxx23) {
+        SemanticError(node, "label in a constexpr function requires C++23");
+        audit->reported = true;
+      }
+      return;
+    }
+    case AST_OP(try):
+      if (before_cxx20) {
+        SemanticError(node, "try-block in a constexpr function requires C++20");
+        audit->reported = true;
+      }
+      return;
+    case AST_OP(if):
+    case AST_OP(while):
+    case AST_OP(do):
+    case AST_OP(for):
+    case AST_OP(switch):
+      if (cxx11) {
+        SemanticError(node,
+                      "statement is not allowed in a C++11 constexpr function");
+        audit->reported = true;
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+void SemanticDiagnoseConstexprFunctionBody(ASTNode* node) {
+  if (node == NULL || node->type == NULL || !TypeIsFunction(node->type) ||
+      !CompilerIsCXX()) {
+    return;
+  }
+  FunctionInfo* info = &node->type->info.function;
+  if ((!info->is_constexpr && !info->is_consteval) || info->is_defaulted ||
+      info->is_deleted || info->body == NULL) {
+    return;
+  }
+  if (SourceLocationIsSystemHeader(node->location) ||
+      (info->symbol != NULL &&
+       SourceLocationIsSystemHeader(info->symbol->location))) {
+    return;
+  }
+  if (info->is_virtual && !CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    SemanticError(node, "virtual constexpr functions require C++20");
+  }
+  if (CompilerCXXAtLeast(kLanguageStandardCXX23)) {
+    return;
+  }
+  ConstexprBodyAudit audit = {
+      .diagnostic = node, .info = info, .returns = 0, .reported = false};
+  ASTNodeVisit(info->body, AuditConstexprFunctionBody, 0, &audit);
 }
 
 bool SemanticAnalyzeStructuredBindingDecomposition(

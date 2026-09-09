@@ -5666,6 +5666,11 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       result = GenerateBuiltinTerminator(gen, vector_node);
       break;
 
+    case AST_OP(builtin_is_constant_evaluated):
+      result = GeneratorGetIntConstant(
+          gen, vector_node->base.type, gen->for_constant_evaluation ? 1 : 0);
+      break;
+
     case AST_OP(builtin_source_file):
       result = GenerateBuiltinSourceFile(gen, vector_node);
       break;

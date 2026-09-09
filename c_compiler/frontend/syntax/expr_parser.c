@@ -47,6 +47,8 @@ static struct Intrinsic {
     {"__builtin_LINE", AST_OP(builtin_source_line), 0},
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
+    {"__builtin_is_constant_evaluated",
+     AST_OP(builtin_is_constant_evaluated), 0},
     {"__builtin_observable_checkpoint",
      AST_OP(builtin_observable_checkpoint), 0},
     {"__builtin_prefetch", AST_OP(builtin_prefetch), 3},
@@ -2910,6 +2912,8 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
   *is_constexpr = false;
   *is_consteval = false;
   *is_noexcept = false;
+  bool saw_constexpr = false;
+  bool saw_consteval = false;
   bool keep_parsing = true;
   while (keep_parsing) {
     if (LexMatch(syntax->lex, TOK(mutable))) {
@@ -2920,8 +2924,22 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
       }
       *is_static = true;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
+      if (saw_consteval) {
+        SyntaxError(syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
+      } else if (saw_constexpr) {
+        SyntaxError(syntax, "Duplicate 'constexpr' specifier");
+      }
+      saw_constexpr = true;
       *is_constexpr = true;
     } else if (LexMatch(syntax->lex, TOK(consteval))) {
+      if (saw_consteval) {
+        SyntaxError(syntax, "Duplicate 'consteval' specifier");
+      } else if (saw_constexpr) {
+        SyntaxError(syntax,
+                    "'constexpr' and 'consteval' cannot both be specified");
+      }
+      saw_consteval = true;
       *is_consteval = true;
       *is_constexpr = true;
     } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {

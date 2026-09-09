@@ -14,6 +14,7 @@
 
 void AnalyzeStatement(ASTNode* node);
 void CheckUnusedLabels(ASTNode* body);
+void SemanticDiagnoseConstexprFunctionBody(ASTNode* node);
 ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr);
 
 // Materializes a structured binding retained in a dependent template body.

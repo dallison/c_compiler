@@ -44,5 +44,6 @@ bool ConstexprPCodeEvaluateObjectConstantForSymbol(ConstEvalContext* ctx,
                                                    Symbol* symbol,
                                                    ASTNode* initializer);
 void ConstexprPCodeClearImageCache(void);
+const char* ConstexprPCodeCStringAt(uint64_t address);
 
 #endif /* constexpr_pcode_h */
