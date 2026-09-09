@@ -9735,9 +9735,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     IdentifierASTNode* callee_id = (IdentifierASTNode*)node->left;
     if (callee_id->symbol != NULL && callee_id->symbol->flags.is_template &&
         callee_id->symbol->type != NULL &&
-        TypeIsStructOrUnion(callee_id->symbol->type) &&
+        (TypeIsStructOrUnion(callee_id->symbol->type) ||
+         StorageIs(callee_id->symbol->storage, STO(typedef))) &&
         !has_pack_expansion_actual &&
-        !CallActualsContainTemplateParameter(node)) {
+        !CallActualsContainTemplateParameter(node) &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            callee_id->template_arguments)) {
       is_concrete_ctad_construction = true;
     }
   }

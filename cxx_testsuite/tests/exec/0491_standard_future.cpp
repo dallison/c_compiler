@@ -92,14 +92,11 @@ int main() {
     }
   }
 
-  bool uses_alloc =
-      std::uses_allocator<std::promise<int>, std::allocator<char>>::value;
-  if (!uses_alloc) {
+  if (!std::uses_allocator<std::promise<int>, std::allocator<char>>::value) {
     return 12;
   }
-  bool uses_task_alloc = std::uses_allocator<
-      std::packaged_task<int(int)>, std::allocator<char>>::value;
-  if (!uses_task_alloc) {
+  if (!std::uses_allocator<std::packaged_task<int(int)>,
+                           std::allocator<char>>::value) {
     return 19;
   }
 

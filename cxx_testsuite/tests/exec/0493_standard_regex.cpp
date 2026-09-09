@@ -37,5 +37,33 @@ int main() {
   } catch (const std::regex_error& error) {
     if (error.code() != std::regex_constants::error_brack) return 12;
   }
+
+  std::regex combined("[A-Z]+", std::regex::icase | std::regex::nosubs);
+  if (!std::regex_match("AbC", combined)) return 13;
+  if (combined.mark_count() != 0) return 14;
+
+  try {
+    std::regex bad_brace("a{");
+    return 15;
+  } catch (const std::regex_error& error) {
+    if (error.code() != std::regex_constants::error_brace &&
+        error.code() != std::regex_constants::error_badbrace) {
+      return 16;
+    }
+  }
+
+  std::smatch range_match;
+  const std::string only = "item-123";
+  if (!std::regex_match(only.begin(), only.end(), range_match, item)) {
+    return 17;
+  }
+  if (range_match.str() != only) return 18;
+
+  std::regex first_only("item");
+  std::regex other("x");
+  first_only.swap(other);
+  if (!std::regex_search("x", first_only)) return 19;
+  if (!std::regex_search("item", other)) return 20;
+
   return 0;
 }

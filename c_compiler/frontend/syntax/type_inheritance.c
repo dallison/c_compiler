@@ -979,6 +979,26 @@ static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
   return true;
 }
 
+static bool CXXBaseMemberFunctionMatches(Syntax* syntax, TypeRecord* derived,
+                                         TypeRecord* base_type,
+                                         TypeRecord* base_func) {
+  TypeRecord* subst = NULL;
+  TypeRecord* compared = base_func;
+  if (base_type != NULL && base_type->template_arguments != NULL &&
+      TypeContainsTemplateParameter(base_func)) {
+    subst = TypeSubstituteTemplateType(syntax, base_func,
+                                       base_type->template_arguments);
+    if (subst != NULL) {
+      compared = subst;
+    }
+  }
+  bool match = CXXMemberFunctionSignaturesMatch(syntax, derived, compared);
+  if (subst != NULL) {
+    TypeRecordDelete(subst);
+  }
+  return match;
+}
+
 static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
                                                 StructMember* member) {
   if (str == NULL || member == NULL || member->symbol == NULL ||
@@ -1006,8 +1026,8 @@ static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
          candidate = candidate->overload_next) {
       if (candidate->is_member_function &&
           candidate->symbol->type->info.function.is_virtual &&
-          CXXMemberFunctionSignaturesMatch(syntax, member->symbol->type,
-                                           candidate->symbol->type)) {
+          CXXBaseMemberFunctionMatches(syntax, member->symbol->type,
+                                       base->type, candidate->symbol->type)) {
         if (destructor_name.value != NULL) {
           StringDestruct(&destructor_name);
         }
@@ -1016,6 +1036,11 @@ static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
     }
     if (destructor_name.value != NULL) {
       StringDestruct(&destructor_name);
+    }
+    StructMember* nested =
+        FindCXXBaseVirtualOverride(syntax, base_struct, member);
+    if (nested != NULL) {
+      return nested;
     }
   }
   return NULL;

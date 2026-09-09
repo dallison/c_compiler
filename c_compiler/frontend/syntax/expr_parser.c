@@ -1527,7 +1527,8 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   Vector* template_arguments = NULL;
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
-       SymbolHasFunctionTemplateOverload(symbol))) {
+       SymbolHasFunctionTemplateOverload(symbol) ||
+       symbol->flags.is_template)) {
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
     template_arguments = TemplateArgumentVectorCopy(parsed_args);
@@ -1611,12 +1612,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
               symbol->type->info.function.is_constructor
           ? symbol->type->info.function.cxx_member_owner
           : NULL;
+  bool is_alias_template = symbol != NULL && symbol->flags.is_template &&
+                            StorageIs(symbol->storage, STO(typedef));
   bool is_functional_class_construction =
       CompilerIsCXX() && symbol != NULL && symbol->type != NULL &&
       ((TypeIsStructOrUnion(symbol->type) &&
         (StorageIs(symbol->storage, STO(typedef)) ||
          (symbol->flags.is_template &&
           symbol->variable_template == NULL))) ||
+       is_alias_template ||
        functional_constructor_owner != NULL) &&
       LexLookingAt(lex, TOK(lparen));
   FullyQualifiedIdentifierDestruct(&name);
@@ -4461,8 +4465,20 @@ static bool CXXPostfixExpressionNamesType(ASTNode* node) {
     return false;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
-  return id->symbol != NULL && StorageIs(id->symbol->storage, STO(typedef)) &&
-         id->symbol->type != NULL && TypeIsStructOrUnion(id->symbol->type);
+  if (id->symbol == NULL) {
+    return false;
+  }
+  if (id->template_arguments != NULL) {
+    return id->symbol->flags.is_template ||
+           StorageIs(id->symbol->storage, STO(typedef));
+  }
+  if (id->symbol->type == NULL) {
+    return false;
+  }
+  if (StorageIs(id->symbol->storage, STO(typedef))) {
+    return true;
+  }
+  return TypeIsStructOrUnion(id->symbol->type);
 }
 
 static Vector* ParseCXXBracedTemporaryActuals(Syntax* syntax, TypeRecord* type,
@@ -4496,6 +4512,7 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
   if (id->template_arguments != NULL ||
       TypeIsClassTemplatePlaceholder(type) ||
       FindCXXConstructorForType(type) != NULL) {
+    type_expr->flags |= kASTCXXFunctionalConstruction;
     Vector* actuals =
         ParseCXXBracedTemporaryActuals(syntax, type, followers);
     return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);

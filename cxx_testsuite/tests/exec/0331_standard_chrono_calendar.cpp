@@ -125,6 +125,12 @@ int check_calendar(void) {
   if (sys_days_from_local_days(local_days(days(10))).time_since_epoch().count() != 10) {
     return 33;
   }
+  if (!(February / 29).ok()) {
+    return 41;
+  }
+  if ((February / 30).ok()) {
+    return 42;
+  }
   return 0;
 }
 

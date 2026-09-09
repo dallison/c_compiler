@@ -188,6 +188,11 @@ constexpr const tuple_element_t<I, pair<T1, T2>>& get(
   return __pair_getter<I, T1, T2>::get(value);
 }
 
+template <class... Types>
+constexpr tuple<decay_t<Types>...> make_tuple(Types&&... args) {
+  return tuple<decay_t<Types>...>(static_cast<Types&&>(args)...);
+}
+
 }  // namespace std
 
 #endif /* tuple_h */

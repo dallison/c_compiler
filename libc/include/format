@@ -3,10 +3,13 @@
 
 #include <__exception_support>
 #include <__itoa.h>
+#include <bitset>
 #include <chrono>
+#include <complex>
 #include <cstddef>
 #include <iterator>
 #include <locale>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -622,7 +625,10 @@ template <class T>
 void __format_with_formatter(const void* pointer,
                              const __format_specification* specification,
                              string& output, const __format_args* arguments) {
-  string_view text(specification->data, specification->size);
+  string_view text(specification != nullptr && specification->data != nullptr
+                        ? specification->data
+                        : "",
+                    specification != nullptr ? specification->size : 0);
   formatter<T, char> value_formatter;
   format_parse_context parse_context(
       text, arguments != nullptr ? arguments->count : 0);
@@ -1406,6 +1412,115 @@ struct formatter<pair<First, Second>, char> {
       *out++ = result[i];
     }
     return out;
+  }
+};
+
+namespace __format_detail {
+
+inline format_context::iterator __write_formatted(
+    format_context& context, const string& result) {
+  auto out = context.out();
+  for (size_t i = 0; i < result.size(); ++i) {
+    *out++ = result[i];
+  }
+  return out;
+}
+
+template <class Tuple, size_t... I>
+string __format_tuple_value(const Tuple& value, index_sequence<I...>) {
+  string result;
+  result.push_back('(');
+  size_t index = 0;
+  ((result.append(index++ ? ", " : ""),
+    result.append(__format_invoke("{}", 2, get<I>(value)))), ...);
+  result.push_back(')');
+  return result;
+}
+
+struct __format_variant_visitor {
+  template <class T>
+  string operator()(const T& inner) const {
+    return __format_invoke("{}", 2, inner);
+  }
+};
+
+}  // namespace __format_detail
+
+template <class... Types>
+struct formatter<tuple<Types...>, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.begin();
+  }
+
+  format_context::iterator format(const tuple<Types...>& value,
+                                  format_context& context) const {
+    return __format_detail::__write_formatted(
+        context,
+        __format_detail::__format_tuple_value(
+            value, make_index_sequence<sizeof...(Types)>{}));
+  }
+};
+
+template <class T>
+struct formatter<optional<T>, char> {
+  format_parse_context::iterator parse(format_parse_context& context) {
+    return context.end();
+  }
+
+  format_context::iterator format(const optional<T>& value,
+                                  format_context& context) const {
+    string result = "nullopt";
+    if (value.has_value()) {
+      const T& inner = *value;
+      result = __format_detail::__format_invoke("{}", 2, inner);
+    }
+    return __format_detail::__write_formatted(context, result);
+  }
+};
+
+template <class... Types>
+struct formatter<variant<Types...>, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.begin();
+  }
+
+  format_context::iterator format(const variant<Types...>& value,
+                                  format_context& context) const {
+    return __format_detail::__write_formatted(
+        context, visit(__format_detail::__format_variant_visitor{}, value));
+  }
+};
+
+template <size_t N>
+struct formatter<bitset<N>, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.begin();
+  }
+
+  format_context::iterator format(const bitset<N>& value,
+                                  format_context& context) const {
+    return __format_detail::__write_formatted(context, value.to_string());
+  }
+};
+
+template <class T>
+struct formatter<complex<T>, char> {
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    return context.begin();
+  }
+
+  format_context::iterator format(const complex<T>& value,
+                                  format_context& context) const {
+    string result = "(";
+    result.append(__format_detail::__format_invoke("{}", 2, value.real()));
+    result.append(",");
+    result.append(__format_detail::__format_invoke("{}", 2, value.imag()));
+    result.append(")");
+    return __format_detail::__write_formatted(context, result);
   }
 };
 

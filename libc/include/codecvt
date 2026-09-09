@@ -216,7 +216,7 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_out(
       mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
-      char*& to_next) const {
+      char*& to_next) const override {
     from_next = from;
     to_next = to;
     if ((Mode & generate_header) != 0) {
@@ -243,7 +243,7 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_in(
       mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
-      Elem*& to_next) const {
+      Elem*& to_next) const override {
     from_next = from;
     to_next = to;
     if ((Mode & consume_header) != 0) {
@@ -269,14 +269,14 @@ class codecvt_utf8 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_unshift(
-      mbstate_t&, char* to, char*, char*& to_next) const {
+      mbstate_t&, char* to, char*, char*& to_next) const override {
     to_next = to;
     return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
   int do_length(mbstate_t& state, const char* from, const char* from_end,
-                size_t max) const {
+                size_t max) const override {
     const char* current = from;
     size_t converted = 0;
     if ((Mode & consume_header) != 0 &&
@@ -315,7 +315,7 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_out(
       mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
-      char*& to_next) const {
+      char*& to_next) const override {
     from_next = from;
     to_next = to;
     if ((Mode & generate_header) != 0) {
@@ -350,7 +350,7 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_in(
       mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
-      Elem*& to_next) const {
+      Elem*& to_next) const override {
     from_next = from;
     to_next = to;
     if ((Mode & consume_header) != 0) {
@@ -382,14 +382,14 @@ class codecvt_utf8_utf16 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_unshift(
-      mbstate_t&, char* to, char*, char*& to_next) const {
+      mbstate_t&, char* to, char*, char*& to_next) const override {
     to_next = to;
     return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
   int do_length(mbstate_t& state, const char* from, const char* from_end,
-                size_t max) const {
+                size_t max) const override {
     const char* current = from;
     size_t units = 0;
     if ((Mode & consume_header) != 0 &&
@@ -430,7 +430,7 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_out(
       mbstate_t& state, const Elem* from, const Elem* from_end,
       const Elem*& from_next, char* to, char* to_end,
-      char*& to_next) const {
+      char*& to_next) const override {
     from_next = from;
     to_next = to;
     bool little = __codecvt_detail::__utf16_little(
@@ -471,7 +471,7 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
   typename codecvt_base::result do_in(
       mbstate_t& state, const char* from, const char* from_end,
       const char*& from_next, Elem* to, Elem* to_end,
-      Elem*& to_next) const {
+      Elem*& to_next) const override {
     from_next = from;
     to_next = to;
     bool little = __codecvt_detail::__utf16_little(
@@ -506,14 +506,14 @@ class codecvt_utf16 : public codecvt<Elem, char, mbstate_t> {
   }
 
   typename codecvt_base::result do_unshift(
-      mbstate_t&, char* to, char*, char*& to_next) const {
+      mbstate_t&, char* to, char*, char*& to_next) const override {
     to_next = to;
     return codecvt_base::ok;
   }
   int do_encoding() const noexcept override { return 0; }
   bool do_always_noconv() const noexcept override { return false; }
   int do_length(mbstate_t& state, const char* from, const char* from_end,
-                size_t max) const {
+                size_t max) const override {
     const char* current = from;
     size_t converted = 0;
     bool little = __codecvt_detail::__utf16_little(

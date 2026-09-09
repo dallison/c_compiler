@@ -295,12 +295,14 @@ class __recursive_directory_stream {
 
 }  // namespace __filesystem_detail
 
+#if __cplusplus < 202002L
 __file_clock::time_point __file_clock::now() noexcept {
   return time_point(duration(
       chrono::duration_cast<chrono::nanoseconds>(
           chrono::system_clock::now().time_since_epoch())
           .count()));
 }
+#endif
 
 bool status_known(file_status value) noexcept {
   return value.type() != file_type::none;

@@ -1,6 +1,7 @@
 #include <locale>
 
 #include <__itoa.h>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <ios>
@@ -134,6 +135,10 @@ template <class CharT, class Iter, class T>
 Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
                             ios_base::iostate& err, T& value) {
   using traits = char_traits<CharT>;
+  const numpunct<CharT>& np = use_facet<numpunct<CharT>>(str.getloc());
+  string grouping = np.grouping();
+  CharT thousands = np.thousands_sep();
+  bool grouped = !grouping.empty() && grouping[0] != 0;
   while (in != end && traits::eq(*in, CharT(' '))) {
     ++in;
   }
@@ -159,8 +164,13 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
     }
   }
   while (in != end) {
+    CharT c = static_cast<CharT>(*in);
+    if (grouped && base == 10 && traits::eq(c, thousands)) {
+      ++in;
+      continue;
+    }
     int digit_value = 0;
-    if (!__read_digit<CharT, Iter>(static_cast<CharT>(*in), base, digit_value)) {
+    if (!__read_digit<CharT, Iter>(c, base, digit_value)) {
       break;
     }
     result = static_cast<T>(result * base + static_cast<T>(digit_value));
@@ -195,6 +205,104 @@ static size_t __locale_format_ptr(char* buf, const void* v) {
   return __ptrtoa(buf, v);
 }
 
+static size_t __insert_grouping(char* buf, size_t len, size_t cap,
+                                 const string& grouping, char thousands_sep) {
+  if (grouping.empty() || grouping[0] == 0 || thousands_sep == 0 ||
+      len + 16 >= cap) {
+    return len;
+  }
+  char tmp[128];
+  if (len >= sizeof(tmp)) {
+    return len;
+  }
+  memcpy(tmp, buf, len);
+  size_t prefix = 0;
+  if (len > 0 && (tmp[0] == '+' || tmp[0] == '-')) {
+    prefix = 1;
+  }
+  if (len - prefix >= 2 && tmp[prefix] == '0' &&
+      (tmp[prefix + 1] == 'x' || tmp[prefix + 1] == 'X')) {
+    prefix += 2;
+  }
+  size_t int_end = prefix;
+  while (int_end < len && tmp[int_end] >= '0' && tmp[int_end] <= '9') {
+    ++int_end;
+  }
+  size_t digits = int_end - prefix;
+  if (digits == 0) {
+    return len;
+  }
+  bool places[64] = {};
+  size_t from_right = 0;
+  size_t group_index = 0;
+  unsigned char group = static_cast<unsigned char>(grouping[0]);
+  while (group > 0 && group != CHAR_MAX) {
+    from_right += group;
+    if (from_right >= digits || from_right >= 64) {
+      break;
+    }
+    places[from_right] = true;
+    if (group_index + 1 < grouping.size() && grouping[group_index + 1] != 0) {
+      ++group_index;
+      group = static_cast<unsigned char>(grouping[group_index]);
+    }
+  }
+  size_t out = prefix;
+  memcpy(buf, tmp, prefix);
+  for (size_t i = 0; i < digits; ++i) {
+    size_t remaining = digits - i;
+    if (remaining < digits && remaining < 64 && places[remaining]) {
+      buf[out++] = thousands_sep;
+    }
+    buf[out++] = tmp[prefix + i];
+  }
+  size_t rest = len - int_end;
+  memcpy(buf + out, tmp + int_end, rest);
+  out += rest;
+  return out;
+}
+
+static size_t __apply_numpunct_char(char* buf, size_t len, size_t cap,
+                                    ios_base& str, int base) {
+  const numpunct<char>& np = use_facet<numpunct<char>>(str.getloc());
+  char decimal = np.decimal_point();
+  if (decimal != '.') {
+    for (size_t i = 0; i < len; ++i) {
+      if (buf[i] == '.') {
+        buf[i] = decimal;
+        break;
+      }
+    }
+  }
+  if (base == 10) {
+    len = __insert_grouping(buf, len, cap, np.grouping(), np.thousands_sep());
+  }
+  return len;
+}
+
+static size_t __apply_numpunct_wchar(char* buf, size_t len, size_t cap,
+                                     ios_base& str, int base) {
+  const numpunct<wchar_t>& np = use_facet<numpunct<wchar_t>>(str.getloc());
+  wchar_t decimal = np.decimal_point();
+  if (decimal != L'.' && decimal <= 127) {
+    char replacement = static_cast<char>(decimal);
+    for (size_t i = 0; i < len; ++i) {
+      if (buf[i] == '.') {
+        buf[i] = replacement;
+        break;
+      }
+    }
+  }
+  char thousands = 0;
+  if (np.thousands_sep() <= 127) {
+    thousands = static_cast<char>(np.thousands_sep());
+  }
+  if (base == 10) {
+    len = __insert_grouping(buf, len, cap, np.grouping(), thousands);
+  }
+  return len;
+}
+
 
 ostreambuf_iterator __davecc_classic_put_bool(ostreambuf_iterator s, ios_base& f, char fill, bool v) {
   const numpunct<char>& np = use_facet<numpunct<char>>(f.getloc());
@@ -214,7 +322,7 @@ ostreambuf_iterator __davecc_classic_put_ulong(ostreambuf_iterator s, ios_base& 
 }
 
 ostreambuf_iterator __davecc_classic_put_llong(ostreambuf_iterator s, ios_base& f, char fill, long long v) {
-  char buf[__DAVECC_ITOA_CAPACITY(long long)];
+  char buf[__DAVECC_ITOA_CAPACITY(long long) + 32];
   ios_base::fmtflags flags = f.flags();
   int base = 10;
   if ((flags & ios_base::basefield) == ios_base::hex) {
@@ -222,31 +330,25 @@ ostreambuf_iterator __davecc_classic_put_llong(ostreambuf_iterator s, ios_base& 
   } else if ((flags & ios_base::basefield) == ios_base::oct) {
     base = 8;
   }
-  size_t len = __locale_format_ll(buf, v, base);
+  size_t len = 0;
   if ((flags & ios_base::showpos) != 0 && v > 0) {
-    char with_sign[__DAVECC_ITOA_CAPACITY(long long) + 1];
-    with_sign[0] = '+';
-    memcpy(with_sign + 1, buf, len);
-    len += 1;
-    return __write_c_string(s, f, fill, with_sign, len);
-  }
-  if ((flags & ios_base::showbase) != 0 && base != 10) {
-    char with_base[__DAVECC_ITOA_CAPACITY(long long) + 2];
-    size_t offset = 0;
-    if (v >= 0) {
-      with_base[offset++] = '0';
-      if (base == 16) {
-        with_base[offset++] = (flags & ios_base::uppercase) ? 'X' : 'x';
-      }
+    buf[0] = '+';
+    len = __locale_format_ll(buf + 1, v, base) + 1;
+  } else if ((flags & ios_base::showbase) != 0 && base != 10 && v >= 0) {
+    buf[len++] = '0';
+    if (base == 16) {
+      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
     }
-    memcpy(with_base + offset, buf, len);
-    return __write_c_string(s, f, fill, with_base, offset + len);
+    len += __locale_format_ll(buf + len, v, base);
+  } else {
+    len = __locale_format_ll(buf, v, base);
   }
+  len = __apply_numpunct_char(buf, len, sizeof(buf), f, base);
   return __write_c_string(s, f, fill, buf, len);
 }
 
 ostreambuf_iterator __davecc_classic_put_ullong(ostreambuf_iterator s, ios_base& f, char fill, unsigned long long v) {
-  char buf[__DAVECC_ITOA_CAPACITY(unsigned long long)];
+  char buf[__DAVECC_ITOA_CAPACITY(unsigned long long) + 32];
   ios_base::fmtflags flags = f.flags();
   int base = 10;
   if ((flags & ios_base::basefield) == ios_base::hex) {
@@ -254,22 +356,20 @@ ostreambuf_iterator __davecc_classic_put_ullong(ostreambuf_iterator s, ios_base&
   } else if ((flags & ios_base::basefield) == ios_base::oct) {
     base = 8;
   }
-  size_t len = __locale_format_ull(buf, v, base);
+  size_t len = 0;
   if ((flags & ios_base::showbase) != 0 && base != 10) {
-    char with_base[__DAVECC_ITOA_CAPACITY(unsigned long long) + 2];
-    size_t offset = 0;
-    with_base[offset++] = '0';
+    buf[len++] = '0';
     if (base == 16) {
-      with_base[offset++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
     }
-    memcpy(with_base + offset, buf, len);
-    return __write_c_string(s, f, fill, with_base, offset + len);
   }
+  len += __locale_format_ull(buf + len, v, base);
+  len = __apply_numpunct_char(buf, len, sizeof(buf), f, base);
   return __write_c_string(s, f, fill, buf, len);
 }
 
 ostreambuf_iterator __davecc_classic_put_double(ostreambuf_iterator s, ios_base& f, char fill, double v) {
-  char buf[64];
+  char buf[96];
   ios_base::fmtflags flags = f.flags();
   streamsize prec = f.precision();
   char* end = nullptr;
@@ -281,6 +381,7 @@ ostreambuf_iterator __davecc_classic_put_double(ostreambuf_iterator s, ios_base&
     end = __PrintGeneralFormat(v, static_cast<int>(prec), buf, sizeof(buf));
   }
   size_t len = end != nullptr ? static_cast<size_t>(end - buf) : strlen(buf);
+  len = __apply_numpunct_char(buf, len, sizeof(buf), f, 10);
   return __write_c_string(s, f, fill, buf, len);
 }
 
@@ -381,6 +482,10 @@ istreambuf_iterator __davecc_classic_get_float(
 istreambuf_iterator __davecc_classic_get_double(
     istreambuf_iterator in, istreambuf_iterator end, ios_base& f,
     ios_base::iostate& err, double& v) {
+  const numpunct<char>& np = use_facet<numpunct<char>>(f.getloc());
+  char thousands = np.thousands_sep();
+  char decimal = np.decimal_point();
+  bool grouped = !np.grouping().empty() && np.grouping()[0] != 0;
   while (in != end && *in == ' ') {
     ++in;
   }
@@ -390,6 +495,13 @@ istreambuf_iterator __davecc_classic_get_double(
     char c = *in;
     if (c == ' ' || c == '\t' || c == '\n') {
       break;
+    }
+    if (grouped && c == thousands) {
+      ++in;
+      continue;
+    }
+    if (c == decimal) {
+      c = '.';
     }
     buf[len++] = c;
     ++in;
@@ -470,7 +582,7 @@ wostreambuf_iterator __davecc_classic_wput_ulong(wostreambuf_iterator s,
 wostreambuf_iterator __davecc_classic_wput_llong(wostreambuf_iterator s,
                                                  ios_base& f, wchar_t fill,
                                                  long long v) {
-  char buf[__DAVECC_ITOA_CAPACITY(long long)];
+  char buf[__DAVECC_ITOA_CAPACITY(long long) + 32];
   ios_base::fmtflags flags = f.flags();
   int base = 10;
   if ((flags & ios_base::basefield) == ios_base::hex) {
@@ -478,33 +590,27 @@ wostreambuf_iterator __davecc_classic_wput_llong(wostreambuf_iterator s,
   } else if ((flags & ios_base::basefield) == ios_base::oct) {
     base = 8;
   }
-  size_t len = __locale_format_ll(buf, v, base);
+  size_t len = 0;
   if ((flags & ios_base::showpos) != 0 && v > 0) {
-    char with_sign[__DAVECC_ITOA_CAPACITY(long long) + 1];
-    with_sign[0] = '+';
-    memcpy(with_sign + 1, buf, len);
-    len += 1;
-    return __write_wc_string(s, f, fill, with_sign, len);
-  }
-  if ((flags & ios_base::showbase) != 0 && base != 10) {
-    char with_base[__DAVECC_ITOA_CAPACITY(long long) + 2];
-    size_t offset = 0;
-    if (v >= 0) {
-      with_base[offset++] = '0';
-      if (base == 16) {
-        with_base[offset++] = (flags & ios_base::uppercase) ? 'X' : 'x';
-      }
+    buf[0] = '+';
+    len = __locale_format_ll(buf + 1, v, base) + 1;
+  } else if ((flags & ios_base::showbase) != 0 && base != 10 && v >= 0) {
+    buf[len++] = '0';
+    if (base == 16) {
+      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
     }
-    memcpy(with_base + offset, buf, len);
-    return __write_wc_string(s, f, fill, with_base, offset + len);
+    len += __locale_format_ll(buf + len, v, base);
+  } else {
+    len = __locale_format_ll(buf, v, base);
   }
+  len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, base);
   return __write_wc_string(s, f, fill, buf, len);
 }
 
 wostreambuf_iterator __davecc_classic_wput_ullong(wostreambuf_iterator s,
                                                   ios_base& f, wchar_t fill,
                                                   unsigned long long v) {
-  char buf[__DAVECC_ITOA_CAPACITY(unsigned long long)];
+  char buf[__DAVECC_ITOA_CAPACITY(unsigned long long) + 32];
   ios_base::fmtflags flags = f.flags();
   int base = 10;
   if ((flags & ios_base::basefield) == ios_base::hex) {
@@ -512,24 +618,22 @@ wostreambuf_iterator __davecc_classic_wput_ullong(wostreambuf_iterator s,
   } else if ((flags & ios_base::basefield) == ios_base::oct) {
     base = 8;
   }
-  size_t len = __locale_format_ull(buf, v, base);
+  size_t len = 0;
   if ((flags & ios_base::showbase) != 0 && base != 10) {
-    char with_base[__DAVECC_ITOA_CAPACITY(unsigned long long) + 2];
-    size_t offset = 0;
-    with_base[offset++] = '0';
+    buf[len++] = '0';
     if (base == 16) {
-      with_base[offset++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
     }
-    memcpy(with_base + offset, buf, len);
-    return __write_wc_string(s, f, fill, with_base, offset + len);
   }
+  len += __locale_format_ull(buf + len, v, base);
+  len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, base);
   return __write_wc_string(s, f, fill, buf, len);
 }
 
 wostreambuf_iterator __davecc_classic_wput_double(wostreambuf_iterator s,
                                                 ios_base& f, wchar_t fill,
                                                 double v) {
-  char buf[64];
+  char buf[96];
   ios_base::fmtflags flags = f.flags();
   streamsize prec = f.precision();
   char* end = nullptr;
@@ -541,6 +645,7 @@ wostreambuf_iterator __davecc_classic_wput_double(wostreambuf_iterator s,
     end = __PrintGeneralFormat(v, static_cast<int>(prec), buf, sizeof(buf));
   }
   size_t len = end != nullptr ? static_cast<size_t>(end - buf) : strlen(buf);
+  len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, 10);
   return __write_wc_string(s, f, fill, buf, len);
 }
 
@@ -644,6 +749,10 @@ wistreambuf_iterator __davecc_classic_wget_float(
 wistreambuf_iterator __davecc_classic_wget_double(
     wistreambuf_iterator in, wistreambuf_iterator end, ios_base& f,
     ios_base::iostate& err, double& v) {
+  const numpunct<wchar_t>& np = use_facet<numpunct<wchar_t>>(f.getloc());
+  wchar_t thousands = np.thousands_sep();
+  wchar_t decimal = np.decimal_point();
+  bool grouped = !np.grouping().empty() && np.grouping()[0] != 0;
   while (in != end && *in == L' ') {
     ++in;
   }
@@ -653,6 +762,15 @@ wistreambuf_iterator __davecc_classic_wget_double(
     wchar_t wc = *in;
     if (wc == L' ' || wc == L'\t' || wc == L'\n') {
       break;
+    }
+    if (grouped && wc == thousands) {
+      ++in;
+      continue;
+    }
+    if (wc == decimal) {
+      buf[len++] = '.';
+      ++in;
+      continue;
     }
     if (wc > 127) {
       err = ios_base::failbit;

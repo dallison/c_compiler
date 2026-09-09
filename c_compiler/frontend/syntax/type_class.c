@@ -925,6 +925,22 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
                                             tag,
                                             completed_specialization_args);
     }
+    if (is_full_specialization && tag != NULL && tag->type != NULL &&
+        specialization_template != NULL &&
+        completed_specialization_args != NULL) {
+      // Record the specialization arguments without template_origin.  Origin
+      // would re-mangle members as `char_traits<char>::eof` and suppress the
+      // explicit specialization's own inline definitions.  Deduction recovers
+      // the primary from the unique `Primary<args>` tag name.
+      if (tag->type->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            tag->type->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      tag->type->template_arguments =
+          TemplateArgumentVectorCopy(completed_specialization_args);
+    }
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.

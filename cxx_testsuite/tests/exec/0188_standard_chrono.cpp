@@ -55,5 +55,15 @@ int main() {
     return 8;
   }
 
+  if ((1s <=> 2s) != std::strong_ordering::less) {
+    return 9;
+  }
+  if ((2s <=> 1s) != std::strong_ordering::greater) {
+    return 10;
+  }
+  if ((1s <=> 1s) != std::strong_ordering::equal) {
+    return 11;
+  }
+
   return 0;
 }

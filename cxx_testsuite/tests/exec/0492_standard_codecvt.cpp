@@ -129,6 +129,14 @@ int main() {
     return 18;
   }
 
+  std::mbstate_t unshift_state = {};
+  char unshift_buf[1] = {};
+  char* unshift_next = nullptr;
+  if (utf8.unshift(unshift_state, unshift_buf, unshift_buf + 1,
+                   unshift_next) != std::codecvt_base::ok) {
+    return 20;
+  }
+
   std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
   if (converter.from_bytes("A").size() != 1 || converter.converted() != 1) {
     return 19;

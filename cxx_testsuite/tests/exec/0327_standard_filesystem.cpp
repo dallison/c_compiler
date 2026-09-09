@@ -2,6 +2,7 @@
 // EXPECT_EXIT: 0
 
 #include <filesystem>
+#include <format>
 #include <fstream>
 
 #ifndef __cpp_lib_filesystem
@@ -103,5 +104,9 @@ int main() {
 
   std::uintmax_t removed = fs::remove_all(root, error);
   if (error || removed != 7 || fs::exists(root, error) || error) return 23;
+
+  if (std::format("{}", fs::path("alpha/beta")) != "alpha/beta") return 38;
+  if (std::format("{:g}", fs::path("alpha/beta")) != "alpha/beta") return 39;
+
   return 0;
 }

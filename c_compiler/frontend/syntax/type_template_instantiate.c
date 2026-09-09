@@ -48,6 +48,7 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
                                                size_t explicit_arg_count,
                                                TypeRecord* formal,
                                                TypeRecord* actual);
+static bool TemplateArgumentHasDependentMemberName(TemplateArgument* arg);
 static bool DeduceFunctionTemplateStructMembers(Vector* args,
                                                 size_t explicit_arg_count,
                                                 TypeRecord* formal,
@@ -2296,6 +2297,14 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
       return SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
           args, explicit_arg_count, index, actual_arg->type);
     }
+    // [temp.deduct.type]: a type named by a qualified-id whose nested-name-
+    // specifier is dependent (`typename basic_string<CharT>::const_iterator`)
+    // is a non-deduced context.  Skip only that argument so sibling parameters
+    // (`Allocator` in `match_results<...::const_iterator, Allocator>`) can still
+    // be deduced from the corresponding actual template arguments.
+    if (TemplateArgumentHasDependentMemberName(formal_arg)) {
+      return true;
+    }
     return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                               formal_arg->type,
                                               actual_arg->type);
@@ -2358,6 +2367,24 @@ static bool ClassTemplateOriginMatches(Symbol* a, Symbol* b) {
     return false;
   }
   return a == b || StringEqualString(&a->name, &b->name);
+}
+
+// An explicit class-template specialization is a distinct Struct whose tag is
+// spelled `Primary<args>` and which does not carry template_origin (that
+// metadata would re-mangle the specialization's own members).  Deduction of
+// `Primary<T>` against that type still has to succeed.
+static bool CXXExplicitSpecializationMatchesPrimary(TypeRecord* actual,
+                                                Symbol* primary) {
+  if (actual == NULL || primary == NULL || primary->name.value == NULL ||
+      !TypeIsStructOrUnion(actual) || actual->info.struct_info == NULL ||
+      actual->info.struct_info->tag_name == NULL ||
+      TypeSpecializationTemplateArguments(actual) == NULL) {
+    return false;
+  }
+  const char* tag = actual->info.struct_info->tag_name->value;
+  const char* name = primary->name.value;
+  size_t n = strlen(name);
+  return strncmp(tag, name, n) == 0 && tag[n] == '<';
 }
 
 // [temp.deduct.call]/4.3: when the parameter is a class template specialization
@@ -2490,10 +2517,42 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
       return DeduceFunctionTemplateTemplateArguments(args, explicit_arg_count,
                                                      formal, base);
     }
-    return false;
+    if (!CXXExplicitSpecializationMatchesPrimary(actual, formal_origin)) {
+      return false;
+    }
+  }
+  Vector* completed_formal_args = NULL;
+  if (formal_origin->type != NULL &&
+      TypeIsStructOrUnion(formal_origin->type) &&
+      formal_origin->type->info.struct_info != NULL && formal_args != NULL &&
+      formal_origin->type->info.struct_info->template_parameters.length >
+          formal_args->length) {
+    // `P` written as `basic_string<CharT>` still has the class template's later
+    // default arguments (`char_traits<CharT>`, `allocator<CharT>`).  Fill
+    // them in so deduction can match a fully-specified argument type such as
+    // `basic_string<char, char_traits<char>, allocator<char>>`.
+    TypeParser parser;
+    TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                   STO(implicit), compiler->syntax.context);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    completed_formal_args = CompleteTemplateArguments(
+        &parser, &formal_origin->type->info.struct_info->template_parameters,
+        formal_args, "", /*emit_error=*/false, kTemplateArgumentsBorrow);
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    TypeParserDestruct(&parser);
+    if (completed_formal_args != NULL) {
+      formal_args = completed_formal_args;
+    }
   }
   Vector* actual_args = TypeSpecializationTemplateArguments(actual);
   if (formal_args == NULL || actual_args == NULL) {
+    if (completed_formal_args != NULL) {
+      VectorDeleteWithContents(completed_formal_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     return false;
   }
   Vector flat_actual_args;
@@ -2695,6 +2754,11 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   }
   ok = ok && actual_index == actual_args->length;
   VectorDestruct(&flat_actual_args);
+  if (completed_formal_args != NULL) {
+    VectorDeleteWithContents(completed_formal_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   return ok;
 }
 
@@ -4718,6 +4782,16 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
       }
       if (TypeIsStructOrUnion(pattern)) {
         if (pattern->info.struct_info == actual->info.struct_info) {
+          // Deferred template-ids copy the primary's struct_info and hang the
+          // concrete arguments on the type record.  Those still have to bind
+          // against a pattern such as `optional<T>` rather than matching by
+          // identity and leaving T unbound.
+          Vector* pattern_args = TypeSpecializationTemplateArguments(pattern);
+          Vector* actual_args = TypeSpecializationTemplateArguments(actual);
+          if (pattern_args != NULL || actual_args != NULL) {
+            return ClassTemplateArgumentVectorPatternMatches(
+                bindings, pattern_args, actual_args);
+          }
           return true;
         }
         bool origin_matches = ClassTemplateOriginMatches(
@@ -7804,6 +7878,11 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
   if (subst == NULL) {
     return NULL;
   }
+  // Alias patterns such as `typename __make_index_sequence<N>::type` stay a
+  // lazy `Template<Args>::member` encoding after substitution.  Collapse that to
+  // the concrete nested typedef so functional casts (`make_index_sequence<N>{}`)
+  // construct `index_sequence<0..N-1>` rather than naming the alias at runtime.
+  subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
   return TypeRecordCalculateSize(subst);
 }
 

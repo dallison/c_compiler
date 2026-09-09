@@ -119,5 +119,17 @@ int main() {
     return 14;
   }
 
+  std::ostringstream grouped;
+  grouped.imbue(customized);
+  grouped << 1234567;
+  if (grouped.str() != "1.234.567") {
+    return 15;
+  }
+  grouped.str("");
+  grouped << std::boolalpha << true;
+  if (grouped.str() != "yes") {
+    return 16;
+  }
+
   return 0;
 }

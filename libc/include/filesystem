@@ -701,7 +701,11 @@ class __file_clock {
   static constexpr bool is_steady = false;
   static time_point now() noexcept;
 };
+#if __cplusplus >= 202002L
+using file_time_type = chrono::file_time_type;
+#else
 using file_time_type = chrono::time_point<__file_clock, chrono::nanoseconds>;
+#endif
 
 struct space_info {
   uintmax_t capacity;
@@ -1027,6 +1031,13 @@ path temp_directory_path();
 path temp_directory_path(error_code& error);
 
 }  // namespace filesystem
+}  // namespace std
+
+#if __cplusplus >= 202002L
+#include <format>
+#endif
+
+namespace std {
 
 template <>
 struct hash<filesystem::path> {
@@ -1034,6 +1045,33 @@ struct hash<filesystem::path> {
     return filesystem::hash_value(value);
   }
 };
+
+#if __cplusplus >= 202002L
+template <>
+struct formatter<filesystem::path, char> {
+  bool __generic = false;
+
+  constexpr format_parse_context::iterator parse(
+      format_parse_context& context) {
+    auto current = context.begin();
+    if (current != context.end() && *current == 'g') {
+      __generic = true;
+      ++current;
+    }
+    return current;
+  }
+
+  format_context::iterator format(const filesystem::path& value,
+                                  format_context& context) const {
+    string text = __generic ? value.generic_string() : value.string();
+    auto out = context.out();
+    for (size_t i = 0; i < text.size(); ++i) {
+      *out++ = text[i];
+    }
+    return out;
+  }
+};
+#endif
 
 }  // namespace std
 

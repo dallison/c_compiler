@@ -3,11 +3,10 @@
 //  c_compiler
 //
 //  C++20 <ostream> support for DaveCC: basic_ostream and its formatted /
-//  unformatted output operations.  Integer digit conversion uses the compact
-//  __itoa helpers, and floating-point conversion uses the lower-level ftoa
-//  helpers, so iostream doesn't drag in the printf machinery. Field width,
-//  fill and adjustfield are applied here so arbitrary fill characters and
-//  internal padding behave per the standard.
+//  unformatted output operations.  Arithmetic inserters use num_put so
+//  locale grouping, thousands separators, and boolalpha names apply. Field
+//  width, fill and adjustfield for non-numeric inserters are applied here so
+//  arbitrary fill characters and internal padding behave per the standard.
 //
 
 #ifndef __davecc_ostream__
@@ -16,13 +15,9 @@
 #include <ios>
 #include <streambuf>
 #include <iosfwd>
+#include <locale>
 #include <__char_traits>
-#include <__itoa.h>
-#include <string.h>
-
-extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
-extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
-extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
+#include <type_traits>
 
 namespace std {
 
@@ -69,47 +64,29 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   }
   virtual ~basic_ostream() {}
 
-  // Formatted output of arithmetic values.
-  basic_ostream& operator<<(bool v) {
-    if ((this->flags() & ios_base::boolalpha) != 0) {
-      return __put_bytes(v ? "true" : "false", v ? 4 : 5, 0);
-    }
-    return __put_signed_int(v ? 1 : 0);
-  }
+  // Formatted output of arithmetic values goes through num_put so numpunct
+  // grouping, thousands_sep, truename/falsename, and padding all apply.
+  basic_ostream& operator<<(bool v) { return __put_num(v); }
   basic_ostream& operator<<(short v) {
-    return __put_signed_int(static_cast<int>(v));
+    return __put_num(static_cast<long>(v));
   }
   basic_ostream& operator<<(unsigned short v) {
-    return __put_unsigned_int(static_cast<unsigned int>(v));
+    return __put_num(static_cast<unsigned long>(v));
   }
-  basic_ostream& operator<<(int v) {
-    return __put_signed_int(v);
-  }
+  basic_ostream& operator<<(int v) { return __put_num(static_cast<long>(v)); }
   basic_ostream& operator<<(unsigned int v) {
-    return __put_unsigned_int(v);
+    return __put_num(static_cast<unsigned long>(v));
   }
-  basic_ostream& operator<<(long v) {
-    return __put_signed_long(static_cast<long long>(v));
-  }
-  basic_ostream& operator<<(unsigned long v) {
-    return __put_unsigned_long(static_cast<unsigned long long>(v));
-  }
-  basic_ostream& operator<<(long long v) { return __put_signed_long(v); }
-  basic_ostream& operator<<(unsigned long long v) {
-    return __put_unsigned_long(v);
-  }
+  basic_ostream& operator<<(long v) { return __put_num(v); }
+  basic_ostream& operator<<(unsigned long v) { return __put_num(v); }
+  basic_ostream& operator<<(long long v) { return __put_num(v); }
+  basic_ostream& operator<<(unsigned long long v) { return __put_num(v); }
   basic_ostream& operator<<(float v) {
-    return __put_float(static_cast<double>(v));
+    return __put_num(static_cast<double>(v));
   }
-  basic_ostream& operator<<(double v) { return __put_float(v); }
-  basic_ostream& operator<<(long double v) {
-    return __put_float(static_cast<double>(v));
-  }
-  basic_ostream& operator<<(const void* v) {
-    char buf[__DAVECC_ITOA_CAPACITY(const void*)];
-    size_t n = __ptrtoa(buf, v);
-    return __put_bytes(buf, n, 0);
-  }
+  basic_ostream& operator<<(double v) { return __put_num(v); }
+  basic_ostream& operator<<(long double v) { return __put_num(v); }
+  basic_ostream& operator<<(const void* v) { return __put_num(v); }
 
   // Insert the contents of another buffer.
   basic_ostream& operator<<(basic_streambuf<CharT, Traits>* sb) {
@@ -262,136 +239,33 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return true;
   }
 
-  // Compute the numeric base and __itoa flag bits from the stream's
-  // basefield / showbase / uppercase / showpos state.
-  unsigned char __int_base_flags(bool is_signed, unsigned char* flags_out) {
-    ios_base::fmtflags current = this->flags();
-    ios_base::fmtflags base = current & ios_base::basefield;
-    unsigned char flags = 0;
-    if ((current & ios_base::uppercase) != 0) {
-      flags |= __DAVECC_ITOA_UPPER;
+  template <class T>
+  basic_ostream& __put_num(T v) {
+    sentry sen(*this);
+    if (!sen) {
+      return *this;
     }
-    if ((current & ios_base::showbase) != 0) {
-      flags |= __DAVECC_ITOA_SHOWBASE;
+    typedef typename is_same<CharT, char>::type character_tag;
+    if (!__put_num_impl(v, character_tag())) {
+      this->setstate(ios_base::badbit);
     }
-    if ((current & ios_base::showpos) != 0 && is_signed &&
-        base == ios_base::dec) {
-      flags |= __DAVECC_ITOA_SHOWPOS;
-    }
-    *flags_out = flags;
-    return base == ios_base::hex ? 16 : base == ios_base::oct ? 8 : 10;
+    return *this;
   }
 
-  // Count the leading sign / base-prefix bytes for internal padding.
-  static size_t __prefix_len(const char* s, size_t n) {
-    size_t i = 0;
-    if (i < n && (s[i] == '-' || s[i] == '+')) {
-      i++;
-    }
-    if (i + 1 < n && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
-      i += 2;
-    }
-    return i;
+  template <class T>
+  bool __put_num_impl(T v, true_type) {
+    ostreambuf_iterator it(this->rdbuf());
+    it = use_facet<num_put<char, ostreambuf_iterator>>(this->getloc())
+             .put(it, *this, this->fill(), v);
+    return !it.failed();
   }
 
-  basic_ostream& __put_signed_int(int v) {
-    char buf[__DAVECC_ITOA_CAPACITY(int)];
-    unsigned char flags;
-    unsigned char base = __int_base_flags(/*is_signed=*/true, &flags);
-    size_t n = base == 10 ? __itoa_int(buf, v, base, flags)
-                          : __utoa_uint(buf, static_cast<unsigned int>(v),
-                                        base, flags);
-    return __put_bytes(buf, n, __prefix_len(buf, n));
-  }
-  basic_ostream& __put_unsigned_int(unsigned int v) {
-    char buf[__DAVECC_ITOA_CAPACITY(unsigned int)];
-    unsigned char flags;
-    unsigned char base = __int_base_flags(/*is_signed=*/false, &flags);
-    size_t n = __utoa_uint(buf, v, base, flags);
-    return __put_bytes(buf, n, __prefix_len(buf, n));
-  }
-  basic_ostream& __put_signed_long(long long v) {
-    char buf[__DAVECC_ITOA_CAPACITY(long long)];
-    unsigned char flags;
-    unsigned char base = __int_base_flags(/*is_signed=*/true, &flags);
-    size_t n = base == 10
-                   ? __itoa_longlong(buf, v, base, flags)
-                   : __utoa_ulonglong(
-                         buf, static_cast<unsigned long long>(v), base, flags);
-    return __put_bytes(buf, n, __prefix_len(buf, n));
-  }
-  basic_ostream& __put_unsigned_long(unsigned long long v) {
-    char buf[__DAVECC_ITOA_CAPACITY(unsigned long long)];
-    unsigned char flags;
-    unsigned char base = __int_base_flags(/*is_signed=*/false, &flags);
-    size_t n = __utoa_ulonglong(buf, v, base, flags);
-    return __put_bytes(buf, n, __prefix_len(buf, n));
-  }
-  basic_ostream& __put_float(double v) {
-    char raw_buffer[64];
-    char formatted[66];
-    ios_base::fmtflags ff = this->flags() & ios_base::floatfield;
-    bool upper = (this->flags() & ios_base::uppercase) != 0;
-    bool showpos = (this->flags() & ios_base::showpos) != 0;
-    bool showpoint = (this->flags() & ios_base::showpoint) != 0;
-    int precision = static_cast<int>(this->precision());
-    if (precision <= 0) {
-      precision = 6;
-    }
-    char* raw;
-    if (ff == ios_base::fixed) {
-      if (precision > static_cast<int>(sizeof(raw_buffer) - 2)) {
-        precision = sizeof(raw_buffer) - 2;
-      }
-      raw = __PrintFloatFormat(v, precision, raw_buffer, sizeof(raw_buffer));
-    } else if (ff == ios_base::scientific) {
-      if (precision > static_cast<int>(sizeof(raw_buffer) - 5)) {
-        precision = sizeof(raw_buffer) - 5;
-      }
-      raw = __PrintScientificFormat(v, precision, raw_buffer,
-                                    sizeof(raw_buffer));
-    } else {
-      if (precision > static_cast<int>(sizeof(raw_buffer) - 5)) {
-        precision = sizeof(raw_buffer) - 5;
-      }
-      raw = __PrintGeneralFormat(v, precision, raw_buffer, sizeof(raw_buffer));
-    }
-
-    size_t raw_length = strlen(raw);
-    bool has_point = false;
-    bool special = false;
-    size_t exponent = raw_length;
-    for (size_t i = 0; i < raw_length; i++) {
-      if (raw[i] == '.') {
-        has_point = true;
-      } else if (raw[i] == 'e' || raw[i] == 'E') {
-        exponent = i;
-      } else if ((raw[i] >= 'a' && raw[i] <= 'z') ||
-                 (raw[i] >= 'A' && raw[i] <= 'Z')) {
-        special = true;
-      }
-    }
-
-    size_t n = 0;
-    if (showpos && (raw_length == 0 || raw[0] != '-')) {
-      formatted[n++] = '+';
-    }
-    for (size_t i = 0; i < raw_length; i++) {
-      if (showpoint && !has_point && !special && i == exponent) {
-        formatted[n++] = '.';
-      }
-      char c = raw[i];
-      if (upper && c >= 'a' && c <= 'z') {
-        c -= 'a' - 'A';
-      }
-      formatted[n++] = c;
-    }
-    if (showpoint && !has_point && !special && exponent == raw_length) {
-      formatted[n++] = '.';
-    }
-    size_t prefix =
-        (n > 0 && (formatted[0] == '-' || formatted[0] == '+')) ? 1 : 0;
-    return __put_bytes(formatted, n, prefix);
+  template <class T>
+  bool __put_num_impl(T v, false_type) {
+    wostreambuf_iterator it(this->rdbuf());
+    it = use_facet<num_put<wchar_t, wostreambuf_iterator>>(this->getloc())
+             .put(it, *this, this->fill(), v);
+    return !it.failed();
   }
 };
 

@@ -1572,6 +1572,15 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
                                                           t2->info.struct_info);
       }
       if (TypeIsEnum(t1) && TypeIsEnum(t2)) {
+        // In C++, every enumeration is a distinct type, including unscoped
+        // enums that share an underlying integer representation.  Comparing
+        // only the leftover type bits makes `enum A` and `enum B` collide, so
+        // overloads such as `operator|(syntax_option_type)` and
+        // `operator|(match_flag_type)` are rejected as duplicates.
+        if (CompilerIsCXX()) {
+          return t1->info.enum_info == t2->info.enum_info &&
+                 t1->qualifiers == t2->qualifiers;
+        }
         if (TypeIsScopedEnum(t1) || TypeIsScopedEnum(t2)) {
           return t1->info.enum_info == t2->info.enum_info &&
                  t1->qualifiers == t2->qualifiers;
