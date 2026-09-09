@@ -492,6 +492,28 @@ if grep -Eq '[[:space:]]adda\(' <<<"$sroa_pair_body"; then
   exit 1
 fi
 
+# x86-64 lowers a dense switch to a RIP-relative indirect jump through
+# 8-byte-aligned jmp slots.
+dense_switch_ir=$(
+  awk '/IR for function dense_switch/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '[[:space:]]cbra\(' <<<"$dense_switch_ir"; then
+  echo "dense switch was not lowered to a computed branch" >&2
+  exit 1
+fi
+dense_switch_asm=$(
+  awk '/^dense_switch:/{inside=1} \
+       inside{print} \
+       /^\.func_end_dense_switch:/{exit}' "$WORK/optimizer.s"
+)
+if ! grep -Eq 'jmp[[:space:]]+\*' <<<"$dense_switch_asm"; then
+  echo "x86_64 dense switch was not lowered to an indirect jump table" >&2
+  exit 1
+fi
+
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.
 induction_body=$(

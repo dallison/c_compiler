@@ -258,6 +258,8 @@ typedef enum {
 #define X86_64_FCMP_SS 0x80000
 #define X86_64_FCMP_SD 0x100000
 #define X86_64_INST_EXTENDED_ASM 0x200000
+// Jump-table start label or a jmp that occupies one 8-byte table slot.
+#define X86_64_INST_TABLE_ENTRY 0x1000000
 #define X86_64_TLS_RELOC 0x400000
 #define X86_64_MFENCE 0x800000
 #define X86_64_ATOMIC_SIZE_SHIFT 24

@@ -488,9 +488,13 @@ static void BuildTargetBasicBlockGraph(TargetGenerator* gen,
       TargetBasicBlockAddEdge(block, taken->block);
     } else if ((inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
        // Table jump is followed by a branch table.  These are j instructions.
-       // Find all of them and link to this block.
+       // Find all of them and link to this block.  x86-64 plants a label at
+       // the table so the computed branch can lea it; skip that one label.
        TargetInstruction* j = TargetNext(inst);
-       while (gen->virtuals->is_table_entry(j)) {
+       if (j != NULL && gen->virtuals->is_label(j)) {
+         j = TargetNext(j);
+       }
+       while (j != NULL && gen->virtuals->is_table_entry(j)) {
          TargetBasicBlockAddEdge(block, j->block);
          j = TargetNext(j);
        }

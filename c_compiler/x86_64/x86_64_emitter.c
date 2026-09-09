@@ -1988,6 +1988,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     emitter->current_block = inst->block;
   }
   if (((int)inst->opcode == (int)X86_64_OP(label))) {
+    if ((inst->flags & X86_64_INST_TABLE_ENTRY) != 0) {
+      fprintf(fp, "\t.p2align 3\n");
+    }
     if ((inst->flags & X86_64_EXPORTED_LABEL) != 0) {
       // Label may be exported.
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
@@ -2495,6 +2498,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
 
     case X86_64_OP(jmp): {
       assert(inst->operand[0] != NULL);
+      if ((inst->flags & X86_64_INST_TABLE_ENTRY) != 0) {
+        fprintf(fp, "\t.p2align 3\n");
+      }
       TargetInstruction* dest = inst->operand[0];
       if (((int)dest->opcode == (int)X86_64_OP(label))) {
         fprintf(fp, "\tjmp .%s_label_%d\n", func_name, dest->id);
@@ -2831,6 +2837,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       } else if (((int)inst->operand[0]->opcode == (int)X86_64_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
         fprintf(fp, ".str.%d(%%rip), ", literal->literal_id);
+      } else if (((int)inst->opcode == (int)X86_64_OP(lea_rip)) &&
+                 ((int)inst->operand[0]->opcode == (int)X86_64_OP(label))) {
+        fprintf(fp, ".%s_label_%d(%%rip), ", func_name, inst->operand[0]->id);
       } else if (((int)inst->opcode == (int)X86_64_OP(lea_rip)) &&
                  TargetIsConst(inst->operand[0])) {
         // PC-relative lea with an immediate displacement (used to materialize

@@ -117,6 +117,29 @@ __attribute__((noinline)) int sroa_pair(int a, int b) {
   return v[0] + v[1];
 }
 
+__attribute__((noinline)) int dense_switch(int selector) {
+  switch (selector) {
+    case 0:
+      return 17;
+    case 1:
+      return 19;
+    case 2:
+      return 23;
+    case 3:
+      return 29;
+    case 4:
+      return 31;
+    case 5:
+      return 37;
+    case 6:
+      return 41;
+    case 7:
+      return 43;
+    default:
+      return 71;
+  }
+}
+
 __attribute__((noinline)) int unroll_sum4(int *a) {
   int s = 0;
   for (int i = 0; i < 4; i++) {
@@ -289,7 +312,8 @@ int main(void) {
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||
       sdiv_const10(-17) != -1 || sdiv_const10(99) != 9 ||
       unroll_sum4(unroll_values) != 10 || sroa_point(3, 4) != 7 ||
-      sroa_pair(5, 6) != 11) {
+      sroa_pair(5, 6) != 11 || dense_switch(5) != 37 ||
+      dense_switch(0) != 17 || dense_switch(11) != 71) {
     result |= 8;
   } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;

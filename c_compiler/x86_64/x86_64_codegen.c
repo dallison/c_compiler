@@ -3019,6 +3019,9 @@ static TargetInstruction* LowerBranch(X86_64Generator* rv, IRNode* node) {
   // Normal branch or non-leaf return branch.
   TargetInstruction* inst =
       (TargetInstruction*)Emit(rv, NewInstruction(X86_64_OP(jmp)));
+  if ((node->flags & kIRJumpTableBranch) != 0) {
+    inst->flags |= X86_64_INST_TABLE_ENTRY;
+  }
 
   TargetInstruction* target = target_node->data.ptr;
   if (target == NULL) {
@@ -4278,36 +4281,38 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
   return call;
 }
 
-// A computed branch is used to branch to a dense switch table consisting
-// of a sequence of 'j' instructions to the case labels.  Each instruction
-// is 4 bytes long.  The instruction sequence for the computed branch is:
+// A computed branch indexes a dense switch table of jmp instructions.  x86
+// jumps are variable length, so each table slot is forced to 8 bytes with
+// .p2align 3 around the entries:
 //
-// entry: t0 = index into table.
-// slli t1, t0, 2      - byte offset into table
-// auipc t2, 0        - high 20 bits of pc at this instruction
-// addi t2, t2, t1     - address of jump instruction
-// jalr x0, t2, 12    - jump to jump instruction + 12
-//
-// The offset in the jalr instruction is because the auipc instruction
-// is 12 bytes before the branch table start.  The value of t2 is the
-// pc of the auipc instruction plus the offset into the table.
+//   leaq table(%rip), %base
+//   shlq $3, %index
+//   addq %index, %base
+//   jmp *%base
+//   .p2align 3
+// table:
+//   jmp case0
+//   .p2align 3
+//   jmp case1
+//   ...
 
 static TargetInstruction* LowerComputedBranch(X86_64Generator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
-  TargetInstruction* slli =
+  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  TargetInstruction* scaled =
       Emit(rv, NewInstruction2(X86_64_OP(shl), value,
-                               GetIntConstant(rv, NULL, kTargetType32Bit, 2)));
-  TargetInstruction* auipc =
-      Emit(rv, NewInstruction1(X86_64_OP(lea_rip),
-                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
-  TargetInstruction* add = Emit(rv, NewInstruction2(X86_64_OP(add), auipc, slli));
-  TargetInstruction* jalr =
-      Emit(rv, NewInstruction3(X86_64_OP(rcall), Zero(rv), add,
-                               GetIntConstant(rv, NULL, kTargetType32Bit, 12)));
-  jalr->flags |= TARGET_INST_TABLE_JUMP;
-  SetLoweredNode(node, jalr);
-  return jalr;
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 3)));
+  TargetInstruction* table = NewInstruction(X86_64_OP(label));
+  table->flags |= X86_64_INST_TABLE_ENTRY;
+  TargetInstruction* base =
+      Emit(rv, NewInstruction1(X86_64_OP(lea_rip), table));
+  TargetInstruction* addr =
+      Emit(rv, NewInstruction2(X86_64_OP(add), base, scaled));
+  TargetInstruction* jmp =
+      Emit(rv, NewInstruction1(X86_64_OP(jmp), addr));
+  jmp->flags |= TARGET_INST_TABLE_JUMP;
+  Emit(rv, table);
+  return SetLoweredNode(node, jmp);
 }
 
 // SysV AMD64 va_list helpers.  The structure layout is:
