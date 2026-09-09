@@ -33,6 +33,7 @@
 #include "induction.h"
 #include "loop_info.h"
 #include "memopt.h"
+#include "sroa.h"
 #include "unroll.h"
 
 static void Trap() {}
@@ -1967,6 +1968,12 @@ void* GenerateFunction(Generator* gen) {
   }
 
   MarkVariablesWhoseAddressEscapes(gen);
+
+  if (OptLevel2()) {
+    // Split constant-offset aggregate accesses into scalars before SSA so
+    // the new temporaries get phis and can be allocated to registers.
+    ScalarReplacementOptimization(gen);
+  }
 
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {
     GeneratorPrintIR(gen, compiler->ir_output_file);

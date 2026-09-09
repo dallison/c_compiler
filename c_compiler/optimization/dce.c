@@ -2,6 +2,7 @@
 
 #include "basic_block.h"
 #include "ir.h"
+#include "type_compare.h"
 
 static bool IsDeadExpression(IRNode* inst) {
   if (!IRIsExpression(inst) || IRIsConstant(inst) || IRIsVariable(inst) ||
@@ -23,6 +24,34 @@ static bool IsDeadExpression(IRNode* inst) {
   return inst->outputs.length == 0;
 }
 
+// Store to a non-escaped local that is never loaded.  SROA and store-to-load
+// forwarding leave these behind; they would otherwise force a stack slot.
+static bool IsDeadLocalStore(IRNode* inst) {
+  if (!IRIsStoreOnly(inst) || inst->inputs.length == 0) {
+    return false;
+  }
+  IRNode* dest = inst->inputs.value.p[0];
+  if (dest == NULL || !IRIsVariable(dest)) {
+    return false;
+  }
+  Symbol* symbol = ((IRVariable*)dest)->symbol;
+  if (symbol == NULL || symbol->flags.address_taken ||
+      symbol->flags.is_argument ||
+      (!symbol->flags.is_local && !symbol->flags.is_temp) ||
+      StorageIs(symbol->storage, STO(static) | STO(extern) | STO(thread)) ||
+      TypeIsVolatile(symbol->type)) {
+    return false;
+  }
+  for (size_t i = 0; i < dest->outputs.length; i++) {
+    IRNode* user = dest->outputs.value.p[i];
+    if (!IRIsStoreOnly(user) || user->inputs.length == 0 ||
+        user->inputs.value.p[0] != dest) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void DeadCodeEliminationOptimization(Generator* gen) {
   // Removing one expression can make its inputs dead.  Iterating to a fixed
   // point is simple here and keeps the pass independent of block-local
@@ -37,7 +66,7 @@ void DeadCodeEliminationOptimization(Generator* gen) {
            !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
            inst = next) {
         next = IRNext(inst);
-        if (IsDeadExpression(inst)) {
+        if (IsDeadExpression(inst) || IsDeadLocalStore(inst)) {
           BasicBlockRemoveInstruction(gen, block, inst);
           changed = true;
         }
@@ -45,3 +74,4 @@ void DeadCodeEliminationOptimization(Generator* gen) {
     }
   } while (changed);
 }
+

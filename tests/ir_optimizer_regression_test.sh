@@ -469,6 +469,29 @@ if [[ "$unroll_o3_rc" -ne "$unroll_o0_rc" ]]; then
   exit 1
 fi
 
+# Small local structs/arrays used only at constant offsets become scalars.
+# After SSA the member adda must be gone; the sum is just the two arguments.
+sroa_point_body=$(
+  awk '/IR for function sroa_point/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq '[[:space:]]adda\(' <<<"$sroa_point_body"; then
+  echo "SROA left a constant-offset adda in sroa_point" >&2
+  exit 1
+fi
+sroa_pair_body=$(
+  awk '/IR for function sroa_pair/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq '[[:space:]]adda\(' <<<"$sroa_pair_body"; then
+  echo "SROA left a constant-offset adda in sroa_pair" >&2
+  exit 1
+fi
+
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.
 induction_body=$(

@@ -210,6 +210,7 @@ davecc_library(davecc_compiler
   c_compiler/optimization/unroll.c
   c_compiler/optimization/optimizer.c
   c_compiler/optimization/ssa.c
+  c_compiler/optimization/sroa.c
   c_compiler/p_code/p_code_assembler.c
   c_compiler/p_code/p_code_codegen.c
   c_compiler/p_code/p_code_emitter.c

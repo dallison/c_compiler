@@ -793,6 +793,7 @@ cc_library(
         "c_compiler/frontend/lexical/generated/unicode_name_data.c",
         "c_compiler/optimization/optimizer.c",
         "c_compiler/optimization/sccp.c",
+        "c_compiler/optimization/sroa.c",
         "c_compiler/driver/options.c",
         "c_compiler/p_code/p_code_assembler.c",
         "c_compiler/p_code/p_code_codegen.c",
