@@ -500,6 +500,37 @@ if ! grep -Eq '[[:space:]]paddd[[:space:]]' <<<"$vectorize_asm"; then
   exit 1
 fi
 
+# SLP packs adjacent straight-line isomorphic adds of static arrays at -O2.
+slp_body=$(
+  awk '/IR for function slp_add4/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$slp_body"; then
+  echo "straight-line add was not SLP-vectorized at -O2" >&2
+  exit 1
+fi
+slp_splat_body=$(
+  awk '/IR for function slp_add1/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$slp_splat_body"; then
+  echo "straight-line splat add was not SLP-vectorized at -O2" >&2
+  exit 1
+fi
+slp_asm=$(
+  awk '/^slp_add4:/{inside=1; next} \
+       /^\.func_end_slp_add4:/{inside=0} \
+       inside' "$WORK/optimizer.s"
+)
+if ! grep -Eq '[[:space:]]paddd[[:space:]]' <<<"$slp_asm"; then
+  echo "x86_64 SLP add did not lower to paddd" >&2
+  exit 1
+fi
+
 # Small local structs/arrays used only at constant offsets become scalars.
 # After SSA the member adda must be gone; the sum is just the two arguments.
 sroa_point_body=$(
@@ -710,6 +741,25 @@ aarch64_vectorize_asm=$(
 # assembler listing currently dumps it as a raw word rather than `add vN.4s`.
 if ! grep -Eq '\.word 0x4e[0-9a-fA-F]{6}' <<<"$aarch64_vectorize_asm"; then
   echo "AArch64 auto-vectorized add did not emit a SIMD add encoding" >&2
+  exit 1
+fi
+aarch64_slp_body=$(
+  awk '/IR for function slp_add4/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$AARCH64_INDUCTION_IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$aarch64_slp_body"; then
+  echo "AArch64 straight-line add was not SLP-vectorized at -O2" >&2
+  exit 1
+fi
+aarch64_slp_asm=$(
+  awk '/^slp_add4:/{inside=1; next} \
+       /^\.func_end_slp_add4:/{inside=0} \
+       inside' "$WORK/aarch64_induction.s"
+)
+if ! grep -Eq '\.word 0x4e[0-9a-fA-F]{6}' <<<"$aarch64_slp_asm"; then
+  echo "AArch64 SLP add did not emit a SIMD add encoding" >&2
   exit 1
 fi
 

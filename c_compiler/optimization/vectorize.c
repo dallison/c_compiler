@@ -2,7 +2,8 @@
 //  vectorize.c
 //  c_compiler
 //
-//  Conservative loop auto-vectorization of unit-stride counted loops.
+//  Conservative loop auto-vectorization of unit-stride counted loops, plus
+//  SLP packing of adjacent isomorphic scalar ops in a single block.
 //
 
 #include "vectorize.h"
@@ -20,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 enum { kNativeVectorBytes = 16 };
 
@@ -749,11 +751,20 @@ static IRNode* MaterializeInvariant(Generator* gen, LoopInfo* loop,
   return EmitBeforeTerminator(gen, loop->preheader, load);
 }
 
-static IRNode* MaterializeSplat(Generator* gen, LoopInfo* loop,
-                               TypeRecord* vector_type, TypeRecord* element,
-                               int vf, IRNode* lane_value) {
-  IRNode* value = MaterializeInvariant(gen, loop, lane_value);
-  if (value == NULL) {
+static void EmitAt(Generator* gen, BasicBlock* block, IRNode* before,
+                   IRNode* inst) {
+  if (before != NULL) {
+    BasicBlockEmitBefore(gen, block, inst, before);
+  } else {
+    EmitBeforeTerminator(gen, block, inst);
+  }
+}
+
+static IRNode* MaterializeSplatAt(Generator* gen, BasicBlock* block,
+                                 IRNode* before, TypeRecord* vector_type,
+                                 TypeRecord* element, int vf,
+                                 IRNode* lane_value) {
+  if (lane_value == NULL || block == NULL) {
     return NULL;
   }
   Symbol* temporary = SyntaxNewTemporary(gen->syntax, vector_type);
@@ -767,13 +778,24 @@ static IRNode* MaterializeSplat(Generator* gen, LoopInfo* loop,
           NewIR2(IR_OP(adda), object,
                  GeneratorGetIntConstant(gen, NULL, lane * element->size)),
           NewPointerTo(kQualPlain, element));
-      EmitBeforeTerminator(gen, loop->preheader, address);
+      EmitAt(gen, block, before, address);
     }
     IRNode* store =
-        NewIR2(GetStoreOpcodeForType(element), address, value);
-    EmitBeforeTerminator(gen, loop->preheader, store);
+        NewIR2(GetStoreOpcodeForType(element), address, lane_value);
+    EmitAt(gen, block, before, store);
   }
   return object;
+}
+
+static IRNode* MaterializeSplat(Generator* gen, LoopInfo* loop,
+                               TypeRecord* vector_type, TypeRecord* element,
+                               int vf, IRNode* lane_value) {
+  IRNode* value = MaterializeInvariant(gen, loop, lane_value);
+  if (value == NULL) {
+    return NULL;
+  }
+  return MaterializeSplatAt(gen, loop->preheader, NULL, vector_type, element,
+                            vf, value);
 }
 
 static void ScalePointerUpdate(Generator* gen, IRNode* update, int vf) {
@@ -865,26 +887,591 @@ static bool VectorizeLoop(Generator* gen, LoopInfo* loop,
   return true;
 }
 
+enum { kSLPPackNodeCap = 256 };
+
+typedef struct {
+  IRNode* store;
+  IRNode* dest_addr;
+  IRNode* dest_base;
+  IRNode* binop;
+  IRNode* left;
+  IRNode* right;
+  IRNode* left_load;
+  IRNode* right_load;
+  Symbol* dest_obj;
+  int64_t dest_off;
+  TypeRecord* element;
+  int elem_size;
+  IROpcode vector_opcode;
+} SLPLane;
+
+typedef struct {
+  IRNode* address;
+  IRNode* base;
+  Symbol* object;
+  int64_t offset;
+} ConstAccess;
+
+typedef struct {
+  bool splat;
+  IRNode* splat_value;
+  Symbol* object;
+  int64_t first_off;
+  IRNode* first_address;
+} SLPOperand;
+
+static bool DecodeConstAddress(IRNode* address, ConstAccess* out) {
+  ConstAccess found = {0};
+  found.address = address;
+  if (address == NULL) {
+    return false;
+  }
+  IRNode* base = address;
+  int64_t offset = 0;
+  if (address->opcode == IR_OP(adda) && address->inputs.length == 2) {
+    IRNode* left = address->inputs.value.p[0];
+    IRNode* right = address->inputs.value.p[1];
+    if (IRIsIntConst(right)) {
+      base = left;
+      offset = IRIntConstValue(right);
+    } else if (IRIsIntConst(left)) {
+      base = right;
+      offset = IRIntConstValue(left);
+    } else {
+      return false;
+    }
+  }
+  base = PeelInvariantBase(base);
+  if (!IsSafeArrayObject(base)) {
+    return false;
+  }
+  found.base = base;
+  found.object = VariableSymbol(base);
+  found.offset = offset;
+  if (found.object == NULL) {
+    return false;
+  }
+  *out = found;
+  return true;
+}
+
+static bool SameSplatValue(IRNode* a, IRNode* b) {
+  if (a == b) {
+    return true;
+  }
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (IRIsIntConst(a) && IRIsIntConst(b)) {
+    return IRIntConstValue(a) == IRIntConstValue(b);
+  }
+  if (IRIsConst(a) && IRIsConst(b) && !IRIsIntConst(a) && !IRIsIntConst(b)) {
+    return ((IRConstant*)a)->value.fvalue == ((IRConstant*)b)->value.fvalue;
+  }
+  return false;
+}
+
+static bool OpcodeIsCommutative(IROpcode opcode) {
+  switch (opcode) {
+    case IR_OP(addi):
+    case IR_OP(andi):
+    case IR_OP(ori):
+    case IR_OP(xori):
+    case IR_OP(addf):
+    case IR_OP(addd):
+    case IR_OP(mulf):
+    case IR_OP(muld):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool AnalyzeSLPStore(IRNode* store, SLPLane* lane) {
+  SLPLane found = {0};
+  if (!IRIsStoreOnly(store) || store->inputs.length < 2) {
+    return false;
+  }
+  found.elem_size = MemoryWidth(store);
+  found.binop = store->inputs.value.p[1];
+  if (found.elem_size <= 0 || found.binop == NULL ||
+      found.binop->inputs.length != 2 || found.binop->block != store->block) {
+    return false;
+  }
+  found.element = found.binop->type;
+  if (found.element == NULL || found.element->size != found.elem_size ||
+      TypeIsVolatile(found.element) || TypeIsAtomic(found.element) ||
+      TypeIsBitInt(found.element)) {
+    return false;
+  }
+  found.vector_opcode =
+      VectorOpcodeForBinop(found.binop->opcode, found.element);
+  if (!OpcodeIsNative(found.vector_opcode, found.element)) {
+    return false;
+  }
+  ConstAccess dest;
+  if (!DecodeConstAddress(store->inputs.value.p[0], &dest)) {
+    return false;
+  }
+  if (dest.offset < 0 || (dest.offset % found.elem_size) != 0) {
+    return false;
+  }
+  if (dest.object->type != NULL && dest.object->type->size > 0 &&
+      dest.offset + found.elem_size > dest.object->type->size) {
+    return false;
+  }
+  found.store = store;
+  found.dest_addr = dest.address;
+  found.dest_base = dest.base;
+  found.dest_obj = dest.object;
+  found.dest_off = dest.offset;
+  found.left = found.binop->inputs.value.p[0];
+  found.right = found.binop->inputs.value.p[1];
+  if (IRIsLoadOnly(found.left)) {
+    found.left_load = found.left;
+  }
+  if (IRIsLoadOnly(found.right)) {
+    found.right_load = found.right;
+  }
+  *lane = found;
+  return true;
+}
+
+static bool ClassifyOperand(IRNode* value, int elem_size, SLPOperand* op) {
+  SLPOperand found = {0};
+  if (value == NULL || elem_size <= 0) {
+    return false;
+  }
+  if (IRIsLoadOnly(value) && MemoryWidth(value) == elem_size &&
+      value->inputs.length >= 1) {
+    ConstAccess access;
+    if (DecodeConstAddress(value->inputs.value.p[0], &access)) {
+      found.object = access.object;
+      found.first_off = access.offset;
+      found.first_address = access.address;
+      *op = found;
+      return true;
+    }
+  }
+  if (!IRIsConst(value) && !IRIsLoadOnly(value) && !IRIsVariable(value)) {
+    return false;
+  }
+  found.splat = true;
+  found.splat_value = value;
+  *op = found;
+  return true;
+}
+
+static bool MatchOperand(const SLPLane* lane, bool use_left,
+                         const SLPOperand* expected, int index, int elem_size) {
+  IRNode* value = use_left ? lane->left : lane->right;
+  if (expected->splat) {
+    return SameSplatValue(value, expected->splat_value);
+  }
+  if (!IRIsLoadOnly(value) || MemoryWidth(value) != elem_size ||
+      value->inputs.length == 0) {
+    return false;
+  }
+  ConstAccess access;
+  if (!DecodeConstAddress(value->inputs.value.p[0], &access)) {
+    return false;
+  }
+  return access.object == expected->object &&
+         access.offset == expected->first_off + (int64_t)index * elem_size;
+}
+
+static bool MatchLaneOperands(const SLPLane* lane, int index,
+                              const SLPOperand* left, const SLPOperand* right,
+                              bool commutative, int elem_size) {
+  if (MatchOperand(lane, true, left, index, elem_size) &&
+      MatchOperand(lane, false, right, index, elem_size)) {
+    return true;
+  }
+  return commutative &&
+         MatchOperand(lane, true, right, index, elem_size) &&
+         MatchOperand(lane, false, left, index, elem_size);
+}
+
+static bool NodeInList(IRNode** list, size_t n, IRNode* node) {
+  for (size_t i = 0; i < n; i++) {
+    if (list[i] == node) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void AddPackNode(IRNode** list, size_t* n, IRNode* node) {
+  if (node == NULL || NodeInList(list, *n, node)) {
+    return;
+  }
+  if (*n < kSLPPackNodeCap) {
+    list[(*n)++] = node;
+  }
+}
+
+static bool HarmlessAddressOp(IRNode* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  switch (inst->opcode) {
+    case IR_OP(label):
+    case IR_OP(loc):
+    case IR_OP(nop):
+    case IR_OP(adda):
+    case IR_OP(muli):
+    case IR_OP(lsli):
+    case IR_OP(signextendi):
+    case IR_OP(zeroextendi):
+    case IR_OP(cast):
+    case IR_OP(addressof):
+      return true;
+    default:
+      return IRIsConst(inst) || IRIsVariable(inst);
+  }
+}
+
+static bool InstPrecedes(BasicBlock* block, IRNode* a, IRNode* b) {
+  for (IRNode* inst = BasicBlockBegin(block);
+       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+       inst = IRNext(inst)) {
+    if (inst == a) {
+      return inst != b;
+    }
+    if (inst == b) {
+      return false;
+    }
+  }
+  return false;
+}
+
+static bool BinopHasPackDependence(const SLPLane* lanes, int vf) {
+  for (int i = 0; i < vf; i++) {
+    IRNode* binop = lanes[i].binop;
+    for (size_t u = 0; u < binop->outputs.length; u++) {
+      IRNode* user = binop->outputs.value.p[u];
+      if (user == lanes[i].store) {
+        continue;
+      }
+      for (int j = 0; j < vf; j++) {
+        if (user == lanes[j].store || user == lanes[j].binop ||
+            user == lanes[j].left || user == lanes[j].right) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool ExtraUsePrecedesFirstStore(const SLPLane* lanes, int vf,
+                                       BasicBlock* block, IRNode* first_store) {
+  for (int i = 0; i < vf; i++) {
+    IRNode* binop = lanes[i].binop;
+    for (size_t u = 0; u < binop->outputs.length; u++) {
+      IRNode* user = binop->outputs.value.p[u];
+      if (user == lanes[i].store) {
+        continue;
+      }
+      if (user->block == block && InstPrecedes(block, user, first_store)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool BinopHasExtraUses(const SLPLane* lane) {
+  for (size_t u = 0; u < lane->binop->outputs.length; u++) {
+    if (lane->binop->outputs.value.p[u] != lane->store) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ReplaceUsesExcept(IRNode* old, IRNode* replacement, IRNode* except) {
+  for (;;) {
+    IRNode* user = NULL;
+    for (size_t i = 0; i < old->outputs.length; i++) {
+      if (old->outputs.value.p[i] != except) {
+        user = old->outputs.value.p[i];
+        break;
+      }
+    }
+    if (user == NULL) {
+      return;
+    }
+    bool replaced = false;
+    for (size_t j = 0; j < user->inputs.length; j++) {
+      if (user->inputs.value.p[j] == old) {
+        IRReplaceInput(user, j, replacement);
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      return;
+    }
+  }
+}
+
+static bool WindowIsPackable(BasicBlock* block, const SLPLane* lanes, int vf) {
+  IRNode* pack_nodes[kSLPPackNodeCap];
+  size_t pack_count = 0;
+  for (int i = 0; i < vf; i++) {
+    AddPackNode(pack_nodes, &pack_count, lanes[i].store);
+    AddPackNode(pack_nodes, &pack_count, lanes[i].binop);
+    AddPackNode(pack_nodes, &pack_count, lanes[i].dest_addr);
+    if (lanes[i].left_load != NULL) {
+      AddPackNode(pack_nodes, &pack_count, lanes[i].left_load);
+      if (lanes[i].left_load->inputs.length > 0) {
+        AddPackNode(pack_nodes, &pack_count,
+                    lanes[i].left_load->inputs.value.p[0]);
+      }
+    }
+    if (lanes[i].right_load != NULL) {
+      AddPackNode(pack_nodes, &pack_count, lanes[i].right_load);
+      if (lanes[i].right_load->inputs.length > 0) {
+        AddPackNode(pack_nodes, &pack_count,
+                    lanes[i].right_load->inputs.value.p[0]);
+      }
+    }
+  }
+  IRNode* last_store = lanes[vf - 1].store;
+  bool in_window = false;
+  for (IRNode* inst = BasicBlockBegin(block);
+       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+       inst = IRNext(inst)) {
+    if (!in_window) {
+      if (!NodeInList(pack_nodes, pack_count, inst)) {
+        continue;
+      }
+      in_window = true;
+    }
+    if (!NodeInList(pack_nodes, pack_count, inst) && !HarmlessAddressOp(inst)) {
+      return false;
+    }
+    if (inst == last_store) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TryPackLanes(Generator* gen, BasicBlock* block, SLPLane* lanes,
+                         int vf) {
+  if (vf < 2) {
+    return false;
+  }
+  const SLPLane* first = &lanes[0];
+  if (kNativeVectorBytes % first->elem_size != 0 ||
+      vf != kNativeVectorBytes / first->elem_size) {
+    return false;
+  }
+  if (first->dest_obj->type != NULL && first->dest_obj->type->size > 0 &&
+      first->dest_off + (int64_t)vf * first->elem_size >
+          first->dest_obj->type->size) {
+    return false;
+  }
+  for (int i = 0; i < vf; i++) {
+    if (lanes[i].elem_size != first->elem_size ||
+        lanes[i].vector_opcode != first->vector_opcode ||
+        lanes[i].dest_obj != first->dest_obj ||
+        lanes[i].binop->opcode != first->binop->opcode ||
+        lanes[i].dest_off !=
+            first->dest_off + (int64_t)i * first->elem_size) {
+      return false;
+    }
+  }
+
+  SLPOperand left;
+  SLPOperand right;
+  if (!ClassifyOperand(first->left, first->elem_size, &left) ||
+      !ClassifyOperand(first->right, first->elem_size, &right)) {
+    return false;
+  }
+  if (left.splat && right.splat) {
+    return false;
+  }
+  bool commutative = OpcodeIsCommutative(first->binop->opcode);
+  for (int i = 0; i < vf; i++) {
+    if (!MatchLaneOperands(&lanes[i], i, &left, &right, commutative,
+                           first->elem_size)) {
+      return false;
+    }
+  }
+  if (!left.splat && left.object == first->dest_obj &&
+      left.first_off != first->dest_off) {
+    return false;
+  }
+  if (!right.splat && right.object == first->dest_obj &&
+      right.first_off != first->dest_off) {
+    return false;
+  }
+  IRNode* first_store = first->store;
+  if (BinopHasPackDependence(lanes, vf) ||
+      ExtraUsePrecedesFirstStore(lanes, vf, block, first_store) ||
+      !WindowIsPackable(block, lanes, vf)) {
+    return false;
+  }
+
+  TypeRecord* vector_type = NewVectorTypeRecord(first->element, vf);
+  IRNode* left_address = left.first_address;
+  IRNode* right_address = right.first_address;
+  if (left.splat) {
+    left_address = MaterializeSplatAt(gen, block, first_store, vector_type,
+                                      first->element, vf, left.splat_value);
+  }
+  if (right.splat) {
+    right_address = MaterializeSplatAt(gen, block, first_store, vector_type,
+                                       first->element, vf, right.splat_value);
+  }
+  if (left_address == NULL || right_address == NULL) {
+    return false;
+  }
+
+  IRNode* vector_op =
+      IRSetType(NewIR3(first->vector_opcode, first->dest_addr, left_address,
+                       right_address),
+                vector_type);
+  vector_op->aux = vector_type;
+  BasicBlockEmitBefore(gen, block, vector_op, first_store);
+
+  for (int i = 0; i < vf; i++) {
+    if (!BinopHasExtraUses(&lanes[i])) {
+      continue;
+    }
+    IRNode* address = lanes[i].dest_base;
+    if (lanes[i].dest_off != 0) {
+      address = IRSetType(
+          NewIR2(IR_OP(adda), lanes[i].dest_base,
+                 GeneratorGetIntConstant(gen, NULL, lanes[i].dest_off)),
+          NewPointerTo(kQualPlain, first->element));
+      BasicBlockEmitBefore(gen, block, address, first_store);
+    }
+    IRNode* reload =
+        IRSetType(NewIR1(GetLoadOpcodeForType(first->element), address),
+                  first->element);
+    IRSetVarUse(reload, first->dest_obj);
+    BasicBlockEmitBefore(gen, block, reload, first_store);
+    ReplaceUsesExcept(lanes[i].binop, reload, lanes[i].store);
+  }
+
+  for (int i = 0; i < vf; i++) {
+    BasicBlockRemoveInstruction(gen, block, lanes[i].store);
+    if (lanes[i].binop->outputs.length == 0) {
+      BasicBlockRemoveInstruction(gen, lanes[i].binop->block, lanes[i].binop);
+    }
+  }
+  IRNode* dead_loads[kSLPPackNodeCap];
+  size_t dead_count = 0;
+  for (int i = 0; i < vf; i++) {
+    IRNode* operands[2] = {lanes[i].left, lanes[i].right};
+    for (int o = 0; o < 2; o++) {
+      IRNode* value = operands[o];
+      if (value == NULL || !IRIsLoadOnly(value) || value->outputs.length != 0 ||
+          value->inputs.length == 0) {
+        continue;
+      }
+      ConstAccess access;
+      if (!DecodeConstAddress(value->inputs.value.p[0], &access)) {
+        continue;
+      }
+      AddPackNode(dead_loads, &dead_count, value);
+    }
+  }
+  for (size_t i = 0; i < dead_count; i++) {
+    BasicBlockRemoveInstruction(gen, dead_loads[i]->block, dead_loads[i]);
+  }
+  RebuildVariableMetadata(block);
+  return true;
+}
+
+static bool SLPVectorizeBlock(Generator* gen, BasicBlock* block) {
+  bool changed = false;
+  for (;;) {
+    size_t n = 0;
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      SLPLane probe;
+      if (AnalyzeSLPStore(inst, &probe)) {
+        n++;
+      }
+    }
+    if (n < 2) {
+      return changed;
+    }
+    SLPLane* lanes = calloc(n, sizeof(SLPLane));
+    if (lanes == NULL) {
+      return changed;
+    }
+    size_t filled = 0;
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = IRNext(inst)) {
+      if (filled < n && AnalyzeSLPStore(inst, &lanes[filled])) {
+        filled++;
+      }
+    }
+    bool packed = false;
+    for (size_t start = 0; start + 2 <= filled; start++) {
+      int elem_size = lanes[start].elem_size;
+      if (elem_size <= 0 || kNativeVectorBytes % elem_size != 0) {
+        continue;
+      }
+      int vf = kNativeVectorBytes / elem_size;
+      if (vf < 2 || start + (size_t)vf > filled) {
+        continue;
+      }
+      if (TryPackLanes(gen, block, lanes + start, vf)) {
+        packed = true;
+        changed = true;
+        break;
+      }
+    }
+    free(lanes);
+    if (!packed) {
+      return changed;
+    }
+  }
+}
+
+static void SLPVectorize(Generator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block == NULL || BasicBlockIsEmpty(block)) {
+      continue;
+    }
+    SLPVectorizeBlock(gen, block);
+  }
+}
+
 void AutoVectorizeOptimization(Generator* gen) {
-  if (!OptLevel2() || gen->loops.length == 0 || !TargetKeepsNativeVectors()) {
+  if (!OptLevel2() || !TargetKeepsNativeVectors()) {
     return;
   }
 
-  Vector candidates;
-  VectorInit(&candidates);
-  for (size_t i = 0; i < gen->loops.length; i++) {
-    VectorAppend(&candidates, gen->loops.value.p[i]);
+  if (gen->loops.length != 0) {
+    Vector candidates;
+    VectorInit(&candidates);
+    for (size_t i = 0; i < gen->loops.length; i++) {
+      VectorAppend(&candidates, gen->loops.value.p[i]);
+    }
+
+    for (size_t i = 0; i < candidates.length; i++) {
+      LoopInfo* loop = candidates.value.p[i];
+      CountedLoop counted;
+      VectorCandidate cand;
+      if (!AnalyzeCountedLoop(gen, loop, &counted) ||
+          !AnalyzeVectorBody(gen, loop, &counted, &cand)) {
+        continue;
+      }
+      VectorizeLoop(gen, loop, &counted, &cand);
+    }
+    VectorDestruct(&candidates);
   }
 
-  for (size_t i = 0; i < candidates.length; i++) {
-    LoopInfo* loop = candidates.value.p[i];
-    CountedLoop counted;
-    VectorCandidate cand;
-    if (!AnalyzeCountedLoop(gen, loop, &counted) ||
-        !AnalyzeVectorBody(gen, loop, &counted, &cand)) {
-      continue;
-    }
-    VectorizeLoop(gen, loop, &counted, &cand);
-  }
-  VectorDestruct(&candidates);
+  SLPVectorize(gen);
 }

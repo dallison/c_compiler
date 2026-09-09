@@ -2093,6 +2093,7 @@ void* GenerateFunction(Generator* gen) {
     // them now turns the copies into a value chain the allocator can keep in
     // a single register.
     MemoryOptimization(gen);
+    AutoVectorizeOptimization(gen);
   }
   
   // It's possible that the optimizations have made some blocks unreaachable

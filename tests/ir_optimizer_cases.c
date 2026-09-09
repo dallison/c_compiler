@@ -100,6 +100,9 @@ static int unroll_values[4] = {1, 2, 3, 4};
 static int vectorize_left[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 static int vectorize_right[8] = {0, 2, 4, 6, 8, 10, 12, 14};
 static int vectorize_out[8];
+static int slp_left[4] = {1, 2, 3, 4};
+static int slp_right[4] = {5, 6, 7, 8};
+static int slp_out[4];
 
 typedef struct {
   int x;
@@ -163,6 +166,22 @@ __attribute__((noinline)) int vectorize_add1(void) {
     vectorize_out[i] = vectorize_left[i] + 1;
   }
   return vectorize_out[0] + vectorize_out[7];
+}
+
+__attribute__((noinline)) int slp_add4(void) {
+  slp_out[0] = slp_left[0] + slp_right[0];
+  slp_out[1] = slp_left[1] + slp_right[1];
+  slp_out[2] = slp_left[2] + slp_right[2];
+  slp_out[3] = slp_left[3] + slp_right[3];
+  return slp_out[0] + slp_out[3];
+}
+
+__attribute__((noinline)) int slp_add1(void) {
+  slp_out[0] = slp_left[0] + 1;
+  slp_out[1] = slp_left[1] + 1;
+  slp_out[2] = slp_left[2] + 1;
+  slp_out[3] = slp_left[3] + 1;
+  return slp_out[0] + slp_out[3];
 }
 
 __attribute__((noinline)) int combine_nested_add(int value) {
@@ -329,7 +348,8 @@ int main(void) {
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||
       sdiv_const10(-17) != -1 || sdiv_const10(99) != 9 ||
       unroll_sum4(unroll_values) != 10 || vectorize_add8() != 23 ||
-      vectorize_add1() != 11 || sroa_point(3, 4) != 7 ||
+      vectorize_add1() != 11 || slp_add4() != 18 || slp_add1() != 7 ||
+      sroa_point(3, 4) != 7 ||
       sroa_pair(5, 6) != 11 || dense_switch(5) != 37 ||
       dense_switch(0) != 17 || dense_switch(11) != 71) {
     result |= 8;
