@@ -3772,6 +3772,13 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             constructor_call = callee != NULL && TypeIsFunction(callee->type) &&
                                callee->type->info.function.is_constructor;
           }
+        } else if (e->expr->op == AST_OP(inline_call) &&
+                   TypeIsVoid(e->expr->type) &&
+                   TypeIsStructOrUnion(target->type)) {
+          // Direct initialization whose constructor call was inlined.  The
+          // inlined body already constructs into the object; do not convert
+          // the void inline_call to the class type.
+          constructor_call = true;
         }
         bool cxx_return_elision_initializer =
             CompilerIsCXX() && e->expr->op == AST_OP(call) &&
@@ -3779,7 +3786,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             !constructor_call &&
             TypeIsStructOrUnion(target->type) &&
             TypeEqual(e->expr->type, target->type);
-        if (!cxx_return_elision_initializer) {
+        if (!constructor_call && !cxx_return_elision_initializer) {
           NormalConversion(e->expr, target->type);
         }
       }
@@ -4917,6 +4924,12 @@ static bool CalleeNamesItsFunction(ASTNode* callee) {
 // 7. It has no named-return-value object. NRVO binds that local directly to the
 //    callee's hidden aggregate-result slot, which does not exist after inlining.
 //
+// Constructors may be inlined when they initialize a named variable
+// (`T x(args)`).  Other constructor expressions construct a temporary and
+// rely on codegen to retarget `this` via current_struct_address, which an
+// inline_call cannot do.  Destructors are never inlined: exception cleanup
+// recognizes `receiver.~T()` expression statements.
+//
 // Why the goto prohibition.  Well, the GotoStatementASTNode contains
 // a resolved reference to its label.  We clone the body to
 // inline it, so this reference is no longer valid after the
@@ -5012,17 +5025,13 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
       func->cxx_member_owner->virtual_bases.length != 0) {
     return false;
   }
-  // Constructors are not inlined because they have no return value; replacing
-  // a constructor call with an inline_call returning void breaks callers that
-  // use the call as a declaration initializer.
-  if (func->is_constructor) {
-    return false;
-  }
   // Exception cleanup ranges are built by recognizing the compiler-inserted
   // `receiver.~T()` statements at the end of a block and pairing them with the
   // declarations above (see statement_codegen.c).  Turning such a call into an
   // inline_call hides that shape, so the block gets no cleanup range at all and
-  // an exception unwinding through it destroys nothing.
+  // an exception unwinding through it destroys nothing.  Some destructor
+  // statements are also analyzed before they are wrapped in an expression
+  // statement, so a call-site parent check is not enough.
   if (func->is_destructor) {
     return false;
   }
@@ -10104,7 +10113,14 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (call_ok && TypeIsFunction(node->left->type) &&
       CalleeNamesItsFunction(node->left)) {
     FunctionInfo* func = &node->left->type->info.function;
-    if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
+    ASTNode* parent = node->base.parent;
+    // Direct `T x(args)` binds `this` to x in the call arguments.  Functional
+    // casts and designated initializers construct a temporary and retarget
+    // `this` during codegen; inlining would keep the temporary.
+    bool constructor_needs_call =
+        func->is_constructor && (parent == NULL || parent->op != AST_OP(vardecl));
+    if (!TypeIsStructOrUnion(return_type) && !constructor_needs_call &&
+        FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.
       ASTNode* inline_call = InlineFunctionCall(func, node);

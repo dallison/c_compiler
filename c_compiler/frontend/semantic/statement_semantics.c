@@ -3052,6 +3052,13 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
           callee != NULL && TypeIsFunction(callee->type) &&
           callee->type->info.function.is_constructor;
     }
+  } else if (initializer_expr != NULL &&
+             initializer_expr->op == AST_OP(inline_call) &&
+             TypeIsVoid(initializer_expr->type) &&
+             TypeIsStructOrUnion(node->symbol->type)) {
+    // Direct initialization whose constructor was inlined.  The inlined body
+    // already constructs into the object; do not convert void to the class.
+    constructor_call = true;
   }
   bool side_effect_initializer =
       node->initializer != NULL && node->initializer->op == AST_OP(stmt_expr);

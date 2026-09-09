@@ -1758,6 +1758,11 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
             TypeIsFunction(callee->type) &&
             callee->type->info.function.is_constructor;
       }
+    } else if (node->initializer != NULL &&
+               node->initializer->op == AST_OP(inline_call) &&
+               TypeIsVoid(node->initializer->type) &&
+               TypeIsStructOrUnion(node->symbol->type)) {
+      object_initializer = true;
     }
   }
   if (!object_initializer) {

@@ -514,6 +514,43 @@ if ! grep -Eq 'jmp[[:space:]]+\*' <<<"$dense_switch_asm"; then
   exit 1
 fi
 
+# Direct `T x(args)` inlines the constructor into stores of `this`.  Copy
+# initialization may still call the copy constructor (it constructs a
+# temporary that codegen retargets).  Destructors are never inlined.
+CXX_DUMP_SOURCE="$WORK/cxx_optimizer_dump.cc"
+cp "$CXX_SOURCE" "$CXX_DUMP_SOURCE"
+"$DAVECC" -target x86_64 -std=c++20 -O2 -Xsave-ir -S \
+  -isystem "$ROOT/libc/include" \
+  "$CXX_DUMP_SOURCE" -o "$WORK/cxx_optimizer.s"
+CXX_IR_FILE="${CXX_DUMP_SOURCE%.cc}.ir"
+if [[ ! -f "$CXX_IR_FILE" ]]; then
+  echo "C++ optimizer IR dump was not produced" >&2
+  exit 1
+fi
+cpp_loop_ir=$(
+  awk '/IR for function cpp_loop/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$CXX_IR_FILE"
+)
+if grep -Eq '[[:space:]]calla\(' <<<"$cpp_loop_ir"; then
+  echo "cpp_loop retained a call after constructor inlining" >&2
+  exit 1
+fi
+cpp_loop_asm=$(
+  awk '/^_Z8cpp_loopii:/{inside=1} \
+       inside{print} \
+       /^\.func_end__Z8cpp_loopii:/{exit}' "$WORK/cxx_optimizer.s"
+)
+if grep -Eq '[[:space:]]call[[:space:]]' <<<"$cpp_loop_asm"; then
+  echo "cpp_loop x86_64 asm retained a call after constructor inlining" >&2
+  exit 1
+fi
+if grep -Eq 'call[[:space:]]+_ZN11AccumulatorC1Ei' "$WORK/cxx_optimizer.s"; then
+  echo "x86_64 still calls Accumulator(int) after constructor inlining" >&2
+  exit 1
+fi
+
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.
 induction_body=$(
