@@ -469,6 +469,37 @@ if [[ "$unroll_o3_rc" -ne "$unroll_o0_rc" ]]; then
   exit 1
 fi
 
+# Auto-vectorize unit-stride counted loops of independent adds at -O2.
+vectorize_body=$(
+  awk '/IR for function vectorize_add8/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$vectorize_body"; then
+  echo "unit-stride add loop was not auto-vectorized at -O2" >&2
+  exit 1
+fi
+vectorize_splat_body=$(
+  awk '/IR for function vectorize_add1/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$vectorize_splat_body"; then
+  echo "splat add loop was not auto-vectorized at -O2" >&2
+  exit 1
+fi
+vectorize_asm=$(
+  awk '/^vectorize_add8:/{inside=1; next} \
+       /^\.func_end_vectorize_add8:/{inside=0} \
+       inside' "$WORK/optimizer.s"
+)
+if ! grep -Eq '[[:space:]]paddd[[:space:]]' <<<"$vectorize_asm"; then
+  echo "x86_64 auto-vectorized add did not lower to paddd" >&2
+  exit 1
+fi
+
 # Small local structs/arrays used only at constant offsets become scalars.
 # After SSA the member adda must be gone; the sum is just the two arguments.
 sroa_point_body=$(
@@ -659,6 +690,28 @@ if [[ ! -f "$AARCH64_INDUCTION_IR_FILE" ]]; then
   exit 1
 fi
 check_derived_induction_ir "$AARCH64_INDUCTION_IR_FILE" "AArch64"
+
+aarch64_vectorize_body=$(
+  awk '/IR for function vectorize_add8/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$AARCH64_INDUCTION_IR_FILE"
+)
+if ! grep -Eq '[[:space:]]vadd\(' <<<"$aarch64_vectorize_body"; then
+  echo "AArch64 unit-stride add loop was not auto-vectorized at -O2" >&2
+  exit 1
+fi
+aarch64_vectorize_asm=$(
+  awk '/^vectorize_add8:/{inside=1; next} \
+       /^\.func_end_vectorize_add8:/{inside=0} \
+       inside' "$WORK/aarch64_induction.s"
+)
+# Integer SIMD add is encoded as a 128-bit three-same instruction; the
+# assembler listing currently dumps it as a raw word rather than `add vN.4s`.
+if ! grep -Eq '\.word 0x4e[0-9a-fA-F]{6}' <<<"$aarch64_vectorize_asm"; then
+  echo "AArch64 auto-vectorized add did not emit a SIMD add encoding" >&2
+  exit 1
+fi
 
 # AArch64 target peepholes run after IR lowering and before register
 # allocation.  Check their emitted instruction shapes independently of the IR

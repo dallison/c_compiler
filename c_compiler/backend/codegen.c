@@ -35,6 +35,7 @@
 #include "memopt.h"
 #include "sroa.h"
 #include "unroll.h"
+#include "vectorize.h"
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
@@ -2080,6 +2081,10 @@ void* GenerateFunction(Generator* gen) {
   if (!compiler->keep_ssa) {
     // Remove any SSA nodes we added, converting back from SSA form.
     GeneratorRemoveSSA(gen);
+  }
+
+  if (OptLevel2() && !compiler->keep_ssa) {
+    AutoVectorizeOptimization(gen);
   }
 
   if (OptLevel3() && !compiler->keep_ssa) {

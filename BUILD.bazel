@@ -785,6 +785,7 @@ cc_library(
         "c_compiler/optimization/loop_info.c",
         "c_compiler/optimization/memopt.c",
         "c_compiler/optimization/unroll.c",
+        "c_compiler/optimization/vectorize.c",
         "c_compiler/frontend/semantic/init_semantics.c",
         "c_compiler/frontend/semantic/rtti.c",
         "c_compiler/backend/ir.c",

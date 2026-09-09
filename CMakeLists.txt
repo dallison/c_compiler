@@ -208,6 +208,7 @@ davecc_library(davecc_compiler
   c_compiler/optimization/gvn.c
   c_compiler/optimization/memopt.c
   c_compiler/optimization/unroll.c
+  c_compiler/optimization/vectorize.c
   c_compiler/optimization/optimizer.c
   c_compiler/optimization/ssa.c
   c_compiler/optimization/sroa.c

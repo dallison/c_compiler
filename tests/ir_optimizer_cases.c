@@ -97,6 +97,9 @@ __attribute__((noinline)) int dead_store_global(int value) {
 }
 
 static int unroll_values[4] = {1, 2, 3, 4};
+static int vectorize_left[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+static int vectorize_right[8] = {0, 2, 4, 6, 8, 10, 12, 14};
+static int vectorize_out[8];
 
 typedef struct {
   int x;
@@ -146,6 +149,20 @@ __attribute__((noinline)) int unroll_sum4(int *a) {
     s += a[i];
   }
   return s;
+}
+
+__attribute__((noinline)) int vectorize_add8(void) {
+  for (int i = 0; i < 8; i++) {
+    vectorize_out[i] = vectorize_left[i] + vectorize_right[i];
+  }
+  return vectorize_out[0] + vectorize_out[7];
+}
+
+__attribute__((noinline)) int vectorize_add1(void) {
+  for (int i = 0; i < 8; i++) {
+    vectorize_out[i] = vectorize_left[i] + 1;
+  }
+  return vectorize_out[0] + vectorize_out[7];
 }
 
 __attribute__((noinline)) int combine_nested_add(int value) {
@@ -311,7 +328,8 @@ int main(void) {
       udiv_const10(100u) != 10u || udiv_const10(9u) != 0u ||
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||
       sdiv_const10(-17) != -1 || sdiv_const10(99) != 9 ||
-      unroll_sum4(unroll_values) != 10 || sroa_point(3, 4) != 7 ||
+      unroll_sum4(unroll_values) != 10 || vectorize_add8() != 23 ||
+      vectorize_add1() != 11 || sroa_point(3, 4) != 7 ||
       sroa_pair(5, 6) != 11 || dense_switch(5) != 37 ||
       dense_switch(0) != 17 || dense_switch(11) != 71) {
     result |= 8;
