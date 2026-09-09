@@ -23,6 +23,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
+#include "typo_correction.h"
 #include "semantics.h"
 #include "errors.h"
 #include "debug.h"
@@ -3368,8 +3369,15 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
   parser->cxx_member_definition =
       FindStructMember(parser->cxx_member_owner, &member_name);
   if (parser->cxx_member_definition == NULL) {
-    SyntaxError(parser->syntax, "No class member named %s",
-                name->spelling.value);
+    const char* suggestion = TypoCorrectionFindMemberName(
+        parser->cxx_member_owner, member_name.value);
+    if (suggestion != NULL) {
+      SyntaxError(parser->syntax, "No class member named %s; did you mean \"%s\"?",
+                  name->spelling.value, suggestion);
+    } else {
+      SyntaxError(parser->syntax, "No class member named %s",
+                  name->spelling.value);
+    }
   }
   StringDestruct(&member_name);
 }

@@ -22,6 +22,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
+#include "typo_correction.h"
 #include "type.h"
 #include "type_class_internal.h"
 #include "type_inheritance.h"
@@ -8893,7 +8894,7 @@ static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
   if (target == NULL) {
     target = SyntaxFindQualifiedTag(syntax, &name);
     if (target == NULL) {
-      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+      TypoCorrectionErrorUnknownSymbol(syntax, &name);
     } else {
       AddUsingAlias(syntax, NewUsingAliasSymbol(FullyQualifiedIdentifierLast(&name),
                                                 target, location),

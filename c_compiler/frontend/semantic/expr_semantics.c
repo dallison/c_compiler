@@ -19,6 +19,7 @@
 #include "compiler.h"
 #include "errors.h"
 #include "symbol_table.h"
+#include "typo_correction.h"
 #include "rtti.h"
 #include "reflection.h"
 #include "reflection_meta_synthesis.h"
@@ -10700,8 +10701,18 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     }
   }
   if (member == NULL) {
-    SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
-                  member_name->value, struct_info->tag_name->value);
+    const char* suggestion =
+        TypoCorrectionFindMemberName(struct_info, member_name->value);
+    const char* tag =
+        struct_info->tag_name != NULL ? struct_info->tag_name->value : "";
+    if (suggestion != NULL) {
+      SemanticError((ASTNode*)node,
+                    "%s is not a member of struct/union %s; did you mean \"%s\"?",
+                    member_name->value, tag, suggestion);
+    } else {
+      SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
+                    member_name->value, tag);
+    }
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
