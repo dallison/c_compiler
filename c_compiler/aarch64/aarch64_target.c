@@ -116,12 +116,9 @@ CompilerTarget* NewAARCH64Target() {
   target->ir_optimizations.tail_call = true;
   target->ir_optimizations.dce = true;
   target->ir_optimizations.copy_prop = true;
-  // Preheader LICM currently lengthens C++ member-loop live ranges enough to
-  // expose allocator aliasing; keep the architecture-neutral analysis and IV
-  // cleanup enabled while gating that motion.
-  target->ir_optimizations.loop_preheaders = false;
+  target->ir_optimizations.loop_preheaders = true;
   target->ir_optimizations.induction_vars = true;
-  target->ir_optimizations.derived_induction_vars = false;
+  target->ir_optimizations.derived_induction_vars = true;
   // The aarch64 backend emits ELF objects whose references and function
   // labels use unprefixed names; prefixing only the data-symbol definitions
   // (via the common emitter) made every global/common symbol unresolvable at

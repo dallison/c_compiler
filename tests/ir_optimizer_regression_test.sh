@@ -521,55 +521,76 @@ fi
 # A canonical zero-based indexed loop is represented by a derived pointer
 # induction variable: scaling disappears and the latch advances the pointer by
 # the element size.
-array_induction_body=$(
-  awk '/IR for function induction_array_sum/{inside=1; after_ssa=0; next} \
-       /IR for function /{if (inside) exit} \
-       inside && /After SSA has been removed/{after_ssa=1; next} \
-       inside && after_ssa' "$INDUCTION_IR_FILE"
-)
-array_scale_locations=$(
-  awk '/^  Loop nesting: /{nesting=$3} \
-       /^\$/ && /[[:space:]](muli|lsli)\(/{print nesting}' \
-      <<<"$array_induction_body"
-)
-if [[ -n "$array_scale_locations" ]] ||
-   ! grep -Eq '[[:space:]]inca\(.*DEF __invented__' \
-      <<<"$array_induction_body" ||
-   ! grep -Eq '[[:space:]]loada\(.*REF __invented__' \
-      <<<"$array_induction_body"; then
-  echo "indexed loop was not strength-reduced to a pointer recurrence" >&2
-  exit 1
-fi
+check_derived_induction_ir() {
+  local ir_file=$1
+  local target_name=$2
+  local array_induction_body
+  array_induction_body=$(
+    awk '/IR for function induction_array_sum/{inside=1; after_ssa=0; next} \
+         /IR for function /{if (inside) exit} \
+         inside && /After SSA has been removed/{after_ssa=1; next} \
+         inside && after_ssa' "$ir_file"
+  )
+  local array_scale_locations
+  array_scale_locations=$(
+    awk '/^  Loop nesting: /{nesting=$3} \
+         /^\$/ && /[[:space:]](muli|lsli)\(/{print nesting}' \
+        <<<"$array_induction_body"
+  )
+  if [[ -n "$array_scale_locations" ]] ||
+     ! grep -Eq '[[:space:]]inca\(.*DEF __invented__' \
+        <<<"$array_induction_body" ||
+     ! grep -Eq '[[:space:]]loada\(.*REF __invented__' \
+        <<<"$array_induction_body"; then
+    echo "$target_name indexed loop was not strength-reduced to a pointer recurrence" >&2
+    exit 1
+  fi
 
-# Non-unit integer updates are intentionally outside this first transform.
-nonunit_induction_body=$(
-  awk '/IR for function induction_nonunit_sum/{inside=1; after_ssa=0; next} \
-       /IR for function /{if (inside) exit} \
-       inside && /After SSA has been removed/{after_ssa=1; next} \
-       inside && after_ssa' "$INDUCTION_IR_FILE"
-)
-if ! awk '
-    /^  Loop nesting: / {nesting=$3}
-    nesting == 1 && /^\$/ && /[[:space:]](muli|lsli)\(/ {found=1}
-    END {exit found ? 0 : 1}
-  ' <<<"$nonunit_induction_body"; then
-  echo "non-unit induction loop was transformed outside the supported scope" >&2
-  exit 1
-fi
+  # Non-unit integer updates are intentionally outside this first transform.
+  local nonunit_induction_body
+  nonunit_induction_body=$(
+    awk '/IR for function induction_nonunit_sum/{inside=1; after_ssa=0; next} \
+         /IR for function /{if (inside) exit} \
+         inside && /After SSA has been removed/{after_ssa=1; next} \
+         inside && after_ssa' "$ir_file"
+  )
+  if ! awk '
+      /^  Loop nesting: / {nesting=$3}
+      nesting == 1 && /^\$/ && /[[:space:]](muli|lsli)\(/ {found=1}
+      END {exit found ? 0 : 1}
+    ' <<<"$nonunit_induction_body"; then
+    echo "$target_name non-unit induction loop was transformed outside the supported scope" >&2
+    exit 1
+  fi
 
-# A reverse loop can begin one element before the array when it executes zero
-# times.  Do not speculate that derived pointer in the preheader.
-reverse_induction_body=$(
-  awk '/IR for function induction_reverse_sum/{inside=1; after_ssa=0; next} \
-       /IR for function /{if (inside) exit} \
-       inside && /After SSA has been removed/{after_ssa=1; next} \
-       inside && after_ssa' "$INDUCTION_IR_FILE"
-)
-if grep -Eq '[[:space:]]deca\(.*DEF __invented__' \
-    <<<"$reverse_induction_body"; then
-  echo "reverse induction speculated a possibly invalid pointer" >&2
+  # A reverse loop can begin one element before the array when it executes zero
+  # times.  Do not speculate that derived pointer in the preheader.
+  local reverse_induction_body
+  reverse_induction_body=$(
+    awk '/IR for function induction_reverse_sum/{inside=1; after_ssa=0; next} \
+         /IR for function /{if (inside) exit} \
+         inside && /After SSA has been removed/{after_ssa=1; next} \
+         inside && after_ssa' "$ir_file"
+  )
+  if grep -Eq '[[:space:]]deca\(.*DEF __invented__' \
+      <<<"$reverse_induction_body"; then
+    echo "$target_name reverse induction speculated a possibly invalid pointer" >&2
+    exit 1
+  fi
+}
+
+check_derived_induction_ir "$INDUCTION_IR_FILE" "ARM"
+
+AARCH64_INDUCTION_DUMP_SOURCE="$WORK/aarch64_induction_dump.c"
+cp "$C_SOURCE" "$AARCH64_INDUCTION_DUMP_SOURCE"
+"$DAVECC" -target aarch64 -O2 -Xsave-ir -S \
+  "$AARCH64_INDUCTION_DUMP_SOURCE" -o "$WORK/aarch64_induction.s"
+AARCH64_INDUCTION_IR_FILE="${AARCH64_INDUCTION_DUMP_SOURCE%.c}.ir"
+if [[ ! -f "$AARCH64_INDUCTION_IR_FILE" ]]; then
+  echo "AArch64 induction IR dump was not produced" >&2
   exit 1
 fi
+check_derived_induction_ir "$AARCH64_INDUCTION_IR_FILE" "AArch64"
 
 # AArch64 target peepholes run after IR lowering and before register
 # allocation.  Check their emitted instruction shapes independently of the IR

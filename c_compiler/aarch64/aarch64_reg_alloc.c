@@ -239,6 +239,16 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
       if (SharesRegisterWithVariable(allocator, op)) {
         continue;
       }
+      // Inside a loop, a value that is live-out of the block is read again on a
+      // later iteration through the back edge, so its linear "last use" in this
+      // block is not really its last use.  Freeing its register here would let a
+      // subsequent temp reuse it and clobber the still-live value (LICM-hoisted
+      // invariants are the usual case).  Restrict this to loop blocks so
+      // straight-line code keeps freeing registers promptly.
+      if (inst->block != NULL && inst->block->loop_nesting > 0 &&
+          BitSetContains(&inst->block->output_ids, op->id)) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
       if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
