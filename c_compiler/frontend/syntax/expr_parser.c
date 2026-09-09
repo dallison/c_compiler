@@ -21,6 +21,7 @@
 #include "reflection.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
+#include "typo_correction.h"
 #include "type.h"
 #include "type_class_internal.h"
 #include "type_internal.h"
@@ -1445,7 +1446,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         FullyQualifiedIdentifierDestruct(&name);
         return dependent;
       }
-      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+      TypoCorrectionErrorUnknownSymbol(syntax, &name);
       TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
       symbol->flags.invented = true;
@@ -1489,13 +1490,23 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         }
         if (!CompilerIsCXX() &&
             GetIntrinsic(FullyQualifiedIdentifierLast(&name)) == NULL) {
+          const char* callee = FullyQualifiedIdentifierLast(&name);
+          const char* suggestion = TypoCorrectionFindVisibleName(syntax, callee);
           if (CompilerCAtLeast(kLanguageStandardC23)) {
-            SyntaxError(syntax, "Calling undeclared function %s",
-                        FullyQualifiedIdentifierLast(&name));
+            if (suggestion != NULL) {
+              SyntaxError(syntax,
+                          "Calling undeclared function %s; did you mean \"%s\"?",
+                          callee, suggestion);
+            } else {
+              SyntaxError(syntax, "Calling undeclared function %s", callee);
+            }
+          } else if (suggestion != NULL) {
+            SyntaxWarning(syntax, "implicit-function-declaration",
+                          "Calling undeclared function %s; did you mean \"%s\"?",
+                          callee, suggestion);
           } else {
             SyntaxWarning(syntax, "implicit-function-declaration",
-                          "Calling undeclared function %s",
-                          FullyQualifiedIdentifierLast(&name));
+                          "Calling undeclared function %s", callee);
           }
         }
 
@@ -1514,7 +1525,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         // and so it is owned/freed by a symbol table rather than leaked.
         SyntaxAddSymbol(syntax, symbol);
       } else {
-        SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+        TypoCorrectionErrorUnknownSymbol(syntax, &name);
         TypeRecord* type =
             NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
         symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type,

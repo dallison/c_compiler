@@ -835,6 +835,7 @@ cc_library(
         "c_compiler/frontend/semantic/reflection_meta_traits.c",
         "c_compiler/frontend/syntax/symbol.c",
         "c_compiler/frontend/syntax/symbol_table.c",
+        "c_compiler/frontend/syntax/typo_correction.c",
         "c_compiler/frontend/syntax/module_identity.c",
         "c_compiler/frontend/syntax/module_syntax.c",
         "c_compiler/frontend/syntax/module_unit.c",

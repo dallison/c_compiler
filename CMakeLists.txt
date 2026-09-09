@@ -188,6 +188,7 @@ davecc_library(davecc_compiler
   c_compiler/frontend/syntax/statement_parser.c
   c_compiler/frontend/syntax/symbol.c
   c_compiler/frontend/syntax/symbol_table.c
+  c_compiler/frontend/syntax/typo_correction.c
   c_compiler/frontend/syntax/syntax.c
   c_compiler/frontend/syntax/type_core.c
   c_compiler/frontend/syntax/type_print.c
