@@ -12,8 +12,8 @@
 #include "codegen.h"
 
 // This optimization moves loop-invariant code to the loop's dedicated
-// preheader.  Explicit natural-loop block sets make nested-loop invariance and
-// memory effects local to each loop rather than global to the function.
+// preheader.  Nested loops are processed inside-out so an invariant can
+// climb from an inner preheader into the enclosing loop.
 //
 // It does, however, increase register pressure and might lead to more
 // register spilling.

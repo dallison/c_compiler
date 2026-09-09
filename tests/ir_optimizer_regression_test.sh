@@ -313,6 +313,66 @@ if ! grep -Eq '^  Loop nesting: 2$' <<<"$nested_body"; then
   echo "nested loop depth was not preserved" >&2
   exit 1
 fi
+nested_multiply_locations=$(
+  awk '/^  Loop nesting: /{nesting=$3} \
+       /^\$/ && /[[:space:]]muli\(/{print nesting}' \
+      <<<"$nested_body"
+)
+if grep -Eq '^[1-9]' <<<"$nested_multiply_locations" ||
+   ! grep -Eq '^0$' <<<"$nested_multiply_locations"; then
+  echo "LICM did not hoist the nested-loop invariant multiply to a preheader" >&2
+  exit 1
+fi
+
+# Store-to-load forwarding replaces a reload of a just-stored global with the
+# stored value.  Dead-store elimination drops the overwritten store of 1.
+store_forward_body=$(
+  awk '/IR for function store_forward_global/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq 'load32\(.*REF memopt_global' <<<"$store_forward_body" ||
+   ! grep -Eq 'const32\(\).* 11 ' <<<"$store_forward_body"; then
+  echo "store-to-load did not forward the stored global constant" >&2
+  exit 1
+fi
+dead_store_body=$(
+  awk '/IR for function dead_store_global/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -Eq 'store32\(.* 1 ' <<<"$dead_store_body"; then
+  echo "dead-store elimination retained the overwritten store of 1" >&2
+  exit 1
+fi
+load_cse_body=$(
+  awk '/IR for function load_cse_global/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+load_cse_count=$(
+  grep -c 'load32\(.*REF memopt_global' <<<"$load_cse_body" || true
+)
+if [[ "$load_cse_count" -ne 1 ]]; then
+  echo "load CSE did not collapse the two global loads (found $load_cse_count)" >&2
+  exit 1
+fi
+combine_add_body=$(
+  awk '/IR for function combine_nested_add/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+if grep -c '[[:space:]]addi(' <<<"$combine_add_body" | grep -qx 1 &&
+   grep -Eq 'const32\(\).* 7 ' <<<"$combine_add_body"; then
+  :
+else
+  echo "nested integer adds were not folded to a single +7" >&2
+  exit 1
+fi
 
 # A canonical induction update already computes the value consumed by the
 # latch comparison.  There must not be a reload of i in the same block.

@@ -793,6 +793,21 @@ dynamic_alloc:
   }
 }
 
+// Two-operand mv/fmv dests (argument copies, NRVO, staged t2) are often
+// cached pseudos emitted in another block.  Allocate them here the same way
+// AllocateUsingDest does, not only when the dest is a delayed varreg.
+static void AllocateRmovEndpoint(RVRegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
+  if (inst == NULL || inst->reg != NULL) {
+    return;
+  }
+  if (RVIsVarRegister(inst)) {
+    AllocateVariableRegister(allocator, inst);
+  } else if (!TargetIsConst(inst)) {
+    AllocateRegister(allocator, inst);
+  }
+}
+
 static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
   assert(((int)inst->opcode == (int)RV_OP(mv)) || ((int)inst->opcode == (int)RV_OP(fmv_s)) ||
@@ -800,10 +815,7 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
-  if (RVIsVarRegister(dest) && dest->reg == NULL) {
-    // Delayed allocation of variable register.
-    AllocateVariableRegister(allocator, dest);
-  }
+  AllocateRmovEndpoint(allocator, dest);
   RVRegister* reg = (RVRegister*)dest->reg;
   assert(reg != NULL);
   
@@ -823,10 +835,7 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
     inst->flags &= ~RV_INST_ARG_MOVE;
     TrapReload(inst);
   } else {
-    if (RVIsVarRegister(src) && src->reg == NULL) {
-      // Delayed allocation of variable register.
-      AllocateVariableRegister(allocator, src);
-    }
+    AllocateRmovEndpoint(allocator, src);
     inst->operand[0]->uses++;
     FreeRegisters(allocator, inst);
   }

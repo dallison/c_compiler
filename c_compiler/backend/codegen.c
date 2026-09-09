@@ -32,6 +32,7 @@
 #include "dce.h"
 #include "induction.h"
 #include "loop_info.h"
+#include "memopt.h"
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
@@ -2036,6 +2037,8 @@ void* GenerateFunction(Generator* gen) {
       DeadCodeEliminationOptimization(gen);
     }
 
+    MemoryOptimization(gen);
+
     if (compiler->ir_optimizations.code_motion &&
         compiler->ir_optimizations.loop_preheaders) {
       // Perform code motion for loops.
@@ -2054,6 +2057,7 @@ void* GenerateFunction(Generator* gen) {
     if (compiler->ir_optimizations.copy_prop) {
       CopyPropagationOptimization(gen);
     }
+    MemoryOptimization(gen);
     if (compiler->ir_optimizations.dce) {
       DeadCodeEliminationOptimization(gen);
     }

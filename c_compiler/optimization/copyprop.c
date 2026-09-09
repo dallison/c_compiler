@@ -16,7 +16,24 @@ static bool IsMoveOpcode(IROpcode opcode) {
   }
 }
 
-static bool CanPropagateMove(IRNode* inst) {
+static bool InstructionPrecedesInFunction(IRNode* before, IRNode* after) {
+  if (before == NULL || after == NULL) {
+    return false;
+  }
+  for (IRNode* inst = before; inst != NULL; inst = IRNext(inst)) {
+    if (inst == after) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool BlockDominates(BasicBlock* dominator, BasicBlock* block) {
+  return dominator != NULL && block != NULL &&
+         BitSetContains(&block->dominators, dominator->block_id);
+}
+
+static bool CanPropagateMove(Generator* gen, IRNode* inst) {
   if (!IsMoveOpcode(inst->opcode) || inst->inputs.length != 1 ||
       inst->outputs.length != 1 || inst->dest != NULL || inst->flags != 0 ||
       inst->type == NULL || TypeIsVolatile(inst->type)) {
@@ -31,11 +48,30 @@ static bool CanPropagateMove(IRNode* inst) {
     return false;
   }
 
-  // Keep this first version pressure-neutral: it only removes a copy inside
-  // one block and never lengthens the source's cross-block live range.
-  return source->block == inst->block && user->block == inst->block &&
-         !IRCheckpointBetween(source, inst) &&
-         !IRCheckpointBetween(inst, user);
+  if (source->block == inst->block && user->block == inst->block) {
+    return !IRCheckpointBetween(source, inst) &&
+           !IRCheckpointBetween(inst, user);
+  }
+
+  // Cross-block copies: the source already reaches the move, and the move
+  // already reaches its only user.  Replacing the move with the source does
+  // not add a new live range, but exception landing pads can enter between
+  // those points, so refuse the function if it has any.
+  if (gen->exception_ranges.length != 0) {
+    return false;
+  }
+  if (IRIsConst(source)) {
+    return user->block != NULL;
+  }
+  if (source->block == NULL || inst->block == NULL || user->block == NULL) {
+    return false;
+  }
+  if (!BlockDominates(source->block, inst->block) ||
+      !BlockDominates(inst->block, user->block)) {
+    return false;
+  }
+  return InstructionPrecedesInFunction(source, inst) &&
+         InstructionPrecedesInFunction(inst, user);
 }
 
 static bool IsSafeSSAVariable(IRNode* node) {
@@ -142,7 +178,7 @@ void CopyPropagationOptimization(Generator* gen) {
       if (PropagateSSALoad(gen, block, inst)) {
         continue;
       }
-      if (!CanPropagateMove(inst)) {
+      if (!CanPropagateMove(gen, inst)) {
         continue;
       }
       IRNode* source = inst->inputs.value.p[0];
